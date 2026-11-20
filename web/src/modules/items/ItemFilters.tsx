@@ -13,7 +13,7 @@ import { UnlessProject } from "../../shell/ScopePicker";
 import { FilterField } from "./FilterField";
 import type { useDraftField } from "./useDraftField";
 import {
-  PHASES, SORTS, appliedDetail, compatExtras, hiddenFilterCount, ignoredPhaseScopes, isActive,
+  PHASES, SORTS, appliedDetail, compatExtras, hiddenFilterCount, ignoredPhaseScopes, isActive, itemFilter,
   primarySelects, secondarySummary, type BrowseState, type CompatExtra,
 } from "./browseState";
 import type { ItemPhase } from "../../api/types";
@@ -178,7 +178,7 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
   onRemove: (key: string, value: string) => void;
   extras: CompatExtra[];
 }) {
-  const sort = browse.sort ?? (browse.q ? "relevance" : browse.state === "merged-by-us" ? "merged" : "updated");
+  const sort = itemFilter(browse).sort ?? (browse.q ? "relevance" : browse.state === "merged-by-us" ? "merged" : "updated");
   const sorts = SORTS.filter(([key]) => (key !== "relevance" || browse.q) && (key !== "merged" || browse.state === "merged-by-us"));
   return <details className="border-b border-line px-3.5 py-2 [&[open]]:pb-3">
     <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink/55 hover:text-ink">
@@ -196,10 +196,10 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
     </div>}
     {phase && <div className="min-w-0 text-2xs text-ink/60"><span className="mb-1 mt-2 block">Source</span><CheckRow checked={browse.discord} onChange={(on) => onPatch({ discord: on ? "1" : null, offset: null, peek: null })} title="Seen on Discord" /></div>}
     {extras.length > 0 && <><ul aria-label="Filters from this link" className="mt-2 flex flex-wrap gap-1.5">
-      {extras.map((extra) => <li key={`${extra.key}:${extra.value}`} className="inline-flex max-w-full items-center gap-1 rounded-full border border-line-strong px-2 py-0.5 text-[11px] leading-4 text-ink/70">
+      {extras.map((extra) => <li key={`${extra.key}:${extra.rawValue}`} className="inline-flex max-w-full items-center gap-1 rounded-full border border-line-strong px-2 py-0.5 text-[11px] leading-4 text-ink/70">
         <span className="min-w-0 break-words">{extra.label}: {extra.value}</span>
         {!extra.applied && <span className="shrink-0 text-warn">not applied</span>}
-        <button type="button" aria-label={`Remove ${extra.label} ${extra.value} from this link`} onClick={() => onRemove(extra.key, extra.value)} className="shrink-0 px-0.5 text-ink/50 hover:text-ink">×</button>
+        <button type="button" aria-label={`Remove ${extra.label} ${extra.value} from this link`} onClick={() => onRemove(extra.key, extra.rawValue)} className="shrink-0 px-0.5 text-ink/50 hover:text-ink">×</button>
       </li>)}
     </ul>
     <p className="mt-1.5 text-[11px] text-ink/45">{phase ? "A phase is set: these values stay in the URL and are not sent to the phase endpoint." : "These values stay in the URL; Reset filters clears them. Phase and classification are different questions and are never combined."}</p></>}

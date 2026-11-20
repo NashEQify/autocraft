@@ -14,7 +14,7 @@ import { localActions, useLocal, useUndo } from "./state";
 import { canTakeBack } from "./access";
 import { cn } from "../../ui/cn";
 
-export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClose, peeked }: {
+export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClose, peeked, allowBatch = true }: {
   id: string;
   d: Decision;
   /** Every loaded decision, for the batch picker (all loaded, never just the checked ones). */
@@ -24,6 +24,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
   onReview: () => void;
   onClose: () => void;
   peeked: boolean;
+  allowBatch?: boolean;
 }) {
   const loc = useLocal();
   const undo = useUndo();
@@ -63,7 +64,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
     {d.claim && <p className="mb-0 mt-1.5"><ClaimPill claim={d.claim} /></p>}
     {d.dispute && <p className="mb-0 mt-1.5 break-words text-warn">{d.dispute.by} disputed {d.answeredBy}&rsquo;s answer: {d.dispute.reason}</p>}
     <ExecLine d={d} canRetry={canUndo} />
-    <div className="mt-2.5 border-t border-line pt-2.5">
+    {allowBatch && <div className="mt-2.5 border-t border-line pt-2.5">
       <p className="mb-1.5 text-ink/55">Batch answer · select any loaded decision</p>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {loaded.map((row) => (
@@ -77,6 +78,6 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
         ))}
       </ul>
       <p className="mb-0 mt-1.5 text-ink/45">A batch appears below the list once two or more are checked (Esc clears). Drafts stay while tools is closed.</p>
-    </div>
+    </div>}
   </div>;
 }

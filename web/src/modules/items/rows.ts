@@ -252,9 +252,9 @@ export function pipelineRead(item: Pick<Item, "classifications"> | null | undefi
   return { text: (chosen.reason ?? "").trim(), classifier: CLASSIFIER_LABEL[chosen.classifier] ?? chosen.classifier, at: chosen.at, matchedSource: !!matched };
 }
 
-/** A phase row's own payload has no classification; the selected row's item GET does. */
-export function effectiveSettled(facts: RowFacts, item: Item | null | undefined): Settled | undefined {
-  return facts.settled ?? item?.settled;
+/** Expansion verdict and reasoning share the selected item GET, never the list's historical verdict. */
+export function effectiveSettled(_facts: RowFacts, item: Item | null | undefined): Settled | undefined {
+  return item?.settled;
 }
 
 /** A read's data is usable only when it is not loading, not failed, and names this row. */

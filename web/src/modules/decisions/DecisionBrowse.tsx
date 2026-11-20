@@ -71,8 +71,39 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const activeId = resolveActive(requested, rows, cursor);
   cursorRef.current = cursor;
+  // Resolve the readable row (including an owned accepted answer) before choosing the compact layout.
+  const explicitRow = requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : undefined;
+  const receiptsFor = query.readReceipts;
+  const pageSerialOf = (id: string) => {
+    if (!receiptsFor) return 0;
+    for (const receipt of receiptsFor) if (receipt.page.decisions.some((d) => d.id === id)) return receipt.readSerial ?? 0;
+    return 0;
+  };
+  // Precedence (contract §5/§8.D): the accepted API truth wins only when its page is not freshly re-read.
+  // R4: ONE accepted authority, the private session's (survives phone remount; no component-local copy).
+  useEffect(() => { answerSession.setScope(scopeKey); }, [scopeKey]);
+  // Reader/session ownership belongs to the mounted FRAME: a genuine reader change drops drafts even when the
+  // conditional answer form is unmounted (the phone-closed detail).
+  useEffect(() => { answerSession.setReader({ login: user.login, role: user.role }); }, [user.login, user.role]);
+  // Minimal subscription: only the accepted pointer (not every Note keystroke) re-renders the queue.
+  // The stored accepted object already carries readerEpoch; return it unchanged so the selector snapshot is cached.
+  const sessionAccepted = useSyncExternalStore(answerSession.subscribe, () => answerSession.get().accepted);
+  // No lossy duplicate projection: the predicate reads the ONE typed session object with its own readerEpoch.
+  const acceptedHere = sessionAccepted && requested.kind === "requested" && sessionAccepted.id === requested.id
+    && sessionAccepted.readerKey === readerKeyOf(readerRef.current)
+    && sessionAccepted.readerEpoch === answerSession.get().readerEpoch
+    && sessionAccepted.scopeKey === scopeKey ? sessionAccepted : null;
+  const acceptedWins = !!acceptedHere && (!explicitRow || (!explicitRow.answer && pageSerialOf(explicitRow.id) <= acceptedHere.ackSerial));
+  useEffect(() => {
+    // A genuine fresh row (answered, or read after the ack) retires the receipt.
+    if (!acceptedHere) return;
+    if (explicitRow && (explicitRow.answer || pageSerialOf(explicitRow.id) > acceptedHere.ackSerial)) answerSession.clearAccepted();
+  }, [acceptedHere, explicitRow?.id, explicitRow?.answer, receiptsFor]);
+  const selected = acceptedWins ? acceptedHere!.decision
+    : requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : rows.find((r) => r.id === activeId);
   const narrow = useMedia("(max-width: 860px)");
-  const queueHidden = narrow && requested.kind !== "none" && !peek;
+  // An unloaded bookmark must leave pagination reachable; it becomes a detail once its page arrives.
+  const queueHidden = narrow && !peek && (requested.kind === "unavailable" || (requested.kind === "requested" && !!selected));
   const queueHiddenRef = useRef(false);
   queueHiddenRef.current = queueHidden;
 
@@ -222,12 +253,12 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     const live = queueHandle.current?.capture();
     const known = live ?? snapshotFor(scopeKey);
     if (known) {
-      pendingRestore.current = known;
+      pendingRestore.current = queueHidden ? known : null;
       captureSnapshot({ scope: known.scope, chosenId: known.chosenId, captureEpoch: known.captureEpoch, anchor: known.anchor });
     }
     if (requested.kind !== "none") setDecision(null);
     armIntent(id ? { kind: "row", id, reveal: true } : { kind: "nativeView" });
-  }, [activeId, requested, setDecision, armIntent, scopeKey]);
+  }, [activeId, requested, queueHidden, setDecision, armIntent, scopeKey]);
 
   const closePeek = useCallback(() => {
     // Arm BEFORE the native dialog unmounts: its return-focus event can be delivered during that unmount,
@@ -411,35 +442,6 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     onOpenItem: (id) => openItem(rows.find((r) => r.id === id)),
   };
 
-  const explicitRow = requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : undefined;
-  const receiptsFor = query.readReceipts;
-  const pageSerialOf = (id: string) => {
-    if (!receiptsFor) return 0;
-    for (const receipt of receiptsFor) if (receipt.page.decisions.some((d) => d.id === id)) return receipt.readSerial ?? 0;
-    return 0;
-  };
-  // Precedence (contract §5/§8.D): the accepted API truth wins only when its page is not freshly re-read.
-  // R4: ONE accepted authority, the private session's (survives phone remount; no component-local copy).
-  useEffect(() => { answerSession.setScope(scopeKey); }, [scopeKey]);
-  // Reader/session ownership belongs to the mounted FRAME: a genuine reader change drops drafts even when the
-  // conditional answer form is unmounted (the phone-closed detail).
-  useEffect(() => { answerSession.setReader({ login: user.login, role: user.role }); }, [user.login, user.role]);
-  // Minimal subscription: only the accepted pointer (not every Note keystroke) re-renders the queue.
-  // The stored accepted object already carries readerEpoch; return it unchanged so the selector snapshot is cached.
-  const sessionAccepted = useSyncExternalStore(answerSession.subscribe, () => answerSession.get().accepted);
-  // No lossy duplicate projection: the predicate reads the ONE typed session object with its own readerEpoch.
-  const acceptedHere = sessionAccepted && requested.kind === "requested" && sessionAccepted.id === requested.id
-    && sessionAccepted.readerKey === readerKeyOf(readerRef.current)
-    && sessionAccepted.readerEpoch === answerSession.get().readerEpoch
-    && sessionAccepted.scopeKey === scopeKey ? sessionAccepted : null;
-  const acceptedWins = !!acceptedHere && (!explicitRow || (!explicitRow.answer && pageSerialOf(explicitRow.id) <= acceptedHere.ackSerial));
-  useEffect(() => {
-    // A genuine fresh row (answered, or read after the ack) retires the receipt.
-    if (!acceptedHere) return;
-    if (explicitRow && (explicitRow.answer || pageSerialOf(explicitRow.id) > acceptedHere.ackSerial)) answerSession.clearAccepted();
-  }, [acceptedHere, explicitRow?.id, explicitRow?.answer, receiptsFor]);
-  const selected = acceptedWins ? acceptedHere!.decision
-    : requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : rows.find((r) => r.id === activeId);
   const checkedHere = rows.filter((r) => loc.checked.has(r.id));
   const answerFacts = (selected || (requested.kind === "requested" && user.role === "viewer")) ? {
     reader: { login: user.login, role: user.role }, readerEpoch: answerSession.get().readerEpoch, user, scopeKey,

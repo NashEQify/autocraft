@@ -112,7 +112,7 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
   const facts = useMemo(() => rows.map(factsFromListRow), [rows]);
   // Once the current results are settled, a selection that cannot open stays explicit — including
   // when the cohort is empty. Loading, a previous cohort and errors are not called "not found".
-  const settled = ready && !!data && !error;
+  const settled = ready && !!data && !loading && !error;
   const problem = settled ? selectionProblem(selection, facts.map((row) => row.key)) : null;
   const updating = loading && !!data && ready;
   const bar = !isActive(browse) ? undefined : updating

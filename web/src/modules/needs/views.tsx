@@ -29,13 +29,13 @@ export function NeedsTabs() {
   const tab = useTab();
   const { search } = useUrlState();
   const { data } = useSummary();
-  return <div role="tablist" aria-label="Work queues" className="mb-4 flex flex-wrap items-center gap-x-1 border-b border-line">
-    {TABS.map((key) => <Link key={key} role="tab" aria-selected={tab === key} to={needsTabsHref(key, search)}
+  return <nav aria-label="Work queues" className="mb-4 flex flex-wrap items-center gap-x-1 border-b border-line">
+    {TABS.map((key) => <Link key={key} aria-current={tab === key ? "page" : undefined} to={needsTabsHref(key, search)}
       className={`-mb-px inline-flex min-h-10 items-center gap-1.5 border-b-2 px-3 py-2 text-sm max-md:min-h-11 ${tab === key ? "border-accent font-[650] text-accent-ink" : "border-transparent text-ink/70 hover:text-ink"}`}>
       {LABEL[key]}
       {data?.counts[key] !== undefined && <span className="num text-xs opacity-60">{data.counts[key]}</span>}
     </Link>)}
-  </div>;
+  </nav>;
 }
 
 /** Keep the Decisions list height bounded; each other tab owns its existing page scroller. */

@@ -166,7 +166,7 @@ const sortLabel = (value: string) => SORTS.find(([key]) => key === value)?.[1] ?
 
 /** One line of the effective filter state: a value the endpoint receives (`applied`) or a URL
     value it does not receive, kept in the link and shown as not applied. */
-export interface Constraint { key: string; label: string; value: string; applied: boolean }
+export interface Constraint { key: string; label: string; value: string; applied: boolean; rawValue?: string }
 
 /**
  * The single truth behind the toolbar, the bar, the phone summary and the compatibility chips.
@@ -174,8 +174,8 @@ export interface Constraint { key: string; label: string; value: string; applied
  */
 export function constraints(browse: BrowseState): Constraint[] {
   const out: Constraint[] = [];
-  const add = (key: string, label: string, value: string | undefined, applied: boolean) => {
-    if (value) out.push({ key, label, value, applied });
+  const add = (key: string, label: string, value: string | undefined, applied: boolean, rawValue?: string) => {
+    if (value) out.push({ key, label, value, applied, rawValue });
   };
   const phase = browse.phase !== undefined;
   const status = statusFilter(browse);
@@ -189,8 +189,8 @@ export function constraints(browse: BrowseState): Constraint[] {
     // Kept in the link, never sent: the reference reports these four in the phase notice.
     add("state", "State", browse.stateRaw && browse.stateRaw !== "all" ? stateLabel(browse.stateRaw) : undefined, false);
     for (const value of browse.labelsRaw) add("label", "Type label", value, false);
-    for (const value of browse.statusRaw) add("status", "Classification", statusLabel(value), false);
-    for (const value of browse.flagsRaw) add("flag", "Flag", flagLabel(value), false);
+    for (const value of browse.statusRaw) add("status", "Classification", statusLabel(value), false, value);
+    for (const value of browse.flagsRaw) add("flag", "Flag", flagLabel(value), false, value);
     add("author", "Author", browse.author, false);
     add("since", "Updated since", browse.since, false);
     add("flow", "Pipeline branch", browse.flow, false);
@@ -281,10 +281,10 @@ export function appliedDetail(browse: BrowseState): string[] {
   return appliedConstraints(browse).filter((constraint) => !primary.has(constraint.key)).map((constraint) => `${constraint.label}: ${constraint.value}`);
 }
 
-export interface CompatExtra { key: string; label: string; value: string; applied: boolean }
+export interface CompatExtra { key: string; label: string; value: string; rawValue: string; applied: boolean }
 
 /** The chips of the compatibility detail: everything the primary controls cannot show, plus
-    every URL value the endpoint does not receive. */
+    every URL value the endpoint does not receive. `value` is display text; `rawValue` removes the URL entry. */
 export function compatExtras(browse: BrowseState): CompatExtra[] {
   const primary = new Set(["q", "phase", "state", "kind", "repo"]);
   return constraints(browse)
@@ -292,7 +292,7 @@ export function compatExtras(browse: BrowseState): CompatExtra[] {
     // must still be visible and removable, while an applied one is already in its control.
     .filter((constraint) => !(constraint.applied && primary.has(constraint.key)))
     .filter((constraint) => !(constraint.applied && ["label", "status", "flag"].includes(constraint.key)))
-    .map(({ key, label, value, applied }) => ({ key, label, value, applied }));
+    .map(({ key, label, value, rawValue, applied }) => ({ key, label, value, rawValue: rawValue ?? value, applied }));
 }
 
 /** Values present in the URL that the chosen endpoint does not receive. */

@@ -85,7 +85,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
           scope: current.scope,
           chosenId: cursorId,
           captureEpoch: latest.current?.layoutEpoch ?? 0,
-          anchor: row && cursorId
+          anchor: row && cursorId && !toolsOpenRef.current
             ? { kind: "row", id: cursorId, relTop, fallbackOffset: offset, measuredEpoch: latest.current?.layoutEpoch ?? 0 }
             : { kind: "offset", offset, measuredEpoch: latest.current?.layoutEpoch ?? 0 },
         } as Snapshot;
@@ -231,23 +231,39 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   // The surface learns the queue is READY once per scope, after the current receipt settled and rows exist.
   const readyScope = useRef<string | null>(null);
   const readyScheduled = useRef<string | null>(null);
+  const readyFrame = useRef<number | null>(null);
+  const mounted = useRef(false);
+  const readyReceipt = useRef({ scope: controlled?.scope, settled: !!data && !loading && !error });
+  readyReceipt.current = { scope: controlled?.scope, settled: !!data && !loading && !error };
   useEffect(() => {
-    if (!controlled || !data || loading) return;
+    if (!controlled || !data || loading || error) return;
     if (readyScheduled.current === controlled.scope) return;
+    if (readyFrame.current !== null) cancelAnimationFrame(readyFrame.current);
     readyScheduled.current = controlled.scope;
-    // READY after the rows are laid out; scheduling is not cancelled by a re-render (the controlled object
-    // is rebuilt each render), so the surface always receives the current handle.
+    // Re-renders keep the scheduled frame; only a newer scope or an unmount cancels it.
     const scope = controlled.scope;
-    requestAnimationFrame(() => {
+    readyFrame.current = requestAnimationFrame(() => {
+      readyFrame.current = null;
       const current = latest.current;
-      // READY is delivered only for the scope the rows in this commit belong to.
-      if (!current || current.scope !== scope) return;
+      const receipt = readyReceipt.current;
+      if (!mounted.current || !scroller.current?.isConnected || !current || current.scope !== scope || !receipt.settled || receipt.scope !== scope) {
+        if (readyScheduled.current === scope) readyScheduled.current = null;
+        return;
+      }
       readyScope.current = scope;
       current.onReady(handle.current, scope);
     });
-  }, [controlled, data, loading]);
-  useEffect(() => {
-    return () => { latest.current?.onDetach(handle.current.capture()); };
+  }, [controlled, data, loading, error]);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      if (readyFrame.current !== null) cancelAnimationFrame(readyFrame.current);
+      readyFrame.current = null;
+      readyScheduled.current = null;
+      // Layout cleanup runs before the scroller ref is detached, while a final capture is still possible.
+      latest.current?.onDetach(handle.current.capture());
+    };
   }, []);
   const oldest = data?.oldestAskedAt;
   // The header's fallback copy: a real summary wins (a valid same-scope snapshot keeps its counts);
@@ -286,7 +302,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
       </div>}
       <div ref={scroller} onScroll={(e) => { if (toolsOpenRef.current) return; const top = e.currentTarget.scrollTop; if (phone) phoneListScroll = top; controlled?.onVisibleListScroll({ scope: controlled.scope, chosenId: controlled.cursorId, captureEpoch: controlled.layoutEpoch, anchor: { kind: "offset", offset: top, measuredEpoch: controlled.layoutEpoch } }); }} className="min-h-0 flex-1 overflow-y-auto">
         {toolsOpen && decision && (
-          <DecisionTools id="decision-tools" d={decision} loaded={list} user={user} peeked={peek === decision.id}
+          <DecisionTools id="decision-tools" d={decision} loaded={list} user={user} peeked={peek === decision.id} allowBatch={!phone}
             onPreview={() => setPeek(peek === decision.id ? null : decision.id)} onReview={() => { setToolsOpen(false); open(decision); }} onClose={closeTools} />
         )}
         <ul role="listbox" aria-label={listLabel} onKeyDown={onListKey} className="m-0 list-none p-1.5">

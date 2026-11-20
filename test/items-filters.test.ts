@@ -262,6 +262,30 @@ test("removing one chip drops only its own CSV value", () => {
   assert.deepEqual(removeValuePatch(browse, "author", "ana"), { author: null });
 });
 
+test("phase compatibility chips remove raw status and flag values without changing their display labels", () => {
+  const browse = of("phase=Review&status=settled,waiting,mystery&flag=security,needs%20decision,urgent&repo=photocraft");
+  const chips = compatExtras(browse);
+  const cases = [
+    ["status", "settled", "Settled", "waiting,mystery"],
+    ["status", "waiting", "Waiting for a second opinion", "settled,mystery"],
+    ["flag", "security", "Security", "needs decision,urgent"],
+    ["flag", "needs decision", "Needs a decision", "security,urgent"],
+  ] as const;
+  for (const [key, raw, display, remaining] of cases) {
+    const chip = chips.find((entry) => entry.key === key && entry.rawValue === raw);
+    assert.ok(chip, raw);
+    assert.equal(chip.value, display);
+    assert.equal(chip.applied, false);
+    const patch = removeValuePatch(browse, chip.key, chip.rawValue);
+    assert.deepEqual(patch, { [key]: remaining });
+    const next = new URLSearchParams(browse.search);
+    for (const [name, value] of Object.entries(patch)) value === null ? next.delete(name) : next.set(name, value);
+    // Removing an ignored chip does not retarget the phase request or erase other raw values.
+    assert.deepEqual(statusFilter(of(next.toString())), statusFilter(browse));
+    assert.equal(next.get(key === "status" ? "flag" : "status"), new URLSearchParams(browse.search).get(key === "status" ? "flag" : "status"));
+  }
+});
+
 test("the primary selects always name the applied value, never 'Any' for an applied scope", () => {
   assert.equal(primarySelects(of(""), REPOS).classification.value, "");
   assert.equal(primarySelects(of("status=unsettled"), REPOS).classification.value, "unsettled");

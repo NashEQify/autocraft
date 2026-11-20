@@ -157,9 +157,21 @@ test("a phase row's expanded classification comes from the selected item; its co
   const phase = factsFromStatusRow(statusRow());
   assert.equal(effectiveSettled(phase, null), undefined);
   assert.deepEqual(effectiveSettled(phase, itemWith([], { settled: settled() })), settled());
-  // The list row's own settled label is preferred over the item GET.
+  // A list row may be historical: the expansion's verdict and reason use the fetched snapshot together.
   const listed = factsFromListRow(listRow());
-  assert.deepEqual(effectiveSettled(listed, itemWith([], { settled: settled({ label: "performance" }) })), listed.settled);
+  const historical = listed.settled;
+  const current = settled({ label: "performance", source: "haiku" });
+  const fetched = itemWith([
+    cls("jev", "2026-01-05T10:00:00Z", "previous source's current reason"),
+    cls("haiku", "2026-01-06T10:00:00Z", "reason for the fetched verdict"),
+  ], { settled: current });
+  const expanded = effectiveSettled(listed, fetched);
+  assert.deepEqual(expanded, current);
+  assert.equal(pipelineRead(fetched, expanded)?.text, "reason for the fetched verdict");
+  assert.deepEqual(listed.settled, historical);
+  assert.notDeepEqual(listed.settled, expanded);
+  assert.equal(effectiveSettled(listed, itemWith([], { settled: undefined })), undefined);
+  assert.equal(effectiveSettled(listed, null), undefined);
 });
 
 test("the item GET adds the metadata a phase row lacks, without inventing any", () => {
@@ -222,14 +234,17 @@ test("F7: a receipt is only usable when it is settled, un-failed and for this ro
 });
 
 test("F8: Last events print absolute times, with honest recent/old/future/invalid cases", () => {
-  const now = Date.parse("2026-11-16T12:00:00Z");
-  assert.match(absoluteEventTime("2026-11-16T03:05:29.784Z", now), /^Today \d{2}:\d{2}$/);
-  assert.match(absoluteEventTime("2026-11-15T14:05:00Z", now), /^Yesterday \d{2}:\d{2}$/);
-  assert.match(absoluteEventTime("2026-03-03T09:07:00Z", now), /^Mar 3 \d{2}:\d{2}$/);
-  assert.match(absoluteEventTime("2024-03-03T09:07:00Z", now), /^Mar 3 2024 \d{2}:\d{2}$/);
-  // A future event is printed as its own date, not clamped to "now".
-  assert.match(absoluteEventTime("2026-11-17T08:30:00Z", now), /^Tomorrow|^Nov 17|^Today/);
-  assert.notEqual(absoluteEventTime("2026-11-17T08:30:00Z", now), absoluteEventTime("2026-11-16T12:00:00Z", now));
+  // The formatter groups LOCAL calendar days. Construct those days locally rather than assuming UTC.
+  const local = (year: number, month: number, day: number, hour: number, minute: number) =>
+    new Date(year, month - 1, day, hour, minute).toISOString();
+  const now = new Date(2026, 10, 16, 12).getTime();
+  assert.equal(absoluteEventTime(local(2026, 11, 16, 3, 5), now), "Today 03:05");
+  assert.equal(absoluteEventTime(local(2026, 11, 15, 14, 5), now), "Yesterday 14:05");
+  assert.equal(absoluteEventTime(local(2026, 3, 3, 9, 7), now), "Mar 3 09:07");
+  assert.equal(absoluteEventTime(local(2024, 3, 3, 9, 7), now), "Mar 3 2024 09:07");
+  // A future event keeps its own local date and clock, not the current instant.
+  assert.equal(absoluteEventTime(local(2026, 11, 17, 8, 30), now), "Nov 17 08:30");
+  assert.notEqual(absoluteEventTime(local(2026, 11, 17, 8, 30), now), absoluteEventTime(local(2026, 11, 16, 12, 0), now));
   assert.equal(absoluteEventTime("not-a-date", now), "Time unknown");
   assert.equal(eventDateTime("2026-11-16T03:05:29.784Z"), "2026-11-16T03:05:29.784Z");
   assert.equal(eventDateTime("not-a-date"), undefined);
