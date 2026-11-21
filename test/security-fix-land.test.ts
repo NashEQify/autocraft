@@ -53,16 +53,19 @@ let seq = 0;
 async function finding(state: string, extra: Record<string, string | number | null> = {}): Promise<number> {
   const n = ++seq;
   const at = "2026-11-05T00:00:00Z";
-  await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_commit, fix_title, fix_summary, fix_branch, fix_files, created_at, updated_at)
-    VALUES ('photocraft', ?, 1, 'psd', 'Layer length trusted', 'high', 0, ?, '[{"path":"crates/psd/src/layer.rs","line":118,"claim":""}]', 'open file', 'writes outside', ?, ?, 'Check layer length before copying', 'The reader compares the length with the remaining data and returns an error.', ?, ?, ?, ?)`)
-    .run(n, state, `fp${n}`, SHA, `fix-check-layer-length-${n}`, JSON.stringify(["crates/psd/src/layer.rs", "crates/psd/tests/autocraft_regression_1.rs"]), at, at);
-  for (const [k, v] of Object.entries(extra)) await db.prepare(`UPDATE security_findings SET ${k} = ? WHERE repo = 'photocraft' AND number = ?`).run(v, n);
+  await db.run(db.k.insertInto("security_findings").values({
+    repo: "photocraft", number: n, scan_id: 1, area: "psd", title: "Layer length trusted", severity: "high", urgent: 0, state, refs: '[{"path":"crates/psd/src/layer.rs","line":118,"claim":""}]',
+    reach: "open file", impact: "writes outside", fingerprint: `fp${n}`, fix_commit: SHA, fix_title: "Check layer length before copying",
+    fix_summary: "The reader compares the length with the remaining data and returns an error.", fix_branch: `fix-check-layer-length-${n}`,
+    fix_files: JSON.stringify(["crates/psd/src/layer.rs", "crates/psd/tests/autocraft_regression_1.rs"]), created_at: at, updated_at: at,
+  }));
+  for (const [k, v] of Object.entries(extra)) await db.run(db.k.updateTable("security_findings").set({ [k]: v }).where("repo", "=", "photocraft").where("number", "=", n));
   return n;
 }
 const stateOf = async (n: number) => (await rawFinding(db, "photocraft", n))!;
 
 before(async () => {
-  await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at, commit_sha) VALUES (1, 'photocraft', 'done', 'boss', '2026-11-05T00:00:00Z', ?)").run(SHA);
+  await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "photocraft", state: "done", started_by: "boss", started_at: "2026-11-05T00:00:00Z", commit_sha: SHA }));
 });
 
 describe("private fix and landing", () => {
@@ -88,9 +91,9 @@ describe("private fix and landing", () => {
 
   test("a fix that cannot start returns the finding to new with a note", async () => {
     const n = await finding("fixing");
-    await db.prepare("UPDATE security_scans SET commit_sha = NULL WHERE id = 1").run();
+    await db.run(db.k.updateTable("security_scans").set({ commit_sha: null }).where("id", "=", 1));
     await runFix(db, "photocraft", n, { log: () => {} } as unknown as FixDeps);
-    await db.prepare("UPDATE security_scans SET commit_sha = ? WHERE id = 1").run(SHA);
+    await db.run(db.k.updateTable("security_scans").set({ commit_sha: SHA }).where("id", "=", 1));
     assert.equal((await stateOf(n)).state, "new");
     assert.match((await stateOf(n)).note ?? "", /no pinned commit/);
   });
@@ -114,7 +117,7 @@ describe("private fix and landing", () => {
       },
     };
     await runFix(db, "photocraft", n, deps);
-    const flags = (await db.prepare("SELECT resumed FROM security_calls WHERE kind = 'fix' AND finding_number = ? ORDER BY id").all(n) as { resumed: number }[]).map((r) => r.resumed);
+    const flags = (await db.all(db.k.selectFrom("security_calls").select("resumed").where("kind", "=", "fix").where("finding_number", "=", n).orderBy("id"))).map((r) => r.resumed);
     return { seen, stores, flags };
   }
 
@@ -190,14 +193,14 @@ describe("private fix and landing", () => {
   });
 
   test("the quiet pull request is the pipeline's own: counted as an own fix PR and in pilot scope; a stalled one shows why", async () => {
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, 'pipeline-bot')").run(PIPELINE_LOGIN_KEY);
+    await db.run(db.k.insertInto("settings").values({ key: PIPELINE_LOGIN_KEY, value: "pipeline-bot" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "pipeline-bot" })));
     await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1");
     const n = await finding("landing", { fix_pr: 91 });
     assert.ok((await ownFixPrs(db, "photocraft")).prs.has("photocraft#91"), "counted as an own fix PR");
     assert.ok((await ownFixPrs(db, "photocraft")).quiet.has("photocraft#91"));
-    await db.prepare("UPDATE security_findings SET state = 'landed' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ state: "landed" }).where("number", "=", n));
     assert.ok((await ownFixPrs(db, "photocraft")).quiet.has("photocraft#91"), "still quiet after the merge, until published");
-    await db.prepare("UPDATE security_findings SET state = 'landing' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ state: "landing" }).where("number", "=", n));
     await db.prepare("INSERT INTO items (repo, number, kind, state) VALUES ('photocraft', 5, 'issue', 'OPEN')").run();
     await setPilot(db, "boss", ["photocraft#5"]);
     assert.equal(await inPilot(db, "photocraft", 91), true, "in scope although the pilot list names other items");
@@ -230,7 +233,7 @@ describe("private fix and landing", () => {
     assert.equal((await stateOf(n)).state, "ready");
     assert.equal((await stateOf(n)).fix_pr, null);
     assert.ok(await isQuiet(db, "photocraft", 78), "a closed quiet pull request stays quiet if it is reopened");
-    await db.prepare("UPDATE security_findings SET state = 'published' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ state: "published" }).where("number", "=", n));
     assert.ok(!await isQuiet(db, "photocraft", 78), "and is not quiet once the advisory is published");
   });
 
@@ -244,7 +247,7 @@ describe("private fix and landing", () => {
     assert.equal(refused.calls.some((c) => c.args.includes("push")), false, "nothing is pushed before the fork exists");
 
     // Pressing Advisory again resumes after the steps that are done.
-    await db.prepare("UPDATE security_findings SET state = 'landing' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ state: "landing" }).where("number", "=", n));
     const ok = fake({ pr: "https://github.com/storytold/photocraft-ghsa-aaaa/pull/3" });
     await runAdvisory(db, "photocraft", n, BY, deps(ok.exec));
     const row = await stateOf(n);

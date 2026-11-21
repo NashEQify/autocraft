@@ -14,6 +14,7 @@ import { regressionName } from "../src/verify/types.ts";
 import { patchFor } from "../src/verify/plan.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { jsonNum } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "secfix-rounds-")), "dash.db"));
@@ -23,13 +24,15 @@ const SHA = "b".repeat(40);
 const SRC = "crates/psd/src/layer.rs";
 let seq = 0;
 
-await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at, commit_sha) VALUES (1, 'photocraft', 'done', 'boss', '2026-11-05T00:00:00Z', ?)").run(SHA);
+await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "photocraft", state: "done", started_by: "boss", started_at: "2026-11-05T00:00:00Z", commit_sha: SHA }));
 
 async function finding(): Promise<number> {
   const n = ++seq;
   const at = "2026-11-05T00:00:00Z";
-  await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, created_at, updated_at)
-    VALUES ('photocraft', ?, 1, 'psd', 'Layer length trusted', 'high', 0, 'fixing', ?, 'open file', 'writes outside', ?, ?, ?)`).run(n, JSON.stringify([{ path: SRC, line: 118, claim: "" }]), `fp${n}`, at, at);
+  await db.run(db.k.insertInto("security_findings").values({
+    repo: "photocraft", number: n, scan_id: 1, area: "psd", title: "Layer length trusted", severity: "high", urgent: 0, state: "fixing", refs: JSON.stringify([{ path: SRC, line: 118, claim: "" }]),
+    reach: "open file", impact: "writes outside", fingerprint: `fp${n}`, created_at: at, updated_at: at,
+  }));
   return n;
 }
 const testNameOf = (n: number): string => regressionName(createHash("sha256").update(`photocraft#${n}`).digest("hex").slice(0, 10));
@@ -69,7 +72,7 @@ function world(n: number, replies: (round: number) => string): World {
   return { calls, asks, deps, reviews };
 }
 
-const rounds = async (n: number) => await db.prepare("SELECT * FROM security_fix_rounds WHERE repo = 'photocraft' AND number = ? ORDER BY round").all(n) as { round: number; state: string; head_task: number; base_task: number; session: string | null }[];
+const rounds = async (n: number) => await db.all(db.k.selectFrom("security_fix_rounds").select(["round", "state", "head_task", "base_task", "session"]).where("repo", "=", "photocraft").where("number", "=", n).orderBy("round"));
 const result = (code: number) => JSON.stringify([{ step: "test", exitCode: code, durationMs: 1, timedOut: false }]);
 const plan = JSON.stringify([{ name: "test", cmd: ["cargo", "test"], network: "none", timeoutSec: 10 }]);
 /** Ends a round's tasks as the worker would: the head task with `head` as the exit code of its step, the base task with `base`. */
@@ -80,7 +83,7 @@ async function end(n: number, head: number, base: number): Promise<void> {
   await db.prepare("INSERT INTO build_task_logs (task_id, seq, step, chunk) VALUES (?, 1, 'test', 'assertion failed: left == right')").run(r.head_task);
 }
 const tasks = async (): Promise<number> => (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks").get() as { n: number }).n;
-const fixJobs = async (n: number): Promise<number> => (await db.prepare("SELECT COUNT(*) AS c FROM jobs WHERE step = 'security-fix' AND json_extract(params, '$.number') = ?").get(n) as { c: number }).c;
+const fixJobs = async (n: number): Promise<number> => (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("c")).where("step", "=", "security-fix").where((eb) => eb(jsonNum(db, "params", "$.number"), "=", n))))!.c;
 
 describe("security fix rounds", () => {
   test("a failed build ends the job; the next job resumes the session with the failure and no job waits on a build", async () => {
@@ -95,7 +98,7 @@ describe("security fix rounds", () => {
     assert.ok(existsSync(dir), "the session store stays with the building round");
     // While the tasks run there is nothing to do, no job is queued, and the finding is not reset.
     assert.equal(await advanceSecurityFixes(db), 0);
-    await db.prepare("UPDATE security_findings SET updated_at = '2026-11-01T00:00:00Z' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ updated_at: "2026-11-01T00:00:00Z" }).where("number", "=", n));
     await reconcileFindings(db, "photocraft");
     assert.equal((await rawFinding(db, "photocraft", n))!.state, "fixing");
     assert.equal(await sweepSessions(db, new Date()), 0, "a building round's session is not swept inside the window");
@@ -107,7 +110,7 @@ describe("security fix rounds", () => {
     assert.match(await runFix(db, "photocraft", n, w.deps), /round 2 queued for build/);
     const second = w.asks[1]!;
     assert.match(second.resume ?? "", /assertion failed/);
-    assert.equal((await db.prepare("SELECT resumed FROM security_calls WHERE kind = 'fix' AND finding_number = ? ORDER BY id").all(n) as { resumed: number }[]).map((r) => r.resumed).join(), "0,1");
+    assert.equal((await db.all(db.k.selectFrom("security_calls").select("resumed").where("kind", "=", "fix").where("finding_number", "=", n).orderBy("id"))).map((r) => r.resumed).join(), "0,1");
     assert.deepEqual((await rounds(n)).map((r) => r.state), ["failed", "building"]);
   });
 
@@ -125,7 +128,7 @@ describe("security fix rounds", () => {
     assert.ok(w.calls.some((c) => c.includes("update-ref") && c.includes(row.fix_ref!)));
     assert.ok(!w.calls.some((c) => /(^| )(push|send-pack)( |$)/.test(c)), "nothing is pushed");
     assert.deepEqual(await rounds(n), [], "the rounds are forgotten when the fix ends");
-    assert.deepEqual((await db.prepare("SELECT round, state FROM security_fix_log WHERE repo = 'photocraft' AND number = ?").all(n) as { round: number; state: string }[]).map((r) => `${r.round}:${r.state}`), ["1:passed"], "the log keeps the round");
+    assert.deepEqual((await db.all(db.k.selectFrom("security_fix_log").select(["round", "state"]).where("repo", "=", "photocraft").where("number", "=", n))).map((r) => `${r.round}:${r.state}`), ["1:passed"], "the log keeps the round");
   });
 
   test("a failed word check never queues a build", async () => {
@@ -144,28 +147,28 @@ describe("security fix rounds", () => {
 
   test("rounds left by a dead fix job are logged under their own attempt when the finding is reconciled", async () => {
     const n = await finding();
-    await db.prepare("UPDATE security_findings SET fix_attempts = 1 WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_findings").set({ fix_attempts: 1 }).where("number", "=", n));
     await runFix(db, "photocraft", n, world(n, () => reply(n)).deps);
-    await db.prepare("UPDATE security_fix_rounds SET state = 'failed', failure = 'boom' WHERE number = ?").run(n);
-    await db.prepare("UPDATE security_findings SET updated_at = '2026-11-01T00:00:00Z' WHERE number = ?").run(n);
+    await db.run(db.k.updateTable("security_fix_rounds").set({ state: "failed", failure: "boom" }).where("number", "=", n));
+    await db.run(db.k.updateTable("security_findings").set({ updated_at: "2026-11-01T00:00:00Z" }).where("number", "=", n));
     await reconcileFindings(db, "photocraft");
     const row = (await rawFinding(db, "photocraft", n))!;
     assert.equal(row.state, "new");
     assert.match(row.last_failure ?? "", /ended before/);
     assert.deepEqual(await rounds(n), []);
-    assert.deepEqual((await db.prepare("SELECT attempt, round, state FROM security_fix_log WHERE number = ?").all(n) as { attempt: number; round: number; state: string }[]).map((r) => `${r.attempt}:${r.round}:${r.state}`), ["1:1:failed"]);
+    assert.deepEqual((await db.all(db.k.selectFrom("security_fix_log").select(["attempt", "round", "state"]).where("number", "=", n))).map((r) => `${r.attempt}:${r.round}:${r.state}`), ["1:1:failed"]);
   });
 
   test("a round building past 4 hours is cancelled and read; a pipeline fix waits for the switch, an operator's does not", async () => {
     const n = await finding(), m = await finding();
     for (const [k, by] of [[n, "boss"], [m, "pipeline"]] as const) {
-      await db.prepare("UPDATE security_findings SET decided_by = ? WHERE number = ?").run(by, k);
+      await db.run(db.k.updateTable("security_findings").set({ decided_by: by }).where("number", "=", k));
       await runFix(db, "photocraft", k, world(k, () => reply(k)).deps);
-      await db.prepare("UPDATE security_fix_rounds SET created_at = '2020-01-01T00:00:00Z' WHERE number = ?").run(k);
+      await db.run(db.k.updateTable("security_fix_rounds").set({ created_at: "2020-01-01T00:00:00Z" }).where("number", "=", k));
     }
     assert.equal(await advanceSecurityFixes(db, false), 1, "only the operator's fix continues with the pipeline off");
-    const job = await db.prepare("SELECT requested_by FROM jobs WHERE step = 'security-fix' AND json_extract(params, '$.number') = ?").get(n) as { requested_by: string };
-    assert.equal(job.requested_by, "boss");
+    const job = await db.get(db.k.selectFrom("jobs").select("requested_by").where("step", "=", "security-fix").where((eb) => eb(jsonNum(db, "params", "$.number"), "=", n)));
+    assert.equal(job!.requested_by, "boss");
     const r = (await rounds(n))[0]!;
     assert.equal((await db.prepare("SELECT state FROM build_tasks WHERE id = ?").get(r.head_task) as { state: string }).state, "cancelled");
     assert.equal(await fixJobs(m), 0);
