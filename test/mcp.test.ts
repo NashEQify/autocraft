@@ -448,7 +448,7 @@ describe("answering", () => {
 describe("token revocation", () => {
   before(() => { answering.enabled = true; });
   after(() => { answering.enabled = false; });
-  const live = async (login: string): Promise<number> => Number((await db.get(db.k.selectFrom("mcp_tokens").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", login)))!.n);
+  const live = async (login: string): Promise<number> => (await db.get(db.k.selectFrom("mcp_tokens").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", login)))!.n;
 
   test("demoting an operator ends its answering tokens for good; plain tokens stay", async () => {
     const b = await signedIn("op2");
