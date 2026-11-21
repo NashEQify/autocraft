@@ -9,6 +9,7 @@ import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
 
 export type ItemPhase = "Triage" | "Waiting for a person" | "Review" | "Fixing" | "Verifying" | "In queue" | "Merged" | "Closed" | "Held" | "Out of scope";
 export interface ItemStatus { phase: ItemPhase; waiting: string | null; next: string | null; since: string }
@@ -25,7 +26,6 @@ const GROUP: Record<FindingState, SecurityGroup> = {
   landed: "Landed or published", advisory: "Landed or published", published: "Landed or published", dismissed: "Dismissed or backlog", backlog: "Dismissed or backlog",
 };
 const SEVERITY_RANK: Record<FindingSeverity, number> = { critical: 0, high: 1, medium: 2, low: 3 };
-const HIDDEN = INTERNAL_FINDING_STATES.map((s) => `'${s}'`).join(", ");
 
 const NOT_FOUND = "not found";
 function needStaff(req: Req): void {
@@ -79,9 +79,9 @@ type LogRound = { attempt: number; round: number; state: string; failure: string
 type LiveRound = { round: number; state: string; failure: string | null; created_at: string };
 
 const logRounds = async (db: Db, repo: string, n: number): Promise<LogRound[]> =>
-  await db.prepare("SELECT attempt, round, state, failure, created_at, ended_at FROM security_fix_log WHERE repo = ? AND number = ? ORDER BY attempt, round").all(repo, n) as LogRound[];
+  await db.all(db.k.selectFrom("security_fix_log").select(["attempt", "round", "state", "failure", "created_at", "ended_at"]).where("repo", "=", repo).where("number", "=", n).orderBy("attempt").orderBy("round"));
 const liveRounds = async (db: Db, repo: string, n: number): Promise<LiveRound[]> =>
-  await db.prepare("SELECT round, state, failure, created_at FROM security_fix_rounds WHERE repo = ? AND number = ? ORDER BY round").all(repo, n) as LiveRound[];
+  await db.all(db.k.selectFrom("security_fix_rounds").select(["round", "state", "failure", "created_at"]).where("repo", "=", repo).where("number", "=", n).orderBy("round"));
 
 /** Rounds the last attempt ran, from the log; null when the log has none. */
 function lastAttemptRounds(log: LogRound[]): number | null {
@@ -106,7 +106,8 @@ export async function securityFindings(db: Db, req: Req): Promise<SecurityList> 
   const rows: FindingRow[] = [];
   for (const repo of repos) {
     await reconcileFindings(db, repo);
-    const stored = await db.prepare(`SELECT * FROM security_findings WHERE repo = ? AND state NOT IN (${HIDDEN})`).all(repo) as StoredFinding[];
+    const stored = await db.all(db.k.selectFrom("security_findings").select(kx.cols("security_findings")).$narrowType<{ severity: FindingSeverity; state: FindingState }>()
+      .where("repo", "=", repo).where("state", "not in", INTERNAL_FINDING_STATES));
     for (const r of stored) rows.push(rowOf(r, await logRounds(db, r.repo, r.number), await liveRounds(db, r.repo, r.number)));
   }
   const byRank = (a: FindingRow, b: FindingRow) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.repo.localeCompare(b.repo) || a.number - b.number;

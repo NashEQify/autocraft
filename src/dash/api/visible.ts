@@ -21,7 +21,7 @@ const memo = new WeakMap<Req, Promise<string[]>>();
 export async function visibleTo(db: Db, user: Pick<User, "role" | "canRead">): Promise<string[]> {
   const tracked = await trackedNames(db);
   if (user.role === "operator") return tracked;
-  const pub = new Set((await db.prepare("SELECT name FROM main.repos WHERE lower(visibility) = 'public'").all() as { name: string }[]).map((r) => r.name));
+  const pub = new Set((await db.all(db.k.selectFrom("main.repos").select("name").where((eb) => eb(eb.fn<string>("lower", ["visibility"]), "=", "public")))).map((r) => r.name));
   const rest = tracked.filter((r) => !pub.has(r));
   const ok = await Promise.all(rest.map((r) => user.canRead(r).catch(() => false)));
   const allowed = new Set(rest.filter((_, i) => ok[i]));
@@ -53,7 +53,7 @@ export async function repoOwners(db: Db, req: Req): Promise<Record<string, strin
 
 /** Every repo name the database knows, tracked or not: the mirror's repos and every repo that was ever tracked (its work rows stay after untracking). */
 async function knownRepos(db: Db): Promise<string[]> {
-  return (await db.prepare("SELECT name FROM main.repos UNION SELECT name FROM main.tracked_repos UNION SELECT name FROM main.ever_tracked_repos ORDER BY 1").all() as { name: string }[]).map((r) => r.name);
+  return (await db.all(db.k.selectFrom("main.repos").select("name").union(db.k.selectFrom("main.tracked_repos").select("name")).union(db.k.selectFrom("main.ever_tracked_repos").select("name")).orderBy("name"))).map((r) => r.name);
 }
 
 /**

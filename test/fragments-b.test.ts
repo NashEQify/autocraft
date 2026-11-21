@@ -12,7 +12,7 @@ import { hiddenArgs, hiddenExpr as traceHiddenExpr, hiddenSql as traceHiddenSql,
 import { touchesHidden, touchesHiddenExpr } from "../src/agents/runs.ts";
 import { excludeHidden, excludeHiddenExpr } from "../src/dash/api/visible.ts";
 import { withoutHidden, withoutHiddenExpr } from "../src/dash/api/decisions.ts";
-import { latestCte, latestCteExpr, TRACKED, trackedExpr } from "../src/dash/api/stats.ts";
+import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
 import { MANUAL_ONLY_KEY, manualExpr, manualSql } from "../src/remote/manual-only.ts";
@@ -143,8 +143,8 @@ async function fixture(db: Db): Promise<void> {
 
 type Case = {
   name: string;
-  /** The text version's statement and its arguments (positional, or one object of named ones). */
-  text: [string, ...Param[]] | [string, Record<string, Param>];
+  /** The text version's statement and its arguments (positional, or one object of named ones); absent once the text version is gone. */
+  text?: [string, ...Param[]] | [string, Record<string, Param>];
   built: (db: Db) => Parameters<Db["all"]>[0];
   /** What the text version selects, as `key` gives it: proves the fixture has rows the fragment keeps and drops. */
   expect: string[];
@@ -198,11 +198,11 @@ function cases(db: Db): Case[] {
       built: (d) => d.k.selectFrom("decisions").select("id as k").where("kind", "=", "merge").where((eb) => withoutHiddenExpr(d, eb, h)!).orderBy("id") });
   }
   for (const repo of [undefined, "app"]) {
-    out.push({ name: `latestCte (${repo ?? "every repo"})`, text: [`WITH ${latestCte(repo)} SELECT repo, number FROM latest ORDER BY repo, number`, repo ? { repo } : {}],
+    out.push({ name: `latestCte (${repo ?? "every repo"})`,
       expect: repo ? ["app:1"] : ["app:1", "lib:1"],
       built: (d) => latestCteExpr(d, repo).selectFrom("latest").select(["repo", "number"]).orderBy("repo").orderBy("number") });
   }
-  out.push({ name: "TRACKED", text: [`SELECT DISTINCT i.repo AS k FROM main.items i WHERE i.${TRACKED} ORDER BY i.repo`], expect: ["app", "lib"],
+  out.push({ name: "TRACKED", expect: ["app", "lib"],
     built: (d) => d.k.selectFrom("main.items as i").select("i.repo as k").distinct().where((eb) => trackedExpr(d, eb, "i.repo")).orderBy("i.repo") });
   out.push({ name: "PHASE_SQL", text: [`SELECT i.number, ${PHASE_SQL} AS phase FROM main.items i LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number WHERE i.repo = 'app' AND i.number <= 5 ORDER BY i.number`],
     expect: ["1:Review", "2:Triage", "3:Triage", "4:Merged", "5:Closed"],
@@ -243,11 +243,11 @@ test("each fragment twin selects the same rows as its text version", async () =>
     const failed: string[] = [];
     for (const c of cases(db)) {
       const key = c.key ?? ((r: Record<string, unknown>) => Object.values(r).map(String).join(":"));
-      const [sql, ...args] = c.text;
+      const [sql, ...args] = c.text ?? [""];
       try {
         // Some text versions are SQLite only (a bare 1 or 0 as a condition, json_each, json_extract): on Postgres their
         // twin must then select what the text version selects on SQLite.
-        const text = await db.prepare(sql).all(...(args as Param[])).catch((e: unknown) => {
+        const text = !c.text ? null : await db.prepare(sql).all(...(args as Param[])).catch((e: unknown) => {
           if (db.dialect === "postgres") return null;
           throw e;
         }) as Record<string, unknown>[] | null;

@@ -14,7 +14,6 @@ export async function stuckItems(db: Db, req: Req): Promise<StuckItems> {
   const l = await storedLiveness(db);
   if (!l) return { checkedAt: null, open: 0, stuck: 0, long: 0, items: [] };
   const hidden = await hiddenRepos(db, req);
-  const title = db.prepare("SELECT title FROM main.items WHERE repo = ? AND number = ?");
-  const items = await mapSeq(l.items.filter((i) => !isHiddenRepo(hidden, i.repo)), async (i) => ({ ...i, wait: waitFor({ hidden }, i.wait), title: (await title.get(i.repo, i.number) as { title: string | null } | undefined)?.title ?? null }));
+  const items = await mapSeq(l.items.filter((i) => !isHiddenRepo(hidden, i.repo)), async (i) => ({ ...i, wait: waitFor({ hidden }, i.wait), title: (await db.get(db.k.selectFrom("main.items").select("title").where("repo", "=", i.repo).where("number", "=", i.number)))?.title ?? null }));
   return { checkedAt: l.checkedAt, open: l.open, stuck: items.filter((i) => i.verdict === "stuck").length, long: items.filter((i) => i.verdict === "long").length, items };
 }

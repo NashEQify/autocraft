@@ -61,8 +61,9 @@ async function scopesOf(db: Db, req: Req, b: Record<string, unknown>, hadAnswer 
 
 export async function list(db: Db, req: Req): Promise<RunnersReply> {
   const helpers = await listHelpers(db, req.user.login);
-  const extra = new Map((await db.prepare(`SELECT t.id, t.machine, t.created_at, t.expires_at, t.can_agent, t.can_answer, h.helper_version FROM mcp_tokens t LEFT JOIN remote_helpers h ON h.token_id = t.id
-      WHERE t.login = ? AND t.kind = 'runner'`).all(req.user.login) as { id: number; machine: string | null; created_at: string; expires_at: string; can_agent: number; can_answer: number; helper_version: string | null }[])
+  const extra = new Map((await db.all(db.k.selectFrom("mcp_tokens as t").leftJoin("remote_helpers as h", "h.token_id", "t.id")
+    .select(["t.id", "t.machine", "t.created_at", "t.expires_at", "t.can_agent", "t.can_answer", "h.helper_version"])
+    .where("t.login", "=", req.user.login).where("t.kind", "=", "runner")))
     .map((r) => [Number(r.id), r]));
   return {
     runners: helpers.flatMap((h) => {
@@ -92,7 +93,7 @@ export async function approve(db: Db, req: Req): Promise<RunnersReply> {
 export async function scopes(db: Db, req: Req): Promise<RunnersReply> {
   const b = body(req);
   if (!Number.isInteger(b.id)) throw new HttpError(400, "id must be a Task Runner id");
-  const had = await db.prepare("SELECT can_answer FROM mcp_tokens WHERE id = ? AND login = ? AND kind = 'runner'").get(b.id as number, req.user.login) as { can_answer: number } | undefined;
+  const had = await db.get(db.k.selectFrom("mcp_tokens").select("can_answer").where("id", "=", b.id as number).where("login", "=", req.user.login).where("kind", "=", "runner"));
   if (!had) throw new HttpError(404, "you have no such Task Runner");
   const s = await scopesOf(db, req, b, had.can_answer === 1);
   if (!await setRunnerScopes(db, req.user.login, b.id as number, s)) throw new HttpError(404, "you have no such Task Runner");

@@ -31,11 +31,10 @@ async function visibleHits(db: Db, req: Req, index: VectorIndex, q: Float32Array
 }
 
 async function describe(db: Db, hits: Hit[]): Promise<SimilarHit[]> {
-  const row = db.prepare("SELECT kind, title, author, state, state_reason FROM items WHERE repo = ? AND number = ?");
   const run = await latestRun(db);
   const out: SimilarHit[] = [];
   for (const h of hits) {
-    const r = await row.get(h.repo, h.number) as { kind: string; title: string | null; author: string | null; state: string; state_reason: string | null } | undefined;
+    const r = await db.get(db.k.selectFrom("items").select(["kind", "title", "author", "state", "state_reason"]).where("repo", "=", h.repo).where("number", "=", h.number));
     if (!r) continue;
     const l = await settledOf(db, h.repo, h.number, run);
     out.push({
@@ -80,7 +79,7 @@ export async function similar(db: Db, req: Req, index: VectorIndex, gate?: Semap
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
-  const it = await db.prepare("SELECT title, body FROM items WHERE repo = ? AND number = ?").get(repo, n) as { title: string | null; body: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", repo).where("number", "=", n));
   if (!it) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   await needVectors(db, index);
   const q = await index.vectorOf(db, repo, n) ?? await embedOne(index, itemText(it.title, it.body), "item", gate);
