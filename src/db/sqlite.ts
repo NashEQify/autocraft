@@ -7,7 +7,7 @@ import { callSite, siteError } from "./handle.ts";
 import type { DB, Row, RunResult } from "./index.ts";
 
 /** Prepared statements kept per connection: preparing the same text again costs more than running it. */
-const CACHE_SIZE = 500;
+const CACHE_SIZE = 1000;
 
 const plain = (rows: unknown[]): Row[] => rows.map((r) => ({ ...(r as Row) }));
 
