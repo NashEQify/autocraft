@@ -2,9 +2,8 @@
 // Under the `box` identity nothing is added: the child inherits this process's environment and the box account's
 // login. Under `app` the child's whole environment is the inherited basics plus an installation token (never the
 // box account's credentials), and a failure to mint one is an error, not a fallback to the box account.
-// The setting is held in memory: the runner's tick and the dashboard's live hub refresh it when the `settings` change
-// counter moves (refreshReadIdentity), so a switch takes effect there without a restart; a one-shot CLI command reads it
-// once, on first use.
+// The setting is held in memory and read again whenever the `settings` change counter moves (refreshReadIdentity), so a
+// switch takes effect in every process without a restart.
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
@@ -48,29 +47,35 @@ async function openShared(path: string): Promise<Db> {
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
-async function settingOf(db: Db): Promise<string | undefined> {
+async function retried<T>(fn: () => Promise<T>): Promise<T> {
   let last: unknown;
   for (let i = 0; i < 3; i++) {
     try {
-      return (await db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value;
+      return await fn();
     } catch (e) { last = e; }
   }
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
+const settingOf = (db: Db): Promise<string | undefined> =>
+  retried(async () => (await db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value);
+
 /** The identity setting as this process holds it, with the `settings` change counter it was read at (null: unknown). */
 let held: { app: boolean; seq: number | null } | null = null;
-let firstRead: Promise<boolean> | null = null;
+/** Bumped by every switch this process notes, so a refresh that read the setting before the switch drops its reading. */
+let generation = 0;
 
 /**
  * Brings the held identity up to date when the `settings` change counter moved (`seq`: the counter as the caller already
- * read it). Long-running loops call it every pass. The counter is read before the value, so a write between the two
- * only makes the next pass read again.
+ * read it). The counter is read before the value, so a write between the two only makes the next pass read again.
  */
 export async function refreshReadIdentity(db: Db, seq?: number): Promise<void> {
-  const at = seq ?? (await db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'settings'").get() as { seq: number } | undefined)?.seq ?? null;
+  const gen = generation;
+  const at = seq ?? (await retried(async () => await db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'settings'").get() as { seq: number } | undefined))?.seq ?? null;
   if (at !== null && held?.seq === at) return;
   const app = await settingOf(db) === "app";
+  // A switch noted while this pass awaited is newer than its reading.
+  if (gen !== generation) return;
   // Another pass may have stored a later reading while this one awaited.
   if (at !== null && held && held.seq !== null && held.seq > at) return;
   held = { app, seq: at };
@@ -78,23 +83,22 @@ export async function refreshReadIdentity(db: Db, seq?: number): Promise<void> {
 
 /** Records a switch this process just wrote, so its own next read uses it before any refresh. */
 export function noteReadIdentity(app: boolean): void {
+  generation++;
   held = { app, seq: null };
 }
 
 /**
- * Whether reads go through the GitHub App right now: the held value, read once on first use when no loop refreshed it.
- * With `db`, that database's setting. Throws when the setting exists to be read but cannot be.
+ * Whether reads go through the GitHub App right now. With `db`, that database's setting. Without, the instance
+ * database's: every call reads its `settings` change counter (one query on the shared handle) and the setting itself
+ * only when the counter moved, so a switch reaches every process, job children included. Throws when the setting exists
+ * to be read but cannot be.
  */
 export async function readsUseApp(db?: Db): Promise<boolean> {
   if (db) return await settingOf(db) === "app";
-  if (held) return held.app;
-  firstRead ??= (async () => {
-    const d = await sharedDb();
-    return d !== null && await settingOf(d) === "app";
-  })().catch((e: unknown) => { firstRead = null; throw e; });
-  const app = await firstRead;
-  held ??= { app, seq: null };
-  return held.app;
+  const d = await sharedDb();
+  if (d === null) return held?.app ?? false;
+  await refreshReadIdentity(d);
+  return held?.app ?? false;
 }
 
 /** The owner of the tracked repos: the default owner when it has any, else the first tracked one. */

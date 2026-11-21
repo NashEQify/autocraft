@@ -15,7 +15,8 @@ export type LiveOptions = {
   stallMs?: number;        // a client whose socket stays backed up this long is dropped
 };
 
-type Client = { res: ServerResponse; alive: () => Promise<boolean>; session: string; stalled?: NodeJS.Timeout };
+// `greeted`: the hello frame went out; changes go only to greeted clients, so none arrives before the hello.
+type Client = { res: ServerResponse; alive: () => Promise<boolean>; session: string; stalled?: NodeJS.Timeout; greeted?: boolean };
 
 export class LiveHub {
   private clients = new Set<Client>();
@@ -62,6 +63,7 @@ export class LiveHub {
     if (this.clients.size === 1) await this.start();
     const seqs = await this.read();
     res.write(`retry: 3000\nevent: hello\ndata: ${JSON.stringify({ seqs })}\n\n`);
+    c.greeted = true;
     res.on("close", () => this.remove(c));
   }
 
@@ -76,8 +78,9 @@ export class LiveHub {
     this.stop();
   }
 
+  /** The markers after a check pass, which announces what changed since the last one. */
   private async read(): Promise<Record<string, number>> {
-    this.last = await readSeqs(this.db);
+    await this.checks.run();
     return this.last;
   }
 
@@ -88,7 +91,7 @@ export class LiveHub {
   }
 
   private async start(): Promise<void> {
-    this.last = await readSeqs(this.db);
+    await this.read();
     await this.identity(this.last);
     this.timer = setInterval(() => void this.checks.skip(), this.pollMs);
     this.beat = setInterval(() => void this.beats.skip(), this.heartbeatMs);
@@ -135,7 +138,7 @@ export class LiveHub {
 
   private send(frame: string): void {
     for (const c of this.clients) {
-      if (c.res.write(frame) || c.stalled) continue;
+      if (!c.greeted || c.res.write(frame) || c.stalled) continue;
       // Backed up: wait for 'drain', and drop the client when it does not come.
       const drop = () => { c.res.destroy(); this.remove(c); };
       c.stalled = setTimeout(drop, this.stallMs);

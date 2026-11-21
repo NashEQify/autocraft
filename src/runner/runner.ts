@@ -103,6 +103,8 @@ function killGroup(pid: number, signal: NodeJS.Signals): void {
 export class Runner {
   readonly db: Db;
   readonly running = new Map<number, Running>();
+  /** Ended jobs whose end could not be recorded: every tick records them again, so their rows reach a final state. */
+  private readonly unrecorded = new Map<number, { code: number | null; signal: NodeJS.Signals | null; spawnError: string | null }>();
   private stopping = false;
   private flowAt = 0;
   private webhookAt = 0;
@@ -173,6 +175,7 @@ export class Runner {
       }
     }
     await this.cancels();
+    await this.recordEnds();
     if (this.stopping) return;
     try {
       await refreshReadIdentity(this.db);
@@ -502,7 +505,10 @@ export class Runner {
     const exited = new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
         void this.finish(id, code, signal, spawnError)
-          .catch((e) => this.o.log(`job ${id}: end not recorded: ${(e as Error).message}`))
+          .catch((e) => {
+            this.unrecorded.set(id, { code, signal, spawnError });
+            this.o.log(`job ${id}: end not recorded: ${(e as Error).message}`);
+          })
           .finally(() => {
             this.running.delete(id);
             resolve();
@@ -518,6 +524,17 @@ export class Runner {
     if (r) this.o.log(`job ${id}: ${r.state}${r.state === "failed" && r.error ? `: ${r.error}` : ""}`);
   }
 
+  private async recordEnds(): Promise<void> {
+    for (const [id, e] of [...this.unrecorded]) {
+      try {
+        await this.finish(id, e.code, e.signal, e.spawnError);
+        this.unrecorded.delete(id);
+      } catch (err) {
+        this.o.log(`job ${id}: end still not recorded: ${(err as Error).message}`);
+      }
+    }
+  }
+
   /** Resolves when every running job has ended. */
   async idle(): Promise<void> {
     while (this.running.size) await Promise.all([...this.running.values()].map((r) => r.exited));
@@ -531,6 +548,7 @@ export class Runner {
     await cancels.run();
     await this.idle();
     clearInterval(timer);
+    await this.recordEnds();
     await Promise.all([this.planThread.close(), this.flowThread.close()]);
   }
 
