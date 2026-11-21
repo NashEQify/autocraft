@@ -10,6 +10,7 @@ import { decisionStamp } from "../src/conversations/cards.ts";
 import { applyAnswer, undo } from "../src/dash/api/decisions.ts";
 import { ask, getDecision } from "../src/decisions.ts";
 import type { Req } from "../src/dash/types.ts";
+import { excluded } from "../src/db/kx.ts";
 import { T1, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
@@ -35,19 +36,20 @@ const deps = (w: World, o: { posted?: string[]; closed?: string[]; failClose?: n
   } } };
 };
 
-const limit = async (w: World, n: number) => await w.db.prepare("INSERT INTO stage_limits (step, per_day) VALUES ('act', ?) ON CONFLICT (step) DO UPDATE SET per_day = excluded.per_day").run(n);
+const limit = async (w: World, n: number) => await w.db.run(w.db.k.insertInto("stage_limits").values({ step: "act", per_day: n }).onConflict((oc) => oc.column("step").doUpdateSet(excluded(["per_day"]))));
 const rank = async (w: World, n: number, level: number) =>
-  await w.db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?) ON CONFLICT (repo, number) DO UPDATE SET score = excluded.score, breakdown = excluded.breakdown, computed_at = excluded.computed_at").run(n, level * 10000, T1);
+  await w.db.run(w.db.k.insertInto("item_rank").values({ repo: "app", number: n, score: level * 10000, breakdown: "{}", computed_at: T1 })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["score", "breakdown", "computed_at"]))));
 const commentCard = async (w: World, n: number) =>
-  Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'comment', ?, 'Hello.', 'comment') RETURNING id").get(n, JSON.stringify({ kind: "comment", text: "Hello." })) as { id: number }).id);
+  Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "comment", params: JSON.stringify({ kind: "comment", text: "Hello." }), text: "Hello.", description: "comment" }).returning("id")))!.id);
 /** A card that comments and answers the item's open scope question, so it locks that decision. */
 const settleCard = async (w: World, n: number) => {
   const id = `app#${n}:scope`;
   await ask(w.db, [{ id, kind: "scope", repo: "app", number: n, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
   const params = { kind: "resolution", steps: [{ kind: "comment" }], settle: { kind: "answer", decision: id, option: "take", stamp: await decisionStamp(w.db, (await getDecision(w.db, id))!) } };
-  return { decision: id, card: Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'resolution', ?, 'Hello.', 'comment and answer') RETURNING id").get(n, JSON.stringify(params)) as { id: number }).id) };
+  return { decision: id, card: Number((await w.db.get(w.db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: n, kind: "resolution", params: JSON.stringify(params), text: "Hello.", description: "comment and answer" }).returning("id")))!.id) };
 };
-const state = async (w: World, id: number) => (await w.db.prepare("SELECT state, error FROM conversation_cards WHERE id = ?").get(id) as { state: string; error: string | null });
+const state = async (w: World, id: number) => (await w.db.get(w.db.k.selectFrom("conversation_cards").select(["state", "error"]).where("id", "=", id)))!;
 const run = (w: World, d: ReturnType<typeof deps>, params: { limit?: number; onHandled?: (n: number) => void } = {}) => runAct(w.db, { repo: "app", dryRun: false, ...params }, () => {}, d);
 const askClose = async (w: World, n: number) => {
   await ask(w.db, [{ id: `app#${n}:scope`, kind: "scope", repo: "app", number: n, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
@@ -174,7 +176,7 @@ describe("blocked repos, GitHub errors and permission reads", () => {
     await doCard(w.db, await commentCard(w, 2), "op", d as never);
     const a = await settleCard(w, 1);
     assert.equal((await doCard(w.db, a.card, "op", d as never)).card.state, "queued");
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     await limit(w, 10);
     // The blocked press holds no place: a new press runs at once instead of queueing behind it.
     assert.equal((await doCard(w.db, await commentCard(w, 2), "op", d as never)).card.state, "done");

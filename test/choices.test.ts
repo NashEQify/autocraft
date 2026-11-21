@@ -31,8 +31,8 @@ const T0 = "2026-01-01T00:00:00Z";
 
 async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "choices-test-")), "t.db"));
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await useTestAccount(db);
   const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
     await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
@@ -61,7 +61,7 @@ describe("decision choices", () => {
       drafts: { [coreKey.option("merge")]: { extras: [{ id: "open_issue", kind: "open_issue", on: true, repo: "app", title: "Follow up", body: "Check the edge case." }] } },
       added: [], pick: { core: coreKey.option("merge"), reason: "Looks right." },
     });
-    assert.equal((await db.prepare("SELECT recommended FROM decisions WHERE id = ?").get(d.id) as { recommended: string }).recommended, "merge");
+    assert.equal((await db.get(db.k.selectFrom("decisions").select("recommended").where("id", "=", d.id)))!.recommended, "merge");
     const view = (await choicesView(db, "app", 2))!;
     const merge = view.cores.find((c) => c.key === "o:merge")!;
     assert.deepEqual(merge.writes, ["merge"]);
@@ -127,7 +127,7 @@ describe("decision choices", () => {
     assert.ok(row.drafts["o:hold"]);
     assert.equal(row.added.length, 3);
     assert.equal(notes.length, 1);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM decision_choices WHERE state = 'current'").get())!.n, 1);
+    assert.equal((await db.get(db.k.selectFrom("decision_choices").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "current")))!.n, 1);
   });
 
   const block = (o: unknown) => `Summary text.\n\`\`\`choices\n${JSON.stringify(o)}\n\`\`\``;
@@ -171,7 +171,7 @@ describe("decision choices", () => {
     assert.deepEqual(row.pick, { core: "o:merge", reason: "Same as the reference app." });
     assert.equal(row.drafts["o:merge"]!.extras[0]!.on, true);
     assert.ok(row.turnId);
-    const rec = await db.prepare("SELECT recommended, recommended_reason, recommended_by FROM decisions WHERE id = ?").get(d.id) as Record<string, string>;
+    const rec = (await db.get(db.k.selectFrom("decisions").select(["recommended", "recommended_reason", "recommended_by"]).where("id", "=", d.id)))!;
     assert.deepEqual({ ...rec }, { recommended: "merge", recommended_reason: "Same as the reference app.", recommended_by: "opus" });
     // A single decision without a block is no valid reply; one that only takes a pick may come without.
     assert.equal(await parsePrepareReply(db, { repo: "app", n: 2, d, single: true }, text), null);
