@@ -9,6 +9,7 @@ import { addFastTrack, fastScoreOf, fastTrackList, setFastTrackWeight, workScore
 import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
 import { scopeToTracked } from "../src/repos.ts";
+import { excluded } from "../src/db/kx.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
 import { excluded } from "../src/db/kx.ts";
 import { queueAdd, queueOrigins, queuePage } from "../src/dash/api/queue-page.ts";
@@ -24,7 +25,7 @@ const start = (w: World, n: number, merge = true) =>
   runPipelineStep(w.db, { repo: "app", number: n, step: { kind: "fixup", instructions: "rename a to b", merge }, by: OPERATOR });
 const fixId = async (w: World, n: number): Promise<number> => ((await w.rows("SELECT id FROM operator_fixups WHERE number = ? ORDER BY id DESC", n))[0]!.id as number);
 const fixRow = async (w: World, n: number, state: string, to: string | null = null) =>
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at, source, operator_fix) VALUES ('app', ?, ?, ?, ?, 1, ?, 'operator', ?)").run(n, `sha${n}`, to, state, T0, await fixId(w, n));
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state, attempt: 1, created_at: T0, source: "operator", operator_fix: await fixId(w, n) }));
 const pushed = async (w: World, n: number, to: string) => await fixRow(w, n, "pushed", to);
 const kindsOf = async (w: World, n: number) => (await w.prPlan(n)).actions.map((a) => `${a.kind}:${String(a.params?.source ?? "")}`);
 /** A pre-approved merge whose fix-up pushed `<n>b` and whose sure take review of it exists: it waits in ci for CI and the pre-merge review. */
@@ -177,12 +178,12 @@ describe("pre-approved merge", () => {
     await w.premerge(15, "clean");
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 15))?.state, "queued");
-    const job = await w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, repo) VALUES ('merge', '{}', 'pipeline', ?, 'running', 'app')").run(T0);
+    const job = (await w.db.get(w.db.k.insertInto("jobs").values({ step: "merge", params: "{}", requested_by: "pipeline", requested_at: T0, state: "running", repo: "app" }).returning("id")))!;
     await assert.rejects(cancelPreapproval(w.db, OPERATOR, "app", 15), /merge of the repo is running/);
     assert.equal((await preapprovalOf(w.db, "app", 15))?.state, "queued");
-    await w.db.prepare("UPDATE jobs SET state = 'done' WHERE id = ?").run(Number(job.lastInsertRowid));
+    await w.db.run(w.db.k.updateTable("jobs").set({ state: "done" }).where("id", "=", job.id));
     await cancelPreapproval(w.db, OPERATOR, "app", 15);
-    await w.db.prepare("INSERT INTO merges (repo, number, head_oid, run_id, at, path, method, outcome) VALUES ('app', 15, 'sha15b', 'r', ?, 'operator', 'squash', 'merged')").run(new Date().toISOString());
+    await w.db.run(w.db.k.insertInto("merges").values({ repo: "app", number: 15, head_oid: "sha15b", run_id: "r", at: new Date().toISOString(), path: "operator", method: "squash", outcome: "merged" }));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 15))?.state, "merged");
   });
@@ -204,7 +205,7 @@ describe("pre-approved merge", () => {
 
   test("a Merge answer at H carries across the pipeline's own conflict merge to H2 as a row in review, once", async () => {
     const w = await (await (await (await fresh()).pr(30)).review(30, { verdict: "take" })).answer(30, "merge");
-    await w.db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, state, attempt, created_at, own_diff) VALUES ('app', 30, 'sha30', 'sha30m', 'merged', 1, ?, 'same')").run(T0);
+    await w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number: 30, from_head: "sha30", to_head: "sha30m", state: "merged", attempt: 1, created_at: T0, own_diff: "same" }));
     await w.synced(30, "sha30m");
     await advancePreapprovals(w.db);
     const p = (await preapprovalOf(w.db, "app", 30))!;
@@ -403,7 +404,8 @@ describe("a maintainer's pre-approval after their dashboard session", () => {
     await w.db.run(w.db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     const stale = new Date(Date.now() - 11 * 60_000).toISOString();
     const perm = async (permission: string, at: string) =>
-      await w.db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?)").run(permission, at);
+      await w.db.run(w.db.k.insertInto("repo_permissions").values({ login: "maint", repo: "app", permission, checked_at: at })
+        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
     await perm("write", new Date().toISOString());
     await preapproveMerge(w.db, { repo: "app", number: 61, by: "maint" });
     // Stands in for appPermission, which writes what GitHub answered to repo_permissions.

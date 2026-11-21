@@ -7,6 +7,7 @@ import { handleDelivery, signatureOf } from "../src/github/webhooks.ts";
 import type { Exec } from "../src/fixup/git.ts";
 import { fastTrackList } from "../src/fasttrack.ts";
 import { preapprovalOf } from "../src/preapproval/index.ts";
+import { excluded } from "../src/db/kx.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
 import { validating } from "./gql.ts";
 import type { AppPermission } from "../src/remote/permission.ts";
@@ -250,7 +251,7 @@ describe("drainCommands", () => {
   test("a maintainer who settles decisions on the repo queues, as with Queue items; without write access they do not", async () => {
     const w = await (await (await fresh()).pr(1)).pr(2);
     await w.db.prepare("INSERT INTO access (login, role, github_id) VALUES ('maint', 'maintainer', 202)").run();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
+    await w.db.run(w.db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, login: "maint", id: 202, number: 2, comment: 6000 }));
     await drained(w, { exec: ghFake().exec, perm: "no" });
     assert.equal((await rows(w))[0]!.state, "refused");
