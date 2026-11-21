@@ -40,7 +40,7 @@ test("older tokens a helper used become runners, the others connectors, and can_
   await db.prepare("UPDATE mcp_tokens SET idle_claim_at = 1 WHERE id = ?").run(idle);
   await db.prepare(`INSERT INTO remote_calls (step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, since, seen_at, max_attempts, timeout_ms, token_id)
     VALUES ('review', 0, 'p', '1', 'top', 'high', 'opus', '{}', 'done', 0, 0, 1, 1, ?)`).run(leased);
-  await db.prepare("DELETE FROM settings WHERE key = 'runner_tokens_split'").run();
+  await db.run(db.k.deleteFrom("settings").where("key", "=", "runner_tokens_split"));
 
   splitRunnerTokens(db.sync!);
   splitRunnerTokens(db.sync!);

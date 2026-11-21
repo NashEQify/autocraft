@@ -34,11 +34,14 @@ let base = "";
 let close: () => Promise<void>;
 
 before(async () => {
-  await db.prepare("INSERT INTO repos (name, visibility, default_branch, open_prs, open_issues) VALUES ('photocraft', 'public', 'main', 0, 0), ('secret', 'private', 'main', 0, 0)").run();
+  await db.run(db.k.insertInto("repos").values([
+    { name: "photocraft", visibility: "public", default_branch: "main", open_prs: 0, open_issues: 0 },
+    { name: "secret", visibility: "private", default_branch: "main", open_prs: 0, open_issues: 0 },
+  ]));
   await addLogin(db, "cli", "boss", "operator", null);
   await addLogin(db, "cli", "viewer1", "viewer", null);
   await addLogin(db, "cli", "maint", "maintainer", null);
-  await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('photocraft', 'cli', 'x'), ('secret', 'cli', 'x')").run();
+  await db.run(db.k.insertInto("main.tracked_repos").values([{ name: "photocraft", added_by: "cli", added_at: "x" }, { name: "secret", added_by: "cli", added_at: "x" }]).onConflict((oc) => oc.doNothing()));
   await scopeToTracked(db);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
   const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });

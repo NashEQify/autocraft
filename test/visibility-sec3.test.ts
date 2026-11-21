@@ -27,12 +27,14 @@ const OPTS = [{ key: "a", label: "A" }, { key: "b", label: "B" }];
 
 before(async () => {
   const now = new Date().toISOString();
-  await db.script("DELETE FROM tracked_repos; INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 1), ('oldrepo', 1)");
-  await db.script("DELETE FROM tracked_repos WHERE name = 'oldrepo'");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'private'), ('oldrepo', 'private')");
-  const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, body, head_oid, author, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "open-app", pipeline: 1 }, { name: "vault", pipeline: 1 }, { name: "oldrepo", pipeline: 1 }]));
+  await db.run(db.k.deleteFrom("tracked_repos").where("name", "=", "oldrepo"));
+  await db.run(db.k.insertInto("repos").values([{ name: "open-app", visibility: "public" }, { name: "vault", visibility: "private" }, { name: "oldrepo", visibility: "private" }]));
+  const item = (repo: string, number: number, kind: string, state: string, title: string, body: string, head_oid: string | null, author: string, created_at: string, updated_at: string) =>
+    db.run(db.k.insertInto("items").values({ repo, number, kind, state, title, body, head_oid, author, created_at, updated_at }));
   for (const [repo, n, kind] of [["open-app", 1, "pr"], ["open-app", 2, "pr"], ["open-app", 10, "issue"], ["vault", 7, "pr"], ["vault", 9, "pr"], ["oldrepo", 5, "pr"]] as const)
-    await item.run(repo, n, kind, "OPEN", `title ${repo}#${n}`, "body", kind === "pr" ? `h${n}` : null, "alice", now, now);
+    await item(repo, n, kind, "OPEN", `title ${repo}#${n}`, "body", kind === "pr" ? `h${n}` : null, "alice", now, now);
   // open-app#2 is the quiet pull request of a security finding.
   await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (1, 'open-app', 'done', 'boss', ?)").run(now);
   await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, created_at, updated_at, fix_pr)
@@ -55,10 +57,11 @@ before(async () => {
   await db.prepare("INSERT INTO sync_runs (started_at, ended_at, mode, items, error) VALUES (?, ?, 'search', 0, 'vault: not found')").run(now, now);
   await db.prepare("INSERT INTO merge_batches (repo, branch, state, base_sha, commit_sha, summary, created_at, updated_at) VALUES ('oldrepo', 'integration-oldrepo-1', 'open', 'b', 'c', 'MARK-OLD-BATCH', ?, ?)").run(now, now);
   // A review of open-app#1 that names an operator's statement made on vault#9; a hold on vault#9 blocked by open-app#10.
-  await db.prepare("INSERT INTO owner_statements (id, source_kind, source_id, repo, number, item_title, author, text, at) VALUES (1, 'decision-note', 'x', 'vault', 9, 'title vault#9', 'boss', 'MARK-OWNER-NOTE', ?)").run(now);
-  const review = db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, verdict, reason, sure, mode, conflicts, blocked_by) VALUES (?, ?, ?, 'r', ?, ?, 'ok', 1, 'full', ?, ?)");
-  await review.run("open-app", 1, "h1", now, "take", JSON.stringify([{ id: 1, reason: "MARK-MODEL-REASON" }]), null);
-  await review.run("vault", 9, "h9", now, "hold", null, JSON.stringify(["open-app#10"]));
+  await db.run(db.k.insertInto("owner_statements").values({ id: 1, source_kind: "decision-note", source_id: "x", repo: "vault", number: 9, item_title: "title vault#9", author: "boss", text: "MARK-OWNER-NOTE", at: now }));
+  const review = (repo: string, number: number, head_oid: string, verdict: string, conflicts: string | null, blocked_by: string | null) =>
+    db.run(db.k.insertInto("opus_reviews").values({ repo, number, head_oid, run_id: "r", at: now, verdict, reason: "ok", sure: 1, mode: "full", conflicts, blocked_by }));
+  await review("open-app", 1, "h1", "take", JSON.stringify([{ id: 1, reason: "MARK-MODEL-REASON" }]), null);
+  await review("vault", 9, "h9", "hold", null, JSON.stringify(["open-app#10"]));
   await ask(db, [
     { id: "open-app#10:scope", kind: "scope", repo: "open-app", number: 10, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
     { id: "open-app#2:scope", kind: "scope", repo: "open-app", number: 2, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
