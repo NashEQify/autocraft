@@ -158,7 +158,7 @@ async function requeue(db: Db, r: Pick<Row, "id" | "run_id" | "attempt" | "max_a
 
 /** Puts a leased call back in the queue without using an attempt (released by its helper, or its token lost the right to run it). */
 async function unlease(db: Db, r: { id: number; runId: number | null; hash: string | null }, why: string, nowMs: number, releasedBy: string | null = null): Promise<void> {
-  const up = await db.prepare(`UPDATE main.remote_calls SET state = 'queued', lease_secret_hash = NULL, token_id = NULL, claim_id = NULL, started_at = NULL, queued_since = ?, error = ?, progress = NULL, picked_by = NULL, picked_at = NULL, pick_until = NULL, released_by = COALESCE(?, released_by), released_at = CASE WHEN ? IS NULL THEN released_at ELSE ? END
+  const up = await db.prepare(`UPDATE main.remote_calls SET state = 'queued', lease_secret_hash = NULL, token_id = NULL, claim_id = NULL, started_at = NULL, queued_since = ?, error = ?, progress = NULL, picked_by = NULL, picked_at = NULL, pick_until = NULL, released_by = COALESCE(?, released_by), released_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN released_at ELSE ? END
     WHERE id = ? AND state = 'leased' AND ${notDistinctFrom(db, "lease_secret_hash", "?")}`).run(nowMs, why, releasedBy, releasedBy, nowMs, r.id, r.hash);
   if (Number(up.changes) !== 1) return;
   dropQueueCache(db);
@@ -558,8 +558,8 @@ const pickerSql = (d: { readonly dialect: Dialect }, login: string): string => `
     WHERE ph.login = ${login} AND pt.kind = 'runner' AND pt.expires_at > ? AND ph.reported_at >= ?)
   AND NOT EXISTS (SELECT 1 FROM main.remote_cooloffs pc WHERE pc.login = ${login} AND pc.until > ?)
   AND NOT EXISTS (SELECT 1 FROM main.user_settings ps WHERE ps.login = ${login} AND ps.key = '${MAX_CALLS_KEY}'
-    AND CAST(ps.value AS INTEGER) BETWEEN 1 AND ${MAX_CALLS_MAX}
-    AND (SELECT COUNT(*) FROM main.remote_calls pl${indexedBy(d, "remote_calls_leased")} WHERE pl.state = 'leased' AND ${ciEq(d, "pl.user_login", login)}) >= CAST(ps.value AS INTEGER)))`;
+    AND CAST(CASE WHEN ps.key = '${MAX_CALLS_KEY}' THEN ps.value END AS INTEGER) BETWEEN 1 AND ${MAX_CALLS_MAX}
+    AND (SELECT COUNT(*) FROM main.remote_calls pl${indexedBy(d, "remote_calls_leased")} WHERE pl.state = 'leased' AND ${ciEq(d, "pl.user_login", login)}) >= CAST(CASE WHEN ps.key = '${MAX_CALLS_KEY}' THEN ps.value END AS INTEGER)))`;
 const pickerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS, nowMs];
 
 /** SQL on a remote_calls row that has a pick: the pick no longer counts, as its time is up or its picker cannot take it now (pickerSql). Bind pickLapsedArgs. */
@@ -770,7 +770,7 @@ export async function heartbeat(db: Db, secret: string | undefined, raw: unknown
   if (!l) return false;
   const h = raw as Partial<Heartbeat> | undefined;
   const line = progressLine(typeof h?.progress === "string" ? unrooted(h.progress, l.root) : h?.progress);
-  await db.prepare("UPDATE main.remote_calls SET heartbeat_at = ?, progress = COALESCE(?, progress), started_at = CASE WHEN ? AND started_at IS NULL THEN ? ELSE started_at END WHERE id = ?")
+  await db.prepare("UPDATE main.remote_calls SET heartbeat_at = ?, progress = COALESCE(?, progress), started_at = CASE WHEN ? = 1 AND started_at IS NULL THEN ? ELSE started_at END WHERE id = ?")
     .run(nowMs, line, h?.phase === "running" ? 1 : 0, nowMs, l.id);
   if (line && l.runId !== null) await setRunProgress(db, l.runId, line);
   return true;
