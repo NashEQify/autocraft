@@ -32,6 +32,7 @@ import { ensureAuthorWrites } from "./author-permission.ts";
 import { longLivedOf, pushable } from "./pushable.ts";
 import { conflictAskText, conflictCommentCount, conflictCommentText, mergeMessage } from "./template.ts";
 import { ownerOf } from "../owners.ts";
+import * as kx from "../db/kx.ts";
 import type { Db } from "../db/index.ts";
 
 const CHECK = CLAUDE_PROMPTS["fixup.check"];
@@ -73,20 +74,19 @@ const oneLine = (s: string) => s.replace(/\s+/g, " ").trim().slice(0, 200);
 
 /** Written before the push, so a crash between the push and its record leaves the merge commit in the push chain. */
 async function recordPushing(db: Db, at: string, c: ConflictCandidate, files: string[], base: string | null, toHead: string): Promise<void> {
-  if (c.lint) { await db.prepare("UPDATE conflict_merges SET state = 'pushing', to_head = ?, patch = NULL WHERE rowid = ?").run(toHead, c.lint.rowid); return; }
-  await db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, base_sha, state, reason, files, attempt, created_at) VALUES (?, ?, ?, ?, ?, 'pushing', NULL, ?, ?, ?)")
-    .run(c.repo, c.number, c.head, toHead, base, JSON.stringify(files), c.attempt, at);
+  if (c.lint) { await db.run(db.k.updateTable("conflict_merges").set({ state: "pushing", to_head: toHead, patch: null }).where(kx.rowid("conflict_merges"), "=", c.lint.rowid)); return; }
+  await db.run(db.k.insertInto("conflict_merges").values({ repo: c.repo, number: c.number, from_head: c.head, to_head: toHead, base_sha: base, state: "pushing", reason: null, files: JSON.stringify(files), attempt: c.attempt, created_at: at }));
 }
 
 async function record(db: Db, at: string, c: ConflictCandidate, state: string, reason: string | null, files: string[], base: string | null, toHead: string | null = null): Promise<void> {
-  const open = await db.prepare("SELECT rowid AS id FROM conflict_merges WHERE repo = ? AND number = ? AND from_head = ? AND state IN ('pushing', 'linting') ORDER BY rowid DESC").get(c.repo, c.number, c.head) as { id: number } | undefined;
-  if (open) await db.prepare("UPDATE conflict_merges SET state = ?, reason = ?, files = ?, to_head = ?, base_sha = ?, patch = NULL WHERE rowid = ?").run(state, reason, JSON.stringify(files), toHead, base, open.id);
+  const open = await db.get(db.k.selectFrom("conflict_merges").select(kx.rowid("conflict_merges").as("id")).where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", c.head)
+    .where("state", "in", ["pushing", "linting"]).orderBy(kx.rowid("conflict_merges"), "desc").limit(1));
+  if (open) await db.run(db.k.updateTable("conflict_merges").set({ state, reason, files: JSON.stringify(files), to_head: toHead, base_sha: base, patch: null }).where(kx.rowid("conflict_merges"), "=", open.id));
   else {
-    await db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, base_sha, state, reason, files, attempt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(c.repo, c.number, c.head, toHead, base, state, reason, JSON.stringify(files), c.attempt, at);
+    await db.run(db.k.insertInto("conflict_merges").values({ repo: c.repo, number: c.number, from_head: c.head, to_head: toHead, base_sha: base, state, reason, files: JSON.stringify(files), attempt: c.attempt, created_at: at }));
   }
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'take', ?, 'fixup', ?)")
-    .run(c.repo, c.number, at, state === "merged" ? `merged ${c.base} at ${short(c.head)}: ${files.length ? files.join(", ") : "no conflicts"}` : state === "asked" ? `asked the contributor to merge ${c.base} at ${short(c.head)}` : `conflict merge ${state} at ${short(c.head)}: ${reason}`);
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "take", at, actor: "fixup",
+    note: state === "merged" ? `merged ${c.base} at ${short(c.head)}: ${files.length ? files.join(", ") : "no conflicts"}` : state === "asked" ? `asked the contributor to merge ${c.base} at ${short(c.head)}` : `conflict merge ${state} at ${short(c.head)}: ${reason}` }));
 }
 
 /**
@@ -199,7 +199,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
   };
   try {
     if (!BASE_NAME.test(c.base)) { await skip("unusable base branch name"); return; }
-    const def = (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(x.repo) as { default_branch: string | null } | undefined)?.default_branch;
+    const def = (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", x.repo)))?.default_branch;
     if (def && def !== c.base) { await skip(`the PR's base ${c.base} is not the default branch ${def}`); return; }
     const pr = await live(db, x, c);
     if (!pr) return;
@@ -311,7 +311,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       await x.claim(c);
       if (!x.d.resolve) { await fail("failed", "no resolver"); return; }
       checkout = (await x.d.checkout?.(x.repo, c.number, head)) ?? undefined;
-      const body = ((await db.prepare("SELECT body FROM items WHERE repo = ? AND number = ?").get(x.repo, c.number) as { body: string | null } | undefined)?.body ?? "").slice(0, 4000);
+      const body = ((await db.get(db.k.selectFrom("items").select("body").where("repo", "=", x.repo).where("number", "=", c.number)))?.body ?? "").slice(0, 4000);
       const repoDir = checkout ? { repo_dir: REPO_PATH } : {};
       const quiet = await isQuiet(db, x.repo, c.number);
       const resFiles: { path: string; mode: string; content: string }[] = [];
@@ -363,10 +363,10 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       const task = rs.length ? await queueLintFor(db, { step: "conflict", repo: x.repo, number: c.number, head, base: baseSha, patch: await git.diffText(head, tree), files: rs }) : null;
       if (task !== null) {
         const round = c.lint ? c.lint.round + 1 : 1;
-        if (c.lint) await db.prepare("UPDATE conflict_merges SET patch = ?, files = ?, lint_task = ?, lint_round = ?, session = ? WHERE rowid = ?").run(JSON.stringify(resFiles), JSON.stringify(files), task, round, storeSessions(keptNow, new Date(x.at())), c.lint.rowid);
+        if (c.lint) await db.run(db.k.updateTable("conflict_merges").set({ patch: JSON.stringify(resFiles), files: JSON.stringify(files), lint_task: task, lint_round: round, session: storeSessions(keptNow, new Date(x.at())) }).where(kx.rowid("conflict_merges"), "=", c.lint.rowid));
         else {
-          await db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, base_sha, state, reason, files, attempt, created_at, patch, lint_task, lint_round, session) VALUES (?, ?, ?, NULL, ?, 'linting', NULL, ?, ?, ?, ?, ?, ?, ?)")
-            .run(x.repo, c.number, c.head, baseSha, JSON.stringify(files), c.attempt, x.at(), JSON.stringify(resFiles), task, round, storeSessions(keptNow, new Date(x.at())));
+          await db.run(db.k.insertInto("conflict_merges").values({ repo: x.repo, number: c.number, from_head: c.head, to_head: null, base_sha: baseSha, state: "linting", reason: null, files: JSON.stringify(files), attempt: c.attempt, created_at: x.at(),
+            patch: JSON.stringify(resFiles), lint_task: task, lint_round: round, session: storeSessions(keptNow, new Date(x.at())) }));
         }
         x.ledger.stored(keptNow);
         x.log(`  ${ref}: resolution stored; lint task ${task} queued (round ${round})`);
@@ -387,7 +387,7 @@ export async function mergeConflict(db: Db, x: ConflictRun, c: ConflictCandidate
       return;
     }
     await record(db, x.at(), c, "merged", null, files, baseSha, commit);
-    if (own.ownDiff) await db.prepare("UPDATE conflict_merges SET own_diff = ?, own_delta = ? WHERE repo = ? AND number = ? AND to_head = ? AND state = 'merged'").run(own.ownDiff, own.delta, x.repo, c.number, commit);
+    if (own.ownDiff) await db.run(db.k.updateTable("conflict_merges").set({ own_diff: own.ownDiff, own_delta: own.delta }).where("repo", "=", x.repo).where("number", "=", c.number).where("to_head", "=", commit).where("state", "=", "merged"));
     x.summary.pushed.push(ref);
     x.log(`  ${ref}: merged ${c.base} into the branch: ${short(commit)} on ${short(head)}${files.length ? `, resolved ${files.join(", ")}` : ""}`);
     const note: Note = files.length ? { by: "model", kind: "comment", model: CONFLICT.models[0] } : { by: "fixed" };

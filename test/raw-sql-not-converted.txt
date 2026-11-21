@@ -275,19 +275,13 @@ src/fixissue/candidates.ts
 
 src/fixissue/index.ts
 
-src/fixup/approval.ts
 
-src/fixup/author-permission.ts
 
-src/fixup/candidates.ts
 
-src/fixup/conflict-state.ts
 
-src/fixup/conflict.ts
 
 src/fixup/index.ts
 
-src/fixup/pushable.ts
 
 src/fixup/select.ts
 

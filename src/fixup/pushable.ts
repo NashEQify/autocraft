@@ -6,7 +6,7 @@ import { slugOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
 
 /** Branch names that are long-lived whatever the repository says. */
-const TRUSTED = "('OWNER', 'MEMBER', 'COLLABORATOR')";
+const TRUSTED = ["OWNER", "MEMBER", "COLLABORATOR"];
 const LONG_LIVED = /^(release|main|master|develop|stable|hotfix|integration|next|staging|production|beta|trunk|gh-pages)([/._-].*)?$|^v?\d+(\.\d+)*(\.x)?$/i;
 
 /** True when the head branch lives in the base repository (`headRepo` is `owner/name`). */
@@ -19,12 +19,15 @@ export type LongLived = (branch: string) => boolean;
 /** Decides whether a branch of `repo` is long-lived: its default branch, the base of any PR, a release-like name, or a head shared by several open PRs. */
 export async function longLivedOf(db: Db, repo: string): Promise<LongLived> {
   const names = new Set<string>();
-  const d = (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch;
+  const d = (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch;
   if (d) names.add(d);
   // Every open PR's base counts, whoever opened it: a retargeted PR can only make another PR unpushable, the safe failure.
-  for (const r of await db.prepare("SELECT DISTINCT base_ref FROM items WHERE repo = ? AND kind = 'pr' AND base_ref IS NOT NULL").all(repo) as { base_ref: string }[]) names.add(r.base_ref);
+  for (const r of await db.all(db.k.selectFrom("items").select("base_ref").distinct().where("repo", "=", repo).where("kind", "=", "pr").where("base_ref", "is not", null).$narrowType<{ base_ref: string }>())) names.add(r.base_ref);
   // A same-repo branch that several open PRs use as their head is shared, not one contributor's.
-  for (const r of await db.prepare(`SELECT head_ref FROM items WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND lower(head_repo) = ? AND head_ref IS NOT NULL AND author_association IN ${TRUSTED} GROUP BY head_ref HAVING COUNT(*) > 1`).all(repo, `${slugOf(repo)}`.toLowerCase()) as { head_ref: string }[]) names.add(r.head_ref);
+  for (const r of await db.all(db.k.selectFrom("items").select("head_ref").where("repo", "=", repo).where("kind", "=", "pr").where("state", "=", "OPEN")
+    .where((eb) => eb(eb.fn<string | null>("lower", ["head_repo"]), "=", `${slugOf(repo)}`.toLowerCase()))
+    .where("head_ref", "is not", null).where("author_association", "in", TRUSTED).groupBy("head_ref").having((eb) => eb.fn.countAll(), ">", 1)
+    .$narrowType<{ head_ref: string }>())) names.add(r.head_ref);
   return (branch) => names.has(branch) || LONG_LIVED.test(branch);
 }
 
@@ -32,10 +35,11 @@ export async function longLivedOf(db: Db, repo: string): Promise<LongLived> {
 export async function longLivedAll(db: Db): Promise<(repo: string) => LongLived> {
   const names = new Map<string, Set<string>>();
   const add = (repo: string, branch: string): void => { (names.get(repo) ?? names.set(repo, new Set()).get(repo)!).add(branch); };
-  for (const r of await db.prepare("SELECT name, default_branch FROM repos WHERE default_branch IS NOT NULL").all() as { name: string; default_branch: string }[]) if (r.default_branch) add(r.name, r.default_branch);
-  for (const r of await db.prepare("SELECT DISTINCT repo, base_ref FROM items WHERE kind = 'pr' AND base_ref IS NOT NULL").all() as { repo: string; base_ref: string }[]) add(r.repo, r.base_ref);
-  for (const r of await db.prepare(`SELECT repo, lower(head_repo) AS head_repo, head_ref FROM items WHERE kind = 'pr' AND state = 'OPEN' AND head_ref IS NOT NULL AND author_association IN ${TRUSTED}
-    GROUP BY repo, lower(head_repo), head_ref HAVING COUNT(*) > 1`).all() as { repo: string; head_repo: string | null; head_ref: string }[])
+  for (const r of await db.all(db.k.selectFrom("repos").select(["name", "default_branch"]).where("default_branch", "is not", null).$narrowType<{ default_branch: string }>())) if (r.default_branch) add(r.name, r.default_branch);
+  for (const r of await db.all(db.k.selectFrom("items").select(["repo", "base_ref"]).distinct().where("kind", "=", "pr").where("base_ref", "is not", null).$narrowType<{ base_ref: string }>())) add(r.repo, r.base_ref);
+  for (const r of await db.all(db.k.selectFrom("items").select((eb) => ["repo", eb.fn<string | null>("lower", ["head_repo"]).as("head_repo"), "head_ref"])
+    .where("kind", "=", "pr").where("state", "=", "OPEN").where("head_ref", "is not", null).where("author_association", "in", TRUSTED)
+    .groupBy((eb) => ["repo", eb.fn("lower", ["head_repo"]), "head_ref"]).having((eb) => eb.fn.countAll(), ">", 1).$narrowType<{ head_ref: string }>()))
     if (r.head_repo === `${slugOf(r.repo)}`.toLowerCase()) add(r.repo, r.head_ref);
   return (repo) => (branch) => !!names.get(repo)?.has(branch) || LONG_LIVED.test(branch);
 }
