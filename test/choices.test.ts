@@ -34,9 +34,10 @@ async function fresh(): Promise<Db> {
   await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
   await useTestAccount(db);
-  const item = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, head_oid, created_at, updated_at, labels) VALUES ('app', ?, ?, 'OPEN', ?, 'Body', 'someone', ?, '${T0}', '${T0}', '[]')`);
-  await item.run(1, "issue", "Issue 1", null);
-  await item.run(2, "pr", "PR 2", "sha2");
+  const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
+    await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
+  await item(1, "issue", "Issue 1", null);
+  await item(2, "pr", "PR 2", "sha2");
   await ask(db, [
     { id: "app#1:scope", kind: "scope", repo: "app", number: 1, question: "Scope?", options: [{ key: "take", label: "Wanted" }, { key: "close", label: "Out of scope" }] },
     { id: "app#2:merge", kind: "merge", repo: "app", number: 2, question: "Merge?", options: [{ key: "merge", label: "Merge" }, { key: "hold", label: "Hold" }] },
@@ -70,8 +71,8 @@ describe("decision choices", () => {
     assert.ok("card" in composed);
     const v = await validateCard(db, "app", 2, composed.card);
     assert.ok("card" in v, "note" in v ? v.note : "");
-    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 2, 'resolution', ?, NULL, ?) RETURNING id")
-      .get(JSON.stringify(v.card.params), v.card.description) as { id: number }).id);
+    const id = Number((await db.get(db.k.insertInto("conversation_cards")
+      .values({ turn_id: 0, repo: "app", number: 2, kind: "resolution", params: JSON.stringify(v.card.params), text: null, description: v.card.description }).returning("id")))!.id);
     const querier = { query: async () => ({}) };
     const exec = async () => ({ code: 0, stdout: "https://github.com/storytold/app/issues/7\n", stderr: "" });
     const { card } = await doCard(db, id, "op", { querier: querier as never, exec: exec as never });
@@ -203,7 +204,7 @@ describe("decision choices", () => {
     const [a, b] = await Promise.all([doChoice(db, who("operator", row.id, hold), deps), doChoice(db, who("operator", row.id, hold), deps)]);
     assert.equal(a.id, b.id);
     assert.equal(a.state, "done");
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM conversation_cards WHERE choice_id = ?").get(row.id))!.n, 1);
+    assert.equal((await db.get(db.k.selectFrom("conversation_cards").select((eb) => eb.fn.countAll<number>().as("n")).where("choice_id", "=", row.id)))!.n, 1);
   });
 
   test("a scope question on a PR the classifier did not label for review: Fix up, then merge keeps the PR in core first and queues the fix-up", async () => {
@@ -225,8 +226,8 @@ describe("decision choices", () => {
       assert.deepEqual({ ...await settleOf([{ id: "label:small extra", kind: "label", label: "small extra" }]), v: 0 }, { v: 0, kind: "answer", option: "small-extra", steps: "label,fixup" });
       const plain = await settleOf([]);
       assert.deepEqual([plain.kind, plain.option, plain.steps], ["answer", "take", "fixup"]);
-      const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 5, 'resolution', ?, NULL, ?) RETURNING id")
-        .get(JSON.stringify(plain.v.card.params), plain.v.card.description) as { id: number }).id);
+      const id = Number((await db.get(db.k.insertInto("conversation_cards")
+        .values({ turn_id: 0, repo: "app", number: 5, kind: "resolution", params: JSON.stringify(plain.v.card.params), text: null, description: plain.v.card.description }).returning("id")))!.id);
       const { card } = await doCard(db, id, OPERATOR, { querier: { query: async () => ({}) } as never, exec: (async () => ({ code: 0, stdout: "", stderr: "" })) as never });
       assert.equal(card.state, "done", card.error ?? "");
       assert.equal((await getDecision(db, "app#5:scope"))!.answer, "take");
