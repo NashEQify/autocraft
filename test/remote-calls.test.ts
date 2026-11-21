@@ -57,7 +57,7 @@ describe("user-local remote calls", async () => {
   /** `login`'s helper asked for top-tier work a moment ago and found none; its write permission on the repo is cached. */
   const idle = async (login: string) => {
     await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ?, idle_tiers = '[\"top\"]', idle_repos = NULL WHERE login = ?").run(Date.now(), login);
-    await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?)").run(login, new Date().toISOString());
+    await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(login, new Date().toISOString());
   };
   const req = (login: string, role: string, json?: unknown) => ({ user: { login, role, canWrite: async () => true }, json }) as unknown as Req;
   const done = async (secret: string, text: string) => await submitCall(db, secret, { ok: true, text, model: "claude-opus-4-5", usage: { inputTokens: 100, outputTokens: 20 }, modelUsage: { "claude-opus-4-5": { inputTokens: 90, outputTokens: 15 }, "claude-haiku-4-5": { inputTokens: 10, outputTokens: 5 } }, costUsd: 0.25,
@@ -237,7 +237,7 @@ describe("user-local remote calls", async () => {
     assert.equal(h?.readiness, "quota-held");
     assert.equal(h?.fresh, true);
     assert.equal(h?.usage?.fiveHour?.usedPercent, 70);
-    await db.prepare("INSERT OR REPLACE INTO remote_cooloffs (login, until, reason) VALUES ('bob', ?, 'test')").run(Date.now() + 3600_000);
+    await db.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('bob', ?, 'test') ON CONFLICT (login) DO UPDATE SET until = excluded.until, reason = excluded.reason, failures = 0, failures_since = NULL").run(Date.now() + 3600_000);
     assert.equal((await listHelpers(db, "bob"))[0]?.readiness, "cooled-off", "the server's cool-off shows before the helper reports it");
     await db.prepare("DELETE FROM remote_cooloffs WHERE login = 'bob'").run();
   });
@@ -278,7 +278,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual(await claimCall(db, callers.bob!, c, canWrite), a, "a repeat after the reply was lost");
     const id = a.lease!.id, now = Date.now();
     // The dashboard's last stamp is 5 minutes old; the lease's last heartbeat 3 minutes.
-    await db.prepare("INSERT OR REPLACE INTO remote_liveness (id, alive_at, since) VALUES (1, ?, ?)").run(now - 5 * 60_000, now - 3600_000);
+    await db.prepare("INSERT INTO remote_liveness (id, alive_at, since) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET alive_at = excluded.alive_at, since = excluded.since").run(now - 5 * 60_000, now - 3600_000);
     await db.prepare("UPDATE remote_calls SET heartbeat_at = ? WHERE id = ?").run(now - 3 * 60_000, id);
     await expireLeases(db, now);
     assert.equal(await stateOf(id), "leased", "nothing expires while the dashboard is down");
