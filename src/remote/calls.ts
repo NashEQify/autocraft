@@ -406,9 +406,10 @@ async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role 
  * Leases the call to the caller if it is still queued and no other user's pick counts for it (a Manual only caller: only
  * its own pick or a follow-up); the pick ends with the lease. The agent run starts now, on no account, with the user and
  * harness. With `cap`, only while the login holds fewer leases than that (checked in the same transaction, so parallel claims
- * of one user cannot pass it together); "limit" when it holds that many.
+ * of one user cannot pass it together); "limit" when it holds that many. `live` is asked inside the same transaction, just
+ * before the lease is written: "gone" when no one waits for the reply any more, and nothing is written.
  */
-async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null = null): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | null> {
+async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
   // The run's stored prompt is built before the write lock is taken: scrubbing and compressing a large prompt takes milliseconds.
   const queued = await db.prepare("SELECT bundle FROM main.remote_calls WHERE id = ? AND state = 'queued'").get(id) as { bundle: string } | undefined;
@@ -416,6 +417,7 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   const packed = queued ? promptOf(queued.bundle) : null;
   return await db.write(async () => {
     if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
+    if (!live()) return "gone";
     const r = await db.prepare(`UPDATE main.remote_calls SET state = 'leased', token_id = ?, user_login = ?, harness = ?, harness_version = ?, model = ?, root = ?, lease_secret_hash = ?, leased_at = ?, heartbeat_at = ?, started_at = NULL, claim_id = ?,
         queued_ms = queued_ms + CASE WHEN queued_since IS NULL THEN 0 ELSE MAX(0, ? - queued_since) END, queued_since = NULL, progress = NULL, error = NULL,
         picked_by = NULL, picked_at = NULL, pick_until = NULL, no_taker_since = NULL
@@ -701,9 +703,9 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       // Only follow-ups of the helper's own sessions carry a parent here (claimOrder).
       if (full && r.parent_id === null) continue;
       if (!(await eligible(caller, r, can, others))) continue;
-      // The client left while eligibility was read: nothing is leased to nobody.
-      if (!live()) return null;
-      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null ? null : r.parent_id !== null ? max + 1 : max);
+      // The client left, or shutdown answered the claim: nothing is leased to nobody.
+      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null ? null : r.parent_id !== null ? max + 1 : max, live);
+      if (lease === "gone") return null;
       if (lease === "limit") {
         limited = true;
         continue;
