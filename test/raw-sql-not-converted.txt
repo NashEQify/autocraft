@@ -295,13 +295,9 @@ src/live.ts
 src/liveness.ts
 
 
-src/mainfix/approval.ts
 
-src/mainfix/index.ts
 
-src/mainfix/pr.ts
 
-src/mainfix/status.ts
 
 src/memory/retrieve.ts
 
