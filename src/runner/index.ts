@@ -1,4 +1,5 @@
 // autocraft-server runner serve | exec | enqueue | jobs | cancel | steps; autocraft-server pipeline on | off | status | limit
+import { writeSetting } from "../settings-read.ts";
 import { resumeStage, TripError } from "../push-outcomes.ts";
 import { startWorkerServer } from "../build/worker-api.ts";
 import { acquireLock } from "../mirror.ts";
@@ -159,7 +160,7 @@ export const commands = {
     },
   },
   "plan-log": {
-    summary: "the incremental planner's change log: status | drop (before a rollback to a release without it)",
+    summary: "the incremental planner's change log: status | shadow on|off (compare every incremental pass with a full load) | drop (before a rollback to a release without it)",
     run: (args: string[]) => planLog(args),
   },
 };
@@ -175,11 +176,16 @@ function planLog(args: string[]): void {
     }, null, 2));
     return;
   }
+  if (args[0] === "shadow" && (args[1] === "on" || args[1] === "off")) {
+    writeSetting(db, "plan_shadow", args[1]);
+    console.log(`plan shadow ${args[1]}`);
+    return;
+  }
   if (args[0] === "drop") {
     console.log(`dropped ${dropPlanChanges(db)} triggers and the change log; the next connect migrates the schema`);
     return;
   }
-  die("usage: autocraft-server plan-log status | drop");
+  die("usage: autocraft-server plan-log status | shadow on|off | drop");
 }
 
 const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | off | drain | status
