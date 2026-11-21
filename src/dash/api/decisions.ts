@@ -45,7 +45,7 @@ export { itemState, shownLookup, withShown } from "./shown.ts";
 import { HEAD_FACT } from "../../merge/queue.ts";
 import { itemState, shownMap, withShown } from "./shown.ts";
 import { slugOf } from "../../owners.ts";
-import { mapSeq } from "../../async-seq.ts";
+import { mapSeq, someSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 
 const json = <T>(s: string | null | undefined, d: T): T => {
@@ -292,11 +292,11 @@ async function snoozedOf(db: Db, d: DecisionRow): Promise<{ by: string; at: stri
 
 /** True when any item the decision concerns (its own, a batch member or a duplicate-group member) is a quiet pull request. */
 export async function touchesQuiet(db: Db, d: DecisionRow, page?: DecisionPage): Promise<boolean> {
-  const quiet = page ? (repo: string, number: number) => page.quiet!.has(`${repo}#${number}`) : async (repo: string, number: number) => await isQuiet(db, repo, number);
-  if (d.repo !== null && d.number !== null && quiet(d.repo, d.number)) return true;
-  if (itemsOf(d).some((r) => quiet(r.repo, r.number))) return true;
+  const quiet = async (repo: string, number: number): Promise<boolean> => (page ? page.quiet!.has(`${repo}#${number}`) : await isQuiet(db, repo, number));
+  if (d.repo !== null && d.number !== null && await quiet(d.repo, d.number)) return true;
+  if (await someSeq(itemsOf(d), async (r) => await quiet(r.repo, r.number))) return true;
   const members = page ? (page.members.get(d.id) ?? []) : (await db.prepare("SELECT repo, number FROM dupe_group_items WHERE decision_id = ?").all(d.id) as { repo: string; number: number }[]);
-  return members.some((m) => quiet(m.repo, m.number));
+  return await someSeq(members, async (m) => await quiet(m.repo, m.number));
 }
 
 type PageItem = { title: string | null; body: string | null; kind: string; state: string; closing_issues: string | null };

@@ -483,7 +483,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
   // queued: the merge queue owns it now; only an answer that stops counting ends it here.
   const d = await getDecision(db, mergeDecisionId(p.repo, p.number, head));
   if (!d || d.answer !== "merge") return cancel("its Merge answer was withdrawn");
-  if (!await isOperator(db, d.answered_by ?? p.by, p.repo, held)) cancel(`${d.answered_by ?? p.by} no longer settles decisions on ${p.repo}, so the Merge answer no longer counts`);
+  if (!await isOperator(db, d.answered_by ?? p.by, p.repo, held)) await cancel(`${d.answered_by ?? p.by} no longer settles decisions on ${p.repo}, so the Merge answer no longer counts`);
 }
 
 /** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */

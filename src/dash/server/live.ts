@@ -84,8 +84,8 @@ export class LiveHub {
 
   private async start(): Promise<void> {
     this.last = await readSeqs(this.db);
-    this.timer = setInterval(async () => await this.check(), this.pollMs);
-    this.beat = setInterval(async () => await this.heartbeat(), this.heartbeatMs);
+    this.timer = setInterval(() => void this.check().catch((e: unknown) => console.error(`live: ${(e as Error).message}`)), this.pollMs);
+    this.beat = setInterval(() => void this.heartbeat().catch((e: unknown) => console.error(`live heartbeat: ${(e as Error).message}`)), this.heartbeatMs);
     this.timer.unref();
     this.beat.unref();
   }

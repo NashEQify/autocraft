@@ -30,11 +30,16 @@ export async function serveHealth(req: IncomingMessage, res: ServerResponse, rea
 /** A listener that serves only the probes (AUTOCRAFT_HEALTH_LISTEN, host:port). */
 export async function startHealthServer(listen: string, ready: () => Promise<boolean>): Promise<{ url: string; close: () => Promise<void> }> {
   const { host, port } = parseListen(listen);
-  const server: Server = createServer({ requestTimeout: 10_000, headersTimeout: 5_000, maxHeaderSize: 4 * 1024 }, async (req, res) => {
-    if (!await serveHealth(req, res, ready)) {
+  const server: Server = createServer({ requestTimeout: 10_000, headersTimeout: 5_000, maxHeaderSize: 4 * 1024 }, (req, res) => {
+    void serveHealth(req, res, ready).then((served) => {
+      if (served) return;
       res.writeHead(404, { ...PROBE_HEADERS, "content-type": "text/plain; charset=utf-8" });
       res.end("not found\n");
-    }
+    }, (e: unknown) => {
+      console.error(`health probe: ${(e as Error).message}`);
+      if (!res.headersSent) res.writeHead(500, PROBE_HEADERS);
+      res.end();
+    });
   });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
