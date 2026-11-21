@@ -100,7 +100,7 @@ async function entryOf(db: Db, f: PrFacts, plan: ReturnType<typeof decidePr>, ti
 
 export async function buildQueue(db: Db, opts: QueueOptions = {}): Promise<QueueEntry[]> {
   const which = opts.merged ?? "all";
-  const title = db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?");
+  const title = (repo: string, number: number) => db.get(db.k.selectFrom("items").select("title").where("repo", "=", repo).where("number", "=", number));
   const out: QueueEntry[] = [];
   const pass = loadPass();
   for (const f of await loadPrFacts(db, { ...(opts.repo ? { repo: opts.repo } : {}), ...(opts.refs ? { refs: opts.refs } : {}), ...(opts.run !== undefined ? { run: opts.run } : {}) })) {
@@ -109,7 +109,7 @@ export async function buildQueue(db: Db, opts: QueueOptions = {}): Promise<Queue
     if (opts.after && (f.repo < opts.after.repo || (f.repo === opts.after.repo && f.number <= opts.after.number))) continue;
     const plan = decidePr(f, pass);
     if (!isQueueState(plan.state)) continue;
-    out.push(await entryOf(db, f, plan, ((await title.get(f.repo, f.number) as { title: string | null } | undefined)?.title ?? "")));
+    out.push(await entryOf(db, f, plan, ((await title(f.repo, f.number))?.title ?? "")));
     if (opts.limit && out.length >= Math.floor(opts.limit)) break;
   }
   return out;

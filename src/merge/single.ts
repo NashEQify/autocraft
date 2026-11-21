@@ -10,6 +10,7 @@ import { planned } from "../core/select.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { excluded } from "../db/kx.ts";
 
 export const SINGLE_MERGE_KEY = "single_merge_max";
 export const SINGLE_MERGE_DEFAULT = 3;
@@ -25,7 +26,7 @@ export async function singleMergeMax(db: Db): Promise<number> {
 export async function setSingleMergeMax(db: Db, n: unknown, by: string): Promise<number> {
   if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > SINGLE_MERGE_LIMIT) throw new Error(`the single-merge limit must be a whole number from 0 to ${SINGLE_MERGE_LIMIT}`);
   const was = await singleMergeMax(db);
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(SINGLE_MERGE_KEY, String(n));
+  await db.run(db.k.insertInto("main.settings").values({ key: SINGLE_MERGE_KEY, value: String(n) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   if (n !== was) await audit(db, by, "single-merge-max", "merge", { max: n, was });
   return n;
 }

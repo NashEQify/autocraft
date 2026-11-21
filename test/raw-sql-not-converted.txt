@@ -322,15 +322,10 @@ src/merge/holds.ts
 
 src/merge/index.ts
 
-src/merge/mergeable.ts
 
-src/merge/no-ci.ts
 
-src/merge/queue.ts
 
-src/merge/single.ts
 
-src/merge/verify-override.ts
 
 
 src/mirror.ts
