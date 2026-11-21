@@ -4,6 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { countQueries } from "../src/db/counter.ts";
 import { isLockTimeout } from "../src/db/errors.ts";
+import { rewriteScriptForPostgres } from "../src/db/params.ts";
 import type { Db } from "../src/db/index.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
 
@@ -165,4 +166,13 @@ test("SQLite-only statement text is rewritten: schema prefixes, INSERT OR IGNORE
   } finally {
     await t.close();
   }
+});
+
+test("a script is rewritten statement by statement, leaving literals and dollar-quoted bodies alone", () => {
+  assert.equal(
+    rewriteScriptForPostgres("CREATE TABLE main.x (a int); INSERT OR IGNORE INTO main.x VALUES (1); SELECT 'a;main.b'"),
+    "CREATE TABLE x (a int); INSERT INTO x VALUES (1) ON CONFLICT DO NOTHING; SELECT 'a;main.b'",
+  );
+  const fn = "CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN INSERT INTO main.t VALUES (1); RETURN NEW; END $$ LANGUAGE plpgsql;";
+  assert.equal(rewriteScriptForPostgres(fn), fn);
 });

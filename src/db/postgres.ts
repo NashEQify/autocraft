@@ -6,7 +6,7 @@ import type * as Pg from "pg";
 import type { Args, Engine, EngineContext, Op, Tx } from "./handle.ts";
 import { callSite, siteError, withoutInsertId } from "./handle.ts";
 import type { DB, DbRole, Row } from "./index.ts";
-import { bindParams, parseParams, rewriteForPostgres, type ParsedParams } from "./params.ts";
+import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, type ParsedParams } from "./params.ts";
 
 /** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
 export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
@@ -148,7 +148,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       if (op === "all") return [...r.rows];
       return withoutInsertId(Number(r.numAffectedRows ?? 0n));
     },
-    script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(text)))),
+    script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text))))),
     configure: (b, mode) => (mode === "read" ? b.setIsolationLevel("repeatable read").setAccessMode("read only") : b.setIsolationLevel("read committed")),
     close: () => kysely.destroy(),
   };
