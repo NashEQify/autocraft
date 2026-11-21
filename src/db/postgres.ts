@@ -6,7 +6,7 @@ import type * as Pg from "pg";
 import type { Args, Engine, EngineContext, Op, Tx } from "./handle.ts";
 import { callSite, siteError, withoutInsertId } from "./handle.ts";
 import type { DB, DbRole, Row } from "./index.ts";
-import { bindParams, parseParams, type ParsedParams } from "./params.ts";
+import { bindParams, parseParams, rewriteForPostgres, type ParsedParams } from "./params.ts";
 
 /** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
 export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
@@ -125,7 +125,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     let p = parsed.get(text);
     if (p) parsed.delete(text);
     else {
-      p = parseParams(text);
+      p = parseParams(rewriteForPostgres(text));
       if (parsed.size >= PARSE_CACHE) parsed.delete(parsed.keys().next().value!);
     }
     parsed.set(text, p);
