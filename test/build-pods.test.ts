@@ -1,6 +1,7 @@
 // Kubernetes build environments with a fake API: a queued task goes through its task, source, step and upload pods, the
 // runner reads the results from pod status, and the pod key can read the task but never report a result; a task whose
-// pod disappears is requeued once, then failed.
+// pod disappears or whose node is lost is requeued once, then failed; a claim that cannot start goes back to the queue;
+// a stage's pod that cannot be created is retried.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -23,14 +24,20 @@ after(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-type Pod = KPod & { spec: Record<string, any> };
+type Pod = Omit<KPod, "spec"> & { spec: Record<string, any> };
 const matches = (labels: Record<string, string> | undefined, selector: string) => selector.split(",").every((kv) => labels?.[kv.split("=")[0]!] === kv.split("=")[1]);
 
 class FakeKube implements KubeApi {
   pods = new Map<string, Pod>();
   pvcs = new Map<string, { metadata: { name: string; labels?: Record<string, string> } }>();
+  /** Makes the next creates that match throw, as a rate limit or quota would. */
+  refuse: ((kind: "pod" | "pvc", labels: Record<string, string>) => boolean) | null = null;
+  #refused(kind: "pod" | "pvc", o: object) {
+    if (this.refuse?.(kind, (o as { metadata: { labels: Record<string, string> } }).metadata.labels)) throw new Error("HTTP 429 too many requests");
+  }
   async listPods(_ns: string, sel: string) { return [...this.pods.values()].filter((p) => matches(p.metadata.labels, sel)); }
   async createPod(ns: string, pod: object) {
+    this.#refused("pod", pod);
     const p = structuredClone(pod) as Pod;
     assert.equal((p.metadata as { namespace?: string }).namespace, ns);
     this.pods.set(p.metadata.name, { ...p, status: { phase: "Pending" } });
@@ -38,7 +45,7 @@ class FakeKube implements KubeApi {
   async deletePod(_ns: string, name: string) { this.pods.delete(name); }
   async podLog(_ns: string, name: string, container: string) { return `${container} of ${name} says hello\n`; }
   async listPvcs(_ns: string, sel: string) { return [...this.pvcs.values()].filter((v) => matches(v.metadata.labels, sel)); }
-  async createPvc(_ns: string, pvc: object) { const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
+  async createPvc(_ns: string, pvc: object) { this.#refused("pvc", pvc); const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
   async deletePvc(_ns: string, name: string) { this.pvcs.delete(name); }
   async canI() { return true; }
   /** The single pod of a task, or fails. */
@@ -82,7 +89,8 @@ test("a task runs through its pods and its results come from pod status", async 
   assert.equal(taskPod.metadata.labels!["craft.build/network"], "api");
   assert.equal(spec.automountServiceAccountToken, false);
   assert.equal(spec.restartPolicy, "Never");
-  assert.equal(spec.nodeSelector, undefined);
+  assert.deepEqual(spec.nodeSelector, { "kubernetes.io/arch": "amd64" });
+  assert.equal(spec.tolerations, undefined);
   assert.equal(spec.securityContext.runAsNonRoot, true);
   assert.ok(spec.activeDeadlineSeconds > 0);
   assert.ok(spec.volumes.every((v: Record<string, unknown>) => v.persistentVolumeClaim || v.emptyDir), "only the task's volume and emptyDirs");
@@ -117,6 +125,7 @@ test("a task runs through its pods and its results come from pod status", async 
   await pass();
   const fetchPod = kube.only(id);
   assert.equal(fetchPod.metadata.labels!["craft.build/network"], "fetch");
+  assert.deepEqual(fetchPod.spec.initContainers.map((x: { name: string; image: string }) => [x.name, x.image]), [["disk", "autocraft:test"]], "the volume is measured by trusted code first");
   assert.deepEqual(fetchPod.spec.containers.map((x: { name: string }) => x.name), ["step-0"]);
   assert.equal(fetchPod.spec.containers[0].image, "rust-stable:test");
   assert.equal(envOf(fetchPod.spec.containers[0]).GATE_FLAG, undefined, "a fetch step gets no gate env");
@@ -125,7 +134,7 @@ test("a task runs through its pods and its results come from pod status", async 
   await pass();
   const offline = kube.only(id);
   assert.equal(offline.metadata.labels!["craft.build/network"], "none");
-  assert.deepEqual(offline.spec.initContainers.map((x: { name: string }) => x.name), ["step-1"]);
+  assert.deepEqual(offline.spec.initContainers.map((x: { name: string }) => x.name), ["disk", "step-1"]);
   assert.deepEqual(offline.spec.containers.map((x: { name: string }) => x.name), ["step-2"]);
   assert.equal(envOf(offline.spec.containers[0]).GATE_FLAG, "1");
 
@@ -182,4 +191,67 @@ test("a task whose pod disappears is requeued once, then failed", async () => {
   assert.match(t.summary ?? "", /disappeared/);
   assert.equal(kube.pods.size, 0);
   assert.equal(kube.pvcs.size, 0);
+});
+
+const queued = (id: number) => db.prepare("SELECT state, attempts FROM build_tasks WHERE id = ?").get(id) as { state: string; attempts: number };
+const runOf = (id: number) => db.prepare("SELECT stage, pod FROM build_pod_runs WHERE task_id = ?").get(id) as { stage: number; pod: string | null } | undefined;
+const simple = () => createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
+const SOURCE_OK = JSON.stringify({ ok: true, env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null });
+
+test("claims that cannot start go back to the queue without using an attempt", async () => {
+  const a = simple(), b = simple();
+  kube.refuse = (kind) => kind === "pvc";
+  await pass();
+  kube.refuse = null;
+  for (const id of [a, b]) assert.deepEqual({ ...queued(id) }, { state: "queued", attempts: 0 });
+  assert.equal(runOf(a) ?? runOf(b), undefined);
+  clock += 61_000;
+  await pass();
+  assert.equal(queued(a).state, "running");
+  assert.equal(queued(b).state, "running");
+  db.exec(`UPDATE build_tasks SET state = 'cancelled' WHERE id IN (${a}, ${b})`);
+  await pass();
+  assert.equal(kube.pods.size, 0);
+});
+
+test("a stage's pod that cannot be created is retried, not given up at once", async () => {
+  const id = simple();
+  await pass();
+  kube.end(kube.only(id));
+  kube.refuse = (kind, labels) => kind === "pod" && labels["craft.build/stage"] === "1";
+  await pass();
+  kube.refuse = null;
+  assert.equal(queued(id).state, "running");
+  assert.deepEqual({ ...runOf(id) }, { stage: 1, pod: null });
+  await pass();
+  assert.equal(kube.pods.size, 0, "waits for the backoff");
+  clock += 20_000;
+  await pass();
+  assert.equal(kube.only(id).metadata.labels!["craft.build/stage"], "1");
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  kube.end(kube.only(id));
+  await pass();
+  assert.equal(queued(id).state, "done");
+});
+
+test("a pod on a lost node loses its task", async () => {
+  const id = simple();
+  await pass();
+  const first = kube.only(id);
+  first.status = { phase: "Running" };
+  first.metadata.deletionTimestamp = new Date(clock - 6 * 60_000).toISOString();
+  await pass();
+  assert.equal(queued(id).attempts, 2, "requeued and claimed again");
+  const second = kube.only(id);
+  assert.notEqual(second.metadata.name, first.metadata.name);
+  second.status = { phase: "Unknown" };
+  await pass();
+  assert.equal(queued(id).state, "running");
+  clock += 6 * 60_000;
+  await pass();
+  const t = getTask(db, id)!;
+  assert.equal(t.state, "failed");
+  assert.match(t.summary ?? "", /stopped reporting/);
+  assert.equal(kube.pods.size, 0);
 });

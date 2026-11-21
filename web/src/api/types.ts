@@ -1781,6 +1781,8 @@ export type KubeSettings = {
   storage: string; storageClass: string;
   /** Longest a task may take from its first pod to its last. */
   deadlineSec: number;
+  /** Longest one step may run, below its own limit. */
+  maxStepSec: number;
   runtimeClassName: string | null;
   arch: "x86_64" | "aarch64";
 };

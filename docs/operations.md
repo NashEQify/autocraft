@@ -923,14 +923,27 @@ A task runs as a sequence of pods that share one volume (a PersistentVolumeClaim
 |---|---|---|---|
 | task | AutoCraft | `api` | Fetches the task (source URL, patch, steps) with a one-time key and writes it to the volume. |
 | source | AutoCraft | `fetch` | Downloads the source tarball, applies the patch and reads the CI gate at the base commit (env, craft-fonts and craft-i18n checkouts). Reports what it found in its termination message. |
-| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. Each step is a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. |
+| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. |
 | upload | AutoCraft | `api` | Uploads the artifacts of the steps that ran, when a step names any. |
 
 - The runner reads each step's exit code, OOM kill and times from pod status, and its output from the pod log. Nothing in a pod reports a result.
 - The one-time key reaches only the `api` pods. It can read its task and upload its artifacts; it stops working when the task pod ends, and the upload pod gets a new one. No key is valid while repository code runs.
-- Every pod: `restartPolicy: Never`, no service-account token, no service links, non-root (uid 10001, `fsGroup` 10001), `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, read-only root, CPU, memory and ephemeral-storage requests and limits, `activeDeadlineSeconds`, and the optional runtime class.
+- Every pod: `restartPolicy: Never`, a `kubernetes.io/arch` node selector from `--arch`, no service-account token, no service links, non-root (uid 10001, `fsGroup` 10001), `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, read-only root, CPU, memory and ephemeral-storage requests and limits, `activeDeadlineSeconds`, and the optional runtime class.
 - `fetch` steps get neither the CI gate's env nor the checkouts, as in the container runtime. Tasks that need a display are not taken. A task whose CI gate names a package the toolchain image lacks fails with the package named: pods cannot install packages. Warm build caches are not used.
-- A pod that disappears, cannot pull its image for 3 minutes, or is not scheduled within 15 minutes loses its task: requeued once, then failed, as for a worker that stops answering. After a restart the runner deletes pods and volumes whose task is no longer the environment's.
+- A pod that disappears, cannot pull its image for 3 minutes, is not scheduled within 15 minutes, stays in deletion or on a node that stopped reporting for 5 minutes, or runs 5 minutes past a deadline Kubernetes should have enforced, loses its task: requeued once, then failed, as for a worker that stops answering. The runner owns these tasks, so the worker heartbeat timeout does not apply to them.
+- A failed create of a later stage's pod (rate limit, quota, an API error) is retried after 15 s, doubling to at most 5 minutes; after 6 tries or 15 minutes the task is lost. A task whose first pod cannot be created goes back to the queue without using an attempt, and the environment takes no task for a minute.
+- After a restart the runner deletes pods and volumes whose task is no longer the environment's. The namespace cannot change while tasks run.
+
+Disk use. The `local-path` provisioner does not enforce a volume's size: a step can write to `/target`, `/cache` and `/out` until the node's disk is full, and a node under disk pressure evicts other pods. What bounds it:
+
+| Bound | Effect |
+|---|---|
+| The `disk` check before every step pod | Fails the task when the volume holds more than `--storage` (or more than two million files). It runs between step pods, not during a step. |
+| `--max-step-sec` and each step's own limit | Caps how long one step can write. |
+| `--ephemeral-limit` | Caps each container's `/src` copy, `/tmp` and logs (emptyDirs with a size limit); the kubelet evicts only that pod. |
+| `--deadline-sec` | Caps the whole task; the volume is deleted when the task ends. |
+
+So a single step can still exceed `--storage` while it runs, by as much as it can write in its time limit. A storage class that enforces size (a block volume, or a quota-capable local provisioner) removes that gap.
 
 Settings (`envs add` and `envs set` options; `envs list` shows them):
 
@@ -945,6 +958,7 @@ Settings (`envs add` and `envs set` options; `envs list` shows them):
 | `--ephemeral-request`, `--ephemeral-limit` | `4Gi`, `16Gi` | Per container: `/src` copies, `/tmp` and logs. |
 | `--storage`, `--storage-class` | `40Gi`, `local-path` | The task's volume: source, `/target`, the cargo cache, `/out`, checkouts. A ReadWriteOnce local volume keeps a task's later pods on the node of its first. |
 | `--deadline-sec` | `10800` | Longest a task may take from its first pod to its last. |
+| `--max-step-sec` | `7200` | Longest one step may run, below its own limit. |
 | `--runtime-class` | none | A sandbox runtime class (gVisor, Kata) when the cluster has one. |
 | `--arch` | `x86_64` | Architecture the pods run on, for claim matching. |
 

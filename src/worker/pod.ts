@@ -4,7 +4,9 @@
 //   task    (network `api`)   fetches the task with the pod key and writes it to the task's volume
 //   source  (network `fetch`) source tarball, patch and CI-gate inputs into the volume; its termination message tells the runner what it found
 //   upload  (network `api`)   uploads the artifacts of the steps that ran
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+//   disk    (first in every step pod) fails the pod when the task's volume holds more than the environment's size,
+//           which a local-path volume does not enforce itself
+import { lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
 import { WorkerApi } from "./client.ts";
@@ -109,16 +111,55 @@ async function uploadPhase(e: PodEnv): Promise<number> {
   return 0;
 }
 
+/** Stops counting past this many entries: a tree that large fails the check as well. */
+const DISK_MAX_ENTRIES = 2_000_000;
+
+/** Space used under `root` (allocated blocks), without following links; null past DISK_MAX_ENTRIES entries. */
+export function usedBytes(root: string): number | null {
+  let total = 0, entries = 0;
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let names: string[];
+    try {
+      names = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const n of names) {
+      if (++entries > DISK_MAX_ENTRIES) return null;
+      const p = join(dir, n);
+      try {
+        const st = lstatSync(p);
+        total += st.blocks * 512;
+        if (st.isDirectory()) stack.push(p);
+      } catch { /* removed meanwhile */ }
+    }
+  }
+  return total;
+}
+
+function diskPhase(e: PodEnv, limit: number): number {
+  const gb = (b: number) => (b / 1024 ** 3).toFixed(1);
+  const used = usedBytes(e.work);
+  const over = used === null ? `the task's volume holds more than ${DISK_MAX_ENTRIES} files` : used > limit ? `the task's volume holds ${gb(used)} GB, over its ${gb(limit)} GB` : null;
+  e.log(over ?? `the task's volume holds ${gb(used!)} GB of ${gb(limit)} GB`);
+  if (!over) return 0;
+  writeFileSync(e.message, over);
+  return 4;
+}
+
 export async function podPhase(phase: string | undefined, env: NodeJS.ProcessEnv = process.env, fetchImpl?: typeof fetch): Promise<number> {
   const e = { ...podEnv(env), ...(fetchImpl ? { fetchImpl } : {}) };
   try {
     if (phase === "task") return await taskPhase(e);
     if (phase === "source") return await sourcePhase(e);
     if (phase === "upload") return await uploadPhase(e);
+    if (phase === "disk") return diskPhase(e, Number(env.AUTOCRAFT_POD_DISK_LIMIT) || 0);
   } catch (err) {
     e.log(`${phase} failed: ${(err as Error).message}`);
     return 1;
   }
-  e.log("usage: autocraft-server worker pod task|source|upload");
+  e.log("usage: autocraft-server worker pod task|source|upload|disk");
   return 2;
 }

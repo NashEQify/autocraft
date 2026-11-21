@@ -31,7 +31,7 @@ const envs: BuildEnv[] = [
     capabilities: { os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [] },
     settings: {
       namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi",
-      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, runtimeClassName: null, arch: "x86_64",
+      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
     },
   },
   { id: "old-box", label: "Old build box", kind: "remote", enabled: false, online: false, lastSeenAt: iso(9 * 24 * HOUR), slots: 2, running: 0, version: null, pausedReason: null, confidential: true, settings: null, capabilities: null },

@@ -41,6 +41,8 @@ export function newPodKey(taskId: number): string {
 }
 
 const DUMMY_HASH = hashKey("no such environment");
+/** The key hash of a kubernetes environment: not a SHA-256 hex digest, so no key matches it. */
+const UNUSABLE_HASH = "none";
 
 /**
  * The environment a bearer key belongs to, or null; a pod key also names its one task. The comparison takes the same time
@@ -51,7 +53,7 @@ export function authenticate(db: DatabaseSync, key: string): { id: string; taskI
   const m = /^cwk_([a-z0-9-]{3,32})_[A-Za-z0-9_-]{20,100}$/.exec(key);
   const p = m ? null : /^cwp_(\d{1,15})_[A-Za-z0-9_-]{20,100}$/.exec(key);
   const row = m
-    ? (db.prepare("SELECT id, key_hash FROM build_envs WHERE id = ?").get(m[1]!) as { id: string; key_hash: string } | undefined)
+    ? (db.prepare("SELECT id, key_hash FROM build_envs WHERE id = ? AND kind != 'kubernetes'").get(m[1]!) as { id: string; key_hash: string } | undefined)
     : p
       ? (db.prepare("SELECT r.env_id AS id, r.key_hash, r.task_id FROM build_pod_runs r JOIN build_envs e ON e.id = r.env_id WHERE r.task_id = ? AND e.kind = 'kubernetes'").get(Number(p[1])) as
         { id: string; key_hash: string; task_id: number } | undefined)
@@ -141,7 +143,7 @@ export function createEnv(db: DatabaseSync, input: unknown, by: string): { env: 
   const at = new Date().toISOString();
   try {
     db.prepare("INSERT INTO build_envs (id, label, kind, slots, confidential, confidential_since, key_hash, created_at, updated_by, updated_at, settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, label, o.kind as EnvKind, slots, confidential ? 1 : 0, confidential ? at : null, hashKey(key), at, by, at, settings);
+      .run(id, label, o.kind as EnvKind, slots, confidential ? 1 : 0, confidential ? at : null, kube ? UNUSABLE_HASH : hashKey(key), at, by, at, settings);
   } catch (e) {
     if (/UNIQUE|constraint/i.test((e as Error).message)) throw new BuildError(409, `environment ${id} exists`);
     throw e;
@@ -158,6 +160,9 @@ export function updateEnv(db: DatabaseSync, id: unknown, input: unknown, by: str
   if (!before) throw new BuildError(404, "no such environment");
   if (o.settings !== undefined && before.kind !== "kubernetes") throw new BuildError(400, "settings are only for kubernetes environments");
   const settings = o.settings !== undefined ? JSON.stringify(parseSettings(o.settings, settingsOf(before.settings))) : before.settings;
+  if (settings !== before.settings && settingsOf(settings).namespace !== settingsOf(before.settings).namespace && db.prepare("SELECT 1 FROM build_pod_runs WHERE env_id = ?").get(before.id)) {
+    throw new BuildError(409, "the namespace cannot change while tasks run in it; disable the environment and wait for them to finish");
+  }
   const next = {
     label: o.label !== undefined ? checkLabel(o.label) : before.label,
     enabled: before.enabled === 1,

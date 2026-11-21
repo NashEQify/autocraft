@@ -17,7 +17,7 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server envs set <id> [--label TEXT] [--enabled yes|no] [--slots N] [--confidential yes|no] [POD SETTINGS]
          POD SETTINGS (kubernetes): --namespace NS  --image REF|runner  --toolchain-image NAME=REF|NAME=none  --worker-url URL
            --cpu-request Q --cpu-limit Q --memory-request Q --memory-limit Q --ephemeral-request Q --ephemeral-limit Q
-           --storage Q --storage-class NAME --deadline-sec N --runtime-class NAME|none --arch x86_64|aarch64
+           --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
@@ -80,7 +80,7 @@ function keyFile(opt: Map<string, string>): { write: (key: string) => void; remo
 const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   namespace: "namespace", image: "image", "worker-url": "workerUrl", "cpu-request": "cpuRequest", "cpu-limit": "cpuLimit", "memory-request": "memoryRequest",
   "memory-limit": "memoryLimit", "ephemeral-request": "ephemeralRequest", "ephemeral-limit": "ephemeralLimit", storage: "storage", "storage-class": "storageClass",
-  "deadline-sec": "deadlineSec", "runtime-class": "runtimeClassName", arch: "arch",
+  "deadline-sec": "deadlineSec", "max-step-sec": "maxStepSec", "runtime-class": "runtimeClassName", arch: "arch",
 };
 
 /** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
@@ -89,7 +89,7 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    out[key] = key === "deadlineSec" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
+    out[key] = key === "deadlineSec" || key === "maxStepSec" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
     const m = /^([^=]+)=(.+)$/.exec(opt.get("toolchain-image")!) ?? die("--toolchain-image takes NAME=REF or NAME=none");
@@ -104,7 +104,7 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
 const settingsLine = (s: KubeSettings): string =>
   `namespace ${s.namespace}, image ${s.image ?? "the runner's own"}, toolchains ${Object.entries(s.toolchainImages).map(([t, i]) => `${t}=${i}`).join(" ") || "none"}, ` +
   `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
-  `deadline ${s.deadlineSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}`;
+  `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}`;
 
 /** A yes|no option as a boolean; undefined when it is not given. */
 function yesNo(opt: Map<string, string>, name: string): boolean | undefined {

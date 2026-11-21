@@ -230,7 +230,8 @@ export function claim(db: DatabaseSync, envId: string, free: number, nowMs: numb
 /** Tasks without a heartbeat for LOST_AFTER_MS: requeued once, then failed; a cancelled one is just cancelled. Returns how many were handled. */
 export function reapLost(db: DatabaseSync, nowMs: number = Date.now()): number {
   const cutoff = new Date(nowMs - LOST_AFTER_MS).toISOString();
-  const stale = db.prepare("SELECT id FROM build_tasks WHERE state IN ('claimed', 'running') AND heartbeat_at < ?").all(cutoff) as { id: number }[];
+  // The pod launcher owns the tasks it runs in pods (launcher.ts) and loses them by their pods' state.
+  const stale = db.prepare("SELECT id FROM build_tasks WHERE state IN ('claimed', 'running') AND heartbeat_at < ? AND id NOT IN (SELECT task_id FROM build_pod_runs)").all(cutoff) as { id: number }[];
   for (const t of stale) loseTask(db, t.id, "The worker stopped answering twice (no heartbeat for 2 minutes).", "Cancelled; the worker stopped answering.", nowMs);
   return stale.length;
 }

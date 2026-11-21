@@ -17,7 +17,7 @@ import { BuildError } from "./envs.ts";
 export const DEFAULT_SETTINGS: KubeSettings = {
   namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981",
   cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi", ephemeralRequest: "4Gi", ephemeralLimit: "16Gi",
-  storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, runtimeClassName: null, arch: "x86_64",
+  storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -95,6 +95,10 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
       case "deadlineSec":
         if (typeof v !== "number" || !Number.isInteger(v) || v < 300 || v > 48 * 3600) throw new BuildError(400, "deadlineSec must be 300 to 172800");
         out.deadlineSec = v;
+        break;
+      case "maxStepSec":
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 60 || v > 7200) throw new BuildError(400, "maxStepSec must be 60 to 7200");
+        out.maxStepSec = v;
         break;
       case "runtimeClassName":
         if (v !== null && (typeof v !== "string" || !DNS_LABEL.test(v))) throw new BuildError(400, "runtimeClassName must be a runtime class name or null");
@@ -193,6 +197,9 @@ export const STEP_WRAPPER = 'cp -a /pristine/. /src/ || { echo "could not copy t
 export const PACKAGES_CHECK = "missing=''; for p in \"$@\"; do dpkg-query -W -f='${Status}' \"$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"$missing $p\"; done; " +
   "if [ -n \"$missing\" ]; then echo \"the toolchain image lacks packages the CI gate installs:$missing (build pods cannot install packages)\" | tee /dev/termination-log >&2; exit 3; fi";
 export const PACKAGES_CONTAINER = "packages";
+/** First in every step pod: the AutoCraft image measures the task's volume, which local-path does not cap (`worker pod disk`). */
+export const DISK_CONTAINER = "disk";
+const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
 function resources(s: KubeSettings) {
@@ -222,6 +229,7 @@ function pod(c: PodCtx, network: "api" | "fetch" | "none", volumes: object[], in
     spec: {
       restartPolicy: "Never", automountServiceAccountToken: false, enableServiceLinks: false, activeDeadlineSeconds: Math.max(60, Math.round(c.deadlineSec)),
       terminationGracePeriodSeconds: 5,
+      nodeSelector: { "kubernetes.io/arch": ARCH_LABEL[c.s.arch] },
       ...(c.s.runtimeClassName ? { runtimeClassName: c.s.runtimeClassName } : {}),
       securityContext: { runAsNonRoot: true, runAsUser: POD_UID, runAsGroup: POD_UID, fsGroup: POD_UID, seccompProfile: { type: "RuntimeDefault" } },
       volumes: [{ name: "work", persistentVolumeClaim: { claimName: c.pvc } }, ...volumes],
@@ -256,13 +264,16 @@ export const sourcePod = (c: PodCtx, image: string) => appPod(c, image, "source"
 export const uploadPod = (c: PodCtx, image: string, key: string, ran: number) =>
   appPod(c, image, "upload", "api", { AUTOCRAFT_POD_KEY: key, AUTOCRAFT_WORKER_URL: c.s.workerUrl, AUTOCRAFT_POD_RAN: String(ran) }, true);
 
-/** One group of steps. Offline steps get the CI gate's env and the craft-fonts / craft-i18n checkouts; a `fetch` step gets neither, as in the container runtime. */
-export function stepPod(c: PodCtx, image: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean) {
+/**
+ * One group of steps, after a disk check (and, in the first group, a package check). Offline steps get the CI gate's env and
+ * the craft-fonts / craft-i18n checkouts; a `fetch` step gets neither, as in the container runtime.
+ */
+export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean) {
   const offline = group.network === "none";
-  const volumes: object[] = [];
+  const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
   const steps = group.steps.map((i) => {
     const step = plan[i]!;
-    volumes.push({ name: `src-${i}`, emptyDir: {} }, { name: `tmp-${i}`, emptyDir: { sizeLimit: "2Gi" } });
+    volumes.push({ name: `src-${i}`, emptyDir: { sizeLimit: c.s.ephemeralLimit } }, { name: `tmp-${i}`, emptyDir: { sizeLimit: "2Gi" } });
     const mounts: object[] = [
       { name: "work", mountPath: "/pristine", subPath: "src", readOnly: true },
       { name: `src-${i}`, mountPath: "/src" },
@@ -272,15 +283,22 @@ export function stepPod(c: PodCtx, image: string, plan: TaskStep[], group: Group
       ...(offline ? prepared.mounts.map((m) => ({ name: "work", mountPath: m.target, subPath: m.sub, readOnly: true })) : []),
     ];
     return container(c.s, stepContainer(i), image, {
-      command: ["/bin/sh", "-c", STEP_WRAPPER, "step", String(step.timeoutSec), ...step.cmd],
+      command: ["/bin/sh", "-c", STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: "/src",
       env: envList({ ...(offline ? prepared.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" }),
       volumeMounts: mounts,
     });
   });
+  const disk = container(c.s, DISK_CONTAINER, appImage, {
+    args: ["worker", "pod", "disk"],
+    env: envList({ HOME: "/tmp", AUTOCRAFT_POD_DISK_LIMIT: String(Math.floor(quantity(c.s.storage))) }),
+    volumeMounts: [{ name: "work", mountPath: "/work", readOnly: true }, { name: "check-tmp", mountPath: "/tmp" }],
+  });
   const check = checkPackages && prepared.packages.length
-    ? [container(c.s, PACKAGES_CONTAINER, image, { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "pkg-tmp", mountPath: "/tmp" }] })]
+    ? [container(c.s, PACKAGES_CONTAINER, image, { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
-  if (check.length) volumes.push({ name: "pkg-tmp", emptyDir: { sizeLimit: "64Mi" } });
-  return pod(c, group.network, volumes, [...check, ...steps.slice(0, -1)], steps.slice(-1));
+  return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1));
 }
+
+/** A step's time limit: its own, capped by the environment's. */
+export const stepCap = (s: KubeSettings, step: TaskStep): number => Math.min(step.timeoutSec, s.maxStepSec);

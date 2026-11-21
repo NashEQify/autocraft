@@ -13,7 +13,8 @@ export type ContainerState = {
 };
 export type ContainerStatus = { name: string; state?: ContainerState };
 export type KPod = {
-  metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string };
+  metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string; deletionTimestamp?: string };
+  spec?: { activeDeadlineSeconds?: number };
   status?: {
     phase?: "Pending" | "Running" | "Succeeded" | "Failed" | "Unknown";
     reason?: string;

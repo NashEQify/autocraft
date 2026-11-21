@@ -1046,6 +1046,10 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   results TEXT NOT NULL DEFAULT '[]', -- JSON TaskResult[] read from pod status
   failed TEXT,                        -- summary of the first failure; later step groups are skipped
   ran INTEGER NOT NULL DEFAULT 0,     -- plan steps that ran
+  logged TEXT NOT NULL DEFAULT '[]',  -- JSON list of "<pod>/<container>" whose output is in the task log
+  create_tries INTEGER NOT NULL DEFAULT 0, -- failed creates of the stage's pod in a row
+  failing_since TEXT,                 -- the first of them
+  retry_at TEXT,                      -- when the next create is tried
   started_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);
