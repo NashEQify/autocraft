@@ -34,6 +34,7 @@ import { jobRemoteQueue, REMOTE_WAIT_CAP_MS, withdrawJobCalls } from "../remote/
 import { exclusive } from "../async-seq.ts";
 import { refreshReadIdentity } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
+import { jsonNum } from "../db/portable.ts";
 
 export const logsDir = (): string => envVar("RUNNER_LOGS") ?? join(homedir(), ".cache/autocraft-logs/jobs");
 
@@ -469,7 +470,7 @@ export class Runner {
 
   /** Why the queued job cannot start: a running job (of this runner or a command-line run) of the same step and repo, a full step, or a held mutex. */
   private async blocked(steps: Awaited<ReturnType<typeof loadSteps>>, id: number): Promise<string | null> {
-    const r = await this.db.prepare("SELECT step, repo, json_extract(params, '$.number') AS number FROM jobs WHERE id = ?").get(id) as { step: string; repo: string | null; number: number | null } | undefined;
+    const r = await this.db.prepare(`SELECT step, repo, ${jsonNum(this.db, "params", "$.number")} AS number FROM jobs WHERE id = ?`).get(id) as { step: string; repo: string | null; number: number | null } | undefined;
     return r ? await jobBlock(this.db, steps, r, { states: ["running"], mutex: true }) : "gone";
   }
 

@@ -67,6 +67,8 @@ import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, w
 import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { groupConcat, inList, jsonText, upsert } from "../db/portable.ts";
+import { pairsFrom } from "../core/ref-filter.ts";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
@@ -232,8 +234,8 @@ const tasksSig = async (db: Db): Promise<string> =>
 
 /** Daily limits are not a topic of their own (they share `jobs`). */
 const limitsSig = async (db: Db): Promise<string> =>
-  String((await db.prepare("SELECT group_concat(step || '=' || COALESCE(per_day, 'n'), ',') AS s FROM (SELECT step, per_day FROM stage_limits ORDER BY step)").get() as { s: string | null }).s ?? "")
-  + String((await db.prepare(`SELECT group_concat(key || '=' || value, ',') AS s FROM (SELECT key, value FROM settings WHERE key LIKE '${KEY_RESET}%' OR key = 'step_parallel' ORDER BY key)`).get() as { s: string | null }).s ?? "");
+  String((await db.prepare(`SELECT ${groupConcat(db, "step || '=' || COALESCE(CAST(per_day AS TEXT), 'n')", ",", "step")} AS s FROM stage_limits`).get() as { s: string | null }).s ?? "")
+  + String((await db.prepare(`SELECT ${groupConcat(db, "key || '=' || value", ",", "key")} AS s FROM settings WHERE key LIKE '${KEY_RESET}%' OR key = 'step_parallel'`).get() as { s: string | null }).s ?? "");
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
@@ -262,8 +264,8 @@ async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy
     const { step: _s, repo: _r, requested_by: _b, ...end } = best;
     return end;
   }
-  return await db.prepare(`SELECT id, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?)
-    AND ended_at IS NOT NULL AND (? IS NULL OR requested_by = ?) AND COALESCE(error, '') <> ? ORDER BY id DESC LIMIT 1`)
+  return await db.prepare(`SELECT id, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE step = ? AND (CAST(? AS TEXT) IS NULL OR repo = ?)
+    AND ended_at IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR requested_by = ?) AND COALESCE(error, '') <> ? ORDER BY id DESC LIMIT 1`)
     .get(step, repo, repo, requestedBy ?? null, requestedBy ?? null, RUNNER_STOPPED) as JobEnd | undefined;
 }
 
@@ -414,7 +416,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       }
       // A repo whose waiting heads have all been pending for more than an hour is read every 5 minutes instead.
       const waiting = (await plansOf(db, ctx)).prs.filter((p) => ciWait.has(p.facts.repo) && p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red);
-      const updated = new Map(waiting.length ? (await db.prepare("SELECT i.repo || '#' || i.number AS k, i.updated_at FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1")
+      const wp = pairsFrom(db, "?", "j");
+      const updated = new Map(waiting.length ? (await db.prepare(`SELECT i.repo || '#' || i.number AS k, i.updated_at FROM ${wp.from} JOIN items i ON i.repo = ${wp.repo} AND i.number = ${wp.number}`)
         .all(JSON.stringify(waiting.map((p) => [p.facts.repo, p.facts.number]))) as { k: string; updated_at: string | null }[]).map((r) => [r.k, r.updated_at]) : []);
       const young = new Set(waiting.filter((p) => { const u = updated.get(`${p.facts.repo}#${p.facts.number}`); return !!u && Date.now() - Date.parse(u) <= 3600_000; })
         .map((p) => p.facts.repo));
@@ -612,7 +615,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "referee",
     detect: async (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
-      if (ctx.run) for (const r of await db.prepare("SELECT json_extract(probs, '$.opusFailedAt') AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND json_extract(probs, '$.opusFailedAt') > ?").all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      if (ctx.run) for (const r of await db.prepare(`SELECT ${jsonText(db, "probs", "$.opusFailedAt")} AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND ${jsonText(db, "probs", "$.opusFailedAt")} > ?`).all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
       return ctx.run && (await servable(db, ctx, "referee", "referee")).length ? [{ step: "referee", params: {} }] : [];
     },
   },
@@ -820,7 +823,7 @@ export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOF
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
  */
 export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string } = {}): Promise<{ until: number; failures: number } | null> {
-  const rows = await db.prepare(`SELECT id, state, ended_at, error FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?) AND requested_by = ? AND state IN ('done', 'failed')
+  const rows = await db.prepare(`SELECT id, state, ended_at, error FROM jobs WHERE step = ? AND (CAST(? AS TEXT) IS NULL OR repo = ?) AND requested_by = ? AND state IN ('done', 'failed')
     AND COALESCE(error, '') <> ? AND COALESCE(error, '') NOT LIKE 'write paced:%' ORDER BY id DESC LIMIT 12`).all(step, o.repo ?? null, o.repo ?? null, AUTOPILOT_USER, RUNNER_STOPPED) as { id: number; state: string; ended_at: string | null; error: string | null }[];
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
@@ -1137,7 +1140,7 @@ function leaseSkipKeys(keys: string | null): string[] | null {
 
 /** True when a running job holds a lease on one of the keys a job skipped (a job from before the keys were recorded: on any lease). */
 async function skippedLeaseHeld(db: Db, keys: string | null): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM work_leases l JOIN jobs j ON j.id = l.job_id WHERE j.state = 'running'${keys ? " AND l.key IN (SELECT value FROM json_each(?))" : ""} LIMIT 1`).get(...(keys ? [keys] : []));
+  return !!await db.prepare(`SELECT 1 FROM work_leases l JOIN jobs j ON j.id = l.job_id WHERE j.state = 'running'${keys ? ` AND ${inList(db, "l.key")}` : ""} LIMIT 1`).get(...(keys ? [keys] : []));
 }
 
 /** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
@@ -1322,7 +1325,7 @@ export type StoredLaneItems = Record<string, { total: number; items: LaneItem[] 
 /** Writes each lane's items as this pass sees them: only the lanes that changed. The table belongs to the `plans` topic, which the planner does not take as input. */
 async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void> {
   const old = new Map((await db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
-  const put = db.prepare("INSERT OR REPLACE INTO lane_next (lane, total, items, at) VALUES (?, ?, ?, ?)");
+  const put = db.prepare(upsert(db, { table: "lane_next", cols: ["lane", "total", "items", "at"], key: ["lane"] }));
   const at = new Date().toISOString();
   for (const lane of lanes) {
     const all = await laneItems(db, ctx, lane);

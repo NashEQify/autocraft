@@ -145,7 +145,7 @@ export async function pageBatches(db: Db, o: { repo?: string; hidden?: HiddenRep
   const params: (string | number)[] = [];
   if (o.repo) { where.push("repo = ?"); params.push(o.repo); }
   // A list from the dashboard's `hiddenRepos` allows only its visible repos, so batches of untracked repos stay out too.
-  if (o.hidden && filtered(o.hidden)) { const h = hiddenJsonTest("repo", o.hidden); where.push(`NOT (${h.sql})`); params.push(h.arg); }
+  if (o.hidden && filtered(o.hidden)) { const h = hiddenJsonTest(db, "repo", o.hidden); where.push(`NOT (${h.sql})`); params.push(h.arg); }
   const filter = where.length ? `WHERE ${where.join(" AND ")}` : "";
   const total = (await db.prepare(`SELECT COUNT(*) AS n FROM main.merge_batches ${filter}`).get(...params) as { n: number }).n;
   const paged = o.before === undefined ? filter : `${filter ? `${filter} AND` : "WHERE"} id < ?`;

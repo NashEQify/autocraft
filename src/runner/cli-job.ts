@@ -63,8 +63,8 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
       mkdirSync(logsDir(), { recursive: true });
       const t = now();
       const repo = typeof full.repo === "string" ? full.repo : null;
-      return Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?)")
-        .run(step.name, JSON.stringify(full), repo, t, t)).lastInsertRowid);
+      return Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?) RETURNING id")
+        .get(step.name, JSON.stringify(full), repo, t, t) as { id: number }).id);
     });
   } catch (e) {
     if (e instanceof JobError) { console.error(`${req.step}: ${e.message}`); return 1; }

@@ -19,6 +19,7 @@ import { changeCursor, changesSince, pruneChanges, type ChangeCursor } from "./p
 import type { ItemFacts, PrFacts } from "./plan.ts";
 import { loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
+import { greatest } from "../db/portable.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
 export type FullReason = "start" | "marker" | "cap" | "global" | "floor";
@@ -220,8 +221,8 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) return;
       await pruneChanges(db, cursor);
       const count = db.prepare(`INSERT INTO main.plan_pass_stats (kind, passes, refs, last_at, ms, max_ms) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (kind) DO UPDATE SET passes = passes + excluded.passes, refs = refs + excluded.refs, last_at = excluded.last_at,
-          ms = ms + excluded.ms, max_ms = max(max_ms, excluded.max_ms)`);
+        ON CONFLICT (kind) DO UPDATE SET passes = plan_pass_stats.passes + excluded.passes, refs = plan_pass_stats.refs + excluded.refs, last_at = excluded.last_at,
+          ms = plan_pass_stats.ms + excluded.ms, max_ms = ${greatest(db, "plan_pass_stats.max_ms", "excluded.max_ms")}`);
       for (const [k, c] of rec.counts) await count.run(k, c.passes, c.refs, c.at, c.ms, c.maxMs);
       rec.counts.clear();
       rec.flushedAt = Date.now();

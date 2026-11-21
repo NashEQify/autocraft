@@ -1,6 +1,6 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, scope decision, labels.
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
-import { refIn, refPairs } from "./ref-filter.ts";
+import { pairsFrom, refIn, refPairs } from "./ref-filter.ts";
 import { settleMemo, settledBy } from "../settlers.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
@@ -31,6 +31,7 @@ import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonRemoveKey } from "../db/portable.ts";
 
 export type { ItemFacts } from "./plan.ts";
 
@@ -74,7 +75,7 @@ const select = (db: Db): string => `SELECT i.repo, i.number, i.kind, i.state, i.
   LEFT JOIN item_stage st ON st.repo = i.repo AND st.number = i.number
   LEFT JOIN fix_attempts fa ON fa.repo = i.repo AND fa.number = i.number
   LEFT JOIN build_tasks ht ON ht.id = fa.head_task_id LEFT JOIN build_tasks bt ON bt.id = fa.base_task_id
-  WHERE (i.state = 'OPEN' OR ${refIn("i", ":closing")})`;
+  WHERE (i.state = 'OPEN' OR ${refIn(db, "i", ":closing")})`;
 
 /** `asked_by` of the decisions a security scan asks (act/index.ts SECURITY_ASKER). */
 const SECURITY_ASKER = "security-scan";
@@ -182,14 +183,14 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const params: Record<string, string> = { model, closing: refPairs(closing) };
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
+  if (opts.refs) { where += ` AND ${refIn(db, "i")}`; params.refs = refPairs(opts.refs); }
   const rows = await db.prepare(`${select(db)}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {
     for (const c of await db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
-        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN json_remove(c.probs, '$.type') ELSE c.probs END AS probs, c.input_hash
-      FROM classifications c WHERE c.run_id = :run AND ${refIn("c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
+        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN ${jsonRemoveKey(db, "c.probs", "type")} ELSE c.probs END AS probs, c.input_hash
+      FROM classifications c WHERE c.run_id = :run AND ${refIn(db, "c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
       const k = `${c.repo}#${c.number}`;
       (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
     }
@@ -219,8 +220,9 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   type Text = { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null };
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
   const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
+  const tp = pairsFrom(db, "?", "j");
   const texts = new Map(needText.length ? (await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
+    FROM ${tp.from} JOIN items i ON i.repo = ${tp.repo} AND i.number = ${tp.number}`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
   const mirrored = db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ? AND kind = 'pr'");
   // The fix PR we just opened counts as open until a sync mirrors it: the mirror's open-PR list doesn't have it yet.
   const ownPrUnmirrored = async (state: string | null, url: string | null): Promise<OpenPr | null> => {

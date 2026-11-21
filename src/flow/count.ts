@@ -26,6 +26,7 @@ import { scopeAnswers } from "../review/candidates.ts";
 import { BACKLOG_KIND } from "../decisions.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { indexedBy, jsonText } from "../db/portable.ts";
 
 export type Counts = Record<string, number>;
 export type Refs = Set<string>;
@@ -101,7 +102,7 @@ export class Ctx {
     const extra = col === "closed_at" ? "AND state <> 'OPEN'" : "";
     if (this.repo) return await this.n(`SELECT COUNT(*) AS n FROM main.items WHERE repo = :repo AND ${col} >= :since ${extra}`, { since: this.since });
     const idx = col === "created_at" ? "items_created" : "items_closed";
-    return await this.n(`SELECT COUNT(*) AS n FROM main.items INDEXED BY ${idx} WHERE ${col} >= :since ${extra}
+    return await this.n(`SELECT COUNT(*) AS n FROM main.items${indexedBy(this.db, idx)} WHERE ${col} >= :since ${extra}
       AND repo IN (SELECT name FROM main.tracked_repos)`, { since: this.since });
   }
 }
@@ -130,7 +131,7 @@ async function classify(c: Ctx): Promise<NodeCount> {
     members.get(`classify.${k}`)!.add(ref(r));
   }
   const run = c.run;
-  const recent = run ? await c.n(`SELECT COUNT(*) AS n FROM main.classifications INDEXED BY classifications_run WHERE run_id = :run AND (classifier = 'jev' OR (classifier = 'haiku' AND input_hash IS NOT NULL)) AND at >= :since
+  const recent = run ? await c.n(`SELECT COUNT(*) AS n FROM main.classifications${indexedBy(c.db, "classifications_run")} WHERE run_id = :run AND (classifier = 'jev' OR (classifier = 'haiku' AND input_hash IS NOT NULL)) AND at >= :since
       AND repo IN (SELECT name FROM main.tracked_repos) ${c.andRepo()}`, { run, since: c.since }) : 0;
   return {
     counts: {
@@ -226,7 +227,7 @@ async function verify(c: Ctx): Promise<NodeCount> {
     counts: {
       ...Object.fromEntries([...by].map(([k, v]) => [k, v.size])),
       "verify.total": total,
-      "verify.recent.finished": await c.n(`SELECT COUNT(*) AS n FROM main.verifications INDEXED BY verifications_finished WHERE finished_at >= :since
+      "verify.recent.finished": await c.n(`SELECT COUNT(*) AS n FROM main.verifications${indexedBy(c.db, "verifications_finished")} WHERE finished_at >= :since
         AND state IN ('passed', 'ci-enough', 'failed', 'error') AND repo IN (SELECT name FROM main.tracked_repos) ${c.andRepo()}`, { since: c.since }),
       "edge.verify.merge": passing,
     },
@@ -370,8 +371,9 @@ async function fixup(c: Ctx): Promise<NodeCount> {
   const hold = members.get("fixup.hold")!;
   const tracked = new Set(await c.repos());
   // The buckets are part of each PR's cached view.
-  const cached = await c.db.prepare(`SELECT repo, number, json_extract(view, '$.fixup') AS fixup, json_extract(view, '$.cifix') AS cifix FROM main.item_plans
-    WHERE kind = 'pr' AND (json_extract(view, '$.fixup') IS NOT NULL OR json_extract(view, '$.cifix') IS NOT NULL) ${c.andRepo()}`).all(c.rp) as { repo: string; number: number; fixup: string | null; cifix: string | null }[];
+  const fixupOf = jsonText(c.db, "view", "$.fixup"), cifixOf = jsonText(c.db, "view", "$.cifix");
+  const cached = await c.db.prepare(`SELECT repo, number, ${fixupOf} AS fixup, ${cifixOf} AS cifix FROM main.item_plans
+    WHERE kind = 'pr' AND (${fixupOf} IS NOT NULL OR ${cifixOf} IS NOT NULL) ${c.andRepo()}`).all(c.rp) as { repo: string; number: number; fixup: string | null; cifix: string | null }[];
   const facts = cached.filter((f) => tracked.has(f.repo));
   for (const f of facts) {
     if (!f.fixup) continue;

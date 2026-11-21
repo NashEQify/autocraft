@@ -328,7 +328,8 @@ export function diffFactsOfCache(repo: string, number: number, head: string): Di
 
 const putFacts = (db: Db) => db.prepare(`INSERT INTO diff_facts (repo, number, head_oid, reasons, lines, pending, last_read) VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (repo, number, head_oid) DO UPDATE SET reasons = excluded.reasons, lines = excluded.lines, pending = excluded.pending, last_read = excluded.last_read
-  WHERE reasons IS NOT excluded.reasons OR lines IS NOT excluded.lines OR pending IS NOT excluded.pending OR last_read IS NOT excluded.last_read`);
+  WHERE diff_facts.reasons IS DISTINCT FROM excluded.reasons OR diff_facts.lines IS DISTINCT FROM excluded.lines
+    OR diff_facts.pending IS DISTINCT FROM excluded.pending OR diff_facts.last_read IS DISTINCT FROM excluded.last_read`);
 const dropFacts = (db: Db) => db.prepare("DELETE FROM diff_facts WHERE repo = ? AND number = ? AND head_oid = ?");
 
 async function writeFacts(db: Db, repo: string, number: number, head: string, f: DiffFacts | null): Promise<void> {

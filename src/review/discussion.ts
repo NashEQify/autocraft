@@ -290,7 +290,7 @@ async function computeDiscussionState(db: Db, repo?: string): Promise<Discussion
   const rows = await db.prepare(`SELECT c.repo, c.number, COALESCE(MAX(c.created_at), '') AS newest,
       COALESCE(MAX(CASE WHEN c.author_association IN (${MAINTAINER_ASSOCIATIONS.map((a) => `'${a}'`).join(", ")})
         OR EXISTS (SELECT 1 FROM main.access a WHERE a.login = c.author AND a.role IN ('operator', 'maintainer')) THEN c.created_at END), '') AS maint
-    FROM comments c WHERE (:repo IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}
+    FROM comments c WHERE (CAST(:repo AS TEXT) IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}
       AND NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = c.repo AND i.number = c.number AND i.kind = 'issue') GROUP BY c.repo, c.number`).all({ repo: repo ?? null, own }) as { repo: string; number: number; newest: string; maint: string }[];
   // The hash needs the comment text; callers ask for it only after a newer entry than a review's snapshot, so it is read on first use (primeHashes reads many in one query).
   const known = new Map<string, string>();
@@ -384,7 +384,7 @@ async function reviewedRows(db: Db, repo?: string): Promise<ReviewedRow[]> {
   const rows = await db.prepare(`SELECT r.repo, r.number, r.head_oid, r.at, r.seen_at, r.disc_hash, r.blocked_by,
       i.base_ref IS NOT NULL AND COALESCE(r.base_ref, p.default_branch) IS NOT NULL AND i.base_ref <> COALESCE(r.base_ref, p.default_branch) AS rebased
     FROM opus_reviews r LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number LEFT JOIN repos p ON p.name = r.repo
-    WHERE r.verdict IS NOT NULL AND (:repo IS NULL OR r.repo = :repo)`)
+    WHERE r.verdict IS NOT NULL AND (CAST(:repo AS TEXT) IS NULL OR r.repo = :repo)`)
     .all({ repo: repo ?? null }) as ReviewedRow[];
   memo.set(repo ?? "", { sig, rows });
   return rows;

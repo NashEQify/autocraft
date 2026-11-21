@@ -2,6 +2,7 @@
 // A lease whose job is not running counts as free, so a crash leaves nothing behind.
 import { currentJob } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
+import { upsert } from "../db/portable.ts";
 
 let skipped = 0;
 /** Items this process skipped because another job held their lease. */
@@ -25,7 +26,7 @@ export async function take(db: Db, key: string, jobId: number, step: string): Pr
   return await db.write(async () => {
     const held = await db.prepare("SELECT l.job_id AS job, j.state AS state FROM work_leases l LEFT JOIN jobs j ON j.id = l.job_id WHERE l.key = ?").get(key) as { job: number; state: string | null } | undefined;
     if (held && held.job !== jobId && held.state === "running") return false;
-    await db.prepare("INSERT OR REPLACE INTO work_leases (key, job_id, step, taken_at) VALUES (?, ?, ?, ?)").run(key, jobId, step, new Date().toISOString());
+    await db.prepare(upsert(db, { table: "work_leases", cols: ["key", "job_id", "step", "taken_at"], key: ["key"] })).run(key, jobId, step, new Date().toISOString());
     return true;
   });
 }
