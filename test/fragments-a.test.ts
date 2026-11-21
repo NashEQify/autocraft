@@ -9,7 +9,7 @@ import type { AnyEb } from "../src/db/kx.ts";
 import { heldOpenExpr, heldOpenSql, lockLiveExpr, lockLiveSql, lockRunningAtExpr, lockRunningAtSql } from "../src/answers/hold.ts";
 import { canSettleExpr, canSettleSql, settledByExpr, settledBySql, settlesAfter, settlesCheckedAtExpr, settlesCheckedAtSql, settlesLoginExpr, settlesLoginSql } from "../src/settlers.ts";
 import { pilotExpr, pilotExprFor, pilotSql, pilotSqlFor } from "../src/pilot.ts";
-import { backlogHeldExpr, backlogHeldSql, groupHeldExpr, groupHeldSql, notHeldExpr, notHeldSql, notOwnIntegrationExpr, notOwnIntegrationSql } from "../src/dupes/held.ts";
+import { backlogHeldExpr, backlogHeldSql } from "../src/dupes/held.ts";
 import { openSubjectExpr, openSubjectSql, prepareStateExpr, prepareStateSql } from "../src/decide/prepared.ts";
 import { snoozedExpr, SNOOZED_SQL } from "../src/decisions.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
@@ -188,10 +188,7 @@ const cases = (): Case[] => [
   onItems("pilotSql without a pilot list", pilotSql(db, "i"), (eb) => pilotExpr(db, eb, "i"), noPilot),
   onItems("pilotSqlFor", pilotSqlFor(db, "i.repo", "i.number"), (eb) => pilotExprFor(db, eb, "i.repo", "i.number")),
   onItems("quietSqlFor", quietSqlFor("i.repo", "i.number"), (eb) => quietExprFor(db, eb, "i.repo", "i.number")),
-  onItems("groupHeldSql", groupHeldSql("i"), (eb) => groupHeldExpr(db, eb, "i")),
   onItems("backlogHeldSql", backlogHeldSql(db, "i"), (eb) => backlogHeldExpr(db, eb, "i")),
-  onItems("notOwnIntegrationSql", notOwnIntegrationSql(db, "i"), (eb) => notOwnIntegrationExpr(db, eb, "i")),
-  onItems("notHeldSql", notHeldSql(db, "i"), (eb) => notHeldExpr(db, eb, "i")),
   {
     name: "fastScoreSql",
     text: `SELECT i.repo, i.number, ${fastScoreSql("i.repo", "i.number", "i.number")} AS s FROM items i ORDER BY i.repo, i.number`,

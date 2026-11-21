@@ -30,6 +30,7 @@ import {
 import { dueSets, rememberDrop, ruleOutcome, saveComparison, storedComparison, type ComparisonResult, type KindSet, type StoredComparison } from "./plan.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
 
 const PR_PROMPT = CLAUDE_PROMPTS["dupes.compare-prs.opus"];
@@ -105,8 +106,7 @@ async function viaRule(db: Db, s: KindSet, at: string, error: string | null, sou
 type Ctx = { db: Db; deps: CompareDeps; log: (l: string) => void; checkouts: Map<string, Promise<string | null>>; runId: string };
 
 const bodyOf = async (db: Db, repo: string, n: number) =>
-  await db.prepare("SELECT title, body, state, author_association, comments_count, closing_issues, head_oid FROM items WHERE repo = ? AND number = ?").get(repo, n) as
-    { title: string | null; body: string | null; state: string; author_association: string | null; comments_count: number | null; closing_issues: string | null; head_oid: string | null };
+  (await db.get(db.k.selectFrom("items").select(["title", "body", "state", "author_association", "comments_count", "closing_issues", "head_oid"]).where("repo", "=", repo).where("number", "=", n)))!;
 
 async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<ComparePrs> {
   const share = Math.floor(GROUP_DIFF_CHARS / numbers.length);
@@ -124,7 +124,7 @@ async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<Compare
       } else diff = `[diff unavailable: ${d.error}]`;
     }
     const checks = it.head_oid ? await checksOf(x.db, repo, n) : undefined;
-    const review = it.head_oid ? (await x.db.prepare("SELECT verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, n, it.head_oid) as { verdict: string } | undefined)?.verdict ?? null : null;
+    const review = it.head_oid ? (await x.db.get(x.db.k.selectFrom("final_reviews").select("verdict").where("repo", "=", repo).where("number", "=", n).where("head_oid", "=", it.head_oid)))?.verdict ?? null : null;
     let linked: number[] = [];
     try { const v = JSON.parse(it.closing_issues ?? "[]") as unknown; if (Array.isArray(v)) linked = v.filter((k): k is number => typeof k === "number"); } catch { /* none */ }
     prs.push({
@@ -304,8 +304,9 @@ function parseArgs(args: string[]): CompareParams {
 
 /** Makes the stored comparisons that include the item not current, so the next dupe-compare step compares their sets again and refreshes the open group decision. Returns how many it marked. */
 export async function compareAgain(db: Db, by: string, repo: string, number: number): Promise<number> {
-  const n = Number((await db.prepare(`UPDATE dupe_comparisons SET hash = 'again:' || hash WHERE repo = ? AND hash NOT LIKE 'again:%'
-    AND EXISTS (SELECT 1 FROM json_each(dupe_comparisons.members) WHERE value = ?)`).run(repo, number)).changes);
+  const n = (await db.run(db.k.updateTable("dupe_comparisons").set((eb) => ({ hash: eb(eb.val("again:"), "||", eb.ref("hash")) })).where("repo", "=", repo)
+    .where((eb) => eb.not(kx.like(db, "hash", eb.val("again:%"))))
+    .where((eb) => eb.exists(eb.selectFrom(kx.jsonEach(db, "dupe_comparisons.members", "m", "bigint")).select(eb.lit(1).as("one")).where("m.value", "=", number))))).changes;
   if (n) await audit(db, by, "compare-again", `${repo}#${number}`, { sets: n });
   return n;
 }
