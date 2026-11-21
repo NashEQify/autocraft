@@ -341,7 +341,6 @@ src/operator-actions.ts
 
 src/optional-checks.ts
 
-src/outside.ts
 
 src/owners.ts
 
