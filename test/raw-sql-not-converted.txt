@@ -380,9 +380,7 @@ src/review/discussion.ts
 
 
 
-src/sql-cache.ts
 
-src/sync-errors.ts
 
 src/verify/index.ts
 
@@ -393,4 +391,3 @@ src/verify/screenshot-config.ts
 
 
 
-src/whitelist.ts

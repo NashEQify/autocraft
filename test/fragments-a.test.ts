@@ -13,7 +13,6 @@ import { backlogHeldExpr, backlogHeldSql, groupHeldExpr, groupHeldSql, notHeldEx
 import { openSubjectExpr, openSubjectSql, prepareStateExpr, prepareStateSql } from "../src/decide/prepared.ts";
 import { snoozedExpr, SNOOZED_SQL } from "../src/decisions.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
-import { statsExpr, STATS_SQL } from "../src/whitelist.ts";
 import { settledOn, settledOnExpr, verdictExpr, VERDICT_SQL } from "../src/classify/settled.ts";
 import { KEEP_KNOWN_MERGEABLE, keepKnownMergeableExpr } from "../src/mirror.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
@@ -252,12 +251,6 @@ const cases = (): Case[] => [
       { run: "r1", repo: "lib", number: 2, status: "disputed", flags: "[]", security: 0, needs_decision: 0 },
     ])),
     undo: async () => void await db.run(db.k.deleteFrom("main.item_settled")),
-  },
-  {
-    name: "STATS_SQL",
-    text: `${STATS_SQL} GROUP BY author ORDER BY author`,
-    built: () => statsExpr(db).groupBy("author").orderBy("author"),
-    varies: "merged",
   },
 ];
 

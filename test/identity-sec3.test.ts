@@ -64,6 +64,17 @@ test("history and an allow count only for their own account, and the pipeline's 
   assert.equal(await prTier(), "whitelisted", "our own fix-up of our commit");
 });
 
+test("the contributors list gives each author's repos and open count, and an override of a login with no PR only without a repo filter", async () => {
+  const db = await fresh();
+  const pr = (number: number, repo: string, author: string, state: string) => ({ repo, number, kind: "pr", state, title: "t", author, created_at: "2026-01-01T00:00:00Z" });
+  await db.run(db.k.insertInto("items").values([pr(1, "b", "ann", "OPEN"), pr(2, "a", "ann", "OPEN"), pr(3, "a", "bob", "OPEN")]));
+  await setOverride(db, "zed", "deny", null, "op");
+  const byLogin = async (opts: { repo?: string; login?: string }) => Object.fromEntries((await contributors(db, opts)).map((c) => [c.login, [c.repos, c.open, c.override]]));
+  assert.deepEqual(await byLogin({}), { ann: ["a,b", 2, null], bob: ["a", 1, null], zed: ["", 0, "deny"] });
+  assert.deepEqual(await byLogin({ repo: "b" }), { ann: ["b", 2, null] });
+  assert.deepEqual(await byLogin({ login: "zed" }), { zed: ["", 0, "deny"] });
+});
+
 test("removing or demoting an operator in any letter case ends their Discord link and their org setup links", async () => {
   const db = await fresh();
   await addLogin(db, "cli", "Owner", "operator", null);
