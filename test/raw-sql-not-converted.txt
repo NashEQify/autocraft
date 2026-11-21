@@ -331,17 +331,12 @@ src/outside.ts
 
 src/owners.ts
 
-src/patchcheck/index.ts
 
 src/pilot.ts
 
-src/postmerge/file.ts
 
-src/postmerge/index.ts
 
-src/postmerge/related.ts
 
-src/postmerge/review.ts
 
 
 
