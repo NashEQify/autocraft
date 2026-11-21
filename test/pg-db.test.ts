@@ -7,6 +7,10 @@ import { isLockTimeout } from "../src/db/errors.ts";
 import { rewriteScriptForPostgres } from "../src/db/params.ts";
 import type { Db } from "../src/db/index.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
+import type { Generated } from "kysely";
+
+/** The test table, for Kysely. */
+type T = { t: { id: Generated<number>; v: string | null } };
 
 const SCHEMA = "CREATE TABLE t (id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, v TEXT, b BYTEA)";
 const count = async (db: Db): Promise<number> => ((await db.prepare("SELECT count(*) AS c FROM t").get()) as { c: number }).c;
@@ -62,7 +66,7 @@ test("a nested write joins the outer one on its connection and rolls back with i
         await a.prepare("INSERT INTO t (v) VALUES ('outer')").run();
         await a.write(async () => {
           assert.ok(a.inTransaction());
-          await a.run(a.k.insertInto("t").values({ v: "inner" }));
+          await a.run(a.k.withTables<T>().insertInto("t").values({ v: "inner" }));
         });
         // Calls in parallel inside the transaction all run in it.
         const seen = await Promise.all([count(a), count(a), a.read(() => count(a))]);

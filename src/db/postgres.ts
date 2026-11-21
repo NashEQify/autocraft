@@ -87,6 +87,27 @@ function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
   };
 }
 
+/**
+ * Kysely's counterpart of the `main.`/`temp.` rewrite raw statements get (src/db/params.ts rewriteForPostgres): table
+ * names `main.x` and `temp.x` (typed in src/db/types.ts for code that reads past the scoped views or writes a shadowed
+ * table) lose the schema, or with `mainSchema` (a scoped handle) `main.x` names `<mainSchema>.x`, past the views.
+ */
+function schemaPlugin(k: typeof K, mainSchema: string | undefined): K.KyselyPlugin {
+  class Transformer extends k.OperationNodeTransformer {
+    protected override transformSchemableIdentifier(node: K.SchemableIdentifierNode, queryId?: K.QueryId): K.SchemableIdentifierNode {
+      const t = super.transformSchemableIdentifier(node, queryId);
+      const schema = t.schema?.name.toLowerCase();
+      if (schema !== "main" && schema !== "temp") return t;
+      return { ...t, schema: schema === "main" && mainSchema ? k.IdentifierNode.create(mainSchema) : undefined };
+    }
+  }
+  const transformer = new Transformer();
+  return {
+    transformQuery: (args) => transformer.transformNode(args.node, args.queryId),
+    transformResult: async (args) => args.result,
+  };
+}
+
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
 export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, opts: PgOptions, ctx: EngineContext): Engine {
   const pool = new pg.Pool({
@@ -130,7 +151,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     }
   }
 
-  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }) });
+  const kysely = new k.Kysely<DB>({ dialect: new Dialect({ pool }), plugins: [schemaPlugin(k, opts.scope)] });
   const parsed = new Map<string, ParsedParams>();
   const parse = (text: string): ParsedParams => {
     let p = parsed.get(text);

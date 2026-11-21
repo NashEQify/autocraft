@@ -1,7 +1,7 @@
 // The Db handle over one backend engine: transaction routing through AsyncLocalStorage, the statement API and the
 // observers. Backend specifics (dialect, drivers, BEGIN forms, statement execution) live in the engine.
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Compilable, DatabaseConnection, Kysely, Transaction, TransactionBuilder } from "kysely";
+import type { Compilable, DatabaseConnection, Kysely, TransactionBuilder } from "kysely";
 import type { DatabaseSync } from "node:sqlite";
 import type { DB, Db, DbEvent, Dialect, NamedParams, Param, Row, RunResult, Statement, WriteOptions } from "./index.ts";
 
@@ -15,7 +15,8 @@ export interface Tx {
   lockTimeoutMs?: number;
   /** The connection the transaction runs on, recorded by the engine's driver at BEGIN. */
   conn?: DatabaseConnection;
-  trx?: Transaction<DB>;
+  /** The transaction's Kysely (a Transaction<DB> typed as its base class, assigned through `unknown`: checking the subclass against the base over the full DB type is too large for the checker). */
+  trx?: Kysely<DB>;
   /** Savepoints taken by `attempt`, for unique names. */
   savepoints?: number;
 }
@@ -202,7 +203,7 @@ export class Handle implements Db {
     try {
       return await this.#als.run(tx, () =>
         this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
-          tx.trx = trx;
+          tx.trx = trx as unknown as Kysely<DB>;
           tx.state = "open";
           lockedAt = performance.now();
           try {

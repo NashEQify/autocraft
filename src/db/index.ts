@@ -33,10 +33,9 @@ export type Dialect = "sqlite" | "postgres";
 /** What a process (or worker thread) uses its handle for; on Postgres it sets the connection pool size. */
 export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "planner" | "periodic" | "cli";
 
-/**
- * The table types Kysely queries are checked against. Loose until generated types from the migrated schema replace it.
- */
-export type DB = Record<string, Record<string, unknown>>;
+/** The table types Kysely queries are checked against, generated from the migrated schema (scripts/gen-db-types.ts). */
+export type { DB } from "./types.ts";
+import type { DB } from "./types.ts";
 
 export type Value = SQLOutputValue;
 export type Row = Record<string, Value>;

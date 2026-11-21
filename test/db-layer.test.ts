@@ -10,6 +10,10 @@ import type { Db } from "../src/db/index.ts";
 import { closeDb, dbFor, openDb } from "../src/db/open.ts";
 import { bindParams, parseParams } from "../src/db/params.ts";
 import { sql } from "../src/db/sql.ts";
+import type { Generated } from "kysely";
+
+/** The test table, for Kysely. */
+type T = { t: { id: Generated<number>; v: string | null } };
 
 let n = 0;
 /** A fresh WAL database file and `count` handles on it, each over its own connection. */
@@ -45,7 +49,7 @@ test("a nested write joins the outer one and rolls back with it", async () => {
       await db!.prepare("INSERT INTO t (v) VALUES ('outer')").run();
       await db!.write(async () => {
         assert.ok(db!.inTransaction());
-        await db!.run(db!.k.insertInto("t").values({ v: "inner" }));
+        await db!.run(db!.k.withTables<T>().insertInto("t").values({ v: "inner" }));
       });
       assert.equal(await count(db!), 2);
       throw new Error("abort");
@@ -71,7 +75,7 @@ test("calls inside db.write run in the transaction, other callers wait for it, a
     await sleep(20);
     assert.equal(outside, undefined);
     // Deeper in this context, across timers, still the transaction (a call routed elsewhere would wait for it forever).
-    await sleep(5).then(async () => assert.equal((await db!.all(db!.k.selectFrom("t").select(sql<number>`count(*)`.as("c"))))[0]?.c, 1));
+    await sleep(5).then(async () => assert.equal((await db!.all(db!.k.withTables<T>().selectFrom("t").select(sql<number>`count(*)`.as("c"))))[0]?.c, 1));
     stray = sleep(30).then(() => db!.prepare("SELECT 1").get());
   });
   await other;

@@ -6,6 +6,10 @@ import type { Db, Dialect } from "../src/db/index.ts";
 import * as P from "../src/db/portable.ts";
 import { sql } from "../src/db/sql.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
+import type { Generated } from "kysely";
+
+/** The test table, for Kysely. */
+type T = { t: { id: Generated<number>; name: string | null; login: string | null; j: string | null; n: number | null; m: number | null } };
 
 const J = JSON.stringify({ a: { b: "x", "c d": "y" }, n: 5, r: 1.5, ok: true, no: false, arr: ["p", "q"], nul: null, objs: [{ k: "u" }, { k: "v" }] });
 
@@ -44,7 +48,7 @@ both("inList matches the elements of a JSON array parameter, with one statement 
 });
 
 both("inValues binds JS values in a Kysely query", async (db) => {
-  const ids = async (values: number[]) => (await db.all(db.k.selectFrom("t").select("id").where(P.inValues(db, sql.ref("id"), values)).orderBy("id"))).map((r) => r.id);
+  const ids = async (values: number[]) => (await db.all(db.k.withTables<T>().selectFrom("t").select("id").where(P.inValues(db, sql.ref("id"), values)).orderBy("id"))).map((r) => r.id);
   assert.deepEqual(await ids([3, 1]), [1, 3]);
   assert.deepEqual(await ids([]), []);
 });

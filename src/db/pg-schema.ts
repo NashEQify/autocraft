@@ -31,7 +31,7 @@ const RESERVED = new Set(`all analyse analyze and any array as asc asymmetric au
   variadic verbose when where window with`.split(/\s+/));
 
 // Columns whose SQLite values are not text even though the column says TEXT (gzip bytes since src/agents/runs.ts packText).
-const TYPE_OVERRIDES: Record<string, string> = {
+export const TYPE_OVERRIDES: Record<string, string> = {
   "agent_run_texts.prompt": "bytea",
   "agent_run_texts.output": "bytea",
 };

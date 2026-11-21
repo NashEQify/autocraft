@@ -14,7 +14,9 @@
     "craft-auto": "src/cli.ts"
   },
   "scripts": {
-    "check": "tsc --noEmit && npm run docs:check && npm run pg-schema:check",
+    "check": "tsc --noEmit && npm run docs:check && npm run pg-schema:check && npm run db-types:check",
+    "db-types": "node scripts/gen-db-types.ts",
+    "db-types:check": "node scripts/gen-db-types.ts --check",
     "docs": "node scripts/gen-docs.ts",
     "docs:check": "node scripts/gen-docs.ts --check",
     "docs:image": "node scripts/flowchart-shot.mjs",
