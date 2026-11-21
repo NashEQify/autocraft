@@ -830,7 +830,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     // The claim named the model the helper meant to run (often an alias); the reply names the one that ran.
     if (r.run_id !== null) {
       await db.prepare("UPDATE main.agent_runs SET reported_model = ? WHERE id = ?").run(s.model.slice(0, 100), r.run_id);
-      try { await saveRemoteTools(db, r.run_id, r.id, rootless((s as { tools?: unknown }).tools, r.root)); } catch (e) { console.log(`tool uses of remote call ${r.id} not stored: ${(e as Error).message}`); }
+      try { await db.attempt(async () => await saveRemoteTools(db, r.run_id!, r.id, rootless((s as { tools?: unknown }).tools, r.root))); } catch (e) { console.log(`tool uses of remote call ${r.id} not stored: ${(e as Error).message}`); }
     }
     return { accepted: true };
   }
