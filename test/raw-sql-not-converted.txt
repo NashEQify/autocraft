@@ -80,12 +80,9 @@ src/dash/api/flow.ts
 
 src/dash/api/github-writes.ts
 
-src/dash/api/home.ts
 
 
-src/dash/api/insight.ts
 
-src/dash/api/item-bar.ts
 
 src/dash/api/item-page.ts
 
