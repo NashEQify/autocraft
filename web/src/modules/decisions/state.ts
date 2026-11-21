@@ -66,10 +66,10 @@ export function useDecisionFilter() {
   const setPeek = useCallback((id: string | null) => rawUpdate({ peek: id }), [rawUpdate]);
   // The selected decision (a real opaque Decision.id). The raw URL value stays until the user closes it.
   const decision = useMemo(() => readDecisionParam(live), [live]);
-  // Selecting and closing a decision are history entries (Back reopens the detail). An activation clears a
-  // lingering peek in the SAME transaction; clearing only the peek is a replace, never a new decision entry.
-  const setDecision = useCallback((id: string | null, opts?: { clearPeek?: boolean }) => {
-    rawUpdate(opts?.clearPeek ? { decision: id, peek: null } : { decision: id }, { replace: false });
+  // Explicit activation/close pushes (Back reopens the detail); keyboard movement replaces. Clearing a
+  // lingering peek belongs to the SAME transaction, never a second decision entry.
+  const setDecision = useCallback((id: string | null, opts?: { clearPeek?: boolean; replace?: boolean }) => {
+    rawUpdate(opts?.clearPeek ? { decision: id, peek: null } : { decision: id }, { replace: opts?.replace ?? false });
   }, [rawUpdate]);
   const clearPeek = useCallback(() => rawUpdate({ peek: null }, { replace: true }), [rawUpdate]);
   // A filter change: the open preview belongs to the old filter, so it closes with the change.
@@ -81,10 +81,6 @@ export function useDecisionFilter() {
 
 /** The loaded pages of the list; `loadMore` appends the next one. A change refetches every loaded page. */
 export type DecisionListQuery = ReturnType<typeof useDecisionList>;
-
-/** Client-only ordering: actual list reads and explicit answer acknowledgements share this clock. */
-let decisionReadSerial = 0;
-export function markDecisionReadBoundary(): number { return ++decisionReadSerial; }
 
 export function useDecisionList() {
   const { filter, search } = useDecisionFilter();
@@ -102,9 +98,8 @@ export function useDecisionList() {
       // other reader's or filter's page is read and no empty continuation is ever sent as a cursor.
       const unwrapped = unwrapCursor(after, scope);
       if (!unwrapped.ok) throw new Error(`invalid continuation (${unwrapped.reason})`);
-      const readSerial = markDecisionReadBoundary();
       const page = await a.decisions.list({ ...filter, after: unwrapped.cursor });
-      return { scope, page, readSerial };
+      return { scope, page };
     },
     // Only a real, non-empty server cursor becomes a continuation; null/empty ends the list.
     (receipt) => nextCursor(scope, receipt.page),

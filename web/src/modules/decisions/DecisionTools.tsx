@@ -11,7 +11,7 @@ import { ClaimPill } from "./parts";
 import { ExecLine } from "./ExecLine";
 import { KIND_TEXT, ageTitle, compactAge } from "./rows";
 import { localActions, useLocal, useUndo } from "./state";
-import { canTakeBack } from "./access";
+import { canActOn, canTakeBack } from "./access";
 import { cn } from "../../ui/cn";
 
 export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClose, peeked, allowBatch = true }: {
@@ -30,6 +30,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
   const undo = useUndo();
   const undoError = loc.undoError?.id === d.id ? loc.undoError : null;
   const canUndo = canTakeBack(user, d);
+  const canReview = canActOn(user, [d]) && !d.answer && !d.preparing && !d.queued && !d.settling;
   const mine = d.opinions.find((o) => o.login === user.login)?.option;
   const checked = new Set(loc.checked);
   return <div id={id} className="shrink-0 border-b border-line bg-sunken/60 px-3.5 py-3 text-xs">
@@ -55,7 +56,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
           <Button size="sm" variant="ghost" onClick={() => void undo(d.id)} className="max-md:min-h-11">Undo</Button>
         )}
         <Button size="sm" variant="primary" icon={ArrowSquareOutIcon} onClick={onReview} data-decision-action className="max-md:min-h-11">
-          Review and answer
+          {canReview ? "Review and answer" : "Open"}
         </Button>
         <Button size="sm" variant="ghost" onClick={onClose} className="max-md:min-h-11">Close</Button>
       </div>
@@ -77,7 +78,6 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
           </li>
         ))}
       </ul>
-      <p className="mb-0 mt-1.5 text-ink/45">A batch appears below the list once two or more are checked (Esc clears). Drafts stay while tools is closed.</p>
     </div>}
   </div>;
 }

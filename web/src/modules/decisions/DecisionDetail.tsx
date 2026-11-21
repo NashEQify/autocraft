@@ -1,7 +1,6 @@
 // The selected decision's passive primary context, list-backed only: everything here comes from the
-// Decision the current guarded list receipt holds. No queries, no answer controls, no claim, no
-// fabricated CI/verdict/history. Options/consequence/workflow/Retry/Undo/Keep and the Evidence/
-// Discussion/History bodies are a later slice.
+// Decision the current guarded list receipt holds. The native-form handoff is explicit;
+// evidence, discussion and timeline stay read-only and permission-guarded.
 import type { ReactNode } from "react";
 import { ArrowLeftIcon } from "@phosphor-icons/react";
 import type { Decision } from "../../api/types";
@@ -24,10 +23,8 @@ export interface DetailContext {
   hasRows: boolean;
   /** The surface is single-column (<=860): compact typography, padding and the mobile backlink. */
   compact: boolean;
-  /** P6: the private answer section (passive when not actionable). */
+  /** The explicit handoff to the native answer form. */
   answer?: ReactNode;
-  /** P6: 1–M selection keys owned by the selected frame (title included), never a window listener. */
-  onFrameKeyDown?: (event: React.KeyboardEvent) => void;
   onClose: () => void;
   onOpenItem: (id: string) => void;
 }
@@ -36,12 +33,12 @@ const PAD = "px-4 pb-[22px] pt-4 min-[861px]:px-[26px] min-[861px]:pb-[26px] min
 
 export function DecisionDetail(ctx: DetailContext) {
   const { decision: d, requested, reason, raw, loading, error, hasRows, compact, onClose, onOpenItem } = ctx;
-  // P7 eligibility: a real settled decision, never while the existing flags say loading/error/unavailable.
+  // Evidence eligibility: a real settled decision, never while the existing flags say loading/error/unavailable.
   const eligible = !!(d && !loading && !error && requested !== "unavailable");
   const evidence = eligible ? <DecisionEvidence decision={d!} /> : undefined;
   const discussion = eligible ? <DecisionDiscussion decision={d!} /> : undefined;
   const timeline = d && !loading && error === undefined && requested !== "unavailable" ? <DecisionTimeline decision={d} /> : undefined;
-  return <section aria-label="Selected decision" className="min-w-0" onKeyDown={ctx.onFrameKeyDown}>
+  return <section aria-label="Selected decision" className="min-w-0">
     {compact && (
       <button type="button" onClick={onClose} className="mb-3 inline-flex min-h-11 items-center gap-1.5 rounded px-1 text-sm text-ink/75 hover:text-ink">
         <ArrowLeftIcon aria-hidden /> All decisions

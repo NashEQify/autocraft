@@ -2,7 +2,7 @@
 // controller and the native preview. One list observer; the frame is list-backed and passive. The surface is the
 // single bookmark owner (capture producer behind the child's handle, one restore per READY) and owns the FOCUS
 // clock, which is independent of bookmark captures.
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import type { ViewProps } from "../../registry/types";
 import { useMedia } from "../../shell/useMedia";
@@ -12,10 +12,8 @@ import { BrowseLayout } from "../../ui/organisms/BrowseLayout";
 import { DecisionDetail } from "./DecisionDetail";
 import { DecisionAnswer } from "./DecisionAnswer";
 import { getScope, projectOf, usePageProject } from "../../api/scope";
-import { canActOn } from "./access.ts";
 import { reviewDecision } from "./review.ts";
 import { useApi } from "../../api/client.ts";
-import { answerSession, materialSignature, questionSignature, readerKeyOf } from "./answer-state";
 import { DecisionPreview } from "./DecisionPreview";
 import { InboxList, type ControlledQueue } from "./InboxList";
 import { NeedsControls } from "./Toolbar";
@@ -48,14 +46,11 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   // The CURRENT reader (login/role) as a live ref: intent arming and execution must both read it, so a genuine
   // reader change never leaves a mount-time reader in a pending intent.
   const readerRef = useRef({ login: user.login, role: user.role });
-  // FULL live facts for the answer getter: the user object, receipt, cursor and the currently rendered scope.
+  // The handoff reads current identity and guarded rows, never a stale queue callback's snapshot.
   const fullUserRef = useRef(user); fullUserRef.current = user;
-  const receiptRef = useRef({ rows, receipts: query.readReceipts, loading: query.loading, error: query.error?.message as string | undefined });
-  receiptRef.current = { rows, receipts: query.readReceipts, loading: query.loading, error: query.error?.message as string | undefined };
+  const receiptRef = useRef({ rows, loading: query.loading, error: query.error?.message });
+  receiptRef.current = { rows, loading: query.loading, error: query.error?.message };
   const cursorRef = useRef<string | undefined>(undefined);
-  const scopeRef = useRef(scopeKey); scopeRef.current = scopeKey;
-  // A reader or scope change drops the accepted slot (it belongs to its owner only).
-
   readerRef.current = { login: user.login, role: user.role };
   // Mutation-time facts: the LIVE canonical scope (projected with the CURRENT reader) and primary id, plus receipt.
   const liveFacts = () => {
@@ -71,36 +66,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const [cursor, setCursor] = useState<string | undefined>(undefined);
   const activeId = resolveActive(requested, rows, cursor);
   cursorRef.current = cursor;
-  // Resolve the readable row (including an owned accepted answer) before choosing the compact layout.
-  const explicitRow = requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : undefined;
-  const receiptsFor = query.readReceipts;
-  const pageSerialOf = (id: string) => {
-    if (!receiptsFor) return 0;
-    for (const receipt of receiptsFor) if (receipt.page.decisions.some((d) => d.id === id)) return receipt.readSerial ?? 0;
-    return 0;
-  };
-  // Precedence (contract §5/§8.D): the accepted API truth wins only when its page is not freshly re-read.
-  // R4: ONE accepted authority, the private session's (survives phone remount; no component-local copy).
-  useEffect(() => { answerSession.setScope(scopeKey); }, [scopeKey]);
-  // Reader/session ownership belongs to the mounted FRAME: a genuine reader change drops drafts even when the
-  // conditional answer form is unmounted (the phone-closed detail).
-  useEffect(() => { answerSession.setReader({ login: user.login, role: user.role }); }, [user.login, user.role]);
-  // Minimal subscription: only the accepted pointer (not every Note keystroke) re-renders the queue.
-  // The stored accepted object already carries readerEpoch; return it unchanged so the selector snapshot is cached.
-  const sessionAccepted = useSyncExternalStore(answerSession.subscribe, () => answerSession.get().accepted);
-  // No lossy duplicate projection: the predicate reads the ONE typed session object with its own readerEpoch.
-  const acceptedHere = sessionAccepted && requested.kind === "requested" && sessionAccepted.id === requested.id
-    && sessionAccepted.readerKey === readerKeyOf(readerRef.current)
-    && sessionAccepted.readerEpoch === answerSession.get().readerEpoch
-    && sessionAccepted.scopeKey === scopeKey ? sessionAccepted : null;
-  const acceptedWins = !!acceptedHere && (!explicitRow || (!explicitRow.answer && pageSerialOf(explicitRow.id) <= acceptedHere.ackSerial));
-  useEffect(() => {
-    // A genuine fresh row (answered, or read after the ack) retires the receipt.
-    if (!acceptedHere) return;
-    if (explicitRow && (explicitRow.answer || pageSerialOf(explicitRow.id) > acceptedHere.ackSerial)) answerSession.clearAccepted();
-  }, [acceptedHere, explicitRow?.id, explicitRow?.answer, receiptsFor]);
-  const selected = acceptedWins ? acceptedHere!.decision
-    : requested.kind === "requested" ? rows.find((r) => r.id === requested.id) : rows.find((r) => r.id === activeId);
+  const selected = rows.find((r) => r.id === activeId);
   const narrow = useMedia("(max-width: 860px)");
   // An unloaded bookmark must leave pagination reachable; it becomes a detail once its page arrives.
   const queueHidden = narrow && !peek && (requested.kind === "unavailable" || (requested.kind === "requested" && !!selected));
@@ -112,11 +78,6 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const queueHandle = useRef<QueueHandle | null>(null);
   const restoredFor = useRef<string | null>(null);
   const [readyTick, setReadyTick] = useState(0);
-  /** ONE bounded accepted answer result, owner-scoped; shown only for its explicit id/reader/scope. */
-  const answerChooser = useRef<((index: number) => void) | null>(null);
-  // null registration = "no chooser"; digits then do nothing instead of invoking a noop.
-  const answerNoteFocus = useRef<(() => void) | null>(null);
-
   const [titleTick, setTitleTick] = useState(0);
   /** The single pending restoration (armed only when a commit unmounts the queue). */
   const pendingRestore = useRef<Snapshot | null>(null);
@@ -133,73 +94,22 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   // page is not it, and the event target is never passed as its own "owned" root.
   const isOwnedRoot = (target: Element | null): target is Element => !!target && target === ownedOuterRoot.current;
 
-  /** The named live-facts getter (contract REPAIR2): read at every mutation/completion boundary. */
+  /** Resolve only the current scope's row before explicitly opening the native item form. */
   const readCurrentFacts = useCallback(() => {
-    const u = fullUserRef.current;
+    const currentUser = fullUserRef.current;
     const liveSearch = window.location.search;
-    const liveScope = liveScopeOf(liveSearch, u.login, u.role, projectOf(window.location.pathname, liveSearch, getScope()));
+    const liveScope = liveScopeOf(liveSearch, currentUser.login, currentUser.role, projectOf(window.location.pathname, liveSearch, getScope()));
     const parsed = readDecisionParam(liveSearch);
-    const liveId = liveDecisionId(liveSearch);
     const state = receiptRef.current;
-    const coherent = liveScope === scopeRef.current;
-    const rowsNow = coherent ? state.rows : [];
-    const row = parsed.kind === "requested" && liveId ? rowsNow.find((r) => r.id === liveId) : undefined;
-    const selectedId = parsed.kind === "requested" ? row?.id : parsed.kind === "none" ? (cursorRef.current && rowsNow.some((r) => r.id === cursorRef.current) ? cursorRef.current : rowsNow[0]?.id) : undefined;
-    // The live read serial of the page that carries the selected id (independent of whether the row object is still
-    // present in a fresh receipt): dispatch freshness is about the READ, not row presence.
-    const serial = selectedId ? (() => { for (const rc of state.receipts ?? []) if (rc.page.decisions.some((d) => d.id === selectedId)) return rc.readSerial ?? 0; return 0; })() : 0;
-    // The default (URI none) resolves to a REAL current row, not an undefined placeholder.
-    const defaultRow = parsed.kind === "none" ? (state.rows.find((r) => r.id === (cursorRef.current ?? state.rows[0]?.id)) ?? state.rows[0]) : undefined;
-    const resolvedRow = parsed.kind === "requested" ? (liveId === selectedId ? row : undefined) : defaultRow;
-    const material = resolvedRow ? materialSignature(resolvedRow, u, resolvedRow ? (loc.overrides[resolvedRow.id] ?? {}) : {}) : "";
-    const question = resolvedRow ? questionSignature(resolvedRow, u, resolvedRow ? (loc.overrides[resolvedRow.id] ?? {}) : {}) : "";
-    const identity = JSON.stringify(parsed.kind === "none" ? ["none"] : parsed.kind === "requested" ? ["requested", parsed.id] : ["unavailable", parsed.raw]);
+    const coherent = liveScope === scopeKeyRef.current;
+    const currentRows = coherent ? state.rows : [];
+    const selectedId = resolveActive(parsed, currentRows, cursorRef.current);
     return {
-      owner: { readerKey: readerKeyOf({ login: u.login, role: u.role }), readerEpoch: answerSession.get().readerEpoch, scopeKey: liveScope, requestedIdentity: parsed, selectedId },
-      user: u, row: resolvedRow,
-      loading: state.loading, error: state.error, sourceReadSerial: serial,
-      overrides: resolvedRow ? (loc.overrides[resolvedRow.id] ?? {}) : {},
-      materialSignature: material, questionSignature: question, requestedIdentity: identity, watermark: answerSession.get().watermark,
-      refetch: () => { if (receiptRef.current === state) queryRef.current?.refetch(); },
-      requestedIdentityAtRender: identity,
-      coherent,
+      user: currentUser, scopeKey: liveScope, requestedIdentity: JSON.stringify(parsed),
+      row: currentRows.find((row) => row.id === selectedId),
+      loading: state.loading, error: state.error, coherent,
     };
-  }, [loc]);
-  const queryRef = useRef<{ refetch: () => void } | null>(null);
-  queryRef.current = { refetch: query.refetch };
-  /** THE single UI-used authority predicate: every mutating handler and completion effect calls it. */
-  // Mirror the live material into the session so the synchronous lock boundary can refuse a stale token.
-  useEffect(() => {
-    const live = readCurrentFacts();
-    answerSession.setMaterial({ requestedIdentity: live.requestedIdentity, materialSignature: live.materialSignature, sourceReadSerial: live.sourceReadSerial });
-    // Sticky QUESTION observation: while a request is in flight only ITS id (A) is observed, resolved from the
-    // current guarded rows independently of the selected B; absence never overwrites the last observation.
-    // Capability observation from the FULL live User — independent of whether A is still in the rows.
-    const capability = JSON.stringify([live.user.login, live.user.role, live.user.writeRepos ?? [], !!live.user.maintainerWrites]);
-    answerSession.setCapability(capability);
-    const pendingId = answerSession.pendingId();
-    const requestId = pendingId ?? (live.requestedIdentity.startsWith('["requested"') ? JSON.parse(live.requestedIdentity)[1] : undefined);
-    const requestRow = requestId ? receiptRef.current.rows.find((r) => r.id === requestId) : undefined;
-    if (requestId && requestRow) answerSession.setQuestion(questionSignature(requestRow, live.user, receiptRef.current.rows.length ? (loc.overrides[requestId] ?? {}) : live.overrides), requestId);
-  });
-  const authorize = useCallback((view: { readerKey: string; readerEpoch: number; scopeKey: string; id: string; materialSignature?: string; requestedIdentity?: string }, intent?: { answerKey?: string }) => {
-    const live = readCurrentFacts();
-    if (!live.coherent || !live.row) return { ok: false as const, live };
-    if (live.owner.readerKey !== view.readerKey || live.owner.readerEpoch !== view.readerEpoch) return { ok: false as const, live };
-    if (live.owner.scopeKey !== view.scopeKey || live.owner.selectedId !== view.id || live.row.id !== view.id) return { ok: false as const, live };
-    // The rendered intent must still match the CURRENT material (a stale callback cannot rebind).
-    if (view.materialSignature !== undefined && view.materialSignature !== live.materialSignature) return { ok: false as const, live };
-    // The RENDERED parsed identity must still be the live one (default → explicit same-id is a change).
-    if (view.requestedIdentity !== undefined && view.requestedIdentity !== live.requestedIdentity) return { ok: false as const, live };
-    if (live.loading || live.error) return { ok: false as const, live };
-    if (!canActOn(live.user, [live.row])) return { ok: false as const, live };
-    if (live.row.answer || live.row.preparing || live.row.queued || live.row.settling) return { ok: false as const, live };
-    const exceptions = (live.row as unknown as { exceptions?: unknown[] }).exceptions?.length ?? 0;
-    if (Object.keys(live.overrides).length > 0 || exceptions > 0) return { ok: false as const, live };
-    if (intent?.answerKey && !live.row.options.some((o) => o.key === intent.answerKey)) return { ok: false as const, live };
-    if (live.sourceReadSerial <= live.watermark) return { ok: false as const, live };
-    return { ok: true as const, live };
-  }, [readCurrentFacts]);
+  }, []);
   const focusTitle = useCallback(() => {
     const owner = page.current;
     const title = owner?.querySelector<HTMLElement>("#detail-title") ?? owner?.querySelector<HTMLElement>("[data-detail-title]") ?? null;
@@ -207,8 +117,12 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   }, []);
   const openItem = useCallback((d: Decision | undefined) => {
     if (!d) return;
-    reviewDecision(d, user, (id) => api.decisions.claim(id), navigate);
-  }, [api, navigate, user]);
+    const live = readCurrentFacts();
+    if (!live.coherent || live.loading || live.error || live.row?.id !== d.id) return;
+    if (live.scopeKey !== scopeKey || live.requestedIdentity !== JSON.stringify(requested)) return;
+    if (live.user.login !== user.login || live.user.role !== user.role) return;
+    reviewDecision(live.row, live.user, (id) => api.decisions.claim(id), navigate);
+  }, [api, navigate, user, scopeKey, requested, readCurrentFacts]);
 
   const cancelIntent = useCallback(() => {
     focusVersion.current += 1;
@@ -240,7 +154,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
       pendingRestore.current = narrow ? chosen : null;
     }
     const uriId = liveDecisionId(window.location.search);
-    if (commitChangesId(uriId, id)) setDecision(id, { clearPeek: true });
+    if (commitChangesId(uriId, id)) setDecision(id, { clearPeek: true, replace: reason === "arrow" });
     else if (peek) clearPeek();
     setCursor(id);
     if (reason === "activate" || narrow) { armIntent({ kind: "title", whenHidden: false }); setTitleTick((n) => n + 1); }
@@ -443,19 +357,10 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   };
 
   const checkedHere = rows.filter((r) => loc.checked.has(r.id));
-  const answerFacts = (selected || (requested.kind === "requested" && user.role === "viewer")) ? {
-    reader: { login: user.login, role: user.role }, readerEpoch: answerSession.get().readerEpoch, user, scopeKey,
-    requested: requested.kind, selectedId: requested.kind === "requested" ? requested.id : activeId,
-    row: selected, loading: query.loading, error: query.error?.message, receipts: query.readReceipts,
-    overrides: selected ? (loc.overrides[selected.id] ?? {}) : {},
-    registerChoose: (fn: ((index: number) => void) | null) => { answerChooser.current = fn; },
-    registerFocusNote: (fn: (() => void) | null) => { answerNoteFocus.current = fn; },
+  const answerFacts = selected ? {
+    user, scopeKey, requestedIdentity: JSON.stringify(requested),
+    row: selected, loading: query.loading, error: query.error?.message,
     readCurrentFacts,
-    authorize,
-    onAccepted: () => {
-      // Reconciliation uses the CURRENT owner/query binding only (never a captured old refetch).
-      if (readCurrentFacts().coherent) query.refetch();
-    },
   } : undefined;
   const detail = <DecisionDetail
     decision={selected}
@@ -468,15 +373,6 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     compact={narrow}
     onClose={closeSelection}
     onOpenItem={() => openItem(selected)}
-    onFrameKeyDown={(event) => {
-      if (event.defaultPrevented) return;
-      const target = event.target as HTMLElement;
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName) || target.isContentEditable) return;
-      if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
-      if (event.key === "n" && answerNoteFocus.current) { event.preventDefault(); answerNoteFocus.current(); return; }
-      const n = Number(event.key);
-      if (Number.isInteger(n) && n >= 1) { answerChooser.current?.(n - 1); if (answerChooser.current) event.preventDefault(); }
-    }}
     answer={answerFacts ? <DecisionAnswer facts={answerFacts} onReview={() => openItem(selected)} /> : undefined}
   />;
 

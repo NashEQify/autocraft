@@ -28,7 +28,7 @@ export interface QueueKeys {
   /** A native preview is open: inspector mode. */
   previewOpen: boolean;
   onCursor: (id: string) => void;
-  /** Primary commit: a changed id pushes the decision; an unchanged/clamped one does nothing. */
+  /** Primary commit: movement replaces, explicit activation pushes; unchanged/clamped ids do nothing. */
   onCommit: (id: string, reason: "activate" | "arrow") => void;
   /** `p` / inspector movement: SET the preview for this row (never a toggle, never a decision change). */
   previewAt: (id: string) => void;
@@ -59,7 +59,7 @@ export function useNeedsQueueKeys(keys: QueueKeys) {
     const next = neighbour(rows, base, step);
     if (!next || next === base) return;                           // clamped or unchanged: nothing to do
     if (previewOpen) { keys.onCursor(next); keys.previewAt(next); return; } // inspector: cursor + peek REPLACE
-    keys.onCommit(next, "arrow");                                  // primary: commit + PUSH
+    keys.onCommit(next, "arrow");                                  // primary: commit + REPLACE
   }, [rows, activeId, cursorId, previewOpen, keys]);
 
   useHotkeys({
