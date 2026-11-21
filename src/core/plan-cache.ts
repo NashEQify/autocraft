@@ -11,6 +11,7 @@ import { isQueueState } from "./plan.ts";
 import { statusOf, type ItemStatus } from "./item-status.ts";
 import { loadPlanSet, type PlanSet, type PlanSetOptions } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 /** The merge-queue fields of a PR whose Plan is in a queue state: what the Queue page and the flow counts show besides the Plan's own state, reasons and note. */
 export type QueueView = {
@@ -127,13 +128,13 @@ type Stored = { sig: string; status: ItemStatus | undefined; state: string; wait
 // The stored rows as of item_plans_rev `rev`, kept between passes: the table is read again only after a write this connection did not make.
 const storedMemo = new WeakMap<Db, { rev: number; rows: Map<string, Stored> }>();
 
-const planRev = async (db: Db): Promise<number | null> => (await db.prepare("SELECT rev FROM main.item_plans_rev WHERE id = 1").get() as { rev: number } | undefined)?.rev ?? null;
+const planRev = async (db: Db): Promise<number | null> => (await db.get(db.k.selectFrom("main.item_plans_rev").select("rev").where("id", "=", 1)))?.rev ?? null;
 
 const storedOf = (r: PlanRow): Stored => ({ sig: sig(r), status: (JSON.parse(r.view) as Partial<PlanView>).status, state: r.state, wait: r.wait, head: r.head });
 
 const readStored = async (db: Db): Promise<Map<string, Stored>> => {
   const rows = new Map<string, Stored>();
-  for (const r of await db.prepare("SELECT repo, number, kind, head, state, item_state, actions, wait, reasons, note, view FROM main.item_plans").all() as PlanRow[]) rows.set(`${r.repo}#${r.number}`, storedOf(r));
+  for (const r of await db.all(db.k.selectFrom("main.item_plans").select(["repo", "number", "kind", "head", "state", "item_state", "actions", "wait", "reasons", "note", "view"]).$narrowType<{ kind: PlanRow["kind"] }>())) rows.set(`${r.repo}#${r.number}`, storedOf(r));
   return rows;
 };
 
@@ -166,12 +167,6 @@ export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string =
   let stored = first.rows;
   let { changed, gone } = diff(stored);
   if (!changed.length && !gone.length) return { written: 0, deleted: 0 };
-  const put = db.prepare(`INSERT INTO main.item_plans (repo, number, kind, head, state, item_state, actions, wait, reasons, note, view, planned_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET kind = excluded.kind, head = excluded.head, state = excluded.state, item_state = excluded.item_state,
-      actions = excluded.actions, wait = excluded.wait, reasons = excluded.reasons, note = excluded.note, view = excluded.view, planned_at = excluded.planned_at`);
-  const del = db.prepare("DELETE FROM main.item_plans WHERE repo = ? AND number = ?");
-  const hist = db.prepare("INSERT INTO main.plan_history (repo, number, head, old_state, new_state, old_wait, wait, reasons, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
   // The memo is dropped until the write commits and is brought up to date after it.
   storedMemo.delete(db);
   const rev = await db.write(async () => {
@@ -182,14 +177,17 @@ export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string =
     }
     for (const r of changed) {
       const old = stored.get(`${r.repo}#${r.number}`);
-      if (!old || old.state !== r.state || old.wait !== r.wait) await hist.run(r.repo, r.number, r.head, old?.state ?? null, r.state, old?.wait ?? null, r.wait, r.reasons, plannedAt);
+      if (!old || old.state !== r.state || old.wait !== r.wait) await db.run(db.k.insertInto("main.plan_history").values({ repo: r.repo, number: r.number, head: r.head, old_state: old?.state ?? null, new_state: r.state, old_wait: old?.wait ?? null, wait: r.wait, reasons: r.reasons, at: plannedAt }));
     }
-    for (const r of changed) await put.run(r.repo, r.number, r.kind, r.head, r.state, r.item_state, r.actions, r.wait, r.reasons, r.note, r.view, plannedAt);
+    for (const r of changed) {
+      await db.run(db.k.insertInto("main.item_plans").values({ repo: r.repo, number: r.number, kind: r.kind, head: r.head, state: r.state, item_state: r.item_state, actions: r.actions, wait: r.wait, reasons: r.reasons, note: r.note, view: r.view, planned_at: plannedAt })
+        .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["kind", "head", "state", "item_state", "actions", "wait", "reasons", "note", "view", "planned_at"]))));
+    }
     for (const k of gone) {
       const i = k.lastIndexOf("#"), repo = k.slice(0, i), number = Number(k.slice(i + 1)), old = stored.get(k)!;
       // A row for the exit, so the item's return does not read as a first plan.
-      await hist.run(repo, number, old.head, old.state, "gone", old.wait, null, "[]", plannedAt);
-      await del.run(repo, number);
+      await db.run(db.k.insertInto("main.plan_history").values({ repo, number, head: old.head, old_state: old.state, new_state: "gone", old_wait: old.wait, wait: null, reasons: "[]", at: plannedAt }));
+      await db.run(db.k.deleteFrom("main.item_plans").where("repo", "=", repo).where("number", "=", number));
     }
     // Read under the write lock: no other write can land between the rows this transaction diffed against (or wrote) and the counter.
     return await planRev(db);
@@ -209,12 +207,11 @@ export type PlanHistoryRow = { head: string | null; oldState: string | null; new
 
 /** The state changes of an item's plan, oldest first. */
 export async function planHistory(db: Db, repo: string, number: number): Promise<PlanHistoryRow[]> {
-  return (await db.prepare("SELECT head, old_state, new_state, old_wait, wait, reasons, at FROM main.plan_history WHERE repo = ? AND number = ? ORDER BY id").all(repo, number) as
-    { head: string | null; old_state: string | null; new_state: string; old_wait: string | null; wait: string | null; reasons: string; at: string }[])
+  return (await db.all(db.k.selectFrom("main.plan_history").select(["head", "old_state", "new_state", "old_wait", "wait", "reasons", "at"]).where("repo", "=", repo).where("number", "=", number).orderBy("id")))
     .map((r) => ({ head: r.head, oldState: r.old_state, newState: r.new_state, oldWait: r.old_wait, wait: r.wait, reasons: JSON.parse(r.reasons) as string[], at: r.at }));
 }
 
 /** Deletes plan history older than `keepMs` (the jobs' horizon). Returns the number of rows. */
 export async function prunePlanHistory(db: Db, keepMs: number, nowMs: number = Date.now()): Promise<number> {
-  return Number((await db.prepare("DELETE FROM main.plan_history WHERE at < ?").run(new Date(nowMs - keepMs).toISOString())).changes);
+  return Number((await db.run(db.k.deleteFrom("main.plan_history").where("at", "<", new Date(nowMs - keepMs).toISOString()))).changes);
 }

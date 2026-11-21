@@ -50,18 +50,19 @@ describe("item status", () => {
   test("since is carried while phase and wait stay, and resets when the wait changes", async () => {
     mkdirSync(SCRATCH, { recursive: true });
     const db = await connectDb(join(mkdtempSync(join(SCRATCH, "item-status-")), "t.db"));
-    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, is_draft, created_at, updated_at) VALUES ('app', 1, 'issue', 'OPEN', 't', 'b', 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
-    const status = async () => (JSON.parse((await db.prepare("SELECT view FROM item_plans WHERE number = 1").get() as { view: string }).view) as PlanView).status;
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "issue", state: "OPEN", title: "t", body: "b", is_draft: 0, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
+    const view = async () => (await db.get(db.k.selectFrom("item_plans").select("view").where("number", "=", 1)))!.view;
+    const status = async () => (JSON.parse(await view()) as PlanView).status;
     const write = async (at: string) => await writePlanCache(db, await loadPlanSet(db), at);
     await write("2026-01-02T00:00:00Z");
     assert.equal((await status()).since, "2026-01-02T00:00:00Z");
     assert.deepEqual(await write("2026-01-03T00:00:00Z"), { written: 0, deleted: 0 }, "an identical pass writes nothing");
     assert.equal((await status()).since, "2026-01-02T00:00:00Z");
     // A stored status with another wait stands in for a wait that changed.
-    const v = JSON.parse((await db.prepare("SELECT view FROM item_plans WHERE number = 1").get() as { view: string }).view) as PlanView;
+    const v = JSON.parse(await view()) as PlanView;
     v.status.waiting = "something else";
-    await db.prepare("UPDATE item_plans SET view = ? WHERE number = 1").run(JSON.stringify(v));
+    await db.run(db.k.updateTable("item_plans").set({ view: JSON.stringify(v) }).where("number", "=", 1));
     await write("2026-01-05T00:00:00Z");
     assert.equal((await status()).since, "2026-01-05T00:00:00Z", "a changed wait resets since");
   });

@@ -16,11 +16,10 @@ const T0 = "2026-01-01T00:00:00Z";
 
 describe("Next page", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('secret', 1)").run();
-  const add = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, is_draft, created_at, updated_at) VALUES (?, ?, 'issue', 'OPEN', ?, 'b', 0, '${T0}', '${T0}')`);
-  for (const n of [3, 1, 2]) await add.run("app", n, `issue ${n}`);
-  await add.run("secret", 9, "hidden");
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "app", pipeline: 1 }, { name: "secret", pipeline: 1 }]));
+  const add = (repo: string, number: number, title: string) => db.run(db.k.insertInto("items").values({ repo, number, kind: "issue", state: "OPEN", title, body: "b", is_draft: 0, created_at: T0, updated_at: T0 }));
+  for (const n of [3, 1, 2]) await add("app", n, `issue ${n}`);
+  await add("secret", 9, "hidden");
   await setEnabled(db, true, "op");
 
   test("a lane lists its items in the planner's order, without hidden repos", async () => {
@@ -42,7 +41,7 @@ describe("Next page", async () => {
   });
 
   test("storing the lists is not planner input", async () => {
-    const seqs = async () => await db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[];
+    const seqs = async () => await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]));
     const before = await seqs();
     await db.run(db.k.insertInto("lane_next").values({ lane: "x", total: 0, items: "[]", at: "now" })
       .onConflict((oc) => oc.column("lane").doUpdateSet(excluded(["total", "items", "at"]))));

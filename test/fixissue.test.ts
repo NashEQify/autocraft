@@ -68,10 +68,10 @@ async function fresh(o: Opts = {}): Promise<Db> {
 
 async function issue(db: Db, n: number, title: string, body: string, o: Opts = {}): Promise<void> {
   await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title, body, author: "someone", created_at: T0, updated_at: T0 }));
-  await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
-    .run(n, T0, o.label ?? "bugfix", JSON.stringify(o.flags ?? []), JSON.stringify({ top: 0.97, ...(o.flags?.includes("needs decision") ? { needs_decision: o.needsDecision ?? 0.9 } : {}) }));
-  if (o.level !== undefined) await db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.level, T0);
-  if (o.score !== undefined) await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?)").run(n, o.score, T0);
+  await db.run(db.k.insertInto("classifications").values({ repo: "app", number: n, classifier: "jev", run_id: "r1", at: T0, type_label: o.label ?? "bugfix", flags: JSON.stringify(o.flags ?? []),
+    probs: JSON.stringify({ top: 0.97, ...(o.flags?.includes("needs decision") ? { needs_decision: o.needsDecision ?? 0.9 } : {}) }) }));
+  if (o.level !== undefined) await db.run(db.k.insertInto("item_priority").values({ repo: "app", number: n, text_hash: "h", impact: o.level, score: 0, model: "jev", at: T0 }));
+  if (o.score !== undefined) await db.run(db.k.insertInto("item_rank").values({ repo: "app", number: n, score: o.score, breakdown: "{}", computed_at: T0 }));
 }
 
 describe("candidates", () => {
@@ -207,7 +207,7 @@ async function finish(db: Db, id: number, end: End): Promise<void> {
     results.push({ step: s.name, exitCode: bad ? 101 : 0, durationMs: 1, timedOut: false });
     if (bad) break;
   }
-  await db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(end === "pass" ? "done" : "failed", JSON.stringify(results), T0, id);
+  await db.run(db.k.updateTable("build_tasks").set({ state: end === "pass" ? "done" : "failed", results: JSON.stringify(results), ended_at: T0 }).where("id", "=", id));
 }
 const finishBoth = async (db: Db, head: End, base: End) => {
   const a = (await attemptOf(db, "app", 5))!;

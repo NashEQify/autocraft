@@ -16,6 +16,7 @@ import { queueAdd, queueOrigins, queuePage } from "../src/dash/api/queue-page.ts
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
+import { excluded } from "../src/db/kx.ts";
 
 let current: World | null = null;
 const fresh = async (): Promise<World> => (current = await (await world()).repo());
@@ -310,7 +311,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
 
   test("the label does not stop it: a plugin candidate or an unclassified PR is reviewed, and a label settled later does not flip it out", async () => {
     const w = await (await (await (await fresh()).pr(16, { label: "plugin candidate" })).pr(17)).pr(18, { label: "plugin candidate", flags: ["needs decision"] });
-    await w.db.prepare("DELETE FROM classifications WHERE number = 17").run();
+    await w.db.run(w.db.k.deleteFrom("classifications").where("number", "=", 17));
     for (const n of [16, 17]) {
       assert.equal((await w.prPlan(n)).state, "label-not-reviewed");
       await preapproveMerge(w.db, { repo: "app", number: n, by: OPERATOR });
@@ -320,7 +321,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     }
     // An open scope question still refuses it, also behind a label that gets no review.
     await assert.rejects(async () => await preapproveMerge(w.db, { repo: "app", number: 18, by: OPERATOR }), /scope question is still open/);
-    await w.db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', 17, 'jev', 'r1', ?, 'plugin candidate', '[]', '{\"top\":0.95}')").run(T0);
+    await w.db.run(w.db.k.insertInto("classifications").values({ repo: "app", number: 17, classifier: "jev", run_id: "r1", at: T0, type_label: "plugin candidate", flags: "[]", probs: '{"top":0.95}' }));
     await w.review(17, { head: "sha17" });
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 17))?.state, "ci");

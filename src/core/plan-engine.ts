@@ -19,7 +19,7 @@ import { changeCursor, changesSince, pruneChanges, type ChangeCursor } from "./p
 import type { ItemFacts, PrFacts } from "./plan.ts";
 import { loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
-import { greatest } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
 export type FullReason = "start" | "marker" | "cap" | "global" | "floor";
@@ -220,16 +220,18 @@ export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
       // A quiet pass writes nothing: the counts and the log's pruning wait for a difference, a full load or the next minute.
       if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) return;
       await pruneChanges(db, cursor);
-      const count = db.prepare(`INSERT INTO main.plan_pass_stats (kind, passes, refs, last_at, ms, max_ms) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT (kind) DO UPDATE SET passes = plan_pass_stats.passes + excluded.passes, refs = plan_pass_stats.refs + excluded.refs, last_at = excluded.last_at,
-          ms = plan_pass_stats.ms + excluded.ms, max_ms = ${greatest(db, "plan_pass_stats.max_ms", "excluded.max_ms")}`);
-      for (const [k, c] of rec.counts) await count.run(k, c.passes, c.refs, c.at, c.ms, c.maxMs);
+      for (const [k, c] of rec.counts) {
+        await db.run(db.k.insertInto("main.plan_pass_stats").values({ kind: k, passes: c.passes, refs: c.refs, last_at: c.at, ms: c.ms, max_ms: c.maxMs })
+          .onConflict((oc) => oc.column("kind").doUpdateSet((eb) => ({
+            passes: eb("main.plan_pass_stats.passes", "+", eb.ref("excluded.passes")), refs: eb("main.plan_pass_stats.refs", "+", eb.ref("excluded.refs")), last_at: eb.ref("excluded.last_at"),
+            ms: eb("main.plan_pass_stats.ms", "+", eb.ref("excluded.ms")), max_ms: eb.case().when("excluded.max_ms", ">", eb.ref("main.plan_pass_stats.max_ms")).then(eb.ref("excluded.max_ms")).else(eb.ref("main.plan_pass_stats.max_ms")).end(),
+          }))));
+      }
       rec.counts.clear();
       rec.flushedAt = Date.now();
       if (diffs.length) {
-        const put = db.prepare("INSERT INTO main.plan_shadow_diffs (at, ref, side, fields, detail) VALUES (?, ?, ?, ?, ?)");
-        for (const d of diffs) await put.run(at, d.ref, d.side, d.fields.join(","), d.detail.slice(0, 2000));
-        await db.prepare("DELETE FROM main.plan_shadow_diffs WHERE rowid <= (SELECT max(rowid) FROM main.plan_shadow_diffs) - ?").run(SHADOW_ROWS);
+        for (const d of diffs) await db.run(db.k.insertInto("main.plan_shadow_diffs").values({ at, ref: d.ref, side: d.side, fields: d.fields.join(","), detail: d.detail.slice(0, 2000) }));
+        await db.run(db.k.deleteFrom("main.plan_shadow_diffs").where(kx.rowid("plan_shadow_diffs"), "<=", (eb) => eb(eb.selectFrom("main.plan_shadow_diffs").select((s) => s.fn.max<number>(kx.rowid("plan_shadow_diffs")).as("m")), "-", SHADOW_ROWS)));
       }
     },
   };
