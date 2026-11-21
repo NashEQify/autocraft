@@ -193,8 +193,8 @@ test("a task whose pod disappears is requeued once, then failed", async () => {
   assert.equal(kube.pvcs.size, 0);
 });
 
-const queued = async (id: number) => (await db.get(db.k.selectFrom("build_tasks").select(["state", "attempts"]).where("id", "=", id)))!;
-const runOf = async (id: number) => await db.get(db.k.selectFrom("build_pod_runs").select(["stage", "pod"]).where("task_id", "=", id));
+const queued = async (id: number) => await db.prepare("SELECT state, attempts FROM build_tasks WHERE id = ?").get(id) as { state: string; attempts: number };
+const runOf = async (id: number) => await db.prepare("SELECT stage, pod FROM build_pod_runs WHERE task_id = ?").get(id) as { stage: number; pod: string | null } | undefined;
 const simple = async () => await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
 const SOURCE_OK = JSON.stringify({ ok: true, env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null });
 
