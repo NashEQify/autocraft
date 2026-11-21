@@ -260,7 +260,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["build_envs", "settings", "TEXT"],
   ["build_envs", "health", "TEXT"],
   ["build_envs", "health_at", "TEXT"],
-  // Times the job went back to the queue after a runner stop or restart (src/runner/resume.ts).
+  // Times the job went back to the queue after a runner stop or restart (src/runner/resuming.ts).
   ["jobs", "resumes", "INTEGER NOT NULL DEFAULT 0"],
   // sha256 of the stored bundle: a resumed job adopts its earlier run's call with the same bundle instead of asking again.
   ["remote_calls", "bundle_hash", "TEXT"],
