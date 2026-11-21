@@ -36,8 +36,7 @@ type Opts = { canModify?: boolean; approved?: boolean; mergeable?: string; verdi
 async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
-  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', ?, 'nearly right', ?, 1, 'full')`)
-    .run(o.reviewHead ?? head, o.verdict ?? "take-fix", FIXES);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: o.reviewHead ?? head, run_id: "rv", at: T0, model: "m", verdict: o.verdict ?? "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
   await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
     VALUES ('app', 7, ?, 'OPEN', 0, 'success', '[]', ?, ?, '${T1}')`).run(head, o.mergeable ?? "MERGEABLE", o.canModify === false ? 0 : 1);
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
@@ -260,7 +259,7 @@ describe("a second ask on a PR we already asked", () => {
       await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'cifix', 'cifix-push', 'app#7', ?)").run(T1, JSON.stringify({ state: "done", from: w.head, to: H2 }));
     }
     await db.run(db.k.updateTable("items").set({ head_oid: H2 }).where("repo", "=", "app"));
-    await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv2', ?, 'm', 'take-fix', 'nearly right', ?, 1, 'full')").run(H2, T1, JSON.stringify([{ file: "src/lib.rs", change: "rename a to c" }]));
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: H2, run_id: "rv2", at: T1, model: "m", verdict: "take-fix", reason: "nearly right", fixes: JSON.stringify([{ file: "src/lib.rs", change: "rename a to c" }]), sure: 1, mode: "full" }));
     await db.prepare("UPDATE pr_checks SET head_oid = ? WHERE repo = 'app' AND number = 7").run(H2);
     const q = w.deps.querier;
     w.deps.querier = { ...q, query: async (s: string, v?: Record<string, unknown>) => { const r = await q.query(s, v as Record<string, unknown>) as { repository?: { pullRequest?: { headRefOid: string } } }; if (r.repository?.pullRequest) r.repository.pullRequest.headRefOid = H2; return r; } } as typeof q;
