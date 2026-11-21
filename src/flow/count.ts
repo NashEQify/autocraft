@@ -185,7 +185,7 @@ async function decide(c: Ctx): Promise<NodeCount> {
 async function review(c: Ctx): Promise<NodeCount> {
   const candidates = await dueRefs(c.db, "review", c.repo ? { repo: c.repo } : {});
   const last = await c.db.prepare(`WITH last AS (SELECT repo, number, verdict, ROW_NUMBER() OVER (PARTITION BY repo, number ORDER BY at DESC, head_oid DESC) AS k
-      FROM final_reviews WHERE 1 ${c.andRepo()})
+      FROM final_reviews WHERE true ${c.andRepo()})
     SELECT l.repo, l.number, l.verdict FROM last l JOIN items i ON i.repo = l.repo AND i.number = l.number
     WHERE l.k = 1 AND i.state = 'OPEN'`).all(c.rp) as { repo: string; number: number; verdict: string }[];
   // A PR waiting for a review at its new head counts there, not under its old verdict.
@@ -334,7 +334,7 @@ async function priority(c: Ctx): Promise<NodeCount> {
     FROM main.items i LEFT JOIN main.item_priority p ON p.repo = i.repo AND p.number = i.number
     WHERE i.state = 'OPEN' AND i.embed_hash IS NOT NULL ${c.tracked("i.repo")}`).all(c.rp) as { repo: string; number: number; s: string }[];
   for (const r of rows) members.get(`priority.${r.s}`)!.add(ref(r));
-  const rank = await c.db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(score), 0) AS top FROM main.item_rank WHERE 1 ${c.tracked()}`).get(c.rp) as { n: number; top: number };
+  const rank = await c.db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(score), 0) AS top FROM main.item_rank WHERE true ${c.tracked()}`).get(c.rp) as { n: number; top: number };
   return {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
@@ -354,7 +354,7 @@ async function fix(c: Ctx): Promise<NodeCount> {
     for (const r of await dueRefs(c.db, "fixissue", { repo, bucket: "new" })) bucket.add(r);
   }
   const rows = await c.db.prepare(`SELECT a.repo, a.number, a.state FROM main.fix_attempts a
-    JOIN main.items i ON i.repo = a.repo AND i.number = a.number AND i.state = 'OPEN' WHERE 1 ${c.tracked("a.repo")}`).all(c.rp) as { repo: string; number: number; state: string }[];
+    JOIN main.items i ON i.repo = a.repo AND i.number = a.number AND i.state = 'OPEN' WHERE true ${c.tracked("a.repo")}`).all(c.rp) as { repo: string; number: number; state: string }[];
   for (const r of rows) members.get(`fix.${r.state}`)?.add(ref(r));
   // A skipped issue whose text changed is a candidate again.
   for (const r of members.get("fix.candidates")!) members.get("fix.skipped")!.delete(r);

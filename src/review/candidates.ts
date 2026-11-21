@@ -49,7 +49,7 @@ async function scopeRows(db: Db, extra: string): Promise<Map<string, string>> {
  */
 export async function scopeAnswers(db: Db, operatorsOnly = false): Promise<Map<string, string>> {
   // A disputed answer does not count until it is kept.
-  return await scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql(db, "decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql(db, "decisions")})`}`);
+  return await scopeRows(db, `AND decisions.exec_state IS DISTINCT FROM 'disputed' ${operatorsOnly ? `AND ${settledBySql(db, "decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql(db, "decisions")})`}`);
 }
 
 /** Items whose latest scope answer is a maintainer's that no longer counts: the item waits for a decision again instead of being reviewed on it. */
