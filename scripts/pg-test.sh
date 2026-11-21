@@ -12,7 +12,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE="${AUTOCRAFT_TEST_PG_IMAGE:-postgres:18}"
-DEFAULT_TESTS=(test/pg-db.test.ts)
+# Size of the tmpfs the data lives on; a copy of a production database needs more than tests do.
+TMPFS_SIZE="${AUTOCRAFT_TEST_PG_TMPFS:-2g}"
+DEFAULT_TESTS=(test/pg-db.test.ts test/pg-copy.test.ts)
 
 # Rootless Docker listens on a per-user socket; use it when DOCKER_HOST is unset and it exists.
 if [[ -z "${DOCKER_HOST:-}" && -S "/run/user/$(id -u)/docker.sock" ]]; then
@@ -22,7 +24,7 @@ fi
 start() {
   local id hostport
   id=$(docker run -d --rm -e POSTGRES_PASSWORD=test -p 127.0.0.1::5432 \
-    --tmpfs /var/lib/postgresql:rw,size=2g "$IMAGE" \
+    --tmpfs "/var/lib/postgresql:rw,size=${TMPFS_SIZE}" "$IMAGE" \
     -c fsync=off -c synchronous_commit=off -c full_page_writes=off -c max_connections=200)
   # The image's init runs a server on the Unix socket only, then restarts it on TCP: ready means ready over TCP.
   for _ in $(seq 1 120); do
