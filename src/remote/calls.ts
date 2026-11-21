@@ -37,7 +37,7 @@ import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db, Dialect } from "../db/index.ts";
-import { ciEq, greatest, inList, notDistinctFrom } from "../db/portable.ts";
+import { ciEq, greatest, indexedBy, inList, notDistinctFrom } from "../db/portable.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
 export const LEASE_IDLE_MS = scaled(2 * 60_000);
@@ -396,9 +396,6 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
 /** The calls the login's helpers hold leases on now, all helpers together. */
 export const leasedBy = async (db: Db, login: string): Promise<number> =>
   Number((await db.prepare(`SELECT COUNT(*) AS n FROM main.remote_calls${indexedBy(db, "remote_calls_leased")} WHERE state = 'leased' AND ${ciEq(db, "user_login", "?")}`).get(login) as { n: number }).n);
-
-/** SQLite's INDEXED BY clause naming the index a query must use; Postgres has no such clause. */
-export const indexedBy = (d: { readonly dialect: Dialect }, index: string): string => (d.dialect === "sqlite" ? ` INDEXED BY ${index}` : "");
 
 /** The role of a live Task Runner credential's user, or null when the credential is gone or expired. */
 async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role | null> {
