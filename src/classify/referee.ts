@@ -4,7 +4,7 @@ import { itemRepos, poolRoom, repoBatches } from "../agents/call.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { type Item } from "./parse.ts";
 import { type Pair, ref } from "./report.ts";
-import { loadItems, pool } from "./run.ts";
+import { loadItems, pool, replaceClassification } from "./run.ts";
 import { runModelStep } from "../agents/step.ts";
 import { REFEREE_SONNET } from "../agents/steps.ts";
 import { rng, spread } from "./sample.ts";
@@ -37,8 +37,6 @@ type RefereeOpts = {
 export async function refereeItems(db: Db, runId: string, items: Item[], opts: RefereeOpts): Promise<number> {
   const perCall = opts.perCall ?? REFEREE.limits.perCall;
   const chunks = await repoBatches(db, items, perCall, (i) => i.repo, (i) => [i]);
-  const ins = db.prepare(`INSERT OR REPLACE INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, reason, probs)
-    VALUES (?, ?, 'sonnet', ?, ?, ?, '[]', ?, ?)`);
   const have = db.prepare(`SELECT 1 FROM classifications WHERE repo = ? AND number = ? AND classifier = 'sonnet' AND run_id = ? AND at >= ?`);
   // Evaluation runs resume: any earlier answer in the run counts. Pipeline runs ask again, since a new answer replaces the old one.
   let total = 0, sent = 0;
@@ -56,7 +54,7 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
       });
       if (r.ok) for (const verdicts of r.values) for (const v of verdicts) {
         const [repo, num] = v.ref.split("#");
-        await ins.run(repo!, Number(num), runId, new Date().toISOString(), v.type_label, v.why, opts.pipeline ? JSON.stringify({ sure: v.sure === true, ...(opts.model && { final: true }) }) : null);
+        await replaceClassification(db, [repo!, Number(num), "sonnet", runId, new Date().toISOString(), v.type_label, "[]", v.why, opts.pipeline ? JSON.stringify({ sure: v.sure === true, ...(opts.model && { final: true }) }) : null]);
         got++;
         await jobItem(db, repo!, Number(num), `refereed${opts.model ? ` by ${opts.model}` : ""} as ${v.type_label}${v.sure === true ? "" : " (unsure)"}`);
       }
@@ -73,8 +71,7 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
           try { p = (JSON.parse(row.probs ?? "{}") as Record<string, unknown>) ?? {}; } catch { /* keep empty */ }
           p.opusFailures = (typeof p.opusFailures === "number" ? p.opusFailures : 0) + 1;
           p.opusFailedAt = new Date().toISOString();
-          await db.prepare(`INSERT OR REPLACE INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, reason, probs) VALUES (?, ?, 'sonnet', ?, ?, ?, '[]', ?, ?)`)
-            .run(i.repo, i.number, runId, row.at, row.type_label, row.reason, JSON.stringify(p));
+          await replaceClassification(db, [i.repo, i.number, "sonnet", runId, row.at, row.type_label, "[]", row.reason, JSON.stringify(p)]);
         }
       }
     }

@@ -30,7 +30,7 @@ async function fresh(): Promise<Db> {
 }
 
 const card = async (db: Db, params: unknown): Promise<number> =>
-  Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'resolution', ?, NULL, 'x')").run(JSON.stringify(params))).lastInsertRowid);
+  Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'resolution', ?, NULL, 'x') RETURNING id").get(JSON.stringify(params)) as { id: number }).id);
 
 describe("one answer per question", () => {
   test("a lock whose card is gone or stale does not block answers", async () => {

@@ -44,6 +44,8 @@ import { envVar } from "../env.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import type { Param } from "../db/index.ts";
+import { upsert } from "../db/portable.ts";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
   const out: { repo: string; number: number }[] = [];
@@ -228,19 +230,30 @@ export function resultUsage(j: { usage?: Record<string, number>; total_cost_usd?
 
 export async function saveVerdict(db: Db, classifier: string, runId: string, v: Verdict): Promise<void> {
   const [repo, num] = v.ref.split("#");
-  await db.prepare(`INSERT OR REPLACE INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, reason, probs)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(repo!, Number(num), classifier, runId, now(), v.type_label, flagsOf(v), v.reason, v.probs);
+  await replaceClassification(db, [repo!, Number(num), classifier, runId, now(), v.type_label, flagsOf(v), v.reason, v.probs]);
 }
 
+/**
+ * Stores one verdict (repo, number, classifier, run_id, at, type_label, flags, reason, probs), replacing the row for the
+ * same key with a new one: a new rowid, which src/classify/settled.ts reads as "changed since".
+ */
+export async function replaceClassification(db: Db, row: Param[]): Promise<void> {
+  await db.write(async () => {
+    await db.prepare("DELETE FROM main.classifications WHERE repo = ? AND number = ? AND classifier = ? AND run_id = ?").run(row[0]!, row[1]!, row[2]!, row[3]!);
+    await db.prepare(`INSERT INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, reason, probs)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...row);
+  });
+}
+
+const USAGE_COLS = ["run_id", "agent", "stage", "model", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"];
+
 export async function saveUsage(db: Db, runId: string, agent: string, stage: string, model: string, items: number, u: Usage, start: string, end: string): Promise<void> {
-  await db.prepare(`INSERT OR REPLACE INTO main.token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens,
-    cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+  await db.prepare(upsert(db, { table: "main.token_usage", cols: USAGE_COLS, key: ["run_id", "agent"] }))
     .run(runId, agent, stage, model, items, u.input, u.output, u.cacheRead, u.cacheWrite, start, end, u.cost);
   // Subagent models get their own rows (same run and stage), so the Cost page splits by model and its totals stay whole.
   for (const e of u.extra ?? []) {
-    await db.prepare(`INSERT OR REPLACE INTO main.token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens,
-      cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(runId, `${agent}+${e.model}`, stage, e.model, e.usage.input, e.usage.output, e.usage.cacheRead, e.usage.cacheWrite, start, end, e.usage.cost);
+    await db.prepare(upsert(db, { table: "main.token_usage", cols: USAGE_COLS, key: ["run_id", "agent"] }))
+      .run(runId, `${agent}+${e.model}`, stage, e.model, 0, e.usage.input, e.usage.output, e.usage.cacheRead, e.usage.cacheWrite, start, end, e.usage.cost);
   }
 }
 

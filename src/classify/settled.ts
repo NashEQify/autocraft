@@ -167,7 +167,7 @@ export async function settledSet(db: Db, run: string | null, refs?: Iterable<str
   if (!run) return async () => settle(null, null);
   const narrow = refs ? ` AND ${refIn(db, "classifications", "?")}` : "";
   // Only what settledFrom() reads: the referee's reason, and Jev's probabilities without the per-type ones.
-  const rows = await db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND json_valid(probs) THEN ${jsonRemoveKey(db, "probs", "type")} ELSE probs END AS probs,
+  const rows = await db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND ${jsonValid(db, "probs")} THEN ${jsonRemoveKey(db, "probs", "type")} ELSE probs END AS probs,
       CASE WHEN classifier = 'sonnet' THEN reason END AS reason, at, input_hash FROM classifications
     WHERE run_id = ? AND classifier IN ('jev', 'haiku', 'sonnet')${narrow}`).all(...(refs ? [run, refPairs(refs)] : [run])) as (ClsRow & { repo: string; number: number; classifier: string })[];
   const byItem = new Map<string, Partial<Record<string, ClsRow>>>();

@@ -110,7 +110,7 @@ test("a second comment in a day does not re-prepare; a Merge? question waits onl
   assert.deepEqual(await prepareIds(w.db, undefined, DAY), [], "later comments wait for a new review, head or Re-prepare");
   await w.db.prepare("UPDATE decisions SET prepared_at = NULL WHERE id LIKE '%merge@%'").run();
   const merge = `app#7:merge@${head}`;
-  const plan = async (actions: unknown[]) => await w.db.prepare("INSERT OR REPLACE INTO item_plans (repo, number, kind, state, actions, reasons, view, planned_at) VALUES ('app', 7, 'pr', 'x', ?, '[]', ?, '2026-11-04T00:00:00.000Z')").run(JSON.stringify(actions), JSON.stringify({ next: "Review" }));
+  const plan = async (actions: unknown[]) => await w.db.prepare("INSERT INTO item_plans (repo, number, kind, state, actions, reasons, view, planned_at) VALUES ('app', 7, 'pr', 'x', ?, '[]', ?, '2026-11-04T00:00:00.000Z') ON CONFLICT (repo, number) DO UPDATE SET actions = excluded.actions, view = excluded.view").run(JSON.stringify(actions), JSON.stringify({ next: "Review" }));
   await plan([]);
   assert.deepEqual(await prepareIds(w.db, undefined, DAY), [merge], "a stale review the Plan does not start (held by a cap or a blocker) does not hold the question");
   await plan([{ kind: "review", head }]);

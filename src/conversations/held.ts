@@ -35,7 +35,7 @@ const oneLine = (e: unknown): string => String((e as Error).message ?? e).replac
 
 export async function holdFollowup(db: Db, h: Pick<HeldRow, "card_id" | "choice_id" | "decision_id" | "answer_seq" | "preapproval_id" | "repo" | "number" | "issue_repo" | "title" | "body" | "by" | "at">): Promise<number> {
   return Number((await db.prepare(`INSERT INTO main.held_followups (card_id, choice_id, decision_id, answer_seq, preapproval_id, repo, number, issue_repo, title, body, by, at, state, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held', ?)`).run(h.card_id, h.choice_id, h.decision_id, h.answer_seq, h.preapproval_id, h.repo, h.number, h.issue_repo, h.title, h.body, h.by, h.at, h.at)).lastInsertRowid);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held', ?) RETURNING id`).get(h.card_id, h.choice_id, h.decision_id, h.answer_seq, h.preapproval_id, h.repo, h.number, h.issue_repo, h.title, h.body, h.by, h.at, h.at) as { id: number }).id);
 }
 
 /** The item's held follow-ups, oldest first. */

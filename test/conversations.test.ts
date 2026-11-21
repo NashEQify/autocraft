@@ -185,7 +185,7 @@ describe("Do it", () => {
       return q.includes("issueOrPullRequest") ? { repository: { issueOrPullRequest: { __typename: "Issue", id: "I_1", state: "OPEN" } } } : {};
     } };
     const params = JSON.stringify({ kind: "close", reason: "completed", pr: false });
-    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'close', ?, 'Done in an earlier PR.', 'x')").run(params)).lastInsertRowid);
+    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'close', ?, 'Done in an earlier PR.', 'x') RETURNING id").get(params) as { id: number }).id);
     const { card } = await doCard(db, id, "op", { querier: querier as never });
     assert.equal(card.state, "done", card.error ?? "");
     assert.ok(sent.some((x) => x.q.includes("closeIssue") && x.v.reason === "COMPLETED"));
@@ -197,8 +197,8 @@ describe("Do it", () => {
   const resolution = async (db: Db, steps: unknown[], settle: unknown, text: string | null) => {
     const p = (await parseReply(db, "app", 1, `Text.\n\`\`\`actions\n${JSON.stringify([{ kind: "resolution", steps, settle, ...(text && { text }) }])}\n\`\`\``))!;
     assert.equal(p.cards.length, 1, p.notes.join("; "));
-    return Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'resolution', ?, ?, ?)")
-      .run(JSON.stringify(p.cards[0]!.params), p.cards[0]!.text, p.cards[0]!.description)).lastInsertRowid);
+    return Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'resolution', ?, ?, ?) RETURNING id")
+      .get(JSON.stringify(p.cards[0]!.params), p.cards[0]!.text, p.cards[0]!.description) as { id: number }).id);
   };
   const github = (failLabel: boolean) => {
     const sent: string[] = [];

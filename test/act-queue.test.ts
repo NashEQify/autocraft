@@ -35,17 +35,17 @@ const deps = (w: World, o: { posted?: string[]; closed?: string[]; failClose?: n
   } } };
 };
 
-const limit = async (w: World, n: number) => await w.db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('act', ?)").run(n);
+const limit = async (w: World, n: number) => await w.db.prepare("INSERT INTO stage_limits (step, per_day) VALUES ('act', ?) ON CONFLICT (step) DO UPDATE SET per_day = excluded.per_day").run(n);
 const rank = async (w: World, n: number, level: number) =>
-  await w.db.prepare("INSERT OR REPLACE INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?)").run(n, level * 10000, T1);
+  await w.db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?) ON CONFLICT (repo, number) DO UPDATE SET score = excluded.score, breakdown = excluded.breakdown, computed_at = excluded.computed_at").run(n, level * 10000, T1);
 const commentCard = async (w: World, n: number) =>
-  Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'comment', ?, 'Hello.', 'comment')").run(n, JSON.stringify({ kind: "comment", text: "Hello." }))).lastInsertRowid);
+  Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'comment', ?, 'Hello.', 'comment') RETURNING id").get(n, JSON.stringify({ kind: "comment", text: "Hello." })) as { id: number }).id);
 /** A card that comments and answers the item's open scope question, so it locks that decision. */
 const settleCard = async (w: World, n: number) => {
   const id = `app#${n}:scope`;
   await ask(w.db, [{ id, kind: "scope", repo: "app", number: n, question: "Out of scope?", options: [{ key: "close", label: "Close" }, { key: "take", label: "Take" }] }]);
   const params = { kind: "resolution", steps: [{ kind: "comment" }], settle: { kind: "answer", decision: id, option: "take", stamp: await decisionStamp(w.db, (await getDecision(w.db, id))!) } };
-  return { decision: id, card: Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'resolution', ?, 'Hello.', 'comment and answer')").run(n, JSON.stringify(params))).lastInsertRowid) };
+  return { decision: id, card: Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', ?, 'resolution', ?, 'Hello.', 'comment and answer') RETURNING id").get(n, JSON.stringify(params)) as { id: number }).id) };
 };
 const state = async (w: World, id: number) => (await w.db.prepare("SELECT state, error FROM conversation_cards WHERE id = ?").get(id) as { state: string; error: string | null });
 const run = (w: World, d: ReturnType<typeof deps>, params: { limit?: number; onHandled?: (n: number) => void } = {}) => runAct(w.db, { repo: "app", dryRun: false, ...params }, () => {}, d);

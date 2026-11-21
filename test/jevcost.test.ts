@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { askJev, runJev, saveUsage, setRunner } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const answers = {
   type: { choice: "performance", confidence: 0.8, probabilities: { performance: 0.8, bugfix: 0.2 } },
@@ -24,7 +25,7 @@ test("a Jev call is priced by its input tokens", async () => {
   assert.ok(Math.abs((await cost(db, "jev-a#1"))! - 0.042) < 1e-9);
 });
 
-test("the migration prices unpriced Jev rows and leaves other models alone", async () => {
+test("the migration prices unpriced Jev rows and leaves other models alone", { skip: sqliteOnly("SQLite data migration in src/db.ts migrate(); Postgres starts from schema.pg.sql and a copy of a migrated SQLite database") }, async () => {
   const dir = mkdtempSync(join(SCRATCH, "jevcost-"));
   const path = join(dir, "t.db");
   const db = await connectDb(path);

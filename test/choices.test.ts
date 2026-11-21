@@ -70,8 +70,8 @@ describe("decision choices", () => {
     assert.ok("card" in composed);
     const v = await validateCard(db, "app", 2, composed.card);
     assert.ok("card" in v, "note" in v ? v.note : "");
-    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 2, 'resolution', ?, NULL, ?)")
-      .run(JSON.stringify(v.card.params), v.card.description)).lastInsertRowid);
+    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 2, 'resolution', ?, NULL, ?) RETURNING id")
+      .get(JSON.stringify(v.card.params), v.card.description) as { id: number }).id);
     const querier = { query: async () => ({}) };
     const exec = async () => ({ code: 0, stdout: "https://github.com/storytold/app/issues/7\n", stderr: "" });
     const { card } = await doCard(db, id, "op", { querier: querier as never, exec: exec as never });
@@ -225,8 +225,8 @@ describe("decision choices", () => {
       assert.deepEqual({ ...await settleOf([{ id: "label:small extra", kind: "label", label: "small extra" }]), v: 0 }, { v: 0, kind: "answer", option: "small-extra", steps: "label,fixup" });
       const plain = await settleOf([]);
       assert.deepEqual([plain.kind, plain.option, plain.steps], ["answer", "take", "fixup"]);
-      const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 5, 'resolution', ?, NULL, ?)")
-        .run(JSON.stringify(plain.v.card.params), plain.v.card.description)).lastInsertRowid);
+      const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 5, 'resolution', ?, NULL, ?) RETURNING id")
+        .get(JSON.stringify(plain.v.card.params), plain.v.card.description) as { id: number }).id);
       const { card } = await doCard(db, id, OPERATOR, { querier: { query: async () => ({}) } as never, exec: (async () => ({ code: 0, stdout: "", stderr: "" })) as never });
       assert.equal(card.state, "done", card.error ?? "");
       assert.equal((await getDecision(db, "app#5:scope"))!.answer, "take");

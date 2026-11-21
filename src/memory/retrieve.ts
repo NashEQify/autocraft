@@ -25,7 +25,7 @@ export async function relatedStatements(db: Db, repo: string, number: number): P
   if (!pr) return [];
   const q = asFloats(pr.vec);
   const rows = await db.prepare(`SELECT id, source_kind, repo, number, item_title, text, at, embedding FROM owner_statements
-    WHERE model = ? AND embedding IS NOT NULL AND repo = ? AND number IS NOT ?
+    WHERE model = ? AND embedding IS NOT NULL AND repo = ? AND number IS DISTINCT FROM ?
       AND NOT (number IS NOT NULL AND ${quietSqlFor("owner_statements.repo", "owner_statements.number")})`).all(pr.model, repo, number) as
     { id: number; source_kind: string; repo: string; number: number | null; item_title: string; text: string; at: string; embedding: Uint8Array }[];
   const hits: (OwnerStatement & { score: number })[] = [];

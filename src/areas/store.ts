@@ -189,9 +189,9 @@ const toProposal = (r: ProposalRow): Proposal => ({ id: r.id, repo: r.repo, kind
 /** Stores a model's proposal. An older open proposal of the same kind is dismissed: the new one replaces it. */
 export async function saveProposal(db: Db, repo: string, kind: Proposal["kind"], areas: Area[], by: string | null): Promise<number> {
   await db.prepare("UPDATE area_proposals SET state = 'dismissed', decided_at = ? WHERE repo = ? AND kind = ? AND state = 'open'").run(now(), repo, kind);
-  const r = await db.prepare("INSERT INTO area_proposals (repo, kind, areas, created_at, created_by) VALUES (?, ?, ?, ?, ?)")
-    .run(repo, kind, JSON.stringify(areas.map((a) => ({ ...a, state: "open" }))), now(), by);
-  return Number(r.lastInsertRowid);
+  const r = await db.prepare("INSERT INTO area_proposals (repo, kind, areas, created_at, created_by) VALUES (?, ?, ?, ?, ?) RETURNING id")
+    .get(repo, kind, JSON.stringify(areas.map((a) => ({ ...a, state: "open" }))), now(), by) as { id: number };
+  return Number(r.id);
 }
 
 export async function proposalsOf(db: Db, repo: string, open = true): Promise<Proposal[]> {
