@@ -25,6 +25,7 @@
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1",
     "graphql": "^17.0.2",
+    "ts5": "npm:typescript@~5.9.3",
     "typescript": "^7.0.2"
   },
   "dependencies": {

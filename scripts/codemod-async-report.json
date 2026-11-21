@@ -1,0 +1,7345 @@
+{
+ "files": 496,
+ "functions": 2830,
+ "signatures": 165,
+ "awaits": 13240,
+ "returnTypes": 1868,
+ "seq": {
+  "every": 12,
+  "filter": 53,
+  "find": 9,
+  "flatMap": 9,
+  "forEach": 10,
+  "map": 95,
+  "reduce": 1,
+  "some": 13,
+  "sort": 2
+ },
+ "transactions": {
+  "write": 42,
+  "read": 1,
+  "plain": [
+   "src/core/plan-engine.ts:77 inReadSnapshot -> read",
+   "src/discord/store.ts:35 recordMessage -> write",
+   "src/downloads/poll.ts:107 foldDeltas -> write",
+   "src/downloads/poll.ts:66 recordRepo -> write"
+  ]
+ },
+ "residue": [
+  {
+   "kind": "accessor",
+   "file": "src/review/discussion.ts",
+   "line": 309,
+   "fn": "computeDiscussionState.map-callback.hash",
+   "detail": "call of computeDiscussionState.prime inside a accessor, which cannot be async"
+  },
+  {
+   "kind": "accessor",
+   "file": "src/review/ours.ts",
+   "line": 25,
+   "fn": "madeBy.b",
+   "detail": "a database call inside a accessor, which cannot be async"
+  },
+  {
+   "kind": "accessor",
+   "file": "src/review/ours.ts",
+   "line": 26,
+   "fn": "madeBy.c",
+   "detail": "a database call inside a accessor, which cannot be async"
+  },
+  {
+   "kind": "accessor",
+   "file": "src/review/ours.ts",
+   "line": 27,
+   "fn": "madeBy.d",
+   "detail": "a database call inside a accessor, which cannot be async"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 389,
+   "fn": "splitRunnerTokens",
+   "detail": "called by connect() and by 2 converted call site(s), e.g. test/runner-credentials.test.ts:43"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 455,
+   "fn": "migrateValues",
+   "detail": "call of mentionNames inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 575,
+   "fn": "ciFirst",
+   "detail": "call of repoHasNoCi inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 637,
+   "fn": "buildHashes",
+   "detail": "call of fillEmbedHashes inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 638,
+   "fn": "buildHashes",
+   "detail": "call of fillClassHashes inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 655,
+   "fn": "buildItemStage",
+   "detail": "call of bulkWrites inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/db.ts",
+   "line": 655,
+   "fn": "buildItemStage.<anonymous>",
+   "detail": "would become async, but it is in connect()'s call tree"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/fixissue/candidates.ts",
+   "line": 99,
+   "fn": "fillTextRefs.write",
+   "detail": "would become async, but it is in connect()'s call tree"
+  },
+  {
+   "kind": "connect-tree",
+   "file": "src/fixissue/candidates.ts",
+   "line": 100,
+   "fn": "fillTextRefs",
+   "detail": "call of bulkWrites inside connect()'s call tree, which stays synchronous"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/agents/accounts.ts",
+   "line": 43,
+   "fn": "syncAccounts",
+   "detail": "call of boxAccounts in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/classify/run.ts",
+   "line": 827,
+   "fn": "runJev",
+   "detail": "call of jevParallel in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/classify/settled.ts",
+   "line": 178,
+   "fn": "settledOf",
+   "detail": "call of latestRun in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/conversations/queue.ts",
+   "line": 81,
+   "fn": "queuePlaces",
+   "detail": "call of queuedCards in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/dupes/canonical.ts",
+   "line": 37,
+   "fn": "canonInfo",
+   "detail": "call of canonInfoAll in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/flow/count.ts",
+   "line": 53,
+   "fn": "Ctx.constructor",
+   "detail": "call of latestRun in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/flow/count.ts",
+   "line": 448,
+   "fn": "countAll",
+   "detail": "call of latestRun in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/flow/summary.ts",
+   "line": 85,
+   "fn": "countRepo",
+   "detail": "call of latestRun in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/outside.ts",
+   "line": 83,
+   "fn": "isOutsideAuthor",
+   "detail": "call of insiders in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/prbuild/select.ts",
+   "line": 43,
+   "fn": "inBuildScope",
+   "detail": "call of baseScopeRepos in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/review/discussion.ts",
+   "line": 337,
+   "fn": "reviewRequestedSince",
+   "detail": "call of discussionState in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "src/runner/autopilot.ts",
+   "line": 278,
+   "fn": "fingerprintOf",
+   "detail": "call of readSeqs in an initializer, which cannot await"
+  },
+  {
+   "kind": "initializer",
+   "file": "test/cifix.test.ts",
+   "line": 251,
+   "fn": "<anonymous>.formatRun",
+   "detail": "call of fresh in an initializer, which cannot await"
+  },
+  {
+   "kind": "sync-callback",
+   "file": "src/runner/autopilot.ts",
+   "line": 1284,
+   "fn": "laneItems.waits.map-callback",
+   "detail": "Array.map callback cannot take an async callback (optional chain, thisArg or no sequential helper)"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 39,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 45,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of planPass"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 46,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of computeLiveness"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 54,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 55,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 57,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of pipelineRepos"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 58,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of setCommentApproval"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 99,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 107,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 108,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 130,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of getDecision"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 133,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of canSettleCached"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 139,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of decisionStamp"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 140,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 145,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 148,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 150,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of dashboard"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 150,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of getDecision"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 168,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of dashboard"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 169,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of getDecision"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 170,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of openDispute"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 175,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of clearDispute"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 178,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 189,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 191,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 192,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 194,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 197,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of planPass"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 198,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of computeLiveness"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/golive-gate.ts",
+   "line": 199,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of refreshLiveness"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 16,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of setInferenceMode"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 27,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of caller"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 29,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of caller"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 30,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 31,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 35,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 36,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 37,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of enqueueCall"
+  },
+  {
+   "kind": "top-level",
+   "file": "scripts/remote-claim-bench.ts",
+   "line": 54,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "src/runner/worker.ts",
+   "line": 12,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/account-token.test.ts",
+   "line": 56,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/admin.test.ts",
+   "line": 25,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of issue"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of pr"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of premerge"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of repo"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of review"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of verified"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of world"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 18,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api-shapes.test.ts",
+   "line": 21,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/api.test.ts",
+   "line": 31,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/auth-hardening.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/build.test.ts",
+   "line": 24,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/claude-accounts.test.ts",
+   "line": 43,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-file-issue.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-file-issue.test.ts",
+   "line": 21,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-issue-new.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-issue-new.test.ts",
+   "line": 28,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of useTestAccount"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-links.test.ts",
+   "line": 14,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-mentions.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-react.test.ts",
+   "line": 15,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-search.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-search.test.ts",
+   "line": 28,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of useTestAccount"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/discord-signals.test.ts",
+   "line": 17,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/github-app.test.ts",
+   "line": 31,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/images.test.ts",
+   "line": 41,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 20,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 21,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 22,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 24,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 25,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 27,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 28,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/itemtools-safety.test.ts",
+   "line": 29,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/job-items.test.ts",
+   "line": 16,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/mcp.test.ts",
+   "line": 28,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/pipeline.test.ts",
+   "line": 30,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/prompts.test.ts",
+   "line": 18,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/prompts.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of useTestAccount"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/prompts.test.ts",
+   "line": 23,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/reference.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/reference.test.ts",
+   "line": 20,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of trackRepo"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/runner.test.ts",
+   "line": 23,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/runner.test.ts",
+   "line": 24,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/secfix-rounds.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/secfix-rounds.test.ts",
+   "line": 21,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/secfix-rounds.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-fix-land.test.ts",
+   "line": 24,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-fix-land.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 21,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 23,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 27,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 28,
+   "fn": "<top-level>",
+   "detail": "top-level await of call of scopeToTracked"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/security-scan.test.ts",
+   "line": 32,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/server.test.ts",
+   "line": 53,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/step-repo.test.ts",
+   "line": 19,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/step-repo.test.ts",
+   "line": 20,
+   "fn": "<top-level>",
+   "detail": "top-level await of a database call"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/stuck-jobs.test.ts",
+   "line": 26,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/visibility-sec3.test.ts",
+   "line": 23,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "top-level",
+   "file": "test/visibility.test.ts",
+   "line": 30,
+   "fn": "<top-level>",
+   "detail": "top-level await of connect"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/agents/call.ts",
+   "line": 271,
+   "fn": "tryStartClaudeRun",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/agents/call.ts",
+   "line": 295,
+   "fn": "pollClaude",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/agents/call.ts",
+   "line": 361,
+   "fn": "tryStartFollowUp",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/build/tasks.ts",
+   "line": 183,
+   "fn": "claim",
+   "detail": "statements with calls after COMMIT inside the try"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/conversations/act.ts",
+   "line": 130,
+   "fn": "answerDecision",
+   "detail": "statements with calls after COMMIT inside the try"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/conversations/act.ts",
+   "line": 581,
+   "fn": "doCard",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/conversations/act.ts",
+   "line": 646,
+   "fn": "failQueued",
+   "detail": "return inside the block, which is not the end of the function"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/core/plan-changes.ts",
+   "line": 183,
+   "fn": "bulkWrites",
+   "detail": "conditional BEGIN: the Db joins nested transactions, so this can become db.write"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/dash/api/conversations.ts",
+   "line": 340,
+   "fn": "doChoice",
+   "detail": "ROLLBACK, COMMIT or BEGIN inside the block (early rollback and return): needs a hand rewrite"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/decide/choices-convert.ts",
+   "line": 134,
+   "fn": "convertOpenDecisions",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/decide/choices.ts",
+   "line": 309,
+   "fn": "writeChoices",
+   "detail": "conditional BEGIN: the Db joins nested transactions, so this can become db.write"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/decisions.ts",
+   "line": 154,
+   "fn": "ask",
+   "detail": "conditional BEGIN: the Db joins nested transactions, so this can become db.write"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/discord/links.ts",
+   "line": 31,
+   "fn": "redeemLinkCode",
+   "detail": "ROLLBACK, COMMIT or BEGIN inside the block (early rollback and return): needs a hand rewrite"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/dupes/decide.ts",
+   "line": 212,
+   "fn": "askGroupDecisions",
+   "detail": "statements with calls after COMMIT inside the try"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/github/write.ts",
+   "line": 198,
+   "fn": "tryBegin",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/postmerge/file.ts",
+   "line": 47,
+   "fn": "claim",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/prbuild/index.ts",
+   "line": 34,
+   "fn": "queuePrBuild",
+   "detail": "ROLLBACK, COMMIT or BEGIN inside the block (early rollback and return): needs a hand rewrite"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/preapproval/index.ts",
+   "line": 118,
+   "fn": "cancelRow",
+   "detail": "BEGIN without a matching COMMIT in the same block"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/preapproval/index.ts",
+   "line": 289,
+   "fn": "handOver",
+   "detail": "ROLLBACK, COMMIT or BEGIN inside the block (early rollback and return): needs a hand rewrite"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/preapproval/index.ts",
+   "line": 564,
+   "fn": "carryAnswers",
+   "detail": "BEGIN without a matching COMMIT in the same block"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/remote/calls.ts",
+   "line": 418,
+   "fn": "leaseCall",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/remote/device-login.ts",
+   "line": 138,
+   "fn": "approveLogin",
+   "detail": "statements with calls after COMMIT inside the try"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/remote/liveness.ts",
+   "line": 21,
+   "fn": "stampAlive",
+   "detail": "try block of another shape (no COMMIT at the end, a catch other than ROLLBACK + rethrow, or a finally)"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/remote/picks.ts",
+   "line": 139,
+   "fn": "pickCall",
+   "detail": "BEGIN without a matching COMMIT in the same block"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/runner/leases.ts",
+   "line": 25,
+   "fn": "take",
+   "detail": "ROLLBACK, COMMIT or BEGIN inside the block (early rollback and return): needs a hand rewrite"
+  },
+  {
+   "kind": "transaction",
+   "file": "src/runner/runner.ts",
+   "line": 477,
+   "fn": "Runner.start",
+   "detail": "BEGIN without a matching COMMIT in the same block"
+  },
+  {
+   "kind": "type-predicate",
+   "file": "src/conversations/cards.ts",
+   "line": 318,
+   "fn": "isTracked",
+   "detail": "a database call inside a type-predicate, which cannot be async"
+  },
+  {
+   "kind": "type-predicate",
+   "file": "src/dash/api/build.ts",
+   "line": 95,
+   "fn": "postFeature.tracked",
+   "detail": "a database call inside a type-predicate, which cannot be async"
+  },
+  {
+   "kind": "type-predicate",
+   "file": "src/security/actions.ts",
+   "line": 167,
+   "fn": "advanceSecurityFixes.filter-callback",
+   "detail": "call of getTask inside a type-predicate, which cannot be async"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/classify/progress.ts",
+   "line": 72,
+   "fn": "coalesce.run",
+   "detail": "setTimeout(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/dash/server/index.ts",
+   "line": 292,
+   "fn": "createApp.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/dash/server/live.ts",
+   "line": 87,
+   "fn": "LiveHub.start.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/dash/server/live.ts",
+   "line": 88,
+   "fn": "LiveHub.start.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/discord/alerts.ts",
+   "line": 176,
+   "fn": "DecisionAlerts.start.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/health.ts",
+   "line": 33,
+   "fn": "startHealthServer.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/remote/liveness.ts",
+   "line": 51,
+   "fn": "startLiveness.tick",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/remote/tools.ts",
+   "line": 129,
+   "fn": "closeSnapshot",
+   "detail": "setTimeout(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/runner/runner.ts",
+   "line": 504,
+   "fn": "Runner.start.<anonymous>.on-callback",
+   "detail": "InternalEventEmitter.on(listener) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "src/runner/runner.ts",
+   "line": 527,
+   "fn": "Runner.stop.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/build.test.ts",
+   "line": 42,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/build.test.ts",
+   "line": 46,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-file-issue.test.ts",
+   "line": 20,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-issue-new.test.ts",
+   "line": 29,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-links.test.ts",
+   "line": 16,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-mentions.test.ts",
+   "line": 23,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-mentions.test.ts",
+   "line": 40,
+   "fn": "<anonymous>.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-react.test.ts",
+   "line": 16,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-search.test.ts",
+   "line": 29,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-signals.test.ts",
+   "line": 19,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/discord-signals.test.ts",
+   "line": 41,
+   "fn": "<anonymous>.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/github-app.test.ts",
+   "line": 145,
+   "fn": "<anonymous>.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/health.test.ts",
+   "line": 10,
+   "fn": "<anonymous>.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/itemtools.test.ts",
+   "line": 28,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/journeys.test.ts",
+   "line": 307,
+   "fn": "<anonymous>.<anonymous>.<anonymous>",
+   "detail": "setInterval(callback) ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/security-fix-land.test.ts",
+   "line": 64,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/security-scan-tests.test.ts",
+   "line": 24,
+   "fn": "<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/sync-health.test.ts",
+   "line": 106,
+   "fn": "<anonymous>.<anonymous>",
+   "detail": "FunctionType ignores the returned promise (fire and forget)"
+  },
+  {
+   "kind": "void-callback",
+   "file": "test/worker-hardening.test.ts",
+   "line": 38,
+   "fn": "<anonymous>.<anonymous>.<anonymous>",
+   "detail": "setTimeout(callback) ignores the returned promise (fire and forget)"
+  }
+ ],
+ "residueCounts": {
+  "accessor": 4,
+  "connect-tree": 9,
+  "initializer": 13,
+  "sync-callback": 1,
+  "top-level": 105,
+  "transaction": 26,
+  "type-predicate": 3,
+  "void-callback": 29
+ },
+ "rmw": {
+  "(top-level)": [
+   {
+    "file": "src/access.ts",
+    "line": 28,
+    "fn": "checkGithubId",
+    "read": "29: SELECT github_id FROM access WHERE login = ?",
+    "write": "32: UPDATE access SET github_id = ? WHERE login = ? AND github_i"
+   },
+   {
+    "file": "src/access.ts",
+    "line": 64,
+    "fn": "addLogin.<anonymous>",
+    "read": "65: call getAccess",
+    "write": "66: INSERT INTO access (login, role, added_by, added_at, note, g"
+   },
+   {
+    "file": "src/access.ts",
+    "line": 82,
+    "fn": "removeLogin.<anonymous>",
+    "read": "83: call getAccess",
+    "write": "86: DELETE FROM access WHERE login = ?"
+   },
+   {
+    "file": "src/access.ts",
+    "line": 105,
+    "fn": "setRole.<anonymous>",
+    "read": "106: call getAccess",
+    "write": "110: UPDATE access SET role = ? WHERE login = ?"
+   },
+   {
+    "file": "src/access.ts",
+    "line": 128,
+    "fn": "run",
+    "read": "130: call connect",
+    "write": "151: call addLogin"
+   },
+   {
+    "file": "src/activity.ts",
+    "line": 90,
+    "fn": "syncActivity",
+    "read": "92: SELECT i.repo, i.number, i.head_oid AS head, i.updated_at FR",
+    "write": "105: call saveActivity"
+   },
+   {
+    "file": "src/author-ids.ts",
+    "line": 60,
+    "fn": "backfillAuthorIds",
+    "read": "63: SELECT author, author_id FROM items i WHERE author IS NOT NU",
+    "write": "67: INSERT OR IGNORE INTO main.author_ids (login, id) VALUES (?,"
+   },
+   {
+    "file": "src/cli.ts",
+    "line": 8,
+    "fn": "main",
+    "read": "31: call connect",
+    "write": "32: call scopeToTracked"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 316,
+    "fn": "backfill",
+    "read": "344: SELECT 1 FROM main.settings WHERE key = 'review_base_backfil",
+    "write": "345: UPDATE main.opus_reviews SET base_ref = (SELECT i.base_ref F"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 414,
+    "fn": "addColumns",
+    "read": "419: PRAGMA main.table_info(",
+    "write": "422: exec"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 426,
+    "fn": "dropColumns",
+    "read": "428: PRAGMA main.table_info(",
+    "write": "431: exec"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 437,
+    "fn": "migrateValues",
+    "read": "446: call migrateValues.scannedAt",
+    "write": "489: UPDATE main.access SET role = 'operator' WHERE role = 'admin"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 635,
+    "fn": "buildHashes",
+    "read": "636: SELECT 1 FROM main.settings WHERE key = 'hashes_built'",
+    "write": "637: call fillEmbedHashes"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 643,
+    "fn": "buildTextRefs",
+    "read": "644: SELECT 1 FROM main.settings WHERE key = 'text_refs_built'",
+    "write": "646: INSERT OR IGNORE INTO main.settings (key, value) VALUES ('te"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 703,
+    "fn": "connect",
+    "read": "704: call open",
+    "write": "705: exec"
+   },
+   {
+    "file": "src/db.ts",
+    "line": 712,
+    "fn": "open",
+    "read": "722: call schemaStamp",
+    "write": "725: call migrateValues"
+   },
+   {
+    "file": "src/decisions-used.ts",
+    "line": 22,
+    "fn": "applyUsedAnswers",
+    "read": "27: call actionable",
+    "write": "44: UPDATE main.decisions SET applied_at = ? WHERE id = ? AND ap"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 204,
+    "fn": "backlogOpen",
+    "read": "205: call backlogCandidates",
+    "write": "208: write block"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 229,
+    "fn": "clearAskedStage.<anonymous>",
+    "read": "231: SELECT stage, at FROM stages WHERE repo = ? AND number = ? O",
+    "write": "232: UPDATE item_stage SET stage = ?, at = ?, reviewed = ? WHERE "
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 242,
+    "fn": "withdrawOpen",
+    "read": "243: call backlogCandidates",
+    "write": "246: write block"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 272,
+    "fn": "setTestRepo",
+    "read": "273: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "275: INSERT INTO main.settings (key, value) VALUES (?, '1')"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 285,
+    "fn": "answerAsSession",
+    "read": "286: call sessionDecision",
+    "write": "292: call applyAnswer"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 309,
+    "fn": "retryAsSession",
+    "read": "310: call sessionDecision",
+    "write": "313: call retryDecision"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 324,
+    "fn": "cardAsSession",
+    "read": "325: SELECT id, repo, number, params, state FROM main.conversatio",
+    "write": "331: call doCard"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 345,
+    "fn": "cardCmd",
+    "read": "353: call connect",
+    "write": "353: call cardAsSession"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 357,
+    "fn": "retryCmd",
+    "read": "362: call connect",
+    "write": "362: call retryAsSession"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 366,
+    "fn": "answerCmd",
+    "read": "373: call connect",
+    "write": "373: call answerAsSession"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 382,
+    "fn": "testRepoCmd",
+    "read": "383: call connect",
+    "write": "390: call setTestRepo"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 393,
+    "fn": "withdrawCmd",
+    "read": "399: call connect",
+    "write": "399: call withdrawOpen"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 404,
+    "fn": "backlogCmd",
+    "read": "410: call connect",
+    "write": "410: call backlogOpen"
+   },
+   {
+    "file": "src/decisions.ts",
+    "line": 415,
+    "fn": "list",
+    "read": "417: call connect",
+    "write": "427: call connect"
+   },
+   {
+    "file": "src/fasttrack.ts",
+    "line": 63,
+    "fn": "addFastTrack",
+    "read": "65: call isTracked",
+    "write": "70: INSERT OR IGNORE INTO main.fast_track (repo, number, added_b"
+   },
+   {
+    "file": "src/fasttrack.ts",
+    "line": 76,
+    "fn": "setFastTrackWeight",
+    "read": "79: SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?",
+    "write": "80: UPDATE main.fast_track SET weight = ? WHERE repo = ? AND num"
+   },
+   {
+    "file": "src/fasttrack.ts",
+    "line": 176,
+    "fn": "run",
+    "read": "177: call connect",
+    "write": "187: call setFastTrackWeight"
+   },
+   {
+    "file": "src/itemhash.ts",
+    "line": 55,
+    "fn": "fill",
+    "read": "59: all",
+    "write": "61: write block"
+   },
+   {
+    "file": "src/liveness.ts",
+    "line": 131,
+    "fn": "refreshLiveness",
+    "read": "132: call setting",
+    "write": "135: write block"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 338,
+    "fn": "writePage",
+    "read": "354: call rememberSlug",
+    "write": "357: write block"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 407,
+    "fn": "readRepoSince",
+    "read": "416: call writePage",
+    "write": "416: call writePage"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 426,
+    "fn": "syncRepo",
+    "read": "429: SELECT high_water FROM repos WHERE name=?",
+    "write": "432: call readRepoSince"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 524,
+    "fn": "syncBySearch",
+    "read": "604: call window",
+    "write": "610: call readRepoSince"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 550,
+    "fn": "syncBySearch.write",
+    "read": "564: call writePage",
+    "write": "564: call writePage"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 569,
+    "fn": "syncBySearch.window",
+    "read": "575: call window",
+    "write": "576: call window"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 720,
+    "fn": "refreshRepoList",
+    "read": "723: call trackedNames",
+    "write": "728: call failRepo"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 764,
+    "fn": "syncPerRepo",
+    "read": "765: call refreshRepoList",
+    "write": "786: call syncRepo"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 835,
+    "fn": "reconcileRepo",
+    "read": "840: call writePage",
+    "write": "840: call writePage"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 875,
+    "fn": "reconcileNext",
+    "read": "876: call trackedNames",
+    "write": "879: call reconcileRepo"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 891,
+    "fn": "runSync",
+    "read": "893: call getSetting",
+    "write": "906: call syncBySearch"
+   },
+   {
+    "file": "src/mirror.ts",
+    "line": 964,
+    "fn": "sync",
+    "read": "982: call connect",
+    "write": "984: DELETE FROM settings WHERE key='full_sync_cursor'"
+   },
+   {
+    "file": "src/operator-actions.ts",
+    "line": 57,
+    "fn": "reviewAgain",
+    "read": "58: call openItem",
+    "write": "62: DELETE FROM opus_reviews WHERE repo = ? AND number = ? AND h"
+   },
+   {
+    "file": "src/operator-actions.ts",
+    "line": 67,
+    "fn": "verifyAgain",
+    "read": "68: call openItem",
+    "write": "72: UPDATE verifications SET state = 'stale' WHERE repo = ? AND "
+   },
+   {
+    "file": "src/operator-actions.ts",
+    "line": 77,
+    "fn": "fixAgain",
+    "read": "78: call openItem",
+    "write": "82: DELETE FROM fix_attempts WHERE repo = ? AND number = ?"
+   },
+   {
+    "file": "src/operator-actions.ts",
+    "line": 87,
+    "fn": "batchAgain",
+    "read": "88: call openItem",
+    "write": "92: call updateBatch"
+   },
+   {
+    "file": "src/operator-actions.ts",
+    "line": 99,
+    "fn": "run",
+    "read": "106: call connect",
+    "write": "111: call backlogItem"
+   },
+   {
+    "file": "src/optional-checks.ts",
+    "line": 35,
+    "fn": "setOptionalCheck",
+    "read": "38: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "41: call save"
+   },
+   {
+    "file": "src/optional-checks.ts",
+    "line": 92,
+    "fn": "run",
+    "read": "94: call connect",
+    "write": "100: call setOptionalCheck"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 49,
+    "fn": "setOutsideLimits",
+    "read": "51: call outsideLimits",
+    "write": "60: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 75,
+    "fn": "backfillAdmitted",
+    "read": "76: SELECT 1 FROM main.settings WHERE key = 'outside_admitted_ba",
+    "write": "78: INSERT OR IGNORE INTO main.outside_admitted (repo, number, a"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 89,
+    "fn": "insiders",
+    "read": "91: call listAccess",
+    "write": "92: call allOwnLogins"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 102,
+    "fn": "refreshOutsideHolds",
+    "read": "103: call outsideLimits",
+    "write": "127: call backfillAdmitted"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 210,
+    "fn": "releaseOutside",
+    "read": "211: SELECT author FROM main.outside_holds WHERE repo = ? AND num",
+    "write": "214: INSERT OR IGNORE INTO main.outside_released (repo, number, b"
+   },
+   {
+    "file": "src/outside.ts",
+    "line": 220,
+    "fn": "releaseAuthor",
+    "read": "221: SELECT repo, number FROM main.outside_holds WHERE author = ?",
+    "write": "225: INSERT OR IGNORE INTO main.outside_released (repo, number, b"
+   },
+   {
+    "file": "src/pilot.ts",
+    "line": 41,
+    "fn": "setRepoPipeline",
+    "read": "42: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "43: UPDATE main.tracked_repos SET pipeline = ? WHERE name = ? AN"
+   },
+   {
+    "file": "src/pilot.ts",
+    "line": 82,
+    "fn": "setPilot",
+    "read": "83: call parsePilotRefs",
+    "write": "84: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 47,
+    "fn": "recordPush",
+    "read": "52: SELECT state FROM main_ci WHERE repo = ? AND head_sha = ?",
+    "write": "60: INSERT INTO push_outcomes (at, stage, action, repo, number, "
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 68,
+    "fn": "resolvePushes",
+    "read": "73: SELECT id, stage, before_res FROM push_outcomes WHERE repo =",
+    "write": "79: UPDATE push_outcomes SET number = ?, after_res = ?, outcome "
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 130,
+    "fn": "trip",
+    "read": "131: call tripRow",
+    "write": "133: INSERT INTO stage_trips (stage, active, reason, evidence, tr"
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 142,
+    "fn": "evaluatePushBreaker",
+    "read": "143: call tripRow",
+    "write": "147: call trip"
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 154,
+    "fn": "mainRedAfterMerge",
+    "read": "155: call weMerged",
+    "write": "157: call trip"
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 161,
+    "fn": "mergeDefect",
+    "read": "163: call weMerged",
+    "write": "165: call trip"
+   },
+   {
+    "file": "src/push-outcomes.ts",
+    "line": 173,
+    "fn": "resumeStage",
+    "read": "176: call tripRow",
+    "write": "179: UPDATE stage_trips SET active = 0, cleared_at = ?, cleared_b"
+   },
+   {
+    "file": "src/reference-lint.ts",
+    "line": 171,
+    "fn": "defaultSemanticDeps.haiku",
+    "read": "172: call inferenceMode",
+    "write": "172: call runModelStep"
+   },
+   {
+    "file": "src/reference.ts",
+    "line": 81,
+    "fn": "importReference",
+    "read": "82: call isTracked",
+    "write": "105: call audit"
+   },
+   {
+    "file": "src/reference.ts",
+    "line": 146,
+    "fn": "run",
+    "read": "163: call connect",
+    "write": "163: call importReference"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 24,
+    "fn": "trackRepo",
+    "read": "28: SELECT owner FROM main.repos WHERE name = ?",
+    "write": "33: INSERT INTO main.repos (name, owner) VALUES (?, ?)"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 58,
+    "fn": "trackRepoChecked",
+    "read": "60: SELECT 1 FROM main.repos WHERE name = ?",
+    "write": "72: call trackRepo"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 83,
+    "fn": "purgeRepo",
+    "read": "85: call isTracked",
+    "write": "86: write block"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 154,
+    "fn": "track",
+    "read": "156: call connect",
+    "write": "156: call trackRepoChecked"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 164,
+    "fn": "untrack",
+    "read": "166: call connect",
+    "write": "166: call untrackRepo"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 168,
+    "fn": "pipeline",
+    "read": "174: call connect",
+    "write": "174: call setRepoPipeline"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 181,
+    "fn": "purge",
+    "read": "184: call connect",
+    "write": "184: call purgeRepo"
+   },
+   {
+    "file": "src/repos.ts",
+    "line": 197,
+    "fn": "run",
+    "read": "198: call connect",
+    "write": "203: call setGithubIdentityChecked"
+   },
+   {
+    "file": "src/settlers.ts",
+    "line": 19,
+    "fn": "setMaintainerWrites",
+    "read": "20: call maintainerWritesOn",
+    "write": "21: INSERT INTO main.settings (key, value) VALUES (?, '1') ON CO"
+   },
+   {
+    "file": "src/whitelist.ts",
+    "line": 205,
+    "fn": "override.<anonymous>",
+    "read": "210: call connect",
+    "write": "210: call setOverride"
+   },
+   {
+    "file": "src/whitelist.ts",
+    "line": 215,
+    "fn": "rule",
+    "read": "216: call connect",
+    "write": "221: call setRule"
+   }
+  ],
+  "act": [
+   {
+    "file": "src/act/approval.ts",
+    "line": 21,
+    "fn": "setCommentApproval",
+    "read": "22: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "24: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/act/dupe-groups.ts",
+    "line": 74,
+    "fn": "actOnGroups",
+    "read": "81: call groupDecisionsToAct",
+    "write": "95: call compareAgain"
+   },
+   {
+    "file": "src/act/dupe-groups.ts",
+    "line": 221,
+    "fn": "queueCarry",
+    "read": "223: SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND num",
+    "write": "224: INSERT OR IGNORE INTO dupe_carries (decision_id, repo, numbe"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 169,
+    "fn": "askHoldDecisions",
+    "read": "172: call planned",
+    "write": "175: call withdrawHoldQuestion"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 185,
+    "fn": "askCloseDecisions",
+    "read": "186: call closeRows",
+    "write": "187: call setAsideSupersededQuestions"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 280,
+    "fn": "runAct",
+    "read": "292: call fillEmbedHashes",
+    "write": "292: call applyDuplicateAnswers"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 329,
+    "fn": "runAct.save",
+    "read": "330: call rowOf",
+    "write": "331: UPDATE actions SET state = ?, reason = ?, comment_url = COAL"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 335,
+    "fn": "runAct.settle",
+    "read": "336: call actionable",
+    "write": "338: UPDATE main.decisions SET applied_at = ? WHERE id = ? AND ap"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 340,
+    "fn": "runAct.skip",
+    "read": "341: call runAct.save",
+    "write": "342: call audit"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 451,
+    "fn": "runAct.begin",
+    "read": "453: call laneForDecision",
+    "write": "455: call setExecState"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 468,
+    "fn": "runAct.comment",
+    "read": "468: call runAct.asAnswerer",
+    "write": "468: call commentOn"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 469,
+    "fn": "runAct.close",
+    "read": "469: call runAct.asAnswerer",
+    "write": "469: call closeItem"
+   },
+   {
+    "file": "src/act/index.ts",
+    "line": 517,
+    "fn": "run",
+    "read": "519: call connect",
+    "write": "519: call runAct"
+   }
+  ],
+  "agents": [
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 43,
+    "fn": "syncAccounts",
+    "read": "43: call boxAccounts",
+    "write": "45: INSERT OR IGNORE INTO claude_accounts (id, label) VALUES (?,"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 64,
+    "fn": "setUsagePause",
+    "read": "67: call usagePause",
+    "write": "69: INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT "
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 122,
+    "fn": "listAccounts",
+    "read": "123: call boxAccounts",
+    "write": "124: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 129,
+    "fn": "updateAccount",
+    "read": "130: call boxAccounts",
+    "write": "143: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 171,
+    "fn": "chooseAccount",
+    "read": "172: call boxAccounts",
+    "write": "173: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 194,
+    "fn": "accountHasRoom",
+    "read": "195: call boxAccounts",
+    "write": "196: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 203,
+    "fn": "freeSlots",
+    "read": "204: call boxAccounts",
+    "write": "205: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 225,
+    "fn": "setJevParallel",
+    "read": "227: call jevParallel",
+    "write": "228: INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT "
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 237,
+    "fn": "claudePauseReason",
+    "read": "238: call boxAccounts",
+    "write": "239: call syncAccounts"
+   },
+   {
+    "file": "src/agents/accounts.ts",
+    "line": 256,
+    "fn": "recordUsageSamples",
+    "read": "259: call boxAccounts",
+    "write": "262: INSERT OR IGNORE INTO account_usage_samples (account_id, t, "
+   },
+   {
+    "file": "src/agents/call.ts",
+    "line": 159,
+    "fn": "queueRoom",
+    "read": "160: call inferenceMode",
+    "write": "162: call freeSlots"
+   },
+   {
+    "file": "src/agents/call.ts",
+    "line": 294,
+    "fn": "pollClaude",
+    "read": "307: call waiterOrder",
+    "write": "308: call freeSlots"
+   },
+   {
+    "file": "src/agents/call.ts",
+    "line": 323,
+    "fn": "startClaudeRun",
+    "read": "327: call levelBand",
+    "write": "329: INSERT INTO model_waits (provider, class, level, job_id, ste"
+   },
+   {
+    "file": "src/agents/index.ts",
+    "line": 19,
+    "fn": "print",
+    "read": "20: call connect",
+    "write": "20: call listAccounts"
+   },
+   {
+    "file": "src/agents/index.ts",
+    "line": 28,
+    "fn": "set",
+    "read": "43: call connect",
+    "write": "43: call updateAccount"
+   },
+   {
+    "file": "src/agents/index.ts",
+    "line": 51,
+    "fn": "jev",
+    "read": "52: call connect",
+    "write": "54: call setJevEnabled"
+   },
+   {
+    "file": "src/agents/index.ts",
+    "line": 68,
+    "fn": "pause",
+    "read": "69: call connect",
+    "write": "81: call setUsagePause"
+   },
+   {
+    "file": "src/agents/index.ts",
+    "line": 94,
+    "fn": "run",
+    "read": "95: call print",
+    "write": "96: call set"
+   },
+   {
+    "file": "src/agents/jev.ts",
+    "line": 57,
+    "fn": "setJevEnabled",
+    "read": "58: call jevEnabled",
+    "write": "59: call put"
+   },
+   {
+    "file": "src/agents/jev.ts",
+    "line": 76,
+    "fn": "jevAvailable",
+    "read": "77: call jevEnabled",
+    "write": "78: call put"
+   },
+   {
+    "file": "src/agents/jev.ts",
+    "line": 88,
+    "fn": "markJevUnavailable",
+    "read": "89: call jevOutage",
+    "write": "91: call put"
+   },
+   {
+    "file": "src/agents/jev.ts",
+    "line": 95,
+    "fn": "markJevWorking",
+    "read": "96: call jevOutage",
+    "write": "97: call clear"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 24,
+    "fn": "addAccount",
+    "read": "28: SELECT id FROM claude_accounts",
+    "write": "37: INSERT INTO claude_accounts (id, label, enabled, updated_by,"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 44,
+    "fn": "beginLogin",
+    "read": "45: call dirOf",
+    "write": "47: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 52,
+    "fn": "sendCode",
+    "read": "53: call dirOf",
+    "write": "58: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 62,
+    "fn": "stopLogin",
+    "read": "63: call dirOf",
+    "write": "64: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 69,
+    "fn": "beginToken",
+    "read": "70: call dirOf",
+    "write": "72: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 93,
+    "fn": "sendTokenCode",
+    "read": "94: call dirOf",
+    "write": "99: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 103,
+    "fn": "stopToken",
+    "read": "104: call dirOf",
+    "write": "105: call audit"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 110,
+    "fn": "removeToken",
+    "read": "111: call dirOf",
+    "write": "113: call recordTokenRemoved"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 118,
+    "fn": "signOut",
+    "read": "119: call dirOf",
+    "write": "125: call recordTokenRemoved"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 132,
+    "fn": "refreshNow",
+    "read": "133: call dirOf",
+    "write": "134: call refreshStatus"
+   },
+   {
+    "file": "src/agents/manage.ts",
+    "line": 160,
+    "fn": "AccountWatcher.tick",
+    "read": "164: call syncAccounts",
+    "write": "171: call refreshStatus"
+   },
+   {
+    "file": "src/agents/runs.ts",
+    "line": 257,
+    "fn": "pruneRuns",
+    "read": "259: call pruneRuns.maxBefore",
+    "write": "259: DELETE FROM agent_run_texts WHERE run_id <= ?"
+   },
+   {
+    "file": "src/agents/step.ts",
+    "line": 112,
+    "fn": "runModelStep",
+    "read": "123: call jevAvailable",
+    "write": "127: call call"
+   },
+   {
+    "file": "src/agents/step.ts",
+    "line": 167,
+    "fn": "call",
+    "read": "172: call askClaude",
+    "write": "175: call askJev"
+   },
+   {
+    "file": "src/agents/step.ts",
+    "line": 227,
+    "fn": "runTiered",
+    "read": "229: call jevAvailable",
+    "write": "236: call jevAvailable"
+   },
+   {
+    "file": "src/agents/step.ts",
+    "line": 230,
+    "fn": "runTiered.map-callback.<anonymous>",
+    "read": "231: call jevAvailable",
+    "write": "232: call runModelStep"
+   },
+   {
+    "file": "src/agents/tools.ts",
+    "line": 75,
+    "fn": "saveRemoteTools",
+    "read": "77: SELECT result FROM main.remote_checks WHERE call_id = ? AND ",
+    "write": "94: call saveUses"
+   },
+   {
+    "file": "src/agents/tools.ts",
+    "line": 97,
+    "fn": "saveUses",
+    "read": "99: SELECT id, command FROM model_checks WHERE run_id = ? ORDER ",
+    "write": "104: INSERT OR REPLACE INTO agent_run_tools (run_id, seq, tool, a"
+   }
+  ],
+  "answers": [
+   {
+    "file": "src/answers/sweep.ts",
+    "line": 34,
+    "fn": "sweepStaleAnswers",
+    "read": "35: SELECT * FROM main.decisions WHERE answer IS NOT NULL AND ap",
+    "write": "43: UPDATE main.decisions SET applied_at = ?, exec_state = 'done"
+   }
+  ],
+  "areas": [
+   {
+    "file": "src/areas/assign.ts",
+    "line": 32,
+    "fn": "diffPaths.<anonymous>",
+    "read": "36: SELECT value FROM settings WHERE key = 'sync_rate_remaining'",
+    "write": "37: call cachedDiff"
+   },
+   {
+    "file": "src/areas/assign.ts",
+    "line": 89,
+    "fn": "assignRepo",
+    "read": "90: call currentList",
+    "write": "102: call jevAvailable"
+   },
+   {
+    "file": "src/areas/assign.ts",
+    "line": 92,
+    "fn": "assignRepo.store",
+    "read": "94: call currentList",
+    "write": "95: call setItemArea"
+   },
+   {
+    "file": "src/areas/assign.ts",
+    "line": 121,
+    "fn": "assignAreas",
+    "read": "122: call dueForArea",
+    "write": "128: call assignRepo"
+   },
+   {
+    "file": "src/areas/index.ts",
+    "line": 41,
+    "fn": "run",
+    "read": "45: call connect",
+    "write": "62: call proposeAreas"
+   },
+   {
+    "file": "src/areas/propose.ts",
+    "line": 28,
+    "fn": "proposeAreas",
+    "read": "30: SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.r",
+    "write": "38: call askClaude"
+   },
+   {
+    "file": "src/areas/propose.ts",
+    "line": 52,
+    "fn": "suggestAreas",
+    "read": "53: call currentList",
+    "write": "64: call askClaude"
+   },
+   {
+    "file": "src/areas/store.ts",
+    "line": 100,
+    "fn": "editAreas",
+    "read": "101: SELECT 1 FROM tracked_repos WHERE name = ?",
+    "write": "154: call save"
+   },
+   {
+    "file": "src/areas/store.ts",
+    "line": 215,
+    "fn": "acceptProposal",
+    "read": "216: call proposalById",
+    "write": "218: call editAreas"
+   },
+   {
+    "file": "src/areas/store.ts",
+    "line": 223,
+    "fn": "dismissProposal",
+    "read": "224: call proposalById",
+    "write": "226: UPDATE area_proposals SET state = 'dismissed', decided_by = "
+   },
+   {
+    "file": "src/areas/store.ts",
+    "line": 230,
+    "fn": "decideSuggestion",
+    "read": "231: call proposalById",
+    "write": "238: call editAreas"
+   }
+  ],
+  "build": [
+   {
+    "file": "src/build/artifacts.ts",
+    "line": 73,
+    "fn": "storeArtifact",
+    "read": "78: SELECT artifact_bytes FROM build_tasks WHERE id = ?",
+    "write": "88: write block"
+   },
+   {
+    "file": "src/build/cli.ts",
+    "line": 92,
+    "fn": "envs",
+    "read": "94: call connect",
+    "write": "107: call envs.<anonymous>"
+   },
+   {
+    "file": "src/build/envs.ts",
+    "line": 129,
+    "fn": "updateEnv",
+    "read": "133: SELECT * FROM build_envs WHERE id = ?",
+    "write": "143: UPDATE build_envs SET label = ?, enabled = ?, slots = ?, con"
+   },
+   {
+    "file": "src/build/envs.ts",
+    "line": 158,
+    "fn": "rotateKey",
+    "read": "159: SELECT 1 FROM build_envs WHERE id = ?",
+    "write": "161: UPDATE build_envs SET key_hash = ?, updated_by = ?, updated_"
+   },
+   {
+    "file": "src/build/features.ts",
+    "line": 41,
+    "fn": "stopQueuedTasks",
+    "read": "45: SELECT id FROM build_tasks WHERE step = ? AND state NOT IN (",
+    "write": "46: call cancelTask"
+   },
+   {
+    "file": "src/build/rounds.ts",
+    "line": 28,
+    "fn": "queueRound",
+    "read": "29: call createTask",
+    "write": "31: call queueWarmBuild"
+   },
+   {
+    "file": "src/build/rounds.ts",
+    "line": 36,
+    "fn": "requeueRound",
+    "read": "36: call cloneTask",
+    "write": "36: call cloneTask"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 127,
+    "fn": "createTask",
+    "read": "139: SELECT COUNT(*) AS n FROM build_tasks WHERE state = 'queued'",
+    "write": "141: INSERT INTO build_tasks (job_id, step, repo, number, head_sh"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 231,
+    "fn": "reapLost",
+    "read": "233: SELECT id, attempts, cancel_requested_at FROM build_tasks WH",
+    "write": "238: call removeArtifacts"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 262,
+    "fn": "startTask",
+    "read": "263: call mine",
+    "write": "265: UPDATE build_tasks SET state = 'running', started_at = COALE"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 270,
+    "fn": "heartbeat",
+    "read": "271: SELECT state, env_id FROM build_tasks WHERE id = ?",
+    "write": "274: UPDATE build_tasks SET heartbeat_at = ? WHERE id = ?"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 282,
+    "fn": "appendLog",
+    "read": "283: call mine",
+    "write": "297: UPDATE build_tasks SET log_bytes = ? WHERE id = ? AND log_by"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 341,
+    "fn": "finishTask",
+    "read": "343: SELECT state, env_id FROM build_tasks WHERE id = ?",
+    "write": "353: UPDATE build_tasks SET state = ?, ended_at = ?, results = ?,"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 365,
+    "fn": "cancelTask",
+    "read": "367: SELECT * FROM build_tasks WHERE id = ?",
+    "write": "375: UPDATE build_tasks SET state = 'cancelled', ended_at = ?, ca"
+   },
+   {
+    "file": "src/build/tasks.ts",
+    "line": 533,
+    "fn": "pruneTasks",
+    "read": "536: SELECT id FROM build_tasks WHERE ended_at IS NOT NULL AND en",
+    "write": "538: call removeArtifacts"
+   },
+   {
+    "file": "src/build/worker-api.ts",
+    "line": 108,
+    "fn": "handler.route",
+    "read": "112: call authenticate",
+    "write": "123: call hello"
+   },
+   {
+    "file": "src/build/worker-update.ts",
+    "line": 118,
+    "fn": "requestUpdate",
+    "read": "124: call busyTasks",
+    "write": "126: call putSetting"
+   },
+   {
+    "file": "src/build/worker-update.ts",
+    "line": 137,
+    "fn": "checkPendingUpdate",
+    "read": "138: call pendingUpdate",
+    "write": "145: call clearSetting"
+   }
+  ],
+  "checktool": [
+   {
+    "file": "src/checktool/index.ts",
+    "line": 170,
+    "fn": "CheckTool.close",
+    "read": "173: call cancelTask",
+    "write": "173: call cancelTask"
+   },
+   {
+    "file": "src/checktool/index.ts",
+    "line": 178,
+    "fn": "CheckTool.runOne",
+    "read": "192: call confidentialReadyAt",
+    "write": "198: INSERT INTO model_checks (run_id, step, repo, number, head, "
+   }
+  ],
+  "cifix": [
+   {
+    "file": "src/cifix/index.ts",
+    "line": 190,
+    "fn": "Recorder.pushing",
+    "read": "191: call open",
+    "write": "192: UPDATE ci_fixes SET state = 'pushing', to_head = ?, files = "
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 210,
+    "fn": "Recorder.dropUnlisted",
+    "read": "212: SELECT rowid AS id, number, head, lint_task FROM ci_fixes WH",
+    "write": "220: UPDATE ci_fixes SET state = 'superseded', reason = 'the plan"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 228,
+    "fn": "Recorder.set",
+    "read": "232: call open",
+    "write": "234: UPDATE ci_fixes SET state = ?, reason = ?, files = ?, to_hea"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 376,
+    "fn": "runCifix",
+    "read": "379: call sweepSessions",
+    "write": "380: call runCifixWith"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 386,
+    "fn": "runCifixWith",
+    "read": "393: call selectCifix",
+    "write": "405: call dropUnlisted"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 425,
+    "fn": "runCifixWith.deliver",
+    "read": "433: call ensureAuthorWrites",
+    "write": "438: call set"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 553,
+    "fn": "runCifixWith.collectFormat",
+    "read": "556: call getTask",
+    "write": "558: call runCifixWith.collectFormat.fail"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 576,
+    "fn": "runCifixWith.claim",
+    "read": "577: call duplicateHeld",
+    "write": "580: call claimForWork"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 582,
+    "fn": "runCifixWith.fixCode",
+    "read": "584: call runCifixWith.claim",
+    "write": "592: call noteLive"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 609,
+    "fn": "runCifixWith.collectLint",
+    "read": "621: call runCifixWith.readPr",
+    "write": "625: call runCifixWith.collectLint.fail"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 660,
+    "fn": "runCifixWith.workOne",
+    "read": "663: call runCifixWith.readPr",
+    "write": "669: call runCifixWith.workOne.skip"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 786,
+    "fn": "runCifixWith.<anonymous>",
+    "read": "787: call runCifixWith.collectFormat",
+    "write": "791: call set"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 795,
+    "fn": "runCifixWith.<anonymous>",
+    "read": "796: call runCifixWith.collectLint",
+    "write": "800: call set"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 812,
+    "fn": "runRerun",
+    "read": "816: call selectCifix",
+    "write": "829: call leaseItem"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 876,
+    "fn": "run",
+    "read": "878: call connect",
+    "write": "878: call runCifix"
+   },
+   {
+    "file": "src/cifix/index.ts",
+    "line": 883,
+    "fn": "run",
+    "read": "885: call connect",
+    "write": "885: call runRerun"
+   },
+   {
+    "file": "src/cifix/select.ts",
+    "line": 7,
+    "fn": "selectCifix",
+    "read": "9: call planned",
+    "write": "23: call planned"
+   }
+  ],
+  "classify": [
+   {
+    "file": "src/classify/index.ts",
+    "line": 34,
+    "fn": "current",
+    "read": "35: call connect",
+    "write": "50: call setCurrentRun"
+   },
+   {
+    "file": "src/classify/index.ts",
+    "line": 54,
+    "fn": "classify",
+    "read": "55: call current",
+    "write": "62: call connect"
+   },
+   {
+    "file": "src/classify/index.ts",
+    "line": 97,
+    "fn": "referee",
+    "read": "100: call connect",
+    "write": "104: call markSpotCheck"
+   },
+   {
+    "file": "src/classify/referee.ts",
+    "line": 44,
+    "fn": "refereeItems.map-callback.<anonymous>",
+    "read": "49: SELECT 1 FROM classifications WHERE repo = ? AND number = ? ",
+    "write": "51: call runModelStep"
+   },
+   {
+    "file": "src/classify/referee.ts",
+    "line": 86,
+    "fn": "markSpotCheck",
+    "read": "88: SELECT repo, number, type_label FROM classifications WHERE c",
+    "write": "93: UPDATE main.classifications SET flags = '[]' WHERE classifie"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 454,
+    "fn": "askClaude",
+    "read": "457: call askOnce",
+    "write": "461: call askOnce"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 469,
+    "fn": "askOnce",
+    "read": "470: call inferenceMode",
+    "write": "470: call askRemote"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 531,
+    "fn": "askOnce.turn",
+    "read": "534: call askOnce.withToken",
+    "write": "540: call askOnce.turn.finish"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 624,
+    "fn": "askOnce.<anonymous>",
+    "read": "626: call credentialsNearExpiry",
+    "write": "633: call tryStartFollowUp"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 685,
+    "fn": "askRemote",
+    "read": "690: call docsOf",
+    "write": "741: call askRemote.turn"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 714,
+    "fn": "askRemote.turn",
+    "read": "715: call enqueueCall",
+    "write": "723: call awaitCall"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 777,
+    "fn": "askJev",
+    "read": "792: call markJevUnavailable",
+    "write": "793: call markJevWorking"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 818,
+    "fn": "runHaiku.map-callback.<anonymous>",
+    "read": "819: call runModelStep",
+    "write": "820: call saveVerdict"
+   },
+   {
+    "file": "src/classify/run.ts",
+    "line": 828,
+    "fn": "runJev.map-callback.<anonymous>",
+    "read": "830: call jevAvailable",
+    "write": "832: call runModelStep"
+   },
+   {
+    "file": "src/classify/settled.ts",
+    "line": 126,
+    "fn": "setCurrentRun",
+    "read": "127: SELECT value FROM settings WHERE key = 'classify_run'",
+    "write": "128: INSERT INTO settings (key, value) VALUES ('classify_run', ?)"
+   },
+   {
+    "file": "src/classify/settled.ts",
+    "line": 232,
+    "fn": "settledTable",
+    "read": "233: SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS coun",
+    "write": "236: CREATE TEMP TABLE IF NOT EXISTS item_settled (repo TEXT NOT "
+   }
+  ],
+  "conversations": [
+   {
+    "file": "src/conversations/act.ts",
+    "line": 67,
+    "fn": "editCard",
+    "read": "68: call need",
+    "write": "101: UPDATE conversation_cards SET text = ?, params = ?, edited_b"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 108,
+    "fn": "dismissCard",
+    "read": "109: call need",
+    "write": "111: write block"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 125,
+    "fn": "answerDecision",
+    "read": "127: call getDecision",
+    "write": "144: call initExecState"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 190,
+    "fn": "postComment",
+    "read": "191: call actGrant",
+    "write": "193: call commentOn"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 197,
+    "fn": "addLabel",
+    "read": "198: call actGrant",
+    "write": "205: call addLabels"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 212,
+    "fn": "closeThe",
+    "read": "213: call actGrant",
+    "write": "218: call commentOn"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 226,
+    "fn": "settleOthers",
+    "read": "227: SELECT id FROM decisions WHERE repo = ? AND number = ? AND a",
+    "write": "230: call resolveDecision"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 235,
+    "fn": "closeDuplicate",
+    "read": "236: call actGrant",
+    "write": "242: call commentOn"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 301,
+    "fn": "unlabel",
+    "read": "303: call actGrant",
+    "write": "307: call removeLabel"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 317,
+    "fn": "reopen",
+    "read": "319: call actGrant",
+    "write": "326: call reopenItem"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 330,
+    "fn": "openIssue",
+    "read": "333: call actGrant",
+    "write": "335: call createIssue"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 343,
+    "fn": "transfer",
+    "read": "345: call actGrant",
+    "write": "354: call transferIssue"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 358,
+    "fn": "assign",
+    "read": "360: call actGrant",
+    "write": "364: call assignTo"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 368,
+    "fn": "askReviewers",
+    "read": "370: call actGrant",
+    "write": "380: call requestReviewers"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 393,
+    "fn": "runResolution",
+    "read": "395: call checkSettle",
+    "write": "415: call runResolution.answerNow"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 490,
+    "fn": "run",
+    "read": "493: call run.laneFor",
+    "write": "496: call runResolution"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 518,
+    "fn": "doCard",
+    "read": "519: call need",
+    "write": "568: call laneForOperator"
+   },
+   {
+    "file": "src/conversations/act.ts",
+    "line": 667,
+    "fn": "drainQueuedCards",
+    "read": "669: call queuedCards",
+    "write": "681: call failQueued"
+   },
+   {
+    "file": "src/conversations/held.ts",
+    "line": 132,
+    "fn": "say",
+    "read": "133: call conversationOf",
+    "write": "133: call insertTurn"
+   },
+   {
+    "file": "src/conversations/held.ts",
+    "line": 154,
+    "fn": "fileHeldFollowups",
+    "read": "157: call dueHeld",
+    "write": "162: UPDATE main.held_followups SET state = 'filed', issue_number"
+   },
+   {
+    "file": "src/conversations/index.ts",
+    "line": 24,
+    "fn": "run",
+    "read": "26: call connect",
+    "write": "32: call doCard"
+   },
+   {
+    "file": "src/conversations/run.ts",
+    "line": 44,
+    "fn": "answerPending.map-callback.<anonymous>",
+    "read": "49: call refreshItem",
+    "write": "51: call claimPending"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 197,
+    "fn": "ensureConversation",
+    "read": "198: call conversationOf",
+    "write": "200: INSERT OR IGNORE INTO conversations (repo, number, item_bloc"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 220,
+    "fn": "insertRow",
+    "read": "226: call seenOf",
+    "write": "228: INSERT INTO conversation_cards (turn_id, repo, number, kind,"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 240,
+    "fn": "appendTurn",
+    "read": "241: call pendingTurn",
+    "write": "244: call insertRow"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 261,
+    "fn": "refreshItem",
+    "read": "262: call conversationOf",
+    "write": "290: call inTx"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 290,
+    "fn": "refreshItem.<anonymous>",
+    "read": "292: call conversationOf",
+    "write": "293: call appendTurn"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 303,
+    "fn": "addOperatorMessage",
+    "read": "307: call itemRow",
+    "write": "309: call ensureConversation"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 313,
+    "fn": "addOperatorMessage.<anonymous>",
+    "read": "314: call applicableSteps",
+    "write": "318: call appendTurn"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 363,
+    "fn": "setInclude",
+    "read": "364: SELECT sent_turn FROM conversation_includes WHERE repo = ? A",
+    "write": "366: DELETE FROM conversation_includes WHERE repo = ? AND number "
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 374,
+    "fn": "startFromOpus",
+    "read": "376: call conversationOf",
+    "write": "377: call ensureConversation"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 392,
+    "fn": "claimPending.<anonymous>",
+    "read": "395: SELECT 1 FROM conversation_turns WHERE repo = ? AND number =",
+    "write": "397: UPDATE conversation_turns SET status = NULL, seq = ? WHERE i"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 420,
+    "fn": "settleWait",
+    "read": "421: call nextSeq",
+    "write": "421: UPDATE conversation_turns SET status = ?, error = ?, seq = ?"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 435,
+    "fn": "storeReply.<anonymous>",
+    "read": "436: call claimed",
+    "write": "439: call settleWait"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 439,
+    "fn": "storeReply.<anonymous>.<anonymous>",
+    "read": "439: call nextSeq",
+    "write": "439: call insertRow"
+   },
+   {
+    "file": "src/conversations/store.ts",
+    "line": 445,
+    "fn": "failTurn.<anonymous>",
+    "read": "446: call claimed",
+    "write": "448: call settleWait"
+   }
+  ],
+  "core": [
+   {
+    "file": "src/core/facts.ts",
+    "line": 135,
+    "fn": "loadPrFacts",
+    "read": "146: ",
+    "write": "168: call staleReviews"
+   },
+   {
+    "file": "src/core/guard.ts",
+    "line": 63,
+    "fn": "check",
+    "read": "65: call disputeOn",
+    "write": "78: call loadPrFact"
+   },
+   {
+    "file": "src/core/guard.ts",
+    "line": 106,
+    "fn": "guardBatchMerge",
+    "read": "108: call guard",
+    "write": "108: call guard"
+   },
+   {
+    "file": "src/core/plan-cache.ts",
+    "line": 152,
+    "fn": "writePlanCache",
+    "read": "165: call storedRows",
+    "write": "178: write block"
+   },
+   {
+    "file": "src/core/plan-cache.ts",
+    "line": 205,
+    "fn": "refreshPlanCache",
+    "read": "206: call loadPlanSet",
+    "write": "206: call writePlanCache"
+   },
+   {
+    "file": "src/core/plan-changes.ts",
+    "line": 202,
+    "fn": "dropPlanChanges",
+    "read": "203: SELECT name FROM main.sqlite_master WHERE type = 'trigger' A",
+    "write": "204: write block"
+   },
+   {
+    "file": "src/core/plan-engine.ts",
+    "line": 143,
+    "fn": "planPass",
+    "read": "146: call shadowMode",
+    "write": "157: call loadPrFacts"
+   },
+   {
+    "file": "src/core/plan-set.ts",
+    "line": 32,
+    "fn": "loadPlanSet",
+    "read": "34: call latestRun",
+    "write": "37: call loadPrFacts"
+   }
+  ],
+  "dash": [
+   {
+    "file": "src/dash/api/activity.ts",
+    "line": 213,
+    "fn": "activity",
+    "read": "227: call needVisible",
+    "write": "238: call allOwnLogins"
+   },
+   {
+    "file": "src/dash/api/admin.ts",
+    "line": 230,
+    "fn": "override",
+    "read": "239: call override.kept",
+    "write": "251: call setOverride"
+   },
+   {
+    "file": "src/dash/api/admin.ts",
+    "line": 519,
+    "fn": "revokeSession",
+    "read": "523: DELETE FROM sessions WHERE rowid = ? RETURNING id_hash, logi",
+    "write": "527: call endTokens"
+   },
+   {
+    "file": "src/dash/api/admin.ts",
+    "line": 534,
+    "fn": "revokeAgentToken",
+    "read": "538: call revokeAnyToken",
+    "write": "540: call audit"
+   },
+   {
+    "file": "src/dash/api/admin.ts",
+    "line": 591,
+    "fn": "putPilot",
+    "read": "596: call setPilot",
+    "write": "601: call pipelineState"
+   },
+   {
+    "file": "src/dash/api/areas.ts",
+    "line": 58,
+    "fn": "edit",
+    "read": "60: call needVisible",
+    "write": "73: call audit"
+   },
+   {
+    "file": "src/dash/api/areas.ts",
+    "line": 79,
+    "fn": "acceptProposalApi",
+    "read": "81: SELECT repo FROM area_proposals WHERE id = ?",
+    "write": "89: call audit"
+   },
+   {
+    "file": "src/dash/api/areas.ts",
+    "line": 86,
+    "fn": "acceptProposalApi.<anonymous>",
+    "read": "87: call decideSuggestion",
+    "write": "88: call acceptProposal"
+   },
+   {
+    "file": "src/dash/api/build.ts",
+    "line": 70,
+    "fn": "cancel.<anonymous>",
+    "read": "71: call visibleTask",
+    "write": "72: call cancelTask"
+   },
+   {
+    "file": "src/dash/api/build.ts",
+    "line": 92,
+    "fn": "postFeature",
+    "read": "100: call postFeature.tracked",
+    "write": "111: call setScope"
+   },
+   {
+    "file": "src/dash/api/build.ts",
+    "line": 132,
+    "fn": "putScreenshots",
+    "read": "133: call trackedRepo",
+    "write": "135: call putConfig"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 176,
+    "fn": "getConversation",
+    "read": "178: call needVisible",
+    "write": "179: call conversationView"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 189,
+    "fn": "postMessage",
+    "read": "192: call needVisible",
+    "write": "194: call conversationView"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 198,
+    "fn": "postInclude",
+    "read": "201: call needVisible",
+    "write": "205: call conversationView"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 238,
+    "fn": "disputePress",
+    "read": "239: call needCard",
+    "write": "245: call disputeCard"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 251,
+    "fn": "keepPress",
+    "read": "252: call needCard",
+    "write": "254: call keepCard"
+   },
+   {
+    "file": "src/dash/api/conversations.ts",
+    "line": 300,
+    "fn": "doChoice",
+    "read": "301: call choicesById",
+    "write": "348: UPDATE main.conversation_cards SET state = 'replaced' WHERE "
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 648,
+    "fn": "answer",
+    "read": "649: call needDecision",
+    "write": "651: call applyAnswer"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 659,
+    "fn": "applyAnswer",
+    "read": "661: call settlingBy",
+    "write": "685: call inTransaction"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 685,
+    "fn": "applyAnswer.<anonymous>",
+    "read": "686: call textsFor",
+    "write": "690: UPDATE main.decisions SET answer = ?, answer_note = ?, excep"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 709,
+    "fn": "snooze",
+    "read": "710: call needDecision",
+    "write": "716: UPDATE main.decisions SET snoozed_by = ?, snoozed_at = ? WHE"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 725,
+    "fn": "reprepare",
+    "read": "726: call needDecision",
+    "write": "730: UPDATE main.decisions SET prepared_at = NULL, prepared_head "
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 737,
+    "fn": "undo",
+    "read": "738: call needDecision",
+    "write": "741: call releaseBacklogItem"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 744,
+    "fn": "undo.<anonymous>",
+    "read": "745: call canUndo",
+    "write": "746: UPDATE main.decisions SET answer = NULL, answer_note = NULL,"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 761,
+    "fn": "dispute",
+    "read": "762: call needDecision",
+    "write": "771: call openDispute"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 776,
+    "fn": "keepAnswer",
+    "read": "777: call needDecision",
+    "write": "780: call clearDispute"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 788,
+    "fn": "retry",
+    "read": "789: call needDecision",
+    "write": "792: call retryDecision"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 798,
+    "fn": "reopen",
+    "read": "799: call needDecision",
+    "write": "802: call releaseBacklogItem"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 815,
+    "fn": "backlogItem",
+    "read": "816: SELECT state FROM items WHERE repo = ? AND number = ?",
+    "write": "824: call applyAnswer"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 829,
+    "fn": "backlogItem.<anonymous>",
+    "read": "830: call getDecision",
+    "write": "831: INSERT INTO main.decisions (id, kind, repo, number, question"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 845,
+    "fn": "backlogItemRoute",
+    "read": "849: call needVisible",
+    "write": "851: call backlogItem"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 878,
+    "fn": "adopt",
+    "read": "879: call needDecision",
+    "write": "890: call inTransaction"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 890,
+    "fn": "adopt.<anonymous>",
+    "read": "891: call textsFor",
+    "write": "893: UPDATE main.decisions SET answer = ?, answer_note = NULL, ex"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 920,
+    "fn": "feedback",
+    "read": "922: call needDecision",
+    "write": "932: INSERT INTO decision_comments (id, decision_id, login, at, b"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 953,
+    "fn": "retract",
+    "read": "955: call needDecision",
+    "write": "958: UPDATE decision_opinions SET retracted_at = ? WHERE decision"
+   },
+   {
+    "file": "src/dash/api/decisions.ts",
+    "line": 967,
+    "fn": "claim",
+    "read": "969: call needDecision",
+    "write": "973: INSERT INTO decision_claims (decision_id, login, since, at) "
+   },
+   {
+    "file": "src/dash/api/discord.ts",
+    "line": 78,
+    "fn": "putChannelRepo",
+    "read": "82: call isPublicRepo",
+    "write": "83: UPDATE discord_channels SET default_repo = ? WHERE channel_i"
+   },
+   {
+    "file": "src/dash/api/discord.ts",
+    "line": 128,
+    "fn": "removeLink",
+    "read": "132: call unlinkRow",
+    "write": "134: call audit"
+   },
+   {
+    "file": "src/dash/api/flow.ts",
+    "line": 13,
+    "fn": "flow",
+    "read": "15: call needVisible",
+    "write": "16: call readSummary"
+   },
+   {
+    "file": "src/dash/api/github-writes.ts",
+    "line": 34,
+    "fn": "writesOf",
+    "read": "36: SELECT rowid, at, action, details FROM audit WHERE target = ",
+    "write": "57: call ownLogins"
+   },
+   {
+    "file": "src/dash/api/home.ts",
+    "line": 155,
+    "fn": "home",
+    "read": "156: call hiddenRepos",
+    "write": "161: call needs"
+   },
+   {
+    "file": "src/dash/api/index.ts",
+    "line": 323,
+    "fn": "progressItems",
+    "read": "324: SELECT (SELECT MAX(synced_at) FROM main.repos) AS synced, (S",
+    "write": "338: call funnelByRepo"
+   },
+   {
+    "file": "src/dash/api/index.ts",
+    "line": 472,
+    "fn": "apiRoutes.<anonymous>",
+    "read": "472: call hiddenRepos",
+    "write": "472: call progress"
+   },
+   {
+    "file": "src/dash/api/inference.ts",
+    "line": 13,
+    "fn": "put",
+    "read": "20: call setAcceptedModels",
+    "write": "22: call setInferenceMode"
+   },
+   {
+    "file": "src/dash/api/item-page.ts",
+    "line": 263,
+    "fn": "itemPage",
+    "read": "264: call context",
+    "write": "278: call githubOf"
+   },
+   {
+    "file": "src/dash/api/items.ts",
+    "line": 100,
+    "fn": "build",
+    "read": "104: call latestRun",
+    "write": "105: call settledTable"
+   },
+   {
+    "file": "src/dash/api/items.ts",
+    "line": 247,
+    "fn": "listItems",
+    "read": "248: call hiddenRepos",
+    "write": "248: call build"
+   },
+   {
+    "file": "src/dash/api/items.ts",
+    "line": 408,
+    "fn": "statusList",
+    "read": "415: call readerOf",
+    "write": "416: call build"
+   },
+   {
+    "file": "src/dash/api/mcp.ts",
+    "line": 24,
+    "fn": "create",
+    "read": "30: call maintainerWritesOn",
+    "write": "32: call audit"
+   },
+   {
+    "file": "src/dash/api/needs.ts",
+    "line": 80,
+    "fn": "feedback",
+    "read": "81: call ownLogin",
+    "write": "81: call allOwnLogins"
+   },
+   {
+    "file": "src/dash/api/needs.ts",
+    "line": 128,
+    "fn": "stopped",
+    "read": "130: SELECT stage, reason, tripped_at FROM stage_trips WHERE acti",
+    "write": "135: call listAccounts"
+   },
+   {
+    "file": "src/dash/api/needs.ts",
+    "line": 190,
+    "fn": "needs",
+    "read": "191: call hiddenRepos",
+    "write": "203: call feedback"
+   },
+   {
+    "file": "src/dash/api/next.ts",
+    "line": 20,
+    "fn": "nextPage",
+    "read": "22: call trackedNames",
+    "write": "37: call laneGate"
+   },
+   {
+    "file": "src/dash/api/next.ts",
+    "line": 56,
+    "fn": "next",
+    "read": "57: call visibleRepos",
+    "write": "57: call nextPage"
+   },
+   {
+    "file": "src/dash/api/nightly.ts",
+    "line": 76,
+    "fn": "select",
+    "read": "78: call visible",
+    "write": "83: call setSelection"
+   },
+   {
+    "file": "src/dash/api/now.ts",
+    "line": 82,
+    "fn": "healthOf",
+    "read": "83: call pipelineSwitch",
+    "write": "98: call listAccounts"
+   },
+   {
+    "file": "src/dash/api/now.ts",
+    "line": 388,
+    "fn": "now",
+    "read": "389: call hiddenRepos",
+    "write": "392: call healthOf"
+   },
+   {
+    "file": "src/dash/api/operator.ts",
+    "line": 29,
+    "fn": "cancelItemPreapproval",
+    "read": "34: call needVisible",
+    "write": "36: call cancelPreapproval"
+   },
+   {
+    "file": "src/dash/api/operator.ts",
+    "line": 43,
+    "fn": "retryItemPreapproval",
+    "read": "48: call needVisible",
+    "write": "50: call retryPreapproval"
+   },
+   {
+    "file": "src/dash/api/operator.ts",
+    "line": 60,
+    "fn": "stopFixItem",
+    "read": "65: call needVisible",
+    "write": "79: call applyAnswer"
+   },
+   {
+    "file": "src/dash/api/pipeline.ts",
+    "line": 192,
+    "fn": "putState",
+    "read": "196: call pipelineState",
+    "write": "197: call setEnabled"
+   },
+   {
+    "file": "src/dash/api/pipeline.ts",
+    "line": 205,
+    "fn": "putJudgementModel",
+    "read": "209: call judgementModel",
+    "write": "210: call setJudgementModel"
+   },
+   {
+    "file": "src/dash/api/pipeline.ts",
+    "line": 227,
+    "fn": "resumeTrip",
+    "read": "230: call resumeStage",
+    "write": "235: call pipelineState"
+   },
+   {
+    "file": "src/dash/api/queue-page.ts",
+    "line": 295,
+    "fn": "markFast.<anonymous>",
+    "read": "295: call addFastTrack",
+    "write": "295: call setFastTrackWeight"
+   },
+   {
+    "file": "src/dash/api/queue-page.ts",
+    "line": 324,
+    "fn": "queueAdd",
+    "read": "330: call needVisible",
+    "write": "344: call preapproveMerge"
+   },
+   {
+    "file": "src/dash/api/queue-page.ts",
+    "line": 379,
+    "fn": "mergeHoldPr.<anonymous>",
+    "read": "379: call holdMerge",
+    "write": "379: call releaseMerge"
+   },
+   {
+    "file": "src/dash/api/queue.ts",
+    "line": 43,
+    "fn": "queue",
+    "read": "48: call readerOf",
+    "write": "55: call flowMembers"
+   },
+   {
+    "file": "src/dash/api/runners.ts",
+    "line": 81,
+    "fn": "approve",
+    "read": "83: call inferenceMode",
+    "write": "88: call audit"
+   },
+   {
+    "file": "src/dash/api/runners.ts",
+    "line": 92,
+    "fn": "scopes",
+    "read": "95: SELECT can_answer FROM mcp_tokens WHERE id = ? AND login = ?",
+    "write": "98: call setRunnerScopes"
+   },
+   {
+    "file": "src/dash/api/security-page.ts",
+    "line": 103,
+    "fn": "securityFindings",
+    "read": "105: call visibleRepos",
+    "write": "108: call reconcileFindings"
+   },
+   {
+    "file": "src/dash/api/security-page.ts",
+    "line": 156,
+    "fn": "findingPage",
+    "read": "159: call needVisible",
+    "write": "160: call reconcileFindings"
+   },
+   {
+    "file": "src/dash/api/security.ts",
+    "line": 35,
+    "fn": "security",
+    "read": "38: call needVisible",
+    "write": "39: call overview"
+   },
+   {
+    "file": "src/dash/api/security.ts",
+    "line": 78,
+    "fn": "finding",
+    "read": "81: call needVisible",
+    "write": "82: call reconcileFindings"
+   },
+   {
+    "file": "src/dash/api/security.ts",
+    "line": 98,
+    "fn": "scans",
+    "read": "100: call visibleRepos",
+    "write": "100: call listScans"
+   },
+   {
+    "file": "src/dash/api/security.ts",
+    "line": 103,
+    "fn": "scanOf",
+    "read": "105: call scanRow",
+    "write": "108: call scanDetail"
+   },
+   {
+    "file": "src/dash/api/stats.ts",
+    "line": 30,
+    "fn": "funnelByRepo",
+    "read": "31: call latestRun",
+    "write": "31: call settledTable"
+   },
+   {
+    "file": "src/dash/api/trace.ts",
+    "line": 540,
+    "fn": "context",
+    "read": "544: call needVisible",
+    "write": "547: call ownLogins"
+   },
+   {
+    "file": "src/dash/api/user-settings.ts",
+    "line": 28,
+    "fn": "setSettings",
+    "read": "39: call parseRepos",
+    "write": "45: call setUserReserve"
+   },
+   {
+    "file": "src/dash/audit.ts",
+    "line": 6,
+    "fn": "auditRefusedSignIn",
+    "read": "8: SELECT rowid, details FROM audit WHERE action = 'sign-in-ref",
+    "write": "10: call audit"
+   },
+   {
+    "file": "src/dash/index.ts",
+    "line": 10,
+    "fn": "serve",
+    "read": "19: call connect",
+    "write": "20: call scopeToTracked"
+   },
+   {
+    "file": "src/dash/mcp/index.ts",
+    "line": 518,
+    "fn": "setWeight",
+    "read": "524: call needVisible",
+    "write": "529: call removeFastTrack"
+   },
+   {
+    "file": "src/dash/mcp/index.ts",
+    "line": 655,
+    "fn": "pickModelCall",
+    "read": "659: call pick",
+    "write": "659: call unpick"
+   },
+   {
+    "file": "src/dash/mcp/index.ts",
+    "line": 670,
+    "fn": "nextTask",
+    "read": "686: call listHelpers",
+    "write": "693: call claimableCalls"
+   },
+   {
+    "file": "src/dash/mcp/index.ts",
+    "line": 728,
+    "fn": "callTool",
+    "read": "731: call listRepos",
+    "write": "734: call sendFeedback"
+   },
+   {
+    "file": "src/dash/mcp/tokens.ts",
+    "line": 115,
+    "fn": "loadToken",
+    "read": "120: SELECT t.id, t.login, t.kind, t.last_used_at, t.can_answer, ",
+    "write": "127: UPDATE mcp_tokens SET last_used_at = ?, expires_at = ? WHERE"
+   },
+   {
+    "file": "src/dash/server/github-app.ts",
+    "line": 54,
+    "fn": "githubAppRoutes.handler",
+    "read": "57: call githubIdentity",
+    "write": "66: DELETE FROM github_app_states"
+   },
+   {
+    "file": "src/dash/server/github-app.ts",
+    "line": 152,
+    "fn": "finishRegistration",
+    "read": "157: SELECT login, session_hash, created_at FROM github_app_state",
+    "write": "159: call convertAndStore"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 42,
+    "fn": "revokeLink",
+    "read": "45: SELECT org FROM github_setup_links WHERE id = ?",
+    "write": "46: call audit"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 115,
+    "fn": "OrgSetup.handle",
+    "read": "118: call #page",
+    "write": "119: call #manager"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 206,
+    "fn": "OrgSetup.#page",
+    "read": "207: call #flowOf",
+    "write": "221: call #newState"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 235,
+    "fn": "OrgSetup.#manager",
+    "read": "237: call #flowOf",
+    "write": "247: call grantOrgRole"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 266,
+    "fn": "OrgSetup.#registered",
+    "read": "269: call #flowOf",
+    "write": "272: call convertAndStore"
+   },
+   {
+    "file": "src/dash/server/github-setup.ts",
+    "line": 277,
+    "fn": "OrgSetup.#installed",
+    "read": "280: SELECT login, session_hash, created_at FROM github_app_state",
+    "write": "285: DELETE FROM github_app_states WHERE state = ?"
+   },
+   {
+    "file": "src/dash/server/index.ts",
+    "line": 417,
+    "fn": "createApp.startOAuth",
+    "read": "420: call githubIdentity",
+    "write": "419: INSERT INTO oauth_states (state, verifier, return_to, identi"
+   },
+   {
+    "file": "src/dash/server/index.ts",
+    "line": 434,
+    "fn": "createApp.auth",
+    "read": "437: call ownsState",
+    "write": "439: call loadSession"
+   },
+   {
+    "file": "src/dash/server/index.ts",
+    "line": 585,
+    "fn": "createApp.handle",
+    "read": "586: call serveChecks",
+    "write": "591: call pruneExpired"
+   },
+   {
+    "file": "src/dash/server/index.ts",
+    "line": 750,
+    "fn": "createApp.handleRemoteHttp",
+    "read": "779: call startLogin",
+    "write": "784: call pollLogin"
+   },
+   {
+    "file": "src/dash/server/index.ts",
+    "line": 870,
+    "fn": "createApp.handleTaskMcp",
+    "read": "880: call leaseState",
+    "write": "884: call taskLease"
+   },
+   {
+    "file": "src/dash/server/reporter-signin.ts",
+    "line": 23,
+    "fn": "reporterSignIn",
+    "read": "27: call peekReporterState",
+    "write": "44: call saveReporter"
+   },
+   {
+    "file": "src/dash/server/reseal.ts",
+    "line": 18,
+    "fn": "resealLegacyValues",
+    "read": "21: SELECT",
+    "write": "30: write block"
+   },
+   {
+    "file": "src/dash/server/sessions.ts",
+    "line": 56,
+    "fn": "loadSession",
+    "read": "59: SELECT s.rowid, s.login, s.csrf, s.token_enc, s.last_seen, s",
+    "write": "68: DELETE FROM sessions WHERE id_hash = ?"
+   },
+   {
+    "file": "src/dash/server/sessions.ts",
+    "line": 95,
+    "fn": "accessToken",
+    "read": "96: SELECT token_enc, login FROM sessions WHERE id_hash = ?",
+    "write": "104: call accessToken.<anonymous>"
+   },
+   {
+    "file": "src/dash/server/sessions.ts",
+    "line": 104,
+    "fn": "accessToken.<anonymous>",
+    "read": "120: SELECT token_enc FROM sessions WHERE id_hash = ?",
+    "write": "126: call accessToken.<anonymous>.end"
+   },
+   {
+    "file": "src/dash/server/sessions.ts",
+    "line": 177,
+    "fn": "makeUser.check",
+    "read": "180: SELECT permission, checked_at FROM repo_permissions WHERE lo",
+    "write": "186: call accessToken"
+   },
+   {
+    "file": "src/dash/server/user-tokens.ts",
+    "line": 63,
+    "fn": "dropUserTokens",
+    "read": "64: DELETE FROM user_tokens WHERE login = ? RETURNING token_enc",
+    "write": "66: INSERT INTO user_token_revocations (login, token_enc, queued"
+   },
+   {
+    "file": "src/dash/server/user-tokens.ts",
+    "line": 88,
+    "fn": "shareRefresh",
+    "read": "89: call readUserTokens",
+    "write": "90: call swapUserTokens"
+   }
+  ],
+  "decide": [
+   {
+    "file": "src/decide/choices-convert.ts",
+    "line": 186,
+    "fn": "convertOpenDecisionsOnce",
+    "read": "187: SELECT 1 FROM main.settings WHERE key = 'choices_converted'",
+    "write": "189: INSERT INTO main.settings (key, value) VALUES ('choices_conv"
+   },
+   {
+    "file": "src/decide/index.ts",
+    "line": 73,
+    "fn": "runDecide",
+    "read": "76: call trackedNames",
+    "write": "108: call setAsideLapsedScope"
+   },
+   {
+    "file": "src/decide/index.ts",
+    "line": 157,
+    "fn": "run",
+    "read": "158: call connect",
+    "write": "158: call runDecide"
+   },
+   {
+    "file": "src/decide/prepare.ts",
+    "line": 204,
+    "fn": "prepare.map-callback.<anonymous>",
+    "read": "206: SELECT * FROM decisions WHERE id = ? AND answer IS NULL",
+    "write": "217: call loadSummaryItems"
+   }
+  ],
+  "discord": [
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 176,
+    "fn": "DecisionAlerts.start.<anonymous>",
+    "read": "178: call readSeqs",
+    "write": "188: call sync"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 198,
+    "fn": "DecisionAlerts.sync",
+    "read": "204: call #pass",
+    "write": "204: call #pass"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 222,
+    "fn": "DecisionAlerts.#pass",
+    "read": "225: call #alerters",
+    "write": "226: call #refreshPermissions"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 258,
+    "fn": "DecisionAlerts.#summary",
+    "read": "261: SELECT 1 FROM discord_alert_msgs WHERE user_hash = ? AND dec",
+    "write": "270: INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 282,
+    "fn": "DecisionAlerts.#refreshPermissions",
+    "read": "285: call maintainerWritesOn",
+    "write": "304: INSERT INTO main.repo_permissions (login, repo, permission, "
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 310,
+    "fn": "DecisionAlerts.#refresh",
+    "read": "317: call getDecision",
+    "write": "321: call DecisionAlerts.#refresh.forget"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 378,
+    "fn": "installAlertCommands.command-callback",
+    "read": "380: call loginOf",
+    "write": "383: call setAlerts"
+   },
+   {
+    "file": "src/discord/alerts.ts",
+    "line": 399,
+    "fn": "installAlertCommands.press",
+    "read": "402: call loginOf",
+    "write": "428: call doChoice"
+   },
+   {
+    "file": "src/discord/commands.ts",
+    "line": 82,
+    "fn": "installAccountCommands.command-callback",
+    "read": "84: call forgetReporter",
+    "write": "85: call audit"
+   },
+   {
+    "file": "src/discord/file-issue.ts",
+    "line": 81,
+    "fn": "junkCheck",
+    "read": "83: call jevAvailable",
+    "write": "96: DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM "
+   },
+   {
+    "file": "src/discord/file-issue.ts",
+    "line": 112,
+    "fn": "fileIssue",
+    "read": "117: call isPublicRepo",
+    "write": "125: call reporterToken"
+   },
+   {
+    "file": "src/discord/index.ts",
+    "line": 70,
+    "fn": "dispatcher.<anonymous>",
+    "read": "71: call handleDispatch",
+    "write": "73: call handleMeta"
+   },
+   {
+    "file": "src/discord/index.ts",
+    "line": 96,
+    "fn": "startDiscord",
+    "read": "118: call installDecisionAlerts",
+    "write": "123: call dropTexts"
+   },
+   {
+    "file": "src/discord/index.ts",
+    "line": 154,
+    "fn": "discord",
+    "read": "156: call connect",
+    "write": "161: call forgetMessages"
+   },
+   {
+    "file": "src/discord/issue-new.ts",
+    "line": 181,
+    "fn": "IssueNew.form",
+    "read": "187: call trackedRepos",
+    "write": "197: call #model"
+   },
+   {
+    "file": "src/discord/issue-new.ts",
+    "line": 243,
+    "fn": "IssueNew.#finish",
+    "read": "244: call #repos",
+    "write": "248: call #model"
+   },
+   {
+    "file": "src/discord/issue-new.ts",
+    "line": 354,
+    "fn": "installIssueNew.component-callback",
+    "read": "356: call open",
+    "write": "357: call none"
+   },
+   {
+    "file": "src/discord/issue-new.ts",
+    "line": 363,
+    "fn": "installIssueNew.component-callback",
+    "read": "365: call form",
+    "write": "366: call answers"
+   },
+   {
+    "file": "src/discord/links.ts",
+    "line": 62,
+    "fn": "unlinkRow",
+    "read": "63: SELECT login FROM discord_links WHERE user_hash = ?",
+    "write": "65: DELETE FROM discord_links WHERE user_hash = ?"
+   },
+   {
+    "file": "src/discord/pings.ts",
+    "line": 90,
+    "fn": "Pings.#ping",
+    "read": "93: SELECT 1 FROM discord_replies WHERE ping_hash = ?",
+    "write": "100: call find"
+   },
+   {
+    "file": "src/discord/replies.ts",
+    "line": 8,
+    "fn": "deleteRepliesOf",
+    "read": "14: SELECT ping_hash, sealed FROM discord_replies WHERE ping_has",
+    "write": "22: DELETE FROM discord_replies WHERE ping_hash = ?"
+   },
+   {
+    "file": "src/discord/reporter.ts",
+    "line": 17,
+    "fn": "saveReporter",
+    "read": "18: SELECT login, token_enc FROM reporter_tokens WHERE reporter ",
+    "write": "19: call queueRevoke"
+   },
+   {
+    "file": "src/discord/reporter.ts",
+    "line": 61,
+    "fn": "obtain",
+    "read": "62: call readReporter",
+    "write": "67: call failReporter"
+   },
+   {
+    "file": "src/discord/reporter.ts",
+    "line": 109,
+    "fn": "forgetReporterRow",
+    "read": "112: DELETE FROM reporter_tokens WHERE reporter = ? RETURNING log",
+    "write": "114: call queueRevoke"
+   },
+   {
+    "file": "src/discord/search.ts",
+    "line": 138,
+    "fn": "Search.find",
+    "read": "141: call candidates",
+    "write": "158: call dropTexts"
+   },
+   {
+    "file": "src/discord/signals.ts",
+    "line": 135,
+    "fn": "Signals.#check",
+    "read": "141: SELECT title FROM main.items WHERE repo = ? AND number = ?",
+    "write": "146: UPDATE discord_mentions SET signal = ? WHERE msg_hash = ? AN"
+   },
+   {
+    "file": "src/discord/signals.ts",
+    "line": 155,
+    "fn": "Signals.#decide",
+    "read": "160: call signalSpentUsd",
+    "write": "161: call jevAvailable"
+   },
+   {
+    "file": "src/discord/store.ts",
+    "line": 23,
+    "fn": "recordMessage",
+    "read": "26: call trackedRepos",
+    "write": "35: write block"
+   },
+   {
+    "file": "src/discord/store.ts",
+    "line": 58,
+    "fn": "forgetAuthor",
+    "read": "62: SELECT msg_hash, repo, number, sealed FROM discord_mentions",
+    "write": "63: DELETE FROM discord_mentions WHERE msg_hash = ? AND repo = ?"
+   },
+   {
+    "file": "src/discord/store.ts",
+    "line": 68,
+    "fn": "handleDispatch",
+    "read": "71: call isWatched",
+    "write": "72: call recordMessage"
+   }
+  ],
+  "downloads": [
+   {
+    "file": "src/downloads/poll.ts",
+    "line": 52,
+    "fn": "recordRepo",
+    "read": "55: SELECT asset_id, downloads, repo FROM release_assets",
+    "write": "66: write block"
+   },
+   {
+    "file": "src/downloads/poll.ts",
+    "line": 98,
+    "fn": "foldDeltas",
+    "read": "100: SELECT asset_id, t, delta FROM download_deltas WHERE span = ",
+    "write": "102: write block"
+   },
+   {
+    "file": "src/downloads/poll.ts",
+    "line": 113,
+    "fn": "pollReleases",
+    "read": "114: call trackedNames",
+    "write": "133: INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT "
+   },
+   {
+    "file": "src/downloads/poll.ts",
+    "line": 120,
+    "fn": "pollReleases.worker",
+    "read": "124: call recordRepo",
+    "write": "124: call recordRepo"
+   },
+   {
+    "file": "src/downloads/poll.ts",
+    "line": 145,
+    "fn": "pollReleasesIfDue",
+    "read": "146: call setting",
+    "write": "148: call pollReleases"
+   }
+  ],
+  "dupes": [
+   {
+    "file": "src/dupes/check.ts",
+    "line": 75,
+    "fn": "store",
+    "read": "76: call pickCanonical",
+    "write": "77: UPDATE duplicate_pairs SET jev_p = ?, haiku = ?, verdict = ?"
+   },
+   {
+    "file": "src/dupes/check.ts",
+    "line": 85,
+    "fn": "checkPairs",
+    "read": "90: call pairInput",
+    "write": "109: call checkPairs.done"
+   },
+   {
+    "file": "src/dupes/check.ts",
+    "line": 113,
+    "fn": "checkPairs.map-callback.<anonymous>",
+    "read": "116: call runModelStep",
+    "write": "124: call checkPairs.done"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 110,
+    "fn": "prInput",
+    "read": "114: call bodyOf",
+    "write": "117: call cachedDiff"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 149,
+    "fn": "compareChunk",
+    "read": "152: call prInput",
+    "write": "164: call runModelStep"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 185,
+    "fn": "compareSet",
+    "read": "188: call canonInfo",
+    "write": "202: call compareChunk"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 227,
+    "fn": "runDupeCompare",
+    "read": "231: call dueSets",
+    "write": "244: call saveComparison"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 274,
+    "fn": "runDupeCompare.map-callback.<anonymous>",
+    "read": "275: call compareSet",
+    "write": "280: call saveComparison"
+   },
+   {
+    "file": "src/dupes/compare.ts",
+    "line": 315,
+    "fn": "run",
+    "read": "316: call connect",
+    "write": "321: call compareAgain"
+   },
+   {
+    "file": "src/dupes/decide.ts",
+    "line": 133,
+    "fn": "supersede",
+    "read": "135: SELECT id FROM decisions WHERE kind = 'duplicate' AND repo =",
+    "write": "139: UPDATE main.decisions SET answer = 'superseded', answered_by"
+   },
+   {
+    "file": "src/dupes/decide.ts",
+    "line": 209,
+    "fn": "askGroupDecisions",
+    "read": "211: call groupPlans",
+    "write": "238: call supersede"
+   },
+   {
+    "file": "src/dupes/decide.ts",
+    "line": 320,
+    "fn": "rekeep",
+    "read": "322: SELECT kind FROM dupe_group_items WHERE decision_id = ? AND ",
+    "write": "327: UPDATE dupe_group_items SET role = ?, target = ? WHERE decis"
+   },
+   {
+    "file": "src/dupes/decide.ts",
+    "line": 339,
+    "fn": "applyDuplicateAnswers",
+    "read": "341: call actionable",
+    "write": "347: call restoreRoles"
+   },
+   {
+    "file": "src/dupes/index.ts",
+    "line": 58,
+    "fn": "runDupes",
+    "read": "65: call fillEmbedHashes",
+    "write": "72: call applyDuplicateAnswers"
+   },
+   {
+    "file": "src/dupes/index.ts",
+    "line": 108,
+    "fn": "run",
+    "read": "109: call connect",
+    "write": "110: call runDupes"
+   },
+   {
+    "file": "src/dupes/plan.ts",
+    "line": 154,
+    "fn": "saveComparison",
+    "read": "161: SELECT additions, deletions, head_oid FROM items WHERE repo ",
+    "write": "165: INSERT OR REPLACE INTO dupe_comparisons (repo, key, kind, me"
+   },
+   {
+    "file": "src/dupes/scan.ts",
+    "line": 66,
+    "fn": "scanItem",
+    "read": "67: call neighbourPairs",
+    "write": "71: write block"
+   },
+   {
+    "file": "src/dupes/texts.ts",
+    "line": 56,
+    "fn": "storeOptionTexts",
+    "read": "57: SELECT number, kind, role, target, detail FROM dupe_group_it",
+    "write": "58: DELETE FROM dupe_group_texts WHERE decision_id = ?"
+   }
+  ],
+  "embed": [
+   {
+    "file": "src/embed/index.ts",
+    "line": 28,
+    "fn": "embedCommand",
+    "read": "38: call connect",
+    "write": "42: call embedItems"
+   },
+   {
+    "file": "src/embed/store.ts",
+    "line": 39,
+    "fn": "embedDue",
+    "read": "40: call plannedItems",
+    "write": "42: call statementsDue"
+   },
+   {
+    "file": "src/embed/store.ts",
+    "line": 54,
+    "fn": "embedItems",
+    "read": "58: call fillEmbedHashes",
+    "write": "67: write block"
+   }
+  ],
+  "fixissue": [
+   {
+    "file": "src/fixissue/approval.ts",
+    "line": 21,
+    "fn": "setFixIssueApproval",
+    "read": "22: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "24: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 267,
+    "fn": "startAttempt",
+    "read": "270: call branchOf",
+    "write": "273: call cachedCrates"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 313,
+    "fn": "assignIssue",
+    "read": "316: call duplicateHeld",
+    "write": "319: call claimForWork"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 326,
+    "fn": "claimIssue",
+    "read": "337: call attemptOf",
+    "write": "346: call ghComment"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 368,
+    "fn": "unclaimHeld",
+    "read": "372: SELECT number FROM fix_attempts WHERE repo = ? AND state IN ",
+    "write": "384: call ownLogins"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 394,
+    "fn": "patchRound",
+    "read": "400: call attemptOf",
+    "write": "402: call fail"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 453,
+    "fn": "runFixIssue",
+    "read": "460: call plannedItems",
+    "write": "506: call unclaimHeld"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 475,
+    "fn": "runFixIssue.map-callback.<anonymous>",
+    "read": "481: call unchanged",
+    "write": "482: call patchRound"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 489,
+    "fn": "runFixIssue.map-callback.<anonymous>",
+    "read": "495: call unchanged",
+    "write": "498: call startAttempt"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 537,
+    "fn": "runFixIssueCollect",
+    "read": "542: call plannedItems",
+    "write": "612: call unclaimHeld"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 551,
+    "fn": "runFixIssueCollect.map-callback.<anonymous>",
+    "read": "559: call unchanged",
+    "write": "560: call openPr"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 618,
+    "fn": "checkPatch",
+    "read": "623: SELECT title, body FROM items WHERE repo = ? AND number = ?",
+    "write": "625: call issueText"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 639,
+    "fn": "forkOf",
+    "read": "641: call githubIdentity",
+    "write": "650: call ghFork"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 686,
+    "fn": "comment",
+    "read": "689: SELECT 1 FROM audit WHERE action = 'fixissue-comment' AND ta",
+    "write": "690: call closedLive"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 697,
+    "fn": "openPr",
+    "read": "716: call openPr.permitted",
+    "write": "718: call fail"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 818,
+    "fn": "run",
+    "read": "820: call connect",
+    "write": "820: call runFixIssue"
+   },
+   {
+    "file": "src/fixissue/index.ts",
+    "line": 825,
+    "fn": "run",
+    "read": "827: call connect",
+    "write": "827: call runFixIssueCollect"
+   }
+  ],
+  "fixup": [
+   {
+    "file": "src/fixup/approval.ts",
+    "line": 22,
+    "fn": "setPushApproval",
+    "read": "23: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "25: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/fixup/author-permission.ts",
+    "line": 99,
+    "fn": "ensureAuthorWrites",
+    "read": "101: call authorOf",
+    "write": "108: INSERT INTO main.author_permissions (login, repo, permission"
+   },
+   {
+    "file": "src/fixup/conflict.ts",
+    "line": 81,
+    "fn": "record",
+    "read": "82: SELECT rowid AS id FROM conflict_merges WHERE repo = ? AND n",
+    "write": "83: UPDATE conflict_merges SET state = ?, reason = ?, files = ?,"
+   },
+   {
+    "file": "src/fixup/conflict.ts",
+    "line": 155,
+    "fn": "askConflict",
+    "read": "158: call live",
+    "write": "163: call guard"
+   },
+   {
+    "file": "src/fixup/conflict.ts",
+    "line": 183,
+    "fn": "mergeConflict",
+    "read": "201: call mergeConflict.skip",
+    "write": "203: call mergeConflict.skip"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 153,
+    "fn": "noteLive",
+    "read": "157: SELECT head_oid FROM pr_checks WHERE repo = ? AND number = ?",
+    "write": "160: UPDATE pr_checks SET state = ?, is_draft = ?, mergeable = CA"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 210,
+    "fn": "Recorder.dropUnlisted",
+    "read": "212: SELECT rowid AS id, lint_task FROM fixups WHERE repo = ? AND",
+    "write": "216: UPDATE fixups SET state = 'superseded', reason = 'the plan n"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 221,
+    "fn": "Recorder.fixup",
+    "read": "227: SELECT created_at FROM fixups WHERE repo = ? AND number = ? ",
+    "write": "229: INSERT INTO fixups (repo, number, from_head, state, reason, "
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 262,
+    "fn": "runFixup",
+    "read": "265: call sweepSessions",
+    "write": "266: call runFixupWith"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 272,
+    "fn": "runFixupWith",
+    "read": "280: call selectFixups",
+    "write": "303: call dropUnlisted"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 312,
+    "fn": "runFixupWith.askOne",
+    "read": "317: call noteLive",
+    "write": "323: call fixup"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 373,
+    "fn": "runFixupWith.claim",
+    "read": "374: call duplicateHeld",
+    "write": "377: call claimForWork"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 393,
+    "fn": "runFixupWith.fixOne",
+    "read": "398: call pushesUnsettled",
+    "write": "399: call leaseItem"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 407,
+    "fn": "runFixupWith.fixOne.fail",
+    "read": "409: call fixup",
+    "write": "411: call jobItem"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 413,
+    "fn": "runFixupWith.fixOne.hold",
+    "read": "415: call fixup",
+    "write": "417: call jobItem"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 609,
+    "fn": "runFixupWith.map-callback.<anonymous>",
+    "read": "609: call runFixupWith.fixOne",
+    "write": "609: call runFixupWith.fixOne"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 630,
+    "fn": "carryWork",
+    "read": "635: call cachedDiff",
+    "write": "635: call cachedDiff"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 689,
+    "fn": "repostAsk",
+    "read": "690: SELECT state, from_head FROM fixups WHERE repo = ? AND numbe",
+    "write": "709: call ghEditComment"
+   },
+   {
+    "file": "src/fixup/index.ts",
+    "line": 730,
+    "fn": "run",
+    "read": "734: call connect",
+    "write": "734: call runFixupTry"
+   },
+   {
+    "file": "src/fixup/select.ts",
+    "line": 32,
+    "fn": "selectFixups",
+    "read": "38: call planned",
+    "write": "38: call planned"
+   },
+   {
+    "file": "src/fixup/try.ts",
+    "line": 29,
+    "fn": "runFixupTry",
+    "read": "31: SELECT head_oid, title FROM items WHERE repo = ? AND number ",
+    "write": "47: call cachedDiff"
+   }
+  ],
+  "flow": [
+   {
+    "file": "src/flow/count.ts",
+    "line": 119,
+    "fn": "classify",
+    "read": "122: call open",
+    "write": "135: call open"
+   },
+   {
+    "file": "src/flow/count.ts",
+    "line": 141,
+    "fn": "decide",
+    "read": "142: SELECT repo, number, items, answer, asked_at, answered_at FR",
+    "write": "144: call openRefs"
+   },
+   {
+    "file": "src/flow/count.ts",
+    "line": 266,
+    "fn": "labels",
+    "read": "267: call trackedNames",
+    "write": "269: call openRefs"
+   },
+   {
+    "file": "src/flow/count.ts",
+    "line": 292,
+    "fn": "dupes",
+    "read": "297: SELECT p.repo, p.a, p.b, ia.state AS sa, ib.state AS sb FROM",
+    "write": "315: call open"
+   },
+   {
+    "file": "src/flow/count.ts",
+    "line": 448,
+    "fn": "countAll",
+    "read": "448: call latestRun",
+    "write": "452: call synced"
+   },
+   {
+    "file": "src/flow/summary.ts",
+    "line": 46,
+    "fn": "markChanged",
+    "read": "47: call getMarks",
+    "write": "78: UPDATE main.flow_summary SET stale = 1"
+   },
+   {
+    "file": "src/flow/summary.ts",
+    "line": 85,
+    "fn": "countRepo",
+    "read": "85: call latestRun",
+    "write": "86: call countAll"
+   },
+   {
+    "file": "src/flow/summary.ts",
+    "line": 98,
+    "fn": "refreshSummary",
+    "read": "100: call markChanged",
+    "write": "101: DELETE FROM main.flow_summary WHERE repo NOT IN (SELECT name"
+   },
+   {
+    "file": "src/flow/summary.ts",
+    "line": 123,
+    "fn": "readSummary",
+    "read": "125: call trackedNames",
+    "write": "136: call countRepo"
+   }
+  ],
+  "github": [
+   {
+    "file": "src/github/claim.ts",
+    "line": 37,
+    "fn": "claimForWork",
+    "read": "42: call weAssigned",
+    "write": "42: call claimItem"
+   },
+   {
+    "file": "src/github/claim.ts",
+    "line": 59,
+    "fn": "releaseItem",
+    "read": "60: call weAssigned",
+    "write": "61: call unassignFrom"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 280,
+    "fn": "knownCommenter",
+    "read": "281: call boundAccess",
+    "write": "282: call settle"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 292,
+    "fn": "expire",
+    "read": "293: call boundAccess",
+    "write": "295: call settle"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 306,
+    "fn": "carryOut",
+    "read": "309: call knownCommenter",
+    "write": "320: call settle"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 380,
+    "fn": "carryOutRepin",
+    "read": "384: call expire",
+    "write": "385: call knownCommenter"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 408,
+    "fn": "refuse",
+    "read": "409: call refusal",
+    "write": "409: call settle"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 420,
+    "fn": "waitsForRead",
+    "read": "422: call openPrsClosing",
+    "write": "429: INSERT INTO main.sync_requests (repo, number, event, request"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 445,
+    "fn": "answer",
+    "read": "446: call guardRepo",
+    "write": "453: call ghComment"
+   },
+   {
+    "file": "src/github/commands.ts",
+    "line": 473,
+    "fn": "drainCommands",
+    "read": "479: SELECT",
+    "write": "490: call expire"
+   },
+   {
+    "file": "src/github/identity.ts",
+    "line": 30,
+    "fn": "setGithubIdentity",
+    "read": "32: call githubIdentity",
+    "write": "34: write block"
+   },
+   {
+    "file": "src/github/identity.ts",
+    "line": 122,
+    "fn": "setGithubIdentityChecked",
+    "read": "125: call githubIdentity",
+    "write": "133: call setGithubIdentity"
+   },
+   {
+    "file": "src/github/identity.ts",
+    "line": 200,
+    "fn": "ownLogins",
+    "read": "202: call setting",
+    "write": "204: call ownBotLogins"
+   },
+   {
+    "file": "src/github/slugs.ts",
+    "line": 18,
+    "fn": "rememberSlug",
+    "read": "20: SELECT value FROM main.settings WHERE key = ?",
+    "write": "22: call writeSetting"
+   },
+   {
+    "file": "src/github/user-lane.ts",
+    "line": 40,
+    "fn": "initExecState",
+    "read": "41: SELECT repo, answered_by FROM main.decisions WHERE id = ? AN",
+    "write": "44: call setExecState"
+   },
+   {
+    "file": "src/github/user-lane.ts",
+    "line": 141,
+    "fn": "resolveLane",
+    "read": "144: call userToken",
+    "write": "161: call userToken"
+   },
+   {
+    "file": "src/github/user-lane.ts",
+    "line": 173,
+    "fn": "laneForDecision",
+    "read": "174: call githubIdentity",
+    "write": "183: call defaultLaneDeps"
+   },
+   {
+    "file": "src/github/user-lane.ts",
+    "line": 187,
+    "fn": "laneForOperator",
+    "read": "188: call githubIdentity",
+    "write": "189: call defaultLaneDeps"
+   },
+   {
+    "file": "src/github/vault.ts",
+    "line": 58,
+    "fn": "Vault.#obtain",
+    "read": "60: call readUserTokens",
+    "write": "66: call failUserTokens"
+   },
+   {
+    "file": "src/github/vault.ts",
+    "line": 100,
+    "fn": "Vault.sweepRevocations",
+    "read": "104: SELECT id, login, token_enc, kind, aad, attempts FROM user_t",
+    "write": "108: UPDATE user_token_revocations SET attempts = attempts + 1 WH"
+   },
+   {
+    "file": "src/github/vault.ts",
+    "line": 129,
+    "fn": "Vault.#revokeRow",
+    "read": "138: call readUserTokens",
+    "write": "159: DELETE FROM user_tokens WHERE login = ?"
+   },
+   {
+    "file": "src/github/webhooks.ts",
+    "line": 63,
+    "fn": "queueDelivery",
+    "read": "65: call trackedName",
+    "write": "69: call queueCommand"
+   },
+   {
+    "file": "src/github/webhooks.ts",
+    "line": 107,
+    "fn": "drainSyncRequests",
+    "read": "109: SELECT repo, number, requested_at FROM main.sync_requests OR",
+    "write": "114: call drainSyncRequests.gone"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 293,
+    "fn": "commentOn",
+    "read": "295: call laneQuery",
+    "write": "297: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 312,
+    "fn": "closeItem",
+    "read": "314: call laneQuery",
+    "write": "321: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 335,
+    "fn": "assignTo",
+    "read": "337: call laneQuery",
+    "write": "338: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 341,
+    "fn": "unassignFrom",
+    "read": "343: call laneQuery",
+    "write": "344: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 347,
+    "fn": "reopenItem",
+    "read": "349: call laneQuery",
+    "write": "350: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 353,
+    "fn": "removeLabel",
+    "read": "355: call laneQuery",
+    "write": "356: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 360,
+    "fn": "transferIssue",
+    "read": "364: call laneQuery",
+    "write": "365: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 372,
+    "fn": "requestReviewers",
+    "read": "374: call laneQuery",
+    "write": "375: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 380,
+    "fn": "postReview",
+    "read": "381: call laneQuery",
+    "write": "383: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 390,
+    "fn": "editReview",
+    "read": "391: call laneQuery",
+    "write": "393: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 396,
+    "fn": "createLabel",
+    "read": "398: call laneQuery",
+    "write": "399: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 405,
+    "fn": "addLabels",
+    "read": "408: call inAppLane",
+    "write": "410: call addLabels"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 459,
+    "fn": "ghComment",
+    "read": "461: call laneExec",
+    "write": "463: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 468,
+    "fn": "ghEditComment",
+    "read": "470: call laneExec",
+    "write": "472: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 480,
+    "fn": "ghDeleteComment",
+    "read": "482: call laneExec",
+    "write": "486: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 499,
+    "fn": "ghOpenPr",
+    "read": "501: call laneExec",
+    "write": "503: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 507,
+    "fn": "ghClosePr",
+    "read": "509: call laneExec",
+    "write": "511: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 516,
+    "fn": "ghFork",
+    "read": "519: call inAppLane",
+    "write": "520: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 538,
+    "fn": "createIssue",
+    "read": "540: call laneExec",
+    "write": "544: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 589,
+    "fn": "ghApproveRun",
+    "read": "590: call laneExec",
+    "write": "591: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 609,
+    "fn": "ghRerunFailed",
+    "read": "610: call laneExec",
+    "write": "613: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 618,
+    "fn": "ghRerunMainFailed",
+    "read": "620: call laneExec",
+    "write": "623: call viaGh"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 661,
+    "fn": "pushed",
+    "read": "663: call laneGit",
+    "write": "666: call recorded"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 785,
+    "fn": "mergeViaCommand",
+    "read": "789: call idOf",
+    "write": "791: call begin"
+   },
+   {
+    "file": "src/github/write.ts",
+    "line": 829,
+    "fn": "cliMergeRecorder.<anonymous>",
+    "read": "830: call connect",
+    "write": "835: call begin"
+   }
+  ],
+  "labels": [
+   {
+    "file": "src/labels/approval.ts",
+    "line": 21,
+    "fn": "setApproval",
+    "read": "22: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "26: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/labels/github.ts",
+    "line": 51,
+    "fn": "ensureLabels",
+    "read": "55: call guardRepo",
+    "write": "58: call createLabel"
+   },
+   {
+    "file": "src/labels/github.ts",
+    "line": 76,
+    "fn": "applyLabels",
+    "read": "80: call approvalOf",
+    "write": "104: UPDATE main.items SET state = ? WHERE repo = ? AND number = "
+   },
+   {
+    "file": "src/labels/github.ts",
+    "line": 170,
+    "fn": "mutate",
+    "read": "175: call mutate.run",
+    "write": "184: call mutate.run"
+   },
+   {
+    "file": "src/labels/index.ts",
+    "line": 41,
+    "fn": "ensure",
+    "read": "43: call connect",
+    "write": "43: call ensureLabels"
+   },
+   {
+    "file": "src/labels/index.ts",
+    "line": 49,
+    "fn": "plan",
+    "read": "51: call connect",
+    "write": "58: call connect"
+   },
+   {
+    "file": "src/labels/index.ts",
+    "line": 64,
+    "fn": "apply",
+    "read": "69: call connect",
+    "write": "69: call applyLabels"
+   }
+  ],
+  "mainci": [
+   {
+    "file": "src/mainci/index.ts",
+    "line": 78,
+    "fn": "saveHead",
+    "read": "79: call optionalChecks",
+    "write": "81: INSERT INTO main_ci (repo, head_sha, branch, state, failing,"
+   },
+   {
+    "file": "src/mainci/index.ts",
+    "line": 92,
+    "fn": "pollMainCi",
+    "read": "93: SELECT name FROM repos WHERE synced_at IS NOT NULL",
+    "write": "101: call saveHead"
+   },
+   {
+    "file": "src/mainci/index.ts",
+    "line": 113,
+    "fn": "pollMainCiIfDue",
+    "read": "114: call setting",
+    "write": "116: call pollMainCi"
+   }
+  ],
+  "mainfix": [
+   {
+    "file": "src/mainfix/approval.ts",
+    "line": 33,
+    "fn": "setMainFixApproval",
+    "read": "34: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "36: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 85,
+    "fn": "defaultDeps.classify",
+    "read": "88: call askClaude",
+    "write": "90: call saveUsage"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 194,
+    "fn": "classifyHead",
+    "read": "196: call optionalChecks",
+    "write": "199: call save"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 232,
+    "fn": "askInfra",
+    "read": "234: call getDecision",
+    "write": "253: call setState"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 257,
+    "fn": "settleReruns",
+    "read": "259: call rowsAt",
+    "write": "260: call setState"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 268,
+    "fn": "applyAnswers",
+    "read": "269: call actionable",
+    "write": "273: call setState"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 296,
+    "fn": "runMainFix",
+    "read": "299: call mainFixApprovalOf",
+    "write": "306: call applyAnswers"
+   },
+   {
+    "file": "src/mainfix/index.ts",
+    "line": 334,
+    "fn": "run",
+    "read": "338: call connect",
+    "write": "339: call runMainFix"
+   },
+   {
+    "file": "src/mainfix/pr.ts",
+    "line": 128,
+    "fn": "attempt",
+    "read": "144: call optionalChecks",
+    "write": "201: call queueLintFor"
+   },
+   {
+    "file": "src/mainfix/pr.ts",
+    "line": 295,
+    "fn": "openFixPrs",
+    "read": "297: SELECT * FROM main_fixes WHERE repo = ? AND state IN ('needs",
+    "write": "302: call sweepSessions"
+   },
+   {
+    "file": "src/mainfix/pr.ts",
+    "line": 305,
+    "fn": "openFixPrs.map-callback.<anonymous>",
+    "read": "310: call pushesUnsettled",
+    "write": "311: call leaseItem"
+   }
+  ],
+  "memory": [
+   {
+    "file": "src/memory/statements.ts",
+    "line": 73,
+    "fn": "collectStatements",
+    "read": "74: SELECT s.* FROM (",
+    "write": "87: INSERT OR IGNORE INTO owner_statements (source_kind, source_"
+   },
+   {
+    "file": "src/memory/statements.ts",
+    "line": 104,
+    "fn": "embedStatements",
+    "read": "105: call collectStatements",
+    "write": "111: UPDATE owner_statements SET embedding = ?, model = ? WHERE i"
+   }
+  ],
+  "merge": [
+   {
+    "file": "src/merge/approval.ts",
+    "line": 22,
+    "fn": "setMergeApproval",
+    "read": "23: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "25: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/merge/base.ts",
+    "line": 36,
+    "fn": "recordLiveBase",
+    "read": "38: SELECT base_ref FROM items WHERE repo = ? AND number = ?",
+    "write": "40: UPDATE main.items SET base_ref = ? WHERE repo = ? AND number"
+   },
+   {
+    "file": "src/merge/batch-store.ts",
+    "line": 67,
+    "fn": "growBatchSize",
+    "read": "67: call batchSizeOf",
+    "write": "67: call setBatchSize"
+   },
+   {
+    "file": "src/merge/batch-store.ts",
+    "line": 68,
+    "fn": "shrinkBatchSize",
+    "read": "68: call batchSizeOf",
+    "write": "68: call setBatchSize"
+   },
+   {
+    "file": "src/merge/batch-store.ts",
+    "line": 89,
+    "fn": "cancelBuild",
+    "read": "91: call getTask",
+    "write": "92: call cancelTask"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 114,
+    "fn": "runBatches",
+    "read": "117: call mergeApprovalOf",
+    "write": "692: call advance"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 144,
+    "fn": "runBatches.closePr",
+    "read": "146: call runBatches.grant",
+    "write": "148: call ghClosePr"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 171,
+    "fn": "runBatches.holdGone",
+    "read": "172: call holdMerge",
+    "write": "173: call audit"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 181,
+    "fn": "runBatches.startBatch",
+    "read": "184: call commitIdentity",
+    "write": "185: call setPipelineLogin"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 255,
+    "fn": "runBatches.supersede",
+    "read": "257: call getBatch",
+    "write": "258: call cancelBuild"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 279,
+    "fn": "runBatches.fail",
+    "read": "280: call membersOf",
+    "write": "281: call shrinkBatchSize"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 309,
+    "fn": "runBatches.drop",
+    "read": "311: call getBatch",
+    "write": "312: call cancelBuild"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 373,
+    "fn": "runBatches.red",
+    "read": "374: call optionalChecks",
+    "write": "380: call supersede"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 442,
+    "fn": "runBatches.publishFailed",
+    "read": "447: call membersOf",
+    "write": "450: call updateBatch"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 454,
+    "fn": "runBatches.publish",
+    "read": "456: call supersede",
+    "write": "458: call refreshChecks"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 500,
+    "fn": "runBatches.recordLanded",
+    "read": "502: call getBatch",
+    "write": "503: call audit"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 523,
+    "fn": "runBatches.land",
+    "read": "525: call refreshChecks",
+    "write": "528: call recordLanded"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 633,
+    "fn": "runBatches.readBuild",
+    "read": "635: call getTask",
+    "write": "636: call runBatches.readBuild.open"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 634,
+    "fn": "runBatches.readBuild.open",
+    "read": "634: call getBatch",
+    "write": "634: call publish"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 671,
+    "fn": "runBatches.advance",
+    "read": "672: call getBatch",
+    "write": "675: call buildQueue"
+   },
+   {
+    "file": "src/merge/batch.ts",
+    "line": 715,
+    "fn": "run",
+    "read": "719: call connect",
+    "write": "719: call runBatches"
+   },
+   {
+    "file": "src/merge/ci-approval.ts",
+    "line": 39,
+    "fn": "setCiApproval",
+    "read": "40: SELECT 1 FROM main.tracked_repos WHERE name = ?",
+    "write": "42: INSERT INTO main.settings (key, value) VALUES (?, ?)"
+   },
+   {
+    "file": "src/merge/ci-approval.ts",
+    "line": 63,
+    "fn": "recordRuns",
+    "read": "65: SELECT * FROM ci_run_approvals WHERE repo = ? AND number = ?",
+    "write": "77: INSERT INTO ci_run_approvals (repo, number, head_oid, cross_"
+   },
+   {
+    "file": "src/merge/ci-approval.ts",
+    "line": 142,
+    "fn": "approveRuns",
+    "read": "152: call needsWork",
+    "write": "163: call jobItem"
+   },
+   {
+    "file": "src/merge/ci-approval.ts",
+    "line": 146,
+    "fn": "approveRuns.save",
+    "read": "147: SELECT approved FROM ci_run_approvals WHERE repo = ? AND num",
+    "write": "149: UPDATE ci_run_approvals SET runs = ?, approved = ?, reread ="
+   },
+   {
+    "file": "src/merge/ci-approval.ts",
+    "line": 199,
+    "fn": "run",
+    "read": "200: call connect",
+    "write": "206: call setCiApproval"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 37,
+    "fn": "holdMerge",
+    "read": "38: call openPr",
+    "write": "39: INSERT OR IGNORE INTO main.merge_holds (repo, number, held_b"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 52,
+    "fn": "endBatch",
+    "read": "53: call getBatch",
+    "write": "54: call cancelBuild"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 84,
+    "fn": "stopBatch",
+    "read": "85: call activeBatch",
+    "write": "87: call audit"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 94,
+    "fn": "removeFromBatch",
+    "read": "95: call activeBatches",
+    "write": "97: call holdMerge"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 125,
+    "fn": "run.<anonymous>",
+    "read": "128: call connect",
+    "write": "128: call holdMerge"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 133,
+    "fn": "run.<anonymous>",
+    "read": "136: call connect",
+    "write": "136: call releaseMerge"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 141,
+    "fn": "run.<anonymous>",
+    "read": "144: call connect",
+    "write": "144: call removeFromBatch"
+   },
+   {
+    "file": "src/merge/controls.ts",
+    "line": 150,
+    "fn": "run.<anonymous>",
+    "read": "152: call connect",
+    "write": "152: call stopBatch"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 206,
+    "fn": "askDue",
+    "read": "211: call withdrawOtherHeadQuestions",
+    "write": "211: call withdrawOtherHeadQuestions"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 220,
+    "fn": "askMergeDecisions",
+    "read": "222: call buildQueue",
+    "write": "223: call planned"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 236,
+    "fn": "runMerge",
+    "read": "243: call scopeRepos",
+    "write": "250: call buildQueue"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 432,
+    "fn": "run",
+    "read": "433: call connect",
+    "write": "433: call askMergeDecisions"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 439,
+    "fn": "run",
+    "read": "441: call connect",
+    "write": "441: call runMerge"
+   },
+   {
+    "file": "src/merge/index.ts",
+    "line": 446,
+    "fn": "run",
+    "read": "448: call connect",
+    "write": "448: call buildQueue"
+   },
+   {
+    "file": "src/merge/mergeable.ts",
+    "line": 28,
+    "fn": "noteMergeable",
+    "read": "37: SELECT value FROM main.settings WHERE key = ?",
+    "write": "41: DELETE FROM main.settings WHERE key = ?"
+   },
+   {
+    "file": "src/merge/mergeable.ts",
+    "line": 80,
+    "fn": "rereadUnknown",
+    "read": "81: SELECT key, value FROM main.settings WHERE key LIKE ?",
+    "write": "89: DELETE FROM main.settings WHERE key = ?"
+   },
+   {
+    "file": "src/merge/single.ts",
+    "line": 24,
+    "fn": "setSingleMergeMax",
+    "read": "26: call singleMergeMax",
+    "write": "27: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/merge/single.ts",
+    "line": 47,
+    "fn": "planSingles",
+    "read": "48: call singleMergeMax",
+    "write": "50: call planned"
+   },
+   {
+    "file": "src/merge/single.ts",
+    "line": 71,
+    "fn": "runSingles",
+    "read": "75: call mergeApprovalOf",
+    "write": "77: call planSingles"
+   },
+   {
+    "file": "src/merge/single.ts",
+    "line": 86,
+    "fn": "run",
+    "read": "88: call connect",
+    "write": "92: call setSingleMergeMax"
+   },
+   {
+    "file": "src/merge/verify-override.ts",
+    "line": 18,
+    "fn": "setAsideAnswerBeforeFailure",
+    "read": "19: SELECT answer FROM decisions WHERE id = ?",
+    "write": "20: call withdrawMergeQuestion"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 32,
+    "fn": "setAside",
+    "read": "33: SELECT answer, applied_at FROM decisions WHERE id = ?",
+    "write": "37: write block"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 54,
+    "fn": "withdrawBlockedQuestions",
+    "read": "59: SELECT answer, applied_at FROM decisions WHERE id = ?",
+    "write": "61: call withdrawMergeQuestion"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 73,
+    "fn": "withdrawGroupedQuestions",
+    "read": "74: SELECT DISTINCT m.repo, m.number, m.id FROM decisions m JOIN",
+    "write": "82: call withdrawMergeQuestion"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 94,
+    "fn": "withdrawOtherHeadQuestions",
+    "read": "96: SELECT id FROM decisions WHERE repo = ? AND number = ? AND k",
+    "write": "99: call withdrawMergeQuestion"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 111,
+    "fn": "setAsideLapsedScope",
+    "read": "112: SELECT repo, number, answer FROM decisions WHERE id = ? AND ",
+    "write": "115: write block"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 133,
+    "fn": "setAsideOldHeadQuestions",
+    "read": "134: SELECT d.id, d.kind, d.repo, d.number FROM decisions d JOIN ",
+    "write": "140: write block"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 157,
+    "fn": "setAsideSupersededQuestions",
+    "read": "158: call setAsideOldHeadQuestions",
+    "write": "171: write block"
+   },
+   {
+    "file": "src/merge/withdraw.ts",
+    "line": 193,
+    "fn": "withdrawClosedQuestions",
+    "read": "194: SELECT d.id, d.kind, d.repo, d.number, i.state, i.kind AS it",
+    "write": "204: write block"
+   }
+  ],
+  "nightly": [
+   {
+    "file": "src/nightly/index.ts",
+    "line": 83,
+    "fn": "setSelection",
+    "read": "85: call selectionOf",
+    "write": "87: INSERT INTO nightly_selection (repo, check_id, enabled, para"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 155,
+    "fn": "defaultDeps.openIssue",
+    "read": "156: call guardRepo",
+    "write": "158: call createIssue"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 182,
+    "fn": "storeBench",
+    "read": "186: SELECT value FROM nightly_bench WHERE repo = ? AND bench = ?",
+    "write": "191: INSERT OR REPLACE INTO nightly_bench (repo, bench, sha, at, "
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 248,
+    "fn": "afterFailure",
+    "read": "251: call history",
+    "write": "275: UPDATE nightly_results SET decision_id = ?, issue_number = ?"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 280,
+    "fn": "collect",
+    "read": "282: SELECT * FROM nightly_runs WHERE repo = ? AND state = 'runni",
+    "write": "288: UPDATE nightly_results SET state = 'error', summary = ?, fin"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 300,
+    "fn": "applyAnswers",
+    "read": "301: call actionable",
+    "write": "304: call applyAnswers.done"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 328,
+    "fn": "queueRun",
+    "read": "329: call headOf",
+    "write": "338: write block"
+   },
+   {
+    "file": "src/nightly/index.ts",
+    "line": 354,
+    "fn": "runNightly",
+    "read": "357: call featureOn",
+    "write": "362: call applyAnswers"
+   }
+  ],
+  "postmerge": [
+   {
+    "file": "src/postmerge/file.ts",
+    "line": 68,
+    "fn": "fileDefect",
+    "read": "72: SELECT default_branch FROM repos WHERE name = ?",
+    "write": "74: call setFollowup"
+   },
+   {
+    "file": "src/postmerge/file.ts",
+    "line": 114,
+    "fn": "runPostmergeFile",
+    "read": "117: call commentApprovalOf",
+    "write": "130: call setFollowup"
+   },
+   {
+    "file": "src/postmerge/file.ts",
+    "line": 163,
+    "fn": "fileFinding",
+    "read": "167: call reviewOf",
+    "write": "177: call audit"
+   },
+   {
+    "file": "src/postmerge/index.ts",
+    "line": 12,
+    "fn": "reviewOne",
+    "read": "16: call mergedPr",
+    "write": "20: call audit"
+   },
+   {
+    "file": "src/postmerge/index.ts",
+    "line": 28,
+    "fn": "run",
+    "read": "35: call connect",
+    "write": "35: call reviewOne"
+   },
+   {
+    "file": "src/postmerge/review.ts",
+    "line": 100,
+    "fn": "saveReview",
+    "read": "103: SELECT 1 FROM postmerge_reviews WHERE repo = ? AND number = ",
+    "write": "109: INSERT OR REPLACE INTO postmerge_reviews (repo, number, merg"
+   },
+   {
+    "file": "src/postmerge/review.ts",
+    "line": 119,
+    "fn": "runPostmerge",
+    "read": "122: call mergedPr",
+    "write": "122: call selectPostmerge"
+   },
+   {
+    "file": "src/postmerge/review.ts",
+    "line": 127,
+    "fn": "runPostmerge.map-callback.<anonymous>",
+    "read": "129: call prepare",
+    "write": "131: call jobItem"
+   }
+  ],
+  "prbuild": [
+   {
+    "file": "src/prbuild/index.ts",
+    "line": 30,
+    "fn": "queuePrBuild",
+    "read": "37: call createTask",
+    "write": "41: INSERT INTO main.pr_builds (repo, number, head_sha, scope, t"
+   },
+   {
+    "file": "src/prbuild/index.ts",
+    "line": 67,
+    "fn": "prBuildDue",
+    "read": "68: call featureOn",
+    "write": "69: call selectPrBuilds"
+   },
+   {
+    "file": "src/prbuild/index.ts",
+    "line": 84,
+    "fn": "collectPrBuilds",
+    "read": "86: call baseScopeRepos",
+    "write": "88: call leaseItem"
+   },
+   {
+    "file": "src/prbuild/index.ts",
+    "line": 146,
+    "fn": "runPrBuilds",
+    "read": "148: call collectPrBuilds",
+    "write": "150: call selectPrBuilds"
+   },
+   {
+    "file": "src/prbuild/select.ts",
+    "line": 48,
+    "fn": "selectPrBuilds",
+    "read": "49: SELECT 1 FROM repos WHERE name = ? AND visibility = 'public'",
+    "write": "65: call isOutsideAuthor"
+   }
+  ],
+  "preapproval": [
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 76,
+    "fn": "say",
+    "read": "77: call conversationOf",
+    "write": "77: call insertTurn"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 106,
+    "fn": "revertAnswer",
+    "read": "109: SELECT 1 FROM audit WHERE action = 'answer' AND target = ? A",
+    "write": "110: UPDATE main.decisions SET answer = NULL, answer_note = NULL,"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 117,
+    "fn": "cancelRow",
+    "read": "128: call inActiveBatch",
+    "write": "132: call moveRaw"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 150,
+    "fn": "runPipelineStep",
+    "read": "153: call prRow",
+    "write": "157: call markReviewsStale"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 226,
+    "fn": "preapproveMerge",
+    "read": "229: call prRow",
+    "write": "232: call loadPrFact"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 267,
+    "fn": "askMerge",
+    "read": "269: call getDecision",
+    "write": "276: call withdrawOtherHeadQuestions"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 286,
+    "fn": "handOver",
+    "read": "296: SELECT 1 FROM verifications WHERE repo = ? AND number = ? AN",
+    "write": "314: call moveRaw"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 350,
+    "fn": "reviewAt",
+    "read": "351: SELECT verdict, sure, reason FROM opus_reviews WHERE repo = ",
+    "write": "353: call staleReviews"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 396,
+    "fn": "advance",
+    "read": "397: call prRow",
+    "write": "402: call advance.cancel"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 399,
+    "fn": "advance.stop",
+    "read": "400: call move",
+    "write": "400: call askMerge"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 519,
+    "fn": "endStaleRequests",
+    "read": "521: SELECT id, repo, number, from_head, by, preapproval_id FROM ",
+    "write": "523: UPDATE operator_fixups SET state = 'ended' WHERE id = ? AND "
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 539,
+    "fn": "settleCancelled",
+    "read": "541: SELECT * FROM preapprovals WHERE state = 'cancelled' AND hea",
+    "write": "543: call move"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 552,
+    "fn": "carryAnswers",
+    "read": "553: SELECT m.repo, m.number, m.from_head, m.to_head, 'base merge",
+    "write": "569: INSERT INTO preapprovals (repo, number, by, at, instructions"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 584,
+    "fn": "advancePreapprovals",
+    "read": "588: call refreshSettlers",
+    "write": "595: call endStaleRequests"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 628,
+    "fn": "cancelPreapproval",
+    "read": "629: SELECT id FROM preapprovals WHERE repo = ? AND number = ? AN",
+    "write": "642: call removeFromBatch"
+   },
+   {
+    "file": "src/preapproval/index.ts",
+    "line": 659,
+    "fn": "retryPreapproval",
+    "read": "660: SELECT * FROM preapprovals WHERE repo = ? AND number = ? ORD",
+    "write": "663: call runPipelineStep"
+   }
+  ],
+  "premerge": [
+   {
+    "file": "src/premerge/index.ts",
+    "line": 24,
+    "fn": "run",
+    "read": "27: call connect",
+    "write": "31: call audit"
+   },
+   {
+    "file": "src/premerge/review.ts",
+    "line": 94,
+    "fn": "runPremerge.map-callback.<anonymous>",
+    "read": "104: call coreRate",
+    "write": "111: call jobItem"
+   }
+  ],
+  "prepush": [
+   {
+    "file": "src/prepush/cli.ts",
+    "line": 40,
+    "fn": "runLint",
+    "read": "42: SELECT head_oid, state FROM items WHERE repo = ? AND number ",
+    "write": "61: call cratesForTests"
+   },
+   {
+    "file": "src/prepush/cli.ts",
+    "line": 97,
+    "fn": "run",
+    "read": "98: call connect",
+    "write": "98: call runLint"
+   },
+   {
+    "file": "src/prepush/index.ts",
+    "line": 73,
+    "fn": "queueLintFor",
+    "read": "74: call testsFeatureCrates",
+    "write": "75: call queueLint"
+   },
+   {
+    "file": "src/prepush/resume.ts",
+    "line": 89,
+    "fn": "sweepSessions",
+    "read": "94: SELECT session FROM",
+    "write": "104: UPDATE"
+   },
+   {
+    "file": "src/prepush/tests.ts",
+    "line": 139,
+    "fn": "testsFeatureCrates",
+    "read": "140: call featureOn",
+    "write": "140: call cratesForTests"
+   }
+  ],
+  "priority": [
+   {
+    "file": "src/priority/index.ts",
+    "line": 46,
+    "fn": "rescore",
+    "read": "47: call reachOfOpenItems",
+    "write": "52: write block"
+   },
+   {
+    "file": "src/priority/index.ts",
+    "line": 66,
+    "fn": "runPrioritize",
+    "read": "68: call fillEmbedHashes",
+    "write": "76: call runTiered"
+   },
+   {
+    "file": "src/priority/index.ts",
+    "line": 100,
+    "fn": "run",
+    "read": "104: call connect",
+    "write": "104: call runPrioritize"
+   },
+   {
+    "file": "src/priority/reach.ts",
+    "line": 27,
+    "fn": "reachOfOpenItems",
+    "read": "29: SELECT repo, number, COUNT(DISTINCT author) AS n FROM commen",
+    "write": "32: call settledTable"
+   }
+  ],
+  "rank": [
+   {
+    "file": "src/rank/index.ts",
+    "line": 24,
+    "fn": "runRank",
+    "read": "25: call latestRun",
+    "write": "50: write block"
+   },
+   {
+    "file": "src/rank/index.ts",
+    "line": 74,
+    "fn": "run",
+    "read": "75: call connect",
+    "write": "90: call runRank"
+   }
+  ],
+  "remote": [
+   {
+    "file": "src/remote/calls.ts",
+    "line": 105,
+    "fn": "enqueueCall",
+    "read": "107: SELECT user_login FROM main.remote_calls WHERE id = ?",
+    "write": "109: INSERT INTO main.remote_calls (job_id, step, stage, prompt_i"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 118,
+    "fn": "withdrawCall",
+    "read": "119: UPDATE main.remote_calls SET state = 'failed', error = ?, en",
+    "write": "122: call finishRun"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 127,
+    "fn": "withdrawJobCalls",
+    "read": "129: SELECT id FROM main.remote_calls WHERE state IN ('queued', '",
+    "write": "131: call withdrawCall"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 176,
+    "fn": "expireLeases",
+    "read": "178: call dashboardAlive",
+    "write": "192: call requeue"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 216,
+    "fn": "liveLease",
+    "read": "219: SELECT id FROM main.remote_calls WHERE lease_secret_hash = ?",
+    "write": "221: call expireLeases"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 412,
+    "fn": "leaseCall",
+    "read": "415: SELECT bundle FROM main.remote_calls WHERE id = ? AND state ",
+    "write": "436: call insertRun"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 530,
+    "fn": "claimOrder",
+    "read": "531: call queuedCalls",
+    "write": "544: call clearPick"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 603,
+    "fn": "claimableCalls",
+    "read": "604: call expireLeases",
+    "write": "613: call claimOrder"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 683,
+    "fn": "prepareClaim",
+    "read": "688: SELECT id, run_id, lease_secret_hash FROM main.remote_calls ",
+    "write": "689: call unlease"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 694,
+    "fn": "prepareClaim.attempt",
+    "read": "696: call claimOrder",
+    "write": "709: call claimOrder"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 771,
+    "fn": "heartbeat",
+    "read": "772: call liveLease",
+    "write": "776: UPDATE main.remote_calls SET heartbeat_at = ?, progress = CO"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 801,
+    "fn": "submitCall",
+    "read": "802: call liveLease",
+    "write": "819: call requeue"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 851,
+    "fn": "releaseCall",
+    "read": "852: call liveLease",
+    "write": "855: call unlease"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 883,
+    "fn": "awaitCall",
+    "read": "885: call pollCall",
+    "write": "887: call endChecks"
+   },
+   {
+    "file": "src/remote/calls.ts",
+    "line": 891,
+    "fn": "pollCall",
+    "read": "901: call expireLeases",
+    "write": "908: UPDATE main.remote_calls SET reply = NULL WHERE id = ?"
+   },
+   {
+    "file": "src/remote/check-relay.ts",
+    "line": 18,
+    "fn": "serveChecks",
+    "read": "19: SELECT id, run_id, input FROM main.remote_checks WHERE call_",
+    "write": "21: UPDATE main.remote_checks SET state = 'running' WHERE id = ?"
+   },
+   {
+    "file": "src/remote/check-relay.ts",
+    "line": 42,
+    "fn": "relayCheck",
+    "read": "48: SELECT state, result FROM main.remote_checks WHERE id = ?",
+    "write": "53: UPDATE main.remote_checks SET state = 'done', result = ?, en"
+   },
+   {
+    "file": "src/remote/cli.ts",
+    "line": 13,
+    "fn": "run",
+    "read": "14: call connect",
+    "write": "24: call setInferenceMode"
+   },
+   {
+    "file": "src/remote/cli.ts",
+    "line": 29,
+    "fn": "run",
+    "read": "30: call makeToken",
+    "write": "35: call connect"
+   },
+   {
+    "file": "src/remote/cli.ts",
+    "line": 42,
+    "fn": "makeToken",
+    "read": "55: call connect",
+    "write": "69: call audit"
+   },
+   {
+    "file": "src/remote/cooloff.ts",
+    "line": 37,
+    "fn": "noteDrop",
+    "read": "38: SELECT 1 FROM main.remote_lease_drops WHERE token_id = ? AND",
+    "write": "40: INSERT INTO main.remote_lease_drops (token_id, login, call_i"
+   },
+   {
+    "file": "src/remote/cooloff.ts",
+    "line": 46,
+    "fn": "noteFailure",
+    "read": "47: SELECT failures, failures_since FROM main.remote_cooloffs WH",
+    "write": "50: call coolOff"
+   },
+   {
+    "file": "src/remote/cooloff.ts",
+    "line": 73,
+    "fn": "clearCooloff",
+    "read": "74: call cooloffOf",
+    "write": "75: DELETE FROM main.remote_cooloffs WHERE login = ?"
+   },
+   {
+    "file": "src/remote/device-login.ts",
+    "line": 96,
+    "fn": "pollLogin",
+    "read": "98: SELECT id, state, expires_at FROM main.runner_logins WHERE s",
+    "write": "104: UPDATE main.runner_logins SET state = 'expired' WHERE id = ?"
+   },
+   {
+    "file": "src/remote/device-login.ts",
+    "line": 136,
+    "fn": "approveLogin",
+    "read": "148: call addRunnerToken",
+    "write": "149: UPDATE main.runner_logins SET state = 'approved', login = ?,"
+   },
+   {
+    "file": "src/remote/device-login.ts",
+    "line": 159,
+    "fn": "denyLogin",
+    "read": "160: call pendingRow",
+    "write": "162: UPDATE main.runner_logins SET state = 'denied', login = ? WH"
+   },
+   {
+    "file": "src/remote/manual-only.ts",
+    "line": 26,
+    "fn": "setManualOnly",
+    "read": "27: call manualOnly",
+    "write": "28: DELETE FROM main.user_settings WHERE login = ? AND key = ?"
+   },
+   {
+    "file": "src/remote/max-calls.ts",
+    "line": 26,
+    "fn": "setUserMaxCalls",
+    "read": "27: call userMaxCalls",
+    "write": "28: DELETE FROM main.user_settings WHERE login = ? AND key = ?"
+   },
+   {
+    "file": "src/remote/mode.ts",
+    "line": 20,
+    "fn": "setInferenceMode",
+    "read": "21: call inferenceMode",
+    "write": "22: DELETE FROM main.settings WHERE key = ?"
+   },
+   {
+    "file": "src/remote/mode.ts",
+    "line": 106,
+    "fn": "setAcceptedModels",
+    "read": "107: call acceptedModels",
+    "write": "120: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/remote/my-repos.ts",
+    "line": 34,
+    "fn": "setUserRepos",
+    "read": "35: call userRepos",
+    "write": "36: INSERT INTO main.user_settings (login, key, value, updated_a"
+   },
+   {
+    "file": "src/remote/my-tasks.ts",
+    "line": 72,
+    "fn": "setUserTasks",
+    "read": "73: call userTasks",
+    "write": "76: DELETE FROM main.user_settings WHERE login = ? AND key = ?"
+   },
+   {
+    "file": "src/remote/permission.ts",
+    "line": 43,
+    "fn": "lookup",
+    "read": "44: SELECT owner FROM main.repos WHERE name = ?",
+    "write": "56: INSERT INTO repo_permissions (login, repo, permission, check"
+   },
+   {
+    "file": "src/remote/picks.ts",
+    "line": 35,
+    "fn": "setPickMinutes",
+    "read": "38: call pickMinutes",
+    "write": "39: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/remote/picks.ts",
+    "line": 129,
+    "fn": "pickCall",
+    "read": "130: call readCall",
+    "write": "147: UPDATE main.remote_calls SET picked_by = ?, picked_at = ?, p"
+   },
+   {
+    "file": "src/remote/picks.ts",
+    "line": 161,
+    "fn": "unpickCall",
+    "read": "163: call readCall",
+    "write": "168: call clearPick"
+   },
+   {
+    "file": "src/remote/reserve.ts",
+    "line": 37,
+    "fn": "setUserReserve",
+    "read": "38: call userReserve",
+    "write": "41: INSERT INTO main.user_settings (login, key, value, updated_a"
+   },
+   {
+    "file": "src/remote/takers.ts",
+    "line": 144,
+    "fn": "sweepTakers",
+    "read": "145: call inferenceMode",
+    "write": "146: DELETE FROM main.remote_no_taker"
+   },
+   {
+    "file": "src/remote/task-items.ts",
+    "line": 34,
+    "fn": "setUserTaskItems",
+    "read": "35: call userTaskItems",
+    "write": "36: DELETE FROM main.user_settings WHERE login = ? AND key = ?"
+   },
+   {
+    "file": "src/remote/tools.ts",
+    "line": 91,
+    "fn": "reference",
+    "read": "94: SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id",
+    "write": "115: INSERT INTO main.remote_passages (call_id, run_id, user_logi"
+   },
+   {
+    "file": "src/remote/tools.ts",
+    "line": 161,
+    "fn": "callTaskTool",
+    "read": "167: call reference",
+    "write": "168: call relayCheck"
+   }
+  ],
+  "repin": [
+   {
+    "file": "src/repin/index.ts",
+    "line": 118,
+    "fn": "requestRepin",
+    "read": "120: call settleRefusal",
+    "write": "127: INSERT INTO main.autorepin_offs (repo, number, off_at) VALUE"
+   },
+   {
+    "file": "src/repin/index.ts",
+    "line": 218,
+    "fn": "finish",
+    "read": "219: call stopTask",
+    "write": "220: UPDATE main.autorepins SET state = ?, result = ?, done_at = "
+   },
+   {
+    "file": "src/repin/index.ts",
+    "line": 225,
+    "fn": "step",
+    "read": "230: call getTask",
+    "write": "232: call cancelTask"
+   },
+   {
+    "file": "src/repin/index.ts",
+    "line": 450,
+    "fn": "notify",
+    "read": "452: call isQuiet",
+    "write": "453: UPDATE main.autorepins SET notice = 'none' WHERE"
+   },
+   {
+    "file": "src/repin/index.ts",
+    "line": 474,
+    "fn": "drainRepins",
+    "read": "477: call repinsDue",
+    "write": "482: call step"
+   }
+  ],
+  "review": [
+   {
+    "file": "src/review/carry-step.ts",
+    "line": 9,
+    "fn": "runCarry",
+    "read": "10: call staleReviews",
+    "write": "13: call planned"
+   },
+   {
+    "file": "src/review/checks.ts",
+    "line": 107,
+    "fn": "saveChecks",
+    "read": "114: call recordRuns",
+    "write": "114: call recordRuns"
+   },
+   {
+    "file": "src/review/checks.ts",
+    "line": 120,
+    "fn": "refreshChecks",
+    "read": "121: SELECT number FROM items i WHERE repo = ? AND kind = 'pr' AN",
+    "write": "127: call saveChecks"
+   },
+   {
+    "file": "src/review/diff.ts",
+    "line": 168,
+    "fn": "cachedDiff",
+    "read": "195: SELECT 1 FROM diff_facts WHERE repo = ? AND number = ? AND h",
+    "write": "195: call recordDiffFacts"
+   },
+   {
+    "file": "src/review/diff.ts",
+    "line": 207,
+    "fn": "rereadDiff",
+    "read": "208: call cachedDiff",
+    "write": "209: call noteReread"
+   },
+   {
+    "file": "src/review/diff.ts",
+    "line": 373,
+    "fn": "buildDiffFacts",
+    "read": "376: SELECT value FROM settings WHERE key = ?",
+    "write": "378: write block"
+   },
+   {
+    "file": "src/review/discussion.ts",
+    "line": 274,
+    "fn": "discussionState",
+    "read": "275: SELECT topic, seq FROM change_seq WHERE topic IN ('items', '",
+    "write": "276: call allOwnLogins"
+   },
+   {
+    "file": "src/review/discussion.ts",
+    "line": 287,
+    "fn": "computeDiscussionState",
+    "read": "288: call ownLogins",
+    "write": "288: call allOwnLogins"
+   },
+   {
+    "file": "src/review/discussion.ts",
+    "line": 399,
+    "fn": "staleReviews",
+    "read": "401: call reviewedRows",
+    "write": "402: call discussionState"
+   },
+   {
+    "file": "src/review/discussion.ts",
+    "line": 431,
+    "fn": "ensurePipelineLogin",
+    "read": "432: call pipelineLogin",
+    "write": "435: call setPipelineLogin"
+   },
+   {
+    "file": "src/review/discussion.ts",
+    "line": 444,
+    "fn": "liveGate",
+    "read": "445: call liveDiscussion",
+    "write": "446: call recordGate"
+   },
+   {
+    "file": "src/review/gate.ts",
+    "line": 30,
+    "fn": "setReviewMinInterval",
+    "read": "33: call reviewMinInterval",
+    "write": "34: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/review/gate.ts",
+    "line": 42,
+    "fn": "recordReviewFailure",
+    "read": "44: call setting",
+    "write": "46: DELETE FROM main.settings WHERE key LIKE ? AND key <> ?"
+   },
+   {
+    "file": "src/review/gate.ts",
+    "line": 113,
+    "fn": "reviewHolds.<anonymous>",
+    "read": "124: call discussionState",
+    "write": "132: call discussionState"
+   },
+   {
+    "file": "src/review/index.ts",
+    "line": 37,
+    "fn": "run",
+    "read": "41: call connect",
+    "write": "44: call markReviewsStale"
+   },
+   {
+    "file": "src/review/index.ts",
+    "line": 50,
+    "fn": "run",
+    "read": "53: call connect",
+    "write": "53: call runChecks"
+   },
+   {
+    "file": "src/review/opus.ts",
+    "line": 78,
+    "fn": "saveOpus",
+    "read": "80: SELECT at FROM opus_reviews WHERE repo = ? AND number = ? AN",
+    "write": "85: call countRerun"
+   },
+   {
+    "file": "src/review/opus.ts",
+    "line": 173,
+    "fn": "prepareOpusInput",
+    "read": "174: SELECT base_ref FROM items WHERE repo = ? AND number = ?",
+    "write": "175: call cachedDiff"
+   },
+   {
+    "file": "src/review/opus.ts",
+    "line": 235,
+    "fn": "runOpusReview",
+    "read": "238: call selectOpusCandidates",
+    "write": "239: call staleReviews"
+   },
+   {
+    "file": "src/review/opus.ts",
+    "line": 276,
+    "fn": "runOpusReview.map-callback.<anonymous>",
+    "read": "278: call prepareOpusInput",
+    "write": "280: call jobItem"
+   },
+   {
+    "file": "src/review/opus.ts",
+    "line": 338,
+    "fn": "run",
+    "read": "354: call connect",
+    "write": "354: call runOpusReview"
+   },
+   {
+    "file": "src/review/post.ts",
+    "line": 46,
+    "fn": "postCandidates",
+    "read": "50: call githubIdentity",
+    "write": "52: call planned"
+   },
+   {
+    "file": "src/review/post.ts",
+    "line": 80,
+    "fn": "runReviewPost",
+    "read": "85: call commentApprovalOf",
+    "write": "90: call postCandidates"
+   },
+   {
+    "file": "src/review/post.ts",
+    "line": 145,
+    "fn": "run",
+    "read": "158: call connect",
+    "write": "158: call runReviewPost"
+   },
+   {
+    "file": "src/review/summary.ts",
+    "line": 51,
+    "fn": "fillReviewSummaries",
+    "read": "52: SELECT * FROM decisions WHERE kind IN ('merge', 'close', 'ho",
+    "write": "70: UPDATE main.decisions SET summary = ?, summary_by = ?, summa"
+   }
+  ],
+  "runner": [
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 161,
+    "fn": "planCtx",
+    "read": "165: call refreshOutsideHolds",
+    "write": "182: call loadPlanSet"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 172,
+    "fn": "planCtx.<anonymous>",
+    "read": "173: call rereadSettingsSnapshot",
+    "write": "176: call planPass"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 193,
+    "fn": "servable",
+    "read": "194: call untakenTest",
+    "write": "196: call plansOf"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 328,
+    "fn": "cifixRepos",
+    "read": "330: call plansOf",
+    "write": "330: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 339,
+    "fn": "detect",
+    "read": "340: call jevUsable",
+    "write": "341: call servable"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 347,
+    "fn": "detect",
+    "read": "348: call jevUsable",
+    "write": "349: call servable"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 362,
+    "fn": "detect",
+    "read": "362: call plansOf",
+    "write": "362: call embedDue"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 367,
+    "fn": "detect",
+    "read": "368: call plansOf",
+    "write": "370: call servable"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 382,
+    "fn": "detect",
+    "read": "384: SELECT recommend_failed_at AS at FROM decisions WHERE answer",
+    "write": "386: call servable"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 393,
+    "fn": "detect",
+    "read": "395: call plansOf",
+    "write": "395: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 431,
+    "fn": "topScore",
+    "read": "432: call plansOf",
+    "write": "432: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 460,
+    "fn": "detect",
+    "read": "462: call plansOf",
+    "write": "462: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 470,
+    "fn": "detect",
+    "read": "471: call plansOf",
+    "write": "475: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 513,
+    "fn": "detect",
+    "read": "516: call plansOf",
+    "write": "522: call plansOf"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 543,
+    "fn": "detect",
+    "read": "544: call plansOf",
+    "write": "545: call selectFixups"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 559,
+    "fn": "detect",
+    "read": "561: call plansOf",
+    "write": "562: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 586,
+    "fn": "detect",
+    "read": "586: call reposWithQueuedBuilds",
+    "write": "586: call prBuildDue"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 592,
+    "fn": "detect",
+    "read": "593: call plansOf",
+    "write": "594: call plansOf"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 611,
+    "fn": "detect",
+    "read": "613: SELECT json_extract(probs, '$.opusFailedAt') AS at FROM clas",
+    "write": "614: call servable"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 621,
+    "fn": "detect",
+    "read": "622: call plansOf",
+    "write": "622: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 630,
+    "fn": "detect",
+    "read": "631: call plansOf",
+    "write": "631: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 644,
+    "fn": "detect",
+    "read": "644: call plansOf",
+    "write": "644: call plansOf"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 651,
+    "fn": "detect",
+    "read": "653: call plansOf",
+    "write": "653: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 661,
+    "fn": "detect",
+    "read": "662: call plansOf",
+    "write": "663: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 676,
+    "fn": "detect",
+    "read": "678: call plansOf",
+    "write": "678: call premergeCandidates"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 686,
+    "fn": "detect",
+    "read": "686: call plansOf",
+    "write": "686: call selectPostmerge"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 841,
+    "fn": "pauseOf",
+    "read": "842: call limitRow",
+    "write": "852: call claudePauseReason"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 868,
+    "fn": "setEnabled",
+    "read": "874: SELECT id, step FROM jobs WHERE state = 'queued' AND request",
+    "write": "876: call requestCancel"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 955,
+    "fn": "stageLimits",
+    "read": "957: call stageStatus",
+    "write": "960: call pauseReason"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 964,
+    "fn": "pipelineState",
+    "read": "966: call judgementModel",
+    "write": "968: call stageLimits"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1009,
+    "fn": "detectPass",
+    "read": "1015: call planCtx",
+    "write": "1083: call detectPass.gate"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1043,
+    "fn": "detectPass.gate",
+    "read": "1048: call jobBlock",
+    "write": "1049: call detectPass.pausedWhy"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1157,
+    "fn": "applyProposals",
+    "read": "1165: call untakenTest",
+    "write": "1166: call applyUsedAnswers"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1203,
+    "fn": "planAutopilot",
+    "read": "1204: call detectAutopilot",
+    "write": "1205: call applyProposals"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1219,
+    "fn": "planDue",
+    "read": "1221: call inputSignature",
+    "write": "1231: call writeSetting"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1273,
+    "fn": "laneItems",
+    "read": "1276: call plansOf",
+    "write": "1303: call planned"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1321,
+    "fn": "storeLaneItems",
+    "read": "1322: SELECT lane, total, items FROM lane_next",
+    "write": "1326: call laneItems"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1360,
+    "fn": "heldLookup.<anonymous>",
+    "read": "1367: call heldLookup.laneHold",
+    "write": "1370: call heldLookup.laneHold"
+   },
+   {
+    "file": "src/runner/autopilot.ts",
+    "line": 1392,
+    "fn": "laneGate",
+    "read": "1393: call isEnabled",
+    "write": "1400: call pauseReason"
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 48,
+    "fn": "jevPass",
+    "read": "52: call jevAvailable",
+    "write": "54: call keepUsage"
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 69,
+    "fn": "haikuPass",
+    "read": "75: call freeSlots",
+    "write": "77: call keepUsage"
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 89,
+    "fn": "haikuOnlyPass",
+    "read": "92: call haikuPass",
+    "write": "98: UPDATE main.classifications SET input_hash = ? WHERE repo = "
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 123,
+    "fn": "pass",
+    "read": "127: call jevItems",
+    "write": "131: call jevPass"
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 150,
+    "fn": "classifyNew",
+    "read": "151: call latestRun",
+    "write": "153: call pass"
+   },
+   {
+    "file": "src/runner/classify.ts",
+    "line": 158,
+    "fn": "classifyAll",
+    "read": "160: call pass",
+    "write": "162: INSERT INTO settings (key, value) VALUES ('classify_run', ?)"
+   },
+   {
+    "file": "src/runner/cli-job.ts",
+    "line": 51,
+    "fn": "runCliJob",
+    "read": "55: call checkRequest",
+    "write": "57: write block"
+   },
+   {
+    "file": "src/runner/concurrency.ts",
+    "line": 31,
+    "fn": "setStepParallel",
+    "read": "36: call stepParallelSetting",
+    "write": "37: INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT "
+   },
+   {
+    "file": "src/runner/exec.ts",
+    "line": 25,
+    "fn": "execJob",
+    "read": "26: call connect",
+    "write": "51: call execJob.fail"
+   },
+   {
+    "file": "src/runner/exec.ts",
+    "line": 34,
+    "fn": "execJob.saveUsage",
+    "read": "35: call usageOf",
+    "write": "36: UPDATE jobs SET usage = ? WHERE id = ?"
+   },
+   {
+    "file": "src/runner/exec.ts",
+    "line": 38,
+    "fn": "execJob.fail",
+    "read": "39: call execJob.saveUsage",
+    "write": "40: UPDATE jobs SET error = ? WHERE id = ?"
+   },
+   {
+    "file": "src/runner/index.ts",
+    "line": 37,
+    "fn": "serve",
+    "read": "41: call connect",
+    "write": "42: call scopeToTracked"
+   },
+   {
+    "file": "src/runner/index.ts",
+    "line": 107,
+    "fn": "enqueueCmd",
+    "read": "118: call connect",
+    "write": "119: call scopeToTracked"
+   },
+   {
+    "file": "src/runner/index.ts",
+    "line": 138,
+    "fn": "cancel",
+    "read": "142: call connect",
+    "write": "142: call requestCancel"
+   },
+   {
+    "file": "src/runner/index.ts",
+    "line": 168,
+    "fn": "planLog",
+    "read": "169: call connect",
+    "write": "180: call writeSetting"
+   },
+   {
+    "file": "src/runner/index.ts",
+    "line": 201,
+    "fn": "pipeline",
+    "read": "203: call connect",
+    "write": "212: call setEnabled"
+   },
+   {
+    "file": "src/runner/jobs.ts",
+    "line": 122,
+    "fn": "enqueue",
+    "read": "123: call checkRequest",
+    "write": "132: INSERT INTO jobs (step, params, repo, requested_by, requeste"
+   },
+   {
+    "file": "src/runner/jobs.ts",
+    "line": 138,
+    "fn": "requestCancel",
+    "read": "139: call jobRow",
+    "write": "143: UPDATE jobs SET state = 'cancelled', ended_at = ?, cancel_re"
+   },
+   {
+    "file": "src/runner/jobs.ts",
+    "line": 157,
+    "fn": "pruneJobs",
+    "read": "164: SELECT id, log_path FROM jobs WHERE ended_at IS NOT NULL AND",
+    "write": "174: DELETE FROM job_items WHERE job_id = ?"
+   },
+   {
+    "file": "src/runner/jobs.ts",
+    "line": 227,
+    "fn": "endJob",
+    "read": "228: call jobRow",
+    "write": "239: call failRunning"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 143,
+    "fn": "Runner.recover",
+    "read": "148: call withdrawJobCalls",
+    "write": "149: DELETE FROM work_leases"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 163,
+    "fn": "Runner.tick",
+    "read": "173: call cancels",
+    "write": "176: call reapLost"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 194,
+    "fn": "Runner.webhookTick",
+    "read": "197: SELECT 1 FROM main.github_commands WHERE",
+    "write": "201: call Runner.webhookTick.<anonymous>"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 201,
+    "fn": "Runner.webhookTick.<anonymous>",
+    "read": "204: call seedRate",
+    "write": "206: call drainSyncRequests"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 251,
+    "fn": "Runner.reconcileTick.<anonymous>",
+    "read": "253: call seedRate",
+    "write": "255: call reconcileNext"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 263,
+    "fn": "Runner.autopilot",
+    "read": "270: call isEnabled",
+    "write": "271: call applyProposals"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 319,
+    "fn": "Runner.usageTick",
+    "read": "324: call recordUsageSamples",
+    "write": "331: call tick"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 368,
+    "fn": "Runner.cancels",
+    "read": "370: SELECT cancel_requested_at FROM jobs WHERE id = ?",
+    "write": "389: UPDATE jobs SET error = ? WHERE id = ? AND state = 'running'"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 419,
+    "fn": "Runner.startJobs",
+    "read": "421: SELECT id, step, params, requested_by, repo FROM jobs WHERE ",
+    "write": "434: UPDATE jobs SET state = 'failed', ended_at = ?, error = ? WH"
+   },
+   {
+    "file": "src/runner/runner.ts",
+    "line": 535,
+    "fn": "Runner.serve",
+    "read": "536: call recover",
+    "write": "538: call buildDiffFacts"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 210,
+    "fn": "run",
+    "read": "212: call checkApproved",
+    "write": "216: call ensureLabels"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 232,
+    "fn": "run",
+    "read": "234: call checkApproved",
+    "write": "242: call ensureLabels"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 314,
+    "fn": "run",
+    "read": "318: call checkMergeApproved",
+    "write": "321: call runSingles"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 344,
+    "fn": "run",
+    "read": "347: call trackedNames",
+    "write": "347: call askMergeDecisions"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 363,
+    "fn": "run",
+    "read": "365: call checkCommentApproved",
+    "write": "367: call runAct"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 390,
+    "fn": "run",
+    "read": "392: call checkPushApproved",
+    "write": "394: call runFixup"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 496,
+    "fn": "run",
+    "read": "498: call checkFixIssueApproved",
+    "write": "500: call runFixIssue"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 559,
+    "fn": "run",
+    "read": "564: call rawFinding",
+    "write": "567: call leaseItem"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 707,
+    "fn": "run",
+    "read": "709: call checkCommentApproved",
+    "write": "711: call runReviewPost"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 763,
+    "fn": "run",
+    "read": "765: call checkCommentApproved",
+    "write": "767: call runPostmergeFile"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 885,
+    "fn": "run",
+    "read": "889: call checkCiApproved",
+    "write": "892: call approveRuns"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 911,
+    "fn": "run",
+    "read": "913: call checkPushApproved",
+    "write": "915: call runCifix"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 931,
+    "fn": "run",
+    "read": "933: call checkCiApproved",
+    "write": "935: call runRerun"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 949,
+    "fn": "run",
+    "read": "951: call checkMainFixApproved",
+    "write": "953: call runMainFix"
+   },
+   {
+    "file": "src/runner/steps.ts",
+    "line": 966,
+    "fn": "run",
+    "read": "968: call checkNightlyOn",
+    "write": "970: call runNightly"
+   },
+   {
+    "file": "src/runner/worker.ts",
+    "line": 14,
+    "fn": "on-callback",
+    "read": "16: call detectAutopilot",
+    "write": "16: call refreshSummary"
+   }
+  ],
+  "sandbox": [
+   {
+    "file": "src/sandbox/workspace.ts",
+    "line": 34,
+    "fn": "setWorkspaceExcluded",
+    "read": "39: call workspaceExcluded",
+    "write": "40: INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONF"
+   },
+   {
+    "file": "src/sandbox/workspace.ts",
+    "line": 147,
+    "fn": "run",
+    "read": "149: call connect",
+    "write": "150: call setWorkspaceExcluded"
+   }
+  ],
+  "security": [
+   {
+    "file": "src/security/actions.ts",
+    "line": 33,
+    "fn": "startScanAs",
+    "read": "36: call reconcileScans",
+    "write": "39: INSERT INTO security_scans (repo, state, cap_usd, started_by"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 59,
+    "fn": "continueScanAs",
+    "read": "60: call scanRow",
+    "write": "66: call reconcileScans"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 86,
+    "fn": "stopScanAs",
+    "read": "87: call scanRow",
+    "write": "92: call requestCancel"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 99,
+    "fn": "actOnFindingAs",
+    "read": "102: call startStep",
+    "write": "108: call moveFinding"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 120,
+    "fn": "autoFixConfirmed",
+    "read": "122: SELECT DISTINCT repo FROM security_findings WHERE state = 'f",
+    "write": "123: call reconcileFindings"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 150,
+    "fn": "advanceSecurityFixes",
+    "read": "151: SELECT f.repo, f.number, f.decided_by AS by, r.created_at, r",
+    "write": "171: call cancelTask"
+   },
+   {
+    "file": "src/security/actions.ts",
+    "line": 185,
+    "fn": "startStep",
+    "read": "186: call findingRow",
+    "write": "195: call clearRounds"
+   },
+   {
+    "file": "src/security/cli.ts",
+    "line": 56,
+    "fn": "open",
+    "read": "57: call connect",
+    "write": "58: call scopeToTracked"
+   },
+   {
+    "file": "src/security/cli.ts",
+    "line": 110,
+    "fn": "list",
+    "read": "113: call open",
+    "write": "114: call reconcileScans"
+   },
+   {
+    "file": "src/security/cli.ts",
+    "line": 123,
+    "fn": "show",
+    "read": "127: call open",
+    "write": "128: call reconcileFindings"
+   },
+   {
+    "file": "src/security/fix.ts",
+    "line": 68,
+    "fn": "defaultFixDeps.ask",
+    "read": "69: SELECT COALESCE(MAX(id), 0) AS n FROM agent_runs",
+    "write": "70: call runModelStep"
+   },
+   {
+    "file": "src/security/fix.ts",
+    "line": 97,
+    "fn": "giveUp",
+    "read": "98: call clearRounds",
+    "write": "99: call advance"
+   },
+   {
+    "file": "src/security/fix.ts",
+    "line": 111,
+    "fn": "runFix",
+    "read": "112: call rawFinding",
+    "write": "119: UPDATE security_findings SET env_wait_at = COALESCE(env_wait"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 64,
+    "fn": "runLand",
+    "read": "65: call rawFinding",
+    "write": "70: call back"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 167,
+    "fn": "runAdvisory",
+    "read": "168: call rawFinding",
+    "write": "183: call back"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 236,
+    "fn": "draftAdvisory",
+    "read": "243: call advisoryRange",
+    "write": "243: call ghAdvisoryCreate"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 252,
+    "fn": "runPublish",
+    "read": "253: call rawFinding",
+    "write": "259: call runPublish.note"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 324,
+    "fn": "pollLanding",
+    "read": "326: SELECT repo, number, fix_pr FROM security_findings WHERE sta",
+    "write": "329: call advance"
+   },
+   {
+    "file": "src/security/land.ts",
+    "line": 371,
+    "fn": "pollLandingIfDue",
+    "read": "372: SELECT 1 FROM security_findings WHERE (state = 'landing' AND",
+    "write": "376: INSERT INTO settings (key, value) VALUES ('security_poll_at'"
+   },
+   {
+    "file": "src/security/real.ts",
+    "line": 19,
+    "fn": "realDeps.send",
+    "read": "20: SELECT COALESCE(MAX(id), 0) AS n FROM agent_runs",
+    "write": "24: call askClaude"
+   },
+   {
+    "file": "src/security/scan.ts",
+    "line": 128,
+    "fn": "linkRepeatedFindings",
+    "read": "129: SELECT repo, number, state, fingerprint, title, refs, catego",
+    "write": "136: UPDATE security_findings SET state = 'duplicate', duplicate_"
+   },
+   {
+    "file": "src/security/scan.ts",
+    "line": 155,
+    "fn": "runScan",
+    "read": "156: call scanRow",
+    "write": "198: call runScan.fail"
+   },
+   {
+    "file": "src/security/scan.ts",
+    "line": 170,
+    "fn": "runScan.call",
+    "read": "173: call runScan.stopped",
+    "write": "175: INSERT INTO security_calls (scan_id, kind, area_idx, finding"
+   },
+   {
+    "file": "src/security/scantest.ts",
+    "line": 48,
+    "fn": "writeAndQueue",
+    "read": "63: call createTask",
+    "write": "69: INSERT OR REPLACE INTO security_scan_tests (repo, number, te"
+   },
+   {
+    "file": "src/security/scantest.ts",
+    "line": 87,
+    "fn": "advanceScanTests",
+    "read": "88: call featureOn",
+    "write": "94: call advanceScanTests.end"
+   },
+   {
+    "file": "src/security/store.ts",
+    "line": 35,
+    "fn": "reconcileScans",
+    "read": "36: SELECT s.id, j.state AS job_state FROM security_scans s JOIN",
+    "write": "41: call finishScan"
+   },
+   {
+    "file": "src/security/store.ts",
+    "line": 94,
+    "fn": "clearRounds",
+    "read": "95: SELECT fix_attempts, state FROM security_findings WHERE repo",
+    "write": "100: INSERT OR REPLACE INTO security_fix_log (repo, number, attem"
+   },
+   {
+    "file": "src/security/store.ts",
+    "line": 112,
+    "fn": "reconcileFindings",
+    "read": "114: SELECT number, state FROM security_findings WHERE repo = ? A",
+    "write": "122: call clearRounds"
+   },
+   {
+    "file": "src/security/store.ts",
+    "line": 127,
+    "fn": "overview",
+    "read": "128: call reconcileScans",
+    "write": "129: call reconcileFindings"
+   }
+  ],
+  "unassign": [
+   {
+    "file": "src/unassign/index.ts",
+    "line": 26,
+    "fn": "runUnassign",
+    "read": "32: call planned",
+    "write": "42: call setPipelineLogin"
+   }
+  ],
+  "verify": [
+   {
+    "file": "src/verify/index.ts",
+    "line": 104,
+    "fn": "runVerify",
+    "read": "107: call selectCandidates",
+    "write": "120: call unavailableCandidates"
+   },
+   {
+    "file": "src/verify/index.ts",
+    "line": 131,
+    "fn": "runVerify.map-callback.<anonymous>",
+    "read": "148: call maybeScreenshot",
+    "write": "151: call runVerify.map-callback.<anonymous>.byCi"
+   },
+   {
+    "file": "src/verify/index.ts",
+    "line": 247,
+    "fn": "run",
+    "read": "250: call connect",
+    "write": "250: call runCollect"
+   },
+   {
+    "file": "src/verify/index.ts",
+    "line": 255,
+    "fn": "run",
+    "read": "260: call connect",
+    "write": "260: call runVerify"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 187,
+    "fn": "summariseFailure",
+    "read": "188: call getTask",
+    "write": "194: call askClaude"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 201,
+    "fn": "cancelOpen",
+    "read": "203: call getTask",
+    "write": "204: call cancelTask"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 212,
+    "fn": "runCollect",
+    "read": "216: SELECT v.*, i.state AS item_state,",
+    "write": "309: call collectScreenshots"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 230,
+    "fn": "runCollect.one",
+    "read": "246: call cancelOpen",
+    "write": "247: call runCollect.one.finish"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 306,
+    "fn": "runCollect.map-callback.<anonymous>",
+    "read": "306: call runCollect.one",
+    "write": "306: call runCollect.one"
+   },
+   {
+    "file": "src/verify/results.ts",
+    "line": 318,
+    "fn": "cancelMovedWarmBuilds",
+    "read": "320: SELECT t.id, t.repo, t.head_sha, r.default_branch FROM build",
+    "write": "325: call cancelTask"
+   },
+   {
+    "file": "src/verify/screenshots.ts",
+    "line": 72,
+    "fn": "maybeScreenshot",
+    "read": "73: call featureOn",
+    "write": "78: call cachedDiff"
+   },
+   {
+    "file": "src/verify/screenshots.ts",
+    "line": 184,
+    "fn": "collectScreenshots",
+    "read": "185: SELECT r.*, i.state AS item_state,",
+    "write": "192: call leaseItem"
+   },
+   {
+    "file": "src/verify/screenshots.ts",
+    "line": 199,
+    "fn": "collectOne",
+    "read": "210: call featureOn",
+    "write": "211: call cancelOpen"
+   },
+   {
+    "file": "src/verify/tasks.ts",
+    "line": 43,
+    "fn": "queueWarmBuild",
+    "read": "44: SELECT 1 FROM build_tasks WHERE repo = ? AND head_sha = ? AN",
+    "write": "48: call createTask"
+   },
+   {
+    "file": "src/verify/tasks.ts",
+    "line": 57,
+    "fn": "cloneTask",
+    "read": "58: SELECT * FROM build_tasks WHERE id = ?",
+    "write": "60: call createTask"
+   },
+   {
+    "file": "src/verify/tasks.ts",
+    "line": 130,
+    "fn": "queueScreenshotTasks",
+    "read": "131: call featureOn",
+    "write": "132: call createTask"
+   }
+  ],
+  "worker": [
+   {
+    "file": "src/worker/index.ts",
+    "line": 21,
+    "fn": "updateCode",
+    "read": "29: call connect",
+    "write": "31: call requestUpdate"
+   },
+   {
+    "file": "src/worker/index.ts",
+    "line": 71,
+    "fn": "run",
+    "read": "72: call updateCode",
+    "write": "74: call connect"
+   }
+  ]
+ }
+}
