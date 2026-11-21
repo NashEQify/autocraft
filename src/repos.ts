@@ -109,7 +109,7 @@ export async function listAll(db: Db): Promise<RepoRow[]> {
     "t.name", eb.val("storytold").as("owner"), eb.lit(1).as("tracked"), "t.pipeline",
     eb.lit(null).as("open_prs"), eb.lit(null).as("open_issues"), eb.lit(null).as("synced_at"),
     eb.selectFrom("main.items as i").select(eb.fn.countAll<number>().as("n")).whereRef("i.repo", "=", "t.name").as("rows"),
-  ]).$narrowType<{ rows: number }>().where((eb) => eb("t.name", "not in", eb.selectFrom("main.repos").select("name")));
+  ]).$narrowType<{ rows: number }>().where((eb) => eb("t.name", "not in", eb.selectFrom("main.repos as r2").select("r2.name")));
   return await db.all(first.unionAll(second).orderBy("tracked", "desc").orderBy("name"));
 }
 
