@@ -139,9 +139,7 @@ src/dash/api/visible.ts
 src/dash/api/work.ts
 
 
-src/dash/mcp/index.ts
 
-src/dash/mcp/tokens.ts
 
 
 

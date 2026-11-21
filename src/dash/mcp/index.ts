@@ -25,7 +25,7 @@ import { HttpError, RateLimiter } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-import { ciEq, jsonText, jsonValid } from "../../db/portable.ts";
+import { ciEq, inList, jsonText, jsonValid, rowid } from "../../db/kx.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BODY_MAX = 20_000;
@@ -532,7 +532,7 @@ async function setWeight(env: McpEnv, raw: unknown): Promise<ToolResult> {
       return { text: removed ? `Took ${refText(r)} off the fast-track list; it goes back to the work rank. An approved merge stays (cancel_queued withdraws it).` : `${refText(r)} was not fast-tracked.` };
     }
     const w = (a.weight as number | undefined) ?? WEIGHT_DEFAULT;
-    const listed = !!await env.db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(r.repo, r.number);
+    const listed = !!await env.db.get(env.db.k.selectFrom("main.fast_track").select((eb) => eb.lit(1).as("one")).where("repo", "=", r.repo).where("number", "=", r.number));
     if (listed) await setFastTrackWeight(env.db, user.login, refText(r), w, "mcp");
     else await addFastTrack(env.db, user.login, refText(r), w, "mcp");
     return { text: `${listed ? "Set the weight" : "Fast-tracked it; its merge is not approved by this (queue_pr does that)"}. ${await placeOf(env, r)}` };
@@ -578,8 +578,8 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   // visible repo (or the one asked for), not only the pipeline's scope the queue rows default to.
   const visible = new Set(await visibleTo(env.db, user));
   const queued = new Set((await cachedQueue(env.db, { merged: "exclude" })).map(item));
-  type Pending = { id: number; repo: string; number: number; state: string; by: string; at: string };
-  const pendingAll = (pendingDone ? [] : await env.db.prepare("SELECT id, repo, number, state, by, at FROM preapprovals WHERE state IN ('fixup', 'review', 'ci') AND id > ? ORDER BY id").all(Number(c?.[2] ?? 0)) as Pending[])
+  const pendingAll = (pendingDone ? [] : await env.db.all(env.db.k.selectFrom("preapprovals").select(["id", "repo", "number", "state", "by", "at"])
+    .where("state", "in", ["fixup", "review", "ci"]).where("id", ">", Number(c?.[2] ?? 0)).orderBy("id")))
     .filter((p) => visible.has(p.repo) && (a.repo === undefined || p.repo === a.repo) && !queued.has(item(p)));
   const shown = pendingAll.slice(0, limit);
   const pending = shown.map((p) => ({ item: item(p), state: p.state, by: staff ? p.by : null, at: p.at }));
@@ -601,14 +601,15 @@ type Held = { repo: string; number: number; head: string; title: string | null; 
 async function heldFixups(db: Db, repos: string[], repo: string | null, limit: number): Promise<Held[]> {
   const want = repo ? repos.filter((r) => r === repo) : repos;
   if (!want.length) return [];
-  const params: Record<string, string | number> = { limit };
-  const names = want.map((r, k) => ((params[`r${k}`] = r), `:r${k}`)).join(",");
-  return await db.prepare(`SELECT p.repo, p.number, p.head, i.title, i.author, p.note FROM item_plans p
-    JOIN items i ON i.repo = p.repo AND i.number = p.number
-    WHERE p.kind = 'pr' AND p.repo IN (${names}) AND i.state = 'OPEN' AND p.head = i.head_oid
-      AND ${jsonValid(db, "p.view")} AND ${jsonText(db, "p.view", "$.fixup")} = 'hold'
-      AND NOT EXISTS (SELECT 1 FROM fixups f WHERE f.repo = p.repo AND f.number = p.number AND f.from_head = p.head AND f.state IN ('pushing', 'linting', 'pushed'))
-    ORDER BY i.created_at, p.repo, p.number LIMIT :limit`).all(params) as Held[];
+  return await db.all(db.k.selectFrom("item_plans as p")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "p.head", "i.title", "i.author", "p.note"])
+    .$narrowType<{ head: string }>()
+    .where("p.kind", "=", "pr").where(inList(db, "p.repo", want)).where("i.state", "=", "OPEN").whereRef("p.head", "=", "i.head_oid")
+    .where(jsonValid(db, "p.view")).where((eb) => eb(jsonText(db, "p.view", "$.fixup"), "=", "hold"))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("fixups as f").select(eb.lit(1).as("one"))
+      .whereRef("f.repo", "=", "p.repo").whereRef("f.number", "=", "p.number").whereRef("f.from_head", "=", "p.head").where("f.state", "in", ["pushing", "linting", "pushed"]))))
+    .orderBy("i.created_at", (o) => o.asc().nullsFirst()).orderBy("p.repo").orderBy("p.number").limit(limit));
 }
 
 async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
@@ -622,9 +623,9 @@ async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const held = await heldFixups(env.db, repos, (a.repo as string | undefined) ?? null, limit + 1);
   const list = (s: string | null): unknown[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; } };
   const rows = await mapSeq(held.slice(0, limit), async (h) => {
-    const review = await env.db.prepare("SELECT reason, fixes FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(h.repo, h.number, h.head) as { reason: string | null; fixes: string | null } | undefined;
-    const last = await env.db.prepare("SELECT state, reason FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state <> 'superseded' ORDER BY created_at DESC, rowid DESC LIMIT 1")
-      .get(h.repo, h.number, h.head) as { state: string; reason: string | null } | undefined;
+    const review = await env.db.get(env.db.k.selectFrom("final_reviews").select(["reason", "fixes"]).where("repo", "=", h.repo).where("number", "=", h.number).where("head_oid", "=", h.head));
+    const last = await env.db.get(env.db.k.selectFrom("fixups").select(["state", "reason"]).where("repo", "=", h.repo).where("number", "=", h.number).where("from_head", "=", h.head).where("state", "<>", "superseded")
+      .orderBy("created_at", "desc").orderBy(rowid("fixups"), "desc").limit(1));
     return {
       item: `${h.repo}#${h.number}`, title: h.title, author: h.author, head: h.head.slice(0, 12),
       github: githubItemUrl(h.repo, h.number, "pr"), link: link(env, itemPath(h.repo, h.number)),
@@ -712,9 +713,9 @@ async function myWork(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const login = (await env.user(false)).login;
   const start = new Date();
   start.setUTCHours(0, 0, 0, 0);
-  const rows = (await env.db.prepare(`SELECT id, prompt_id, items, state, started_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd FROM agent_runs
-    WHERE ${ciEq(env.db, "user_login", "?")} AND started_at >= ? ORDER BY id DESC LIMIT 200`).all(login, start.toISOString()) as
-    { id: number; prompt_id: string; items: string; state: string; started_at: string; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; cost_usd: number | null }[])
+  const rows = (await env.db.all(env.db.k.selectFrom("agent_runs")
+    .select(["id", "prompt_id", "items", "state", "started_at", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "cost_usd"])
+    .where((eb) => ciEq(env.db, "user_login", eb.val(login))).where("started_at", ">=", start.toISOString()).orderBy("id", "desc").limit(200)))
     .map((r) => ({
       promptId: r.prompt_id, items: (JSON.parse(r.items) as { repo: string; number: number }[]).slice(0, 6).map((i) => `${i.repo}#${i.number}`), state: r.state, startedAt: r.started_at,
       tokens: { input: r.input_tokens, output: r.output_tokens, cacheRead: r.cache_read_tokens, cacheWrite: r.cache_write_tokens }, costUsd: r.cost_usd,
