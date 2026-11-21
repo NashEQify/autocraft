@@ -259,11 +259,8 @@ src/dupes/held.ts
 
 src/dupes/index.ts
 
-src/dupes/plan.ts
 
-src/dupes/scan.ts
 
-src/dupes/texts.ts
 
 src/embed/store.ts
 
