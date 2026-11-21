@@ -542,7 +542,7 @@ export async function runFixIssueCollect(db: Db, params: CollectParams = {}, log
   const rows = [
     ...await mapSeq((await plannedItems(db, "fixissue-collect")), async (p) => (await attemptOf(db, p.facts.repo, p.facts.number))!),
     ...(await db.prepare(`SELECT a.* FROM fix_attempts a JOIN items i ON i.repo = a.repo AND i.number = a.number
-      WHERE a.state = 'testing' AND i.state <> 'OPEN' AND ${pilotSqlFor("a.repo", "a.number")} AND NOT ${backlogHeldSql("a")}`).all() as AttemptRow[]),
+      WHERE a.state = 'testing' AND i.state <> 'OPEN' AND ${pilotSqlFor(db, "a.repo", "a.number")} AND NOT ${backlogHeldSql(db, "a")}`).all() as AttemptRow[]),
   ].sort(byUpdated).filter((r, i, all) => all.findIndex((o) => o.repo === r.repo && o.number === r.number) === i);
   s.looked = rows.length;
   if (params.dryRun) { log(`fixissue-collect: ${rows.length} pending; dry run`); return s; }

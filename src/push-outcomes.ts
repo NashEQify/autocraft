@@ -83,7 +83,7 @@ export async function resolvePushes(db: Db, rows: { repo: string; number: number
   }
   // A push whose PR is closed or merged, or whose head moved past the pushed commit (the mirror may still show the head before the push), will not get a result of its own.
   await db.prepare(`UPDATE push_outcomes SET outcome = 'unknown', resolved_at = ? WHERE outcome IS NULL AND number IS NOT NULL AND EXISTS
-    (SELECT 1 FROM items i WHERE i.repo = push_outcomes.repo AND i.number = push_outcomes.number AND (i.state <> 'OPEN' OR (i.head_oid IS NOT NULL AND i.head_oid <> push_outcomes.to_oid AND i.head_oid IS NOT push_outcomes.from_oid)))`).run(at);
+    (SELECT 1 FROM items i WHERE i.repo = push_outcomes.repo AND i.number = push_outcomes.number AND (i.state <> 'OPEN' OR (i.head_oid IS NOT NULL AND i.head_oid <> push_outcomes.to_oid AND i.head_oid IS DISTINCT FROM push_outcomes.from_oid)))`).run(at);
   const old = new Date(Date.parse(at) - EXPIRE_MS).toISOString();
   if (await db.prepare("SELECT 1 FROM push_outcomes WHERE outcome IS NULL AND at < ? LIMIT 1").get(old))
     await db.prepare("UPDATE push_outcomes SET outcome = 'unknown', resolved_at = ? WHERE outcome IS NULL AND at < ?").run(at, old);

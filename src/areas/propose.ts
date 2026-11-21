@@ -27,7 +27,7 @@ const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, c
 /** One Opus call for the repo's list. Returns the stored proposal's id, or null when the model gave no usable list. */
 export async function proposeAreas(db: Db, repo: string, p: ProposeParams): Promise<number | null> {
   const model = p.model ?? PROPOSE.models[0]!, start = now();
-  const titles = (await db.prepare(`SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")}
+  const titles = (await db.prepare(`SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql(db, "i")}
     ORDER BY i.updated_at DESC LIMIT ?`).all(repo, PROPOSE_TITLES) as { title: string }[]).map((r) => r.title);
   const checkout = await p.checkout(repo).catch(() => null);
   const input: AreaProposeInput = { ref: repo, repo, titles, current: (await currentList(db, repo))?.areas ?? [] };
@@ -55,7 +55,7 @@ export async function suggestAreas(db: Db, repo: string, p: Omit<ProposeParams, 
   const model = p.model ?? SUGGEST.models[0]!, start = now();
   const items = (await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body FROM items i
     LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
-    WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND a.area IS NULL AND a.source <> 'operator' AND a.list_version = ?
+    WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql(db, "i")} AND a.area IS NULL AND a.source <> 'operator' AND a.list_version = ?
     ORDER BY i.updated_at DESC LIMIT ?`).all(repo, list.version, SUGGEST_ITEMS) as { ref: string; title: string; body: string }[]);
   if (!items.length) return null;
   let usage = zero();

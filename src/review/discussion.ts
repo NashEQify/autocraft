@@ -16,6 +16,8 @@ import { pipelineMe, setPipelineLogin } from "../github/pipeline-account.ts";
 import { allOwnLogins, ownLogins } from "../github/identity.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { inList, jsonText } from "../db/portable.ts";
+import { pairsFrom } from "../core/ref-filter.ts";
 
 /** Setting that holds the pipeline account's login (also read by src/merge/queue.ts). */
 const LOGIN_KEY = "pipeline_login";
@@ -96,20 +98,20 @@ export function discussionHash(xs: { id: string; body: string | null }[]): strin
 /** What a review read: when, and a hash of the counted entries. */
 export type Snapshot = { seen: string; hash: string | null };
 
-/** The `:own` parameter of NOT_OURS. With no login known, '' stands in, so authorless rows stay out as before. */
+/** The `:own` parameter of notOurs. With no login known, '' stands in, so authorless rows stay out as before. */
 const ownJson = (own: Set<string>): string => JSON.stringify(own.size ? [...own] : [""]);
 
 /** SQL for "written by someone other than us" (`c` is the comments table alias): not our logins, not our review post, and not a comment the pipeline wrote (its audited text) under an operator's own login. */
-const NOT_OURS = `COALESCE(c.author, '') NOT IN (SELECT value FROM json_each(:own))
+const notOurs = (db: Db): string => `${inList(db, "COALESCE(c.author, '')", ":own", "text", true)}
   AND c.id NOT IN (SELECT review_id FROM review_posts WHERE repo = c.repo AND number = c.number)
-  AND NOT EXISTS (SELECT 1 FROM main.audit au WHERE au.target = c.repo || '#' || c.number AND c.body IS NOT NULL AND json_extract(au.details, '$.text') = c.body)`;
+  AND NOT EXISTS (SELECT 1 FROM main.audit au WHERE au.target = c.repo || '#' || c.number AND c.body IS NOT NULL AND ${jsonText(db, "au.details", "$.text")} = c.body)`;
 
 type MirrorRow = { id: string; kind: string; author: string | null; created_at: string | null; body: string | null; review_state: string | null; counted: number | null; maint: number };
 const mirrorRows = async (db: Db, repo: string, number: number): Promise<MirrorRow[]> =>
   await db.prepare(`SELECT c.id, c.kind, c.author, c.created_at, c.body, c.review_state, c.counted,
       (c.author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') OR EXISTS (SELECT 1 FROM main.access a WHERE lower(a.login) = lower(c.author) AND a.role IN ('operator', 'maintainer')))
         AND COALESCE(c.author, '') <> COALESCE((SELECT i.author FROM items i WHERE i.repo = c.repo AND i.number = c.number), '') AS maint FROM comments c
-    WHERE c.repo = :repo AND c.number = :number AND ${NOT_OURS} ORDER BY c.created_at`).all({ repo, number, own: ownJson(await ownLogins(db, repo)) }) as MirrorRow[];
+    WHERE c.repo = :repo AND c.number = :number AND ${notOurs(db)} ORDER BY c.created_at`).all({ repo, number, own: ownJson(await ownLogins(db, repo)) }) as MirrorRow[];
 
 /** Comments and review bodies from the mirror: the fallback for a call that has no GitHub connection. */
 async function mirrorDiscussion(db: Db, repo: string, number: number): Promise<{ entries: DiscussionEntry[]; hash: string; maint: Set<number> }> {
@@ -290,14 +292,15 @@ async function computeDiscussionState(db: Db, repo?: string): Promise<Discussion
   const rows = await db.prepare(`SELECT c.repo, c.number, COALESCE(MAX(c.created_at), '') AS newest,
       COALESCE(MAX(CASE WHEN c.author_association IN (${MAINTAINER_ASSOCIATIONS.map((a) => `'${a}'`).join(", ")})
         OR EXISTS (SELECT 1 FROM main.access a WHERE a.login = c.author AND a.role IN ('operator', 'maintainer')) THEN c.created_at END), '') AS maint
-    FROM comments c WHERE (:repo IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}
+    FROM comments c WHERE (CAST(:repo AS TEXT) IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${notOurs(db)}
       AND NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = c.repo AND i.number = c.number AND i.kind = 'issue') GROUP BY c.repo, c.number`).all({ repo: repo ?? null, own }) as { repo: string; number: number; newest: string; maint: string }[];
   // The hash needs the comment text; callers ask for it only after a newer entry than a review's snapshot, so it is read on first use (primeHashes reads many in one query).
   const known = new Map<string, string>();
   const texts = async (keys: { repo: string; number: number }[]): Promise<Map<string, { id: string; body: string | null }[]>> => {
     const by = new Map<string, { id: string; body: string | null }[]>(keys.map((k) => [`${k.repo}#${k.number}`, []]));
-    for (const c of await db.prepare(`SELECT c.repo, c.number, c.id, c.body FROM json_each(:keys) j JOIN comments c ON c.repo = j.value ->> 0 AND c.number = j.value ->> 1
-      WHERE c.counted = 1 AND ${NOT_OURS}`).all({ keys: JSON.stringify(keys.map((k) => [k.repo, k.number])), own }) as { repo: string; number: number; id: string; body: string | null }[])
+    const kp = pairsFrom(db, ":keys", "j");
+    for (const c of await db.prepare(`SELECT c.repo, c.number, c.id, c.body FROM ${kp.from} JOIN comments c ON c.repo = ${kp.repo} AND c.number = ${kp.number}
+      WHERE c.counted = 1 AND ${notOurs(db)}`).all({ keys: JSON.stringify(keys.map((k) => [k.repo, k.number])), own }) as { repo: string; number: number; id: string; body: string | null }[])
       by.get(`${c.repo}#${c.number}`)?.push(c);
     return by;
   };
@@ -384,7 +387,7 @@ async function reviewedRows(db: Db, repo?: string): Promise<ReviewedRow[]> {
   const rows = await db.prepare(`SELECT r.repo, r.number, r.head_oid, r.at, r.seen_at, r.disc_hash, r.blocked_by,
       i.base_ref IS NOT NULL AND COALESCE(r.base_ref, p.default_branch) IS NOT NULL AND i.base_ref <> COALESCE(r.base_ref, p.default_branch) AS rebased
     FROM opus_reviews r LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number LEFT JOIN repos p ON p.name = r.repo
-    WHERE r.verdict IS NOT NULL AND (:repo IS NULL OR r.repo = :repo)`)
+    WHERE r.verdict IS NOT NULL AND (CAST(:repo AS TEXT) IS NULL OR r.repo = :repo)`)
     .all({ repo: repo ?? null }) as ReviewedRow[];
   memo.set(repo ?? "", { sig, rows });
   return rows;

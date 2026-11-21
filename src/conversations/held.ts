@@ -16,6 +16,7 @@ import { actRoom } from "./queue.ts";
 import { conversationOf, insertTurn, systemBlock } from "./store.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonText, jsonValid } from "../db/portable.ts";
 
 export type HeldState = "held" | "filing" | "filed" | "dropped" | "failed";
 export type HeldRow = {
@@ -96,7 +97,7 @@ export const HELD_STUCK_MS = Math.max(10 * 60_000, 4 * PACE_MAX_WAIT_MS);
  */
 export async function filingOutcome(db: Db, h: HeldRow, ms: number = Date.now()): Promise<{ state: "filed"; number: number; url: string } | { state: "held" } | null> {
   if (h.state !== "filing" || Date.parse(h.updated_at) > ms - HELD_STUCK_MS) return null;
-  const a = await db.prepare("SELECT details FROM main.audit WHERE action = 'act-open-issue' AND json_valid(details) AND json_extract(details, '$.held') = ? AND at >= ? ORDER BY rowid DESC LIMIT 1").get(h.id, h.updated_at) as { details: string } | undefined;
+  const a = await db.prepare(`SELECT details FROM main.audit WHERE action = 'act-open-issue' AND ${jsonText(db, `CASE WHEN ${jsonValid(db, "details")} THEN details END`, "$.held")} = ? AND at >= ? ORDER BY rowid DESC LIMIT 1`).get(h.id, h.updated_at) as { details: string } | undefined;
   if (!a) return { state: "held" };
   const d = JSON.parse(a.details) as { state?: string; url?: string };
   const m = d.state === "done" ? /\/issues\/(\d+)/.exec(d.url ?? "") : null;

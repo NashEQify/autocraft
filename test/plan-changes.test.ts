@@ -48,7 +48,7 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
 
   // Cross-item: a batch row reaches its integration PR and every member.
   const batch = Number((await db.prepare(`INSERT INTO merge_batches (repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at)
-    VALUES ('app', 'integration-1', 'open', 'b', 'c', 50, ?, ?)`).run(T, T)).lastInsertRowid);
+    VALUES ('app', 'integration-1', 'open', 'b', 'c', 50, ?, ?) RETURNING id`).get(T, T) as { id: number }).id);
   await db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (?, 3, 'h3', 0), (?, 4, 'h4', 1)").run(batch, batch);
   seq = (await since(seq)).cursor;
   await db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = ?").run(batch);
@@ -186,7 +186,9 @@ test("a held PR is logged when its blocker closes; a bulk write logs nothing and
   assert.deepEqual((await db.prepare("SELECT seq FROM item_changes").all() as { seq: number }[]).filter((r) => !seq.seen.has(r.seq)), []);
   seq = c.cursor;
 
-  await db.script("DELETE FROM plan_full; DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
+  await db.script(db.dialect === "postgres"
+    ? "DELETE FROM plan_full; SELECT setval(pg_get_serial_sequence('item_changes', 'seq'), 1, false)"
+    : "DELETE FROM plan_full; DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
   await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('other', 'op', ?, 1)").run(T);
   assert.equal((await changesSince(db, seq)).full, true);
 });

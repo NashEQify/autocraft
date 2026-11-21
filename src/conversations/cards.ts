@@ -14,6 +14,7 @@ import { LOGIN } from "../access.ts";
 import { CLOSE_REASONS, COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, RESOLVE_MAX, type CardKind, type CloseReason } from "./types.ts";
 import { findSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { ciEq } from "../db/portable.ts";
 
 /**
  * One step of a resolution. The comment step's text is the card's `text`. Every kind but `review` and `fixup` is one GitHub write
@@ -256,9 +257,9 @@ export function cleanComment(s: string): string {
 export async function closeRefusal(db: Db, repo: string, n: number): Promise<string | null> {
   const has = async (cond: string) => !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${cond}`).get(repo, n);
   if (!await has("1 = 1")) return `${ref(repo, n)} is not in the mirror`;
-  if (!await has(notOwnIntegrationSql("i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
-  if (!await has(pilotSql("i"))) return `${ref(repo, n)} is outside the pilot`;
-  if (await has(backlogHeldSql("i"))) return `${ref(repo, n)} is held by a Backlog answer`;
+  if (!await has(notOwnIntegrationSql(db, "i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
+  if (!await has(pilotSql(db, "i"))) return `${ref(repo, n)} is outside the pilot`;
+  if (await has(backlogHeldSql(db, "i"))) return `${ref(repo, n)} is held by a Backlog answer`;
   return null;
 }
 
@@ -325,8 +326,8 @@ const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLo
  */
 export async function mayWrite(db: Db, repo: string, login: string): Promise<boolean> {
   if (await db.prepare("SELECT 1 FROM repo_permissions WHERE repo = ? AND login = ? AND permission IN ('write', 'maintain', 'admin')").get(repo, login)) return true;
-  return !!await db.prepare(`SELECT 1 FROM items WHERE repo = ? AND author = ? COLLATE NOCASE AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR')
-    UNION ALL SELECT 1 FROM comments WHERE repo = ? AND author = ? COLLATE NOCASE AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') LIMIT 1`).get(repo, login, repo, login);
+  return !!await db.prepare(`SELECT 1 FROM items WHERE repo = ? AND ${ciEq(db, "author", "?")} AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR')
+    UNION ALL SELECT 1 FROM comments WHERE repo = ? AND ${ciEq(db, "author", "?")} AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') LIMIT 1`).get(repo, login, repo, login);
 }
 
 const pr = (f: ItemFacts | undefined): boolean => f?.kind === "pr";

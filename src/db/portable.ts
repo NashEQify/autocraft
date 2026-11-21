@@ -14,7 +14,9 @@
  * | `json_extract(c, '$.n')` (a number)           | `jsonNum(db, "c", "$.n")`                 |
  * | `json_extract(c, '$.ok')` (true/false → 1/0)  | `jsonBool(db, "c", "$.ok")`               |
  * | `json_type(c, '$.a')`                         | `jsonType(db, "c", "$.a")`                |
+ * | `json_array_length(c)`                        | `jsonArrayLength(db, "c")`                |
  * | `json_valid(c)`                               | `jsonValid(db, "c")` (a predicate)        |
+ * | `json_remove(c, '$.k')` (an object)           | `jsonRemoveKey(db, "c", "k")`             |
  * | `FROM t, json_each(t.c) j` (an array)         | `` `FROM t, ${jsonEach(db, "t.c", "j")}` ``|
  * | `INSERT OR IGNORE INTO t ...`                 | `insertIgnore(db, "t (a, b) VALUES (?, ?)")` |
  * | `INSERT OR REPLACE INTO t ...`                | `upsert(db, { table, cols, key })`        |
@@ -27,6 +29,7 @@
  * | `char(10)`                                    | `chr(db, 10)`                             |
  * | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`       | `?` bound to `nowParam()`                 |
  * | `rowid`                                       | `rowidOf("table")`                        |
+ * | `t INDEXED BY idx`                            | `` `t${indexedBy(db, "idx")}` ``          |
  *
  * JSON stays TEXT on Postgres: the JSON helpers cast with `::json` in the query. Paths are SQLite's (`$.a.b`, `$[0]`,
  * `$.a[2].b`, `$."odd key"`).
@@ -109,9 +112,22 @@ export function jsonType(d: D, expr: string, path?: string): string {
     + ` FROM (SELECT ${v} AS v) AS jt)`;
 }
 
+/** The number of elements of the JSON array `expr`; NULL for NULL. */
+export function jsonArrayLength(d: D, expr: string): string {
+  return pgOf(d) ? `json_array_length((${expr})::json)` : `json_array_length(${expr})`;
+}
+
 /** Whether `expr` is valid JSON, as a predicate: use it bare (`WHERE ${jsonValid(...)}`), never compare it with 1. */
 export function jsonValid(d: D, expr: string): string {
   return pgOf(d) ? `((${expr}) IS JSON)` : `json_valid(${expr})`;
+}
+
+/**
+ * The JSON object `expr` without its top-level key `key`, as text. Postgres goes through jsonb, so the text may differ
+ * from SQLite's in key order and spacing (the parsed value is the same); guard text that may not be valid JSON.
+ */
+export function jsonRemoveKey(d: D, expr: string, key: string): string {
+  return pgOf(d) ? `((${expr})::jsonb - ${quote(key)})::text` : `json_remove(${expr}, ${quote(`$.${key}`)})`;
 }
 
 /**
@@ -250,4 +266,9 @@ export function rowidOf(table: string): string {
   const col = rowids.get(table);
   if (!col) throw new Error(`rowidOf: table ${table} has no rowid`);
   return col;
+}
+
+/** ` INDEXED BY index` after a table name on SQLite; nothing on Postgres, whose planner takes no index hints. */
+export function indexedBy(d: D, index: string): string {
+  return pgOf(d) ? "" : ` INDEXED BY ${index}`;
 }

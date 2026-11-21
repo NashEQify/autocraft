@@ -274,10 +274,10 @@ describe("api", () => {
       assert.equal(d.answeredBy, "maint");
       assert.equal(await auditCount("answer", "maint"), 1);
       assert.ok((await actionableIds()).includes(X1));
-      assert.ok(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql("d")}`).get(X1));
+      assert.ok(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql(db, "d")}`).get(X1));
       await identity(false);
       assert.ok(!(await actionableIds()).includes(X1), "an answer on a repo that left the app identity stops counting");
-      assert.equal(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql("d")}`).get(X1), undefined, "nor at the SQL sites other than actionable()");
+      assert.equal(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql(db, "d")}`).get(X1), undefined, "nor at the SQL sites other than actionable()");
       // Work and answers the maintainer started count only while the conditions hold; a flip to legacy stops them everywhere.
       await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'photocraft', 'write', ?)").run(new Date().toISOString());
       await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES ('photocraft', 7, 'h1', 'fix it', 'maint', ?)").run(new Date().toISOString());

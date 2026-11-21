@@ -128,8 +128,8 @@ export async function enqueue(db: Db, stepName: unknown, rawParams: unknown, by:
     throw new JobError(409, `${step.name} with these settings is already queued`);
   }
   const repo = typeof params.repo === "string" ? params.repo : null;
-  const id = Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state) VALUES (?, ?, ?, ?, ?, 'queued')")
-    .run(step.name, json, repo, by, now())).lastInsertRowid);
+  const id = Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state) VALUES (?, ?, ?, ?, ?, 'queued') RETURNING id")
+    .get(step.name, json, repo, by, now()) as { id: number }).id);
   return await getJob(db, id);
 }
 

@@ -55,7 +55,7 @@ export async function dueForArea(db: Db, opts: { repo?: string; limit: number; r
     FROM items i JOIN tracked_repos t ON t.name = i.repo
     JOIN (SELECT repo, MAX(version) AS v FROM area_lists GROUP BY repo) l ON l.repo = i.repo
     LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
-    WHERE i.state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND ${pilotSql("i")} AND (:repo IS NULL OR i.repo = :repo)
+    WHERE i.state = 'OPEN' AND ${notOwnIntegrationSql(db, "i")} AND ${pilotSql(db, "i")} AND (CAST(:repo AS TEXT) IS NULL OR i.repo = :repo)
       AND (a.number IS NULL OR (a.source <> 'operator' AND (a.list_version <> l.v OR (:rescan AND a.area IS NULL))))
     ORDER BY t.pipeline DESC, i.updated_at DESC, i.repo, i.number`)
     .all({ repo: opts.repo ?? null, rescan: opts.rescan ? 1 : 0 }) as unknown as Due[];

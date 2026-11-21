@@ -18,8 +18,8 @@ async function fresh(name: string) {
   return await connectDb(join(SCRATCH, `leases-${name}-${process.pid}.db`));
 }
 const addJob = async (db: Awaited<ReturnType<typeof fresh>>, step: string, state: string, params: object = {}, items = 0): Promise<number> =>
-  Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, items) VALUES (?, ?, 'pipeline', ?, ?, ?, ?)")
-    .run(step, JSON.stringify(params), new Date().toISOString(), state, state === "queued" ? null : new Date().toISOString(), items)).lastInsertRowid);
+  Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, items) VALUES (?, ?, 'pipeline', ?, ?, ?, ?) RETURNING id")
+    .get(step, JSON.stringify(params), new Date().toISOString(), state, state === "queued" ? null : new Date().toISOString(), items) as { id: number }).id);
 const as = (jobId: number, step: string) => setCallContext({ jobId, step, stage: 1, cancelled: async () => false });
 
 test("fixup and cifix on one PR: the second job skips it, and a lease of an ended job is free", async () => {
@@ -45,7 +45,7 @@ test("fixup and cifix on one PR: the second job skips it, and a lease of an ende
 
 test("a second job of a step gets the day's remainder minus the first job's unspent limit", async () => {
   const db = await fresh("limit");
-  await db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('fixup', 20)").run();
+  await db.prepare("INSERT INTO stage_limits (step, per_day) VALUES ('fixup', 20) ON CONFLICT (step) DO UPDATE SET per_day = excluded.per_day").run();
   const step = { name: "fixup", params: [{ name: "limit", kind: "int", min: 1, max: 50, default: 15 }] } as unknown as StepDef;
   assert.deepEqual(await jobLimit(db, step), { limit: 15 });
   await addJob(db, "fixup", "running", { limit: 15 }, 4); // 4 used (counted today), 11 unspent

@@ -9,6 +9,7 @@ import { RUNNING_STALE_MS } from "../answers/hold.ts";
 import { actBlockedReason } from "../runner/autopilot.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { ciEq, jsonText, jsonValid } from "../db/portable.ts";
 
 /** What a queued card needs to run later as the press would have run: the presser's choices at the time. */
 export type QueueArgs = { skip?: number[]; note?: string; noteStaysOut?: boolean; role?: string };
@@ -35,11 +36,12 @@ export function cardWriteCount(params: CardParams, text: string | null): number 
 /** The writes of cards that run now and have not made them yet: counted as used, so two presses at once cannot both take the last room. */
 async function runningReserve(db: Db, ms: number): Promise<number> {
   const rows = await db.prepare("SELECT id, params, text, acted_at FROM main.conversation_cards WHERE state = 'running' AND acted_at > ?").all(new Date(ms - RUNNING_STALE_MS).toISOString()) as { id: number; params: string; text: string | null; acted_at: string }[];
+  const valid = `CASE WHEN ${jsonValid(db, "details")} THEN details END`;
   let n = 0;
   for (const r of rows) {
     let need = 0;
     try { need = cardWriteCount(JSON.parse(r.params) as CardParams, r.text); } catch { continue; }
-    const written = (await db.prepare(`SELECT COUNT(*) AS n FROM main.audit WHERE json_valid(details) AND json_extract(details, '$.source') = 'conversation' AND json_extract(details, '$.card') = ? AND json_extract(details, '$.state') = 'done' AND at >= ?`).get(r.id, r.acted_at) as { n: number }).n;
+    const written = (await db.prepare(`SELECT COUNT(*) AS n FROM main.audit WHERE ${jsonText(db, valid, "$.source")} = 'conversation' AND ${jsonText(db, valid, "$.card")} = ? AND ${jsonText(db, valid, "$.state")} = 'done' AND at >= ?`).get(r.id, r.acted_at) as { n: number }).n;
     n += Math.max(0, need - written);
   }
   return n;
@@ -99,7 +101,7 @@ export const queuedAhead = async (db: Db, except?: number): Promise<boolean> =>
 /** Records a dispute of a queued press. False when the card is not queued, is the disputer's own, or is already disputed. */
 export async function disputeCard(db: Db, id: number, by: string, reason: string, at: string): Promise<boolean> {
   return Number((await db.prepare(`UPDATE main.conversation_cards SET dispute_by = ?, dispute_reason = ?, dispute_at = ?
-    WHERE id = ? AND state = 'queued' AND dispute_by IS NULL AND acted_by <> ? COLLATE NOCASE`).run(by, reason, at, id, by)).changes) === 1;
+    WHERE id = ? AND state = 'queued' AND dispute_by IS NULL AND NOT ${ciEq(db, "acted_by", "?")}`).run(by, reason, at, id, by)).changes) === 1;
 }
 
 export async function keepCard(db: Db, id: number): Promise<boolean> {

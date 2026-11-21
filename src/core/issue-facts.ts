@@ -1,6 +1,6 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, scope decision, labels.
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
-import { refIn, refPairs } from "./ref-filter.ts";
+import { pairsFrom, refIn, refPairs } from "./ref-filter.ts";
 import { settleMemo, settledBy } from "../settlers.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
@@ -31,6 +31,7 @@ import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonRemoveKey } from "../db/portable.ts";
 
 export type { ItemFacts } from "./plan.ts";
 
@@ -58,10 +59,10 @@ type Row = {
 const sameAsText = (col: string): string => `CASE WHEN ${col} = i.embed_hash THEN '' ELSE ${col} END`;
 const asText = (h: string | null, text: string | null): string | null => (h === "" ? text : h);
 
-const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
+const select = (db: Db): string => `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
     CASE WHEN i.class_scheme = '${SCHEME_ID}' THEN i.class_hash END AS class_hash,
     ${fastScoreSql("i.repo", "i.number", "r.score")} AS score,
-    ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration, ${backlogHeldSql("i")} AS held_backlog,
+    ${pilotSql(db, "i")} AS in_pilot, ${notOwnIntegrationSql(db, "i")} AS not_integration, ${backlogHeldSql(db, "i")} AS held_backlog,
     (EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = i.repo AND dh.number = i.number AND (dh.answer IS NULL OR dh.answer = 'close'))
       OR ${groupHeldSql("i")}) AS held_dup,
     ${sameAsText("p.text_hash")} AS pr_hash, p.impact, ${sameAsText("e.hash")} AS e_hash, ${sameAsText("s.hash")} AS scan_hash, st.stage,
@@ -74,7 +75,7 @@ const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees,
   LEFT JOIN item_stage st ON st.repo = i.repo AND st.number = i.number
   LEFT JOIN fix_attempts fa ON fa.repo = i.repo AND fa.number = i.number
   LEFT JOIN build_tasks ht ON ht.id = fa.head_task_id LEFT JOIN build_tasks bt ON bt.id = fa.base_task_id
-  WHERE (i.state = 'OPEN' OR ${refIn("i", ":closing")})`;
+  WHERE (i.state = 'OPEN' OR ${refIn(db, "i", ":closing")})`;
 
 /** `asked_by` of the decisions a security scan asks (act/index.ts SECURITY_ASKER). */
 const SECURITY_ASKER = "security-scan";
@@ -110,7 +111,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
   // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
-  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
+  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql(db, "decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
     WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
     (PrepareColumns & { locked: number; lock_at: string | null; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
     const dupegroup = d.id.includes(":dupegroup:");
@@ -182,14 +183,14 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const params: Record<string, string> = { model, closing: refPairs(closing) };
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
-  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  if (opts.refs) { where += ` AND ${refIn(db, "i")}`; params.refs = refPairs(opts.refs); }
+  const rows = await db.prepare(`${select(db)}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {
     for (const c of await db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
-        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN json_remove(c.probs, '$.type') ELSE c.probs END AS probs, c.input_hash
-      FROM classifications c WHERE c.run_id = :run AND ${refIn("c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
+        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN ${jsonRemoveKey(db, "c.probs", "type")} ELSE c.probs END AS probs, c.input_hash
+      FROM classifications c WHERE c.run_id = :run AND ${refIn(db, "c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
       const k = `${c.repo}#${c.number}`;
       (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
     }
@@ -219,8 +220,9 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   type Text = { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null };
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
   const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
+  const tp = pairsFrom(db, "?", "j");
   const texts = new Map(needText.length ? (await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
+    FROM ${tp.from} JOIN items i ON i.repo = ${tp.repo} AND i.number = ${tp.number}`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
   const mirrored = db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ? AND kind = 'pr'");
   // The fix PR we just opened counts as open until a sync mirrors it: the mirror's open-PR list doesn't have it yet.
   const ownPrUnmirrored = async (state: string | null, url: string | null): Promise<OpenPr | null> => {

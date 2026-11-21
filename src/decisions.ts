@@ -9,6 +9,7 @@ import { audit } from "./dash/audit.ts";
 import { inPilot } from "./pilot.ts";
 import { filterSeq, someSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import { distinctFrom } from "./db/portable.ts";
 import { openDb } from "./db/open.ts";
 
 export const KINDS = ["scope", "duplicate", "close", "merge", "hold", "split", "other", "backlog"] as const;
@@ -138,18 +139,19 @@ export function validateAsk(q: Record<string, unknown>): Record<string, string |
 export async function ask(db: Db, questions: Record<string, unknown>[], inTransaction = false): Promise<{ inserted: number; updated: number }> {
   const rows = questions.map(validateAsk);
   const cols = ["id", ...ASK_FIELDS];
-  const changed = "(excluded.question IS NOT question OR excluded.options IS NOT options)";
-  const keepsPick = "(prepared_at IS NOT NULL AND NOT " + changed + ")";
+  const changed = `(${distinctFrom(db, "excluded.question", "decisions.question")} OR ${distinctFrom(db, "excluded.options", "decisions.options")})`;
+  const keepsPick = "(decisions.prepared_at IS NOT NULL AND NOT " + changed + ")";
+  // Postgres needs the existing row's columns qualified: bare names are ambiguous with `excluded`.
   const set = (c: string): string =>
-    SUMMARY_FIELDS.includes(c) ? `${c} = COALESCE(excluded.${c}, ${c})`
-    : c === "recommended" || c === "recommended_reason" ? `${c} = CASE WHEN ${keepsPick} THEN ${c} ELSE excluded.${c} END`
+    SUMMARY_FIELDS.includes(c) ? `${c} = COALESCE(excluded.${c}, decisions.${c})`
+    : c === "recommended" || c === "recommended_reason" ? `${c} = CASE WHEN ${keepsPick} THEN decisions.${c} ELSE excluded.${c} END`
     : `${c} = excluded.${c}`;
   const stmt = db.prepare(`INSERT INTO main.decisions (${cols.join(",")}) VALUES (${cols.map((c) => `:${c}`).join(",")})
-    ON CONFLICT(id) DO UPDATE SET ${ASK_FIELDS.map(set).join(", ")}, recommended_by = CASE WHEN ${keepsPick} THEN recommended_by ELSE NULL END,
-      prepared_at = CASE WHEN ${changed} THEN NULL ELSE prepared_at END,
-      recommend_failures = CASE WHEN ${changed} THEN NULL ELSE recommend_failures END,
-      snoozed_by = CASE WHEN ${changed} THEN NULL ELSE snoozed_by END,
-      snoozed_at = CASE WHEN ${changed} THEN NULL ELSE snoozed_at END`);
+    ON CONFLICT(id) DO UPDATE SET ${ASK_FIELDS.map(set).join(", ")}, recommended_by = CASE WHEN ${keepsPick} THEN decisions.recommended_by ELSE NULL END,
+      prepared_at = CASE WHEN ${changed} THEN NULL ELSE decisions.prepared_at END,
+      recommend_failures = CASE WHEN ${changed} THEN NULL ELSE decisions.recommend_failures END,
+      snoozed_by = CASE WHEN ${changed} THEN NULL ELSE decisions.snoozed_by END,
+      snoozed_at = CASE WHEN ${changed} THEN NULL ELSE decisions.snoozed_at END`);
   const exists = db.prepare("SELECT 1 FROM decisions WHERE id = ?");
   let inserted = 0, updated = 0;
   const write = async () => {
@@ -173,7 +175,7 @@ export async function operators(db: Db): Promise<Set<string>> {
 
 export async function actionable(db: Db): Promise<Actionable[]> {
   const rows = await db.prepare(`SELECT * FROM decisions WHERE answer IS NOT NULL AND answer <> '${BACKLOG.key}' AND applied_at IS NULL
-    AND ${settledBySql("decisions")} ORDER BY answered_at`).all() as DecisionRow[];
+    AND ${settledBySql(db, "decisions")} ORDER BY answered_at`).all() as DecisionRow[];
   return rows.map((d) => ({
     id: d.id, kind: d.kind, repo: d.repo, number: d.number, items: itemsOf(d), answer: d.answer!,
     exceptions: exceptionsOf(d).map((e) => ({ repo: e.repo, number: e.number, answer: e.answer })),

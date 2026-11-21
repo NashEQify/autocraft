@@ -71,7 +71,7 @@ export { nextUtcMidnight };
 export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<(repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>> {
   // Each table is read once, on first use, for every PR (or only `refs`, "repo#number"), keyed by `repo#number`.
   const only = refs ? refPairs(refs) : null;
-  const narrow = (a: string): string => (only ? ` AND ${refIn(a)}` : "");
+  const narrow = (a: string): string => (only ? ` AND ${refIn(db, a)}` : "");
   const bind = (p: Record<string, string> = {}): Record<string, string> => (only ? { ...p, refs: only } : p);
   const once = <T>(load: () => Promise<T>): (() => Promise<T>) => { let v: T | undefined; return async () => (v ??= await load()); };
   type Last = { k: string; head_oid: string; at: string; verdict: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null };

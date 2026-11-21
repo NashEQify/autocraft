@@ -9,6 +9,7 @@ import { knownStep, modelsOf, usesClaude, type Params, type StepDef } from "./st
 import { setting } from "../settings-read.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonNum } from "../db/portable.ts";
 
 export const STEP_PARALLEL_KEY = "step_parallel";
 export const STEP_PARALLEL_DEFAULT = 1;
@@ -44,7 +45,7 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
 export type Active = { id: number; step: string; state: string; repo: string | null; number: number | null; params?: string };
 
 export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> {
-  return await db.prepare(`SELECT id, step, state, repo, json_extract(params, '$.number') AS number, params FROM jobs WHERE state IN (${states.map(() => "?").join(",")})`)
+  return await db.prepare(`SELECT id, step, state, repo, ${jsonNum(db, "params", "$.number")} AS number, params FROM jobs WHERE state IN (${states.map(() => "?").join(",")})`)
     .all(...states) as Active[];
 }
 

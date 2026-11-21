@@ -29,6 +29,7 @@ import { lockLiveSql } from "../answers/hold.ts";
 import { discussionKeySql, openSubjectSql, prepareDue, prepareStateSql, utcDayStart, type PrepareColumns } from "./prepared.ts";
 import { PREPARE_DIFF_LIMIT, PREPARE_MEMBERS, PREPARE_STOPPED_LIMIT, PREPARE_SUMMARY_MAX, PREPARE_TURNS_LIMIT, type PrepareInput } from "./prepare-types.ts";
 import type { Db } from "../db/index.ts";
+import { inList, jsonEach, notDistinctFrom } from "../db/portable.ts";
 
 export const PREPARE_PROMPT = CLAUDE_PROMPTS["decide.prepare"];
 
@@ -107,10 +108,10 @@ export const PREPARE_AGING_MS = 24 * 3600_000;
  * (P0 first), then oldest first. A decision whose press is running or queued is locked and not prepared. The item's Plan says whether the decide step has work; this reads the decisions themselves.
  */
 export async function prepareIds(db: Db, repos?: string[], nowMs: number = Date.now()): Promise<string[]> {
-  const rows = await db.prepare(`SELECT d.id, d.repo, d.asked_at, d.number, d.prepare_requested_at, d.prepared_at, d.prepared_head, d.prepare_failed_head, d.recommend_failures, d.recommend_failed_at, i.kind AS item_kind, i.head_oid, d.kind, d.prepared_discussion, ${prepareStateSql("d")},
+  const rows = await db.prepare(`SELECT d.id, d.repo, d.asked_at, d.number, d.prepare_requested_at, d.prepared_at, d.prepared_head, d.prepare_failed_head, d.recommend_failures, d.recommend_failed_at, i.kind AS item_kind, i.head_oid, d.kind, d.prepared_discussion, ${prepareStateSql(db, "d")},
       COALESCE(CAST(rk.score / 10000 AS INTEGER), 2) AS band
     FROM decisions d LEFT JOIN items i ON i.repo = d.repo AND i.number = d.number LEFT JOIN item_rank rk ON rk.repo = d.repo AND rk.number = d.number
-    WHERE d.answer IS NULL AND d.kind <> 'backlog' AND d.repo IS NOT NULL AND d.number IS NOT NULL AND ${openSubjectSql("d", "i")} AND ${pilotSql("i")} AND ${notOwnIntegrationSql("i")} AND NOT ${lockLiveSql("d")}
+    WHERE d.answer IS NULL AND d.kind <> 'backlog' AND d.repo IS NOT NULL AND d.number IS NOT NULL AND ${openSubjectSql("d", "i")} AND ${pilotSql(db, "i")} AND ${notOwnIntegrationSql(db, "i")} AND NOT ${lockLiveSql("d")}
     ORDER BY d.prepare_requested_at IS NULL, d.prepare_requested_at, d.asked_at, d.id`).all(utcDayStart(nowMs)) as (DueRow & { band: number })[];
   const due = rows.filter((r) => !repos?.length || repos.includes(r.repo)).filter((r) => prepareDue(r, headOf(r), nowMs));
   const level = (r: { band: number; asked_at: string }): number => r.band + Math.min(4, Math.floor(Math.max(0, nowMs - Date.parse(r.asked_at)) / PREPARE_AGING_MS) || 0);
@@ -142,7 +143,7 @@ export async function stoppedBy(db: Db, d: DecisionRow, head: string | null): Pr
   const seen = new Set<string>();
   const classifications = cls.filter((c) => !seen.has(c.classifier) && seen.add(c.classifier)).map((c) => ({ classifier: c.classifier, type_label: c.type_label, want: c.want, reference_claim: cut(c.reference, 300) || null, flags: arr(c.flags), reason: cut(c.reason, 400), duplicate_of: c.dup_of }));
   if (classifications.length) out.classifications = classifications;
-  const cmp = await db.prepare(`SELECT kind, members, source, reason, result FROM dupe_comparisons WHERE repo = ? AND EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?) ORDER BY at DESC LIMIT 2`).all(d.repo, d.number) as { kind: string; members: string; source: string; reason: string | null; result: string | null }[];
+  const cmp = await db.prepare(`SELECT kind, members, source, reason, result FROM dupe_comparisons WHERE repo = ? AND EXISTS (SELECT 1 FROM ${jsonEach(db, "members", "m")} WHERE m.value = ?) ORDER BY at DESC LIMIT 2`).all(d.repo, d.number) as { kind: string; members: string; source: string; reason: string | null; result: string | null }[];
   if (cmp.length) out.duplicate_comparisons = cmp.map((c) => ({ kind: c.kind, members: arr(c.members), by: c.source, reason: cut(c.reason, 600), result: cut(c.result, 1500) }));
   if (d.id.includes(":dupegroup:")) {
     const members = await db.prepare("SELECT number, kind, role, target, detail FROM dupe_group_items WHERE decision_id = ? ORDER BY number").all(d.id) as { number: number; kind: string; role: string; target: number | null; detail: string | null }[];
@@ -194,13 +195,13 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
   const select = db.prepare("SELECT * FROM decisions WHERE id = ? AND answer IS NULL");
   const itemOf = db.prepare("SELECT kind, state, mergeable, head_oid, additions, deletions, changed_files FROM items WHERE repo = ? AND number = ?");
   const checksOf = db.prepare("SELECT head_oid, overall, mergeable FROM pr_checks WHERE repo = ? AND number = ?");
-  const failed = db.prepare(`UPDATE main.decisions SET recommend_failures = CASE WHEN prepare_failed_head IS ? THEN COALESCE(recommend_failures, 0) + 1 ELSE 1 END,
+  const failed = db.prepare(`UPDATE main.decisions SET recommend_failures = CASE WHEN ${notDistinctFrom(db, "prepare_failed_head", "?")} THEN COALESCE(recommend_failures, 0) + 1 ELSE 1 END,
     recommend_failed_at = ?, prepare_failed_head = ? WHERE id = ?`);
   const store = db.prepare(`UPDATE main.decisions SET recommended = ?, recommended_reason = ?, recommended_by = ?, summary = ?, summary_by = ?, summary_at = ?,
     prepared_at = ?, prepared_head = ?, prepared_discussion = ?, recommend_failures = NULL, recommend_failed_at = NULL, prepare_failed_head = NULL, prepare_requested_at = NULL
     WHERE id = ? AND answer IS NULL AND question = ? AND options = ?`);
   const res: PrepareResult = { stored: 0, failed: 0 };
-  const rowOf = new Map((await db.prepare("SELECT id, repo, number FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(ids)) as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r]));
+  const rowOf = new Map((await db.prepare(`SELECT id, repo, number FROM decisions WHERE ${inList(db, "id")}`).all(JSON.stringify(ids)) as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r]));
   await pool(ids.map((id, k) => async () => {
     if (await p.cancelled?.()) return;
     const d = await select.get(id) as Row | undefined;
@@ -250,8 +251,8 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const dir = referenceDir(repo);
     const semantic = p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`);
     // What the call reads of the discussion, kept with the prepare; the call counts against the decision's daily cap unless an operator asked for it.
-    const readKey = (await db.prepare(`SELECT ${discussionKeySql("d")} AS k FROM decisions d WHERE d.id = ?`).get(d.id) as { k: string | null }).k ?? "";
-    const tried = (await db.prepare("INSERT INTO main.decision_prepares (decision_id, at, manual) VALUES (?, ?, ?)").run(d.id, now(), d.prepare_requested_at ? 1 : 0)).lastInsertRowid;
+    const readKey = (await db.prepare(`SELECT ${discussionKeySql(db, "d")} AS k FROM decisions d WHERE d.id = ?`).get(d.id) as { k: string | null }).k ?? "";
+    const tried = (await db.prepare("INSERT INTO main.decision_prepares (decision_id, at, manual) VALUES (?, ?, ?) RETURNING rowid").get(d.id, now(), d.prepare_requested_at ? 1 : 0) as { rowid: number }).rowid;
     let r;
     try {
       r = await runModelStep(db, PREPARE, input, {

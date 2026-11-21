@@ -10,10 +10,13 @@ const key = (repo: string, n: number) => `${repo}#${n}`;
 /** Confirmed duplicates per canonical item, from the duplicates stage's `duplicate_pairs` table. Empty when the table or a column is missing. */
 export async function duplicateCounts(db: Db): Promise<Map<string, number>> {
   const out = new Map<string, number>();
-  const exists = await db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_pairs'").get();
-  if (!exists) return out;
-  const cols = new Set((await db.prepare("PRAGMA table_info(duplicate_pairs)").all() as { name: string }[]).map((c) => c.name));
-  if (!["repo", "canonical", "verdict"].every((c) => cols.has(c))) return out;
+  // A Postgres database always has the whole schema; an old SQLite file may not.
+  if (db.dialect === "sqlite") {
+    const exists = await db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'duplicate_pairs'").get();
+    if (!exists) return out;
+    const cols = new Set((await db.prepare("PRAGMA table_info(duplicate_pairs)").all() as { name: string }[]).map((c) => c.name));
+    if (!["repo", "canonical", "verdict"].every((c) => cols.has(c))) return out;
+  }
   const rows = await db.prepare("SELECT repo, canonical FROM duplicate_pairs WHERE verdict = 'duplicate' AND canonical IS NOT NULL").all() as { repo: string; canonical: string | number }[];
   for (const r of rows) {
     // The canonical item is a number in the pair's repo, or a "repo#number" ref.

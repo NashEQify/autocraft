@@ -9,6 +9,7 @@ import { targetKeys } from "../act/order.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { sortSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { inList, jsonBool, jsonText } from "../db/portable.ts";
 
 /** Next step text → queued stage and the Queue tab that lists it. Steps not listed here are not queued. */
 const QUEUED: Record<string, Pick<QueueSlot, "stage" | "tab">> = {
@@ -61,9 +62,9 @@ export function orderStages(items: { repo: string; number: number; score: number
 /** Orders the pipeline's open ranked items by stage, from the Plan cache: the next-step text of each item in scope, and the batch states of the PRs. */
 export async function computeStages(db: Db): Promise<Stages> {
   const held = new Set((await db.prepare("SELECT repo, number FROM main.merge_holds").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
-  const rows = await db.prepare(`SELECT p.repo, p.number, p.state, json_extract(p.view, '$.next') AS next FROM main.item_plans p
+  const rows = await db.prepare(`SELECT p.repo, p.number, p.state, ${jsonText(db, "p.view", "$.next")} AS next FROM main.item_plans p
     JOIN main.items i ON i.repo = p.repo AND i.number = p.number AND i.state = 'OPEN' JOIN main.item_rank r ON r.repo = p.repo AND r.number = p.number
-    WHERE json_extract(p.view, '$.scope') = 1`).all() as { repo: string; number: number; state: string; next: string | null }[];
+    WHERE ${jsonBool(db, "p.view", "$.scope")} = 1`).all() as { repo: string; number: number; state: string; next: string | null }[];
   const score = scoreLookup(db);
   const out: { repo: string; number: number; score: number; next: string }[] = [];
   for (const r of rows) {
@@ -96,7 +97,7 @@ async function actEntries(db: Db): Promise<Entry[]> {
   }
   if (!targets.length) return [];
   const keys = await targetKeys(db, targets);
-  const disputed = new Set((await db.prepare("SELECT id FROM main.decisions WHERE exec_state = 'disputed' AND id IN (SELECT value FROM json_each(?))").all(JSON.stringify(targets.map((t) => t.decisionId))) as { id: string }[]).map((x) => x.id));
+  const disputed = new Set((await db.prepare(`SELECT id FROM main.decisions WHERE exec_state = 'disputed' AND ${inList(db, "id")}`).all(JSON.stringify(targets.map((t) => t.decisionId))) as { id: string }[]).map((x) => x.id));
   return targets.filter((t) => !disputed.has(t.decisionId)).map((t) => {
     const k = keys.get(t.decisionId);
     const sec = k?.at ? Date.parse(k.at) / 1000 : 0;
