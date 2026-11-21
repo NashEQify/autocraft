@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { setJevEnabled } from "../src/agents/jev.ts";
 import { plannedItems } from "../src/core/select-items.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
+import { excluded } from "../src/db/kx.ts";
 import { fillEmbedHashes } from "../src/itemhash.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
@@ -40,14 +41,14 @@ test("prioritize waits for a Task Runner or Jev while its items need one", async
 test("dupes-compare runs without a Task Runner only for a set settled by rule", async () => {
   const w = await (await (await (await world()).repo()).issue(1, { title: "crash on open" })).issue(2, { title: "crashes when opening" });
   await fillEmbedHashes(w.db);
-  const hash = async (n: number) => (await w.db.prepare("SELECT embed_hash FROM items WHERE repo = 'app' AND number = ?").get(n) as { embed_hash: string }).embed_hash;
-  await w.db.prepare("INSERT INTO duplicate_pairs (repo, a, b, a_hash, b_hash, similarity, created_at, verdict) VALUES ('app', 1, 2, ?, ?, 0.9, ?, 'duplicate')").run(await hash(1), await hash(2), T0);
+  const hash = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
+  await w.db.run(w.db.k.insertInto("duplicate_pairs").values({ repo: "app", a: 1, b: 2, a_hash: await hash(1), b_hash: await hash(2), similarity: 0.9, created_at: T0, verdict: "duplicate" }));
   await setInferenceMode(w.db, "user-local", "test");
   const lanes = LANES.filter((l) => l.name === "dupes-compare");
   const proposed = async () => (await detectAutopilot(w.db, { lanes })).proposals.map((p) => p.step);
 
   assert.equal((await plannedItems(w.db, "dupes-compare")).length, 2, "both open members wait for the comparison");
   assert.deepEqual(await proposed(), [], "two open members need a model call no Task Runner takes");
-  await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE repo = 'app' AND number = 2").run();
+  await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 2));
   assert.deepEqual(await proposed(), ["dupes-compare"], "a closed member wins by rule, without a model");
 });
