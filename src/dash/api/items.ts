@@ -1,5 +1,5 @@
 // The Items browser (`GET /api/items`) and the top-bar search (`GET /api/search`),
-// both over the full-text tables items_fts and comments_fts (src/schema.sql).
+// both over the full-text search of items and comments (src/db/search.ts).
 import { canSeeInternals } from "./staff.ts";
 import type { SQLInputValue } from "node:sqlite";
 import type {
@@ -22,67 +22,22 @@ import type { CachedEntry } from "../../core/plan-read.ts";
 import { statusFromItem } from "../../core/item-status.ts";
 import { ITEM_PHASES, PHASE_SQL, type ItemPhase, type ItemStatus, type ItemStatusList, type ItemStatusRow } from "./home-types.ts";
 import { mapSeq } from "../../async-seq.ts";
-import type { Db } from "../../db/index.ts";
-
-const HAS_WORD = /[\p{L}\p{N}]/u;
-const quote = (s: string) => `"${s.replace(/"/g, "")}"`;
-
-/**
- * Turns what a person types into an FTS5 query, or null when nothing is left
- * to search for. Words must all match; "quoted text" is a phrase; a trailing *
- * matches a prefix; -word excludes; OR between terms means either. Every term
- * is quoted, so FTS5 syntax characters in the input are never operators.
- * `prefixLast` makes the last word a prefix (for search-as-you-type).
- */
-export function ftsQuery(input: string, prefixLast = false): string | null {
-  const pos: string[] = [];
-  const neg: string[] = [];
-  const re = /(-?)"([^"]*)"?|(\S+)/g;
-  const raw = input.slice(0, 300);
-  for (let m = re.exec(raw); m; m = re.exec(raw)) {
-    if (m[2] !== undefined) {
-      if (HAS_WORD.test(m[2])) (m[1] ? neg : pos).push(quote(m[2]));
-      continue;
-    }
-    let w = m[3]!;
-    if (w === "OR") {
-      if (pos.length && pos[pos.length - 1] !== "OR") pos.push("OR");
-      continue;
-    }
-    const isNeg = w.startsWith("-") && w.length > 1;
-    if (isNeg) w = w.slice(1);
-    const atEnd = m.index + m[0].length === raw.length && !/\s$/.test(raw);
-    // a prefix of one or two letters would expand to most of the index
-    const prefix = w.endsWith("*") || (prefixLast && atEnd && !isNeg && w.length >= 3);
-    w = w.replace(/\*+$/, "");
-    if (!HAS_WORD.test(w)) continue;
-    (isNeg ? neg : pos).push(quote(w) + (prefix ? "*" : ""));
-    if (pos.length + neg.length >= 16) break;
-  }
-  while (pos[pos.length - 1] === "OR") pos.pop();
-  if (!pos.length) return null;
-  return [`(${pos.join(" ")})`, ...neg.map((n) => `NOT ${n}`)].join(" ");
-}
+import type { Db, Dialect } from "../../db/index.ts";
+import { commentMatchSql, commentRankOrder, itemMatchSql, parseSearch, searchParam, snippetSql } from "../../db/search.ts";
 
 // Items matching the query bound as :q in their title, body or any comment.
-const HIT_IDS = `hits AS (
-  SELECT rowid AS rid FROM items_fts WHERE items_fts MATCH :q
+const hitIds = (d: Dialect): string => `hits AS (
+  ${itemMatchSql(d, ":q")}
   UNION
-  SELECT it.rowid FROM comments_fts
-    JOIN main.comments c ON c.rowid = comments_fts.rowid
-    JOIN main.items it ON it.repo = c.repo AND it.number = c.number
-  WHERE comments_fts MATCH :q)`;
+  ${commentMatchSql(d, ":q", "it.rowid", { join: "JOIN main.items it ON it.repo = c.repo AND it.number = c.number" })})`;
 
-// The same with the best bm25 score (lower is better): a title match weighs most,
+// The same with the best score (lower is better): a title match weighs most,
 // a comment match half as much as one in the body.
-const HITS_SCORED = `hits AS (
+const hitsScored = (d: Dialect): string => `hits AS (
   SELECT rid, MIN(score) AS score FROM (
-    SELECT rowid AS rid, bm25(items_fts, 10.0, 1.0) AS score FROM items_fts WHERE items_fts MATCH :q
+    ${itemMatchSql(d, ":q", { score: true })}
     UNION ALL
-    SELECT it.rowid, bm25(comments_fts) * 0.5 FROM comments_fts
-      JOIN main.comments c ON c.rowid = comments_fts.rowid
-      JOIN main.items it ON it.repo = c.repo AND it.number = c.number
-    WHERE comments_fts MATCH :q)
+    ${commentMatchSql(d, ":q", "it.rowid", { join: "JOIN main.items it ON it.repo = c.repo AND it.number = c.number", score: 0.5 })}) AS m
   GROUP BY rid)`;
 
 const STATUSES: SettledStatus[] = ["settled", "waiting", "disagree", "unclassified"];
@@ -106,8 +61,8 @@ async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort
   const run = q.get("run") || await latestRun(db);
   const params: Record<string, SQLInputValue> = {};
   const where: string[] = [];
-  const fts = ftsQuery(q.get("q") ?? "");
-  if (fts) params.q = fts;
+  const fts = parseSearch(q.get("q") ?? "");
+  if (fts) params.q = searchParam(db, fts);
   const hide = excludeHidden("i.repo", hidden, params);
   if (hide) where.push(hide);
   const repos = list(req, "repo");
@@ -199,20 +154,19 @@ async function snippets(db: Db, fts: string, rows: Row[]): Promise<Map<number, S
   if (!rows.length) return out;
   const ids = rows.map((r) => r.rid);
   const inList = ids.map(() => "?").join(",");
-  const sn = (t: string, col: number) => `snippet(${t}, ${col}, '${OPEN}', '${CLOSE}', '…', 24)`;
-  const own = await db.prepare(`SELECT rowid AS rid, ${sn("items_fts", 0)} AS t, ${sn("items_fts", 1)} AS b
-    FROM items_fts WHERE items_fts MATCH ? AND rowid IN (${inList})`).all(fts, ...ids) as { rid: number; t: string | null; b: string | null }[];
+  const sn = (field: "title" | "body" | "comment") => snippetSql(db, ":q", field, OPEN, CLOSE, 24);
+  const own = await db.prepare(itemMatchSql(db, ":q", { cols: `${sn("title")} AS t, ${sn("body")} AS b`, tail: `AND rowid IN (${inList})` }))
+    .all({ q: fts }, ...ids) as { rid: number; t: string | null; b: string | null }[];
   for (const r of own) {
     if (r.b?.includes(OPEN)) out.set(r.rid, { field: "body", author: null, text: r.b });
     else if (r.t?.includes(OPEN)) out.set(r.rid, { field: "title", author: null, text: r.t });
   }
   const rest = rows.filter((r) => !out.has(r.rid));
   if (!rest.length) return out;
-  const pairs = rest.map(() => "(?, ?)").join(",");
-  const cm = await db.prepare(`SELECT c.repo, c.number, c.author, ${sn("comments_fts", 0)} AS t FROM comments_fts
-    JOIN main.comments c ON c.rowid = comments_fts.rowid
-    WHERE comments_fts MATCH ? AND (c.repo, c.number) IN (VALUES ${pairs}) ORDER BY rank`)
-    .all(fts, ...rest.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; author: string | null; t: string }[];
+  const pairs = rest.map(() => "(?, CAST(? AS BIGINT))").join(",");
+  const cm = await db.prepare(commentMatchSql(db, ":q", `c.repo, c.number, c.author, ${sn("comment")} AS t`,
+    { tail: `AND (c.repo, c.number) IN (VALUES ${pairs}) ${commentRankOrder(db, ":q")}` }))
+    .all({ q: fts }, ...rest.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; author: string | null; t: string }[];
   const byRef = new Map(rest.map((r) => [`${r.repo}#${r.number}`, r.rid]));
   for (const c of cm) {
     const rid = byRef.get(`${c.repo}#${c.number}`);
@@ -261,7 +215,7 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
     const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
     const offset = Math.max(0, Number(req.query.get("offset")) || 0);
     const from = (scored: boolean) => (b.text
-      ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
+      ? `WITH ${scored ? hitsScored(db.dialect) : hitIds(db.dialect)} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
       : "SELECT %COLS FROM items i") + ` LEFT JOIN item_settled s ON ${settledOn(b.run, "s")}`;
     const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
 
@@ -313,7 +267,7 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
 async function discordCounts(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!rows.length) return out;
-  const pairs = rows.map(() => "(?, ?)").join(",");
+  const pairs = rows.map(() => "(?, CAST(? AS BIGINT))").join(",");
   for (const m of await db.prepare(`SELECT repo, number, COUNT(*) AS n FROM main.discord_mentions WHERE (repo, number) IN (VALUES ${pairs}) GROUP BY repo, number`)
     .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; n: number }[]) out.set(`${m.repo}#${m.number}`, m.n);
   return out;
@@ -324,7 +278,7 @@ async function mergedHow(db: Db, rows: { repo: string; number: number; kind: str
   const out = new Map<string, "rule" | "operator" | "batch">();
   const prs = rows.filter((r) => r.kind === "pr");
   if (!prs.length) return out;
-  const pairs = prs.map(() => "(?, ?)").join(",");
+  const pairs = prs.map(() => "(?, CAST(? AS BIGINT))").join(",");
   const args = prs.flatMap((r) => [r.repo, r.number]);
   for (const m of await db.prepare(`SELECT repo, number, path FROM main.merges WHERE outcome = 'merged' AND (repo, number) IN (VALUES ${pairs}) ORDER BY at`).all(...args) as { repo: string; number: number; path: string }[])
     out.set(`${m.repo}#${m.number}`, m.path === "operator" ? "operator" : "rule");
@@ -338,7 +292,7 @@ async function mergedHow(db: Db, rows: { repo: string; number: number; kind: str
 async function stagesOf(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!rows.length) return out;
-  const pairs = rows.map(() => "(?, ?)").join(",");
+  const pairs = rows.map(() => "(?, CAST(? AS BIGINT))").join(",");
   const got = await db.prepare(`SELECT repo, number, stage FROM main.item_stage WHERE (repo, number) IN (VALUES ${pairs})`)
     .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; stage: string }[];
   for (const g of got) out.set(`${g.repo}#${g.number}`, g.stage);
@@ -378,19 +332,19 @@ export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
         WHERE author LIKE :p AND repo IN (SELECT name FROM main.tracked_repos)${hide ? ` AND ${hide}` : ""}
         ORDER BY state <> 'OPEN', updated_at DESC LIMIT 5`).all({ p: `${q}%`, ...hp }) as Hit[];
     }
-    const fts = ftsQuery(q, true);
+    const fts = parseSearch(q, true);
     if (!fts) return rows.map(hitOf);
     const have = new Set(rows.map((r) => `${r.repo}#${r.number}`));
     // The newest 100 matches by title, then by body when titles give too few, open ones first.
-    // Ordered by rowid, which FTS5 stops early on; ranking every match is too slow for common words.
-    const look = db.prepare(`WITH hits AS (SELECT rowid AS rid FROM items_fts WHERE items_fts MATCH :q ORDER BY rowid DESC LIMIT 100)
+    // Ordered by rowid, where the search can stop early; ranking every match is too slow for common words.
+    const look = db.prepare(`WITH hits AS (${itemMatchSql(db, ":q", { tail: "ORDER BY rowid DESC LIMIT 100" })})
       SELECT i.repo, i.number, i.kind, i.title, i.author, i.state
       FROM hits h JOIN items i ON i.rowid = h.rid${hide ? ` WHERE ${hide.replace("repo", "i.repo")}` : ""}
       ORDER BY i.state <> 'OPEN', i.updated_at DESC LIMIT 20`);
-    let text = await look.all({ q: `title : ${fts}`, ...hp }) as Hit[];
+    let text = await look.all({ q: searchParam(db, fts, { titleOnly: true }), ...hp }) as Hit[];
     if (text.length < 20) {
       const seenT = new Set(text.map((r) => `${r.repo}#${r.number}`));
-      text = [...text, ...(await look.all({ q: fts, ...hp }) as Hit[]).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
+      text = [...text, ...(await look.all({ q: searchParam(db, fts), ...hp }) as Hit[]).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
     }
     rows = [...rows, ...text.filter((r) => !have.has(`${r.repo}#${r.number}`))].slice(0, 20);
   }
@@ -430,7 +384,7 @@ export async function statusList(db: Db, req: Req): Promise<ItemStatusList> {
   const b = await build(db, { ...req, query: only }, reader.hidden);
   const internals = canSeeInternals(req);
   const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
-  const from = (cols: string) => (b.text ? `WITH ${HIT_IDS} SELECT ${cols} FROM hits h JOIN items i ON i.rowid = h.rid` : `SELECT ${cols} FROM items i`) +
+  const from = (cols: string) => (b.text ? `WITH ${hitIds(db.dialect)} SELECT ${cols} FROM hits h JOIN items i ON i.rowid = h.rid` : `SELECT ${cols} FROM items i`) +
     " LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number";
   const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
   // Items mentioned on Discord (display only; src/discord/store.ts).
