@@ -5,7 +5,8 @@
 //
 // The shadow check (setting `plan_shadow` = "on") also runs a full load in the same read transaction every incremental
 // pass and records each difference in `plan_shadow_diffs`; AUTOCRAFT_PLAN_SHADOW (on, off, throw) overrides the setting,
-// and "throw" fails the pass on a difference instead (tests). Pass counts per kind are in `plan_pass_stats`.
+// and "throw" fails the pass on a difference instead (tests). Pass counts per kind are in `plan_pass_stats`, written with
+// the next difference, full load or minute.
 import type { DatabaseSync } from "node:sqlite";
 import { embedderId, modelName } from "../embed/model.ts";
 import { appSlug } from "../github/identity.ts";
@@ -37,6 +38,11 @@ type State = {
 
 const states = new WeakMap<DatabaseSync, State>();
 
+/** Pass counts not yet written to plan_pass_stats, per connection. */
+const records = new WeakMap<DatabaseSync, { flushedAt: number; counts: Map<string, { passes: number; refs: number; at: string }> }>();
+/** Quiet passes write their counts and prune the change log at most this often. */
+const RECORD_EVERY_MS = 60_000;
+
 type Diff = { ref: string; side: "pr" | "item"; fields: string[]; detail: string };
 
 export type PlanPass = {
@@ -47,7 +53,7 @@ export type PlanPass = {
   refs: number;
   /** Differences the shadow check found (empty when it did not run). */
   diffs: Diff[];
-  /** Records the pass and prunes the change log it consumed; call after the pass's writes succeeded. */
+  /** Records the pass and prunes the change log it consumed (a quiet pass: at most once a minute); call after the pass's writes succeeded. */
   finish: () => void;
 };
 
@@ -199,12 +205,19 @@ export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
   return {
     plans, kind, refs, diffs,
     finish: () => {
-      pruneChanges(db, seq);
+      const rec = records.get(db) ?? records.set(db, { flushedAt: 0, counts: new Map() }).get(db)!;
       const at = new Date(now).toISOString();
-      const count = db.prepare(`INSERT INTO main.plan_pass_stats (kind, passes, refs, last_at) VALUES (?, 1, ?, ?)
-        ON CONFLICT (kind) DO UPDATE SET passes = passes + 1, refs = refs + excluded.refs, last_at = excluded.last_at`);
-      count.run(kind, refs, at);
-      if (shadowRan) count.run(diffs.length ? "shadow:different" : "shadow:same", diffs.length, at);
+      const add = (k: string, n: number): void => { const c = rec.counts.get(k) ?? { passes: 0, refs: 0, at }; rec.counts.set(k, { passes: c.passes + 1, refs: c.refs + n, at }); };
+      add(kind, refs);
+      if (shadowRan) add(diffs.length ? "shadow:different" : "shadow:same", diffs.length);
+      // A quiet pass writes nothing: the counts and the log's pruning wait for a difference, a full load or the next minute.
+      if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) return;
+      pruneChanges(db, seq);
+      const count = db.prepare(`INSERT INTO main.plan_pass_stats (kind, passes, refs, last_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (kind) DO UPDATE SET passes = passes + excluded.passes, refs = refs + excluded.refs, last_at = excluded.last_at`);
+      for (const [k, c] of rec.counts) count.run(k, c.passes, c.refs, c.at);
+      rec.counts.clear();
+      rec.flushedAt = Date.now();
       if (diffs.length) {
         const put = db.prepare("INSERT INTO main.plan_shadow_diffs (at, ref, side, fields, detail) VALUES (?, ?, ?, ?, ?)");
         for (const d of diffs) put.run(at, d.ref, d.side, d.fields.join(","), d.detail.slice(0, 2000));
