@@ -284,7 +284,6 @@ src/mirror.ts
 
 
 
-src/outside.ts
 
 src/owners.ts
 
