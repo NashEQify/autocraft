@@ -16,6 +16,7 @@ import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixissue-test-"));
@@ -58,15 +59,15 @@ type Opts = { existingPr?: string; approved?: boolean; label?: string; flags?: s
 
 async function fresh(o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public", default_branch: "main" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await issue(db, 5, "Panic when the slice is empty", "first() indexes element 0.", o);
   if (o.approved !== false) await setFixIssueApproval(db, "op", "app", true);
   return db;
 }
 
 async function issue(db: Db, n: number, title: string, body: string, o: Opts = {}): Promise<void> {
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, ?, 'someone', ?, ?)").run(n, title, body, T0, T0);
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title, body, author: "someone", created_at: T0, updated_at: T0 }));
   await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
     .run(n, T0, o.label ?? "bugfix", JSON.stringify(o.flags ?? []), JSON.stringify({ top: 0.97, ...(o.flags?.includes("needs decision") ? { needs_decision: o.needsDecision ?? 0.9 } : {}) }));
   if (o.level !== undefined) await db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.level, T0);
@@ -154,7 +155,7 @@ async function world(o: Opts & { check?: string | null; triage?: string; patches
   const fork = join(root, "fork.git");
   git(root, "init", "-q", "--bare", fork);
   const db = await fresh(o);
-  if (o.title) await db.prepare("UPDATE items SET title = ? WHERE number = 5").run(o.title);
+  if (o.title) await db.run(db.k.updateTable("items").set({ title: o.title }).where("number", "=", 5));
   const log: string[] = [], calls: string[] = [], asked: string[] = [];
   const replies = [...(o.patches ?? [GOOD])];
   let forked = false;
@@ -293,8 +294,8 @@ describe("claim comment of an attempt that ends without a PR", () => {
   const URL = "https://github.com/storytold/app/issues/5#issuecomment-777";
   async function claimed(state: string, prUrl: string | null, author = LOGIN) {
     const w = await world();
-    await w.db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, pr_url, created_at, updated_at) VALUES ('app', 5, ?, 'h', ?, 1, ?, ?, ?)").run(w.sha, state, prUrl, T0, T0);
-    await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'fixissue', 'fixissue-claim', 'app#5', ?)").run(T0, JSON.stringify({ url: URL, state: "done" }));
+    await w.db.run(w.db.k.insertInto("fix_attempts").values({ repo: "app", number: 5, main_sha: w.sha, text_hash: "h", state, round: 1, pr_url: prUrl, created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("audit").values({ at: T0, login: "fixissue", action: "fixissue-claim", target: "app#5", details: JSON.stringify({ url: URL, state: "done" }) }));
     w.deps.querier = validating({ spent: 0, remaining: 5000, async query() { return { viewer: { login: LOGIN, id: "U42" } }; } } as Querier);
     const api: string[] = [];
     const inner = w.deps.exec;
@@ -314,10 +315,11 @@ describe("claim comment of an attempt that ends without a PR", () => {
     await run(held.w);
     await run(held.w);
     assert.deepEqual(held.api, ["get", "delete"]);
-    assert.equal((await held.w.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'fixissue-unclaim' AND details LIKE '%\"state\":\"done\"%'").get())!.n, 1);
+    assert.equal((await held.w.db.get(held.w.db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", "fixissue-unclaim")
+      .where((eb) => like(held.w.db, "details", eb.val('%"state":"done"%')))))!.n, 1);
 
     const bot = await claimed("failed", null, "app-bot[bot]");
-    await bot.w.db.prepare("INSERT INTO settings (key, value) VALUES ('app_slugs', '[\"app-bot\"]')").run();
+    await bot.w.db.run(bot.w.db.k.insertInto("settings").values({ key: "app_slugs", value: '["app-bot"]' }));
     await run(bot.w);
     assert.deepEqual(bot.api, ["get", "delete"]);
 
@@ -329,8 +331,8 @@ describe("claim comment of an attempt that ends without a PR", () => {
 
 test("the fix PR we just opened counts as the issue's open PR until a sync mirrors it", async () => {
   const db = await fresh();
-  await db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, pr_url, created_at, updated_at) VALUES ('app', 5, 'm', 'h', 'pr-opened', 'https://github.com/o/app/pull/6', ?, ?)").run(T0, T0);
+  await db.run(db.k.insertInto("fix_attempts").values({ repo: "app", number: 5, main_sha: "m", text_hash: "h", state: "pr-opened", pr_url: "https://github.com/o/app/pull/6", created_at: T0, updated_at: T0 }));
   assert.deepEqual((await loadItemFact(db, "app", 5))?.fix.openPr, { number: 6, closes: true });
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', 6, 'pr', 'CLOSED', 'Fix', '', 'bot', ?, ?)").run(T0, T0);
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 6, kind: "pr", state: "CLOSED", title: "Fix", body: "", author: "bot", created_at: T0, updated_at: T0 }));
   assert.equal((await loadItemFact(db, "app", 5))?.fix.openPr, null);
 });
