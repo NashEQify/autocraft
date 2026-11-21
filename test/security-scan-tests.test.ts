@@ -12,6 +12,7 @@ import { runScan, type Ask, type ScanDeps } from "../src/security/scan.ts";
 import { advanceScanTests, NOT_SHOWN_NOTE } from "../src/security/scantest.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { cols, excluded, jsonNum } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "scan-tests-"));
@@ -47,9 +48,9 @@ function deps(spy: Spy, withTests: boolean): ScanDeps {
     crates: async () => { spy.crates++; return { ok: true, rust: true, crates: [{ name: "psd", dir: "crates/psd" }] }; },
   };
 }
-const newScan = async (repo: string): Promise<number> => Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES (?, 'modeling', NULL, 'boss', '2026-11-05T00:00:00Z')").run(repo)).lastInsertRowid);
-const findings = async (repo: string) => await db.prepare("SELECT number, title, severity, state, verification FROM security_findings WHERE repo = ? ORDER BY number").all(repo) as { number: number; title: string; severity: string; state: string; verification: string }[];
-const testRow = async (repo: string, n: number) => await db.prepare("SELECT * FROM security_scan_tests WHERE repo = ? AND number = ?").get(repo, n) as { state: string; task_id: number; retried: number } | undefined;
+const newScan = async (repo: string): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo, state: "modeling", cap_usd: null, started_by: "boss", started_at: "2026-11-05T00:00:00Z" }).returning("id")))!.id;
+const findings = async (repo: string) => await db.all(db.k.selectFrom("security_findings").select(["number", "title", "severity", "state", "verification"]).where("repo", "=", repo).orderBy("number"));
+const testRow = async (repo: string, n: number) => await db.get(db.k.selectFrom("security_scan_tests").select(cols("security_scan_tests")).where("repo", "=", repo).where("number", "=", n));
 const result = (step: string, exitCode: number | null, timedOut = false) => ({ step, exitCode, durationMs: 1, timedOut });
 
 describe("scan tests", () => {
@@ -60,14 +61,14 @@ describe("scan tests", () => {
     assert.deepEqual([wired.tests, wired.crates], [0, 0]);
     assert.ok(!wired.ids.includes("security.scantest"));
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM build_tasks").get() as { n: number }).n, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_scan_tests").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("security_scan_tests").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_calls WHERE kind = 'test'").get() as { n: number }).n, 0);
     assert.deepEqual(wired.ids, plain.ids);
     const strip = (rows: Awaited<ReturnType<typeof findings>>) => rows.map(({ number: _n, ...r }) => r);
     assert.deepEqual(strip(await findings("wired")), strip(await findings("plain")));
     assert.deepEqual(await advanceScanTests(db), []);
     assert.equal(await autoFixConfirmed(db, "wired"), 4, "every confirmed finding starts its fix as before");
-    await db.prepare("DELETE FROM jobs").run();
+    await db.run(db.k.deleteFrom("jobs"));
   });
 
   test("with the switch on, the test is queued before the fix and its outcome marks the finding", async () => {
@@ -78,7 +79,7 @@ describe("scan tests", () => {
     assert.equal(spy.tests, 4);
     const rows = await findings("on");
     assert.deepEqual(rows.map((r) => r.state), ["new", "new", "new", "new"], "no automatic fix starts while a test is building");
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM jobs WHERE step = 'security-fix'").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("step", "=", "security-fix")))!.n, 0);
     const tasks = await db.prepare("SELECT * FROM build_tasks ORDER BY id").all() as { step: string; patch: string; head_sha: string; priority: number; number: number | null }[];
     assert.equal(tasks.length, 4);
     for (const t of tasks) {
@@ -115,17 +116,18 @@ describe("scan tests", () => {
     // Findings are kept as they were; only the passing test leaves a note.
     const after = await findings("on");
     assert.deepEqual(after.map((r) => [r.state, r.severity]), [["new", "high"], ["new", "high"], ["new", "high"], ["new", "high"]]);
-    assert.equal((await db.prepare("SELECT note FROM security_findings WHERE repo = 'on' AND number = ?").get(b) as { note: string }).note, NOT_SHOWN_NOTE);
+    assert.equal((await db.get(db.k.selectFrom("security_findings").select("note").where("repo", "=", "on").where("number", "=", b)))!.note, NOT_SHOWN_NOTE);
     // The automatic fix skips the finding whose test passed and starts the others.
     assert.equal(await autoFixConfirmed(db, "on"), 3);
-    const started = (await db.prepare("SELECT json_extract(params, '$.number') AS n FROM jobs WHERE step = 'security-fix' ORDER BY n").all() as { n: number }[]).map((r) => r.n);
+    const started = (await db.all(db.k.selectFrom("jobs").select(jsonNum(db, "params", "$.number").as("n")).where("step", "=", "security-fix").orderBy("n"))).map((r) => r.n);
     assert.deepEqual(started, [a, c, d]);
   });
 
   test("a test that builds for over four hours is cancelled and read as could-not-build", async () => {
     const n = (await findings("on"))[0]!.number;
-    await db.prepare("INSERT OR REPLACE INTO security_scan_tests (repo, number, test_path, crate, test_patch, test_source, task_id, state, created_at) VALUES ('stuck', ?, 'p', 'psd', 'x', 'x', ?, 'building', ?)")
-      .run(n, (await testRow("on", n))!.task_id, new Date(Date.now() - 5 * 3_600_000).toISOString());
+    await db.run(db.k.insertInto("security_scan_tests")
+      .values({ repo: "stuck", number: n, test_path: "p", crate: "psd", test_patch: "x", test_source: "x", task_id: (await testRow("on", n))!.task_id, state: "building", created_at: new Date(Date.now() - 5 * 3_600_000).toISOString() })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({ ...excluded(["test_path", "crate", "test_patch", "test_source", "task_id", "state", "created_at"])(eb), retried: 0, detail: null, ended_at: null }))));
     await db.prepare("UPDATE build_tasks SET state = 'queued', results = '[]' WHERE id = ?").run((await testRow("on", n))!.task_id);
     assert.deepEqual(await advanceScanTests(db), [{ repo: "stuck", number: n, state: "could-not-build" }]);
     assert.equal((await getTask(db, (await testRow("on", n))!.task_id))!.state, "cancelled");

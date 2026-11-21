@@ -486,7 +486,6 @@ src/runner/steps.ts
 
 src/sandbox/workspace.ts
 
-src/security/actions.ts
 
 src/security/fix.ts
 

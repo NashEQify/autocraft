@@ -17,6 +17,7 @@ import { securityRepo } from "../src/security/rules.ts";
 import { autoFixConfirmed } from "../src/security/actions.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "security-test-"));
@@ -122,8 +123,8 @@ function fakeModel(costs = { model: 1, area: 2, verify: 0.5 }, calls: string[] =
   return { ask, checkout: async () => ({ dir: tree, sha: "a".repeat(40) }), cancelled: async () => false, log: () => {} };
 }
 
-const newScan = async (cap: number | null): Promise<number> => Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES ('photocraft', 'modeling', ?, 'boss', '2026-11-05T00:00:00Z')").run(cap)).lastInsertRowid);
-const scanOf = async (id: number) => await db.prepare("SELECT * FROM security_scans WHERE id = ?").get(id) as { state: string; cost_usd: number; areas_done: number; areas_total: number; estimate_usd: number | null; commit_sha: string };
+const newScan = async (cap: number | null): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo: "photocraft", state: "modeling", cap_usd: cap, started_by: "boss", started_at: "2026-11-05T00:00:00Z" }).returning("id")))!.id;
+const scanOf = async (id: number) => (await db.get(db.k.selectFrom("security_scans").select(kx.cols("security_scans")).where("id", "=", id)))!;
 
 describe("security deep scan", () => {
   test("areas become findings and verify drops the disproved one; a confirmed finding's fix starts once", async () => {
@@ -137,21 +138,21 @@ describe("security deep scan", () => {
     assert.equal(s.commit_sha, "a".repeat(40));
     assert.deepEqual(calls, ["security.model", "security.area", "security.verify", "security.verify", "security.area"], "riskiest area first; one verify per finding");
     assert.equal(s.cost_usd, 1 + 2 + 0.5 * 2 + 2);
-    const rows = await db.prepare("SELECT title, state, verification FROM security_findings WHERE scan_id = ? ORDER BY number").all(id) as { title: string; state: string; verification: string }[];
+    const rows = await db.all(db.k.selectFrom("security_findings").select(["title", "state", "verification"]).where("scan_id", "=", id).orderBy("number"));
     assert.deepEqual(rows.map((r) => [r.title, r.state]), [["Layer length trusted", "fixing"], ["Name read unchecked", "disproved"]]);
-    assert.equal(JSON.parse(rows[0]!.verification).proposedTest, "parse a layer with len = u32::MAX");
-    const fixes = async () => await db.prepare("SELECT requested_by, json_extract(params, '$.number') AS n FROM jobs WHERE step = 'security-fix'").all() as { requested_by: string; n: number }[];
-    const confirmed = (await db.prepare("SELECT number FROM security_findings WHERE scan_id = ? AND title = 'Layer length trusted'").get(id) as { number: number }).number;
+    assert.equal(JSON.parse(rows[0]!.verification!).proposedTest, "parse a layer with len = u32::MAX");
+    const fixes = async () => await db.all(db.k.selectFrom("jobs").select(["requested_by", kx.jsonNum(db, "params", "$.number").as("n")]).where("step", "=", "security-fix"));
+    const confirmed = (await db.get(db.k.selectFrom("security_findings").select("number").where("scan_id", "=", id).where("title", "=", "Layer length trusted")))!.number;
     assert.deepEqual((await fixes()).map((j) => [j.requested_by, j.n]), [["pipeline", confirmed]]);
     // Back to new as after a failed fix: the finding is left for the operator, not started again.
-    await db.prepare("UPDATE security_findings SET state = 'new' WHERE scan_id = ?").run(id);
+    await db.run(db.k.updateTable("security_findings").set({ state: "new" }).where("scan_id", "=", id));
     assert.equal(await autoFixConfirmed(db), 0);
     // A fix the pipeline switch cancelled does not count: once the finding is back to new, the fix is queued again.
-    await db.prepare("UPDATE jobs SET state = 'cancelled' WHERE step = 'security-fix'").run();
-    await db.prepare("UPDATE security_findings SET state = 'fixing', updated_at = '2026-01-01T00:00:00Z' WHERE scan_id = ? AND title = 'Layer length trusted'").run(id);
+    await db.run(db.k.updateTable("jobs").set({ state: "cancelled" }).where("step", "=", "security-fix"));
+    await db.run(db.k.updateTable("security_findings").set({ state: "fixing", updated_at: "2026-01-01T00:00:00Z" }).where("scan_id", "=", id).where("title", "=", "Layer length trusted"));
     assert.equal(await autoFixConfirmed(db), 1);
-    await db.prepare("UPDATE security_findings SET state = 'new' WHERE scan_id = ?").run(id);
-    await db.prepare("DELETE FROM jobs WHERE step = 'security-fix'").run();
+    await db.run(db.k.updateTable("security_findings").set({ state: "new" }).where("scan_id", "=", id));
+    await db.run(db.k.deleteFrom("jobs").where("step", "=", "security-fix"));
     await db.prepare("DELETE FROM audit WHERE action = 'security-finding-fix'").run();
     // A second scan does not raise the same findings again, nor ask to verify them.
     const again = await newScan(null);
@@ -168,18 +169,18 @@ describe("security deep scan", () => {
     assert.deepEqual(none, [], "no call starts when even the first would pass the cap");
 
     // $1 threat model, $2 area scan, then a verify (about $0.6) would pass $3.5.
-    await db.prepare("DELETE FROM security_findings").run();
+    await db.run(db.k.deleteFrom("security_findings"));
     const mid = await newScan(3.5);
     await runScan(db, mid, fakeModel());
     const s = await scanOf(mid);
     assert.equal(s.state, "capped");
     assert.equal(s.cost_usd, 3);
-    const left = await db.prepare("SELECT state, verification FROM security_findings WHERE scan_id = ?").all(mid) as { state: string; verification: string }[];
-    assert.ok(left.length > 0 && left.every((f) => f.state === "new" && JSON.parse(f.verification).score === null), "findings found before the cap are kept and marked as not verified");
+    const left = await db.all(db.k.selectFrom("security_findings").select(["state", "verification"]).where("scan_id", "=", mid));
+    assert.ok(left.length > 0 && left.every((f) => f.state === "new" && JSON.parse(f.verification!).score === null), "findings found before the cap are kept and marked as not verified");
   });
 
   test("viewers get 404 on the security endpoints; maintainers read; operators act", async () => {
-    await db.prepare("DELETE FROM security_findings").run();
+    await db.run(db.k.deleteFrom("security_findings"));
     const boss = await signedIn("boss"), maint = await signedIn("maint"), viewer = await signedIn("viewer1");
     const started = await boss.post<ScanView>("/api/repos/photocraft/security/scans", { capUsd: 50 });
     assert.equal(started.state, "modeling");
@@ -239,7 +240,7 @@ describe("security deep scan", () => {
   });
 
   test("a call that fails after spending still counts against the cap", async () => {
-    await db.prepare("DELETE FROM security_findings").run();
+    await db.run(db.k.deleteFrom("security_findings"));
     const model = fakeModel();
     const ask: Ask = (async (id: string, input: object) => (id === "security.area" ? { text: null, cost: 2 } : (model.ask as (i: string, x: object) => Promise<unknown>)(id, input))) as Ask;
     const id = await newScan(3.5);
@@ -250,7 +251,7 @@ describe("security deep scan", () => {
   });
 
   test("findings that share an entry point but not a sink are both kept; a repeat (same sink and category, same title, or two more shared refs) is linked to the earlier finding", async () => {
-    await db.prepare("DELETE FROM security_findings").run();
+    await db.run(db.k.deleteFrom("security_findings"));
     const model = fakeModel();
     const entry = ref("crates/psd/src/layer.rs", 10);
     const ask: Ask = (async (id: string, input: object) => {
@@ -265,25 +266,25 @@ describe("security deep scan", () => {
     }) as Ask;
     const a = await newScan(null);
     await runScan(db, a, { ...model, ask });
-    const titles = async () => (await db.prepare("SELECT title FROM security_findings WHERE state = 'new' ORDER BY number").all() as { title: string }[]).map((r) => r.title);
+    const titles = async () => (await db.all(db.k.selectFrom("security_findings").select("title").where("state", "=", "new").orderBy("number"))).map((r) => r.title);
     assert.deepEqual(await titles(), ["Layer length trusted", "Channel count trusted"]);
     const b = await newScan(null);
     await runScan(db, b, { ...model, ask });
     assert.equal((await titles()).length, 2, "the second scan adds nothing visible");
-    const dupes = await db.prepare("SELECT duplicate_of FROM security_findings WHERE state = 'duplicate' ORDER BY number").all() as { duplicate_of: number }[];
+    const dupes = await db.all(db.k.selectFrom("security_findings").select("duplicate_of").where("state", "=", "duplicate").orderBy("number"));
     assert.equal(dupes.length, 6);
     const boss = await signedIn("boss");
     const first = await boss.get<FindingView>("/api/security/findings/photocraft/" + dupes[0]!.duplicate_of);
     assert.ok(first.timeline.some((c) => c.kind === "duplicate"));
     // A repeat stored as its own finding (an older rule) is linked at runner start; a second pass changes nothing.
-    await db.prepare("UPDATE security_findings SET state = 'new', duplicate_of = NULL WHERE state = 'duplicate' AND title = 'Unchecked size copies heap bytes out'").run();
+    await db.run(db.k.updateTable("security_findings").set({ state: "new", duplicate_of: null }).where("state", "=", "duplicate").where("title", "=", "Unchecked size copies heap bytes out"));
     assert.equal(await linkRepeatedFindings(db), 2);
     assert.equal(await linkRepeatedFindings(db), 0);
     assert.equal((await titles()).length, 2);
   });
 
   test("a capped scan continues with a higher cap: finished work is not redone, the next area runs", async () => {
-    await db.prepare("DELETE FROM security_findings").run();
+    await db.run(db.k.deleteFrom("security_findings"));
     const boss = await signedIn("boss"), maint = await signedIn("maint");
     // $1 model, $2 PSD area (two findings to verify), then a verify would pass $3.5.
     const id = await newScan(3.5);
@@ -295,7 +296,7 @@ describe("security deep scan", () => {
     await boss.post(`/api/security/scans/${id}/continue`, { cap: 3 }, 400);
     const other = await boss.post<ScanView>("/api/repos/photocraft/security/scans", { capUsd: 5 });
     await boss.post(`/api/security/scans/${id}/continue`, { cap: 50 }, 409);
-    await db.prepare("UPDATE security_scans SET state = 'done' WHERE id = ?").run(other.id);
+    await db.run(db.k.updateTable("security_scans").set({ state: "done" }).where("id", "=", other.id));
 
     const resumed = await boss.post<ScanView>(`/api/security/scans/${id}/continue`, { cap: 50 });
     assert.equal(resumed.state, "verifying", "findings the cap left unchecked are verified first");
@@ -310,7 +311,7 @@ describe("security deep scan", () => {
     assert.equal(s.commit_sha, before.commit_sha);
     assert.equal(s.areas_done, 2);
     assert.equal(s.cost_usd, before.cost_usd + 0.5 * 2 + 2);
-    const rows = await db.prepare("SELECT state FROM security_findings WHERE scan_id = ? ORDER BY number").all(id) as { state: string }[];
+    const rows = await db.all(db.k.selectFrom("security_findings").select("state").where("scan_id", "=", id).orderBy("number"));
     assert.deepEqual(rows.map((r) => r.state), ["new", "disproved"]);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_areas WHERE scan_id = ?").get(id) as { n: number }).n, 2);
     assert.ok((await db.prepare("SELECT 1 FROM audit WHERE action = 'security-scan-continue'").get()));
@@ -320,7 +321,8 @@ describe("security deep scan", () => {
   test("a maintainer who cannot see the repo sees none of its scan jobs", async () => {
     const boss = await signedIn("boss"), maint = await signedIn("maint");
     const started = await boss.post<ScanView>("/api/repos/secret/security/scans", { capUsd: 1 });
-    await db.prepare("UPDATE jobs SET state = 'running', progress = 'area 1', started_at = ? WHERE id = (SELECT job_id FROM security_scans WHERE id = ?)").run(new Date().toISOString(), started.id);
+    await db.run(db.k.updateTable("jobs").set({ state: "running", progress: "area 1", started_at: new Date().toISOString() })
+      .where("id", "=", (eb) => eb.selectFrom("security_scans").select("job_id").where("id", "=", started.id)));
     const steps = (c: Client) => c.get<{ jobs: { step: string; params: { repo?: string } }[] }>("/api/pipeline/jobs").then((r) => r.jobs.filter((j) => j.step === "security-scan" && j.params.repo === "secret").length);
     assert.equal(await steps(boss), 1);
     assert.equal(await steps(maint), 0);
