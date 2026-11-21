@@ -226,7 +226,6 @@ src/fixissue/candidates.ts
 
 
 
-src/fixup/index.ts
 
 
 src/fixup/select.ts

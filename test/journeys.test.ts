@@ -166,7 +166,7 @@ describe("PR journeys", () => {
     const first = await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
     assert.deepEqual(first.pushed, []);
     assert.deepEqual(git.pushes, []);
-    assert.deepEqual(await w.rows("SELECT state, lint_round, lint_state FROM fixups"), [{ state: "linting", lint_round: 1, lint_state: "pending" }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round", "lint_state"])), [{ state: "linting", lint_round: 1, lint_state: "pending" }]);
     assert.deepEqual((await w.prPlan(1)).actions, []);
     const t1 = (await w.rows("SELECT id, state FROM build_tasks"))[0] as { id: number; state: string };
     assert.equal(t1.state, "queued");
@@ -178,7 +178,7 @@ describe("PR journeys", () => {
     assert.deepEqual(second.pushed, []);
     assert.equal(asked.length, 2);
     assert.match(asked[1]!.previous!.findings[0]!, /needless at line 1/);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM fixups"), [{ state: "linting", lint_round: 2 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round"])), [{ state: "linting", lint_round: 2 }]);
 
     // Round 2 is clean; rustfmt wants `{}`: one push whose commit has the format change.
     const t2 = ((await w.rows("SELECT id FROM build_tasks ORDER BY id DESC LIMIT 1"))[0] as { id: number }).id;
@@ -189,7 +189,7 @@ describe("PR journeys", () => {
     const pushed = git.branchHead();
     assert.deepEqual(git.pushes, [{ lease: git.head, to: pushed }]);
     assert.equal(sh(git.fork, "show", `${pushed}:src/lib.rs`), "fn b() {}\nfn main() { b(); }");
-    assert.deepEqual(await w.rows("SELECT state, from_head, to_head FROM fixups"), [{ state: "pushed", from_head: git.head, to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "from_head", "to_head"])), [{ state: "pushed", from_head: git.head, to_head: pushed }]);
     assert.equal(w.gh.writesOf("comment").length, 1);
 
     // Sync sees the new head; it is reviewed, verified and pre-merge reviewed like any head.
@@ -219,7 +219,7 @@ describe("lint findings resume the patch session", () => {
       return n === 1 ? git.patch : edit;
     };
     await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
-    const stored = async () => JSON.parse(((await w.rows("SELECT session FROM fixups"))[0] as { session: string }).session) as Record<string, { id: string; dir: string }>;
+    const stored = async () => JSON.parse((await w.db.get(w.db.k.selectFrom("fixups").select("session")))!.session!) as Record<string, { id: string; dir: string }>;
     assert.equal((await stored())[""]!.id, "s1");
     await endLint(w, ((await w.rows("SELECT id FROM build_tasks"))[0] as { id: number }).id, { diagnostics: [{ line: 1 }] });
     clock += minutes * 60_000;
@@ -342,7 +342,7 @@ describe("patch model build tool", () => {
     const second = await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
     assert.deepEqual(second.pushed, ["app#1"]);
     assert.equal(asked, 1);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM fixups"), [{ state: "pushed", lint_round: 1 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round"])), [{ state: "pushed", lint_round: 1 }]);
   });
 });
 
