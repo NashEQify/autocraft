@@ -356,13 +356,9 @@ src/postmerge/related.ts
 
 src/postmerge/review.ts
 
-src/postmerge/select.ts
 
-src/prbuild/index.ts
 
-src/prbuild/select.ts
 
-src/prbuild/view.ts
 
 src/preapproval/index.ts
 
