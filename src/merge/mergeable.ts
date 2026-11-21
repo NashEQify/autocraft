@@ -17,7 +17,7 @@ const keyOf = (repo: string, n: number) => `${PREFIX}${repo}#${n}`;
 
 export type UnknownState = { head: string; since: string; reads: number; rereads: number; stuck: boolean };
 
-const parse = (v: string | null): UnknownState | null => { try { const x = JSON.parse(v as string) as UnknownState; return typeof x.since === "string" && typeof x.head === "string" ? x : null; } catch { return null; } };
+const parse = (v: string | null): UnknownState | null => { try { if (v === null) return null; const x = JSON.parse(v) as UnknownState; return typeof x.since === "string" && typeof x.head === "string" ? x : null; } catch { return null; } };
 
 /** GraphQL checks reads in a row that still showed an unknown state before GitHub's REST endpoint is asked (a count, not a clock). */
 export const READS_BEFORE_REQUEST = 5;
