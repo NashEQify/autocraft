@@ -1,6 +1,7 @@
 // The order the Act step works in: the item's priority level (security raised, as the work rank holds it), then the time of the answer, oldest first.
 import { DEFAULT_BAND } from "../rank/level.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type TargetKey = { band: number; at: string };
 
@@ -8,8 +9,10 @@ export type TargetKey = { band: number; at: string };
 export async function targetKeys(db: Db, targets: { decisionId: string; repo: string; number: number }[]): Promise<Map<string, TargetKey>> {
   const out = new Map<string, TargetKey>();
   if (!targets.length) return out;
-  const rows = await db.prepare(`SELECT d.id, COALESCE(d.answered_at, '') AS at, COALESCE(r.score / 10000, ${DEFAULT_BAND}) AS band
-    FROM main.decisions d LEFT JOIN main.item_rank r ON r.repo = d.repo AND r.number = d.number WHERE d.id IN (SELECT value FROM json_each(?))`).all(JSON.stringify(targets.map((t) => t.decisionId))) as { id: string; at: string; band: number }[];
+  const rows = await db.all(db.k.selectFrom("main.decisions as d")
+    .leftJoin("main.item_rank as r", (j) => j.onRef("r.repo", "=", "d.repo").onRef("r.number", "=", "d.number"))
+    .select((eb) => ["d.id", eb.fn.coalesce("d.answered_at", eb.val("")).as("at"), eb.fn.coalesce(eb("r.score", "/", eb.lit(10000)), eb.lit(DEFAULT_BAND)).as("band")])
+    .where(kx.inList(db, "d.id", targets.map((t) => t.decisionId))));
   for (const r of rows) out.set(r.id, { band: Math.min(4, Math.floor(r.band)), at: r.at });
   return out;
 }

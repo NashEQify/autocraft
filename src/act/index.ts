@@ -17,6 +17,7 @@
 //
 //   autocraft-server act --repo R [--limit N] [--apply]
 //   autocraft-server comment-approval [--repo R]
+import * as kx from "../db/kx.ts";
 import { OPERATOR_MODELS } from "../prompts/index.ts";
 import { audit } from "../dash/audit.ts";
 import { closeItem, commentOn, duplicateClose, type CloseHow, type Note, type Writer } from "../github/write.ts";
@@ -112,13 +113,16 @@ const short = (sha: string) => sha.slice(0, 7);
 
 // ---- Close this PR? ------------------------------------------------------------
 
-type ReviewRow = { verdict?: string; repo: string; number: number; head_oid: string; reason: string; sure: number | null; lines: number; title: string | null; author: string | null };
+type ReviewRow = { verdict?: string; repo: string; number: number; head_oid: string; reason: string | null; sure: number | null; lines: number; title: string | null; author: string | null };
+
+const reviewQuery = (db: Db, repo: string, number: number, head: string | null) => db.k.selectFrom("final_reviews as r").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
+  .select((eb) => ["r.repo", "r.number", "r.head_oid", "r.reason", "r.sure", eb(eb.fn.coalesce("i.additions", eb.lit(0)), "+", eb.fn.coalesce("i.deletions", eb.lit(0))).as("lines"), "i.title", "i.author"])
+  .$narrowType<{ repo: string; number: number; head_oid: string }>()
+  .where("r.repo", "=", repo).where("r.number", "=", number).where("r.head_oid", "=", head);
 
 /** The final close reviews behind the Close? questions the Plans ask for in this repo. */
 async function closeRows(db: Db, repo: string): Promise<ReviewRow[]> {
-  const get = db.prepare(`SELECT r.verdict, r.repo, r.number, r.head_oid, r.reason, r.sure, COALESCE(i.additions, 0) + COALESCE(i.deletions, 0) AS lines, i.title, i.author
-    FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number WHERE r.repo = ? AND r.number = ? AND r.head_oid = ? AND r.verdict = 'close'`);
-  return (await mapSeq((await plannedItems(db, "act", { repo })).filter((p) => p.action.params?.ask), async (p) => await get.get(repo, p.facts.number, p.action.head) as ReviewRow | undefined)).filter((r): r is ReviewRow => !!r);
+  return (await mapSeq((await plannedItems(db, "act", { repo })).filter((p) => p.action.params?.ask), async (p) => await db.get(reviewQuery(db, repo, p.facts.number, p.action.head).select("r.verdict").$narrowType<{ verdict: string }>().where("r.verdict", "=", "close")))).filter((r): r is NonNullable<typeof r> => !!r);
 }
 
 /** A quiet pull request's question carries no model reason: the reason would name what the fix protects against, and the close comment is public. */
@@ -129,7 +133,7 @@ export function closeQuestion(r: ReviewRow, why: string | null = null, quiet = f
     question: "Close this PR?",
     context: `The Opus review says close${r.sure === 0 ? " (Opus was unsure)" : ""}.`,
     facts: [
-      ...(quiet ? [] : [`${REASON_FACT}${r.reason.replace(/\s+/g, " ").trim().slice(0, 300)}`]),
+      ...(quiet ? [] : [`${REASON_FACT}${(r.reason ?? "").replace(/\s+/g, " ").trim().slice(0, 300)}`]),
       `author: ${r.author ?? "unknown"}, size ${sizeOf(r.lines)}`,
       `${HEAD_FACT}${r.head_oid}`,
     ],
@@ -153,7 +157,7 @@ export function holdQuestion(r: ReviewRow, quiet = false, ci: string | null = nu
     context: ci ? `${ci}. The review says ${r.verdict}, but the PR cannot merge while CI fails, so a Merge answer would change nothing.`
       : `The Opus review says hold${r.sure === 0 ? " (Opus was unsure)" : ""}: it neither takes the PR as it is nor closes it, and nothing happens until a person decides.`,
     facts: [
-      ...(quiet ? [] : [`${REASON_FACT}${r.reason.replace(/\s+/g, " ").trim().slice(0, 300)}`]),
+      ...(quiet ? [] : [`${REASON_FACT}${(r.reason ?? "").replace(/\s+/g, " ").trim().slice(0, 300)}`]),
       `author: ${r.author ?? "unknown"}, size ${sizeOf(r.lines)}`,
       `${HEAD_FACT}${r.head_oid}`,
     ],
@@ -168,13 +172,11 @@ export function holdQuestion(r: ReviewRow, quiet = false, ci: string | null = nu
  * Returns the ids asked.
  */
 export async function askHoldDecisions(db: Db, at: string, repo?: string): Promise<string[]> {
-  const get = db.prepare(`SELECT r.repo, r.number, r.head_oid, r.reason, r.sure, COALESCE(i.additions, 0) + COALESCE(i.deletions, 0) AS lines, i.title, i.author
-    FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number WHERE r.repo = ? AND r.number = ? AND r.head_oid = ?`);
   const todo = (await planned(db, "ask-merge", repo ? { repo } : {})).filter((p) => p.action.params?.hold === true);
   const qs: (Record<string, unknown> & { id: string })[] = [];
   for (const p of todo) {
     if (p.action.params?.withdraw) { await withdrawHoldQuestion(db, p.facts.repo, p.facts.number, String(p.action.params?.decisionHead ?? p.action.head ?? ""), at, "the review at that head no longer says hold"); continue; }
-    const r = await get.get(p.facts.repo, p.facts.number, p.action.head) as ReviewRow | undefined;
+    const r = await db.get(reviewQuery(db, p.facts.repo, p.facts.number, p.action.head));
     if (r) qs.push(holdQuestion(r, await isQuiet(db, r.repo, r.number), typeof p.action.params?.ci === "string" ? p.action.params.ci : null));
   }
   if (qs.length) { await ask(db, qs.map((q) => ({ ...q, asked_at: at }))); await setAsideSupersededQuestions(db, at, repo); }
@@ -196,7 +198,7 @@ type Target = { decisionId: string; kind: "scope" | "close" | "duplicate" | "mer
 
 type ActionRow = { attempts: number; id: number; decision_id: string; repo: string; number: number; kind: string; state: string; comment_url: string | null; reason: string | null; created_at: string };
 const rowOf = async (db: Db, t: Target): Promise<ActionRow | undefined> =>
-  await db.prepare("SELECT * FROM actions WHERE decision_id = ? AND repo = ? AND number = ? AND kind = ?").get(t.decisionId, t.repo, t.number, KIND) as ActionRow | undefined;
+  await db.get(db.k.selectFrom("actions").select(kx.cols("actions")).where("decision_id", "=", t.decisionId).where("repo", "=", t.repo).where("number", "=", t.number).where("kind", "=", KIND));
 
 /** `asked_by` of the decisions a security scan asks. An operator's close answer to one applies in any repo approved for commenting, in the pipeline or not. */
 export const SECURITY_ASKER = "security-scan";
@@ -329,14 +331,14 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
 
   const save = async (t: Target, state: "done" | "skipped" | "failed" | "stopped", reason: string | null, url: string | null, attempts?: number) => {
     const prev = await rowOf(db, t);
-    if (prev) await db.prepare("UPDATE actions SET state = ?, reason = ?, comment_url = COALESCE(?, comment_url), created_at = ?, attempts = COALESCE(?, attempts) WHERE id = ?").run(state, reason, url, at(), attempts ?? null, prev.id);
-    else await db.prepare("INSERT INTO actions (decision_id, repo, number, kind, state, comment_url, reason, created_at, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(t.decisionId, t.repo, t.number, KIND, state, url, reason, at(), attempts ?? 0);
+    if (prev) await db.run(db.k.updateTable("actions").set((eb) => ({ state, reason, comment_url: eb.fn.coalesce(eb.val(url), "comment_url"), created_at: at(), attempts: eb.fn.coalesce(eb.val(attempts ?? null), "attempts") })).where("id", "=", prev.id));
+    else await db.run(db.k.insertInto("actions").values({ decision_id: t.decisionId, repo: t.repo, number: t.number, kind: KIND, state, comment_url: url, reason, created_at: at(), attempts: attempts ?? 0 }));
   };
   // A decision is applied once none of its targets is left to do.
   const settle = async (t: Target) => {
     const a = (await actionable(db)).find((x) => x.id === t.decisionId);
     if (a && !(await pending(db, repo, a.items.filter((i) => i.repo === repo).map(refOf))).some((p) => p.decisionId === t.decisionId) && !targetsOfElsewhere(a, repo))
-      await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at(), t.decisionId);
+      await db.run(db.k.updateTable("main.decisions").set({ applied_at: at() }).where("id", "=", t.decisionId).where("applied_at", "is", null));
   };
   const skip = async (t: Target, reason: string) => {
     await save(t, "skipped", reason, null);
@@ -402,7 +404,7 @@ export async function runAct(db: Db, params: ActParams, log: (line: string) => v
       if (!await answerStands(db, t.decisionId, dec.answer)) { await jobItem(db, t.repo, t.number, "not closed: the answer was taken back or disputed", log); continue; }
       await closeItem(w, g, q, { repo: t.repo, number: t.number, id: live.id, pr: live.type === "PullRequest" }, { decision: t.decisionId, head: live.head }, how);
       await save(t, "done", null, url);
-      await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(t.repo, t.number, at(), ACTOR, `closed after ${t.kind} decision ${t.decisionId}`);
+      await db.run(db.k.insertInto("main.stages").values({ repo: t.repo, number: t.number, stage: "closed", at: at(), actor: ACTOR, note: `closed after ${t.kind} decision ${t.decisionId}` }));
       summary.done.push(refOf(t));
       await jobItem(db, t.repo, t.number, "commented and closed", log);
       await settle(t);
@@ -525,7 +527,7 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
       const db = await openDb();
-      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
       for (const r of repos) {
         const a = await commentApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);

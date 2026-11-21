@@ -3,13 +3,10 @@
 # not listed. Keep the blank lines: they let branches that delete different lines merge cleanly.
 
 
-src/act/approval.ts
 
 src/act/dupe-groups.ts
 
-src/act/index.ts
 
-src/act/order.ts
 
 
 src/agents/accounts.ts
