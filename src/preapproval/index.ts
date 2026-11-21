@@ -115,30 +115,21 @@ export async function revertAnswer(db: Db, p: Row, by: string): Promise<boolean>
 
 /** Cancels the row and takes the hand-over answer back in one transaction, whatever state the caller read. False when the row had ended meanwhile. */
 async function cancelRow(db: Db, id: number, by: string, reason: string, line: string, guard = false, via?: string): Promise<boolean> {
-  db.exec("BEGIN IMMEDIATE");
-  let p: Row | undefined;
-  try {
-    p = await db.prepare("SELECT * FROM preapprovals WHERE id = ?").get(id) as Row | undefined;
-    if (!p || !(ACTIVE as readonly string[]).includes(p.state)) {
-      db.exec("ROLLBACK");
-      return false;
-    }
+  // Nothing is written before an early return, so committing leaves the database as a rollback would.
+  const p = await db.write(async () => {
+    const p = await db.prepare("SELECT * FROM preapprovals WHERE id = ?").get(id) as Row | undefined;
+    if (!p || !(ACTIVE as readonly string[]).includes(p.state)) return null;
     // Past the guard of the merge queue, a cancel cannot stop the merge: a batch holds the PR, or it is merged.
     if (guard && p.state === "queued") {
       if (await inActiveBatch(db, p.repo, p.number)) throw new Error("the PR is still in an integration batch");
       if (await mergeRunning(db, p.repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
       if (p.head && await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND head_oid = ? AND outcome = 'merged'").get(p.repo, p.number, p.head)) throw new Error("the PR is already merged");
     }
-    if (!await moveRaw(db, p, "cancelled", { by, reason, via })) {
-      db.exec("ROLLBACK");
-      return false;
-    }
+    if (!await moveRaw(db, p, "cancelled", { by, reason, via })) return null;
     await revertAnswer(db, p, by);
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+    return p;
+  });
+  if (!p) return false;
   await say(db, p.repo, p.number, line);
   return true;
 }
@@ -286,35 +277,17 @@ type Hand = { done: true } | { gone: true } | { wait: true } | { stop: string };
 async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>): Promise<Hand> {
   const id = mergeDecisionId(p.repo, p.number, head);
   const at = iso();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (!await isOperator(db, p.by, p.repo, held)) {
-      db.exec("ROLLBACK");
-      return { stop: `${p.by} no longer settles decisions on ${p.repo}` };
-    }
+  // Nothing is written before an early return, so committing leaves the database as a rollback would.
+  const stopped = await db.write(async (): Promise<Hand | null> => {
+    if (!await isOperator(db, p.by, p.repo, held)) return { stop: `${p.by} no longer settles decisions on ${p.repo}` };
     // A hand-over waits for a running verification and never answers Merge over a failed one: the operator is asked.
-    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('planned', 'running')").get(p.repo, p.number, head)) {
-      db.exec("ROLLBACK");
-      return { wait: true };
-    }
-    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('failed', 'error')").get(p.repo, p.number, head)) {
-      db.exec("ROLLBACK");
-      return { stop: `verification failed at ${headName(p)}` };
-    }
+    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('planned', 'running')").get(p.repo, p.number, head)) return { wait: true };
+    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('failed', 'error')").get(p.repo, p.number, head)) return { stop: `verification failed at ${headName(p)}` };
     const d0 = await getDecision(db, id);
-    if (d0 && d0.answer !== null && d0.answer !== "merge") {
-      db.exec("ROLLBACK");
-      return { stop: `the Merge? question at this head was answered ${d0.answer}` };
-    }
+    if (d0 && d0.answer !== null && d0.answer !== "merge") return { stop: `the Merge? question at this head was answered ${d0.answer}` };
     // A conversation card is settling the question right now: the hand-over waits for it instead of answering over it.
-    if (d0 && d0.answer === null && await db.prepare(`SELECT 1 FROM main.decisions WHERE id = ? AND ${lockLiveSql("decisions")}`).get(id)) {
-      db.exec("ROLLBACK");
-      return { wait: true };
-    }
-    if (!await moveRaw(db, p, "queued", { head })) {
-      db.exec("ROLLBACK");
-      return { gone: true };
-    }
+    if (d0 && d0.answer === null && await db.prepare(`SELECT 1 FROM main.decisions WHERE id = ? AND ${lockLiveSql("decisions")}`).get(id)) return { wait: true };
+    if (!await moveRaw(db, p, "queued", { head })) return { gone: true };
     if (!await getDecision(db, id)) {
       await ask(db, [{
         id, kind: "merge", repo: p.repo, number: p.number, question: "Merge this PR?",
@@ -335,11 +308,9 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
       await replaceProposedCards(db, p.repo, p.number, id);
       await audit(db, p.by, "answer", id, { answer: "merge", source: "preapproval" });
     }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+    return null;
+  });
+  if (stopped) return stopped;
   await say(db, p.repo, p.number, "CI is green and the pre-merge review is clean: the PR is in the merge queue, which checks it as for any Merge answer.");
   return { done: true };
 }
@@ -561,18 +532,14 @@ async function carryAnswers(db: Db, held: ReadonlySet<string>): Promise<void> {
     if (await db.prepare("SELECT 1 FROM audit WHERE action = 'answer' AND target = ? AND details LIKE '%\"source\":\"preapproval\"%'").get(d.id) && await db.prepare(`SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND head = ? AND state IN (${ACTIVE.map(() => "?").join(",")})`).get(x.repo, x.number, x.from_head, ...ACTIVE)) continue;
     if (!await mergeApprovalOf(db, x.repo)) continue;
     const at = iso();
-    db.exec("BEGIN IMMEDIATE");
-    let id: number;
-    try {
+    const carried = await db.write(async () => {
       // Re-check under the write lock: another tick may have created it.
-      if (await db.prepare("SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND head = ?").get(x.repo, x.number, x.to_head)) { db.exec("ROLLBACK"); continue; }
-      id = Number((await db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, head, updated_at, fix_id) VALUES (?, ?, ?, ?, '', 'review', ?, ?, ?, NULL)").run(x.repo, x.number, d.answered_by, at, x.from_head, x.to_head, at)).lastInsertRowid);
+      if (await db.prepare("SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND head = ?").get(x.repo, x.number, x.to_head)) return false;
+      const id = Number((await db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, head, updated_at, fix_id) VALUES (?, ?, ?, ?, '', 'review', ?, ?, ?, NULL)").run(x.repo, x.number, d.answered_by, at, x.from_head, x.to_head, at)).lastInsertRowid);
       await audit(db, ACTOR, "preapproval", `${x.repo}#${x.number}`, { id, state: "review", head: x.to_head, carried: x.from_head });
-      db.exec("COMMIT");
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
+      return true;
+    });
+    if (!carried) continue;
     await say(db, x.repo, x.number, `${d.answered_by}'s Merge answer at ${short(x.from_head)} carries to the pipeline's ${x.what} ${short(x.to_head)} once the review, the pre-merge review and CI there are clean.`);
   }
 }

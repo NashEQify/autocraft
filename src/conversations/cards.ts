@@ -316,7 +316,7 @@ const bareRepo = (v: unknown): unknown => {
   const { owner, name } = splitSlug(v);
   return owner.toLowerCase() === ownerOf(name).toLowerCase() ? name : v;
 };
-const isTracked = (db: Db, repo: unknown): repo is string => typeof repo === "string" && !!db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo);
+const isTracked = async (db: Db, repo: string): Promise<boolean> => !!(await db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo));
 const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLowerCase() === b.toLowerCase();
 
 /**
@@ -342,7 +342,7 @@ function issueText(raw: unknown, max: number, what: string, drop: ReadonlySet<st
 
 export function openIssueStep(db: Db, st: Record<string, unknown>, drop: ReadonlySet<string>): Checked<Step> {
   const repo = bareRepo(st.repo);
-  if (!isTracked(db, repo)) return { note: `dropped a resolution: "${String(st.repo).slice(0, 40)}" is not a tracked repository` };
+  if (typeof repo !== "string" || !await isTracked(db, repo)) return { note: `dropped a resolution: "${String(st.repo).slice(0, 40)}" is not a tracked repository` };
   const title = issueText(st.title, ISSUE_TITLE_MAX, "title", drop, true);
   if ("note" in title) return title;
   const body = issueText(st.body, COMMENT_MAX, "body", drop, false);
@@ -354,7 +354,7 @@ export async function transferStep(db: Db, repo: string, n: number, toRaw: unkno
   const to = bareRepo(toRaw);
   const f = await itemFacts(db, repo, n);
   if (pr(f)) return { note: "dropped a resolution: only an issue can be moved to another repository" };
-  if (!isTracked(db, to) || to === repo) return { note: `dropped a resolution: "${String(to).slice(0, 40)}" is not another tracked repository` };
+  if (typeof to !== "string" || !await isTracked(db, to) || to === repo) return { note: `dropped a resolution: "${String(to).slice(0, 40)}" is not another tracked repository` };
   if (ownerOf(to).toLowerCase() !== ownerOf(repo).toLowerCase()) return { note: "dropped a resolution: an issue moves only between repositories of one owner" };
   const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };

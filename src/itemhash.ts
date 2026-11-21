@@ -4,7 +4,8 @@
 //   class_hash: the classifier's input hash (scheme, title, body, size); decides re-classifying.
 //     class_scheme names the scheme it was computed under, so a changed scheme rehashes lazily.
 import { createHash } from "node:crypto";
-import { BULK_ROWS, bulkWrites } from "./core/plan-changes.ts";
+import type { DatabaseSync } from "node:sqlite";
+import { BULK_ROWS, bulkWrites, bulkWritesSync } from "./core/plan-changes.ts";
 import { itemInput, type Item } from "./classify/parse.ts";
 import { LABELS, RULES } from "./classify/rules.ts";
 import { itemText, textHash } from "./embed/text.ts";
@@ -42,17 +43,47 @@ const BATCH = 2000;
 
 /** Fills embed_hash where it is missing. Returns the number of rows written. */
 export async function fillEmbedHashes(db: Db): Promise<number> {
-  return await fill(db, "embed-hashes", `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
-    "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", (r) => [embedHash(r.title, r.body)]);
+  return await fill(db, EMBED);
 }
 
 /** Fills class_hash where it is missing or was computed under another scheme. Only open items: the classifier reads no others. */
 export async function fillClassHashes(db: Db): Promise<number> {
-  return await fill(db, "class-hashes", `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
-    `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, (r) => [classifyHash(r)]);
+  return await fill(db, CLASS);
 }
 
-async function fill(db: Db, source: string, select: string, update: string, values: (r: Fields) => string[]): Promise<number> {
+type Fill = { source: string; select: string; update: string; values: (r: Fields) => string[] };
+
+const EMBED: Fill = {
+  source: "embed-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
+  update: "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", values: (r) => [embedHash(r.title, r.body)],
+};
+
+const CLASS: Fill = {
+  source: "class-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
+  update: `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, values: (r) => [classifyHash(r)],
+};
+
+/** fillEmbedHashes() then fillClassHashes(), for connect()'s migrations, which stay synchronous. */
+export function fillHashesSync(db: DatabaseSync): void {
+  for (const { source, select, update, values } of [EMBED, CLASS]) {
+    const sel = db.prepare(select), upd = db.prepare(update);
+    for (;;) {
+      const rows = sel.all() as unknown as Fields[];
+      if (!rows.length) break;
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const write = (): void => { for (const r of rows) upd.run(...values(r), r.repo, r.number); };
+        if (rows.length >= BULK_ROWS) bulkWritesSync(db, source, write); else write();
+        db.exec("COMMIT");
+      } catch (e) {
+        db.exec("ROLLBACK");
+        throw e;
+      }
+    }
+  }
+}
+
+async function fill(db: Db, { source, select, update, values }: Fill): Promise<number> {
   const sel = db.prepare(select), upd = db.prepare(update);
   let total = 0;
   for (;;) {

@@ -825,7 +825,8 @@ export async function runHaiku(db: Db, runId: string, items: Item[], batchSize =
   return items.length - skipped;
 }
 
-export async function runJev(db: Db, runId: string, items: Item[], width = jevParallel(db)): Promise<void> {
+export async function runJev(db: Db, runId: string, items: Item[], width?: number): Promise<void> {
+  if (width === undefined) width = await jevParallel(db);
   await pool(items.map((item) => async () => {
     // Once a call shows Jev is unavailable, the items still waiting are left for Haiku.
     if (!await jevAvailable(db)) return;

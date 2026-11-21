@@ -306,9 +306,7 @@ export async function choicesById(db: Db, id: string): Promise<ChoicesRow | unde
  */
 export async function writeChoices(db: Db, row: Omit<ChoicesRow, "id" | "state" | "createdAt">, o: { by?: string | null; now?: Date } = {}): Promise<ChoicesRow> {
   const id = randomUUID(), at = (o.now ?? new Date()).toISOString();
-  const own = !db.inTransaction();
-  if (own) db.exec("BEGIN IMMEDIATE");
-  try {
+  await db.write(async () => {
     await db.prepare("UPDATE main.decision_choices SET state = 'replaced' WHERE decision_id = ? AND state = 'current'").run(row.decisionId);
     await db.prepare(`INSERT INTO main.decision_choices (id, decision_id, repo, number, turn_id, stamp, seen, source, drafts, added, pick, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)`)
@@ -323,11 +321,7 @@ export async function writeChoices(db: Db, row: Omit<ChoicesRow, "id" | "state" 
       await db.prepare(`UPDATE main.decisions SET recommended = NULL, recommended_reason = NULL${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
         .run(...[...(o.by !== undefined ? [o.by] : []), row.decisionId] as (string | null)[]);
     }
-    if (own) db.exec("COMMIT");
-  } catch (e) {
-    if (own) db.exec("ROLLBACK");
-    throw e;
-  }
+  });
   return (await choicesById(db, id))!;
 }
 

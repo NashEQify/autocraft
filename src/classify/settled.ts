@@ -175,7 +175,8 @@ export async function settledSet(db: Db, run: string | null, refs?: Iterable<str
 }
 
 /** Loops resolve `run` once (latestRun) and pass it, or use settledLookup(). */
-export async function settledOf(db: Db, repo: string, number: number, run = latestRun(db)): Promise<Settled> {
+export async function settledOf(db: Db, repo: string, number: number, run?: string | null): Promise<Settled> {
+  if (run === undefined) run = await latestRun(db);
   return await settledLookup(db, run)(repo, number);
 }
 

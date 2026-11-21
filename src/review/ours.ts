@@ -13,18 +13,19 @@ async function carriedNote(db: Db, repo: string, decision: string | null): Promi
 
 type Pushes = {
   a?: { f: string; reason: string | null; source: string | null; carry_decision: string | null };
-  b?: { f: string; reason: string | null; kind: string };
-  c?: { f: string; reason: string | null };
-  d?: { f: string };
+  // Read only when the earlier kinds found none.
+  b: () => Promise<{ f: string; reason: string | null; kind: string } | undefined>;
+  c: () => Promise<{ f: string; reason: string | null } | undefined>;
+  d: () => Promise<{ f: string } | undefined>;
 };
 
 /** The commit of ours that made `head`, or null when no push of ours ended there (a contributor's commit). */
 async function madeBy(db: Db, repo: string, number: number, head: string): Promise<Row | null> {
   return await madeFrom(db, repo, {
     a: await db.prepare("SELECT from_head AS f, reason, source, carry_decision FROM fixups WHERE repo = ? AND number = ? AND to_head = ? AND state = 'pushed' ORDER BY rowid DESC").get(repo, number, head) as Pushes["a"],
-    get b() { return db.prepare("SELECT head AS f, reason, kind FROM ci_fixes WHERE repo = ? AND number = ? AND to_head = ? AND state = 'pushed' ORDER BY rowid DESC").get(repo, number, head) as Pushes["b"]; },
-    get c() { return db.prepare("SELECT from_head AS f, reason FROM conflict_merges WHERE repo = ? AND number = ? AND to_head = ? AND state = 'merged' ORDER BY rowid DESC").get(repo, number, head) as Pushes["c"]; },
-    get d() { return db.prepare("SELECT from_head AS f FROM dupe_carries WHERE repo = ? AND number = ? AND to_head = ? AND outcome LIKE 'pushed%' AND from_head IS NOT NULL").get(repo, number, head) as Pushes["d"]; },
+    b: async () => await db.prepare("SELECT head AS f, reason, kind FROM ci_fixes WHERE repo = ? AND number = ? AND to_head = ? AND state = 'pushed' ORDER BY rowid DESC").get(repo, number, head) as Awaited<ReturnType<Pushes["b"]>>,
+    c: async () => await db.prepare("SELECT from_head AS f, reason FROM conflict_merges WHERE repo = ? AND number = ? AND to_head = ? AND state = 'merged' ORDER BY rowid DESC").get(repo, number, head) as Awaited<ReturnType<Pushes["c"]>>,
+    d: async () => await db.prepare("SELECT from_head AS f FROM dupe_carries WHERE repo = ? AND number = ? AND to_head = ? AND outcome LIKE 'pushed%' AND from_head IS NOT NULL").get(repo, number, head) as Awaited<ReturnType<Pushes["d"]>>,
   });
 }
 
@@ -33,11 +34,11 @@ async function madeFrom(db: Db, repo: string, p: Pushes): Promise<Row | null> {
   const a = p.a;
   if (a?.source === "carry") return { from: a.f, kind: "carry", note: await carriedNote(db, repo, a.carry_decision), source: a.source };
   if (a) return { from: a.f, kind: a.source === "premerge" ? "pre-merge fix" : a.source === "operator" ? "operator fix-up" : "fix-up", note: a.reason, source: a.source };
-  const b = p.b;
+  const b = await p.b();
   if (b) return { from: b.f, kind: "CI fix", note: b.reason ?? `fix for the failing ${b.kind} check` };
-  const c = p.c;
+  const c = await p.c();
   if (c) return { from: c.f, kind: "base merge", note: c.reason ?? "merged the base branch into the PR" };
-  const d = p.d;
+  const d = await p.d();
   if (d) return { from: d.f, kind: "carry", note: "carried parts of closed duplicates onto the PR" };
   return null;
 }
@@ -78,7 +79,7 @@ export function ourCommitsLoader(db: Db): (repo: string, number: number, earlier
   });
   return async (repo, number, earlier, head) => await walk(db, async (h) => {
     const m = await load(), k = `${repo}#${number}@${h}`;
-    return await madeFrom(db, repo, { a: m.a.get(k), b: m.b.get(k), c: m.c.get(k), d: m.d.get(k) });
+    return await madeFrom(db, repo, { a: m.a.get(k), b: async () => m.b.get(k), c: async () => m.c.get(k), d: async () => m.d.get(k) });
   }, repo, number, earlier, head);
 }
 

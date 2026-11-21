@@ -135,22 +135,13 @@ export async function pickCall(db: Db, user: Picker, id: number, nowMs: number =
   const why = await pickRefusal(state, user, c, nowMs, async (l) => fresh.has(l));
   if (why) throw new HttpError(409, why);
   const cap = await pickCapMs(db);
-  db.exec("BEGIN IMMEDIATE");
-  let changed: number;
-  try {
+  const changed = await db.write(async () => {
     // Parallel picks of one user cannot pass the most picks together.
-    if (await livePicks(db, user.login, nowMs, id) >= state.pickMax) {
-      db.exec("ROLLBACK");
-      throw new HttpError(409, `you hold ${state.pickMax} picks, your most`);
-    }
-    changed = Number((await db.prepare(`UPDATE main.remote_calls SET picked_by = ?, picked_at = ?, pick_until = ?
+    if (await livePicks(db, user.login, nowMs, id) >= state.pickMax) throw new HttpError(409, `you hold ${state.pickMax} picks, your most`);
+    return Number((await db.prepare(`UPDATE main.remote_calls SET picked_by = ?, picked_at = ?, pick_until = ?
       WHERE id = ? AND state = 'queued' AND parent_id IS NULL AND (picked_by IS NULL OR picked_by = ? OR ${pickLapsedSql})`)
       .run(user.login, nowMs, cap === null ? null : nowMs + cap, id, user.login, ...pickLapsedArgs(nowMs))).changes);
-    db.exec("COMMIT");
-  } catch (e) {
-    if (db.inTransaction()) db.exec("ROLLBACK");
-    throw e;
-  }
+  });
   if (changed !== 1) throw new HttpError(409, "another user picked it, or it is no longer queued");
   dropQueueCache(db);
   await audit(db, user.login, "remote-pick", targetOf(c.refs), { id, promptId: c.promptId, ...(cap !== null && { until: new Date(nowMs + cap).toISOString() }), ...(via && { via }) });

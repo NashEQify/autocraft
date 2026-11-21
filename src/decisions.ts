@@ -152,17 +152,13 @@ export async function ask(db: Db, questions: Record<string, unknown>[], inTransa
       snoozed_at = CASE WHEN ${changed} THEN NULL ELSE snoozed_at END`);
   const exists = db.prepare("SELECT 1 FROM decisions WHERE id = ?");
   let inserted = 0, updated = 0;
-  if (!inTransaction) db.exec("BEGIN IMMEDIATE");
-  try {
+  const write = async () => {
     for (const r of rows) {
       if (await exists.get(r.id as string)) updated++; else inserted++;
       await stmt.run(r);
     }
-    if (!inTransaction) db.exec("COMMIT");
-  } catch (e) {
-    if (!inTransaction) db.exec("ROLLBACK");
-    throw e;
-  }
+  };
+  if (inTransaction) await write(); else await db.write(write);
   return { inserted, updated };
 }
 

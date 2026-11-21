@@ -210,22 +210,17 @@ async function textOf(db: Db, p: GroupPlan) {
 export async function askGroupDecisions(db: Db, repo: string | undefined, at: string): Promise<string[]> {
   const asked: string[] = [];
   for (const p of await groupPlans(db, repo)) {
-    db.exec("BEGIN IMMEDIATE");
-    try {
+    const id = await db.write(async (): Promise<string | null> => {
       if (!p.closing) {
         // Nothing to close: the pair decisions and an open group decision about these members have no use.
         await supersede(db, p, "", at);
-        db.exec("COMMIT");
-        continue;
+        return null;
       }
       // An answer waiting for Act that already lists every member to close: no second decision.
       const waiting = new Set((await db.prepare(`SELECT gi.number FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id WHERE d.kind = 'duplicate' AND d.id LIKE '%:dupegroup:%' AND d.repo = ?
         AND d.answer IS NOT NULL AND d.answer NOT IN ('superseded', 'distinct', 'backlog') AND d.applied_at IS NULL`).all(p.repo) as { number: number }[]).map((r) => r.number));
       p.items = p.items.filter((i) => !(i.role === "close" && waiting.has(i.number)));
-      if (!p.items.some((i) => i.role === "close")) {
-        db.exec("COMMIT");
-        continue;
-      }
+      if (!p.items.some((i) => i.role === "close")) return null;
       const id = await idFor(db, p);
       const t = await textOf(db, p);
       const primary = p.items.find((i) => i.number === p.number)!;
@@ -238,10 +233,7 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
       };
       await supersede(db, p, id, at);
       // An open decision whose question and member roles are unchanged keeps its asked time and stored texts.
-      if (await unchanged(db, q, p)) {
-        db.exec("COMMIT");
-        continue;
-      }
+      if (await unchanged(db, q, p)) return null;
       await ask(db, [q], true);
       // ask() keeps the stored summary_by when the new one is empty; the author must follow the text.
       await db.prepare("UPDATE main.decisions SET summary_by = ? WHERE id = ?").run(t.by || null, id);
@@ -254,14 +246,12 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
         const r = await db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?").get(p.repo, n) as { state: string } | undefined;
         return r?.state === "OPEN" && await inPilot(db, p.repo, n);
       });
-      db.exec("COMMIT");
-      asked.push(id);
-      await jobItem(db, p.repo, p.number, "asked a duplicate decision", console.log, id);
-      await withdrawGroupedQuestions(db, at, p.repo);
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
+      return id;
+    });
+    if (id === null) continue;
+    asked.push(id);
+    await jobItem(db, p.repo, p.number, "asked a duplicate decision", console.log, id);
+    await withdrawGroupedQuestions(db, at, p.repo);
   }
   return asked;
 }

@@ -121,7 +121,7 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
       if (delay === undefined) {
         // Final. A request newer than the last failure grants one more try; a failure then stamps a newer time and makes it final again.
         const since = failed.split("|")[1] ?? "";
-        const asked = (await staleSince())(repo, number, since) || maintainerSince((await discussionState(db, repo)).get(`${repo}#${number}`), since, null);
+        const asked = (await staleSince())(repo, number, since) || await maintainerSince((await discussionState(db, repo)).get(`${repo}#${number}`), since, null);
         if (!asked) return { kind: "failed", wait: `its review failed ${n} times at this commit; a new commit, a Review again press or a maintainer's comment gives it one more try` };
       } else if (at + delay > nowMs) return { kind: "failed", wait: `the review after ${n} failed ${n === 1 ? "try" : "tries"} at this commit, from ${new Date(at + delay).toISOString().slice(11, 16)}`, until: at + delay };
     }
@@ -131,7 +131,7 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
       let state = states.get(repo);
       if (!state) states.set(repo, (state = await discussionState(db, repo)));
       // reviewRequestedSince() with the stale marks read once.
-      if ((await staleSince())(repo, number, last.at) || maintainerSince(state.get(ref), last.seen_at ?? last.at, last.disc_hash)) return null;
+      if ((await staleSince())(repo, number, last.at) || await maintainerSince(state.get(ref), last.seen_at ?? last.at, last.disc_hash)) return null;
     }
     let settled = false;
     if (last?.verdict === "hold" && storedBlockedBy(last.blocked_by).length) {

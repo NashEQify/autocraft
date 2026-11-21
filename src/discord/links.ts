@@ -28,26 +28,15 @@ export async function createLinkCode(db: Db, keys: DiscordKeys, login: string, n
 /** Spends a code and links `discordUserId` to the login the code was made for. Returns the login, or null for a wrong, used or expired code. A Discord account has one login, so an earlier link of it is replaced. */
 export async function redeemLinkCode(db: Db, keys: DiscordKeys, code: string, discordUserId: string, now = Date.now()): Promise<string | null> {
   const h = codeHash(keys, code);
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const row = await db.prepare("SELECT login, expires_at AS expiresAt FROM discord_link_codes WHERE code_hash = ?").get(h) as { login: string; expiresAt: string } | undefined;
-    if (!row) {
-      db.exec("ROLLBACK");
-      return null;
-    }
+    if (!row) return null;
     await db.prepare("DELETE FROM discord_link_codes WHERE code_hash = ?").run(h);
-    if (Date.parse(row.expiresAt) <= now) {
-      db.exec("COMMIT");
-      return null;
-    }
+    if (Date.parse(row.expiresAt) <= now) return null;
     await db.prepare(`INSERT INTO discord_links (user_hash, login, linked_at) VALUES (?, ?, ?)
       ON CONFLICT(user_hash) DO UPDATE SET login = excluded.login, linked_at = excluded.linked_at`).run(userHash(keys, discordUserId), row.login, new Date(now).toISOString());
-    db.exec("COMMIT");
     return row.login;
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 /** The dashboard login linked to a Discord user, or null. */

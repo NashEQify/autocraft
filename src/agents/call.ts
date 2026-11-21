@@ -269,20 +269,12 @@ type RunInput = Omit<RunStart, "accountId" | "jobId" | "step" | "stage">;
  * same time cannot both take the last slot. Returns why it could not, if it could not.
  */
 export async function tryStartClaudeRun(db: Db, s: RunInput, minTokenMs?: number): Promise<Started | Exclude<Choice, { account: unknown }>> {
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const c = await chooseAccount(db, Date.now(), minTokenMs);
-    if (!("account" in c)) {
-      db.exec("COMMIT");
-      return c;
-    }
+    if (!("account" in c)) return c;
     const runId = await insertRun(db, { ...s, ...stepOf(s.promptId), accountId: c.account.id });
-    db.exec("COMMIT");
     return { runId, configDir: c.account.configDir, accountId: c.account.id };
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* already committed */ }
-    throw e;
-  }
+  });
 }
 
 export class WaitLimitError extends Error {}
@@ -293,31 +285,20 @@ export class WaitLimitError extends Error {}
  * The waiter row is deleted in the same transaction as the run insert.
  */
 async function pollClaude(db: Db, w: Waiter, s: RunInput, minTokenMs?: number): Promise<{ started: Started } | { wait: Exclude<Choice, { account: unknown }> }> {
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const nowMs = Date.now();
     const c = await chooseAccount(db, nowMs, minTokenMs);
     // Eligibility ignores full slots: a waiter that only lacks a slot still counts when ranking, one that lacks a fresh token does not.
     const eligible = "account" in await chooseAccount(db, nowMs, minTokenMs, true) ? 1 : 0;
     const up = await db.prepare("UPDATE model_waits SET seen_at = ?, eligible = ? WHERE id = ?").run(nowMs, eligible, w.id);
     if (Number(up.changes) === 0) await db.prepare("INSERT INTO model_waits (id, provider, class, level, job_id, step, repo, since, seen_at, eligible) VALUES (?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?)").run(w.id, w.cls, w.level, context?.jobId ?? null, w.step, w.repo, w.since, nowMs, eligible);
-    if (!("account" in c)) {
-      db.exec("COMMIT");
-      return { wait: c };
-    }
+    if (!("account" in c)) return { wait: c };
     const rank = (await waiterOrder(db, nowMs)).findIndex((x) => x.id === w.id);
-    if (rank < 0 || rank >= await freeSlots(db, nowMs)) {
-      db.exec("COMMIT");
-      return { wait: { wait: "other calls are ahead in the queue" } };
-    }
+    if (rank < 0 || rank >= await freeSlots(db, nowMs)) return { wait: { wait: "other calls are ahead in the queue" } };
     const runId = await insertRun(db, { ...s, ...stepOf(s.promptId), accountId: c.account.id });
     await db.prepare("DELETE FROM model_waits WHERE id = ?").run(w.id);
-    db.exec("COMMIT");
     return { started: { runId, configDir: c.account.configDir, accountId: c.account.id } };
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* already committed */ }
-    throw e;
-  }
+  });
 }
 
 /** Waits for an enabled account with a free slot and headroom (at most `maxWaitMs` when given, else for ever), then records the running agent run on it. Waiting calls are ordered by class (security first), then by the running calls of their repo and step, then by age. With `minTokenMs`, accounts whose login token expires sooner are skipped and the call waits for a refresh. */
@@ -359,19 +340,10 @@ export async function startJevRun(db: Db, s: Omit<RunStart, "accountId" | "jobId
 
 /** Records a follow-up run on the account of an earlier call (its session lives there), or returns null when that account is no longer enabled, has no headroom or no free slot. Same transaction rule as `tryStartClaudeRun`. */
 export async function tryStartFollowUp(db: Db, accountId: string, s: RunInput): Promise<number | null> {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (!await accountHasRoom(db, accountId)) {
-      db.exec("COMMIT");
-      return null;
-    }
-    const id = await insertRun(db, { ...s, ...stepOf(s.promptId), accountId });
-    db.exec("COMMIT");
-    return id;
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* already committed */ }
-    throw e;
-  }
+  return await db.write(async () => {
+    if (!await accountHasRoom(db, accountId)) return null;
+    return await insertRun(db, { ...s, ...stepOf(s.promptId), accountId });
+  });
 }
 
 /** The config directory of a box account, or null when the box no longer lists it. */

@@ -15,10 +15,9 @@ export const ALIVE_STALE_MS = 3 * ALIVE_EVERY_MS;
  * the server; the unbroken run of stamps then starts afresh.
  */
 export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<void> {
-  // Another request's transaction is open on this connection (across an await): the next tick stamps.
+  // Called inside a transaction: the next tick stamps.
   if (db.inTransaction()) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  await db.write(async () => {
     const r = await db.prepare("SELECT alive_at FROM main.remote_liveness WHERE id = 1").get() as { alive_at: number } | undefined;
     if (!r) await db.prepare("INSERT INTO main.remote_liveness (id, alive_at, since) VALUES (1, ?, ?)").run(nowMs, nowMs);
     else if (nowMs - Number(r.alive_at) > ALIVE_STALE_MS) {
@@ -28,11 +27,7 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
         WHERE state = 'leased'`).run(gap, nowMs);
       await db.prepare("UPDATE main.remote_liveness SET alive_at = ?, since = ? WHERE id = 1").run(nowMs, nowMs);
     } else await db.prepare("UPDATE main.remote_liveness SET alive_at = ? WHERE id = 1").run(nowMs);
-    db.exec("COMMIT");
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* already ended */ }
-    throw e;
-  }
+  });
 }
 
 /**
@@ -51,7 +46,7 @@ export async function startLiveness(db: Db): Promise<() => void> {
     try { await stampAlive(db); } catch (e) { if (!isBusy(e)) console.log(`liveness stamp not written: ${(e as Error).message}`); }
   };
   await tick();
-  const t = setInterval(tick, ALIVE_EVERY_MS);
+  const t = setInterval(() => void tick(), ALIVE_EVERY_MS);
   t.unref();
   return () => clearInterval(t);
 }

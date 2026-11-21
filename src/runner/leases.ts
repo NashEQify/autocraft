@@ -22,20 +22,12 @@ export function skipItem(key: string, log: (line: string) => void, why: string):
 
 /** Takes the lease for the job. False when another running job holds it. */
 export async function take(db: Db, key: string, jobId: number, step: string): Promise<boolean> {
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const held = await db.prepare("SELECT l.job_id AS job, j.state AS state FROM work_leases l LEFT JOIN jobs j ON j.id = l.job_id WHERE l.key = ?").get(key) as { job: number; state: string | null } | undefined;
-    if (held && held.job !== jobId && held.state === "running") {
-      db.exec("ROLLBACK");
-      return false;
-    }
+    if (held && held.job !== jobId && held.state === "running") return false;
     await db.prepare("INSERT OR REPLACE INTO work_leases (key, job_id, step, taken_at) VALUES (?, ?, ?, ?)").run(key, jobId, step, new Date().toISOString());
-    db.exec("COMMIT");
     return true;
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 export async function release(db: Db, key: string, jobId: number): Promise<void> {

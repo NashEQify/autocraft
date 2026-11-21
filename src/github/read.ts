@@ -9,6 +9,7 @@ import { dbPath } from "../db.ts";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
 import type { Db } from "../db/index.ts";
+import { dbFor } from "../db/open.ts";
 
 export type ReadEnv = Record<string, string>;
 export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
@@ -18,17 +19,19 @@ let shared: { path: string; db: Db } | null = null;
  * A read-only handle on the instance database, opened on first use. Null only when there is no database file (nothing
  * configured the identity); a file that cannot be opened is an error, never a silent read as the box account.
  */
-function sharedDb(): Db | null {
+async function sharedDb(): Promise<Db | null> {
   const path = dbPath();
   if (shared?.path === path) return shared.db;
   if (!existsSync(path)) return null;
   let last: unknown;
   for (let i = 0; i < 3; i++) {
+    let sync: DatabaseSync;
     try {
-      const db = new DatabaseSync(path, { readOnly: true, timeout: 5_000 });
-      shared = { path, db };
-      return db;
-    } catch (e) { last = e; }
+      sync = new DatabaseSync(path, { readOnly: true, timeout: 5_000 });
+    } catch (e) { last = e; continue; }
+    const db = await dbFor(sync);
+    shared = { path, db };
+    return db;
   }
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
@@ -45,13 +48,13 @@ async function settingOf(db: Db): Promise<string | undefined> {
 
 /** Whether reads go through the GitHub App right now. Throws when the setting exists to be read but cannot be. */
 export async function readsUseApp(db?: Db): Promise<boolean> {
-  const d = db ?? sharedDb();
+  const d = db ?? await sharedDb();
   return d !== null && await settingOf(d) === "app";
 }
 
 /** The owner of the tracked repos: the default owner when it has any, else the first tracked one. */
 export async function trackedOwner(db?: Db): Promise<string> {
-  const d = db ?? sharedDb();
+  const d = db ?? await sharedDb();
   try {
     const rows = await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
     const owners = (rows ?? []).map((r) => r.owner).filter((o) => OWNER.test(o));

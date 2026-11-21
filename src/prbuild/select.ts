@@ -40,7 +40,8 @@ export type PrBuildCandidate = { repo: string; number: number; head: string; /**
 type Row = { number: number; author: string | null; author_association: string | null; author_type: string | null; head: string | null };
 
 /** Whether the worker would claim a build task for the PR: its repo is in the pipeline's scope, or the PR is fast-tracked (as `claim` in src/build/tasks.ts). */
-export async function inBuildScope(db: Db, repo: string, number: number, scope: Set<string> = baseScopeRepos(db)): Promise<boolean> {
+export async function inBuildScope(db: Db, repo: string, number: number, scope?: Set<string>): Promise<boolean> {
+  if (scope === undefined) scope = await baseScopeRepos(db);
   return scope.has(repo) || await isFastTracked(db, repo, number);
 }
 

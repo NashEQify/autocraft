@@ -135,24 +135,16 @@ export async function pendingLogin(db: Db, code: string, yourIp: string, nowMs: 
  */
 export async function approveLogin(db: Db, login: string, code: string, rawLabel: unknown, scopes: Scopes, approverIp: string, otherMachine: boolean, nowMs: number = Date.now()): Promise<{ row: McpTokenRow; machine: Machine | null; ip: string | null } | null> {
   const label = rawLabel === undefined ? undefined : cleanLabel(rawLabel);
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const r = await pendingRow(db, code, nowMs);
-    if (!r) {
-      db.exec("ROLLBACK");
-      return null;
-    }
+    if (!r) return null;
     if (!otherMachine && !sameAddress(r.ip ?? "", approverIp)) {
       throw new HttpError(409, "this login was started from another address than yours; approve it only if you started it on another machine, and say so (otherMachine)");
     }
     const row = await addRunnerToken(db, login, r.secret_hash, label ?? r.label, r.machine, scopes);
     await db.prepare("UPDATE main.runner_logins SET state = 'approved', login = ?, token_id = ? WHERE id = ?").run(login, row.id, r.id);
-    db.exec("COMMIT");
     return { row, machine: machineOf(r), ip: r.ip };
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 /** Denies a waiting login; what it asked for, or null when no login waits under the code. */

@@ -474,16 +474,8 @@ export class Runner {
   private async start(id: number, stepName: string, steps: Awaited<ReturnType<typeof loadSteps>>): Promise<boolean> {
     const logPath = join(this.o.logs, `job-${id}.log`);
     // The check and the claim are one write transaction, so a command-line run cannot take the step in between.
-    this.db.exec("BEGIN IMMEDIATE");
-    let claimed: number | bigint;
-    try {
-      claimed = await this.blocked(steps, id) ? 0
-        : (await this.db.prepare("UPDATE jobs SET state = 'running', started_at = ?, log_path = ? WHERE id = ? AND state = 'queued'").run(now(), logPath, id)).changes;
-      this.db.exec("COMMIT");
-    } catch (e) {
-      this.db.exec("ROLLBACK");
-      throw e;
-    }
+    const claimed = await this.db.write(async () => await this.blocked(steps, id) ? 0
+      : (await this.db.prepare("UPDATE jobs SET state = 'running', started_at = ?, log_path = ? WHERE id = ? AND state = 'queued'").run(now(), logPath, id)).changes);
     if (!claimed) return false;
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
@@ -501,10 +493,13 @@ export class Runner {
     let spawnError: string | null = null;
     child.on("error", (e) => (spawnError = e.message));
     const exited = new Promise<void>((resolve) => {
-      child.on("close", async (code, signal) => {
-        await this.finish(id, code, signal, spawnError);
-        this.running.delete(id);
-        resolve();
+      child.on("close", (code, signal) => {
+        void this.finish(id, code, signal, spawnError)
+          .catch((e) => this.o.log(`job ${id}: end not recorded: ${(e as Error).message}`))
+          .finally(() => {
+            this.running.delete(id);
+            resolve();
+          });
       });
     });
     this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
@@ -524,7 +519,7 @@ export class Runner {
   /** Stops every running job (SIGTERM, then SIGKILL after the grace time) and waits for them. */
   async stop(): Promise<void> {
     this.stopping = true;
-    const timer = setInterval(async () => await this.cancels(), 500);
+    const timer = setInterval(() => void this.cancels().catch((e) => this.o.log(`cancels: ${(e as Error).message}`)), 500);
     await this.cancels();
     await this.idle();
     clearInterval(timer);

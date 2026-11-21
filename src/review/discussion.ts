@@ -263,7 +263,7 @@ export async function discussionOf(db: Db, repo: string, number: number, live?: 
 
 const staleKey = (repo: string, number: number) => `${STALE_KEY}${repo}#${number}`;
 
-export type DiscussionState = Map<string, { newest: string; hash: string; /** Newest counted entry by a maintainer (OWNER, MEMBER, COLLABORATOR or a dashboard user); "" when none. */ maint: string }>;
+export type DiscussionState = Map<string, { newest: string; /** The hash of the counted entries, read on first use. */ hash: () => Promise<string>; /** Newest counted entry by a maintainer (OWNER, MEMBER, COLLABORATOR or a dashboard user); "" when none. */ maint: string }>;
 
 const MAINTAINER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
 
@@ -307,7 +307,7 @@ async function computeDiscussionState(db: Db, repo?: string): Promise<Discussion
   const rowOf = new Map(rows.map((r) => [`${r.repo}#${r.number}`, r]));
   const state: DiscussionState = new Map(rows.map((r) => {
     const k = `${r.repo}#${r.number}`;
-    return [k, { newest: r.newest, maint: r.maint, get hash() { if (!known.has(k)) prime([r]); return known.get(k)!; } }];
+    return [k, { newest: r.newest, maint: r.maint, hash: async () => { if (!known.has(k)) await prime([r]); return known.get(k)!; } }];
   }));
   primers.set(state, async (refs) => {
     const keys = [...new Set(refs)].filter((k) => !known.has(k)).flatMap((k) => rowOf.get(k) ?? []);
@@ -327,16 +327,17 @@ export async function primeHashes(state: DiscussionState, refs: Iterable<string>
 const maintNewer = (state: { maint: string } | undefined, seen: string): boolean => !!state && !!state.maint && sec(state.maint) > sec(seen);
 
 /** A maintainer's counted entry newer than a review's snapshot that the review did not read; PR author comments do not count. */
-export function maintainerSince(state: { newest: string; hash: string; maint: string } | undefined, seen: string, hash: string | null): boolean {
-  return maintNewer(state, seen) && state!.hash !== hash;
+export async function maintainerSince(state: { newest: string; hash: () => Promise<string>; maint: string } | undefined, seen: string, hash: string | null): Promise<boolean> {
+  return maintNewer(state, seen) && (await state!.hash()) !== hash;
 }
 
 /**
  * Whether a maintainer or an operator asked for a new review of the PR after `since` (the latest review's time): "Review again",
  * a merge-time check that found new discussion, or a maintainer's comment. Such a request skips the blocker, CI and daily-cap waits.
  */
-export async function reviewRequestedSince(db: Db, repo: string, number: number, since: string, seen: string | null, hash: string | null, state: DiscussionState = discussionState(db, repo)): Promise<boolean> {
-  return await markedStaleSince(db, repo, number, since) || maintainerSince(state.get(`${repo}#${number}`), seen ?? since, hash);
+export async function reviewRequestedSince(db: Db, repo: string, number: number, since: string, seen: string | null, hash: string | null, state?: DiscussionState): Promise<boolean> {
+  if (state === undefined) state = await discussionState(db, repo);
+  return await markedStaleSince(db, repo, number, since) || await maintainerSince(state.get(`${repo}#${number}`), seen ?? since, hash);
 }
 
 /** True when the discussion has a counted entry newer than a review's snapshot and differs from what that review read (no hash: any newer entry). */
@@ -416,7 +417,7 @@ export async function staleReviews(db: Db, repo?: string, respectCap = false, op
     const ref = `${r.repo}#${r.number}`;
     const marked = (marks.get(ref) ?? "") > r.at;
     // On a head that has a review, only a maintainer's words (or an operator's request) make it stale: the PR author's comments feed the next review but do not start one.
-    const talked = maintainerSince(state.get(ref), r.seen_at ?? r.at, r.disc_hash);
+    const talked = await maintainerSince(state.get(ref), r.seen_at ?? r.at, r.disc_hash);
     // A hold that waited for other items is reviewed once when none is open any more.
     const blocked = !!r.blocked_by && storedBlockedBy(r.blocked_by).length > 0 ? await blockers().active(ref, r.blocked_by, r.at, now) : null;
     const unblocked = blocked !== null && blocked.length === 0;

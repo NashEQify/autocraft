@@ -182,8 +182,7 @@ const runsPrCode = (t: { step: string; number: number | null }): boolean => t.st
  */
 export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now()): Promise<ClaimResult> {
   await reapLost(db, nowMs);
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  const tasks = await db.write(async () => {
     const env = await db.prepare("SELECT * FROM build_envs WHERE id = ?").get(envId) as
       { enabled: number; kind: string; slots: number; reported_slots: number | null; capabilities: string | null; paused_reason: string | null; confidential: number } | undefined;
     const caps = env?.capabilities ? json<Capabilities | null>(env.capabilities, null) : null;
@@ -221,12 +220,9 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
         }
       }
     }
-    db.exec("COMMIT");
-    return { tasks: out, cancel: await cancelIds(db, envId) };
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+    return out;
+  });
+  return { tasks, cancel: await cancelIds(db, envId) };
 }
 
 /** Tasks without a heartbeat for LOST_AFTER_MS: requeued once, then failed; a cancelled one is just cancelled. Returns how many were handled. */

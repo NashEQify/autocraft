@@ -276,7 +276,8 @@ type FpRecord = { job: number; fp: string };
 const fpKey = (step: string, repo: string | null): string => `pipeline_fp:${step}|${repo ?? ""}`;
 
 /** What the lane's input looked like: the step, its repo, and the counters of the topics it reads. */
-export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs: Record<string, number> = readSeqs(db)): Promise<string> {
+export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
+  if (seqs === undefined) seqs = await readSeqs(db);
   const topics = lane.topics ?? INPUT_TOPICS;
   return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await lane.extra?.(db) ?? "", await takersOf(db)].join("|");
 }
@@ -1279,10 +1280,10 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
   // A repo whose jobs of every step of the lane wait for a Task Runner: the planner proposes none for it.
   const untaken = (ctx.untaken ??= await untakenTest(db)), noRunner = new Map<string, string | null>();
   // Why the repo's jobs wait (the first step's reason), or null when some step of the lane has a taker.
-  const waits = (repo: string): string | null => {
+  const waits = async (repo: string): Promise<string | null> => {
     let w = noRunner.get(repo);
     if (w === undefined) {
-      const why = lane.steps?.map(async (step) => await untaken({ step, repo })) ?? [];
+      const why = lane.steps ? await mapSeq(lane.steps, async (step) => await untaken({ step, repo })) : [];
       noRunner.set(repo, (w = why.length > 0 && why.every((x) => x !== null) ? why[0]! : null));
     }
     return w;
@@ -1292,7 +1293,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     if (seen.has(ref)) return;
     seen.add(ref);
     const refused = gates(f, wantOf(a), "pipeline");
-    const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? waits(f.repo);
+    const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? await waits(f.repo);
     const fast = ((await fastOf(db, ctx)).get(ref) ?? 0) >= FAST_FLOOR;
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,

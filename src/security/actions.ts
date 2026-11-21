@@ -1,6 +1,7 @@
 // The security deep scan's operator actions, shared by the dashboard API and the CLI. Callers check who may act; these
 // functions check the state of the scan or finding and throw a SecurityError that carries an HTTP-style status.
 import type { FindingAction, FindingState, FindingView, ScanView } from "../../web/src/api/types.ts";
+import { filterSeq } from "../async-seq.ts";
 import { featureOn } from "../build/features.ts";
 import { audit } from "../dash/audit.ts";
 import { TERMINAL, cancelTask, confidentialReadyAt, getTask, privateClockStart } from "../build/tasks.ts";
@@ -164,7 +165,7 @@ export async function advanceSecurityFixes(db: Db, pipelineOn = true): Promise<n
   for (const r of rows) {
     const by = r.by ?? "pipeline";
     if (by === "pipeline" && !pipelineOn) continue;
-    const open = [r.head_task, r.base_task].filter((id): id is number => { const t = id === null ? null : getTask(db, id); return !!t && !TERMINAL.includes(t.state); });
+    const open = (await filterSeq([r.head_task, r.base_task], async (id) => { const t = id === null ? null : await getTask(db, id); return !!t && !TERMINAL.includes(t.state); })).filter((id) => id !== null);
     if (open.length) {
       const since = await privateClockStart(db, r.created_at!);
       if (since === null || Date.now() - since <= ROUND_BUILD_LIMIT_MS) continue;

@@ -44,17 +44,12 @@ async function setFollowup(db: Db, d: Row, state: FollowupState, at: string, x: 
 
 /** Writes the `filing` row unless another process already holds or finished this finding. */
 async function claim(db: Db, d: Row, at: string, attempts: number): Promise<boolean> {
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  return await db.write(async () => {
     const cur = await db.prepare("SELECT state FROM postmerge_followups WHERE repo = ? AND number = ? AND review_at = ? AND finding = ?").get(d.repo, d.number, d.review_at, d.finding) as { state: string } | undefined;
-    if (cur?.state === "filing" || cur?.state === "filed") { db.exec("ROLLBACK"); return false; }
+    if (cur?.state === "filing" || cur?.state === "filed") return false;
     await setFollowup(db, d, "filing", at, { attempts });
-    db.exec("COMMIT");
     return true;
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* nothing open */ }
-    throw e;
-  }
+  });
 }
 
 const oneLine = (e: unknown): string => String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 300);

@@ -414,12 +414,8 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   const queued = await db.prepare("SELECT bundle FROM main.remote_calls WHERE id = ? AND state = 'queued'").get(id) as { bundle: string } | undefined;
   const promptOf = (bundle: string): Uint8Array => packPrompt(joinParts(forHarness(JSON.parse(bundle) as Omit<TaskBundle, "callId">, claim.harness, claim.root ?? "")));
   const packed = queued ? promptOf(queued.bundle) : null;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (cap !== null && await leasedBy(db, caller.login) >= cap) {
-      db.exec("COMMIT");
-      return "limit";
-    }
+  return await db.write(async () => {
+    if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
     const r = await db.prepare(`UPDATE main.remote_calls SET state = 'leased', token_id = ?, user_login = ?, harness = ?, harness_version = ?, model = ?, root = ?, lease_secret_hash = ?, leased_at = ?, heartbeat_at = ?, started_at = NULL, claim_id = ?,
         queued_ms = queued_ms + CASE WHEN queued_since IS NULL THEN 0 ELSE MAX(0, ? - queued_since) END, queued_since = NULL, progress = NULL, error = NULL,
         picked_by = NULL, picked_at = NULL, pick_until = NULL, no_taker_since = NULL
@@ -427,20 +423,13 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
         AND EXISTS (SELECT 1 FROM main.mcp_tokens lt WHERE lt.id = ? AND lt.kind = 'runner' AND lt.expires_at > ?) RETURNING ${COLS}`)
       .get(caller.tokenId, caller.login, claim.harness, claim.harnessVersion, model, claim.root ?? null, sha256hex(secret), nowMs, nowMs, claim.requestId, nowMs, id,
         caller.login, ...pickLapsedArgs(nowMs), await manualOnly(db, caller.login) ? 1 : 0, caller.login, caller.tokenId, new Date(nowMs).toISOString()) as Row | undefined;
-    if (!r) {
-      db.exec("COMMIT");
-      return null;
-    }
+    if (!r) return null;
     const refs = JSON.parse(r.items) as ItemRef[];
     const runId = await insertRun(db, { jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version, provider: "claude", model: r.asked_model, accountId: null, items: refs, prompt: packed ?? promptOf(r.bundle) });
     await db.prepare("UPDATE main.agent_runs SET user_login = ?, harness = ?, reported_model = ? WHERE id = ?").run(caller.login, claim.harness, model, runId);
     await db.prepare("UPDATE main.remote_calls SET run_id = ? WHERE id = ?").run(runId, id);
-    db.exec("COMMIT");
     return { id, secret, title: titleOf(r.prompt_id, refs), requiredHelper: REQUIRED_HELPER };
-  } catch (e) {
-    try { db.exec("ROLLBACK"); } catch { /* already committed */ }
-    throw e;
-  }
+  });
 }
 
 /**

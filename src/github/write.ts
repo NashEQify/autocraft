@@ -196,17 +196,11 @@ async function tryBegin(w: Writer, action: string, target: string, details: Deta
     .run(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d))).lastInsertRowid);
   const started = { ...details, state: "started" };
   if (identity.startsWith("user:")) return { id: await insert(started) };
-  w.db.exec("BEGIN IMMEDIATE");
-  try {
+  return await w.db.write(async () => {
     const wait = await keyWait(w.db, action, identity, owner, now);
-    if (wait > 0) { w.db.exec("COMMIT"); return { wait }; }
-    const id = await insert({ ...started, paceOwner: owner });
-    w.db.exec("COMMIT");
-    return { id };
-  } catch (e) {
-    try { w.db.exec("ROLLBACK"); } catch { /* already ended */ }
-    throw e;
-  }
+    if (wait > 0) return { wait };
+    return { id: await insert({ ...started, paceOwner: owner }) };
+  });
 }
 
 /** The running job's id, joined to the audit row so a write can be traced to its job. Absent outside a job. */

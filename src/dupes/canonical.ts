@@ -34,7 +34,8 @@ export async function canonInfoAll(db: Db, items: { repo: string; number: number
   return new Map(rows.map((r) => [r.k, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
 }
 
-export function canonInfo(db: Db, repo: string, numbers: number[], known: Map<string, CanonInfo> = canonInfoAll(db, numbers.map((number) => ({ repo, number })))): CanonInfo[] {
+export function canonInfo(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): CanonInfo[] {
+  if (known === undefined) known = await canonInfoAll(db, numbers.map((number) => ({ repo, number })));
   return numbers.map((n) => {
     const r = known.get(`${repo}#${n}`);
     if (!r) throw new Error(`${repo}#${n} is not in the database`);

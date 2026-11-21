@@ -82,7 +82,8 @@ export async function markChanged(db: Db): Promise<number> {
 }
 
 /** Counts one repo and stores its row. */
-export async function countRepo(db: Db, repo: string, now = Date.now(), run: string | null = latestRun(db)): Promise<Counts> {
+export async function countRepo(db: Db, repo: string, now = Date.now(), run?: string | null): Promise<Counts> {
+  if (run === undefined) run = await latestRun(db);
   const counts = (await countAll(db, repo, now, run)).counts;
   await db.prepare(`INSERT INTO main.flow_summary (repo, counts, counted_at, stale, decisions_sig) VALUES (?, ?, ?, 0, ?)
     ON CONFLICT (repo) DO UPDATE SET counts = excluded.counts, counted_at = excluded.counted_at, stale = 0, decisions_sig = excluded.decisions_sig`)

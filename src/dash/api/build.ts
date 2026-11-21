@@ -92,19 +92,19 @@ export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
 export const postFeature = async (db: Db, req: Req): Promise<BuildFeatures> => {
   const b = (req.json ?? {}) as { feature?: unknown; on?: unknown; repo?: unknown; scope?: unknown; perDay?: unknown };
   if (!isFeature(b.feature)) throw new HttpError(400, `feature must be one of ${BUILD_FEATURES.join(", ")}`);
-  const tracked = (r: unknown): r is string => typeof r === "string" && !!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(r);
+  const tracked = async (r: string): Promise<boolean> => !!(await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(r));
   // Every field is checked before anything is written.
   if (b.scope !== undefined || b.perDay !== undefined) {
     if (b.feature !== "pr-builds") throw new HttpError(400, "only pr-builds has a scope and a daily cap");
     if (b.scope !== undefined && b.scope !== "outside" && b.scope !== "all") throw new HttpError(400, "scope must be outside or all");
-    if (b.scope !== undefined && !tracked(b.repo)) throw new HttpError(400, "repo must be a tracked repo");
+    if (b.scope !== undefined && (typeof b.repo !== "string" || !await tracked(b.repo))) throw new HttpError(400, "repo must be a tracked repo");
     if (b.perDay !== undefined && (typeof b.perDay !== "number" || !Number.isInteger(b.perDay) || b.perDay < 0 || b.perDay > 1000)) throw new HttpError(400, "perDay must be a whole number from 0 to 1000");
   }
   if (b.on !== undefined && typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
   if (b.on === undefined && b.scope === undefined && b.perDay === undefined) throw new HttpError(400, "on must be true or false");
   let repo: string | undefined;
   if (b.on !== undefined && b.repo !== undefined && b.repo !== null) {
-    if (!tracked(b.repo)) throw new HttpError(400, "repo must be a tracked repo");
+    if (typeof b.repo !== "string" || !await tracked(b.repo)) throw new HttpError(400, "repo must be a tracked repo");
     if (!REPO_SCOPED[b.feature]) throw new HttpError(400, `${b.feature} has no per-repo switch`);
     repo = b.repo;
   }

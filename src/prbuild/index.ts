@@ -32,21 +32,16 @@ export async function queuePrBuild(db: Db, c: { repo: string; number: number; he
   const plan = planFor("rust", c.repo, c.head);
   if (!plan) return null;
   // The row and the task are written together, and an existing row for the head means the build was already queued.
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    if (await db.prepare("SELECT 1 FROM main.pr_builds WHERE repo = ? AND number = ? AND head_sha = ?").get(c.repo, c.number, c.head)) { db.exec("ROLLBACK"); return null; }
+  return await db.write(async () => {
+    if (await db.prepare("SELECT 1 FROM main.pr_builds WHERE repo = ? AND number = ? AND head_sha = ?").get(c.repo, c.number, c.head)) return null;
     const id = await createTask(db, {
       step: STEP, repo: c.repo, number: c.number, headSha: c.head, baseSha: c.base, priority: PR_BUILD_PRIORITY, plan,
       requires: { os: "linux", toolchains: ["rust-stable"] }, warm: { key: warmKeyOf(c.repo), role: "use" },
     });
     await db.prepare("INSERT INTO main.pr_builds (repo, number, head_sha, scope, task_id, state, created_at) VALUES (?, ?, ?, ?, ?, 'queued', ?)")
       .run(c.repo, c.number, c.head, await scopeOf(db, c.repo), id, now());
-    db.exec("COMMIT");
     return id;
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 type Pending = { repo: string; number: number; head_sha: string; task_id: number | null; retried: number; item_state: string | null; item_head: string | null };

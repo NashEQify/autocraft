@@ -338,22 +338,19 @@ export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<Conver
   // The press is claimed here, with no await between the check and the insert: a second press that got this far sees the first one's card.
   let id = 0;
   let failedBefore: CardRow | undefined;
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  const pressed = await db.write(async () => {
     if ((await choicesById(db, row.id))?.state !== "current") throw new HttpError(409, "replaced by newer choices");
     const prior = await priorOf();
-    if (prior && (prior.state === "running" || prior.state === "done" || prior.state === "queued")) { db.exec("COMMIT"); return await cardView(db, prior, req.user); }
+    if (prior && (prior.state === "running" || prior.state === "done" || prior.state === "queued")) return prior;
     // A run whose outcome is unknown may have repeated writes: the operator prepares again or says what else to do.
     if (prior?.state === "failed" && /^outcome unknown/.test(prior.error ?? "")) throw new HttpError(409, "the last run of these choices stopped after some of its steps; Re-prepare, or tell Opus what to do next");
     failedBefore = prior?.state === "failed" ? prior : undefined;
     await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE choice_id = ? AND state = 'proposed'").run(row.id);
     id = Number((await db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?)")
       .run(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id)).lastInsertRowid);
-    db.exec("COMMIT");
-  } catch (e) {
-    if (db.inTransaction()) db.exec("ROLLBACK");
-    throw e;
-  }
+    return undefined;
+  });
+  if (pressed) return await cardView(db, pressed, req.user);
   try {
     // Edits the user made to the drafted texts: the comment, the issue, the fix-up instructions.
     const edit: CardEdit = {};

@@ -41,7 +41,8 @@ export function validLabel(v: unknown): string {
 type Row = { id: string; label: string; enabled: number; max_concurrent: number };
 
 /** Adds a row (disabled, labelled with its id) for each account of the box config that has none. */
-export async function syncAccounts(db: Db, box: BoxAccount[] = boxAccounts(db)): Promise<void> {
+export async function syncAccounts(db: Db, box?: BoxAccount[]): Promise<void> {
+  box ??= await boxAccounts(db);
   const ins = db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES (?, ?)");
   for (const a of box) await ins.run(a.id, a.id);
 }

@@ -79,7 +79,8 @@ async function queuedRows(db: Db): Promise<QueuedRow[]> {
 }
 
 /** Places (from 1) of the queued cards that will run: a disputed press has none. Read once per request. */
-export function queuePlaces(db: Db, rows: QueuedRow[] = queuedCards(db)): Map<number, number> {
+export function queuePlaces(db: Db, rows?: QueuedRow[]): Map<number, number> {
+  if (rows === undefined) rows = await queuedCards(db);
   const out = new Map<number, number>();
   for (const r of rows) if (!r.dispute_by) out.set(r.id, out.size + 1);
   return out;

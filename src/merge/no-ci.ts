@@ -7,9 +7,14 @@ export const NO_CI_SAMPLE = 20;
 export const repoChecksKnown = async (db: Db, repo: string): Promise<boolean> => !!await db.prepare("SELECT 1 FROM pr_checks WHERE repo = ? LIMIT 1").get(repo);
 /** True when the repo has checks fetched for some PRs and none of the latest NO_CI_SAMPLE reported any. */
 export async function repoHasNoCi(db: Db, repo: string): Promise<boolean> {
-  const rows = await db.prepare("SELECT overall FROM pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT ?").all(repo, NO_CI_SAMPLE) as { overall: string | null }[];
-  return rows.length > 0 && rows.every((r) => !r.overall || r.overall === "none");
+  return noCiFrom(await db.prepare(NO_CI_SQL).all(repo, NO_CI_SAMPLE) as { overall: string | null }[]);
 }
+
+/** The latest checks of one repo, newest first (parameters: repo, NO_CI_SAMPLE). */
+export const NO_CI_SQL = "SELECT overall FROM pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT ?";
+
+/** repoHasNoCi() from the rows of NO_CI_SQL. */
+export const noCiFrom = (rows: { overall: string | null }[]): boolean => rows.length > 0 && rows.every((r) => !r.overall || r.overall === "none");
 
 /** repoHasNoCi() for every repo, from one reading of each repo's latest NO_CI_SAMPLE checks. */
 export async function reposWithNoCi(db: Db): Promise<Set<string>> {

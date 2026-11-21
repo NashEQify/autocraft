@@ -51,7 +51,7 @@ export class Ctx {
   readonly repo: string | null;
   /** The classification run every counter uses, resolved once. */
   readonly run: string | null;
-  constructor(db: Db, repo: string | null, now = Date.now(), run: string | null = latestRun(db)) {
+  constructor(db: Db, repo: string | null, now: number, run: string | null) {
     this.run = run;
     this.db = db;
     this.repo = repo;
@@ -446,7 +446,8 @@ export const COUNTERS = { synced, dupes, classify, priority, decide, labels, rev
 export type CountedNode = keyof typeof COUNTERS;
 
 /** Every count for one repo, or for every tracked repo when `repo` is null. */
-export async function countAll(db: Db, repo: string | null, now = Date.now(), run: string | null = latestRun(db)): Promise<NodeCount> {
+export async function countAll(db: Db, repo: string | null, now = Date.now(), run?: string | null): Promise<NodeCount> {
+  if (run === undefined) run = await latestRun(db);
   const c = new Ctx(db, repo, now, run);
   const out: NodeCount = { counts: {}, members: new Map() };
   for (const f of Object.values(COUNTERS)) {
@@ -461,5 +462,5 @@ export async function countAll(db: Db, repo: string | null, now = Date.now(), ru
 export async function branchMembers(db: Db, key: string): Promise<Refs | null> {
   const node = key.split(".")[0] as CountedNode;
   if (!Object.hasOwn(COUNTERS, node)) return null;
-  return (await COUNTERS[node](new Ctx(db, null))).members.get(key) ?? null;
+  return (await COUNTERS[node](new Ctx(db, null, Date.now(), await latestRun(db)))).members.get(key) ?? null;
 }

@@ -181,18 +181,30 @@ export const BULK_ROWS = 500;
  */
 export async function bulkWrites<T>(db: Db, source: string, fn: () => Promise<T>): Promise<T> {
   const own = !db.inTransaction();
-  if (own) db.exec("BEGIN IMMEDIATE");
-  const nested = !!await db.prepare("SELECT 1 FROM main.plan_bulk").get();
+  return await db.write(async () => {
+    const nested = !!await db.prepare("SELECT 1 FROM main.plan_bulk").get();
+    try {
+      if (!nested) await db.script("INSERT INTO main.plan_bulk (id) VALUES (1)");
+      const out = await fn();
+      if (!nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
+      return out;
+    } catch (e) {
+      // A transaction of its own rolls the marker back; the caller's goes on, so the marker goes now.
+      if (!own && !nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
+      throw e;
+    }
+  });
+}
+
+/** bulkWrites() inside the caller's transaction, for connect()'s migrations, which stay synchronous. */
+export function bulkWritesSync(db: DatabaseSync, source: string, fn: () => void): void {
+  if (db.prepare("SELECT 1 FROM main.plan_bulk").get()) return fn();
+  db.exec("INSERT INTO main.plan_bulk (id) VALUES (1)");
   try {
-    if (!nested) await db.script("INSERT INTO main.plan_bulk (id) VALUES (1)");
-    const out = await fn();
-    if (!nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
-    if (own) db.exec("COMMIT");
-    return out;
-  } catch (e) {
-    if (own) { if (db.inTransaction()) db.exec("ROLLBACK"); }
-    else if (!nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
-    throw e;
+    fn();
+  } finally {
+    db.exec("DELETE FROM main.plan_bulk");
+    db.exec(markFull(`bulk:${source}`));
   }
 }
 

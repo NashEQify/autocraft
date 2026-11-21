@@ -127,8 +127,7 @@ async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined
   const d0 = await getDecision(db, decisionId);
   if (!d0 || d0.answer !== null || d0.repo !== c.repo || d0.number !== c.number || (stamp !== undefined && await decisionStamp(db, d0) !== stamp)) throw new Error("the decision changed");
   if (canWrite) for (const r of reposOf(d0)) if (!(await canWrite(r).catch(() => false))) throw new Error(`no write access to ${slugOf(r)}`);
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  const { d, o } = await db.write(async () => {
     const d = await getDecision(db, decisionId);
     if (!d || d.answer !== null || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
     const o = optionsOf(d).find((x) => x.key === key);
@@ -140,13 +139,10 @@ async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined
     await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
     await replaceProposedCards(db, d.repo, d.number, d.id);
     await audit(db, by, "answer", d.id, { answer: key, source: "conversation", card: c.id });
-    db.exec("COMMIT");
-    if (writeEffect(d.kind, key)) await initExecState(db, d.id);
-    return { result: `Answered the decision with "${o.label}"`, url: null };
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+    return { d, o };
+  });
+  if (writeEffect(d.kind, key)) await initExecState(db, d.id);
+  return { result: `Answered the decision with "${o.label}"`, url: null };
 }
 
 /** Closes the card's decision as handled in the conversation: the answer is HANDLED with the summary as its note, already applied, so no step acts on it. Writes nothing to GitHub. */
@@ -577,33 +573,35 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
     if ("refused" in g) throw new ConversationError(409, g.refused);
     if (params.kind === "resolution" && params.settle) await checkSettle(db, c, params.settle, deps.canWrite).catch((e) => { throw new ConversationError(409, String((e as Error).message ?? e)); });
   }
-  let queued = false;
-  db.exec("BEGIN IMMEDIATE");
+  let claimed: "busy" | "lost" | { queued: boolean };
   try {
-    const from = draining ? "queued" : "proposed";
-    // Room is taken in this transaction, for all the card's writes at once. A press queues behind the presses already waiting.
-    const wait = needW > 0 && (!await actRoom(db, needW, nowMs) || (!draining && await queuedAhead(db, id)));
-    if (wait && draining) { db.exec("ROLLBACK"); return { card: c, ran: false }; }
-    if (wait) {
-      const block = await actBlockedReason(db, c.repo);
-      if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);
-    }
-    const claim = wait
-      ? await db.prepare("UPDATE conversation_cards SET state = 'queued', acted_by = ?, acted_at = ?, queued_at = ?, queue_args = ?, error = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'proposed'")
-        .run(by, at, at, JSON.stringify({ ...(deps.skip?.length && { skip: deps.skip }), ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) } satisfies QueueArgs), id)
-      : await db.prepare("UPDATE conversation_cards SET state = 'running', acted_by = ?, acted_at = ? WHERE id = ? AND state = ? AND dispute_by IS NULL").run(by, at, id, from);
-    if (claim.changes !== 1) { db.exec("ROLLBACK"); return { card: await need(db, id), ran: false }; }
-    // Checked inside the transaction that starts the run, so an answer written a moment ago is seen.
-    const refusal = writing ? await pendingAnswerRefusal(db, c.repo, c.number, by) : null;
-    if (refusal) throw new Error(refusal);
-    if (settles) await claimSettling(db, settles, id, by);
-    db.exec("COMMIT");
-    queued = wait;
+    claimed = await db.write(async () => {
+      const from = draining ? "queued" : "proposed";
+      // Room is taken in this transaction, for all the card's writes at once. A press queues behind the presses already waiting.
+      const wait = needW > 0 && (!await actRoom(db, needW, nowMs) || (!draining && await queuedAhead(db, id)));
+      // Nothing is written before either early return, so committing leaves the database as a rollback would.
+      if (wait && draining) return "busy";
+      if (wait) {
+        const block = await actBlockedReason(db, c.repo);
+        if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);
+      }
+      const claim = wait
+        ? await db.prepare("UPDATE conversation_cards SET state = 'queued', acted_by = ?, acted_at = ?, queued_at = ?, queue_args = ?, error = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'proposed'")
+          .run(by, at, at, JSON.stringify({ ...(deps.skip?.length && { skip: deps.skip }), ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) } satisfies QueueArgs), id)
+        : await db.prepare("UPDATE conversation_cards SET state = 'running', acted_by = ?, acted_at = ? WHERE id = ? AND state = ? AND dispute_by IS NULL").run(by, at, id, from);
+      if (claim.changes !== 1) return "lost";
+      // Checked inside the transaction that starts the run, so an answer written a moment ago is seen.
+      const refusal = writing ? await pendingAnswerRefusal(db, c.repo, c.number, by) : null;
+      if (refusal) throw new Error(refusal);
+      if (settles) await claimSettling(db, settles, id, by);
+      return { queued: wait };
+    });
   } catch (e) {
-    if (db.inTransaction()) db.exec("ROLLBACK");
     throw new ConversationError(409, String((e as Error).message ?? e));
   }
-  if (queued) {
+  if (claimed === "busy") return { card: c, ran: false };
+  if (claimed === "lost") return { card: await need(db, id), ran: false };
+  if (claimed.queued) {
     await audit(db, by, "conversation-card-queue", ref(c.repo, c.number), { card: id, kind: c.kind });
     await insertTurn(db, c.repo, c.number, {
       kind: "system", login: "system", body: `${by} pressed the card: ${c.description}. Queued: daily GitHub write limit.` + (note ? ` Note: ${note}` : ""),
@@ -643,16 +641,12 @@ async function failQueued(db: Db, c: CardRow, error: string, deps: StoreDeps): P
   const at = (deps.now?.() ?? new Date()).toISOString();
   let settles: string | undefined;
   try { settles = settledDecisionOf(JSON.parse(c.params) as CardParams); } catch { /* a card with unreadable parameters settles nothing */ }
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  const failed = await db.write(async () => {
     const r = await db.prepare("UPDATE conversation_cards SET state = 'failed', error = ?, acted_at = ? WHERE id = ? AND state = 'queued'").run(error, at, c.id);
     if (r.changes === 1 && settles) await releaseSettling(db, settles, c.id);
-    db.exec("COMMIT");
-    if (r.changes !== 1) return;
-  } catch (e) {
-    if (db.inTransaction()) db.exec("ROLLBACK");
-    throw e;
-  }
+    return r.changes === 1;
+  });
+  if (!failed) return;
   await audit(db, c.acted_by ?? "system", "conversation-card", ref(c.repo, c.number), { card: c.id, kind: c.kind, state: "failed", error, queued: true });
   await insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${c.acted_by}'s queued card could not run: ${c.description}. ${error}.`, block: systemBlock(`The queued action chosen by ${c.acted_by} could not run: ${c.description}. ${error}.`) }, deps);
 }
