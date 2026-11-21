@@ -58,6 +58,8 @@ export interface ConnectOptions {
   busyTimeoutMs?: number;
   /** The handle's use, for its pool size on Postgres. Defaults to the process's role (`setDbRole`). */
   role?: DbRole;
+  /** Postgres: bring the schema and triggers up to date first (default). False opens the database as it is. */
+  migrate?: boolean;
 }
 
 /**

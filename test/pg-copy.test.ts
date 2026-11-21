@@ -3,6 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { gzipSync } from "node:zlib";
 import { connect } from "../src/db.ts";
 import { copyDatabase, RUNTIME_TABLES, verifyDatabases } from "../src/db/copy.ts";
@@ -44,6 +45,9 @@ test("a SQLite database copied to Postgres and back verifies equal; a changed ro
     const round = await verifyDatabases(file, back, { skipExtra: true, log: quiet });
     assert.deepEqual(round.tables.filter((t) => !t.ok && !RUNTIME_TABLES.has(t.table)), [], "the round trip equals the original");
     assert.deepEqual(round.sequences.filter((t) => !RUNTIME_TABLES.has(t.table)), []);
+    // The SQLite target keeps its own schema stamp (the copy never carries one over), so opening it migrates nothing.
+    const stamp = (f: string) => { const d = new DatabaseSync(f, { readOnly: true }); try { return d.prepare("SELECT value FROM settings WHERE key = 'schema_stamp'").get()?.value; } finally { d.close(); } };
+    assert.equal(stamp(back), stamp(file));
     const b = await connectDb(back);
     const hits = (await b.prepare("SELECT count(*) AS n FROM items_fts WHERE items_fts MATCH 'parser'").get()) as { n: number };
     await b.close();

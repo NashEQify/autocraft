@@ -3,7 +3,7 @@
 //
 // A copy into Postgres applies src/schema.pg.sql without its triggers, copies every table in key order keeping rowid and
 // identity values, sets every identity sequence past the copied keys (or to SQLite's AUTOINCREMENT counter), then
-// installs the triggers and runs ANALYZE. A copy into SQLite creates the schema with `connect()`, drops the triggers for
+// migrates it (triggers, runtime tables, stamp), copies the runtime tables' counters and logs, and runs ANALYZE. A copy into SQLite creates the schema with `connect()`, drops the triggers for
 // the copy, then restores them, rebuilds the full-text indexes and review_blockers, and sets sqlite_sequence.
 //
 // Digests are read through each side's Db, so they see the values the app sees: an integer stored as bigint, a bytea
@@ -14,16 +14,23 @@ import { DatabaseSync } from "node:sqlite";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { planChangesSql } from "../core/plan-changes.ts";
 import type { Db, Param, Row, Value } from "./index.ts";
-import { connectDb, dbFor, isPgUrl } from "./open.ts";
-import { MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
+import { connectDb, dbFor, isPgUrl, loadPg } from "./open.ts";
+import { applyPgSchema, MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
+import { pgConnectionString } from "./postgres.ts";
 import { HAND_TRIGGERS } from "./pg-schema.ts";
 
 /**
  * Tables the app creates when it opens a database (src/live.ts, src/core/plan-changes.ts), not in the schema file. On
- * Postgres they come with the runtime triggers (`installPgTriggers`). A copy skips them when only one side has them:
- * their rows are counters and logs the target rebuilds.
+ * Postgres they come with the runtime triggers (`migratePgTarget`), so a copy into Postgres copies them after that, values
+ * as they are. A copy or comparison skips them when only one side has them; live_flush exists only on Postgres.
  */
-export const RUNTIME_TABLES = new Set(["change_seq", "item_changes", "plan_full", "plan_full_causes", "plan_shadow_diffs", "plan_pass_stats", "plan_bulk", "review_blockers"]);
+export const RUNTIME_TABLES = new Set(["change_seq", "item_changes", "plan_full", "plan_full_causes", "plan_shadow_diffs", "plan_pass_stats", "plan_bulk", "review_blockers", "live_flush"]);
+
+/**
+ * Rows a copy leaves where they are and a comparison leaves out: the schema stamp belongs to each database's own
+ * migration (SQLite and Postgres stamps differ), so the target keeps or writes its own.
+ */
+const ROW_FILTER: Record<string, string> = { settings: "key <> 'schema_stamp'" };
 
 /**
  * Columns that Postgres stores as bytea and SQLite rows may hold as plain text from before texts were gzipped
@@ -125,7 +132,8 @@ const tablesOf = (db: Db): Promise<Map<string, Table>> => (db.dialect === "postg
 
 async function openSide(target: string, opts: { readOnly: boolean }): Promise<Side> {
   let db: Db;
-  if (isPgUrl(target)) db = await connectDb(target, { role: "cli" });
+  // Postgres opens as it is: the target gets its triggers after the rows are in, and a source is never migrated.
+  if (isPgUrl(target)) db = await connectDb(target, { role: "cli", migrate: false });
   else if (opts.readOnly) {
     if (!existsSync(target)) throw new Error(`no SQLite database at ${target}`);
     db = await dbFor(new DatabaseSync(target, { readOnly: true }));
@@ -192,13 +200,13 @@ async function* pages(db: Db, t: Table, batch: number): AsyncGenerator<Row[]> {
   const keys = t.key.map(keyRef);
   const keyList = keys.length === 1 ? keys[0]! : `(${keys.join(", ")})`;
   const marks = keys.length === 1 ? "?" : `(${keys.map(() => "?").join(", ")})`;
+  const filter = ROW_FILTER[t.name];
   const head = `SELECT ${t.select.join(", ")} FROM ${qi(t.name)}`;
   const tail = `ORDER BY ${keys.join(", ")} LIMIT ${batch}`;
   let last: Param[] | undefined;
   for (;;) {
-    const rows = last
-      ? await db.prepare(`${head} WHERE ${keyList} > ${marks} ${tail}`).all(...last)
-      : await db.prepare(`${head} ${tail}`).all();
+    const where = [filter, last && `${keyList} > ${marks}`].filter(Boolean);
+    const rows = await db.prepare(`${head} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ${tail}`).all(...(last ?? []));
     if (rows.length) yield rows;
     if (rows.length < batch) return;
     const end = rows[rows.length - 1]!;
@@ -344,15 +352,20 @@ export function pgSchemaWithoutTriggers(sql: string = pgSchemaSql()): string {
 }
 
 /**
- * Installs every trigger of a Postgres database: the hand-translated schema triggers and, once they exist on Postgres,
- * the runtime triggers of the live topics and the plan change log (which also fill review_blockers and the other
- * RUNTIME_TABLES). A copy calls this after the rows are in, so copied rows fire nothing.
+ * Brings a Postgres target to the app's schema and triggers once the copied rows are in, in one transaction under the
+ * migration lock, so the copied rows fire nothing. This is the one place the copy migrates: with the runtime triggers
+ * (src/db/pg-triggers.ts) it becomes `migratePg(client)`, which also creates the RUNTIME_TABLES and stores the stamp;
+ * until then it applies the schema file with its hand-translated triggers.
  */
-export async function installPgTriggers(db: Db): Promise<void> {
-  await db.write(async () => {
-    for (const sql of handTriggerSql()) await db.script(sql);
-    // Runtime triggers (live topics, plan change log) go here when their Postgres versions land.
-  });
+async function migratePgTarget(url: string): Promise<void> {
+  const pg = await loadPg();
+  const client = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-copy" });
+  await client.connect();
+  try {
+    await applyPgSchema(client);
+  } finally {
+    await client.end();
+  }
 }
 
 async function hasRows(db: Db, tables: Iterable<string>): Promise<string | undefined> {
@@ -381,6 +394,12 @@ async function prepareTarget(target: string, replace: boolean, match: (tables: M
           WHERE NOT t.tgisinternal AND c.relnamespace = current_schema()::regnamespace`).all()) as { name: string; tbl: string }[];
         for (const t of triggers) await db.script(`DROP TRIGGER ${qi(t.name)} ON ${qi(t.tbl)}`);
         await db.script(pgSchemaWithoutTriggers());
+        // Indexes other than keys are built in one pass after the rows are in, by the migration (its schema file creates
+        // every index IF NOT EXISTS): far faster than updating them row by row, above all the search columns' GIN indexes.
+        const indexes = (await db.prepare(`SELECT i.relname AS name FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid JOIN pg_class t ON t.oid = x.indrelid
+          WHERE t.relnamespace = current_schema()::regnamespace AND NOT x.indisprimary
+            AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid)`).all()) as { name: string }[];
+        for (const ix of indexes) await db.script(`DROP INDEX ${qi(ix.name)}`);
         side.tables = await pgTables(db);
         return match(side.tables, side.label);
       });
@@ -427,7 +446,7 @@ async function clearTables(db: Db, tables: string[]): Promise<void> {
   if (!tables.length) return;
   await db.write(async () => {
     if (db.dialect === "postgres") return db.script(`TRUNCATE ${tables.map(qi).join(", ")} RESTART IDENTITY`);
-    for (const t of tables) await db.script(`DELETE FROM main.${qi(t)}`);
+    for (const t of tables) await db.script(`DELETE FROM main.${qi(t)}${ROW_FILTER[t] ? ` WHERE ${ROW_FILTER[t]}` : ""}`);
     await db.prepare(`DELETE FROM main.sqlite_sequence WHERE name IN (${tables.map(() => "?").join(", ")})`).run(...tables);
   });
 }
@@ -493,25 +512,43 @@ export async function copyDatabase(o: CopyOptions): Promise<CopyResult> {
     if (extra.length) log(`left out (only on one side): ${extra.join(", ")}`);
     const stats: TableStats[] = [];
     const d = dst;
-    const srcSeqs = await src.db.read(async () => {
-      for (const [from, to] of both) {
+    const copyAll = async (tables: [Table, Table][]) => {
+      for (const [from, to] of tables) {
         const s = await copyTable(src, d, from, to, batch);
         stats.push(s);
         log(`  ${s.table.padEnd(32)} ${String(s.rows).padStart(10)} rows ${fmtMb(s.bytes).padStart(11)} ${fmtMs(s.ms).padStart(9)}`);
       }
-      return sequences(src.db);
-    });
-    t = performance.now();
+    };
     const copied = new Set(names);
-    if (dst.db.dialect === "postgres") {
-      await setPgSequences(dst.db, copied, srcSeqs);
-      await installPgTriggers(dst.db);
-      await dst.db.script("ANALYZE");
-    } else {
-      await setSqliteSequences(dst.db, copied, srcSeqs);
-      await finishSqlite(dst.db, prepared.sqliteTriggers);
+    // One source snapshot for everything, including the runtime tables copied after the migration.
+    await src.db.read(async () => {
+      await copyAll(both);
+      const srcSeqs = await sequences(src.db);
+      t = performance.now();
+      if (d.db.dialect === "postgres") {
+        await setPgSequences(d.db, copied, srcSeqs);
+        await migratePgTarget(o.to);
+        log(`sequences, migration: indexes and triggers (${fmtMs(performance.now() - t)})`);
+        // The migration created the runtime tables the target lacked; their counters and logs come over as they are.
+        d.tables = await pgTables(d.db);
+        const late = matchTables(src, d, o.skipExtra === true).both.filter(([a]) => !copied.has(a.name));
+        if (late.length) {
+          await clearTables(d.db, late.map(([a]) => a.name));
+          await copyAll(late);
+          for (const [a] of late) copied.add(a.name);
+          await setPgSequences(d.db, new Set(late.map(([a]) => a.name)), srcSeqs);
+        }
+      } else {
+        await setSqliteSequences(d.db, copied, srcSeqs);
+        await finishSqlite(d.db, prepared.sqliteTriggers);
+        log(`sequences, triggers, search index (${fmtMs(performance.now() - t)})`);
+      }
+    });
+    if (d.db.dialect === "postgres") {
+      t = performance.now();
+      await d.db.script("ANALYZE");
+      log(`ANALYZE (${fmtMs(performance.now() - t)})`);
     }
-    log(`sequences, triggers${dst.db.dialect === "postgres" ? ", ANALYZE" : ", search index"} (${fmtMs(performance.now() - t)})`);
     const rows = stats.reduce((n, s) => n + s.rows, 0);
     const bytes = stats.reduce((n, s) => n + s.bytes, 0);
     const totalMs = performance.now() - t0;
