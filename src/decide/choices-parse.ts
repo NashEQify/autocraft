@@ -77,7 +77,7 @@ async function checkExtra(db: Db, repo: string, n: number, raw: unknown, removin
       return "note" in r ? r : { extra: { kind, on, logins: (r.value as Extract<Step, { kind: "request_reviewers" }>).logins } };
     }
     case "open_issue": {
-      const r = step(openIssueStep(db, { repo: raw.repo ?? repo, title: raw.title, body: raw.body }, drop));
+      const r = step(await openIssueStep(db, { repo: raw.repo ?? repo, title: raw.title, body: raw.body }, drop));
       if ("note" in r) return r;
       const v = r.value as Extract<Step, { kind: "open_issue" }>;
       return { extra: { kind, on, repo: v.repo, title: v.title, body: v.body } };

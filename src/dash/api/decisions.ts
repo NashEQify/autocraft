@@ -212,7 +212,7 @@ async function queuedOf(db: Db, d: DecisionRow, viewer: Viewer): Promise<Decisio
   const id = await queuedLock(db, d);
   if (id === null) return null;
   const c = await db.prepare("SELECT acted_by, dispute_by, dispute_reason, dispute_at FROM main.conversation_cards WHERE id = ?").get(id) as { acted_by: string | null; dispute_by: string | null; dispute_reason: string | null; dispute_at: string | null };
-  const place = queuePlace(db, id);
+  const place = await queuePlace(db, id);
   return { card: id, by: c.acted_by ?? "", place, reason: queueReason(place), dispute: c.dispute_by ? { by: c.dispute_by, reason: viewer.staff ? (c.dispute_reason ?? "") : "", at: c.dispute_at ?? "" } : null };
 }
 

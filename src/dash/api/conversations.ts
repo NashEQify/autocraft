@@ -38,8 +38,8 @@ async function guardAsync<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-function queuedView(db: Db, c: CardRow, staff: boolean): NonNullable<ConversationCard["queued"]> {
-  const place = c.dispute_by ? null : queuePlace(db, c.id);
+async function queuedView(db: Db, c: CardRow, staff: boolean): Promise<NonNullable<ConversationCard["queued"]>> {
+  const place = c.dispute_by ? null : await queuePlace(db, c.id);
   return { place, reason: queueReason(place), dispute: c.dispute_by ? { by: c.dispute_by, reason: staff ? (c.dispute_reason ?? "") : "", at: c.dispute_at ?? "" } : null };
 }
 
@@ -81,7 +81,7 @@ export async function cardView(db: Db, c: CardRow, who?: { login: string; role: 
     ...(effect && { writes: effect }),
     ...(c.state === "done" && { done: { at: c.acted_at ?? "", link: c.result_url ?? "", label: c.result ?? "Done" } }),
     ...(c.state === "failed" && c.error && { error: c.error }),
-    ...(c.state === "queued" && { queued: queuedView(db, c, !!who && (who.role === "operator" || who.role === "maintainer")) }),
+    ...(c.state === "queued" && { queued: await queuedView(db, c, !!who && (who.role === "operator" || who.role === "maintainer")) }),
     ...(c.acted_by && { by: c.acted_by }),
     ...(c.acted_at && { at: c.acted_at }),
     ...(c.edited_by && { edited: true, editedBy: c.edited_by }),

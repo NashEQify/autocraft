@@ -74,7 +74,7 @@ export function defaultCheckDeps(db: Db): CheckDeps {
 export type CheckCounts = { checked: number; jev: number; haiku: number; haikuAlone: number; verdicts: Record<string, number>; unanswered: number };
 
 async function store(db: Db, k: PairKey, jev: number | null, haiku: PairVerdict | null, verdict: PairVerdict, at: string): Promise<void> {
-  const canonical = verdict === "duplicate" ? pickCanonical(db, k.repo, [k.a, k.b]).number : null;
+  const canonical = verdict === "duplicate" ? (await pickCanonical(db, k.repo, [k.a, k.b])).number : null;
   await db.prepare(`UPDATE duplicate_pairs SET jev_p = ?, haiku = ?, verdict = ?, canonical = ?, checked_at = ?
     WHERE repo = ? AND a = ? AND b = ? AND a_hash = ? AND b_hash = ?`).run(jev, haiku, verdict, canonical, at, k.repo, k.a, k.b, k.a_hash, k.b_hash);
 }

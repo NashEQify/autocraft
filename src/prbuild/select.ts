@@ -63,7 +63,7 @@ export async function selectPrBuilds(db: Db, repo: string, o: { rust?: RustCheck
   for (const r of rows) {
     if (!r.head || await have.get(repo, r.number, r.head) || held.has(`${repo}#${r.number}`)) continue;
     if (!await inBuildScope(db, repo, r.number, scope)) continue;
-    if (!all && !isOutsideAuthor(db, r)) continue;
+    if (!all && !await isOutsideAuthor(db, r)) continue;
     const isRust = rust(repo, r.head);
     if (isRust === false) continue;
     out.push({ repo, number: r.number, head: r.head, rust: isRust });

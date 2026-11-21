@@ -34,7 +34,7 @@ export async function canonInfoAll(db: Db, items: { repo: string; number: number
   return new Map(rows.map((r) => [r.k, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
 }
 
-export function canonInfo(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): CanonInfo[] {
+export async function canonInfo(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): Promise<CanonInfo[]> {
   if (known === undefined) known = await canonInfoAll(db, numbers.map((number) => ({ repo, number })));
   return numbers.map((n) => {
     const r = known.get(`${repo}#${n}`);
@@ -44,8 +44,8 @@ export function canonInfo(db: Db, repo: string, numbers: number[], known?: Map<s
 }
 
 /** The item to keep, and a short reason for the decision card. */
-export function pickCanonical(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): { number: number; why: string } {
-  const sorted = canonInfo(db, repo, numbers, known).sort(compareCanonical);
+export async function pickCanonical(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): Promise<{ number: number; why: string }> {
+  const sorted = (await canonInfo(db, repo, numbers, known)).sort(compareCanonical);
   const [best, next] = sorted as [CanonInfo, CanonInfo | undefined];
   const why = !next ? "the only one"
     : closed(best) !== closed(next) ? `it is already ${best.state === "MERGED" ? "merged" : "closed"}`

@@ -427,7 +427,7 @@ export function installAlertCommands(ix: Interactions, alerts: DecisionAlerts): 
         json: { core: core.key, params: {}, extras: sendable(core).map((e) => ({ id: e.id })) }, user,
       } as Req;
       const card = await doChoice(db, req, alerts.deps.act);
-      await call.edit({ content: card.state === "failed" ? `Failed: ${soft(card.error ?? "the choice did not run", 300)}` : `${card.state === "done" ? "Done" : card.state === "queued" ? "Queued: daily GitHub write limit" + (queuePlace(db, card.id) ? `, #${queuePlace(db, card.id)} in line` : "") : "Started"}: ${soft(core.label, 80)}`, components: [] });
+      await call.edit({ content: card.state === "failed" ? `Failed: ${soft(card.error ?? "the choice did not run", 300)}` : `${card.state === "done" ? "Done" : card.state === "queued" ? "Queued: daily GitHub write limit" + (await queuePlace(db, card.id) ? `, #${await queuePlace(db, card.id)} in line` : "") : "Started"}: ${soft(core.label, 80)}`, components: [] });
     } catch (e) {
       await call.edit({ content: e instanceof HttpError ? e.message : "Something went wrong. Try again in a moment.", components: [] });
       if (!(e instanceof HttpError)) alerts.deps.log(`discord: alert press failed: ${(e as Error).message}`);

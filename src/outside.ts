@@ -81,7 +81,7 @@ async function backfillAdmitted(db: Db, since: string, now: number): Promise<voi
 }
 
 /** Whether a PR or issue row is by an outside author: not a collaborator by association, not a bot, not an operator, maintainer or own pipeline login. `inside` may be passed when many rows are judged. */
-export function isOutsideAuthor(db: Db, r: { author: string | null; author_association: string | null; author_type: string | null }, inside?: Set<string>): boolean {
+export async function isOutsideAuthor(db: Db, r: { author: string | null; author_association: string | null; author_type: string | null }, inside?: Set<string>): Promise<boolean> {
   if (inside === undefined) inside = await insiders(db);
   if (!r.author) return false;
   return !INSIDE_ASSOCIATIONS.has(r.author_association ?? "") && !isBotAuthor({ author: r.author, author_type: r.author_type }) && !inside.has(r.author.toLowerCase());
@@ -137,7 +137,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
       if (v === undefined) { v = (await isWhitelisted(db, r.author, r.author_id)).ok; memo.set(k, v); }
       return v;
     };
-    const cheap = rows.filter((r) => isOutsideAuthor(db, r, inside));
+    const cheap = await filterSeq(rows, async (r) => await isOutsideAuthor(db, r, inside));
 
     // Surge: outside-author items of the last hour since the last resume.
     if (lim.surgePerHour > 0 && !tripped?.active) {

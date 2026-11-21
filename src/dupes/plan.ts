@@ -10,6 +10,7 @@ import { inPilot, pilotSql } from "../pilot.ts";
 import { backlogHeldSql } from "./held.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { mapSeq } from "../async-seq.ts";
 
 type Edge = { repo: string; a: number; b: number; similarity: number; jev_p: number | null; haiku: string | null };
 
@@ -40,8 +41,8 @@ export async function duplicateGroups(db: Db, repo?: string): Promise<Group[]> {
   for (const e of edges) by.set(find(`${e.repo}#${e.a}`), [...(by.get(find(`${e.repo}#${e.a}`)) ?? []), e]);
   const groups = [...by.values()].map((es) => ({ es, members: [...new Set(es.flatMap((e) => [e.a, e.b]))].sort((x, y) => x - y) }));
   const known = await canonInfoAll(db, groups.flatMap((g) => g.members.map((number) => ({ repo: g.es[0]!.repo, number }))));
-  return groups.map(({ es, members }) => {
-    const c = pickCanonical(db, es[0]!.repo, members, known);
+  return await mapSeq(groups, async ({ es, members }) => {
+    const c = await pickCanonical(db, es[0]!.repo, members, known);
     return { repo: es[0]!.repo, canonical: c.number, why: c.why, members, edges: es };
   });
 }

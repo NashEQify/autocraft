@@ -50,7 +50,7 @@ export async function lockMessage(db: Db, d: DecisionRow): Promise<string> {
   const by = await settlingBy(db, d) ?? "someone";
   const card = await queuedLock(db, d);
   if (card === null) return settlingMessage(by);
-  const place = queuePlace(db, card);
+  const place = await queuePlace(db, card);
   return `${by}'s answer waits for the daily GitHub write limit${place ? ` (#${place})` : ""}`;
 }
 

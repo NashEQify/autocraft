@@ -340,7 +340,7 @@ function issueText(raw: unknown, max: number, what: string, drop: ReadonlySet<st
   return { value: t };
 }
 
-export function openIssueStep(db: Db, st: Record<string, unknown>, drop: ReadonlySet<string>): Checked<Step> {
+export async function openIssueStep(db: Db, st: Record<string, unknown>, drop: ReadonlySet<string>): Promise<Checked<Step>> {
   const repo = bareRepo(st.repo);
   if (typeof repo !== "string" || !await isTracked(db, repo)) return { note: `dropped a resolution: "${String(st.repo).slice(0, 40)}" is not a tracked repository` };
   const title = issueText(st.title, ISSUE_TITLE_MAX, "title", drop, true);
@@ -512,7 +512,7 @@ async function validateResolution(db: Db, repo: string, n: number, c: Record<str
       case "duplicate": r = await duplicateStep(db, repo, n, st.of); break;
       case "unlabel": r = await unlabelStep(db, repo, n, st.label); break;
       case "reopen": r = await reopenStep(db, repo, n); break;
-      case "open_issue": r = openIssueStep(db, st, drop); break;
+      case "open_issue": r = await openIssueStep(db, st, drop); break;
       case "transfer": r = await transferStep(db, repo, n, st.to); break;
       case "assign": r = await assignStep(db, repo, n, st.login); break;
       case "request_reviewers": r = await reviewersStep(db, repo, n, st.logins); break;

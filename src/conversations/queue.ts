@@ -79,7 +79,7 @@ async function queuedRows(db: Db): Promise<QueuedRow[]> {
 }
 
 /** Places (from 1) of the queued cards that will run: a disputed press has none. Read once per request. */
-export function queuePlaces(db: Db, rows?: QueuedRow[]): Map<number, number> {
+export async function queuePlaces(db: Db, rows?: QueuedRow[]): Promise<Map<number, number>> {
   if (rows === undefined) rows = await queuedCards(db);
   const out = new Map<number, number>();
   for (const r of rows) if (!r.dispute_by) out.set(r.id, out.size + 1);
@@ -87,7 +87,7 @@ export function queuePlaces(db: Db, rows?: QueuedRow[]): Map<number, number> {
 }
 
 /** 1-based place of the card in the queue, or null when it is not queued or is disputed. */
-export const queuePlace = (db: Db, cardId: number): number | null => queuePlaces(db).get(cardId) ?? null;
+export const queuePlace = async (db: Db, cardId: number): Promise<number | null> => (await queuePlaces(db)).get(cardId) ?? null;
 
 /** The shown reason of a queued press. The place is read when shown, never stored. */
 export const queueReason = (place: number | null): string => (place === null ? "daily GitHub write limit" : `daily GitHub write limit, #${place} in line`);

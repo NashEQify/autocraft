@@ -224,7 +224,7 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
       const id = await idFor(db, p);
       const t = await textOf(db, p);
       const primary = p.items.find((i) => i.number === p.number)!;
-      const alts = canonInfo(db, p.repo, p.items.filter((i) => i.kind === primary.kind && i.number !== p.number && i.role !== "stay").map((i) => i.number)).sort(compareCanonical).slice(0, 3);
+      const alts = (await canonInfo(db, p.repo, p.items.filter((i) => i.kind === primary.kind && i.number !== p.number && i.role !== "stay").map((i) => i.number))).sort(compareCanonical).slice(0, 3);
       const q = {
         id, kind: "duplicate", repo: p.repo, number: p.number, question: t.question, context: t.context, facts: t.facts,
         options: [{ ...GROUP_OPTIONS.accept, label: t.keepLabel }, ...alts.map((a) => ({ key: keepKey(a.number), label: `Keep #${a.number} instead`, hint: `Posts the comments shown under it: keeps #${a.number}, closes the others, #${p.number} too.` })), GROUP_OPTIONS.distinct],

@@ -94,9 +94,9 @@ async function liveOf(q: Querier, repo: string, numbers: number[]): Promise<Map<
 
 const NOW_ISO = (d: CompareDeps) => d.now().toISOString();
 
-function viaRule(db: Db, s: KindSet, at: string, error: string | null, source: "rule" | "closed" | "single"): StoredComparison {
+async function viaRule(db: Db, s: KindSet, at: string, error: string | null, source: "rule" | "closed" | "single"): Promise<StoredComparison> {
   const numbers = s.members.map((m) => m.number);
-  const c = pickCanonical(db, s.repo, numbers);
+  const c = await pickCanonical(db, s.repo, numbers);
   const others = numbers.filter((n) => n !== c.number).map((number) => (s.kind === "pr" ? { number, duplicate: true, better: [], carry: [] } : { number, adds: [] }));
   const reason = source === "closed" ? c.why : source === "single" ? "the only one" : `kept by rule: ${c.why}`;
   return { repo: s.repo, key: s.key, kind: s.kind, members: numbers, hash: s.hash, kept: c.number, source, model: null, reason, result: { others, rounds: 0 }, error, attempts: 0, at };
@@ -186,7 +186,7 @@ const setRefs = (s: KindSet): { repo: string; number: number }[] => (s.members.l
 async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
   const at = NOW_ISO(x.deps);
   // Best by rule first, so every chunk holds a mix of strong and weak members and the rule's pick reaches the last round.
-  const infos = canonInfo(x.db, s.repo, s.members.map((m) => m.number)).sort(compareCanonical);
+  const infos = (await canonInfo(x.db, s.repo, s.members.map((m) => m.number))).sort(compareCanonical);
   let current = infos.map((i) => i.number);
   const usage: { u: Usage; model: string; ran?: string } = { u: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null }, model: "" };
   const start = at;
@@ -203,7 +203,7 @@ async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
       const r = await compareChunk(x, s, chunk, usage);
       if (!r) {
         await saveUsage(x.db, x.runId, `dupes-compare-${s.key.replace(/[^A-Za-z0-9]/g, "-")}`, "dupes", usage.model, 0, usage.u, start, NOW_ISO(x.deps));
-        return viaRule(x.db, s, at, "no valid answer from the model", "rule");
+        return await viaRule(x.db, s, at, "no valid answer from the model", "rule");
       }
       winners.push(r.keep);
       last = r;
@@ -242,10 +242,10 @@ export async function runDupeCompare(db: Db, params: CompareParams = {}, log: (l
     const at = NOW_ISO(d);
     const rule = ruleOutcome(set);
     if (rule === "closed") {
-      await saveComparison(db, viaRule(db, set, at, null, "closed"), set);
+      await saveComparison(db, await viaRule(db, set, at, null, "closed"), set);
       s.closedWins++;
     } else if (rule === "single") {
-      await saveComparison(db, viaRule(db, set, at, null, "single"), set);
+      await saveComparison(db, await viaRule(db, set, at, null, "single"), set);
       s.single++;
     } else calls.push(set);
   }
