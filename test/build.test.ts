@@ -40,8 +40,8 @@ const task = async (over: Partial<Parameters<typeof createTask>[1]> = {}) => awa
 const clear = async () => await db.script("DELETE FROM build_tasks; DELETE FROM build_task_logs; DELETE FROM build_artifacts");
 
 before(async () => {
-  await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 0)");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'internal')");
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "open-app", pipeline: 1 }, { name: "vault", pipeline: 0 }]));
+  await db.run(db.k.insertInto("repos").values([{ name: "open-app", visibility: "public" }, { name: "vault", visibility: "internal" }]));
 });
 after(async () => {
   await db.close();

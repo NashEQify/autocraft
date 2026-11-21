@@ -49,8 +49,8 @@ describe("per-lease tools of remote calls", async () => {
     referenceOptions.embedder = fake;
     await setInferenceMode(db, "user-local", "test");
     const now = new Date().toISOString();
-    await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public')").run();
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('photocraft', 7, 'issue', 'OPEN', 'Wave filter crashes', 'b', 'alice', ?, ?)").run(now, now);
+    await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold", visibility: "public" }));
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 7, kind: "issue", state: "OPEN", title: "Wave filter crashes", body: "b", author: "alice", created_at: now, updated_at: now }));
     writeSnapshot(dbFile);
     const ref = join(dir, "reference", "photocraft");
     mkdirSync(ref, { recursive: true });

@@ -4,19 +4,19 @@
 // permissions themselves. Item and comment text is returned as data only.
 import { live } from "./live.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import * as kx from "../../db/kx.ts";
 import { prBuildView } from "../../prbuild/view.ts";
 import { checksOf } from "../../patchcheck/index.ts";
 import { priorityOf } from "../../priority/read.ts";
 import { preapprovalOf } from "../../preapproval/index.ts";
-import type { SQLInputValue } from "node:sqlite";
 import type {
   CiState, DecisionKind, Done, Funnel, Item, ItemAction, ItemComment, ItemFixup, ItemPremerge, ItemReviews, ItemState, ItemVerification, ReviewSide, Mergeable, Progress, RepoProgress, Tier, User,
 } from "../../../web/src/api/types.ts";
 import { trackedNames } from "../../repos.ts";
-import { excludeHidden, hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } from "./visible.ts";
-import { withoutHidden } from "./decisions.ts";
+import { excludeHiddenExpr, hiddenRepos, allVisibleRepos, needVisible, repoOwners, visibleRepos } from "./visible.ts";
+import { withoutHiddenExpr } from "./decisions.ts";
 import { contributors } from "../../whitelist.ts";
-import { CLOSED_ITEMS, TRACKED, doneByRepo, funnelByRepo, latestCte, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
+import { doneByRepo, funnelByRepo, latestCteExpr, trackedExpr, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
 import { HttpError, RateLimiter } from "../server/util.ts";
 import { findingsOf, type PremergeRow } from "../../premerge/store.ts";
 import type { Req, Res, Route } from "../types.ts";
@@ -104,7 +104,7 @@ async function writeRepos(db: Db, req: Req): Promise<string[]> {
 }
 
 async function me(db: Db, req: Req): Promise<User> {
-  const mw = await db.prepare("SELECT value FROM settings WHERE key = 'maintainer_writes'").get() as { value: string } | undefined;
+  const mw = await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "maintainer_writes"));
   return {
     login: req.user.login,
     role: req.user.role,
@@ -121,18 +121,12 @@ const CI: Record<string, CiState> = { SUCCESS: "passing", FAILURE: "failing", ER
 const MERGEABLE: Record<string, Mergeable> = { MERGEABLE: "clean", CONFLICTING: "conflicts" };
 const TIER: Record<string, Tier> = { whitelisted: "whitelisted", not: "not", allow: "override-allow", deny: "override-deny" };
 
-type ItemRow = {
-  repo: string; number: number; kind: string; state: string; title: string | null; body: string | null; author: string | null;
-  created_at: string | null; updated_at: string | null; labels: string | null; additions: number | null; deletions: number | null; changed_files: number | null;
-  mergeable: string | null; ci_state: string | null; closed_at: string | null; merged_at: string | null; merged_by: string | null;
-};
-
 export async function itemCore(db: Db, req: Req): Promise<Item> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
-  const it = await db.prepare("SELECT * FROM items WHERE repo = ? AND number = ?").get(repo, n) as ItemRow | undefined;
+  const it = await db.get(db.k.selectFrom("items").select(kx.cols("items")).where("repo", "=", repo).where("number", "=", n));
   if (!it) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   const c = it.author ? (await contributors(db, { login: it.author })).find((x) => x.login === it.author) : undefined;
   let labels: string[] = [];
@@ -140,13 +134,18 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     const l = JSON.parse(it.labels ?? "[]") as unknown;
     if (Array.isArray(l)) labels = l.filter((x): x is string => typeof x === "string");
   } catch { /* malformed: no labels */ }
-  const stages = await db.prepare("SELECT stage, at, actor AS \"by\", note FROM stages WHERE repo = ? AND number = ? ORDER BY at, rowid").all(repo, n) as
-    { stage: Item["stages"][number]["stage"]; at: string; by: string | null; note: string | null }[];
-  const comments = await db.prepare(`SELECT id, author, created_at AS at, body, kind, review_state AS reviewState FROM comments
-    WHERE repo = ? AND number = ? AND NOT (kind = 'review' AND COALESCE(TRIM(body), '') = '') ORDER BY created_at, rowid`).all(repo, n) as unknown as ItemComment[];
-  const decisionIds = (await db.prepare(`SELECT id FROM decisions WHERE (repo = :repo AND number = :n) OR (number IS NULL AND EXISTS (
-      SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') = :repo AND json_extract(j.value, '$.number') = :n)) ORDER BY asked_at`).all({ repo, n }) as { id: string }[]).map((r) => r.id);
+  const stages = await db.all(db.k.selectFrom("stages").select(["stage", "at", "actor as by", "note"]).where("repo", "=", repo).where("number", "=", n)
+    .orderBy("at").orderBy(kx.rowid("stages")).$narrowType<{ stage: Item["stages"][number]["stage"] }>());
+  const comments = await db.all(db.k.selectFrom("comments").select(["id", "author", "created_at as at", "body", "kind", "review_state as reviewState"])
+    .where("repo", "=", repo).where("number", "=", n)
+    .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "=", "")])))
+    .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] | null }>());
+  const decisionIds = (await db.all(db.k.selectFrom("decisions").select("id").where((eb) => eb.or([
+    eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
+    eb.and([eb("number", "is", null), eb.exists(
+      db.k.selectFrom(kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end(), "j")).select(eb.lit(1).as("one"))
+        .where((e) => e.and([e(kx.jsonText(db, "j.value", "$.repo"), "=", repo), e(kx.jsonNum(db, "j.value", "$.number"), "=", n)])))]),
+  ])).orderBy("asked_at"))).map((r) => r.id);
   // The quiet pull request of a security fix: viewers get none of the model text about it.
   const veil = !canSeeInternals(req) && await isQuiet(db, repo, n);
   const out: Item = {
@@ -161,12 +160,12 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     mergeable: MERGEABLE[it.mergeable ?? ""] ?? "unknown",
     labels, createdAt: it.created_at ?? "", updatedAt: it.updated_at ?? "",
     closedAt: it.closed_at, mergedAt: it.merged_at, mergedBy: it.merged_by,
-    pipelineOn: (await db.prepare("SELECT pipeline FROM tracked_repos WHERE name = ?").get(repo) as { pipeline: number } | undefined)?.pipeline === 1,
+    pipelineOn: (await db.get(db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo)))?.pipeline === 1,
     related: await relatedOf(db, repo, n), classifications: await classificationsOf(db, repo, n), area: await areaNameOf(db, repo, n),
     // Stage notes quote review reasons, verification summaries and fix-up reasons: staff only.
     stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: canSeeInternals(req) ? s.note : null })),
     discord: await discord.discordOf(db, repo, n),
-    comments: comments.map((x) => ({ ...x, author: x.author ?? "", body: x.body ?? "" })),
+    comments: comments.map((x) => ({ ...x, kind: x.kind ?? "comment", at: x.at ?? "", author: x.author ?? "", body: x.body ?? "" })),
     decisionIds, settled: unflagged(await settledOf(db, repo, n), await isQuiet(db, repo, n), !veil) as Item["settled"], priority: await priorityOf(db, repo, n),
     ...(it.kind === "pr" ? await prWork(db, repo, n, canSeeInternals(req)) : { verification: null, fixups: [], prBuild: null }),
     // The reviewer's reasons quote the patch, so viewers get the verdict only.
@@ -192,13 +191,16 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
 
 /** The changed files the activity sync stored for the current head; empty until the sync has read the PR. */
 async function filesOf(db: Db, repo: string, n: number): Promise<Item["files"]> {
-  return (await db.prepare(`SELECT f.path, f.additions, f.deletions FROM pr_files f JOIN items i ON i.repo = f.repo AND i.number = f.number AND i.head_oid = f.head
-    WHERE f.repo = ? AND f.number = ? ORDER BY f.path`).all(repo, n) as { path: string; additions: number; deletions: number }[]);
+  return db.all(db.k.selectFrom("pr_files as f")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").onRef("i.head_oid", "=", "f.head"))
+    .select(["f.path", "f.additions", "f.deletions"]).where("f.repo", "=", repo).where("f.number", "=", n).orderBy("f.path"));
 }
 
 /** The head's check contexts as the checks sync stored them; empty when they belong to an older head. */
 async function ciChecksOf(db: Db, repo: string, n: number): Promise<Item["ciChecks"]> {
-  const r = await db.prepare("SELECT c.checks FROM pr_checks c JOIN items i ON i.repo = c.repo AND i.number = c.number WHERE c.repo = ? AND c.number = ? AND (i.head_oid IS NULL OR i.head_oid = c.head_oid)").get(repo, n) as { checks: string } | undefined;
+  const r = await db.get(db.k.selectFrom("pr_checks as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number"))
+    .select("c.checks").where("c.repo", "=", repo).where("c.number", "=", n)
+    .where((eb) => eb.or([eb("i.head_oid", "is", null), eb("i.head_oid", "=", eb.ref("c.head_oid"))])));
   if (!r) return [];
   let list: unknown = [];
   try { list = JSON.parse(r.checks); } catch { /* malformed: none */ }
@@ -208,7 +210,8 @@ async function ciChecksOf(db: Db, repo: string, n: number): Promise<Item["ciChec
 
 /** Pre-merge review rows of the PR, newest first. */
 async function premergeOf(db: Db, repo: string, n: number): Promise<ItemPremerge[]> {
-  const rows = await db.prepare("SELECT * FROM premerge_reviews WHERE repo = ? AND number = ? ORDER BY at DESC, head_oid DESC").all(repo, n) as unknown as PremergeRow[];
+  const rows: PremergeRow[] = await db.all(db.k.selectFrom("premerge_reviews").select(kx.cols("premerge_reviews")).where("repo", "=", repo).where("number", "=", n)
+    .orderBy("at", "desc").orderBy("head_oid", "desc"));
   return rows.map((r) => ({ head: r.head_oid, at: r.at, model: r.model, findings: findingsOf(r), searched: r.searched, error: r.error, tries: r.tries }));
 }
 
@@ -219,8 +222,8 @@ async function premergeOf(db: Db, repo: string, n: number): Promise<ItemPremerge
  */
 async function conflictsNamed(db: Db, repo: string, n: number, head: string, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews["conflicts"]> {
   const stored = [
-    (await db.prepare("SELECT conflicts FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, n, head) as { conflicts: string | null } | undefined)?.conflicts,
-    (await db.prepare("SELECT conflicts FROM premerge_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, n, head) as { conflicts: string | null } | undefined)?.conflicts,
+    (await db.get(db.k.selectFrom("opus_reviews").select("conflicts").where("repo", "=", repo).where("number", "=", n).where("head_oid", "=", head)))?.conflicts,
+    (await db.get(db.k.selectFrom("premerge_reviews").select("conflicts").where("repo", "=", repo).where("number", "=", n).where("head_oid", "=", head)))?.conflicts,
   ];
   const out: ItemReviews["conflicts"] = [];
   for (const raw of stored) {
@@ -228,9 +231,9 @@ async function conflictsNamed(db: Db, repo: string, n: number, head: string, int
     try { v = JSON.parse(raw ?? "[]"); } catch { /* unreadable: none */ }
     for (const h of Array.isArray(v) ? (v as { id?: unknown; reason?: unknown }[]) : []) {
       if (typeof h?.id !== "number" || out.some((d) => d.id === h.id)) continue;
-      const d = await db.prepare(`SELECT s.repo, s.number, s.text, s.item_title, i.kind, i.state, i.title FROM owner_statements s
-        LEFT JOIN items i ON i.repo = s.repo AND i.number = s.number WHERE s.id = ?`).get(h.id) as
-        { repo: string; number: number | null; text: string; item_title: string; kind: "pr" | "issue" | null; state: string | null; title: string | null } | undefined;
+      const d = await db.get(db.k.selectFrom("owner_statements as s").leftJoin("items as i", (j) => j.onRef("i.repo", "=", "s.repo").onRef("i.number", "=", "s.number"))
+        .select(["s.repo", "s.number", "s.text", "s.item_title", "i.kind", "i.state", "i.title"]).where("s.id", "=", h.id)
+        .$narrowType<{ kind: "pr" | "issue" | null }>());
       if (!d || isHiddenRepo(hidden, d.repo)) continue;
       out.push({
         id: h.id, repo: d.repo, number: d.number, kind: d.kind, state: d.state ? (d.state.toLowerCase() as ItemState) : null, title: d.title ?? (d.item_title || null),
@@ -243,36 +246,38 @@ async function conflictsNamed(db: Db, repo: string, n: number, head: string, int
 
 /** `internals` false (viewers): the verdict only; the reviewer's reason, fixes and risks quote the patch. */
 async function reviewsOf(db: Db, repo: string, n: number, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews | null> {
-  const o = await db.prepare(`SELECT head_oid, at, mode, base_head, verdict, sure, reason, fixes, risks FROM final_reviews
-    WHERE repo = ? AND number = ? ORDER BY at DESC, head_oid DESC LIMIT 1`).get(repo, n) as
-    { head_oid: string; at: string; mode: "full" | "delta"; base_head: string | null; verdict: ReviewSide["verdict"]; sure: number; reason: string; fixes: string | null; risks: string | null } | undefined;
+  // The view holds the rows of opus_reviews that have a verdict; its head, time and mode columns are NOT NULL there.
+  const o = await db.get(db.k.selectFrom("final_reviews").select(["head_oid", "at", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks"])
+    .where("repo", "=", repo).where("number", "=", n).orderBy("at", "desc").orderBy("head_oid", "desc").limit(1)
+    .$narrowType<{ head_oid: string; at: string; mode: "full" | "delta"; verdict: ReviewSide["verdict"] }>());
   if (!o) return null;
   const list = <T>(s: string | null): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
-  const head = (await db.prepare("SELECT head_oid FROM items WHERE repo = ? AND number = ?").get(repo, n) as { head_oid: string | null } | undefined)?.head_oid ?? null;
+  const head = (await db.get(db.k.selectFrom("items").select("head_oid").where("repo", "=", repo).where("number", "=", n)))?.head_oid ?? null;
   return {
     head: o.head_oid, current: o.head_oid === head, conflicts: await conflictsNamed(db, repo, n, o.head_oid, internals, hidden),
-    opus: { verdict: o.verdict, reason: internals ? o.reason : "", fixes: internals ? list(o.fixes) : [], risks: internals ? list(o.risks) : [], at: o.at, sure: o.sure === 1, mode: o.mode, baseHead: o.base_head },
-    final: { verdict: o.verdict, reason: internals ? o.reason : "", decided: true },
+    opus: { verdict: o.verdict, reason: internals ? o.reason ?? "" : "", fixes: internals ? list(o.fixes) : [], risks: internals ? list(o.risks) : [], at: o.at, sure: o.sure === 1, mode: o.mode, baseHead: o.base_head },
+    final: { verdict: o.verdict, reason: internals ? o.reason ?? "" : "", decided: true },
   };
 }
 
 /** `internals` false (viewers): states only, without job errors or model output. */
 async function prWork(db: Db, repo: string, n: number, internals: boolean): Promise<Pick<Item, "verification" | "fixups" | "prBuild">> {
-  const head = (await db.prepare("SELECT head_oid FROM items WHERE repo = ? AND number = ?").get(repo, n) as { head_oid: string | null } | undefined)?.head_oid ?? null;
-  const latest = await db.prepare("SELECT head_sha FROM verifications WHERE repo = ? AND number = ? ORDER BY (head_sha = ?) DESC, created_at DESC LIMIT 1").get(repo, n, head) as { head_sha: string } | undefined;
+  const head = (await db.get(db.k.selectFrom("items").select("head_oid").where("repo", "=", repo).where("number", "=", n)))?.head_oid ?? null;
+  const latest = await db.get(db.k.selectFrom("verifications").select("head_sha").where("repo", "=", repo).where("number", "=", n)
+    .$if(head !== null, (q) => q.orderBy((eb) => eb("head_sha", "=", head!), "desc")).orderBy("created_at", "desc").limit(1));
   const v = latest ? await verificationOf(db, repo, n, latest.head_sha) : null;
   const plan = (v?.plan ?? null) as Record<string, unknown> | null;
   const strings = (x: unknown): string[] => (Array.isArray(x) ? x.filter((s): s is string => typeof s === "string") : []);
-  const fixups = (await db.prepare("SELECT from_head, to_head, state, reason, files, attempt, created_at FROM fixups WHERE repo = ? AND number = ? ORDER BY created_at, rowid").all(repo, n) as
-    { from_head: string; to_head: string | null; state: string; reason: string | null; files: string | null; attempt: number; created_at: string }[])
+  const fixups = (await db.all(db.k.selectFrom("fixups").select(["from_head", "to_head", "state", "reason", "files", "attempt", "created_at"])
+    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy(kx.rowid("fixups"))))
     .map((f): ItemFixup => {
       let files: string[] = [];
       try { files = strings(JSON.parse(f.files ?? "[]")); } catch { /* malformed: none */ }
       return { fromHead: f.from_head, toHead: f.to_head, state: f.state as ItemFixup["state"], reason: internals ? f.reason : null, files: internals ? files : [], attempt: f.attempt, createdAt: f.created_at };
     });
   // CI fix tries are listed with the fix-ups, oldest first.
-  const ciFixes = (await db.prepare("SELECT head, to_head, state, reason, files, attempt, created_at FROM ci_fixes WHERE repo = ? AND number = ? ORDER BY created_at, rowid").all(repo, n) as
-    { head: string; to_head: string | null; state: string; reason: string | null; files: string | null; attempt: number; created_at: string }[])
+  const ciFixes = (await db.all(db.k.selectFrom("ci_fixes").select(["head", "to_head", "state", "reason", "files", "attempt", "created_at"])
+    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy(kx.rowid("ci_fixes"))))
     .map((f): ItemFixup => {
       let files: string[] = [];
       try { files = strings(JSON.parse(f.files ?? "[]")); } catch { /* malformed: none */ }
@@ -293,8 +298,9 @@ async function prWork(db: Db, repo: string, n: number, internals: boolean): Prom
 }
 
 async function actionsOf(db: Db, repo: string, n: number): Promise<ItemAction[]> {
-  return (await db.prepare("SELECT decision_id, kind, state, comment_url, reason, created_at, (SELECT d.kind FROM decisions d WHERE d.id = actions.decision_id) AS decision_kind FROM actions WHERE repo = ? AND number = ? ORDER BY created_at, id").all(repo, n) as
-    { decision_id: string; kind: string; state: string; comment_url: string | null; reason: string | null; created_at: string; decision_kind: string | null }[])
+  return (await db.all(db.k.selectFrom("actions").select(["decision_id", "kind", "state", "comment_url", "reason", "created_at"])
+    .select((eb) => eb.selectFrom("decisions as d").select("d.kind").whereRef("d.id", "=", "actions.decision_id").limit(1).as("decision_kind"))
+    .where("repo", "=", repo).where("number", "=", n).orderBy("created_at").orderBy("id")))
     .map((a): ItemAction => ({ decisionId: a.decision_id, decisionKind: a.decision_kind as DecisionKind | null, kind: a.kind, state: a.state as ItemAction["state"], commentUrl: a.comment_url, reason: a.reason, createdAt: a.created_at }));
 }
 
@@ -322,18 +328,18 @@ const PROGRESS_MAX_AGE = 60_000;
 // the mirror, the stages or the tracked repos change, or for a minute at most
 // (classifier verdicts and the hourly counts show within that minute).
 async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
-  const sig = await db.prepare(`SELECT (SELECT MAX(synced_at) FROM main.repos) AS synced,
-      (SELECT value FROM main.settings WHERE key = 'org_high_water') AS hw,
-      (SELECT COUNT(*) || ':' || COALESCE(MAX(rowid), 0) FROM main.stages) AS st,
-      (SELECT group_concat(name) FROM main.tracked_repos) AS tr`).get() as Record<string, string | null>;
+  const sig = await db.get(db.k.selectNoFrom((eb) => [
+    eb.selectFrom("main.repos").select((e) => e.fn.max<string | null>("synced_at").as("m")).as("synced"),
+    eb.selectFrom("main.settings").select("value").where("key", "=", "org_high_water").as("hw"),
+    eb.selectFrom("main.stages").select((e) => e.fn.countAll<number>().as("c")).as("st_count"),
+    eb.selectFrom("main.stages").select((e) => e.fn.max<number | null>(kx.rowid("main.stages")).as("m")).as("st_max"),
+    eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("g")).as("tr"),
+  ]));
   const key = JSON.stringify(sig);
   const cache = progressCache.get(db) ?? progressCache.set(db, new Map()).get(db)!;
   const slot = JSON.stringify([hidden, hidden.visible ?? null]);
   const hit = cache.get(slot);
   if (hit && hit.key === key && Date.now() - hit.at < PROGRESS_MAX_AGE) return hit.value;
-  const hp: Record<string, SQLInputValue> = { since: "" };
-  const hideSql = excludeHidden("i.repo", hidden, hp);
-
   const start = await trackingStart(db);
   const now = Date.now();
   const funnels = new Map((await funnelByRepo(db)).filter((r) => !isHiddenRepo(hidden, r.repo)).map((r) => [r.repo, r]));
@@ -341,9 +347,13 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
   const perHour = new Array<number>(24).fill(0);
   const perHourPipeline = new Array<number>(24).fill(0);
   const since = now - 24 * 3600_000;
-  for (const r of await db.prepare(`WITH ${latestCte()} SELECT i.closed_at, l.stage IN ('merged', 'closed', 'fixed-by-us') AS ours
-      FROM ${CLOSED_ITEMS(db)} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
-      WHERE i.closed_at >= :since AND i.state <> 'OPEN' AND i.${TRACKED}${hideSql ? ` AND ${hideSql}` : ""}`).all({ ...hp, since: new Date(since).toISOString() }) as { closed_at: string; ours: number | null }[]) {
+  for (const r of await db.all(latestCteExpr(db).selectFrom("main.items as i")
+    .leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
+    .select((eb) => ["i.closed_at", eb("l.stage", "in", ["merged", "closed", "fixed-by-us"]).as("ours")])
+    .where("i.closed_at", ">=", new Date(since).toISOString()).where("i.state", "<>", "OPEN")
+    .where((eb) => trackedExpr(db, eb, "i.repo"))
+    .where((eb) => excludeHiddenExpr(db, "i.repo", hidden) ?? eb.lit(true))
+    .$narrowType<{ closed_at: string }>())) {
     const h = Math.floor((Date.parse(r.closed_at) - since) / 3600_000);
     if (h >= 0 && h < 24) {
       perHour[h]!++;
@@ -369,11 +379,10 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
 
 async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
   const heavy = await progressItems(db, hidden);
-  const dp: Record<string, string> = {};
-  const hideDec = withoutHidden(db, hidden, dp);
   const openDec = new Map<string, number>();
   let decisionsOpen = 0;
-  for (const r of await db.prepare(`SELECT repo, number, items FROM decisions WHERE answer IS NULL${hideDec ? ` AND ${hideDec}` : ""}`).all(dp) as { repo: string | null; number: number | null; items: string | null }[]) {
+  for (const r of await db.all(db.k.selectFrom("decisions").select(["repo", "number", "items"]).where("answer", "is", null)
+    .where((eb) => withoutHiddenExpr(db, eb, hidden) ?? eb.lit(true)))) {
     decisionsOpen++;
     let repos = r.number !== null && r.repo ? [r.repo] : [];
     if (r.number === null) {
@@ -384,7 +393,8 @@ async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
     for (const x of repos) openDec.set(x, (openDec.get(x) ?? 0) + 1);
   }
   const today = new Date().toISOString().slice(0, 10);
-  const answeredToday = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE answered_at >= :t${hideDec ? ` AND ${hideDec}` : ""}`).get({ ...dp, t: `${today}T00:00:00` }) as { n: number }).n;
+  const answeredToday = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where("answered_at", ">=", `${today}T00:00:00`)
+    .where((eb) => withoutHiddenExpr(db, eb, hidden) ?? eb.lit(true))))!.n;
   return {
     ...heavy,
     repos: heavy.repos.map((r) => ({ ...r, decisionsOpen: openDec.get(r.repo) ?? 0 })),

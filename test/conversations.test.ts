@@ -30,8 +30,8 @@ const T0 = "2026-01-01T00:00:00Z";
 
 async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "conv-test-")), "t.db"));
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await useTestAccount(db);
   const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
     await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body text", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
@@ -142,7 +142,7 @@ describe("new step kinds", () => {
 
   test("transfer is for issues and last, an answer that writes takes open_issue but not a comment, fixup that merges needs a merge or scope decision", async () => {
     const db = await fresh();
-    await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('lib', 'op', ?, 1)").run(T0);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "lib", added_by: "op", added_at: T0, pipeline: 1 }));
     await ask(db, [{ id: "app#2:merge", kind: "merge", repo: "app", number: 2, question: "Merge?", options: [{ key: "merge", label: "Merge" }, { key: "hold", label: "Hold" }] }]);
     const p1 = await run(db, 3, [
       R([{ kind: "transfer", to: "lib" }]),
@@ -191,7 +191,7 @@ describe("Do it", () => {
     const { card } = await doCard(db, id, "op", { querier: querier as never });
     assert.equal(card.state, "done", card.error ?? "");
     assert.ok(sent.some((x) => x.q.includes("closeIssue") && x.v.reason === "COMPLETED"));
-    const d = await db.prepare("SELECT answer, applied_at FROM decisions WHERE id = 'app#1:scope'").get() as { answer: string; applied_at: string | null };
+    const d = (await db.get(db.k.selectFrom("decisions").select(["answer", "applied_at"]).where("id", "=", "app#1:scope")))!;
     assert.equal(d.answer, "handled");
     assert.ok(d.applied_at);
   });
@@ -229,7 +229,7 @@ describe("Do it", () => {
 
   test("a transfer needs the comment approval of the target repository too", async () => {
     const db = await fresh();
-    await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('lib', 'op', ?, 1)").run(T0);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "lib", added_by: "op", added_at: T0, pipeline: 1 }));
     const sent: string[] = [];
     const querier = { query: async (q: string) => {
       if (q.includes("issueOrPullRequest")) return { repository: { issueOrPullRequest: { __typename: "Issue", id: "I_1", state: "OPEN" } } };
@@ -254,7 +254,7 @@ describe("Do it", () => {
     const { card } = await doCard(ok, id, "op", { querier: g.querier as never });
     assert.equal(card.state, "done", card.error ?? "");
     assert.deepEqual(g.sent.filter((x) => x === "comment" || x === "label"), ["comment", "label"]);
-    const d = await ok.prepare("SELECT answer, answered_by FROM decisions WHERE id = 'app#1:scope'").get() as { answer: string; answered_by: string };
+    const d = (await ok.get(ok.k.selectFrom("decisions").select(["answer", "answered_by"]).where("id", "=", "app#1:scope")))!;
     assert.deepEqual({ ...d }, { answer: "take", answered_by: "op" });
 
     const bad = await fresh();
@@ -263,7 +263,7 @@ describe("Do it", () => {
     const failed = (await doCard(bad, await resolution(bad, [{ kind: "comment" }, { kind: "label", label: "bugfix" }], { kind: "answer", option: "take" }, "Thanks."), "op", { querier: b.querier as never })).card;
     assert.equal(failed.state, "failed");
     assert.match(failed.error ?? "", /Already done: Post the comment below/);
-    assert.equal((await bad.prepare("SELECT answer FROM decisions WHERE id = 'app#1:scope'").get())!.answer, null);
+    assert.equal((await bad.get(bad.k.selectFrom("decisions").select("answer").where("id", "=", "app#1:scope")))!.answer, null);
   });
 
   /** Stores an Opus turn with one proposed card (as a reply would) and returns the card's id. */
@@ -284,7 +284,7 @@ describe("Do it", () => {
     assert.equal(done.state, "done", done.error ?? "");
     assert.deepEqual(g.sent.filter((x) => x === "comment" || x === "label"), ["label"]);
     assert.match(done.result ?? "", /skipped: Post the comment below/);
-    const dec = await db.prepare("SELECT answer, answer_note FROM decisions WHERE id = 'app#1:scope'").get() as { answer: string; answer_note: string };
+    const dec = (await db.get(db.k.selectFrom("decisions").select(["answer", "answer_note"]).where("id", "=", "app#1:scope")))!;
     assert.deepEqual({ ...dec }, { answer: "take", answer_note: "Because of the pack" });
     assert.ok((await db.get(db.k.selectFrom("conversation_turns").select("body").where("kind", "=", "system").where("number", "=", 1).orderBy("id", "desc").limit(1)))!.body.endsWith("Note: Because of the pack"));
 
@@ -321,7 +321,7 @@ describe("Do it", () => {
     assert.equal(blocks.filter((b) => b.block.includes('<included from="maintainer" login="maint"') && b.block.includes("I think it is fine ")).length, 1);
     assert.ok(!blocks[0]!.block.includes("@x"));
     // A source from another item's decision is refused.
-    await db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at) VALUES ('app#3:scope', 'scope', 'app', 3, 'Scope?', '[]', ?)").run(T0);
+    await db.run(db.k.insertInto("decisions").values({ id: "app#3:scope", kind: "scope", repo: "app", number: 3, question: "Scope?", options: "[]", asked_at: T0 }));
     await db.run(db.k.insertInto("decision_comments").values({ id: "c3", decision_id: "app#3:scope", login: "maint", at: T0, body: "Other item" }));
     await assert.rejects(() => conv.postInclude(db, req("operator", { repo: "app", n: "1" }, { source: "decision-comment:c3", on: true })), (e) => e instanceof HttpError && e.status === 400);
     // The next asked message carries nothing again.

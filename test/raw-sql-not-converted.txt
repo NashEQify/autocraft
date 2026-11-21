@@ -121,7 +121,6 @@ src/dash/api/github-writes.ts
 
 src/dash/api/home.ts
 
-src/dash/api/index.ts
 
 src/dash/api/insight.ts
 
