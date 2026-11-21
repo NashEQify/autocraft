@@ -8,6 +8,7 @@ import { MAX_RERUNS_PER_DAY, discussionState, maintainerSince, nextUtcMidnight, 
 import { ourCommitsLoader } from "./ours.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import type { NotNull } from "kysely";
 
 /** Opus review calls of one PR per UTC day, new heads, re-runs and failed calls together (a reply-fix turn is part of its review). */
 export const MAX_REVIEWS_PER_DAY = MAX_RERUNS_PER_DAY;
@@ -43,7 +44,7 @@ export async function recordReviewFailure(db: Db, repo: string, number: number, 
   const key = failKey(repo, number, head);
   const cur = await setting(db, key);
   const n = (Number(cur?.split("|")[0]) || 0) + 1;
-  await db.run(db.k.deleteFrom("main.settings").where((eb) => kx.like(db, "key", eb.val(`${kx.likeEscape(`${FAIL_KEY}${repo}#${number}@`)}%`), "\\")).where("key", "<>", key));
+  await db.run(db.k.deleteFrom("main.settings").where((eb) => kx.like(db, "key", eb.val(`${FAIL_KEY}${repo}#${number}@%`))).where("key", "<>", key));
   await db.run(db.k.insertInto("main.settings").values({ key, value: `${n}|${new Date(nowMs).toISOString()}` }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
 }
 
@@ -80,8 +81,9 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
       .select(["o.repo", "o.number", "o.head_oid", "o.at", "o.verdict", "o.seen_at", "o.disc_hash", "o.blocked_by"])
       .where("o.verdict", "is not", null)
       .$if(!!only, (q) => q.where(kx.refIn(db, "o", only!)))
-      .orderBy("o.at", (o) => o.desc().nullsLast()).orderBy(kx.rowid("main.opus_reviews", "o"), "desc"));
-    for (const r of rows) if (!out.has(keyOf(r))) out.set(keyOf(r), { ...r, k: keyOf(r), verdict: r.verdict! });
+      .$narrowType<{ verdict: NotNull }>()
+      .orderBy("o.at", "desc").orderBy(kx.rowid("main.opus_reviews", "o"), "desc"));
+    for (const r of rows) if (!out.has(keyOf(r))) out.set(keyOf(r), { ...r, k: keyOf(r) });
     return out;
   });
   type Count = { k: string; n: number; last: string | null };
@@ -109,7 +111,7 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
     .where((eb) => eb.or([eb("p.fix_id", "is not", null), eb("p.head", "<>", eb.ref("p.from_head"))]))
     .$if(!!only, (q) => q.where(kx.refIn(db, "p", only!))))).flatMap((r) => (r.head === null ? [] : [`${keyOf(r)}@${r.head}`]))));
   const failures = once(async () => new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"])
-    .where((eb) => kx.like(db, "key", eb.val(`${kx.likeEscape(FAIL_KEY)}%`), "\\")))).map((r) => [r.key, r.value])));
+    .where((eb) => kx.like(db, "key", eb.val(`${FAIL_KEY}%`))))).map((r) => [r.key, r.value])));
   // The checks list only where effectiveCiWith() reads it: a failure.
   const checks = once(async () => new Map((await db.all(db.k.selectFrom("main.pr_checks as c")
     .select((eb) => ["c.repo", "c.number", "c.head_oid", "c.overall", eb.case().when("c.overall", "=", "failure").then(eb.ref("c.checks")).end().as("checks")])

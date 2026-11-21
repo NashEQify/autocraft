@@ -16,8 +16,8 @@ const answerOf = async (w: World, n: number, head: string) => await w.rows("SELE
 
 test("a retarget makes the review stale like a push, and the re-review against the new base voids the old base's answer and pre-merge review", async () => {
   const w = (current = await (await (await (await (await (await world()).repo()).pr(1)).review(1)).answer(1, "merge")).premerge(1, "clean"));
-  await w.db.run(w.db.k.updateTable("main.items").set({ base_ref: "release" }).where("number", "=", 1));
-  await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ base_ref: "release" }).where("number", "=", 1));
+  await w.db.run(w.db.k.updateTable("items").set({ base_ref: "release" }).where("number", "=", 1));
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ base_ref: "release" }).where("number", "=", 1));
   assert.equal((await staleReviews(w.db, "app")).size, 0);
 
   // The PR author retargets to the default branch; a live read before the merge records it.
@@ -25,7 +25,7 @@ test("a retarget makes the review stale like a push, and the re-review against t
   assert.ok((await staleReviews(w.db, "app")).has("app#1@sha1"));
   assert.equal(await markedStaleSince(w.db, "app", 1, ""), false);
   const today = new Date().toISOString();
-  for (let i = 0; i < 3; i++) await w.db.run(w.db.k.insertInto("main.opus_review_history").values({ repo: "app", number: 1, head_oid: "sha1", at: today, model: "m", mode: "full", verdict: "take", sure: 1, reason: "r" }));
+  for (let i = 0; i < 3; i++) await w.db.run(w.db.k.insertInto("opus_review_history").values({ repo: "app", number: 1, head_oid: "sha1", at: today, model: "m", mode: "full", verdict: "take", sure: 1, reason: "r" }));
   assert.equal((await reviewHold(w.db, "app", 1, "sha1"))?.kind, "cap");
 
   await saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: "sha1" }, {

@@ -117,7 +117,7 @@ test("a PR's facts change with the clock alone no earlier than its refreshAt: a 
     review: { ref: "app#1", verdict: "hold", sure: true, reason: "r", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: ["app#2"] },
   });
   await w.synced(1, "h2");
-  const at = Date.parse((await w.db.get(w.db.k.selectFrom("main.opus_reviews").select("at").where("number", "=", 1)))!.at);
+  const at = Date.parse((await w.db.get(w.db.k.selectFrom("opus_reviews").select("at").where("number", "=", 1)))!.at);
   const load = async (now: number) => (await loadPrFacts(w.db, { now, refs: ["app#1"] }))[0]!;
   const f = await load(at + 3600_000);
   assert.equal(f.reviewHold?.kind, "blocked");
@@ -166,7 +166,7 @@ test("a held PR is logged when its blocker closes; a bulk write logs nothing and
   const since = async (cursor: ChangeCursor) => { const c = await changesSince(db, cursor); return { ...c, refs: [...c.refs].sort() }; };
   const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', ?, 'pr', 'OPEN', 't', ?)");
   for (const n of [1, 2, 3]) await item.run(n, T);
-  await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, blocked_by) VALUES ('app', 1, 'h1', ?, 'full', 'hold', '[\"app#2\", 7, \"app#2\"]')").run(T);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "h1", at: T, mode: "full", verdict: "hold", blocked_by: '["app#2", 7, "app#2"]' }));
   let seq = await changeCursor(db);
   await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
   let c = await since(seq);

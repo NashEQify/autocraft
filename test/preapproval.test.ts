@@ -79,7 +79,7 @@ describe("pre-approved merge", () => {
     await start(w, 3);
     await pushed(w, 3, "sha3b");
     await (await w.synced(3, "sha3b")).review(3, { head: "sha3b" });
-    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "failure" }).where("number", "=", 3));
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "failure" }).where("number", "=", 3));
     // The CI fix step may still repair the red head: the pre-approval waits for it, and asks once it has given up.
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 3))?.state, "ci");
@@ -111,7 +111,7 @@ describe("pre-approved merge", () => {
     const w = await (await (await fresh()).pr(5)).review(5, { verdict: "take-fix" });
     await inCi(w, 5);
     await w.premerge(5, "clean");
-    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ sure: 0 }).where("number", "=", 5).where("head_oid", "=", "sha5b"));
+    await w.db.run(w.db.k.updateTable("opus_reviews").set({ sure: 0 }).where("number", "=", 5).where("head_oid", "=", "sha5b"));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "asked");
     assert.deepEqual(await answerOf(w, 5, "sha5b"), [{ answer: null }]);
@@ -165,7 +165,7 @@ describe("pre-approved merge", () => {
     assert.equal((await w.rows("SELECT state FROM operator_fixups WHERE number = 13"))[0]!.state, "ended");
 
     await start(w, 14);
-    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ mergeable: "CONFLICTING" }).where("number", "=", 14));
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ mergeable: "CONFLICTING" }).where("number", "=", 14));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 14))?.state, "asked");
   });
@@ -301,7 +301,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
 
   test("the add asks for no review of its own: running CI still holds the review of the PR's head", async () => {
     const w = await (await fresh()).pr(13);
-    await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "pending" }).where("number", "=", 13));
+    await w.db.run(w.db.k.updateTable("pr_checks").set({ overall: "pending" }).where("number", "=", 13));
     await preapproveMerge(w.db, { repo: "app", number: 13, by: OPERATOR });
     assert.equal((await (await reviewHolds(w.db))("app", 13, "sha13"))?.kind, "ci");
   });

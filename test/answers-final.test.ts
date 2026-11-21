@@ -28,7 +28,7 @@ const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePr
 describe("pre-approval and review holds", () => {
   test("the fix-up push lifts a blocked hold; a review that failed for good asks a Merge question", async () => {
     const w = await (await (await (await (await (await fresh()).pr(1)).review(1, { verdict: "take-fix" })).pr(2)).pr(3)).review(3, { verdict: "take-fix" });
-    await w.db.run(w.db.k.updateTable("main.opus_reviews").set({ verdict: "hold" }).where("number", "=", 1));
+    await w.db.run(w.db.k.updateTable("opus_reviews").set({ verdict: "hold" }).where("number", "=", 1));
     await save(w, 1, "sha1", "hold", true, ["app#2"]);
     await startPushed(w, 1, "sha1b");
     await settle(w);
