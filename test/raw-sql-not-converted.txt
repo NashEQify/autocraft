@@ -333,11 +333,8 @@ src/remote/reserve.ts
 
 src/remote/room.ts
 
-src/remote/takers.ts
 
-src/remote/task-items.ts
 
-src/remote/tools.ts
 
 
 

@@ -10,7 +10,7 @@
 // (a job about to start, a repo's takers) counts a filtered runner only for the repos that have an open matching item.
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
-import { ciEq } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export const TASK_ITEMS_KEY = "task_items";
 export const TASK_ITEMS = ["all", "fast", "mine"] as const;
@@ -20,7 +20,7 @@ const isTaskItems = (v: unknown): v is TaskItems => typeof v === "string" && (TA
 
 /** The user's item choice; "all" with no row or a value no longer offered. */
 export async function userTaskItems(db: Db, login: string): Promise<TaskItems> {
-  const v = (await db.prepare("SELECT value FROM main.user_settings WHERE login = ? AND key = ?").get(login, TASK_ITEMS_KEY) as { value: string } | undefined)?.value;
+  const v = (await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", TASK_ITEMS_KEY)))?.value;
   return isTaskItems(v) ? v : "all";
 }
 
@@ -33,9 +33,9 @@ export function parseTaskItems(raw: unknown): TaskItems {
 /** Stores the item choice ("all" removes the row); a change is audited. */
 export async function setUserTaskItems(db: Db, login: string, v: TaskItems): Promise<TaskItems> {
   const was = await userTaskItems(db, login);
-  if (v === "all") await db.prepare("DELETE FROM main.user_settings WHERE login = ? AND key = ?").run(login, TASK_ITEMS_KEY);
-  else await db.prepare("INSERT INTO main.user_settings (login, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-    .run(login, TASK_ITEMS_KEY, v, new Date().toISOString());
+  if (v === "all") await db.run(db.k.deleteFrom("main.user_settings").where("login", "=", login).where("key", "=", TASK_ITEMS_KEY));
+  else await db.run(db.k.insertInto("main.user_settings").values({ login, key: TASK_ITEMS_KEY, value: v, updated_at: new Date().toISOString() })
+    .onConflict((oc) => oc.columns(["login", "key"]).doUpdateSet(kx.excluded(["value", "updated_at"]))));
   if (v !== was) await audit(db, login, "task-items", login, { items: v, was });
   return v;
 }
@@ -48,9 +48,14 @@ export async function itemFilter(db: Db, login: string): Promise<ItemFilter> {
   const choice = await userTaskItems(db, login);
   if (choice === "all") return null;
   // The live pre-approval states are ACTIVE in src/preapproval/index.ts.
-  const rows = await db.prepare(`SELECT f.repo, f.number FROM main.fast_track f JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN'
-    WHERE ? = 'fast' OR ${ciEq(db, "f.added_by", "?")} OR EXISTS (SELECT 1 FROM main.preapprovals p WHERE p.repo = f.repo AND p.number = f.number
-      AND ${ciEq(db, "p.by", "?")} AND p.state IN ('fixup', 'review', 'ci', 'queued'))`).all(choice, login, login) as { repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("main.fast_track as f")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").on("i.state", "=", "OPEN"))
+    .select(["f.repo", "f.number"])
+    .$if(choice !== "fast", (q) => q.where((eb) => eb.or([
+      kx.ciEq(db, "f.added_by", eb.val(login)),
+      eb.exists(eb.selectFrom("main.preapprovals as p").select(eb.lit(1).as("one")).whereRef("p.repo", "=", "f.repo").whereRef("p.number", "=", "f.number")
+        .where(kx.ciEq(db, "p.by", eb.val(login))).where("p.state", "in", ["fixup", "review", "ci", "queued"])),
+    ]))));
   return { refs: new Set(rows.map((r) => `${r.repo}#${r.number}`)), repos: new Set(rows.map((r) => r.repo)) };
 }
 

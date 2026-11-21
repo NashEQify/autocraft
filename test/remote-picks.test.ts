@@ -26,6 +26,7 @@ import { poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-picks-"));
@@ -33,8 +34,8 @@ const dir = mkdtempSync(join(SCRATCH, "remote-picks-"));
 describe("picks and Manual only", async () => {
   const db = await connectDb(join(dir, "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')").run();
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = 'public'").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "photocraft", visibility: "public" }).onConflict((oc) => oc.column("name").doUpdateSet({ visibility: "public" })));
   const callers: Record<string, Caller> = {};
   for (const [login, role] of [["alice", "maintainer"], ["bob", "maintainer"], ["olga", "operator"], ["eve", "viewer"]] as const) {
     await db.run(db.k.insertInto("access").values({ login, role }));
@@ -71,7 +72,7 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("alice"), null, "and not bob's pick");
     assert.equal(await leased("bob", { fastLane: true }), null, "a top-tier review does not fit the fast lane");
     assert.equal(await leased("bob"), third);
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'bob' AND target = 'photocraft#2'").get());
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "remote-pick").where("login", "=", "bob").where("target", "=", "photocraft#2")));
     await clear();
   });
 
@@ -97,9 +98,9 @@ describe("picks and Manual only", async () => {
   test("a pick does not count while its picker is cooling off or at their Max calls at once", async () => {
     const a = await q();
     await pickCall(db, user("bob"), a);
-    await db.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('Bob', ?, 'testing cool-off')").run(Date.now() + 60_000);
+    await db.run(db.k.insertInto("remote_cooloffs").values({ login: "Bob", until: Date.now() + 60_000, reason: "testing cool-off" }));
     assert.equal(await leased("alice"), a, "bob is cooling off: alice's runner takes his pick");
-    await db.prepare("DELETE FROM remote_cooloffs WHERE login = 'bob'").run();
+    await db.run(db.k.deleteFrom("remote_cooloffs").where("login", "=", "bob"));
     await setUserMaxCalls(db, "bob", 1);
     const b = await q();
     await pickCall(db, user("bob"), b);
@@ -129,7 +130,8 @@ describe("picks and Manual only", async () => {
     await assert.rejects(async () => await unpickCall(db, user(loser), a), /only operators/);
     await unpickCall(db, user("olga", "operator"), a);
     assert.equal(await pickedBy(a), null);
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-unpick' AND login = 'olga' AND details LIKE ?").get(`%"picker":"${winner}"%`));
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "remote-unpick").where("login", "=", "olga")
+      .where((eb) => kx.like(db, "details", eb.val(`%"picker":"${winner}"%`)))));
     await clear();
   });
 
@@ -145,7 +147,7 @@ describe("picks and Manual only", async () => {
     await pickCall(db, user("alice"), a);
     assert.equal(await leased("alice"), a, "her own pick");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { manualOnly: false } }));
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'manual-only' AND login = 'alice'").get());
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "manual-only").where("login", "=", "alice")));
     await clear();
   });
 
@@ -191,7 +193,8 @@ describe("picks and Manual only", async () => {
     assert.match(taken.content[0].text, /another user picked it/);
     assert.equal((await rpc("alice", "maintainer", "tools/call", { name: "pick_model_call", arguments: { id: String(b) } })).isError, undefined);
     assert.equal(await pickedBy(b), "alice");
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'alice' AND details LIKE '%\"via\":\"mcp\"%'").get());
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "remote-pick").where("login", "=", "alice")
+      .where((eb) => kx.like(db, "details", eb.val('%"via":"mcp"%')))));
     await rpc("alice", "maintainer", "tools/call", { name: "unpick_model_call", arguments: { id: String(b) } });
     assert.equal(await pickedBy(b), null);
     await clear();
