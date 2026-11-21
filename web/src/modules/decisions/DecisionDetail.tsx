@@ -70,15 +70,15 @@ function Body({ d, onOpenItem, answer, evidence, discussion, timeline }: { d: De
     : null;
   return <>
     <p className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
-      <span className="font-mono text-[11px]">{refText(d)}</span>
+      <span className="font-mono text-2xs">{refText(d)}</span>
       <span aria-hidden>·</span>
       <span>{KIND_TEXT[d.kind]}</span>
       <span aria-hidden>·</span>
       <span title={ageTitle(d.askedAt)}>asked {compactAge(d.askedAt)}</span>
       {claim && <><span aria-hidden>·</span><span title={`claimed ${d.claim!.since}`}>{claim}</span></>}
     </p>
-    <h2 id="detail-title" tabIndex={-1} className={cn("m-0 break-words font-bold text-ink", "text-[19px] leading-[23.75px] min-[861px]:text-[21px] min-[861px]:leading-[26.25px]")}>{d.title}</h2>
-    <p className={cn("mt-1 break-words font-semibold text-ink/85", "text-[16px] leading-[21.6px] min-[861px]:text-[17px] min-[861px]:leading-[22.95px]")}>{d.question}</p>
+    <h2 id="detail-title" tabIndex={-1} className={cn("m-0 break-words font-bold text-ink", "text-xl")}>{d.title}</h2>
+    <p className={cn("mt-1 break-words font-semibold text-ink/85", "text-md min-[861px]:text-lg")}>{d.question}</p>
     {word && <p className="mt-2 text-xs text-ink/60">Answer · {word.text}{d.answer && d.options.find((o) => o.key === d.answer) ? ` · ${d.options.find((o) => o.key === d.answer)!.label}` : ""}</p>}
     {facts.length > 0 && <ul className="mt-3 space-y-1 text-sm leading-6 text-ink/80">{facts.map((f, i) => <li key={i} className="break-words">{f}</li>)}</ul>}
     {rec && <p className="mt-3 break-words text-sm text-ink/80"><strong className="font-semibold">{rec.label}</strong>{rec.reason && <> — {rec.reason}</>}</p>}

@@ -344,12 +344,7 @@ export function clearPhasePatch(): Record<string, null> {
   return { phase: null, state: null, label: null, status: null, flag: null, offset: null, open: null, peek: null };
 }
 
-/**
- * Which Items actions create a history entry. The approved reference pushes a discrete control's
- * URL (`go()` -> pushState, app.js:2294-2300 for selects, :2233 for a row, :2242 for Reset) and
- * replaces the URL while the search input is typed (app.js:2316). The alias redirect replaces too
- * (app.js:501). One map, so the wiring and its test cannot drift apart.
- */
+/** Discrete Items controls push history; typing and alias redirects replace the current entry. */
 export type HistoryAction = "filter" | "phase" | "clear-phase" | "reset" | "remove" | "paging" | "preview" | "open" | "search" | "author" | "alias";
 export const HISTORY_ENTRY: Record<HistoryAction, "push" | "replace"> = {
   filter: "push",
@@ -368,7 +363,7 @@ export function historyOptions(action: HistoryAction): { replace: boolean } {
   return { replace: HISTORY_ENTRY[action] === "replace" };
 }
 
-/** `/items/filters` is an alias of the unified browser, not a second view (reference app.js:498-502). */
+/** `/items/filters` is an alias of the unified browser, not a second view. */
 export function aliasHref(search: string): string {
   const params = new URLSearchParams(search);
   params.delete("phase");

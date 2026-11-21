@@ -5,7 +5,7 @@ import { useUser } from "../../shell/UserContext";
 import { DisclosurePanel } from "../../ui/molecules/DisclosurePanel";
 import { changeDiscussionOpen, discussionModel, DISCUSSION_READ_ERROR } from "./discussion";
 
-// P8: read-only Discussion for the SELECTED decision — the supplied opinions plus the decision's own comment thread.
+// Read-only Discussion for the SELECTED decision — the supplied opinions plus the decision's own comment thread.
 // It never writes, adopts, replies, polls or retries; the closed disclosure does no projection and mounts no hook.
 
 const rowCls = "min-w-0 break-words";

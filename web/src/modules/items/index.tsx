@@ -13,7 +13,7 @@ export const itemsModule: FeatureModule = {
   routes: [
     { path: "items", scoped: true, view: { id: "items", title: "Items", panels: [{ id: "main", title: "Items", component: ItemsView, defaultSize: 100 }] } },
     // Older links and the previous classification view's URL; the alias keeps every key but
-    // `phase`, which never belonged to it, and renders the one browser (reference app.js:498-502).
+    // `phase`, which never belonged to it, and renders the one browser.
     { path: "items/filters", scoped: true, view: { id: "items-filters", title: "Items", panels: [{ id: "main", title: "Items", component: ItemsFiltersAlias, defaultSize: 100 }] } },
   ],
 };

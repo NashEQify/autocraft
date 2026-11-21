@@ -1,4 +1,4 @@
-// P8 Discussion — pure projections for the read-only Discussion disclosure.
+// Discussion — pure projections for the read-only Discussion disclosure.
 //
 // Plain data in, plain data out: the module holds no collection, no cache and no subscription. The React owner in
 // DecisionDiscussion.tsx keeps the mutable OPEN set in `useState` and calls `changeDiscussionOpen` for every update.
@@ -6,29 +6,11 @@
 import type { Decision, DecisionComment } from "../../api/types.ts";
 
 /** The most OPEN decision identities one reader's mounted Discussion owner can remember. */
-export const DISCUSSION_OPEN_LIMIT = 512;
+export { DISCLOSURE_OPEN_LIMIT as DISCUSSION_OPEN_LIMIT, changeDisclosureOpen as changeDiscussionOpen } from "../../ui/disclosureState.ts";
 
 /** The single honest message for a failed or unusable thread read (never an answer/draft failure). */
 export const DISCUSSION_READ_ERROR = "Could not read the decision comments. The decision and your draft are unaffected.";
 
-/** Immutable bounded transition: no mutation, same reference for a no-op, oldest OPEN eviction at the cap. */
-export function changeDiscussionOpen(ids: ReadonlySet<string>, id: string, open: boolean): ReadonlySet<string> {
-  if (!id) return ids;
-  if (open) {
-    if (ids.has(id)) return ids;
-    const next = new Set(ids);
-    if (next.size >= DISCUSSION_OPEN_LIMIT) {
-      const oldest = next.values().next();
-      if (!oldest.done) next.delete(oldest.value);
-    }
-    next.add(id);
-    return next;
-  }
-  if (!ids.has(id)) return ids;
-  const next = new Set(ids);
-  next.delete(id);
-  return next;
-}
 
 export interface DiscussionOpinionRow {
   key: string;

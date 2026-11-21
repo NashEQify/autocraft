@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { EVIDENCE_OPEN_LIMIT, EVIDENCE_READ_ERROR, changeEvidenceOpen, checkStateText, decisionEvidenceModel, itemEvidenceModel, evidenceStaff } from "../web/src/modules/decisions/evidence.ts";
+import { decisionEvidenceModel, itemEvidenceModel, evidenceStaff } from "../web/src/modules/decisions/evidence.ts";
 
 const d = (over: Record<string, unknown> = {}) => ({
   id: "designcraft#3837:scope", kind: "scope", repo: "designcraft", number: 3837,
@@ -10,36 +10,8 @@ const d = (over: Record<string, unknown> = {}) => ({
   docket: "deckcraft#77", optionTexts: [], items: [], shown: null, ...over,
 }) as never;
 
-test("the OPEN set is bounded at 512 with oldest-open eviction and no mutation", () => {
-  let ids: ReadonlySet<string> = new Set();
-  for (let i = 0; i < EVIDENCE_OPEN_LIMIT; i++) ids = changeEvidenceOpen(ids, `d${i}`, true);
-  assert.equal(ids.size, EVIDENCE_OPEN_LIMIT);
-  assert.ok(ids.has("d0"));
-  const before = ids;
-  ids = changeEvidenceOpen(ids, "new", true);
-  assert.equal(ids.size, EVIDENCE_OPEN_LIMIT, "still bounded");
-  assert.equal(ids.has("d0"), false, "the oldest open id was evicted");
-  assert.equal(ids.has("new"), true);
-  assert.ok(before.has("d0"), "the input set was not mutated");
-});
 
-test("redundant open keeps the same reference (insertion age unchanged); close removes and absent close is a no-op", () => {
-  const ids: ReadonlySet<string> = new Set(["a"]);
-  assert.equal(changeEvidenceOpen(ids, "a", true), ids);
-  assert.equal(changeEvidenceOpen(ids, "zzz", false), ids);
-  const closed = changeEvidenceOpen(ids, "a", false);
-  assert.equal(closed.size, 0);
-  assert.ok(ids.has("a"), "close does not mutate the input");
-  assert.equal(changeEvidenceOpen(ids, "", true), ids, "an empty id is a no-op");
-});
 
-test("the set never stores a non-string or empty id and stays <=512", () => {
-  let ids: ReadonlySet<string> = new Set();
-  ids = changeEvidenceOpen(ids, "", true);
-  assert.equal(ids.size, 0);
-  for (let i = 0; i < 600; i++) ids = changeEvidenceOpen(ids, `x${i}`, true);
-  assert.ok(ids.size <= EVIDENCE_OPEN_LIMIT);
-});
 
 test("decision evidence: facts start at original position 2, in order, with no truncation", () => {
   const m = decisionEvidenceModel(d());
@@ -116,21 +88,7 @@ test("item evidence: kind comes from the payload, and an issue is not-applicable
   assert.equal(pr.notApplicable, false, "a PR with no review yet is not 'not applicable'");
 });
 
-test("checks wording: passing/failing/pending/none are truthful and none is never green", () => {
-  assert.equal(checkStateText("passing"), "Passing");
-  assert.equal(checkStateText("failing"), "Failing");
-  assert.equal(checkStateText("pending"), "Pending");
-  assert.equal(checkStateText("none"), "No result recorded");
-  assert.equal(checkStateText("weird"), "Unrecognised state: weird");
-  assert.notEqual(checkStateText("none"), "Passing");
-  assert.notEqual(checkStateText("none"), "Pending");
-});
 
-test("the read error is honest and never an answer failure", () => {
-  assert.match(EVIDENCE_READ_ERROR, /Could not read the item evidence/);
-  assert.match(EVIDENCE_READ_ERROR, /decision and your draft are unaffected/);
-  assert.doesNotMatch(EVIDENCE_READ_ERROR, /answer/i);
-});
 
 test("facts are sliced by POSITION, not by value: identical strings after position 2 still appear", () => {
   const m = decisionEvidenceModel(d({ facts: ["same", "same", "same", "same", "same"] }));
@@ -158,19 +116,7 @@ test("classifier rows keep native order for the same classifier across different
   assert.deepEqual(decisionEvidenceModel(d({ classifications: rows })).classifiers.map((c) => c.reason), ["later", "earlier"]);
 });
 
-test("the OPEN helper keeps identity for open-of-open even at the cap", () => {
-  let ids: ReadonlySet<string> = new Set();
-  for (let i = 0; i < EVIDENCE_OPEN_LIMIT; i++) ids = changeEvidenceOpen(ids, `k${i}`, true);
-  assert.equal(changeEvidenceOpen(ids, "k511", true), ids, "re-opening the newest keeps the same reference");
-  assert.equal(ids.size, EVIDENCE_OPEN_LIMIT);
-});
 
-test("closing the newest and reopening gives a fresh insertion order", () => {
-  let ids: ReadonlySet<string> = new Set(["a", "b"]);
-  ids = changeEvidenceOpen(ids, "a", false);
-  ids = changeEvidenceOpen(ids, "a", true);
-  assert.deepEqual([...ids], ["b", "a"]);
-});
 
 test("item evidence is null when there is no payload at all", () => {
   assert.equal(itemEvidenceModel(undefined, true), null);

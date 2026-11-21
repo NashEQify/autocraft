@@ -9,44 +9,41 @@ import { Link } from "react-router-dom";
 import { CaretDownIcon, GithubLogoIcon } from "@phosphor-icons/react";
 import type { Decision, Item, ItemPageData } from "../../api/types";
 import { Badge, type Tone } from "../../ui/atoms/Badge";
+import { Button } from "../../ui/atoms/Button";
+import { formatCost } from "../../lib/trace";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
 import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { ItemRef } from "../../ui/molecules/ItemRef";
 import { CHECK_COLUMNS, checkCells, Size } from "../queue/checks";
 import { cn } from "../../ui/cn";
 import { decisionPath, githubItemUrl, itemPath } from "../../lib/links";
-import { eventTime } from "../../lib/format";
+import { clock, when, eventTime } from "../../lib/format";
 import {
-  QUEUE_TEXT, absoluteEventTime, answerFacts, answerQueueText, classificationDetail, classificationToken, decisionReceipt, detailFacts, effectiveSettled,
+  QUEUE_TEXT, answerFacts, answerQueueText, classificationDetail, classificationToken, decisionReceipt, detailFacts, effectiveSettled,
   eventDateTime, lastEvents, pipelineRead, receipt, rowWord, statusWord, type RowFacts,
 } from "./rows";
 
 const TONE: Record<string, Tone> = { ok: "ok", warn: "warn", bad: "bad", neutral: "neutral" };
 
-/** The row head: the only interactive part, one native button that toggles the inline detail. */
+/** Native item links and a separate button for the read-only inline detail. */
 export function ItemRow({ facts, open, onToggle, children }: { facts: RowFacts; open: boolean; onToggle: () => void; children?: ReactNode }) {
   const panel = useId();
   const token = facts.settled ? classificationToken(facts.settled) : null;
   return <li className={cn("border-b border-line last:border-0", open && "bg-bg")}>
-    <button
-      type="button"
-      aria-expanded={open}
-      aria-controls={open ? panel : undefined}
-      onClick={onToggle}
-      className="group relative grid w-full gap-[7px] px-[18px] py-[15px] pr-[38px] text-left outline-none hover:bg-ink/[0.03] focus-visible:bg-accent/[0.06] max-[680px]:pl-3.5"
-    >
-      <span className="text-pretty text-[13.5px] font-[550] leading-5">
-        <span className="mr-[7px] whitespace-nowrap font-mono text-xs font-[450] opacity-65">{facts.repo}#{facts.number}</span>
-        {facts.title}
-      </span>
-      <span className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px]">
+    <div className="grid gap-1.5 px-4 py-3">
+      <div className="relative min-h-8 max-md:min-h-11">
+        <ItemRef repo={facts.repo} number={facts.number} kind={facts.kind} state={facts.state} title={facts.title} stretch className="font-medium" />
+      </div>
+      <Button type="button" variant="ghost" size="sm" aria-label={`Details for ${facts.repo}#${facts.number}`}
+        aria-expanded={open} aria-controls={open ? panel : undefined} onClick={onToggle}
+        className="h-auto min-h-7 w-full flex-wrap justify-start whitespace-normal px-0 py-1 text-left font-normal max-md:min-h-11">
         {token ? <Badge tone={TONE[token.tone] ?? "neutral"}>{token.text}</Badge> : facts.status ? <Badge tone="neutral">{facts.status.phase}</Badge> : null}
         {facts.flags.includes("security") && <Badge tone="bad">Security</Badge>}
         {rowWord(facts) && <span className="min-w-0 break-words text-ink/60">{rowWord(facts)}</span>}
-        <span className="ml-auto shrink-0 opacity-70"><TimeAgo iso={facts.updatedAt} /></span>
-      </span>
-      <CaretDownIcon aria-hidden className={cn("absolute right-[19px] top-[23px] text-[13px] text-ink/45 transition-transform duration-150", open && "rotate-180")} />
-    </button>
+        <span className="ml-auto shrink-0 text-ink/60"><TimeAgo iso={facts.updatedAt} /></span>
+        <span className="inline-flex items-center gap-1">Details <CaretDownIcon aria-hidden className={cn("transition-transform duration-150", open && "rotate-180")} /></span>
+      </Button>
+    </div>
     {open && <div id={panel} className="border-t border-dashed border-line px-4 pb-4 pt-1">{children}</div>}
   </li>;
 }
@@ -76,6 +73,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
   itemError?: string;
   decision: Decision | null | undefined;
 }) {
+  const viewer = useUser().role === "viewer";
   const events = lastEvents(detail?.timeline);
   const settled = effectiveSettled(facts, item);
   const read = pipelineRead(item, settled);
@@ -92,7 +90,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
           <p className="mb-0 mt-1.5 text-[11.5px] text-ink/50">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
         </> : null}
         {!itemLoading && !itemError && read && !read.text ? <>
-          <p className="m-0 text-ink/55">The classifier recorded no reason for this item. Quiet items show verdicts without reasons to this role.</p>
+          <p className="m-0 text-ink/55">No classifier reason recorded.</p>
           <p className="mb-0 mt-1.5 text-[11.5px] text-ink/50">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
         </> : null}
         {!itemLoading && !itemError && !read ? <p className="m-0 text-ink/55">No classifier has run for this item, so there is nothing it read to quote.</p> : null}
@@ -104,7 +102,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
           {answer && <p className="mb-0 mt-2 text-[11.5px] leading-5 text-ink/60">
             Execution (joined from the decision, not an Items field): <Badge tone={TONE[answer.tone] ?? "neutral"}>{answer.state}</Badge> — separate from the classification above.
             {answer.reason ? <span className="block">{answer.reason}</span> : null}
-            {answer.appliedAt ? <span className="block">Applied {absoluteEventTime(answer.appliedAt)}</span> : null}
+            {answer.appliedAt ? <span className="block">Applied {when(answer.appliedAt)}</span> : null}
           </p>}
         </> : itemLoading ? <p role="status" className="m-0 text-ink/50">Loading classification…</p>
           : itemError ? <p className="m-0 text-bad">Classification could not be read: {itemError}</p>
@@ -139,7 +137,8 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
         {events.length > 0 && <ul className="m-0 list-none divide-y divide-line p-0">
           {events.map((event) => <li key={event.id} className="py-2 first:pt-0 last:pb-0">
             <strong className="font-semibold text-ink/85">{event.text}</strong>
-            <span className="text-ink/55"> · <time dateTime={eventDateTime(event.at)}>{absoluteEventTime(event.at)}</time></span>
+            <span className="text-ink/55"> · <time dateTime={eventDateTime(event.at)} title={eventDateTime(event.at) ? when(event.at) : undefined} aria-label={eventDateTime(event.at) ? when(event.at) : undefined}>{eventDateTime(event.at) ? clock(event.at) : "Time unknown"}</time></span>
+            {!viewer && formatCost(event.costUsd) && <span className="num text-ink/55"> · {formatCost(event.costUsd)}</span>}
           </li>)}
         </ul>}
       </Section>

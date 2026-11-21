@@ -163,7 +163,6 @@ function HoldCard({ d, choices, updating, evidence }: { d: Decision; choices?: D
   const evidenceWhy = rec ? null : why;
   // Who may answer: write access on every repo involved, and only where AutoCraft settles the decision for the reader.
   const answerable = canActOn(user, [d]);
-  const mayWrite = canAct(user, d.items.length ? d.items.map((i) => i.repo) : [d.repo]);
   // A per-item answer can only be set where a press is possible now: nobody edits a batch while it is held, settling or being prepared.
   const editable = answerable && !queued && !applying && !preparing && !loading;
   return (
@@ -191,13 +190,7 @@ function HoldCard({ d, choices, updating, evidence }: { d: Decision; choices?: D
         <p role="status" className="mt-2 text-sm text-ink/55">Loading the answer options…</p>
       ) : answerable ? (
         <ChoiceGroup d={d} user={user} choices={choices} />
-      ) : (
-        <p className="mt-2 text-xs leading-5 text-ink/55">
-          {mayWrite
-            ? "Read only: AutoCraft only takes answers here from operators and maintainers it acts for."
-            : "Read only: answering needs GitHub write access on " + (d.number === null ? "every repo in the batch" : d.repo) + "."}
-        </p>
-      )}
+      ) : null}
       <Evidence d={d} why={evidenceWhy} editable={editable} extra={evidence} />
       {(d.priority || d.claim || (user.role === "operator" && d.number !== null)) && (
         <div className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-line pt-2">

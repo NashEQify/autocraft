@@ -5,7 +5,7 @@ import { test } from "node:test";
 import type { Classification, Item, ItemListRow, ItemStatusRow, Settled, TimelineEntry } from "../web/src/api/types.ts";
 import {
   aliasToOpenHref, classificationDetail, classificationToken, decisionReceipt, detailFacts, factsFromListRow, factsFromStatusRow,
-  absoluteEventTime, answerFacts, answerQueueText, conflictNote, effectiveSettled, eventDateTime, lastEvents, parseRef, parseSelection, pipelineRead, receipt, refKey,
+  answerFacts, answerQueueText, conflictNote, effectiveSettled, lastEvents, parseRef, parseSelection, pipelineRead, receipt, refKey,
   rowWord, scopedPayload, selectionPatch, selectionProblem, statusWord,
 } from "../web/src/modules/items/rows.ts";
 
@@ -103,11 +103,11 @@ test("classification provenance names the classifiers and their confidence", () 
   assert.match(classificationDetail(settled({ status: "unclassified", label: null }), 2), /latest classification run settled nothing/i);
 });
 
-test("last events are the newest three of the selected item's real timeline", () => {
+test("last events keep the latest supplied subset and display it oldest first", () => {
   const at = (iso: string, text: string): TimelineEntry => ({ id: text, at: iso, kind: "harness", actor: "AutoCraft", icon: "job", text, tone: "neutral", costUsd: null, major: true, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [], feedback: null });
   const timeline = [at("2026-01-01T00:00:00Z", "oldest"), at("2026-01-03T00:00:00Z", "newest"), at("2026-01-02T00:00:00Z", "middle"), at("2026-01-04T00:00:00Z", "latest")];
-  assert.deepEqual(lastEvents(timeline).map((entry) => entry.text), ["latest", "newest", "middle"]);
-  assert.deepEqual(lastEvents(timeline, 2).map((entry) => entry.text), ["latest", "newest"]);
+  assert.deepEqual(lastEvents(timeline).map((entry) => entry.text), ["middle", "newest", "latest"]);
+  assert.deepEqual(lastEvents(timeline, 2).map((entry) => entry.text), ["newest", "latest"]);
   assert.deepEqual(lastEvents(undefined), []);
 });
 
@@ -233,22 +233,6 @@ test("F7: a receipt is only usable when it is settled, un-failed and for this ro
   assert.equal(decisionReceipt(null, { loading: false }, ref), null);
 });
 
-test("F8: Last events print absolute times, with honest recent/old/future/invalid cases", () => {
-  // The formatter groups LOCAL calendar days. Construct those days locally rather than assuming UTC.
-  const local = (year: number, month: number, day: number, hour: number, minute: number) =>
-    new Date(year, month - 1, day, hour, minute).toISOString();
-  const now = new Date(2026, 10, 16, 12).getTime();
-  assert.equal(absoluteEventTime(local(2026, 11, 16, 3, 5), now), "Today 03:05");
-  assert.equal(absoluteEventTime(local(2026, 11, 15, 14, 5), now), "Yesterday 14:05");
-  assert.equal(absoluteEventTime(local(2026, 3, 3, 9, 7), now), "Mar 3 09:07");
-  assert.equal(absoluteEventTime(local(2024, 3, 3, 9, 7), now), "Mar 3 2024 09:07");
-  // A future event keeps its own local date and clock, not the current instant.
-  assert.equal(absoluteEventTime(local(2026, 11, 17, 8, 30), now), "Nov 17 08:30");
-  assert.notEqual(absoluteEventTime(local(2026, 11, 17, 8, 30), now), absoluteEventTime(local(2026, 11, 16, 12, 0), now));
-  assert.equal(absoluteEventTime("not-a-date", now), "Time unknown");
-  assert.equal(eventDateTime("2026-11-16T03:05:29.784Z"), "2026-11-16T03:05:29.784Z");
-  assert.equal(eventDateTime("not-a-date"), undefined);
-});
 
 test("an answered decision gives execution facts separate from classification, from real fields", () => {
   const base = { id: "d", answer: "fix", exec: null, appliedAt: null } as const;

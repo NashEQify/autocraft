@@ -1,6 +1,6 @@
 import { UnlessProject } from "../../shell/ScopePicker";
 // Needs controls: the decision View (a native select) and the Filters disclosure, both inside the
-// queue card's header (reference decisionControls/needsScope, app.js:696-704). One surface at every
+// queue card's header. One surface at every
 // width — no rail, no drawer, no modal. Scope lives in the URL; this file only draws it, from the
 // same effective projection the list request uses.
 import { useMemo, useState } from "react";

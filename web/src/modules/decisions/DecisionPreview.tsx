@@ -101,7 +101,6 @@ function DecisionPeek({ d }: { d: Decision }) {
               </li>
             ))}
           </ul>
-          <p className="mt-1.5 text-xs leading-5 text-ink/50">Per-item overrides are in the full task.</p>
         </section>
       )}
       {facts.length > 0 && (

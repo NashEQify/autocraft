@@ -16,6 +16,7 @@ import { useUrlState } from "../../lib/hooks";
 import { BrowserChrome, EmptyResults, type BrowserProps } from "./ItemFilters";
 import { ItemRow, OpenRowDetail, SelectionUnavailable } from "./ItemRows";
 import { PhaseItems } from "./StatusItems";
+import { useRowContinuity, useDisplayRows } from "./rowContinuity";
 import { useDraftField } from "./useDraftField";
 import {
   aliasHref, clearPhasePatch, historyOptions, isActive, itemFilter, parseBrowse, removeValuePatch, resetPatch,
@@ -24,7 +25,7 @@ import {
   conflictNote, factsFromListRow, parseSelection, refKey, scopedPayload, selectionPatch, selectionProblem, type OpenRef,
 } from "./rows";
 
-/** Old links land in the one browser; the alias is not a second view (reference app.js:498-502). */
+/** Old links land in the one browser; the alias is not a second view. */
 export function ItemsFiltersAlias() {
   const { search } = useLocation();
   return <Navigate replace to={aliasHref(search)} />;
@@ -43,6 +44,9 @@ export function ItemsView(_: ViewProps) {
   }, []);
   const browse = useMemo(() => parseBrowse(liveSearch), [liveSearch]);
   const selection = useMemo(() => parseSelection(liveSearch), [liveSearch]);
+  const user = useUser();
+  const project = usePageProject();
+  const continuity = useRowContinuity(JSON.stringify([user, project, browse.repo]));
   // Scoped to the link's own selection: the ignored peek is only named while that open row is the
   // one on screen, so a later row, close, filter, reset, paging or typing never inherits the note.
   const [conflict, setConflict] = useState<{ peek: string; openKey: string } | null>(null);
@@ -82,14 +86,14 @@ export function ItemsView(_: ViewProps) {
   const searchDraft = useDraftField({ value: browse.q ?? "", commit: onSearch, resolveKey: resetKey });
   const authorDraft = useDraftField({ value: browse.author ?? "", commit: onAuthor, resolveKey: resetKey });
   const props: Omit<BrowserProps, "browse"> = {
-    phone, onPatch, onOffset, search: searchDraft, author: authorDraft,
+    continuity, phone, onPatch, onOffset, search: searchDraft, author: authorDraft,
     onClearPhase, onReset, onRemove, selection, onToggleRow, onCloseSelection, selectionNote, resetKey,
   };
   return browse.phase ? <PhaseItems browse={browse} {...props} /> : <ListItems browse={browse} {...props} />;
 }
 
 /** Default mode: the list endpoint's rows, one inline expansion for the selected item. */
-function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPhase, onReset, onRemove, selection, onToggleRow, onCloseSelection, selectionNote, resetKey }: BrowserProps) {
+function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPhase, onReset, onRemove, selection, onToggleRow, onCloseSelection, selectionNote, resetKey, continuity }: BrowserProps) {
   const user = useUser();
   // The list payload carries the classification's provenance, including the referee's reason the
   // server redacts per role. The cache key therefore names the reader as well as the filter, and a
@@ -98,38 +102,37 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
   const project = usePageProject();
   const scope = JSON.stringify([user.login, user.role, project]);
   const filter = useMemo(() => itemFilter(browse), [browse]);
+  const queryScope = JSON.stringify([scope, filter]);
   // The receipt carries the reader it was fetched for: a payload from another scope is discarded,
   // so the previous reader's rows — and the redacted-per-role provenance in them — never render.
   const { data: receipt, error, loading } = useQuery(
-    `items:${scope}:${JSON.stringify(filter)}`,
-    async (api) => ({ scope, payload: await api.items(filter) }),
+    `items:${queryScope}`,
+    async (api) => ({ scope: queryScope, payload: await api.items(filter) }),
     { gcTime: 0 },
   );
-  const data = scopedPayload(receipt, scope);
+  const data = error ? undefined : scopedPayload(receipt, queryScope);
   const ready = !!data;
   const { data: repos } = useQuery("repos", (api) => api.repos());
   const rows = ready ? data?.rows ?? [] : [];
   const facts = useMemo(() => rows.map(factsFromListRow), [rows]);
+  const display = useDisplayRows(facts, ready, loading, error, continuity);
   // Once the current results are settled, a selection that cannot open stays explicit — including
   // when the cohort is empty. Loading, a previous cohort and errors are not called "not found".
   const settled = ready && !!data && !loading && !error;
   const problem = settled ? selectionProblem(selection, facts.map((row) => row.key)) : null;
-  const updating = loading && !!data && ready;
-  const bar = !isActive(browse) ? undefined : updating
-    ? "Updating results… previous rows stay visible."
-    : data
-      ? <>Filtered view · {num(data.total)} {data.total === 1 ? "item" : "items"}{browse.status.length ? ` of ${num(Object.values(data.byStatus).reduce((sum, count) => sum + count, 0))}` : ""} · {num(data.byStatus.settled)} settled, {num(data.byStatus.waiting)} waiting for a second opinion, {num(data.byStatus.disagree)} disagreements, {num(data.byStatus.unclassified)} not classified{data.run ? ` (run ${data.run})` : ""}</>
-      : "Loading items…";
+  const bar = isActive(browse) && data && !loading
+    ? <>Filtered view · {num(data.total)} {data.total === 1 ? "item" : "items"}{browse.status.length ? ` of ${num(Object.values(data.byStatus).reduce((sum, count) => sum + count, 0))}` : ""} · {num(data.byStatus.settled)} settled, {num(data.byStatus.waiting)} waiting for a second opinion, {num(data.byStatus.disagree)} disagreements, {num(data.byStatus.unclassified)} not classified{data.run ? ` (run ${data.run})` : ""}</>
+    : undefined;
   return <Page title="Items" sub={ready && data && !loading ? `${num(data.total)} ${data.total === 1 ? "item" : "items"}` : undefined}>
-    <BrowserChrome browse={browse} repos={repos ?? []} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={rows.length > 0}>
-      <ErrorLine error={error?.message} className="px-4 py-3" />
-      {!ready && !error && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading this view for your role…</p>}
-      {ready && !data && !error && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
+    <BrowserChrome browse={browse} repos={repos ?? []} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
+      <ErrorLine error={error ? error.message || "Could not read these items." : undefined} className="px-4 py-3" />
+      {!ready && !error && !display.retained && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
+      {display.retained && <p role="status" className="sr-only">Loading items…</p>}
       {problem && <SelectionUnavailable {...problem} onClose={onCloseSelection} />}
       {data && !rows.length && !problem && <EmptyResults onReset={onReset} />}
-      {rows.length > 0 && <ul aria-label="Items" className="m-0 list-none p-0">
-        {facts.map((row) => <ItemRow key={row.key} facts={row} open={!!selection.open && refKey(selection.open) === row.key} onToggle={() => onToggleRow({ repo: row.repo, number: row.number })}>
-          {selection.open && refKey(selection.open) === row.key && <OpenRowDetail facts={row} note={selectionNote} />}
+      {display.rows.length > 0 && <ul aria-label="Items" aria-busy={!ready || loading} ref={(node) => { if (node) node.inert = display.retained; }} className="m-0 list-none p-0">
+        {display.rows.map((row) => <ItemRow key={row.key} facts={row} open={!display.retained && !!selection.open && refKey(selection.open) === row.key} onToggle={() => { if (!display.retained && ready) onToggleRow({ repo: row.repo, number: row.number }); }}>
+          {!display.retained && selection.open && refKey(selection.open) === row.key && <OpenRowDetail facts={row} note={selectionNote} />}
         </ItemRow>)}
       </ul>}
       {data && <Pager offset={filter.offset ?? 0} limit={filter.limit ?? 50} total={data.total} onOffset={(offset) => onOffset(offset ? String(offset) : null)} />}

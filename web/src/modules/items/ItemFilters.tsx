@@ -13,10 +13,11 @@ import { UnlessProject } from "../../shell/ScopePicker";
 import { FilterField } from "./FilterField";
 import type { useDraftField } from "./useDraftField";
 import {
-  PHASES, SORTS, appliedDetail, compatExtras, hiddenFilterCount, ignoredPhaseScopes, isActive, itemFilter,
+  PHASES, SORTS, appliedDetail, compatExtras, hiddenFilterCount, isActive, itemFilter,
   primarySelects, secondarySummary, type BrowseState, type CompatExtra,
 } from "./browseState";
 import type { ItemPhase } from "../../api/types";
+import type { RowContinuity } from "./rowContinuity";
 import type { OpenRef, Selection } from "./rows";
 
 export type DraftField = ReturnType<typeof useDraftField>;
@@ -25,6 +26,7 @@ export type DraftField = ReturnType<typeof useDraftField>;
     pagination and the preview); `onPeek` only moves the passive preview; `onRemove` drops one
     compatibility value from the link. */
 export interface BrowserProps {
+  continuity: RowContinuity;
   browse: BrowseState;
   /** The approved 860 px phone breakpoint, where the secondary controls fold into Filters. */
   phone: boolean;
@@ -122,7 +124,6 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
 
     {(!phone || phase) && <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-line px-3.5 py-2.5">
       {phone ? <strong className="text-sm">{browse.phase}</strong> : phaseField}
-      {phase && <span className="min-w-[160px] flex-1 text-xs leading-5 text-ink/70">Clear the phase to use State, classification, label and flag filters.{ignoredPhaseScopes(browse) ? " Other filters in this link are not applied." : ""}</span>}
       {phase && <button type="button" onClick={onClearPhase} className="inline-flex items-center whitespace-nowrap text-xs text-accent-ink hover:underline max-md:min-h-11">Clear phase</button>}
     </div>}
 
@@ -202,6 +203,6 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
         <button type="button" aria-label={`Remove ${extra.label} ${extra.value} from this link`} onClick={() => onRemove(extra.key, extra.rawValue)} className="shrink-0 px-0.5 text-ink/50 hover:text-ink">×</button>
       </li>)}
     </ul>
-    <p className="mt-1.5 text-[11px] text-ink/45">{phase ? "A phase is set: these values stay in the URL and are not sent to the phase endpoint." : "These values stay in the URL; Reset filters clears them. Phase and classification are different questions and are never combined."}</p></>}
+    </>}
   </details>;
 }

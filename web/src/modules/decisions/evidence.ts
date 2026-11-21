@@ -1,4 +1,4 @@
-// P7 Evidence — pure projections and the bounded OPEN-id set transition.
+// Evidence — pure projections and the bounded OPEN-id set transition.
 //
 // Everything here is plain data in, plain data out: the module holds NO collection, NO cache and NO subscription.
 // The React owner (`ReaderEvidence` in DecisionEvidence.tsx) keeps the mutable OPEN set in `useState` and calls
@@ -7,30 +7,13 @@
 import type { Classification, Decision, ItemPageData, OpusReviewEntry } from "../../api/types.ts";
 
 /** The most OPEN Decision identities one reader's mounted Evidence owner can remember. */
-export const EVIDENCE_OPEN_LIMIT = 512;
+export { DISCLOSURE_OPEN_LIMIT as EVIDENCE_OPEN_LIMIT, changeDisclosureOpen as changeEvidenceOpen } from "../../ui/disclosureState.ts";
 
 /**
  * Immutable transition for the OPEN-id set: never mutates `ids`, never stores an empty id, keeps the SAME reference
  * for a redundant open (insertion age is not refreshed) and for closing an id that is not open, and evicts the
  * OLDEST open id when an open would exceed `EVIDENCE_OPEN_LIMIT`.
  */
-export function changeEvidenceOpen(ids: ReadonlySet<string>, id: string, open: boolean): ReadonlySet<string> {
-  if (!id) return ids;
-  if (open) {
-    if (ids.has(id)) return ids;
-    const next = new Set(ids);
-    if (next.size >= EVIDENCE_OPEN_LIMIT) {
-      const oldest = next.values().next();
-      if (!oldest.done) next.delete(oldest.value);
-    }
-    next.add(id);
-    return next;
-  }
-  if (!ids.has(id)) return ids;
-  const next = new Set(ids);
-  next.delete(id);
-  return next;
-}
 
 /** What the selected decision itself contributes, all of it already in the DTO the list loaded. */
 export interface DecisionEvidenceModel {
@@ -111,16 +94,7 @@ export function evidenceStaff(role: string, _maintainerWrites?: boolean): boolea
   return role === "operator" || role === "maintainer";
 }
 
-/** Honest per-check wording: `none` is "no result recorded" for that named check, never a pass or a run. */
-export function checkStateText(state: string): string {
-  switch (state) {
-    case "passing": return "Passing";
-    case "failing": return "Failing";
-    case "pending": return "Pending";
-    case "none": return "No result recorded";
-    default: return `Unrecognised state: ${String(state)}`;
-  }
-}
+export { checkStateText } from "../../lib/status.ts";
 
 /** The single honest message for a rejected read and for the hook's thrown `unchanged` result. */
 export const EVIDENCE_READ_ERROR = "Could not read the item evidence. The decision and your draft are unaffected.";

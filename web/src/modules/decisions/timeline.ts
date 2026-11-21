@@ -2,7 +2,7 @@
 // No cache, collection, subscription or permission policy lives at module scope.
 import type { Decision, ItemPageData, TimelineEntry } from "../../api/types.ts";
 
-export const TIMELINE_OPEN_LIMIT = 512;
+export { DISCLOSURE_OPEN_LIMIT as TIMELINE_OPEN_LIMIT, changeDisclosureOpen as changeTimelineOpen } from "../../ui/disclosureState.ts";
 export const TIMELINE_EVENT_LIMIT = 4;
 export const TIMELINE_READ_ERROR = "Could not read the item timeline. The decision and your draft are unaffected.";
 
@@ -30,21 +30,6 @@ export interface TimelineModel {
   empty: boolean;
 }
 
-/** Immutable OPEN-only memory: redundant opens do not refresh insertion age. */
-export function changeTimelineOpen(ids: ReadonlySet<string>, id: string, open: boolean): ReadonlySet<string> {
-  if (!id || ids.has(id) === open) return ids;
-  const next = new Set(ids);
-  if (open) {
-    if (next.size >= TIMELINE_OPEN_LIMIT) {
-      const oldest = next.values().next();
-      if (!oldest.done) next.delete(oldest.value);
-    }
-    next.add(id);
-  } else {
-    next.delete(id);
-  }
-  return next;
-}
 
 /** Only the supplied own item reference; never infer a member from a batch or group. */
 export function timelineReference(d: Pick<Decision, "repo" | "number">): TimelineReference | null {

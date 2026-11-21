@@ -167,9 +167,10 @@ export function statusWord(facts: RowFacts): string {
 
 export const QUEUE_TEXT = (queue: QueueSlot): string => `${queue.stage} · place ${queue.place}`;
 
-/** Last events: newest first, capped, from the selected expansion's real timeline. */
+/** The latest capped events, displayed oldest first without mutating the supplied history. */
 export function lastEvents(timeline: TimelineEntry[] | undefined, cap = 3): TimelineEntry[] {
-  return [...(timeline ?? [])].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)).slice(0, cap);
+  const ordered = [...(timeline ?? [])].sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  return ordered.slice(Math.max(0, ordered.length - cap));
 }
 
 export interface DetailFact { label: string; value: string }
@@ -273,27 +274,6 @@ export function decisionReceipt<T extends { repo: string; number: number | null 
   return data.number == null || (data.repo === ref.repo && data.number === ref.number) ? data : null;
 }
 
-/* ---- event timestamps (absolute, Items-local) -------------------------------------------------
-   The reference prints an event's absolute time (`atAbs`, "Today 08:20"), not a relative one. The
-   shared `eventTime` stays as it is for row ages and other surfaces. */
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const pad = (n: number) => String(n).padStart(2, "0");
-
-/** `Today 08:20`, `Yesterday 14:05`, `Nov 3 14:32`, `Nov 3 2025 14:32`; "Time unknown" for an unparseable value. */
-export function absoluteEventTime(iso: string, now = Date.now()): string {
-  const t = Date.parse(iso);
-  if (!Number.isFinite(t)) return "Time unknown";
-  const d = new Date(t);
-  const n = new Date(now);
-  const clock = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  const midnight = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
-  const days = Math.round((midnight(n) - midnight(d)) / 86_400_000);
-  if (days === 0) return `Today ${clock}`;
-  if (days === 1) return `Yesterday ${clock}`;
-  const md = `${MONTHS[d.getMonth()]} ${d.getDate()}`;
-  return d.getFullYear() === n.getFullYear() ? `${md} ${clock}` : `${md} ${d.getFullYear()} ${clock}`;
-}
-
 /** The machine-readable companion of the printed time; absent when the value is not a date. */
 export function eventDateTime(iso: string): string | undefined {
   return Number.isFinite(Date.parse(iso)) ? iso : undefined;
@@ -348,12 +328,7 @@ export function answerQueueText(answer: AnswerFacts): string {
   return answer.disputed ? "Held — disputed" : answer.state;
 }
 
-/**
- * The list payload carries the reader it was fetched for. A payload from another login or role is
- * discarded, so the previous reader's rows — which can carry reasons the server redacts per role —
- * never render while the new scope's own read is pending or after it failed. A filter change keeps
- * the same scope, so the previous rows stay visible while the new ones load (the accepted behaviour).
- */
+/** Only an exact current reader/project/filter receipt is authoritative; retained rows are separate presentation. */
 export function scopedPayload<T>(receipt: { scope: string; payload: T } | undefined, scope: string): T | undefined {
   return receipt && receipt.scope === scope ? receipt.payload : undefined;
 }

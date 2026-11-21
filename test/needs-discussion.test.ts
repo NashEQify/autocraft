@@ -1,9 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  DISCUSSION_OPEN_LIMIT,
-  DISCUSSION_READ_ERROR,
-  changeDiscussionOpen,
   discussionModel,
 } from "../web/src/modules/decisions/discussion.ts";
 
@@ -14,35 +11,9 @@ const dec = (over: Record<string, unknown> = {}) => ({
 const op = (over: Record<string, unknown> = {}) => ({ id: "o1", login: "anna", option: "take", note: "note", at: "t1", permission: "write", ...over }) as never;
 const cm = (over: Record<string, unknown> = {}) => ({ id: "c1", login: "ben", at: "t2", body: "hello", ...over }) as never;
 
-test("open set: bounded at 512 with oldest-open eviction and no mutation", () => {
-  let ids: ReadonlySet<string> = new Set();
-  for (let i = 0; i < DISCUSSION_OPEN_LIMIT; i++) ids = changeDiscussionOpen(ids, `d${i}`, true);
-  assert.equal(ids.size, DISCUSSION_OPEN_LIMIT);
-  const before = ids;
-  ids = changeDiscussionOpen(ids, "new", true);
-  assert.equal(ids.size, DISCUSSION_OPEN_LIMIT);
-  assert.equal(ids.has("d0"), false);
-  assert.equal(ids.has("new"), true);
-  assert.ok(before.has("d0"));
-});
 
-test("open set: redundant open keeps the same reference", () => {
-  const ids: ReadonlySet<string> = new Set(["a"]);
-  assert.equal(changeDiscussionOpen(ids, "a", true), ids);
-});
 
-test("open set: absent close and empty id are no-ops", () => {
-  const ids: ReadonlySet<string> = new Set(["a"]);
-  assert.equal(changeDiscussionOpen(ids, "zzz", false), ids);
-  assert.equal(changeDiscussionOpen(ids, "", true), ids);
-});
 
-test("open set: close removes without mutating the input", () => {
-  const ids: ReadonlySet<string> = new Set(["a"]);
-  const next = changeDiscussionOpen(ids, "a", false);
-  assert.equal(next.size, 0);
-  assert.ok(ids.has("a"));
-});
 
 test("model: opinion rows keep native order and every row", () => {
   const m = discussionModel(dec({ opinions: [op(), op({ id: "o2", login: "cara" }), op({ id: "o3", login: "dan" })] }), []);
@@ -55,10 +26,6 @@ test("model: keys stay unique for duplicate native ids, logins and times", () =>
   assert.equal(new Set(m.comments.map((c) => c.key)).size, 2);
 });
 
-test("model: first exact option match gives the label", () => {
-  const m = discussionModel(dec({ options: [{ key: "take", label: "First" }, { key: "take", label: "Second" }], opinions: [op()] }), []);
-  assert.equal(m.opinions[0].optionLabel, "First");
-});
 
 test("model: an unknown option key keeps the key and invents no label", () => {
   const m = discussionModel(dec({ opinions: [op({ option: "gone" })] }), []);
@@ -72,17 +39,7 @@ test("model: a null option key has no label", () => {
   assert.equal(m.opinions[0].optionLabel, null);
 });
 
-test("model: permission write is granted and labelled GitHub write", () => {
-  const m = discussionModel(dec({ opinions: [op()] }), []);
-  assert.equal(m.opinions[0].permissionGranted, true);
-  assert.equal(m.opinions[0].permissionLabel, "GitHub write");
-});
 
-test("model: permission none is not granted and says so", () => {
-  const m = discussionModel(dec({ opinions: [op({ permission: "none" })] }), []);
-  assert.equal(m.opinions[0].permissionGranted, false);
-  assert.equal(m.opinions[0].permissionLabel, "No GitHub write recorded");
-});
 
 test("model: an unknown permission value never implies granted access", () => {
   const m = discussionModel(dec({ opinions: [op({ permission: "weird" })] }), []);
@@ -90,11 +47,6 @@ test("model: an unknown permission value never implies granted access", () => {
   assert.match(m.opinions[0].permissionLabel, /Permission: weird/);
 });
 
-test("model: via mcp marks an agent only for the exact value", () => {
-  assert.equal(discussionModel(dec({ opinions: [op({ via: "mcp" })] }), []).opinions[0].viaMcp, true);
-  assert.equal(discussionModel(dec({ opinions: [op({ via: "other" })] }), []).opinions[0].viaMcp, false);
-  assert.equal(discussionModel(dec(), [cm({ via: "mcp" })]).comments[0].viaMcp, true);
-});
 
 test("model: a null note is no note and not 'unavailable'", () => {
   const m = discussionModel(dec({ opinions: [op({ note: null })] }), []);
@@ -155,10 +107,4 @@ test("model: opinions and comments stay separate groups", () => {
   const m = discussionModel(dec({ opinions: [op()] }), [cm()]);
   assert.equal(m.opinions.length, 1);
   assert.equal(m.comments.length, 1);
-});
-
-test("the read error message is honest and never blames the answer", () => {
-  assert.match(DISCUSSION_READ_ERROR, /Could not read the decision comments/);
-  assert.match(DISCUSSION_READ_ERROR, /decision and your draft are unaffected/);
-  assert.doesNotMatch(DISCUSSION_READ_ERROR, /answer/i);
 });

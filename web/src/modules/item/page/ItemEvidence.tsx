@@ -1,4 +1,5 @@
 import type { ItemPageData } from "../../../api/types";
+import { checkStateText } from "../../../lib/status";
 import { useUser } from "../../../shell/UserContext";
 import { Badge } from "../../../ui/atoms/Badge";
 import { PrBuildLine } from "../../../ui/molecules/PrBuildLine";
@@ -20,7 +21,7 @@ export function ItemEvidence({ d }: { d: ItemPageData }) {
       {d.kind === "pr" && (
         <section aria-label="GitHub checks" className="space-y-3 px-4 py-4 md:px-5">
           <h3 className="text-sm font-semibold">GitHub checks</h3>
-          {d.github.checks.length ? <ul className="space-y-2">{d.github.checks.map((c) => <li key={c.name} className="flex min-w-0 items-start gap-3 text-sm"><span className="min-w-0 flex-1 break-words">{c.name}</span><Badge tone={c.state === "passing" ? "ok" : c.state === "failing" ? "bad" : "neutral"}>{c.state === "passing" ? "Passed" : c.state === "failing" ? "Failed" : "Running"}</Badge></li>)}</ul> : <p className="text-sm text-ink/50">No checks recorded.</p>}
+          {d.github.checks.length ? <ul className="space-y-2">{d.github.checks.map((c) => <li key={c.name} className="flex min-w-0 items-start gap-3 text-sm"><span className="min-w-0 flex-1 break-words">{c.name}</span><Badge tone={c.state === "passing" ? "ok" : c.state === "failing" ? "bad" : "neutral"}>{checkStateText(c.state)}</Badge></li>)}</ul> : <p className="text-sm text-ink/50">No checks recorded.</p>}
           <PrBuildLine b={d.prBuild} />
         </section>
       )}

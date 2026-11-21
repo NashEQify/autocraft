@@ -118,7 +118,7 @@ export function FunnelChart({ f }: { f: Funnel }) {
         <p className="mt-3 text-xs text-ink/60">
           Not yet classified: <span className="num font-medium text-ink">{num(f.secondOpinion)}</span> waiting for a second opinion,{" "}
           <span className="num font-medium text-ink">{num(f.disagreement)}</span> where the two classifiers disagree.{" "}
-          <Link to="/items/filters?status=unsettled" className="text-accent-ink hover:underline">
+          <Link to="/items?status=unsettled" className="text-accent-ink hover:underline">
             See them
           </Link>
         </p>

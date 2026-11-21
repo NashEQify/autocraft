@@ -5,7 +5,7 @@ import { useUser } from "../../shell/UserContext";
 import { DisclosurePanel } from "../../ui/molecules/DisclosurePanel";
 import { changeEvidenceOpen, checkStateText, decisionEvidenceModel, evidenceStaff, EVIDENCE_READ_ERROR, itemEvidenceModel } from "./evidence";
 
-// P7: read-only Evidence for the SELECTED decision, after the Open-item action. Everything it shows comes from the
+// Read-only Evidence for the SELECTED decision, after the Open-item action. Everything it shows comes from the
 // decision the frame already resolved, plus — only while the disclosure is open, and only for a verified single PR
 // item — the existing item-page read through `useItemPreview`. It never writes, claims, polls or retries, and the
 // closed disclosure does no projection work at all.
@@ -94,7 +94,6 @@ function EvidenceBody({ decision, staff }: { decision: Decision; staff: boolean 
       {model.classifiers.length > 0 && (
         <div className="min-w-0">
           <h4 className={headCls}>Classifiers ({model.classifiers.length})</h4>
-          <p className="mt-1 text-xs text-ink/45">A label is not an approval.</p>
           <dl className="mt-1 grid gap-2 text-sm">
             {model.classifiers.map((c) => (
               <div key={c.key} className="min-w-0">

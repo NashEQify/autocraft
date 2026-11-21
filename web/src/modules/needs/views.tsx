@@ -33,7 +33,7 @@ export function NeedsTabs() {
     {TABS.map((key) => <Link key={key} aria-current={tab === key ? "page" : undefined} to={needsTabsHref(key, search)}
       className={`-mb-px inline-flex min-h-10 items-center gap-1.5 border-b-2 px-3 py-2 text-sm max-md:min-h-11 ${tab === key ? "border-accent font-[650] text-accent-ink" : "border-transparent text-ink/70 hover:text-ink"}`}>
       {LABEL[key]}
-      {data?.counts[key] !== undefined && <span className="num text-xs opacity-60">{data.counts[key]}</span>}
+      {data?.counts[key] !== undefined && <span className="num text-xs opacity-60">{data.counts[key]}{key === "decisions" ? " waiting" : ""}</span>}
     </Link>)}
   </nav>;
 }

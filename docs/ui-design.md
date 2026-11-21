@@ -156,7 +156,7 @@ Desktop, three panels: queue (28 %), decision (45 %), discussion (27 %, collapsi
 - **Recommendation**: when a decision has a recommendation and the model gave a reason, one sentence stands above the options in the Workflow box: "Recommended: <option> — <reason>". The recommended option also carries a "Recommended" pill. With no reason there is no sentence.
 - **Duplicate groups** have their own kind, "Duplicates", with its own chip and group header. The item page opens with the group: one card per member, each an `ItemRef` with its role (Keep, Close, Stays open), then the summary. A member's card lists "Does better", "Worth carrying over" and "Adds" as bullets, each point whole; empty lists do not show.
 - **Risks**: a Merge? or Close? decision lists the review's risks as bullets under the summary.
-- **Answering**: an operator's click or number key answers and moves to the next decision. A small notice, "Answered: <option> <repo#number>" with Undo, shows for about 8 seconds or until the next answer, then goes away. Undo shows only while the decision is undoable (the pipeline has not applied or posted it); `u` undoes the notice's answer. On the Answered tab a row keeps its Undo while the decision is undoable. When the server refuses an Undo, its message shows briefly and the notice goes away.
+- **Answering**: the queue explicitly opens the complete native item form. Answers use its prepared choices, extra actions, public text and confirmation; the queue does not submit inline answers or register number/note shortcuts. A small notice, "Answered: <option> <repo#number>" with Undo, shows for about 8 seconds or until the next answer, then goes away. Undo shows only while the decision is undoable (the pipeline has not applied or posted it); `u` undoes the notice's answer. On the Answered tab a row keeps its Undo while the decision is undoable. When the server refuses an Undo, its message shows briefly and the notice goes away.
 
 Description rendering is for untrusted input: raw HTML is dropped, only `http(s)`, `mailto`, relative and anchor links survive, links open in a new tab with `rel="noopener noreferrer nofollow"`, and only GitHub-hosted images load inline. The CSP allows only same-origin images, so the renderer sends images on the hosts the server's image proxy serves (`GET /img`, see the README) through it: lazy-loaded, at most the column's width and 480 px tall, and a click opens the original on GitHub in a new tab. Every other image, and one the proxy refuses, becomes a chip with its alt text that opens the image in a new tab on click.
 
@@ -223,9 +223,9 @@ Charts are hand-written SVG and HTML (no chart library): every bar has a 2 px su
 | `?` | Shortcut sheet for the current screen |
 | `[` | Collapse or expand the sidebar |
 | `g d`, `g p` | Go to decisions, progress |
-| `j` / `k` | Next / previous decision |
-| `1`–`4` | Answer (operator) or feedback with that option (everyone else) |
-| `n` | Focus the note |
+| `j` / `k`, arrows, Home / End | Move through the queue, replacing the current selection history entry |
+| Enter / Space or a row’s Details button | Deliberately activate a decision, pushing a history entry |
+| Close / Escape | Close the selected decision, pushing a history entry |
 | `x` | Check the row for a batch answer; `Esc` clears |
 | `u` | Undo the last answer |
 | `o` | Open the item page |

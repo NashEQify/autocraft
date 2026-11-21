@@ -68,7 +68,7 @@ export interface MetaFact { key: "ref" | "kind" | "claim" | "answer"; text: stri
 
 /**
  * The reference's meta order, omitting what the DTO does not carry. A claim carries its elapsed time
- * ("on it · ochre-fox · 12m", app.js:1009) with the absolute moment in the accessible title; a claim
+ * ("on it · reader · 12m") with the absolute moment in the accessible title; a claim
  * without a valid `since` shows the reader and says the time is unknown rather than inventing one.
  */
 export function metaFacts(d: Decision, now = nowMs()): MetaFact[] {
