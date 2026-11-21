@@ -13,7 +13,6 @@ import { setUserRepos } from "../src/remote/my-repos.ts";
 import { noRunnerFor } from "../src/runner/concurrency.ts";
 import { detectAutopilot, LANES } from "../src/runner/autopilot.ts";
 import { OPERATOR, T0, world } from "./world-db.ts";
-import { excluded } from "../src/db/kx.ts";
 
 test("prioritize waits for a Task Runner or Jev while its items need one", async () => {
   const w = await (await (await world()).repo()).issue(1);
