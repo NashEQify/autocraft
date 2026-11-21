@@ -7,7 +7,7 @@ import { SCRATCH } from "./scratch.ts";
 import { isBusy } from "../src/db.ts";
 import { countQueries } from "../src/db/counter.ts";
 import type { Db } from "../src/db/index.ts";
-import { dbFor } from "../src/db/open.ts";
+import { closeDb, dbFor, openDb } from "../src/db/open.ts";
 import { bindParams, parseParams } from "../src/db/params.ts";
 import { sql } from "../src/db/sql.ts";
 
@@ -123,4 +123,17 @@ test("placeholders outside literals and comments bind by node:sqlite's rules", (
   assert.equal(text, "SELECT $1, $2, '?:y', \"a?\" -- ?\n, $3, $2, $4 /* :z */, $5, a::text");
   assert.deepEqual(values, [1, "X", 2, 3, "W"]);
   assert.throws(() => bindParams(p, [{ q: 1 }], String), /Unknown named parameter/);
+});
+
+test("a module closing the process's shared handle doesn't end it for the rest of the process", async () => {
+  const before = process.env.AUTOCRAFT_DB;
+  process.env.AUTOCRAFT_DB = join(SCRATCH, `shared-${process.pid}.db`);
+  try {
+    const job = await openDb();
+    await (await openDb()).close();
+    assert.deepEqual(await job.prepare("SELECT 1 AS one").get(), { one: 1 });
+  } finally {
+    await closeDb();
+    if (before === undefined) delete process.env.AUTOCRAFT_DB; else process.env.AUTOCRAFT_DB = before;
+  }
 });

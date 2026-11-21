@@ -36,12 +36,21 @@ export async function connectDb(path: string = dbPath(), opts: { busyTimeoutMs?:
   return dbFor(connect(path, opts));
 }
 
-let proc: Promise<Db> | undefined;
+let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
 
-/** The process's handle on the configured database. */
-export function openDb(): Promise<Db> {
-  if (envVar("DB_URL") !== undefined) return Promise.reject(new Error("AUTOCRAFT_DB_URL is set, but the Postgres backend is not available yet"));
-  return (proc ??= connectDb());
+/**
+ * The process's handle on the configured database. It is shared by everything in the process, so its `close()` does
+ * nothing: a module that closes the handle it was given must not end it for the job or server still using it. Only
+ * `closeDb()` closes it.
+ */
+export async function openDb(): Promise<Db> {
+  if (envVar("DB_URL") !== undefined) throw new Error("AUTOCRAFT_DB_URL is set, but the Postgres backend is not available yet");
+  proc ??= connectDb().then((db) => {
+    const close = db.close.bind(db);
+    db.close = async () => {};
+    return { db, close };
+  });
+  return (await proc).db;
 }
 
 /** Closes the process's handle (CLI exit). */
