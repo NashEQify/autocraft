@@ -12,7 +12,6 @@ src/act/index.ts
 
 src/act/order.ts
 
-src/activity.ts
 
 src/agents/accounts.ts
 
@@ -52,7 +51,6 @@ src/build/cli.ts
 
 src/build/envs.ts
 
-src/build/features.ts
 
 src/build/launcher.ts
 
@@ -546,7 +544,6 @@ src/runner/job-items.ts
 
 src/runner/jobs.ts
 
-src/runner/leases.ts
 
 src/runner/runner.ts
 

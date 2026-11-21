@@ -7,6 +7,7 @@ import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
 import { readSeqs } from "../src/live.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const fresh = async () => await connectDb(join(mkdtempSync(join(SCRATCH, "bf-")), "t.db"));
@@ -28,8 +29,8 @@ test("a repo-scoped feature needs the global switch and the repo's own; scan-tes
   assert.deepEqual((await featureStates(db)).find((s) => s.feature === "screenshots"), { feature: "screenshots", on: true, repos: ["app"] });
   await setFeature(db, "scan-tests", true, "op", "app");
   assert.equal(await featureOn(db, "scan-tests", "other"), true);
-  const row = await db.prepare("SELECT login, target, details FROM audit WHERE action = 'build-feature' ORDER BY rowid LIMIT 1").get() as { login: string; target: string; details: string };
-  assert.deepEqual([row.login, row.target, JSON.parse(row.details)], ["op", "screenshots", { feature: "screenshots", on: true, repo: "app" }]);
+  const row = (await db.get(db.k.selectFrom("audit").select(["login", "target", "details"]).where("action", "=", "build-feature").orderBy(rowid("audit")).limit(1)))!;
+  assert.deepEqual([row.login, row.target, JSON.parse(row.details ?? "null")], ["op", "screenshots", { feature: "screenshots", on: true, repo: "app" }]);
 });
 
 test("a switch change is not planner input", async () => {

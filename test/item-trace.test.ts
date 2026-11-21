@@ -50,7 +50,7 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
   const t = await full(db);
   assert.deepEqual(t.events.map((e) => e.id.replace(/:\d+$/, "")), ["gh:opened", `commit:${H1}`, "activity:L1", "comment:c1", "plan", "run", "review:opus", "review:opus", "audit"]);
   assert.deepEqual(t.events.filter((e) => e.id.startsWith("activity") || e.id.startsWith("commit")).map((e) => e.summary), ["Pushed commit aaaaaaa", "Added label bug"]);
-  assert.deepEqual((await db.prepare("SELECT path FROM pr_files WHERE repo = 'photocraft' AND number = 7 AND head = ?").all(H2)).map((r) => r.path), ["src/a.rs"]);
+  assert.deepEqual((await db.all(db.k.selectFrom("pr_files").select("path").where("repo", "=", "photocraft").where("number", "=", 7).where("head", "=", H2))).map((r) => r.path), ["src/a.rs"]);
   assert.deepEqual(t.events.slice(-5).map((e) => e.head), [H1, H1, H1, H2, H2], "a model call takes the head current at its time");
   const call = t.events.find((e) => e.kind === "model-call")!;
   assert.equal(call.call?.toolCalls, 1);
@@ -110,13 +110,15 @@ test("a viewer gets no staff-only post-merge fields and only the GitHub writes o
 
 test("the activity pass skips a missing item, retries a failed one later and goes on to the others", async () => {
   const db = await connectDb(":memory:");
-  for (const n of [1, 2, 3])
-    await db.prepare("INSERT INTO items (repo, number, kind, state, author, created_at, updated_at, head_oid) VALUES ('photocraft', ?, 'issue', 'OPEN', 'dev', '2026-01-01T00:00:00Z', ?, NULL)").run(n, `2026-01-0${n}T00:00:00Z`);
+  await db.run(db.k.insertInto("items").values([1, 2, 3].map((n) => ({
+    repo: "photocraft", number: n, kind: "issue", state: "OPEN", author: "dev", created_at: "2026-01-01T00:00:00Z", updated_at: `2026-01-0${n}T00:00:00Z`, head_oid: null,
+  }))));
   const asked: number[] = [];
+  let fails = true;
   const client = { spent: 0, remaining: 5000, async query(_q: string, v: { number: number }) {
     asked.push(v.number);
     if (v.number === 3) return { repository: { issueOrPullRequest: null } };
-    if (v.number === 2) throw new Error("boom");
+    if (v.number === 2 && fails) throw new Error("boom");
     return { repository: { issueOrPullRequest: { __typename: "Issue", issueTimeline: { nodes: [] } } } };
   } };
   const now = new Date("2026-01-10T00:00:00Z");
@@ -124,8 +126,11 @@ test("the activity pass skips a missing item, retries a failed one later and goe
   assert.deepEqual(asked, [3, 2, 1]);
   asked.length = 0;
   assert.equal(await syncActivity(db, client, now), 0, "a missing item and a failed one wait");
+  fails = false;
   assert.equal(await syncActivity(db, client, new Date(now.getTime() + 2 * 3_600_000)), 1);
   assert.deepEqual(asked, [2]);
+  const state = await db.get(db.k.selectFrom("activity_sync").select(["error", "retry_at"]).where("repo", "=", "photocraft").where("number", "=", 2));
+  assert.deepEqual(state, { error: null, retry_at: null }, "a successful read clears the earlier failure");
 });
 
 test("decision_items follows a decision that changes or goes away", async () => {
