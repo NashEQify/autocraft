@@ -1,14 +1,14 @@
 // Per-repo approval for the pipeline to open fix PRs for issues there (push to the pipeline fork, open a PR,
 // comment on the issue). Set only from the dashboard by an operator (src/dash/api/admin.ts).
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
 
 export type FixIssueApproval = { by: string; at: string };
 const key = (repo: string) => `fixissue_approved:${repo}`;
 
-export function fixIssueApprovalOf(db: DatabaseSync, repo: string): FixIssueApproval | null {
-  const value = setting(db, key(repo));
+export async function fixIssueApprovalOf(db: Db, repo: string): Promise<FixIssueApproval | null> {
+  const value = await setting(db, key(repo));
   if (value === undefined) return null;
   try {
     return JSON.parse(value) as FixIssueApproval;
@@ -18,11 +18,11 @@ export function fixIssueApprovalOf(db: DatabaseSync, repo: string): FixIssueAppr
 }
 
 // Returns false when nothing changed.
-export function setFixIssueApproval(db: DatabaseSync, by: string, repo: string, approved: boolean): boolean {
-  if (!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
-  if ((fixIssueApprovalOf(db, repo) !== null) === approved) return false;
-  if (approved) db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
-  else db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
-  audit(db, by, approved ? "fixissue-approve" : "fixissue-revoke", repo);
+export async function setFixIssueApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {
+  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if ((await fixIssueApprovalOf(db, repo) !== null) === approved) return false;
+  if (approved) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
+  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  await audit(db, by, approved ? "fixissue-approve" : "fixissue-revoke", repo);
   return true;
 }

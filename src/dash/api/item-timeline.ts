@@ -2,15 +2,15 @@
 // Opus's reviews and replies are turns; the harness's work (jobs, checks, writes, fix-ups, merges) is lines the page folds into runs.
 // Redaction: viewers get lines without prompts, texts, model calls or job errors; a quiet pull request keeps what the trace context already veils.
 import { featureOn } from "../../build/features.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type { HistoryCall, TimelineEntry, TimelineTone } from "../../../web/src/api/types.ts";
 import type { Preapproval } from "../../../web/src/api/types.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { filingOutcome, heldOf, HELD_STUCK_MS } from "../../conversations/held.ts";
 import { arr, clip, stepTitle, type Ctx, type Ev } from "./trace.ts";
+import type { Db } from "../../db/index.ts";
 
 const short = (s: string | null | undefined): string => (s ?? "").slice(0, 7);
-const q = <T>(db: DatabaseSync, sql: string, ...args: (string | number)[]): T[] => db.prepare(sql).all(...args) as T[];
+const q = async <T>(db: Db, sql: string, ...args: (string | number)[]): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 const VERDICT: Record<string, string> = { take: "take", "take-fix": "take with fixes", hold: "hold", close: "close" };
 const VERDICT_TONE: Record<string, TimelineTone> = { take: "ok", "take-fix": "warn", hold: "warn", close: "bad" };
 const BAD = /fail|error|refus|reject|broke|too-large/i;
@@ -34,19 +34,19 @@ type Turn = { id: number; kind: string; login: string; at: string; body: string;
 type DecisionRow = { id: string; question: string; options: string | null; answer: string | null; answer_note: string | null; answered_by: string | null; answered_at: string | null; answered_role: string | null };
 
 /** The page's timeline. `ev` is the item trace; `preapprovals` are the item's rows, oldest first. */
-export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): TimelineEntry[] {
+export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Promise<TimelineEntry[]> {
   const { db, repo, n, staff } = c;
   const out: TimelineEntry[] = [];
   const callsOf = (jobId: unknown): HistoryCall[] =>
     !staff ? [] : ev.filter((x) => x.kind === "model-call" && x.ref.jobId === jobId).map((x) => ({ label: `${x.call?.step ?? x.summary} (${x.call?.model ?? x.actor.name})`, kind: "model" as const, costUsd: x.call?.costUsd ?? null, ...(x.call?.via && { via: x.call.via }) }));
   const callCost = (calls: HistoryCall[]): number | null => (calls.some((x) => x.costUsd !== null) ? calls.reduce((s, x) => s + (x.costUsd ?? 0), 0) : null);
   const fixSteps = ev.filter((e) => e.kind === "step" && /^(fixup|cifix|conflict):/.test(e.id));
-  const stepOfJob = new Map(q<{ id: number; step: string }>(db, "SELECT id, step FROM jobs WHERE json_extract(params, '$.number') = ?1 AND repo = ?2 UNION SELECT j.id, j.step FROM job_items ji JOIN jobs j ON j.id = ji.job_id WHERE ji.number = ?1 AND ji.repo = ?2", n, repo).map((j) => [j.id, j.step]));
+  const stepOfJob = new Map((await q<{ id: number; step: string }>(db, "SELECT id, step FROM jobs WHERE json_extract(params, '$.number') = ?1 AND repo = ?2 UNION SELECT j.id, j.step FROM job_items ji JOIN jobs j ON j.id = ji.job_id WHERE ji.number = ?1 AND ji.repo = ?2", n, repo)).map((j) => [j.id, j.step]));
   const jobsWithCalls = new Set(ev.filter((e) => e.kind === "job").map((e) => e.ref.jobId));
   const mergeSteps = ev.filter((e) => e.kind === "step" && e.id.startsWith("merge:"));
   const near = (a: string, b: string, ms: number) => Math.abs(Date.parse(a) - Date.parse(b)) <= ms;
   // The model calls of every Opus review, read once.
-  const calls = staff ? runRows(db, ev.flatMap((e) => (e.kind === "review" && e.id.replace(/^review:/, "").startsWith("opus") ? ((e.ref.runIds as number[] | undefined) ?? []) : []))) : new Map<number, RunRow>();
+  const calls = staff ? await runRows(db, ev.flatMap((e) => (e.kind === "review" && e.id.replace(/^review:/, "").startsWith("opus") ? ((e.ref.runIds as number[] | undefined) ?? []) : []))) : new Map<number, RunRow>();
 
   for (const e of ev) {
     const after = e.summary.includes(": ") ? e.summary.slice(e.summary.indexOf(": ") + 2) : e.summary;
@@ -131,8 +131,8 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
   }
 
   // Our build failed where upstream CI passed: a note on the item (from pr_builds, not a stage row, so it never becomes the latest stage).
-  for (const b of q<{ head_sha: string; summary: string | null; finished_at: string | null }>(db, "SELECT head_sha, summary, finished_at FROM main.pr_builds WHERE repo = ? AND number = ? AND disagree = 1 AND finished_at IS NOT NULL", repo, n)) {
-    if (!featureOn(db, "pr-builds", repo)) break;
+  for (const b of await q<{ head_sha: string; summary: string | null; finished_at: string | null }>(db, "SELECT head_sha, summary, finished_at FROM main.pr_builds WHERE repo = ? AND number = ? AND disagree = 1 AND finished_at IS NOT NULL", repo, n)) {
+    if (!await featureOn(db, "pr-builds", repo)) break;
     const t = base(`pr-build:${b.head_sha}`, b.finished_at!, "harness", "AutoCraft", "check", `Our build failed at ${short(b.head_sha)} where CI passed${staff && b.summary ? `: ${clip(b.summary, 140)}` : ""}`);
     t.tone = "bad";
     out.push(t);
@@ -140,7 +140,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
   // Screenshot runs (staff only, as the images are): planned when the run was queued, then its outcome. From screenshot_runs, not stage rows.
   if (staff && !c.veiled) {
     type Shot = { head_sha: string; state: string; reason: string | null; verdict: string | null; clear: number | null; comparison: string | null; held: number; has_plan: number; created_at: string; finished_at: string | null };
-    for (const r of q<Shot>(db, "SELECT head_sha, state, reason, verdict, clear, comparison, held, plan IS NOT NULL AS has_plan, created_at, finished_at FROM main.screenshot_runs WHERE repo = ? AND number = ?", repo, n)) {
+    for (const r of await q<Shot>(db, "SELECT head_sha, state, reason, verdict, clear, comparison, held, plan IS NOT NULL AS has_plan, created_at, finished_at FROM main.screenshot_runs WHERE repo = ? AND number = ?", repo, n)) {
       if (r.state === "skipped" || r.state === "stale") continue;
       const id = `screenshots:${r.head_sha}`;
       if (r.has_plan) {
@@ -156,7 +156,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
     }
   }
   // People answer and post: one line each, with the option's label.
-  const decisions = q<DecisionRow>(db, `SELECT id, question, options, answer, answer_note, answered_by, answered_at, answered_role FROM decisions WHERE repo = ? AND number = ? AND answered_at IS NOT NULL AND answered_role IS NOT NULL AND answer NOT IN ('withdrawn', 'superseded')`, repo, n);
+  const decisions = await q<DecisionRow>(db, `SELECT id, question, options, answer, answer_note, answered_by, answered_at, answered_role FROM decisions WHERE repo = ? AND number = ? AND answered_at IS NOT NULL AND answered_role IS NOT NULL AND answer NOT IN ('withdrawn', 'superseded')`, repo, n);
   for (const d of decisions) {
     const label = arr<{ key: string; label: string }>(d.options).find((o) => o.key === d.answer)?.label ?? d.answer ?? "";
     const t = base(`decision:${d.id}:answered`, d.answered_at!, "person", d.answered_by ?? "someone", "person", `chose: ${label}`);
@@ -165,7 +165,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
     out.push(t);
   }
   if (staff) {
-    const ops = q<{ id: number; decision_id: string; login: string; option: string | null; note: string | null; at: string; permission: string | null; options: string | null; answer: string | null }>(db,
+    const ops = await q<{ id: number; decision_id: string; login: string; option: string | null; note: string | null; at: string; permission: string | null; options: string | null; answer: string | null }>(db,
       `SELECT o.id, o.decision_id, o.login, o.option, o.note, o.at, o.permission, d.options, d.answer FROM decision_opinions o JOIN decisions d ON d.id = o.decision_id WHERE d.repo = ? AND d.number = ?`, repo, n);
     for (const o of ops) {
       const label = o.option ? arr<{ key: string; label: string }>(o.options).find((x) => x.key === o.option)?.label ?? o.option : null;
@@ -174,7 +174,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
       t.feedback = { source: `decision-opinion:${o.id}`, decisionId: o.decision_id, pick: o.option, write: o.permission === "write", open: o.answer === null };
       out.push(t);
     }
-    for (const cm of q<{ id: number; decision_id: string; login: string; body: string; at: string; answer: string | null }>(db,
+    for (const cm of await q<{ id: number; decision_id: string; login: string; body: string; at: string; answer: string | null }>(db,
       `SELECT c.id, c.decision_id, c.login, c.body, c.at, d.answer FROM decision_comments c JOIN decisions d ON d.id = c.decision_id WHERE d.repo = ? AND d.number = ?`, repo, n)) {
       const t = base(`comment:${cm.id}`, cm.at, "person", cm.login, "chat", clip(cm.body, 110));
       t.major = true; t.body = cm.body.length > 110 ? cm.body : null;
@@ -182,7 +182,7 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
       out.push(t);
     }
     // Opus's messages that answer a person are conversation; the others (a refreshed summary of the question) are the harness's work.
-    const turns = q<Turn & { seq: number }>(db, "SELECT id, kind, login, at, body, status, error, seq FROM conversation_turns WHERE repo = ? AND number = ? ORDER BY seq, id", repo, n);
+    const turns = await q<Turn & { seq: number }>(db, "SELECT id, kind, login, at, body, status, error, seq FROM conversation_turns WHERE repo = ? AND number = ? ORDER BY seq, id", repo, n);
     turns.forEach((t, i) => {
       // System lines repeat what the press, pre-approval and fix-up lines say.
       if (t.kind === "system") return;
@@ -212,13 +212,13 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
   });
 
   // Issues a card held until the merge: the press, and what became of it. A filed one is the "Opened issue" write line.
-  for (const h of heldOf(db, repo, n)) {
+  for (const h of await heldOf(db, repo, n)) {
     const t = base(`held:${h.id}`, h.at, "person", h.by, "person", `After the merge: open an issue in ${h.issue_repo}`);
     t.major = true;
     if (staff && !c.veiled) { t.body = h.title; if (h.state === "held" && h.reason) t.lines = [`Waiting: ${h.reason}`]; }
     out.push(t);
     // A stopped create the Act step cannot settle from its audit row (filingOutcome) stays unknown.
-    const stuck = h.state === "filing" && Date.parse(h.updated_at) < Date.now() - HELD_STUCK_MS && filingOutcome(db, h) === null;
+    const stuck = h.state === "filing" && Date.parse(h.updated_at) < Date.now() - HELD_STUCK_MS && await filingOutcome(db, h) === null;
     if (h.state !== "dropped" && h.state !== "failed" && !stuck) continue;
     const end = base(`held:${h.id}:end`, h.updated_at, "harness", "AutoCraft", "github",
       h.state === "dropped" ? `Held issue dropped: ${h.reason ?? "no reason recorded"}` : stuck ? "Held issue: the create's outcome is unknown, check GitHub" : `Held issue not opened${staff && h.reason ? `: ${clip(h.reason, 120)}` : ""}`);
@@ -231,9 +231,9 @@ export function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Timel
 }
 
 type RunRow = { id: number; step: string; model: string; cost_usd: number | null; user_login: string | null; harness: string | null; reported_model: string | null };
-function runRows(db: DatabaseSync, ids: number[]): Map<number, RunRow> {
+async function runRows(db: Db, ids: number[]): Promise<Map<number, RunRow>> {
   if (!ids.length) return new Map();
-  return new Map(q<RunRow>(db, "SELECT id, step, model, cost_usd, user_login, harness, reported_model FROM agent_runs WHERE id IN (SELECT value FROM json_each(?))", JSON.stringify(ids)).map((r) => [r.id, r]));
+  return new Map((await q<RunRow>(db, "SELECT id, step, model, cost_usd, user_login, harness, reported_model FROM agent_runs WHERE id IN (SELECT value FROM json_each(?))", JSON.stringify(ids))).map((r) => [r.id, r]));
 }
 
 /** The calls of the runs `ids` that exist, in id order. */

@@ -1,9 +1,10 @@
 // Owner memory: what the operators said once (a decision's answer note, a comment on GitHub, a message in an AutoCraft
 // conversation) is kept as a statement with an embedding. Reviews of related work get the closest statements (retrieve.ts).
-import type { DatabaseSync } from "node:sqlite";
 import type { Embedder } from "../embed/model.ts";
 import { BODY_CHARS, cleanBody } from "../embed/text.ts";
 import { toBlob } from "../embed/store.ts";
+import { forEachSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export type StatementKind = "decision-note" | "comment" | "conversation";
 
@@ -59,9 +60,9 @@ export function commentDatabaseId(node: string): string | null {
  * `#issuecomment-` in a stored URL, review ids are the node id in `details.review`. Posts from before the note line existed
  * carry no prefix, and they come from the owner's account, so only the audit tells them apart.
  */
-function postedIds(db: DatabaseSync): { numbers: Set<string>; nodes: Set<string> } {
+async function postedIds(db: Db): Promise<{ numbers: Set<string>; nodes: Set<string> }> {
   const numbers = new Set<string>(), nodes = new Set<string>();
-  const rows = db.prepare("SELECT details FROM audit WHERE details LIKE '%issuecomment-%' OR details LIKE '%\"review\"%'").all() as { details: string | null }[];
+  const rows = await db.prepare("SELECT details FROM audit WHERE details LIKE '%issuecomment-%' OR details LIKE '%\"review\"%'").all() as { details: string | null }[];
   for (const r of rows) {
     for (const m of (r.details ?? "").matchAll(/#issuecomment-(\d+)/g)) numbers.add(m[1]!);
     try { const v = (JSON.parse(r.details ?? "{}") as { review?: unknown }).review; if (typeof v === "string") nodes.add(v); } catch { /* not JSON: none */ }
@@ -70,21 +71,21 @@ function postedIds(db: DatabaseSync): { numbers: Set<string>; nodes: Set<string>
 }
 
 /** Adds the sources that have no statement yet; returns how many. Needs no model. */
-export function collectStatements(db: DatabaseSync): number {
-  const rows = db.prepare(`SELECT s.* FROM (${NEW_SOURCES}) s
+export async function collectStatements(db: Db): Promise<number> {
+  const rows = await db.prepare(`SELECT s.* FROM (${NEW_SOURCES}) s
     WHERE NOT EXISTS (SELECT 1 FROM owner_statements o WHERE o.source_kind = s.kind AND o.source_id = s.sid)`).all({ min: STATEMENT_MIN_CHARS }) as
     { kind: string; sid: string; repo: string; number: number | null; text: string; author: string; at: string }[];
   const title = db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?");
   const put = db.prepare(`INSERT OR IGNORE INTO owner_statements (source_kind, source_id, repo, number, item_title, author, text, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-  const own = postedIds(db);
+  const own = await postedIds(db);
   let n = 0;
   for (const r of rows) {
     if (r.kind === "comment") {
       const num = commentDatabaseId(r.sid);
       if (own.nodes.has(r.sid) || (num !== null && own.numbers.has(num))) continue;
     }
-    const t = r.number === null ? undefined : (title.get(r.repo, r.number) as { title: string | null } | undefined)?.title;
-    n += Number(put.run(r.kind, r.sid, r.repo, r.number, t ?? "", r.author, r.text.slice(0, STATEMENT_MAX_CHARS), r.at).changes);
+    const t = r.number === null ? undefined : (await title.get(r.repo, r.number) as { title: string | null } | undefined)?.title;
+    n += Number((await put.run(r.kind, r.sid, r.repo, r.number, t ?? "", r.author, r.text.slice(0, STATEMENT_MAX_CHARS), r.at)).changes);
   }
   return n;
 }
@@ -95,20 +96,20 @@ export const statementText = (title: string, text: string): string => `${title.t
 const WAITING = "embedding IS NULL OR model IS NOT ?";
 
 /** Whether there are sources to collect or statements to embed with `modelId`. */
-export function statementsDue(db: DatabaseSync, modelId: string): boolean {
-  collectStatements(db);
-  return !!db.prepare(`SELECT 1 FROM owner_statements WHERE ${WAITING} LIMIT 1`).get(modelId);
+export async function statementsDue(db: Db, modelId: string): Promise<boolean> {
+  await collectStatements(db);
+  return !!await db.prepare(`SELECT 1 FROM owner_statements WHERE ${WAITING} LIMIT 1`).get(modelId);
 }
 
 /** Collects new statements and embeds the ones without a vector of this model; returns how many were embedded. */
-export async function embedStatements(db: DatabaseSync, embedder: Embedder, batch = 32): Promise<number> {
-  collectStatements(db);
-  const todo = db.prepare(`SELECT id, item_title, text FROM owner_statements WHERE ${WAITING} ORDER BY id`).all(embedder.id) as { id: number; item_title: string; text: string }[];
+export async function embedStatements(db: Db, embedder: Embedder, batch = 32): Promise<number> {
+  await collectStatements(db);
+  const todo = await db.prepare(`SELECT id, item_title, text FROM owner_statements WHERE ${WAITING} ORDER BY id`).all(embedder.id) as { id: number; item_title: string; text: string }[];
   const put = db.prepare("UPDATE owner_statements SET embedding = ?, model = ? WHERE id = ?");
   for (let i = 0; i < todo.length; i += batch) {
     const part = todo.slice(i, i + batch);
     const vecs = await embedder.embed(part.map((t) => statementText(t.item_title, t.text)), "item");
-    part.forEach((t, k) => put.run(toBlob(vecs[k]!), embedder.id, t.id));
+    await forEachSeq(part, async (t, k) => await put.run(toBlob(vecs[k]!), embedder.id, t.id));
   }
   return todo.length;
 }

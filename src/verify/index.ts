@@ -12,9 +12,7 @@
 import { leaseItem } from "../runner/leases.ts";
 import { poolRoom, takersCut } from "../agents/call.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { BuildError } from "../build/envs.ts";
-import { connect } from "../db.ts";
 import { runModelStep } from "../agents/step.ts";
 import { VERIFY_PLAN } from "../agents/steps.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
@@ -31,6 +29,8 @@ import { maybeScreenshot, type ScreenshotDeps } from "./screenshots.ts";
 import { regressionName, type Crate, type VerifyPlanInput } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { slugOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export { collectDue, listVerifications, runCollect, verificationOf, type VerificationView } from "./results.ts";
 
@@ -69,7 +69,7 @@ export function defaultDeps(): VerifyDeps {
   };
 }
 
-export type VerifyParams = { repo: string; limit?: number; dryRun?: boolean; onHandled?: (n: number) => void; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => boolean };
+export type VerifyParams = { repo: string; limit?: number; dryRun?: boolean; onHandled?: (n: number) => void; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean> };
 export type VerifySummary = {
   runId: string; repo: string; candidates: number; handled: number;
   kinds: Record<string, number>; errors: number; tasks: number[]; warm: number | null; skipped: string[];
@@ -81,16 +81,16 @@ const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 type Saved = { kind: string; reason: string; plan: unknown; model: string | null; headTask: number | null; baseTask: number | null; baseSha: string | null; state: string; summary: string | null };
 
 /** Stores the verification of a PR head and its stages row. */
-export function saveVerification(db: DatabaseSync, c: { repo: string; number: number; head_oid: string }, v: Saved): void {
+export async function saveVerification(db: Db, c: { repo: string; number: number; head_oid: string }, v: Saved): Promise<void> {
   const at = now();
-  db.prepare(`INSERT OR REPLACE INTO verifications (repo, number, head_sha, base_sha, kind, reason, plan, model, head_task_id, base_task_id, state, summary, created_at, finished_at)
+  await db.prepare(`INSERT OR REPLACE INTO verifications (repo, number, head_sha, base_sha, kind, reason, plan, model, head_task_id, base_task_id, state, summary, created_at, finished_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(c.repo, c.number, c.head_oid, v.baseSha, v.kind, v.reason, v.plan === null ? null : JSON.stringify(v.plan), v.model, v.headTask, v.baseTask, v.state, v.summary, at,
       v.state === "ci-enough" || v.state === "error" || v.state === "unavailable" ? at : null);
   const stage = v.state === "planned" ? "verify-planned" : v.state === "ci-enough" ? "verify-ci-enough" : v.state === "unavailable" ? "verify-unavailable" : "verify-error";
-  db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)")
+  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)")
     .run(c.repo, c.number, stage, at, "verify", `${v.kind} at ${c.head_oid.slice(0, 7)}: ${v.summary ?? v.reason}`.slice(0, 300));
-  jobItem(db, c.repo, c.number, `${stage}: ${v.kind} at ${c.head_oid.slice(0, 7)}`, () => {});   // the caller logs the outcome itself
+  await jobItem(db, c.repo, c.number, `${stage}: ${v.kind} at ${c.head_oid.slice(0, 7)}`, () => {});   // the caller logs the outcome itself
 }
 
 /** The plan as stored: the patch is in the task row, so the plan column keeps its size. */
@@ -101,46 +101,46 @@ const unavailableRow = (reason: string): Saved => ({ kind: "unavailable", reason
 
 const errorRow = (reason: string): Saved => ({ kind: "error", reason, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "error", summary: reason });
 
-export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (line: string) => void = console.log, deps: VerifyDeps = defaultDeps()): Promise<VerifySummary> {
+export async function runVerify(db: Db, params: VerifyParams, log: (line: string) => void = console.log, deps: VerifyDeps = defaultDeps()): Promise<VerifySummary> {
   const { repo } = params;
   const runId = `verify-${repo}-${now().replace(/[-:]/g, "").slice(0, 15)}`;
-  let cands = selectCandidates(db, repo);
+  let cands = await selectCandidates(db, repo);
   const summary: VerifySummary = { runId, repo, candidates: cands.length, handled: 0, kinds: {}, errors: 0, tasks: [], warm: null, skipped: [] };
   if (params.dryRun) {
     log(`verify ${repo}: ${cands.length} candidates; dry run, nothing fetched or asked`);
     return summary;
   }
   // Whether the repo has CI is unknown until its checks were read: nothing is recorded before.
-  if (!repoChecksKnown(db, repo)) {
+  if (!await repoChecksKnown(db, repo)) {
     log(`verify ${repo}: no checks read yet; nothing recorded`);
     return summary;
   }
-  cands = takersCut(db, cands, params.limit, repo, (c) => c.number);
+  cands = await takersCut(db, cands, params.limit, repo, (c) => c.number);
   // Nothing to build for these: recorded at once so the PR goes on to the Merge? decision.
-  for (const u of unavailableCandidates(db, repo)) {
-    saveVerification(db, u.c, unavailableRow(u.reason));
+  for (const u of await unavailableCandidates(db, repo)) {
+    await saveVerification(db, u.c, unavailableRow(u.reason));
     log(`  ${refOf(u.c)}: verification unavailable: ${u.reason}`);
     summary.handled++;
     params.onHandled?.(summary.handled);
   }
-  const branch = (db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
+  const branch = (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
   let queued = false;
-  const ci = !repoHasNoCi(db, repo);
+  const ci = !await repoHasNoCi(db, repo);
 
   let stoppedLogged = false;
   await pool(cands.map((c) => async (): Promise<void> => {
-    if (params.stopping?.()) {
+    if (await params.stopping?.()) {
       if (!stoppedLogged) log(`verify ${repo}: stopping, no new PRs started`);
       stoppedLogged = true;
       return;
     }
-    const release = leaseItem(db, `pr:${repo}#${c.number}`, log);
+    const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
     if (!release) return;
     try {
       const ref = refOf(c);
       const handle = (): void => { summary.handled++; params.onHandled?.(summary.handled); };
-      const byCi = (): void => {
-        saveVerification(db, c, { kind: "ci-enough", reason: CI_REASON, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "ci-enough", summary: CI_REASON });
+      const byCi = async (): Promise<void> => {
+        await saveVerification(db, c, { kind: "ci-enough", reason: CI_REASON, plan: null, model: null, headTask: null, baseTask: null, baseSha: null, state: "ci-enough", summary: CI_REASON });
         summary.kinds["ci-enough"] = (summary.kinds["ci-enough"] ?? 0) + 1;
         handle();
       };
@@ -148,28 +148,28 @@ export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (li
       await maybeScreenshot(db, c, deps, log, runId).catch((e: unknown) => log(`  ${refOf(c)}: screenshots: ${(e as Error).message}`));
       if (ci) {
         // Only a bugfix that adds or changes a test file may get a regression test; everything else is covered by CI.
-        if (c.label !== "bugfix") { byCi(); return; }
+        if (c.label !== "bugfix") { await byCi(); return; }
         const pre = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff);
         // Without a readable diff there is no test file to find, so CI is the verification.
-        if (!pre.ok || !codeDiff(pre.text).testsOmitted.length) { byCi(); return; }
+        if (!pre.ok || !codeDiff(pre.text).testsOmitted.length) { await byCi(); return; }
       }
       const cr = await cachedCrates(repo, c.head_oid, deps.fetchCrates, db);
       if (!cr.ok) { log(`  ${ref}: no crate list: ${cr.error}`); summary.skipped.push(ref); return; }
       if (!cr.rust) {
-        saveVerification(db, c, unavailableRow(NOT_RUST_REASON));
+        await saveVerification(db, c, unavailableRow(NOT_RUST_REASON));
         log(`  ${ref}: verification unavailable: ${NOT_RUST_REASON}`);
         handle();
         return;
       }
       const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff);
       if (!d.ok) {
-        if (d.tooLarge) { saveVerification(db, c, errorRow("GitHub refuses the diff: too large to plan")); summary.errors++; handle(); }
+        if (d.tooLarge) { await saveVerification(db, c, errorRow("GitHub refuses the diff: too large to plan")); summary.errors++; handle(); }
         else { log(`  ${ref}: no diff: ${d.error}`); summary.skipped.push(ref); }
         return;
       }
       let cd = codeDiff(d.text);
       if (!cd.files.length && cd.testsOmitted.length) cd = codeDiff(d.text, true);
-      if (cd.text.length > MAX_DIFF_CHARS) { saveVerification(db, c, errorRow(`code diff of ${cd.text.length} characters is too large to plan`)); summary.errors++; handle(); return; }
+      if (cd.text.length > MAX_DIFF_CHARS) { await saveVerification(db, c, errorRow(`code diff of ${cd.text.length} characters is too large to plan`)); summary.errors++; handle(); return; }
       const base = await deps.baseOf(repo, c.number);
       if (!base) { log(`  ${ref}: no base commit`); summary.skipped.push(ref); return; }
 
@@ -186,33 +186,33 @@ export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (li
       handle();
       if (!result.ok) {
         log(`  ${ref}: invalid plan: ${result.error}`);
-        saveVerification(db, c, { ...errorRow(result.error), model: deps.model });
+        await saveVerification(db, c, { ...errorRow(result.error), model: deps.model });
         summary.errors++;
         return;
       }
       const plan = result.plan;
       summary.kinds[plan.kind] = (summary.kinds[plan.kind] ?? 0) + 1;
       if (plan.kind === "ci-enough") {
-        saveVerification(db, c, { kind: plan.kind, reason: plan.reason, plan: null, model: deps.model, headTask: null, baseTask: null, baseSha: base, state: "ci-enough", summary: plan.reason });
+        await saveVerification(db, c, { kind: plan.kind, reason: plan.reason, plan: null, model: deps.model, headTask: null, baseTask: null, baseSha: base, state: "ci-enough", summary: plan.reason });
         return;
       }
       try {
-        const ids = queueTasks(db, plan, { repo, number: c.number, head: c.head_oid, base });
+        const ids = await queueTasks(db, plan, { repo, number: c.number, head: c.head_oid, base });
         summary.tasks.push(...ids);
         queued = true;
-        saveVerification(db, c, { kind: plan.kind, reason: plan.reason, plan: storedPlan(plan), model: deps.model, headTask: ids[0] ?? null, baseTask: ids[1] ?? null, baseSha: base, state: "planned", summary: plan.reason });
+        await saveVerification(db, c, { kind: plan.kind, reason: plan.reason, plan: storedPlan(plan), model: deps.model, headTask: ids[0] ?? null, baseTask: ids[1] ?? null, baseSha: base, state: "planned", summary: plan.reason });
       } catch (e) {
         if (!(e instanceof BuildError)) throw e;
         log(`  ${ref}: tasks not queued: ${e.message}`);
-        saveVerification(db, c, { ...errorRow(`tasks not queued: ${e.message}`), model: deps.model });
+        await saveVerification(db, c, { ...errorRow(`tasks not queued: ${e.message}`), model: deps.model });
         summary.errors++;
       }
-    } finally { release(); }
+    } finally { await release(); }
   }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]), { max: POOL_MAX.verify });
 
   if (queued) {
     const main = await deps.mainHead(repo, branch);
-    if (main) summary.warm = queueWarmBuild(db, repo, main);
+    if (main) summary.warm = await queueWarmBuild(db, repo, main);
     else log(`verify ${repo}: no head for ${branch}; no warm build queued`);
   }
   log(`verify ${repo}: ${summary.handled} planned (${Object.entries(summary.kinds).map(([k, n]) => `${n} ${k}`).join(", ") || "none"}); ${summary.errors} errors, ${summary.skipped.length} skipped; ${summary.tasks.length} tasks${summary.warm ? ", 1 warm build" : ""}`);
@@ -247,7 +247,7 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       if (args.some((a) => a !== "--dry-run")) throw new Error("options: --dry-run");
       const { runCollect } = await import("./results.ts");
-      await runCollect(connect(), { dryRun: args.length > 0 });
+      await runCollect(await openDb(), { dryRun: args.length > 0 });
     },
   },
   verify: {
@@ -257,7 +257,7 @@ export const commands = {
       if (typeof f.repo !== "string") throw new Error("missing --repo");
       const limit = typeof f.limit === "string" ? Number(f.limit) : undefined;
       if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error("--limit is a positive whole number");
-      await runVerify(connect(), { repo: f.repo, limit, dryRun: f["dry-run"] === true });
+      await runVerify(await openDb(), { repo: f.repo, limit, dryRun: f["dry-run"] === true });
     },
   },
 };

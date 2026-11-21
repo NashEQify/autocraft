@@ -5,16 +5,16 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fillClassHashes, fillEmbedHashes } from "./itemhash.ts";
+import { fillHashesSync } from "./itemhash.ts";
 import { fillTextRefs } from "./fixissue/candidates.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
-import { bulkWrites, planChangesSql } from "./core/plan-changes.ts";
+import { bulkWritesSync, planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
-import { repoHasNoCi } from "./merge/no-ci.ts";
+import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
-import { mentionNames } from "./github/slugs.ts";
+import { SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
 import { SIM_THRESHOLD } from "./dupes/scan.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
@@ -455,7 +455,8 @@ function migrateValues(db: DatabaseSync): void {
     db.exec("COMMIT");
   }
   // The mention flag for the pipeline login and app slugs the comments were last flagged for.
-  const names = JSON.stringify(mentionNames(db));
+  const settingOf = (key: string) => (db.prepare("SELECT value FROM main.settings WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+  const names = JSON.stringify(namesOf(settingOf("pipeline_login"), parseSlugs(settingOf(SLUGS_KEY))));
   const built = (db.prepare("SELECT value FROM main.settings WHERE key = 'mentions_built'").get() as { value: string } | undefined)?.value ?? "";
   if (names !== built) {
     db.exec("BEGIN IMMEDIATE");
@@ -575,7 +576,7 @@ function ciFirst(db: DatabaseSync): void {
       const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'verify-ci-enough', ?, 'verify', ?)");
       for (const v of db.prepare("SELECT repo, number, head_sha, head_task_id, base_task_id FROM main.verifications WHERE kind = 'tests' AND state IN ('planned', 'running')").all() as
         { repo: string; number: number; head_sha: string; head_task_id: number | null; base_task_id: number | null }[]) {
-        if (repoHasNoCi(db, v.repo)) continue;
+        if (noCiFrom(db.prepare(NO_CI_SQL).all(v.repo, NO_CI_SAMPLE) as { overall: string | null }[])) continue;
         for (const t of [v.head_task_id, v.base_task_id]) if (t !== null) cancel.run(at, at, t);
         settle.run(at, v.repo, v.number, v.head_sha);
         stage.run(v.repo, v.number, at, `ci-enough at ${v.head_sha.slice(0, 7)}: upstream CI is the check`);
@@ -637,8 +638,7 @@ function buildSearchIndex(db: DatabaseSync): void {
 // Batched (src/itemhash.ts), so other processes can write between batches.
 function buildHashes(db: DatabaseSync): void {
   if (db.prepare("SELECT 1 FROM main.settings WHERE key = 'hashes_built'").get()) return;
-  fillEmbedHashes(db);
-  fillClassHashes(db);
+  fillHashesSync(db);
   db.exec("INSERT OR IGNORE INTO main.settings (key, value) VALUES ('hashes_built', '1')");
 }
 
@@ -655,7 +655,7 @@ function buildItemStage(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!db.prepare("SELECT 1 FROM main.settings WHERE key = 'item_stage_built'").get()) {
-      bulkWrites(db, "item-stage", () => db.exec(`INSERT OR REPLACE INTO main.item_stage (repo, number, stage, at, reviewed)
+      bulkWritesSync(db, "item-stage", () => db.exec(`INSERT OR REPLACE INTO main.item_stage (repo, number, stage, at, reviewed)
         SELECT repo, number, stage, at, reviewed FROM (
           SELECT repo, number, stage, at, MAX(stage = 'reviewed') OVER (PARTITION BY repo, number) AS reviewed,
             ROW_NUMBER() OVER (PARTITION BY repo, number ORDER BY at DESC, rowid DESC) AS rn FROM main.stages

@@ -1,9 +1,9 @@
 // CLI: `autocraft-server areas list|propose|accept|edit|rescan|suggest --repo R`. Runs the steps in this process,
 // like the other stage commands; the dashboard queues the same steps as jobs.
-import { connect } from "../db.ts";
 import { assignAreas } from "./assign.ts";
 import { proposeAreas, suggestAreas } from "./propose.ts";
 import { acceptProposal, areaCounts, currentList, decideSuggestion, editAreas, proposalsOf, unassignedCount, type AreaEdit } from "./store.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = "areas list|propose|accept [--id N] [--names A,B]|edit add NAME DESCRIPTION|rename FROM TO|merge FROM INTO|remove NAME|describe NAME DESCRIPTION|rescan [--limit N]|suggest --repo R";
 const BY = "cli";
@@ -42,19 +42,19 @@ export const commands = {
       const repo = flag(args, "--repo"), words = positional(args);
       const what = words.shift();
       if (!repo || !what) throw new Error(`usage: autocraft-server areas --repo R ${USAGE}`);
-      const db = connect();
+      const db = await openDb();
       const usageRun = `areas-cli-${new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
       switch (what) {
         case "list": {
-          const cur = currentList(db, repo);
+          const cur = await currentList(db, repo);
           if (!cur) console.log(`${repo} has no area list`);
           else {
-            const open = new Map(areaCounts(db, repo).map((c) => [c.area, c.open]));
+            const open = new Map((await areaCounts(db, repo)).map((c) => [c.area, c.open]));
             console.log(`${repo}: version ${cur.version}`);
             for (const a of cur.areas) console.log(`  ${a.name} (${open.get(a.name) ?? 0} open): ${a.description}`);
-            console.log(`${unassignedCount(db, repo)} open items without an area`);
+            console.log(`${await unassignedCount(db, repo)} open items without an area`);
           }
-          for (const p of proposalsOf(db, repo)) console.log(`${p.kind} ${p.id}: ${p.areas.map((a) => `${a.name}${a.state === "open" ? "" : ` [${a.state}]`}`).join(", ")}`);
+          for (const p of await proposalsOf(db, repo)) console.log(`${p.kind} ${p.id}: ${p.areas.map((a) => `${a.name}${a.state === "open" ? "" : ` [${a.state}]`}`).join(", ")}`);
           break;
         }
         case "propose": {
@@ -69,22 +69,22 @@ export const commands = {
           break;
         }
         case "accept": {
-          const id = flag(args, "--id") ? Number(flag(args, "--id")) : proposalsOf(db, repo)[0]?.id;
-          const p = proposalsOf(db, repo).find((x) => x.id === id);
+          const id = flag(args, "--id") ? Number(flag(args, "--id")) : (await proposalsOf(db, repo))[0]?.id;
+          const p = (await proposalsOf(db, repo)).find((x) => x.id === id);
           if (!p) throw new Error("no open proposal; see `areas list`");
           const version = p.kind === "propose"
-            ? acceptProposal(db, p.id, BY)
-            : decideSuggestion(db, p.id, BY, (flag(args, "--names") ?? "").split(",").map((x) => x.trim()).filter(Boolean));
+            ? await acceptProposal(db, p.id, BY)
+            : await decideSuggestion(db, p.id, BY, (flag(args, "--names") ?? "").split(",").map((x) => x.trim()).filter(Boolean));
           console.log(version ? `saved version ${version}; run: areas rescan --repo ${repo}` : "nothing accepted");
           break;
         }
         case "edit": {
-          const version = editAreas(db, repo, editOf(words), BY);
+          const version = await editAreas(db, repo, editOf(words), BY);
           console.log(`saved version ${version}; run: areas rescan --repo ${repo}`);
           break;
         }
         case "rescan": {
-          const r = await assignAreas(db, { repo, limit: Number(flag(args, "--limit") ?? 5000), rescan: true, usageRun, progress: (l) => console.log(l), log: console.log });
+          const r = await assignAreas(db, { repo, limit: Number(flag(args, "--limit") ?? 5000), rescan: true, usageRun, progress: async (l) => console.log(l), log: console.log });
           console.log(`${r.due} items asked: Jev settled ${r.jev}, Haiku ${r.haiku}, ${r.none} fit none, ${r.left} unanswered`);
           break;
         }

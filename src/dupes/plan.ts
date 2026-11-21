@@ -5,17 +5,18 @@
 // more than 20% since the compared head. A head push or a PR text edit alone does not
 // make it stale, but a decision binds each PR member to the head the comparison read.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { canonInfoAll, pickCanonical } from "./canonical.ts";
 import { inPilot, pilotSql } from "../pilot.ts";
 import { backlogHeldSql } from "./held.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
+import { mapSeq, someSeq } from "../async-seq.ts";
 
 type Edge = { repo: string; a: number; b: number; similarity: number; jev_p: number | null; haiku: string | null };
 
 /** Duplicate pairs whose items still have the checked text. */
-export function duplicateEdges(db: DatabaseSync, repo?: string): Edge[] {
-  return db.prepare(`SELECT p.repo, p.a, p.b, p.similarity, p.jev_p, p.haiku FROM duplicate_pairs p
+export async function duplicateEdges(db: Db, repo?: string): Promise<Edge[]> {
+  return await db.prepare(`SELECT p.repo, p.a, p.b, p.similarity, p.jev_p, p.haiku FROM duplicate_pairs p
     JOIN items ia ON ia.repo = p.repo AND ia.number = p.a AND ia.embed_hash = p.a_hash
     JOIN items ib ON ib.repo = p.repo AND ib.number = p.b AND ib.embed_hash = p.b_hash
     WHERE p.verdict = 'duplicate' AND p.by_operator = 0 ${repo ? "AND p.repo = ?" : ""} ORDER BY p.repo, p.a, p.b`).all(...(repo ? [repo] : [])) as Edge[];
@@ -23,7 +24,7 @@ export function duplicateEdges(db: DatabaseSync, repo?: string): Edge[] {
 
 export type Group = { repo: string; canonical: number; why: string; members: number[]; edges: Edge[] };
 
-export function duplicateGroups(db: DatabaseSync, repo?: string): Group[] {
+export async function duplicateGroups(db: Db, repo?: string): Promise<Group[]> {
   const parent = new Map<string, string>();
   const find = (x: string): string => {
     let r = x;
@@ -31,7 +32,7 @@ export function duplicateGroups(db: DatabaseSync, repo?: string): Group[] {
     parent.set(x, r);
     return r;
   };
-  const edges = duplicateEdges(db, repo);
+  const edges = await duplicateEdges(db, repo);
   for (const e of edges) {
     for (const n of [e.a, e.b]) if (!parent.has(`${e.repo}#${n}`)) parent.set(`${e.repo}#${n}`, `${e.repo}#${n}`);
     parent.set(find(`${e.repo}#${e.a}`), find(`${e.repo}#${e.b}`));
@@ -39,9 +40,9 @@ export function duplicateGroups(db: DatabaseSync, repo?: string): Group[] {
   const by = new Map<string, Edge[]>();
   for (const e of edges) by.set(find(`${e.repo}#${e.a}`), [...(by.get(find(`${e.repo}#${e.a}`)) ?? []), e]);
   const groups = [...by.values()].map((es) => ({ es, members: [...new Set(es.flatMap((e) => [e.a, e.b]))].sort((x, y) => x - y) }));
-  const known = canonInfoAll(db, groups.flatMap((g) => g.members.map((number) => ({ repo: g.es[0]!.repo, number }))));
-  return groups.map(({ es, members }) => {
-    const c = pickCanonical(db, es[0]!.repo, members, known);
+  const known = await canonInfoAll(db, groups.flatMap((g) => g.members.map((number) => ({ repo: g.es[0]!.repo, number }))));
+  return await mapSeq(groups, async ({ es, members }) => {
+    const c = await pickCanonical(db, es[0]!.repo, members, known);
     return { repo: es[0]!.repo, canonical: c.number, why: c.why, members, edges: es };
   });
 }
@@ -73,15 +74,15 @@ function legacySetHash(members: Member[]): string {
 export const DIFF_SIZE_CHANGE = 0.2;
 const sizeOf = (m: { additions: number | null; deletions: number | null }): number | null => (m.additions === null || m.deletions === null ? null : m.additions + m.deletions);
 
-export function kindSetsOf(db: DatabaseSync, g: Group): KindSet[] {
-  return kindSetsLoader(db, [g])(g);
+export async function kindSetsOf(db: Db, g: Group): Promise<KindSet[]> {
+  return (await kindSetsLoader(db, [g]))(g);
 }
 
 type MemberRow = Member & { k?: string; state_reason?: string | null; in_pilot?: number; held_backlog?: number };
 /** kindSetsOf() for the given groups, with their members' rows read once; `inPilot` and `backlogHeld` answer for the members the same way. */
-export function kindSetsLoader(db: DatabaseSync, groups: Group[]): ((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => boolean; backlogHeld: (repo: string, number: number) => boolean } {
+export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => Promise<boolean>; backlogHeld: (repo: string, number: number) => boolean }> {
   const rows = new Map<string, { m: Member; reason: string | null; pilot: boolean; backlog: boolean }>();
-  for (const r of db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
+  for (const r of await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
       i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql("i")} AS in_pilot, ${backlogHeldSql("i")} AS held_backlog
     FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`)
     .all(JSON.stringify(groups.flatMap((g) => g.members.map((n) => [g.repo, n])))) as MemberRow[]) {
@@ -93,9 +94,9 @@ export function kindSetsLoader(db: DatabaseSync, groups: Group[]): ((g: Group) =
     rows.set(k, { m: r, reason, pilot, backlog });
   }
   // Left out: a rejected (closed, unmerged) PR; an item already closed as a duplicate, or whose pair decision is answered close (the act step closes it).
-  const gone = new Set((db.prepare(`SELECT repo || '#' || number AS k FROM decisions WHERE kind = 'duplicate' AND id LIKE '%:duplicate@%' AND answer = 'close'`).all() as { k: string }[]).map((r) => r.k));
+  const gone = new Set((await db.prepare(`SELECT repo || '#' || number AS k FROM decisions WHERE kind = 'duplicate' AND id LIKE '%:duplicate@%' AND answer = 'close'`).all() as { k: string }[]).map((r) => r.k));
   // A member our own group Act closed can never become a kept item later.
-  const closedByUs = new Set((db.prepare("SELECT g.repo || '#' || p.number AS k FROM dupe_group_posts p JOIN dupe_groups g ON g.decision_id = p.decision_id WHERE p.step = 'close' AND p.url IS NOT NULL").all() as { k: string }[]).map((r) => r.k));
+  const closedByUs = new Set((await db.prepare("SELECT g.repo || '#' || p.number AS k FROM dupe_group_posts p JOIN dupe_groups g ON g.decision_id = p.decision_id WHERE p.step = 'close' AND p.url IS NOT NULL").all() as { k: string }[]).map((r) => r.k));
   const setsOf = (g: Group): KindSet[] => {
     const members = g.members.flatMap((n): Member[] => {
       const ref = `${g.repo}#${n}`, r = rows.get(ref);
@@ -109,7 +110,7 @@ export function kindSetsLoader(db: DatabaseSync, groups: Group[]): ((g: Group) =
     });
   };
   return Object.assign(setsOf, {
-    inPilot: (repo: string, number: number): boolean => rows.get(`${repo}#${number}`)?.pilot ?? inPilot(db, repo, number),
+    inPilot: async (repo: string, number: number): Promise<boolean> => rows.get(`${repo}#${number}`)?.pilot ?? await inPilot(db, repo, number),
     // An item not in the mirror is not held (backlogHeld reads the items row).
     backlogHeld: (repo: string, number: number): boolean => rows.get(`${repo}#${number}`)?.backlog ?? false,
   });
@@ -133,15 +134,15 @@ export type ComparisonResult = {
 
 type ComparisonRow = Omit<StoredComparison, "members" | "result"> & { members: string; result: string | null };
 
-export function storedComparison(db: DatabaseSync, repo: string, key: string): StoredComparison | null {
-  const r = db.prepare("SELECT * FROM dupe_comparisons WHERE repo = ? AND key = ?").get(repo, key) as ComparisonRow | undefined;
+export async function storedComparison(db: Db, repo: string, key: string): Promise<StoredComparison | null> {
+  const r = await db.prepare("SELECT * FROM dupe_comparisons WHERE repo = ? AND key = ?").get(repo, key) as ComparisonRow | undefined;
   return r ? parseComparison(r) : null;
 }
 
 /** storedComparison() for the sets of the repo (every repo without one), from one reading of the table. */
-export function storedComparisons(db: DatabaseSync, repo?: string): (repo: string, key: string) => StoredComparison | null {
-  const rows = new Map((db.prepare(`SELECT * FROM dupe_comparisons${repo !== undefined ? " WHERE repo = ?" : ""}`).all(...(repo !== undefined ? [repo] : [])) as ComparisonRow[]).map((r) => [`${r.repo}\n${r.key}`, r]));
-  return (r, key) => { const row = rows.get(`${r}\n${key}`); return row ? parseComparison(row) : null; };
+export async function storedComparisons(db: Db, repo?: string): Promise<(repo: string, key: string) => Promise<StoredComparison | null>> {
+  const rows = new Map((await db.prepare(`SELECT * FROM dupe_comparisons${repo !== undefined ? " WHERE repo = ?" : ""}`).all(...(repo !== undefined ? [repo] : [])) as ComparisonRow[]).map((r) => [`${r.repo}\n${r.key}`, r]));
+  return async (r, key) => { const row = rows.get(`${r}\n${key}`); return row ? parseComparison(row) : null; };
 }
 
 function parseComparison(r: ComparisonRow): StoredComparison {
@@ -151,18 +152,18 @@ function parseComparison(r: ComparisonRow): StoredComparison {
 }
 
 /** `set` is the compared snapshot: its members' sizes are stored, not whatever the items hold by now. */
-export function saveComparison(db: DatabaseSync, c: StoredComparison, set?: KindSet): void {
+export async function saveComparison(db: Db, c: StoredComparison, set?: KindSet): Promise<void> {
   const sizes: Record<number, number> = {}, heads: Record<number, string> = {};
   if (c.kind === "pr" && set) {
     for (const m of set.members) { const z = sizeOf(m); if (z !== null) sizes[m.number] = z; if (m.head_oid) heads[m.number] = m.head_oid; }
   } else if (c.kind === "pr") {
     const get = db.prepare("SELECT additions, deletions, head_oid FROM items WHERE repo = ? AND number = ?");
     for (const n of c.members) {
-      const m = (get.get(c.repo, n) as { additions: number | null; deletions: number | null; head_oid: string | null } | undefined) ?? { additions: null, deletions: null, head_oid: null };
+      const m = (await get.get(c.repo, n) as { additions: number | null; deletions: number | null; head_oid: string | null } | undefined) ?? { additions: null, deletions: null, head_oid: null };
       const z = sizeOf(m); if (z !== null) sizes[n] = z; if (m.head_oid) heads[n] = m.head_oid;
     }
   }
-  db.prepare(`INSERT OR REPLACE INTO dupe_comparisons (repo, key, kind, members, hash, kept, source, model, reason, result, error, attempts, at, summary, why, sizes, heads)
+  await db.prepare(`INSERT OR REPLACE INTO dupe_comparisons (repo, key, kind, members, hash, kept, source, model, reason, result, error, attempts, at, summary, why, sizes, heads)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(c.repo, c.key, c.kind, JSON.stringify(c.members), c.hash, c.kept, c.source, c.model, c.reason, c.result ? JSON.stringify(c.result) : null, c.error, c.attempts, c.at, c.summary ?? null, c.why ?? null, c.kind === "pr" ? JSON.stringify(sizes) : null, c.kind === "pr" ? JSON.stringify(heads) : null);
 }
 
@@ -182,15 +183,15 @@ function diffMoved(c: StoredComparison, members: Member[]): boolean {
  * The head of PR `n` that its latest stored comparison read; undefined when no comparison is stored or the latest recorded no
  * heads (stored before heads were kept), so nothing binds the PR to code a comparison saw; null when the comparison read no head of it.
  */
-export function comparedHead(db: DatabaseSync, repo: string, n: number): string | null | undefined {
-  const r = db.prepare(`SELECT heads, json_extract(heads, '$."' || :n || '"') AS head FROM dupe_comparisons
+export async function comparedHead(db: Db, repo: string, n: number): Promise<string | null | undefined> {
+  const r = await db.prepare(`SELECT heads, json_extract(heads, '$."' || :n || '"') AS head FROM dupe_comparisons
     WHERE repo = :repo AND kind = 'pr' AND EXISTS (SELECT 1 FROM json_each(members) WHERE value = :n) ORDER BY at DESC LIMIT 1`).get({ repo, n }) as { heads: string | null; head: string | null } | undefined;
   return !r || r.heads == null ? undefined : r.head ?? null;
 }
 
 /** The stored comparison of the set when it is current. */
-export const currentComparison = (db: DatabaseSync, s: KindSet, stored: (repo: string, key: string) => StoredComparison | null = (r, k) => storedComparison(db, r, k)): StoredComparison | null => {
-  const c = stored(s.repo, s.key);
+export const currentComparison = async (db: Db, s: KindSet, stored: (repo: string, key: string) => Promise<StoredComparison | null> = async (r, k) => await storedComparison(db, r, k)): Promise<StoredComparison | null> => {
+  const c = await stored(s.repo, s.key);
   if (!c) return null;
   if (c.hash === s.hash) return diffMoved(c, s.members) ? null : c;
   return c.sizes == null && c.hash === legacySetHash(s.members) ? c : null;
@@ -202,28 +203,28 @@ export const RULE_ATTEMPTS = 3;
 const dropKey = (s: { repo: string; key: string }) => `dupe_drop:${s.repo}:${s.key}`;
 
 /** Remembers that the set changed on GitHub since the sync, so it is not tried again for a while. */
-export function rememberDrop(db: DatabaseSync, s: KindSet, at: string): void {
-  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(dropKey(s), `${s.hash}|${at}`);
+export async function rememberDrop(db: Db, s: KindSet, at: string): Promise<void> {
+  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(dropKey(s), `${s.hash}|${at}`);
 }
 
 /** When the set's current snapshot was last dropped (ms), or null. */
-function droppedAt(db: DatabaseSync, s: KindSet): number | null {
-  const v = setting(db, dropKey(s));
+async function droppedAt(db: Db, s: KindSet): Promise<number | null> {
+  const v = await setting(db, dropKey(s));
   if (!v) return null;
   const [hash, at] = v.split("|");
   return hash === s.hash ? Date.parse(at!) : null;
 }
 
-function recentlyDropped(db: DatabaseSync, s: KindSet, nowMs: number): boolean {
-  const at = droppedAt(db, s);
+async function recentlyDropped(db: Db, s: KindSet, nowMs: number): Promise<boolean> {
+  const at = await droppedAt(db, s);
   return at !== null && nowMs - at < DROP_PAUSE_MS;
 }
 
 /** A stored rule result is tried again after 15 minutes, three times at most, while no decision of the group is answered. */
-function retryable(db: DatabaseSync, c: StoredComparison, nowMs: number): boolean {
+async function retryable(db: Db, c: StoredComparison, nowMs: number): Promise<boolean> {
   if (c.source !== "rule" || c.attempts >= RULE_ATTEMPTS || nowMs - Date.parse(c.at) < RULE_RETRY_MS) return false;
   const placeholders = c.members.map(() => "?").join(",");
-  return !db.prepare(`SELECT 1 FROM dupe_group_items gi JOIN decisions d ON d.id = gi.decision_id
+  return !await db.prepare(`SELECT 1 FROM dupe_group_items gi JOIN decisions d ON d.id = gi.decision_id
     WHERE gi.repo = ? AND gi.number IN (${placeholders}) AND d.answer IS NOT NULL AND d.answer <> 'superseded' LIMIT 1`).get(c.repo, ...c.members);
 }
 
@@ -231,19 +232,19 @@ function retryable(db: DatabaseSync, c: StoredComparison, nowMs: number): boolea
  * Sets that need a comparison: an open member is in the pilot and no current result is stored (or a rule result may be retried), and the set did not just change on GitHub.
  * `change` is told, per set, when its answer changes with the clock alone: a rule result's retry wait or a drop's pause ends.
  */
-export function dueSets(db: DatabaseSync, repo?: string, nowMs: number = Date.now(), change?: (s: KindSet, at: number) => void): KindSet[] {
+export async function dueSets(db: Db, repo?: string, nowMs: number = Date.now(), change?: (s: KindSet, at: number) => void): Promise<KindSet[]> {
   const out: KindSet[] = [];
-  const groups = duplicateGroups(db, repo), setsOf = kindSetsLoader(db, groups), stored = storedComparisons(db, repo);
+  const groups = await duplicateGroups(db, repo), setsOf = await kindSetsLoader(db, groups), stored = await storedComparisons(db, repo);
   for (const g of groups)
     for (const s of setsOf(g)) {
-      if (!s.members.some((m) => m.state === "OPEN" && setsOf.inPilot(s.repo, m.number))) continue;
-      const c = currentComparison(db, s, stored);
+      if (!await someSeq(s.members, async (m) => m.state === "OPEN" && await setsOf.inPilot(s.repo, m.number))) continue;
+      const c = await currentComparison(db, s, stored);
       if (change) {
         if (c && c.source === "rule" && c.attempts < RULE_ATTEMPTS) change(s, Date.parse(c.at) + RULE_RETRY_MS);
-        const dropped = droppedAt(db, s);
+        const dropped = await droppedAt(db, s);
         if (dropped !== null) change(s, dropped + DROP_PAUSE_MS);
       }
-      if ((!c || retryable(db, c, nowMs)) && !recentlyDropped(db, s, nowMs)) out.push(s);
+      if ((!c || await retryable(db, c, nowMs)) && !await recentlyDropped(db, s, nowMs)) out.push(s);
     }
   return out;
 }

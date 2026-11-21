@@ -4,8 +4,6 @@
 // `Guarded` value that only core/guard.ts makes, so the compiler enforces that the
 // guard ran right before. Transports (querier, exec, git, merge command) stay
 // injected so tests fake them and assert the rows.
-import type { DatabaseSync } from "node:sqlite";
-import { connect } from "../db.ts";
 import { recordPush } from "../push-outcomes.ts";
 import type { Grant, Guarded, GuardedItem, GuardedRepo } from "../core/guard.ts";
 import { auditIdentity, githubIdentity, identityFor, type WriteKind } from "./identity.ts";
@@ -23,12 +21,15 @@ import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { call, GITHUB_API } from "./app.ts";
 import { currentJobId } from "../agents/call.ts";
 import { giveaway } from "../security/rules.ts";
+import { filterSeq, forEachSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
 export type { Note } from "./note.ts";
 
 /** Who writes (the audit login: the stage name, or the operator for manual actions) and where the row goes. */
-export type Writer = { db: DatabaseSync; login: string; /** Replaces the clock (tests). */ now?: () => number; /** Replaces the pacing sleep (tests). */ sleep?: (ms: number) => Promise<void>; /** Replaces the installation-token minter (tests). */ mint?: (owner: string, repo: string, scope?: TokenScope) => Promise<string>; /** Replaces the app lane's GraphQL client (tests). */ appClient?: (env: Record<string, string>) => Pick<Querier, "query"> };
+export type Writer = { db: Db; login: string; /** Replaces the clock (tests). */ now?: () => number; /** Replaces the pacing sleep (tests). */ sleep?: (ms: number) => Promise<void>; /** Replaces the installation-token minter (tests). */ mint?: (owner: string, repo: string, scope?: TokenScope) => Promise<string>; /** Replaces the app lane's GraphQL client (tests). */ appClient?: (env: Record<string, string>) => Pick<Querier, "query"> };
 type Details = Record<string, unknown>;
 type Retry = <T>(f: () => Promise<T>) => Promise<T>;
 
@@ -54,7 +55,7 @@ function opensOwnPr(g: Grant, repo: string): void {
  * Who a write is made as, for the audit row's `identity`: `legacy` while the grant's repo is on the box account, else
  * the grant's identity (src/github/identity.ts). Every write takes it from its grant, so none goes unmapped.
  */
-const idOf = (w: Writer, g: Guarded | Grant, kind: WriteKind = "other"): string => auditIdentity(w.db, g, kind);
+const idOf = async (w: Writer, g: Guarded | Grant, kind: WriteKind = "other"): Promise<string> => await auditIdentity(w.db, g, kind);
 
 /** The text a write puts on GitHub: the note line and the text, with anything that looks like a credential hidden. */
 const posted = (note: Note, text: string): string => withNote(note, scrub(text));
@@ -67,7 +68,7 @@ const posted = (note: Note, text: string): string => withNote(note, scrub(text))
 // app token, and the caller supplies the person's transport. Every other write of such a grant is the app's
 // (`actsAsPerson` in identity.ts), whatever transport the caller passes.
 
-const inAppLane = (w: Writer, g: Guarded | Grant, kind: WriteKind = "other"): boolean => githubIdentity(w.db) === "app" && identityFor(g, kind) === "app";
+const inAppLane = async (w: Writer, g: Guarded | Grant, kind: WriteKind = "other"): Promise<boolean> => await githubIdentity(w.db) === "app" && identityFor(g, kind) === "app";
 
 /**
  * The child environment for a grant's repo, holding an installation token that reaches that repo only (and `scope`'s).
@@ -88,8 +89,8 @@ async function appEnv(w: Writer, g: Guarded | Grant, scope?: TokenScope): Promis
 /** A failed command result for a mint failure: callers already handle a non-zero exit. No request went out, so it is marked not sent. */
 const failedResult = (e: unknown): ExecResult => ({ code: 1, stdout: "", stderr: String((e as Error).message ?? e), sent: false });
 
-function laneExec(w: Writer, g: Guarded | Grant, exec: Exec, kind: WriteKind = "other"): Exec {
-  if (!inAppLane(w, g, kind)) return exec;
+async function laneExec(w: Writer, g: Guarded | Grant, exec: Exec, kind: WriteKind = "other"): Promise<Exec> {
+  if (!await inAppLane(w, g, kind)) return exec;
   return async (cmd, args, opts) => {
     let env: Record<string, string>;
     try { env = await appEnv(w, g); } catch (e) { return failedResult(e); }
@@ -97,8 +98,8 @@ function laneExec(w: Writer, g: Guarded | Grant, exec: Exec, kind: WriteKind = "
   };
 }
 
-function laneGit(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, scope?: TokenScope): Pick<Git, "git"> {
-  if (!inAppLane(w, g)) return git;
+async function laneGit(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, scope?: TokenScope): Promise<Pick<Git, "git">> {
+  if (!await inAppLane(w, g)) return git;
   return {
     git: async (args, opts) => {
       let env: Record<string, string>;
@@ -108,8 +109,8 @@ function laneGit(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, scope?: T
   };
 }
 
-function laneQuery(w: Writer, g: Guarded | Grant, q: Querier, kind: WriteKind = "other", scope?: TokenScope): Querier {
-  if (!inAppLane(w, g, kind)) return q;
+async function laneQuery(w: Writer, g: Guarded | Grant, q: Querier, kind: WriteKind = "other", scope?: TokenScope): Promise<Querier> {
+  if (!await inAppLane(w, g, kind)) return q;
   return {
     query: async (query, variables) => (w.appClient ?? ((env) => new Client(0, env)))(await appEnv(w, g, scope)).query(query, variables),
     get spent() { return q.spent; },
@@ -156,8 +157,8 @@ function paceOwner(identity: string, target: string, owner?: string): string {
 }
 
 /** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
-function keyWait(db: DatabaseSync, action: string, identity: string, owner: string, now: number): number {
-  const rows = db.prepare(
+async function keyWait(db: Db, action: string, identity: string, owner: string, now: number): Promise<number> {
+  const rows = await db.prepare(
     `SELECT at, json_extract(details, '$.state') AS state, json_extract(details, '$.error') AS error FROM audit
      WHERE at >= ? AND json_extract(details, '$.identity') = ? AND json_extract(details, '$.paceOwner') = ? ORDER BY at`,
   ).all(new Date(now - 3_600_000).toISOString(), identity, owner) as { at: string; state: string | null; error: string | null }[];
@@ -178,9 +179,9 @@ function keyWait(db: DatabaseSync, action: string, identity: string, owner: stri
  * How long the pipeline's write of `action` on `repo` (made as the app, or the box account while writes use it) waits for
  * the budget now; 0 when it may start. The planner reads it so it does not queue a job whose writes would be refused as paced.
  */
-export function pipelineWriteWait(db: DatabaseSync, action: string, repo: string, now: number = Date.now()): number {
-  const identity = githubIdentity(db) === "box" ? "legacy" : "app";
-  return keyWait(db, action, identity, paceOwner(identity, repo), now);
+export async function pipelineWriteWait(db: Db, action: string, repo: string, now: number = Date.now()): Promise<number> {
+  const identity = await githubIdentity(db) === "box" ? "legacy" : "app";
+  return await keyWait(db, action, identity, paceOwner(identity, repo), now);
 }
 
 /**
@@ -188,24 +189,18 @@ export function pipelineWriteWait(db: DatabaseSync, action: string, repo: string
  * window's rows via the audit_at index: fine at this volume) and inserts when under budget. Returns the row id, or
  * how long to wait before the window frees.
  */
-function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): { id: number } | { wait: number } {
+async function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): Promise<{ id: number } | { wait: number }> {
   const identity = String(details.identity ?? "");
   const owner = paceOwner(identity, target, ownerArg);
-  const insert = (d: Details): number => Number(w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?)")
-    .run(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d)).lastInsertRowid);
+  const insert = async (d: Details): Promise<number> => Number((await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?)")
+    .run(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d))).lastInsertRowid);
   const started = { ...details, state: "started" };
-  if (identity.startsWith("user:")) return { id: insert(started) };
-  w.db.exec("BEGIN IMMEDIATE");
-  try {
-    const wait = keyWait(w.db, action, identity, owner, now);
-    if (wait > 0) { w.db.exec("COMMIT"); return { wait }; }
-    const id = insert({ ...started, paceOwner: owner });
-    w.db.exec("COMMIT");
-    return { id };
-  } catch (e) {
-    try { w.db.exec("ROLLBACK"); } catch { /* already ended */ }
-    throw e;
-  }
+  if (identity.startsWith("user:")) return { id: await insert(started) };
+  return await w.db.write(async () => {
+    const wait = await keyWait(w.db, action, identity, owner, now);
+    if (wait > 0) return { wait };
+    return { id: await insert({ ...started, paceOwner: owner }) };
+  });
 }
 
 /** The running job's id, joined to the audit row so a write can be traced to its job. Absent outside a job. */
@@ -218,17 +213,17 @@ async function begin(w: Writer, action: string, target: string, details: Details
   const t0 = clock();
   for (;;) {
     const now = clock();
-    const r = tryBegin(w, action, target, details, now, owner);
+    const r = await tryBegin(w, action, target, details, now, owner);
     if ("id" in r) return r.id;
     if (now - t0 + r.wait > PACE_MAX_WAIT_MS) throw new WritePacedError(`${String(details.identity)} on ${paceOwner(String(details.identity), target, owner) || "all owners"}`, r.wait);
     await sleep(r.wait);
   }
 }
 
-function finish(w: Writer, id: number, details: Details, error?: string): void {
+async function finish(w: Writer, id: number, details: Details, error?: string): Promise<void> {
   const d = error === undefined ? { ...details, state: "done" } : { ...details, state: "failed", error };
   // The pacing key's owner, set by begin(), stays on the row.
-  w.db.prepare("UPDATE audit SET details = CASE WHEN json_extract(details, '$.paceOwner') IS NULL THEN ?1 ELSE json_set(?1, '$.paceOwner', json_extract(details, '$.paceOwner')) END WHERE rowid = ?2")
+  await w.db.prepare("UPDATE audit SET details = CASE WHEN json_extract(details, '$.paceOwner') IS NULL THEN ?1 ELSE json_set(?1, '$.paceOwner', json_extract(details, '$.paceOwner')) END WHERE rowid = ?2")
     .run(JSON.stringify(d), id);
 }
 
@@ -240,12 +235,12 @@ async function recorded<T>(w: Writer, identity: string, action: string, target: 
   try {
     r = await f();
   } catch (e) {
-    finish(w, id, details, oneLine(String((e as Error).message ?? e)));
+    await finish(w, id, details, oneLine(String((e as Error).message ?? e)));
     throw e;
   }
   const bad = failure?.(r) ?? null;
-  if (bad !== null) finish(w, id, details, bad);
-  else finish(w, id, { ...details, ...view?.(r) });
+  if (bad !== null) await finish(w, id, details, bad);
+  else await finish(w, id, { ...details, ...view?.(r) });
   return r;
 }
 
@@ -292,9 +287,9 @@ export type ItemRef = { repo: string; number: number; id: string };
 /** Posts a comment on an issue or PR; returns the comment's URL. `details` is the source (run or decision) and any context. */
 export async function commentOn(w: Writer, g: Grant, q: Querier, action: string, item: ItemRef, note: Note, text: string, details: Details = {}): Promise<string> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
+  q = await laneQuery(w, g, q);
   const body = posted(note, text);
-  const r = await recorded(w, idOf(w, g), action, refOf(item.repo, item.number), { ...details, text: body },
+  const r = await recorded(w, await idOf(w, g), action, refOf(item.repo, item.number), { ...details, text: body },
     () => q.query(ADD_COMMENT, { id: item.id, body }) as Promise<{ addComment?: { commentEdge?: { node?: { url?: string } } } }>,
     (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }));
   return r.addComment?.commentEdge?.node?.url ?? "";
@@ -311,14 +306,14 @@ export function duplicateClose(kept: { id: string; pr: boolean }, keptRef?: stri
 /** Closes an issue or PR. Issues get a state reason; a DUPLICATE close that GitHub rejects is retried once as NOT_PLANNED. */
 export async function closeItem(w: Writer, g: Grant, q: Querier, item: ItemRef & { pr: boolean }, details: Details = {}, how?: CloseHow): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q, "close");
+  q = await laneQuery(w, g, q, "close");
   const o = typeof how === "string" ? { reason: how } as Exclude<CloseHow, string> : how;
   // GitHub has a state reason for issues only.
   const reason = o && !item.pr ? o.reason : undefined;
   const duplicateOf = reason === "DUPLICATE" ? o?.duplicateOf : undefined;
   const d0 = reason ? { ...details, reason, ...(o?.keptRef ? { kept: o.keptRef } : {}) } : details;
   let fellBack = false;
-  await recorded(w, idOf(w, g, "close"), "act-close", refOf(item.repo, item.number), d0, async () => {
+  await recorded(w, await idOf(w, g, "close"), "act-close", refOf(item.repo, item.number), d0, async () => {
     if (item.pr) return q.query(CLOSE_PR, { id: item.id });
     if (!reason) return q.query(CLOSE_ISSUE, { id: item.id });
     if (reason !== "DUPLICATE") return q.query(CLOSE_ISSUE_AS, { id: item.id, reason });
@@ -334,26 +329,26 @@ export async function closeItem(w: Writer, g: Grant, q: Querier, item: ItemRef &
 
 export async function assignTo(w: Writer, g: Grant, q: Querier, item: ItemRef, user: { id: string; login: string }, details: Details = {}): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "assign", refOf(item.repo, item.number), { ...details, assignee: user.login }, () => q.query(ASSIGN, { id: item.id, user: user.id }));
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "assign", refOf(item.repo, item.number), { ...details, assignee: user.login }, () => q.query(ASSIGN, { id: item.id, user: user.id }));
 }
 
 export async function unassignFrom(w: Writer, g: Grant, q: Querier, item: ItemRef, user: { id: string; login: string }, details: Details = {}): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "unassign", refOf(item.repo, item.number), { ...details, assignee: user.login }, () => q.query(UNASSIGN, { id: item.id, user: user.id }));
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "unassign", refOf(item.repo, item.number), { ...details, assignee: user.login }, () => q.query(UNASSIGN, { id: item.id, user: user.id }));
 }
 
 export async function reopenItem(w: Writer, g: Grant, q: Querier, item: ItemRef & { pr: boolean }, details: Details = {}): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "act-reopen", refOf(item.repo, item.number), details, () => q.query(item.pr ? REOPEN_PR : REOPEN_ISSUE, { id: item.id }));
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "act-reopen", refOf(item.repo, item.number), details, () => q.query(item.pr ? REOPEN_PR : REOPEN_ISSUE, { id: item.id }));
 }
 
 export async function removeLabel(w: Writer, g: Grant, q: Querier, item: ItemRef, label: { id: string; name: string }, details: Details = {}): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "act-unlabel", refOf(item.repo, item.number), { ...details, label: label.name }, () => q.query(REMOVE_LABEL, { id: item.id, label: label.id }));
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "act-unlabel", refOf(item.repo, item.number), { ...details, label: label.name }, () => q.query(REMOVE_LABEL, { id: item.id, label: label.id }));
 }
 
 /** Moves an issue to another repository of the organisation (`to.id` is its node id). The grant `gTo` must cover the target repo; returns the issue's new URL. */
@@ -361,8 +356,8 @@ export async function transferIssue(w: Writer, g: Grant, gTo: Grant, q: Querier,
   covers(g, item.repo, item.number);
   covers(gTo, to.repo);
   // The move needs both repositories.
-  q = laneQuery(w, g, q, "other", { also: [to.repo] });
-  const r = await recorded(w, idOf(w, g), "act-transfer", refOf(item.repo, item.number), { ...details, to: to.repo },
+  q = await laneQuery(w, g, q, "other", { also: [to.repo] });
+  const r = await recorded(w, await idOf(w, g), "act-transfer", refOf(item.repo, item.number), { ...details, to: to.repo },
     () => q.query(TRANSFER_ISSUE, { id: item.id, repo: to.id }) as Promise<{ transferIssue?: { issue?: { url?: string } } }>,
     (x) => ({ url: x.transferIssue?.issue?.url ?? undefined }));
   return r.transferIssue?.issue?.url ?? "";
@@ -371,16 +366,16 @@ export async function transferIssue(w: Writer, g: Grant, gTo: Grant, q: Querier,
 /** Requests reviews from users (added to the reviewers already requested). */
 export async function requestReviewers(w: Writer, g: Grant, q: Querier, item: ItemRef, users: { id: string; login: string }[], details: Details = {}): Promise<void> {
   covers(g, item.repo, item.number);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "act-request-reviewers", refOf(item.repo, item.number), { ...details, reviewers: users.map((u) => u.login) },
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "act-request-reviewers", refOf(item.repo, item.number), { ...details, reviewers: users.map((u) => u.login) },
     () => q.query(REQUEST_REVIEWS, { id: item.id, users: users.map((u) => u.id) }));
 }
 
 /** Posts a review as a plain comment review on the commit; returns the review id (null when GitHub returned none). */
 export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review">, nodeId: string, note: Note, text: string, details: Details = {}): Promise<string | null> {
-  q = laneQuery(w, g, q);
+  q = await laneQuery(w, g, q);
   const body = posted(note, text);
-  const r = await recorded(w, idOf(w, g), "review-post", refOf(g.repo, g.number), { ...details, head: g.head },
+  const r = await recorded(w, await idOf(w, g), "review-post", refOf(g.repo, g.number), { ...details, head: g.head },
     () => q.query(ADD_REVIEW, { pr: nodeId, oid: g.head, body }) as Promise<{ addPullRequestReview?: { pullRequestReview?: { id?: string } | null } | null }>,
     (x) => ({ review: x.addPullRequestReview?.pullRequestReview?.id ?? undefined }),
     (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"));
@@ -388,15 +383,15 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
 }
 
 export async function editReview(w: Writer, q: Querier, g: Guarded<"post-review">, reviewId: string, note: Note, text: string, details: Details = {}): Promise<void> {
-  q = laneQuery(w, g, q);
+  q = await laneQuery(w, g, q);
   const body = posted(note, text);
-  await recorded(w, idOf(w, g), "review-edit", refOf(g.repo, g.number), { ...details, head: g.head, review: reviewId }, () => q.query(EDIT_REVIEW, { id: reviewId, body }));
+  await recorded(w, await idOf(w, g), "review-edit", refOf(g.repo, g.number), { ...details, head: g.head, review: reviewId }, () => q.query(EDIT_REVIEW, { id: reviewId, body }));
 }
 
 export async function createLabel(w: Writer, g: GuardedRepo, q: Querier, repo: string, repoId: string, label: { name: string; color: string; description: string }, retry: Retry = direct, details: Details = {}): Promise<void> {
   covers(g, repo);
-  q = laneQuery(w, g, q);
-  await recorded(w, idOf(w, g), "label-create", repo, { ...details, name: label.name }, () => retry(() => q.query(CREATE_LABEL, { input: { repositoryId: repoId, ...label } })));
+  q = await laneQuery(w, g, q);
+  await recorded(w, await idOf(w, g), "label-create", repo, { ...details, name: label.name }, () => retry(() => q.query(CREATE_LABEL, { input: { repositoryId: repoId, ...label } })));
 }
 
 export type LabelWrite = { number: number; id: string; labelIds: string[]; names: string[]; /** The guard that let this item's labels through (an item grant, or the repo grant of a conversation card). */ g: GuardedItem | GuardedRepo };
@@ -405,21 +400,21 @@ export type LabelWrite = { number: number; id: string; labelIds: string[]; names
 export async function addLabels(w: Writer, q: Querier, repo: string, items: LabelWrite[], retry: Retry = direct, details: Details = {}): Promise<number[]> {
   for (const it of items) covers(it.g, repo, it.number);
   // Items of different lanes go out in separate requests, each with its own token.
-  const app = items.filter((it) => inAppLane(w, it.g));
+  const app = await filterSeq(items, async (it) => await inAppLane(w, it.g));
   if (app.length > 0 && app.length < items.length) {
     const first = await addLabels(w, q, repo, app, retry, details);
-    return [...first, ...(await addLabels(w, q, repo, items.filter((it) => !inAppLane(w, it.g)), retry, details))];
+    return [...first, ...(await addLabels(w, q, repo, await filterSeq(items, async (it) => !await inAppLane(w, it.g)), retry, details))];
   }
-  if (app.length > 0) q = laneQuery(w, items[0]!.g, q);
+  if (app.length > 0) q = await laneQuery(w, items[0]!.g, q);
   const vars: Record<string, unknown> = {};
   items.forEach((it, k) => { vars[`i${k}`] = it.id; vars[`l${k}`] = it.labelIds; });
-  const det = (it: LabelWrite): Details => ({ ...details, labels: it.names, identity: idOf(w, it.g), ...jobOf() });
+  const det = async (it: LabelWrite): Promise<Details> => ({ ...details, labels: it.names, identity: await idOf(w, it.g), ...jobOf() });
   const ids: number[] = [];
   try {
-    for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), det(it)));
+    for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it)));
   } catch (e) {
     // Paced partway: the rows already added were never sent.
-    for (const id of ids) w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+    for (const id of ids) await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
     throw e;
   }
   let d: Record<string, unknown> | null;
@@ -427,15 +422,15 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
     d = await retry(() => q.query(addLabelsMutation(items.length), vars));
   } catch (e) {
     const msg = oneLine(String((e as Error).message ?? e));
-    items.forEach((it, k) => finish(w, ids[k]!, det(it), msg));
+    await forEachSeq(items, async (it, k) => await finish(w, ids[k]!, await det(it), msg));
     throw e;
   }
   const done: number[] = [];
-  items.forEach((it, k) => {
+  await forEachSeq(items, async (it, k) => {
     if (d && d[`m${k}`] !== null && d[`m${k}`] !== undefined) {
       done.push(it.number);
-      finish(w, ids[k]!, det(it));
-    } else finish(w, ids[k]!, det(it), "GitHub did not apply the labels");
+      await finish(w, ids[k]!, await det(it));
+    } else await finish(w, ids[k]!, await det(it), "GitHub did not apply the labels");
   });
   return done;
 }
@@ -456,20 +451,20 @@ export function ghAskComment(w: Writer, exec: Exec, action: string, g: Guarded<A
 }
 
 /** `action` is the audit action of the caller's stage (act, fixup or fixissue comment). Not for asks: those use ghAskComment. */
-export function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; pr: boolean }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
+export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; pr: boolean }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
-  exec = laneExec(w, g, exec);
+  exec = await laneExec(w, g, exec);
   const body = posted(note, text);
-  return viaGh(w, idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
+  return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
     [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body);
 }
 
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
-export function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
+export async function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
-  exec = laneExec(w, g, exec);
+  exec = await laneExec(w, g, exec);
   const body = posted(note, text);
-  return viaGh(w, idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body, comment: o.commentId },
+  return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body, comment: o.commentId },
     ["api", "-X", "PATCH", `repos/${slugOf(o.repo)}/issues/comments/${o.commentId}`, "-F", "body=@-"], body);
 }
 
@@ -477,13 +472,13 @@ export function ghEditComment(w: Writer, g: CommentGrant, exec: Exec, action: st
  * Deletes a comment of ours (`commentId` is the number in its `#issuecomment-` URL). The comment's author must be one of
  * `logins` (the box account and the app's bot names); a comment that is already gone counts as done (the audit row carries `gone: true`).
  */
-export function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string; logins: ReadonlySet<string> }, details: Details = {}): Promise<ExecResult> {
+export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; commentId: string; logins: ReadonlySet<string> }, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
-  exec = laneExec(w, g, exec);
+  exec = await laneExec(w, g, exec);
   const path = `repos/${slugOf(o.repo)}/issues/comments/${o.commentId}`;
   const gone = (r: ExecResult): boolean => r.code !== 0 && /404|not found/i.test(`${r.stderr} ${r.stdout}`);
   const goneResult: ExecResult = { code: 0, stdout: "gone", stderr: "" };
-  return recorded(w, idOf(w, g), action, refOf(o.repo, o.number), { ...details, comment: o.commentId },
+  return recorded(w, await idOf(w, g), action, refOf(o.repo, o.number), { ...details, comment: o.commentId },
     async () => {
       const author = await exec("gh", ["api", path, "--jq", ".user.login"]);
       if (gone(author)) return goneResult;
@@ -496,28 +491,28 @@ export function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, action: 
     (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
 }
 
-export function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string }, note: Note, details: Details = {}): Promise<ExecResult> {
+export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string }, note: Note, details: Details = {}): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
-  exec = laneExec(w, g, exec);
+  exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
-  return viaGh(w, idOf(w, g), exec, action, o.target, { ...details, text: body },
+  return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body },
     ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body);
 }
 
-export function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
+export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
-  exec = laneExec(w, g, exec, "close");
+  exec = await laneExec(w, g, exec, "close");
   const comment = posted(note, text);
-  return viaGh(w, idOf(w, g, "close"), exec, "batch-pr-close", refOf(o.repo, o.number), { ...details, text: comment },
+  return viaGh(w, await idOf(w, g, "close"), exec, "batch-pr-close", refOf(o.repo, o.number), { ...details, text: comment },
     ["pr", "close", String(o.number), "--repo", `${slugOf(o.repo)}`, "--comment", comment]);
 }
 
 /** Creates the pipeline account's fork of `repo` when it has none. */
-export function ghFork(w: Writer, g: GuardedRepo, exec: Exec, repo: string, details: Details = {}): Promise<ExecResult> {
+export async function ghFork(w: Writer, g: GuardedRepo, exec: Exec, repo: string, details: Details = {}): Promise<ExecResult> {
   covers(g, repo);
   // An app has no account to own a fork: its branches go to the base repository (forkOf returns it), so no fork is made.
-  if (inAppLane(w, g)) return Promise.resolve({ code: 1, stdout: "", stderr: "app identity: the app has no fork; push to the base repository" });
-  return viaGh(w, idOf(w, g), exec, "fork-create", repo, details, ["repo", "fork", `${slugOf(repo)}`, "--clone=false"]);
+  if (await inAppLane(w, g)) return Promise.resolve({ code: 1, stdout: "", stderr: "app identity: the app has no fork; push to the base repository" });
+  return viaGh(w, await idOf(w, g), exec, "fork-create", repo, details, ["repo", "fork", `${slugOf(repo)}`, "--clone=false"]);
 }
 
 /** `clear`: GitHub refused the request, so no issue can exist. Otherwise the outcome is unknown (a timeout, a lost response, a success without a URL). */
@@ -537,11 +532,11 @@ const REFUSED = /issues are disabled|has disabled issues|could not resolve to a 
  */
 export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: string; target: string; title: string; body: string; /** The audit action; the post-merge step's by default. */ action?: string }, note: Note, details: Details = {}): Promise<{ number: number; url: string }> {
   covers(g, o.repo);
-  exec = laneExec(w, g, exec);
+  exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
   let r: ExecResult;
   try {
-    r = await viaGh(w, idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
+    r = await viaGh(w, await idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
       ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body);
   } catch (e) {
     // exec rejects only when the command could not be started; the pacing rejects before anything is sent.
@@ -586,9 +581,9 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
 }
 
 /** Approves one Actions run that waits for a maintainer's approval (a run from an outside contributor's PR). */
-export function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
-  exec = laneExec(w, g, exec);
-  return viaGh(w, idOf(w, g), exec, "ci-run-approve", refOf(g.repo, g.number), { ...details, run: runId },
+export async function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
+  exec = await laneExec(w, g, exec);
+  return viaGh(w, await idOf(w, g), exec, "ci-run-approve", refOf(g.repo, g.number), { ...details, run: runId },
     ["api", "-X", "POST", `repos/${slugOf(g.repo)}/actions/runs/${runId}/approve`]);
 }
 
@@ -607,20 +602,20 @@ async function runOutsideHead(identity: string, exec: Exec, repo: string, runId:
 
 /** Reruns the failed jobs of one Actions run of a PR's head commit. */
 export async function ghRerunFailed(w: Writer, exec: Exec, g: Guarded<"cifix">, runId: number, details: Details = {}): Promise<ExecResult> {
-  exec = laneExec(w, g, exec);
-  const off = await runOutsideHead(idOf(w, g), exec, g.repo, runId, g.head);
+  exec = await laneExec(w, g, exec);
+  const off = await runOutsideHead(await idOf(w, g), exec, g.repo, runId, g.head);
   if (off) return off;
-  return viaGh(w, idOf(w, g), exec, "ci-rerun", refOf(g.repo, g.number), { ...details, run: runId },
+  return viaGh(w, await idOf(w, g), exec, "ci-rerun", refOf(g.repo, g.number), { ...details, run: runId },
     ["run", "rerun", String(runId), "--failed", "--repo", `${slugOf(g.repo)}`]);
 }
 
 /** Reruns the failed jobs of one Actions run on a head that belongs to no item (a default-branch head, or an integration batch tip): the audit target names the repo and the commit. */
 export async function ghRerunMainFailed(w: Writer, g: GuardedRepo, exec: Exec, o: { repo: string; head: string; runId: number }, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo);
-  exec = laneExec(w, g, exec);
-  const off = await runOutsideHead(idOf(w, g), exec, o.repo, o.runId, o.head);
+  exec = await laneExec(w, g, exec);
+  const off = await runOutsideHead(await idOf(w, g), exec, o.repo, o.runId, o.head);
   if (off) return off;
-  return viaGh(w, idOf(w, g), exec, "ci-rerun", `${o.repo}:${o.head.slice(0, 8)}`, { ...details, run: o.runId },
+  return viaGh(w, await idOf(w, g), exec, "ci-rerun", `${o.repo}:${o.head.slice(0, 8)}`, { ...details, run: o.runId },
     ["run", "rerun", String(o.runId), "--failed", "--repo", `${slugOf(o.repo)}`]);
 }
 
@@ -651,25 +646,25 @@ export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action
   opensOwnPr(g, o.repo);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/.test(o.remote) || o.branch.startsWith("-") || !/^[0-9a-f]{40,64}$/.test(o.sha)) throw new Error("the push target is not a repository and branch");
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
-  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then((r) => {
+  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
-    if (r.code === 0) try { w.db.prepare("INSERT OR IGNORE INTO main.own_commits (repo, sha, action, at) VALUES (?, ?, ?, ?)").run(o.repo, o.sha, action, new Date().toISOString()); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    if (r.code === 0) try { await w.db.prepare("INSERT OR IGNORE INTO main.own_commits (repo, sha, action, at) VALUES (?, ?, ?, ?)").run(o.repo, o.sha, action, new Date().toISOString()); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;
   });
 }
 
 async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, action: string, target: string, o: { remote: string; branch: string; sha: string }, lease: string, details: Details, pr: { repo: string; number: number | null }, asBox = false): Promise<ExecResult> {
   // A contributor's fork is outside the installation: that push keeps the installation-wide token.
-  if (!asBox) git = laneGit(w, g, git, o.remote.toLowerCase() === slugOf(g.repo).toLowerCase() ? undefined : { wide: true });
+  if (!asBox) git = await laneGit(w, g, git, o.remote.toLowerCase() === slugOf(g.repo).toLowerCase() ? undefined : { wide: true });
   // A box-account push (an advisory's private fork) is audited as legacy whatever the repo's identity.
-  const identity = asBox ? "legacy" : idOf(w, g);
+  const identity = asBox ? "legacy" : await idOf(w, g);
   const r = await recorded(w, identity, action, target, { ...details, branch: o.branch, remote: o.remote, commit: o.sha },
     () => git.git(["push", "--quiet", lease, `https://github.com/${o.remote}.git`, `${o.sha}:refs/heads/${o.branch}`]),
     undefined,
     (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`));
   if (r.code === 0) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
-    try { recordPush(w.db, action, { ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    try { await recordPush(w.db, action, { ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
   }
   return r;
 }
@@ -786,26 +781,26 @@ export async function mergeViaCommand(w: Writer, run: (cmd: string, args: string
   const args = [`${slugOf(g.repo)}`, String(g.number), `--${o.method}`, ...(o.extra ?? []), "--head", g.head];
   const repo = g.repo;
   const method: string = o.method;
-  const base = { ...details, method, identity: idOf(w, g, "merge"), ...jobOf() };
+  const base = { ...details, method, identity: await idOf(w, g, "merge"), ...jobOf() };
   const target = refOf(repo, g.number);
   const id = await begin(w, "merge", target, base);
   let r: CommandResult;
   try {
-    if (inAppLane(w, g, "merge")) {
+    if (await inAppLane(w, g, "merge")) {
       // The merge command runs with the installation token as its whole environment.
       try { r = await run(cmd, args, await appEnv(w, g)); } catch (e) { if (!String((e as Error).message).startsWith("app identity:")) throw e; r = failedResult(e); }
     } else r = await run(cmd, args, env);
   } catch (e) {
-    finish(w, id, base, oneLine(String((e as Error).message ?? e)));
+    await finish(w, id, base, oneLine(String((e as Error).message ?? e)));
     throw e;
   }
   if (r.code === 0) {
-    finish(w, id, { ...base, commit: r.stdout.match(/\bMERGED ([0-9a-f]{7,40})\b/)?.[1] });
+    await finish(w, id, { ...base, commit: r.stdout.match(/\bMERGED ([0-9a-f]{7,40})\b/)?.[1] });
     return r;
   }
   // The command can fail after GitHub merged (the check afterwards), so the caller may confirm the merge landed.
-  if (await landed?.().catch(() => false)) finish(w, id, { ...base, note: "landed after the command reported an error" });
-  else finish(w, id, base, oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
+  if (await landed?.().catch(() => false)) await finish(w, id, { ...base, note: "landed after the command reported an error" });
+  else await finish(w, id, base, oneLine(r.stderr || r.stdout) || `exit code ${r.code}`);
   return r;
 }
 
@@ -825,23 +820,23 @@ export async function ghMergePr(gh: (args: string[]) => Promise<string>, repo: s
 }
 
 /** Records a merge made from the command line, in the database `connect()` opens, under the login `cli`. */
-export function cliMergeRecorder(repoSlug: string, pr: string, method: string, head: string): () => Promise<(error?: string) => void> {
+export function cliMergeRecorder(repoSlug: string, pr: string, method: string, head: string): () => Promise<(error?: string) => Promise<void>> {
   return async () => {
-    const w: Writer = { db: connect(), login: "cli" };
+    const w: Writer = { db: await openDb(), login: "cli" };
     // The command line runs as the box account whatever the repo's setting.
     const details = { method: method.slice(2), head, identity: "legacy" };
     let id: number;
     try {
       id = await begin(w, "merge", `${repoName(repoSlug)}#${Number(pr)}`, details, splitSlug(repoSlug).owner);
     } catch (e) {
-      w.db.close();
+      await w.db.close();
       throw e;
     }
-    return (error) => {
+    return async (error) => {
       try {
-        finish(w, id, details, error);
+        await finish(w, id, details, error);
       } finally {
-        w.db.close();
+        await w.db.close();
       }
     };
   };

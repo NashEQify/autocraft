@@ -3,13 +3,13 @@
 // file (mode 0600) and are printed only with --print. Text a worker sent is shown with control
 // characters removed, so it cannot drive the terminal.
 import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import type { EnvKind, KubeSettings } from "../../web/src/api/types.ts";
-import { connect } from "../db.ts";
 import { envVar } from "../env.ts";
 import { trackedNames } from "../repos.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
@@ -114,20 +114,20 @@ function yesNo(opt: Map<string, string>, name: string): boolean | undefined {
   return v === "yes";
 }
 
-function run<T>(f: () => T): T {
+async function run<T>(f: () => Promise<T>): Promise<T> {
   try {
-    return f();
+    return await f();
   } catch (e) {
     if (e instanceof BuildError) die(e.message);
     throw e;
   }
 }
 
-function envs(args: string[]): void {
+async function envs(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
-  const db = connect();
+  const db = await openDb();
   if (sub === "list") {
-    for (const e of listEnvs(db)) {
+    for (const e of await listEnvs(db)) {
       const c = e.capabilities;
       console.log(`${e.id.padEnd(16)} ${safe(e.label).padEnd(24)} ${e.kind.padEnd(14)} ${e.enabled ? (e.online ? "online " : "offline") : "disabled"} ${e.running}/${e.slots} slots${e.confidential ? "  confidential" : ""}  ${c ? `${c.os}/${c.arch} ${c.cpus} cpu ${c.memGb} GB ${c.toolchains.join(",")}` : "no report yet"}${e.pausedReason ? `  paused: ${safe(e.pausedReason)}` : ""}`);
       if (e.settings) console.log(`${"".padEnd(16)} ${settingsLine(e.settings)}`);
@@ -139,7 +139,7 @@ function envs(args: string[]): void {
     const confidential = yesNo(opt, "confidential");
     if (opt.get("kind") === "kubernetes") {
       const settings = podSettings(opt, null);
-      const { env } = run(() => createEnv(db, { id: pos[0], label: opt.get("label"), kind: "kubernetes", slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }), ...(settings && { settings }) }, "cli"));
+      const { env } = await run(async () => await createEnv(db, { id: pos[0], label: opt.get("label"), kind: "kubernetes", slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }), ...(settings && { settings }) }, "cli"));
       console.log(`environment ${env.id} created (no worker key: the runner starts its pods)\n${settingsLine(env.settings!)}`);
       if (!env.settings!.image && !envVar("IMAGE")) console.log("note: this shell has no AUTOCRAFT_IMAGE; the runner must have it, or set --image");
       return;
@@ -147,7 +147,7 @@ function envs(args: string[]): void {
     if (podSettings(opt, null)) die("pod settings are only for --kind kubernetes");
     const f = keyFile(opt);
     try {
-      const { env, key } = (() => createEnv(db, { id: pos[0], label: opt.get("label"), kind: opt.get("kind"), slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }) }, "cli"))();
+      const { env, key } = await (async () => await createEnv(db, { id: pos[0], label: opt.get("label"), kind: opt.get("kind"), slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }) }, "cli"))();
       f.write(key!);
       console.log(`environment ${env.id} created`);
     } catch (e) {
@@ -165,10 +165,10 @@ function envs(args: string[]): void {
       const v = yesNo(opt, name);
       if (v !== undefined) input[name] = v;
     }
-    const settings = podSettings(opt, listEnvs(db).find((x) => x.id === pos[0])?.settings ?? null);
+    const settings = podSettings(opt, (await listEnvs(db)).find((x) => x.id === pos[0])?.settings ?? null);
     if (settings) input.settings = settings;
     if (!Object.keys(input).length) die(USAGE);
-    const e = run(() => updateEnv(db, pos[0], input, "cli"));
+    const e = await run(async () => await updateEnv(db, pos[0], input, "cli"));
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
     if (e.settings) console.log(settingsLine(e.settings));
   } else if (sub === "rotate-key") {
@@ -176,7 +176,7 @@ function envs(args: string[]): void {
     if (!pos[0]) die(USAGE);
     const f = keyFile(opt);
     try {
-      f.write(rotateKey(db, pos[0], "cli").key);
+      f.write((await rotateKey(db, pos[0], "cli")).key);
       console.log("the old key no longer works");
     } catch (e) {
       f.remove();
@@ -188,19 +188,19 @@ function envs(args: string[]): void {
 
 const OS = ["linux", "macos", "windows"];
 
-function tasks(args: string[]): void {
+async function tasks(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
-  const db = connect();
+  const db = await openDb();
   if (sub === "list") {
     const { opt } = options(rest);
-    const page = run(() => listTasks(db, { state: opt.get("state") as never, env: opt.get("env"), repo: opt.get("repo"), limit: Number(opt.get("limit")) || 20 }));
+    const page = await run(async () => await listTasks(db, { state: opt.get("state") as never, env: opt.get("env"), repo: opt.get("repo"), limit: Number(opt.get("limit")) || 20 }));
     for (const t of page.tasks) {
       console.log(`${String(t.id).padStart(5)} ${t.state.padEnd(9)} ${t.repo.padEnd(16)} ${t.headSha.slice(0, 8)} ${(t.envId ?? "-").padEnd(12)} ${t.queuedAt.slice(0, 16)} ${safe(t.summary)}`);
     }
   } else if (sub === "show") {
     const id = Number(rest[0]);
     if (!Number.isInteger(id)) die(USAGE);
-    const t = getTaskDetail(db, id) ?? die("no such task");
+    const t = await getTaskDetail(db, id) ?? die("no such task");
     console.log(`task ${t.id}  ${t.state}${t.cancelRequested ? " (cancel requested)" : ""}  ${t.repo}${t.number ? `#${t.number}` : ""} @ ${t.headSha}`);
     console.log(`requires ${JSON.stringify(t.requires)}  priority ${t.priority}  env ${t.envId ?? "-"}  queued ${t.queuedAt}${t.endedAt ? `  ended ${t.endedAt}` : ""}`);
     for (const s of t.plan) {
@@ -213,36 +213,36 @@ function tasks(args: string[]): void {
   } else if (sub === "cancel") {
     const id = Number(rest[0]);
     if (!Number.isInteger(id)) die(USAGE);
-    const t = run(() => cancelTask(db, id, "cli"));
+    const t = await run(async () => await cancelTask(db, id, "cli"));
     console.log(`task ${id}: ${t.state === "cancelled" ? "cancelled" : "cancel requested"}`);
   } else if (sub === "mem") {
     const { opt } = options(rest);
     const days = Number(opt.get("days") ?? 30);
     if (!Number.isFinite(days) || days <= 0) die(USAGE);
     const gb = (b: number) => (b / 1e9).toFixed(2);
-    const rows = memorySummary(db, days);
+    const rows = await memorySummary(db, days);
     if (rows.length === 0) console.log(`no steps with memory data in the last ${days} days`);
     else {
       console.log(`${"repo".padEnd(20)} ${"step".padEnd(16)} ${"steps".padStart(5)} ${"median GB".padStart(10)} ${"max GB".padStart(8)} ${"oom".padStart(4)}`);
       for (const r of rows) console.log(`${safe(r.repo).padEnd(20)} ${safe(r.step).padEnd(16)} ${String(r.steps).padStart(5)} ${gb(r.medianBytes).padStart(10)} ${gb(r.maxBytes).padStart(8)} ${String(r.oom).padStart(4)}`);
     }
   } else if (sub === "enqueue-test") {
-    enqueueTest(db, rest);
+    await enqueueTest(db, rest);
   } else die(USAGE);
 }
 
 /** A harmless smoke-test task: system facts with no network, then the cargo version. */
-function enqueueTest(db: DatabaseSync, args: string[]): void {
+async function enqueueTest(db: Db, args: string[]): Promise<void> {
   const { opt } = options(args);
   const os = opt.get("env-requires");
   const repo = opt.get("repo");
   const sha = opt.get("sha");
   if (!os || !repo || !sha) die(USAGE);
   if (!OS.includes(os)) die(`--env-requires must be one of ${OS.join(", ")}`);
-  if (!trackedNames(db).includes(repo)) die(`${repo} is not a tracked repo`);
-  const vis = (db.prepare("SELECT visibility FROM main.repos WHERE name = ?").get(repo) as { visibility: string | null } | undefined)?.visibility;
+  if (!(await trackedNames(db)).includes(repo)) die(`${repo} is not a tracked repo`);
+  const vis = (await db.prepare("SELECT visibility FROM main.repos WHERE name = ?").get(repo) as { visibility: string | null } | undefined)?.visibility;
   if (vis?.toLowerCase() !== "public") die(`${repo} is not public; workers fetch source anonymously`);
-  const id = run(() => createTask(db, {
+  const id = await run(async () => await createTask(db, {
     step: "smoke-test", repo, headSha: sha, requires: { os: os as "linux" | "macos" | "windows" },
     plan: [
       { name: "system", cmd: ["sh", "-c", "uname -a; nproc; free -g"], network: "none", timeoutSec: 60 },
@@ -253,6 +253,6 @@ function enqueueTest(db: DatabaseSync, args: string[]): void {
 }
 
 export const commands = {
-  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id>", run: (args: string[]) => envs(args) },
-  tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: (args: string[]) => tasks(args) },
+  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id>", run: async (args: string[]) => await envs(args) },
+  tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: async (args: string[]) => await tasks(args) },
 };

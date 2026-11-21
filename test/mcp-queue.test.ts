@@ -14,13 +14,13 @@ import { OPERATOR, world, type World } from "./world-db.ts";
 let current: World | null = null;
 // The pre-approval tools need an answering token, which exists only while answering is available.
 before(() => { answering.enabled = true; });
-const fresh = (): World => (current = world().repo());
+const fresh = async (): Promise<World> => (current = await (await world()).repo());
 afterEach(() => current?.close());
 
 /** `who.role` is read on every call, as the server reads the access list: a test changes it to demote the login under a live session. */
 const envOf = (w: World, role: Role, login = role === "operator" ? OPERATOR : "maint", who = { role }, canAnswer = true): McpEnv => ({
   db: w.db, baseUrl: null, limiter: new RateLimiter(60, 3600_000), canAnswer, expensive: () => 0,
-  user: () => ({ login, role: who.role, canWrite: async () => true, canRead: async () => true }),
+  user: async () => ({ login, role: who.role, canWrite: async () => true, canRead: async () => true }),
 });
 
 let id = 0;
@@ -32,12 +32,12 @@ async function call(env: McpEnv, name: string, args: Record<string, unknown> = {
   return { text: r.content[0].text as string, isError: r.isError === true };
 }
 const names = async (env: McpEnv): Promise<string[]> => (await rpc(env, "tools/list")).tools.map((t: { name: string }) => t.name);
-const weights = (w: World) => fastTrackList(w.db).map((f) => [f.number, f.weight]);
+const weights = async (w: World) => (await fastTrackList(w.db)).map((f) => [f.number, f.weight]);
 const data = (text: string): any => JSON.parse(text.slice(text.indexOf(">>>\n") + 4, text.lastIndexOf("\n<<<end untrusted>>>")));
 
 describe("merge queue tools", () => {
   test("an operator is offered the write tools; a maintainer's answering token only queue_pr; everyone reads the queue", async () => {
-    const w = fresh();
+    const w = await fresh();
     const op = envOf(w, "operator"), maint = envOf(w, "maintainer"), viewer = envOf(w, "viewer");
     const maintNoAnswer = envOf(w, "maintainer", "maint", { role: "maintainer" }, false);
     const writes = (list: string[]) => list.filter((n) => ["queue_pr", "set_weight", "cancel_queued"].includes(n));
@@ -56,7 +56,7 @@ describe("merge queue tools", () => {
   });
 
   test("an operator token that cannot answer is not offered queue_pr or cancel_queued, and a call is refused", async () => {
-    const w = fresh().pr(1);
+    const w = await (await fresh()).pr(1);
     const op = envOf(w, "operator", OPERATOR, { role: "operator" }, false);
     const list = await names(op);
     assert.deepEqual(list.filter((n) => ["queue_pr", "cancel_queued"].includes(n)), []);
@@ -67,31 +67,31 @@ describe("merge queue tools", () => {
       assert.equal(r.isError, true, name);
       assert.match(r.text, /cannot answer decisions/);
     }
-    assert.equal(preapprovalOf(w.db, "app", 1), null);
+    assert.equal(await preapprovalOf(w.db, "app", 1), null);
     assert.equal((await call(op, "set_weight", { item: "app#1", weight: 3 })).isError, false);
   });
 
   test("queue_pr needs write permission on the repo and audits its writes as mcp", async () => {
-    const w = fresh().pr(1);
-    const noWrite: McpEnv = { ...envOf(w, "operator"), user: () => ({ login: OPERATOR, role: "operator", canWrite: async () => false, canRead: async () => true }) };
+    const w = await (await fresh()).pr(1);
+    const noWrite: McpEnv = { ...envOf(w, "operator"), user: async () => ({ login: OPERATOR, role: "operator", canWrite: async () => false, canRead: async () => true }) };
     const r = await call(noWrite, "queue_pr", { item: "app#1" });
     assert.equal(r.isError, true);
     assert.match(r.text, /no write access to storytold\/app/);
-    assert.equal(preapprovalOf(w.db, "app", 1), null);
+    assert.equal(await preapprovalOf(w.db, "app", 1), null);
     const op = envOf(w, "operator");
     await call(op, "queue_pr", { item: "app#1" });
     await call(op, "cancel_queued", { item: "app#1" });
     await call(op, "set_weight", { item: "app#1", remove: true });
-    const rows = w.db.prepare("SELECT action, details FROM audit WHERE action IN ('preapproval', 'fasttrack-add', 'fasttrack-remove')").all() as { action: string; details: string | null }[];
+    const rows = await w.db.prepare("SELECT action, details FROM audit WHERE action IN ('preapproval', 'fasttrack-add', 'fasttrack-remove')").all() as { action: string; details: string | null }[];
     assert.ok(rows.length >= 4);
     for (const x of rows) assert.equal(JSON.parse(x.details ?? "{}").via, "mcp", `${x.action} ${x.details}`);
   });
 
   test("a viewer gets no batch summary, staff do", async () => {
-    const w = fresh().pr(1);
-    const id = insertBatch(w.db, { repo: "app", branch: "batch-1", baseSha: "b", commitSha: "c", parentId: null, members: [{ number: 1, head_oid: "h" }], at: "2026-01-01T00:00:00Z" });
-    updateBatch(w.db, id, "2026-01-01T00:00:00Z", { summary: "push failed: remote said no" });
-    refreshPlanCache(w.db);
+    const w = await (await fresh()).pr(1);
+    const id = await insertBatch(w.db, { repo: "app", branch: "batch-1", baseSha: "b", commitSha: "c", parentId: null, members: [{ number: 1, head_oid: "h" }], at: "2026-01-01T00:00:00Z" });
+    await updateBatch(w.db, id, "2026-01-01T00:00:00Z", { summary: "push failed: remote said no" });
+    await refreshPlanCache(w.db);
     for (const [role, want] of [["operator", "push failed: remote said no"], ["maintainer", "push failed: remote said no"], ["viewer", null]] as const) {
       const d = data((await call(envOf(w, role), "list_merge_queue", { repo: "app" })).text);
       assert.equal(d.batches.length, 1, role);
@@ -100,7 +100,7 @@ describe("merge queue tools", () => {
   });
 
   test("a maintainer queues only where they answer decisions, with the default weight; set_weight and cancel_queued stay with operators", async () => {
-    const w = fresh().pr(1).pr(2);
+    const w = await (await (await fresh()).pr(1)).pr(2);
     const maint = envOf(w, "maintainer");
     const refusedAll = async () => {
       for (const [name, args, why] of [["queue_pr", { item: "app#1" }, /only an operator, or a maintainer with write access where the app acts for them/], ["set_weight", { item: "app#1", weight: 9 }, /only operators steer the merge queue/], ["cancel_queued", { item: "app#1" }, /only operators steer the merge queue/]] as const) {
@@ -108,29 +108,29 @@ describe("merge queue tools", () => {
         assert.equal(r.isError, true, name);
         assert.match(r.text, why, name);
       }
-      assert.equal(preapprovalOf(w.db, "app", 1), null);
-      assert.deepEqual(weights(w), []);
+      assert.equal(await preapprovalOf(w.db, "app", 1), null);
+      assert.deepEqual(await weights(w), []);
     };
     // Maintainer writes off, then on without the app identity: nothing changes.
     await refusedAll();
-    w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run();
+    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run();
     await refusedAll();
-    w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
     const r = await call(maint, "queue_pr", { item: "app#1", weight: 6 });
     assert.equal(r.isError, false, r.text);
     assert.match(r.text, /The weight was ignored: only operators set fast-track weights/);
-    assert.equal(preapprovalOf(w.db, "app", 1)?.by, "maint");
-    assert.deepEqual(weights(w), [[1, 5]]);
+    assert.equal((await preapprovalOf(w.db, "app", 1))?.by, "maint");
+    assert.deepEqual(await weights(w), [[1, 5]]);
     // An item an operator fast-tracked keeps its weight, lighter or not.
-    addFastTrack(w.db, OPERATOR, "app#2", 3);
+    await addFastTrack(w.db, OPERATOR, "app#2", 3);
     assert.equal((await call(maint, "queue_pr", { item: "app#2", weight: 9 })).isError, false);
-    assert.deepEqual(weights(w), [[1, 5], [2, 3]]);
+    assert.deepEqual(await weights(w), [[1, 5], [2, 3]]);
     assert.equal((await call(maint, "cancel_queued", { item: "app#1" })).isError, true);
     assert.equal((await call(maint, "set_weight", { item: "app#1", remove: true })).isError, true);
   });
 
   test("an operator demoted after tools/list is refused on the next call, with the tools still in its client's list", async () => {
-    const w = fresh().pr(1).pr(2);
+    const w = await (await (await fresh()).pr(1)).pr(2);
     const who: { role: Role } = { role: "operator" };
     const env = envOf(w, "operator", OPERATOR, who);
     assert.ok((await names(env)).includes("queue_pr"));
@@ -142,26 +142,26 @@ describe("merge queue tools", () => {
       assert.equal(r.isError, true, name);
       assert.match(r.text, why, name);
     }
-    assert.equal(preapprovalOf(w.db, "app", 1), null);
-    assert.equal(preapprovalOf(w.db, "app", 2)?.state, "review");
-    assert.deepEqual(weights(w), [[2, 4]]);
+    assert.equal(await preapprovalOf(w.db, "app", 1), null);
+    assert.equal((await preapprovalOf(w.db, "app", 2))?.state, "review");
+    assert.deepEqual(await weights(w), [[2, 4]]);
     // As a maintainer with an answering token it keeps only queue_pr (the server turns answering off while maintainer writes are off).
     assert.deepEqual((await names(env)).filter((n) => ["queue_pr", "set_weight", "cancel_queued"].includes(n)), ["queue_pr"]);
   });
 
   test("queue_pr pre-approves the PR at its head and fast-tracks it with the weight, as the Queue page does", async () => {
-    const w = fresh().pr(1).pr(2);
+    const w = await (await (await fresh()).pr(1)).pr(2);
     const op = envOf(w, "operator");
     const r = await call(op, "queue_pr", { item: "app#1", weight: 8 });
     assert.equal(r.isError, false, r.text);
     assert.match(r.text, /Added to the merge queue/);
     assert.match(r.text, /weight 8, 1 of 1/);
-    assert.equal(preapprovalOf(w.db, "app", 1)?.state, "review");
-    assert.equal(preapprovalOf(w.db, "app", 1)?.by, OPERATOR);
-    assert.deepEqual(weights(w), [[1, 8]]);
+    assert.equal((await preapprovalOf(w.db, "app", 1))?.state, "review");
+    assert.equal((await preapprovalOf(w.db, "app", 1))?.by, OPERATOR);
+    assert.deepEqual(await weights(w), [[1, 8]]);
     // The default weight; a URL works as the item too.
     assert.equal((await call(op, "queue_pr", { item: "https://github.com/storytold/app/pull/2" })).isError, false);
-    assert.deepEqual(weights(w), [[1, 8], [2, 5]]);
+    assert.deepEqual(await weights(w), [[1, 8], [2, 5]]);
     // Queued twice: the pre-approval's own refusal comes back.
     const again = await call(op, "queue_pr", { item: "app#1" });
     assert.equal(again.isError, true);
@@ -169,38 +169,38 @@ describe("merge queue tools", () => {
   });
 
   test("set_weight changes, adds without approving, and removes; its arguments are checked", async () => {
-    const w = fresh().pr(1).pr(2);
+    const w = await (await (await fresh()).pr(1)).pr(2);
     const op = envOf(w, "operator");
     await call(op, "queue_pr", { item: "app#1", weight: 8 });
     assert.match((await call(op, "set_weight", { item: "app#1", weight: 3 })).text, /Set the weight\. app#1 is fast-tracked with weight 3/);
     assert.match((await call(op, "set_weight", { item: "app#2", weight: 6 })).text, /not approved by this/);
-    assert.deepEqual(weights(w), [[2, 6], [1, 3]]);
-    assert.equal(preapprovalOf(w.db, "app", 2), null);
+    assert.deepEqual(await weights(w), [[2, 6], [1, 3]]);
+    assert.equal(await preapprovalOf(w.db, "app", 2), null);
     assert.match((await call(op, "set_weight", { item: "app#2", remove: true })).text, /Took app#2 off/);
     assert.match((await call(op, "set_weight", { item: "app#2", remove: true })).text, /was not fast-tracked/);
-    assert.deepEqual(weights(w), [[1, 3]]);
+    assert.deepEqual(await weights(w), [[1, 3]]);
     for (const args of [{ item: "app#1", weight: 11 }, { item: "app#1", weight: 2.5 }, { item: "app#1", weight: 4, remove: true }, { item: "nothing here" }, { item: "app#1", remove: "yes" }]) {
       assert.equal((await call(op, "set_weight", args)).isError, true, JSON.stringify(args));
     }
-    assert.deepEqual(weights(w), [[1, 3]]);
+    assert.deepEqual(await weights(w), [[1, 3]]);
   });
 
   test("cancel_queued withdraws the pre-approval and keeps the weight; a second cancel is refused", async () => {
-    const w = fresh().pr(1);
+    const w = await (await fresh()).pr(1);
     const op = envOf(w, "operator");
     await call(op, "queue_pr", { item: "app#1", weight: 7 });
     const r = await call(op, "cancel_queued", { item: "app#1" });
     assert.equal(r.isError, false, r.text);
     assert.match(r.text, /is cancelled\. app#1 is fast-tracked with weight 7.*remove: true/);
-    assert.equal(preapprovalOf(w.db, "app", 1)?.state, "cancelled");
-    assert.deepEqual(weights(w), [[1, 7]]);
+    assert.equal((await preapprovalOf(w.db, "app", 1))?.state, "cancelled");
+    assert.deepEqual(await weights(w), [[1, 7]]);
     const again = await call(op, "cancel_queued", { item: "app#1" });
     assert.equal(again.isError, true);
     assert.match(again.text, /no pre-approved merge in progress/);
   });
 
   test("list_merge_queue shows what an agent queued, with its weight, to any role; viewers get no logins", async () => {
-    const w = fresh().pr(1).pr(2);
+    const w = await (await (await fresh()).pr(1)).pr(2);
     await call(envOf(w, "operator"), "queue_pr", { item: "app#2", weight: 9 });
     for (const role of ["operator", "maintainer", "viewer"] as const) {
       const r = await call(envOf(w, role), "list_merge_queue", { repo: "app" });
@@ -236,17 +236,17 @@ describe("merge queue tools", () => {
   }
 
   test("a queued PR that is a queue row on a later page is never listed as before its review", async () => {
-    const w = fresh().pr(1).review(1).pr(2).review(2).pr(3);
+    const w = await (await (await (await (await (await fresh()).pr(1)).review(1)).pr(2)).review(2)).pr(3);
     const op = envOf(w, "operator");
     for (const n of [1, 2, 3]) assert.equal((await call(op, "queue_pr", { item: `app#${n}` })).isError, false);
-    refreshPlanCache(w.db);
+    await refreshPlanCache(w.db);
     const all = await pages(op, 1);
     assert.deepEqual(all.prs.sort(), ["app#1", "app#2"]);
     assert.deepEqual(all.pending, ["app#3"]);
   });
 
   test("pre-approvals before review page on with the cursor: none is skipped or shown twice", async () => {
-    const w = fresh().pr(1).pr(2).pr(3).pr(4).pr(5);
+    const w = await (await (await (await (await (await fresh()).pr(1)).pr(2)).pr(3)).pr(4)).pr(5);
     const op = envOf(w, "operator");
     for (const n of [1, 2, 3, 4, 5]) await call(op, "queue_pr", { item: `app#${n}` });
     const all = await pages(op, 2);

@@ -1,6 +1,6 @@
 // What AutoCraft is doing about a red default branch, in words for the Main CI page. Read-only.
-import type { DatabaseSync } from "node:sqlite";
 import { mainFixApprovals } from "./approval.ts";
+import type { Db } from "../db/index.ts";
 
 /** Shown first when a head has rows in several states: what needs a person comes before what is running. */
 const ORDER = ["fix-failed", "needs-fix", "linting", "asked", "pr-opened", "rerun-requested", "issue-opened", "declined", "nothing-to-do", "rerun-passed"] as const;
@@ -19,20 +19,20 @@ const TEXT: Record<(typeof ORDER)[number], string> = {
 };
 
 /** Null when the repo has no approval and nothing was done at this head. */
-export function autocraftText(db: DatabaseSync, repo: string, headSha: string, state: string): string | null {
-  return autocraftTexts(db, [{ repo, headSha, state }]).get(`${repo}\0${headSha}`) ?? null;
+export async function autocraftText(db: Db, repo: string, headSha: string, state: string): Promise<string | null> {
+  return (await autocraftTexts(db, [{ repo, headSha, state }])).get(`${repo}\0${headSha}`) ?? null;
 }
 
 /** `autocraftText` of many heads in two reads, by repo and head joined by a NUL. */
-export function autocraftTexts(db: DatabaseSync, heads: { repo: string; headSha: string; state: string }[]): Map<string, string | null> {
+export async function autocraftTexts(db: Db, heads: { repo: string; headSha: string; state: string }[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   if (!heads.length) return out;
-  const rows = db.prepare("SELECT repo, head_sha, state, pr_number FROM main_fixes WHERE (repo, head_sha) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))")
+  const rows = await db.prepare("SELECT repo, head_sha, state, pr_number FROM main_fixes WHERE (repo, head_sha) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))")
     .all(JSON.stringify(heads.map((h) => [h.repo, h.headSha]))) as { repo: string; head_sha: string; state: string; pr_number: number | null }[];
   const fixes = new Map<string, typeof rows>();
   for (const r of rows) (fixes.get(`${r.repo}\0${r.head_sha}`) ?? fixes.set(`${r.repo}\0${r.head_sha}`, []).get(`${r.repo}\0${r.head_sha}`)!).push(r);
   const first = (k: string) => { const states = new Set((fixes.get(k) ?? []).map((r) => r.state)); return ORDER.find((s) => states.has(s)); };
-  const approvals = mainFixApprovals(db, [...new Set(heads.filter((h) => h.state === "red" && !first(`${h.repo}\0${h.headSha}`)).map((h) => h.repo))]);
+  const approvals = await mainFixApprovals(db, [...new Set(heads.filter((h) => h.state === "red" && !first(`${h.repo}\0${h.headSha}`)).map((h) => h.repo))]);
   for (const h of heads) {
     const k = `${h.repo}\0${h.headSha}`;
     const f = first(k);

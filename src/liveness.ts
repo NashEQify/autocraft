@@ -2,11 +2,12 @@
 // An item that is neither is STUCK; a live item whose plan state and wait have not changed for a long time is LONG (a monitor
 // threshold, not a pipeline wait). The runner refreshes the stored result after planner passes (refreshLiveness); the health check,
 // the Stuck items page and `autocraft-server liveness` read it.
-import type { DatabaseSync } from "node:sqlite";
 import { fixStoppedWait, TRIAGE_WAIT } from "./core/decide-item.ts";
 import type { WaitKind } from "./core/plan.ts";
 import { blockersOfWait } from "./review/blockers.ts";
 import { setting, writeSetting } from "./settings-read.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 export type LivenessVerdict = "stuck" | "long";
 /** Why an item is live (`live` causes) or stuck (`stuck` causes). */
@@ -72,33 +73,33 @@ const DAY_MS = 86_400_000;
 
 type Row = { repo: string; number: number; kind: "pr" | "issue"; state: string; item_state: string | null; actions: number; wait: string | null; phase: string; since: string; wait_kind: WaitKind | null };
 
-function keySet(db: DatabaseSync, sql: string): Set<string> {
-  return new Set((db.prepare(sql).all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+async function keySet(db: Db, sql: string): Promise<Set<string>> {
+  return new Set((await db.prepare(sql).all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
 }
 
 /** Items that have an open question, a disputed answer, or a stopped step, by `repo#number`. */
-export function flagSets(db: DatabaseSync): { question: Set<string>; answered: Set<string>; dispute: Set<string>; stopped: Set<string> } {
-  const question = keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NULL AND number IS NOT NULL
+export async function flagSets(db: Db): Promise<{ question: Set<string>; answered: Set<string>; dispute: Set<string>; stopped: Set<string> }> {
+  const question = await keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NULL AND number IS NOT NULL
     UNION SELECT di.repo, di.number FROM main.decision_items di JOIN main.decisions d ON d.id = di.decision_id WHERE d.answer IS NULL
     UNION SELECT g.repo, g.number FROM main.dupe_group_items g JOIN main.decisions d ON d.id = g.decision_id WHERE d.answer IS NULL`);
-  const answered = keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NOT NULL AND applied_at IS NULL AND exec_state IS NOT 'disputed' AND number IS NOT NULL
+  const answered = await keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NOT NULL AND applied_at IS NULL AND exec_state IS NOT 'disputed' AND number IS NOT NULL
     UNION SELECT di.repo, di.number FROM main.decision_items di JOIN main.decisions d ON d.id = di.decision_id WHERE d.answer IS NOT NULL AND d.applied_at IS NULL AND d.exec_state IS NOT 'disputed'
     UNION SELECT g.repo, g.number FROM main.dupe_group_items g JOIN main.decisions d ON d.id = g.decision_id WHERE d.answer IS NOT NULL AND d.applied_at IS NULL AND d.exec_state IS NOT 'disputed'`);
-  const dispute = keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NOT NULL AND exec_state = 'disputed' AND number IS NOT NULL
+  const dispute = await keySet(db, `SELECT repo, number FROM main.decisions WHERE answer IS NOT NULL AND exec_state = 'disputed' AND number IS NOT NULL
     UNION SELECT di.repo, di.number FROM main.decision_items di JOIN main.decisions d ON d.id = di.decision_id WHERE d.answer IS NOT NULL AND d.exec_state = 'disputed'
     UNION SELECT g.repo, g.number FROM main.dupe_group_items g JOIN main.decisions d ON d.id = g.decision_id WHERE d.answer IS NOT NULL AND d.exec_state = 'disputed'`);
-  const stopped = keySet(db, `SELECT a.repo, a.number FROM main.actions a JOIN main.decisions d ON d.id = a.decision_id
+  const stopped = await keySet(db, `SELECT a.repo, a.number FROM main.actions a JOIN main.decisions d ON d.id = a.decision_id
     WHERE a.state = 'stopped' AND d.answer IS NOT NULL AND d.applied_at IS NULL AND d.exec_state IS NOT 'disputed'
     UNION SELECT repo, number FROM main.item_plans WHERE kind = 'issue' AND wait IN ('${fixStoppedWait("skipped").replaceAll("'", "''")}', '${fixStoppedWait("failed").replaceAll("'", "''")}')`);
   return { question, answered, dispute, stopped };
 }
 
-export function computeLiveness(db: DatabaseSync, nowMs: number = Date.now()): Liveness {
-  const days = Number(setting(db, LONG_DAYS_KEY));
+export async function computeLiveness(db: Db, nowMs: number = Date.now()): Promise<Liveness> {
+  const days = Number(await setting(db, LONG_DAYS_KEY));
   const longMs = (Number.isFinite(days) && days > 0 ? days : LONG_DAYS_DEFAULT) * DAY_MS;
-  const flags = flagSets(db);
+  const flags = await flagSets(db);
   // The view's status and wait kind and the action count, read in SQL: the rows' JSON stays in the database. Ended and switched-off items are not checked.
-  const rows = db.prepare(`SELECT p.repo, p.number, p.kind, p.state, p.item_state, json_array_length(p.actions) AS actions, p.wait,
+  const rows = await db.prepare(`SELECT p.repo, p.number, p.kind, p.state, p.item_state, json_array_length(p.actions) AS actions, p.wait,
       COALESCE(json_extract(p.view, '$.status.phase'), 'Triage') AS phase, COALESCE(json_extract(p.view, '$.status.since'), p.planned_at) AS since, json_extract(p.view, '$.waitKind') AS wait_kind
     FROM main.item_plans p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
     WHERE i.state = 'OPEN' AND COALESCE(json_extract(p.view, '$.status.phase'), 'Triage') NOT IN ('Pipeline off', 'Merged', 'Closed')`).all() as Row[];
@@ -128,33 +129,28 @@ export function computeLiveness(db: DatabaseSync, nowMs: number = Date.now()): L
 }
 
 /** Recomputes and stores the result unless one is newer than REFRESH_MS. Returns true when it ran. */
-export function refreshLiveness(db: DatabaseSync, nowMs: number = Date.now(), force = false): boolean {
-  const last = Date.parse(setting(db, "liveness_at") ?? "");
+export async function refreshLiveness(db: Db, nowMs: number = Date.now(), force = false): Promise<boolean> {
+  const last = Date.parse(await setting(db, "liveness_at") ?? "");
   if (!force && Number.isFinite(last) && nowMs - last < REFRESH_MS) return false;
-  const res = computeLiveness(db, nowMs);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec("DELETE FROM main.liveness_items");
+  const res = await computeLiveness(db, nowMs);
+  await db.write(async () => {
+    await db.script("DELETE FROM main.liveness_items");
     const put = db.prepare("INSERT INTO main.liveness_items (repo, number, kind, verdict, cause, state, wait, phase, since, checked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-    for (const i of res.items) put.run(i.repo, i.number, i.kind, i.verdict, i.cause, i.state, i.wait, i.phase, i.since, res.checkedAt);
-    writeSetting(db, "liveness_at", res.checkedAt);
-    writeSetting(db, "liveness_open", String(res.open));
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+    for (const i of res.items) await put.run(i.repo, i.number, i.kind, i.verdict, i.cause, i.state, i.wait, i.phase, i.since, res.checkedAt);
+    await writeSetting(db, "liveness_at", res.checkedAt);
+    await writeSetting(db, "liveness_open", String(res.open));
+  });
   return true;
 }
 
 /** The stored result; null before the first refresh. */
-export function storedLiveness(db: DatabaseSync): Liveness | null {
-  const at = setting(db, "liveness_at");
+export async function storedLiveness(db: Db): Promise<Liveness | null> {
+  const at = await setting(db, "liveness_at");
   if (!at) return null;
-  const items = (db.prepare("SELECT repo, number, kind, verdict, cause, state, wait, phase, since FROM main.liveness_items ORDER BY verdict DESC, since, repo, number").all() as LivenessItem[]);
+  const items = (await db.prepare("SELECT repo, number, kind, verdict, cause, state, wait, phase, since FROM main.liveness_items ORDER BY verdict DESC, since, repo, number").all() as LivenessItem[]);
   const causes: Record<string, number> = {};
   for (const i of items) if (i.verdict === "stuck") causes[i.cause] = (causes[i.cause] ?? 0) + 1;
-  const open = Number(setting(db, "liveness_open") ?? 0);
+  const open = Number(await setting(db, "liveness_open") ?? 0);
   return { checkedAt: at, stuck: items.filter((i) => i.verdict === "stuck").length, long: items.filter((i) => i.verdict === "long").length, open, causes, items };
 }
 
@@ -169,7 +165,7 @@ export const commands = {
     summary: "liveness [--json]: open items that are stuck (nothing due, nobody asked) or long; exit 1 when any is stuck",
     run: async (args: string[]) => {
       const { connect } = await import("./db.ts");
-      const l = computeLiveness(connect());
+      const l = await computeLiveness(await openDb());
       if (args.includes("--json")) console.log(JSON.stringify(l, null, 2));
       else printReport(l);
       process.exit(l.stuck > 0 ? 1 : 0);

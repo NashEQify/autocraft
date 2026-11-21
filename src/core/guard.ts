@@ -1,7 +1,6 @@
 // The guard: the only way to get a `Guarded` value, which every PR write in github/write.ts requires.
 // Right before a write it reloads the facts (with a live read of head, state and mergeable for merges and pushes),
 // runs decide() again, applies the gates, and passes only when the Plan still holds the same action at the same head.
-import type { DatabaseSync } from "node:sqlite";
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { decidePr } from "./decide.ts";
@@ -21,6 +20,7 @@ import type { ActionKind, PrFacts } from "./plan.ts";
 import { identityOfDecision, type Identity } from "../github/identity.ts";
 import { disputeOn } from "../answers/hold.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
 
 declare const guarded: unique symbol;
 
@@ -43,7 +43,7 @@ export type LiveRead = { state: "OPEN" | "MERGED" | "CLOSED"; head: string; draf
 export type Live = (repo: string, number: number) => Promise<LiveRead | null>;
 
 /** The live read of the merge step: fetches the PR's checks (and stores them), which carry head, state, draft and mergeable. */
-export function liveOf(db: DatabaseSync, q: Querier): Live {
+export function liveOf(db: Db, q: Querier): Live {
   return async (repo, number) => {
     const [c] = await refreshChecks(db, q, repo, [number]);
     return c ? { state: c.state as LiveRead["state"], head: c.head_oid, draft: c.is_draft, mergeable: c.mergeable ?? "UNKNOWN" } : null;
@@ -60,9 +60,9 @@ const needsLive = (a: Want): boolean =>
 
 const make = <K extends ActionKind>(ref: Ref, a: Want<K>, head: string, as: Identity = "app"): Guarded<K> => ({ scope: "pr", action: a, head, repo: ref.repo, number: ref.number, as }) as unknown as Guarded<K>;
 
-async function check(db: DatabaseSync, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f: PrFacts } | Refused> {
+async function check(db: Db, ref: Ref, a: Ask, by: By, live?: Live): Promise<{ f: PrFacts } | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
+  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
   let read: LiveRead | null = null;
   if (needsLive(a)) {
     if (!live) return { refused: `${name}: no live read of the PR before the write` };
@@ -75,7 +75,7 @@ async function check(db: DatabaseSync, ref: Ref, a: Ask, by: By, live?: Live): P
     if (read.state !== "OPEN") return { refused: `${name}: no longer open on GitHub (${read.state.toLowerCase()})` };
     if (read.head !== a.head) return { refused: `${name}: head moved from ${short(a.head)} to ${short(read.head)} since the review` };
   }
-  let f = loadPrFact(db, ref.repo, ref.number);
+  let f = await loadPrFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open PR the pipeline tracks` };
   if (read) f = { ...f, ghState: read.state, head: read.head, draft: read.draft, mergeable: read.mergeable };
   const why = gates(f, a, by);
@@ -93,17 +93,17 @@ async function check(db: DatabaseSync, ref: Ref, a: Ask, by: By, live?: Live): P
 }
 
 /** Lets one PR write through, or says why not. Call it right before the write. */
-export async function guard<K extends ActionKind>(db: DatabaseSync, ref: Ref, action: Ask<K>, by: By, live?: Live): Promise<Guarded<K> | Refused> {
+export async function guard<K extends ActionKind>(db: Db, ref: Ref, action: Ask<K>, by: By, live?: Live): Promise<Guarded<K> | Refused> {
   const r = await check(db, ref, action, by, live);
   if ("refused" in r) return r;
-  return make(ref, action, action.head, identityOfDecision(db, action.decisionId));
+  return make(ref, action, action.head, await identityOfDecision(db, action.decisionId));
 }
 
 /**
  * Lets the merge of a batch PR through: every member must pass the guard at its batched head, and the batch PR must
  * still be open at the batch tip. The returned value is for the batch PR.
  */
-export async function guardBatchMerge(db: DatabaseSync, batch: Ref & { head: string }, members: { number: number; head: string }[], by: By, live: Live): Promise<Guarded<"merge"> | Refused> {
+export async function guardBatchMerge(db: Db, batch: Ref & { head: string }, members: { number: number; head: string }[], by: By, live: Live): Promise<Guarded<"merge"> | Refused> {
   for (const m of members) {
     const r = await guard(db, { repo: batch.repo, number: m.number }, { kind: "merge", head: m.head, batch: true }, by, live);
     if ("refused" in r) return r;
@@ -122,10 +122,10 @@ export async function guardBatchMerge(db: DatabaseSync, batch: Ref & { head: str
 }
 
 /** Lets an issue or PR write of the item steps through while decideItem still has the action for the item. No GitHub read: the caller reads what it needs. */
-export async function guardItem(db: DatabaseSync, ref: Ref, action: ItemWant, by: By, asDecision?: string): Promise<GuardedItem | Refused> {
+export async function guardItem(db: Db, ref: Ref, action: ItemWant, by: By, asDecision?: string): Promise<GuardedItem | Refused> {
   const name = `${ref.repo}#${ref.number}`;
-  if (disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
-  const f = loadItemFact(db, ref.repo, ref.number);
+  if (await disputeOn(db, ref.repo, ref.number)) return { refused: `${name}: an answer on it is disputed` };
+  const f = await loadItemFact(db, ref.repo, ref.number);
   if (!f) return { refused: `${name}: not an open item the pipeline tracks` };
   const why = gates(f, action, by);
   if (why) return { refused: `${name}: ${why}` };
@@ -138,21 +138,21 @@ export async function guardItem(db: DatabaseSync, ref: Ref, action: ItemWant, by
     const now = plan.actions.map((x) => x.kind + (typeof x.params?.bucket === "string" ? `:${x.params.bucket}` : "")).join(", ") || "none";
     return { refused: `${name}: the plan no longer has ${action.kind}${action.bucket ? `:${action.bucket}` : ""} (state ${plan.state}, actions: ${now})` };
   }
-  return { scope: "item", action, repo: ref.repo, number: ref.number, as: identityOfDecision(db, asDecision ?? action.decisionId) } as unknown as GuardedItem;
+  return { scope: "item", action, repo: ref.repo, number: ref.number, as: await identityOfDecision(db, asDecision ?? action.decisionId) } as unknown as GuardedItem;
 }
 
 /** The approvals of a repo and the global switch, read now. */
-export function repoApprovals(db: DatabaseSync, repo: string): Parameters<typeof gateRepo>[0] {
-  const on = pipelineWrites(setting(db, "pipeline_enabled"));
+export async function repoApprovals(db: Db, repo: string): Promise<Parameters<typeof gateRepo>[0]> {
+  const on = pipelineWrites(await setting(db, "pipeline_enabled"));
   return {
-    merge: !!mergeApprovalOf(db, repo), push: pushApprovalOf(db, repo) !== null, comment: commentApprovalOf(db, repo) !== null, ci: ciApprovalOf(db, repo) !== null,
-    labels: labelsApprovalOf(db, repo) !== null, "fix-issue": fixIssueApprovalOf(db, repo) !== null, "main-fix": mainFixApprovalOf(db, repo) !== null, pipelineOn: on,
+    merge: !!await mergeApprovalOf(db, repo), push: await pushApprovalOf(db, repo) !== null, comment: await commentApprovalOf(db, repo) !== null, ci: await ciApprovalOf(db, repo) !== null,
+    labels: await labelsApprovalOf(db, repo) !== null, "fix-issue": await fixIssueApprovalOf(db, repo) !== null, "main-fix": await mainFixApprovalOf(db, repo) !== null, pipelineOn: on,
   };
 }
 
 /** Lets a repo-level write through (no item behind it): the repo approval it needs (null: none) and, for the pipeline's own writes, the global switch. */
-export function guardRepo(db: DatabaseSync, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string): GuardedRepo | Refused {
-  const why = gateRepo(repoApprovals(db, repo), need, by, repo);
+export async function guardRepo(db: Db, repo: string, need: RepoNeed, by: By, decisionId?: string, login?: string): Promise<GuardedRepo | Refused> {
+  const why = gateRepo(await repoApprovals(db, repo), need, by, repo);
   // `login`: the operator pressing the button right now (a conversation card), who acts as themselves with no answered decision yet.
-  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : identityOfDecision(db, decisionId) } as unknown as GuardedRepo);
+  return why ? { refused: `${repo}: ${why}` } : ({ scope: "repo", need, repo, as: login ? `user:${login}` : await identityOfDecision(db, decisionId) } as unknown as GuardedRepo);
 }

@@ -18,10 +18,10 @@
 // settle() is the rule; settledOf() applies it to one item and settledTable()
 // to a whole run for queries.
 import { refIn, refPairs } from "../core/ref-filter.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
+import type { Db } from "../db/index.ts";
 
 export const SURE = 0.9;
 
@@ -105,28 +105,28 @@ function settleLabel(jev: (Verdict & { top: number | null }) | null, haiku: Verd
 }
 
 /** The run of the newest Jev or Haiku-alone verdict: two indexed lookups, the newer wins. */
-export function newestVerdictRun(db: DatabaseSync): string | null {
-  const jev = db.prepare("SELECT run_id, at FROM classifications WHERE classifier = 'jev' ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
-  const alone = db.prepare("SELECT run_id, at FROM main.classifications INDEXED BY classifications_alone WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
+export async function newestVerdictRun(db: Db): Promise<string | null> {
+  const jev = await db.prepare("SELECT run_id, at FROM classifications WHERE classifier = 'jev' ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
+  const alone = await db.prepare("SELECT run_id, at FROM main.classifications INDEXED BY classifications_alone WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
   return (alone && (!jev || alone.at > jev.at) ? alone : jev)?.run_id ?? null;
 }
 
 // The run the dashboard shows: the current classification run (settings.classify_run), else the one with the newest Jev verdict.
-export function latestRun(db: DatabaseSync): string | null {
-  const set = db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined;
+export async function latestRun(db: Db): Promise<string | null> {
+  const set = await db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined;
   if (set?.value) return set.value;
-  return newestVerdictRun(db);
+  return await newestVerdictRun(db);
 }
 
 /** True when `run` has at least one Jev or Haiku verdict. */
-export const runExists = (db: DatabaseSync, run: string): boolean =>
-  !!db.prepare(`SELECT 1 FROM classifications WHERE run_id = ? AND ${VERDICT_SQL} LIMIT 1`).get(run);
+export const runExists = async (db: Db, run: string): Promise<boolean> =>
+  !!await db.prepare(`SELECT 1 FROM classifications WHERE run_id = ? AND ${VERDICT_SQL} LIMIT 1`).get(run);
 
 /** Makes `run` the current classification run (settings.classify_run), audited. */
-export function setCurrentRun(db: DatabaseSync, run: string, by: string): void {
-  const prev = (db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined)?.value ?? null;
-  db.prepare("INSERT INTO settings (key, value) VALUES ('classify_run', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(run);
-  audit(db, by, "classify-run", `run:${run}`, { previous: prev });
+export async function setCurrentRun(db: Db, run: string, by: string): Promise<void> {
+  const prev = (await db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined)?.value ?? null;
+  await db.prepare("INSERT INTO settings (key, value) VALUES ('classify_run', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(run);
+  await audit(db, by, "classify-run", `run:${run}`, { previous: prev });
 }
 
 const parseFlags = (s: string | null): string[] => {
@@ -139,10 +139,10 @@ const parseFlags = (s: string | null): string[] => {
 type ClsRow = { type_label: string; flags: string | null; probs: string | null; reason: string | null; at: string; input_hash: string | null };
 
 /** The settled label from an item's Jev and Haiku rows of the run; `referee` reads its Sonnet row, only when both count. */
-function settledFrom(j: ClsRow | undefined, h0: ClsRow | undefined, referee: () => ClsRow | undefined): Settled {
+async function settledFrom(j: ClsRow | undefined, h0: ClsRow | undefined, referee: () => Promise<ClsRow | undefined>): Promise<Settled> {
   // A Haiku row without a Jev row counts only when Haiku classified alone.
   const h = h0 && (j || h0.input_hash !== null) ? h0 : undefined;
-  const r = j && h ? referee() : undefined;
+  const r = j && h ? await referee() : undefined;
   return settle(
     j ? { label: j.type_label, flags: parseFlags(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
     h ? { label: h.type_label, flags: parseFlags(h.flags) } : null,
@@ -151,32 +151,33 @@ function settledFrom(j: ClsRow | undefined, h0: ClsRow | undefined, referee: () 
 }
 
 /** settledOf() for one run, with the statement prepared once: for loops over many items. */
-export function settledLookup(db: DatabaseSync, run: string | null): (repo: string, number: number) => Settled {
-  if (!run) return () => settle(null, null);
+export function settledLookup(db: Db, run: string | null): (repo: string, number: number) => Promise<Settled> {
+  if (!run) return async () => settle(null, null);
   const q = db.prepare("SELECT type_label, flags, probs, reason, at, input_hash FROM classifications WHERE repo = ? AND number = ? AND classifier = ? AND run_id = ?");
-  return (repo, number) => settledFrom(q.get(repo, number, "jev", run) as ClsRow | undefined, q.get(repo, number, "haiku", run) as ClsRow | undefined,
-    () => q.get(repo, number, "sonnet", run) as ClsRow | undefined);
+  return async (repo, number) => await settledFrom(await q.get(repo, number, "jev", run) as ClsRow | undefined, await q.get(repo, number, "haiku", run) as ClsRow | undefined,
+    async () => await q.get(repo, number, "sonnet", run) as ClsRow | undefined);
 }
 
 /**
  * settledLookup() with the run's rows read in one query: every item of the run, or only `refs` ("repo#number"). An item
  * outside `refs` reads as unclassified.
  */
-export function settledSet(db: DatabaseSync, run: string | null, refs?: Iterable<string>): (repo: string, number: number) => Settled {
-  if (!run) return () => settle(null, null);
+export async function settledSet(db: Db, run: string | null, refs?: Iterable<string>): Promise<(repo: string, number: number) => Promise<Settled>> {
+  if (!run) return async () => settle(null, null);
   const narrow = refs ? ` AND ${refIn("classifications", "?")}` : "";
   // Only what settledFrom() reads: the referee's reason, and Jev's probabilities without the per-type ones.
-  const rows = db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND json_valid(probs) THEN json_remove(probs, '$.type') ELSE probs END AS probs,
+  const rows = await db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND json_valid(probs) THEN json_remove(probs, '$.type') ELSE probs END AS probs,
       CASE WHEN classifier = 'sonnet' THEN reason END AS reason, at, input_hash FROM classifications
     WHERE run_id = ? AND classifier IN ('jev', 'haiku', 'sonnet')${narrow}`).all(...(refs ? [run, refPairs(refs)] : [run])) as (ClsRow & { repo: string; number: number; classifier: string })[];
   const byItem = new Map<string, Partial<Record<string, ClsRow>>>();
   for (const r of rows) { const k = `${r.repo}#${r.number}`; (byItem.get(k) ?? byItem.set(k, {}).get(k)!)[r.classifier] = r; }
-  return (repo, number) => { const c = byItem.get(`${repo}#${number}`) ?? {}; return settledFrom(c.jev, c.haiku, () => c.sonnet); };
+  return async (repo, number) => { const c = byItem.get(`${repo}#${number}`) ?? {}; return await settledFrom(c.jev, c.haiku, async () => c.sonnet); };
 }
 
 /** Loops resolve `run` once (latestRun) and pass it, or use settledLookup(). */
-export function settledOf(db: DatabaseSync, repo: string, number: number, run = latestRun(db)): Settled {
-  return settledLookup(db, run)(repo, number);
+export async function settledOf(db: Db, repo: string, number: number, run?: string | null): Promise<Settled> {
+  if (run === undefined) run = await latestRun(db);
+  return await settledLookup(db, run)(repo, number);
 }
 
 /** A pipeline referee row: evaluation rows have no `sure` in probs and give null. */
@@ -214,9 +215,9 @@ export function topOf(probs: string | null): number | null {
 // Items without a Jev or Haiku verdict have no row ("unclassified"). Classifiers only
 // insert (INSERT OR REPLACE gives a new rowid), so verdicts with a rowid above
 // the last one seen are applied item by item; a new run or fewer rows than
-// expected rebuilds the table.
+// expected rebuilds the table. The last run and rowid seen are kept in temp.item_settled_seen beside the table, so a
+// read that rolls back (and a CREATE TEMP TABLE with it) takes both back together.
 type Seen = { run: string | null; maxRowid: number; count: number };
-const seen = new WeakMap<DatabaseSync, Seen>();
 
 type VerdictRow = { repo: string; number: number; jl: string | null; jf: string | null; probs: string | null; hl: string | null; hf: string | null; sl: string | null; ss: number | null; sr: string | null; sf: number | null; sx: number | null };
 // Items with a Jev or a Haiku verdict: Haiku alone settles an item when Jev was unavailable.
@@ -229,13 +230,21 @@ const VERDICTS = `SELECT k.repo, k.number, j.type_label AS jl, j.flags AS jf, j.
     AND s.at >= j.at AND s.at >= h.at AND json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.sure') IS NOT NULL
   WHERE 1 = 1`;
 
-export function settledTable(db: DatabaseSync, run: string | null): void {
-  const now = db.prepare("SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS count FROM main.classifications").get() as { maxRowid: number; count: number };
-  const prev = seen.get(db);
-  if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
-  db.exec(`CREATE TEMP TABLE IF NOT EXISTS item_settled (repo TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, label TEXT,
+// The table belongs to the connection, and so to every async context on it: a caller runs this and its own queries on
+// temp.item_settled inside one db.read (or db.write), so no other context rebuilds the table for another run between
+// them. The refresh is itself one read snapshot, so it joins either; it writes only the temp table.
+export function settledTable(db: Db, run: string | null): Promise<void> {
+  return db.read(() => refreshSettled(db, run));
+}
+
+async function refreshSettled(db: Db, run: string | null): Promise<void> {
+  const now = await db.prepare("SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS count FROM main.classifications").get() as { maxRowid: number; count: number };
+  await db.script(`CREATE TEMP TABLE IF NOT EXISTS item_settled (repo TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, label TEXT,
     source TEXT, top REAL, jev_label TEXT, haiku_label TEXT, flags TEXT NOT NULL, security INTEGER NOT NULL, needs_decision INTEGER NOT NULL,
-    referee_label TEXT, referee_sure INTEGER, referee_reason TEXT, referee_final INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo, number))`);
+    referee_label TEXT, referee_sure INTEGER, referee_reason TEXT, referee_final INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo, number));
+    CREATE TEMP TABLE IF NOT EXISTS item_settled_seen (id INTEGER PRIMARY KEY CHECK (id = 1), run TEXT, max_rowid INTEGER NOT NULL, count INTEGER NOT NULL)`);
+  const prev = await db.prepare("SELECT run, max_rowid AS maxRowid, count FROM temp.item_settled_seen WHERE id = 1").get() as Seen | undefined;
+  if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
   const rows: unknown[][] = [];
   const put = (r: VerdictRow) => {
     const ref = r.sl !== null && r.ss !== null ? { label: r.sl, sure: !!r.ss, reason: r.sr ?? "", ...(r.sf ? { final: true } : {}), ...(r.sx ? { failures: r.sx } : {}) } : null;
@@ -244,38 +253,31 @@ export function settledTable(db: DatabaseSync, run: string | null): void {
       s.flags.includes("security") ? 1 : 0, s.flags.includes("needs decision") ? 1 : 0, s.referee?.label ?? null, s.referee ? Number(s.referee.sure) : null, s.referee?.reason ?? null, refereeClosed(s.referee) ? 1 : 0]);
   };
   // All rows in one statement: the table is rebuilt in full on a connection's first use.
-  const insertAll = () => {
+  const insertAll = async () => {
     if (!rows.length) return;
     const cols = Array.from({ length: 15 }, (_, i) => `value ->> ${i}`).join(", ");
-    db.prepare(`INSERT OR REPLACE INTO temp.item_settled SELECT ${cols} FROM json_each(?)`).run(JSON.stringify(rows));
+    await db.prepare(`INSERT OR REPLACE INTO temp.item_settled SELECT ${cols} FROM json_each(?)`).run(JSON.stringify(rows));
   };
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const fresh = prev && prev.run === run
-      ? (db.prepare("SELECT DISTINCT repo, number FROM main.classifications WHERE rowid > ? AND run_id = ?").all(prev.maxRowid, run) as { repo: string; number: number }[])
-      : null;
-    const added = prev ? (db.prepare("SELECT COUNT(*) AS n FROM main.classifications WHERE rowid > ?").get(prev.maxRowid) as { n: number }).n : 0;
-    // INSERT OR REPLACE removes one row for each it adds, so the count only falls when something was deleted.
-    if (fresh && run && now.count >= prev!.count && now.count <= prev!.count + added) {
-      if (fresh.length) {
-        const keys = JSON.stringify(fresh.map((k) => [k.repo, k.number]));
-        const found = db.prepare(`${VERDICTS} AND (k.repo, k.number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:keys))`).all({ run, keys }) as VerdictRow[];
-        const have = new Set(found.map((r) => `${r.repo}#${r.number}`));
-        const gone = fresh.filter((k) => !have.has(`${k.repo}#${k.number}`)).map((k) => [k.repo, k.number]);
-        if (gone.length) db.prepare("DELETE FROM temp.item_settled WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").run(JSON.stringify(gone));
-        for (const r of found) put(r);
-      }
-    } else {
-      db.exec("DELETE FROM temp.item_settled");
-      if (run) for (const r of db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
+  const fresh = prev && prev.run === run
+    ? (await db.prepare("SELECT DISTINCT repo, number FROM main.classifications WHERE rowid > ? AND run_id = ?").all(prev.maxRowid, run) as { repo: string; number: number }[])
+    : null;
+  const added = prev ? (await db.prepare("SELECT COUNT(*) AS n FROM main.classifications WHERE rowid > ?").get(prev.maxRowid) as { n: number }).n : 0;
+  // INSERT OR REPLACE removes one row for each it adds, so the count only falls when something was deleted.
+  if (fresh && run && now.count >= prev!.count && now.count <= prev!.count + added) {
+    if (fresh.length) {
+      const keys = JSON.stringify(fresh.map((k) => [k.repo, k.number]));
+      const found = await db.prepare(`${VERDICTS} AND (k.repo, k.number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:keys))`).all({ run, keys }) as VerdictRow[];
+      const have = new Set(found.map((r) => `${r.repo}#${r.number}`));
+      const gone = fresh.filter((k) => !have.has(`${k.repo}#${k.number}`)).map((k) => [k.repo, k.number]);
+      if (gone.length) await db.prepare("DELETE FROM temp.item_settled WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").run(JSON.stringify(gone));
+      for (const r of found) put(r);
     }
-    insertAll();
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
+  } else {
+    await db.script("DELETE FROM temp.item_settled");
+    if (run) for (const r of await db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
   }
-  seen.set(db, { run, ...now });
+  await insertAll();
+  await db.prepare("INSERT OR REPLACE INTO temp.item_settled_seen (id, run, max_rowid, count) VALUES (1, ?, ?, ?)").run(run, now.maxRowid, now.count);
 }
 
 export type SettledRow = {

@@ -90,3 +90,24 @@ async function mergeSort<T>(xs: T[], cmp: (a: T, b: T) => number | Promise<numbe
   while (j < b.length) out.push(b[j++]);
   return out;
 }
+
+/**
+ * `fn` behind a guard so its runs never overlap: timer ticks and other callers in the same process would otherwise
+ * interleave at every await. `skip()` does nothing while a run is in progress (for interval ticks); `run()` waits for the
+ * run in progress, then runs again (for callers that need a pass that starts after their own write).
+ */
+export function exclusive(fn: () => Promise<void>): { skip(): Promise<void>; run(): Promise<void> } {
+  let cur: Promise<void> | null = null;
+  const start = (): Promise<void> => {
+    const p: Promise<void> = fn().finally(() => { if (cur === p) cur = null; });
+    cur = p;
+    return p;
+  };
+  return {
+    skip: () => (cur ? Promise.resolve() : start()),
+    run: async () => {
+      while (cur) await cur.catch(() => {});
+      return start();
+    },
+  };
+}

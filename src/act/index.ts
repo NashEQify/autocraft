@@ -18,10 +18,8 @@
 //   autocraft-server act --repo R [--limit N] [--apply]
 //   autocraft-server comment-approval [--repo R]
 import { OPERATOR_MODELS } from "../prompts/index.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { closeItem, commentOn, duplicateClose, type CloseHow, type Note, type Writer } from "../github/write.ts";
-import { connect } from "../db.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { actionable, ask, factsOf, getDecision, type Actionable, type DecisionRow, type Kind } from "../decisions.ts";
 import { HEAD_FACT } from "../merge/queue.ts";
@@ -46,6 +44,9 @@ import { ownerOf } from "../owners.ts";
 import { sweepStaleAnswers } from "../answers/sweep.ts";
 import { authFailure, isWaiting, laneForDecision, markExecDone, noWriteReason, setExecState, SIGN_IN_REASON, type LaneDeps, type Lane } from "../github/user-lane.ts";
 import type { Exec } from "../fixup/git.ts";
+import { filterSeq, mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 const ACTOR = "act";
 const NO_IO: GroupIo = { live: async () => null, comment: async () => "", close: async () => {} };
@@ -114,10 +115,10 @@ const short = (sha: string) => sha.slice(0, 7);
 type ReviewRow = { verdict?: string; repo: string; number: number; head_oid: string; reason: string; sure: number | null; lines: number; title: string | null; author: string | null };
 
 /** The final close reviews behind the Close? questions the Plans ask for in this repo. */
-function closeRows(db: DatabaseSync, repo: string): ReviewRow[] {
+async function closeRows(db: Db, repo: string): Promise<ReviewRow[]> {
   const get = db.prepare(`SELECT r.verdict, r.repo, r.number, r.head_oid, r.reason, r.sure, COALESCE(i.additions, 0) + COALESCE(i.deletions, 0) AS lines, i.title, i.author
     FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number WHERE r.repo = ? AND r.number = ? AND r.head_oid = ? AND r.verdict = 'close'`);
-  return plannedItems(db, "act", { repo }).filter((p) => p.action.params?.ask).map((p) => get.get(repo, p.facts.number, p.action.head) as ReviewRow | undefined).filter((r): r is ReviewRow => !!r);
+  return (await mapSeq((await plannedItems(db, "act", { repo })).filter((p) => p.action.params?.ask), async (p) => await get.get(repo, p.facts.number, p.action.head) as ReviewRow | undefined)).filter((r): r is ReviewRow => !!r);
 }
 
 /** A quiet pull request's question carries no model reason: the reason would name what the fix protects against, and the close comment is public. */
@@ -166,26 +167,26 @@ export function holdQuestion(r: ReviewRow, quiet = false, ci: string | null = nu
  * Asks the Hold questions the Plans call for and sets aside open ones whose head is no longer held. Writes decisions only.
  * Returns the ids asked.
  */
-export function askHoldDecisions(db: DatabaseSync, at: string, repo?: string): string[] {
+export async function askHoldDecisions(db: Db, at: string, repo?: string): Promise<string[]> {
   const get = db.prepare(`SELECT r.repo, r.number, r.head_oid, r.reason, r.sure, COALESCE(i.additions, 0) + COALESCE(i.deletions, 0) AS lines, i.title, i.author
     FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number WHERE r.repo = ? AND r.number = ? AND r.head_oid = ?`);
-  const todo = planned(db, "ask-merge", repo ? { repo } : {}).filter((p) => p.action.params?.hold === true);
+  const todo = (await planned(db, "ask-merge", repo ? { repo } : {})).filter((p) => p.action.params?.hold === true);
   const qs: (Record<string, unknown> & { id: string })[] = [];
   for (const p of todo) {
-    if (p.action.params?.withdraw) { withdrawHoldQuestion(db, p.facts.repo, p.facts.number, String(p.action.params?.decisionHead ?? p.action.head ?? ""), at, "the review at that head no longer says hold"); continue; }
-    const r = get.get(p.facts.repo, p.facts.number, p.action.head) as ReviewRow | undefined;
-    if (r) qs.push(holdQuestion(r, isQuiet(db, r.repo, r.number), typeof p.action.params?.ci === "string" ? p.action.params.ci : null));
+    if (p.action.params?.withdraw) { await withdrawHoldQuestion(db, p.facts.repo, p.facts.number, String(p.action.params?.decisionHead ?? p.action.head ?? ""), at, "the review at that head no longer says hold"); continue; }
+    const r = await get.get(p.facts.repo, p.facts.number, p.action.head) as ReviewRow | undefined;
+    if (r) qs.push(holdQuestion(r, await isQuiet(db, r.repo, r.number), typeof p.action.params?.ci === "string" ? p.action.params.ci : null));
   }
-  if (qs.length) { ask(db, qs.map((q) => ({ ...q, asked_at: at }))); setAsideSupersededQuestions(db, at, repo); }
-  else setAsideSupersededQuestions(db, at, repo);
-  fillReviewSummaries(db, at, repo);
+  if (qs.length) { await ask(db, qs.map((q) => ({ ...q, asked_at: at }))); await setAsideSupersededQuestions(db, at, repo); }
+  else await setAsideSupersededQuestions(db, at, repo);
+  await fillReviewSummaries(db, at, repo);
   return qs.map((q) => q.id);
 }
 
-export function askCloseDecisions(db: DatabaseSync, repo: string, at: string): string[] {
-  const qs = closeRows(db, repo).map((r) => closeQuestion(r, reviewText(db, r.repo, r.number, r.head_oid)?.why ?? null, isQuiet(db, r.repo, r.number)));
-  if (qs.length) { ask(db, qs.map((q) => ({ ...q, asked_at: at }))); setAsideSupersededQuestions(db, at, repo); }
-  fillReviewSummaries(db, at, repo);
+export async function askCloseDecisions(db: Db, repo: string, at: string): Promise<string[]> {
+  const qs = await mapSeq((await closeRows(db, repo)), async (r) => closeQuestion(r, (await reviewText(db, r.repo, r.number, r.head_oid))?.why ?? null, await isQuiet(db, r.repo, r.number)));
+  if (qs.length) { await ask(db, qs.map((q) => ({ ...q, asked_at: at }))); await setAsideSupersededQuestions(db, at, repo); }
+  await fillReviewSummaries(db, at, repo);
   return qs.map((q) => q.id);
 }
 
@@ -194,8 +195,8 @@ export function askCloseDecisions(db: DatabaseSync, repo: string, at: string): s
 type Target = { decisionId: string; kind: "scope" | "close" | "duplicate" | "merge" | "hold"; repo: string; number: number };
 
 type ActionRow = { attempts: number; id: number; decision_id: string; repo: string; number: number; kind: string; state: string; comment_url: string | null; reason: string | null; created_at: string };
-const rowOf = (db: DatabaseSync, t: Target): ActionRow | undefined =>
-  db.prepare("SELECT * FROM actions WHERE decision_id = ? AND repo = ? AND number = ? AND kind = ?").get(t.decisionId, t.repo, t.number, KIND) as ActionRow | undefined;
+const rowOf = async (db: Db, t: Target): Promise<ActionRow | undefined> =>
+  await db.prepare("SELECT * FROM actions WHERE decision_id = ? AND repo = ? AND number = ? AND kind = ?").get(t.decisionId, t.repo, t.number, KIND) as ActionRow | undefined;
 
 /** `asked_by` of the decisions a security scan asks. An operator's close answer to one applies in any repo approved for commenting, in the pipeline or not. */
 export const SECURITY_ASKER = "security-scan";
@@ -205,20 +206,20 @@ export const ACT_MAX_ATTEMPTS = 3;
 
 /** Answered-close targets in the repo that the Plans send here: no final (done or skipped) action row yet. */
 /** Item-level targets only: a duplicate group's members are carried out by actOnGroups, which the same act actions schedule. */
-function pending(db: DatabaseSync, repo: string, refs?: string[]): Target[] {
+async function pending(db: Db, repo: string, refs?: string[]): Promise<Target[]> {
   // A decision that waits for its operator's token or access is not work until it is retried or answered again.
-  return plannedItems(db, "act", { repo, refs }).filter((p) => !p.action.params?.ask && !p.action.params?.group && !isWaiting(db, p.action.params?.decisionId as string))
+  return (await filterSeq((await plannedItems(db, "act", { repo, refs })), async (p) => !p.action.params?.ask && !p.action.params?.group && !await isWaiting(db, p.action.params?.decisionId as string)))
     .map((p): Target => ({ decisionId: p.action.params!.decisionId as string, kind: p.action.params!.bucket as Target["kind"], repo, number: p.facts.number }));
 }
 
 /** The decision still carries the answer the target was planned for: not undone, applied, disputed or answered differently. */
-function answerStands(db: DatabaseSync, id: string, answer: string | null): boolean {
-  const d = getDecision(db, id);
+async function answerStands(db: Db, id: string, answer: string | null): Promise<boolean> {
+  const d = await getDecision(db, id);
   return !!d && d.answer === answer && !d.applied_at && d.exec_state !== "disputed";
 }
 
 /** The repo's targets in the order Act works: item priority level (security raised), then the time of the answer. */
-const pendingInOrder = (db: DatabaseSync, repo: string, refs?: string[]): Target[] => orderTargets(db, pending(db, repo, refs));
+const pendingInOrder = async (db: Db, repo: string, refs?: string[]): Promise<Target[]> => await orderTargets(db, await pending(db, repo, refs));
 
 // ---- GitHub ----------------------------------------------------------------------
 
@@ -277,7 +278,7 @@ export function commentPreview(d: DecisionRow): string | null {
   return null;
 }
 
-export async function runAct(db: DatabaseSync, params: ActParams, log: (line: string) => void = console.log, deps?: ActDeps): Promise<ActSummary> {
+export async function runAct(db: Db, params: ActParams, log: (line: string) => void = console.log, deps?: ActDeps): Promise<ActSummary> {
   const { repo } = params;
   const dryRun = params.dryRun ?? true;
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
@@ -289,7 +290,7 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
   // Queued card presses run first, from the same shared daily count: they were pressed before this run, and each is held to the presser's current access.
   let cardWrites = 0;
   if (!dryRun) {
-    fillEmbedHashes(db); applyDuplicateAnswers(db, at()); sweepStaleAnswers(db, at());
+    await fillEmbedHashes(db); await applyDuplicateAnswers(db, at()); await sweepStaleAnswers(db, at());
     const { drainQueuedCards } = await import("../conversations/act.ts");
     const drained = await drainQueuedCards(db, { now: deps?.now, querier: deps?.querier, lane: deps?.lane }, params.limit === undefined ? {} : { writes: params.limit });
     cardWrites = drained.writes;
@@ -305,15 +306,15 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
     if (held.filed || held.dropped) log(`act: ${held.filed} held follow-up issue${held.filed === 1 ? "" : "s"} filed, ${held.dropped} dropped`);
     if (held.unknown) log(`act: a held follow-up issue was being created when the answer was lost; it may exist, check GitHub`);
   }
-  if (!commentApprovalOf(db, repo)) {
+  if (!await commentApprovalOf(db, repo)) {
     summary.note = `commenting in ${repo} is not approved`;
     log(`act ${repo}: ${summary.note}; nothing done`);
     return summary;
   }
-  let todo = pendingInOrder(db, repo);
+  let todo = await pendingInOrder(db, repo);
   if (params.limit !== undefined) todo = todo.slice(0, Math.max(0, params.limit - cardWrites));
   if (dryRun) {
-    summary.asked = closeRows(db, repo).map((r) => closeDecisionId(r.repo, r.number, r.head_oid));
+    summary.asked = (await closeRows(db, repo)).map((r) => closeDecisionId(r.repo, r.number, r.head_oid));
     for (const id of summary.asked) log(`  would ask Close? ${id}`);
     for (const t of todo) log(`  would comment and close ${refOf(t)} (${t.decisionId})`);
     await actOnGroups(db, { repo, io: NO_IO, at, log, left: () => Infinity, handled: () => {}, dryRun: true });
@@ -322,59 +323,59 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
     return summary;
   }
   const d = deps ?? defaultDeps();
-  summary.asked = askCloseDecisions(db, repo, at());
+  summary.asked = await askCloseDecisions(db, repo, at());
   if (summary.asked.length) log(`  asked ${summary.asked.length} Close? decision${summary.asked.length === 1 ? "" : "s"}`);
   // Newly asked ones are unanswered, so the work list is the one taken above.
 
-  const save = (t: Target, state: "done" | "skipped" | "failed" | "stopped", reason: string | null, url: string | null, attempts?: number) => {
-    const prev = rowOf(db, t);
-    if (prev) db.prepare("UPDATE actions SET state = ?, reason = ?, comment_url = COALESCE(?, comment_url), created_at = ?, attempts = COALESCE(?, attempts) WHERE id = ?").run(state, reason, url, at(), attempts ?? null, prev.id);
-    else db.prepare("INSERT INTO actions (decision_id, repo, number, kind, state, comment_url, reason, created_at, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(t.decisionId, t.repo, t.number, KIND, state, url, reason, at(), attempts ?? 0);
+  const save = async (t: Target, state: "done" | "skipped" | "failed" | "stopped", reason: string | null, url: string | null, attempts?: number) => {
+    const prev = await rowOf(db, t);
+    if (prev) await db.prepare("UPDATE actions SET state = ?, reason = ?, comment_url = COALESCE(?, comment_url), created_at = ?, attempts = COALESCE(?, attempts) WHERE id = ?").run(state, reason, url, at(), attempts ?? null, prev.id);
+    else await db.prepare("INSERT INTO actions (decision_id, repo, number, kind, state, comment_url, reason, created_at, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").run(t.decisionId, t.repo, t.number, KIND, state, url, reason, at(), attempts ?? 0);
   };
   // A decision is applied once none of its targets is left to do.
-  const settle = (t: Target) => {
-    const a = actionable(db).find((x) => x.id === t.decisionId);
-    if (a && !pending(db, repo, a.items.filter((i) => i.repo === repo).map(refOf)).some((p) => p.decisionId === t.decisionId) && !targetsOfElsewhere(a, repo))
-      db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at(), t.decisionId);
+  const settle = async (t: Target) => {
+    const a = (await actionable(db)).find((x) => x.id === t.decisionId);
+    if (a && !(await pending(db, repo, a.items.filter((i) => i.repo === repo).map(refOf))).some((p) => p.decisionId === t.decisionId) && !targetsOfElsewhere(a, repo))
+      await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at(), t.decisionId);
   };
-  const skip = (t: Target, reason: string) => {
-    save(t, "skipped", reason, null);
-    audit(db, ACTOR, "act-skip", refOf(t), { decision: t.decisionId, reason });
+  const skip = async (t: Target, reason: string) => {
+    await save(t, "skipped", reason, null);
+    await audit(db, ACTOR, "act-skip", refOf(t), { decision: t.decisionId, reason });
     summary.skipped.push({ ref: refOf(t), reason });
-    jobItem(db, t.repo, t.number, `skipped: ${reason}`, log);
-    settle(t);
+    await jobItem(db, t.repo, t.number, `skipped: ${reason}`, log);
+    await settle(t);
   };
 
   let handled = 0;
   for (const t of todo) {
     // The daily count is shared with card presses; one target is one count.
-    if (!actRoom(db, 1, (deps?.now() ?? new Date()).getTime())) { summary.note = "the daily limit is reached"; break; }
-    const dec = getDecision(db, t.decisionId)!;
-    const prev = rowOf(db, t);
+    if (!await actRoom(db, 1, (deps?.now() ?? new Date()).getTime())) { summary.note = "the daily limit is reached"; break; }
+    const dec = (await getDecision(db, t.decisionId))!;
+    const prev = await rowOf(db, t);
     // Under the app's identity the close is made as the operator who answered, with their token (the comment before it is the app's); it waits when there is none.
     const lr = await laneForDecision(db, d.lane, t.decisionId, [t.repo]);
     if (lr && !("lane" in lr)) {
-      if ("transient" in lr) jobItem(db, t.repo, t.number, `not closed yet: ${lr.transient}`, log);
-      else { setExecState(db, t.decisionId, lr.state, lr.reason); jobItem(db, t.repo, t.number, `waiting: ${lr.reason}`, log); }
+      if ("transient" in lr) await jobItem(db, t.repo, t.number, `not closed yet: ${lr.transient}`, log);
+      else { await setExecState(db, t.decisionId, lr.state, lr.reason); await jobItem(db, t.repo, t.number, `waiting: ${lr.reason}`, log); }
       continue;
     }
     // Counted once the target has a lane: a waiting or transient one is not work done, so the planner can settle.
     handled++;
     params.onHandled?.(handled);
-    if (lr) setExecState(db, t.decisionId, "pending");
+    if (lr) await setExecState(db, t.decisionId, "pending");
     const q = lr ? lr.lane.querier : d.querier;
     try {
       const live = await readLive(q, t.repo, t.number);
-      if (!live) { skip(t, "GitHub returned no such item"); continue; }
-      if (live.state !== "OPEN") { skip(t, `already ${live.state.toLowerCase()} on GitHub`); continue; }
+      if (!live) { await skip(t, "GitHub returned no such item"); continue; }
+      if (live.state !== "OPEN") { await skip(t, `already ${live.state.toLowerCase()} on GitHub`); continue; }
       if (t.kind === "close" || t.kind === "merge" || t.kind === "hold") {
         const h = headFact(dec);
-        if (live.type !== "PullRequest" || !h || live.head !== h) { skip(t, `head moved since the decision (${h ? short(h) : "no head recorded"} → ${live.head ? short(live.head) : "none"})`); continue; }
+        if (live.type !== "PullRequest" || !h || live.head !== h) { await skip(t, `head moved since the decision (${h ? short(h) : "no head recorded"} → ${live.head ? short(live.head) : "none"})`); continue; }
       }
       const g = await guardItem(db, { repo: t.repo, number: t.number }, { kind: "act", bucket: t.kind, decisionId: t.decisionId }, params.by ?? CLI_BY);
-      if ("refused" in g) { jobItem(db, t.repo, t.number, `not closed: ${g.refused}`, log); continue; }
+      if ("refused" in g) { await jobItem(db, t.repo, t.number, `not closed: ${g.refused}`, log); continue; }
       // Read again after every await above: an undo or a dispute that landed meanwhile stops the write.
-      if (!answerStands(db, t.decisionId, dec.answer)) { jobItem(db, t.repo, t.number, "not closed: the answer was taken back or disputed", log); continue; }
+      if (!await answerStands(db, t.decisionId, dec.answer)) { await jobItem(db, t.repo, t.number, "not closed: the answer was taken back or disputed", log); continue; }
       let url = prev?.comment_url ?? null;
       // A duplicate's close reason needs the kept issue, read before the comment is posted and again here on a retry.
       let how: CloseHow | undefined = t.kind === "scope" ? "NOT_PLANNED" : undefined;
@@ -387,63 +388,63 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
         let body: string;
         if (t.kind === "duplicate") {
           const orig = /^([\w.-]+)#(\d+)$/.exec(factValue(dec, DUP_FACT) ?? "");
-          if (!orig || orig[1] !== t.repo || Number(orig[2]) === t.number) { skip(t, "the decision names no other item of this repo as the original"); continue; }
+          if (!orig || orig[1] !== t.repo || Number(orig[2]) === t.number) { await skip(t, "the decision names no other item of this repo as the original"); continue; }
           const o = await readLive(q, t.repo, Number(orig[2]));
-          if (!o) { skip(t, "GitHub returned no such original"); continue; }
+          if (!o) { await skip(t, "GitHub returned no such original"); continue; }
           how = duplicateClose({ id: o.id, pr: o.type === "PullRequest" }, `${orig[1]}#${orig[2]}`);
           body = duplicateComment({ repo: t.repo, original: `${orig[1]}#${orig[2]}`, closed: o.state !== "OPEN" });
-        } else body = commentFor(dec, t, (t.kind === "close" || t.kind === "hold") && isQuiet(db, t.repo, t.number));
+        } else body = commentFor(dec, t, (t.kind === "close" || t.kind === "hold") && await isQuiet(db, t.repo, t.number));
         url = await commentOn(w, g, q, "act-comment", { repo: t.repo, number: t.number, id: live.id }, decisionNote(dec), body, { decision: t.decisionId });
         // Saved before the close so a retry after a failed close does not comment twice.
-        save(t, "failed", "comment posted; close not done yet", url);
+        await save(t, "failed", "comment posted; close not done yet", url);
       }
       // The comment was awaited above; an undo is refused once it is posted, but a dispute or an answer changed before it is not.
-      if (!answerStands(db, t.decisionId, dec.answer)) { jobItem(db, t.repo, t.number, "not closed: the answer was taken back or disputed", log); continue; }
+      if (!await answerStands(db, t.decisionId, dec.answer)) { await jobItem(db, t.repo, t.number, "not closed: the answer was taken back or disputed", log); continue; }
       await closeItem(w, g, q, { repo: t.repo, number: t.number, id: live.id, pr: live.type === "PullRequest" }, { decision: t.decisionId, head: live.head }, how);
-      save(t, "done", null, url);
-      db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(t.repo, t.number, at(), ACTOR, `closed after ${t.kind} decision ${t.decisionId}`);
+      await save(t, "done", null, url);
+      await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(t.repo, t.number, at(), ACTOR, `closed after ${t.kind} decision ${t.decisionId}`);
       summary.done.push(refOf(t));
-      jobItem(db, t.repo, t.number, "commented and closed", log);
-      settle(t);
+      await jobItem(db, t.repo, t.number, "commented and closed", log);
+      await settle(t);
     } catch (e) {
       const why = (e as Error).message.replace(/\s+/g, " ").slice(0, 300);
       const denied = lr ? authFailure(e) : null;
-      if (denied === "transient") { jobItem(db, t.repo, t.number, `not closed yet: ${why}`, log); continue; }
+      if (denied === "transient") { await jobItem(db, t.repo, t.number, `not closed yet: ${why}`, log); continue; }
       if (denied) {
         // The user's token may not do this write: wait for access instead of failing, and write nothing as anyone else.
-        setExecState(db, t.decisionId, denied, denied === "waiting-token" ? SIGN_IN_REASON : noWriteReason(t.repo));
-        jobItem(db, t.repo, t.number, `waiting: ${why}`, log);
+        await setExecState(db, t.decisionId, denied, denied === "waiting-token" ? SIGN_IN_REASON : noWriteReason(t.repo));
+        await jobItem(db, t.repo, t.number, `waiting: ${why}`, log);
         continue;
       }
       // An error of GitHub itself (a server error, timeout, network failure, rate limit) says nothing about this target: the run stops, no try is counted,
       // and the job ends as failed so the registered failure backoff applies.
       if (githubWide(e)) {
         summary.failed.push({ ref: refOf(t), reason: why });
-        jobItem(db, t.repo, t.number, `GitHub is failing, stopping: ${why}`, log);
+        await jobItem(db, t.repo, t.number, `GitHub is failing, stopping: ${why}`, log);
         break;
       }
-      const row = rowOf(db, t);
+      const row = await rowOf(db, t);
       // The comment of a retry that already posted it is not repeated. After ACT_MAX_ATTEMPTS failed tries the target is stopped and a person is asked; the other targets go on.
       // The job ends as failed (see the step), so the registered failure backoff spaces the tries.
       const attempts = (row?.attempts ?? 0) + 1;
       const stop = attempts >= ACT_MAX_ATTEMPTS;
       const shown = stop ? `stopped after ${attempts} failed tries: ${why}` : why;
-      if (lr || stop) setExecState(db, t.decisionId, "failed", shown);
-      save(t, stop ? "stopped" : "failed", shown, row?.comment_url ?? null, attempts);
-      if (stop) audit(db, ACTOR, "act-stopped", refOf(t), { decision: t.decisionId, reason: why, attempts });
+      if (lr || stop) await setExecState(db, t.decisionId, "failed", shown);
+      await save(t, stop ? "stopped" : "failed", shown, row?.comment_url ?? null, attempts);
+      if (stop) await audit(db, ACTOR, "act-stopped", refOf(t), { decision: t.decisionId, reason: why, attempts });
       summary.failed.push({ ref: refOf(t), reason: shown });
-      jobItem(db, t.repo, t.number, `failed: ${shown}`, log);
+      await jobItem(db, t.repo, t.number, `failed: ${shown}`, log);
     }
   }
   // Duplicate groups: the stored comments and closes, within what is left of the limit.
-  const groupGrant = summary.failed.length ? null : guardRepo(db, repo, "comment", params.by ?? CLI_BY);
+  const groupGrant = summary.failed.length ? null : await guardRepo(db, repo, "comment", params.by ?? CLI_BY);
   if (groupGrant && "refused" in groupGrant) log(`  duplicate groups: not applied: ${groupGrant.refused}`);
   else if (groupGrant) {
     // Each group decision's closes are made as the operator who answered it; `begin` picks that operator's lane.
     let lane: Lane | null = null;
     const q = (): Querier => lane?.querier ?? d.querier;
-    const asAnswerer = (decision: string): GuardedRepo => {
-      const g = guardRepo(db, repo, "comment", params.by ?? CLI_BY, decision);
+    const asAnswerer = async (decision: string): Promise<GuardedRepo> => {
+      const g = await guardRepo(db, repo, "comment", params.by ?? CLI_BY, decision);
       if ("refused" in g) throw new Error(g.refused);
       return g;
     };
@@ -452,21 +453,21 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
         lane = null;
         const lr = await laneForDecision(db, d.lane, decision, [repo]);
         if (!lr) return null;
-        if ("lane" in lr) { lane = lr.lane; setExecState(db, decision, "pending"); return null; }
+        if ("lane" in lr) { lane = lr.lane; await setExecState(db, decision, "pending"); return null; }
         if ("transient" in lr) return lr.transient;
-        setExecState(db, decision, lr.state, lr.reason);
+        await setExecState(db, decision, lr.state, lr.reason);
         return lr.reason;
       },
-      failed(decision, why, err) {
+      async failed(decision, why, err) {
         const denied = lane ? authFailure(err) : null;
         if (denied === "transient") return true;
-        if (denied) { setExecState(db, decision, denied, denied === "waiting-token" ? SIGN_IN_REASON : noWriteReason(repo)); return true; }
-        if (lane) setExecState(db, decision, "failed", why);
+        if (denied) { await setExecState(db, decision, denied, denied === "waiting-token" ? SIGN_IN_REASON : noWriteReason(repo)); return true; }
+        if (lane) await setExecState(db, decision, "failed", why);
         return false;
       },
       live: (n) => readLive(q(), repo, n),
-      comment: (live, body, at) => commentOn(w, asAnswerer(at.decision), q(), "act-comment", { repo, number: at.number, id: live.id }, decisionNote(getDecision(db, at.decision)!), body, { decision: at.decision }),
-      close: (live, at, kept) => closeItem(w, asAnswerer(at.decision), q(), { repo, number: at.number, id: live.id, pr: live.type === "PullRequest" }, { decision: at.decision, head: live.head }, kept ? duplicateClose({ id: kept.id, pr: kept.type === "PullRequest" }, `${repo}#${kept.number}`) : "NOT_PLANNED"),
+      comment: async (live, body, at) => commentOn(w, await asAnswerer(at.decision), q(), "act-comment", { repo, number: at.number, id: live.id }, decisionNote((await getDecision(db, at.decision))!), body, { decision: at.decision }),
+      close: async (live, at, kept) => closeItem(w, await asAnswerer(at.decision), q(), { repo, number: at.number, id: live.id, pr: live.type === "PullRequest" }, { decision: at.decision, head: live.head }, kept ? duplicateClose({ id: kept.id, pr: kept.type === "PullRequest" }, `${repo}#${kept.number}`) : "NOT_PLANNED"),
     };
     const g = await actOnGroups(db, {
       repo, io, at, log, dryRun: false,
@@ -477,7 +478,7 @@ export async function runAct(db: DatabaseSync, params: ActParams, log: (line: st
     summary.skipped.push(...g.skipped);
     summary.failed.push(...g.failed);
   }
-  markExecDone(db);
+  await markExecDone(db);
   log(`act ${repo}: ${summary.done.length} closed, ${summary.skipped.length} skipped, ${summary.failed.length} failed, ${summary.asked.length} asked`);
   return summary;
 }
@@ -516,17 +517,17 @@ export const commands = {
     summary: "act --repo R [--limit N] [--apply]: comment and close items an operator answered close, ask Close? for reviewed PRs (dry run unless --apply)",
     async run(args: string[]): Promise<void> {
       const f = parseArgs(args);
-      await runAct(connect(), { repo: f.repo, limit: f.limit, dryRun: !f.apply });
+      await runAct(await openDb(), { repo: f.repo, limit: f.limit, dryRun: !f.apply });
     },
   },
   "comment-approval": {
     summary: "comment-approval [--repo R]: which repos an operator approved for comments and closes",
-    run(args: string[]): void {
+    async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
-      const db = connect();
-      const repos = i >= 0 ? [args[i + 1]!] : (db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const db = await openDb();
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
       for (const r of repos) {
-        const a = commentApprovalOf(db, r);
+        const a = await commentApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);
       }
     },

@@ -1,9 +1,9 @@
 // The Opus check of a patch we wrote, before it reaches GitHub (Fix-up pushes, Fix PRs). The model's reply is
 // text our code validates; every check is recorded in patch_checks for the Item page.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { CHECK_MAX_PROBLEMS, CHECK_PROBLEM_CHARS, CHECK_REASON_WORDS, type CheckKind, type PatchCheck } from "./types.ts";
+import type { Db } from "../db/index.ts";
 
 export const patchHash = (patch: string): string => createHash("sha256").update(patch).digest("hex").slice(0, 16);
 
@@ -29,13 +29,13 @@ export type PatchCheckRow = {
 };
 
 /** `subject` is the commit the patch applies to: the PR head (fixup) or the default branch head (fix). */
-export function recordCheck(db: DatabaseSync, r: { kind: CheckKind; repo: string; number: number; subject: string; patch: string; round: number; model: string; check: PatchCheck; at: string }): void {
-  db.prepare("INSERT INTO patch_checks (kind, repo, number, subject, patch_hash, round, verdict, reasons, problems, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+export async function recordCheck(db: Db, r: { kind: CheckKind; repo: string; number: number; subject: string; patch: string; round: number; model: string; check: PatchCheck; at: string }): Promise<void> {
+  await db.prepare("INSERT INTO patch_checks (kind, repo, number, subject, patch_hash, round, verdict, reasons, problems, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
     .run(r.kind, r.repo, r.number, r.subject, patchHash(r.patch), r.round, r.check.verdict, r.check.reasons, JSON.stringify(r.check.problems), r.model, r.at);
 }
 
-export function checksOf(db: DatabaseSync, repo: string, number: number): PatchCheckRow[] {
-  const rows = db.prepare("SELECT id, kind, subject, patch_hash, round, verdict, reasons, problems, model, created_at FROM patch_checks WHERE repo = ? AND number = ? ORDER BY id").all(repo, number) as
+export async function checksOf(db: Db, repo: string, number: number): Promise<PatchCheckRow[]> {
+  const rows = await db.prepare("SELECT id, kind, subject, patch_hash, round, verdict, reasons, problems, model, created_at FROM patch_checks WHERE repo = ? AND number = ? ORDER BY id").all(repo, number) as
     { id: number; kind: CheckKind; subject: string; patch_hash: string; round: number; verdict: "approve" | "reject"; reasons: string; problems: string; model: string; created_at: string }[];
   return rows.map((x) => ({ id: x.id, kind: x.kind, repo, number, subject: x.subject, patchHash: x.patch_hash, round: x.round, verdict: x.verdict, reasons: x.reasons, problems: JSON.parse(x.problems) as string[], model: x.model, createdAt: x.created_at }));
 }

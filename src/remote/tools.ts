@@ -5,7 +5,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
 import { finished, PassThrough, type Readable } from "node:stream";
 import { dirname, join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { CHECK_SERVER } from "../checktool/bridge.ts";
 import { TOOL as CHECK_TOOL } from "../checktool/server/tool.ts";
 import { fixupDir, GIT_ENV, gitDirEnv, HARDENING } from "../fixup/git.ts";
@@ -18,6 +17,8 @@ import { REFERENCE_SERVER } from "./bundle.ts";
 import { liveLease } from "./calls.ts";
 import { relayCheck } from "./check-relay.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
+import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../db/index.ts";
 
 export type { ToolResult };
 
@@ -58,10 +59,10 @@ export const TASK_TOOLS: Record<string, readonly unknown[]> = { [ITEM_SERVER]: I
 export type TaskLease = { id: number; runId: number | null; login: string; servers: string[]; mounts: Mount[]; referenceRepo: string | null };
 
 /** The live lease of a secret with what its tools need from the call, or null. */
-export function taskLease(db: DatabaseSync, secret: string | undefined): TaskLease | null {
-  const l = liveLease(db, secret);
+export async function taskLease(db: Db, secret: string | undefined): Promise<TaskLease | null> {
+  const l = await liveLease(db, secret);
   if (!l) return null;
-  const r = db.prepare("SELECT bundle, reference_repo FROM main.remote_calls WHERE id = ?").get(l.id) as { bundle: string; reference_repo: string | null };
+  const r = await db.prepare("SELECT bundle, reference_repo FROM main.remote_calls WHERE id = ?").get(l.id) as { bundle: string; reference_repo: string | null };
   const b = JSON.parse(r.bundle) as Omit<TaskBundle, "callId">;
   return { id: l.id, runId: l.runId, login: l.login, servers: b.mcpServers, mounts: b.mounts, referenceRepo: r.reference_repo };
 }
@@ -88,10 +89,10 @@ const passageText = (p: Passage): string => `passage ${p.id}: ${p.title} (${p.pa
 const reserved = new Map<string, number>();
 
 /** Serves reference passages within the lease's allowance and records each one. */
-async function reference(db: DatabaseSync, lease: TaskLease, name: string, raw: unknown): Promise<ToolResult> {
+async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): Promise<ToolResult> {
   const repo = lease.referenceRepo;
   if (!repo) return { text: "this call has no reference documentation", isError: true };
-  const used = (db.prepare("SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id = ? AND run_id IS ?").get(lease.id, lease.runId) as { n: number }).n;
+  const used = (await db.prepare("SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id = ? AND run_id IS ?").get(lease.id, lease.runId) as { n: number }).n;
   const key = `${lease.id}:${lease.runId}`;
   const left = PASSAGES_PER_LEASE - Number(used) - (reserved.get(key) ?? 0);
   if (left <= 0) return { text: `refused: the ${PASSAGES_PER_LEASE} reference passages of this call are used up; answer with what you know`, isError: true };
@@ -112,7 +113,7 @@ async function reference(db: DatabaseSync, lease: TaskLease, name: string, raw: 
     served = found.slice(0, left);
     const now = Date.now();
     const ins = db.prepare("INSERT INTO main.remote_passages (call_id, run_id, user_login, repo, passage_id, page, at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-    for (const p of served) ins.run(lease.id, lease.runId, lease.login, repo, p.id, p.page, now);
+    for (const p of served) await ins.run(lease.id, lease.runId, lease.login, repo, p.id, p.page, now);
   } finally {
     const rest = (reserved.get(key) ?? 0) - left;
     if (rest > 0) reserved.set(key, rest);
@@ -158,14 +159,14 @@ function items(name: string, raw: unknown): ToolResult {
  * Runs one tool of `server` for the lease, which must list the server. Bad arguments and refusals come back as an error
  * result. `check` waits for the job process: `tick` is called about every 15 s meanwhile, and `signal` ends the wait.
  */
-export async function callTaskTool(db: DatabaseSync, lease: TaskLease, secret: string, server: string, name: unknown, raw: unknown, opts: { signal?: AbortSignal; tick?: () => void } = {}): Promise<ToolResult> {
+export async function callTaskTool(db: Db, lease: TaskLease, secret: string, server: string, name: unknown, raw: unknown, opts: { signal?: AbortSignal; tick?: () => void } = {}): Promise<ToolResult> {
   const tools = TASK_TOOLS[server] as { name: string }[] | undefined;
   if (!tools || !lease.servers.includes(server)) return { text: `this call has no ${server} tools`, isError: true };
   if (typeof name !== "string" || !tools.some((t) => t.name === name)) return { text: `unknown tool ${JSON.stringify(name)}`, isError: true };
   try {
-    if (server === ITEM_SERVER) return items(name, raw);
+    if (server === ITEM_SERVER) return await items(name, raw);
     if (server === REFERENCE_SERVER) return await reference(db, lease, name, raw);
-    return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live: () => liveLease(db, secret)?.id === lease.id, ...opts });
+    return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live: async () => (await liveLease(db, secret))?.id === lease.id, ...opts });
   } catch (e) {
     if (e instanceof BadArgs) return { text: e.message, isError: true };
     console.error(`task tool ${server}/${name}: ${(e as Error).stack ?? e}`);

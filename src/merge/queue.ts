@@ -1,7 +1,6 @@
 // The merge queue as a view of Plans: every PR with a take or take-fix review at its current head commit, with the fields the
 // dashboard, the flow counts and the merge executors show. Nothing here decides: state, path, reasons and notes come from
 // decidePr (src/core/decide.ts); the rest is read from the facts. Reads only local tables; no GitHub calls.
-import type { DatabaseSync } from "node:sqlite";
 import { decidePr, queueEntry } from "../core/decide.ts";
 import { loadPass, loadPrFacts } from "../core/facts.ts";
 import { isQueueState, QUEUE_STATES, type PrFacts, type QueueState } from "../core/plan.ts";
@@ -9,6 +8,7 @@ import { mergeDecisionId, VERIFY_UNAVAILABLE } from "../core/rules.ts";
 import { claimsOf, findingsOf, premergeAt, type PremergeFinding } from "../premerge/store.ts";
 import type { Claim } from "../review/opus-parse.ts";
 import type { Tier } from "../whitelist.ts";
+import type { Db } from "../db/index.ts";
 
 export { QUEUE_STATES, type QueueState };
 export {
@@ -76,13 +76,13 @@ export type QueueOptions = {
 };
 
 /** The queue row of a PR whose Plan is in a queue state. */
-function entryOf(db: DatabaseSync, f: PrFacts, plan: ReturnType<typeof decidePr>, title: string): QueueEntry {
+async function entryOf(db: Db, f: PrFacts, plan: ReturnType<typeof decidePr>, title: string): Promise<QueueEntry> {
   const r = f.review!;
   const merged = plan.state === "merged";
   const x = queueEntry(f, merged, !merged);
   let premerge: QueueEntry["premerge"] = null;
   if (x.premerge) {
-    const row = premergeAt(db, f.repo, f.number, r.head);
+    const row = await premergeAt(db, f.repo, f.number, r.head);
     const all = findingsOf(row);
     const defects = all.filter((d) => d.severity === "defect");
     premerge = { state: x.premerge, defects, unknownClaims: claimsOf(row).filter((c) => c.impact === "unknown"), minor: all.length - defects.length, error: row?.error ?? null };
@@ -98,18 +98,18 @@ function entryOf(db: DatabaseSync, f: PrFacts, plan: ReturnType<typeof decidePr>
   };
 }
 
-export function buildQueue(db: DatabaseSync, opts: QueueOptions = {}): QueueEntry[] {
+export async function buildQueue(db: Db, opts: QueueOptions = {}): Promise<QueueEntry[]> {
   const which = opts.merged ?? "all";
   const title = db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?");
   const out: QueueEntry[] = [];
   const pass = loadPass();
-  for (const f of loadPrFacts(db, { ...(opts.repo ? { repo: opts.repo } : {}), ...(opts.refs ? { refs: opts.refs } : {}), ...(opts.run !== undefined ? { run: opts.run } : {}) })) {
+  for (const f of await loadPrFacts(db, { ...(opts.repo ? { repo: opts.repo } : {}), ...(opts.refs ? { refs: opts.refs } : {}), ...(opts.run !== undefined ? { run: opts.run } : {}) })) {
     if (opts.exclude?.includes(f.repo)) continue;
     if (which === "exclude" ? f.ghState !== "OPEN" : which === "only" ? f.ghState !== "MERGED" : f.ghState === "CLOSED") continue;
     if (opts.after && (f.repo < opts.after.repo || (f.repo === opts.after.repo && f.number <= opts.after.number))) continue;
     const plan = decidePr(f, pass);
     if (!isQueueState(plan.state)) continue;
-    out.push(entryOf(db, f, plan, ((title.get(f.repo, f.number) as { title: string | null } | undefined)?.title ?? "")));
+    out.push(await entryOf(db, f, plan, ((await title.get(f.repo, f.number) as { title: string | null } | undefined)?.title ?? "")));
     if (opts.limit && out.length >= Math.floor(opts.limit)) break;
   }
   return out;

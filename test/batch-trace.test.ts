@@ -8,6 +8,7 @@ import { failureLocations, repoPath } from "../src/merge/batch-blame.ts";
 import { batchSizeOf } from "../src/merge/batch-store.ts";
 import { runBatches, type BatchDeps } from "../src/merge/batch.ts";
 import { world, type World } from "./world-db.ts";
+import { mapSeq } from "../src/async-seq.ts";
 
 const quiet = () => {};
 let current: World | null = null;
@@ -58,10 +59,10 @@ type Fake = {
   blame: Record<string, number>;
 };
 
-function setup(prs: number[], o: { build?: boolean } = {}) {
-  const w = (current = world().repo());
-  for (const n of prs) w.pr(n).review(n).verified(n).premerge(n, "clean");
-  if (o.build) { setFeature(w.db, "batch-build", true, "op"); setFeature(w.db, "batch-build", true, "op", "app"); }
+async function setup(prs: number[], o: { build?: boolean } = {}) {
+  const w = (current = await (await world()).repo());
+  for (const n of prs) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
+  if (o.build) { await setFeature(w.db, "batch-build", true, "op"); await setFeature(w.db, "batch-build", true, "op", "app"); }
   const fake: Fake = { log: "", completedAt: "2026-01-01T23:00:00Z", files: {}, blame: {} };
   const reruns: string[] = [];
   const base = w.gh.batchDeps();
@@ -88,18 +89,18 @@ function setup(prs: number[], o: { build?: boolean } = {}) {
           return ok(JSON.stringify({ check_runs: [{ name: "gate / test", status: "completed", conclusion: "failure", details_url: "https://github.com/storytold/app/actions/runs/77/job/1", completed_at: fake.completedAt }] }));
         }
         if (a[0] === "run" && a[1] === "view") return ok(fake.log);
-        if (a[0] === "api" && /actions\/runs\/77$/.test(a[1]!)) return ok(JSON.stringify({ head_sha: (w.db.prepare("SELECT commit_sha FROM merge_batches WHERE state IN ('checking', 'open') ORDER BY id DESC").get() as { commit_sha: string }).commit_sha }));
+        if (a[0] === "api" && /actions\/runs\/77$/.test(a[1]!)) return ok(JSON.stringify({ head_sha: (await w.db.prepare("SELECT commit_sha FROM merge_batches WHERE state IN ('checking', 'open') ORDER BY id DESC").get() as { commit_sha: string }).commit_sha }));
         if (a[0] === "run" && a[1] === "rerun") { reruns.push(a[2]!); return ok(); }
       }
       return base.exec(cmd, args, opts);
     },
   };
   const run = () => runBatches(w.db, { repo: "app" }, quiet, deps);
-  const batches = () => w.rows("SELECT id, state, parent_id, ci_reruns, summary FROM merge_batches ORDER BY id") as { id: number; state: string; parent_id: number | null; ci_reruns: number; summary: string | null }[];
-  const membersOf = (id: number) => w.rows("SELECT number FROM merge_batch_prs WHERE batch_id = ? ORDER BY position", id).map((r) => r.number);
+  const batches = async () => await w.rows("SELECT id, state, parent_id, ci_reruns, summary FROM merge_batches ORDER BY id") as { id: number; state: string; parent_id: number | null; ci_reruns: number; summary: string | null }[];
+  const membersOf = async (id: number) => (await w.rows("SELECT number FROM merge_batch_prs WHERE batch_id = ? ORDER BY position", id)).map((r) => r.number);
   const red = () => w.gh.live(900, { ci: "failure" });
   const setMain = (sha: string) => { mainHead = sha; };
-  const baseOf = (id: number) => (w.rows("SELECT base_sha FROM merge_batches WHERE id = ?", id)[0] as { base_sha: string }).base_sha;
+  const baseOf = async (id: number) => ((await w.rows("SELECT base_sha FROM merge_batches WHERE id = ?", id))[0] as { base_sha: string }).base_sha;
   return { w, fake, reruns, run, batches, membersOf, red, setMain, baseOf, deps };
 }
 
@@ -107,59 +108,59 @@ const errorAt = (file: string, line: number) => `test\tRun tests\terror[E0308]: 
 
 describe("a red batch", () => {
   test("traced to one PR: that PR is tested alone, the rest rebuilt without it, and the batch size stays", async () => {
-    const t = setup([1, 2, 3]);
+    const t = await setup([1, 2, 3]);
     await t.run();
-    const size = batchSizeOf(t.w.db, "app");
+    const size = await batchSizeOf(t.w.db, "app");
     t.fake.log = errorAt("src/b.rs", 4);
     t.fake.blame["src/b.rs:4"] = 2;
     t.red();
     const s = await t.run();
     assert.equal(s.split.length, 1);
-    const rows = t.batches();
+    const rows = await t.batches();
     assert.equal(rows[0]!.state, "split");
     assert.match(rows[0]!.summary!, /traced to #2 \(the error at src\/b\.rs:4 is in its commit c000000\)/);
-    assert.deepEqual(rows.slice(1).map((b) => [b.parent_id, t.membersOf(b.id)]), [[1, [2]], [1, [1, 3]]]);
-    assert.equal(batchSizeOf(t.w.db, "app"), size);
+    assert.deepEqual(await mapSeq(rows.slice(1), async (b) => [b.parent_id, await t.membersOf(b.id)]), [[1, [2]], [1, [1, 3]]]);
+    assert.equal(await batchSizeOf(t.w.db, "app"), size);
     assert.deepEqual(t.reruns, []);
-    assert.equal(t.w.rows("SELECT target FROM audit WHERE action = 'batch-blame'").map((r) => r.target).join(), "app#2");
+    assert.equal((await t.w.rows("SELECT target FROM audit WHERE action = 'batch-blame'")).map((r) => r.target).join(), "app#2");
     // Nothing is held: #2 is only held if it is red alone too.
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
+    assert.deepEqual(await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
   });
 
   test("a file only one PR changed points at it when blame finds no member's commit", async () => {
-    const t = setup([1, 2]);
+    const t = await setup([1, 2]);
     await t.run();
     t.fake.log = "test\tRun tests\tthread 'x' panicked at src/only1.rs:9:1:\n";
     t.fake.files = { 1: ["src/only1.rs"], 2: ["src/other.rs"] };
     t.red();
     await t.run();
-    assert.match(t.batches()[0]!.summary!, /traced to #1 \(the panic is in src\/only1\.rs:9, a file only it changed\)/);
+    assert.match((await t.batches())[0]!.summary!, /traced to #1 \(the panic is in src\/only1\.rs:9, a file only it changed\)/);
   });
 
   test("no trace: the failed runs are rerun once; stale results wait, fresh ones split the batch and halve the size", async () => {
-    const t = setup([1, 2, 3, 4]);
+    const t = await setup([1, 2, 3, 4]);
     await t.run();
-    const size = batchSizeOf(t.w.db, "app");
+    const size = await batchSizeOf(t.w.db, "app");
     t.fake.log = "test\tRun tests\ttest paint::fill ... FAILED\n";
     t.red();
     const first = await t.run();
     assert.deepEqual(t.reruns, ["77"]);
     assert.equal(first.waiting.length, 1);
-    assert.deepEqual(t.batches().map((b) => [b.state, b.ci_reruns]), [["open", 1]]);
-    assert.match(t.batches()[0]!.summary!, /no PR traced, rerunning the failed runs once/);
+    assert.deepEqual((await t.batches()).map((b) => [b.state, b.ci_reruns]), [["open", 1]]);
+    assert.match((await t.batches())[0]!.summary!, /no PR traced, rerunning the failed runs once/);
     // The red result from before the rerun does not count.
     assert.equal((await t.run()).waiting.length, 1);
-    assert.equal(t.batches()[0]!.state, "open");
+    assert.equal((await t.batches())[0]!.state, "open");
     t.fake.completedAt = "2026-01-02T00:30:00Z";
     const s = await t.run();
     assert.equal(s.split.length, 1);
     assert.deepEqual(t.reruns, ["77"], "one rerun per batch");
-    assert.deepEqual(t.batches().map((b) => b.state), ["split", "open", "open"]);
-    assert.equal(batchSizeOf(t.w.db, "app"), Math.floor(size / 2));
+    assert.deepEqual((await t.batches()).map((b) => b.state), ["split", "open", "open"]);
+    assert.equal(await batchSizeOf(t.w.db, "app"), Math.floor(size / 2));
   });
 
   test("the rerun waits while a failed check's run is in progress, and a fully refused rerun fails the batch at once", async () => {
-    const t = setup([1]);
+    const t = await setup([1]);
     await t.run();
     t.red();
     let status = "in_progress";
@@ -175,68 +176,68 @@ describe("a red batch", () => {
     };
     assert.equal((await t.run()).waiting.length, 1);
     assert.deepEqual(t.reruns, []);
-    assert.deepEqual(t.batches().map((b) => [b.state, b.ci_reruns]), [["open", 0]]);
-    assert.match(t.batches()[0]!.summary!, /waiting for the failed CI runs to finish/);
+    assert.deepEqual((await t.batches()).map((b) => [b.state, b.ci_reruns]), [["open", 0]]);
+    assert.match((await t.batches())[0]!.summary!, /waiting for the failed CI runs to finish/);
     // Completed, but GitHub refuses every rerun call: no wait out of the rerun window.
     status = "completed";
     refuse = true;
     await t.run();
-    assert.deepEqual(t.batches().map((b) => [b.state, b.ci_reruns]), [["failed", 1]]);
+    assert.deepEqual((await t.batches()).map((b) => [b.state, b.ci_reruns]), [["failed", 1]]);
   });
 
   test("a single PR is rerun once before it is held", async () => {
-    const t = setup([1]);
+    const t = await setup([1]);
     await t.run();
     t.red();
     await t.run();
     assert.deepEqual(t.reruns, ["77"]);
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
+    assert.deepEqual(await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
     t.fake.completedAt = "2026-01-02T00:30:00Z";
     await t.run();
-    assert.equal(t.batches()[0]!.state, "failed");
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'").map((r) => r.number), [1]);
+    assert.equal((await t.batches())[0]!.state, "failed");
+    assert.deepEqual((await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'")).map((r) => r.number), [1]);
   });
 
   test("checks red on main at the base too blame no PR: the batch waits, then is rebuilt on the new head", async () => {
-    const t = setup([1, 2]);
+    const t = await setup([1, 2]);
     await t.run();
-    t.w.db.prepare(`INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, first_seen_at, state_changed_at, updated_at)
+    await t.w.db.prepare(`INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, first_seen_at, state_changed_at, updated_at)
       VALUES ('app', ?, 'main', 'green', '[{"name":"gate / test","url":"u"}]', '[]', ?, ?, ?)`).run(MAIN, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
     t.fake.log = errorAt("src/b.rs", 4);
     t.fake.blame["src/b.rs:4"] = 2;
     t.red();
     assert.equal((await t.run()).waiting.length, 1);
-    assert.deepEqual(t.batches().map((b) => b.state), ["open"]);
-    assert.match(t.batches()[0]!.summary!, /failed on main at the base too; waits for main to change/);
+    assert.deepEqual((await t.batches()).map((b) => b.state), ["open"]);
+    assert.match((await t.batches())[0]!.summary!, /failed on main at the base too; waits for main to change/);
     assert.deepEqual(t.reruns, []);
     t.setMain("d".repeat(40));
     const s = await t.run();
     assert.equal(s.superseded.length, 1);
-    assert.equal(t.batches()[0]!.state, "superseded");
-    assert.deepEqual(t.membersOf(t.batches()[1]!.id), [1, 2]);
-    assert.equal(t.baseOf(t.batches()[1]!.id), "d".repeat(40));
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
+    assert.equal((await t.batches())[0]!.state, "superseded");
+    assert.deepEqual(await t.membersOf((await t.batches())[1]!.id), [1, 2]);
+    assert.equal(await t.baseOf((await t.batches())[1]!.id), "d".repeat(40));
+    assert.deepEqual(await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
   });
 
   test("a red combined-tree build is traced from its log the same way", async () => {
-    const t = setup([1, 2, 3], { build: true });
+    const t = await setup([1, 2, 3], { build: true });
     await t.run();
-    const task = (t.w.rows("SELECT task_id FROM merge_batches")[0] as { task_id: number }).task_id;
-    t.w.db.prepare("UPDATE merge_batches SET build_tries = 2").run();
-    const plan = JSON.parse((t.w.rows("SELECT plan FROM build_tasks WHERE id = ?", task)[0] as { plan: string }).plan) as { name: string }[];
+    const task = ((await t.w.rows("SELECT task_id FROM merge_batches"))[0] as { task_id: number }).task_id;
+    await t.w.db.prepare("UPDATE merge_batches SET build_tries = 2").run();
+    const plan = JSON.parse(((await t.w.rows("SELECT plan FROM build_tasks WHERE id = ?", task))[0] as { plan: string }).plan) as { name: string }[];
     const results = [];
     for (const step of plan) { results.push({ step: step.name, exitCode: step.name === "test" ? 1 : 0, durationMs: 1, timedOut: false }); if (step.name === "test") break; }
-    t.w.db.prepare("UPDATE build_tasks SET state = 'failed', results = ?, ended_at = ?, summary = 'x' WHERE id = ?").run(JSON.stringify(results), "2026-01-02T00:00:00Z", task);
-    t.w.db.prepare("INSERT INTO build_task_logs (task_id, step, seq, chunk) VALUES (?, 'test', 1, ?)").run(task, "thread 'fill' panicked at src/fill.rs:3:1:\n");
+    await t.w.db.prepare("UPDATE build_tasks SET state = 'failed', results = ?, ended_at = ?, summary = 'x' WHERE id = ?").run(JSON.stringify(results), "2026-01-02T00:00:00Z", task);
+    await t.w.db.prepare("INSERT INTO build_task_logs (task_id, step, seq, chunk) VALUES (?, 'test', 1, ?)").run(task, "thread 'fill' panicked at src/fill.rs:3:1:\n");
     t.fake.blame["src/fill.rs:3"] = 3;
     await t.run();
-    const rows = t.batches();
+    const rows = await t.batches();
     assert.match(rows[0]!.summary!, /combined tree failed at test; traced to #3/);
-    assert.deepEqual(rows.slice(1).map((b) => t.membersOf(b.id)), [[3], [1, 2]]);
+    assert.deepEqual(await mapSeq(rows.slice(1), async (b) => await t.membersOf(b.id)), [[3], [1, 2]]);
   });
 
   test("after the rerun, results that cannot be read wait out the deadline instead of holding the PR", async () => {
-    const t = setup([1]);
+    const t = await setup([1]);
     await t.run();
     t.red();
     await t.run();
@@ -245,17 +246,17 @@ describe("a red batch", () => {
     const exec = t.deps.exec;
     t.deps.exec = async (cmd, args, opts) => (cmd === "gh" && args[0] === "api" && /check-runs/.test(args[1] ?? "") ? { code: 1, stdout: "", stderr: "HTTP 502" } : exec(cmd, args, opts));
     assert.equal((await t.run()).waiting.length, 1);
-    assert.equal(t.batches()[0]!.state, "open");
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
+    assert.equal((await t.batches())[0]!.state, "open");
+    assert.deepEqual(await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'"), []);
     // Past the deadline the batch goes on, as it would with stale results.
-    t.w.db.prepare("UPDATE merge_batches SET ci_rerun_at = '2026-01-01T00:00:00Z'").run();
+    await t.w.db.prepare("UPDATE merge_batches SET ci_rerun_at = '2026-01-01T00:00:00Z'").run();
     await t.run();
-    assert.equal(t.batches()[0]!.state, "failed");
-    assert.deepEqual(t.w.rows("SELECT number FROM stages WHERE stage = 'hold'").map((r) => r.number), [1]);
+    assert.equal((await t.batches())[0]!.state, "failed");
+    assert.deepEqual((await t.w.rows("SELECT number FROM stages WHERE stage = 'hold'")).map((r) => r.number), [1]);
   });
 
   test("the batches a trace starts share one base, also when the default branch moves between them", async () => {
-    const t = setup([1, 2, 3]);
+    const t = await setup([1, 2, 3]);
     await t.run();
     t.fake.log = errorAt("src/b.rs", 4);
     t.fake.blame["src/b.rs:4"] = 2;
@@ -268,8 +269,8 @@ describe("a red batch", () => {
       return exec(cmd, args, opts);
     };
     await t.run();
-    const started = t.batches().slice(1);
+    const started = (await t.batches()).slice(1);
     assert.equal(started.length, 2);
-    assert.equal(t.baseOf(started[0]!.id), t.baseOf(started[1]!.id));
+    assert.equal(await t.baseOf(started[0]!.id), await t.baseOf(started[1]!.id));
   });
 });

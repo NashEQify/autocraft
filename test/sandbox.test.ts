@@ -6,7 +6,6 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { setRunner, askClaude, type Runner } from "../src/classify/run.ts";
-import { connect } from "../src/db.ts";
 import { claudeArgs, claudeParts } from "../src/prompts/index.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { SAMPLE_PATCH, SAMPLE_TRIAGE } from "../src/fixissue/types.ts";
@@ -19,6 +18,7 @@ import { tokenNearExpiry } from "../src/sandbox/index.ts";
 import type { SessionAsk } from "../src/prepush/resume.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "sandbox-test-"));
@@ -156,9 +156,9 @@ describe("bubblewrap (no model)", { skip: !bwrapOk && "bwrap unavailable" }, () 
   });
 });
 
-describe("askClaude in tool mode", () => {
-  const db = connect(join(dir, "t.db"));
-  const box = useTestAccount(db);
+describe("askClaude in tool mode", async () => {
+  const db = await connectDb(join(dir, "t.db"));
+  const box = await useTestAccount(db);
 
   test("runs claude inside bwrap with the sandbox arguments, records turns, removes token-like text", async () => {
     const cfg = box.configDir + "t";
@@ -179,7 +179,7 @@ describe("askClaude in tool mode", () => {
       assert.deepEqual(calls[0]!.args.slice(-claudeArgs("review.opus", "opus", true).length), claudeArgs("review.opus", "opus", true));
       assert.equal(r!.turns, 4);
       assert.ok(!r!.text.includes(leak));
-      const run = db.prepare("SELECT summary FROM agent_runs ORDER BY rowid DESC LIMIT 1").get() as { summary: string } | undefined;
+      const run = await db.prepare("SELECT summary FROM agent_runs ORDER BY rowid DESC LIMIT 1").get() as { summary: string } | undefined;
       assert.match(run?.summary ?? "", /4 turns/);
       // Without a checkout the same prompt runs tool-free through plain claude.
       await askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);

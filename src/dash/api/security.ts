@@ -1,6 +1,5 @@
 // The security deep scan API. Operators and maintainers read; operators act. Everyone else gets 404, so the
 // endpoints do not show that findings exist.
-import type { DatabaseSync } from "node:sqlite";
 import type { FindingView, ScanDetail, ScanView, SecurityOverview } from "../../../web/src/api/types.ts";
 import { actOnFindingAs, continueScanAs, SecurityError, startScanAs, stopScanAs } from "../../security/actions.ts";
 import { listScans, overview, reconcileFindings, findingRow, scanDetail, toFinding, scanRow } from "../../security/store.ts";
@@ -8,6 +7,7 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
+import type { Db } from "../../db/index.ts";
 
 const NOT_FOUND = "not found";
 function needStaff(req: Req): void {
@@ -32,15 +32,15 @@ function number(v: string | undefined, what: string): number {
   return n;
 }
 
-export async function security(db: DatabaseSync, req: Req): Promise<SecurityOverview> {
+export async function security(db: Db, req: Req): Promise<SecurityOverview> {
   needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
-  return overview(db, repo);
+  return await overview(db, repo);
 }
 
 /** Runs a security action and gives its refusals the HTTP status they carry. */
-async function asHttp<T>(run: () => Promise<T> | T): Promise<T> {
+async function asHttp<T>(run: () => Promise<Promise<T> | T>): Promise<T> {
   try {
     return await run();
   } catch (e) {
@@ -49,61 +49,61 @@ async function asHttp<T>(run: () => Promise<T> | T): Promise<T> {
   }
 }
 
-export async function startScan(db: DatabaseSync, req: Req): Promise<ScanView> {
+export async function startScan(db: Db, req: Req): Promise<ScanView> {
   needOperator(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
   const b = body(req);
-  return asHttp(() => startScanAs(db, repo, req.user.login, b.capUsd));
+  return asHttp(async () => startScanAs(db, repo, req.user.login, b.capUsd));
 }
 
-export async function stopScan(db: DatabaseSync, req: Req): Promise<ScanView> {
+export async function stopScan(db: Db, req: Req): Promise<ScanView> {
   needOperator(req);
   const id = number(req.params.id, "scan");
-  const scan = scanRow(db, id);
+  const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return asHttp(() => stopScanAs(db, id, req.user.login));
+  return asHttp(async () => await stopScanAs(db, id, req.user.login));
 }
 
-export async function continueScan(db: DatabaseSync, req: Req): Promise<ScanView> {
+export async function continueScan(db: Db, req: Req): Promise<ScanView> {
   needOperator(req);
   const id = number(req.params.id, "scan");
-  const scan = scanRow(db, id);
+  const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return asHttp(() => continueScanAs(db, id, req.user.login, body(req).cap));
+  return asHttp(async () => continueScanAs(db, id, req.user.login, body(req).cap));
 }
 
-export async function finding(db: DatabaseSync, req: Req): Promise<FindingView> {
+export async function finding(db: Db, req: Req): Promise<FindingView> {
   needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
-  reconcileFindings(db, repo);
-  const row = findingRow(db, repo, number(req.params.n, "finding"));
+  await reconcileFindings(db, repo);
+  const row = await findingRow(db, repo, number(req.params.n, "finding"));
   if (!row) throw new HttpError(404, NOT_FOUND);
-  return toFinding(db, row);
+  return await toFinding(db, row);
 }
 
-export async function actOnFinding(db: DatabaseSync, req: Req): Promise<FindingView> {
+export async function actOnFinding(db: Db, req: Req): Promise<FindingView> {
   needOperator(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
   const n = number(req.params.n, "finding");
   const b = body(req);
-  return asHttp(() => actOnFindingAs(db, repo, n, req.user.login, b));
+  return asHttp(async () => actOnFindingAs(db, repo, n, req.user.login, b));
 }
 
 /** Scans of the repos the reader can see, newest first; `?repo=` narrows to one. */
-export async function scans(db: DatabaseSync, req: Req): Promise<ScanView[]> {
+export async function scans(db: Db, req: Req): Promise<ScanView[]> {
   needStaff(req);
-  return listScans(db, await visibleRepos(db, req), req.query.get("repo") || undefined);
+  return await listScans(db, await visibleRepos(db, req), req.query.get("repo") || undefined);
 }
 
-export async function scanOf(db: DatabaseSync, req: Req): Promise<ScanDetail> {
+export async function scanOf(db: Db, req: Req): Promise<ScanDetail> {
   needStaff(req);
-  const scan = scanRow(db, number(req.params.id, "scan"));
+  const scan = await scanRow(db, number(req.params.id, "scan"));
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return scanDetail(db, scan);
+  return await scanDetail(db, scan);
 }

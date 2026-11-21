@@ -5,11 +5,9 @@
 // The ci-approve step approves them (approveRuns) for repos an operator approved. Set only from the dashboard
 // (src/dash/api/admin.ts).
 import { jobItem } from "../runner/job-items.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { MAX_FAILURES } from "../core/rules.ts";
 import { audit } from "../dash/audit.ts";
 import { effectiveCi } from "../optional-checks.ts";
-import { connect } from "../db.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -21,12 +19,14 @@ import { trackedNames } from "../repos.ts";
 import { ghExec, type Gh } from "./safe-merge.ts";
 import { slugOf } from "../owners.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export type CiApproval = { by: string; at: string };
 const key = (repo: string) => `ci_approved:${repo}`;
 
-export function ciApprovalOf(db: DatabaseSync, repo: string): CiApproval | null {
-  const value = setting(db, key(repo));
+export async function ciApprovalOf(db: Db, repo: string): Promise<CiApproval | null> {
+  const value = await setting(db, key(repo));
   if (value === undefined) return null;
   try {
     return JSON.parse(value) as CiApproval;
@@ -36,12 +36,12 @@ export function ciApprovalOf(db: DatabaseSync, repo: string): CiApproval | null 
 }
 
 // Returns false when nothing changed.
-export function setCiApproval(db: DatabaseSync, by: string, repo: string, approved: boolean): boolean {
-  if (!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
-  if ((ciApprovalOf(db, repo) !== null) === approved) return false;
-  if (approved) db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
-  else db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
-  audit(db, by, approved ? "ci-approve" : "ci-revoke", repo);
+export async function setCiApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {
+  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if ((await ciApprovalOf(db, repo) !== null) === approved) return false;
+  if (approved) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
+  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  await audit(db, by, approved ? "ci-approve" : "ci-revoke", repo);
   return true;
 }
 
@@ -60,9 +60,9 @@ export type Suite = { id: number; name: string; event: string; status: string; c
 type Row = { head_oid: string; cross_repo: number; runs: string; approved: string; reread: number; failed: string; approved_at: string | null };
 
 /** Records the workflow runs waiting for approval at the PR's head, from the check suites the sync read. Called with every PR the checks job stores. */
-export function recordRuns(db: DatabaseSync, c: { repo: string; number: number; head_oid: string; state: string; cross_repo?: boolean; suites?: Suite[] }, at = new Date().toISOString()): void {
+export async function recordRuns(db: Db, c: { repo: string; number: number; head_oid: string; state: string; cross_repo?: boolean; suites?: Suite[] }, at = new Date().toISOString()): Promise<void> {
   if (c.state !== "OPEN") return;
-  const prev = db.prepare("SELECT * FROM ci_run_approvals WHERE repo = ? AND number = ?").get(c.repo, c.number) as Row | undefined;
+  const prev = await db.prepare("SELECT * FROM ci_run_approvals WHERE repo = ? AND number = ?").get(c.repo, c.number) as Row | undefined;
   const suites = c.suites ?? [];
   const same = prev?.head_oid === c.head_oid ? prev : undefined;
   const approved = (JSON.parse(same?.approved ?? "[]") as number[]);
@@ -73,24 +73,24 @@ export function recordRuns(db: DatabaseSync, c: { repo: string; number: number; 
   const waiting: WaitingRun[] = suites.filter((x) => x.conclusion === "ACTION_REQUIRED" && !approved.includes(x.id)).map((x) => ({ id: x.id, name: x.name, event: x.event }));
   if (!prev && !waiting.length) return;
   // With the approval off nothing clears a mark the suites do not confirm, so the sync does.
-  const reread = same?.reread && (suites.some((x) => x.conclusion === "ACTION_REQUIRED") || ciApprovalOf(db, c.repo)) ? 1 : 0;
-  db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  const reread = same?.reread && (suites.some((x) => x.conclusion === "ACTION_REQUIRED") || await ciApprovalOf(db, c.repo)) ? 1 : 0;
+  await db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (repo, number) DO UPDATE SET head_oid = excluded.head_oid, cross_repo = excluded.cross_repo, runs = excluded.runs, approved = excluded.approved,
       reread = excluded.reread, failed = excluded.failed, checked_at = excluded.checked_at, approved_at = excluded.approved_at`)
     .run(c.repo, c.number, c.head_oid, c.cross_repo ? 1 : 0, JSON.stringify(waiting), JSON.stringify(left), reread, same?.failed ?? "{}", at, same?.approved_at ?? null);
 }
 
 /** A merge was refused because of `action_required` runs the sync does not list: the step reads that head's runs. */
-export function markReread(db: DatabaseSync, repo: string, number: number, head: string, at = new Date().toISOString()): void {
-  db.prepare("DELETE FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid <> ?").run(repo, number, head);
-  db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at) VALUES (?, ?, ?, 1, '[]', '[]', 1, '{}', ?)
+export async function markReread(db: Db, repo: string, number: number, head: string, at = new Date().toISOString()): Promise<void> {
+  await db.prepare("DELETE FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid <> ?").run(repo, number, head);
+  await db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at) VALUES (?, ?, ?, 1, '[]', '[]', 1, '{}', ?)
     ON CONFLICT (repo, number) DO UPDATE SET reread = 1, checked_at = excluded.checked_at`).run(repo, number, head, at);
 }
 
 /** `overall` as CI reads for the PR's head, with failures of the repo's optional checks left out (effectiveOverall): "pending" while runs wait for approval or the ones we approved have not finished, since the check rollup does not list them. */
-export function overallAt(db: DatabaseSync, repo: string, number: number, head: string, overall: string): string {
-  const eff = overall === "failure" ? effectiveCi(db, repo, overall, (db.prepare("SELECT checks FROM pr_checks WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { checks: string } | undefined)?.checks) : overall;
-  const r = db.prepare("SELECT runs, approved, reread FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { runs: string; approved: string; reread: number } | undefined;
+export async function overallAt(db: Db, repo: string, number: number, head: string, overall: string): Promise<string> {
+  const eff = overall === "failure" ? await effectiveCi(db, repo, overall, (await db.prepare("SELECT checks FROM pr_checks WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { checks: string } | undefined)?.checks) : overall;
+  const r = await db.prepare("SELECT runs, approved, reread FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { runs: string; approved: string; reread: number } | undefined;
   if (!r) return eff;
   return r.reread || JSON.parse(r.runs).length || JSON.parse(r.approved).length ? "pending" : eff;
 }
@@ -102,11 +102,11 @@ export type Candidate = { number: number; head: string; runs: WaitingRun[]; rere
  * batch PRs with runs waiting at the batch tip (their code is the members' code, and every member is reviewed at the head it was batched at).
  * The runs are read from the recorded row at the action's head.
  */
-export function needsWork(db: DatabaseSync, repo: string, run?: string | null, plans?: PlanSet): Candidate[] {
+export async function needsWork(db: Db, repo: string, run?: string | null, plans?: PlanSet): Promise<Candidate[]> {
   const row = db.prepare("SELECT runs, reread, failed, cross_repo FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?");
   const out: Candidate[] = [];
-  for (const { facts, action } of planned(db, "approve-ci", { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) })) {
-    const a = row.get(repo, facts.number, action.head) as { runs: string; reread: number; failed: string; cross_repo: number } | undefined;
+  for (const { facts, action } of await planned(db, "approve-ci", { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) })) {
+    const a = await row.get(repo, facts.number, action.head) as { runs: string; reread: number; failed: string; cross_repo: number } | undefined;
     if (!a) continue;
     out.push({ number: facts.number, head: action.head!, runs: JSON.parse(a.runs) as WaitingRun[], reread: !!a.reread, failed: JSON.parse(a.failed) as Record<string, number>, crossRepo: !!a.cross_repo });
   }
@@ -139,20 +139,20 @@ export type ApproveDeps = {
 export type ApproveResult = { approved: string[]; skipped: string[]; failed: string[] };
 
 /** Approves the waiting runs of every candidate whose PR is still open, not a draft, a fork's, and at the reviewed head. */
-export async function approveRuns(db: DatabaseSync, repo: string, d: ApproveDeps): Promise<ApproveResult> {
+export async function approveRuns(db: Db, repo: string, d: ApproveDeps): Promise<ApproveResult> {
   const log = d.log ?? (() => {});
   const w: Writer = { db, login: ACTOR };
   const out: ApproveResult = { approved: [], skipped: [], failed: [] };
-  const save = (c: Candidate, runs: WaitingRun[], approved: number[], failed: Record<string, number>): void => {
-    const prev = db.prepare("SELECT approved FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, c.number, c.head) as { approved: string } | undefined;
+  const save = async (c: Candidate, runs: WaitingRun[], approved: number[], failed: Record<string, number>): Promise<void> => {
+    const prev = await db.prepare("SELECT approved FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, c.number, c.head) as { approved: string } | undefined;
     const all = [...new Set([...(JSON.parse(prev?.approved ?? "[]") as number[]), ...approved])];
-    db.prepare("UPDATE ci_run_approvals SET runs = ?, approved = ?, reread = 0, failed = ?, approved_at = CASE WHEN ? THEN ? ELSE approved_at END WHERE repo = ? AND number = ? AND head_oid = ?")
+    await db.prepare("UPDATE ci_run_approvals SET runs = ?, approved = ?, reread = 0, failed = ?, approved_at = CASE WHEN ? THEN ? ELSE approved_at END WHERE repo = ? AND number = ? AND head_oid = ?")
       .run(JSON.stringify(runs), JSON.stringify(all), JSON.stringify(failed), approved.length ? 1 : 0, new Date().toISOString(), repo, c.number, c.head);
   };
-  for (const c of needsWork(db, repo)) {
+  for (const c of await needsWork(db, repo)) {
     if (out.approved.length + out.failed.length >= d.limit) break;
-    if (!ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
-    if (mergeHeld(db, repo, c.number)) continue;
+    if (!await ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
+    if (await mergeHeld(db, repo, c.number)) continue;
     const ref = `${repo}#${c.number}`;
     let runs = c.runs;
     let pr: { state?: string; draft?: boolean; head?: { sha?: string; repo?: { full_name?: string } | null }; base?: { repo?: { full_name?: string } | null } };
@@ -160,14 +160,14 @@ export async function approveRuns(db: DatabaseSync, repo: string, d: ApproveDeps
       if (c.reread) runs = await readRuns(d.gh, repo, c.head);
       pr = JSON.parse(await d.gh(["api", `repos/${slugOf(repo)}/pulls/${c.number}`]));
     } catch (e) {
-      jobItem(db, repo, c.number, `CI runs not read: ${(e as Error).message}`, log);
+      await jobItem(db, repo, c.number, `CI runs not read: ${(e as Error).message}`, log);
       out.failed.push(ref);
       continue;
     }
     const sameRepo = !pr.head?.repo || pr.head.repo.full_name === pr.base?.repo?.full_name;
     if (pr.state !== "open" || pr.draft !== false || pr.head?.sha !== c.head || sameRepo) {
-      jobItem(db, repo, c.number, "CI runs skipped: closed, a draft, at another head or not from a fork", log);
-      if (c.reread) save(c, c.runs, [], c.failed);
+      await jobItem(db, repo, c.number, "CI runs skipped: closed, a draft, at another head or not from a fork", log);
+      if (c.reread) await save(c, c.runs, [], c.failed);
       out.skipped.push(ref);
       continue;
     }
@@ -176,7 +176,7 @@ export async function approveRuns(db: DatabaseSync, repo: string, d: ApproveDeps
     const done: number[] = [];
     let stopped: string | null = null;
     for (const run of todo) {
-      if (!ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
+      if (!await ciApprovalOf(db, repo)) throw new Error(`approving CI runs in ${repo} is not approved`);
       const g = await guard(db, { repo, number: c.number }, { kind: "approve-ci", head: c.head }, d.by ?? CLI_BY);
       if ("refused" in g) { stopped = g.refused; break; }
       const r = await ghApproveRun(w, d.exec, g, run.id, { head: c.head, workflow: run.name });
@@ -184,11 +184,11 @@ export async function approveRuns(db: DatabaseSync, repo: string, d: ApproveDeps
       else if (REPEATABLE.test(`${r.stderr} ${r.stdout}`)) failed[run.id] = (failed[run.id] ?? 0) + 1;
       else log(`${ref}: run ${run.id}: ${(r.stderr || r.stdout).trim().slice(0, 120)}; will retry`);
     }
-    save(c, runs.filter((r) => !done.includes(r.id)), done, failed);
-    if (stopped !== null) { jobItem(db, repo, c.number, `CI runs not approved: ${stopped}`, log); out.skipped.push(ref); continue; }
+    await save(c, runs.filter((r) => !done.includes(r.id)), done, failed);
+    if (stopped !== null) { await jobItem(db, repo, c.number, `CI runs not approved: ${stopped}`, log); out.skipped.push(ref); continue; }
     const bad = todo.length - done.length;
     (bad ? out.failed : out.approved).push(ref);
-    jobItem(db, repo, c.number, bad ? `${bad} of ${todo.length} CI runs not approved` : `approved ${todo.length} CI run${todo.length === 1 ? "" : "s"}`, log);
+    await jobItem(db, repo, c.number, bad ? `${bad} of ${todo.length} CI runs not approved` : `approved ${todo.length} CI run${todo.length === 1 ? "" : "s"}`, log);
   }
   return out;
 }
@@ -196,18 +196,18 @@ export async function approveRuns(db: DatabaseSync, repo: string, d: ApproveDeps
 export const commands = {
   "ci-approval": {
     summary: "ci-approval [--repo R] [on|off]: whether the pipeline may approve waiting CI runs of reviewed outside PRs, per tracked repo; on or off with --repo sets it",
-    run(args: string[]): void {
-      const db = connect();
+    async run(args: string[]): Promise<void> {
+      const db = await openDb();
       const i = args.indexOf("--repo");
       const set = args.find((a) => a === "on" || a === "off");
       if (set) {
         const repo = i >= 0 ? args[i + 1] ?? "" : "";
         if (!repo) throw new Error("ci-approval --repo R on|off");
-        console.log(setCiApproval(db, "cli", repo, set === "on") ? `${repo}: CI run approval ${set}` : `${repo}: CI run approval was already ${set}`);
+        console.log(await setCiApproval(db, "cli", repo, set === "on") ? `${repo}: CI run approval ${set}` : `${repo}: CI run approval was already ${set}`);
         return;
       }
-      for (const repo of i >= 0 ? [args[i + 1] ?? ""] : trackedNames(db)) {
-        const a = ciApprovalOf(db, repo);
+      for (const repo of i >= 0 ? [args[i + 1] ?? ""] : await trackedNames(db)) {
+        const a = await ciApprovalOf(db, repo);
         console.log(`${repo}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);
       }
     },

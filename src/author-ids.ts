@@ -1,14 +1,14 @@
 // Binds each author login with PR history to the GitHub account id it belongs to, so a login that later passes to another account
 // does not inherit the history (tiersOf reads author_ids). The sync binds ids as it writes rows; this step covers history written earlier.
-import type { DatabaseSync } from "node:sqlite";
 import { ownerOf } from "./owners.ts";
 import type { Querier } from "./mirror.ts";
+import type { Db } from "./db/index.ts";
 
 const BATCH = 40;
 
 /** Logins whose merged or closed PRs count toward a tier and that have no bound account id. */
-export function unboundLogins(db: DatabaseSync): string[] {
-  return (db.prepare(`SELECT DISTINCT author FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
+export async function unboundLogins(db: Db): Promise<string[]> {
+  return (await db.prepare(`SELECT DISTINCT author FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
     AND NOT EXISTS (SELECT 1 FROM author_ids a WHERE a.login = items.author) ORDER BY author`).all() as { author: string }[]).map((r) => r.author);
 }
 
@@ -57,17 +57,17 @@ async function lookup(client: Querier, owner: string, prs: Pr[], out: Map<string
  * from the login's own oldest merged or closed PR (what GitHub reports as its author), never from the login's current holder.
  * Ids stored on item rows are used only when every row of the login has one. One batched pass per owner; nothing when all are bound.
  */
-export async function backfillAuthorIds(db: DatabaseSync, client: Querier | null): Promise<number> {
+export async function backfillAuthorIds(db: Db, client: Querier | null): Promise<number> {
   const bind = db.prepare("INSERT OR IGNORE INTO main.author_ids (login, id) VALUES (?, ?)");
   let n = 0;
-  const known = db.prepare(`SELECT author, author_id FROM items i WHERE author IS NOT NULL AND author_id IS NOT NULL
+  const known = await db.prepare(`SELECT author, author_id FROM items i WHERE author IS NOT NULL AND author_id IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM author_ids a WHERE a.login = i.author)
     AND NOT EXISTS (SELECT 1 FROM items j WHERE j.author = i.author AND j.author_id IS NULL)
     GROUP BY author ORDER BY MIN(created_at)`).all() as { author: string; author_id: number }[];
-  for (const r of known) n += Number(bind.run(r.author, r.author_id).changes);
-  const missing = new Set(unboundLogins(db));
+  for (const r of known) n += Number((await bind.run(r.author, r.author_id)).changes);
+  const missing = new Set(await unboundLogins(db));
   if (!client || !missing.size) return n;
-  const oldest = (db.prepare(`SELECT author AS login, repo, number, MIN(created_at) AS first FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
+  const oldest = (await db.prepare(`SELECT author AS login, repo, number, MIN(created_at) AS first FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
     GROUP BY author ORDER BY author`).all() as Pr[]).filter((p) => missing.has(p.login));
   const byOwner = new Map<string, Pr[]>();
   for (const p of oldest) (byOwner.get(ownerOf(p.repo)) ?? byOwner.set(ownerOf(p.repo), []).get(ownerOf(p.repo))!).push(p);
@@ -83,6 +83,6 @@ export async function backfillAuthorIds(db: DatabaseSync, client: Querier | null
     }
   }
   if (skipped.length) console.log(`author ids: skipped ${skipped.join(", ")} (no readable token)`);
-  for (const [login, id] of found) n += Number(bind.run(login, id).changes);
+  for (const [login, id] of found) n += Number((await bind.run(login, id)).changes);
   return n;
 }

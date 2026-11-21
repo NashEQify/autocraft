@@ -9,13 +9,11 @@
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { poolRoom, takersFirst } from "../agents/call.ts";
 import { runModelStep } from "../agents/step.ts";
 import { COMPARE_ISSUES, COMPARE_PRS } from "../agents/steps.ts";
 import { add, askClaude, pool, saveUsage, type Usage } from "../classify/run.ts";
 import { audit } from "../dash/audit.ts";
-import { connect } from "../db.ts";
 import { ownerOf } from "../owners.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
@@ -30,6 +28,9 @@ import {
   type CompareIssue, type CompareIssues, type ComparePr, type ComparePrs,
 } from "./group.ts";
 import { dueSets, rememberDrop, ruleOutcome, saveComparison, storedComparison, type ComparisonResult, type KindSet, type StoredComparison } from "./plan.ts";
+import { filterSeq, mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 const PR_PROMPT = CLAUDE_PROMPTS["dupes.compare-prs.opus"];
 const ISSUE_PROMPT = CLAUDE_PROMPTS["dupes.compare-issues.sonnet"];
@@ -56,15 +57,15 @@ export type CompareParams = { limit?: number; repo?: string; dryRun?: boolean; o
 export type CompareSummary = { due: number; compared: number; byRule: number; closedWins: number; single: number; dropped: number; asked: string[]; dryRun: boolean };
 
 /** A read-only checkout of the repo's default branch at its current head, or null (no sandbox, no head, fetch failed). */
-export async function baseCheckout(db: DatabaseSync, repo: string): Promise<string | null> {
+export async function baseCheckout(db: Db, repo: string): Promise<string | null> {
   const { branchOf, defaultDeps } = await import("../fixissue/index.ts");
   const { checkoutForCommit } = await import("../sandbox/index.ts");
-  const branch = branchOf(db, repo);
+  const branch = await branchOf(db, repo);
   const sha = await defaultDeps().mainHead(repo, branch);
   return sha ? checkoutForCommit(repo, branch, sha, console.log) : null;
 }
 
-export function defaultCompareDeps(db: DatabaseSync): CompareDeps {
+export function defaultCompareDeps(db: Db): CompareDeps {
   return {
     querier: new Client(500), fetchDiff: ghDiff,
     baseCheckout: (repo) => baseCheckout(db, repo),
@@ -93,25 +94,25 @@ async function liveOf(q: Querier, repo: string, numbers: number[]): Promise<Map<
 
 const NOW_ISO = (d: CompareDeps) => d.now().toISOString();
 
-function viaRule(db: DatabaseSync, s: KindSet, at: string, error: string | null, source: "rule" | "closed" | "single"): StoredComparison {
+async function viaRule(db: Db, s: KindSet, at: string, error: string | null, source: "rule" | "closed" | "single"): Promise<StoredComparison> {
   const numbers = s.members.map((m) => m.number);
-  const c = pickCanonical(db, s.repo, numbers);
+  const c = await pickCanonical(db, s.repo, numbers);
   const others = numbers.filter((n) => n !== c.number).map((number) => (s.kind === "pr" ? { number, duplicate: true, better: [], carry: [] } : { number, adds: [] }));
   const reason = source === "closed" ? c.why : source === "single" ? "the only one" : `kept by rule: ${c.why}`;
   return { repo: s.repo, key: s.key, kind: s.kind, members: numbers, hash: s.hash, kept: c.number, source, model: null, reason, result: { others, rounds: 0 }, error, attempts: 0, at };
 }
 
-type Ctx = { db: DatabaseSync; deps: CompareDeps; log: (l: string) => void; checkouts: Map<string, Promise<string | null>>; runId: string };
+type Ctx = { db: Db; deps: CompareDeps; log: (l: string) => void; checkouts: Map<string, Promise<string | null>>; runId: string };
 
-const bodyOf = (db: DatabaseSync, repo: string, n: number) =>
-  db.prepare("SELECT title, body, state, author_association, comments_count, closing_issues, head_oid FROM items WHERE repo = ? AND number = ?").get(repo, n) as
+const bodyOf = async (db: Db, repo: string, n: number) =>
+  await db.prepare("SELECT title, body, state, author_association, comments_count, closing_issues, head_oid FROM items WHERE repo = ? AND number = ?").get(repo, n) as
     { title: string | null; body: string | null; state: string; author_association: string | null; comments_count: number | null; closing_issues: string | null; head_oid: string | null };
 
 async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<ComparePrs> {
   const share = Math.floor(GROUP_DIFF_CHARS / numbers.length);
   const prs: ComparePr[] = [];
   for (const n of numbers) {
-    const it = bodyOf(x.db, repo, n);
+    const it = await bodyOf(x.db, repo, n);
     let diff = "", files: string[] = [];
     if (it.head_oid) {
       const d = await cachedDiff(x.db, repo, n, it.head_oid, x.deps.fetchDiff);
@@ -122,8 +123,8 @@ async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<Compare
         diff = cd.text.length > share ? `${cd.text.slice(0, share)}\n[diff cut]` : cd.text;
       } else diff = `[diff unavailable: ${d.error}]`;
     }
-    const checks = it.head_oid ? checksOf(x.db, repo, n) : undefined;
-    const review = it.head_oid ? (x.db.prepare("SELECT verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, n, it.head_oid) as { verdict: string } | undefined)?.verdict ?? null : null;
+    const checks = it.head_oid ? await checksOf(x.db, repo, n) : undefined;
+    const review = it.head_oid ? (await x.db.prepare("SELECT verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, n, it.head_oid) as { verdict: string } | undefined)?.verdict ?? null : null;
     let linked: number[] = [];
     try { const v = JSON.parse(it.closing_issues ?? "[]") as unknown; if (Array.isArray(v)) linked = v.filter((k): k is number => typeof k === "number"); } catch { /* none */ }
     prs.push({
@@ -134,9 +135,9 @@ async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<Compare
   return { ref: prsRef(repo, numbers), prs };
 }
 
-function issueInput(db: DatabaseSync, repo: string, numbers: number[]): CompareIssues {
-  const issues: CompareIssue[] = numbers.map((n) => {
-    const it = bodyOf(db, repo, n);
+async function issueInput(db: Db, repo: string, numbers: number[]): Promise<CompareIssues> {
+  const issues: CompareIssue[] = await mapSeq(numbers, async (n) => {
+    const it = await bodyOf(db, repo, n);
     return { ref: `#${n}`, title: it.title ?? "", body: it.body ?? "", state: it.state.toLowerCase(), author_association: it.author_association, comments: it.comments_count ?? 0 };
   });
   return { ref: prsRef(repo, numbers), issues };
@@ -166,7 +167,7 @@ async function compareChunk(x: Ctx, s: KindSet, numbers: number[], usage: { u: U
     if (r.ok && r.model) usage.ran = r.model;
     return r.ok ? r.value : null;
   }
-  const input = issueInput(x.db, s.repo, numbers);
+  const input = await issueInput(x.db, s.repo, numbers);
   const model = ISSUE_PROMPT.models[0]!;
   usage.model = model;
   const r = await runModelStep(x.db, COMPARE_ISSUES, { numbers, input }, { ask: (i) => deps.ask("dupes.compare-issues.sonnet", model, i.input) });
@@ -185,7 +186,7 @@ const setRefs = (s: KindSet): { repo: string; number: number }[] => (s.members.l
 async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
   const at = NOW_ISO(x.deps);
   // Best by rule first, so every chunk holds a mix of strong and weak members and the rule's pick reaches the last round.
-  const infos = canonInfo(x.db, s.repo, s.members.map((m) => m.number)).sort(compareCanonical);
+  const infos = (await canonInfo(x.db, s.repo, s.members.map((m) => m.number))).sort(compareCanonical);
   let current = infos.map((i) => i.number);
   const usage: { u: Usage; model: string; ran?: string } = { u: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null }, model: "" };
   const start = at;
@@ -201,8 +202,8 @@ async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
       if (chunk.length === 1) { winners.push(chunk[0]!); continue; }
       const r = await compareChunk(x, s, chunk, usage);
       if (!r) {
-        saveUsage(x.db, x.runId, `dupes-compare-${s.key.replace(/[^A-Za-z0-9]/g, "-")}`, "dupes", usage.model, 0, usage.u, start, NOW_ISO(x.deps));
-        return viaRule(x.db, s, at, "no valid answer from the model", "rule");
+        await saveUsage(x.db, x.runId, `dupes-compare-${s.key.replace(/[^A-Za-z0-9]/g, "-")}`, "dupes", usage.model, 0, usage.u, start, NOW_ISO(x.deps));
+        return await viaRule(x.db, s, at, "no valid answer from the model", "rule");
       }
       winners.push(r.keep);
       last = r;
@@ -213,7 +214,7 @@ async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
     if (chunks.length === 1) break;
   }
   const kept = current[0]!;
-  saveUsage(x.db, x.runId, `dupes-compare-${s.key.replace(/[^A-Za-z0-9]/g, "-")}`, "dupes", usage.model, s.members.length, usage.u, start, NOW_ISO(x.deps));
+  await saveUsage(x.db, x.runId, `dupes-compare-${s.key.replace(/[^A-Za-z0-9]/g, "-")}`, "dupes", usage.model, s.members.length, usage.u, start, NOW_ISO(x.deps));
   const others = s.members.map((m) => m.number).filter((n) => n !== kept).sort((a, b) => a - b).map((n) => {
     const l = lost.get(n)!;
     return { ...l.other, ...(l.winner !== kept ? { via: l.winner } : {}) };
@@ -224,11 +225,11 @@ async function compareSet(x: Ctx, s: KindSet): Promise<StoredComparison> {
   };
 }
 
-export async function runDupeCompare(db: DatabaseSync, params: CompareParams = {}, log: (line: string) => void = console.log, deps?: CompareDeps): Promise<CompareSummary> {
+export async function runDupeCompare(db: Db, params: CompareParams = {}, log: (line: string) => void = console.log, deps?: CompareDeps): Promise<CompareSummary> {
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const d = deps ?? defaultCompareDeps(db);
   const s: CompareSummary = { due: 0, compared: 0, byRule: 0, closedWins: 0, single: 0, dropped: 0, asked: [], dryRun: !!params.dryRun };
-  const sets = dueSets(db, params.repo, d.now().getTime());
+  const sets = await dueSets(db, params.repo, d.now().getTime());
   s.due = sets.length;
   if (params.dryRun) {
     log(`dupe-compare: ${sets.length} sets to compare; dry run, nothing written`);
@@ -241,10 +242,10 @@ export async function runDupeCompare(db: DatabaseSync, params: CompareParams = {
     const at = NOW_ISO(d);
     const rule = ruleOutcome(set);
     if (rule === "closed") {
-      saveComparison(db, viaRule(db, set, at, null, "closed"), set);
+      await saveComparison(db, await viaRule(db, set, at, null, "closed"), set);
       s.closedWins++;
     } else if (rule === "single") {
-      saveComparison(db, viaRule(db, set, at, null, "single"), set);
+      await saveComparison(db, await viaRule(db, set, at, null, "single"), set);
       s.single++;
     } else calls.push(set);
   }
@@ -258,34 +259,34 @@ export async function runDupeCompare(db: DatabaseSync, params: CompareParams = {
       calls = [];
     }
     const asked = calls.length;
-    calls = calls.filter((c) => {
+    calls = await filterSeq(calls, async (c) => {
       const l = live.get(c.repo)!;
       const bad = c.members.find((m) => { const v = l.get(m.number); return !v || v.state !== m.state || (m.kind === "pr" && v.head !== m.head_oid); });
       if (bad) {
-        jobItem(db, c.repo, bad.number, `dropped from duplicate set ${c.key}, it changed on GitHub since the last sync`, log);
-        rememberDrop(db, c, NOW_ISO(d));
+        await jobItem(db, c.repo, bad.number, `dropped from duplicate set ${c.key}, it changed on GitHub since the last sync`, log);
+        await rememberDrop(db, c, NOW_ISO(d));
       }
       return !bad;
     });
     s.dropped = asked - calls.length;
   }
-  if (params.limit !== undefined) calls = takersFirst(db, calls, (c) => [c.repo], setRefs, ISSUE_PROMPT.id).slice(0, params.limit);
+  if (params.limit !== undefined) calls = (await takersFirst(db, calls, (c) => [c.repo], setRefs, ISSUE_PROMPT.id)).slice(0, params.limit);
   let handled = 0;
   await pool(calls.map((set) => async () => {
     const r = await compareSet(x, set);
     if (r.source === "rule") {
-      const prev = storedComparison(db, set.repo, set.key);
+      const prev = await storedComparison(db, set.repo, set.key);
       r.attempts = (prev && prev.source === "rule" && prev.hash === set.hash ? prev.attempts : 0) + 1;
     }
-    saveComparison(db, r, set);
+    await saveComparison(db, r, set);
     if (r.source === "rule") {
       s.byRule++;
       log(`  ${set.repo} ${set.key}: no valid answer; kept #${r.kept} by rule`);
     } else s.compared++;
-    for (const m of set.members) jobItem(db, set.repo, m.number, `compared in duplicate set ${set.key}, keep #${r.kept}${r.source === "rule" ? " (by rule)" : ""}`, () => {});
+    for (const m of set.members) await jobItem(db, set.repo, m.number, `compared in duplicate set ${set.key}, keep #${r.kept}${r.source === "rule" ? " (by rule)" : ""}`, () => {});
     params.onHandled?.(++handled);
   }), poolRoom(db, (i) => [calls[i]!.repo], (i) => setRefs(calls[i]!), { promptId: ISSUE_PROMPT.id }));
-  s.asked = askGroupDecisions(db, params.repo, NOW_ISO(d));
+  s.asked = await askGroupDecisions(db, params.repo, NOW_ISO(d));
   log(`dupe-compare: ${s.compared} compared by a model, ${s.byRule} by rule, ${s.closedWins} won by a closed member, ${s.single} single, ${s.dropped} dropped; ${s.asked.length} decisions asked`);
   return s;
 }
@@ -302,10 +303,10 @@ function parseArgs(args: string[]): CompareParams {
 }
 
 /** Makes the stored comparisons that include the item not current, so the next dupe-compare step compares their sets again and refreshes the open group decision. Returns how many it marked. */
-export function compareAgain(db: DatabaseSync, by: string, repo: string, number: number): number {
-  const n = Number(db.prepare(`UPDATE dupe_comparisons SET hash = 'again:' || hash WHERE repo = ? AND hash NOT LIKE 'again:%'
-    AND EXISTS (SELECT 1 FROM json_each(dupe_comparisons.members) WHERE value = ?)`).run(repo, number).changes);
-  if (n) audit(db, by, "compare-again", `${repo}#${number}`, { sets: n });
+export async function compareAgain(db: Db, by: string, repo: string, number: number): Promise<number> {
+  const n = Number((await db.prepare(`UPDATE dupe_comparisons SET hash = 'again:' || hash WHERE repo = ? AND hash NOT LIKE 'again:%'
+    AND EXISTS (SELECT 1 FROM json_each(dupe_comparisons.members) WHERE value = ?)`).run(repo, number)).changes);
+  if (n) await audit(db, by, "compare-again", `${repo}#${number}`, { sets: n });
   return n;
 }
 
@@ -313,12 +314,12 @@ export const commands = {
   "dupe-compare": {
     summary: "dupe-compare [--limit N] [--dry-run] | again REPO#N [--by LOGIN]: compare each duplicate group in one pass (Opus for PRs, Sonnet for issues) and ask the group decisions; again compares the sets that include the item once more",
     async run(args: string[]): Promise<void> {
-      const db = connect();
+      const db = await openDb();
       if (args[0] === "again") {
         const m = /^([\w.-]+)#(\d+)$/.exec(args[1] ?? "");
         const by = args[2] === "--by" && args[3] ? args[3] : "cli";
         if (!m || args.length !== (args[2] ? 4 : 2)) throw new Error("usage: autocraft-server dupe-compare again <repo>#<number> [--by <login>]");
-        const n = compareAgain(db, by, m[1]!, Number(m[2]));
+        const n = await compareAgain(db, by, m[1]!, Number(m[2]));
         console.log(n ? `${args[1]}: ${n} comparison${n === 1 ? "" : "s"} marked; the next dupe-compare step compares again` : `${args[1]}: no stored comparison includes it`);
         return;
       }

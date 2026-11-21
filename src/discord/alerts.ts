@@ -3,7 +3,6 @@
 // answer from anywhere the message is edited: buttons removed, the answer named. Stored per message: the channel and message ids
 // (sealed), nothing else about the content. Free text (notes, extras, messages to Opus) stays on the dashboard.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { applyDrafts, choicesById, coresFor, currentChoices, type Core } from "../decide/choices.ts";
 import type { ActionTag } from "../decide/choices-types.ts";
 import { decisionStamp } from "../conversations/cards.ts";
@@ -22,6 +21,8 @@ import { loginOf } from "./links.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import { RestError, type DiscordRest, type EditBody } from "./rest.ts";
 import { ghPermission, type PermissionReader } from "../fixup/author-permission.ts";
+import { everySeq, exclusive, filterSeq, someSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** What the alerts need from Discord beyond messages: the direct-message channel of a user. */
 export type DmRest = DiscordRest & { createDm(userId: string): Promise<{ id: string }> };
@@ -53,8 +54,8 @@ const soft = (s: string, n: number): string => {
   return t.length > n ? `${t.slice(0, n - 1)}…` : t;
 };
 
-const roleOf = (db: DatabaseSync, login: string): Role | null => {
-  const r = (db.prepare("SELECT role FROM main.access WHERE login = ?").get(login) as { role: string } | undefined)?.role;
+const roleOf = async (db: Db, login: string): Promise<Role | null> => {
+  const r = (await db.prepare("SELECT role FROM main.access WHERE login = ?").get(login) as { role: string } | undefined)?.role;
   return r === "operator" || r === "maintainer" || r === "viewer" ? r : null;
 };
 
@@ -68,40 +69,40 @@ const permKey = (login: string, repo: string): string => `${login.toLowerCase()}
  * permission on each, read within RECEIVE_PERMISSION_TTL_MS (by a dashboard visit or the alert pass), is write or better. `kept`: pairs
  * (permKey) whose refresh failed in this pass, where the older row still counts. A press checks it live.
  */
-export function mayReceive(db: DatabaseSync, login: string, role: Role, repos: string[], now: number = Date.now(), kept: ReadonlySet<string> = new Set()): boolean {
+export async function mayReceive(db: Db, login: string, role: Role, repos: string[], now: number = Date.now(), kept: ReadonlySet<string> = new Set()): Promise<boolean> {
   if (role === "operator") return true;
-  if (role !== "maintainer" || !maintainerWritesOn(db) || !allAppIdentity(db, repos)) return false;
+  if (role !== "maintainer" || !await maintainerWritesOn(db) || !await allAppIdentity(db, repos)) return false;
   const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
-  return repos.every((r) => !!db.prepare("SELECT 1 FROM main.repo_permissions WHERE login = ? AND repo = ? AND permission IN ('write', 'maintain', 'admin') AND (checked_at > ? OR ?)")
+  return await everySeq(repos, async (r) => !!await db.prepare("SELECT 1 FROM main.repo_permissions WHERE login = ? AND repo = ? AND permission IN ('write', 'maintain', 'admin') AND (checked_at > ? OR ?)")
     .get(login, r, since, Number(kept.has(permKey(login, r)))));
 }
 
-export function mayAlert(db: DatabaseSync, login: string): boolean {
-  const role = roleOf(db, login);
+export async function mayAlert(db: Db, login: string): Promise<boolean> {
+  const role = await roleOf(db, login);
   if (role === "operator") return true;
-  if (role !== "maintainer" || !maintainerWritesOn(db)) return false;
+  if (role !== "maintainer" || !await maintainerWritesOn(db)) return false;
   // Turning alerts on takes a write permission of any age: the alert pass reads a stale one again before it sends.
-  return trackedNames(db).some((r) => mayReceive(db, login, role, [r], Date.now(), new Set([permKey(login, r)])));
+  return await someSeq((await trackedNames(db)), async (r) => await mayReceive(db, login, role, [r], Date.now(), new Set([permKey(login, r)])));
 }
 
-export function setAlerts(db: DatabaseSync, keys: DiscordKeys, userId: string, channelId: string | null): void {
+export async function setAlerts(db: Db, keys: DiscordKeys, userId: string, channelId: string | null): Promise<void> {
   const h = keys.hash("author", userId);
   if (channelId === null) {
-    db.prepare("DELETE FROM discord_alerts WHERE user_hash = ?").run(h);
-    db.prepare("DELETE FROM discord_alert_msgs WHERE user_hash = ?").run(h);
+    await db.prepare("DELETE FROM discord_alerts WHERE user_hash = ?").run(h);
+    await db.prepare("DELETE FROM discord_alert_msgs WHERE user_hash = ?").run(h);
     return;
   }
-  db.prepare(`INSERT INTO discord_alerts (user_hash, sealed, created_at) VALUES (?, ?, ?)
+  await db.prepare(`INSERT INTO discord_alerts (user_hash, sealed, created_at) VALUES (?, ?, ?)
     ON CONFLICT(user_hash) DO UPDATE SET sealed = excluded.sealed`).run(h, ref(keys, channelId, "-", aad(h)), new Date().toISOString());
 }
 
-export const alertsOn = (db: DatabaseSync, keys: DiscordKeys, userId: string): boolean =>
-  !!db.prepare("SELECT 1 FROM discord_alerts WHERE user_hash = ?").get(keys.hash("author", userId));
+export const alertsOn = async (db: Db, keys: DiscordKeys, userId: string): Promise<boolean> =>
+  !!await db.prepare("SELECT 1 FROM discord_alerts WHERE user_hash = ?").get(keys.hash("author", userId));
 
 type Built = { content: string; components: unknown[]; choicesId: string | null };
 
-const itemTitle = (db: DatabaseSync, repo: string, n: number): string =>
-  (db.prepare("SELECT title FROM main.items WHERE repo = ? AND number = ?").get(repo, n) as { title: string | null } | undefined)?.title ?? "";
+const itemTitle = async (db: Db, repo: string, n: number): Promise<string> =>
+  (await db.prepare("SELECT title FROM main.items WHERE repo = ? AND number = ?").get(repo, n) as { title: string | null } | undefined)?.title ?? "";
 
 /** A button names its core by a short hash of the core key, so a changed list of choices never runs another core. */
 export const coreId = (key: string): string => createHash("sha256").update(key).digest("base64url").slice(0, 8);
@@ -115,11 +116,11 @@ const pressable = (core: Core): boolean => !(core.params && "instructions" in co
 const writesOf = (core: Core): ActionTag[] => [...new Set([...core.writes, ...sendable(core).map((e) => e.tag)])];
 
 /** The message for an open decision: question, Opus's line, what each choice does, and the buttons when its choices are prepared. */
-export function buildMessage(db: DatabaseSync, d: DecisionRow, baseUrl: string | null): Built {
+export async function buildMessage(db: Db, d: DecisionRow, baseUrl: string | null): Promise<Built> {
   const items = itemsOf(d);
   const first = items[0]!;
-  const head = `**${soft(first.repo, 60)}#${first.number}** ${soft(itemTitle(db, first.repo, first.number), 120)}${items.length > 1 ? ` and ${items.length - 1} more` : ""}`;
-  const view = d.repo && d.number ? choicesView(db, d.repo, d.number) : null;
+  const head = `**${soft(first.repo, 60)}#${first.number}** ${soft(await itemTitle(db, first.repo, first.number), 120)}${items.length > 1 ? ` and ${items.length - 1} more` : ""}`;
+  const view = d.repo && d.number ? await choicesView(db, d.repo, d.number) : null;
   const lines = [head, soft(d.question, 600)];
   if (view?.pick?.reason) lines.push(`Opus: ${soft(view.pick.reason, 400)}`);
   const buttons: unknown[] = [];
@@ -142,10 +143,10 @@ export function buildMessage(db: DatabaseSync, d: DecisionRow, baseUrl: string |
 }
 
 export type AlertDeps = {
-  db: DatabaseSync; keys: DiscordKeys; rest: DmRest; log: (line: string) => void;
+  db: Db; keys: DiscordKeys; rest: DmRest; log: (line: string) => void;
   baseUrl: string | null;
   /** The signed-in-equivalent user for a linked login: its GitHub permissions, read live where a session allows. */
-  userFor: (login: string, role: Role, forWrite: boolean) => User;
+  userFor: (login: string, role: Role, forWrite: boolean) => Promise<User>;
   perHour?: number;
   now?: () => number;
   act?: ActDeps;
@@ -173,9 +174,9 @@ export class DecisionAlerts {
   /** Polls the change markers of the decision topics; a change runs one pass. Runs a first pass at once. */
   start(signal: AbortSignal): void {
     void this.sync();
-    const t = setInterval(() => {
+    const poll = exclusive(async () => {
       try {
-        const seqs = readSeqs(this.#d.db);
+        const seqs = await readSeqs(this.#d.db);
         const sig = TOPICS.map((k) => seqs[k] ?? 0).join(",");
         let changed = sig !== this.#last;
         this.#last = sig;
@@ -189,7 +190,8 @@ export class DecisionAlerts {
       } catch (e) {
         this.#d.log(`discord: alert poll failed: ${(e as Error).message}`);
       }
-    }, POLL_MS);
+    });
+    const t = setInterval(() => void poll.skip(), POLL_MS);
     t.unref();
     signal.addEventListener("abort", () => clearInterval(t), { once: true });
   }
@@ -208,11 +210,11 @@ export class DecisionAlerts {
     }
   }
 
-  #alerters(): Alerter[] {
+  async #alerters(): Promise<Alerter[]> {
     const { db, keys } = this.#d;
     const out: Alerter[] = [];
-    for (const r of db.prepare("SELECT a.user_hash, a.sealed, l.login FROM discord_alerts a JOIN discord_links l ON l.user_hash = a.user_hash").all() as { user_hash: string; sealed: string; login: string }[]) {
-      const role = roleOf(db, r.login);
+    for (const r of await db.prepare("SELECT a.user_hash, a.sealed, l.login FROM discord_alerts a JOIN discord_links l ON l.user_hash = a.user_hash").all() as { user_hash: string; sealed: string; login: string }[]) {
+      const role = await roleOf(db, r.login);
       const channelId = keys.open(r.sealed, aad(r.user_hash))?.channelId;
       if (role && channelId) out.push({ userHash: r.user_hash, login: r.login, role, channelId });
     }
@@ -222,32 +224,32 @@ export class DecisionAlerts {
   async #pass(): Promise<void> {
     const { db, keys, rest, log } = this.#d;
     const now = (this.#d.now ?? Date.now)();
-    const people = this.#alerters();
+    const people = await this.#alerters();
     await this.#refreshPermissions(people, now);
     // Messages first: an answer or new choices change what is shown.
-    for (const m of db.prepare("SELECT decision_id, user_hash, sealed, choices_id, sent_at FROM discord_alert_msgs").all() as MsgRow[]) {
+    for (const m of await db.prepare("SELECT decision_id, user_hash, sealed, choices_id, sent_at FROM discord_alert_msgs").all() as MsgRow[]) {
       const owner = people.find((x) => x.userHash === m.user_hash);
       if (owner) await this.#refresh(m, owner);
     }
     for (const p of people) {
-      const open = db.prepare(`SELECT * FROM decisions WHERE answer IS NULL AND NOT ${SNOOZED_SQL} AND NOT ${lockLiveSql("decisions")} AND asked_at >= (SELECT created_at FROM discord_alerts WHERE user_hash = ?) ORDER BY asked_at`).all(p.userHash) as DecisionRow[];
-      const have = new Set((db.prepare("SELECT decision_id FROM discord_alert_msgs WHERE user_hash = ?").all(p.userHash) as { decision_id: string }[]).map((r) => r.decision_id));
-      const fresh = open.filter((d) => !have.has(d.id) && itemsOf(d).length > 0 && mayReceive(db, p.login, p.role, reposOf(d), now, this.#kept));
+      const open = await db.prepare(`SELECT * FROM decisions WHERE answer IS NULL AND NOT ${SNOOZED_SQL} AND NOT ${lockLiveSql("decisions")} AND asked_at >= (SELECT created_at FROM discord_alerts WHERE user_hash = ?) ORDER BY asked_at`).all(p.userHash) as DecisionRow[];
+      const have = new Set((await db.prepare("SELECT decision_id FROM discord_alert_msgs WHERE user_hash = ?").all(p.userHash) as { decision_id: string }[]).map((r) => r.decision_id));
+      const fresh = await filterSeq(open, async (d) => !have.has(d.id) && itemsOf(d).length > 0 && await mayReceive(db, p.login, p.role, reposOf(d), now, this.#kept));
       if (!fresh.length) continue;
-      let room = (this.#d.perHour ?? PER_HOUR) - Number((db.prepare("SELECT COUNT(*) AS n FROM discord_alert_msgs WHERE user_hash = ? AND (sealed IS NOT NULL OR decision_id LIKE 'summary:%') AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString()) as { n: number }).n);
+      let room = (this.#d.perHour ?? PER_HOUR) - Number((await db.prepare("SELECT COUNT(*) AS n FROM discord_alert_msgs WHERE user_hash = ? AND (sealed IS NOT NULL OR decision_id LIKE 'summary:%') AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString()) as { n: number }).n);
       const overflow: DecisionRow[] = [];
       for (const d of fresh) {
         if (room <= 0) { overflow.push(d); continue; }
         try {
-          const b = buildMessage(db, d, this.#d.baseUrl);
+          const b = await buildMessage(db, d, this.#d.baseUrl);
           const sent = await rest.createMessage(p.channelId, { content: b.content, components: b.components, allowed_mentions: { parse: [] } });
-          db.prepare("INSERT OR REPLACE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, ?, ?, ?)")
+          await db.prepare("INSERT OR REPLACE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, ?, ?, ?)")
             .run(d.id, p.userHash, ref(keys, p.channelId, sent.id, aad(p.userHash, d.id)), b.choicesId, new Date(now).toISOString());
           room--;
         } catch (e) {
           log(`discord: alert not sent: ${(e as Error).message}`);
           // Direct messages that are closed will stay closed; anything else is tried again on the next change.
-          if (e instanceof RestError && e.status === 403) db.prepare("INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, NULL, NULL, ?)").run(d.id, p.userHash, new Date(now).toISOString());
+          if (e instanceof RestError && e.status === 403) await db.prepare("INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, NULL, NULL, ?)").run(d.id, p.userHash, new Date(now).toISOString());
           else break;
         }
       }
@@ -258,7 +260,7 @@ export class DecisionAlerts {
   async #summary(p: Alerter, ds: DecisionRow[], now: number): Promise<void> {
     const { db, rest, log } = this.#d;
     // One summary per person per hour; the questions it would have named wait for the next pass after that.
-    if (db.prepare("SELECT 1 FROM discord_alert_msgs WHERE user_hash = ? AND decision_id LIKE 'summary:%' AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString())) return;
+    if (await db.prepare("SELECT 1 FROM discord_alert_msgs WHERE user_hash = ? AND decision_id LIKE 'summary:%' AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString())) return;
     const base = this.#d.baseUrl?.replace(/\/+$/, "");
     const lines = ds.slice(0, 10).map((d) => {
       const f = itemsOf(d)[0]!;
@@ -267,8 +269,8 @@ export class DecisionAlerts {
     try {
       await rest.createMessage(p.channelId, { content: `${ds.length} new ${ds.length === 1 ? "question" : "questions"}\n${lines.join("\n")}${ds.length > 10 ? `\nand ${ds.length - 10} more` : ""}`.slice(0, 1990), allowed_mentions: { parse: [] } });
       const ins = db.prepare("INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, NULL, NULL, ?)");
-      for (const d of ds) ins.run(d.id, p.userHash, new Date(now).toISOString());
-      ins.run(`summary:${now}`, p.userHash, new Date(now).toISOString());
+      for (const d of ds) await ins.run(d.id, p.userHash, new Date(now).toISOString());
+      await ins.run(`summary:${now}`, p.userHash, new Date(now).toISOString());
     } catch (e) {
       log(`discord: alert summary not sent: ${(e as Error).message}`);
     }
@@ -282,9 +284,9 @@ export class DecisionAlerts {
   async #refreshPermissions(people: Alerter[], now: number): Promise<void> {
     const { db, log } = this.#d;
     const maintainers = people.filter((p) => p.role === "maintainer");
-    if (!maintainers.length || !maintainerWritesOn(db)) return;
+    if (!maintainers.length || !await maintainerWritesOn(db)) return;
     const repos = new Set<string>();
-    for (const d of db.prepare("SELECT * FROM decisions WHERE answer IS NULL").all() as DecisionRow[]) for (const r of reposOf(d)) repos.add(r);
+    for (const d of await db.prepare("SELECT * FROM decisions WHERE answer IS NULL").all() as DecisionRow[]) for (const r of reposOf(d)) repos.add(r);
     if (!repos.size) return;
     const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
     const stale = db.prepare("SELECT 1 FROM main.repo_permissions WHERE login = ? AND repo = ? AND checked_at <= ?");
@@ -294,14 +296,14 @@ export class DecisionAlerts {
     for (const login of new Set(maintainers.map((p) => p.login))) {
       for (const repo of repos) {
         const k = permKey(login, repo);
-        if (!stale.get(login, repo, since)) { this.#kept.delete(k); continue; }
+        if (!await stale.get(login, repo, since)) { this.#kept.delete(k); continue; }
         const last = this.#permRead.get(k);
         if (last && now - last.at < RECEIVE_PERMISSION_TTL_MS) continue;
         const p = await read(repo, login).catch(() => null);
         this.#permRead.set(k, { at: now, failed: p === null });
         if (p === null) { this.#kept.add(k); log(`discord: permission of ${login} on ${repo} could not be read`); continue; }
         this.#kept.delete(k);
-        store.run(login, repo, p, new Date(now).toISOString());
+        await store.run(login, repo, p, new Date(now).toISOString());
       }
     }
   }
@@ -309,25 +311,25 @@ export class DecisionAlerts {
   /** Brings one message up to date: answered or withdrawn decisions lose their buttons; prepared or replaced choices change them. */
   async #refresh(m: MsgRow, p: Alerter): Promise<void> {
     const { db, keys, rest, log } = this.#d;
-    const forget = (): void => {
+    const forget = async (): Promise<void> => {
       this.#seen.delete(`${m.decision_id}|${m.user_hash}`);
-      db.prepare("DELETE FROM discord_alert_msgs WHERE decision_id = ? AND user_hash = ?").run(m.decision_id, m.user_hash);
+      await db.prepare("DELETE FROM discord_alert_msgs WHERE decision_id = ? AND user_hash = ?").run(m.decision_id, m.user_hash);
     };
-    if (m.decision_id.startsWith("summary:")) return Date.parse(m.sent_at) < (this.#d.now ?? Date.now)() - 2 * HOUR_MS ? forget() : undefined;
-    const d = getDecision(db, m.decision_id);
+    if (m.decision_id.startsWith("summary:")) return Date.parse(m.sent_at) < (this.#d.now ?? Date.now)() - 2 * HOUR_MS ? await forget() : undefined;
+    const d = await getDecision(db, m.decision_id);
     const open = d && d.answer === null;
     if (open && m.sealed === null) return;
     // A summarised or unsendable decision has no message to edit: once it is settled the row is not needed.
-    if (m.sealed === null) return forget();
+    if (m.sealed === null) return await forget();
     const at = keys.open(m.sealed, aad(m.user_hash, m.decision_id));
-    if (!at) return forget();
+    if (!at) return await forget();
     let body: EditBody;
     let choicesId: string | null = null;
     let gone = false;
     if (open) {
       // Nothing to redo while the decision and its choices are as they were at the last pass.
-      const may = mayReceive(db, p.login, p.role, reposOf(d), (this.#d.now ?? Date.now)(), this.#kept);
-      const key = [may, d.answer, d.question, currentChoices(db, d.id)?.id, decisionStamp(db, d), m.choices_id, coresFor(db, d).map((c) => c.key).join()].join("|");
+      const may = await mayReceive(db, p.login, p.role, reposOf(d), (this.#d.now ?? Date.now)(), this.#kept);
+      const key = [may, d.answer, d.question, (await currentChoices(db, d.id))?.id, await decisionStamp(db, d), m.choices_id, (await coresFor(db, d)).map((c) => c.key).join()].join("|");
       const k = `${m.decision_id}|${m.user_hash}`;
       if (this.#seen.get(k) === key) return;
       this.#seen.set(k, key);
@@ -335,32 +337,32 @@ export class DecisionAlerts {
         gone = true;
         body = { content: "No longer available", components: [] };
       } else {
-      const b = buildMessage(db, d, this.#d.baseUrl);
+      const b = await buildMessage(db, d, this.#d.baseUrl);
       if (b.choicesId === m.choices_id) return;
       choicesId = b.choicesId;
       body = { content: b.content, components: b.components };
       }
     } else {
-      body = { content: this.#settledText(d), components: [] };
+      body = { content: await this.#settledText(d), components: [] };
     }
     try {
       await rest.editMessage(at.channelId, at.messageId, body);
-      if (gone) forget();
-      else if (open) db.prepare("UPDATE discord_alert_msgs SET choices_id = ? WHERE decision_id = ? AND user_hash = ?").run(choicesId, m.decision_id, m.user_hash);
-      else forget();
+      if (gone) await forget();
+      else if (open) await db.prepare("UPDATE discord_alert_msgs SET choices_id = ? WHERE decision_id = ? AND user_hash = ?").run(choicesId, m.decision_id, m.user_hash);
+      else await forget();
     } catch (e) {
       // A deleted message cannot be edited and need not be.
-      if (e instanceof RestError && e.status === 404) return forget();
+      if (e instanceof RestError && e.status === 404) return await forget();
       log(`discord: alert edit failed: ${(e as Error).message}`);
     }
   }
 
   /** The text that replaces the message: the item, the question and the outcome. */
-  #settledText(d: DecisionRow | undefined): string {
+  async #settledText(d: DecisionRow | undefined): Promise<string> {
     if (!d) return "No longer open";
     const items = itemsOf(d);
     const f = items[0];
-    const head = f ? `**${soft(f.repo, 60)}#${f.number}** ${soft(itemTitle(this.#d.db, f.repo, f.number), 120)}\n${soft(d.question, 300)}\n` : "";
+    const head = f ? `**${soft(f.repo, 60)}#${f.number}** ${soft(await itemTitle(this.#d.db, f.repo, f.number), 120)}\n${soft(d.question, 300)}\n` : "";
     if (d.answer === WITHDRAWN_OPTION.key) return `${head}Withdrawn`;
     const label = [...optionsOf(d), BACKLOG, HANDLED].find((o) => o.key === d.answer)?.label ?? d.answer ?? "";
     return `${head}${d.answered_by ? `Answered by ${soft(d.answered_by, 60)}: ${soft(label, 100)}` : soft(label, 100)}`;
@@ -377,20 +379,20 @@ export function installAlertCommands(ix: Interactions, alerts: DecisionAlerts): 
   const { db, keys, rest } = alerts.deps;
   ix.command("autocraft alerts", null, async (call: Call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
-    const login = loginOf(db, keys, call.userId);
+    const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: "Link your account first with /autocraft link." }));
     if (call.option("state") === "off") {
-      setAlerts(db, keys, call.userId, null);
+      await setAlerts(db, keys, call.userId, null);
       return void (await call.edit({ content: "Alerts are off." }));
     }
-    if (!mayAlert(db, login)) return void (await call.edit({ content: "This login may not settle decisions on any repo, so there is nothing to alert." }));
+    if (!await mayAlert(db, login)) return void (await call.edit({ content: "This login may not settle decisions on any repo, so there is nothing to alert." }));
     let channel: string;
     try {
       channel = (await rest.createDm(call.userId)).id;
     } catch {
       return void (await call.edit({ content: "I could not open a direct message with you. Allow direct messages from server members and try again." }));
     }
-    setAlerts(db, keys, call.userId, channel);
+    await setAlerts(db, keys, call.userId, channel);
     await call.edit({ content: "Alerts are on. New decisions you may settle arrive here as direct messages." });
     void alerts.sync();
   });
@@ -399,16 +401,16 @@ export function installAlertCommands(ix: Interactions, alerts: DecisionAlerts): 
   const press = async (call: Call, confirmed: boolean): Promise<void> => {
     const [, choicesId, id] = (call.interaction.data?.custom_id ?? "").split(":");
     if (!call.userId || !choicesId || !id) return void (await call.edit({ content: "This button is not valid." }));
-    const login = loginOf(db, keys, call.userId);
+    const login = await loginOf(db, keys, call.userId);
     if (!login) return void (await call.edit({ content: "Link your account first with /autocraft link." }));
-    const role = roleOf(db, login);
+    const role = await roleOf(db, login);
     if (!role) return void (await call.edit({ content: "This login has no access to AutoCraft." }));
     try {
-      const row = choicesById(db, choicesId);
-      const d = row && getDecision(db, row.decisionId);
+      const row = await choicesById(db, choicesId);
+      const d = row && await getDecision(db, row.decisionId);
       if (!row || !d) throw new HttpError(404, `no choices ${choicesId}`);
       // The same list the dashboard shows for these choices; the core is found by its key, never by position.
-      const core = applyDrafts(db, d, coresFor(db, d), row).find((c) => coreId(c.key) === id);
+      const core = (await applyDrafts(db, d, await coresFor(db, d), row)).find((c) => coreId(c.key) === id);
       if (!core) throw new HttpError(409, "replaced by newer choices");
       const writes = writesOf(core);
       if (!confirmed && writes.length) {
@@ -420,13 +422,13 @@ export function installAlertCommands(ix: Interactions, alerts: DecisionAlerts): 
           components: [{ type: 1, components: [{ type: 2, style: 4, label: `Confirm: ${words}`.slice(0, 80), custom_id: `dcc:${choicesId}:${id}` }] }],
         }));
       }
-      const user = alerts.deps.userFor(login, role, true);
+      const user = await alerts.deps.userFor(login, role, true);
       const req = {
         method: "POST", path: `/api/decision-choices/${choicesId}/do`, params: { id: choicesId }, query: new URLSearchParams(), form: new URLSearchParams(), csrf: "", nonce: "",
         json: { core: core.key, params: {}, extras: sendable(core).map((e) => ({ id: e.id })) }, user,
       } as Req;
       const card = await doChoice(db, req, alerts.deps.act);
-      await call.edit({ content: card.state === "failed" ? `Failed: ${soft(card.error ?? "the choice did not run", 300)}` : `${card.state === "done" ? "Done" : card.state === "queued" ? "Queued: daily GitHub write limit" + (queuePlace(db, card.id) ? `, #${queuePlace(db, card.id)} in line` : "") : "Started"}: ${soft(core.label, 80)}`, components: [] });
+      await call.edit({ content: card.state === "failed" ? `Failed: ${soft(card.error ?? "the choice did not run", 300)}` : `${card.state === "done" ? "Done" : card.state === "queued" ? "Queued: daily GitHub write limit" + (await queuePlace(db, card.id) ? `, #${await queuePlace(db, card.id)} in line` : "") : "Started"}: ${soft(core.label, 80)}`, components: [] });
     } catch (e) {
       await call.edit({ content: e instanceof HttpError ? e.message : "Something went wrong. Try again in a moment.", components: [] });
       if (!(e instanceof HttpError)) alerts.deps.log(`discord: alert press failed: ${(e as Error).message}`);

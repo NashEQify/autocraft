@@ -1,7 +1,6 @@
 // Model calls that propose areas: one Opus call per repo for a whole list (with the repo workspace), and
 // one Sonnet call that suggests new areas from a sample of the items without an area. Both only store a
 // proposal; the operator accepts it (store.ts).
-import type { DatabaseSync } from "node:sqlite";
 import { add, askClaude, saveUsage, type Usage } from "../classify/run.ts";
 import { notOwnIntegrationSql } from "../dupes/held.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
@@ -9,6 +8,7 @@ import { REPO_PATH } from "../sandbox/command.ts";
 import { parseProposal, parseSuggestion } from "./parse.ts";
 import { currentList, saveProposal } from "./store.ts";
 import { PROPOSE_TITLES, SUGGEST_ITEMS, type AreaProposeInput } from "./types.ts";
+import type { Db } from "../db/index.ts";
 
 const PROPOSE = CLAUDE_PROMPTS["areas.propose"], SUGGEST = CLAUDE_PROMPTS["areas.suggest"];
 const now = () => new Date().toISOString();
@@ -25,12 +25,12 @@ export type ProposeParams = {
 const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null });
 
 /** One Opus call for the repo's list. Returns the stored proposal's id, or null when the model gave no usable list. */
-export async function proposeAreas(db: DatabaseSync, repo: string, p: ProposeParams): Promise<number | null> {
+export async function proposeAreas(db: Db, repo: string, p: ProposeParams): Promise<number | null> {
   const model = p.model ?? PROPOSE.models[0]!, start = now();
-  const titles = (db.prepare(`SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")}
+  const titles = (await db.prepare(`SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")}
     ORDER BY i.updated_at DESC LIMIT ?`).all(repo, PROPOSE_TITLES) as { title: string }[]).map((r) => r.title);
   const checkout = await p.checkout(repo).catch(() => null);
-  const input: AreaProposeInput = { ref: repo, repo, titles, current: currentList(db, repo)?.areas ?? [] };
+  const input: AreaProposeInput = { ref: repo, repo, titles, current: (await currentList(db, repo))?.areas ?? [] };
   if (checkout) input.repo_dir = REPO_PATH;
   let usage = zero();
   let areas = null;
@@ -40,20 +40,20 @@ export async function proposeAreas(db: DatabaseSync, repo: string, p: ProposePar
     usage = add(usage, reply.usage);
     areas = parseProposal(reply.text);
   }
-  saveUsage(db, p.usageRun, `areas-propose-${repo}`, "areas", model, areas ? 1 : 0, usage, start, now());
+  await saveUsage(db, p.usageRun, `areas-propose-${repo}`, "areas", model, areas ? 1 : 0, usage, start, now());
   if (!areas) {
     p.log?.(`areas: no usable list for ${repo}`);
     return null;
   }
-  return saveProposal(db, repo, "propose", areas, p.by);
+  return await saveProposal(db, repo, "propose", areas, p.by);
 }
 
 /** One Sonnet call over a sample of the repo's items without an area. Returns the stored suggestion's id, or null when there is nothing to suggest. */
-export async function suggestAreas(db: DatabaseSync, repo: string, p: Omit<ProposeParams, "checkout">): Promise<number | null> {
-  const list = currentList(db, repo);
+export async function suggestAreas(db: Db, repo: string, p: Omit<ProposeParams, "checkout">): Promise<number | null> {
+  const list = await currentList(db, repo);
   if (!list) throw new Error(`${repo} has no area list; propose one first`);
   const model = p.model ?? SUGGEST.models[0]!, start = now();
-  const items = (db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body FROM items i
+  const items = (await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body FROM items i
     LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
     WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND a.area IS NULL AND a.source <> 'operator' AND a.list_version = ?
     ORDER BY i.updated_at DESC LIMIT ?`).all(repo, list.version, SUGGEST_ITEMS) as { ref: string; title: string; body: string }[]);
@@ -66,10 +66,10 @@ export async function suggestAreas(db: DatabaseSync, repo: string, p: Omit<Propo
     usage = add(usage, reply.usage);
     areas = parseSuggestion(reply.text, list.areas);
   }
-  saveUsage(db, p.usageRun, `areas-suggest-${repo}`, "areas", model, areas ? 1 : 0, usage, start, now());
+  await saveUsage(db, p.usageRun, `areas-suggest-${repo}`, "areas", model, areas ? 1 : 0, usage, start, now());
   if (!areas?.length) {
     p.log?.(`areas: no new area suggested for ${repo}`);
     return null;
   }
-  return saveProposal(db, repo, "suggest", areas, p.by);
+  return await saveProposal(db, repo, "suggest", areas, p.by);
 }

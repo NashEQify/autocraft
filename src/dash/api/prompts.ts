@@ -21,6 +21,6 @@ const COMMIT = ((): string | null => {
   }
 })();
 
-export function prompts(): PromptsReport {
+export async function prompts(): Promise<PromptsReport> {
   return promptsReport(COMMIT);
 }

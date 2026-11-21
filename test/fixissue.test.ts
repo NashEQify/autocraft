@@ -2,10 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import type { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { getTask } from "../src/build/tasks.ts";
-import { connect } from "../src/db.ts";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { setFixIssueApproval } from "../src/fixissue/approval.ts";
 import { attemptOf, runFixIssue, type CollectDeps } from "../src/fixissue/index.ts";
@@ -16,6 +14,8 @@ import type { Querier } from "../src/mirror.ts";
 import { REPO_PATH } from "../src/sandbox/command.ts";
 import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
+import type { Db } from "../src/db/index.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixissue-test-"));
@@ -56,21 +56,21 @@ const TRIAGE_OK = (files = [LIB]) => JSON.stringify([{ ref: "app#5", fixable: tr
 
 type Opts = { existingPr?: string; approved?: boolean; label?: string; flags?: string[]; needsDecision?: number; score?: number; level?: string };
 
-function fresh(o: Opts = {}): DatabaseSync {
-  const db = connect(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  issue(db, 5, "Panic when the slice is empty", "first() indexes element 0.", o);
-  if (o.approved !== false) setFixIssueApproval(db, "op", "app", true);
+async function fresh(o: Opts = {}): Promise<Db> {
+  const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
+  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
+  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await issue(db, 5, "Panic when the slice is empty", "first() indexes element 0.", o);
+  if (o.approved !== false) await setFixIssueApproval(db, "op", "app", true);
   return db;
 }
 
-function issue(db: DatabaseSync, n: number, title: string, body: string, o: Opts = {}): void {
-  db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, ?, 'someone', ?, ?)").run(n, title, body, T0, T0);
-  db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
+async function issue(db: Db, n: number, title: string, body: string, o: Opts = {}): Promise<void> {
+  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, ?, 'someone', ?, ?)").run(n, title, body, T0, T0);
+  await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
     .run(n, T0, o.label ?? "bugfix", JSON.stringify(o.flags ?? []), JSON.stringify({ top: 0.97, ...(o.flags?.includes("needs decision") ? { needs_decision: o.needsDecision ?? 0.9 } : {}) }));
-  if (o.level !== undefined) db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.level, T0);
-  if (o.score !== undefined) db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?)").run(n, o.score, T0);
+  if (o.level !== undefined) await db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.level, T0);
+  if (o.score !== undefined) await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', ?, ?, '{}', ?)").run(n, o.score, T0);
 }
 
 describe("candidates", () => {
@@ -136,11 +136,11 @@ describe("texts", () => {
 
 // ---- the whole step against real git, with GitHub and the models faked ----------
 
-type World = { db: DatabaseSync; deps: CollectDeps; log: string[]; calls: string[]; sha: string; replies: (string | null)[]; fork: string; asked: string[] };
+type World = { db: Db; deps: CollectDeps; log: string[]; calls: string[]; sha: string; replies: (string | null)[]; fork: string; asked: string[] };
 
 const APPROVE = JSON.stringify({ verdict: "approve", reasons: "fixes the cause", problems: [] });
 
-function world(o: Opts & { check?: string | null; triage?: string; patches?: (string | null)[]; title?: string; lib?: string } = {}): World {
+async function world(o: Opts & { check?: string | null; triage?: string; patches?: (string | null)[]; title?: string; lib?: string } = {}): Promise<World> {
   const root = mkdtempSync(join(dir, "w-"));
   const work = join(root, "work");
   mkdirSync(join(work, "crates/app/src"), { recursive: true });
@@ -153,8 +153,8 @@ function world(o: Opts & { check?: string | null; triage?: string; patches?: (st
   git(root, "clone", "-q", "--bare", work, upstream);
   const fork = join(root, "fork.git");
   git(root, "init", "-q", "--bare", fork);
-  const db = fresh(o);
-  if (o.title) db.prepare("UPDATE items SET title = ? WHERE number = 5").run(o.title);
+  const db = await fresh(o);
+  if (o.title) await db.prepare("UPDATE items SET title = ? WHERE number = 5").run(o.title);
   const log: string[] = [], calls: string[] = [], asked: string[] = [];
   const replies = [...(o.patches ?? [GOOD])];
   let forked = false;
@@ -197,8 +197,8 @@ function world(o: Opts & { check?: string | null; triage?: string; patches?: (st
 }
 
 type End = "pass" | "fail-test" | "fail-build";
-function finish(db: DatabaseSync, id: number, end: End): void {
-  const t = getTask(db, id)!;
+async function finish(db: Db, id: number, end: End): Promise<void> {
+  const t = (await getTask(db, id))!;
   const failAt = end === "pass" ? null : end === "fail-test" ? "test" : "build";
   const results = [];
   for (const s of t.plan) {
@@ -206,12 +206,12 @@ function finish(db: DatabaseSync, id: number, end: End): void {
     results.push({ step: s.name, exitCode: bad ? 101 : 0, durationMs: 1, timedOut: false });
     if (bad) break;
   }
-  db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(end === "pass" ? "done" : "failed", JSON.stringify(results), T0, id);
+  await db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(end === "pass" ? "done" : "failed", JSON.stringify(results), T0, id);
 }
-const finishBoth = (db: DatabaseSync, head: End, base: End) => {
-  const a = attemptOf(db, "app", 5)!;
-  finish(db, a.head_task_id!, head);
-  finish(db, a.base_task_id!, base);
+const finishBoth = async (db: Db, head: End, base: End) => {
+  const a = (await attemptOf(db, "app", 5))!;
+  await finish(db, a.head_task_id!, head);
+  await finish(db, a.base_task_id!, base);
 };
 const quiet = () => {};
 
@@ -220,11 +220,11 @@ describe("fix step", () => {
     const lib = "pub fn first(v: &[u8]) -> u8 {\n    v[0]\n}\n" + Array.from({ length: 6000 }, (_, i) => `fn f${i}() {}`).join("\n") + "\n";
     const patchCalls = (w: World) => w.asked.filter((a) => a.startsWith("fixissue.patch:")).map((a) => JSON.parse(a.slice("fixissue.patch:".length)) as PatchInput);
 
-    const held = world({ lib });
+    const held = await world({ lib });
     await runFixIssue(held.db, { repo: "app", dryRun: false }, quiet, held.deps);
     assert.equal(patchCalls(held).length, 0);
 
-    const w = world({ lib });
+    const w = await world({ lib });
     w.deps.checkout = async () => "/checkout";
     await runFixIssue(w.db, { repo: "app", dryRun: false }, quiet, w.deps);
     const calls = patchCalls(w);
@@ -248,9 +248,9 @@ describe("fix step", () => {
 
 describe("opening the PR is gated and repeatable", () => {
   const passedWorld = async (o: Parameters<typeof world>[0] = {}) => {
-    const w = world(o);
+    const w = await world(o);
     await runFixIssue(w.db, { repo: "app", dryRun: false }, quiet, w.deps);
-    finishBoth(w.db, "pass", "fail-test");
+    await finishBoth(w.db, "pass", "fail-test");
     return w;
   };
   const writes = (w: World) => w.log.length + w.calls.filter((c) => c === "gh repo").length;
@@ -291,10 +291,10 @@ describe("fix step assignment", () => {
 
 describe("claim comment of an attempt that ends without a PR", () => {
   const URL = "https://github.com/storytold/app/issues/5#issuecomment-777";
-  function claimed(state: string, prUrl: string | null, author = LOGIN) {
-    const w = world();
-    w.db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, pr_url, created_at, updated_at) VALUES ('app', 5, ?, 'h', ?, 1, ?, ?, ?)").run(w.sha, state, prUrl, T0, T0);
-    w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'fixissue', 'fixissue-claim', 'app#5', ?)").run(T0, JSON.stringify({ url: URL, state: "done" }));
+  async function claimed(state: string, prUrl: string | null, author = LOGIN) {
+    const w = await world();
+    await w.db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, pr_url, created_at, updated_at) VALUES ('app', 5, ?, 'h', ?, 1, ?, ?, ?)").run(w.sha, state, prUrl, T0, T0);
+    await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'fixissue', 'fixissue-claim', 'app#5', ?)").run(T0, JSON.stringify({ url: URL, state: "done" }));
     w.deps.querier = validating({ spent: 0, remaining: 5000, async query() { return { viewer: { login: LOGIN, id: "U42" } }; } } as Querier);
     const api: string[] = [];
     const inner = w.deps.exec;
@@ -310,27 +310,27 @@ describe("claim comment of an attempt that ends without a PR", () => {
   const run = (w: World) => runFixIssue(w.db, { repo: "app", dryRun: false }, quiet, w.deps);
 
   test("a held attempt's claim is deleted once; a taken attempt keeps it", async () => {
-    const held = claimed("failed", null);
+    const held = await claimed("failed", null);
     await run(held.w);
     await run(held.w);
     assert.deepEqual(held.api, ["get", "delete"]);
-    assert.equal(held.w.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'fixissue-unclaim' AND details LIKE '%\"state\":\"done\"%'").get()!.n, 1);
+    assert.equal((await held.w.db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'fixissue-unclaim' AND details LIKE '%\"state\":\"done\"%'").get())!.n, 1);
 
-    const bot = claimed("failed", null, "app-bot[bot]");
-    bot.w.db.prepare("INSERT INTO settings (key, value) VALUES ('app_slugs', '[\"app-bot\"]')").run();
+    const bot = await claimed("failed", null, "app-bot[bot]");
+    await bot.w.db.prepare("INSERT INTO settings (key, value) VALUES ('app_slugs', '[\"app-bot\"]')").run();
     await run(bot.w);
     assert.deepEqual(bot.api, ["get", "delete"]);
 
-    const taken = claimed("opened", "https://github.com/storytold/app/pull/12");
+    const taken = await claimed("opened", "https://github.com/storytold/app/pull/12");
     await run(taken.w);
     assert.deepEqual(taken.api, []);
   });
 });
 
-test("the fix PR we just opened counts as the issue's open PR until a sync mirrors it", () => {
-  const db = fresh();
-  db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, pr_url, created_at, updated_at) VALUES ('app', 5, 'm', 'h', 'pr-opened', 'https://github.com/o/app/pull/6', ?, ?)").run(T0, T0);
-  assert.deepEqual(loadItemFact(db, "app", 5)?.fix.openPr, { number: 6, closes: true });
-  db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', 6, 'pr', 'CLOSED', 'Fix', '', 'bot', ?, ?)").run(T0, T0);
-  assert.equal(loadItemFact(db, "app", 5)?.fix.openPr, null);
+test("the fix PR we just opened counts as the issue's open PR until a sync mirrors it", async () => {
+  const db = await fresh();
+  await db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, pr_url, created_at, updated_at) VALUES ('app', 5, 'm', 'h', 'pr-opened', 'https://github.com/o/app/pull/6', ?, ?)").run(T0, T0);
+  assert.deepEqual((await loadItemFact(db, "app", 5))?.fix.openPr, { number: 6, closes: true });
+  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', 6, 'pr', 'CLOSED', 'Fix', '', 'bot', ?, ?)").run(T0, T0);
+  assert.equal((await loadItemFact(db, "app", 5))?.fix.openPr, null);
 });

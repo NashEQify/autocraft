@@ -1,11 +1,11 @@
 // The related items and earlier reviews of a PR that the post-merge, review and pre-merge prompts show.
-import type { DatabaseSync } from "node:sqlite";
 import type { PostmergeReviewRow, RelatedItem } from "./parse.ts";
+import type { Db } from "../db/index.ts";
 
 /** Our earlier Opus reviews of the PR, oldest first. */
-export function reviewHistory(db: DatabaseSync, repo: string, number: number): PostmergeReviewRow[] {
+export async function reviewHistory(db: Db, repo: string, number: number): Promise<PostmergeReviewRow[]> {
   const list = <T>(s: string | null): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
-  return (db.prepare("SELECT head_oid, at, verdict, sure, reason, risks, fixes FROM opus_review_history WHERE repo = ? AND number = ? AND verdict IS NOT NULL ORDER BY at, rowid").all(repo, number) as
+  return (await db.prepare("SELECT head_oid, at, verdict, sure, reason, risks, fixes FROM opus_review_history WHERE repo = ? AND number = ? AND verdict IS NOT NULL ORDER BY at, rowid").all(repo, number) as
     { head_oid: string; at: string; verdict: string; sure: number; reason: string; risks: string | null; fixes: string | null }[])
     .map((r) => ({ head: r.head_oid, verdict: r.verdict, sure: r.sure === 1, reason: r.reason, risks: list<string>(r.risks), fixes: list(r.fixes), at: r.at }));
 }
@@ -16,8 +16,8 @@ const REVIEW_REASON_CHARS = 600, REVIEW_NOTE_CHARS = 300, REVIEW_NOTES = 8, REVI
  * The one earlier review the pre-merge review gets: the latest at `head`, else the latest of the PR, as a list of at most one row.
  * Its text is cut (reason, at most 8 risks and 10 fixes, each cut), so the prompt does not grow with the PR's review count.
  */
-export function latestReview(db: DatabaseSync, repo: string, number: number, head: string): PostmergeReviewRow[] {
-  const all = reviewHistory(db, repo, number);
+export async function latestReview(db: Db, repo: string, number: number, head: string): Promise<PostmergeReviewRow[]> {
+  const all = await reviewHistory(db, repo, number);
   const r = [...all].reverse().find((x) => x.head === head) ?? all[all.length - 1];
   if (!r) return [];
   const cut = (s: unknown, n: number) => (typeof s === "string" ? s.slice(0, n) : "");
@@ -29,12 +29,12 @@ export function latestReview(db: DatabaseSync, repo: string, number: number, hea
 export const RELATED_CLOSED_DAYS = 30;
 
 /** Items of the repo, open or closed in the last 30 days, that mention the PR by number or one of its files by path: number, kind, state and title, for deduplication. */
-export function relatedOpen(db: DatabaseSync, repo: string, number: number, files: string[], at = Date.now()): RelatedItem[] {
+export async function relatedOpen(db: Db, repo: string, number: number, files: string[], at = Date.now()): Promise<RelatedItem[]> {
   const needles = [`#${number}`, ...files.slice(0, 30)];
   const where = needles.map(() => "(i.title LIKE ? ESCAPE '\\' OR i.body LIKE ? ESCAPE '\\')").join(" OR ");
   const args = needles.flatMap((n) => { const like = `%${n.replace(/[\\%_]/g, "\\$&")}%`; return [like, like]; });
   const since = new Date(at - RELATED_CLOSED_DAYS * 86400_000).toISOString();
-  const rows = db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.body FROM items i WHERE i.repo = ?
+  const rows = await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.body FROM items i WHERE i.repo = ?
     AND (i.state = 'OPEN' OR COALESCE(i.closed_at, i.merged_at, i.updated_at) >= ?) AND i.number <> ? AND (${where}) ORDER BY i.number LIMIT 60`).all(repo, since, number, ...args) as
     { number: number; kind: "issue" | "pr"; state: string; title: string | null; body: string | null }[];
   const byNumber = new RegExp(String.raw`(?<![\w/])#${number}(?!\d)`);

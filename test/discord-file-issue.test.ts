@@ -6,19 +6,19 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { connect } from "../src/db.ts";
 import { fileIssue, forgetReporter, type FileHooks } from "../src/discord/file-issue.ts";
 import { readReporter } from "../src/discord/reporter.ts";
 import { TokenBox } from "../src/dash/server/crypto.ts";
 import type { Provider, Tokens } from "../src/dash/server/provider.ts";
 import { reporterSignIn } from "../src/dash/server/reporter-signin.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-file-"));
-const db = connect(join(dir, "d.db"));
-after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
-db.exec("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')");
+const db = await connectDb(join(dir, "d.db"));
+after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
+await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')");
 
 const box = new TokenBox("s".repeat(40));
 const tokens: Tokens = { access: "ghu_access", expiresAt: Date.now() + 3_600_000, refresh: "ghr_refresh", refreshExpiresAt: Date.now() + 86_400_000 };
@@ -44,7 +44,7 @@ describe("filing from Discord", () => {
     assert.equal(r.status, "sign-in");
     const state = new URL((r as { url: string }).url).searchParams.get("state")!;
     assert.match((r as { url: string }).url, /^https:\/\/craft\.example\/discord\/github\/start\?state=/);
-    const stored = db.prepare("SELECT state_hash, reporter FROM reporter_states").get() as { state_hash: string; reporter: string };
+    const stored = await db.prepare("SELECT state_hash, reporter FROM reporter_states").get() as { state_hash: string; reporter: string };
     assert.equal(stored.state_hash, createHash("sha256").update(state).digest("hex"));
     assert.equal(stored.reporter, "rep1");
 
@@ -55,7 +55,7 @@ describe("filing from Discord", () => {
     assert.equal((await reporterSignIn(d, cb, new Map(), "n"))!.r.status, 400, "needs the browser's cookie");
     const ok = await reporterSignIn(d, new URL(`http://x/discord/github/callback?state=${state}&code=good`), new Map([["__Host-craft_reporter", state]]), "n");
     assert.match(ok!.r.html!, /Signed in as octo\. Go back to Discord and press File it\./);
-    assert.equal(readReporter(db, box, "rep1")!.tokens!.access, "ghu_access");
+    assert.equal((await readReporter(db, box, "rep1"))!.tokens!.access, "ghu_access");
     assert.equal((await reporterSignIn(d, cb, new Map([["__Host-craft_reporter", state]]), "n"))!.r.status, 400, "the state is single use");
   });
 
@@ -68,11 +68,11 @@ describe("filing from Discord", () => {
     assert.deepEqual(r, { status: "filed", number: 41, url: "https://github.com/storytold/photocraft/issues/41", login: "octo" });
     assert.equal(calls[0]!.input, "Quality 40 gives the same size as 100.\n\nFiled from Discord with AutoCraft.");
     assert.ok(calls[1]!.args.includes("bug"), "labelled");
-    const a = db.prepare("SELECT login, target, details FROM audit WHERE action = 'discord-issue-open'").get() as { login: string; target: string; details: string };
+    const a = await db.prepare("SELECT login, target, details FROM audit WHERE action = 'discord-issue-open'").get() as { login: string; target: string; details: string };
     const det = JSON.parse(a.details);
     assert.deepEqual([a.login, a.target, det.state, det.number, det.url], ["octo", "photocraft", "done", 41, "https://github.com/storytold/photocraft/issues/41"]);
     assert.ok(!a.details.includes("Quality 40"), "the text is not kept in the audit row");
-    assert.equal((db.prepare("SELECT COUNT(*) AS c FROM audit WHERE action = 'discord-issue-label'").get() as { c: number }).c, 1);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS c FROM audit WHERE action = 'discord-issue-label'").get() as { c: number }).c, 1);
   });
 
   test("a fourth issue in 24 hours by the same login is refused", async () => {
@@ -83,19 +83,19 @@ describe("filing from Discord", () => {
   });
 
   test("a refused filing gives its slot back", async () => {
-    const before = (db.prepare("SELECT COUNT(*) AS c FROM discord_filed").get() as { c: number }).c;
+    const before = (await db.prepare("SELECT COUNT(*) AS c FROM discord_filed").get() as { c: number }).c;
     junk = true;
     await fileIssue(deps, req, hooks);
     junk = false;
-    assert.equal((db.prepare("SELECT COUNT(*) AS c FROM discord_filed").get() as { c: number }).c, before);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS c FROM discord_filed").get() as { c: number }).c, before);
   });
 
-  test("forgetReporter removes the token and queues its revoke", () => {
-    assert.equal(forgetReporter(db, "rep1"), true);
-    assert.equal((db.prepare("SELECT COUNT(*) AS c FROM discord_filed WHERE reporter = 'rep1'").get() as { c: number }).c, 0);
-    assert.equal(readReporter(db, box, "rep1"), null);
-    const q = db.prepare("SELECT login, kind, aad FROM user_token_revocations").get() as { login: string; kind: string; aad: string };
+  test("forgetReporter removes the token and queues its revoke", async () => {
+    assert.equal(await forgetReporter(db, "rep1"), true);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS c FROM discord_filed WHERE reporter = 'rep1'").get() as { c: number }).c, 0);
+    assert.equal(await readReporter(db, box, "rep1"), null);
+    const q = await db.prepare("SELECT login, kind, aad FROM user_token_revocations").get() as { login: string; kind: string; aad: string };
     assert.deepEqual({ ...q }, { login: "octo", kind: "token", aad: "reporter_tokens:rep1" });
-    assert.equal(forgetReporter(db, "rep1"), false);
+    assert.equal(await forgetReporter(db, "rep1"), false);
   });
 });

@@ -1,11 +1,12 @@
 // Converts the resolution cards Opus proposed before the choices format into decision_choices drafts, without a model call.
 // `cardsToDrafts` is the pure mapping (also used for settling cards in a conversation turn); `convertOpenDecisions` applies it to the open decisions.
-import type { DatabaseSync } from "node:sqlite";
 import type { CardParams, Step } from "../conversations/cards.ts";
 import { decisionStamp, openDecision } from "../conversations/cards.ts";
 import type { DecisionRow } from "../decisions.ts";
 import { applyDrafts, coresFor, MAX_ADDED_CORES, withIds, writeChoices } from "./choices.ts";
 import { coreKey, type ChoicesBlockExtra, type ChoicesRow, type CoreKey, type StoredDraft } from "./choices-types.ts";
+import { forEachSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** A proposed card as the mapper reads it. */
 export interface DraftCard { params: CardParams; text: string | null }
@@ -67,10 +68,10 @@ function mapCard(c: DraftCard): { key: CoreKey; draft: Draft; note?: string } | 
  * comment extra, the settle reason the reason param), a backlog card to `backlog`, a closing/duplicate/transfer/fixup/review card to the
  * matching core. Cores the decision does not offer now and extras a core does not take for the item are dropped with a note.
  */
-export function cardsToDrafts(db: DatabaseSync, d: DecisionRow, cards: DraftCard[]): MappedDrafts {
+export async function cardsToDrafts(db: Db, d: DecisionRow, cards: DraftCard[]): Promise<MappedDrafts> {
   const out: MappedDrafts = { cores: {}, add: [], notes: [], used: [] };
   if (!d.repo || !d.number) return out;
-  const offered = coresFor(db, d);
+  const offered = await coresFor(db, d);
   const mapped = new Map<number, { key: CoreKey; draft: Draft }>();
   const seen = new Set<CoreKey>();
   cards.forEach((c, i) => {
@@ -88,7 +89,7 @@ export function cardsToDrafts(db: DatabaseSync, d: DecisionRow, cards: DraftCard
   // The extras each core takes are what applyDrafts shows for the drafts as stored.
   const drafts: ChoicesRow["drafts"] = {};
   for (const m of mapped.values()) drafts[m.key] = { ...(m.draft.params && { params: m.draft.params }), extras: withIds(m.draft.extras) };
-  const view = applyDrafts(db, d, offered, { added: [...kept], drafts } as ChoicesRow);
+  const view = await applyDrafts(db, d, offered, { added: [...kept], drafts } as ChoicesRow);
   for (const [i, m] of mapped) {
     const core = view.find((c) => c.key === m.key);
     const isAdded = m.key.startsWith("x:");
@@ -126,66 +127,69 @@ export interface ConvertResult {
   notes: string[];
 }
 
-export function convertOpenDecisions(db: DatabaseSync, o: { dryRun?: boolean } = {}): ConvertResult {
-  const open = db.prepare(`SELECT * FROM main.decisions WHERE answer IS NULL AND number IS NOT NULL AND repo IS NOT NULL AND id NOT LIKE '%:dupegroup:%'
+class DryRun extends Error {}
+
+export async function convertOpenDecisions(db: Db, o: { dryRun?: boolean } = {}): Promise<ConvertResult> {
+  const open = await db.prepare(`SELECT * FROM main.decisions WHERE answer IS NULL AND number IS NOT NULL AND repo IS NOT NULL AND id NOT LIKE '%:dupegroup:%'
     AND NOT EXISTS (SELECT 1 FROM main.decision_choices c WHERE c.decision_id = decisions.id AND c.state = 'current')`).all() as unknown as DecisionRow[];
   let converted = 0, skipped = 0, stale = 0, unconverted = 0;
   const notes: string[] = [];
-  db.exec("BEGIN IMMEDIATE");
   try {
-    for (const d of open) {
-      if (openDecision(db, d.repo!, d.number!)?.id !== d.id) { skipped++; continue; }
-      const turn = db.prepare("SELECT id FROM main.conversation_turns WHERE repo = ? AND number = ? AND kind = 'opus' ORDER BY id DESC LIMIT 1").get(d.repo, d.number) as { id: number } | undefined;
-      const rows = turn ? db.prepare("SELECT id, params, text, seen FROM main.conversation_cards WHERE turn_id = ? AND state = 'proposed' ORDER BY id").all(turn.id) as unknown as CardRow[] : [];
-      const cards: DraftCard[] = [];
-      const kept: CardRow[] = [];
-      const stampNow = decisionStamp(db, d);
-      for (const r of rows) {
-        let params: CardParams;
-        try { params = JSON.parse(r.params) as CardParams; } catch { params = { kind: "comment", text: "" }; }
-        const settle = params.kind === "resolution" ? params.settle : params.kind === "answer" || params.kind === "backlog" ? params : null;
-        if (settle && (settle.decision !== d.id || (settle.stamp !== undefined && settle.stamp !== stampNow))) { stale++; continue; }
-        cards.push({ params, text: r.text });
-        kept.push(r);
+    await db.write(async () => {
+      for (const d of open) {
+        if ((await openDecision(db, d.repo!, d.number!))?.id !== d.id) { skipped++; continue; }
+        const turn = await db.prepare("SELECT id FROM main.conversation_turns WHERE repo = ? AND number = ? AND kind = 'opus' ORDER BY id DESC LIMIT 1").get(d.repo, d.number) as { id: number } | undefined;
+        const rows = turn ? await db.prepare("SELECT id, params, text, seen FROM main.conversation_cards WHERE turn_id = ? AND state = 'proposed' ORDER BY id").all(turn.id) as unknown as CardRow[] : [];
+        const cards: DraftCard[] = [];
+        const kept: CardRow[] = [];
+        const stampNow = await decisionStamp(db, d);
+        for (const r of rows) {
+          let params: CardParams;
+          try { params = JSON.parse(r.params) as CardParams; } catch { params = { kind: "comment", text: "" }; }
+          const settle = params.kind === "resolution" ? params.settle : params.kind === "answer" || params.kind === "backlog" ? params : null;
+          if (settle && (settle.decision !== d.id || (settle.stamp !== undefined && settle.stamp !== stampNow))) { stale++; continue; }
+          cards.push({ params, text: r.text });
+          kept.push(r);
+        }
+        const m = await cardsToDrafts(db, d, cards);
+        notes.push(...m.notes.map((x) => `${d.id}: ${x}`));
+        if (!turn || !m.used.length) { skipped++; continue; }
+        converted++;
+        if (o.dryRun) continue;
+        const first = kept[m.used[0]!]!;
+        const seen = (() => { try { const s = JSON.parse(first.seen ?? "{}") as { head?: string | null; last_comment?: string | null }; return { head: s.head ?? null, lastComment: s.last_comment ?? null }; } catch { return { head: null, lastComment: null }; } })();
+        const pickKey = d.recommended ? (d.recommended === "backlog" ? coreKey.backlog : coreKey.option(d.recommended)) : null;
+        const pick = pickKey && (await coresFor(db, d)).some((c) => c.key === pickKey) ? { core: pickKey, reason: d.recommended_reason ?? null } : { core: null, reason: null };
+        await writeChoices(db, {
+          decisionId: d.id, repo: d.repo!, number: d.number!, turnId: turn.id, stamp: await decisionStamp(db, d), seen, source: "converted",
+          drafts: Object.fromEntries([...Object.entries(m.cores), ...m.add.map((a) => [a.key, a.draft] as const)].map(([k, v]) => [k, { ...(v.params && { params: v.params }), extras: withIds(v.extras) }])),
+          added: m.add.map((a) => a.key), pick,
+        });
+        const mark = db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'");
+        for (const i of m.used) await mark.run(kept[i]!.id);
+        // A settling card that maps to no core would show next to the new answer list; it is replaced and counted.
+        await forEachSeq(cards, async (c, i) => {
+          const p = c.params;
+          const settling = p.kind === "resolution" ? p.settle !== null || p.steps.some((s) => ENDING.has(s.kind)) : p.kind === "answer" || p.kind === "backlog" || p.kind === "resolve" || p.kind === "close" || p.kind === "duplicate";
+          if (m.used.includes(i) || !settling) return;
+          unconverted++;
+          notes.push(`${d.id}: replaced a card that settles the decision and matches none of its choices`);
+          await mark.run(kept[i]!.id);
+        });
       }
-      const m = cardsToDrafts(db, d, cards);
-      notes.push(...m.notes.map((x) => `${d.id}: ${x}`));
-      if (!turn || !m.used.length) { skipped++; continue; }
-      converted++;
-      if (o.dryRun) continue;
-      const first = kept[m.used[0]!]!;
-      const seen = (() => { try { const s = JSON.parse(first.seen ?? "{}") as { head?: string | null; last_comment?: string | null }; return { head: s.head ?? null, lastComment: s.last_comment ?? null }; } catch { return { head: null, lastComment: null }; } })();
-      const pickKey = d.recommended ? (d.recommended === "backlog" ? coreKey.backlog : coreKey.option(d.recommended)) : null;
-      const pick = pickKey && coresFor(db, d).some((c) => c.key === pickKey) ? { core: pickKey, reason: d.recommended_reason ?? null } : { core: null, reason: null };
-      writeChoices(db, {
-        decisionId: d.id, repo: d.repo!, number: d.number!, turnId: turn.id, stamp: decisionStamp(db, d), seen, source: "converted",
-        drafts: Object.fromEntries([...Object.entries(m.cores), ...m.add.map((a) => [a.key, a.draft] as const)].map(([k, v]) => [k, { ...(v.params && { params: v.params }), extras: withIds(v.extras) }])),
-        added: m.add.map((a) => a.key), pick,
-      });
-      const mark = db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'");
-      for (const i of m.used) mark.run(kept[i]!.id);
-      // A settling card that maps to no core would show next to the new answer list; it is replaced and counted.
-      cards.forEach((c, i) => {
-        const p = c.params;
-        const settling = p.kind === "resolution" ? p.settle !== null || p.steps.some((s) => ENDING.has(s.kind)) : p.kind === "answer" || p.kind === "backlog" || p.kind === "resolve" || p.kind === "close" || p.kind === "duplicate";
-        if (m.used.includes(i) || !settling) return;
-        unconverted++;
-        notes.push(`${d.id}: replaced a card that settles the decision and matches none of its choices`);
-        mark.run(kept[i]!.id);
-      });
-    }
-    db.exec(o.dryRun ? "ROLLBACK" : "COMMIT");
+      // A dry run rolls back what it wrote.
+      if (o.dryRun) throw new DryRun();
+    });
   } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
+    if (!(e instanceof DryRun)) throw e;
   }
   return { converted, skipped, stale, unconverted, notes };
 }
 
 /** Runs the conversion once per database (settings key `choices_converted`). */
-export function convertOpenDecisionsOnce(db: DatabaseSync): ConvertResult | null {
-  if (db.prepare("SELECT 1 FROM main.settings WHERE key = 'choices_converted'").get()) return null;
-  const r = convertOpenDecisions(db);
-  db.exec("INSERT INTO main.settings (key, value) VALUES ('choices_converted', '1') ON CONFLICT (key) DO NOTHING");
+export async function convertOpenDecisionsOnce(db: Db): Promise<ConvertResult | null> {
+  if (await db.prepare("SELECT 1 FROM main.settings WHERE key = 'choices_converted'").get()) return null;
+  const r = await convertOpenDecisions(db);
+  await db.script("INSERT INTO main.settings (key, value) VALUES ('choices_converted', '1') ON CONFLICT (key) DO NOTHING");
   return r;
 }

@@ -1,9 +1,9 @@
 // A login's write permission for helper claims, read through the GitHub App's installation token so that a helper keeps
 // working after the user's dashboard session has ended. One cache per login and repo is shared by all slots and helpers.
-import type { DatabaseSync } from "node:sqlite";
 import { AppError, call, GITHUB_API } from "../github/app.ts";
 import { installationToken } from "../github/install-token.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
+import type { Db } from "../db/index.ts";
 
 export const APP_PERMISSION_TTL = 60_000;
 
@@ -23,7 +23,7 @@ const inflight = new Map<string, Promise<AppPermission>>();
 export function clearPermissionCache(): void { cache.clear(); inflight.clear(); }
 
 /** `login`'s permission on `repo` from the GitHub App: cached 60 s, concurrent lookups share one request. Written to repo_permissions. */
-export function appPermission(db: DatabaseSync, login: string, repo: string, deps: PermissionDeps = {}): Promise<AppPermission> {
+export function appPermission(db: Db, login: string, repo: string, deps: PermissionDeps = {}): Promise<AppPermission> {
   const now = deps.now ?? Date.now;
   const key = `${login.toLowerCase()}\0${repo}`;
   const hit = cache.get(key);
@@ -40,8 +40,8 @@ export function appPermission(db: DatabaseSync, login: string, repo: string, dep
   return p;
 }
 
-async function lookup(db: DatabaseSync, login: string, repo: string, deps: PermissionDeps): Promise<AppPermission> {
-  const row = db.prepare("SELECT owner FROM main.repos WHERE name = ?").get(repo) as { owner: string | null } | undefined;
+async function lookup(db: Db, login: string, repo: string, deps: PermissionDeps): Promise<AppPermission> {
+  const row = await db.prepare("SELECT owner FROM main.repos WHERE name = ?").get(repo) as { owner: string | null } | undefined;
   if (!row?.owner) return { kind: "unavailable" };
   let token: string;
   try {
@@ -53,7 +53,7 @@ async function lookup(db: DatabaseSync, login: string, repo: string, deps: Permi
     const r = await call(deps.apiBase ?? GITHUB_API, `/repos/${encodeURIComponent(row.owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(login)}/permission`, token) as { permission?: unknown; role_name?: unknown };
     const role = typeof r.role_name === "string" ? r.role_name : "";
     const permission = WRITE_PERMISSIONS.has(role) ? role : typeof r.permission === "string" ? r.permission : "none";
-    db.prepare(`INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)
+    await db.prepare(`INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)
                 ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at`)
       .run(login, repo, permission, new Date().toISOString());
     return { kind: "ok", permission };

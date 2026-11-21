@@ -1,6 +1,6 @@
 // Shared queries for the Progress, Repo and Run and cost pages.
-import type { DatabaseSync } from "node:sqlite";
 import { latestRun, settledTable } from "../../classify/settled.ts";
+import type { Db } from "../../db/index.ts";
 
 // Latest stage per item, from the item_stage table the stages trigger maintains.
 export const LATEST_SQL = `latest AS (SELECT repo, number, stage, reviewed FROM main.item_stage %W)`;
@@ -8,8 +8,8 @@ export const LATEST_SQL = `latest AS (SELECT repo, number, stage, reviewed FROM 
 export const latestCte = (repo?: string): string => LATEST_SQL.replace("%W", repo ? "WHERE repo = :repo" : "");
 
 // When tracking began: set by connect() (src/db.ts) on first use.
-export function trackingStart(db: DatabaseSync): string {
-  const r = db.prepare("SELECT value FROM main.settings WHERE key = 'tracking_started_at'").get() as { value: string } | undefined;
+export async function trackingStart(db: Db): Promise<string> {
+  const r = await db.prepare("SELECT value FROM main.settings WHERE key = 'tracking_started_at'").get() as { value: string } | undefined;
   return r?.value ?? new Date().toISOString();
 }
 
@@ -27,36 +27,38 @@ export type FunnelRow = {
 };
 
 // "classified" counts settled type labels (src/classify/settled.ts) in the latest run.
-export function funnelByRepo(db: DatabaseSync, repo?: string): FunnelRow[] {
-  settledTable(db, latestRun(db));
-  return db.prepare(`WITH ${latestCte(repo)}
-    SELECT i.repo, COUNT(*) AS open,
-      SUM(st.status = 'settled') AS classified, SUM(st.status = 'waiting') AS second_opinion, SUM(st.status = 'disagree') AS disagreement,
-      SUM(COALESCE(l.reviewed, 0)
-       OR EXISTS (SELECT 1 FROM main.classifications c WHERE c.repo = i.repo AND c.number = i.number AND c.classifier = 'sonnet')) AS reviewed,
-      SUM(l.stage IN ('take', 'verified') OR (l.stage LIKE 'verify-%' AND l.stage <> 'verify-failed')) AS take, SUM(l.stage = 'hold') AS hold, SUM(l.stage = 'close') AS close,
-      SUM(l.stage = 'needs-decision') AS needs_decision, SUM(l.stage = 'batched') AS batched
-    FROM items i LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
-    LEFT JOIN temp.item_settled st ON st.repo = i.repo AND st.number = i.number
-    WHERE i.state = 'OPEN' ${repo ? "AND i.repo = :repo" : ""}
-    GROUP BY i.repo`).all(p(repo)).map((r) => ({
-      ...r, classified: r.classified ?? 0, second_opinion: r.second_opinion ?? 0, disagreement: r.disagreement ?? 0,
-      take: r.take ?? 0, hold: r.hold ?? 0, close: r.close ?? 0, needs_decision: r.needs_decision ?? 0, batched: r.batched ?? 0,
-    })) as FunnelRow[];
+export async function funnelByRepo(db: Db, repo?: string): Promise<FunnelRow[]> {
+  return await db.read(async () => {
+    await settledTable(db, await latestRun(db));
+    return (await db.prepare(`WITH ${latestCte(repo)}
+      SELECT i.repo, COUNT(*) AS open,
+        SUM(st.status = 'settled') AS classified, SUM(st.status = 'waiting') AS second_opinion, SUM(st.status = 'disagree') AS disagreement,
+        SUM(COALESCE(l.reviewed, 0)
+         OR EXISTS (SELECT 1 FROM main.classifications c WHERE c.repo = i.repo AND c.number = i.number AND c.classifier = 'sonnet')) AS reviewed,
+        SUM(l.stage IN ('take', 'verified') OR (l.stage LIKE 'verify-%' AND l.stage <> 'verify-failed')) AS take, SUM(l.stage = 'hold') AS hold, SUM(l.stage = 'close') AS close,
+        SUM(l.stage = 'needs-decision') AS needs_decision, SUM(l.stage = 'batched') AS batched
+      FROM items i LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
+      LEFT JOIN temp.item_settled st ON st.repo = i.repo AND st.number = i.number
+      WHERE i.state = 'OPEN' ${repo ? "AND i.repo = :repo" : ""}
+      GROUP BY i.repo`).all(p(repo))).map((r) => ({
+        ...r, classified: r.classified ?? 0, second_opinion: r.second_opinion ?? 0, disagreement: r.disagreement ?? 0,
+        take: r.take ?? 0, hold: r.hold ?? 0, close: r.close ?? 0, needs_decision: r.needs_decision ?? 0, batched: r.batched ?? 0,
+      })) as FunnelRow[];
+  });
 }
 
 export type DoneRow = { repo: string; merged_pipeline: number; closed_pipeline: number; closed_others: number; total: number };
 
 // Done since tracking began. Merged PRs carry closed_at too, so one range covers both.
-export function doneByRepo(db: DatabaseSync, start: string, repo?: string): DoneRow[] {
-  return db.prepare(`WITH ${latestCte(repo)}, d AS (
+export async function doneByRepo(db: Db, start: string, repo?: string): Promise<DoneRow[]> {
+  return (await db.prepare(`WITH ${latestCte(repo)}, d AS (
       SELECT i.repo, i.state, l.stage FROM ${CLOSED_ITEMS} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
       WHERE i.closed_at >= :start AND i.state <> 'OPEN' AND i.${TRACKED} ${repo ? "AND i.repo = :repo" : ""})
     SELECT repo,
       SUM(state = 'MERGED' AND stage = 'merged') AS merged_pipeline,
       SUM(state = 'CLOSED' AND stage IN ('closed', 'fixed-by-us')) AS closed_pipeline,
       COUNT(*) AS total
-    FROM d GROUP BY repo`).all(p(repo, { start })).map((r) => {
+    FROM d GROUP BY repo`).all(p(repo, { start }))).map((r) => {
       const x = r as Omit<DoneRow, "closed_others">;
       return { ...x, closed_others: x.total - x.merged_pipeline - x.closed_pipeline };
     });
@@ -64,7 +66,7 @@ export function doneByRepo(db: DatabaseSync, start: string, repo?: string): Done
 
 // Open items per repo per day since tracking began, rebuilt backwards from the
 // current open count and the created/closed dates.
-export function trend(db: DatabaseSync, start: string, openNow: Map<string, number>, repo?: string): { days: string[]; series: Map<string, number[]> } {
+export async function trend(db: Db, start: string, openNow: Map<string, number>, repo?: string): Promise<{ days: string[]; series: Map<string, number[]> }> {
   const today = new Date().toISOString().slice(0, 10);
   const days: string[] = [];
   for (let t = Date.parse(start.slice(0, 10)); ; t += 86400_000) {
@@ -73,8 +75,8 @@ export function trend(db: DatabaseSync, start: string, openNow: Map<string, numb
     if (d >= today || days.length > 365) break;
   }
   const r = repo ? "AND repo = :repo" : "";
-  const created = db.prepare(`SELECT repo, substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM ${CREATED_ITEMS} WHERE created_at >= :start AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
-  const closed = db.prepare(`SELECT repo, substr(closed_at, 1, 10) AS d, COUNT(*) AS n FROM ${CLOSED_ITEMS} WHERE closed_at >= :start AND state <> 'OPEN' AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
+  const created = await db.prepare(`SELECT repo, substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM ${CREATED_ITEMS} WHERE created_at >= :start AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
+  const closed = await db.prepare(`SELECT repo, substr(closed_at, 1, 10) AS d, COUNT(*) AS n FROM ${CLOSED_ITEMS} WHERE closed_at >= :start AND state <> 'OPEN' AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
   const delta = new Map<string, Map<string, number>>();
   const add = (repo: string, d: string, n: number) => {
     if (!delta.has(repo)) delta.set(repo, new Map());

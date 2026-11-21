@@ -7,8 +7,6 @@
 // and that a counted helper may take come first. A helper held by its plan usage or paused stops asking for work and reports
 // so; a helper that stopped without a word stops counting once its last claim and heartbeats are old. The helpers of a Manual
 // only user (manual-only.ts) take only the user's own picks and follow-ups, so they are no room.
-import type { DatabaseSync } from "node:sqlite";
-import { prep } from "../sql-cache.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { queueSnapshot, runnerTakes } from "./calls.ts";
@@ -21,6 +19,8 @@ import { TASK_CHOICES, taskOfStep, userSkips } from "./my-tasks.ts";
 import { itemFilter, type ItemFilter } from "./task-items.ts";
 import { scaled } from "./time-scale.ts";
 import { HEARTBEAT_S } from "./protocol.ts";
+import { filterSeq, mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
 export const IDLE_FRESH_MS = scaled(45_000);
@@ -45,17 +45,17 @@ const LIVE_LEASE_MS = 3 * scaled(HEARTBEAT_S * 1000);
  * lately still gets calls; the claim then checks the permission itself. The helper's repos are those of its last idle claim
  * (`idle_repos`) narrowed by the user's current My repos.
  */
-export function remoteRoom(db: DatabaseSync, cls: number, nowMs: number = Date.now(), repos?: readonly string[], step?: string): number {
-  return roomOf(db, roomState(db, nowMs), cls, nowMs, repos, step);
+export async function remoteRoom(db: Db, cls: number, nowMs: number = Date.now(), repos?: readonly string[], step?: string): Promise<number> {
+  return await roomOf(db, await roomState(db, nowMs), cls, nowMs, repos, step);
 }
 
 /**
  * Whether each of `logins` counts as able to write to a repo for the room: true unless a non-write permission confirmed within
  * PERM_READ_TTL is cached. One query for every login.
  */
-export function roomCanWrite(db: DatabaseSync, logins: readonly string[], nowMs: number): (login: string, repo: string) => boolean {
+export async function roomCanWrite(db: Db, logins: readonly string[], nowMs: number): Promise<(login: string, repo: string) => boolean> {
   const denied = new Set<string>();
-  for (const p of prep(db, "SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE login IN (SELECT value FROM json_each(?))").all(JSON.stringify([...new Set(logins)])) as { login: string; repo: string; permission: string; checked_at: string }[])
+  for (const p of await db.prepare("SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE login IN (SELECT value FROM json_each(?))").all(JSON.stringify([...new Set(logins)])) as { login: string; repo: string; permission: string; checked_at: string }[])
     if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
   return (login, repo) => !denied.has(`${login.toLowerCase()}\n${repo}`);
 }
@@ -69,26 +69,25 @@ type Taker = { h: Helper; active: boolean; r: { login: string; role: string; rep
  */
 export type RoomState = { ready: Helper[]; active: Helper[]; takers?: { list: Taker[]; canWrite: (login: string, repo: string) => boolean }; left: Map<string, number> };
 
-export function roomState(db: DatabaseSync, nowMs: number = Date.now()): RoomState {
-  const rows = (prep(db, `SELECT t.login, a.role, t.idle_claim_at, t.idle_repos, COALESCE(h.slots, 1) AS slots,
+export async function roomState(db: Db, nowMs: number = Date.now()): Promise<RoomState> {
+  const rows = await filterSeq((await db.prepare(`SELECT t.login, a.role, t.idle_claim_at, t.idle_repos, COALESCE(h.slots, 1) AS slots,
       (SELECT COUNT(*) FROM main.remote_calls c WHERE c.state = 'leased' AND c.token_id = t.id) AS leased,
       (SELECT MAX(c.heartbeat_at) FROM main.remote_calls c WHERE c.state = 'leased' AND c.token_id = t.id) AS beat
     FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id LEFT JOIN main.access a ON a.login = t.login
-    WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ? AND NOT ${manualSql("t.login")}`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as Helper[])
-    .filter((h) => userSkips(db, h.login).size < TASK_CHOICES.length && (itemFilter(db, h.login)?.refs.size ?? 1) > 0);
+    WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ? AND NOT ${manualSql("t.login")}`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as Helper[]), async (h) => (await userSkips(db, h.login)).size < TASK_CHOICES.length && ((await itemFilter(db, h.login))?.refs.size ?? 1) > 0);
   return { ready: rows, active: rows.filter((h) => isActive(h, nowMs)), left: new Map() };
 }
 
 const isActive = (h: Helper, nowMs: number): boolean =>
   (h.beat !== null && Number(h.beat) >= nowMs - LIVE_LEASE_MS) || (h.idle_claim_at !== null && Number(h.idle_claim_at) >= nowMs - IDLE_FRESH_MS);
 
-function takersOf(db: DatabaseSync, st: RoomState, nowMs: number): NonNullable<RoomState["takers"]> {
+async function takersOf(db: Db, st: RoomState, nowMs: number): Promise<NonNullable<RoomState["takers"]>> {
   return st.takers ??= {
-    canWrite: roomCanWrite(db, st.ready.map((h) => h.login), nowMs),
-    list: st.ready.map((h) => {
+    canWrite: await roomCanWrite(db, st.ready.map((h) => h.login), nowMs),
+    list: await mapSeq(st.ready, async (h) => {
       let own: string[] | undefined;
       try { own = h.idle_repos ? JSON.parse(h.idle_repos) as string[] : undefined; } catch { /* every repo */ }
-      return { h, active: isActive(h, nowMs), r: { login: h.login, role: h.role ?? "", repos: claimRepos(db, h.login, own), skip: userSkips(db, h.login), items: itemFilter(db, h.login) } };
+      return { h, active: isActive(h, nowMs), r: { login: h.login, role: h.role ?? "", repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login) } };
     }),
   };
 }
@@ -101,12 +100,12 @@ function takersOf(db: DatabaseSync, st: RoomState, nowMs: number): NonNullable<R
  * The calls ahead that only runners taking every item may take use up those runners' slots alone, so a call on a chosen item
  * finds the filtered runners' slots free while the others are busy with calls they alone take.
  */
-export function roomOf(db: DatabaseSync, st: RoomState, cls: number, nowMs: number, repos?: readonly string[], step?: string, refs?: readonly { repo: string; number: number }[]): number {
+export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, repos?: readonly string[], step?: string, refs?: readonly { repo: string; number: number }[]): Promise<number> {
   let takers: { h: Helper; filtered: boolean }[] = st.active.map((h) => ({ h, filtered: false }));
   let takes: (c: { prompt_id: string; repos: readonly string[]; step?: string; refs?: readonly { repo: string; number: number }[] }) => boolean = () => true;
   let filteredTake: typeof takes = () => false;
   if ((repos !== undefined || step !== undefined || refs !== undefined) && st.active.length) {
-    const t = takersOf(db, st, nowMs);
+    const t = await takersOf(db, st, nowMs);
     const task = step === undefined ? undefined : taskOfStep(step);
     const on = repos ?? (refs ? [...new Set(refs.map((x) => x.repo))] : undefined);
     const fit = t.list.filter(({ active, r }) => active && (on === undefined ? !(task !== undefined && r.skip.has(task)) && (r.items === null || [...r.items.repos].some((x) => runnerTakes(r, { prompt_id: "", repos: [x], step }, t.canWrite))) : runnerTakes(r, { prompt_id: "", repos: on, step, refs }, t.canWrite)));
@@ -125,8 +124,8 @@ export function roomOf(db: DatabaseSync, st: RoomState, cls: number, nowMs: numb
   for (const [login, { n, filtered }] of free) {
     let left = st.left.get(login);
     if (left === undefined) {
-      const max = userMaxCalls(db, login);
-      left = max === null ? Infinity : Math.max(0, max - Number((prep(db, "SELECT COUNT(*) AS n FROM main.remote_calls INDEXED BY remote_calls_leased WHERE state = 'leased' AND user_login = ? COLLATE NOCASE").get(login) as { n: number }).n));
+      const max = await userMaxCalls(db, login);
+      left = max === null ? Infinity : Math.max(0, max - Number((await db.prepare("SELECT COUNT(*) AS n FROM main.remote_calls INDEXED BY remote_calls_leased WHERE state = 'leased' AND user_login = ? COLLATE NOCASE").get(login) as { n: number }).n));
       st.left.set(login, left);
     }
     if (filtered) some += Math.min(n, left);
@@ -134,7 +133,7 @@ export function roomOf(db: DatabaseSync, st: RoomState, cls: number, nowMs: numb
   }
   if (all + some === 0) return 0;
   let aheadAll = 0, aheadSome = 0;
-  for (const r of queueSnapshot(db, nowMs)) {
+  for (const r of await queueSnapshot(db, nowMs)) {
     if (r.seen_at < nowMs - CALLER_STALE_MS || claimClass(r, nowMs) < cls || !takes(r)) continue;
     if (some > 0 && filteredTake(r)) aheadSome++;
     else aheadAll++;

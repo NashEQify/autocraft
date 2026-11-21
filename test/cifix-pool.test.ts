@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { spawnSync } from "node:child_process";
 import { setCallContext } from "../src/agents/call.ts";
-import { connect } from "../src/db.ts";
 import { runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { exec, type Exec } from "../src/fixup/git.ts";
@@ -13,6 +12,7 @@ import type { Querier } from "../src/mirror.ts";
 import { take } from "../src/runner/leases.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "cifix-pool-"));
@@ -31,7 +31,7 @@ const git = (cwd: string, ...args: string[]): string => {
 };
 
 /** Two PRs (#7, #8) with a failing gate check, one model slot pool of 8, and a fake model that waits until `calls` calls are in flight. */
-function setup(calls = 2) {
+async function setup(calls = 2) {
   const root = mkdtempSync(join(dir, "w-"));
   const work = join(root, "work");
   mkdirSync(join(work, "src"), { recursive: true });
@@ -46,16 +46,16 @@ function setup(calls = 2) {
   const fork = join(root, "fork.git");
   git(root, "clone", "-q", "--bare", work, fork);
   for (const n of [7, 8]) git(fork, "update-ref", `refs/pull/${n}/head`, heads[n]!);
-  const db = connect(join(root, "t.db"));
+  const db = await connectDb(join(root, "t.db"));
   for (const n of [7, 8]) {
-    db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at) VALUES ('app', ?, 'pr', 'OPEN', 'Rename', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(n, heads[n]);
-    db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(n, heads[n]);
-    db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at) VALUES ('app', ?, ?, 'OPEN', 0, 'failure', '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', 1, '${T1}')`).run(n, heads[n]);
+    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at) VALUES ('app', ?, 'pr', 'OPEN', 'Rename', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(n, heads[n]);
+    await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(n, heads[n]);
+    await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at) VALUES ('app', ?, ?, 'OPEN', 0, 'failure', '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', 1, '${T1}')`).run(n, heads[n]);
   }
-  db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  setPushApproval(db, "op", "app", true);
-  db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES ('a1', 'a1')").run();
-  db.prepare("UPDATE claude_accounts SET enabled = 1, max_concurrent = 8 WHERE id = 'a1'").run();
+  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await setPushApproval(db, "op", "app", true);
+  await db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES ('a1', 'a1')").run();
+  await db.prepare("UPDATE claude_accounts SET enabled = 1, max_concurrent = 8 WHERE id = 'a1'").run();
   const querier: Querier = validating({
     spent: 0, remaining: 5000,
     async query(_q: string, v: { n: number }) {
@@ -96,18 +96,18 @@ function setup(calls = 2) {
 }
 
 test("two PRs of one cifix job make their model calls at once", { timeout: 120_000 }, async () => {
-  const w = setup();
+  const w = await setup();
   await runCifix(w.db, { repo: "app", dryRun: false }, () => {}, w.deps);
   assert.deepEqual([...w.asked].sort(), ["app#7", "app#8"]);
   assert.equal(w.overlap(), true, "the second call started while the first was still waiting");
 });
 
 test("a PR whose lease another running job holds is skipped", { timeout: 120_000 }, async () => {
-  const w = setup(1);
-  const add = (step: string): number => Number(w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES (?, '{}', 'pipeline', ?, 'running', ?)").run(step, T0, T0).lastInsertRowid);
-  const mine = add("cifix"), other = add("fixup");
-  assert.ok(take(w.db, "pr:app#8", other, "fixup"));
-  setCallContext({ jobId: mine, step: "cifix", stage: 1, cancelled: () => false });
+  const w = await setup(1);
+  const add = async (step: string): Promise<number> => Number((await w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES (?, '{}', 'pipeline', ?, 'running', ?)").run(step, T0, T0)).lastInsertRowid);
+  const mine = await add("cifix"), other = await add("fixup");
+  assert.ok(await take(w.db, "pr:app#8", other, "fixup"));
+  setCallContext({ jobId: mine, step: "cifix", stage: 1, cancelled: async () => false });
   const lines: string[] = [];
   await runCifix(w.db, { repo: "app", dryRun: false }, (l) => lines.push(l), w.deps);
   assert.deepEqual(w.asked, ["app#7"]);

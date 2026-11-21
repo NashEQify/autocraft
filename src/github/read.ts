@@ -2,57 +2,110 @@
 // Under the `box` identity nothing is added: the child inherits this process's environment and the box account's
 // login. Under `app` the child's whole environment is the inherited basics plus an installation token (never the
 // box account's credentials), and a failure to mint one is an error, not a fallback to the box account.
-// The setting is read at every call, so a switch takes effect in the runner and the dashboard without a restart.
+// The setting is held in memory and read again whenever the `settings` change counter moves (refreshReadIdentity), so a
+// switch takes effect in every process without a restart.
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
+import type { Db } from "../db/index.ts";
+import { dbFor } from "../db/open.ts";
 
 export type ReadEnv = Record<string, string>;
-export type ReadDeps = { db?: DatabaseSync; mint?: (owner: string) => Promise<string>; defaultOwner?: () => string };
+export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
 
-let shared: { path: string; db: DatabaseSync } | null = null;
+// The promise is kept, so two first calls at once share one open.
+let shared: { path: string; db: Promise<Db> } | null = null;
 /**
  * A read-only handle on the instance database, opened on first use. Null only when there is no database file (nothing
  * configured the identity); a file that cannot be opened is an error, never a silent read as the box account.
  */
-function sharedDb(): DatabaseSync | null {
+async function sharedDb(): Promise<Db | null> {
   const path = dbPath();
-  if (shared?.path === path) return shared.db;
+  if (shared?.path === path) return await shared.db;
   if (!existsSync(path)) return null;
+  const mine = { path, db: openShared(path) };
+  shared = mine;
+  try {
+    return await mine.db;
+  } catch (e) {
+    if (shared === mine) shared = null;
+    throw e;
+  }
+}
+
+async function openShared(path: string): Promise<Db> {
+  let last: unknown;
+  for (let i = 0; i < 3; i++) {
+    let sync: DatabaseSync;
+    try {
+      sync = new DatabaseSync(path, { readOnly: true, timeout: 5_000 });
+    } catch (e) { last = e; continue; }
+    return await dbFor(sync);
+  }
+  throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
+}
+
+async function retried<T>(fn: () => Promise<T>): Promise<T> {
   let last: unknown;
   for (let i = 0; i < 3; i++) {
     try {
-      const db = new DatabaseSync(path, { readOnly: true, timeout: 5_000 });
-      shared = { path, db };
-      return db;
+      return await fn();
     } catch (e) { last = e; }
   }
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
-function settingOf(db: DatabaseSync): string | undefined {
-  let last: unknown;
-  for (let i = 0; i < 3; i++) {
-    try {
-      return (db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value;
-    } catch (e) { last = e; }
-  }
-  throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
+const settingOf = (db: Db): Promise<string | undefined> =>
+  retried(async () => (await db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value);
+
+/** The identity setting as this process holds it, with the `settings` change counter it was read at (null: unknown). */
+let held: { app: boolean; seq: number | null } | null = null;
+/** Bumped by every switch this process notes, so a refresh that read the setting before the switch drops its reading. */
+let generation = 0;
+
+/**
+ * Brings the held identity up to date when the `settings` change counter moved (`seq`: the counter as the caller already
+ * read it). The counter is read before the value, so a write between the two only makes the next pass read again.
+ */
+export async function refreshReadIdentity(db: Db, seq?: number): Promise<void> {
+  const gen = generation;
+  const at = seq ?? (await retried(async () => await db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'settings'").get() as { seq: number } | undefined))?.seq ?? null;
+  if (at !== null && held?.seq === at) return;
+  const app = await settingOf(db) === "app";
+  // A switch noted while this pass awaited is newer than its reading.
+  if (gen !== generation) return;
+  // Another pass may have stored a later reading while this one awaited.
+  if (at !== null && held && held.seq !== null && held.seq > at) return;
+  held = { app, seq: at };
 }
 
-/** Whether reads go through the GitHub App right now. Throws when the setting exists to be read but cannot be. */
-export function readsUseApp(db?: DatabaseSync): boolean {
-  const d = db ?? sharedDb();
-  return d !== null && settingOf(d) === "app";
+/** Records a switch this process just wrote, so its own next read uses it before any refresh. */
+export function noteReadIdentity(app: boolean): void {
+  generation++;
+  held = { app, seq: null };
+}
+
+/**
+ * Whether reads go through the GitHub App right now. With `db`, that database's setting. Without, the instance
+ * database's: every call reads its `settings` change counter (one query on the shared handle) and the setting itself
+ * only when the counter moved, so a switch reaches every process, job children included. Throws when the setting exists
+ * to be read but cannot be.
+ */
+export async function readsUseApp(db?: Db): Promise<boolean> {
+  if (db) return await settingOf(db) === "app";
+  const d = await sharedDb();
+  if (d === null) return held?.app ?? false;
+  await refreshReadIdentity(d);
+  return held?.app ?? false;
 }
 
 /** The owner of the tracked repos: the default owner when it has any, else the first tracked one. */
-export function trackedOwner(db?: DatabaseSync): string {
-  const d = db ?? sharedDb();
+export async function trackedOwner(db?: Db): Promise<string> {
+  const d = db ?? await sharedDb();
   try {
-    const rows = d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
+    const rows = await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
     const owners = (rows ?? []).map((r) => r.owner).filter((o) => OWNER.test(o));
     if (owners.some((o) => o.toLowerCase() === DEFAULT_OWNER)) return DEFAULT_OWNER;
     if (owners[0]) return owners[0];
@@ -61,7 +114,7 @@ export function trackedOwner(db?: DatabaseSync): string {
 }
 
 /** The owner whose installation serves a read: `owner` when valid, else the tracked owner's. */
-export const resolveOwner = (owner?: string, db?: DatabaseSync): string => (owner && OWNER.test(owner) ? owner : trackedOwner(db));
+export const resolveOwner = async (owner?: string, db?: Db): Promise<string> => (owner && OWNER.test(owner) ? owner : await trackedOwner(db));
 
 const slugOwner = (v: string | undefined): string | undefined => {
   const o = v?.includes("/") ? v.split("/")[0] : undefined;
@@ -105,8 +158,8 @@ export class AppReadError extends Error {
 export async function readEnv(owner?: string, deps: ReadDeps = {}): Promise<ReadEnv | undefined> {
   // A process that was started with an identity of its own (a merge child that acts as a person) keeps it.
   if (process.env[TOKEN_ENV]) return undefined;
-  if (!readsUseApp(deps.db)) return undefined;
-  const o = owner && OWNER.test(owner) ? owner : (deps.defaultOwner ?? (() => trackedOwner(deps.db)))();
+  if (!await readsUseApp(deps.db)) return undefined;
+  const o = owner && OWNER.test(owner) ? owner : await (deps.defaultOwner ?? (async () => await trackedOwner(deps.db)))();
   try {
     return appChildEnv(await (deps.mint ?? installationToken)(o));
   } catch (e) {

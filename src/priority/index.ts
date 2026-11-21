@@ -4,16 +4,17 @@
 // current hash; Haiku decides where Jev is under 90 % sure, and for every item
 // while Jev is unavailable (src/agents/jev.ts). The reach is
 // recomputed from the mirror's reach signals on every pass, without a model.
-import type { DatabaseSync } from "node:sqlite";
 import { takersFirst } from "../agents/call.ts";
 import { runTiered } from "../agents/step.ts";
 import { PRIORITY } from "../agents/steps.ts";
 import { type Item, refOf } from "../classify/parse.ts";
-import { connect } from "../db.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { reachOfOpenItems } from "./reach.ts";
 import { reachScore, settleImpact, type Impact } from "./score.ts";
 import { itemOf, plannedItems } from "../core/select-items.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 const JEV_CHUNK = 40;
 const now = () => new Date().toISOString();
@@ -21,17 +22,17 @@ const now = () => new Date().toISOString();
 type Due = Item & { hash: string };
 
 /** The items the Plans send to rating: no priority row, or one made at other text. */
-function dueItems(db: DatabaseSync): Due[] {
-  return plannedItems(db, "prioritize").map((p) => ({ ...itemOf(db, p.facts.repo, p.facts.number), hash: p.facts.embedHash }));
+async function dueItems(db: Db): Promise<Due[]> {
+  return await mapSeq((await plannedItems(db, "prioritize")), async (p) => ({ ...await itemOf(db, p.facts.repo, p.facts.number), hash: p.facts.embedHash }));
 }
 
 type Verdict = { jev: { impact: Impact; p: number } | null; haiku: { impact: Impact; reason: string } | null };
 
-function save(db: DatabaseSync, item: Due, v: Verdict): boolean {
+async function save(db: Db, item: Due, v: Verdict): Promise<boolean> {
   const s = settleImpact(v.jev, v.haiku?.impact ?? null);
   if (!s) return false;
   const reason = s.model === "haiku" ? v.haiku!.reason : v.jev ? `${v.jev.impact} ${v.jev.p.toFixed(2)}` : "";
-  db.prepare(`INSERT INTO item_priority (repo, number, text_hash, impact, jev_impact, jev_p, haiku_impact, score, model, reason, at)
+  await db.prepare(`INSERT INTO item_priority (repo, number, text_hash, impact, jev_impact, jev_p, haiku_impact, score, model, reason, at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (repo, number) DO UPDATE SET text_hash = excluded.text_hash, impact = excluded.impact, jev_impact = excluded.jev_impact, jev_p = excluded.jev_p,
       haiku_impact = excluded.haiku_impact, model = excluded.model, reason = excluded.reason, at = excluded.at`).run(item.repo, item.number, item.hash, s.impact, v.jev?.impact ?? null, v.jev?.p ?? null,
@@ -43,40 +44,35 @@ function save(db: DatabaseSync, item: Due, v: Verdict): boolean {
  * Recomputes the reach of every open item with a priority row from the current reach signals.
  * Returns the number of rows whose reach changed.
  */
-export function rescore(db: DatabaseSync, nowMs: number = Date.now()): number {
-  const reach = reachOfOpenItems(db, nowMs);
-  const rows = db.prepare(`SELECT p.repo, p.number, p.score FROM item_priority p JOIN items i ON i.repo = p.repo AND i.number = p.number WHERE i.state = 'OPEN'`)
+export async function rescore(db: Db, nowMs: number = Date.now()): Promise<number> {
+  const reach = await reachOfOpenItems(db, nowMs);
+  const rows = await db.prepare(`SELECT p.repo, p.number, p.score FROM item_priority p JOIN items i ON i.repo = p.repo AND i.number = p.number WHERE i.state = 'OPEN'`)
     .all() as { repo: string; number: number; score: number }[];
   const upd = db.prepare("UPDATE item_priority SET score = ? WHERE repo = ? AND number = ?");
   let changed = 0;
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  await db.write(async () => {
     for (const r of rows) {
       const rc = reach.get(`${r.repo}#${r.number}`);
       if (!rc) continue;
       const score = reachScore(rc);
-      if (score !== r.score) { upd.run(score, r.repo, r.number); changed++; }
+      if (score !== r.score) { await upd.run(score, r.repo, r.number); changed++; }
     }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
   return changed;
 }
 
-export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => boolean; log?: (line: string) => void };
+export type PrioritizeOptions = { limit: number; onSent?: (n: number) => void; cancelled?: () => Promise<boolean>; log?: (line: string) => void };
 export type PrioritizeResult = { due: number; sent: number; jev: number; haiku: number; saved: number; rescored: number; haikuAlone: number };
 
-export async function runPrioritize(db: DatabaseSync, opts: PrioritizeOptions): Promise<PrioritizeResult> {
+export async function runPrioritize(db: Db, opts: PrioritizeOptions): Promise<PrioritizeResult> {
   const log = opts.log ?? (() => {});
-  fillEmbedHashes(db);
-  const all = dueItems(db);
+  await fillEmbedHashes(db);
+  const all = await dueItems(db);
   const due = all.length;
-  const todo = takersFirst(db, all, (x) => [x.repo], (x) => [x], "priority.haiku").slice(0, opts.limit);
+  const todo = (await takersFirst(db, all, (x) => [x.repo], (x) => [x], "priority.haiku")).slice(0, opts.limit);
   log(`prioritize: ${due} items due, taking ${todo.length}`);
   const res: PrioritizeResult = { due, sent: 0, jev: 0, haiku: 0, saved: 0, rescored: 0, haikuAlone: 0 };
-  for (let i = 0; i < todo.length && !opts.cancelled?.(); i += JEV_CHUNK) {
+  for (let i = 0; i < todo.length && !await opts.cancelled?.(); i += JEV_CHUNK) {
     const all = todo.slice(i, i + JEV_CHUNK);
     const t = await runTiered(db, PRIORITY, all);
     // An item whose Haiku batch no Task Runner could take is left for a later pass, unsaved.
@@ -91,10 +87,10 @@ export async function runPrioritize(db: DatabaseSync, opts: PrioritizeOptions): 
       if (t.haiku.has(ref)) res.haiku++;
     }
     res.haikuAlone += t.alone.size;
-    for (const item of chunk) if (save(db, item, verdicts.get(refOf(item))!)) res.saved++;
+    for (const item of chunk) if (await save(db, item, verdicts.get(refOf(item))!)) res.saved++;
     else log(`prioritize: no valid answer for ${refOf(item)}`);
   }
-  res.rescored = rescore(db);
+  res.rescored = await rescore(db);
   if (res.haikuAlone) log(`Jev unavailable: Haiku rated ${res.haikuAlone} items`);
   return res;
 }
@@ -106,7 +102,7 @@ export const commands = {
       const i = args.indexOf("--limit");
       const limit = i >= 0 ? Number(args[i + 1]) : 500;
       if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit is a whole number of at least 1");
-      const r = await runPrioritize(connect(), { limit, log: console.log });
+      const r = await runPrioritize(await openDb(), { limit, log: console.log });
       console.log(`${r.saved} of ${r.sent} rated (${r.jev} by Jev, ${r.haiku} by Haiku); ${r.rescored} reach values changed${r.haikuAlone ? `; Jev unavailable: Haiku rated ${r.haikuAlone} items` : ""}`);
     },
   },

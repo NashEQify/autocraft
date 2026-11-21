@@ -7,7 +7,6 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { gunzip, gunzipSync } from "node:zlib";
 import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
-import type { DatabaseSync } from "node:sqlite";
 import { LOGIN, checkGithubId, getAccess } from "../../access.ts";
 import { audit, auditRefusedSignIn } from "../audit.ts";
 import type { Req, Res, Role, Route } from "../types.ts";
@@ -52,7 +51,9 @@ import { startLiveness } from "../../remote/liveness.ts";
 import { archiveOf, callTaskTool, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
 import { handleDelivery, WEBHOOK_BODY_LIMIT, WEBHOOK_PATH } from "../../github/webhooks.ts";
 import { esc, HttpError, parseCookies, plainPage, previewTags, RateLimiter, safeReturnTo } from "./util.ts";
-import { prep } from "../../sql-cache.ts";
+import { exclusive } from "../../async-seq.ts";
+import { refreshReadIdentity } from "../../github/read.ts";
+import type { Db } from "../../db/index.ts";
 
 export const SESSION_COOKIE = "__Host-craft_session";
 /** `oauth_states.return_to` of an "act as you" authorization, which the shared sign-in callback tells apart from a sign-in by this prefix. */
@@ -91,10 +92,10 @@ const BUSY_RETRY_S = 5;
 
 export type AppOptions = {
   config: Config;
-  db: DatabaseSync;
+  db: Db;
   // The connection of the helper routes and the remote maintenance: a short busy timeout, so a locked database answers 503 at
   // once instead of holding the event loop for the 30-second timeout of `db`. Default: `db`.
-  remoteDb?: DatabaseSync;
+  remoteDb?: Db;
   provider?: Provider;
   routes?: Route[];          // default: the JSON API
   images?: ImageProxy;       // default: fetches with global fetch and the bot's gh token
@@ -219,14 +220,14 @@ function cookie(name: string, value: string, maxAgeSec: number): string {
   return `${name}=${value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAgeSec}`;
 }
 
-export function createApp(opts: AppOptions & { routes: Route[] }) {
+export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const { config, db } = opts;
   const rdb = opts.remoteDb ?? db;
-  const provider = opts.provider ?? providerFor(config, () => githubIdentity(db));
+  const provider = opts.provider ?? providerFor(config, async () => await githubIdentity(db));
   // The org setup link signs in with the OAuth App even when dashboard sign-in uses the GitHub App.
   const setupProvider = opts.provider ?? (config.devAuth ? provider : oauthProviderFor(config));
   const box = new TokenBox(config.secrets.sessionKey);
-  const resealed = resealLegacyValues(db, box);
+  const resealed = await resealLegacyValues(db, box);
   const resealedTotal = Object.values(resealed).reduce((a, b) => a + b, 0);
   if (resealedTotal) console.log(`re-sealed ${resealedTotal} stored token values under the current key (${Object.entries(resealed).map(([t, n]) => `${t} ${n}`).join(", ")})`);
   // The GitHub App's own provider: it signs users in under login=github-app, and always makes and refreshes their user tokens (the "act as you" authorization).
@@ -242,9 +243,9 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
   const writeLimitSession = new RateLimiter(60, 60_000);
   const writeLimitIp = new RateLimiter(300, 60_000);
   const imageIndex = new ImageIndex(db);
-  registerImageRepos((href) => imageIndex.reposOf(href));
+  registerImageRepos(async (href) => await imageIndex.reposOf(href));
   const images = opts.images ?? new ImageProxy({
-    cacheDir: config.imageCacheDir, repos: (href) => imageIndex.reposOf(href),
+    cacheDir: config.imageCacheDir, repos: async (href) => await imageIndex.reposOf(href),
     token: imageTokenSource(process.env),
   });
   const imageLimit = new RateLimiter(120, 60_000);    // upstream fetches per session; cache hits are free
@@ -289,14 +290,17 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
 
   // Ended remote calls, finished check relays and the status of deleted tokens, once a minute; a busy database skips a round.
   // The same pass withdraws queued calls no Task Runner has been able to take for a while and marks repos without one (takers.ts).
-  const maintenance = setInterval(() => {
+  const maintain = exclusive(async () => {
     try {
-      remote.pruneRemote(rdb);
-      sweepTakers(rdb);
+      await remote.pruneRemote(rdb);
+      await sweepTakers(rdb);
+      // The live hub refreshes it only while a page is open.
+      await refreshReadIdentity(rdb);
     } catch (e) {
       if (!isBusy(e)) console.log(`remote maintenance failed: ${(e as Error).message}`);
     }
-  }, scaled(60_000));
+  });
+  const maintenance = setInterval(() => void maintain.skip(), scaled(60_000));
   maintenance.unref();
 
   function secure(headers: Record<string, string | string[]>, csp: string): Record<string, string | string[]> {
@@ -372,7 +376,7 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       json = await readJson(req);
       if (!safeEqual(String(req.headers[CSRF_HEADER] ?? ""), session.csrf)) return out(apiError(403, "missing or wrong CSRF token"));
       if (url.pathname === "/api/signout") {
-        deleteSession(db, parseCookies(req.headers.cookie).get(SESSION_COOKIE)!);
+        await deleteSession(db, parseCookies(req.headers.cookie).get(SESSION_COOKIE)!);
         return send(res, nonce, { status: 204 }, [cookie(SESSION_COOKIE, "", 0)]);
       }
     }
@@ -386,18 +390,18 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     if (route.operator && session.role !== "operator") return out(apiError(403, "operators only"));
     const r: Req = {
       method, path: url.pathname, params: params!, query: url.searchParams, form: new URLSearchParams(), json,
-      user: makeUser(db, box, provider, session, writes, githubIdentity(db) === "app"),
+      user: makeUser(db, box, provider, session, writes, await githubIdentity(db) === "app"),
       scope: route.scoped && !writes ? scopeOf(req) : null,
       csrf: session.csrf, ip: clientIp(req), nonce,
     };
     const res2 = await route.handler(db, r);
     // The writer sees its own change at once; other processes' writes arrive on the watcher's next read.
-    if (writes) live.poke();
+    if (writes) await live.poke();
     return out(res2);
   }
 
   // GET /api/live: same session as /api, but no rate limit and no request timeout.
-  function handleLive(req: IncomingMessage, res: ServerResponse, nonce: string, session: Session): void {
+  async function handleLive(req: IncomingMessage, res: ServerResponse, nonce: string, session: Session): Promise<void> {
     if (live.full) return send(res, nonce, apiError(503, "too many live connections"));
     req.socket.setTimeout(0);
     req.socket.setNoDelay(true);
@@ -407,26 +411,26 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       [CSRF_HEADER]: session.csrf,
     }, "default-src 'none'");
     res.writeHead(200, headers);
-    live.add(res, () => loadSession(db, cookieId) !== null, session.idHash);
+    await live.add(res, async () => await loadSession(db, cookieId) !== null, session.idHash);
   }
 
   /** Under the app identity with no app keys, sign-in has nothing to go through: it is refused, never sent to the OAuth App. */
-  const signInBlocked = (): boolean => githubIdentity(db) === "app" && !opts.provider && !config.devAuth && !config.secrets.app;
+  const signInBlocked = async (): Promise<boolean> => await githubIdentity(db) === "app" && !opts.provider && !config.devAuth && !config.secrets.app;
   const noAppPage = (nonce: string): Res => errorPage(nonce, 503, "Sign-in unavailable", "GitHub sign-in is set to the GitHub App, but no app keys are available. An operator must restore the app's keys or switch the GitHub identity back to the box account.");
 
-  function startOAuth(returnTo: string, selectAccount: boolean, scopes?: string[], p: Provider = provider): { r: Res; cookies: string[] } {
+  async function startOAuth(returnTo: string, selectAccount: boolean, scopes?: string[], p: Provider = provider): Promise<{ r: Res; cookies: string[] }> {
     const state = randomToken(24), verifier = randomToken(48);
-    db.prepare("INSERT INTO oauth_states (state, verifier, return_to, identity, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(state, verifier, returnTo, githubIdentity(db), new Date().toISOString());
+    await db.prepare("INSERT INTO oauth_states (state, verifier, return_to, identity, created_at) VALUES (?, ?, ?, ?, ?)")
+      .run(state, verifier, returnTo, await githubIdentity(db), new Date().toISOString());
     return {
-      r: { redirect: p.authorizeUrl(state, pkceChallenge(verifier), callbackUrl, selectAccount, scopes) },
+      r: { redirect: await p.authorizeUrl(state, pkceChallenge(verifier), callbackUrl, selectAccount, scopes) },
       cookies: [cookie(STATE_COOKIE, state, 600)],
     };
   }
 
   const setup = new OrgSetup({
     db, config, deps: appDeps, provider: setupProvider,
-    startOAuth: (returnTo, scopes) => startOAuth(returnTo, true, scopes, setupProvider),
+    startOAuth: async (returnTo, scopes) => await startOAuth(returnTo, true, scopes, setupProvider),
     sameOrigin: (req) => sameOrigin(req),
     readForm: readBody,
   });
@@ -434,27 +438,27 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
   async function auth(req: IncomingMessage, url: URL, nonce: string, cookies: Map<string, string>): Promise<{ r: Res; cookies?: string[] }> {
     const ip = clientIp(req);
     const path = url.pathname;
-    if (path.startsWith("/auth/setup") || path === "/auth/github-app/setup" || (path === "/auth/github-app/callback" && setup.ownsState(url.searchParams.get("state") ?? ""))) {
+    if (path.startsWith("/auth/setup") || path === "/auth/github-app/setup" || (path === "/auth/github-app/callback" && await setup.ownsState(url.searchParams.get("state") ?? ""))) {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
-      const out = await setup.handle(req, url, nonce, cookies, loadSession(db, cookies.get(SESSION_COOKIE))?.role === "operator");
+      const out = await setup.handle(req, url, nonce, cookies, (await loadSession(db, cookies.get(SESSION_COOKIE)))?.role === "operator");
       if (out) return out;
     }
     if (req.method === "GET" && path === "/auth/signin") {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
       const returnTo = safeReturnTo(url.searchParams.get("return_to"));
-      if (loadSession(db, cookies.get(SESSION_COOKIE))) return { r: { redirect: returnTo } };
-      if (signInBlocked()) return { r: noAppPage(nonce) };
-      return startOAuth(returnTo, url.searchParams.get("select") === "1");
+      if (await loadSession(db, cookies.get(SESSION_COOKIE))) return { r: { redirect: returnTo } };
+      if (await signInBlocked()) return { r: noAppPage(nonce) };
+      return await startOAuth(returnTo, url.searchParams.get("select") === "1");
     }
     if (req.method === "GET" && path === "/auth/authorize-app") {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
       const returnTo = safeReturnTo(url.searchParams.get("return_to"));
-      const s = loadSession(db, cookies.get(SESSION_COOKIE));
+      const s = await loadSession(db, cookies.get(SESSION_COOKIE));
       if (!s) return { r: { redirect: `/auth/signin?${new URLSearchParams({ return_to: `/auth/authorize-app?${new URLSearchParams({ return_to: returnTo })}` })}` } };
       if (s.role !== "operator") return { r: errorPage(nonce, 403, "Not authorised", "Only operators authorize AutoCraft to act as them.") };
       const appProvider = appProviderNow();
       if (!appProvider) return { r: errorPage(nonce, 409, "No GitHub App", "No GitHub App is registered, so there is nothing to authorize.") };
-      return startOAuth(`${AUTHORIZE_PREFIX}${returnTo}`, false, undefined, appProvider);
+      return await startOAuth(`${AUTHORIZE_PREFIX}${returnTo}`, false, undefined, appProvider);
     }
     if (req.method === "GET" && path === "/auth/callback") {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
@@ -464,23 +468,23 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       const state = url.searchParams.get("state") ?? "";
       const code = url.searchParams.get("code") ?? "";
-      const row = db.prepare("SELECT verifier, return_to, identity, created_at FROM oauth_states WHERE state = ?").get(state) as
+      const row = await db.prepare("SELECT verifier, return_to, identity, created_at FROM oauth_states WHERE state = ?").get(state) as
         { verifier: string; return_to: string | null; identity: string | null; created_at: string } | undefined;
       const cookieState = cookies.get(STATE_COOKIE) ?? "";
       const stateOk = !!row && safeEqual(cookieState, state);
-      if (stateOk) db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
+      if (stateOk) await db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
       if (!row || !code || !stateOk || Date.now() - Date.parse(row.created_at) > 600_000) {
         return { r: errorPage(nonce, 400, "Sign-in expired", "Start again from the sign-in link."), cookies: clear };
       }
       const plainSignIn = !row.return_to?.startsWith("setup:") && !row.return_to?.startsWith(AUTHORIZE_PREFIX);
       // A sign-in finishes under the identity it started with; if that is no longer the current one, it starts again.
-      const startedAs: "box" | "app" = row.identity === "app" ? "app" : row.identity === "box" ? "box" : githubIdentity(db);
-      const changed = (): boolean => plainSignIn && startedAs !== githubIdentity(db);
-      if (plainSignIn && signInBlocked()) return { r: noAppPage(nonce), cookies: clear };
-      if (changed()) return { r: errorPage(nonce, 400, "Sign-in failed", "The GitHub identity changed during sign-in. Start again."), cookies: clear };
+      const startedAs: "box" | "app" = row.identity === "app" ? "app" : row.identity === "box" ? "box" : await githubIdentity(db);
+      const changed = async (): Promise<boolean> => plainSignIn && startedAs !== await githubIdentity(db);
+      if (plainSignIn && await signInBlocked()) return { r: noAppPage(nonce), cookies: clear };
+      if (await changed()) return { r: errorPage(nonce, 400, "Sign-in failed", "The GitHub identity changed during sign-in. Start again."), cookies: clear };
       let tokens: Tokens | null, who: GithubUser | null;
       try {
-        const p = row.return_to?.startsWith("setup:") ? setupProvider : row.return_to?.startsWith(AUTHORIZE_PREFIX) ? (appProviderNow() ?? provider) : opts.provider || config.devAuth ? provider : providerFor(config, () => startedAs);
+        const p = row.return_to?.startsWith("setup:") ? setupProvider : row.return_to?.startsWith(AUTHORIZE_PREFIX) ? (appProviderNow() ?? provider) : opts.provider || config.devAuth ? provider : providerFor(config, async () => startedAs);
         tokens = await p.exchange(code, row.verifier, callbackUrl);
         who = tokens ? await p.identity(tokens.access) : null;
       } catch (e) {
@@ -496,31 +500,31 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       if (row.return_to?.startsWith(AUTHORIZE_PREFIX)) {
         // "Act as you": only the user token is stored. The session and the sign-in are untouched.
-        const s = loadSession(db, cookies.get(SESSION_COOKIE));
-        if (!s || s.role !== "operator" || s.login.toLowerCase() !== who.login.toLowerCase() || checkGithubId(db, s.login, who.id) === "mismatch") {
+        const s = await loadSession(db, cookies.get(SESSION_COOKIE));
+        if (!s || s.role !== "operator" || s.login.toLowerCase() !== who.login.toLowerCase() || await checkGithubId(db, s.login, who.id) === "mismatch") {
           // The token belongs to an account that may not act here: end it before answering.
           void (appProviderNow() ?? provider).revoke(tokens.access).catch(() => {});
           return { r: errorPage(nonce, 403, "Not authorised", "Sign in to the dashboard as the GitHub account you authorize, then try again."), cookies: clear };
         }
-        saveUserTokens(db, box, s.login, who.id, tokens);
-        retryWaiting(db, s.login);
-        audit(db, s.login, "github-app-authorize", s.login, { ip });
+        await saveUserTokens(db, box, s.login, who.id, tokens);
+        await retryWaiting(db, s.login);
+        await audit(db, s.login, "github-app-authorize", s.login, { ip });
         return { r: { redirect: safeReturnTo(row.return_to.slice(AUTHORIZE_PREFIX.length)) }, cookies: clear };
       }
       const login = who.login;
-      const access = getAccess(db, login);
+      const access = await getAccess(db, login);
       if (!access) {
-        auditRefusedSignIn(db, login, { ip });
+        await auditRefusedSignIn(db, login, { ip });
         return { r: errorPage(nonce, 403, "Not authorised", `The GitHub account ${login} is not on this dashboard's access list.`), cookies: clear };
       }
-      if (checkGithubId(db, access.login, who.id) === "mismatch") {
-        auditRefusedSignIn(db, login, { ip, reason: "github-id-mismatch" });
+      if (await checkGithubId(db, access.login, who.id) === "mismatch") {
+        await auditRefusedSignIn(db, login, { ip, reason: "github-id-mismatch" });
         return { r: errorPage(nonce, 403, "Not authorised", `The GitHub account ${login} is not the account that was added to this dashboard's access list.`), cookies: clear };
       }
-      if (changed()) return { r: errorPage(nonce, 400, "Sign-in failed", "The GitHub identity changed during sign-in. Start again."), cookies: clear };
-      const id = createSession(db, box, access.login, tokens, req.headers["user-agent"]);
-      if (startedAs === "app") { saveUserTokens(db, box, access.login, who.id, tokens); retryWaiting(db, access.login); }
-      audit(db, access.login, "sign-in", access.login, { ip });
+      if (await changed()) return { r: errorPage(nonce, 400, "Sign-in failed", "The GitHub identity changed during sign-in. Start again."), cookies: clear };
+      const id = await createSession(db, box, access.login, tokens, req.headers["user-agent"]);
+      if (startedAs === "app") { await saveUserTokens(db, box, access.login, who.id, tokens); await retryWaiting(db, access.login); }
+      await audit(db, access.login, "sign-in", access.login, { ip });
       return {
         r: { redirect: safeReturnTo(row.return_to) },
         cookies: [...clear, cookie(SESSION_COOKIE, id, SESSION_TTL / 1000)],
@@ -530,14 +534,14 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
       if (!sameOrigin(req)) return { r: errorPage(nonce, 403, "Refused", "This form was sent from another site.") };
       const form = await readBody(req);
-      const s = loadSession(db, cookies.get(SESSION_COOKIE));
+      const s = await loadSession(db, cookies.get(SESSION_COOKIE));
       if (!s) return { r: { redirect: `/auth/signin?${new URLSearchParams({ return_to: "/admin/github-app" })}` } };
       if (!safeEqual(form.get("csrf") ?? "", s.csrf)) return { r: errorPage(nonce, 403, "Refused", "The form expired. Reload the page and try again.") };
-      return { r: startRegistration(db, config, req, form, nonce, s) };
+      return { r: await startRegistration(db, config, req, form, nonce, s) };
     }
     if (req.method === "GET" && path === "/auth/github-app/callback") {
       if (!signinLimit.allow(ip)) return { r: errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again.") };
-      const s = loadSession(db, cookies.get(SESSION_COOKIE));
+      const s = await loadSession(db, cookies.get(SESSION_COOKIE));
       if (!s) return { r: { redirect: `/auth/signin?${new URLSearchParams({ return_to: "/admin/github-app" })}` } };
       return { r: await finishRegistration(db, config, appDeps, url, nonce, s) };
     }
@@ -545,10 +549,10 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       if (!sameOrigin(req)) return { r: errorPage(nonce, 403, "Refused", "This form was sent from another site.") };
       const form = await readBody(req);
       const id = cookies.get(SESSION_COOKIE);
-      const s = loadSession(db, id);
+      const s = await loadSession(db, id);
       if (s) {
         if (!safeEqual(form.get("csrf") ?? "", s.csrf)) return { r: errorPage(nonce, 403, "Refused", "The form expired. Reload the page and try again.") };
-        deleteSession(db, id!);
+        await deleteSession(db, id!);
       }
       return { r: { redirect: "/auth/signed-out" }, cookies: [cookie(SESSION_COOKIE, "", 0)] };
     }
@@ -577,23 +581,23 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
   }
 
   /** A request with an operator's or maintainer's session: /healthz/checks gives them its times and counts. */
-  const staffCaller = (req: IncomingMessage): boolean => {
-    const role = loadSession(db, parseCookies(req.headers.cookie).get(SESSION_COOKIE))?.role;
+  const staffCaller = async (req: IncomingMessage): Promise<boolean> => {
+    const role = (await loadSession(db, parseCookies(req.headers.cookie).get(SESSION_COOKIE)))?.role;
     return role === "operator" || role === "maintainer";
   };
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (serveHealth(req, res, () => dbReady(db)) || serveChecks(req, res, db, Date.now(), 5_000, staffCaller)) return;
+    if (await serveHealth(req, res, async () => await dbReady(db)) || await serveChecks(req, res, db, Date.now(), 5_000, staffCaller)) return;
     const nonce = randomToken(16);
     try {
       if (Date.now() - lastPrune > 3_600_000) {
         lastPrune = Date.now();
-        pruneExpired(db);
-        pruneTokens(db);
+        await pruneExpired(db);
+        await pruneTokens(db);
         void vault.sweepRevocations().catch(() => {});
       }
       // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep.
-      if (prep(db, "SELECT 1 FROM user_token_revocations WHERE attempts = 0 LIMIT 1").get()) void vault.sweepRevocations(true).catch(() => {});
+      if (await db.prepare("SELECT 1 FROM user_token_revocations WHERE attempts = 0 LIMIT 1").get()) void vault.sweepRevocations(true).catch(() => {});
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
       if (config.devAuth && (req.headers["x-forwarded-for"] !== undefined || !isLoopbackHost(req.headers.host))) {
@@ -614,17 +618,17 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       if (url.pathname === WEBHOOK_PATH) return await handleWebhook(req, res);
       const method = req.method;
       // Public: the Discord bot's privacy notice must be readable by people who are not dashboard users.
-      if (method === "GET" && url.pathname === DISCORD_PRIVACY_PATH) return send(res, nonce, { html: discordPrivacyPage(nonce, contactOf(db)) });
+      if (method === "GET" && url.pathname === DISCORD_PRIVACY_PATH) return send(res, nonce, { html: discordPrivacyPage(nonce, await contactOf(db)) });
       // Public: a Discord reporter's GitHub sign-in for filing issues (no dashboard session).
       if (FILING_IN_DISCORD && method === "GET" && (url.pathname === REPORTER_START_PATH || url.pathname === REPORTER_CALLBACK_PATH)) {
         if (!signinLimit.allow(clientIp(req))) return send(res, nonce, errorPage(nonce, 429, "Too many attempts", "Wait a few minutes and try again."));
         const out = await reporterSignIn({ db, box, provider: appProviderNow(), baseUrl: config.baseUrl }, url, cookies, nonce);
         if (out) return send(res, nonce, out.r, out.cookies);
       }
-      if (method === "GET" && url.pathname === DISCORD_TERMS_PATH) return send(res, nonce, { html: discordTermsPage(nonce, contactOf(db)) });
+      if (method === "GET" && url.pathname === DISCORD_TERMS_PATH) return send(res, nonce, { html: discordTermsPage(nonce, await contactOf(db)) });
       // Public: the favicon and the preview image, which sign-in pages and link-preview crawlers load without a session.
       if (method === "GET" && PUBLIC_FILES.has(url.pathname)) return await sendWeb(res, nonce, url.pathname);
-      const session = loadSession(db, cookies.get(SESSION_COOKIE));
+      const session = await loadSession(db, cookies.get(SESSION_COOKIE));
       if (!session) {
         const wantsPage = method === "GET" && /text\/html/.test(String(req.headers.accept ?? ""));
         if (wantsPage) {
@@ -636,7 +640,7 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
         }
         return send(res, nonce, { status: 401, json: { error: "sign-in required" } });
       }
-      if (method === "GET" && url.pathname === "/api/live") return handleLive(req, res, nonce, session);
+      if (method === "GET" && url.pathname === "/api/live") return await handleLive(req, res, nonce, session);
       if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url, nonce, session);
       if (url.pathname === "/img") return await sendImage(req, res, url, session);
       // Every other address belongs to the React app, which routes on the client.
@@ -676,7 +680,7 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       throw e;
     }
     const one = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
-    const v = handleDelivery(db, config.secrets.app?.webhookSecret ?? null, { signature: one(req.headers["x-hub-signature-256"]), event: one(req.headers["x-github-event"]) }, raw, safeEqual, config.secrets.app?.slug ?? null);
+    const v = await handleDelivery(db, config.secrets.app?.webhookSecret ?? null, { signature: one(req.headers["x-hub-signature-256"]), event: one(req.headers["x-github-event"]) }, raw, safeEqual, config.secrets.app?.slug ?? null);
     return reply(v.status);
   }
 
@@ -689,7 +693,7 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     if (req.method !== "POST") return reply(405, rpcError(-32000, "POST one JSON-RPC message; this server has no event stream"), { allow: "POST" });
     if (!sameOrigin(req)) return reply(403, rpcError(-32000, "cross-origin request refused"));
     const auth = String(req.headers.authorization ?? "");
-    const caller = loadToken(db, /^Bearer\s+(\S+)$/i.exec(auth)?.[1]);
+    const caller = await loadToken(db, /^Bearer\s+(\S+)$/i.exec(auth)?.[1]);
     // The per-address limit counts failed authentications only: behind a proxy every client shares one address.
     if (!caller && !mcpLimitIp.allow(clientIp(req))) return reply(429, rpcError(-32000, "too many requests; wait a minute"), { "retry-after": "60" });
     if (!caller) return reply(401, rpcError(-32001, "a valid AutoCraft agent token is required (Authorization: Bearer <token>); make one on the dashboard's Connect page"), { "www-authenticate": 'Bearer realm="autocraft"' });
@@ -705,12 +709,12 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg)) return reply(400, rpcError(-32600, "send one JSON-RPC message as an object; batches are not supported"));
     const m = msg as McpMsg;
     const out = await handleMcp({
-      db, baseUrl: config.baseUrl, limiter: mcpFeedback, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: answering.enabled && caller.canAnswer && (caller.role === "operator" || (caller.role === "maintainer" && maintainerWritesOn(db))),
-      user: (forWrite) => userForLogin(db, box, provider, caller.login, caller.role, forWrite),
+      db, baseUrl: config.baseUrl, limiter: mcpFeedback, expensive: () => mcpExpensive.take(caller.login.toLowerCase()), canAnswer: answering.enabled && caller.canAnswer && (caller.role === "operator" || (caller.role === "maintainer" && await maintainerWritesOn(db))),
+      user: async (forWrite) => await userForLogin(db, box, provider, caller.login, caller.role, forWrite),
       // The task tools are offered while one of the login's Task Runners reports in; they never lease.
-      ...(inferenceMode(db) === "user-local" && { userLocal: true, ...(hasFreshRunner(db, caller.login) && { run: { canWrite: claimPermission(caller.login, caller.role).canWrite } }) }),
+      ...(await inferenceMode(db) === "user-local" && { userLocal: true, ...(await hasFreshRunner(db, caller.login) && { run: { canWrite: (await claimPermission(caller.login, caller.role)).canWrite } }) }),
     }, m);
-    if (mcpWrites(m)) live.poke();
+    if (mcpWrites(m)) await live.poke();
     // A notification or a response from the client: accepted, nothing to say.
     if (!out) return reply(202, null);
     return reply(200, out);
@@ -721,8 +725,8 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
   // asked, a write permission confirmed within PERM_READ_TTL still counts, so a GitHub failure does not stall the helpers;
   // past that the call is passed over and `errors` says why.
   // Claims are helper routes: the permission reads and writes use their short busy timeout (rdb).
-  function claimPermission(login: string, role: Role): { canWrite: (repo: string) => Promise<boolean>; errors: Map<string, string> } {
-    const user = userForLogin(rdb, box, provider, login, role, true);
+  async function claimPermission(login: string, role: Role): Promise<{ canWrite: (repo: string) => Promise<boolean>; errors: Map<string, string> }> {
+    const user = await userForLogin(rdb, box, provider, login, role, true);
     const errors = new Map<string, string>();
     return {
       errors,
@@ -730,14 +734,14 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
         const app = await appPermission(rdb, login, repo);
         if (app.kind === "ok") return WRITE_PERMISSIONS.has(app.permission);
         if (app.kind === "error") {
-          if (cachedWrite(rdb, login, repo, PERM_READ_TTL)) return true;
+          if (await cachedWrite(rdb, login, repo, PERM_READ_TTL)) return true;
           errors.set(repo, app.why);
           return false;
         }
         if (await user.canWrite(repo)) return true;
-        const why = user.permissionError?.(repo);
+        const why = await user.permissionError?.(repo);
         if (!why) return false;
-        if (cachedWrite(rdb, login, repo, PERM_READ_TTL)) return true;
+        if (await cachedWrite(rdb, login, repo, PERM_READ_TTL)) return true;
         errors.set(repo, why);
         return false;
       },
@@ -760,8 +764,8 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     const tooMany = (): void => reply(429, { error: "too many requests; wait a minute" }, { "retry-after": "60" });
     const db = rdb;
     /** The runner credential's caller, or null once the refusal is sent. */
-    const runner = (): McpCaller | null => {
-      const caller = loadToken(db, bearer);
+    const runner = async (): Promise<McpCaller | null> => {
+      const caller = await loadToken(db, bearer);
       if (!caller) {
         if (!mcpLimitIp.allow(clientIp(req))) tooMany();
         else reply(401, { error: "a valid Task Runner credential is required (Authorization: Bearer <credential>); run autocraft login" }, { "www-authenticate": 'Bearer realm="autocraft"' });
@@ -776,17 +780,17 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
         const ip = clientIp(req);
         if (!loginStartLimit.allow(addressKey(ip))) return reply(429, { error: "too many logins from this address; wait a few minutes" }, { "retry-after": "600" });
         const start = parseLoginStart(await readRemoteJson(req));
-        return reply(200, startLogin(db, start, ip, config.baseUrl ?? `http://${req.headers.host ?? "localhost"}`) satisfies LoginStartReply);
+        return reply(200, await startLogin(db, start, ip, config.baseUrl ?? `http://${req.headers.host ?? "localhost"}`) satisfies LoginStartReply);
       }
       if (path === ROUTES.loginPoll) {
         if (!bearer || bearer.length > 200) return reply(401, { error: "send the credential the login was started with (Authorization: Bearer <credential>)" }, { "www-authenticate": 'Bearer realm="autocraft"' });
         if (!loginPollLimit.allow(sha256hex(bearer))) return reply(429, { error: "polled too often" }, { "retry-after": "5" });
-        const out = pollLogin(db, bearer);
+        const out = await pollLogin(db, bearer);
         if (!out && !mcpLimitIp.allow(clientIp(req))) return tooMany();
         return out ? reply(200, out satisfies LoginPollReply) : reply(401, { error: "no login was started with this credential" }, { "www-authenticate": 'Bearer realm="autocraft"' });
       }
       if (path === ROUTES.claim) {
-        const caller = runner();
+        const caller = await runner();
         if (!caller) return;
         if (!remoteClaimLimit.allow(String(caller.tokenId))) return tooMany();
         // A held claim whose client leaves stops waiting; a reply already written does not count as leaving. Listened for
@@ -796,8 +800,8 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
         if (req.socket.destroyed) gone.abort();
         const claim = remote.parseClaim(await readRemoteJson(req));
         // In the server mode no call is queued for helpers: nothing to take for a while.
-        if (inferenceMode(db) !== "user-local") return reply(200, { lease: null, retryAfter: 300, reserve: userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies ClaimReply);
-        const perm = claimPermission(caller.login, caller.role);
+        if (await inferenceMode(db) !== "user-local") return reply(200, { lease: null, retryAfter: 300, reserve: await userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies ClaimReply);
+        const perm = await claimPermission(caller.login, caller.role);
         const out = await remote.claimCall(db, caller, claim, perm.canWrite, Date.now(), { waits: claimWaits, signal: gone.signal, blocked: () => perm.errors.size > 0 });
         // Calls passed over because GitHub could not confirm the permission: the helper logs why it gets nothing.
         if (!out.lease && out.reason === undefined && perm.errors.size) out.reason = [...perm.errors.values()][0];
@@ -805,16 +809,16 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
         return reply(200, { ...out, encodings: [...ENCODINGS] } satisfies ClaimReply, { "x-held-ms": String(heldMsOf(out)) });
       }
       if (path === ROUTES.status) {
-        const caller = runner();
+        const caller = await runner();
         if (!caller) return;
         if (!remoteStatusLimit.allow(String(caller.tokenId))) return tooMany();
-        storeStatus(db, caller.tokenId, caller.login, parseStatus(await readRemoteJson(req)));
-        return reply(200, { ok: true, reserve: userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies StatusReply);
+        await storeStatus(db, caller.tokenId, caller.login, parseStatus(await readRemoteJson(req)));
+        return reply(200, { ok: true, reserve: await userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies StatusReply);
       }
       const tool = path.startsWith(`${ROUTES.tool}/`) ? /^([a-z][a-z0-9_-]{0,40})\/([a-z][a-z0-9_]{0,60})$/.exec(path.slice(ROUTES.tool.length + 1)) : null;
       if (![ROUTES.bundle, ROUTES.heartbeat, ROUTES.submit, ROUTES.release, ROUTES.tarball].includes(path as never) && !tool) return reply(404, { error: "not found" });
       // An unknown secret counts against the address; a known one whose lease ended or went back to the queue is answered 410.
-      const state = remote.leaseState(db, bearer);
+      const state = await remote.leaseState(db, bearer);
       if (!state) {
         if (!mcpLimitIp.allow(clientIp(req))) return tooMany();
         return reply(401, { error: "a lease secret is required (Authorization: Bearer <secret>)" }, { "www-authenticate": 'Bearer realm="autocraft"' });
@@ -822,16 +826,16 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
       if (path !== ROUTES.tarball && !tool && !remoteLeaseLimit.allow(String(state.id))) return tooMany();
       const gone = (): void => reply(410, { error: "the lease is gone (expired, withdrawn or already submitted)" });
       if (path === ROUTES.bundle) {
-        const b = remote.bundleOf(db, bearer);
+        const b = await remote.bundleOf(db, bearer);
         return b ? reply(200, b) : gone();
       }
-      if (path === ROUTES.heartbeat) return remote.heartbeat(db, bearer, await readRemoteJson(req)) ? reply(200, { ok: true }) : gone();
-      if (path === ROUTES.release) return remote.releaseCall(db, bearer, await readRemoteJson(req)) ? reply(200, { ok: true }) : gone();
+      if (path === ROUTES.heartbeat) return await remote.heartbeat(db, bearer, await readRemoteJson(req)) ? reply(200, { ok: true }) : gone();
+      if (path === ROUTES.release) return await remote.releaseCall(db, bearer, await readRemoteJson(req)) ? reply(200, { ok: true }) : gone();
       if (path === ROUTES.submit) {
-        const out = remote.submitCall(db, bearer, await readRemoteJson(req, SUBMIT_BODY_LIMIT));
+        const out = await remote.submitCall(db, bearer, await readRemoteJson(req, SUBMIT_BODY_LIMIT));
         return out ? reply(200, out) : gone();
       }
-      const lease = taskLease(db, bearer);
+      const lease = await taskLease(db, bearer);
       if (!lease) return gone();
       if (path === ROUTES.tarball) {
         if (!remoteArchiveLimit.allow(String(lease.id))) return tooMany();
@@ -877,11 +881,11 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     if (req.method !== "POST") return reply(405, rpcError(-32000, "POST one JSON-RPC message; this server has no event stream"), { allow: "POST" });
     if (!sameOrigin(req)) return reply(403, rpcError(-32000, "cross-origin request refused"));
     const bearer = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization ?? ""))?.[1];
-    if (!remote.leaseState(db, bearer)) {
+    if (!await remote.leaseState(db, bearer)) {
       if (!mcpLimitIp.allow(clientIp(req))) return reply(429, rpcError(-32000, "too many requests; wait a minute"), { "retry-after": "60" });
       return reply(401, rpcError(-32001, "a lease secret is required (Authorization: Bearer <secret>)"), { "www-authenticate": 'Bearer realm="autocraft"' });
     }
-    const lease = taskLease(db, bearer);
+    const lease = await taskLease(db, bearer);
     if (!lease) return reply(410, rpcError(-32001, "the lease is gone (expired, withdrawn or already submitted)"));
     const server = url.pathname.slice(ROUTES.mcp.length + 1);
     const tools = TASK_TOOLS[server];
@@ -936,9 +940,9 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
     // An image is served only when one of the repos whose text contains it is visible to this user.
     const raw = url.searchParams.get("u") ?? "";
     const href = allowedImage(raw)?.href;
-    const owners = href ? imageIndex.reposOf(href) : [];
+    const owners = href ? await imageIndex.reposOf(href) : [];
     if (owners.length) {
-      const visible = new Set(await visibleTo(db, makeUser(db, box, provider, session, false, githubIdentity(db) === "app")));
+      const visible = new Set(await visibleTo(db, makeUser(db, box, provider, session, false, await githubIdentity(db) === "app")));
       if (!owners.some((o) => visible.has(o))) {
         res.writeHead(404, secure({ "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }, "default-src 'none'"));
         return void res.end("not an image of a tracked repo");
@@ -1015,14 +1019,14 @@ export function createApp(opts: AppOptions & { routes: Route[] }) {
   return { handle, routes: opts.routes, provider, live, close: () => { clearInterval(maintenance); claimWaits.close(); live.close(); } };
 }
 
-export async function startServer(opts: AppOptions): Promise<{ server: Server; url: string; app: ReturnType<typeof createApp>; close(): Promise<void> }> {
+export async function startServer(opts: AppOptions): Promise<{ server: Server; url: string; app: Awaited<ReturnType<typeof createApp>>; close(): Promise<void> }> {
   const feedbackLimiter = opts.feedbackLimiter ?? new RateLimiter(60, 3600_000);
-  const app = createApp({ ...opts, feedbackLimiter, routes: opts.routes ?? (await defaultRoutes(feedbackLimiter, opts.githubUserId)) });
+  const app = await createApp({ ...opts, feedbackLimiter, routes: opts.routes ?? (await defaultRoutes(feedbackLimiter, opts.githubUserId)) });
   const server = createServer({ requestTimeout: 30_000, headersTimeout: 15_000 }, (req, res) => void app.handle(req, res));
   // Job processes expire user-local leases only while this process stamps that it serves (src/remote/liveness.ts). The
   // stamp uses the helper routes' short busy timeout: a busy database skips a tick rather than stalling the event loop.
   if (TIME_SCALE !== 1) console.log(`WARNING: AUTOCRAFT_REMOTE_TIME_SCALE=${TIME_SCALE}: user-local time windows are shortened (test only)`);
-  const stopLiveness = startLiveness(opts.remoteDb ?? opts.db);
+  const stopLiveness = await startLiveness(opts.remoteDb ?? opts.db);
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(opts.config.port, opts.config.host, resolve);

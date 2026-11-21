@@ -2,13 +2,12 @@
 // least every STATUS_EVERY_S while it runs; the last one is kept per runner credential, with its slots and busy count. The
 // planner's room counts only runners whose last status is `ready` and fresh, by their free slots (room.ts); the Connect
 // page (GET /api/runners) and my_work list the user's own.
-import type { DatabaseSync } from "node:sqlite";
-import { prep } from "../sql-cache.ts";
 import { HttpError } from "../dash/server/util.ts";
 import { cooloffOf } from "./cooloff.ts";
 import { isTier } from "./mode.ts";
 import { scaled } from "./time-scale.ts";
 import { READINESS, STATUS_EVERY_S, type HarnessId, type HelperInfo, type HelperStatus, type Machine, type Readiness, type Reserve, type Tier, type UsageReading, type UsageWindow } from "./protocol.ts";
+import type { Db } from "../db/index.ts";
 
 /** A status this old no longer counts: one report interval and a minute of slack. */
 export const STATUS_FRESH_MS = scaled((STATUS_EVERY_S + 60) * 1000);
@@ -79,28 +78,28 @@ export function parseStatus(raw: unknown): HelperStatus {
  * Keeps a helper's status as the last one of its credential, and the machine it names on the credential. Rows of deleted
  * credentials go with the dashboard's minute maintenance (pruneRemote).
  */
-export function storeStatus(db: DatabaseSync, tokenId: number, login: string, s: HelperStatus, nowMs: number = Date.now()): void {
-  prep(db, `INSERT INTO main.remote_helpers (token_id, login, readiness, until, reason, harness, models, reserve, usage, reported_at, slots, busy, last_error, helper_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+export async function storeStatus(db: Db, tokenId: number, login: string, s: HelperStatus, nowMs: number = Date.now()): Promise<void> {
+  await db.prepare(`INSERT INTO main.remote_helpers (token_id, login, readiness, until, reason, harness, models, reserve, usage, reported_at, slots, busy, last_error, helper_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (token_id) DO UPDATE SET login = excluded.login, readiness = excluded.readiness, until = excluded.until, reason = excluded.reason, harness = excluded.harness,
       models = excluded.models, reserve = excluded.reserve, usage = excluded.usage, reported_at = excluded.reported_at,
       slots = excluded.slots, busy = excluded.busy, last_error = excluded.last_error, helper_version = COALESCE(excluded.helper_version, remote_helpers.helper_version)`)
     .run(tokenId, login, s.readiness, s.until ?? null, s.reason ?? null, s.harness, JSON.stringify(s.models), JSON.stringify(s.reserve), s.usage ? JSON.stringify(s.usage) : null, nowMs, s.slots, s.busy, s.lastError ? JSON.stringify(s.lastError) : null, s.helperVersion ?? null);
-  if (s.machine) prep(db, "UPDATE main.mcp_tokens SET machine = ? WHERE id = ? AND machine IS NOT ?").run(JSON.stringify(s.machine), tokenId, JSON.stringify(s.machine));
+  if (s.machine) await db.prepare("UPDATE main.mcp_tokens SET machine = ? WHERE id = ? AND machine IS NOT ?").run(JSON.stringify(s.machine), tokenId, JSON.stringify(s.machine));
 }
 
 /** Whether the login has a Task Runner whose last status is fresh (the MCP Connector then offers the task tools). */
-export function hasFreshRunner(db: DatabaseSync, login: string, nowMs: number = Date.now()): boolean {
-  return prep(db, `SELECT 1 FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
+export async function hasFreshRunner(db: Db, login: string, nowMs: number = Date.now()): Promise<boolean> {
+  return await db.prepare(`SELECT 1 FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
     WHERE t.login = ? AND t.kind = 'runner' AND t.expires_at > ? AND h.reported_at >= ? LIMIT 1`).get(login, new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) !== undefined;
 }
 
 /** The login's helpers: every live Task Runner credential, with its last status. */
-export function listHelpers(db: DatabaseSync, login: string, nowMs: number = Date.now()): HelperInfo[] {
-  const rows = prep(db, `SELECT t.id, t.label, t.last_used_at, h.readiness, h.until, h.reason, h.harness, h.models, h.reserve, h.usage, h.reported_at, h.slots, h.busy, h.last_error
+export async function listHelpers(db: Db, login: string, nowMs: number = Date.now()): Promise<HelperInfo[]> {
+  const rows = await db.prepare(`SELECT t.id, t.label, t.last_used_at, h.readiness, h.until, h.reason, h.harness, h.models, h.reserve, h.usage, h.reported_at, h.slots, h.busy, h.last_error
       FROM main.mcp_tokens t LEFT JOIN main.remote_helpers h ON h.token_id = t.id
     WHERE t.login = ? AND t.kind = 'runner' AND t.expires_at > ? ORDER BY t.created_at DESC, t.id DESC`).all(login, new Date(nowMs).toISOString()) as
     { id: number; label: string | null; last_used_at: string | null; readiness: Readiness | null; until: string | null; reason: string | null; harness: HarnessId | null; models: string | null; reserve: string | null; usage: string | null; reported_at: number | null; slots: number | null; busy: number | null; last_error: string | null }[];
-  const cooloff = cooloffOf(db, login, nowMs);
+  const cooloff = await cooloffOf(db, login, nowMs);
   return rows.map((r) => {
     const reported = r.reported_at === null ? null : Number(r.reported_at);
     const used = r.last_used_at ? Date.parse(r.last_used_at) : null;

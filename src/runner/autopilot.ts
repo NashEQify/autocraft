@@ -11,7 +11,6 @@
 // The planner reads the database, writes only its Plan cache (item_plans) and queues jobs; the runner starts them.
 // Each lane's `detect` reads the Plans of the pass (src/core/plan-set.ts).
 import { RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type { PipelineState, StageLimit } from "../../web/src/api/types.ts";
 import { readSeqs, TOPICS } from "../live.ts";
 import { pendingConversations } from "../conversations/store.ts";
@@ -66,6 +65,8 @@ import { JUDGEMENT_MODELS, judgementModel } from "../decide/judgement.ts";
 import { FAST_FLOOR, fastFirst, fastScores } from "../fasttrack.ts";
 import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
 import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
+import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
@@ -88,8 +89,8 @@ const KEY_CURSOR = "pipeline_review_cursor";
 const KEY_VERIFY_CURSOR = "pipeline_verify_cursor";
 const KEY_RESET = "limit_reset_at:";
 
-const getSetting = (db: DatabaseSync, key: string): string | null =>
-  setting(db, key) ?? null;
+const getSetting = async (db: Db, key: string): Promise<string | null> =>
+  await setting(db, key) ?? null;
 const setSetting = writeSetting;
 
 // ---- lanes ---------------------------------------------------------------------
@@ -130,14 +131,14 @@ export type Lane = {
   /** The change topics the lane's input lives in (default: INPUT_TOPICS). A job that handled nothing is not queued again while these and `extra` are unchanged. */
   topics?: string[];
   /** Input that no topic reports, e.g. the state of sandbox tasks. */
-  extra?: (db: DatabaseSync) => string;
+  extra?: (db: Db) => Promise<string>;
   /** Least time between two of the lane's jobs: for cheap recomputes whose input moves in bursts (a sync writes in several transactions) and that no stage waits on. */
   minGapMs?: number;
-  detect: (db: DatabaseSync, ctx: PlanCtx) => Candidate[];
+  detect: (db: Db, ctx: PlanCtx) => Promise<Candidate[]>;
   /** Work score of the lane's best item, null when it has none. Lanes that define it share capacity: see orderLanes(). */
-  topScore?: (db: DatabaseSync, ctx: PlanCtx) => number | null;
+  topScore?: (db: Db, ctx: PlanCtx) => Promise<number | null>;
   /** Runs when the candidate was queued; may write. */
-  chosen?: (db: DatabaseSync, c: Candidate) => void;
+  chosen?: (db: Db, c: Candidate) => Promise<void>;
 };
 
 /** What every lane's detect shares, resolved once per planner pass. */
@@ -158,45 +159,45 @@ export type PlanCtx = {
 };
 
 /** Only the repos in scope (pipeline on, narrowed by the pilot) are planned for; a job for another repo is never proposed. */
-export const planCtx = (db: DatabaseSync, incremental = false): PlanCtx => {
+export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => {
   // The outside-author holds first: the facts below read them through the pilot condition (src/outside.ts).
   const wake: number[] = [];
   try {
-    const outside = refreshOutsideHolds(db);
+    const outside = await refreshOutsideHolds(db);
     if (outside.wakeAt !== null) wake.push(outside.wakeAt);
   } catch (e) {
     console.error(`autopilot: outside-author holds: ${(e as Error).message}`);
   }
   if (incremental) {
     // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
-    return inReadSnapshot(db, () => {
-      rereadSettingsSnapshot(db);
-      const scope = scopeRepos(db);
-      const run = latestRun(db);
-      const pass = planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
-      return { run, tracked: trackedNames(db).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {} };
+    return await inReadSnapshot(db, async () => {
+      await rereadSettingsSnapshot(db);
+      const scope = await scopeRepos(db);
+      const run = await latestRun(db);
+      const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
+      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {} };
     });
   }
-  const scope = scopeRepos(db);
-  const run = latestRun(db);
-  return { run, tracked: trackedNames(db).filter((r) => scope.has(r)), plans: loadPlanSet(db, { run }), wake, notes: {} };
+  const scope = await scopeRepos(db);
+  const run = await latestRun(db);
+  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: await loadPlanSet(db, { run }), wake, notes: {} };
 };
 
 /** The pass's Plans (loaded on first use when the ctx came without). */
-const plansOf = (db: DatabaseSync, ctx: PlanCtx): PlanSet => (ctx.plans ??= loadPlanSet(db, { run: ctx.run }));
+const plansOf = async (db: Db, ctx: PlanCtx): Promise<PlanSet> => (ctx.plans ??= await loadPlanSet(db, { run: ctx.run }));
 /**
  * The planned items of `kind` that a job of `step`, which serves every repo, gets to work now. In the user-local mode a job
  * leaves out the Claude calls no Task Runner takes (the pools' poolRoom, the pair check's taker test), so an item that only
  * such a call would serve is not work: a job for it would handle nothing and be queued again on every change of its input.
  * `free`: the item needs no Claude call now (no model, or Jev while Jev may be called).
  */
-function servable(db: DatabaseSync, ctx: PlanCtx, kind: ActionKind, step: string, free: (p: PlannedItem) => boolean = () => false): PlannedItem[] {
-  const untaken = (ctx.untaken ??= untakenTest(db)), byRepo = new Map<string, string | null>();
+async function servable(db: Db, ctx: PlanCtx, kind: ActionKind, step: string, free: (p: PlannedItem) => boolean = () => false): Promise<PlannedItem[]> {
+  const untaken = (ctx.untaken ??= await untakenTest(db)), byRepo = new Map<string, string | null>();
   let why: string | null = null;
-  const out = plannedItems(db, kind, { plans: plansOf(db, ctx) }).filter((p) => {
+  const out = await filterSeq((await plannedItems(db, kind, { plans: await plansOf(db, ctx) })), async (p) => {
     if (free(p)) return true;
     const repo = p.facts.repo;
-    if (!byRepo.has(repo)) byRepo.set(repo, untaken({ step, repo }));
+    if (!byRepo.has(repo)) byRepo.set(repo, await untaken({ step, repo }));
     const w = byRepo.get(repo)!;
     why ??= w;
     return w === null;
@@ -207,7 +208,7 @@ function servable(db: DatabaseSync, ctx: PlanCtx, kind: ActionKind, step: string
 }
 
 /** The pass's fast-track scores, keyed by `repo#number`. */
-const fastOf = (db: DatabaseSync, ctx: PlanCtx): Map<string, number> => (ctx.fast ??= fastScores(db));
+const fastOf = async (db: Db, ctx: PlanCtx): Promise<Map<string, number>> => (ctx.fast ??= await fastScores(db));
 
 /** Whether the guard would let the pipeline make the write an action stands for: the global switch and the repo's approval. */
 const wantOf = (a: Action): Want => ({ kind: a.kind, ...(typeof a.params?.bucket === "string" ? { bucket: a.params.bucket } : {}) });
@@ -223,37 +224,37 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
 export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs"].includes(t));
 
 /** User-local mode: the Task Runners that could take calls (takerSignature). Work a pool left for want of a taker waits on it. */
-const takersOf = (db: DatabaseSync): string => (inferenceMode(db) === "user-local" ? takerSignature(db) : "");
+const takersOf = async (db: Db): Promise<string> => (await inferenceMode(db) === "user-local" ? await takerSignature(db) : "");
 
 /** Sandbox tasks that ended, for lanes that read their results. */
-const tasksSig = (db: DatabaseSync): string =>
-  String((db.prepare("SELECT COUNT(*) AS n FROM main.build_tasks WHERE state IN ('done', 'failed', 'cancelled', 'lost')").get() as { n: number }).n);
+const tasksSig = async (db: Db): Promise<string> =>
+  String((await db.prepare("SELECT COUNT(*) AS n FROM main.build_tasks WHERE state IN ('done', 'failed', 'cancelled', 'lost')").get() as { n: number }).n);
 
 /** Daily limits are not a topic of their own (they share `jobs`). */
-const limitsSig = (db: DatabaseSync): string =>
-  String((db.prepare("SELECT group_concat(step || '=' || COALESCE(per_day, 'n'), ',') AS s FROM (SELECT step, per_day FROM stage_limits ORDER BY step)").get() as { s: string | null }).s ?? "")
-  + String((db.prepare(`SELECT group_concat(key || '=' || value, ',') AS s FROM (SELECT key, value FROM settings WHERE key LIKE '${KEY_RESET}%' OR key = 'step_parallel' ORDER BY key)`).get() as { s: string | null }).s ?? "");
+const limitsSig = async (db: Db): Promise<string> =>
+  String((await db.prepare("SELECT group_concat(step || '=' || COALESCE(per_day, 'n'), ',') AS s FROM (SELECT step, per_day FROM stage_limits ORDER BY step)").get() as { s: string | null }).s ?? "")
+  + String((await db.prepare(`SELECT group_concat(key || '=' || value, ',') AS s FROM (SELECT key, value FROM settings WHERE key LIKE '${KEY_RESET}%' OR key = 'step_parallel' ORDER BY key)`).get() as { s: string | null }).s ?? "");
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
 type JobEnd = { id: number; endedAt: string; state: string; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null };
 
 /** Job and limit reads of one planner pass, loaded on first use. Other connections may start or end jobs meanwhile; applyProposals re-checks blocks and limits with fresh reads. */
-type PassReads = { db: DatabaseSync; limits?: Map<string, LimitRow>; started?: { day: string; rows: { step: string; started_at: string; items: number | null }[] }; ends?: (JobEnd & { step: string; repo: string | null; requested_by: string | null })[] };
+type PassReads = { db: Db; limits?: Map<string, LimitRow>; started?: { day: string; rows: { step: string; started_at: string; items: number | null }[] }; ends?: (JobEnd & { step: string; repo: string | null; requested_by: string | null })[] };
 let passReads: PassReads | null = null;
-const passOf = (db: DatabaseSync): PassReads | null => (passReads?.db === db ? passReads : null);
+const passOf = (db: Db): PassReads | null => (passReads?.db === db ? passReads : null);
 
-function withPassReads<T>(db: DatabaseSync, fn: () => T): T {
-  if (passReads) return fn();
+async function withPassReads<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+  if (passReads) return await fn();
   passReads = { db };
-  try { return fn(); } finally { passReads = null; }
+  try { return await fn(); } finally { passReads = null; }
 }
 
-function lastJobEnd(db: DatabaseSync, step: string, repo: string | null, requestedBy?: string): JobEnd | undefined {
+async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy?: string): Promise<JobEnd | undefined> {
   const pass = passOf(db);
   if (pass) {
     // The newest ended job of each step, repo and requester; the answer is the newest of those that match.
-    pass.ends ??= db.prepare(`SELECT id, step, repo, requested_by, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE id IN (
+    pass.ends ??= await db.prepare(`SELECT id, step, repo, requested_by, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE id IN (
       SELECT MAX(id) FROM jobs WHERE ended_at IS NOT NULL AND COALESCE(error, '') <> ? GROUP BY step, repo, requested_by)`).all(RUNNER_STOPPED) as NonNullable<PassReads["ends"]>;
     let best: NonNullable<PassReads["ends"]>[number] | undefined;
     for (const e of pass.ends) if (e.step === step && (repo === null || e.repo === repo) && (requestedBy === undefined || e.requested_by === requestedBy) && (!best || e.id > best.id)) best = e;
@@ -261,7 +262,7 @@ function lastJobEnd(db: DatabaseSync, step: string, repo: string | null, request
     const { step: _s, repo: _r, requested_by: _b, ...end } = best;
     return end;
   }
-  return db.prepare(`SELECT id, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?)
+  return await db.prepare(`SELECT id, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?)
     AND ended_at IS NOT NULL AND (? IS NULL OR requested_by = ?) AND COALESCE(error, '') <> ? ORDER BY id DESC LIMIT 1`)
     .get(step, repo, repo, requestedBy ?? null, requestedBy ?? null, RUNNER_STOPPED) as JobEnd | undefined;
 }
@@ -275,13 +276,14 @@ type FpRecord = { job: number; fp: string };
 const fpKey = (step: string, repo: string | null): string => `pipeline_fp:${step}|${repo ?? ""}`;
 
 /** What the lane's input looked like: the step, its repo, and the counters of the topics it reads. */
-export function fingerprintOf(db: DatabaseSync, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs: Record<string, number> = readSeqs(db)): string {
+export async function fingerprintOf(db: Db, lane: Pick<Lane, "topics" | "extra">, step: string, params: Params, seqs?: Record<string, number>): Promise<string> {
+  if (seqs === undefined) seqs = await readSeqs(db);
   const topics = lane.topics ?? INPUT_TOPICS;
-  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), lane.extra?.(db) ?? "", takersOf(db)].join("|");
+  return [step, typeof params.repo === "string" ? params.repo : "", ...topics.map((t) => seqs[t] ?? 0), await lane.extra?.(db) ?? "", await takersOf(db)].join("|");
 }
 
-function fpRecord(db: DatabaseSync, step: string, repo: string | null): FpRecord | null {
-  const v = getSetting(db, fpKey(step, repo));
+async function fpRecord(db: Db, step: string, repo: string | null): Promise<FpRecord | null> {
+  const v = await getSetting(db, fpKey(step, repo));
   if (!v) return null;
   try { return JSON.parse(v) as FpRecord; } catch { return null; }
 }
@@ -294,9 +296,9 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
 }
 
 /** Per repo approved for fixing issues: whether a patch round is due and its first new candidate (highest score). */
-function fixWork(db: DatabaseSync, tracked: string[], plans: PlanSet): Map<string, { retry: boolean; top?: { number: number; score: number | null } }> {
+async function fixWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, { retry: boolean; top?: { number: number; score: number | null } }>> {
   const repos = new Set(tracked), out = new Map<string, { retry: boolean; top?: { number: number; score: number | null } }>();
-  for (const p of allowed(plannedItems(db, "fixissue", { plans }))) {
+  for (const p of allowed(await plannedItems(db, "fixissue", { plans }))) {
     const { repo, number, score } = p.facts;
     if (!repos.has(repo)) continue;
     const w = out.get(repo) ?? out.set(repo, { retry: false }).get(repo)!;
@@ -325,10 +327,10 @@ export function orderLanes<T extends { name: string }>(lanes: T[], tops: Map<str
 }
 
 /** Repos with a CI-fix action of one of the buckets that the guard lets the pipeline carry out (rerun: CI approval; work and collect: a push, or a comment on a closed branch). */
-function cifixRepos(db: DatabaseSync, ctx: PlanCtx, buckets: string[]): string[] {
+async function cifixRepos(db: Db, ctx: PlanCtx, buckets: string[]): Promise<string[]> {
   const repos = new Set(ctx.tracked);
-  const due = allowed(planned(db, "cifix", { plans: plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
-  return flightFirst(plansOf(db, ctx), [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort());
+  const due = allowed(await planned(db, "cifix", { plans: await plansOf(db, ctx) })).filter((p) => buckets.includes(String(p.action.params?.bucket)));
+  return flightFirst(await plansOf(db, ctx), [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort());
 }
 
 /** The code of each lane, keyed by name. Names, steps and order come from the stage registry. */
@@ -336,17 +338,17 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   {
     name: "classify",
     // Jev classifies the items Jev is due for without a Task Runner; Haiku's calls need one.
-    detect: (db, ctx) => {
-      const jev = !!ctx.run && jevUsable(db);
-      return ctx.run && servable(db, ctx, "classify", "classify-new", (p) => jev && p.action.params?.source === "jev").length ? [{ step: "classify-new", params: {} }] : [];
+    detect: async (db, ctx) => {
+      const jev = !!ctx.run && await jevUsable(db);
+      return ctx.run && (await servable(db, ctx, "classify", "classify-new", (p) => jev && p.action.params?.source === "jev")).length ? [{ step: "classify-new", params: {} }] : [];
     },
   },
   {
     // Items without a priority at their current text hash; the scores of the others are refreshed by the same job.
     name: "priority",
-    detect: (db, ctx) => {
-      const jev = jevUsable(db);
-      return servable(db, ctx, "prioritize", "prioritize", () => jev).length ? [{ step: "prioritize", params: {} }] : [];
+    detect: async (db, ctx) => {
+      const jev = await jevUsable(db);
+      return (await servable(db, ctx, "prioritize", "prioritize", () => jev)).length ? [{ step: "prioritize", params: {} }] : [];
     },
   },
   {
@@ -355,46 +357,46 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "rank",
     topics: ["rank-inputs"],
     minGapMs: 60_000,
-    detect: () => [{ step: "rank", params: {} }],
+    detect: async () => [{ step: "rank", params: {} }],
   },
   {
     name: "embed",
-    detect: (db, ctx) => (embedDue(db, embedderId(modelName()), plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
+    detect: async (db, ctx) => (await embedDue(db, embedderId(modelName()), await plansOf(db, ctx)) ? [{ step: "embed", params: {} }] : []),
   },
   {
     // Before Decide: items held as duplicates wait out the later stages.
     name: "dupes",
-    detect: (db, ctx) => {
-      const plans = plansOf(db, ctx);
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx);
       // Scans (local vectors), group questions and answers need no model; a pair check needs a Task Runner, also for its Jev half.
-      return servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan || !!p.action.params?.group).length || plannedItems(db, "dupe-answer", { plans }).length ? [{ step: "dupes", params: {} }] : [];
+      return (await servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan || !!p.action.params?.group)).length || (await plannedItems(db, "dupe-answer", { plans })).length ? [{ step: "dupes", params: {} }] : [];
     },
   },
   {
     // Each duplicate group is compared once its pairs are checked; the comparison asks the group decision.
     name: "dupes-compare",
     // A set settled by rule (a closed member, a lone member) needs no model; the others need a Task Runner.
-    detect: (db, ctx) => (servable(db, ctx, "dupes-compare", "dupes-compare", (p) => p.facts.inCompareSet === "rule").length ? [{ step: "dupes-compare", params: {} }] : []),
+    detect: async (db, ctx) => ((await servable(db, ctx, "dupes-compare", "dupes-compare", (p) => p.facts.inCompareSet === "rule")).length ? [{ step: "dupes-compare", params: {} }] : []),
   },
   {
     name: "decide",
     // Open scope decisions without a recommendation (asked before recommendations existed) also need a job; an answered-null one has recommended_by set.
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       // A recommendation that failed is tried again once its backoff ends.
-      for (const r of db.prepare("SELECT recommend_failed_at AS at FROM decisions WHERE answer IS NULL AND recommend_failed_at > ?").all(new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      for (const r of await db.prepare("SELECT recommend_failed_at AS at FROM decisions WHERE answer IS NULL AND recommend_failed_at > ?").all(new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
       // A new scope decision is asked without a model; the prepare calls Opus.
-      return servable(db, ctx, "decide", "decide", (p) => p.action.params?.source === "new").length ? [{ step: "decide", params: {} }] : [];
+      return (await servable(db, ctx, "decide", "decide", (p) => p.action.params?.source === "new")).length ? [{ step: "decide", params: {} }] : [];
     },
   },
   {
     // One repo per job, round robin; the repo's checks come before its review.
     name: "review",
     perRepo: true,
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       const out: Candidate[] = [];
-      const top = firstByRepo(planned(db, "review", { plans: plansOf(db, ctx) }));
+      const top = firstByRepo(await planned(db, "review", { plans: await plansOf(db, ctx) }));
       // A PR waiting out the minimum time between reviews, the conflict merge cap or the backoff of an unsent comment is planned again when it ends.
-      for (const p of plansOf(db, ctx).prs) {
+      for (const p of (await plansOf(db, ctx)).prs) {
         const f = p.facts;
         for (const t of [f.reviewHold?.until, f.conflict?.until, f.fixup?.unsent, f.cifix?.unsent, ...f.carry.map((c) => c.unsent)]) {
           const at = typeof t === "object" ? t.until : t;
@@ -402,23 +404,23 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         }
       }
       // No other stage re-reads the checks of a head that was stored as running or red: a PR whose review waits for CI has its repo's checks read again, at most once per WAITING_CI_RECHECK_MS.
-      const ciWait = new Set(plansOf(db, ctx).prs.filter((p) => p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red && p.plan.wait === p.facts.reviewHold.wait).map((p) => p.facts.repo));
-      for (const repo of flightFirst(plansOf(db, ctx), fastFirst(db, roundRobin(ctx.tracked, getSetting(db, KEY_CURSOR)), (r) => top.get(r)?.facts.number, fastOf(db, ctx)))) {
+      const ciWait = new Set((await plansOf(db, ctx)).prs.filter((p) => p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red && p.plan.wait === p.facts.reviewHold.wait).map((p) => p.facts.repo));
+      for (const repo of flightFirst(await plansOf(db, ctx), await fastFirst(db, roundRobin(ctx.tracked, await getSetting(db, KEY_CURSOR)), (r) => top.get(r)?.facts.number, await fastOf(db, ctx)))) {
         if (!top.has(repo)) continue;
-        const checks = lastJobEnd(db, "checks", repo);
+        const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
         const review = { step: "opus-review", params: { repo } };
         out.push(fresh ? review : { step: "checks", params: { repo }, poll: true, gate: review });
       }
       // A repo whose waiting heads have all been pending for more than an hour is read every 5 minutes instead.
-      const waiting = plansOf(db, ctx).prs.filter((p) => ciWait.has(p.facts.repo) && p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red);
-      const updated = new Map(waiting.length ? (db.prepare("SELECT i.repo || '#' || i.number AS k, i.updated_at FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1")
+      const waiting = (await plansOf(db, ctx)).prs.filter((p) => ciWait.has(p.facts.repo) && p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red);
+      const updated = new Map(waiting.length ? (await db.prepare("SELECT i.repo || '#' || i.number AS k, i.updated_at FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1")
         .all(JSON.stringify(waiting.map((p) => [p.facts.repo, p.facts.number]))) as { k: string; updated_at: string | null }[]).map((r) => [r.k, r.updated_at]) : []);
       const young = new Set(waiting.filter((p) => { const u = updated.get(`${p.facts.repo}#${p.facts.number}`); return !!u && Date.now() - Date.parse(u) <= 3600_000; })
         .map((p) => p.facts.repo));
       for (const repo of [...ciWait].sort()) {
         if (out.some((c) => c.params.repo === repo)) continue;
-        const last = lastJobEnd(db, "checks", repo);
+        const last = await lastJobEnd(db, "checks", repo);
         const gap = young.has(repo) ? WAITING_CI_RECHECK_MS : 5 * 60_000;
         if (last && Date.now() - Date.parse(last.endedAt) < gap) {
           ctx.wake?.push(Date.parse(last.endedAt) + gap);
@@ -428,38 +430,38 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       }
       return out;
     },
-    topScore: (db, ctx) => {
-      const top = firstByRepo(planned(db, "review", { plans: plansOf(db, ctx) }));
+    topScore: async (db, ctx) => {
+      const top = firstByRepo(await planned(db, "review", { plans: await plansOf(db, ctx) }));
       return bestScore(ctx.tracked.map((repo) => top.get(repo)?.facts.score));
     },
-    chosen: (db, c) => {
-      if (c.step === "opus-review") setSetting(db, KEY_CURSOR, String(c.params.repo));
+    chosen: async (db, c) => {
+      if (c.step === "opus-review") await setSetting(db, KEY_CURSOR, String(c.params.repo));
     },
   },
   {
     name: "labels",
     perRepo: true,
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       if (!ctx.run) return [];
-      const repos = new Set(allowed(plannedItems(db, "label", { plans: plansOf(db, ctx) })).map((p) => p.facts.repo));
+      const repos = new Set(allowed(await plannedItems(db, "label", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       // A repo whose GitHub write budget is used up would label nothing (the writes are refused as paced): it waits for the window to move.
       const now = Date.now();
-      return ctx.tracked.filter((repo) => {
+      return (await filterSeq(ctx.tracked, async (repo) => {
         if (!repos.has(repo)) return false;
-        const wait = pipelineWriteWait(db, "labels-apply", repo, now);
+        const wait = await pipelineWriteWait(db, "labels-apply", repo, now);
         if (wait <= PACE_MAX_WAIT_MS) return true;
         ctx.wake?.push(now + wait);
         if (ctx.notes) ctx.notes["labels-apply"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
         return false;
-      }).map((repo) => ({ step: "labels-apply", params: { repo } }));
+      })).map((repo) => ({ step: "labels-apply", params: { repo } }));
     },
   },
   {
     // Needs no merge approval: asking writes only decisions.
     name: "merge-ask",
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       const repos = new Set(ctx.tracked);
-      return allowed(planned(db, "ask-merge", { plans: plansOf(db, ctx) })).some((p) => repos.has(p.facts.repo)) ? [{ step: "merge-ask", params: {} }] : [];
+      return allowed(await planned(db, "ask-merge", { plans: await plansOf(db, ctx) })).some((p) => repos.has(p.facts.repo)) ? [{ step: "merge-ask", params: {} }] : [];
     },
   },
   {
@@ -467,17 +469,17 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "merge",
     perRepo: true,
     extra: tasksSig,
-    detect: (db, ctx) => {
-      const plans = plansOf(db, ctx);
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx);
       // The merge queue: PRs with a queue state (merged ones too), in repos approved for merging.
       const queue = plans.prs.filter((p) => p.facts.ghState !== "CLOSED" && isQueueState(p.plan.state) && p.facts.repoFacts.mergeApproved)
         .map((p) => ({ repo: p.facts.repo, number: p.facts.number, state: p.plan.state, eligible: p.plan.eligible }));
-      const due = new Set(allowed(planned(db, "merge", { plans })).map((p) => p.facts.repo));
-      const batches = new Set(batchesDue(db));
+      const due = new Set(allowed(await planned(db, "merge", { plans })).map((p) => p.facts.repo));
+      const batches = new Set(await batchesDue(db));
       const out: Candidate[] = [];
       // A merge job that advanced a batch runs again at once; one that only watched waits.
-      const later = (step: string, repo: string): boolean => {
-        const last = lastJobEnd(db, step, repo);
+      const later = async (step: string, repo: string): Promise<boolean> => {
+        const last = await lastJobEnd(db, step, repo);
         if (last && (step === "checks" || wasIdle(last)) && Date.now() - Date.parse(last.endedAt) < WAITING_CI_RECHECK_MS) {
           ctx.wake?.push(Date.parse(last.endedAt) + WAITING_CI_RECHECK_MS);
           const n = queue.filter((e) => e.repo === repo && e.state === "waiting-ci").length;
@@ -487,15 +489,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
         return false;
       };
       // The repo whose eligible PR is fast-tracked first goes first.
-      const fast = fastOf(db, ctx);
+      const fast = await fastOf(db, ctx);
       const topEligible = (r: string): number | undefined => queue.filter((e) => e.repo === r && e.eligible).sort((a, b) => (fast.get(`${r}#${b.number}`) ?? -1) - (fast.get(`${r}#${a.number}`) ?? -1))[0]?.number;
-      for (const repo of flightFirst(plans, fastFirst(db, [...new Set([...due, ...batches])].sort(), topEligible, fast))) {
+      for (const repo of flightFirst(plans, await fastFirst(db, [...new Set([...due, ...batches])].sort(), topEligible, fast))) {
         const poll = batches.has(repo);
-        if (poll && later("merge", repo)) continue;
+        if (poll && await later("merge", repo)) continue;
         out.push({ step: "merge", params: { repo }, ...(poll ? { poll } : {}) });
       }
       // No other stage refreshes a PR that waits only for CI or for GitHub to compute its mergeable state.
-      const waiting = [...new Set(queue.filter((e) => e.state === "waiting-ci").map((e) => e.repo))].filter((repo) => !due.has(repo) && !batches.has(repo) && !later("checks", repo)).sort();
+      const waiting = (await filterSeq([...new Set(queue.filter((e) => e.state === "waiting-ci").map((e) => e.repo))], async (repo) => !due.has(repo) && !batches.has(repo) && !await later("checks", repo))).sort();
       for (const repo of waiting) out.push({ step: "checks", params: { repo }, poll: true, gate: { step: "merge", params: { repo }, poll: true } });
       return out;
     },
@@ -505,33 +507,33 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "act",
     perRepo: true,
     // Queued card presses: the drain runs when the first press fits under the daily limit, so the room (and the limit) is part of the input.
-    extra: (db) => {
-      const h = queueHead(db);
-      const held = heldDue(db).sig;
-      return [h ? `queue:${h.fits ? 1 : 0}:${actLimit(db) ?? "n"}` : "", held ? `${held}:${actLimit(db) ?? "n"}` : ""].filter(Boolean).join("|");
+    extra: async (db) => {
+      const h = await queueHead(db);
+      const held = (await heldDue(db)).sig;
+      return [h ? `queue:${h.fits ? 1 : 0}:${await actLimit(db) ?? "n"}` : "", held ? `${held}:${await actLimit(db) ?? "n"}` : ""].filter(Boolean).join("|");
     },
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       // Repos in the order of their best target: item priority level, then repos that Act served least recently (so one busy repo does not keep the shared daily limit), then the oldest answer.
       const best = new Map<string, { band: number; at: string }>();
-      const targets = allowed(plannedItems(db, "act", { plans: plansOf(db, ctx) })).flatMap((p) => (typeof p.action.params?.decisionId === "string" ? [{ decisionId: p.action.params.decisionId, repo: p.facts.repo, number: p.facts.number }] : []));
-      const keys = targetKeys(db, targets);
+      const targets = allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) })).flatMap((p) => (typeof p.action.params?.decisionId === "string" ? [{ decisionId: p.action.params.decisionId, repo: p.facts.repo, number: p.facts.number }] : []));
+      const keys = await targetKeys(db, targets);
       for (const t of targets) {
         const k = keys.get(t.decisionId);
         if (k && (!best.has(t.repo) || compareKeys(k, best.get(t.repo)) < 0)) best.set(t.repo, k);
       }
-      for (const p of allowed(plannedItems(db, "act", { plans: plansOf(db, ctx) }))) if (!best.has(p.facts.repo)) best.set(p.facts.repo, { band: 0, at: "" });
+      for (const p of allowed(await plannedItems(db, "act", { plans: await plansOf(db, ctx) }))) if (!best.has(p.facts.repo)) best.set(p.facts.repo, { band: 0, at: "" });
       // The press at the head of the queue is carried out by the job of its repo once it fits; until then the planner wakes at the next UTC midnight, when room returns.
-      const head = queueHead(db);
+      const head = await queueHead(db);
       if (head && !head.fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-      else if (head && ctx.tracked.includes(head.repo) && commentApprovalOf(db, head.repo)) best.set(head.repo, { band: 5, at: "" });
+      else if (head && ctx.tracked.includes(head.repo) && await commentApprovalOf(db, head.repo)) best.set(head.repo, { band: 5, at: "" });
       // Follow-up issues held until a PR merged: filed by the job of the PR's repo once it merged, dropped once it closed or its merge path ended.
       // A row a stopped create left in `filing` is settled from its audit row once it is old enough: wake then.
-      ctx.wake?.push(...filingWakes(db));
-      for (const [repo, fits] of heldDue(db).repos) {
+      ctx.wake?.push(...await filingWakes(db));
+      for (const [repo, fits] of (await heldDue(db)).repos) {
         if (!fits) ctx.wake?.push(nextUtcMidnight(Date.now()));
-        else if (ctx.tracked.includes(repo) && commentApprovalOf(db, repo)) best.set(repo, { band: 5, at: "" });
+        else if (ctx.tracked.includes(repo) && await commentApprovalOf(db, repo)) best.set(repo, { band: 5, at: "" });
       }
-      const served = new Map(ctx.tracked.map((repo) => [repo, lastJobEnd(db, "act", repo)?.endedAt ?? ""]));
+      const served = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, (await lastJobEnd(db, "act", repo))?.endedAt ?? ""]));
       return ctx.tracked.filter((repo) => best.has(repo)).sort((a, b) => best.get(b)!.band - best.get(a)!.band || (served.get(a)! < served.get(b)! ? -1 : served.get(a)! > served.get(b)! ? 1 : 0) || compareKeys(best.get(a), best.get(b)) || a.localeCompare(b)).map((repo) => ({ step: "act", params: { repo } }));
     },
   },
@@ -540,15 +542,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     // A stored patch is collected when its lint task ends.
     extra: tasksSig,
-    detect: (db, ctx) => {
-      const plans = plansOf(db, ctx);
-      const sels = new Map(ctx.tracked.map((repo) => [repo, selectFixups(db, repo, ctx.run, plans)]));
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx);
+      const sels = new Map(await mapSeq(ctx.tracked, async (repo) => [repo, await selectFixups(db, repo, ctx.run, plans)]));
       const repos = ctx.tracked.filter((repo) => {
         const sel = sels.get(repo)!;
         const push = repoAllows(plans, repo, { kind: "fixup", bucket: "fix" }), ask = repoAllows(plans, repo, { kind: "fixup", bucket: "ask" });
         return (push && (sel.fix.length > 0 || sel.lint.length > 0 || sel.conflictMerge.length > 0)) || (ask && (sel.ask.length > 0 || sel.conflictAsk.length > 0));
       });
-      return flightFirst(plans, fastFirst(db, repos.sort(), (r) => { const sel = sels.get(r)!; return (sel.lint[0] ?? sel.fix[0] ?? sel.ask[0] ?? sel.conflictMerge[0] ?? sel.conflictAsk[0])?.number; }, fastOf(db, ctx))).map((repo) => ({ step: "fixup", params: { repo } }));
+      return flightFirst(plans, await fastFirst(db, repos.sort(), (r) => { const sel = sels.get(r)!; return (sel.lint[0] ?? sel.fix[0] ?? sel.ask[0] ?? sel.conflictMerge[0] ?? sel.conflictAsk[0])?.number; }, await fastOf(db, ctx))).map((repo) => ({ step: "fixup", params: { repo } }));
     },
   },
   {
@@ -556,70 +558,70 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "verify",
     perRepo: true,
     extra: tasksSig,
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       const out: Candidate[] = [];
-      const plans = plansOf(db, ctx);
-      const top = firstByRepo([...planned(db, "verify", { plans, bucket: "plan" }), ...planned(db, "verify", { plans, bucket: "unavailable" })]);
-      for (const repo of flightFirst(plans, fastFirst(db, roundRobin(ctx.tracked, getSetting(db, KEY_VERIFY_CURSOR)), (r) => top.get(r)?.facts.number, fastOf(db, ctx)))) {
+      const plans = await plansOf(db, ctx);
+      const top = firstByRepo([...await planned(db, "verify", { plans, bucket: "plan" }), ...await planned(db, "verify", { plans, bucket: "unavailable" })]);
+      for (const repo of flightFirst(plans, await fastFirst(db, roundRobin(ctx.tracked, await getSetting(db, KEY_VERIFY_CURSOR)), (r) => top.get(r)?.facts.number, await fastOf(db, ctx)))) {
         if (!top.has(repo)) continue;
-        const checks = lastJobEnd(db, "checks", repo);
+        const checks = await lastJobEnd(db, "checks", repo);
         const fresh = checks?.state === "done" && Date.now() - Date.parse(checks.endedAt) < CHECKS_FRESH_MS;
         const verify = { step: "verify", params: { repo } };
         out.push(fresh ? verify : { step: "checks", params: { repo }, poll: true, gate: verify });
       }
       return out;
     },
-    chosen: (db, c) => {
-      if (c.step === "verify") setSetting(db, KEY_VERIFY_CURSOR, String(c.params.repo));
+    chosen: async (db, c) => {
+      if (c.step === "verify") await setSetting(db, KEY_VERIFY_CURSOR, String(c.params.repo));
     },
   },
   {
     name: "verify-collect",
     extra: tasksSig,
-    detect: (db) => (collectDue(db) ? [{ step: "verify-collect", params: {} }] : []),
+    detect: async (db) => (await collectDue(db) ? [{ step: "verify-collect", params: {} }] : []),
   },
   {
     // Our own build of PR heads (pr-builds feature): queues new builds and collects finished ones, no model call. Off: no repo is detected.
     name: "pr-build",
     perRepo: true,
     extra: tasksSig,
-    detect: (db, ctx) => [...new Set([...ctx.tracked, ...reposWithQueuedBuilds(db)])].filter((repo) => prBuildDue(db, repo)).sort().map((repo) => ({ step: "pr-build", params: { repo } })),
+    detect: async (db, ctx) => (await filterSeq([...new Set([...ctx.tracked, ...await reposWithQueuedBuilds(db)])], async (repo) => await prBuildDue(db, repo))).sort().map((repo) => ({ step: "pr-build", params: { repo } })),
   },
   {
     name: "fixissue",
     perRepo: true,
     extra: tasksSig,
-    detect: (db, ctx) => {
-      const work = fixWork(db, ctx.tracked, plansOf(db, ctx));
-      return flightFirst(plansOf(db, ctx), fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.top?.number, fastOf(db, ctx))).map((repo) => ({ step: "fixissue", params: { repo } }));
+    detect: async (db, ctx) => {
+      const work = await fixWork(db, ctx.tracked, await plansOf(db, ctx));
+      return flightFirst(await plansOf(db, ctx), await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.top?.number, await fastOf(db, ctx))).map((repo) => ({ step: "fixissue", params: { repo } }));
     },
-    topScore: (db, ctx) => bestScore([...fixWork(db, ctx.tracked, plansOf(db, ctx)).values()].map((w) => w.top?.score)),
+    topScore: async (db, ctx) => bestScore([...(await fixWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((w) => w.top?.score)),
   },
   {
     name: "fixissue-collect",
     extra: tasksSig,
     // Finished build tasks, or a passed fix to open in a repo approved for fixing while the day's pull request limit has room.
-    detect: (db, ctx) => {
-      const due = plannedItems(db, "fixissue-collect", { plans: plansOf(db, ctx) });
-      const opens = allowed(due).some((p) => p.action.params?.source === "passed") && openedToday(db, new Date()) < perDay(db);
+    detect: async (db, ctx) => {
+      const due = await plannedItems(db, "fixissue-collect", { plans: await plansOf(db, ctx) });
+      const opens = allowed(due).some((p) => p.action.params?.source === "passed") && await openedToday(db, new Date()) < await perDay(db);
       return due.some((p) => p.action.params?.source === "testing") || opens ? [{ step: "fixissue-collect", params: {} }] : [];
     },
   },
   {
     // Label disagreements outside the scope labels, after Jev and Haiku have both answered.
     name: "referee",
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
-      if (ctx.run) for (const r of db.prepare("SELECT json_extract(probs, '$.opusFailedAt') AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND json_extract(probs, '$.opusFailedAt') > ?").all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
-      return ctx.run && servable(db, ctx, "referee", "referee").length ? [{ step: "referee", params: {} }] : [];
+      if (ctx.run) for (const r of await db.prepare("SELECT json_extract(probs, '$.opusFailedAt') AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND json_extract(probs, '$.opusFailedAt') > ?").all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      return ctx.run && (await servable(db, ctx, "referee", "referee")).length ? [{ step: "referee", params: {} }] : [];
     },
   },
   {
     // A review carried to our checked fix-up needs no model, so this runs while Claude is paused.
     name: "review-carry",
     perRepo: true,
-    detect: (db, ctx) => {
-      const due = new Set(planned(db, "carry", { plans: plansOf(db, ctx) }).map((p) => p.facts.repo));
+    detect: async (db, ctx) => {
+      const due = new Set((await planned(db, "carry", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "review-carry", params: { repo } }));
     },
   },
@@ -627,55 +629,55 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // The final Opus reviews, posted as one PR review each in repos approved for comments.
     name: "review-post",
     perRepo: true,
-    detect: (db, ctx) => {
-      const due = new Set(allowed(planned(db, "post-review", { plans: plansOf(db, ctx) })).map((p) => p.facts.repo));
+    detect: async (db, ctx) => {
+      const due = new Set(allowed(await planned(db, "post-review", { plans: await plansOf(db, ctx) })).map((p) => p.facts.repo));
       return ctx.tracked.filter((repo) => due.has(repo)).sort().map((repo) => ({ step: "review-post", params: { repo } }));
     },
   },
   {
     // Operator messages in conversations; answered whether or not the item's repo is in scope, since an operator started them.
     name: "conversation",
-    detect: (db) => (pendingConversations(db).length ? [{ step: "conversation", params: {} }] : []),
+    detect: async (db) => ((await pendingConversations(db)).length ? [{ step: "conversation", params: {} }] : []),
   },
   {
     // Runs GitHub holds for approval on reviewed outside PRs; the checks job records them, the step approves.
     name: "ci-approve",
     perRepo: true,
-    detect: (db, ctx) => ctx.tracked.filter((repo) => repoAllows(plansOf(db, ctx), repo, { kind: "approve-ci" }) && needsWork(db, repo, ctx.run, plansOf(db, ctx)).length).sort().map((repo) => ({ step: "ci-approve", params: { repo } })),
+    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => repoAllows(await plansOf(db, ctx), repo, { kind: "approve-ci" }) && (await needsWork(db, repo, ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "ci-approve", params: { repo } })),
   },
   {
     // Failing gate checks of wanted PRs: the log is read, a formatter run is queued or collected, or a patch is written and pushed.
     name: "cifix",
     perRepo: true,
     extra: tasksSig,
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       // A stored patch whose lint task ended is collected by the same step.
-      const lint = allowed(planned(db, "lint", { plans: plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
-      return flightFirst(plansOf(db, ctx), [...new Set([...cifixRepos(db, ctx, ["work", "collect"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
+      const lint = allowed(await planned(db, "lint", { plans: await plansOf(db, ctx), bucket: "cifix" })).map((p) => p.facts.repo).filter((r) => ctx.tracked.includes(r));
+      return flightFirst(await plansOf(db, ctx), [...new Set([...await cifixRepos(db, ctx, ["work", "collect"]), ...lint])].sort()).map((repo) => ({ step: "cifix", params: { repo } }));
     },
   },
   {
     // The planner decides which items left the path to merge; this lane only carries out the unassign actions.
     name: "unassign",
     perRepo: true,
-    detect: (db, ctx) => {
-      const plans = plansOf(db, ctx), repos = new Set(ctx.tracked);
-      const due = [...allowed(planned(db, "unassign", { plans })), ...allowed(plannedItems(db, "unassign", { plans }))];
+    detect: async (db, ctx) => {
+      const plans = await plansOf(db, ctx), repos = new Set(ctx.tracked);
+      const due = [...allowed(await planned(db, "unassign", { plans })), ...allowed(await plannedItems(db, "unassign", { plans }))];
       return [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort().map((repo) => ({ step: "unassign", params: { repo } }));
     },
   },
   {
     name: "cifix-rerun",
     perRepo: true,
-    detect: (db, ctx) => cifixRepos(db, ctx, ["rerun"]).map((repo) => ({ step: "cifix-rerun", params: { repo } })),
+    detect: async (db, ctx) => (await cifixRepos(db, ctx, ["rerun"])).map((repo) => ({ step: "cifix-rerun", params: { repo } })),
   },
   {
     // The adversarial review of each PR head the merge rule would merge; the queue holds the PR until it is stored.
     name: "premerge",
     perRepo: true,
-    detect: (db, ctx) => {
+    detect: async (db, ctx) => {
       const repos = new Set(ctx.tracked);
-      const due = new Set(premergeCandidates(db, { plans: plansOf(db, ctx), ...(ctx.wake ? { wake: ctx.wake } : {}) }).map((e) => e.repo));
+      const due = new Set((await premergeCandidates(db, { plans: await plansOf(db, ctx), ...(ctx.wake ? { wake: ctx.wake } : {}) })).map((e) => e.repo));
       return [...due].filter((repo) => repos.has(repo)).sort().map((repo) => ({ step: "premerge", params: { repo } }));
     },
   },
@@ -683,15 +685,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Opus reviews what each pipeline merge landed; reads only, so it needs no repo approval.
     name: "postmerge",
     perRepo: true,
-    detect: (db, ctx) => ctx.tracked.filter((repo) => selectPostmerge(db, repo, Date.now(), ctx.run, plansOf(db, ctx)).length).sort().map((repo) => ({ step: "postmerge", params: { repo } })),
+    detect: async (db, ctx) => (await filterSeq(ctx.tracked, async (repo) => (await selectPostmerge(db, repo, Date.now(), ctx.run, await plansOf(db, ctx))).length)).sort().map((repo) => ({ step: "postmerge", params: { repo } })),
   },
   {
     // The defects of those reviews become issues in repos approved for comments.
     name: "postmerge-file",
     perRepo: true,
-    detect: (db, { tracked }) => {
-      const pending = new Set(pendingDefects(db).map((d) => d.repo));
-      return tracked.filter((repo) => commentApprovalOf(db, repo) && pending.has(repo)).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
+    detect: async (db, { tracked }) => {
+      const pending = new Set((await pendingDefects(db)).map((d) => d.repo));
+      return (await filterSeq(tracked, async (repo) => await commentApprovalOf(db, repo) && pending.has(repo))).sort().map((repo) => ({ step: "postmerge-file", params: { repo } }));
     },
   },
   {
@@ -699,19 +701,19 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "main-fix",
     perRepo: true,
     // A rerun waits for the next reading of the head or a time limit; the clock moves with no change in the data.
-    extra: (db) => {
-      const n = (db.prepare("SELECT COUNT(*) AS n FROM main.main_fixes WHERE state = 'rerun-requested'").get() as { n: number }).n;
+    extra: async (db) => {
+      const n = (await db.prepare("SELECT COUNT(*) AS n FROM main.main_fixes WHERE state = 'rerun-requested'").get() as { n: number }).n;
       return n ? `${n}:${Math.floor(Date.now() / 300_000)}` : "";
     },
-    detect: (db, { tracked }) => tracked.filter((repo) => mainFixDue(db, repo)).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
+    detect: async (db, { tracked }) => (await filterSeq(tracked, async (repo) => await mainFixDue(db, repo))).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
   },
   {
     // The nightly checks of repos with the build feature on: queued once a day per repo (in data, from the last run's time), collected when their tasks end.
     name: "nightly",
     perRepo: true,
     // The day's schedule moves with the clock, not with a change in the data.
-    extra: (db) => (featureOn(db, "nightly") ? String(Math.floor(Date.now() / 3_600_000)) : ""),
-    detect: (db, { tracked }) => nightlyRepos(db, tracked).map((repo) => ({ step: "nightly", params: { repo } })),
+    extra: async (db) => (await featureOn(db, "nightly") ? String(Math.floor(Date.now() / 3_600_000)) : ""),
+    detect: async (db, { tracked }) => (await nightlyRepos(db, tracked)).map((repo) => ({ step: "nightly", params: { repo } })),
   },
 ];
 
@@ -736,36 +738,36 @@ type LimitRow = { step: string; per_day: number | null; updated_by: string | nul
 /** Daily limits that apply until an operator sets one. */
 export const DEFAULT_PER_DAY: Record<string, number> = defaultPerDay();
 
-export const limitRow = (db: DatabaseSync, step: string): LimitRow => {
+export const limitRow = async (db: Db, step: string): Promise<LimitRow> => {
   const pass = passOf(db);
-  const row = pass ? (pass.limits ??= new Map((db.prepare("SELECT * FROM stage_limits").all() as LimitRow[]).map((r) => [r.step, r]))).get(step)
-    : db.prepare("SELECT * FROM stage_limits WHERE step = ?").get(step) as LimitRow | undefined;
+  const row = pass ? (pass.limits ??= new Map((await db.prepare("SELECT * FROM stage_limits").all() as LimitRow[]).map((r) => [r.step, r]))).get(step)
+    : await db.prepare("SELECT * FROM stage_limits WHERE step = ?").get(step) as LimitRow | undefined;
   return row ?? { step, per_day: DEFAULT_PER_DAY[step] ?? null, updated_by: null, updated_at: null };
 };
 
 /** Items handled by the step's jobs that started today (UTC) and after the operator's last reset of its count; for Act, also the GitHub writes of conversation cards. */
-export function usageToday(db: DatabaseSync, step: string, ms: number = Date.now()): number {
-  if (step === "act") return actUsedToday(db, ms);
-  const day = dayStart(ms), reset = getSetting(db, KEY_RESET + step);
+export async function usageToday(db: Db, step: string, ms: number = Date.now()): Promise<number> {
+  if (step === "act") return await actUsedToday(db, ms);
+  const day = dayStart(ms), reset = await getSetting(db, KEY_RESET + step);
   const pass = passOf(db);
   if (pass) {
     // The jobs started since the start of the day, read once; a reset only moves the start later.
-    if (pass.started?.day !== day) pass.started = { day, rows: db.prepare("SELECT step, started_at, items FROM jobs WHERE started_at >= ?").all(day) as NonNullable<PassReads["started"]>["rows"] };
+    if (pass.started?.day !== day) pass.started = { day, rows: await db.prepare("SELECT step, started_at, items FROM jobs WHERE started_at >= ?").all(day) as NonNullable<PassReads["started"]>["rows"] };
     const from = reset && reset > day ? reset : day;
     return pass.started.rows.reduce((n, j) => n + (j.step === step && j.started_at >= from ? j.items ?? 0 : 0), 0);
   }
-  return (db.prepare("SELECT COALESCE(SUM(items), 0) AS n FROM jobs WHERE step = ? AND started_at >= ?").get(step, reset && reset > day ? reset : day) as { n: number }).n;
+  return (await db.prepare("SELECT COALESCE(SUM(items), 0) AS n FROM jobs WHERE step = ? AND started_at >= ?").get(step, reset && reset > day ? reset : day) as { n: number }).n;
 }
 
 /**
  * The part of its `limit` that each queued or running job of the step has not used yet: the day's limit keeps it for them.
  * A queued job that waits for a Task Runner (untakenTest) keeps none.
  */
-export function reservedByJobs(db: DatabaseSync, step: string, untaken?: UntakenTest): number {
-  const rows = db.prepare("SELECT params, items, state, repo FROM jobs WHERE step = ? AND state IN ('queued', 'running')").all(step) as { params: string; items: number | null; state: string; repo: string | null }[];
+export async function reservedByJobs(db: Db, step: string, untaken?: UntakenTest): Promise<number> {
+  const rows = await db.prepare("SELECT params, items, state, repo FROM jobs WHERE step = ? AND state IN ('queued', 'running')").all(step) as { params: string; items: number | null; state: string; repo: string | null }[];
   let n = 0;
   for (const r of rows) {
-    if (r.state === "queued" && (untaken ??= untakenTest(db))({ step, repo: r.repo, params: r.params })) continue;
+    if (r.state === "queued" && await (untaken ??= await untakenTest(db))({ step, repo: r.repo, params: r.params })) continue;
     let limit: unknown;
     try { limit = (JSON.parse(r.params) as { limit?: unknown }).limit; } catch { continue; }
     if (typeof limit === "number") n += Math.max(0, limit - (r.items ?? 0));
@@ -774,11 +776,11 @@ export function reservedByJobs(db: DatabaseSync, step: string, untaken?: Untaken
 }
 
 /** The `limit` a job of the step may get (undefined when the step has none), or null when the day's limit leaves less than the step's minimum. `wanted` is a limit asked for (default: the step's). */
-export function jobLimit(db: DatabaseSync, step: StepDef, ms: number = Date.now(), wanted?: number, untaken?: UntakenTest): { limit?: number } | null {
+export async function jobLimit(db: Db, step: StepDef, ms: number = Date.now(), wanted?: number, untaken?: UntakenTest): Promise<{ limit?: number } | null> {
   const lp = step.params.find((p) => p.name === "limit" && p.kind === "int");
   if (!lp || lp.kind !== "int") return {};
-  const perDay = limitRow(db, step.name).per_day;
-  const limit = Math.min(wanted ?? lp.default ?? lp.max, lp.max, perDay === null ? Infinity : perDay - usageToday(db, step.name, ms) - reservedByJobs(db, step.name, untaken));
+  const perDay = (await limitRow(db, step.name)).per_day;
+  const limit = Math.min(wanted ?? lp.default ?? lp.max, lp.max, perDay === null ? Infinity : perDay - await usageToday(db, step.name, ms) - await reservedByJobs(db, step.name, untaken));
   return limit < lp.min ? null : { limit };
 }
 
@@ -787,10 +789,10 @@ export function jobLimit(db: DatabaseSync, step: StepDef, ms: number = Date.now(
  * (a job of the step for the same repo is queued or running, the step already works its most repos, a running job
  * holds the step's mutex, the daily limit, a pause).
  */
-export function cliGate(db: DatabaseSync, step: { name: string }, steps: Map<string, StepDef>, params: Params = {}, ms: number = Date.now()): string | null {
-  const busy = jobBlock(db, steps, { step: step.name, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { mutex: true });
+export async function cliGate(db: Db, step: { name: string }, steps: Map<string, StepDef>, params: Params = {}, ms: number = Date.now()): Promise<string | null> {
+  const busy = await jobBlock(db, steps, { step: step.name, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { mutex: true });
   if (busy) return busy;
-  return pauseReason(db, step.name, ms, { backoff: false });
+  return await pauseReason(db, step.name, ms, { backoff: false });
 }
 
 /** The steps an operator release (operator-actions.ts) hands new work to. */
@@ -799,10 +801,10 @@ const RELEASE_STEPS: Record<string, string[]> = {
 };
 
 /** When an operator last released work for the step, or null. */
-function releasedAt(db: DatabaseSync, step: string): string | null {
+async function releasedAt(db: Db, step: string): Promise<string | null> {
   const actions = Object.keys(RELEASE_STEPS).filter((a) => RELEASE_STEPS[a]!.includes(step));
   if (!actions.length) return null;
-  return (db.prepare(`SELECT MAX(at) AS at FROM audit WHERE action IN (${actions.map(() => "?").join(", ")})`).get(...actions) as { at: string | null }).at;
+  return (await db.prepare(`SELECT MAX(at) AS at FROM audit WHERE action IN (${actions.map(() => "?").join(", ")})`).get(...actions) as { at: string | null }).at;
 }
 
 /** The least wait after a job stopped for running past its deadline. */
@@ -817,18 +819,18 @@ export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOF
  * different from the one the failed job saw); later failures wait out the backoff, because inputs that change every
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
  */
-export function failureBackoff(db: DatabaseSync, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string } = {}): { until: number; failures: number } | null {
-  const rows = db.prepare(`SELECT id, state, ended_at, error FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?) AND requested_by = ? AND state IN ('done', 'failed')
+export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string } = {}): Promise<{ until: number; failures: number } | null> {
+  const rows = await db.prepare(`SELECT id, state, ended_at, error FROM jobs WHERE step = ? AND (? IS NULL OR repo = ?) AND requested_by = ? AND state IN ('done', 'failed')
     AND COALESCE(error, '') <> ? AND COALESCE(error, '') NOT LIKE 'write paced:%' ORDER BY id DESC LIMIT 12`).all(step, o.repo ?? null, o.repo ?? null, AUTOPILOT_USER, RUNNER_STOPPED) as { id: number; state: string; ended_at: string | null; error: string | null }[];
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
   if (!failures || !rows[0]!.ended_at) return null;
-  const released = releasedAt(db, step);
+  const released = await releasedAt(db, step);
   if (released && released > rows[0]!.ended_at) return null;
   // A job stopped for its deadline did paid work that a rerun would repeat: a changed input does not end the wait.
   const stopped = DEADLINE_ERROR.test(rows[0]!.error ?? "");
   if (o.fp !== undefined && failures === 1 && !stopped) {
-    const rec = fpRecord(db, step, o.repo ?? null);
+    const rec = await fpRecord(db, step, o.repo ?? null);
     if (rec && rec.job === rows[0]!.id && rec.fp !== o.fp) return null;
   }
   const until = Date.parse(rows[0]!.ended_at) + (stopped ? Math.max(DEADLINE_BACKOFF_MS, failureDelayMs(failures)) : failureDelayMs(failures));
@@ -838,56 +840,56 @@ export function failureBackoff(db: DatabaseSync, step: string, ms: number = Date
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
 /** Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused. A step's models are taken at their defaults. */
-export function pauseOf(db: DatabaseSync, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): { why: string; wakeAt: number | null } | null {
-  const l = limitRow(db, step), used = usageToday(db, step, ms);
-  const tripped = tripReasonOfStep(db, step);
+export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
+  const l = await limitRow(db, step), used = await usageToday(db, step, ms);
+  const tripped = await tripReasonOfStep(db, step);
   if (tripped) return { why: tripped, wakeAt: null };
   if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
   if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
-  const b = o.backoff === false ? null : failureBackoff(db, step, ms);
+  const b = o.backoff === false ? null : await failureBackoff(db, step, ms);
   if (b !== null) return { why: `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`, wakeAt: b.until };
   // Steps that call Claude (decide, opus-review, the Haiku part of classify-new) wait for an account with headroom.
   // In the user-local mode no account is used: calls wait for helpers instead.
-  if (usesClaude(modelsOf(knownStep(step), {})) && inferenceMode(db) === "server") {
-    const why = claudePauseReason(db, ms);
+  if (usesClaude(modelsOf(knownStep(step), {})) && await inferenceMode(db) === "server") {
+    const why = await claudePauseReason(db, ms);
     return why === null ? null : { why, wakeAt: ms + 60_000 };
   }
   return null;
 }
 
 /** Why the stage cannot start jobs now, or null. The one place a stage's pause is decided. */
-export const pauseReason = (db: DatabaseSync, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): string | null => pauseOf(db, step, ms, o)?.why ?? null;
+export const pauseReason = async (db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<string | null> => (await pauseOf(db, step, ms, o))?.why ?? null;
 
 // ---- state ---------------------------------------------------------------------
 
 /** On: the planner queues jobs and the runner starts them. Draining and off are both not enabled. */
-export const isEnabled = (db: DatabaseSync): boolean => getSetting(db, KEY_ENABLED) === "1";
+export const isEnabled = async (db: Db): Promise<boolean> => await getSetting(db, KEY_ENABLED) === "1";
 /** Draining: like off for new work, but the writes of jobs already running go through. */
-export const isDraining = (db: DatabaseSync): boolean => getSetting(db, KEY_ENABLED) === PIPELINE_DRAIN;
+export const isDraining = async (db: Db): Promise<boolean> => await getSetting(db, KEY_ENABLED) === PIPELINE_DRAIN;
 
-export function setEnabled(db: DatabaseSync, enabled: boolean, by: string, mode: "off" | "drain" = "off"): void {
-  setSetting(db, KEY_ENABLED, enabled ? "1" : mode === "drain" ? PIPELINE_DRAIN : "0");
-  setSetting(db, KEY_BY, by);
-  setSetting(db, KEY_AT, now());
+export async function setEnabled(db: Db, enabled: boolean, by: string, mode: "off" | "drain" = "off"): Promise<void> {
+  await setSetting(db, KEY_ENABLED, enabled ? "1" : mode === "drain" ? PIPELINE_DRAIN : "0");
+  await setSetting(db, KEY_BY, by);
+  await setSetting(db, KEY_AT, now());
   // Automatic jobs still waiting are dropped; running ones finish.
   if (!enabled) {
-    const waiting = db.prepare("SELECT id, step FROM jobs WHERE state = 'queued' AND requested_by = ?").all(AUTOPILOT_USER) as { id: number; step: string }[];
+    const waiting = await db.prepare("SELECT id, step FROM jobs WHERE state = 'queued' AND requested_by = ?").all(AUTOPILOT_USER) as { id: number; step: string }[];
     for (const j of waiting) {
-      requestCancel(db, j.id, by);
-      audit(db, by, "job-cancel", `job:${j.id}`, { step: j.step, state: "queued", reason: "pipeline switched off" });
+      await requestCancel(db, j.id, by);
+      await audit(db, by, "job-cancel", `job:${j.id}`, { step: j.step, state: "queued", reason: "pipeline switched off" });
     }
   }
   // Turning on plans at once; the sync that already happened is not new.
-  if (enabled) deleteSetting(db, KEY_PLANNED_AT);
+  if (enabled) await deleteSetting(db, KEY_PLANNED_AT);
 }
 
 /** How many of the newest jobs deadlineStops looks at. */
 const STOP_WINDOW = 5000;
 
 /** Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has beaten. */
-export function deadlineStops(db: DatabaseSync): { step: string; jobId: number; error: string; endedAt: string; count: number }[] {
-  const floor = Number((db.prepare("SELECT MAX(id) AS m FROM jobs").get() as { m: number | null }).m ?? 0) - STOP_WINDOW;
-  const rows = db.prepare("SELECT step, id, error, ended_at AS endedAt FROM jobs WHERE id > ? AND state = 'failed' AND (error LIKE 'stopped: ran past %' OR error LIKE 'stopped: no progress for %') ORDER BY id DESC").all(floor) as { step: string; id: number; error: string; endedAt: string }[];
+export async function deadlineStops(db: Db): Promise<{ step: string; jobId: number; error: string; endedAt: string; count: number }[]> {
+  const floor = Number((await db.prepare("SELECT MAX(id) AS m FROM jobs").get() as { m: number | null }).m ?? 0) - STOP_WINDOW;
+  const rows = await db.prepare("SELECT step, id, error, ended_at AS endedAt FROM jobs WHERE id > ? AND state = 'failed' AND (error LIKE 'stopped: ran past %' OR error LIKE 'stopped: no progress for %') ORDER BY id DESC").all(floor) as { step: string; id: number; error: string; endedAt: string }[];
   const lastDone = db.prepare("SELECT MAX(id) AS m FROM jobs WHERE step = ? AND state = 'done'");
   // The acknowledgement is an audit row, which the header's query refetches on and the planner does not.
   const acked = db.prepare("SELECT MAX(at) AS at FROM audit WHERE action = 'deadline-ack' AND target = ?");
@@ -895,9 +897,9 @@ export function deadlineStops(db: DatabaseSync): { step: string; jobId: number; 
   const steps = [...new Set(rows.map((r) => r.step))];
   for (const step of steps) {
     const mine = rows.filter((r) => r.step === step), latest = mine[0]!;
-    const done = Number((lastDone.get(step) as { m: number | null }).m ?? 0);
+    const done = Number((await lastDone.get(step) as { m: number | null }).m ?? 0);
     if (done > latest.id) continue;
-    const ack = (acked.get(`step:${step}`) as { at: string | null }).at;
+    const ack = (await acked.get(`step:${step}`) as { at: string | null }).at;
     if (ack && ack >= latest.endedAt) continue;
     out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt, count: mine.filter((r) => r.id > done).length });
   }
@@ -905,8 +907,8 @@ export function deadlineStops(db: DatabaseSync): { step: string; jobId: number; 
 }
 
 /** An operator acknowledges the deadline stops of a step: they leave the warnings until the next one. */
-export function ackDeadline(db: DatabaseSync, step: string, by: string): void {
-  audit(db, by, "deadline-ack", `step:${step}`, {});
+export async function ackDeadline(db: Db, step: string, by: string): Promise<void> {
+  await audit(db, by, "deadline-ack", `step:${step}`, {});
 }
 
 /** Steps that have a row in stage_limits, in pipeline order. */
@@ -919,7 +921,7 @@ export class LimitError extends Error {
   status = 400;
 }
 
-export function setLimit(db: DatabaseSync, step: unknown, input: unknown, by: string): { perDay: number | null } {
+export async function setLimit(db: Db, step: unknown, input: unknown, by: string): Promise<{ perDay: number | null }> {
   if (typeof step !== "string" || !LIMIT_STEPS.includes(step)) throw Object.assign(new LimitError("no such stage"), { status: 404 });
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new LimitError("the body must be a JSON object");
   const keys = Object.keys(input);
@@ -928,44 +930,44 @@ export function setLimit(db: DatabaseSync, step: unknown, input: unknown, by: st
   if (perDay === undefined) throw new LimitError("perDay is required (null means no limit)");
   if (ZERO_ONLY.includes(step) && perDay !== null && perDay !== 0) throw new LimitError(`${step} cannot be sized by a daily limit: use none, or 0 to pause it`);
   if (perDay !== null && (typeof perDay !== "number" || !Number.isInteger(perDay) || perDay < 0 || perDay > 100_000)) throw new LimitError("perDay must be null or a whole number from 0 to 100000");
-  db.prepare(`INSERT INTO stage_limits (step, per_day, updated_by, updated_at) VALUES (?, ?, ?, ?)
+  await db.prepare(`INSERT INTO stage_limits (step, per_day, updated_by, updated_at) VALUES (?, ?, ?, ?)
     ON CONFLICT (step) DO UPDATE SET per_day = excluded.per_day, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
     .run(step, perDay, by, now());
-  audit(db, by, "stage-limit", `step:${step}`, { perDay });
+  await audit(db, by, "stage-limit", `step:${step}`, { perDay });
   return { perDay };
 }
 
 /** Starts today's count of one step (or of all) again from zero. */
-export function resetLimitCount(db: DatabaseSync, step: unknown, by: string): { steps: string[] } {
+export async function resetLimitCount(db: Db, step: unknown, by: string): Promise<{ steps: string[] }> {
   const steps = step === "all" ? LIMIT_STEPS : typeof step === "string" && LIMIT_STEPS.includes(step) ? [step] : null;
   if (!steps) throw Object.assign(new LimitError("no such stage"), { status: 404 });
   const at = now();
-  for (const st of steps) setSetting(db, KEY_RESET + st, at);
-  audit(db, by, "limit-reset", step === "all" ? "step:all" : `step:${step}`, { steps });
+  for (const st of steps) await setSetting(db, KEY_RESET + st, at);
+  await audit(db, by, "limit-reset", step === "all" ? "step:all" : `step:${step}`, { steps });
   return { steps };
 }
 
 /** What a stage is doing now: running, queued, or why it is not (the planner's last reading); null when unknown. */
-function stepStatus(db: DatabaseSync, step: string, why: string | undefined): string | null {
-  const j = db.prepare("SELECT state FROM jobs WHERE step = ? AND state IN ('running', 'queued') ORDER BY state = 'running' DESC LIMIT 1").get(step) as { state: string } | undefined;
+async function stepStatus(db: Db, step: string, why: string | undefined): Promise<string | null> {
+  const j = await db.prepare("SELECT state FROM jobs WHERE step = ? AND state IN ('running', 'queued') ORDER BY state = 'running' DESC LIMIT 1").get(step) as { state: string } | undefined;
   if (j) return j.state;
   return why ?? null;
 }
 
-export async function stageLimits(db: DatabaseSync): Promise<StageLimit[]> {
+export async function stageLimits(db: Db): Promise<StageLimit[]> {
   const steps = await loadSteps();
-  const why = stageStatus(db);
-  return LIMIT_STEPS.map((step) => {
-    const l = limitRow(db, step);
-    return { step, title: steps.get(step)?.title ?? step, perDay: l.per_day, usedToday: usageToday(db, step), pausedReason: pauseReason(db, step), tripped: tripReasonOfStep(db, step) !== null ? STEP_STAGE[step] : undefined, status: stepStatus(db, step, why[step]) };
+  const why = await stageStatus(db);
+  return await mapSeq(LIMIT_STEPS, async (step) => {
+    const l = await limitRow(db, step);
+    return { step, title: steps.get(step)?.title ?? step, perDay: l.per_day, usedToday: await usageToday(db, step), pausedReason: await pauseReason(db, step), tripped: await tripReasonOfStep(db, step) !== null ? STEP_STAGE[step] : undefined, status: await stepStatus(db, step, why[step]) };
   });
 }
 
-export async function pipelineState(db: DatabaseSync): Promise<Omit<PipelineState, "outside">> {
+export async function pipelineState(db: Db): Promise<Omit<PipelineState, "outside">> {
   return {
-    judgementModel: judgementModel(db), judgementModels: [...JUDGEMENT_MODELS],
-    enabled: isEnabled(db), draining: isDraining(db), changedBy: getSetting(db, KEY_BY), changedAt: getSetting(db, KEY_AT),
-    heartbeat: getSetting(db, "runner_heartbeat"), limits: await stageLimits(db), pilot: pilotItems(db),
+    judgementModel: await judgementModel(db), judgementModels: [...JUDGEMENT_MODELS],
+    enabled: await isEnabled(db), draining: await isDraining(db), changedBy: await getSetting(db, KEY_BY), changedAt: await getSetting(db, KEY_AT),
+    heartbeat: await getSetting(db, "runner_heartbeat"), limits: await stageLimits(db), pilot: await pilotItems(db),
   };
 }
 
@@ -1000,34 +1002,34 @@ const nextUtcMidnight = (ms: number): number => Date.parse(dayStart(ms)) + 86_40
  * item or repo, the pipeline scope, then gate() per candidate: same-step job, pause and daily limit, failure backoff,
  * unchanged input, minimum gap.
  */
-export async function detectAutopilot(db: DatabaseSync, opts: PlanOptions = {}): Promise<Detected> {
+export async function detectAutopilot(db: Db, opts: PlanOptions = {}): Promise<Detected> {
   const steps = await loadSteps();
   // The rest of the pass is synchronous, so its settings come from one reading of the table.
-  return withSettingsSnapshot(db, () => withPassReads(db, () => detectPass(db, opts, steps)));
+  return await withSettingsSnapshot(db, async () => await withPassReads(db, async () => await detectPass(db, opts, steps)));
 }
 
-function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, StepDef>): Detected {
+async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>): Promise<Detected> {
   const lanes = opts.lanes ?? LANES, ms = opts.nowMs ?? Date.now();
   const logs: string[] = [];
   const log = (l: string) => { logs.push(l); opts.log?.(l); };
   const proposals: Proposal[] = [];
   const t0 = performance.now();
-  const ctx = planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
+  const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
   // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
-  const untaken = (ctx.untaken = untakenTest(db, steps, ms));
+  const untaken = (ctx.untaken = await untakenTest(db, steps, ms));
   const loadMs = performance.now() - t0;
-  const scope = scopeRepos(db);
-  const seqs = readSeqs(db);
+  const scope = await scopeRepos(db);
+  const seqs = await readSeqs(db);
   const status: Record<string, string> = {};
-  const active = activeJobs(db);
-  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(stepParallel(db), 16));
+  const active = await activeJobs(db);
+  const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(await stepParallel(db), 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();
   const limitLeft = new Map<string, { limit?: number } | null>();
 
-  const pausedWhy = (stepName: string): string | null => {
+  const pausedWhy = async (stepName: string): Promise<string | null> => {
     if (!paused.has(stepName)) {
-      const p = pauseOf(db, stepName, ms, { backoff: false });
+      const p = await pauseOf(db, stepName, ms, { backoff: false });
       const why = p?.why ?? null;
       paused.set(stepName, why);
       if (p?.wakeAt != null) ctx.wake?.push(p.wakeAt);
@@ -1040,20 +1042,20 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
    * The job's `limit` (undefined when the step has none), or null when it cannot start now. With `lane`, the
    * input checks apply too: failure backoff and "nothing changed since a job that handled nothing".
    */
-  const gate = (stepName: string, params: Params, lane?: Lane, poll = false, precheck = false): { limit?: number } | null => {
+  const gate = async (stepName: string, params: Params, lane?: Lane, poll = false, precheck = false): Promise<{ limit?: number } | null> => {
     const step = steps.get(stepName);
     if (!step) return null;
     const pending: Active[] = proposals.filter((p) => p.step === stepName).map((p) => ({ id: 0, step: p.step, state: "proposed", repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }));
     const repo0 = typeof params.repo === "string" ? params.repo : null;
-    if (jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
-    const reason = pausedWhy(stepName);
+    if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
+    const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
-    const waits = repo0 === null ? null : untaken({ step: stepName, repo: repo0, params });
+    const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params });
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
       const repo = typeof params.repo === "string" ? params.repo : null;
-      const fp = fingerprintOf(db, lane, stepName, params, seqs);
-      const b = failureBackoff(db, stepName, ms, { repo, fp });
+      const fp = await fingerprintOf(db, lane, stepName, params, seqs);
+      const b = await failureBackoff(db, stepName, ms, { repo, fp });
       if (b) {
         ctx.wake?.push(b.until);
         note(stepName, `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`);
@@ -1061,37 +1063,37 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
         if (!warned.has(key)) { warned.add(key); log(`autopilot: ${stepName}: failed ${b.failures} times in a row; retry at ${hhmm(b.until)}`); }
         return null;
       }
-      if (!poll && unchangedSinceIdle(db, stepName, repo, fp)) { note(stepName, "nothing to do: its input has not changed since the last run"); return null; }
+      if (!poll && await unchangedSinceIdle(db, stepName, repo, fp)) { note(stepName, "nothing to do: its input has not changed since the last run"); return null; }
       if (lane.minGapMs) {
-        const last = lastJobEnd(db, stepName, repo, AUTOPILOT_USER);
+        const last = await lastJobEnd(db, stepName, repo, AUTOPILOT_USER);
         const next = last ? Date.parse(last.endedAt) + lane.minGapMs : 0;
         if (next > ms) { ctx.wake?.push(next); return null; }
       }
     }
-    if (!limitLeft.has(stepName)) limitLeft.set(stepName, jobLimit(db, step, ms, undefined, untaken));
+    if (!limitLeft.has(stepName)) limitLeft.set(stepName, await jobLimit(db, step, ms, undefined, untaken));
     return limitLeft.get(stepName)!;
   };
 
   const tops = new Map<string, number | null>();
   for (const lane of lanes) {
     if (!lane.topScore) continue;
-    try { tops.set(lane.name, lane.topScore(db, ctx)); } catch (e) { log(`autopilot: ${lane.name}: ${(e as Error).message}`); }
+    try { tops.set(lane.name, await lane.topScore(db, ctx)); } catch (e) { log(`autopilot: ${lane.name}: ${(e as Error).message}`); }
   }
   for (const lane of orderLanes(lanes, tops)) {
     try {
       // A lane whose steps cannot start is not worth detecting.
-      if (lane.steps && !lane.steps.some((s) => gate(s, {}, undefined, false, true))) continue;
-      const candidates = lane.detect(db, ctx);
+      if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) continue;
+      const candidates = await lane.detect(db, ctx);
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
       for (const c of candidates) {
         const outside = [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
         if (outside) { note(outside.step, "outside the pipeline scope"); continue; }
-        if (c.gate && !gate(c.gate.step, c.gate.params, lane, c.gate.poll)) continue;
-        const g = gate(c.step, c.params, lane, c.poll);
+        if (c.gate && !await gate(c.gate.step, c.gate.params, lane, c.gate.poll)) continue;
+        const g = await gate(c.step, c.params, lane, c.poll);
         if (!g) continue;
         const params: Params = { ...c.params, ...(g.limit === undefined ? {} : { limit: g.limit }) };
-        proposals.push({ lane: lane.name, step: c.step, params, fp: fingerprintOf(db, lane, c.step, c.params, seqs), ...(c.gate ? { gate: c.gate } : {}) });
+        proposals.push({ lane: lane.name, step: c.step, params, fp: await fingerprintOf(db, lane, c.step, c.params, seqs), ...(c.gate ? { gate: c.gate } : {}) });
         if (++taken >= perLane) break;
       }
     } catch (e) {
@@ -1100,7 +1102,7 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
   }
   // The lists the Next page shows come from the same pass, so the page needs no Plans of its own.
   if (!opts.lanes) {
-    try { storeLaneItems(db, lanes, ctx); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
+    try { await storeLaneItems(db, lanes, ctx); } catch (e) { log(`autopilot: next items: ${(e as Error).message}`); }
   }
   const lanesMs = performance.now() - t0 - loadMs;
   // The Plan cache: the planner's output for the dashboard.
@@ -1108,15 +1110,15 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
   const t1 = performance.now();
   let cached = false;
   try {
-    cache = writePlanCache(db, ctx.plans!);
+    cache = await writePlanCache(db, ctx.plans!);
     cached = true;
   } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
   const cacheMs = performance.now() - t1;
   if (cached) {
-    try { ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
+    try { await ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
   }
   // The liveness check follows the plan cache and stores its own result at most every few minutes.
-  try { refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
+  try { await refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
   const passKind = ctx.pass ? `${ctx.pass.kind}, ${ctx.pass.refs} loaded${ctx.pass.diffs.length ? `, ${ctx.pass.diffs.length} shadow differences` : ""}` : undefined;
   if (ctx.pass?.diffs.length) log(`autopilot: plan shadow: ${ctx.pass.diffs.length} differences (plan_shadow_diffs)`);
   if (loadMs + lanesMs + cacheMs > 2000) log(`autopilot: pass took ${Math.round(loadMs + lanesMs + cacheMs)} ms${passKind ? ` (${passKind})` : ""}: plans ${Math.round(loadMs)}, lanes ${Math.round(lanesMs)}, cache ${Math.round(cacheMs)} (${cache.written} rows written, ${cache.deleted} deleted)`);
@@ -1134,27 +1136,27 @@ function leaseSkipKeys(keys: string | null): string[] | null {
 }
 
 /** True when a running job holds a lease on one of the keys a job skipped (a job from before the keys were recorded: on any lease). */
-function skippedLeaseHeld(db: DatabaseSync, keys: string | null): boolean {
-  return !!db.prepare(`SELECT 1 FROM work_leases l JOIN jobs j ON j.id = l.job_id WHERE j.state = 'running'${keys ? " AND l.key IN (SELECT value FROM json_each(?))" : ""} LIMIT 1`).get(...(keys ? [keys] : []));
+async function skippedLeaseHeld(db: Db, keys: string | null): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 FROM work_leases l JOIN jobs j ON j.id = l.job_id WHERE j.state = 'running'${keys ? " AND l.key IN (SELECT value FROM json_each(?))" : ""} LIMIT 1`).get(...(keys ? [keys] : []));
 }
 
 /** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
-function unchangedSinceIdle(db: DatabaseSync, step: string, repo: string | null, fp: string): boolean {
-  const last = lastJobEnd(db, step, repo, AUTOPILOT_USER);
+async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp: string): Promise<boolean> {
+  const last = await lastJobEnd(db, step, repo, AUTOPILOT_USER);
   if (!last || last.state !== "done" || !wasIdle(last)) return false;
   // A job that skipped items another job was working retries once no running job holds a lease on any of them. While one does, the step stays parked, so the planner does not queue it in a loop.
   // Skips for want of a taker do not count: such a step is woken by the taker signature in its fingerprint.
   const leaseKeys = leaseSkipKeys(last.lease_skip_keys);
-  if (last.lease_skips && leaseKeys?.length !== 0 && !skippedLeaseHeld(db, leaseKeys && JSON.stringify(leaseKeys))) return false;
-  const rec = fpRecord(db, step, repo);
+  if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys && JSON.stringify(leaseKeys))) return false;
+  const rec = await fpRecord(db, step, repo);
   if (!rec || rec.job !== last.id || rec.fp !== fp) return false;
-  return !((releasedAt(db, step) ?? "") > last.endedAt);
+  return !((await releasedAt(db, step) ?? "") > last.endedAt);
 }
 
 const warned = new Set<string>();
 
 /** Queues the proposals: per lane and repo the first one that is accepted. Returns the queued job ids. */
-export async function applyProposals(db: DatabaseSync, proposals: Proposal[], opts: PlanOptions & { wakeAt?: number | null; status?: Record<string, string> } = {}): Promise<number[]> {
+export async function applyProposals(db: Db, proposals: Proposal[], opts: PlanOptions & { wakeAt?: number | null; status?: Record<string, string> } = {}): Promise<number[]> {
   const lanes = opts.lanes ?? LANES, log = opts.log ?? (() => {});
   const queued: number[] = [];
   const done = new Set<string>();
@@ -1162,32 +1164,32 @@ export async function applyProposals(db: DatabaseSync, proposals: Proposal[], op
   const reserved: Active[] = [];
   const asActive = (step: string, params: Params, state: string): Active => ({ id: 0, step, state, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null });
   const steps = await loadSteps();
-  const untaken = untakenTest(db, steps);
-  try { applyUsedAnswers(db); } catch (e) { log(`autopilot: answers: ${(e as Error).message}`); }
+  const untaken = await untakenTest(db, steps);
+  try { await applyUsedAnswers(db); } catch (e) { log(`autopilot: answers: ${(e as Error).message}`); }
   // Marks the next planner pass wants: when a wait ends, and why stages are not starting.
-  if (opts.wakeAt) setSetting(db, KEY_WAKE_AT, new Date(opts.wakeAt).toISOString());
-  else deleteSetting(db, KEY_WAKE_AT);
-  if (opts.status) setSetting(db, KEY_STATUS, JSON.stringify(opts.status));
+  if (opts.wakeAt) await setSetting(db, KEY_WAKE_AT, new Date(opts.wakeAt).toISOString());
+  else await deleteSetting(db, KEY_WAKE_AT);
+  if (opts.status) await setSetting(db, KEY_STATUS, JSON.stringify(opts.status));
   for (const p of proposals) {
     const slot = `${p.lane}\0${typeof p.params.repo === "string" ? p.params.repo : ""}`;
     if (done.has(slot)) continue;
     try {
       // The detection ran a moment ago: a job of the same step and repo may have been queued since.
-      if (jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken })) continue;
-      if (p.gate && jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken })) continue;
+      if (await jobBlock(db, steps, { step: p.step, repo: typeof p.params.repo === "string" ? p.params.repo : null, number: typeof p.params.number === "number" ? p.params.number : null }, { reserved, untaken })) continue;
+      if (p.gate && await jobBlock(db, steps, { step: p.gate.step, repo: typeof p.gate.params.repo === "string" ? p.gate.params.repo : null }, { reserved, untaken })) continue;
       // The limit is what is left now, so two proposals of one step cannot both carry the whole remainder.
-      const job = await enqueue(db, p.step, p.params, AUTOPILOT_USER, (step, params) => {
+      const job = await enqueue(db, p.step, p.params, AUTOPILOT_USER, async (step, params) => {
         if (typeof params.limit !== "number") return params;
-        const lim = jobLimit(db, step, Date.now(), params.limit, untaken);
+        const lim = await jobLimit(db, step, Date.now(), params.limit, untaken);
         return lim ? { ...params, ...lim } : null;
       });
       queued.push(job.id);
       reserved.push(asActive(p.step, p.params, "queued"));
       if (p.gate) reserved.push(asActive(p.gate.step, p.gate.params, "gated"));
       done.add(slot);
-      if (p.fp !== undefined) setSetting(db, fpKey(p.step, typeof p.params.repo === "string" ? p.params.repo : null), JSON.stringify({ job: job.id, fp: p.fp } satisfies FpRecord));
+      if (p.fp !== undefined) await setSetting(db, fpKey(p.step, typeof p.params.repo === "string" ? p.params.repo : null), JSON.stringify({ job: job.id, fp: p.fp } satisfies FpRecord));
       const c: Candidate = { step: p.step, params: Object.fromEntries(Object.entries(p.params).filter(([k]) => k !== "limit")) };
-      lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
+      await lanes.find((l) => l.name === p.lane)?.chosen?.(db, c);
       log(`autopilot: job ${job.id}: ${p.step} ${JSON.stringify(job.params)}`);
     } catch (e) {
       if (!(e instanceof JobError)) {
@@ -1200,15 +1202,15 @@ export async function applyProposals(db: DatabaseSync, proposals: Proposal[], op
 }
 
 /** Detection and queueing in one go, on one connection. */
-export async function planAutopilot(db: DatabaseSync, opts: PlanOptions = {}): Promise<number[]> {
+export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<number[]> {
   const found = await detectAutopilot(db, opts);
   return applyProposals(db, found.proposals, { ...opts, wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) });
 }
 
 /** What the planner's marks say about the content stages read and the limits that apply to them. */
-function inputSignature(db: DatabaseSync): string {
-  const seqs = readSeqs(db);
-  return [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limitsSig(db), tasksSig(db), takersOf(db)].join(",");
+async function inputSignature(db: Db): Promise<string> {
+  const seqs = await readSeqs(db);
+  return [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), await limitsSig(db), await tasksSig(db), await takersOf(db)].join(",");
 }
 
 /**
@@ -1216,29 +1218,29 @@ function inputSignature(db: DatabaseSync): string {
  * work, a wait the last pass found has ended, or the fallback timer ran out. Moves the planner's marks when
  * it is, so the caller must then plan.
  */
-export function planDue(db: DatabaseSync, nowMs: number = Date.now()): boolean {
+export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
   const t = nowMs;
-  const sig = inputSignature(db);
-  const changed = sig !== (getSetting(db, KEY_SEQS_SEEN) ?? "");
-  const plannedAt = getSetting(db, KEY_PLANNED_AT);
+  const sig = await inputSignature(db);
+  const changed = sig !== (await getSetting(db, KEY_SEQS_SEEN) ?? "");
+  const plannedAt = await getSetting(db, KEY_PLANNED_AT);
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
-  const wake = getSetting(db, KEY_WAKE_AT);
-  const finished = db.prepare("SELECT 1 FROM jobs WHERE requested_by = ? AND ended_at > ?").get(AUTOPILOT_USER, plannedAt ?? "");
-  const released = db.prepare(`SELECT 1 FROM audit WHERE action IN (${Object.keys(RELEASE_STEPS).map(() => "?").join(", ")}) AND at > ?`)
+  const wake = await getSetting(db, KEY_WAKE_AT);
+  const finished = await db.prepare("SELECT 1 FROM jobs WHERE requested_by = ? AND ended_at > ?").get(AUTOPILOT_USER, plannedAt ?? "");
+  const released = await db.prepare(`SELECT 1 FROM audit WHERE action IN (${Object.keys(RELEASE_STEPS).map(() => "?").join(", ")}) AND at > ?`)
     .get(...Object.keys(RELEASE_STEPS), plannedAt ?? "");
   const woken = wake !== null && Date.parse(wake) <= t;
   if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !released && !woken) return false;
-  setSetting(db, KEY_SEQS_SEEN, sig);
-  setSetting(db, KEY_PLANNED_AT, new Date(t).toISOString());
+  await setSetting(db, KEY_SEQS_SEEN, sig);
+  await setSetting(db, KEY_PLANNED_AT, new Date(t).toISOString());
   // The pass about to run sets the next wake time when it is applied. With the switch off nothing is applied, so a
   // wake time that has passed would stay and make every tick plan again.
-  if (woken) deleteSetting(db, KEY_WAKE_AT);
+  if (woken) await deleteSetting(db, KEY_WAKE_AT);
   return true;
 }
 
 /** Why each stage is not starting, as the last planner pass saw it; keyed by step. */
-export function stageStatus(db: DatabaseSync): Record<string, string> {
-  try { return JSON.parse(getSetting(db, KEY_STATUS) ?? "{}") as Record<string, string>; } catch { return {}; }
+export async function stageStatus(db: Db): Promise<Record<string, string>> {
+  try { return JSON.parse(await getSetting(db, KEY_STATUS) ?? "{}") as Record<string, string>; } catch { return {}; }
 }
 
 // ---- what each lane will take next ----------------------------------------------
@@ -1270,29 +1272,29 @@ export type LaneItem = {
  * its candidates, and within a repo the order the planner's own selection (planned, plannedItems) gives. Items of
  * other repos follow. The dashboard's Next page reads this, so it cannot drift from what the autopilot picks.
  */
-export function laneItems(db: DatabaseSync, ctx: PlanCtx, lane: Pick<Lane, "name" | "perRepo" | "detect" | "steps">): LaneItem[] {
+export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "perRepo" | "detect" | "steps">): Promise<LaneItem[]> {
   const kinds = LANE_KINDS[lane.name];
   if (!kinds) return [];
-  const plans = plansOf(db, ctx);
+  const plans = await plansOf(db, ctx);
   const seen = new Set<string>(), all: LaneItem[] = [];
   // A repo whose jobs of every step of the lane wait for a Task Runner: the planner proposes none for it.
-  const untaken = (ctx.untaken ??= untakenTest(db)), noRunner = new Map<string, string | null>();
+  const untaken = (ctx.untaken ??= await untakenTest(db)), noRunner = new Map<string, string | null>();
   // Why the repo's jobs wait (the first step's reason), or null when some step of the lane has a taker.
-  const waits = (repo: string): string | null => {
+  const waits = async (repo: string): Promise<string | null> => {
     let w = noRunner.get(repo);
     if (w === undefined) {
-      const why = lane.steps?.map((step) => untaken({ step, repo })) ?? [];
+      const why = lane.steps ? await mapSeq(lane.steps, async (step) => await untaken({ step, repo })) : [];
       noRunner.set(repo, (w = why.length > 0 && why.every((x) => x !== null) ? why[0]! : null));
     }
     return w;
   };
-  const add = (f: Planned["facts"] | PlannedItem["facts"], state: string, a: Action) => {
+  const add = async (f: Planned["facts"] | PlannedItem["facts"], state: string, a: Action) => {
     const ref = `${f.repo}#${f.number}`;
     if (seen.has(ref)) return;
     seen.add(ref);
     const refused = gates(f, wantOf(a), "pipeline");
-    const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? waits(f.repo);
-    const fast = (fastOf(db, ctx).get(ref) ?? 0) >= FAST_FLOOR;
+    const blocked = !ctx.tracked.includes(f.repo) ? "outside the pipeline scope" : refused === "The pipeline is off" ? null : refused ?? await waits(f.repo);
+    const fast = ((await fastOf(db, ctx)).get(ref) ?? 0) >= FAST_FLOOR;
     all.push({
       repo: f.repo, number: f.number, kind: "kind" in f ? f.kind : "pr", action: a.kind, bucket: typeof a.params?.bucket === "string" ? a.params.bucket : null,
       fast, rank: f.score, inFlight: inFlightNow(f, state), next: false, blocked,
@@ -1300,11 +1302,11 @@ export function laneItems(db: DatabaseSync, ctx: PlanCtx, lane: Pick<Lane, "name
     });
   };
   for (const k of kinds) {
-    for (const p of planned(db, k, { plans })) add(p.facts, p.plan.state, p.action);
-    for (const p of plannedItems(db, k, { plans })) add(p.facts, p.plan.state, p.action);
+    for (const p of await planned(db, k, { plans })) await add(p.facts, p.plan.state, p.action);
+    for (const p of await plannedItems(db, k, { plans })) await add(p.facts, p.plan.state, p.action);
   }
   const repos: string[] = [];
-  for (const c of lane.detect(db, ctx)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
+  for (const c of await lane.detect(db, ctx)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
   const picked = (i: LaneItem) => !lane.perRepo || repos.includes(i.repo);
   const first = lane.perRepo ? repos.flatMap((r) => all.filter((i) => i.repo === r)) : all;
   const rest = all.filter((i) => !first.includes(i));
@@ -1318,25 +1320,25 @@ const NEXT_PER_LANE = 500;
 export type StoredLaneItems = Record<string, { total: number; items: LaneItem[] }>;
 
 /** Writes each lane's items as this pass sees them: only the lanes that changed. The table belongs to the `plans` topic, which the planner does not take as input. */
-function storeLaneItems(db: DatabaseSync, lanes: Lane[], ctx: PlanCtx): void {
-  const old = new Map((db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
+async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void> {
+  const old = new Map((await db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
   const put = db.prepare("INSERT OR REPLACE INTO lane_next (lane, total, items, at) VALUES (?, ?, ?, ?)");
   const at = new Date().toISOString();
   for (const lane of lanes) {
-    const all = laneItems(db, ctx, lane);
+    const all = await laneItems(db, ctx, lane);
     const prev = old.get(lane.name);
     old.delete(lane.name);
-    if (!all.length) { if (prev) db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane.name); continue; }
+    if (!all.length) { if (prev) await db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane.name); continue; }
     const items = JSON.stringify(all.slice(0, NEXT_PER_LANE));
-    if (!prev || prev.total !== all.length || prev.items !== items) put.run(lane.name, all.length, items, at);
+    if (!prev || prev.total !== all.length || prev.items !== items) await put.run(lane.name, all.length, items, at);
   }
-  for (const lane of old.keys()) db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane);
+  for (const lane of old.keys()) await db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane);
 }
 
 /** The lane lists of the planner's last pass, keyed by lane name. */
-export function storedLaneItems(db: DatabaseSync): StoredLaneItems {
+export async function storedLaneItems(db: Db): Promise<StoredLaneItems> {
   const out: StoredLaneItems = {};
-  for (const r of db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]) out[r.lane] = { total: r.total, items: JSON.parse(r.items) as LaneItem[] };
+  for (const r of await db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]) out[r.lane] = { total: r.total, items: JSON.parse(r.items) as LaneItem[] };
   return out;
 }
 
@@ -1345,29 +1347,29 @@ const HELD_LANES = ["act", "merge", "labels", "fixup", "fixissue"];
 
 export type Held = { reason: string; approval: boolean };
 /** Reads the stored lane lists once; call it once per request and ask per decision. */
-export function heldLookup(db: DatabaseSync): (repo: string, number: number, decisionId?: string) => Held | null {
-  const rows = new Map((db.prepare(`SELECT lane, total, items FROM lane_next WHERE lane IN (${HELD_LANES.map(() => "?").join(",")})`).all(...HELD_LANES) as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
+export async function heldLookup(db: Db): Promise<(repo: string, number: number, decisionId?: string) => Promise<Held | null>> {
+  const rows = new Map((await db.prepare(`SELECT lane, total, items FROM lane_next WHERE lane IN (${HELD_LANES.map(() => "?").join(",")})`).all(...HELD_LANES) as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
   const parsed = new Map<string, LaneItem[]>();
   const gateOf = new Map<string, Held | null>();
-  const laneHold = (name: string): Held | null => {
+  const laneHold = async (name: string): Promise<Held | null> => {
     if (!gateOf.has(name)) {
       const lane = LANES.find((l) => l.name === name);
-      const g = lane ? laneGate(db, lane, new Map(STEPS.map((x) => [x.name, x]))) : null;
+      const g = lane ? await laneGate(db, lane, new Map(STEPS.map((x) => [x.name, x]))) : null;
       gateOf.set(name, g && !g.canRun && g.kind !== "running" && g.why ? { reason: plain(g.why), approval: false } : null);
     }
     return gateOf.get(name)!;
   };
-  return (repo, number, decisionId) => {
+  return async (repo, number, decisionId) => {
     for (const [name, row] of rows) {
       if (!parsed.has(name)) parsed.set(name, JSON.parse(row.items) as LaneItem[]);
       const items = parsed.get(name)!;
       const item = items.find((i) => i.repo === repo && i.number === number && (!i.decisionId || !decisionId || i.decisionId === decisionId));
       if (item) {
         if (item.blocked) return { reason: plain(item.blocked), approval: /not approved$/.test(item.blocked) };
-        return laneHold(name);
+        return await laneHold(name);
       }
       // The stored list is capped: an item beyond it is judged by the lane's own gate alone.
-      if (row.total > items.length && name === "act") { const h = laneHold(name); if (h) return h; }
+      if (row.total > items.length && name === "act") { const h = await laneHold(name); if (h) return h; }
     }
     return null;
   };
@@ -1377,27 +1379,27 @@ export function heldLookup(db: DatabaseSync): (repo: string, number: number, dec
  * Why no Act job will run for `repo` now, or null: the pipeline is off or draining, off for the repo, Act is tripped, or its daily limit is 0.
  * A reached daily limit is not a block: queued presses wait for it. Presses that cannot be carried out are refused with this reason instead of queued.
  */
-export function actBlockedReason(db: DatabaseSync, repo: string): string | null {
-  if (!isEnabled(db)) return isDraining(db) ? "the pipeline is draining" : "the pipeline is off";
-  if (!scopeRepos(db).has(repo)) return `the pipeline is off for ${repo}`;
-  const tripped = tripReasonOfStep(db, "act");
+export async function actBlockedReason(db: Db, repo: string): Promise<string | null> {
+  if (!await isEnabled(db)) return await isDraining(db) ? "the pipeline is draining" : "the pipeline is off";
+  if (!(await scopeRepos(db)).has(repo)) return `the pipeline is off for ${repo}`;
+  const tripped = await tripReasonOfStep(db, "act");
   if (tripped) return `Act is ${tripped}`;
-  if (limitRow(db, "act").per_day === 0) return "the daily limit of Act is 0";
+  if ((await limitRow(db, "act")).per_day === 0) return "the daily limit of Act is 0";
   return null;
 }
 
 export type LaneGate = { canRun: boolean; kind: "ok" | "running" | "off" | "breaker" | "limit" | "account" | "backoff"; why: string | null };
 
 /** Whether a job of the lane can start now, from the same checks the planner's gate() makes. */
-export function laneGate(db: DatabaseSync, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): LaneGate {
-  if (!isEnabled(db)) return { canRun: false, kind: "off", why: isDraining(db) ? "The pipeline is draining" : "The pipeline is off" };
+export async function laneGate(db: Db, lane: Pick<Lane, "steps">, allSteps: Map<string, StepDef>, ms: number = Date.now()): Promise<LaneGate> {
+  if (!await isEnabled(db)) return { canRun: false, kind: "off", why: await isDraining(db) ? "The pipeline is draining" : "The pipeline is off" };
   const steps = lane.steps ?? [];
   let blocked: LaneGate | null = null;
   for (const s of steps) {
     // Blocked only when no repo can start: the step already works its most repos.
-    const full = jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true });
+    const full = await jobBlock(db, allSteps, { step: s, repo: null }, { precheck: true });
     if (full) { blocked ??= { canRun: false, kind: "running", why: full.replace(/ \(step_parallel\)$/, "") }; continue; }
-    const why = pauseReason(db, s, ms);
+    const why = await pauseReason(db, s, ms);
     if (!why) return { canRun: true, kind: "ok", why: null };
     const kind = /^tripped/.test(why) ? "breaker" : /daily limit/.test(why) ? "limit" : /^failed/.test(why) ? "backoff" : "account";
     blocked ??= { canRun: false, kind, why: plain(why) };

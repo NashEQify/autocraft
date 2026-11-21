@@ -2,8 +2,6 @@
 // by the callers in src/classify/run.ts, read by the API.
 import { filtered, hiddenTest, type HiddenRepos } from "../hidden-sql.ts";
 import { gunzipSync, gzipSync } from "node:zlib";
-import type { DatabaseSync } from "node:sqlite";
-import { prep } from "../sql-cache.ts";
 import type { AgentRun, AgentRunDetail, AgentRunFilter, AgentRunPage, AgentRunState, AgentRunTool, ItemRef, ItemShown, RateBucket, Rates } from "../../web/src/api/types.ts";
 
 export const MAX_ITEM_REFS = 50;
@@ -36,6 +34,8 @@ export const unpackText = (v: unknown): string | null => (typeof v === "string" 
 
 import { shownLookup } from "../dash/api/shown.ts";
 import { scrub } from "../runner/scrub.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 const now = (): string => new Date().toISOString();
 
@@ -51,36 +51,36 @@ const runEnded = (): void => { for (const f of [...endWakers]) f(); };
 export const packPrompt = (prompt: string): Uint8Array => packText(scrub(prompt.slice(0, TEXT_MAX)));
 
 /** Inserts the running row, its item refs and its prompt text. Does not open a transaction. */
-export function insertRun(db: DatabaseSync, s: RunStart): number {
+export async function insertRun(db: Db, s: RunStart): Promise<number> {
   const refs = s.items.slice(0, MAX_ITEM_REFS);
-  const id = Number(prep(db, `INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, account_id, items, item_count, state, started_at)
+  const id = Number((await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, account_id, items, item_count, state, started_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-    .run(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now()).lastInsertRowid);
-  const ins = prep(db, "INSERT OR IGNORE INTO agent_run_items (run_id, repo, number) VALUES (?, ?, ?)");
-  for (const r of s.items) ins.run(id, r.repo, r.number);
-  prep(db, "INSERT INTO agent_run_texts (run_id, prompt) VALUES (?, ?)").run(id, typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt);
+    .run(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now())).lastInsertRowid);
+  const ins = db.prepare("INSERT OR IGNORE INTO agent_run_items (run_id, repo, number) VALUES (?, ?, ?)");
+  for (const r of s.items) await ins.run(id, r.repo, r.number);
+  await db.prepare("INSERT INTO agent_run_texts (run_id, prompt) VALUES (?, ?)").run(id, typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt);
   return id;
 }
 
-export function finishRun(db: DatabaseSync, id: number, e: RunEnd): void {
+export async function finishRun(db: Db, id: number, e: RunEnd): Promise<void> {
   const t = e.tokens;
-  prep(db, `UPDATE agent_runs SET state = ?, ended_at = ?, input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, cost_usd = ?, summary = ?, error = ?, progress = NULL
+  await db.prepare(`UPDATE agent_runs SET state = ?, ended_at = ?, input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, cost_usd = ?, summary = ?, error = ?, progress = NULL
     WHERE id = ? AND state = 'running'`)
     .run(e.state, now(), t?.input ?? null, t?.output ?? null, t?.cacheRead ?? null, t?.cacheWrite ?? null, e.costUsd ?? null, e.summary ?? null, e.error ? e.error.slice(0, ERROR_MAX) : null, id);
-  if (e.output) prep(db, "UPDATE agent_run_texts SET output = ? WHERE run_id = ?").run(packText(scrub(e.output.slice(0, TEXT_MAX))), id);
+  if (e.output) await db.prepare("UPDATE agent_run_texts SET output = ? WHERE run_id = ?").run(packText(scrub(e.output.slice(0, TEXT_MAX))), id);
   setImmediate(runEnded); // after the caller's own follow-up claim, which gets the freed slot first
 }
 
 /** The latest progress line of a running call (src/classify/progress.ts). */
-export function setRunProgress(db: DatabaseSync, id: number, line: string): void {
-  db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ? AND state = 'running'").run(line, id);
+export async function setRunProgress(db: Db, id: number, line: string): Promise<void> {
+  await db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ? AND state = 'running'").run(line, id);
 }
 
 /** Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. */
-export function failRunning(db: DatabaseSync, reason: string, jobId?: number): number {
+export async function failRunning(db: Db, reason: string, jobId?: number): Promise<number> {
   const r = jobId === undefined
-    ? db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running'").run(now(), reason, reason)
-    : db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND job_id = ?").run(now(), reason, reason, jobId);
+    ? await db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running'").run(now(), reason, reason)
+    : await db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND job_id = ?").run(now(), reason, reason, jobId);
   return Number(r.changes);
 }
 
@@ -105,11 +105,11 @@ function refs(s: string): ItemRef[] {
 }
 
 /** `via` (the helper's login) goes to staff only. */
-function toRun(r: RunRow, shown: (repo: string, number: number) => ItemShown, staff: boolean): AgentRun {
+async function toRun(r: RunRow, shown: (repo: string, number: number) => Promise<ItemShown>, staff: boolean): Promise<AgentRun> {
   return {
     id: r.id, jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version,
     provider: r.provider === "jev" ? "jev" : "claude", model: r.model, accountId: r.account_id, accountLabel: r.account_id ? (r.account_label ?? r.account_id) : null,
-    items: refs(r.items).map((x) => ({ ...x, ...shown(x.repo, x.number) })), itemCount: r.item_count, state: r.state, startedAt: r.started_at, endedAt: r.ended_at,
+    items: await mapSeq(refs(r.items), async (x) => ({ ...x, ...await shown(x.repo, x.number) })), itemCount: r.item_count, state: r.state, startedAt: r.started_at, endedAt: r.ended_at,
     inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens, costUsd: r.cost_usd, summary: r.summary,
     ...(staff && r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }),
     ...(r.state === "running" && r.progress && { progress: r.progress }),
@@ -131,7 +131,7 @@ const CURSOR_RE = /^[1-9][0-9]{0,15}$/;
 export const AGENT_PAGE_DEFAULT = 50, AGENT_PAGE_MAX = 200;
 
 /** Newest first, keyset on id: a page costs index reads proportional to its size, however many runs exist. */
-export function listRuns(db: DatabaseSync, f: AgentRunFilter, hidden: HiddenRepos = [], staff = false): AgentRunPage {
+export async function listRuns(db: Db, f: AgentRunFilter, hidden: HiddenRepos = [], staff = false): Promise<AgentRunPage> {
   if (f.state !== undefined && !["running", "done", "failed", "recent"].includes(f.state)) throw new RunQueryError(400, "unknown state");
   if (f.step !== undefined && !STEP_RE.test(f.step)) throw new RunQueryError(400, "bad step");
   if (f.account !== undefined && !ACCOUNT_RE.test(f.account)) throw new RunQueryError(400, "bad account");
@@ -156,10 +156,10 @@ export function listRuns(db: DatabaseSync, f: AgentRunFilter, hidden: HiddenRepo
   } else {
     sql = `${SELECT} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY r.id DESC LIMIT ?`;
   }
-  const rows = db.prepare(sql).all(...args, limit + 1) as RunRow[];
+  const rows = await db.prepare(sql).all(...args, limit + 1) as RunRow[];
   const shown = shownLookup(db);
   const page = rows.slice(0, limit);
-  return { runs: page.map((x) => toRun(x, shown, staff)), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
+  return { runs: await mapSeq(page, async (x) => await toRun(x, shown, staff)), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
 }
 
 /**
@@ -172,23 +172,23 @@ export const touchesHidden = (hidden: HiddenRepos): { sql: string; args: string[
 };
 
 /** A run that touches a hidden repo is not found; prompt and output text go only to `texts` viewers (operators). */
-export function getRun(db: DatabaseSync, id: unknown, view: { hidden?: HiddenRepos; texts?: boolean } = { texts: true }): AgentRunDetail {
+export async function getRun(db: Db, id: unknown, view: { hidden?: HiddenRepos; texts?: boolean } = { texts: true }): Promise<AgentRunDetail> {
   if (typeof id !== "number" || !Number.isInteger(id) || id < 1) throw new RunQueryError(400, "not a run id");
-  const r = db.prepare(`${SELECT} WHERE r.id = ?`).get(id) as RunRow | undefined;
+  const r = await db.prepare(`${SELECT} WHERE r.id = ?`).get(id) as RunRow | undefined;
   if (!r) throw new RunQueryError(404, `no agent run ${id}`);
-  if (view.hidden && filtered(view.hidden) && !db.prepare(`SELECT 1 FROM agent_runs r WHERE r.id = ? AND ${touchesHidden(view.hidden).sql}`).get(id, ...touchesHidden(view.hidden).args)) {
+  if (view.hidden && filtered(view.hidden) && !await db.prepare(`SELECT 1 FROM agent_runs r WHERE r.id = ? AND ${touchesHidden(view.hidden).sql}`).get(id, ...touchesHidden(view.hidden).args)) {
     throw new RunQueryError(404, `no agent run ${id}`);
   }
-  const tools = runTools(db, id);
+  const tools = await runTools(db, id);
   // Tool arguments carry file paths and patch text: like the prompt, for operators only.
-  if (!view.texts) return { ...toRun(r, shownLookup(db), false), prompt: null, output: null, error: r.error ? "failed" : null, tools: tools.map((t) => ({ ...t, args: null })), textsHidden: true };
-  const t = db.prepare("SELECT prompt, output FROM agent_run_texts WHERE run_id = ?").get(id) as { prompt: unknown; output: unknown } | undefined;
-  return { ...toRun(r, shownLookup(db), view.texts === true), prompt: unpackText(t?.prompt), output: unpackText(t?.output), error: r.error, tools };
+  if (!view.texts) return { ...await toRun(r, shownLookup(db), false), prompt: null, output: null, error: r.error ? "failed" : null, tools: tools.map((t) => ({ ...t, args: null })), textsHidden: true };
+  const t = await db.prepare("SELECT prompt, output FROM agent_run_texts WHERE run_id = ?").get(id) as { prompt: unknown; output: unknown } | undefined;
+  return { ...await toRun(r, shownLookup(db), view.texts === true), prompt: unpackText(t?.prompt), output: unpackText(t?.output), error: r.error, tools };
 }
 
 /** The tool uses of a run in order; a check-tool use carries its model_checks row. */
-export function runTools(db: DatabaseSync, runId: number): AgentRunTool[] {
-  const rows = db.prepare(`SELECT t.seq, t.tool, t.args, t.result_bytes, t.is_error, t.started_at, t.ended_at, t.check_id, c.command, c.crate, c.test_name, c.outcome
+export async function runTools(db: Db, runId: number): Promise<AgentRunTool[]> {
+  const rows = await db.prepare(`SELECT t.seq, t.tool, t.args, t.result_bytes, t.is_error, t.started_at, t.ended_at, t.check_id, c.command, c.crate, c.test_name, c.outcome
     FROM agent_run_tools t LEFT JOIN model_checks c ON c.id = t.check_id WHERE t.run_id = ? ORDER BY t.seq`).all(runId) as
     { seq: number; tool: string; args: string; result_bytes: number | null; is_error: number; started_at: string | null; ended_at: string | null; check_id: number | null; command: string | null; crate: string | null; test_name: string | null; outcome: string | null }[];
   return rows.map((r) => ({
@@ -198,11 +198,11 @@ export function runTools(db: DatabaseSync, runId: number): AgentRunTool[] {
 }
 
 /** Labels of the accounts each job's runs used, for a page of jobs. */
-export function accountLabelsByJob(db: DatabaseSync, jobIds: number[]): Map<number, string[]> {
+export async function accountLabelsByJob(db: Db, jobIds: number[]): Promise<Map<number, string[]>> {
   const out = new Map<number, string[]>();
   if (!jobIds.length) return out;
   const marks = jobIds.map(() => "?").join(",");
-  const rows = db.prepare(`SELECT DISTINCT r.job_id AS job, COALESCE(a.label, r.account_id) AS label FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id
+  const rows = await db.prepare(`SELECT DISTINCT r.job_id AS job, COALESCE(a.label, r.account_id) AS label FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id
     WHERE r.job_id IN (${marks}) AND r.account_id IS NOT NULL ORDER BY 1, 2`).all(...jobIds) as { job: number; label: string }[];
   for (const r of rows) out.set(r.job, [...(out.get(r.job) ?? []), r.label]);
   return out;
@@ -211,7 +211,7 @@ export function accountLabelsByJob(db: DatabaseSync, jobIds: number[]): Map<numb
 // ---- rates ---------------------------------------------------------------------
 
 /** Items moved per stage, and usage of the enabled accounts, in hourly (24h) or daily (7d) buckets ending now (UTC). */
-export async function rates(db: DatabaseSync, window: unknown, nowMs: number = Date.now(), hidden: HiddenRepos = []): Promise<Rates> {
+export async function rates(db: Db, window: unknown, nowMs: number = Date.now(), hidden: HiddenRepos = []): Promise<Rates> {
   if (window !== "24h" && window !== "7d") throw new RunQueryError(400, "window must be 24h or 7d");
   const hourly = window === "24h", step = hourly ? 3600_000 : 86_400_000, n = hourly ? 24 : 7;
   const end = Math.floor(nowMs / step) * step + step;
@@ -225,13 +225,13 @@ export async function rates(db: DatabaseSync, window: unknown, nowMs: number = D
   const byStep = new Map<string, Map<string, RateBucket>>();
   const bucketsOf = (s: string) => byStep.get(s) ?? (byStep.set(s, empty()), byStep.get(s)!);
 
-  for (const r of db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COALESCE(SUM(items), 0) AS items FROM jobs
+  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COALESCE(SUM(items), 0) AS items FROM jobs
     WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND (repo IS NULL OR NOT (${jobHide.sql}))` : ""} GROUP BY step, t`)
     .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? jobHide.args : [])) as { step: string; t: string; items: number }[]) {
     const b = bucketsOf(r.step).get(r.t);
     if (b) b.items = r.items;
   }
-  for (const r of db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COUNT(*) AS runs, COALESCE(SUM(state = 'failed'), 0) AS failed FROM agent_runs r
+  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COUNT(*) AS runs, COALESCE(SUM(state = 'failed'), 0) AS failed FROM agent_runs r
     WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND ${runHide.sql}` : ""} GROUP BY step, t`)
     .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? runHide.args : [])) as { step: string; t: string; runs: number; failed: number }[]) {
     const b = bucketsOf(r.step).get(r.t);
@@ -243,9 +243,9 @@ export async function rates(db: DatabaseSync, window: unknown, nowMs: number = D
   const stages = names.map((s) => ({ step: s, title: steps.get(s)?.title ?? s, buckets: [...bucketsOf(s).values()] }))
     .sort((a, b) => (steps.get(a.step)?.stage ?? 99) - (steps.get(b.step)?.stage ?? 99) || a.step.localeCompare(b.step));
 
-  const accounts = (db.prepare("SELECT id, label FROM claude_accounts WHERE enabled = 1 ORDER BY id").all() as { id: string; label: string }[]).map((a) => ({
+  const accounts = await mapSeq((await db.prepare("SELECT id, label FROM claude_accounts WHERE enabled = 1 ORDER BY id").all() as { id: string; label: string }[]), async (a) => ({
     id: a.id, label: a.label,
-    samples: (db.prepare(`SELECT strftime('${fmt}', t) AS t, MAX(five_hour_pct) AS fiveHourPct, MAX(weekly_pct) AS weeklyPct FROM account_usage_samples
+    samples: (await db.prepare(`SELECT strftime('${fmt}', t) AS t, MAX(five_hour_pct) AS fiveHourPct, MAX(weekly_pct) AS weeklyPct FROM account_usage_samples
       WHERE account_id = ? AND t >= ? GROUP BY 1 ORDER BY 1`).all(a.id, from) as { t: string; fiveHourPct: number | null; weeklyPct: number | null }[]),
   }));
   return { window, bucket: hourly ? "hour" : "day", stages, accounts };
@@ -254,12 +254,12 @@ export async function rates(db: DatabaseSync, window: unknown, nowMs: number = D
 // ---- retention -----------------------------------------------------------------
 
 /** Drops prompt and output text and tool uses with their runs after RUN_KEEP_MS (ten years). Cutoffs are by id, found through the started_at index. */
-export function pruneRuns(db: DatabaseSync, nowMs: number = Date.now()): { texts: number; runs: number } {
-  const maxBefore = (ms: number): number => (db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM agent_runs WHERE started_at < ?").get(new Date(nowMs - ms).toISOString()) as { id: number }).id;
-  const texts = Number(db.prepare("DELETE FROM agent_run_texts WHERE run_id <= ?").run(maxBefore(TEXT_KEEP_MS)).changes);
-  const old = maxBefore(RUN_KEEP_MS);
-  db.prepare("DELETE FROM agent_run_tools WHERE run_id <= ?").run(old);
-  db.prepare("DELETE FROM agent_run_items WHERE run_id <= ?").run(old);
-  const runs = Number(db.prepare("DELETE FROM agent_runs WHERE id <= ?").run(old).changes);
+export async function pruneRuns(db: Db, nowMs: number = Date.now()): Promise<{ texts: number; runs: number }> {
+  const maxBefore = async (ms: number): Promise<number> => (await db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM agent_runs WHERE started_at < ?").get(new Date(nowMs - ms).toISOString()) as { id: number }).id;
+  const texts = Number((await db.prepare("DELETE FROM agent_run_texts WHERE run_id <= ?").run(await maxBefore(TEXT_KEEP_MS))).changes);
+  const old = await maxBefore(RUN_KEEP_MS);
+  await db.prepare("DELETE FROM agent_run_tools WHERE run_id <= ?").run(old);
+  await db.prepare("DELETE FROM agent_run_items WHERE run_id <= ?").run(old);
+  const runs = Number((await db.prepare("DELETE FROM agent_runs WHERE id <= ?").run(old)).changes);
   return { texts, runs };
 }

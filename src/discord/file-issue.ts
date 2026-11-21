@@ -1,7 +1,6 @@
 // Filing a drafted issue from Discord under the person's own GitHub account: the reporter sign-in, the junk check and
 // the limits. The Discord flow (src/discord/issue-new.ts) calls fileIssue() when the person presses File it.
 // The reporter's token set is kept by src/discord/reporter.ts; the sign-in routes are src/dash/server/reporter-signin.ts.
-import type { DatabaseSync } from "node:sqlite";
 import { jevAvailable } from "../agents/jev.ts";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { envVar } from "../env.ts";
@@ -15,6 +14,7 @@ import { JEV_PROMPTS } from "../prompts/index.ts";
 import { isPublicRepo } from "../public/status.ts";
 import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-ask.ts";
 import { failReporter, forgetReporterRow, newReporterState, readReporter, reporterToken } from "./reporter.ts";
+import type { Db } from "../db/index.ts";
 
 /** Filing from Discord under the person's account is built but off: the sign-in needs a Discord identity step first, so a forwarded sign-in link cannot link someone else's GitHub account. While off, the draft offers only the prefilled GitHub link and the sign-in routes answer 404. */
 export const FILING_IN_DISCORD = false;
@@ -37,7 +37,7 @@ export type FileResult =
   /** Not filed: a limit, the junk check or a GitHub error. `reason` is shown to the person; the flow offers the GitHub link instead. */
   | { status: "refused"; reason: string };
 
-export type FileDeps = { db: DatabaseSync; log: (line: string) => void };
+export type FileDeps = { db: Db; log: (line: string) => void };
 
 /** Limits over 24 hours. `DAILY_WRITES` is the GitHub write limit of the audit action `discord-issue-open`. */
 export const PER_LOGIN = 3;
@@ -52,7 +52,7 @@ const LABEL: Record<IssueKind, string> = { bug: "bug", feature: "enhancement" };
 /** What a test replaces: the token box and provider (else the secrets file's), `gh`, the junk judges, the clock and the public base URL. */
 export type FileHooks = {
   box?: TokenBox; provider?: Provider; exec?: Exec; baseUrl?: string | null; now?: () => number;
-  judge?: { jev: (db: DatabaseSync, a: JunkAsk) => Promise<number | null>; haiku: (db: DatabaseSync, a: JunkAsk) => Promise<boolean | null> };
+  judge?: { jev: (db: Db, a: JunkAsk) => Promise<number | null>; haiku: (db: Db, a: JunkAsk) => Promise<boolean | null> };
 };
 
 const JEV_STEP: JevStep<JunkAsk, number> = {
@@ -66,7 +66,7 @@ const JEV_STEP: JevStep<JunkAsk, number> = {
 const HAIKU_STEP: ClaudeStep<JunkAsk, boolean> = {
   provider: "claude", id: "discord.junk.haiku",
   toPrompt: (a) => [a],
-  parse: (text) => {
+  parse: async (text) => {
     const v = parseJunk(text);
     return v === null ? null : { value: v };
   },
@@ -78,9 +78,9 @@ const modelJudge: NonNullable<FileHooks["judge"]> = {
 };
 
 /** Jev first, Haiku where Jev is unsure or unavailable. With no model answer the draft is not filed ("unknown"): the person still has the GitHub link. The texts of the calls are deleted when they end. */
-async function junkCheck(db: DatabaseSync, a: JunkAsk, judge: NonNullable<FileHooks["judge"]>, log: (l: string) => void): Promise<"junk" | "ok" | "unknown"> {
+async function junkCheck(db: Db, a: JunkAsk, judge: NonNullable<FileHooks["judge"]>, log: (l: string) => void): Promise<"junk" | "ok" | "unknown"> {
   try {
-    if (jevAvailable(db)) {
+    if (await jevAvailable(db)) {
       const p = await judge.jev(db, a);
       const band = p === null ? "unsure" : junkBand(p);
       if (band === "yes") return "junk";
@@ -93,7 +93,7 @@ async function junkCheck(db: DatabaseSync, a: JunkAsk, judge: NonNullable<FileHo
     return "unknown";
   } finally {
     try {
-      db.prepare("DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-issue' AND state <> 'running')").run();
+      await db.prepare("DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-issue' AND state <> 'running')").run();
     } catch (e) { log(`discord: removing junk texts failed: ${(e as Error).message}`); }
   }
 }
@@ -107,14 +107,14 @@ function secretsOf(env = process.env): { box: TokenBox; provider: Provider } | n
   }
 }
 
-const count = (db: DatabaseSync, sql: string, ...args: (string | number)[]): number => Number((db.prepare(sql).get(...args) as { c: number }).c);
+const count = async (db: Db, sql: string, ...args: (string | number)[]): Promise<number> => Number((await db.prepare(sql).get(...args) as { c: number }).c);
 
 export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHooks = {}): Promise<FileResult> {
   const { db, log } = deps;
   const now = (hooks.now ?? Date.now)();
   const title = req.title.replace(/\s+/g, " ").trim();
   const body = req.body.trim();
-  if (!isPublicRepo(db, req.repo)) return { status: "refused", reason: "That repo is not open for filing from Discord." };
+  if (!await isPublicRepo(db, req.repo)) return { status: "refused", reason: "That repo is not open for filing from Discord." };
   if (!title || !body) return { status: "refused", reason: "The title and the description must not be empty." };
   if (title.length > TITLE_MAX) return { status: "refused", reason: "The title is too long." };
 
@@ -123,16 +123,16 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
   if (!keys || !baseUrl) return { status: "refused", reason: "Filing from Discord is not set up." };
 
   const tok = await reporterToken(db, keys.box, keys.provider, req.reporter, now);
-  if (!tok.ok && tok.signIn) return { status: "sign-in", url: `${baseUrl}/discord/github/start?state=${encodeURIComponent(newReporterState(db, req.reporter, now))}` };
+  if (!tok.ok && tok.signIn) return { status: "sign-in", url: `${baseUrl}/discord/github/start?state=${encodeURIComponent(await newReporterState(db, req.reporter, now))}` };
   if (!tok.ok) return { status: "refused", reason: "GitHub did not answer. Try again in a minute." };
 
   const since = new Date(now - DAY_MS).toISOString();
-  db.prepare("DELETE FROM discord_filed WHERE at < ?").run(since);
-  if (count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE login = ? AND at >= ?", tok.login, since) >= PER_LOGIN) return { status: "refused", reason: `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.` };
-  if (count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE repo = ? AND at >= ?", req.repo, since) >= PER_REPO) return { status: "refused", reason: "This repo has reached its limit of issues filed from Discord today." };
-  if (count(db, "SELECT COUNT(*) AS c FROM audit WHERE action = ? AND at >= ? AND json_extract(details, '$.state') <> 'failed'", AUDIT_ACTION, since) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
+  await db.prepare("DELETE FROM discord_filed WHERE at < ?").run(since);
+  if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE login = ? AND at >= ?", tok.login, since) >= PER_LOGIN) return { status: "refused", reason: `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.` };
+  if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE repo = ? AND at >= ?", req.repo, since) >= PER_REPO) return { status: "refused", reason: "This repo has reached its limit of issues filed from Discord today." };
+  if (await count(db, "SELECT COUNT(*) AS c FROM audit WHERE action = ? AND at >= ? AND json_extract(details, '$.state') <> 'failed'", AUDIT_ACTION, since) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
   // The slot is reserved before any await, so parallel sessions of one person cannot pass the limit together; every failure below frees it.
-  const slot = Number(db.prepare("INSERT INTO discord_filed (repo, number, login, reporter, at) VALUES (?, 0, ?, ?, ?)").run(req.repo, tok.login, req.reporter, new Date(now).toISOString()).lastInsertRowid);
+  const slot = Number((await db.prepare("INSERT INTO discord_filed (repo, number, login, reporter, at) VALUES (?, 0, ?, ?, ?)").run(req.repo, tok.login, req.reporter, new Date(now).toISOString())).lastInsertRowid);
   let filed = false;
   try {
     const junk = await junkCheck(db, { title, body }, hooks.judge ?? modelJudge, log);
@@ -149,23 +149,23 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
     } catch (e) {
       const err = String((e as Error).message ?? e);
       if (/HTTP 401|bad credentials/i.test(err)) {
-        failReporter(db, req.reporter, tok.version, now);
-        return { status: "sign-in", url: `${baseUrl}/discord/github/start?state=${encodeURIComponent(newReporterState(db, req.reporter, now))}` };
+        await failReporter(db, req.reporter, tok.version, now);
+        return { status: "sign-in", url: `${baseUrl}/discord/github/start?state=${encodeURIComponent(await newReporterState(db, req.reporter, now))}` };
       }
       if (e instanceof IssueError && !e.clear) { filed = true; /* the issue may exist: the slot stays used */ return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;
-    db.prepare("UPDATE discord_filed SET number = ? WHERE rowid = ?").run(made.number, slot);
+    await db.prepare("UPDATE discord_filed SET number = ? WHERE rowid = ?").run(made.number, slot);
     // A label is a courtesy: GitHub refuses it when the repo has no such label or the account may not set labels.
     await labelReporterIssue(w, asUser, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
     return { status: "filed", number: made.number, url: made.url, login: tok.login };
   } finally {
-    if (!filed) db.prepare("DELETE FROM discord_filed WHERE rowid = ?").run(slot);
+    if (!filed) await db.prepare("DELETE FROM discord_filed WHERE rowid = ?").run(slot);
   }
 }
 
 /** Removes the person's GitHub sign-in (on /autocraft unlink and `discord forget --user`) and queues its token's revoke. Returns whether one existed. */
-export function forgetReporter(db: DatabaseSync, reporter: string): boolean {
-  return forgetReporterRow(db, reporter);
+export async function forgetReporter(db: Db, reporter: string): Promise<boolean> {
+  return await forgetReporterRow(db, reporter);
 }

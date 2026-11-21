@@ -3,13 +3,13 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { describe, test } from "node:test";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { askClaude, setRunner, setWorkspace } from "../src/classify/run.ts";
 import { eventLines } from "../src/classify/progress.ts";
-import { connect } from "../src/db.ts";
+import type { Db } from "../src/db/index.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "stream-"));
@@ -18,9 +18,9 @@ process.env.AUTOCRAFT_CHECKOUT_DIR = join(dir, "checkouts");
 process.env.AUTOCRAFT_CLAUDE_CWD = join(dir, "cwd");
 setWorkspace(async () => []);
 
-function fresh(): DatabaseSync {
-  const db = connect(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  const box = useTestAccount(db);
+async function fresh(): Promise<Db> {
+  const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
+  const box = await useTestAccount(db);
   mkdirSync(`${box.configDir}t`, { recursive: true });
   writeFileSync(`${box.configDir}t/.credentials.json`, JSON.stringify({ claudeAiOauth: { expiresAt: Date.now() + 86_400_000 } }));
   return db;
@@ -45,13 +45,13 @@ const EVENTS = [
 ];
 
 /** Emits the events one by one with a pause, as the CLI would. */
-const streaming = (events: string[], during?: (k: number) => void | Promise<void>) =>
+const streaming = (events: string[], during?: (k: number) => Promise<void | Promise<void>>) =>
   setRunner(async (_cmd, args, _in, _cwd, _t, _env, onLine) => {
     assert.ok(args.includes("stream-json") && args.includes("--verbose"));
     let out = "";
     for (const [k, l] of events.entries()) {
       out += `${l}\n`;
-      onLine?.(l);
+      await onLine?.(l);
       await during?.(k);
       await new Promise((r) => setTimeout(r, 5));
     }
@@ -80,11 +80,11 @@ describe("progress lines", () => {
 
 describe("askClaude with a stream", () => {
   test("onProgress gets the lines in order; the answer is the last result event; the run shows the latest line until it ends", async () => {
-    const db = fresh();
+    const db = await fresh();
     const seen: string[] = [];
     let running: string | null | undefined;
-    const restore = streaming(EVENTS, (k) => {
-      if (k === 1) running = (db.prepare("SELECT progress FROM agent_runs WHERE state = 'running'").get() as { progress: string } | undefined)?.progress;
+    const restore = streaming(EVENTS, async (k) => {
+      if (k === 1) running = (await db.prepare("SELECT progress FROM agent_runs WHERE state = 'running'").get() as { progress: string } | undefined)?.progress;
     });
     try {
       const r = await askClaude("conversation.turn", "opus", [{ ref: "app#1", item: "{}", turns: "" }], db, { checkout: dir, onProgress: (l) => seen.push(l) });
@@ -100,20 +100,20 @@ describe("askClaude with a stream", () => {
     assert.equal(seen[0], "Reading craft-i18n/packs/hu/menu.ftl");
     assert.equal(seen[2], 'Explorer: Searching for "spellcheck" in src');
     assert.equal(running, "Reading craft-i18n/packs/hu/menu.ftl");
-    const row = db.prepare("SELECT state, progress FROM agent_runs").get() as { state: string; progress: string | null };
+    const row = await db.prepare("SELECT state, progress FROM agent_runs").get() as { state: string; progress: string | null };
     assert.equal(row.state, "done");
     assert.equal(row.progress, null);
   });
 
   test("an error result still fails the call", async () => {
-    const db = fresh();
+    const db = await fresh();
     const restore = streaming([tool("Read", { file_path: "/repo/a" }), JSON.stringify({ type: "result", is_error: true, result: "boom" })]);
     try {
       assert.equal(await askClaude("conversation.turn", "opus", [{ ref: "app#1", item: "{}", turns: "" }], db, { checkout: dir }), null);
     } finally {
       restore();
     }
-    assert.equal((db.prepare("SELECT summary FROM agent_runs").get() as { summary: string }).summary, "model error");
+    assert.equal((await db.prepare("SELECT summary FROM agent_runs").get() as { summary: string }).summary, "model error");
   });
 });
 

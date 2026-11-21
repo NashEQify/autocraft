@@ -3,7 +3,6 @@
 // It stores no fixups row, records no check or audit row and writes nothing to GitHub; model usage, model_checks and the
 // worker tasks are recorded as for any run. The pipeline setting and the stage's limits do not apply.
 import { mkdirSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import { getTask, TERMINAL } from "../build/tasks.ts";
 import { CheckTool, applyCheck, refusal } from "../checktool/index.ts";
 import { CHECK_DIFF_CAP, CHECK_PATCH_CAP } from "../patchcheck/types.ts";
@@ -18,6 +17,7 @@ import { shownSize, viewFile } from "./excerpt.ts";
 import { Git } from "./git.ts";
 import { buildScriptsAt, fixupEditable, validatePatch, type FixupPr } from "./patch.ts";
 import { ownerOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
 
 const LINT_GIVE_UP_MS = 90 * 60_000;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -26,11 +26,11 @@ const indent = (s: string) => s.trimEnd().split("\n").map((l) => `  ${l}`).join(
 /** Returns the exit code: 0 clean, 2 when the lint task found something or the Opus check rejected, 1 on an error. */
 const BASE_QUERY = `query($owner: String!, $name: String!, $n: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $n) { baseRefOid } } }`;
 
-export async function runFixupTry(db: DatabaseSync, repo: string, number: number, d: FixupDeps = defaultDeps(), log: (line: string) => void = console.log): Promise<number> {
+export async function runFixupTry(db: Db, repo: string, number: number, d: FixupDeps = defaultDeps(), log: (line: string) => void = console.log): Promise<number> {
   const ref = `${repo}#${number}`;
-  const item = db.prepare("SELECT head_oid, title FROM items WHERE repo = ? AND number = ? AND kind = 'pr'").get(repo, number) as { head_oid: string | null; title: string | null } | undefined;
+  const item = await db.prepare("SELECT head_oid, title FROM items WHERE repo = ? AND number = ? AND kind = 'pr'").get(repo, number) as { head_oid: string | null; title: string | null } | undefined;
   if (!item?.head_oid) throw new Error(`${ref} is not a PR in the database`);
-  const review = db.prepare("SELECT fixes, reason, verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ? ORDER BY at DESC LIMIT 1").get(repo, number, item.head_oid) as { fixes: string | null; reason: string | null; verdict: string } | undefined;
+  const review = await db.prepare("SELECT fixes, reason, verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ? ORDER BY at DESC LIMIT 1").get(repo, number, item.head_oid) as { fixes: string | null; reason: string | null; verdict: string } | undefined;
   if (!review) throw new Error(`${ref} has no review at its head ${item.head_oid.slice(0, 7)}`);
   if (review.verdict !== "take-fix") throw new Error(`the latest review of ${ref} at its head is ${review.verdict}, not take-fix`);
   const fixes = parseFixes(review.fixes);
@@ -63,8 +63,8 @@ export async function runFixupTry(db: DatabaseSync, repo: string, number: number
   }
   log(`${ref} at ${head.slice(0, 7)}: ${fixes.length} fixes in ${files.join(", ")}; ${checkout ? "sandbox checkout ready" : "NO checkout: the model runs without tools"}`);
 
-  const before0 = (db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM agent_runs").get() as { n: number }).n;
-  const before = (db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM model_checks").get() as { n: number }).n;
+  const before0 = (await db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM agent_runs").get() as { n: number }).n;
+  const before = (await db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM model_checks").get() as { n: number }).n;
   const base = (await d.querier.query(BASE_QUERY, { owner: ownerOf(repo), name: repo, n: number }) as { repository?: { pullRequest?: { baseRefOid?: string } | null } }).repository?.pullRequest?.baseRefOid ?? null;
   const tool = new CheckTool({ db, step: "fixup", repo, number, head, base, applies: applyCheck(git, d.root, head, (p) => refusal(validatePatch(p, files, (x) => fixupEditable(x, scripts)))) });
   const t0 = Date.now();
@@ -73,10 +73,10 @@ export async function runFixupTry(db: DatabaseSync, repo: string, number: number
 
   const offered = checkout !== undefined && CLAUDE_PROMPTS["fixup.patch"].sandbox?.check === true;
   log(`\ntools given to the model: ${offered ? `${[...CLAUDE_PROMPTS["fixup.patch"].sandbox!.tools, "Agent", "mcp__build__check"].join(", ")} (check offered; commands that returned a result: ${[...tool.ran].join(", ") || "none"})` : "none (no checkout, so no sandbox and no check tool)"}`);
-  const runs = db.prepare("SELECT id, summary FROM agent_runs WHERE prompt_id IN ('fixup.patch') AND id > ? ORDER BY id").all(before0) as { id: number; summary: string | null }[];
+  const runs = await db.prepare("SELECT id, summary FROM agent_runs WHERE prompt_id IN ('fixup.patch') AND id > ? ORDER BY id").all(before0) as { id: number; summary: string | null }[];
   for (const r of runs) log(`model call: agent run ${r.id}: ${r.summary ?? "no summary"}`);
   log("tool calls:");
-  const calls = db.prepare("SELECT command, crate, test_name, task_id, outcome, started_at, ended_at FROM model_checks WHERE id > ? AND step = 'fixup' AND repo = ? AND number = ? AND head = ? ORDER BY id").all(before, repo, number, head) as
+  const calls = await db.prepare("SELECT command, crate, test_name, task_id, outcome, started_at, ended_at FROM model_checks WHERE id > ? AND step = 'fixup' AND repo = ? AND number = ? AND head = ? ORDER BY id").all(before, repo, number, head) as
     { command: string; crate: string | null; test_name: string | null; task_id: number | null; outcome: string | null; started_at: string; ended_at: string | null }[];
   if (!calls.length) log("  none");
   for (const c of calls) log(`  ${c.command}${c.crate ? ` -p ${c.crate}` : ""}${c.test_name ? ` ${c.test_name}` : ""}: ${c.outcome ?? "unfinished"} (task ${c.task_id ?? "none"}, ${c.ended_at ? Math.round((Date.parse(c.ended_at) - Date.parse(c.started_at)) / 1000) : "?"} s)`);
@@ -102,11 +102,11 @@ export async function runFixupTry(db: DatabaseSync, repo: string, number: number
   log(`\nlint task ${task} queued`);
   const l0 = Date.now();
   while (Date.now() - l0 < LINT_GIVE_UP_MS) {
-    const t = getTask(db, task);
+    const t = await getTask(db, task);
     if (!t || TERMINAL.includes(t.state)) break;
     await sleep(5000);
   }
-  const res = readLint(db, task);
+  const res = await readLint(db, task);
   if (res.kind !== "result") { log(`lint: no result: ${res.kind === "pending" ? "still running" : res.reason}`); return 1; }
   log(`lint: ${res.findings.length} findings on the patch's lines`);
   for (const f of res.findings) log(indent(`${f.level} ${f.code ?? ""} ${f.file}:${f.line}\n${f.rendered}`));

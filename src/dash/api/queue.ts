@@ -1,6 +1,5 @@
 // The merge queue for the dashboard: read-only, anyone signed in, limited to the repos the requester may see; viewers get
 // the queue rows without the review's reason, verification text and the plan's quoted reasons (src/dash/api/reader.ts).
-import type { DatabaseSync } from "node:sqlite";
 import type { BatchList, BatchState, Mergeable, QueueBatch, QueueList, QueueRow, QueueState, Tier, TypeLabel } from "../../../web/src/api/types.ts";
 import { cachedQueue, countMergedPlans, countStates, type CachedEntry } from "../../core/plan-read.ts";
 import { QUEUE_STATES } from "../../core/plan.ts";
@@ -10,6 +9,7 @@ import type { Req } from "../types.ts";
 import { flowMembers } from "./flow.ts";
 import { queueTextFor, readerOf, type Reader } from "./reader.ts";
 import { isHiddenRepo } from "../../hidden-sql.ts";
+import type { Db } from "../../db/index.ts";
 
 const TIER: Record<string, Tier> = { whitelisted: "whitelisted", not: "not", allow: "override-allow", deny: "override-deny" };
 const MERGEABLE: Record<string, Mergeable> = { MERGEABLE: "clean", CONFLICTING: "conflicts" };
@@ -37,10 +37,10 @@ function parseCursor(s: string | null): { repo: string; number: number } | undef
 // The queue rows come from the Plan cache (src/core/plan-read.ts): open PRs are read whole (counts and the state filter need all of
 // them) and cut into pages by (repo, number); merged PRs are read a page at a time and only when state=merged.
 /** PRs (repo#number@head) in an integration batch in flight: without a state filter they are listed under their batch, not in the PR list. */
-const inFlight = (db: DatabaseSync): Set<string> => new Set((db.prepare(`SELECT b.repo || '#' || p.number || '@' || p.head_oid AS k
+const inFlight = async (db: Db): Promise<Set<string>> => new Set((await db.prepare(`SELECT b.repo || '#' || p.number || '@' || p.head_oid AS k
   FROM main.merge_batch_prs p JOIN main.merge_batches b ON b.id = p.batch_id WHERE b.state IN ('checking', 'open')`).all() as { k: string }[]).map((r) => r.k));
 
-export async function queue(db: DatabaseSync, req: Req): Promise<QueueList> {
+export async function queue(db: Db, req: Req): Promise<QueueList> {
   const repo = req.query.get("repo") || undefined;
   const state = req.query.get("state") || undefined;
   const limit = Math.min(Math.max(Number(req.query.get("limit")) || 100, 1), 500);
@@ -52,9 +52,9 @@ export async function queue(db: DatabaseSync, req: Req): Promise<QueueList> {
   // A flowchart branch lists exactly its own PRs, whatever their state.
   const flowKey = req.query.get("flow");
   if (flowKey) {
-    const refs = /^merge\.[a-z-]+$/.test(flowKey) ? flowMembers(db, flowKey) : null;
+    const refs = /^merge\.[a-z-]+$/.test(flowKey) ? await flowMembers(db, flowKey) : null;
     if (!refs) throw new HttpError(400, "flow must name a Merge queue branch");
-    const entries = cachedQueue(db, { repo, merged: "all", hidden, refs });
+    const entries = await cachedQueue(db, { repo, merged: "all", hidden, refs });
     const from = after ? entries.findIndex((e) => e.repo > after.repo || (e.repo === after.repo && e.number > after.number)) : 0;
     const rest = from < 0 ? [] : entries.slice(from);
     const rows = rest.slice(0, limit);
@@ -63,8 +63,8 @@ export async function queue(db: DatabaseSync, req: Req): Promise<QueueList> {
       next: rest.length > limit ? cursorOf(rows[rows.length - 1]!) : null,
     };
   }
-  const open = cachedQueue(db, { repo, merged: "exclude", hidden });
-  const merged = countMergedPlans(db, repo, hidden);
+  const open = await cachedQueue(db, { repo, merged: "exclude", hidden });
+  const merged = await countMergedPlans(db, repo, hidden);
   // An open PR that we merged and the mirror has not seen merged yet counts as merged.
   const counts = countStates(open);
   counts.merged += merged;
@@ -72,11 +72,11 @@ export async function queue(db: DatabaseSync, req: Req): Promise<QueueList> {
   let more: boolean;
   let match: CachedEntry[] | undefined;
   if (state === "merged") {
-    page = cachedQueue(db, { repo, merged: "only", after, limit: limit + 1, hidden });
+    page = await cachedQueue(db, { repo, merged: "only", after, limit: limit + 1, hidden });
     more = page.length > limit;
     page = page.slice(0, limit);
   } else {
-    const batched = state ? null : inFlight(db);
+    const batched = state ? null : await inFlight(db);
     match = open.filter((e) => e.state !== "merged" && (state ? e.state === state : !batched!.has(`${e.repo}#${e.number}@${e.head}`)));
     const from = after ? match.findIndex((e) => e.repo > after.repo || (e.repo === after.repo && e.number > after.number)) : 0;
     const rest = from < 0 ? [] : match.slice(from);
@@ -88,7 +88,7 @@ export async function queue(db: DatabaseSync, req: Req): Promise<QueueList> {
 }
 
 /** One page of integration batches, newest first, each with its member PRs as queue rows. `after` is the id of the last batch of the previous page. */
-export async function queueBatches(db: DatabaseSync, req: Req): Promise<BatchList> {
+export async function queueBatches(db: Db, req: Req): Promise<BatchList> {
   const repo = req.query.get("repo") || undefined;
   const limit = Math.min(Math.max(Number(req.query.get("limit")) || 20, 1), 100);
   const afterRaw = req.query.get("after");
@@ -97,9 +97,9 @@ export async function queueBatches(db: DatabaseSync, req: Req): Promise<BatchLis
   const reader = await readerOf(db, req);
   const hidden = reader.hidden;
   if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
-  const { batches, total, more } = pageBatches(db, { repo, hidden, before: after, limit });
+  const { batches, total, more } = await pageBatches(db, { repo, hidden, before: after, limit });
   const refs = batches.flatMap((b) => b.prs.map((p) => `${b.repo}#${p.number}`));
-  const rows = new Map(refs.length ? cachedQueue(db, { merged: "all", refs, hidden }).map((e) => [`${e.repo}#${e.number}`, toRow(e, reader)]) : []);
+  const rows = new Map(refs.length ? (await cachedQueue(db, { merged: "all", refs, hidden })).map((e) => [`${e.repo}#${e.number}`, toRow(e, reader)]) : []);
   const out = batches.map((b) => toBatch(b, reader, b.prs.flatMap((p) => rows.get(`${b.repo}#${p.number}`) ?? [])));
   return { batches: out, total, next: more ? String(out[out.length - 1]!.id) : null };
 }

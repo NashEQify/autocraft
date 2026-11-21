@@ -2,13 +2,12 @@
 // for a call. Calls are queued by job processes, not by the dashboard, so a waiting claim cannot be woken in-process: while
 // any claim waits, one timer reads the `remote-queue` topic's change counter (src/live.ts) and, when it moved, tries the
 // waiting claims one at a time, oldest first. Each claim is also tried in full every RETRY_MS and once at its deadline.
-import type { DatabaseSync } from "node:sqlite";
 import { isBusy } from "../db.ts";
-import { prep } from "../sql-cache.ts";
 import type { ClaimReply } from "./protocol.ts";
 
 export type EmptyReply = Extract<ClaimReply, { lease: null }>;
 import { scaled, scaledS } from "./time-scale.ts";
+import type { Db } from "../db/index.ts";
 
 /** The longest a claim is held, in seconds, whatever its `wait` asks. */
 export const HOLD_MAX_S = 25;
@@ -26,7 +25,8 @@ export const holdMs = (wait: number | undefined): number => (wait && wait > 0 ? 
 /**
  * One try of a claim: a reply to send now, or null when there is nothing to take and no reason to give. `quick`: the queue
  * changed, so try only if the claim's list of candidates is not empty. `live`: whether a client still waits for the reply,
- * checked just before a call is leased.
+ * asked in the transaction that leases a call, just before the lease is written; true means the try's reply is the claim's
+ * answer, so a held claim is no longer answered by its client leaving or by shutdown.
  */
 export type ClaimTry = (nowMs: number, opts: { quick: boolean; live: () => boolean }) => Promise<ClaimReply | null>;
 
@@ -63,14 +63,21 @@ type Waiter = {
   from: number;
   attempt: ClaimTry;
   /** Records the claim as an idle helper's (idle_claim_at). */
-  idle: (nowMs: number) => void;
+  idle: (nowMs: number) => Promise<void>;
   /** The empty reply; `held` when it ends a wait that ran to its deadline. */
-  empty: (nowMs: number, held: boolean) => EmptyReply;
+  empty: (nowMs: number, held: boolean) => Promise<EmptyReply>;
   /** A reason outside the try to answer at once (a write permission GitHub could not confirm). */
   blocked: () => boolean;
   resolve: (r: ClaimReply) => void;
   reject: (e: unknown) => void;
   done: boolean;
+  /** The client leaving or shutdown answered the claim (the reply may still be on its way): a try in flight leases nothing. */
+  answered: boolean;
+  /**
+   * A try passed its `live` check and may be writing a lease: the client leaving or shutdown leaves the answer to the try,
+   * so no lease goes out with no one told of it.
+   */
+  leasing: boolean;
 };
 
 /** How long each held reply waited, for the `X-Held-Ms` header. */
@@ -79,7 +86,7 @@ export const heldMsOf = (r: ClaimReply): number => held.get(r) ?? 0;
 
 /** The waiting claims of one dashboard process. */
 export class ClaimWaits {
-  #db: DatabaseSync;
+  #db: Db;
   #tickMs: number;
   #retryMs: number;
   #waiters: Waiter[] = [];
@@ -88,7 +95,7 @@ export class ClaimWaits {
   #closed = false;
 
   /** `db`: the helper routes' connection (short busy timeout); a busy database skips a tick. */
-  constructor(db: DatabaseSync, opts: { tickMs?: number; retryMs?: number } = {}) {
+  constructor(db: Db, opts: { tickMs?: number; retryMs?: number } = {}) {
     this.#db = db;
     this.#tickMs = opts.tickMs ?? TICK_MS;
     this.#retryMs = opts.retryMs ?? RETRY_MS;
@@ -102,11 +109,12 @@ export class ClaimWaits {
   hold(ticket: Ticket, deadline: number, w: Pick<Waiter, "attempt" | "idle" | "empty" | "blocked">): Promise<ClaimReply> {
     return new Promise<ClaimReply>((resolve, reject) => {
       const now = Date.now();
-      const waiter: Waiter = { ...w, ticket, deadline, nextTry: now + this.#retryMs, seq: null, from: now, resolve, reject, done: false };
+      const waiter: Waiter = { ...w, ticket, deadline, nextTry: now + this.#retryMs, seq: null, from: now, resolve, reject, done: false, answered: false, leasing: false };
       const prev = ticket.onGone;
       ticket.onGone = () => {
-        if (!waiter.done) {
-          try { this.#settle(waiter, waiter.empty(Date.now(), false)); } catch (e) { this.#settle(waiter, null, e); }
+        if (!waiter.done && !waiter.answered && !waiter.leasing) {
+          waiter.answered = true;
+          void waiter.empty(Date.now(), false).then((r) => this.#settle(waiter, r), (e: unknown) => this.#settle(waiter, null, e));
         }
         prev?.();
       };
@@ -121,11 +129,14 @@ export class ClaimWaits {
     this.#closed = true;
     const now = Date.now();
     for (const w of [...this.#waiters]) {
-      if (w.done) continue;
-      let r: EmptyReply;
-      try { r = w.empty(now, false); } catch (e) { this.#settle(w, null, e); continue; }
-      this.#settle(w, { ...r, retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) });
+      if (w.done || w.answered || w.leasing) continue;
+      w.answered = true;
+      void this.#closing(w, now).then((r) => this.#settle(w, r), (e: unknown) => this.#settle(w, null, e));
     }
+  }
+
+  async #closing(w: Waiter, now: number): Promise<ClaimReply> {
+    return { ...await w.empty(now, false), retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) };
   }
 
   #settle(w: Waiter, r: ClaimReply | null, err?: unknown): void {
@@ -144,7 +155,7 @@ export class ClaimWaits {
     try {
       let seq: number;
       try {
-        seq = Number((prep(this.#db, "SELECT seq FROM main.change_seq WHERE topic = 'remote-queue'").get() as { seq: number } | undefined)?.seq ?? 0);
+        seq = Number((await this.#db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'remote-queue'").get() as { seq: number } | undefined)?.seq ?? 0);
       } catch (e) {
         if (isBusy(e)) return;
         throw e;
@@ -156,25 +167,41 @@ export class ClaimWaits {
           await new Promise<void>((r) => setImmediate(r));
           slice = performance.now();
         }
-        if (w.done) continue;
+        if (w.done || w.answered) continue;
         const now = Date.now();
         const final = now >= w.deadline, full = final || now >= w.nextTry;
         if (!full && w.seq === seq) continue;
         w.seq = seq;
         if (full) w.nextTry = now + this.#retryMs;
         try {
-          // A claim answered meanwhile (its client left, or shutdown answered it) must not lease the call it found.
-          const r = await w.attempt(now, { quick: !full, live: () => !w.ticket.gone && !w.done && !this.#closed });
-          if (w.done) continue;
+          // A claim whose client left, or that shutdown or a pass answered meanwhile, must not lease the call it found.
+          const live = (): boolean => {
+            if (w.done || w.answered || w.ticket.gone || this.#closed) return false;
+            w.leasing = true;
+            return true;
+          };
+          let r: ClaimReply | null;
+          try {
+            r = await w.attempt(now, { quick: !full, live });
+          } finally {
+            w.leasing = false;
+          }
+          if (w.done || w.answered) continue;
           if (r) this.#settle(w, r);
-          else if (w.blocked()) this.#settle(w, w.empty(now, false));
+          // Shutdown or the client leaving while the try was leasing, which leased nothing, gets the answer it left to the try.
+          else if (this.#closed) this.#settle(w, await this.#closing(w, now));
+          else if (w.ticket.gone || w.blocked()) this.#settle(w, await w.empty(now, false));
           else if (final) {
-            w.idle(now);
-            this.#settle(w, w.empty(now, true));
+            await w.idle(now);
+            this.#settle(w, await w.empty(now, true));
           }
         } catch (e) {
+          if (w.done || w.answered) continue;
           // A busy database: the claim keeps waiting and is tried again, unless this was its last try.
           if (!isBusy(e) || final) this.#settle(w, null, e);
+          // Shutdown or the client leaving while the try was leasing gets the answer it left to the try, not a wait for the next retry.
+          else if (this.#closed) await this.#closing(w, now).then((r) => this.#settle(w, r), (err: unknown) => this.#settle(w, null, err));
+          else if (w.ticket.gone) await w.empty(now, false).then((r) => this.#settle(w, r), (err: unknown) => this.#settle(w, null, err));
         }
       }
     } catch (e) {

@@ -7,7 +7,6 @@
 // pass and records each difference in `plan_shadow_diffs`; on a difference the pass plans from the full load and keeps its
 // facts. AUTOCRAFT_PLAN_SHADOW (on, off, throw) overrides the setting; "throw" fails the pass on a difference (tests).
 // Pass counts and durations per kind are in `plan_pass_stats`, written with the next difference, full load or minute.
-import type { DatabaseSync } from "node:sqlite";
 import { embedderId, modelName } from "../embed/model.ts";
 import { appSlug } from "../github/identity.ts";
 import { ownersStamp } from "../owners.ts";
@@ -19,6 +18,7 @@ import { loadItemFacts } from "./issue-facts.ts";
 import { changeSeq, changesSince, pruneChanges } from "./plan-changes.ts";
 import type { ItemFacts, PrFacts } from "./plan.ts";
 import { loadPlanSet, type ItemPlanned, type PlanSet, type PrPlan } from "./plan-set.ts";
+import type { Db } from "../db/index.ts";
 
 export type ShadowMode = "off" | "on" | "throw";
 export type FullReason = "start" | "marker" | "cap" | "global" | "floor";
@@ -36,10 +36,10 @@ type State = {
   fingerprint: string;
 };
 
-const states = new WeakMap<DatabaseSync, State>();
+const states = new WeakMap<Db, State>();
 
 /** Pass counts not yet written to plan_pass_stats, per connection. */
-const records = new WeakMap<DatabaseSync, { flushedAt: number; counts: Map<string, { passes: number; refs: number; at: string; ms: number; maxMs: number }> }>();
+const records = new WeakMap<Db, { flushedAt: number; counts: Map<string, { passes: number; refs: number; at: string; ms: number; maxMs: number }> }>();
 /** Quiet passes write their counts and prune the change log at most this often. */
 const RECORD_EVERY_MS = 60_000;
 
@@ -54,14 +54,14 @@ export type PlanPass = {
   /** Differences the shadow check found (empty when it did not run). */
   diffs: Diff[];
   /** Records the pass with its duration (ms) and prunes the change log it consumed (a quiet pass: at most once a minute); call after the pass's writes succeeded. */
-  finish: (passMs?: number) => void;
+  finish: (passMs?: number) => Promise<void>;
 };
 
 /** The shadow mode: the environment's (tests, harnesses), else the setting. */
-export function shadowMode(db: DatabaseSync): ShadowMode {
+export async function shadowMode(db: Db): Promise<ShadowMode> {
   const env = process.env.AUTOCRAFT_PLAN_SHADOW;
   if (env === "on" || env === "off" || env === "throw") return env;
-  return setting(db, "plan_shadow") === "on" ? "on" : "off";
+  return await setting(db, "plan_shadow") === "on" ? "on" : "off";
 }
 
 /** The fact inputs that are not database rows: the owners cache, the GitHub App's slug, the classification run and the embedding model. */
@@ -72,21 +72,16 @@ const refOf = (f: { repo: string; number: number }): string => `${f.repo}#${f.nu
 const byRef = (a: { repo: string; number: number }, b: { repo: string; number: number }): number => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : a.number - b.number);
 
 /** Runs `fn` in one read transaction on `db` (inside the caller's when one is open). */
-export function inReadSnapshot<T>(db: DatabaseSync, fn: () => T): T {
-  if (db.isTransaction) return fn();
-  db.exec("BEGIN");
-  try {
-    const out = fn();
-    db.exec("COMMIT");
+export async function inReadSnapshot<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+  if (db.inTransaction()) return await fn();
+  return await db.read(async () => {
+    const out = await fn();
     return out;
-  } catch (e) {
-    if (db.isTransaction) db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 /** Forgets the kept facts of `db`: its next pass loads everything. */
-export function dropPlanState(db: DatabaseSync): void {
+export function dropPlanState(db: Db): void {
   states.delete(db);
 }
 
@@ -145,21 +140,21 @@ export type PlanPassOptions = {
  * One planner pass's PlanSet from the facts kept for `db`. Reads only; run it inside inReadSnapshot so the change log, the
  * loads and the shadow's full load see one state of the database.
  */
-export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
+export async function planPass(db: Db, o: PlanPassOptions): Promise<PlanPass> {
   const { now, run } = o;
   const model = o.model ?? embedderId(modelName());
-  const shadow = shadowMode(db);
+  const shadow = await shadowMode(db);
   const print = fingerprint(run, model);
   let state = states.get(db);
-  const changes = state ? changesSince(db, state.seq) : null;
+  const changes = state ? await changesSince(db, state.seq) : null;
   const reason: FullReason | null = !state || !changes ? "start" : changes.full ? (changes.cause ?? "marker") : state.fingerprint !== print ? "global" : now - state.fullAt >= o.fullEveryMs ? "floor" : null;
   const load = { now, run };
   let refs: number;
   let refreshUnchanged = 0;
   if (reason) {
     // The seq first: the transaction holds the rows the loads below read at that seq.
-    const seq = changeSeq(db);
-    const prs = loadPrFacts(db, load), items = loadItemFacts(db, { ...load, model });
+    const seq = await changeSeq(db);
+    const prs = await loadPrFacts(db, load), items = await loadItemFacts(db, { ...load, model });
     state = { prs: new Map(prs.map((f) => [refOf(f), f])), items: new Map(items.map((f) => [refOf(f), f])), seq, fullAt: now, fingerprint: print };
     states.set(db, state);
     refs = new Set([...state.prs.keys(), ...state.items.keys()]).size;
@@ -171,7 +166,7 @@ export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
     for (const [ref, f] of s.items) if (f.refreshAt !== undefined && f.refreshAt <= now && !logged.has(ref)) due.set(ref, { ...due.get(ref), item: f });
     const reload = [...logged, ...due.keys()];
     if (reload.length) {
-      const prs = loadPrFacts(db, { ...load, refs: reload }), items = loadItemFacts(db, { ...load, model, refs: reload });
+      const prs = await loadPrFacts(db, { ...load, refs: reload }), items = await loadItemFacts(db, { ...load, model, refs: reload });
       for (const ref of reload) { s.prs.delete(ref); s.items.delete(ref); }
       for (const f of prs) s.prs.set(refOf(f), f);
       for (const f of items) s.items.set(refOf(f), f);
@@ -195,7 +190,7 @@ export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
   const shadowRan = !reason && shadow !== "off";
   const diffs: Diff[] = [];
   if (shadowRan) {
-    const full = loadPlanSet(db, { now, run, model });
+    const full = await loadPlanSet(db, { now, run, model });
     diffs.push(...shadowDiffs(plans, full));
     if (diffs.length && shadow === "throw") {
       states.delete(db);
@@ -211,7 +206,7 @@ export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
   const seq = kept.seq;
   return {
     plans, kind, refs, diffs,
-    finish: (passMs = 0) => {
+    finish: async (passMs = 0) => {
       const rec = records.get(db) ?? records.set(db, { flushedAt: 0, counts: new Map() }).get(db)!;
       const at = new Date(now).toISOString();
       const add = (k: string, n: number, ms = 0): void => {
@@ -223,17 +218,17 @@ export function planPass(db: DatabaseSync, o: PlanPassOptions): PlanPass {
       if (refreshUnchanged) add("refresh:unchanged", refreshUnchanged);
       // A quiet pass writes nothing: the counts and the log's pruning wait for a difference, a full load or the next minute.
       if (!diffs.length && !reason && Date.now() - rec.flushedAt < RECORD_EVERY_MS) return;
-      pruneChanges(db, seq);
+      await pruneChanges(db, seq);
       const count = db.prepare(`INSERT INTO main.plan_pass_stats (kind, passes, refs, last_at, ms, max_ms) VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT (kind) DO UPDATE SET passes = passes + excluded.passes, refs = refs + excluded.refs, last_at = excluded.last_at,
           ms = ms + excluded.ms, max_ms = max(max_ms, excluded.max_ms)`);
-      for (const [k, c] of rec.counts) count.run(k, c.passes, c.refs, c.at, c.ms, c.maxMs);
+      for (const [k, c] of rec.counts) await count.run(k, c.passes, c.refs, c.at, c.ms, c.maxMs);
       rec.counts.clear();
       rec.flushedAt = Date.now();
       if (diffs.length) {
         const put = db.prepare("INSERT INTO main.plan_shadow_diffs (at, ref, side, fields, detail) VALUES (?, ?, ?, ?, ?)");
-        for (const d of diffs) put.run(at, d.ref, d.side, d.fields.join(","), d.detail.slice(0, 2000));
-        db.prepare("DELETE FROM main.plan_shadow_diffs WHERE rowid <= (SELECT max(rowid) FROM main.plan_shadow_diffs) - ?").run(SHADOW_ROWS);
+        for (const d of diffs) await put.run(at, d.ref, d.side, d.fields.join(","), d.detail.slice(0, 2000));
+        await db.prepare("DELETE FROM main.plan_shadow_diffs WHERE rowid <= (SELECT max(rowid) FROM main.plan_shadow_diffs) - ?").run(SHADOW_ROWS);
       }
     },
   };

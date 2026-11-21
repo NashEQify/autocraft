@@ -1,8 +1,8 @@
 // AutoCraft's GitHub writes on one item, read from the audit table and joined to the comments and commits they made.
 // Plain rows only: the item page API maps them to its own shapes.
-import type { DatabaseSync } from "node:sqlite";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { ownLogins } from "../../github/identity.ts";
+import type { Db } from "../../db/index.ts";
 
 /** A comment written before its URL was recorded matches by time within this window. */
 export const MATCH_WINDOW_MS = 120_000;
@@ -31,11 +31,11 @@ type CommentRow = { id: string; kind: string; url: string | null; created_at: st
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 /** The writes AutoCraft made on `repo#number`, oldest first. */
-export function writesOf(db: DatabaseSync, repo: string, number: number): WriteRow[] {
+export async function writesOf(db: Db, repo: string, number: number): Promise<WriteRow[]> {
   const actions = Object.keys(GITHUB_ACTIONS);
-  const audit = db.prepare(`SELECT rowid, at, action, details FROM audit WHERE target = ? AND action IN (${actions.map(() => "?").join(",")}) ORDER BY at, rowid`)
+  const audit = await db.prepare(`SELECT rowid, at, action, details FROM audit WHERE target = ? AND action IN (${actions.map(() => "?").join(",")}) ORDER BY at, rowid`)
     .all(`${repo}#${number}`, ...actions) as AuditRow[];
-  const comments = db.prepare("SELECT id, kind, url, created_at, author FROM comments WHERE repo = ? AND number = ?").all(repo, number) as CommentRow[];
+  const comments = await db.prepare("SELECT id, kind, url, created_at, author FROM comments WHERE repo = ? AND number = ?").all(repo, number) as CommentRow[];
   const taken = new Set<string>();
   const byUrl = new Map(comments.filter((c) => c.url).map((c) => [c.url!, c]));
   const byId = new Map(comments.map((c) => [c.id, c]));
@@ -54,7 +54,7 @@ export function writesOf(db: DatabaseSync, repo: string, number: number): WriteR
   });
   // Fallback for rows without a URL (crash-time rows, rows from before URLs were recorded): the nearest comment of the same kind
   // inside the window that no write of this item claimed and that the account the write used wrote.
-  const ours = ownLogins(db, repo);
+  const ours = await ownLogins(db, repo);
   for (const row of out) {
     if (row.comment || row.state === "failed" || row.action.endsWith("-edit") || !/comment|review-post/.test(row.action)) continue;
     const by = row.identity?.startsWith("user:") ? new Set([row.identity.slice(5)]) : ours;
@@ -72,14 +72,14 @@ export function writesOf(db: DatabaseSync, repo: string, number: number): WriteR
 }
 
 /** Whether AutoCraft pushed this commit to the item: an audit push row on it recorded the oid as its `commit`. */
-export function pushedByAutoCraft(db: DatabaseSync, repo: string, number: number, oid: string): boolean {
-  return db.prepare("SELECT 1 FROM audit WHERE target = ?2 AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done' AND (json_extract(details, '$.commit') = ?1 OR json_extract(details, '$.sha') = ?1) LIMIT 1").get(oid, `${repo}#${number}`) !== undefined;
+export async function pushedByAutoCraft(db: Db, repo: string, number: number, oid: string): Promise<boolean> {
+  return await db.prepare("SELECT 1 FROM audit WHERE target = ?2 AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done' AND (json_extract(details, '$.commit') = ?1 OR json_extract(details, '$.sha') = ?1) LIMIT 1").get(oid, `${repo}#${number}`) !== undefined;
 }
 
 /** The commits AutoCraft pushed to the item, as `pushedByAutoCraft` finds them: the `commit` or `sha` its done audit push rows recorded. */
-export function pushedCommits(db: DatabaseSync, repo: string, number: number): Set<string> {
+export async function pushedCommits(db: Db, repo: string, number: number): Promise<Set<string>> {
   const out = new Set<string>();
-  for (const r of db.prepare("SELECT json_extract(details, '$.commit') AS c, json_extract(details, '$.sha') AS s FROM audit WHERE target = ? AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done'").all(`${repo}#${number}`) as { c: unknown; s: unknown }[])
+  for (const r of await db.prepare("SELECT json_extract(details, '$.commit') AS c, json_extract(details, '$.sha') AS s FROM audit WHERE target = ? AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done'").all(`${repo}#${number}`) as { c: unknown; s: unknown }[])
     for (const v of [r.c, r.s]) if (typeof v === "string") out.add(v);
   return out;
 }

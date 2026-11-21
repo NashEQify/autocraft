@@ -4,7 +4,6 @@ import { resumeStage, TripError } from "../push-outcomes.ts";
 import { startWorkerServer } from "../build/worker-api.ts";
 import { startPodLauncher } from "../build/launcher.ts";
 import { acquireLock } from "../mirror.ts";
-import { connect } from "../db.ts";
 import { audit } from "../dash/audit.ts";
 import { scopeToTracked } from "../repos.ts";
 import { convertOpenDecisionsOnce } from "../decide/choices-convert.ts";
@@ -23,6 +22,7 @@ import { dropPlanChanges } from "../core/plan-changes.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server runner serve
        autocraft-server runner steps
@@ -39,13 +39,13 @@ async function serve(): Promise<void> {
   const lock = runnerLockPath();
   const release = acquireLock(lock);
   if (!release) die("another runner is running on this database");
-  const db = connect();
-  scopeToTracked(db);
+  const db = await openDb();
+  await scopeToTracked(db);
   // Once per database: open decisions' proposed cards become choices. Here rather than in db.ts migrations, which cannot import the decision modules.
-  const conv = convertOpenDecisionsOnce(db);
+  const conv = await convertOpenDecisionsOnce(db);
   if (conv) console.log(`runner: converted ${conv.converted} open decisions to choices (${conv.skipped} skipped, ${conv.stale} stale cards, ${conv.unconverted} cards matching no choice)`);
   for (const note of conv?.notes ?? []) console.log(`runner: choices conversion: ${note}`);
-  const linked = linkRepeatedFindings(db);
+  const linked = await linkRepeatedFindings(db);
   if (linked) console.log(`runner: linked ${linked} security findings to the earlier findings they repeat`);
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
@@ -63,14 +63,14 @@ async function serve(): Promise<void> {
   startPodLauncher(db, ac.signal, (l) => console.log(l));
   // Optional: counts Discord mentions of tracked items when a bot token file is configured. A failure is logged and never stops the runner.
   try {
-    startDiscord(db, ac.signal, (l) => console.log(l));
+    await startDiscord(db, ac.signal, (l) => console.log(l));
   } catch (e) {
     console.error(`runner: Discord not started: ${(e as Error).message}`);
   }
   // Optional listener for the probes alone, for a runner whose worker API is not reachable by the prober.
   const healthListen = envVar("HEALTH_LISTEN");
   const health = healthListen
-    ? await startHealthServer(healthListen, () => dbReady(db)).then(
+    ? await startHealthServer(healthListen, async () => await dbReady(db)).then(
         (h) => (console.log(`runner: health endpoints on ${h.url}`), h),
         (e: Error) => (console.error(`runner: health listener not started: ${e.message}`), null),
       )
@@ -87,7 +87,7 @@ async function serve(): Promise<void> {
     await health?.close();
     await workers?.close();
     release();
-    db.close();
+    await db.close();
   }
   console.log("runner: stopped");
 }
@@ -118,8 +118,8 @@ async function enqueueCmd(args: string[]): Promise<void> {
     if (!p || rest[i + 1] === undefined) die(`unknown or incomplete option ${rest[i]}`);
     params[k] = p.kind === "int" ? Number(rest[i + 1]) : rest[i + 1]!;
   }
-  const db = connect();
-  scopeToTracked(db);
+  const db = await openDb();
+  await scopeToTracked(db);
   try {
     const job = await enqueue(db, name, params, "cli");
     console.log(`job ${job.id} queued: ${job.step} ${JSON.stringify(job.params)}`);
@@ -129,20 +129,20 @@ async function enqueueCmd(args: string[]): Promise<void> {
   }
 }
 
-function jobs(args: string[]): void {
+async function jobs(args: string[]): Promise<void> {
   const state = args[args.indexOf("--state") + 1];
   const limit = Number(args[args.indexOf("--limit") + 1]) || 20;
-  const list = listJobs(connect(), { state: args.includes("--state") ? (state as never) : undefined, limit });
+  const list = await listJobs(await openDb(), { state: args.includes("--state") ? (state as never) : undefined, limit });
   for (const j of list.jobs) {
     console.log(`${String(j.id).padStart(5)} ${j.state.padEnd(9)} ${j.step.padEnd(16)} ${j.requestedAt.slice(0, 16)} ${j.requestedBy.padEnd(12)} ${j.summary ?? j.error ?? j.progress ?? ""}`);
   }
 }
 
-function cancel(args: string[]): void {
+async function cancel(args: string[]): Promise<void> {
   const id = Number(args[0]);
   if (!Number.isInteger(id)) die(USAGE);
   try {
-    const j = requestCancel(connect(), id, "cli");
+    const j = await requestCancel(await openDb(), id, "cli");
     console.log(`job ${id}: ${j.state === "cancelled" ? "cancelled" : "cancel requested"}`);
   } catch (e) {
     if (e instanceof JobError) die(e.message);
@@ -164,28 +164,28 @@ export const commands = {
   },
   "plan-log": {
     summary: "the incremental planner's change log: status | shadow on|off (compare every incremental pass with a full load) | drop (before a rollback to a release without it)",
-    run: (args: string[]) => planLog(args),
+    run: async (args: string[]) => await planLog(args),
   },
 };
 
-function planLog(args: string[]): void {
-  const db = connect();
+async function planLog(args: string[]): Promise<void> {
+  const db = await openDb();
   if (args[0] === "status") {
     console.log(JSON.stringify({
-      logged: (db.prepare("SELECT count(*) AS n FROM main.item_changes").get() as { n: number }).n,
-      passes: db.prepare("SELECT kind, passes, refs, ms, max_ms, last_at FROM main.plan_pass_stats ORDER BY kind").all(),
-      fullCauses: db.prepare("SELECT source, n FROM main.plan_full_causes ORDER BY n DESC LIMIT 10").all(),
-      shadowDiffs: (db.prepare("SELECT count(*) AS n FROM main.plan_shadow_diffs").get() as { n: number }).n,
+      logged: (await db.prepare("SELECT count(*) AS n FROM main.item_changes").get() as { n: number }).n,
+      passes: await db.prepare("SELECT kind, passes, refs, ms, max_ms, last_at FROM main.plan_pass_stats ORDER BY kind").all(),
+      fullCauses: await db.prepare("SELECT source, n FROM main.plan_full_causes ORDER BY n DESC LIMIT 10").all(),
+      shadowDiffs: (await db.prepare("SELECT count(*) AS n FROM main.plan_shadow_diffs").get() as { n: number }).n,
     }, null, 2));
     return;
   }
   if (args[0] === "shadow" && (args[1] === "on" || args[1] === "off")) {
-    writeSetting(db, "plan_shadow", args[1]);
+    await writeSetting(db, "plan_shadow", args[1]);
     console.log(`plan shadow ${args[1]}`);
     return;
   }
   if (args[0] === "drop") {
-    console.log(`dropped ${dropPlanChanges(db)} triggers and the change log; the next connect migrates the schema`);
+    console.log(`dropped ${await dropPlanChanges(db)} triggers and the change log; the next connect migrates the schema`);
     return;
   }
   die("usage: autocraft-server plan-log status | shadow on|off | drop");
@@ -203,8 +203,8 @@ const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | of
 // Recorded as `cli`: only someone with a shell on the host can run this.
 async function pipeline(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
-  const db = connect();
-  const mode = isEnabled(db) ? "on" : isDraining(db) ? "drain" : "off";
+  const db = await openDb();
+  const mode = await isEnabled(db) ? "on" : await isDraining(db) ? "drain" : "off";
   if ((sub === "drain" && mode === "off") || (sub === "on" && rest[0] === "--if-draining" && mode !== "drain")) {
     // A deploy drains from On only and ends only a drain it started: an operator's Off stays Off.
     if (sub === "drain") die(`pipeline is OFF; not draining`);
@@ -212,41 +212,41 @@ async function pipeline(args: string[]): Promise<void> {
     return;
   }
   if (sub === "on" || sub === "off" || sub === "drain") {
-    setEnabled(db, sub === "on", "cli", sub === "drain" ? "drain" : "off");
-    audit(db, "cli", "pipeline-switch", "pipeline", { enabled: sub === "on", ...(sub === "drain" && { draining: true }) });
+    await setEnabled(db, sub === "on", "cli", sub === "drain" ? "drain" : "off");
+    await audit(db, "cli", "pipeline-switch", "pipeline", { enabled: sub === "on", ...(sub === "drain" && { draining: true }) });
     console.log(`pipeline ${sub}`);
   } else if (sub === "parallel") {
     if (rest.length > 1) die(PIPELINE_USAGE);
     try {
-      if (rest[0] !== undefined) setStepParallel(db, rest[0], "cli");
+      if (rest[0] !== undefined) await setStepParallel(db, rest[0], "cli");
     } catch (e) {
       if (e instanceof ParallelError) die(e.message);
       throw e;
     }
-    console.log(`step_parallel ${stepParallelSetting(db)}`);
+    console.log(`step_parallel ${await stepParallelSetting(db)}`);
     return;
   } else if (sub === "review-interval") {
     if (rest.length > 1) die(PIPELINE_USAGE);
     try {
-      if (rest[0] !== undefined) setReviewMinInterval(db, rest[0], "cli");
+      if (rest[0] !== undefined) await setReviewMinInterval(db, rest[0], "cli");
     } catch (e) {
       die((e as Error).message);
     }
-    console.log(`${MIN_INTERVAL_KEY} ${reviewMinInterval(db)}`);
+    console.log(`${MIN_INTERVAL_KEY} ${await reviewMinInterval(db)}`);
     return;
   } else if (sub === "pick-minutes") {
     if (rest.length > 1) die(PIPELINE_USAGE);
     try {
-      if (rest[0] !== undefined) setPickMinutes(db, rest[0], "cli");
+      if (rest[0] !== undefined) await setPickMinutes(db, rest[0], "cli");
     } catch (e) {
       die((e as Error).message);
     }
-    console.log(`${PICK_MINUTES_KEY} ${pickMinutes(db)}`);
+    console.log(`${PICK_MINUTES_KEY} ${await pickMinutes(db)}`);
     return;
   } else if (sub === "resume") {
     if (rest.length !== 1) die(PIPELINE_USAGE);
     try {
-      resumeStage(db, rest[0]!, "cli");
+      await resumeStage(db, rest[0]!, "cli");
       console.log(`${rest[0]} resumed`);
     } catch (e) {
       if (e instanceof TripError) die(e.message);
@@ -256,7 +256,7 @@ async function pipeline(args: string[]): Promise<void> {
     const target = rest[1] === "--all" ? "all" : rest[1];
     if (!target || rest.length > 2) die(PIPELINE_USAGE);
     try {
-      const { steps } = resetLimitCount(db, target, "cli");
+      const { steps } = await resetLimitCount(db, target, "cli");
       console.log(`reset today's count of ${steps.length === 1 ? steps[0] : `${steps.length} stages`}`);
     } catch (e) {
       if (e instanceof LimitError) die(e.message);
@@ -266,7 +266,7 @@ async function pipeline(args: string[]): Promise<void> {
     const step = rest[0], n = rest[rest.indexOf("--per-day") + 1];
     if (!step || rest.indexOf("--per-day") < 0 || n === undefined) die(PIPELINE_USAGE);
     try {
-      setLimit(db, step, { perDay: n === "none" ? null : Number(n) }, "cli");
+      await setLimit(db, step, { perDay: n === "none" ? null : Number(n) }, "cli");
     } catch (e) {
       if (e instanceof LimitError) die(e.message);
       throw e;
@@ -275,14 +275,14 @@ async function pipeline(args: string[]): Promise<void> {
     const [action, ...refs] = rest;
     if (action === "set" && refs.length) {
       try {
-        setPilot(db, "cli", refs);
+        await setPilot(db, "cli", refs);
       } catch (e) {
         if (e instanceof PilotError) die(e.message);
         throw e;
       }
-    } else if (action === "clear") setPilot(db, "cli", []);
+    } else if (action === "clear") await setPilot(db, "cli", []);
     else if (action !== "show") die(PIPELINE_USAGE);
-    const p = pilotItems(db);
+    const p = await pilotItems(db);
     console.log(p.length ? `pilot: ${p.length} items: ${p.join(" ")}` : "no pilot");
     return;
   } else if (sub !== "status") die(PIPELINE_USAGE);

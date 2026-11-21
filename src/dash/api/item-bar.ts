@@ -74,20 +74,20 @@ export function deriveSteps(i: {
   return out;
 }
 
-type Q = <T>(sql: string, ...args: (string | number)[]) => T[];
+type Q = <T>(sql: string, ...args: (string | number)[]) => Promise<T[]>;
 
 const FIX_DONE = /^(pushed|merged)$/;
 /** The unsent comments at the row's head (and, for fix-ups, of its source and carry-over), as column `unsent`. */
 const unsentCount = (table: string, head: string, same = "") => `(SELECT COUNT(*) FROM ${table} u WHERE u.repo = x.repo AND u.number = x.number AND u.${head} = x.${head}${same} AND u.state = 'comment-unsent') AS unsent`;
 const FIX_FAILED = /^(failed|refused|rejected|too-large|cannot-push|push-denied|comment-failed)$/;
 
-function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean): Evidence[] {
+async function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean): Promise<Evidence[]> {
   const { repo, n } = c;
   const out: Evidence[] = [];
   const reasonOf = (s: string | null | undefined) => (c.staff && s ? clip(s.replace(/^(refused|failed|error):\s*/i, ""), 160) : null);
   const cleared = new Map<string, string>();
   const seen = new Set<number>();
-  for (const j of q<{ id: number; step: string; state: string; outcome: string | null; at: string; ended_at: string | null; error: string | null }>(
+  for (const j of await q<{ id: number; step: string; state: string; outcome: string | null; at: string; ended_at: string | null; error: string | null }>(
     "SELECT j.id, j.step, j.state, ji.outcome, ji.at, j.ended_at, j.error FROM job_items ji JOIN jobs j ON j.id = ji.job_id WHERE ji.repo = ? AND ji.number = ? AND j.state IN ('done', 'failed')", repo, n)) {
     seen.add(j.id);
     const stage = stageOfStep(j.step)?.id;
@@ -100,7 +100,7 @@ function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean):
   }
   // A crashed job has no job_items row: read it by its params.
   const since = new Date(Date.now() - FAILED_JOBS_DAYS * 86400_000).toISOString();
-  for (const j of q<{ id: number; step: string; ended_at: string; error: string | null }>(
+  for (const j of await q<{ id: number; step: string; ended_at: string; error: string | null }>(
     "SELECT id, step, ended_at, error FROM jobs WHERE state = 'failed' AND repo = ?1 AND ended_at > ?3 AND json_extract(params, '$.number') = ?2", repo, n, since)) {
     const stage = stageOfStep(j.step)?.id;
     if (stage && !seen.has(j.id)) out.push({ stage, state: "failed", at: j.ended_at, jobId: j.id, label: nameOf(j.step), reason: reasonOf(j.error), step: j.step });
@@ -114,36 +114,36 @@ function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean):
     const r = top && (FIX_DONE.test(top.state) || failed(top)) ? top : undefined;
     if (r) live.push({ stage, state: FIX_DONE.test(r.state) ? "done" : "failed", at: r.at, jobId: null, label, reason: FIX_DONE.test(r.state) ? null : reasonOf(r.reason) });
   };
-  rowsOf("Fix-up", "fixup", q(`SELECT state, reason, created_at AS at, ${unsentCount("fixups", "from_head", " AND u.source IS x.source AND u.carry_decision IS x.carry_decision")} FROM fixups x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  rowsOf("CI fix", "fixup", q(`SELECT state, reason, created_at AS at, ${unsentCount("ci_fixes", "head")} FROM ci_fixes x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  rowsOf("Conflict merge", "fixup", q(`SELECT state, reason, created_at AS at, ${unsentCount("conflict_merges", "from_head")} FROM conflict_merges x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  for (const v of q<{ state: string; summary: string | null; at: string }>("SELECT state, summary, COALESCE(finished_at, created_at) AS at FROM verifications WHERE repo = ? AND number = ? AND state != 'stale' ORDER BY created_at DESC LIMIT 1", repo, n)) {
+  rowsOf("Fix-up", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("fixups", "from_head", " AND u.source IS x.source AND u.carry_decision IS x.carry_decision")} FROM fixups x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
+  rowsOf("CI fix", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("ci_fixes", "head")} FROM ci_fixes x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
+  rowsOf("Conflict merge", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("conflict_merges", "from_head")} FROM conflict_merges x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
+  for (const v of await q<{ state: string; summary: string | null; at: string }>("SELECT state, summary, COALESCE(finished_at, created_at) AS at FROM verifications WHERE repo = ? AND number = ? AND state != 'stale' ORDER BY created_at DESC LIMIT 1", repo, n)) {
     if (v.state === "passed" || v.state === "ci-enough") live.push({ stage: "verify", state: "done", at: v.at, jobId: null, label: "Verify", reason: null });
     else if (v.state === "failed" || v.state === "error") live.push({ stage: "verify", state: "failed", at: v.at, jobId: null, label: "Verify", reason: reasonOf(v.summary) });
   }
-  for (const r of q<{ at: string }>("SELECT MAX(answered_at) AS at FROM decisions WHERE repo = ? AND number = ? AND answer IS NOT NULL HAVING at IS NOT NULL", repo, n)) live.push({ stage: "decide", state: "done", at: r.at, jobId: null, label: "Decision", reason: null });
+  for (const r of await q<{ at: string }>("SELECT MAX(answered_at) AS at FROM decisions WHERE repo = ? AND number = ? AND answer IS NOT NULL HAVING at IS NOT NULL", repo, n)) live.push({ stage: "decide", state: "done", at: r.at, jobId: null, label: "Decision", reason: null });
   if (mergedAt && mergedByUs) live.push({ stage: "merge", state: "done", at: mergedAt, jobId: null, label: "Merge", reason: null });
   return live;
 }
 
-export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: string | null; pipelineOn: boolean }, status: ItemStatus): ItemBar {
+export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: string | null; pipelineOn: boolean }, status: ItemStatus): Promise<ItemBar> {
   const { db, repo, n } = c;
-  const q: Q = (sql, ...args) => db.prepare(sql).all(...args) as never;
+  const q: Q = async (sql, ...args) => await db.prepare(sql).all(...args) as never;
   if (c.veiled) return { headline: { tone: "idle", text: status.phase, next: null, model: null, startedAt: null, jobId: null }, steps: [] };
 
   // A job_items row of a running job means the item is finished, so running work is matched by the job's params and by the item's own running calls.
-  const active = q<{ id: number; step: string; state: string; started_at: string | null }>(
+  const active = await q<{ id: number; step: string; state: string; started_at: string | null }>(
     "SELECT id, step, state, started_at FROM jobs WHERE state IN ('running', 'queued') AND repo = ?1 AND json_extract(params, '$.number') = ?2 ORDER BY id", repo, n);
-  const runs = q<{ step: string; model: string; job_id: number | null; started_at: string }>(
+  const runs = await q<{ step: string; model: string; job_id: number | null; started_at: string }>(
     "SELECT r.step, r.model, r.job_id, r.started_at FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.state = 'running' ORDER BY r.id", repo, n);
   const job = active.find((j) => j.state === "running");
   const run = runs.find((r) => job && r.job_id === job.id) ?? runs[0];
   const queued = active.find((j) => j.state === "queued");
 
-  const mergedByUs = it.state === "merged" && db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged'").get(repo, n) !== undefined;
-  const evidence = evidenceOf(c, q, it.mergedAt, mergedByUs);
+  const mergedByUs = it.state === "merged" && await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged'").get(repo, n) !== undefined;
+  const evidence = await evidenceOf(c, q, it.mergedAt, mergedByUs);
   const costs = new Map<StageId, number>();
-  for (const r of q<{ step: string; cost: number | null }>(`SELECT r.step, r.cost_usd AS cost FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.cost_usd IS NOT NULL${hiddenSql(c.hidden)}`, repo, n, ...hiddenArgs(c.hidden))) {
+  for (const r of await q<{ step: string; cost: number | null }>(`SELECT r.step, r.cost_usd AS cost FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.cost_usd IS NOT NULL${hiddenSql(c.hidden)}`, repo, n, ...hiddenArgs(c.hidden))) {
     const id = stageOfStep(r.step)?.id;
     if (id) costs.set(id, (costs.get(id) ?? 0) + r.cost!);
   }
@@ -154,7 +154,7 @@ export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: 
   const latestFail = [...evidence].filter((e) => e.state === "failed").sort((a, b) => (a.at < b.at ? 1 : -1))
     .find((f) => !evidence.some((e) => e.stage === f.stage && e.state === "done" && e.at > f.at) && (!phaseStage || f.stage === phaseStage || Date.now() - Date.parse(f.at) < RECENT_MS));
   // A failed pre-approval heads the bar until a newer one replaces it or the PR merges.
-  const pre = open ? (q<{ state: string; reason: string | null }>("SELECT state, reason FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 1", repo, n)[0]) : undefined;
+  const pre = open ? (await q<{ state: string; reason: string | null }>("SELECT state, reason FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 1", repo, n))[0] : undefined;
   const preFailed = pre?.state === "failed" ? { label: /fix-up/i.test(pre.reason ?? "") ? "Fix-up" : "Pre-approved merge", reason: c.staff && pre.reason ? clip(pre.reason, 160) : null } : null;
   const current: StageId | null = runningStep ? stageOfStep(runningStep)?.id ?? null : queued ? stageOfStep(queued.step)?.id ?? null : open ? phaseStage ?? null : null;
 
@@ -163,7 +163,7 @@ export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: 
   const failText = (label: string, reason: string | null) => `${label} failed${reason ? `: ${reason}` : ""}`;
   if (open && runningStep) headline = { tone: "running", text: `${nameOf(runningStep)} running`, next: status.next, model: run?.model ?? null, startedAt: job?.started_at ?? run?.started_at ?? null, jobId: job?.id ?? run?.job_id ?? null };
   else if (open && queued) {
-    const pos = (db.prepare("SELECT COUNT(*) AS k FROM jobs WHERE state = 'queued' AND step = ? AND id < ?").get(queued.step, queued.id) as { k: number }).k + 1;
+    const pos = (await db.prepare("SELECT COUNT(*) AS k FROM jobs WHERE state = 'queued' AND step = ? AND id < ?").get(queued.step, queued.id) as { k: number }).k + 1;
     headline = { ...base, tone: "queued", text: `Queued for ${nameOf(queued.step)} · #${pos} in line`, jobId: queued.id };
   } else if (open && status.outside) headline = { ...base, tone: "waiting", text: `Waiting: ${status.waiting ?? "an operator's release"}`, outside: status.outside };
   else if (preFailed) headline = { ...base, tone: "failed", text: failText(preFailed.label, preFailed.reason) };

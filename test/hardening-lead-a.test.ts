@@ -3,13 +3,13 @@ import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { connect } from "../src/db.ts";
 import { TokenBox } from "../src/dash/server/crypto.ts";
 import { resealLegacyValues } from "../src/dash/server/reseal.ts";
 import { addLogin, checkGithubId } from "../src/access.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { parseWorkerConfig } from "../src/worker/config.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const KEY = "hardening-session-key-hardening-0";
 
@@ -21,37 +21,37 @@ function sealLegacy(plain: string, aad: string): string {
   return Buffer.concat([iv, c.getAuthTag(), body]).toString("base64url");
 }
 
-test("legacy-sealed values are re-sealed at startup, then open; open alone refuses them", () => {
+test("legacy-sealed values are re-sealed at startup, then open; open alone refuses them", async () => {
   mkdirSync(SCRATCH, { recursive: true });
-  const db = connect(join(SCRATCH, `hardening-a-${process.pid}.db`));
+  const db = await connectDb(join(SCRATCH, `hardening-a-${process.pid}.db`));
   const box = new TokenBox(KEY);
   const legacy = sealLegacy("{}", "user_tokens:alice");
   assert.equal(box.open(legacy, "user_tokens:alice"), null);
-  db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('Alice', 1, ?, 1, 'x', 'ok')").run(legacy);
-  assert.deepEqual(resealLegacyValues(db, box), { user_tokens: 1 });
-  const now = (db.prepare("SELECT token_enc FROM user_tokens").get() as { token_enc: string }).token_enc;
+  await db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('Alice', 1, ?, 1, 'x', 'ok')").run(legacy);
+  assert.deepEqual(await resealLegacyValues(db, box), { user_tokens: 1 });
+  const now = (await db.prepare("SELECT token_enc FROM user_tokens").get() as { token_enc: string }).token_enc;
   assert.equal(box.open(now, "user_tokens:alice"), "{}");
-  assert.deepEqual(resealLegacyValues(db, box), {});
-  db.close();
+  assert.deepEqual(await resealLegacyValues(db, box), {});
+  await db.close();
 });
 
-test("switching the identity queues revocation of stored user tokens", () => {
+test("switching the identity queues revocation of stored user tokens", async () => {
   mkdirSync(SCRATCH, { recursive: true });
-  const db = connect(join(SCRATCH, `hardening-b-${process.pid}.db`));
-  db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('bob', 2, 'enc', 1, 'x', 'ok')").run();
-  assert.equal(setGithubIdentity(db, "op", "app"), true);
-  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM user_tokens").get() as { n: number }).n, 0);
-  assert.equal((db.prepare("SELECT COUNT(*) AS n FROM user_token_revocations WHERE login = 'bob'").get() as { n: number }).n, 1);
-  db.close();
+  const db = await connectDb(join(SCRATCH, `hardening-b-${process.pid}.db`));
+  await db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('bob', 2, 'enc', 1, 'x', 'ok')").run();
+  assert.equal(await setGithubIdentity(db, "op", "app"), true);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM user_tokens").get() as { n: number }).n, 0);
+  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM user_token_revocations WHERE login = 'bob'").get() as { n: number }).n, 1);
+  await db.close();
 });
 
-test("an access entry added with a GitHub id rejects another id at sign-in", () => {
+test("an access entry added with a GitHub id rejects another id at sign-in", async () => {
   mkdirSync(SCRATCH, { recursive: true });
-  const db = connect(join(SCRATCH, `hardening-c-${process.pid}.db`));
-  addLogin(db, "op", "carol", "viewer", null, 7);
-  assert.equal(checkGithubId(db, "carol", 8), "mismatch");
-  assert.equal(checkGithubId(db, "carol", 7), "ok");
-  db.close();
+  const db = await connectDb(join(SCRATCH, `hardening-c-${process.pid}.db`));
+  await addLogin(db, "op", "carol", "viewer", null, 7);
+  assert.equal(await checkGithubId(db, "carol", 8), "mismatch");
+  assert.equal(await checkGithubId(db, "carol", 7), "ok");
+  await db.close();
 });
 
 test("coordinatorUrl: plain http only for loopback, private and cluster-internal hosts", () => {

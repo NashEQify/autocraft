@@ -1,8 +1,8 @@
 import { sweepRunningCards } from "../conversations/act.ts";
-import { connect } from "../db.ts";
 import { scopeToTracked } from "../repos.ts";
 import { ConfigError, loadConfig } from "./server/config.ts";
 import { startServer } from "./server/index.ts";
+import { connectDb } from "../db/open.ts";
 
 /** How long a helper route waits for SQLite's write lock before it answers 503. */
 const REMOTE_BUSY_MS = 2_000;
@@ -16,16 +16,16 @@ async function serve(): Promise<void> {
     console.error(`dash serve: ${e.message}`);
     process.exit(2);
   }
-  const db = connect(config.dbPath);
-  scopeToTracked(db);
-  sweepRunningCards(db);
+  const db = await connectDb(config.dbPath);
+  await scopeToTracked(db);
+  await sweepRunningCards(db);
   // The helper routes' own connection: they wait at most REMOTE_BUSY_MS for a write lock and then answer 503.
-  const remoteDb = connect(config.dbPath, { busyTimeoutMs: REMOTE_BUSY_MS });
+  const remoteDb = await connectDb(config.dbPath, { busyTimeoutMs: REMOTE_BUSY_MS });
   const { url, close } = await startServer({ config, db, remoteDb });
   console.log(`dashboard listening on ${url}${config.devAuth ? " (development sign-in)" : ""}`);
-  const stop = () => void close().then(() => {
-    remoteDb.close();
-    db.close();
+  const stop = () => void close().then(async () => {
+    await remoteDb.close();
+    await db.close();
     process.exit(0);
   });
   process.once("SIGTERM", stop);

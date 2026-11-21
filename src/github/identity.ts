@@ -5,7 +5,6 @@
 //    requests, transfers, fix-up pushes, CI approvals, edits, and every rule, review and automatic write.
 // The instance-wide setting `github_identity` decides whether that is used at all: under `box` (the default) the box
 // account makes every write, and `as` only appears in the audit row as a record of what it would be.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import type { Grant, Guarded } from "../core/guard.ts";
 import { ownerOf } from "../owners.ts";
@@ -13,6 +12,8 @@ import { knownSlugs, rememberSlug } from "./slugs.ts";
 import { AppError, call, GITHUB_API } from "./app.ts";
 import { AppNotInstalledError, installationToken, readAppSecrets, RepoNotInInstallationError } from "./install-token.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
+import { noteReadIdentity } from "./read.ts";
 
 export type Identity = "app" | `user:${string}`;
 export type GithubIdentity = "box" | "app";
@@ -21,33 +22,29 @@ export const GITHUB_IDENTITIES: readonly GithubIdentity[] = ["box", "app"];
 const KEY = "github_identity";
 
 /** The one instance-wide switch: whose account GitHub writes and dashboard sign-in use. Read at every use, never cached. */
-export function githubIdentity(db: DatabaseSync): GithubIdentity {
-  const value = setting(db, KEY);
+export async function githubIdentity(db: Db): Promise<GithubIdentity> {
+  const value = await setting(db, KEY);
   return value === "app" ? "app" : "box";
 }
 
 /** Returns false when nothing changed. A change ends every dashboard session, so everyone signs in again under the new mode. */
-export function setGithubIdentity(db: DatabaseSync, by: string, value: unknown): boolean {
+export async function setGithubIdentity(db: Db, by: string, value: unknown): Promise<boolean> {
   if (value !== "box" && value !== "app") throw new Error("the GitHub identity must be box or app");
-  const was = githubIdentity(db);
+  const was = await githubIdentity(db);
   if (was === value) return false;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-  if (value === "box") db.prepare("DELETE FROM main.settings WHERE key = ?").run(KEY);
-  else db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(KEY, value);
-  audit(db, by, "github-identity", value, { identity: value, was });
+  await db.write(async () => {
+  if (value === "box") await db.prepare("DELETE FROM main.settings WHERE key = ?").run(KEY);
+  else await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(KEY, value);
+  await audit(db, by, "github-identity", value, { identity: value, was });
   // Sessions' own tokens belong to whichever identity created them; the grant revocation below covers app sessions.
-  db.prepare("DELETE FROM sessions").run();
+  await db.prepare("DELETE FROM sessions").run();
   // The stored user tokens belong to the mode being left: queue their revocation at GitHub (the vault's sweep).
-  const stored = db.prepare("DELETE FROM user_tokens RETURNING login, token_enc").all() as { login: string; token_enc: string }[];
+  const stored = await db.prepare("DELETE FROM user_tokens RETURNING login, token_enc").all() as { login: string; token_enc: string }[];
   const queue = db.prepare("INSERT INTO user_token_revocations (login, token_enc, queued_at, kind) VALUES (?, ?, ?, 'grant')");
   const at = new Date().toISOString();
-  for (const t of stored) queue.run(t.login, t.token_enc, at);
-  db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  for (const t of stored) await queue.run(t.login, t.token_enc, at);
+  });
+  noteReadIdentity(value === "app");
   return true;
 }
 
@@ -58,9 +55,9 @@ export type WriteKind = "merge" | "close" | "other";
 export const actsAsPerson = (kind: WriteKind): boolean => kind === "merge" || kind === "close";
 
 /** The person who answered `decisionId`, or the app (no decision, not answered yet): who a merge or close for it is made as. */
-export function identityOfDecision(db: DatabaseSync, decisionId: string | undefined): Identity {
+export async function identityOfDecision(db: Db, decisionId: string | undefined): Promise<Identity> {
   if (decisionId === undefined) return "app";
-  const row = db.prepare("SELECT answered_by FROM decisions WHERE id = ? AND answer IS NOT NULL").get(decisionId) as { answered_by: string | null } | undefined;
+  const row = await db.prepare("SELECT answered_by FROM decisions WHERE id = ? AND answer IS NOT NULL").get(decisionId) as { answered_by: string | null } | undefined;
   return row?.answered_by ? `user:${row.answered_by}` : "app";
 }
 
@@ -68,8 +65,8 @@ export function identityOfDecision(db: DatabaseSync, decisionId: string | undefi
 export const identityFor = (g: Guarded | Grant, kind: WriteKind = "other"): Identity => (actsAsPerson(kind) ? g.as : "app");
 
 /** What an audit row records: `legacy` while writes use the box account, else the identity the write is made as. */
-export function auditIdentity(db: DatabaseSync, g: Guarded | Grant, kind: WriteKind = "other"): "legacy" | Identity {
-  return githubIdentity(db) === "box" ? "legacy" : identityFor(g, kind);
+export async function auditIdentity(db: Db, g: Guarded | Grant, kind: WriteKind = "other"): Promise<"legacy" | Identity> {
+  return await githubIdentity(db) === "box" ? "legacy" : identityFor(g, kind);
 }
 
 /** Whether the app can act on `owner/repo`: covered, not covered (with the reason), or not confirmable now (GitHub 5xx, rate limit, network). */
@@ -90,8 +87,8 @@ export async function appCoverage(owner: string, repo: string, mint: (owner: str
 }
 
 /** Tracked repos by coverage; `unconfirmed` are those GitHub could not answer for. */
-export async function trackedCoverage(db: DatabaseSync, mint?: (owner: string, repo: string) => Promise<string>): Promise<{ uncovered: string[]; unconfirmed: string[] }> {
-  const names = (db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+export async function trackedCoverage(db: Db, mint?: (owner: string, repo: string) => Promise<string>): Promise<{ uncovered: string[]; unconfirmed: string[] }> {
+  const names = (await db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
   const uncovered: string[] = [], unconfirmed: string[] = [];
   for (const n of names) {
     const c = await appCoverage(ownerOf(n), n, mint);
@@ -103,7 +100,7 @@ export async function trackedCoverage(db: DatabaseSync, mint?: (owner: string, r
 
 let coverageMemo: { at: number; running: boolean; uncovered: string[]; unconfirmed: string[] } | null = null;
 /** What the health check shows: the last coverage reading of the tracked repos, refreshed in the background at most every 2 minutes (the minter caches installations). With `refresh` false it still answers from the memo at once, and starts a background refresh only when the memo is missing or older than 10 minutes. */
-export function coverageSnapshot(db: DatabaseSync, refresh = true): { uncovered: string[]; unconfirmed: string[] } {
+export function coverageSnapshot(db: Db, refresh = true): { uncovered: string[]; unconfirmed: string[] } {
   const maxAge = refresh ? 120_000 : 600_000;  // the probe answers from the memo at once, and only starts a refresh when it is missing or old
   if (!coverageMemo || (!coverageMemo.running && Date.now() - coverageMemo.at > maxAge)) {
     const prev = coverageMemo;
@@ -125,9 +122,9 @@ export class IdentityRefused extends Error {
 
 /** Sets the identity. Switching to `app` needs a registered app and an installation covering every tracked repo. Returns false when nothing changed. */
 export async function setGithubIdentityChecked(
-  db: DatabaseSync, by: string, value: unknown, deps: { registered: () => boolean; mint?: (owner: string, repo: string) => Promise<string> },
+  db: Db, by: string, value: unknown, deps: { registered: () => boolean; mint?: (owner: string, repo: string) => Promise<string> },
 ): Promise<boolean> {
-  if (value === "app" && githubIdentity(db) !== "app") {
+  if (value === "app" && await githubIdentity(db) !== "app") {
     if (!deps.registered()) throw new IdentityRefused("No GitHub App is registered.", []);
     const { uncovered, unconfirmed } = await trackedCoverage(db, deps.mint);
     if (uncovered.length) throw new IdentityRefused(`The GitHub App does not cover ${uncovered.length === 1 ? "this repo" : "these repos"}: ${uncovered.join(", ")}.`, uncovered);
@@ -135,7 +132,7 @@ export async function setGithubIdentityChecked(
     // The app may have been removed while GitHub was asked: check again, with no await before the write.
     if (!deps.registered()) throw new IdentityRefused("No GitHub App is registered.", []);
   }
-  return setGithubIdentity(db, by, value);
+  return await setGithubIdentity(db, by, value);
 }
 
 /** Who a commit is made as, and the login its comments carry. */
@@ -164,10 +161,10 @@ export function botUserId(slug: string, token: () => Promise<string>, base: stri
  * user (`<slug>[bot]`), which is also the login its comments carry; otherwise the box account `box` reads.
  */
 export async function commitIdentity(
-  db: DatabaseSync, repo: string, box: () => Promise<{ login: string; email: string }>,
+  db: Db, repo: string, box: () => Promise<{ login: string; email: string }>,
   deps: { slug?: () => string | null; botId?: (slug: string) => Promise<number> } = {},
 ): Promise<CommitIdentity> {
-  if (githubIdentity(db) === "app") {
+  if (await githubIdentity(db) === "app") {
     const slug = (deps.slug ?? (() => readAppSecrets()?.slug ?? null))();
     if (slug) {
       const id = await (deps.botId ?? ((s: string) => botUserId(s, () => installationToken(ownerOf(repo), repo))))(slug);
@@ -180,10 +177,10 @@ export async function commitIdentity(
 }
 
 /** The bot logins (bare slug and `<slug>[bot]`) of every known slug plus `extra`; the registered app's slug is recorded when `db` is given. */
-export function ownBotLogins(db: DatabaseSync, extra: string | null = null): string[] {
+export async function ownBotLogins(db: Db, extra: string | null = null): Promise<string[]> {
   const live = appSlug();
-  if (live) { try { rememberSlug(db, live); } catch { /* a read-only connection: the live slug is still used below */ } }
-  const slugs = new Set([...knownSlugs(db), ...(live ? [live] : []), ...(extra ? [extra] : [])]);
+  if (live) { try { await rememberSlug(db, live); } catch { /* a read-only connection: the live slug is still used below */ } }
+  const slugs = new Set([...await knownSlugs(db), ...(live ? [live] : []), ...(extra ? [extra] : [])]);
   return [...slugs].flatMap((s) => [s, `${s}[bot]`]);
 }
 
@@ -202,17 +199,17 @@ export function appSlug(): string | null {
  * mirror, `<slug>[bot]` in REST), on every repo whatever the identity setting, so items from before a switch stay ours.
  * `slug` is an extra slug injectable for tests; the registered app's is recorded and included by default.
  */
-export function ownLogins(db: DatabaseSync, _repo: string, slug: string | null = null): Set<string> {
+export async function ownLogins(db: Db, _repo: string, slug: string | null = null): Promise<Set<string>> {
   const out = new Set<string>();
-  const box = setting(db, "pipeline_login");
+  const box = await setting(db, "pipeline_login");
   if (box) out.add(box);
-  for (const l of ownBotLogins(db, slug)) out.add(l);
+  for (const l of await ownBotLogins(db, slug)) out.add(l);
   return out;
 }
 
 /** Every login that is ours on any repo (for views that span repos). */
-export function allOwnLogins(db: DatabaseSync, slug: string | null = null): Set<string> {
-  return ownLogins(db, "", slug);
+export async function allOwnLogins(db: Db, slug: string | null = null): Promise<Set<string>> {
+  return await ownLogins(db, "", slug);
 }
 
 export { knownSlugs, rememberSlug };

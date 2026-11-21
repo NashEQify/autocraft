@@ -6,12 +6,13 @@ import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtemp
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "./dash/audit.ts";
-import { connect, dbPath } from "./db.ts";
+import { dbPath } from "./db.ts";
 import { isTracked } from "./repos.ts";
 import { buildReferenceIndex, referenceSearch } from "./reference-search.ts";
 import { isInstructionPath } from "./sandbox/instruction-paths.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 export class ReferenceError extends Error {}
 
@@ -78,8 +79,8 @@ function checkTree(dir: string, depth = 0): void {
 }
 
 /** Installs the archive as the repo's reference folder: extracted beside it, then renamed into place. */
-export function importReference(db: DatabaseSync, by: string, repo: string, tarFile: string, replace = false): { files: number; bytes: number } {
-  if (!REPO_NAME.test(repo) || !isTracked(db, repo)) throw new ReferenceError(`${repo} is not a tracked repo`);
+export async function importReference(db: Db, by: string, repo: string, tarFile: string, replace = false): Promise<{ files: number; bytes: number }> {
+  if (!REPO_NAME.test(repo) || !await isTracked(db, repo)) throw new ReferenceError(`${repo} is not a tracked repo`);
   const root = referenceRoot(), target = join(root, repo);
   if (existsSync(target) && !replace) throw new ReferenceError(`${repo} already has reference documentation; use --replace`);
   const summary = checkArchive(tarFile);
@@ -102,7 +103,7 @@ export function importReference(db: DatabaseSync, by: string, repo: string, tarF
     rmSync(staging, { recursive: true, force: true });
     throw e;
   }
-  audit(db, by, "reference-import", repo, { repo, ...summary });
+  await audit(db, by, "reference-import", repo, { repo, ...summary });
   return summary;
 }
 
@@ -160,7 +161,7 @@ export const commands = {
           try {
             const file = join(tmp, "in.tar");
             await saveStdin(file);
-            const r = importReference(connect(), "cli", rest[0], file, rest.includes("--replace"));
+            const r = await importReference(await openDb(), "cli", rest[0], file, rest.includes("--replace"));
             console.log(`imported ${r.files} files (${r.bytes} bytes) for ${rest[0]}`);
             await buildReferenceIndex(rest[0], {}, "force");
             console.log("search index built");

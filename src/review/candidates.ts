@@ -1,7 +1,7 @@
 // The head commit of a PR as best known, the scope answers per item.
 import { settledBySql } from "../settlers.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { KEEP_IN_CORE, REVIEW_LABELS, sizeOf, type Size } from "../core/rules.ts";
+import type { Db } from "../db/index.ts";
 export { REVIEW_LABELS, sizeOf, type Size };
 
 
@@ -23,9 +23,9 @@ export function headOf(r: { head_oid: string | null; updated_at: string | null; 
 
 const MAINTAINER_ANSWER = "answered_by IN (SELECT login FROM main.access WHERE role = 'maintainer')";
 
-function scopeRows(db: DatabaseSync, extra: string): Map<string, string> {
+async function scopeRows(db: Db, extra: string): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const rows = db.prepare(`SELECT repo, number, items, answer, exceptions FROM decisions
+  const rows = await db.prepare(`SELECT repo, number, items, answer, exceptions FROM decisions
     WHERE kind = 'scope' AND answer IS NOT NULL AND NOT (answer = 'withdrawn' AND answered_by = 'pipeline') ${extra} ORDER BY answered_at DESC`).all() as
     { repo: string | null; number: number | null; items: string | null; answer: string; exceptions: string | null }[];
   for (const r of rows) {
@@ -47,25 +47,25 @@ function scopeRows(db: DatabaseSync, extra: string): Map<string, string> {
  * The answer of the latest answered scope decision per item ("repo#n"), for every item at once. A maintainer's answer
  * counts only while it is settled (src/settlers.ts); `operatorsOnly` keeps only answers whose answerer settles.
  */
-export function scopeAnswers(db: DatabaseSync, operatorsOnly = false): Map<string, string> {
+export async function scopeAnswers(db: Db, operatorsOnly = false): Promise<Map<string, string>> {
   // A disputed answer does not count until it is kept.
-  return scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql("decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")})`}`);
+  return await scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql("decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")})`}`);
 }
 
 /** Items whose latest scope answer is a maintainer's that no longer counts: the item waits for a decision again instead of being reviewed on it. */
-export function unsettledScope(db: DatabaseSync): Set<string> {
-  return new Set(scopeRows(db, `AND ${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}`).keys());
+export async function unsettledScope(db: Db): Promise<Set<string>> {
+  return new Set((await scopeRows(db, `AND ${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}`)).keys());
 }
 
 /**
  * The person's keep-in-core scope answer that stands for a PR, with who gave it and their note; null when scope is open,
  * answered otherwise, or answered only by a pipeline step.
  */
-export function settledScope(db: DatabaseSync, repo: string, number: number): { answer: string; by: string | null; note: string | null } | null {
+export async function settledScope(db: Db, repo: string, number: number): Promise<{ answer: string; by: string | null; note: string | null } | null> {
   const ref = `${repo}#${number}`;
-  const answer = scopeAnswers(db).get(ref);
+  const answer = (await scopeAnswers(db)).get(ref);
   if (!answer || !KEEP_IN_CORE.includes(answer)) return null;
-  const rows = db.prepare(`SELECT answered_by, answer_note, repo, number, items FROM decisions
+  const rows = await db.prepare(`SELECT answered_by, answer_note, repo, number, items FROM decisions
     WHERE kind = 'scope' AND answer = ? AND answered_by IS NOT NULL AND answered_by <> 'pipeline' AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}) ORDER BY answered_at DESC`).all(answer) as
     { answered_by: string; answer_note: string | null; repo: string | null; number: number | null; items: string | null }[];
   const r = rows.find((x) => (x.number !== null ? x.repo === repo && x.number === number : parseRefs(x.items).some((i) => i.repo === repo && i.number === number)));
@@ -75,7 +75,7 @@ export function settledScope(db: DatabaseSync, repo: string, number: number): { 
 }
 
 /** A tracked issue "repo#n" whose open decision is a scope question (a PR is a code dependency, never only a question). */
-export function isScopeQuestion(db: DatabaseSync, ref: string): boolean {
+export async function isScopeQuestion(db: Db, ref: string): Promise<boolean> {
   const [repo, n] = ref.split("#");
-  return !!db.prepare("SELECT 1 FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number AND i.kind = 'issue' WHERE d.repo = ? AND d.number = ? AND d.kind = 'scope' AND d.answer IS NULL LIMIT 1").get(repo!, Number(n));
+  return !!await db.prepare("SELECT 1 FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number AND i.kind = 'issue' WHERE d.repo = ? AND d.number = ? AND d.kind = 'scope' AND d.answer IS NULL LIMIT 1").get(repo!, Number(n));
 }

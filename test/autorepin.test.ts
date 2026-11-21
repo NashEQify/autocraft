@@ -150,7 +150,7 @@ let current: World | null = null;
 afterEach(() => current?.close());
 
 /** app#1 from the fork contrib/app (branch `fix`), pinned to libs at OLD; libs#12 is open in the mirror. */
-function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } = {}): Setup {
+async function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } = {}): Promise<Setup> {
   const root = mkdtempSync(join(SCRATCH, "repin-"));
   const work = join(root, "work");
   mkdirSync(work);
@@ -164,11 +164,11 @@ function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } = {}): 
   git(root, "clone", "-q", "--bare", work, fork);
   git(fork, "update-ref", "refs/pull/1/head", head);
 
-  const w = (current = world().repo(o.off).pr(1, { head }));
-  w.db.prepare("UPDATE access SET github_id = 101 WHERE login = ?").run(OPERATOR);
-  w.db.prepare("INSERT INTO tracked_repos (name, added_by, added_at) VALUES ('libs', ?, '2026-01-01T00:00:00Z')").run(OPERATOR);
-  w.db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('libs', 'public', 'main')").run();
-  w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 12, 'pr', 'OPEN', 'lib change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
+  const w = (current = await (await (await world()).repo(o.off)).pr(1, { head }));
+  await w.db.prepare("UPDATE access SET github_id = 101 WHERE login = ?").run(OPERATOR);
+  await w.db.prepare("INSERT INTO tracked_repos (name, added_by, added_at) VALUES ('libs', ?, '2026-01-01T00:00:00Z')").run(OPERATOR);
+  await w.db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('libs', 'public', 'main')").run();
+  await w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 12, 'pr', 'OPEN', 'lib change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
 
   const s: Setup = {
     w, fork, head, comments: [], pushes: 0, live: { head, state: "OPEN", ref: "MERGED", base: "main", sha: SHA, mergedAt: new Date().toISOString() },
@@ -200,17 +200,17 @@ function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } = {}): 
 }
 
 const set = (s: Setup, branch: string | null = null) => requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref: { owner: "storytold", name: "libs", number: 12 }, branch });
-const merged = (s: Setup, state = "MERGED") => s.w.db.prepare("UPDATE items SET state = ? WHERE repo = 'libs' AND number = 12").run(state);
-const row = (s: Setup) => ({ ...s.w.db.prepare("SELECT state, tries, to_head, result, notice FROM autorepins").get() }) as { state: string; tries: number; to_head: string | null; result: string | null; notice: string | null };
-const task = (s: Setup) => s.w.db.prepare("SELECT id, patch, plan, head_sha FROM build_tasks WHERE step = 'autorepin' ORDER BY id DESC").get() as { id: number; patch: string; plan: string; head_sha: string } | undefined;
+const merged = async (s: Setup, state = "MERGED") => await s.w.db.prepare("UPDATE items SET state = ? WHERE repo = 'libs' AND number = 12").run(state);
+const row = async (s: Setup) => ({ ...await s.w.db.prepare("SELECT state, tries, to_head, result, notice FROM autorepins").get() }) as { state: string; tries: number; to_head: string | null; result: string | null; notice: string | null };
+const task = async (s: Setup) => await s.w.db.prepare("SELECT id, patch, plan, head_sha FROM build_tasks WHERE step = 'autorepin' ORDER BY id DESC").get() as { id: number; patch: string; plan: string; head_sha: string } | undefined;
 /** The lockfile task ended with `lock` as its Cargo.lock. */
-function locked(s: Setup, lock: string | null, state = "done"): void {
-  const id = task(s)!.id;
-  s.w.db.prepare("UPDATE build_tasks SET state = ?, ended_at = '2026-01-03T00:00:00Z' WHERE id = ?").run(state, id);
+async function locked(s: Setup, lock: string | null, state = "done"): Promise<void> {
+  const id = (await task(s))!.id;
+  await s.w.db.prepare("UPDATE build_tasks SET state = ?, ended_at = '2026-01-03T00:00:00Z' WHERE id = ?").run(state, id);
   if (lock === null) return;
   const tmp = tempPath(id);
   writeFileSync(tmp, lock);
-  storeArtifact(s.w.db, id, "Cargo.lock", tmp);
+  await storeArtifact(s.w.db, id, "Cargo.lock", tmp);
 }
 
 /** Delivers a comment on app#1 holding `body` and carries it out; `now`: the comment's text when the runner reads it again. */
@@ -219,7 +219,7 @@ async function comment(s: Setup, body: string, now = body): Promise<void> {
     action: "created", repository: { full_name: "storytold/app", name: "app" }, issue: { number: 1, pull_request: { url: "x" } },
     comment: { id: 5000, body, created_at: new Date().toISOString(), user: { login: OPERATOR, id: 101, type: "User" } },
   }));
-  handleDelivery(s.w.db, "secret", { event: "issue_comment", signature: signatureOf("secret", raw) }, raw, safeEqual, SLUG);
+  await handleDelivery(s.w.db, "secret", { event: "issue_comment", signature: signatureOf("secret", raw) }, raw, safeEqual, SLUG);
   await drainCommands(s.w.db, {
     querier: s.deps.querier, exec: s.deps.exec, slug: SLUG,
     permission: async () => ({ kind: "ok", permission: "write" }),
@@ -229,32 +229,32 @@ async function comment(s: Setup, body: string, now = body): Promise<void> {
 
 describe("autorepin", () => {
   test("a comment sets it, and nothing happens while the dependency's pull request is open", async () => {
-    const s = setup();
+    const s = await setup();
     await comment(s, `@${SLUG} autorepin storytold/libs#12`);
     assert.equal(s.comments.length, 1);
     assert.match(s.comments[0]!, new RegExp(`@${OPERATOR} Autorepin set: once storytold/libs#12 is merged`));
-    assert.equal(row(s).state, "waiting");
-    assert.equal(anyRepinDue(s.w.db), false);
+    assert.equal((await row(s)).state, "waiting");
+    assert.equal(await anyRepinDue(s.w.db), false);
     assert.equal(await drainRepins(s.w.db, s.deps), 0);
-    assert.equal(task(s), undefined);
+    assert.equal(await task(s), undefined);
   });
 
   test("after the merge the lockfile task gets the repinned manifest, and its lockfile is pushed with it on top of the head", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, s.deps);
-    const t = task(s)!;
-    assert.equal(row(s).state, "locking");
+    const t = (await task(s))!;
+    assert.equal((await row(s)).state, "locking");
     assert.equal(t.head_sha, s.head);
     assert.ok(t.patch.includes(`+craft-ui = { git = "${LIBS}", rev = "${SHA}" }`) && !t.patch.includes("Cargo.lock"), t.patch);
     assert.equal((JSON.parse(t.plan) as { network: string }[])[0]!.network, "fetch");
     assert.equal(s.pushes, 0, "nothing is pushed before the lockfile is back");
-    assert.equal(anyRepinDue(s.w.db), false, "it waits for the task");
+    assert.equal(await anyRepinDue(s.w.db), false, "it waits for the task");
 
-    locked(s, lockOf(SHA));
+    await locked(s, lockOf(SHA));
     assert.equal(await drainRepins(s.w.db, s.deps), 1);
-    const r = row(s);
+    const r = await row(s);
     assert.equal(r.state, "pushed");
     assert.equal(s.branch(), r.to_head);
     assert.equal(git(s.fork, "rev-parse", `${r.to_head}^`), s.head, "one commit on the head");
@@ -268,162 +268,162 @@ describe("autorepin", () => {
   });
 
   test("a merge pre-approved at the old head goes on at the repinned head, to be reviewed again", async () => {
-    const s = setup({ lock: false });
-    preapproveMerge(s.w.db, { repo: "app", number: 1, by: OPERATOR });
+    const s = await setup({ lock: false });
+    await preapproveMerge(s.w.db, { repo: "app", number: 1, by: OPERATOR });
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, s.deps);
-    const to = row(s).to_head!;
-    s.w.synced(1, to);
-    advancePreapprovals(s.w.db);
-    const p = preapprovalOf(s.w.db, "app", 1)!;
+    const to = (await row(s)).to_head!;
+    await s.w.synced(1, to);
+    await advancePreapprovals(s.w.db);
+    const p = (await preapprovalOf(s.w.db, "app", 1))!;
     assert.deepEqual([p.state, p.head], ["review", to]);
   });
 
   test("without a lockfile the manifest is pushed at once", async () => {
-    const s = setup({ lock: false });
+    const s = await setup({ lock: false });
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "pushed");
-    assert.equal(task(s), undefined);
+    assert.equal((await row(s)).state, "pushed");
+    assert.equal(await task(s), undefined);
     assert.equal(s.at("Cargo.toml"), MANIFEST.replace(OLD, SHA).trim());
   });
 
   test("a lockfile that names another source is not pushed, and the comment says why", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, s.deps);
-    locked(s, lockOf(SHA, `\n[[package]]\nname = "evil"\nversion = "1.0.0"\nsource = "git+https://github.com/else/where?rev=abc#abc"\n`));
+    await locked(s, lockOf(SHA, `\n[[package]]\nname = "evil"\nversion = "1.0.0"\nsource = "git+https://github.com/else/where?rev=abc#abc"\n`));
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "failed");
+    assert.equal((await row(s)).state, "failed");
     assert.equal(s.pushes, 0);
     assert.equal(s.branch(), s.head);
     assert.match(s.comments[0]!, /Autorepin of storytold\/libs failed: .*evil/);
   });
 
   test("a head that moved while the lockfile was written starts over instead of pushing", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, s.deps);
-    locked(s, lockOf(SHA));
+    await locked(s, lockOf(SHA));
     s.live.head = "d".repeat(40);
     await drainRepins(s.w.db, s.deps);
-    assert.deepEqual([row(s).state, row(s).tries, s.pushes], ["waiting", 1, 0]);
-    assert.equal(anyRepinDue(s.w.db), false, "not again within the minute");
-    assert.equal(anyRepinDue(s.w.db, new Date(Date.now() + 120_000)), true);
+    assert.deepEqual([(await row(s)).state, (await row(s)).tries, s.pushes], ["waiting", 1, 0]);
+    assert.equal(await anyRepinDue(s.w.db), false, "not again within the minute");
+    assert.equal(await anyRepinDue(s.w.db, new Date(Date.now() + 120_000)), true);
   });
 
   test("a lockfile task that keeps failing ends it with a comment", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     for (let i = 0; i < MAX_TRIES; i++) {
       const later = () => new Date(Date.now() + (i + 1) * 120_000);
       await drainRepins(s.w.db, { ...s.deps, now: later });
-      locked(s, null, "failed");
+      await locked(s, null, "failed");
       await drainRepins(s.w.db, { ...s.deps, now: later });
     }
-    assert.equal(row(s).state, "failed");
+    assert.equal((await row(s)).state, "failed");
     assert.equal(s.pushes, 0);
     assert.equal(s.comments.length, 1);
   });
 
   test("a dependency pull request closed without merging drops it and says so", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s, "CLOSED");
+    await merged(s, "CLOSED");
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "cancelled");
+    assert.equal((await row(s)).state, "cancelled");
     assert.equal(s.pushes, 0);
     assert.match(s.comments[0]!, /closed without merging/);
   });
 
   test("a merge into another branch than the default one is not repinned to", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     s.live.base = "release-1";
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "failed");
-    assert.equal(task(s), undefined);
+    assert.equal((await row(s)).state, "failed");
+    assert.equal(await task(s), undefined);
   });
 
   test("a merge commit the default branch no longer holds is not repinned to", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     s.live.sha = STRAY;
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "failed");
-    assert.equal(task(s), undefined);
+    assert.equal((await row(s)).state, "failed");
+    assert.equal(await task(s), undefined);
     assert.match(s.comments[0]!, /no longer on/);
   });
 
   test("via a branch: waits, without counting tries, while the merge is only on the default branch, then pins to the commit that brought it in", async () => {
-    const s = setup();
+    const s = await setup();
     nextAt(NEXT_OLD);
     await comment(s, `@${SLUG} autorepin storytold/libs#12 via next`);
     assert.match(s.comments[0]!, /once storytold\/libs#12 is merged and on `next`/);
     s.comments.length = 0;
-    merged(s);
+    await merged(s);
     const t0 = Date.now();
     for (let i = 0; i < MAX_TRIES + 1; i++) await drainRepins(s.w.db, { ...s.deps, now: () => new Date(t0 + i * 20 * 60_000) });
-    assert.deepEqual([row(s).state, row(s).tries, task(s), s.comments.length], ["waiting", 0, undefined, 0]);
+    assert.deepEqual([(await row(s)).state, (await row(s)).tries, await task(s), s.comments.length], ["waiting", 0, undefined, 0]);
     // A failed fetch between waits is one try; the next wait clears it, so scattered failures never add up to MAX_TRIES.
     const blip = t0 + (MAX_TRIES + 1) * 20 * 60_000;
     git(LIBS_GIT, "update-ref", "-d", "refs/heads/next");
     await drainRepins(s.w.db, { ...s.deps, now: () => new Date(blip) });
-    assert.equal(row(s).tries, 1);
+    assert.equal((await row(s)).tries, 1);
     nextAt(NEXT_OLD);
     await drainRepins(s.w.db, { ...s.deps, now: () => new Date(blip + 20 * 60_000) });
-    assert.deepEqual([row(s).state, row(s).tries], ["waiting", 0]);
+    assert.deepEqual([(await row(s)).state, (await row(s)).tries], ["waiting", 0]);
     const last = blip + 20 * 60_000;
-    assert.equal(anyRepinDue(s.w.db, new Date(last + 60_000)), false, "not looked for again within minutes");
-    assert.equal(anyRepinDue(s.w.db, new Date(last + 20 * 60_000)), true);
+    assert.equal(await anyRepinDue(s.w.db, new Date(last + 60_000)), false, "not looked for again within minutes");
+    assert.equal(await anyRepinDue(s.w.db, new Date(last + 20 * 60_000)), true);
 
     nextAt(NEXT_NEW);
     const later = { ...s.deps, now: () => new Date(last + 20 * 60_000) };
     await drainRepins(s.w.db, later);
-    const t = task(s)!;
+    const t = (await task(s))!;
     assert.ok(t.patch.includes(`rev = "${SYNC}"`), t.patch);
-    locked(s, lockOf(SYNC));
+    await locked(s, lockOf(SYNC));
     await drainRepins(s.w.db, later);
-    assert.equal(row(s).state, "pushed");
+    assert.equal((await row(s)).state, "pushed");
     assert.equal(s.at("Cargo.toml"), MANIFEST.replace(OLD, SYNC).trim());
     assert.match(s.comments[0]!, /the first next commit that contains storytold\/libs#12/);
   });
 
   test("via a branch that does not exist is refused and nothing is stored", async () => {
-    const s = setup();
+    const s = await setup();
     s.noBranch = "nope";
     await assert.rejects(requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref: { owner: "storytold", name: "libs", number: 12 }, branch: "nope", querier: s.deps.querier }), /storytold\/libs has no branch nope/);
-    assert.equal(s.w.db.prepare("SELECT count(*) AS n FROM autorepins").get()!.n, 0);
+    assert.equal((await s.w.db.prepare("SELECT count(*) AS n FROM autorepins").get())!.n, 0);
   });
 
   test("via a branch the merge never reaches fails once the wait runs out", async () => {
-    const s = setup();
+    const s = await setup();
     nextAt(NEXT_OLD);
     await set(s, "next");
-    merged(s);
+    await merged(s);
     s.live.mergedAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "failed");
-    assert.equal(task(s), undefined);
+    assert.equal((await row(s)).state, "failed");
+    assert.equal(await task(s), undefined);
     assert.match(s.comments[0]!, /has not reached storytold\/libs's next/);
   });
 
   test("via a branch, a pull request merged straight into it is pinned to its own merge commit", async () => {
-    const s = setup({ lock: false });
+    const s = await setup({ lock: false });
     nextAt(NEXT_NEW);
     await set(s, "next");
-    merged(s);
+    await merged(s);
     s.live.base = "next";
     s.live.sha = NEXT_OLD;
     await drainRepins(s.w.db, s.deps);
-    assert.equal(row(s).state, "pushed");
+    assert.equal((await row(s)).state, "pushed");
     assert.equal(s.at("Cargo.toml"), MANIFEST.replace(OLD, NEXT_OLD).trim());
   });
 
@@ -438,88 +438,88 @@ describe("autorepin", () => {
       } };
     };
     // Waiting for `next`: the off comes during the fetch of `next`.
-    const a = setup();
+    const a = await setup();
     nextAt(NEXT_OLD);
     await set(a, "next");
-    merged(a);
+    await merged(a);
     await drainRepins(a.w.db, offDuring(a, (x) => x.some((y) => y.includes("refs/heads/next"))));
-    assert.equal(row(a).state, "cancelled");
-    assert.equal(anyRepinDue(a.w.db, new Date(Date.now() + 3600_000)), false);
+    assert.equal((await row(a)).state, "cancelled");
+    assert.equal(await anyRepinDue(a.w.db, new Date(Date.now() + 3600_000)), false);
     a.w.close();
     // Merged: the off comes during the fetch of the pull request's head, before the lockfile task.
-    const b = setup();
+    const b = await setup();
     await set(b);
-    merged(b);
+    await merged(b);
     await drainRepins(b.w.db, offDuring(b, (x) => x.some((y) => y.includes("refs/pull/"))));
-    assert.deepEqual([row(b).state, task(b), b.pushes, b.comments.length], ["cancelled", undefined, 0, 0]);
+    assert.deepEqual([(await row(b)).state, await task(b), b.pushes, b.comments.length], ["cancelled", undefined, 0, 0]);
   });
 
   test("whoever asked must still have write access when the merge comes", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
-    merged(s);
+    await merged(s);
     await drainRepins(s.w.db, { ...s.deps, permission: async () => "no" });
-    assert.equal(row(s).state, "failed");
-    assert.equal(task(s), undefined);
+    assert.equal((await row(s)).state, "failed");
+    assert.equal(await task(s), undefined);
   });
 
   test("is refused on an issue, for a repo that is not tracked, and where pushes are not approved", async () => {
-    const s = setup({ off: ["push"] });
+    const s = await setup({ off: ["push"] });
     const ask = (o: Partial<Parameters<typeof requestRepin>[1]>) => requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref: { owner: null, name: "libs", number: 12 }, ...o });
     await assert.rejects(ask({ pr: false }), /pull requests/);
     await assert.rejects(ask({ ref: { owner: null, name: "nowhere", number: 1 } }), /not a repository AutoCraft tracks/);
     await assert.rejects(ask({ ref: { owner: "someone-else", name: "libs", number: 12 } }), /not a repository AutoCraft tracks/);
     await assert.rejects(ask({ canWrite: false }), /write access/);
     await assert.rejects(ask({}), /not approved/);
-    assert.equal(s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get()!.n, 0);
+    assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
   });
 
   test("is refused while the repo is outside the pipeline's scope and the pull request is not fast-tracked, since no worker would take its task", async () => {
-    const s = setup();
-    s.w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
+    const s = await setup();
+    await s.w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
     await assert.rejects(set(s), /pipeline is off for storytold\/app/);
-    assert.equal(s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get()!.n, 0);
+    assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
   });
 
   test("an autorepin command carried out after a later off does not set it again", async () => {
-    const s = setup();
+    const s = await setup();
     const ask = (ref: Parameters<typeof requestRepin>[1]["ref"], at: string) => requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref, at: new Date(at) });
     const libs = { owner: null, name: "libs", number: 12 };
     await ask(libs, "2026-02-01T10:00:00Z");
     await ask(null, "2026-02-01T10:10:00Z");
     // The command of 10:05, whose permission read GitHub settled only now.
     await assert.rejects(ask(libs, "2026-02-01T10:05:00Z"), /later autorepin/);
-    assert.equal(row(s).state, "cancelled");
+    assert.equal((await row(s)).state, "cancelled");
     await ask(libs, "2026-02-01T10:20:00Z");
-    assert.equal(row(s).state, "waiting");
+    assert.equal((await row(s)).state, "waiting");
   });
 
   test("off drops a waiting autorepin", async () => {
-    const s = setup();
+    const s = await setup();
     await set(s);
     await requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref: null });
-    merged(s);
+    await merged(s);
     assert.equal(await drainRepins(s.w.db, s.deps), 0);
-    assert.equal(row(s).state, "cancelled");
+    assert.equal((await row(s)).state, "cancelled");
     assert.equal(s.comments.length, 0);
   });
 
   test("an off given before any autorepin was set still stops an older command carried out later", async () => {
-    const s = setup();
+    const s = await setup();
     const ask = (ref: Parameters<typeof requestRepin>[1]["ref"], at: string) => requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref, at: new Date(at) });
     const libs = { owner: null, name: "libs", number: 12 };
     await ask(null, "2026-02-01T10:10:00Z");
     await assert.rejects(ask(libs, "2026-02-01T10:05:00Z"), /later autorepin off/);
-    assert.equal(s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get()!.n, 0);
+    assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
     await ask(libs, "2026-02-01T10:20:00Z");
-    assert.equal(row(s).state, "waiting");
+    assert.equal((await row(s)).state, "waiting");
   });
 
   test("a comment edited to name another pull request before it is carried out sets nothing", async () => {
-    const s = setup();
-    s.w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 13, 'pr', 'OPEN', 'other change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
+    const s = await setup();
+    await s.w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 13, 'pr', 'OPEN', 'other change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
     await comment(s, `@${SLUG} autorepin storytold/libs#12`, `@${SLUG} autorepin storytold/libs#13`);
-    assert.equal(s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get()!.n, 0);
-    assert.equal(s.w.db.prepare("SELECT state FROM github_commands").get()!.state, "ignored");
+    assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
+    assert.equal((await s.w.db.prepare("SELECT state FROM github_commands").get())!.state, "ignored");
   });
 });

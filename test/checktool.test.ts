@@ -36,7 +36,7 @@ describe("check limits", () => {
     const rs = await Promise.all([1, 2, 3].map(() => tool.run({ patch: "p", command: "check" })));
     assert.ok(rs.every((r) => r.isError && /calls are used up/.test(r.text)));
     assert.equal(applied, 0);
-    tool.close();
+    await tool.close();
     assert.match((await tool.run({ patch: "p", command: "check" })).text, /model call is over/);
   });
 });

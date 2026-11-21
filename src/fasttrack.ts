@@ -6,11 +6,12 @@
 // stays in the table but is ignored: lists and positions count open items only.
 //
 //   autocraft-server fasttrack add <url|repo#n> [--weight N] | weight <url|repo#n> <N> | remove <url|repo#n> | list
-import type { DatabaseSync } from "node:sqlite";
 import { ownerOf } from "./owners.ts";
 import { audit } from "./dash/audit.ts";
-import { connect } from "./db.ts";
 import { isTracked } from "./repos.ts";
+import { everySeq, mapSeq } from "./async-seq.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 export class FastTrackError extends Error {
   status: number;
@@ -48,45 +49,45 @@ export function parseItemRef(input: unknown): FastRef {
 }
 
 /** Open fast-tracked items, first to run first: heaviest first, then in the order added. */
-export function fastTrackList(db: DatabaseSync): FastItem[] {
-  const rows = db.prepare(`SELECT f.repo, f.number, f.weight, f.added_by, f.added_at FROM main.fast_track f
+export async function fastTrackList(db: Db): Promise<FastItem[]> {
+  const rows = await db.prepare(`SELECT f.repo, f.number, f.weight, f.added_by, f.added_at FROM main.fast_track f
     JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN' ORDER BY f.weight DESC, f.id`).all() as { repo: string; number: number; weight: number; added_by: string; added_at: string }[];
   return rows.map((r, k) => ({ repo: r.repo, number: r.number, position: k + 1, of: rows.length, weight: r.weight, addedBy: r.added_by, addedAt: r.added_at }));
 }
 
 /** `repo#number` → position, list size and weight, for the open fast-tracked items. */
-export function fastPositions(db: DatabaseSync): Map<string, { position: number; of: number; weight: number }> {
-  return new Map(fastTrackList(db).map((f) => [refText(f), { position: f.position, of: f.of, weight: f.weight }]));
+export async function fastPositions(db: Db): Promise<Map<string, { position: number; of: number; weight: number }>> {
+  return new Map((await fastTrackList(db)).map((f) => [refText(f), { position: f.position, of: f.of, weight: f.weight }]));
 }
 
 /** Adds an open item of a tracked repo at the end of its weight. Returns false when it was already there (its weight stays as it is). */
-export function addFastTrack(db: DatabaseSync, by: string, input: unknown, weight: unknown = WEIGHT_DEFAULT, via?: string): { ref: FastRef; added: boolean } {
+export async function addFastTrack(db: Db, by: string, input: unknown, weight: unknown = WEIGHT_DEFAULT, via?: string): Promise<{ ref: FastRef; added: boolean }> {
   const ref = parseItemRef(input);
-  if (!isTracked(db, ref.repo)) throw new FastTrackError(`${ref.repo} is not a tracked repo`, 404);
-  const item = db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(ref.repo, ref.number) as { state: string } | undefined;
+  if (!await isTracked(db, ref.repo)) throw new FastTrackError(`${ref.repo} is not a tracked repo`, 404);
+  const item = await db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(ref.repo, ref.number) as { state: string } | undefined;
   if (!item) throw new FastTrackError(`no item ${refText(ref)} in the mirror`, 404);
   if (item.state !== "OPEN") throw new FastTrackError(`${refText(ref)} is not open`, 409);
   const w = parseWeight(weight);
-  const r = db.prepare("INSERT OR IGNORE INTO main.fast_track (repo, number, added_by, added_at, weight) VALUES (?, ?, ?, ?, ?)").run(ref.repo, ref.number, by, new Date().toISOString(), w);
-  if (r.changes) audit(db, by, "fasttrack-add", refText(ref), { weight: w, ...(via ? { via } : {}) });
+  const r = await db.prepare("INSERT OR IGNORE INTO main.fast_track (repo, number, added_by, added_at, weight) VALUES (?, ?, ?, ?, ?)").run(ref.repo, ref.number, by, new Date().toISOString(), w);
+  if (r.changes) await audit(db, by, "fasttrack-add", refText(ref), { weight: w, ...(via ? { via } : {}) });
   return { ref, added: r.changes > 0 };
 }
 
 /** Changes the weight of a fast-tracked item; among items of its new weight it keeps its place by when it was added. */
-export function setFastTrackWeight(db: DatabaseSync, by: string, input: unknown, weight: unknown, via?: string): { ref: FastRef; weight: number } {
+export async function setFastTrackWeight(db: Db, by: string, input: unknown, weight: unknown, via?: string): Promise<{ ref: FastRef; weight: number }> {
   const ref = parseItemRef(input);
   const w = parseWeight(weight);
-  if (!db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(ref.repo, ref.number)) throw new FastTrackError(`${refText(ref)} is not fast-tracked`, 404);
-  const r = db.prepare("UPDATE main.fast_track SET weight = ? WHERE repo = ? AND number = ? AND weight <> ?").run(w, ref.repo, ref.number, w);
-  if (r.changes) audit(db, by, "fasttrack-weight", refText(ref), { weight: w, ...(via ? { via } : {}) });
+  if (!await db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(ref.repo, ref.number)) throw new FastTrackError(`${refText(ref)} is not fast-tracked`, 404);
+  const r = await db.prepare("UPDATE main.fast_track SET weight = ? WHERE repo = ? AND number = ? AND weight <> ?").run(w, ref.repo, ref.number, w);
+  if (r.changes) await audit(db, by, "fasttrack-weight", refText(ref), { weight: w, ...(via ? { via } : {}) });
   return { ref, weight: w };
 }
 
 /** Takes an item off the list; it returns to normal ranking. Returns false when it was not on it. */
-export function removeFastTrack(db: DatabaseSync, by: string, input: unknown, via?: string): { ref: FastRef; removed: boolean } {
+export async function removeFastTrack(db: Db, by: string, input: unknown, via?: string): Promise<{ ref: FastRef; removed: boolean }> {
   const ref = parseItemRef(input);
-  const r = db.prepare("DELETE FROM main.fast_track WHERE repo = ? AND number = ?").run(ref.repo, ref.number);
-  if (r.changes) audit(db, by, "fasttrack-remove", refText(ref), via ? { via } : undefined);
+  const r = await db.prepare("DELETE FROM main.fast_track WHERE repo = ? AND number = ?").run(ref.repo, ref.number);
+  if (r.changes) await audit(db, by, "fasttrack-remove", refText(ref), via ? { via } : undefined);
   return { ref, removed: r.changes > 0 };
 }
 
@@ -107,8 +108,8 @@ export const fastScoreSql = (repo: string, number: string, scoreExpr: string): s
     OR EXISTS (SELECT 1 FROM main.fix_attempts fa WHERE fa.repo = ${repo} AND fa.number = fq.number AND fa.pr_url LIKE '%/pull/' || ${number}))), ${scoreExpr})`;
 
 /** The fast-track score of the item (see `fastScoreSql`), or null when it is not fast-tracked. */
-export function fastScoreOf(db: DatabaseSync, repo: string, number: number): number | null {
-  const r = db.prepare(`SELECT ${fastScoreSql("?1", "CAST(?2 AS INTEGER)", "NULL")} AS s`).get(repo, number) as { s: number | null };
+export async function fastScoreOf(db: Db, repo: string, number: number): Promise<number | null> {
+  const r = await db.prepare(`SELECT ${fastScoreSql("?1", "CAST(?2 AS INTEGER)", "NULL")} AS s`).get(repo, number) as { s: number | null };
   return r.s;
 }
 
@@ -119,8 +120,8 @@ const linkedPr = (url: string): number | null => {
 };
 
 /** The fast-track score of every fast-tracked item (see `fastScoreSql`), keyed by `repo#number`: one query. An item without an entry is not fast-tracked. */
-export function fastScores(db: DatabaseSync): Map<string, number> {
-  const rows = db.prepare(`SELECT ft.repo, ft.number, NULL AS pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft
+export async function fastScores(db: Db): Promise<Map<string, number>> {
+  const rows = await db.prepare(`SELECT ft.repo, ft.number, NULL AS pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft
     UNION ALL SELECT ft.repo, NULL, fa.pr_url, ${rowScore("ft")} FROM main.fast_track ft JOIN main.fix_attempts fa ON fa.repo = ft.repo AND fa.number = ft.number
     WHERE fa.pr_url IS NOT NULL`).all() as { repo: string; number: number | null; pr_url: string | null; s: number }[];
   const out = new Map<string, number>();
@@ -133,34 +134,34 @@ export function fastScores(db: DatabaseSync): Map<string, number> {
   return out;
 }
 
-export const isFastTracked = (db: DatabaseSync, repo: string, number: number): boolean => fastScoreOf(db, repo, number) !== null;
+export const isFastTracked = async (db: Db, repo: string, number: number): Promise<boolean> => await fastScoreOf(db, repo, number) !== null;
 
 /** True when the sandbox task belongs to a fast-tracked item: its PR or issue, or a batch of fast-tracked PRs only. */
-export function fastTask(db: DatabaseSync, t: { id: number; repo: string; number: number | null }): boolean {
-  if (t.number !== null) return isFastTracked(db, t.repo, t.number);
-  const b = db.prepare("SELECT id FROM main.merge_batches WHERE task_id = ?").get(t.id) as { id: number } | undefined;
+export async function fastTask(db: Db, t: { id: number; repo: string; number: number | null }): Promise<boolean> {
+  if (t.number !== null) return await isFastTracked(db, t.repo, t.number);
+  const b = await db.prepare("SELECT id FROM main.merge_batches WHERE task_id = ?").get(t.id) as { id: number } | undefined;
   if (!b) return false;
-  const ms = db.prepare("SELECT number FROM main.merge_batch_prs WHERE batch_id = ?").all(b.id) as { number: number }[];
-  return ms.length > 0 && ms.every((m) => isFastTracked(db, t.repo, m.number));
+  const ms = await db.prepare("SELECT number FROM main.merge_batch_prs WHERE batch_id = ?").all(b.id) as { number: number }[];
+  return ms.length > 0 && await everySeq(ms, async (m) => await isFastTracked(db, t.repo, m.number));
 }
 
 /**
  * Repos whose best candidate (`top` gives its number) is fast-tracked come first, the earliest fast-tracked first; the others follow in the given order.
  * Planners that visit repos one per job use it so fast track also orders across repos.
  */
-export function fastFirst(db: DatabaseSync, repos: string[], top: (repo: string) => number | undefined, scores?: Map<string, number>): string[] {
-  const scoreOf = (r: string, n: number): number | null => (scores ? scores.get(`${r}#${n}`) ?? null : fastScoreOf(db, r, n));
-  const score = new Map(repos.map((r) => { const n = top(r); return [r, n === undefined ? null : scoreOf(r, n)] as const; }));
+export async function fastFirst(db: Db, repos: string[], top: (repo: string) => number | undefined, scores?: Map<string, number>): Promise<string[]> {
+  const scoreOf = async (r: string, n: number): Promise<number | null> => (scores ? scores.get(`${r}#${n}`) ?? null : await fastScoreOf(db, r, n));
+  const score = new Map(await mapSeq(repos, async (r) => { const n = top(r); return [r, n === undefined ? null : await scoreOf(r, n)] as const; }));
   const fast = repos.filter((r) => (score.get(r) ?? 0) >= FAST_FLOOR).sort((x, y) => score.get(y)! - score.get(x)!);
   return [...fast, ...repos.filter((r) => !fast.includes(r))];
 }
 
 /** Work score of every ranked open item of the repo, with fast-tracked items raised above all others. */
-export function workScores(db: DatabaseSync, repo: string): Map<number, number> {
-  const out = new Map((db.prepare("SELECT number, score FROM main.item_rank WHERE repo = ?").all(repo) as { number: number; score: number }[]).map((r) => [r.number, r.score]));
-  for (const f of db.prepare(`SELECT number, ${rowScore("ft")} AS s FROM main.fast_track ft WHERE repo = ?`).all(repo) as { number: number; s: number }[]) out.set(f.number, f.s);
+export async function workScores(db: Db, repo: string): Promise<Map<number, number>> {
+  const out = new Map((await db.prepare("SELECT number, score FROM main.item_rank WHERE repo = ?").all(repo) as { number: number; score: number }[]).map((r) => [r.number, r.score]));
+  for (const f of await db.prepare(`SELECT number, ${rowScore("ft")} AS s FROM main.fast_track ft WHERE repo = ?`).all(repo) as { number: number; s: number }[]) out.set(f.number, f.s);
   // A fast-tracked issue's Fix PR takes the issue's place.
-  for (const f of db.prepare(`SELECT fa.pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft JOIN main.fix_attempts fa ON fa.repo = ft.repo AND fa.number = ft.number
+  for (const f of await db.prepare(`SELECT fa.pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft JOIN main.fix_attempts fa ON fa.repo = ft.repo AND fa.number = ft.number
     WHERE ft.repo = ? AND fa.pr_url IS NOT NULL`).all(repo) as { pr_url: string; s: number }[]) {
     const n = Number(/\/pull\/(\d+)$/.exec(f.pr_url)?.[1]);
     const own = out.get(n) ?? 0;
@@ -173,28 +174,28 @@ export function workScores(db: DatabaseSync, repo: string): Map<number, number> 
 export const commands = {
   fasttrack: {
     summary: "fasttrack add <url|repo#n> [--weight N] | weight <url|repo#n> <N> | remove <url|repo#n> | list: items that go first in every stage, heaviest first (1-10, default 5), then in the order added",
-    run(args: string[]): void {
-      const db = connect();
+    async run(args: string[]): Promise<void> {
+      const db = await openDb();
       const [sub, item] = args;
       try {
         if (sub === "list" && args.length === 1) {
-          const list = fastTrackList(db);
+          const list = await fastTrackList(db);
           if (!list.length) console.log("no fast-tracked items");
           for (const f of list) console.log(`${f.position} of ${f.of}  weight ${f.weight}  ${refText(f)}  added by ${f.addedBy} ${f.addedAt}`);
           return;
         }
         if (sub === "weight" && item && args.length === 3) {
-          const r = setFastTrackWeight(db, "cli", item, args[2]);
+          const r = await setFastTrackWeight(db, "cli", item, args[2]);
           console.log(`${refText(r.ref)}: weight ${r.weight}`);
           return;
         }
         const weighted = sub === "add" && args.length === 4 && args[2] === "--weight";
         if ((sub === "add" || sub === "remove") && item && (args.length === 2 || weighted)) {
           if (sub === "add") {
-            const r = addFastTrack(db, "cli", item, weighted ? args[3] : undefined);
+            const r = await addFastTrack(db, "cli", item, weighted ? args[3] : undefined);
             console.log(r.added ? `${refText(r.ref)}: fast-tracked` : `${refText(r.ref)}: already fast-tracked`);
           } else {
-            const r = removeFastTrack(db, "cli", item);
+            const r = await removeFastTrack(db, "cli", item);
             console.log(r.removed ? `${refText(r.ref)}: fast track removed` : `${refText(r.ref)}: was not fast-tracked`);
           }
           return;

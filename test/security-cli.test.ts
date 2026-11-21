@@ -3,18 +3,18 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 import { addLogin } from "../src/access.ts";
-import { connect } from "../src/db.ts";
 import { setTestRepo } from "../src/decisions.ts";
 import { requireSessionOperator } from "../src/security/cli.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
-test("the session refuses a repo that is not a test repo and a login that is not an operator", () => {
-  const db = connect(join(SCRATCH, "cli.db"));
-  db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('repo1', 'cli', 'x')").run();
-  addLogin(db, "cli", "op1", "operator", null);
-  addLogin(db, "cli", "view1", "viewer", null);
-  assert.throws(() => requireSessionOperator(db, "repo1", "op1"), /not marked as a test repo/);
-  setTestRepo(db, "cli", "repo1", true);
-  assert.throws(() => requireSessionOperator(db, "repo1", "view1"), /not an operator/);
-  assert.equal(requireSessionOperator(db, "repo1", "op1"), "op1");
+test("the session refuses a repo that is not a test repo and a login that is not an operator", async () => {
+  const db = await connectDb(join(SCRATCH, "cli.db"));
+  await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('repo1', 'cli', 'x')").run();
+  await addLogin(db, "cli", "op1", "operator", null);
+  await addLogin(db, "cli", "view1", "viewer", null);
+  await assert.rejects(async () => await requireSessionOperator(db, "repo1", "op1"), /not marked as a test repo/);
+  await setTestRepo(db, "cli", "repo1", true);
+  await assert.rejects(async () => await requireSessionOperator(db, "repo1", "view1"), /not an operator/);
+  assert.equal(await requireSessionOperator(db, "repo1", "op1"), "op1");
 });

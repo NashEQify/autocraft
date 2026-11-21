@@ -2,8 +2,8 @@
 // marks its past comments. It is always asked of GitHub as the box account (`gh api user` with this process's own
 // environment). A GraphQL `viewer` or a read or write lane answers as the app's bot under `github_identity = app`, and an
 // app has no user and cannot be assigned.
-import type { DatabaseSync } from "node:sqlite";
 import { exec, type Exec } from "../fixup/git.ts";
+import type { Db } from "../db/index.ts";
 
 export type Who = { login: string; nodeId: string; email: string };
 export type Me = { id: string; login: string };
@@ -41,9 +41,9 @@ export async function pipelineMe(log: (line: string) => void = () => {}, run: Ex
 }
 
 /** Records the pipeline login; a bot login is refused so the stored value is always the box account's. */
-export function setPipelineLogin(db: DatabaseSync, login: string, overwrite = true): boolean {
+export async function setPipelineLogin(db: Db, login: string, overwrite = true): Promise<boolean> {
   if (!login || isBotLogin(login)) return false;
-  db.prepare(`INSERT INTO main.settings (key, value) VALUES ('pipeline_login', ?) ON CONFLICT (key) DO ${overwrite ? "UPDATE SET value = excluded.value" : "NOTHING"}`).run(login);
+  await db.prepare(`INSERT INTO main.settings (key, value) VALUES ('pipeline_login', ?) ON CONFLICT (key) DO ${overwrite ? "UPDATE SET value = excluded.value" : "NOTHING"}`).run(login);
   return true;
 }
 

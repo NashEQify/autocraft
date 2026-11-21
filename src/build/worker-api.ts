@@ -5,7 +5,6 @@
 import { createWriteStream, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import type { DatabaseSync } from "node:sqlite";
 import { parseListen } from "../dash/server/config.ts";
 import { TokenBucket } from "../dash/server/limits.ts";
 import { RateLimiter } from "../dash/server/util.ts";
@@ -14,13 +13,14 @@ import { authenticate, BuildError, hello, touch } from "./envs.ts";
 import { appendLog, claim, finishTask, heartbeat, MAX_CHUNK_BYTES, ownedTask, podTask, startTask } from "./tasks.ts";
 import { dbReady, serveHealth } from "../health.ts";
 import { envVar } from "../env.ts";
+import type { Db } from "../db/index.ts";
 
 export const DEFAULT_WORKER_LISTEN = "127.0.0.1:8981";
 /** Largest JSON body: a log chunk of 64 KB with its JSON escaping, or a result list. */
 export const JSON_LIMIT = 4 * MAX_CHUNK_BYTES;
 
 export type WorkerServerOptions = {
-  db: DatabaseSync;
+  db: Db;
   /** host:port; default AUTOCRAFT_WORKER_LISTEN or 127.0.0.1:8981 (port 0 picks a free one). */
   listen?: string;
   log?: (line: string) => void;
@@ -109,7 +109,7 @@ export function handler(o: WorkerServerOptions) {
     const url = new URL(req.url ?? "/", "http://worker.invalid");
     const m = /^Bearer (\S{1,200})$/.exec(String(req.headers.authorization ?? ""));
     const addr = req.socket.remoteAddress ?? "?";
-    const env = m ? authenticate(db, m[1]!) : null;
+    const env = m ? await authenticate(db, m[1]!) : null;
     if (!env) {
       if (!badAuth.allow(addr)) throw new Refusal(429, "too many failed attempts", { "retry-after": "60" });
       throw new Refusal(401, "missing or wrong worker key", { "www-authenticate": "Bearer" });
@@ -121,29 +121,29 @@ export function handler(o: WorkerServerOptions) {
 
     // A build pod's key reads its one task and uploads that task's artifacts; results come from pod status, read by the runner.
     if (env.taskId !== undefined) {
-      if (method === "GET" && path === "/worker/pod/task") return reply(res, 200, podTask(db, env.id, env.taskId));
+      if (method === "GET" && path === "/worker/pod/task") return reply(res, 200, await podTask(db, env.id, env.taskId));
       const a = /^\/worker\/tasks\/(\d{1,15})\/artifacts\/[^/]+$/.exec(path);
       if (!a || method !== "PUT" || Number(a[1]) !== env.taskId) throw new Refusal(403, "a build pod key may only read its task and upload its artifacts");
     } else if (path === "/worker/pod/task") throw new Refusal(403, "only a build pod key reads a pod task");
 
     if (method === "POST" && path === "/worker/hello") {
-      return reply(res, 200, hello(db, env.id, await readJson(req, 16 * 1024)));
+      return reply(res, 200, await hello(db, env.id, await readJson(req, 16 * 1024)));
     }
     if (method === "POST" && path === "/worker/claim") {
       const b = (await readJson(req, 1024)) as { free?: unknown; pausedReason?: unknown };
       if (typeof b.free !== "number" || !Number.isInteger(b.free) || b.free < 0 || b.free > 1024) throw new Refusal(400, "free must be a whole number");
       const paused = typeof b.pausedReason === "string" ? b.pausedReason.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 200) || null : null;
-      touch(db, env.id, paused);
-      return reply(res, 200, claim(db, env.id, b.free));
+      await touch(db, env.id, paused);
+      return reply(res, 200, await claim(db, env.id, b.free));
     }
     const t = /^\/worker\/tasks\/([^/]+)\/(start|log|finish|heartbeat|artifacts\/([^/]+))$/.exec(path);
     if (t) {
-      touch(db, env.id);
+      await touch(db, env.id);
       const id = taskId(t[1]);
       const action = t[2]!.startsWith("artifacts/") ? "artifacts" : t[2]!;
       if (action === "artifacts") {
         if (method !== "PUT") throw new Refusal(405, "use PUT");
-        ownedTask(db, env.id, id);
+        await ownedTask(db, env.id, id);
         let name: string;
         try {
           name = decodeURIComponent(t[3]!);
@@ -153,25 +153,25 @@ export function handler(o: WorkerServerOptions) {
         if (!NAME_RE.test(name)) throw new Refusal(400, "artifact names are 1 to 100 letters, digits, dots, underscores or hyphens");
         const tmp = await receive(req, id, MAX_ARTIFACT_BYTES);
         try {
-          ownedTask(db, env.id, id);
+          await ownedTask(db, env.id, id);
         } catch (e) {
           unlinkSync(tmp);
           throw e;
         }
-        return reply(res, 200, storeArtifact(db, id, name, tmp));
+        return reply(res, 200, await storeArtifact(db, id, name, tmp));
       }
       if (method !== "POST") throw new Refusal(405, "use POST");
-      if (action === "start") return reply(res, 200, startTask(db, env.id, id));
-      if (action === "heartbeat") return reply(res, 200, heartbeat(db, env.id, id));
+      if (action === "start") return reply(res, 200, await startTask(db, env.id, id));
+      if (action === "heartbeat") return reply(res, 200, await heartbeat(db, env.id, id));
       const body = (await readJson(req, action === "log" ? JSON_LIMIT : 256 * 1024)) as Record<string, unknown>;
-      if (action === "log") return reply(res, 200, appendLog(db, env.id, id, body.step, body.chunk));
-      return reply(res, 200, finishTask(db, env.id, id, body));
+      if (action === "log") return reply(res, 200, await appendLog(db, env.id, id, body.step, body.chunk));
+      return reply(res, 200, await finishTask(db, env.id, id, body));
     }
     throw new Refusal(404, "no such endpoint");
   }
 
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
-    if (serveHealth(req, res, () => dbReady(db))) return;
+    if (await serveHealth(req, res, async () => await dbReady(db))) return;
     try {
       await route(req, res);
     } catch (e) {

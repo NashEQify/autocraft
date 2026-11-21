@@ -4,7 +4,6 @@
 // manager, and installs the app. The owner's token lives in memory for this
 // flow only: never written to the database, a log line or an audit row.
 import type { IncomingMessage } from "node:http";
-import type { DatabaseSync } from "node:sqlite";
 import type { GithubSetupLink } from "../../../web/src/api/types.ts";
 import { audit } from "../audit.ts";
 import { AppError, appManifest, installationAccount, installUrl, registrationUrl, settingsUrl, type AppDeps } from "../../github/app.ts";
@@ -17,6 +16,7 @@ import { randomToken, safeEqual, sha256hex } from "./crypto.ts";
 import { convertAndStore, DEFAULT_APP_NAME, publicBase } from "./github-app.ts";
 import type { GithubUser, Provider, Tokens } from "./provider.ts";
 import { esc, plainPage } from "./util.ts";
+import type { Db } from "../../db/index.ts";
 
 export const SETUP_COOKIE = "__Host-craft_setup";
 const LINK_TTL_MS = 7 * 86_400_000;
@@ -29,27 +29,27 @@ type LinkRow = { id: string; org: string; created_by: string; created_at: string
 // ---- Links (operator side) --------------------------------------------------
 
 /** A new link for `org`. The URL path carries the secret and is returned only here; the database keeps its hash. */
-export function createLink(db: DatabaseSync, operator: string, org: string): { link: GithubSetupLink; path: string } | null {
+export async function createLink(db: Db, operator: string, org: string): Promise<{ link: GithubSetupLink; path: string } | null> {
   if (!ORG.test(org)) return null;
   const id = randomToken(6), secret = randomToken(24), now = Date.now();
   const expires = new Date(now + LINK_TTL_MS).toISOString();
-  db.prepare("INSERT INTO github_setup_links (id, org, created_by, hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
+  await db.prepare("INSERT INTO github_setup_links (id, org, created_by, hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)")
     .run(id, org, operator, sha256hex(secret), new Date(now).toISOString(), expires);
-  audit(db, operator, "github-app-link-create", org, { id, expires });
+  await audit(db, operator, "github-app-link-create", org, { id, expires });
   return { link: { id, org, createdBy: operator, createdAt: new Date(now).toISOString(), expiresAt: expires }, path: `/auth/setup/${secret}` };
 }
 
-export function revokeLink(db: DatabaseSync, operator: string, id: string): boolean {
-  const r = db.prepare("UPDATE github_setup_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL AND used_at IS NULL").run(new Date().toISOString(), id);
+export async function revokeLink(db: Db, operator: string, id: string): Promise<boolean> {
+  const r = await db.prepare("UPDATE github_setup_links SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL AND used_at IS NULL").run(new Date().toISOString(), id);
   if (r.changes !== 1) return false;
-  const l = db.prepare("SELECT org FROM github_setup_links WHERE id = ?").get(id) as { org: string };
-  audit(db, operator, "github-app-link-revoke", l.org, { id });
+  const l = await db.prepare("SELECT org FROM github_setup_links WHERE id = ?").get(id) as { org: string };
+  await audit(db, operator, "github-app-link-revoke", l.org, { id });
   return true;
 }
 
 /** Links that can still be used, newest first. */
-export function openLinks(db: DatabaseSync): GithubSetupLink[] {
-  const rows = db.prepare(`SELECT id, org, created_by, created_at, expires_at FROM github_setup_links WHERE revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR} ORDER BY created_at DESC`)
+export async function openLinks(db: Db): Promise<GithubSetupLink[]> {
+  const rows = await db.prepare(`SELECT id, org, created_by, created_at, expires_at FROM github_setup_links WHERE revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR} ORDER BY created_at DESC`)
     .all(new Date().toISOString()) as LinkRow[];
   return rows.map((l) => ({ id: l.id, org: l.org, createdBy: l.created_by, createdAt: l.created_at, expiresAt: l.expires_at }));
 }
@@ -57,8 +57,8 @@ export function openLinks(db: DatabaseSync): GithubSetupLink[] {
 /** A link works only while its creator is an operator on the access list. */
 const BY_OPERATOR = "EXISTS (SELECT 1 FROM access a WHERE a.login = github_setup_links.created_by COLLATE NOCASE AND a.role = 'operator')";
 
-const openLink = (db: DatabaseSync, where: "id" | "hash", value: string): LinkRow | null =>
-  (db.prepare(`SELECT * FROM github_setup_links WHERE ${where} = ? AND revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR}`).get(value, new Date().toISOString()) as LinkRow | undefined) ?? null;
+const openLink = async (db: Db, where: "id" | "hash", value: string): Promise<LinkRow | null> =>
+  (await db.prepare(`SELECT * FROM github_setup_links WHERE ${where} = ? AND revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR}`).get(value, new Date().toISOString()) as LinkRow | undefined) ?? null;
 
 // ---- The visitor's flow -----------------------------------------------------
 
@@ -74,11 +74,11 @@ type Flow = {
 type Reply = { r: Res; cookies?: string[] };
 
 export type SetupDeps = {
-  db: DatabaseSync; config: Config; deps: AppDeps;
+  db: Db; config: Config; deps: AppDeps;
   /** The OAuth App's provider: it issues the visitor's token and revokes it again. */
   provider: Provider;
   /** Starts the OAuth sign-in; the callback returns here with `returnTo`. */
-  startOAuth: (returnTo: string, scopes: string[]) => Reply;
+  startOAuth: (returnTo: string, scopes: string[]) => Promise<Reply>;
   sameOrigin: (req: IncomingMessage) => boolean;
   readForm: (req: IncomingMessage) => Promise<URLSearchParams>;
 };
@@ -95,8 +95,8 @@ export class OrgSetup {
   }
 
   /** True when `state` belongs to a setup link, so the GitHub callback is routed here instead of to a dashboard session. */
-  ownsState(state: string): boolean {
-    const row = this.#d.db.prepare("SELECT session_hash FROM github_app_states WHERE state = ?").get(state) as { session_hash: string } | undefined;
+  async ownsState(state: string): Promise<boolean> {
+    const row = await this.#d.db.prepare("SELECT session_hash FROM github_app_states WHERE state = ?").get(state) as { session_hash: string } | undefined;
     return !!row && /^(link|install):/.test(row.session_hash);
   }
 
@@ -115,9 +115,9 @@ export class OrgSetup {
   async handle(req: IncomingMessage, url: URL, nonce: string, cookies: Map<string, string>, operatorSession: boolean): Promise<Reply | null> {
     const path = url.pathname, method = req.method;
     const seg = path.split("/");     // "", "auth", "setup", ...
-    if (method === "GET" && path === "/auth/setup") return { r: this.#page(req, nonce, cookies) };
+    if (method === "GET" && path === "/auth/setup") return { r: await this.#page(req, nonce, cookies) };
     if (method === "POST" && path === "/auth/setup/manager") return await this.#manager(req, nonce, cookies);
-    if (method === "GET" && seg.length === 4 && seg[2] === "setup") return { r: this.#landing(seg[3]!, nonce) };
+    if (method === "GET" && seg.length === 4 && seg[2] === "setup") return { r: await this.#landing(seg[3]!, nonce) };
     if (method === "POST" && seg.length === 5 && seg[2] === "setup" && seg[4] === "signin") return await this.#signin(req, seg[3]!, nonce);
     if (method === "GET" && path === "/auth/github-app/callback") return { r: await this.#registered(url, nonce, cookies) };
     if (method === "GET" && path === "/auth/github-app/setup") return await this.#installed(url, nonce, operatorSession);
@@ -126,8 +126,8 @@ export class OrgSetup {
 
   // -- pages --
 
-  #landing(secret: string, nonce: string): Res {
-    const link = openLink(this.#d.db, "hash", sha256hex(secret));
+  async #landing(secret: string, nonce: string): Promise<Res> {
+    const link = await openLink(this.#d.db, "hash", sha256hex(secret));
     if (!link) return gone(nonce);
     const body = `<form method="post" action="/auth/setup/${esc(secret)}/signin">
 <label class="check"><input type="checkbox" name="manager" value="1" checked> Make ${esc(link.created_by)} an app manager</label>
@@ -138,20 +138,20 @@ export class OrgSetup {
   async #signin(req: IncomingMessage, secret: string, nonce: string): Promise<Reply> {
     if (!this.#d.sameOrigin(req)) return { r: message(nonce, 403, "This form was sent from another site.") };
     const form = await this.#d.readForm(req);
-    const link = openLink(this.#d.db, "hash", sha256hex(secret));
+    const link = await openLink(this.#d.db, "hash", sha256hex(secret));
     if (!link) return { r: gone(nonce) };
     const flow: Flow = { id: randomToken(24), key: randomToken(16), linkId: link.id, org: link.org, operator: link.created_by, manager: form.get("manager") === "1", login: null, token: null, manage: null };
     this.#flows.set(flow.id, flow);
     this.#byKey.set(flow.key, flow);
     setTimeout(() => this.#drop(flow), FLOW_TTL_MS).unref();
-    const out = this.#d.startOAuth(OAUTH_PREFIX + flow.key, flow.manager ? ["read:org", "admin:org"] : ["read:org"]);
+    const out = await this.#d.startOAuth(OAUTH_PREFIX + flow.key, flow.manager ? ["read:org", "admin:org"] : ["read:org"]);
     return { r: out.r, cookies: [...(out.cookies ?? []), `${SETUP_COOKIE}=${flow.id}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${FLOW_TTL_MS / 1000}`] };
   }
 
   /** The OAuth callback for a setup flow: the visitor must own the org. The token is not kept unless the manager step needs it. */
   async signedIn(returnTo: string, tokens: Tokens, who: GithubUser, nonce: string, cookies: Map<string, string>): Promise<Reply> {
     const flow = this.#byKey.get(returnTo.slice(OAUTH_PREFIX.length));
-    if (!flow || !safeEqual(cookies.get(SETUP_COOKIE) ?? "", flow.id) || !openLink(this.#d.db, "id", flow.linkId)) {
+    if (!flow || !safeEqual(cookies.get(SETUP_COOKIE) ?? "", flow.id) || !await openLink(this.#d.db, "id", flow.linkId)) {
       this.#revoke(tokens.access);
       return { r: gone(nonce) };
     }
@@ -178,11 +178,11 @@ export class OrgSetup {
     return { r: { redirect: "/auth/setup" } };
   }
 
-  #flowOf(cookies: Map<string, string>): Flow | null {
+  async #flowOf(cookies: Map<string, string>): Promise<Flow | null> {
     const id = cookies.get(SETUP_COOKIE) ?? "";
     const flow = this.#flows.get(id);
     if (!flow || !flow.login || !safeEqual(id, flow.id)) return null;
-    if (!openLink(this.#d.db, "id", flow.linkId)) {
+    if (!await openLink(this.#d.db, "id", flow.linkId)) {
       this.#drop(flow);
       return null;
     }
@@ -196,15 +196,15 @@ export class OrgSetup {
     return `AutoCraft's app belongs to ${app.owner?.login ?? "another account"}; transfer it or ask the operator.`;
   }
 
-  #newState(kind: "link" | "install", flow: Flow): string {
+  async #newState(kind: "link" | "install", flow: Flow): Promise<string> {
     const { db } = this.#d, state = randomToken(24), tag = `${kind}:${flow.linkId}`;
-    db.prepare("DELETE FROM github_app_states WHERE created_at <= ? OR session_hash = ?").run(new Date(Date.now() - FLOW_TTL_MS).toISOString(), tag);
-    db.prepare("INSERT INTO github_app_states (state, login, session_hash, created_at) VALUES (?, ?, ?, ?)").run(state, flow.login!, tag, new Date().toISOString());
+    await db.prepare("DELETE FROM github_app_states WHERE created_at <= ? OR session_hash = ?").run(new Date(Date.now() - FLOW_TTL_MS).toISOString(), tag);
+    await db.prepare("INSERT INTO github_app_states (state, login, session_hash, created_at) VALUES (?, ?, ?, ?)").run(state, flow.login!, tag, new Date().toISOString());
     return state;
   }
 
-  #page(req: IncomingMessage, nonce: string, cookies: Map<string, string>): Res {
-    const flow = this.#flowOf(cookies);
+  async #page(req: IncomingMessage, nonce: string, cookies: Map<string, string>): Promise<Res> {
+    const flow = await this.#flowOf(cookies);
     if (!flow) return reopen(nonce);
     const { config } = this.#d, app = config.secrets.app;
     const foreign = this.#foreignApp(flow);
@@ -218,7 +218,7 @@ export class OrgSetup {
     else {
       const name = envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME;
       const manifest = JSON.stringify(appManifest(name, publicBase(config, req)));
-      steps.push(`<li><form method="post" action="${esc(registrationUrl(this.#newState("link", flow), flow.org))}"><input type="hidden" name="manifest" value="${esc(manifest)}"><button class="wide">Create GitHub App</button></form></li>`);
+      steps.push(`<li><form method="post" action="${esc(registrationUrl(await this.#newState("link", flow), flow.org))}"><input type="hidden" name="manifest" value="${esc(manifest)}"><button class="wide">Create GitHub App</button></form></li>`);
     }
     if (flow.manager) {
       if (flow.manage === "done") done(managerLabel);
@@ -227,14 +227,14 @@ export class OrgSetup {
       else later(managerLabel);
     }
     const managerOpen = flow.manager && flow.manage === null;
-    if (app && !managerOpen) steps.push(`<li><a class="button wide" href="${esc(installUrl(app.slug))}?state=${encodeURIComponent(this.#newState("install", flow))}">Install</a></li>`);
+    if (app && !managerOpen) steps.push(`<li><a class="button wide" href="${esc(installUrl(app.slug))}?state=${encodeURIComponent(await this.#newState("install", flow))}">Install</a></li>`);
     else later("Install");
     return page(nonce, flow.org, `<ol class="steps">${steps.join("")}</ol>`);
   }
 
   async #manager(req: IncomingMessage, nonce: string, cookies: Map<string, string>): Promise<Reply> {
     if (!this.#d.sameOrigin(req)) return { r: message(nonce, 403, "This form was sent from another site.") };
-    const flow = this.#flowOf(cookies);
+    const flow = await this.#flowOf(cookies);
     if (!flow) return { r: reopen(nonce) };
     const foreign = this.#foreignApp(flow);
     if (foreign) return { r: message(nonce, 409, foreign) };
@@ -266,8 +266,8 @@ export class OrgSetup {
   async #registered(url: URL, nonce: string, cookies: Map<string, string>): Promise<Res> {
     const state = url.searchParams.get("state") ?? "", code = url.searchParams.get("code") ?? "";
     const stale = "This registration is unknown, used or expired. Open the setup link again.";
-    const flow = this.#flowOf(cookies);
-    const row = this.#d.db.prepare("SELECT login, session_hash, created_at FROM github_app_states WHERE state = ?").get(state) as { login: string; session_hash: string; created_at: string } | undefined;
+    const flow = await this.#flowOf(cookies);
+    const row = await this.#d.db.prepare("SELECT login, session_hash, created_at FROM github_app_states WHERE state = ?").get(state) as { login: string; session_hash: string; created_at: string } | undefined;
     if (!flow || !row || !code || row.session_hash !== `link:${flow.linkId}` || row.login !== flow.login || Date.now() - Date.parse(row.created_at) > FLOW_TTL_MS) return message(nonce, 400, stale);
     return await convertAndStore(this.#d.db, this.#d.config, this.#d.deps, code, state, nonce,
       { login: flow.login!, back: "/auth/setup", backLabel: "Back", redirect: "/auth/setup", org: flow.org, details: { org: flow.org, via: "setup-link" } }, stale);
@@ -277,13 +277,13 @@ export class OrgSetup {
   async #installed(url: URL, nonce: string, operatorSession: boolean): Promise<Reply> {
     const { db, config } = this.#d;
     const state = url.searchParams.get("state") ?? "", id = Number(url.searchParams.get("installation_id"));
-    const row = state ? db.prepare("SELECT login, session_hash, created_at FROM github_app_states WHERE state = ?").get(state) as { login: string; session_hash: string; created_at: string } | undefined : undefined;
+    const row = state ? await db.prepare("SELECT login, session_hash, created_at FROM github_app_states WHERE state = ?").get(state) as { login: string; session_hash: string; created_at: string } | undefined : undefined;
     if (!row || !row.session_hash.startsWith("install:")) {
       // An install started from the admin page or on GitHub: the setup URL is in every manifest.
       return { r: operatorSession ? { redirect: "/admin/github-app" } : page(nonce, "AutoCraft", `<p class="done-text">Installed</p>`) };
     }
-    db.prepare("DELETE FROM github_app_states WHERE state = ?").run(state);
-    const link = Date.now() - Date.parse(row.created_at) > FLOW_TTL_MS ? null : openLink(db, "id", row.session_hash.slice("install:".length));
+    await db.prepare("DELETE FROM github_app_states WHERE state = ?").run(state);
+    const link = Date.now() - Date.parse(row.created_at) > FLOW_TTL_MS ? null : await openLink(db, "id", row.session_hash.slice("install:".length));
     if (!link) return { r: gone(nonce) };
     const retry = (status: number, text: string): Reply => ({ r: message(nonce, status, text, "/auth/setup") });
     const app = config.secrets.app;
@@ -296,8 +296,8 @@ export class OrgSetup {
       return retry(502, "GitHub did not answer. Go back and try again.");
     }
     if (account?.toLowerCase() !== link.org.toLowerCase()) return retry(409, `The app was installed on ${account ?? "another account"}, not ${link.org}. Install it on ${link.org}.`);
-    db.prepare("UPDATE github_setup_links SET used_at = ?, used_by = ?, installation_id = ? WHERE id = ?").run(new Date().toISOString(), row.login, id, link.id);
-    audit(db, row.login, "github-app-link-use", link.org, { id: link.id, installationId: id });
+    await db.prepare("UPDATE github_setup_links SET used_at = ?, used_by = ?, installation_id = ? WHERE id = ?").run(new Date().toISOString(), row.login, id, link.id);
+    await audit(db, row.login, "github-app-link-use", link.org, { id: link.id, installationId: id });
     for (const f of [...this.#flows.values()]) if (f.linkId === link.id) this.#drop(f);
     return { r: page(nonce, link.org, `<p class="done-text">Done</p>`) };
   }

@@ -81,20 +81,20 @@ export type ImageProxyOptions = {
   fetch?: typeof fetch;
   token?: (owner: string | undefined) => Promise<string | null>;   // the token for attachment URLs of a repo owner
   cacheDir?: string | null;               // null: no disk cache
-  repos?: (href: string) => string[];     // tracked repos whose text contains the URL; default: none
+  repos?: (href: string) => Promise<string[]>;     // tracked repos whose text contains the URL; default: none
   maxConcurrent?: number;                 // upstream fetches at once
   queueWaitMs?: number;                   // how long a fetch waits for a free slot
 };
 
-let currentIndex: ((href: string) => string[]) | null = null;
+let currentIndex: ((href: string) => Promise<string[]>) | null = null;
 /** Sets the lookup that `imageRepo` answers from (the server registers its image index). */
-export function registerImageRepos(fn: ((href: string) => string[]) | null): void {
+export function registerImageRepos(fn: ((href: string) => Promise<string[]>) | null): void {
   currentIndex = fn;
 }
 /** The repo an allowed image URL belongs to (the first, when it occurs in several), else null. */
-export function imageRepo(raw: string): string | null {
+export async function imageRepo(raw: string): Promise<string | null> {
   const u = allowedImage(raw);
-  return (u && currentIndex?.(u.href)[0]) || null;
+  return (u && (await currentIndex?.(u.href))?.[0]) || null;
 }
 
 /**
@@ -150,19 +150,19 @@ export class ImageProxy {
   #cacheDir: string | null;
   #inflight = new Map<string, Promise<ImageResult>>();
   #writes = 0;
-  #repos: (href: string) => string[];
+  #repos: (href: string) => Promise<string[]>;
   #slots: Semaphore;
 
   constructor(opts: ImageProxyOptions = {}) {
     this.#fetch = opts.fetch ?? fetch;
     this.#tokenSource = opts.token ?? ghToken;
     this.#cacheDir = opts.cacheDir === undefined ? defaultImageCacheDir() : opts.cacheDir;
-    this.#repos = opts.repos ?? (() => []);
+    this.#repos = opts.repos ?? (async () => []);
     this.#slots = new Semaphore(opts.maxConcurrent ?? MAX_UPSTREAM_FETCHES, opts.queueWaitMs ?? FETCH_QUEUE_WAIT_MS);
   }
 
   async #getToken(href: string): Promise<string | null> {
-    const repo = this.#repos(href)[0];
+    const repo = (await this.#repos(href))[0];
     const owner = repo ? ownerOf(repo) : undefined;
     const key = owner ?? "";
     let t = this.#tokens.get(key);
@@ -174,12 +174,12 @@ export class ImageProxy {
   }
 
   /** `allow` is asked only when the image has to be fetched (the per-session rate limit). */
-  get(raw: string, allow: () => boolean = () => true): Promise<ImageResult> {
+  async get(raw: string, allow: () => boolean = () => true): Promise<ImageResult> {
     const url = allowedImage(raw);
     if (!url) return Promise.resolve({ status: 404, error: "not an allowed image" });
     const key = url.href;
     // Checked before the cache and the fetch: a cached image is served only while its URL is still in the mirror.
-    if (!this.#repos(key).length) return Promise.resolve({ status: 404, error: "not an image of a tracked repo" });
+    if (!(await this.#repos(key)).length) return Promise.resolve({ status: 404, error: "not an image of a tracked repo" });
     const running = this.#inflight.get(key);
     if (running) return running;
     const p = this.#load(url, allow).finally(() => this.#inflight.delete(key));

@@ -1,8 +1,8 @@
 // Comparison report for a classification run: Jev against Haiku, and both against reference labels.
 import { readFileSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import { LABELS } from "./rules.ts";
 import { slugOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
 
 export type Row = {
   repo: string; number: number; kind: "pr" | "issue"; title: string;
@@ -13,8 +13,8 @@ export const ref = (r: { repo: string; number: number }) => `${r.repo}#${r.numbe
 export const itemUrl = (r: { repo: string; number: number; kind: string }) =>
   `https://github.com/${slugOf(r.repo)}/${r.kind === "pr" ? "pull" : "issues"}/${r.number}`;
 
-export function loadRows(db: DatabaseSync, runId: string): Row[] {
-  const rows = db.prepare(`SELECT c.repo, c.number, i.kind, i.title, c.classifier, c.type_label, c.flags, c.reason, c.probs
+export async function loadRows(db: Db, runId: string): Promise<Row[]> {
+  const rows = await db.prepare(`SELECT c.repo, c.number, i.kind, i.title, c.classifier, c.type_label, c.flags, c.reason, c.probs
     FROM classifications c JOIN items i ON i.repo = c.repo AND i.number = c.number WHERE c.run_id = ?`).all(runId) as
     (Omit<Row, "flags" | "top"> & { flags: string | null; probs: string | null })[];
   return rows.map(({ flags, probs, ...r }) => ({

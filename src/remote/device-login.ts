@@ -5,11 +5,11 @@
 // runner asks for scopes (agent access, answering); the approver's ticks decide what the row gets.
 // A login is single use and lasts LOGIN_TTL_MS; its row stays an hour past that for the runner to read the outcome (pruneTokens).
 import { randomInt } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { addRunnerToken, cleanLabel, type McpTokenRow, type Scopes } from "../dash/mcp/tokens.ts";
 import { sha256hex } from "../dash/server/crypto.ts";
 import { HttpError } from "../dash/server/util.ts";
 import type { LoginPollReply, LoginStart, LoginStartReply, LoginState, Machine, PendingRunnerLogin } from "./protocol.ts";
+import type { Db } from "../db/index.ts";
 
 export const CODE_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ";
 export const LOGIN_TTL_MS = 600_000;
@@ -70,14 +70,14 @@ export function normalizeCode(raw: unknown): string | null {
 export const showCode = (code: string): string => `${code.slice(0, 4)}-${code.slice(4)}`;
 
 /** Stores a new login and returns what the runner shows; `baseUrl` is the dashboard's origin. */
-export function startLogin(db: DatabaseSync, start: LoginStart, ip: string, baseUrl: string, nowMs: number = Date.now()): LoginStartReply {
-  const pending = (db.prepare("SELECT ip FROM main.runner_logins WHERE state = 'pending' AND expires_at > ?").all(nowMs) as { ip: string | null }[]);
+export async function startLogin(db: Db, start: LoginStart, ip: string, baseUrl: string, nowMs: number = Date.now()): Promise<LoginStartReply> {
+  const pending = (await db.prepare("SELECT ip FROM main.runner_logins WHERE state = 'pending' AND expires_at > ?").all(nowMs) as { ip: string | null }[]);
   if (pending.length >= MAX_PENDING) throw new HttpError(429, "too many Task Runner logins are waiting; try again in a few minutes");
   const key = addressKey(ip);
   if (pending.filter((r) => r.ip !== null && addressKey(r.ip) === key).length >= MAX_PENDING_PER_ADDRESS) {
     throw new HttpError(429, "too many Task Runner logins from this address are waiting; approve or deny them, or wait a few minutes");
   }
-  if (db.prepare("SELECT 1 FROM main.runner_logins WHERE secret_hash = ? UNION ALL SELECT 1 FROM main.mcp_tokens WHERE token_hash = ?").get(start.credentialHash, start.credentialHash)) {
+  if (await db.prepare("SELECT 1 FROM main.runner_logins WHERE secret_hash = ? UNION ALL SELECT 1 FROM main.mcp_tokens WHERE token_hash = ?").get(start.credentialHash, start.credentialHash)) {
     throw new HttpError(409, "this credential was already used for a login; make a new one");
   }
   const label = cleanLabel(start.label) ?? start.machine.hostname.slice(0, 60);
@@ -85,7 +85,7 @@ export function startLogin(db: DatabaseSync, start: LoginStart, ip: string, base
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_code) DO NOTHING RETURNING id`);
   for (let i = 0; i < 8; i++) {
     const code = Array.from({ length: 8 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
-    if (insert.get(code, start.credentialHash, label, JSON.stringify(start.machine), ip, start.helperVersion, nowMs, nowMs + LOGIN_TTL_MS, start.scopes?.agent === false ? 0 : 1, start.scopes?.answer === true ? 1 : 0)) {
+    if (await insert.get(code, start.credentialHash, label, JSON.stringify(start.machine), ip, start.helperVersion, nowMs, nowMs + LOGIN_TTL_MS, start.scopes?.agent === false ? 0 : 1, start.scopes?.answer === true ? 1 : 0)) {
       return { userCode: showCode(code), verifyUrl: `${baseUrl}/connect?runner=${showCode(code)}`, interval: POLL_INTERVAL_S, expiresIn: LOGIN_TTL_MS / 1000 };
     }
   }
@@ -93,15 +93,15 @@ export function startLogin(db: DatabaseSync, start: LoginStart, ip: string, base
 }
 
 /** The state of the login a credential started, or null when the server knows neither the login nor the credential. */
-export function pollLogin(db: DatabaseSync, credential: string, nowMs: number = Date.now()): LoginPollReply | null {
+export async function pollLogin(db: Db, credential: string, nowMs: number = Date.now()): Promise<LoginPollReply | null> {
   const hash = sha256hex(credential);
-  const row = db.prepare("SELECT id, state, expires_at FROM main.runner_logins WHERE secret_hash = ?").get(hash) as { id: number; state: LoginState; expires_at: number } | undefined;
+  const row = await db.prepare("SELECT id, state, expires_at FROM main.runner_logins WHERE secret_hash = ?").get(hash) as { id: number; state: LoginState; expires_at: number } | undefined;
   if (!row) {
     // The login's row is pruned an hour after it expired; its approved credential still answers.
-    return db.prepare("SELECT 1 FROM main.mcp_tokens WHERE token_hash = ? AND kind = 'runner' AND expires_at > ?").get(hash, new Date(nowMs).toISOString()) ? { state: "approved" } : null;
+    return await db.prepare("SELECT 1 FROM main.mcp_tokens WHERE token_hash = ? AND kind = 'runner' AND expires_at > ?").get(hash, new Date(nowMs).toISOString()) ? { state: "approved" } : null;
   }
   if (row.state === "pending" && Number(row.expires_at) <= nowMs) {
-    db.prepare("UPDATE main.runner_logins SET state = 'expired' WHERE id = ? AND state = 'pending'").run(row.id);
+    await db.prepare("UPDATE main.runner_logins SET state = 'expired' WHERE id = ? AND state = 'pending'").run(row.id);
     return { state: "expired" };
   }
   return { state: row.state };
@@ -109,16 +109,16 @@ export function pollLogin(db: DatabaseSync, credential: string, nowMs: number = 
 
 type Row = { id: number; secret_hash: string; label: string | null; machine: string | null; ip: string | null; helper_version: string | null; created_at: number; expires_at: number; want_agent: number; want_answer: number };
 
-function pendingRow(db: DatabaseSync, code: string, nowMs: number): Row | null {
-  return (db.prepare("SELECT id, secret_hash, label, machine, ip, helper_version, created_at, expires_at, want_agent, want_answer FROM main.runner_logins WHERE user_code = ? AND state = 'pending' AND expires_at > ?")
+async function pendingRow(db: Db, code: string, nowMs: number): Promise<Row | null> {
+  return (await db.prepare("SELECT id, secret_hash, label, machine, ip, helper_version, created_at, expires_at, want_agent, want_answer FROM main.runner_logins WHERE user_code = ? AND state = 'pending' AND expires_at > ?")
     .get(code, nowMs) as Row | undefined) ?? null;
 }
 
 const machineOf = (r: Row): Machine | null => (r.machine ? JSON.parse(r.machine) as Machine : null);
 
 /** The login waiting for approval under a normalized user code, for the approval card; null when there is none. */
-export function pendingLogin(db: DatabaseSync, code: string, yourIp: string, nowMs: number = Date.now()): PendingRunnerLogin | null {
-  const r = pendingRow(db, code, nowMs);
+export async function pendingLogin(db: Db, code: string, yourIp: string, nowMs: number = Date.now()): Promise<PendingRunnerLogin | null> {
+  const r = await pendingRow(db, code, nowMs);
   if (!r) return null;
   return {
     label: r.label ?? "", machine: machineOf(r) ?? { hostname: "", platform: "", arch: "" }, ip: r.ip ?? "", yourIp,
@@ -133,32 +133,24 @@ export function pendingLogin(db: DatabaseSync, code: string, yourIp: string, now
  * another address than the approver's (`approverIp`, addressKey) is approved only with `otherMachine`, the approver's statement
  * that they started it elsewhere; 409 otherwise. Null when no login waits under the code. The caller checks who may grant `answer`.
  */
-export function approveLogin(db: DatabaseSync, login: string, code: string, rawLabel: unknown, scopes: Scopes, approverIp: string, otherMachine: boolean, nowMs: number = Date.now()): { row: McpTokenRow; machine: Machine | null; ip: string | null } | null {
+export async function approveLogin(db: Db, login: string, code: string, rawLabel: unknown, scopes: Scopes, approverIp: string, otherMachine: boolean, nowMs: number = Date.now()): Promise<{ row: McpTokenRow; machine: Machine | null; ip: string | null } | null> {
   const label = rawLabel === undefined ? undefined : cleanLabel(rawLabel);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const r = pendingRow(db, code, nowMs);
-    if (!r) {
-      db.exec("ROLLBACK");
-      return null;
-    }
+  return await db.write(async () => {
+    const r = await pendingRow(db, code, nowMs);
+    if (!r) return null;
     if (!otherMachine && !sameAddress(r.ip ?? "", approverIp)) {
       throw new HttpError(409, "this login was started from another address than yours; approve it only if you started it on another machine, and say so (otherMachine)");
     }
-    const row = addRunnerToken(db, login, r.secret_hash, label ?? r.label, r.machine, scopes);
-    db.prepare("UPDATE main.runner_logins SET state = 'approved', login = ?, token_id = ? WHERE id = ?").run(login, row.id, r.id);
-    db.exec("COMMIT");
+    const row = await addRunnerToken(db, login, r.secret_hash, label ?? r.label, r.machine, scopes);
+    await db.prepare("UPDATE main.runner_logins SET state = 'approved', login = ?, token_id = ? WHERE id = ?").run(login, row.id, r.id);
     return { row, machine: machineOf(r), ip: r.ip };
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 /** Denies a waiting login; what it asked for, or null when no login waits under the code. */
-export function denyLogin(db: DatabaseSync, login: string, code: string, nowMs: number = Date.now()): { label: string | null; machine: Machine | null; ip: string | null } | null {
-  const r = pendingRow(db, code, nowMs);
+export async function denyLogin(db: Db, login: string, code: string, nowMs: number = Date.now()): Promise<{ label: string | null; machine: Machine | null; ip: string | null } | null> {
+  const r = await pendingRow(db, code, nowMs);
   if (!r) return null;
-  if (db.prepare("UPDATE main.runner_logins SET state = 'denied', login = ? WHERE id = ? AND state = 'pending'").run(login, r.id).changes !== 1) return null;
+  if ((await db.prepare("UPDATE main.runner_logins SET state = 'denied', login = ? WHERE id = ? AND state = 'pending'").run(login, r.id)).changes !== 1) return null;
   return { label: r.label, machine: machineOf(r), ip: r.ip };
 }

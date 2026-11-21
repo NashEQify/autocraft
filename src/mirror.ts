@@ -3,11 +3,11 @@ import { refreshSnapshot } from "./itemtools/snapshot.ts";
 import { isCounted } from "./review/discussion.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { SQLInputValue } from "node:sqlite";
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { connect, dbPath } from "./db.ts";
+import { dbPath } from "./db.ts";
 import { trackedNames } from "./repos.ts";
 import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
@@ -17,8 +17,11 @@ import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";
 import { envVar } from "./env.ts";
 import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/read.ts";
-import { DEFAULT_OWNER, loadOwners, ownerOf, slugOf } from "./owners.ts";
+import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
+import { filterSeq } from "./async-seq.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
 const FULL_PAGE = 30;
@@ -132,7 +135,7 @@ export class Client {
       if (e instanceof AppReadError && !e.notInstalled) throw new Transient(e.message);
       throw e;
     }
-    return { env, key: env ? resolveOwner(owner).toLowerCase() : "" };
+    return { env, key: env ? (await resolveOwner(owner)).toLowerCase() : "" };
   }
 
   /** Makes the rate figures those of `key` (an installation, or the box account). */
@@ -335,7 +338,7 @@ export const KEEP_KNOWN_MERGEABLE = (table: string): string =>
  * `readAt` is when the read of these nodes started (before its first GitHub request), stored as `item_reads.synced_at`, so a
  * read that began before a change never passes for one made after it (src/github/commands.ts compares it with a comment's time).
  */
-function writePage(db: DatabaseSync, repo: string, kind: Kind, detail: Detail, nodes: Node[], force = false, readAt: string = iso(new Date())): void {
+async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes: Node[], force = false, readAt: string = iso(new Date())): Promise<void> {
   // Upserts keep each row's rowid, which the full-text index (schema.sql) is keyed on.
   const insert = db.prepare(`INSERT INTO main.items (${COLUMNS.join(",")}) VALUES (${COLUMNS.map((c) => `:${c}`).join(",")})
     ON CONFLICT (repo, number) DO UPDATE SET ${COLUMNS.filter((c) => c !== "repo" && c !== "number").map((c) => c === "mergeable" ? `mergeable=${KEEP_KNOWN_MERGEABLE("items")}` : `${c}=excluded.${c}`).join(",")}`);
@@ -351,41 +354,36 @@ function writePage(db: DatabaseSync, repo: string, kind: Kind, detail: Detail, n
     repo=excluded.repo, number=excluded.number, kind=excluded.kind, author=excluded.author, created_at=excluded.created_at,
     body=excluded.body, review_state=excluded.review_state, commit_oid=excluded.commit_oid, counted=excluded.counted, author_association=excluded.author_association, mentions_pipeline=excluded.mentions_pipeline, url=excluded.url`);
   const live = appSlug();
-  if (live) { try { rememberSlug(db, live); } catch { /* read-only connection */ } }
-  const own = mentionNames(db, live);
+  if (live) { try { await rememberSlug(db, live); } catch { /* read-only connection */ } }
+  const own = await mentionNames(db, live);
   const lastRead = db.prepare("SELECT synced_at FROM main.item_reads WHERE repo = ? AND number = ?");
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  await db.write(async () => {
     // A read never replaces what a later-started read stored: the item, its comments and its read time stay the newer read's.
-    nodes = nodes.filter((n) => {
-      const last = (lastRead.get(repo, n.number) as { synced_at: string } | undefined)?.synced_at;
+    nodes = await filterSeq(nodes, async (n) => {
+      const last = (await lastRead.get(repo, n.number) as { synced_at: string } | undefined)?.synced_at;
       return last === undefined || !(Date.parse(last) > Date.parse(readAt));
     });
     for (const n of nodes) {
       const row = toRow(repo, kind, n, detail);
       // A row identical to the stored one (overlapping reads re-fetch many) writes nothing.
-      const old = stored.get(repo, n.number) as Record<string, SQLInputValue> | undefined;
+      const old = await stored.get(repo, n.number) as Record<string, SQLInputValue> | undefined;
       if (!force && old && COLUMNS.every((c) => old[c] === row[c])) continue;
-      insert.run(row);
-      if (kind === "pr") setRefs.run(textRefs(row.title as string | null, row.body as string | null), repo, n.number);
-      if (typeof row.author === "string" && typeof row.author_id === "number") bindId.run(row.author, row.author_id);
+      await insert.run(row);
+      if (kind === "pr") await setRefs.run(textRefs(row.title as string | null, row.body as string | null), repo, n.number);
+      if (typeof row.author === "string" && typeof row.author_id === "number") await bindId.run(row.author, row.author_id);
       if (detail === "full") {
         const rows = commentRows(repo, kind, n, own);
         // A forced re-read of an unchanged item upserts in place: an identical comment bumps no topic. Comments past the newest 20 go.
-        if (!force) del.run(repo, n.number);
-        for (const row of rows) insComment.run(...row);
-        if (force) db.prepare(`DELETE FROM main.comments WHERE repo = ? AND number = ? AND id NOT IN (${rows.map(() => "?").join(",") || "''"})`).run(repo, n.number, ...rows.map((r) => r[2] as string));
+        if (!force) await del.run(repo, n.number);
+        for (const row of rows) await insComment.run(...row);
+        if (force) await db.prepare(`DELETE FROM main.comments WHERE repo = ? AND number = ? AND id NOT IN (${rows.map(() => "?").join(",") || "''"})`).run(repo, n.number, ...rows.map((r) => r[2] as string));
       }
     }
     if (nodes.length) {
-      db.prepare(`INSERT INTO main.item_reads (repo, number, synced_at) VALUES ${nodes.map(() => "(?,?,?)").join(",")}
+      await db.prepare(`INSERT INTO main.item_reads (repo, number, synced_at) VALUES ${nodes.map(() => "(?,?,?)").join(",")}
         ON CONFLICT (repo, number) DO UPDATE SET synced_at = excluded.synced_at WHERE julianday(excluded.synced_at) >= julianday(item_reads.synced_at)`).run(...nodes.flatMap((n) => [repo, n.number, readAt]));
     }
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 // `repositoryOwner` serves organizations and users alike.
@@ -409,7 +407,7 @@ const ownedBy = (n: Node, name: string): boolean => {
 const iso = (d: Date): string => d.toISOString().replace(/\.\d+Z$/, "Z");
 
 // Reads a repo's items, newest first, down to `cutoff` (everything when null). Moves no high water.
-async function readRepoSince(db: DatabaseSync, client: Querier, name: string, cutoff: string | null): Promise<{ count: number; newest: string }> {
+async function readRepoSince(db: Db, client: Querier, name: string, cutoff: string | null): Promise<{ count: number; newest: string }> {
   // Before the first request: every page of this read counts as read from here on (never later than its own request).
   const startedAt = iso(new Date());
   let newest = "";
@@ -418,7 +416,7 @@ async function readRepoSince(db: DatabaseSync, client: Querier, name: string, cu
     const passes: [Detail, string[]][] = [["full", ["OPEN"]], ["light", kind === "issue" ? ["CLOSED"] : ["CLOSED", "MERGED"]]];
     for (const [detail, states] of passes) {
       for await (const nodes of untilCutoff(fetchPages(client, kind, detail, name, states), cutoff)) {
-        writePage(db, name, kind, detail, nodes, false, startedAt);
+        await writePage(db, name, kind, detail, nodes, false, startedAt);
         count += nodes.length;
         for (const n of nodes) if (n.updatedAt > newest) newest = n.updatedAt;
       }
@@ -428,17 +426,17 @@ async function readRepoSince(db: DatabaseSync, client: Querier, name: string, cu
 }
 
 // high_water is written only when the whole repo finished, so a crash leaves the repo incomplete.
-async function syncRepo(db: DatabaseSync, client: Querier, name: string, full: boolean): Promise<number> {
+async function syncRepo(db: Db, client: Querier, name: string, full: boolean): Promise<number> {
   // synced_at is the start of the sync: every item the sync read is at least as new as it (the pre-approved merge compares it with a push).
   const startedAt = iso(new Date());
-  const row = db.prepare("SELECT high_water FROM repos WHERE name=?").get(name) as { high_water: string | null } | undefined;
+  const row = await db.prepare("SELECT high_water FROM repos WHERE name=?").get(name) as { high_water: string | null } | undefined;
   const high = row?.high_water ?? null;
   const cutoff = high && !full ? iso(new Date(new Date(high).getTime() - OVERLAP_MS)) : null;
   const read = await readRepoSince(db, client, name, cutoff);
   const count = read.count;
   const newest = read.newest > (high ?? "") ? read.newest : (high ?? "");
   // max(): an incremental sync may have moved the high water further while a full pass ran.
-  db.prepare(`UPDATE main.repos SET synced_at=:at, high_water=CASE WHEN :hw IS NOT NULL AND (high_water IS NULL OR high_water < :hw) THEN :hw ELSE high_water END
+  await db.prepare(`UPDATE main.repos SET synced_at=:at, high_water=CASE WHEN :hw IS NOT NULL AND (high_water IS NULL OR high_water < :hw) THEN :hw ELSE high_water END
     WHERE name=:name`).run({ at: startedAt, hw: newest || null, name });
   return count;
 }
@@ -503,19 +501,19 @@ export function searchSince(orgHighWater: string): string {
 export type Querier = { query(query: string, variables: object): Promise<Node>; spent: number; remaining: number | null; resetAt?: Date | null; repoMovedTo?(owner: string, name: string): string | null | Promise<string | null> };
 
 /** Skips a repo that cannot be read: logs and records why, with the new name when GitHub redirects. The run goes on with the other repos. */
-async function failRepo(db: DatabaseSync, client: Querier, name: string, e: unknown): Promise<void> {
+async function failRepo(db: Db, client: Querier, name: string, e: unknown): Promise<void> {
   let moved: string | null = null;
   if ((e as { type?: string })?.type === "NOT_FOUND") {
     try { moved = (await client.repoMovedTo?.(ownerOf(name), name)) ?? null; } catch { /* the plain NOT_FOUND is recorded */ }
   }
-  recordRepoFailure(db, name, e, moved);
+  await recordRepoFailure(db, name, e, moved);
   console.warn(`${slugOf(name)}: not synced: ${(e as Error).message}${moved ? ` (moved to ${moved})` : ""}`);
 }
 
-const getSetting = (db: DatabaseSync, key: string): string | null =>
-  ((db.prepare("SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined)?.value) ?? null;
-const setSetting = (db: DatabaseSync, key: string, value: string): void => {
-  db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+const getSetting = async (db: Db, key: string): Promise<string | null> =>
+  ((await db.prepare("SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined)?.value) ?? null;
+const setSetting = async (db: Db, key: string, value: string): Promise<void> => {
+  await db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
 };
 
 // Search returns at most SEARCH_CAP results per query. A window with more matches is cut in half
@@ -526,7 +524,7 @@ export type SearchResult = { count: number; newest: string | null; slices: numbe
 
 // Everything updated from `since` to `until`, oldest slice first. `newest` is the largest updatedAt
 // returned (tracked repos or not), the next sync's starting point; null when nothing matched.
-export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: string[], since: string, until: string): Promise<SearchResult> {
+export async function syncBySearch(db: Db, client: Querier, tracked: string[], since: string, until: string): Promise<SearchResult> {
   const trackedSet = new Set(tracked);
   // Before the first request: the read start every page of this run is stored with (see writePage).
   const startedAt = iso(new Date());
@@ -552,7 +550,7 @@ export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: s
     }
   }
 
-  function write(nodes: Node[]): void {
+  async function write(nodes: Node[]): Promise<void> {
     const groups = new Map<string, Node[]>();
     for (const n of nodes) {
       if (n?.updatedAt && n.updatedAt > (out.newest ?? "")) out.newest = n.updatedAt;
@@ -566,7 +564,7 @@ export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: s
     }
     for (const [key, group] of groups) {
       const [repo, kind, detail] = key.split("\t");
-      writePage(db, repo, kind as Kind, detail as Detail, group, false, startedAt);
+      await writePage(db, repo, kind as Kind, detail as Detail, group, false, startedAt);
       out.count += group.length;
     }
   }
@@ -587,7 +585,7 @@ export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: s
       for (const name of tracked) {
         try {
           const r = await readRepoSince(db, client, name, iso(from));
-          clearRepoFailure(db, name);
+          await clearRepoFailure(db, name);
           out.count += r.count;
           if (r.newest > (repoNewest.get(name) ?? "")) repoNewest.set(name, r.newest);
           if (r.newest > (out.newest ?? "")) out.newest = r.newest;
@@ -599,7 +597,7 @@ export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: s
     }
     out.slices++;
     for (;;) {
-      write(conn.nodes);
+      await write(conn.nodes);
       if (!conn.pageInfo.hasNextPage) return;
       conn = await page(q, conn.pageInfo.endCursor);
     }
@@ -610,17 +608,17 @@ export async function syncBySearch(db: DatabaseSync, client: Querier, tracked: s
   for (const name of tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
     try {
       // A repo that failed for a while has its own high water behind the window: read from there.
-      const hw = (db.prepare("SELECT high_water FROM repos WHERE name = ?").get(name) as { high_water: string | null } | undefined)?.high_water;
+      const hw = (await db.prepare("SELECT high_water FROM repos WHERE name = ?").get(name) as { high_water: string | null } | undefined)?.high_water;
       const own = hw ? new Date(new Date(hw).getTime() - OVERLAP_MS) : null;
       const r = await readRepoSince(db, client, name, iso(own && own < from ? own : from));
-      clearRepoFailure(db, name);
+      await clearRepoFailure(db, name);
       out.count += r.count;
       if (r.newest > (repoNewest.get(name) ?? "")) repoNewest.set(name, r.newest);
     } catch (e) {
       await failRepo(db, client, name, e);
     }
   }
-  for (const [repo, t] of repoNewest) bump.run(t, repo, t);
+  for (const [repo, t] of repoNewest) await bump.run(t, repo, t);
   return out;
 }
 
@@ -722,10 +720,10 @@ query($owner: String!, $name: String!) {
 
 // Lists the default org's repos. Repos of other owners are tracked one by one by name, never listed;
 // a failure reading one is logged and leaves the rest of the sync alone.
-async function refreshRepoList(db: DatabaseSync, client: Querier): Promise<string[]> {
+async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
   const repos: (Node & { owner: string })[] = [];
   for (const r of await listRepos(client, DEFAULT_OWNER)) repos.push({ ...r, owner: DEFAULT_OWNER });
-  for (const name of trackedNames(db).filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
+  for (const name of (await trackedNames(db)).filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
     const owner = ownerOf(name);
     try {
       const r = (await client.query(REPO_QUERY, { owner, name })).repository;
@@ -737,7 +735,7 @@ async function refreshRepoList(db: DatabaseSync, client: Querier): Promise<strin
   }
   // A tracked repo of the default org missing from the listing is archived, or moved or deleted: only the last two are errors.
   const listedNames = new Set(repos.map((r) => r.name as string));
-  for (const name of trackedNames(db).filter((n) => ownerOf(n) === DEFAULT_OWNER && !listedNames.has(n))) {
+  for (const name of (await trackedNames(db)).filter((n) => ownerOf(n) === DEFAULT_OWNER && !listedNames.has(n))) {
     try {
       const r = (await client.query(REPO_QUERY, { owner: DEFAULT_OWNER, name })).repository;
       if (!r || r.owner?.login?.toLowerCase() !== DEFAULT_OWNER.toLowerCase()) throw new GithubError("graphql error: repository not found under this owner", 0, "NOT_FOUND");
@@ -751,24 +749,24 @@ async function refreshRepoList(db: DatabaseSync, client: Querier): Promise<strin
     ON CONFLICT(name) DO UPDATE SET visibility=excluded.visibility, default_branch=excluded.default_branch,
     open_prs=excluded.open_prs, open_issues=excluded.open_issues WHERE repos.owner = excluded.owner`);
   for (const r of repos) {
-    const res = upsert.run(r.name, r.owner, r.visibility.toLowerCase(), r.defaultBranchRef?.name ?? null, r.pullRequests.totalCount, r.issues.totalCount);
+    const res = await upsert.run(r.name, r.owner, r.visibility.toLowerCase(), r.defaultBranchRef?.name ?? null, r.pullRequests.totalCount, r.issues.totalCount);
     if (!res.changes) {
       await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
     }
   }
-  loadOwners(db);
+  await reloadOwners(db);
   // A repo the listing shows exists again: its not-found record is stale.
-  for (const r of repos) db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind = 'not-found'").run(r.name);
-  setSetting(db, "repos_refreshed_at", iso(new Date()));
+  for (const r of repos) await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind = 'not-found'").run(r.name);
+  await setSetting(db, "repos_refreshed_at", iso(new Date()));
   return [...new Set(repos.map((r: Node) => r.name as string))];
 }
 
 /** Repos the last per-repo pass skipped; the org high water waits for them. */
 let syncFailures = 0;
 
-async function syncPerRepo(db: DatabaseSync, client: Querier, opts: SyncOpts): Promise<number> {
+async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<number> {
   const listed = await refreshRepoList(db, client);
-  const tracked = trackedNames(db);
+  const tracked = await trackedNames(db);
   const names = selectSyncRepos(listed, tracked, opts);
   const gone = opts.only.length || opts.all ? [] : tracked.filter((n) => !listed.includes(n));
   if (gone.length) console.log(`tracked but not in the org (archived or renamed): ${gone.join(", ")}`);
@@ -776,7 +774,7 @@ async function syncPerRepo(db: DatabaseSync, client: Querier, opts: SyncOpts): P
   // so a stopped run continues after it. The cursor belongs to one scope (tracked repos or all).
   const resumable = opts.full && !opts.only.length;
   const scope = opts.all ? "all" : "tracked";
-  const saved = resumable ? getSetting(db, "full_sync_cursor") : null;
+  const saved = resumable ? await getSetting(db, "full_sync_cursor") : null;
   const after = saved?.startsWith(`${scope}|`) ? saved.slice(scope.length + 1) : null;
   const todo = after === null ? names : names.filter((n) => n > after);
   if (after !== null) console.log(`resuming the full re-sync after ${after}: ${todo.length} of ${names.length} repos left`);
@@ -799,13 +797,13 @@ async function syncPerRepo(db: DatabaseSync, client: Querier, opts: SyncOpts): P
       continue;
     }
     transientRun = 0;
-    clearRepoFailure(db, name);
+    await clearRepoFailure(db, name);
     total += count;
     // The cursor stops at the first failure so the next full run redoes that repo.
-    if (resumable && !failed) setSetting(db, "full_sync_cursor", `${scope}|${name}`);
+    if (resumable && !failed) await setSetting(db, "full_sync_cursor", `${scope}|${name}`);
     console.log(`${name}: ${count} items, ${client.spent - before} points used, ${client.remaining} left`);
   }
-  if (resumable && !failed) db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
+  if (resumable && !failed) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
   // One broken repo does not fail the run; all of them failing does.
   if (failed > 0 && failed === todo.length) throw lastError;
   syncFailures = failed;
@@ -827,9 +825,9 @@ query($owner: String!, $name: String!, $number: Int!) {
 
 /** Writes one item read by number (a webhook re-read) like the sync does. False for a null, deleted or transferred item: the daily reconcile handles those. */
 /** `readAt`: when the request for `n` was sent (see writePage); default now. */
-export function writeItemNode(db: DatabaseSync, repo: string, n: Node | null | undefined, readAt?: Date): boolean {
+export async function writeItemNode(db: Db, repo: string, n: Node | null | undefined, readAt?: Date): Promise<boolean> {
   if (!n || n.repository?.name !== repo || !ownedBy(n, repo)) return false;
-  writePage(db, repo, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], true, iso(readAt ?? new Date()));
+  await writePage(db, repo, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], true, iso(readAt ?? new Date()));
   return true;
 }
 
@@ -837,16 +835,16 @@ export function writeItemNode(db: DatabaseSync, repo: string, n: Node | null | u
 // open here but not listed as open on GitHub are read one by one: closed or merged ones are
 // updated, deleted or transferred ones (not found, or found in another repo) are marked CLOSED
 // (no consumer reads a state other than OPEN, CLOSED and MERGED) and audited.
-export async function reconcileRepo(db: DatabaseSync, client: Querier, name: string, now: Date = new Date()): Promise<{ open: number; updated: number; gone: number }> {
+export async function reconcileRepo(db: Db, client: Querier, name: string, now: Date = new Date()): Promise<{ open: number; updated: number; gone: number }> {
   const listed = new Set<string>();
   const startedAt = iso(new Date());
   for (const kind of ["issue", "pr"] as const) {
     for await (const nodes of fetchPages(client, kind, "full", name, ["OPEN"])) {
-      writePage(db, name, kind, "full", nodes, false, startedAt);
+      await writePage(db, name, kind, "full", nodes, false, startedAt);
       for (const n of nodes) listed.add(`${kind}\t${n.number}`);
     }
   }
-  const stale = (db.prepare("SELECT kind, number FROM items WHERE repo = ? AND state = 'OPEN'").all(name) as { kind: Kind; number: number }[])
+  const stale = (await db.prepare("SELECT kind, number FROM items WHERE repo = ? AND state = 'OPEN'").all(name) as { kind: Kind; number: number }[])
     .filter((r) => !listed.has(`${r.kind}\t${r.number}`));
   let updated = 0;
   let gone = 0;
@@ -854,22 +852,22 @@ export async function reconcileRepo(db: DatabaseSync, client: Querier, name: str
     const sentAt = iso(new Date());
     const n: Node = (await client.query(ONE_QUERY, { owner: ownerOf(name), name, number: r.number })).repository?.issueOrPullRequest;
     if (n && n.repository?.name === name && ownedBy(n, name)) {
-      writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
+      await writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
       updated++;
     } else {
-      db.prepare("UPDATE main.items SET state = 'CLOSED', closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'")
+      await db.prepare("UPDATE main.items SET state = 'CLOSED', closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'")
         .run(iso(now), name, r.number);
-      audit(db, "sync", "item-gone", `${name}#${r.number}`, { reason: "not found or transferred on GitHub; marked CLOSED" });
+      await audit(db, "sync", "item-gone", `${name}#${r.number}`, { reason: "not found or transferred on GitHub; marked CLOSED" });
       gone++;
     }
   }
-  db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), name);
+  await db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), name);
   return { open: listed.size, updated, gone };
 }
 
 // Of the tracked repos the sync has read in full, the one whose last reconcile is oldest, when it is over a day old (never: first).
-export function reconcileDue(db: DatabaseSync, tracked: string[], now: Date): string | null {
-  const at = new Map((db.prepare("SELECT name, reconciled_at FROM repos WHERE synced_at IS NOT NULL AND high_water IS NOT NULL").all() as { name: string; reconciled_at: string | null }[]).map((r) => [r.name, r.reconciled_at ?? ""]));
+export async function reconcileDue(db: Db, tracked: string[], now: Date): Promise<string | null> {
+  const at = new Map((await db.prepare("SELECT name, reconciled_at FROM repos WHERE synced_at IS NOT NULL AND high_water IS NOT NULL").all() as { name: string; reconciled_at: string | null }[]).map((r) => [r.name, r.reconciled_at ?? ""]));
   const oldest = [...tracked].filter((n) => at.has(n)).sort((a, b) => at.get(a)!.localeCompare(at.get(b)!))[0];
   if (oldest === undefined) return null;
   const last = at.get(oldest)!;
@@ -877,30 +875,30 @@ export function reconcileDue(db: DatabaseSync, tracked: string[], now: Date): st
 }
 
 /** Reconciles the repo that is due, if any, and returns its name. A failure is recorded and still moves `reconciled_at`, so a failing repo does not keep first place. */
-export async function reconcileNext(db: DatabaseSync, client: Querier, now: Date = new Date(), log: (line: string) => void = console.log): Promise<string | null> {
-  const due = reconcileDue(db, trackedNames(db), now);
+export async function reconcileNext(db: Db, client: Querier, now: Date = new Date(), log: (line: string) => void = console.log): Promise<string | null> {
+  const due = await reconcileDue(db, await trackedNames(db), now);
   if (!due) return null;
   try {
     const c = await reconcileRepo(db, client, due, now);
-    clearRepoFailure(db, due);
+    await clearRepoFailure(db, due);
     log(`reconcile ${due}: ${c.open} open, ${c.updated} re-read, ${c.gone} gone`);
   } catch (e) {
     await failRepo(db, client, due, e);
-    db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), due);
+    await db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), due);
   }
   return due;
 }
 
 // Runs one sync. `org_high_water` is the newest updatedAt stored, so the next search starts ten
 // minutes before it; it does not move for --repo runs, and a full re-sync leaves an existing one alone.
-export async function runSync(db: DatabaseSync, client: Querier, opts: SyncOpts, now: Date = new Date()): Promise<{ mode: string; items: number }> {
+export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date = new Date()): Promise<{ mode: string; items: number }> {
   const started = iso(now);
-  const orgHigh = getSetting(db, "org_high_water");
-  const tracked = trackedNames(db);
-  const synced = new Set((db.prepare("SELECT name FROM repos WHERE synced_at IS NOT NULL").all() as { name: string }[]).map((r) => r.name));
+  const orgHigh = await getSetting(db, "org_high_water");
+  const tracked = await trackedNames(db);
+  const synced = new Set((await db.prepare("SELECT name FROM repos WHERE synced_at IS NOT NULL").all() as { name: string }[]).map((r) => r.name));
   // A repo that cannot be read has no synced_at and would keep every run per-repo.
   // Only a repo that cannot be read at all (not found, no access) is passed over; others are retried per repo for their first full read.
-  const broken = new Set((db.prepare("SELECT repo FROM sync_repo_errors WHERE kind IN ('not-found', 'forbidden')").all() as { repo: string }[]).map((r) => r.repo));
+  const broken = new Set((await db.prepare("SELECT repo FROM sync_repo_errors WHERE kind IN ('not-found', 'forbidden')").all() as { repo: string }[]).map((r) => r.repo));
   const wantsSearch = !opts.only.length && !opts.all && !opts.full && !opts.perRepo && orgHigh !== null
     && tracked.every((n) => synced.has(n) || broken.has(n));
   const spent0 = client.spent;
@@ -912,53 +910,53 @@ export async function runSync(db: DatabaseSync, client: Querier, opts: SyncOpts,
       mode = "search";
       items = r.count;
       const high = r.newest && r.newest > (orgHigh as string) ? r.newest : (orgHigh as string);
-      if (high !== orgHigh) setSetting(db, "org_high_water", high);
-      const last = getSetting(db, "search_catchup_at");
+      if (high !== orgHigh) await setSetting(db, "org_high_water", high);
+      const last = await getSetting(db, "search_catchup_at");
       if (!last || now.getTime() - new Date(last).getTime() >= CATCHUP_EVERY_MS) {
         const c = await syncBySearch(db, client, tracked, iso(new Date(new Date(high).getTime() - CATCHUP_SPAN_MS)), iso(new Date(high)));
         items += c.count;
-        setSetting(db, "search_catchup_at", started);
+        await setSetting(db, "search_catchup_at", started);
       }
       // One org-wide search covers every tracked repo, so each counts as synced now.
       // The search read every default-org repo, so errors of earlier runs other than not-found are stale; a failure of this run (at >= started) stays.
-      for (const n of tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER)) db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind IN ('transient', 'error') AND at < ?").run(n, started);
+      for (const n of tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER)) await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind IN ('transient', 'error') AND at < ?").run(n, started);
       // Not the repos that were never read in full (no high water) or that cannot be read.
       const mark = db.prepare("UPDATE main.repos SET synced_at = ? WHERE name = ? AND high_water IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_repo_errors e WHERE e.repo = repos.name)");
-      for (const n of tracked) mark.run(started, n);
+      for (const n of tracked) await mark.run(started, n);
       console.log(`search: ${r.slices} slice${r.slices === 1 ? "" : "s"}${r.fallbacks ? `, ${r.fallbacks} listed per repo` : ""}`);
-      const at = getSetting(db, "repos_refreshed_at");
+      const at = await getSetting(db, "repos_refreshed_at");
       if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) await refreshRepoList(db, client);
     } else {
       syncFailures = 0;
       items = await syncPerRepo(db, client, opts);
-      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) setSetting(db, "org_high_water", started);
+      if (!opts.only.length && !syncFailures && (orgHigh === null || !opts.full)) await setSetting(db, "org_high_water", started);
     }
   } finally {
     // The dashboard can show the rate budget from these.
     const prefix = opts.full ? "sync_full" : "sync";
-    setSetting(db, `${prefix}_points_last_run`, String(client.spent - spent0));
-    if (client.remaining !== null) setSetting(db, "sync_rate_remaining", String(client.remaining));
-    if (client.resetAt) setSetting(db, "sync_rate_reset_at", client.resetAt.toISOString());
+    await setSetting(db, `${prefix}_points_last_run`, String(client.spent - spent0));
+    if (client.remaining !== null) await setSetting(db, "sync_rate_remaining", String(client.remaining));
+    if (client.resetAt) await setSetting(db, "sync_rate_reset_at", client.resetAt.toISOString());
   }
   // History written before ids were bound: one batched pass, nothing when every login is bound.
-  if (opts.full || (!opts.only.length && getSetting(db, "author_ids_backfilled") === null)) {
+  if (opts.full || (!opts.only.length && await getSetting(db, "author_ids_backfilled") === null)) {
     try {
       const { backfillAuthorIds } = await import("./author-ids.ts");
       const bound = await backfillAuthorIds(db, client);
       if (bound) console.log(`bound ${bound} author account id${bound === 1 ? "" : "s"}`);
-      setSetting(db, "author_ids_backfilled", iso(new Date()));
-      db.prepare("DELETE FROM main.settings WHERE key = 'author_ids_error'").run();
+      await setSetting(db, "author_ids_backfilled", iso(new Date()));
+      await db.prepare("DELETE FROM main.settings WHERE key = 'author_ids_error'").run();
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
       console.log(`author ids: ${msg}`);
-      setSetting(db, "author_ids_error", `${iso(new Date())} ${(e as { type?: string })?.type ?? ""} ${msg}`);
+      await setSetting(db, "author_ids_error", `${iso(new Date())} ${(e as { type?: string })?.type ?? ""} ${msg}`);
     }
   }
   // Questions about items this sync found closed or merged no longer apply. Writes decisions only.
   const { withdrawClosedQuestions, setAsideSupersededQuestions } = await import("./merge/withdraw.ts");
-  const withdrawn = withdrawClosedQuestions(db, iso(new Date()));
+  const withdrawn = await withdrawClosedQuestions(db, iso(new Date()));
   if (withdrawn) console.log(`withdrew ${withdrawn} decision${withdrawn === 1 ? "" : "s"} about closed items`);
-  const aside = setAsideSupersededQuestions(db, iso(new Date()));
+  const aside = await setAsideSupersededQuestions(db, iso(new Date()));
   if (aside) console.log(`set aside ${aside} superseded decision${aside === 1 ? "" : "s"}`);
   return { mode, items };
 }
@@ -984,16 +982,16 @@ async function sync(args: string[]): Promise<void> {
   const release = acquireLock(opts.full ? fullLockPath() : lockPath());
   if (!release) return;
   try {
-    const db = connect();
+    const db = await openDb();
     const client = new Client(reserve);
-    if (restart) db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
+    if (restart) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
     const querier = opts.full ? lowPriority(client, { busy: () => lockHeld(lockPath()), minRemaining: keep }) : client;
     // Each run leaves a row for the Pipeline page; rows older than two days go.
-    const row = db.prepare("INSERT INTO sync_runs (started_at) VALUES (?)").run(iso(new Date())).lastInsertRowid;
-    db.prepare("DELETE FROM sync_runs WHERE started_at < ?").run(iso(new Date(Date.now() - 2 * 86400_000)));
+    const row = (await db.prepare("INSERT INTO sync_runs (started_at) VALUES (?)").run(iso(new Date()))).lastInsertRowid;
+    await db.prepare("DELETE FROM sync_runs WHERE started_at < ?").run(iso(new Date(Date.now() - 2 * 86400_000)));
     try {
       const { mode, items } = await runSync(db, querier, opts);
-      db.prepare("UPDATE sync_runs SET ended_at = ?, mode = ?, items = ? WHERE rowid = ?").run(iso(new Date()), mode, items, row);
+      await db.prepare("UPDATE sync_runs SET ended_at = ?, mode = ?, items = ? WHERE rowid = ?").run(iso(new Date()), mode, items, row);
       console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
       // Sandboxed calls read the item snapshot instead of GitHub. The refresh is incremental and writes nothing when nothing differs; a visibility change alone removes a repository's rows.
       refreshSnapshot();
@@ -1032,7 +1030,7 @@ async function sync(args: string[]): Promise<void> {
         }
       }
     } catch (e) {
-      db.prepare("UPDATE sync_runs SET ended_at = ?, error = ? WHERE rowid = ?").run(iso(new Date()), String((e as Error)?.message ?? e).slice(0, 300), row);
+      await db.prepare("UPDATE sync_runs SET ended_at = ?, error = ? WHERE rowid = ?").run(iso(new Date()), String((e as Error)?.message ?? e).slice(0, 300), row);
       throw e;
     }
   } finally {
@@ -1040,8 +1038,8 @@ async function sync(args: string[]): Promise<void> {
   }
 }
 
-function syncStatus(): void {
-  const rows = connect().prepare(`
+async function syncStatus(): Promise<void> {
+  const rows = await (await openDb()).prepare(`
     SELECT r.name, r.open_prs, r.open_issues, r.synced_at,
            EXISTS (SELECT 1 FROM tracked_repos t WHERE t.name = r.name) AS tracked,
            (SELECT COUNT(*) FROM items i WHERE i.repo = r.name) AS n
@@ -1058,6 +1056,6 @@ export const commands = {
 };
 
 /** Marks a PR we just merged as merged in the mirror, so counts don't wait for the next sync; the sync later fills in what GitHub reports. */
-export function markMerged(db: DatabaseSync, repo: string, number: number, at: string): void {
-  db.prepare("UPDATE main.items SET state = 'MERGED', merged_at = COALESCE(merged_at, ?), closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'").run(at, at, repo, number);
+export async function markMerged(db: Db, repo: string, number: number, at: string): Promise<void> {
+  await db.prepare("UPDATE main.items SET state = 'MERGED', merged_at = COALESCE(merged_at, ?), closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'").run(at, at, repo, number);
 }

@@ -1,8 +1,8 @@
 // What the fix-up step works on (the PRs come from their Plans, fixup/select.ts): candidate shapes, fix lists and tries.
-import type { DatabaseSync } from "node:sqlite";
 import { FORMAT_REASONS, safePath } from "./patch.ts";
 import type { ConflictCandidate } from "./conflict-state.ts";
 import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
+import type { Db } from "../db/index.ts";
 
 /** Fix-up tries per PR (pushed, failed, refused or rejected) before the step leaves it to a person. */
 export const MAX_ATTEMPTS = FIXUP_MAX_ATTEMPTS;
@@ -50,8 +50,8 @@ export type FixupState = (typeof FIXUP_STATES)[number];
 const ATTEMPT_STATES: FixupState[] = ["pushing", "pushed", "failed", "refused", "rejected"];
 
 /** Refusals for a wrong hunk header count (fixed by recounting since) are not tries. Pre-merge rounds have their own budget. */
-export function attemptsOf(db: DatabaseSync, repo: string, number: number): number {
-  return (db.prepare(`SELECT COUNT(*) AS n FROM fixups WHERE repo = ? AND number = ? AND source IS NULL AND state IN (${ATTEMPT_STATES.map(() => "?").join(",")})
+export async function attemptsOf(db: Db, repo: string, number: number): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM fixups WHERE repo = ? AND number = ? AND source IS NULL AND state IN (${ATTEMPT_STATES.map(() => "?").join(",")})
       AND NOT (state = 'refused' AND (${FORMAT_REASONS.map(() => "COALESCE(reason, '') LIKE ?").join(" OR ")}))`)
     .get(repo, number, ...ATTEMPT_STATES, ...FORMAT_REASONS.map((r) => `${r}%`)) as { n: number }).n;
 }

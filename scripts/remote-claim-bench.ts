@@ -5,36 +5,36 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createToken } from "../src/dash/mcp/tokens.ts";
-import { connect } from "../src/db.ts";
 import { claimCall, enqueueCall, type Caller } from "../src/remote/calls.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
 import { PROTOCOL_VERSION, type Claim, type TaskBundle } from "../src/remote/protocol.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const CALLS = 500, REPOS = 25, IDLE = 50, ROUNDS = 40;
 const dir = mkdtempSync(join(tmpdir(), "claim-bench-"));
 try {
-  const db = connect(join(dir, "bench.db"));
-  setInferenceMode(db, "user-local", "bench");
+  const db = await connectDb(join(dir, "bench.db"));
+  await setInferenceMode(db, "user-local", "bench");
   const now = Date.now(), iso = new Date(now).toISOString();
   const bundle: Omit<TaskBundle, "callId"> = { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 600, maxTurns: 10, stdin: "x".repeat(20_000), system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} };
   const perm = db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)");
-  const caller = (login: string): Caller => {
-    db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'maintainer')").run(login);
-    return { tokenId: createToken(db, login, "helper", { kind: "runner" }).row.id, login, role: "maintainer" };
+  const caller = async (login: string): Promise<Caller> => {
+    await db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'maintainer')").run(login);
+    return { tokenId: (await createToken(db, login, "helper", { kind: "runner" })).row.id, login, role: "maintainer" };
   };
   // "author" wrote every PR; the idle helpers asked for top-tier work. Only the last of them may write, so an author's claim
   // looks through the others for every call before it gives way.
-  const author = caller("author"), taker = caller("taker");
+  const author = await caller("author"), taker = await caller("taker");
   for (let i = 0; i < IDLE; i++) {
-    const c = caller(`idle${i}`);
-    db.prepare("UPDATE mcp_tokens SET idle_claim_at = ?, idle_tiers = '[\"top\"]', idle_repos = NULL WHERE id = ?").run(now, c.tokenId);
-    for (let r = 0; r < REPOS; r++) perm.run(c.login, `repo${r}`, i === IDLE - 1 ? "write" : "read", iso);
+    const c = await caller(`idle${i}`);
+    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ?, idle_tiers = '[\"top\"]', idle_repos = NULL WHERE id = ?").run(now, c.tokenId);
+    for (let r = 0; r < REPOS; r++) await perm.run(c.login, `repo${r}`, i === IDLE - 1 ? "write" : "read", iso);
   }
   for (let i = 0; i < CALLS; i++) {
     const repo = `repo${i % REPOS}`, number = 1000 + i;
-    db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at) VALUES (?, ?, 'pr', 'OPEN', 't', 'author', ?, ?)").run(repo, number, iso, iso);
-    db.prepare("INSERT INTO pr_commits (repo, number, oid, committed_at, author, co_authors) VALUES (?, ?, ?, ?, 'author', '[\"someone\"]')").run(repo, number, `oid${i}`, iso);
-    enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", bundle, items: [{ repo, number }], level: i % 5, maxAttempts: 2 }, now);
+    await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at) VALUES (?, ?, 'pr', 'OPEN', 't', 'author', ?, ?)").run(repo, number, iso, iso);
+    await db.prepare("INSERT INTO pr_commits (repo, number, oid, committed_at, author, co_authors) VALUES (?, ?, ?, ?, 'author', '[\"someone\"]')").run(repo, number, `oid${i}`, iso);
+    await enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", bundle, items: [{ repo, number }], level: i % 5, maxAttempts: 2 }, now);
   }
   const claim: Claim = { requestId: "bench-claim-0001", protocol: PROTOCOL_VERSION, helperVersion: "9.0.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } };
   const canWrite = async () => true;
@@ -51,7 +51,7 @@ try {
   };
   await time("pass-over", author, false);
   await time("take", taker, true);
-  db.close();
+  await db.close();
 } finally {
   rmSync(dir, { recursive: true, force: true });
 }

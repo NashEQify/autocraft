@@ -1,7 +1,7 @@
 // autocraft-server accounts list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | pause [show | --five-hour N --weekly N]
-import { connect } from "../db.ts";
 import { jevEnabled, jevOutage, setJevEnabled } from "./jev.ts";
 import { AccountError, jevParallel, listAccounts, setJevParallel, setUsagePause, updateAccount, usagePause } from "./accounts.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server accounts list
        autocraft-server accounts set <id> [--label <text>] [--enabled yes|no] [--max-concurrent <N>]   (N from 1 to 100)
@@ -16,8 +16,8 @@ function die(msg: string): never {
 
 const pct = (n: number | null) => (n === null ? "  - " : `${String(Math.round(n)).padStart(3)}%`);
 
-function print(): void {
-  const list = listAccounts(connect());
+async function print(): Promise<void> {
+  const list = await listAccounts(await openDb());
   if (!list.length) console.log("no accounts in the box config (AUTOCRAFT_ACCOUNTS)");
   for (const a of list) {
     console.log(`${a.id.padEnd(10)} ${a.enabled ? "enabled " : "disabled"} ${a.label.padEnd(24)} ${a.running}/${a.maxConcurrent} running  5h ${pct(a.usage.fiveHourPct)}  week ${pct(a.usage.weeklyPct)}${a.pausedReason ? `  ${a.pausedReason}` : ""}`);
@@ -25,7 +25,7 @@ function print(): void {
 }
 
 // Recorded as `cli`: only someone with a shell on the host can run this.
-function set(args: string[]): void {
+async function set(args: string[]): Promise<void> {
   const [id, ...rest] = args;
   if (!id) die(USAGE);
   const input: { label?: string; enabled?: boolean; maxConcurrent?: number } = {};
@@ -40,35 +40,35 @@ function set(args: string[]): void {
     }
   }
   try {
-    updateAccount(connect(), id, input, "cli");
+    await updateAccount(await openDb(), id, input, "cli");
   } catch (e) {
     if (e instanceof AccountError) die(e.message);
     throw e;
   }
-  print();
+  await print();
 }
 
-function jev(args: string[]): void {
-  const db = connect();
+async function jev(args: string[]): Promise<void> {
+  const db = await openDb();
   if (args.length > 1) die(USAGE);
-  if (args[0] === "on" || args[0] === "off") setJevEnabled(db, args[0] === "on", "cli");
+  if (args[0] === "on" || args[0] === "off") await setJevEnabled(db, args[0] === "on", "cli");
   else if (args[0] !== undefined) {
     try {
-      setJevParallel(db, Number(args[0]), "cli");
+      await setJevParallel(db, Number(args[0]), "cli");
     } catch (e) {
       if (e instanceof AccountError) die(e.message);
       throw e;
     }
   }
-  console.log(`Jev calls at once: ${jevParallel(db)}`);
-  const o = jevOutage(db);
-  console.log(o ? `Jev unavailable (${o.reason}) since ${o.since}; Haiku does its work` : jevEnabled(db) ? "Jev in use" : "Jev off");
+  console.log(`Jev calls at once: ${await jevParallel(db)}`);
+  const o = await jevOutage(db);
+  console.log(o ? `Jev unavailable (${o.reason}) since ${o.since}; Haiku does its work` : await jevEnabled(db) ? "Jev in use" : "Jev off");
 }
 
-function pause(args: string[]): void {
-  const db = connect();
+async function pause(args: string[]): Promise<void> {
+  const db = await openDb();
   if (args.length && args[0] !== "show") {
-    const cur = usagePause(db);
+    const cur = await usagePause(db);
     const input = { fiveHour: cur.fiveHour, weekly: cur.weekly };
     for (let i = 0; i < args.length; i += 2) {
       const v = args[i + 1];
@@ -78,24 +78,24 @@ function pause(args: string[]): void {
       else die(USAGE);
     }
     try {
-      setUsagePause(db, input, "cli");
+      await setUsagePause(db, input, "cli");
     } catch (e) {
       if (e instanceof AccountError) die(e.message);
       throw e;
     }
   } else if (args.length > 1) die(USAGE);
-  const p = usagePause(db);
+  const p = await usagePause(db);
   console.log(`Pause at: 5-hour ${p.fiveHour} %, weekly ${p.weekly} %`);
 }
 
 export const commands = {
   accounts: {
     summary: "Claude accounts: list | set <id> [--label X] [--enabled yes|no] [--max-concurrent N] | jev [N | on | off] | pause [show | --five-hour N --weekly N]",
-    run: (args: string[]) => {
-      if (args[0] === "list") print();
-      else if (args[0] === "set") set(args.slice(1));
-      else if (args[0] === "jev") jev(args.slice(1));
-      else if (args[0] === "pause") pause(args.slice(1));
+    run: async (args: string[]) => {
+      if (args[0] === "list") await print();
+      else if (args[0] === "set") await set(args.slice(1));
+      else if (args[0] === "jev") await jev(args.slice(1));
+      else if (args[0] === "pause") await pause(args.slice(1));
       else die(USAGE);
     },
   },

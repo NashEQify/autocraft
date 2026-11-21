@@ -5,10 +5,11 @@ import { test } from "node:test";
 import { exec, type Exec, type ExecResult } from "../src/fixup/git.ts";
 import { setFixIssueApproval } from "../src/fixissue/approval.ts";
 import { attemptOf, runFixIssueCollect, type CollectDeps } from "../src/fixissue/index.ts";
-import { connect } from "../src/db.ts";
 import { SCRATCH } from "./scratch.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { spawnSync } from "node:child_process";
+import { mapSeq } from "../src/async-seq.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixissue-pool-"));
@@ -48,17 +49,17 @@ async function collect(perDay?: number) {
   const fork = join(root, "fork.git");
   git(root, "init", "-q", "--bare", fork);
 
-  const db = connect(join(root, "t.db"));
-  useTestAccount(db);
-  db.prepare("UPDATE claude_accounts SET max_concurrent = 4").run();
-  db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  setFixIssueApproval(db, "op", "app", true);
-  if (perDay !== undefined) db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('fixissue', ?)").run(perDay);
+  const db = await connectDb(join(root, "t.db"));
+  await useTestAccount(db);
+  await db.prepare("UPDATE claude_accounts SET max_concurrent = 4").run();
+  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
+  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await setFixIssueApproval(db, "op", "app", true);
+  if (perDay !== undefined) await db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('fixissue', ?)").run(perDay);
   for (const n of [5, 6]) {
-    db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, 'b', 'someone', ?, ?)").run(n, `Panic ${n}`, T0, T0);
-    db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, 'bugfix', '[]', '{\"top\":0.97}')").run(n, T0);
-    db.prepare(`INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, patch, files, crate, crate_dir, size, created_at, updated_at)
+    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, 'b', 'someone', ?, ?)").run(n, `Panic ${n}`, T0, T0);
+    await db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, 'bugfix', '[]', '{\"top\":0.97}')").run(n, T0);
+    await db.prepare(`INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, patch, files, crate, crate_dir, size, created_at, updated_at)
       VALUES ('app', ?, ?, 'h', 'passed', 1, ?, ?, 'app', 'crates/app', 'S', ?, ?)`).run(n, sha, patchFor(n), JSON.stringify([LIB]), T0, T0);
   }
 
@@ -104,7 +105,7 @@ test("fixissue-collect opens the PR of each of two passed attempts once when the
   const { s, created, db } = await collect();
   assert.equal(s.opened, 2);
   assert.equal(created.length, 2);
-  assert.deepEqual([5, 6].map((n) => attemptOf(db, "app", n)!.state), ["pr-opened", "pr-opened"]);
+  assert.deepEqual(await mapSeq([5, 6], async (n) => (await attemptOf(db, "app", n))!.state), ["pr-opened", "pr-opened"]);
 });
 
 test("with one PR a day, two attempts that run at the same time open exactly one", async () => {

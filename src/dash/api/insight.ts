@@ -1,5 +1,4 @@
 // Read-only insight endpoints: classifier agreement per run, and token use and spend.
-import type { DatabaseSync } from "node:sqlite";
 import type {
   Agreement, ClassifierReport, ClassifierRun, CostReport, Disagreement, DisagreementList, FlagAgreement, UsageTotals,
 } from "../../../web/src/api/types.ts";
@@ -10,18 +9,19 @@ import type { Req } from "../types.ts";
 import { itemState } from "./shown.ts";
 import { canSeeInternals } from "./staff.ts";
 import { excludeHidden, hiddenRepos } from "./visible.ts";
+import type { Db } from "../../db/index.ts";
 
 const FLAGS = ["security", "needs decision"];
 
 // ---- classifiers -------------------------------------------------------------
 
-function runs(db: DatabaseSync, hidden: string[]): ClassifierRun[] {
+async function runs(db: Db, hidden: string[]): Promise<ClassifierRun[]> {
   const hp: Record<string, string> = {};
   const hide = excludeHidden("x.repo", hidden, hp);
   const prob = new Map<string, boolean>();
-  for (const r of db.prepare("SELECT run_id, classifier, COUNT(probs) AS p FROM classifications GROUP BY run_id, classifier").all() as
+  for (const r of await db.prepare("SELECT run_id, classifier, COUNT(probs) AS p FROM classifications GROUP BY run_id, classifier").all() as
     { run_id: string; classifier: string; p: number }[]) prob.set(`${r.run_id}\0${r.classifier}`, r.p > 0);
-  const pairs = db.prepare(`SELECT x.run_id AS run, x.classifier AS x, y.classifier AS y, COUNT(*) AS n, MAX(x.at) AS at
+  const pairs = await db.prepare(`SELECT x.run_id AS run, x.classifier AS x, y.classifier AS y, COUNT(*) AS n, MAX(x.at) AS at
     FROM classifications x JOIN classifications y ON y.run_id = x.run_id AND y.repo = x.repo AND y.number = x.number AND y.classifier > x.classifier
     ${hide ? `WHERE ${hide}` : ""}
     GROUP BY x.run_id, x.classifier, y.classifier`).all(hp) as { run: string; x: string; y: string; n: number; at: string }[];
@@ -50,15 +50,15 @@ function flagsOf(s: string | null): string[] {
   } catch { return []; }
 }
 
-export async function classifiersReport(db: DatabaseSync, req: Req): Promise<ClassifierReport> {
+export async function classifiersReport(db: Db, req: Req): Promise<ClassifierReport> {
   const hp: Record<string, string | number> = {};
   const hide = excludeHidden("x.repo", await hiddenRepos(db, req), hp);
-  const all = runs(db, await hiddenRepos(db, req));
+  const all = await runs(db, await hiddenRepos(db, req));
   const run = all.find((r) => r.id === req.query.get("run")) ?? all[0];
   if (!run) return { runs: [], run: "", a: "", b: "", labels: [...LABELS], items: 0, overall: agr(), byKind: { pr: agr(), issue: agr() }, byLabel: [], byRepo: [], confusion: [], bands: [], flags: [] };
   const qa = req.query.get("a"), qb = req.query.get("b");
   const pair = run.pairs.find((p) => p.a === qa && p.b === qb) ?? run.pairs.find((p) => p.a === qb && p.b === qa) ?? run.pairs[0]!;
-  const rows = db.prepare(`SELECT x.repo, i.kind, x.type_label AS ta, y.type_label AS tb, json_extract(x.probs, '$.top') AS pa, x.flags AS fa, y.flags AS fb
+  const rows = await db.prepare(`SELECT x.repo, i.kind, x.type_label AS ta, y.type_label AS tb, json_extract(x.probs, '$.top') AS pa, x.flags AS fa, y.flags AS fb
     FROM classifications x JOIN classifications y ON y.run_id = x.run_id AND y.repo = x.repo AND y.number = x.number AND y.classifier = :b
     LEFT JOIN items i ON i.repo = x.repo AND i.number = x.number
     WHERE x.run_id = :run AND x.classifier = :a${hide ? ` AND ${hide}` : ""}`).all({ run: run.id, a: pair.a, b: pair.b, ...hp }) as PairRow[];
@@ -105,7 +105,7 @@ export async function classifiersReport(db: DatabaseSync, req: Req): Promise<Cla
   };
 }
 
-export async function disagreements(db: DatabaseSync, req: Req): Promise<DisagreementList> {
+export async function disagreements(db: Db, req: Req): Promise<DisagreementList> {
   const run = req.query.get("run") ?? "", a = req.query.get("a") ?? "", b = req.query.get("b") ?? "";
   const where = ["x.run_id = :run", "x.classifier = :a", "x.type_label IS NOT NULL", "y.type_label IS NOT NULL", "x.type_label <> y.type_label"];
   const p: Record<string, string | number> = { run, a, b };
@@ -125,8 +125,8 @@ export async function disagreements(db: DatabaseSync, req: Req): Promise<Disagre
   const off = Math.min(1_000_000, Math.max(0, Math.floor(Number(req.query.get("offset"))) || 0));
   const from = `FROM classifications x JOIN classifications y ON y.run_id = x.run_id AND y.repo = x.repo AND y.number = x.number AND y.classifier = :b
     LEFT JOIN items i ON i.repo = x.repo AND i.number = x.number WHERE ${where.join(" AND ")}`;
-  const total = (db.prepare(`SELECT COUNT(*) AS n ${from}`).get(p) as { n: number }).n;
-  const rows = db.prepare(`SELECT x.repo, x.number, i.kind, i.state, i.title, x.type_label AS la, y.type_label AS lb,
+  const total = (await db.prepare(`SELECT COUNT(*) AS n ${from}`).get(p) as { n: number }).n;
+  const rows = await db.prepare(`SELECT x.repo, x.number, i.kind, i.state, i.title, x.type_label AS la, y.type_label AS lb,
       json_extract(x.probs, '$.top') AS pa, json_extract(y.probs, '$.top') AS pb ${from} ORDER BY x.repo, x.number LIMIT :lim OFFSET :off`).all({ ...p, lim, off }) as
     { repo: string; number: number; kind: string | null; state: string | null; title: string | null; la: string; lb: string; pa: number | null; pb: number | null }[];
   return {
@@ -144,7 +144,7 @@ const TOTALS = `COUNT(*) AS calls, COALESCE(SUM(items), 0) AS items, COALESCE(SU
   COALESCE(SUM(cache_read_tokens), 0) AS cacheRead, COALESCE(SUM(cache_write_tokens), 0) AS cacheWrite, SUM(cost_usd) AS usd,
   COALESCE(ROUND((julianday(MAX(ended_at)) - julianday(MIN(started_at))) * 86400), 0) AS wallSeconds`;
 
-export async function cost(db: DatabaseSync, req: Req): Promise<CostReport> {
+export async function cost(db: Db, req: Req): Promise<CostReport> {
   const run = req.query.get("run") ?? "";
   const p: Record<string, string | number> = { run };
   const hidden = await hiddenRepos(db, req);
@@ -154,25 +154,25 @@ export async function cost(db: DatabaseSync, req: Req): Promise<CostReport> {
   const staff = canSeeInternals(req);
   // Null-safe: calls without a repo (classification runs) stay in the totals.
   const flt = `(:run = '' OR run_id = :run)${hide ? ` AND (repo IS NULL OR ${hide})` : ""}`;
-  const q = <T>(sql: string) => (db.prepare(sql).all(p) as T[]).map((r) => ({ ...r }) as T);
-  const total = (db.prepare(`SELECT ${TOTALS} FROM token_usage WHERE ${flt}`).get(p) as unknown as UsageTotals);
-  const span = db.prepare(`SELECT MIN(COALESCE(ended_at, started_at)) AS a, MAX(COALESCE(ended_at, started_at)) AS b FROM token_usage WHERE ${flt}`).get(p) as { a: string | null; b: string | null };
+  const q = async <T>(sql: string) => (await db.prepare(sql).all(p) as T[]).map((r) => ({ ...r }) as T);
+  const total = (await db.prepare(`SELECT ${TOTALS} FROM token_usage WHERE ${flt}`).get(p) as unknown as UsageTotals);
+  const span = await db.prepare(`SELECT MIN(COALESCE(ended_at, started_at)) AS a, MAX(COALESCE(ended_at, started_at)) AS b FROM token_usage WHERE ${flt}`).get(p) as { a: string | null; b: string | null };
   const hours = span.a && span.b ? (Date.parse(span.b) - Date.parse(span.a)) / 3600_000 : 0;
   const bucketSize = hours > 72 ? "day" : "hour";
   const len = bucketSize === "day" ? 10 : 13;
   return {
-    runs: db.prepare(`SELECT run_id AS id, MIN(started_at) AS "from", MAX(COALESCE(ended_at, started_at)) AS "to" FROM token_usage${hide ? ` WHERE (repo IS NULL OR ${hide})` : ""} GROUP BY run_id ORDER BY MAX(COALESCE(ended_at, started_at)) DESC`).all(Object.fromEntries(Object.entries(p).filter(([k]) => k !== "run"))) as CostReport["runs"],
+    runs: await db.prepare(`SELECT run_id AS id, MIN(started_at) AS "from", MAX(COALESCE(ended_at, started_at)) AS "to" FROM token_usage${hide ? ` WHERE (repo IS NULL OR ${hide})` : ""} GROUP BY run_id ORDER BY MAX(COALESCE(ended_at, started_at)) DESC`).all(Object.fromEntries(Object.entries(p).filter(([k]) => k !== "run"))) as CostReport["runs"],
     run,
     total: { ...(total as object) } as UsageTotals,
-    itemsClassified: (db.prepare(`SELECT COUNT(*) AS n FROM (SELECT DISTINCT repo, number FROM classifications WHERE ${flt})`).get(p) as { n: number }).n,
-    stages: q<CostReport["stages"][number]>(`SELECT COALESCE(stage, '') AS stage, COALESCE(model, '') AS model, ${TOTALS} FROM token_usage WHERE ${flt} GROUP BY stage, model ORDER BY stage, model`),
-    repos: q<CostReport["repos"][number]>(`SELECT repo, ${TOTALS} FROM token_usage WHERE ${flt} AND repo IS NOT NULL GROUP BY repo ORDER BY COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)), 0) DESC`),
-    users: !staff ? [] : q<CostReport["users"][number]>(`SELECT user_login AS login, COUNT(*) AS calls, COALESCE(SUM(item_count), 0) AS items, COALESCE(SUM(input_tokens), 0) AS input, COALESCE(SUM(output_tokens), 0) AS output,
+    itemsClassified: (await db.prepare(`SELECT COUNT(*) AS n FROM (SELECT DISTINCT repo, number FROM classifications WHERE ${flt})`).get(p) as { n: number }).n,
+    stages: await q<CostReport["stages"][number]>(`SELECT COALESCE(stage, '') AS stage, COALESCE(model, '') AS model, ${TOTALS} FROM token_usage WHERE ${flt} GROUP BY stage, model ORDER BY stage, model`),
+    repos: await q<CostReport["repos"][number]>(`SELECT repo, ${TOTALS} FROM token_usage WHERE ${flt} AND repo IS NOT NULL GROUP BY repo ORDER BY COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)), 0) DESC`),
+    users: !staff ? [] : await q<CostReport["users"][number]>(`SELECT user_login AS login, COUNT(*) AS calls, COALESCE(SUM(item_count), 0) AS items, COALESCE(SUM(input_tokens), 0) AS input, COALESCE(SUM(output_tokens), 0) AS output,
         COALESCE(SUM(cache_read_tokens), 0) AS cacheRead, COALESCE(SUM(cache_write_tokens), 0) AS cacheWrite, SUM(cost_usd) AS usd,
         COALESCE(ROUND((julianday(MAX(ended_at)) - julianday(MIN(started_at))) * 86400), 0) AS wallSeconds
       FROM agent_runs WHERE provider = 'claude'${hideRuns ? ` AND EXISTS (SELECT 1 FROM agent_run_items y WHERE y.run_id = agent_runs.id) AND NOT EXISTS (SELECT 1 FROM agent_run_items x WHERE x.run_id = agent_runs.id AND NOT (${hideRuns}))` : ""} AND (:run = '' OR started_at BETWEEN (SELECT MIN(started_at) FROM token_usage WHERE run_id = :run) AND (SELECT MAX(COALESCE(ended_at, started_at)) FROM token_usage WHERE run_id = :run))
       GROUP BY user_login ORDER BY user_login IS NULL, COALESCE(SUM(cost_usd), 0) DESC`),
-    series: q<CostReport["series"][number]>(`SELECT substr(COALESCE(ended_at, started_at), 1, ${len}) AS bucket,
+    series: await q<CostReport["series"][number]>(`SELECT substr(COALESCE(ended_at, started_at), 1, ${len}) AS bucket,
         COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) + COALESCE(cache_read_tokens, 0) + COALESCE(cache_write_tokens, 0)), 0) AS tokens, SUM(cost_usd) AS usd
       FROM token_usage WHERE ${flt} AND COALESCE(ended_at, started_at) IS NOT NULL GROUP BY bucket ORDER BY bucket`),
     bucketSize,

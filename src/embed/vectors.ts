@@ -12,8 +12,8 @@
 // again and overwrites its slot. Deleted rows and changed tracked repos need a
 // rebuild, done on the side and swapped in when complete; a rebuild also runs
 // every REBUILD_MS to drop vectors of deleted rows.
-import type { DatabaseSync } from "node:sqlite";
 import type { Embedder } from "./model.ts";
+import type { Db } from "../db/index.ts";
 
 export type Hit = { repo: string; number: number; score: number };
 
@@ -91,12 +91,12 @@ export class VectorIndex {
   }
 
   /** Starts loading or catching up when the table changed (checked at most every CHECK_MS). Returns at once. */
-  refresh(db: DatabaseSync): void {
+  async refresh(db: Db): Promise<void> {
     if (this.loading) return;
     const now = Date.now();
     if (this.store && now - this.checked < CHECK_MS) return;
     this.checked = now;
-    const s = db.prepare(`SELECT (SELECT COUNT(*) FROM main.item_embeddings) AS n, (SELECT MAX(rowid) FROM main.item_embeddings) AS m,
+    const s = await db.prepare(`SELECT (SELECT COUNT(*) FROM main.item_embeddings) AS n, (SELECT MAX(rowid) FROM main.item_embeddings) AS m,
       (SELECT group_concat(name) FROM main.tracked_repos) AS t`).get() as { n: number; m: number | null; t: string | null };
     const tracked = s.t ?? "";
     const cur = this.store;
@@ -112,19 +112,19 @@ export class VectorIndex {
   }
 
   /** Resolves once the first load finished (at once when the index has vectors). */
-  async ready(db: DatabaseSync): Promise<void> {
-    this.refresh(db);
+  async ready(db: Db): Promise<void> {
+    await this.refresh(db);
     if (!this.size && this.loading) await this.job;
   }
 
-  private async load(db: DatabaseSync, into: Store | null, tracked: string, tableRows: number): Promise<void> {
+  private async load(db: Db, into: Store | null, tracked: string, tableRows: number): Promise<void> {
     // A full rebuild fills a new store, swapped in at the end; an incremental load writes into the live one.
     const s = into ?? newStore(this.embedder.dim, Math.max(1024, Math.ceil(tableRows * 1.2)), tracked);
     const next = db.prepare(`SELECT rowid AS rid, repo, number, vec FROM main.item_embeddings
       WHERE rowid > ? AND model = ? AND repo IN (SELECT name FROM main.tracked_repos) ORDER BY rowid LIMIT ?`);
     try {
       for (;;) {
-        const rows = next.all(s.lastRowid, this.embedder.id, CHUNK) as { rid: number; repo: string; number: number; vec: Uint8Array }[];
+        const rows = await next.all(s.lastRowid, this.embedder.id, CHUNK) as { rid: number; repo: string; number: number; vec: Uint8Array }[];
         for (const r of rows) put(s, r.repo, r.number, r.vec);
         if (rows.length) s.lastRowid = rows[rows.length - 1]!.rid;
         if (rows.length < CHUNK) break;
@@ -138,8 +138,8 @@ export class VectorIndex {
     }
   }
 
-  vectorOf(db: DatabaseSync, repo: string, number: number): Float32Array | undefined {
-    this.refresh(db);
+  async vectorOf(db: Db, repo: string, number: number): Promise<Float32Array | undefined> {
+    await this.refresh(db);
     const s = this.store;
     const i = s?.at.get(`${repo}#${number}`);
     if (!s || i === undefined) return undefined;
@@ -149,8 +149,8 @@ export class VectorIndex {
   }
 
   // The `limit` items closest to `q`, best first, leaving out `skip` ("repo#n"); with `repo`, only items of that repo.
-  nearest(db: DatabaseSync, q: Float32Array, limit: number, skip?: string, repo?: string): Hit[] {
-    this.refresh(db);
+  async nearest(db: Db, q: Float32Array, limit: number, skip?: string, repo?: string): Promise<Hit[]> {
+    await this.refresh(db);
     const s = this.store;
     if (!s) return [];
     const dim = s.dim;

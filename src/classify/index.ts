@@ -1,13 +1,13 @@
 // autocraft-server classify | classify current | classify-sample | classify-referee | classify-compare
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
-import { connect } from "../db.ts";
 import { band, compareReport, itemUrl, loadReference, loadRows, pairUp, ref, type Pair } from "./report.ts";
 import { markSpotCheck, pickDisagreements, runReferee } from "./referee.ts";
 import { latestRun, runExists, setCurrentRun } from "./settled.ts";
 import { loadItems, loadRefs, runHaiku, runJev } from "./run.ts";
 import { rng, shuffle } from "./sample.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 function flags(args: string[], names: string[]): Record<string, string> {
   const out: Record<string, string> = {};
@@ -31,57 +31,57 @@ function need(f: Record<string, string>, name: string): string {
 }
 
 // autocraft-server classify current [<run>]: shows the current run, or makes <run> the current one.
-function current(args: string[]): void {
-  const db = connect();
+async function current(args: string[]): Promise<void> {
+  const db = await openDb();
   const [run] = args;
   if (args.length > 1) {
     console.error("usage: classify current [<run>]");
     process.exit(1);
   }
   if (run === undefined) {
-    const set = (db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined)?.value;
-    console.log(set ? `current run: ${set}` : `no current run is set; the run with the newest Jev (or Haiku-alone) verdict is used: ${latestRun(db) ?? "none"}`);
+    const set = (await db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined)?.value;
+    console.log(set ? `current run: ${set}` : `no current run is set; the run with the newest Jev (or Haiku-alone) verdict is used: ${await latestRun(db) ?? "none"}`);
     return;
   }
-  if (!runExists(db, run)) {
+  if (!await runExists(db, run)) {
     console.error(`run ${run} has no Jev or Haiku-alone verdicts`);
     process.exit(1);
   }
-  setCurrentRun(db, run, "cli");
+  await setCurrentRun(db, run, "cli");
   console.log(`current run: ${run}`);
 }
 
 async function classify(args: string[]): Promise<void> {
-  if (args[0] === "current") return current(args.slice(1));
+  if (args[0] === "current") return await current(args.slice(1));
   const f = flags(args, ["classifier", "run-id", "items"]);
   const which = need(f, "classifier"), runId = need(f, "run-id");
   if (which !== "jev" && which !== "haiku") {
     console.error("--classifier is jev or haiku");
     process.exit(1);
   }
-  const db = connect();
-  const items = loadItems(db, loadRefs(need(f, "items")));
+  const db = await openDb();
+  const items = await loadItems(db, loadRefs(need(f, "items")));
   const t0 = Date.now();
   if (which === "jev") await runJev(db, runId, items);
   else await runHaiku(db, runId, items);
-  const n = (db.prepare("SELECT count(*) AS n FROM classifications WHERE run_id = ? AND classifier = ?").get(runId, which) as { n: number }).n;
+  const n = (await db.prepare("SELECT count(*) AS n FROM classifications WHERE run_id = ? AND classifier = ?").get(runId, which) as { n: number }).n;
   console.log(`${which}: ${n}/${items.length} items classified in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 }
 
 /** Open PRs that have a reference label, plus open issues of the named repos, chosen with a fixed seed. */
-function sample(args: string[]): void {
+async function sample(args: string[]): Promise<void> {
   const f = flags(args, ["seed", "reference", "pr-repo", "prs", "issue-repos", "issues-each", "out-dir"]);
   const seed = Number(f.seed ?? 1), rand = rng(seed);
-  const db = connect();
+  const db = await openDb();
   const outDir = need(f, "out-dir");
   const prRepo = need(f, "pr-repo");
   const reference = loadReference(need(f, "reference"), prRepo);
   const open = db.prepare("SELECT number FROM items WHERE repo = ? AND kind = ? AND state = 'OPEN' ORDER BY number");
-  const prs = (open.all(prRepo, "pr") as { number: number }[]).map((r) => `${prRepo}#${r.number}`).filter((r) => reference.has(r));
+  const prs = (await open.all(prRepo, "pr") as { number: number }[]).map((r) => `${prRepo}#${r.number}`).filter((r) => reference.has(r));
   const a = shuffle(prs, rand).slice(0, Number(f.prs ?? 200)).sort();
   const b: string[] = [];
   for (const repo of (f["issue-repos"] ?? "").split(",").filter(Boolean)) {
-    const issues = (open.all(repo, "issue") as { number: number }[]).map((r) => `${repo}#${r.number}`);
+    const issues = (await open.all(repo, "issue") as { number: number }[]).map((r) => `${repo}#${r.number}`);
     b.push(...shuffle(issues, rand).slice(0, Number(f["issues-each"] ?? 50)).sort());
   }
   writeFileSync(join(outDir, "items-a.txt"), a.join("\n") + "\n");
@@ -90,25 +90,25 @@ function sample(args: string[]): void {
   console.log(`${prs.length} open PRs with a reference label; sampled ${a.length} PRs and ${b.length} issues into ${outDir}`);
 }
 
-function pairsOf(db: DatabaseSync, runId: string, refFile: string | undefined, prRepo: string): Pair[] {
-  return pairUp(loadRows(db, runId), refFile ? loadReference(refFile, prRepo) : new Map());
+async function pairsOf(db: Db, runId: string, refFile: string | undefined, prRepo: string): Promise<Pair[]> {
+  return pairUp(await loadRows(db, runId), refFile ? loadReference(refFile, prRepo) : new Map());
 }
 
 async function referee(args: string[]): Promise<void> {
   const f = flags(args, ["run-id", "reference", "pr-repo", "count", "spot-check", "seed"]);
   const runId = need(f, "run-id"), seed = Number(f.seed ?? 1);
-  const db = connect();
-  const pairs = pairsOf(db, runId, f.reference, f["pr-repo"] ?? "photocraft");
+  const db = await openDb();
+  const pairs = await pairsOf(db, runId, f.reference, f["pr-repo"] ?? "photocraft");
   const picked = pickDisagreements(pairs, Number(f.count ?? 30), seed);
   await runReferee(db, runId, picked);
-  markSpotCheck(db, runId, pairs, Number(f["spot-check"] ?? 10), seed);
+  await markSpotCheck(db, runId, pairs, Number(f["spot-check"] ?? 10), seed);
   console.log(`refereed ${picked.length} of ${pairs.filter((p) => p.jev.type_label !== p.haiku.type_label).length} disagreements`);
 }
 
 type Usage = { model: string; agents: number; items: number; input: number; output: number; cache_read: number; cache_write: number; cost: number | null; first: string; last: string; busy: number };
 
-function costSection(db: DatabaseSync, runId: string, pairs: Pair[]): string {
-  const rows = db.prepare(`SELECT model, count(*) AS agents, sum(items) AS items, sum(input_tokens) AS input, sum(output_tokens) AS output,
+async function costSection(db: Db, runId: string, pairs: Pair[]): Promise<string> {
+  const rows = await db.prepare(`SELECT model, count(*) AS agents, sum(items) AS items, sum(input_tokens) AS input, sum(output_tokens) AS output,
     sum(cache_read_tokens) AS cache_read, sum(cache_write_tokens) AS cache_write, sum(cost_usd) AS cost, min(started_at) AS first, max(ended_at) AS last,
     sum((julianday(ended_at) - julianday(started_at)) * 86400) AS busy FROM token_usage WHERE run_id = ? GROUP BY model`).all(runId) as Usage[];
   const n = pairs.length;
@@ -123,8 +123,8 @@ function costSection(db: DatabaseSync, runId: string, pairs: Pair[]): string {
     `| ${head.join(" | ")} |\n|${head.map(() => "---").join("|")}|\n${body.map((r) => `| ${r.join(" | ")} |`).join("\n")}`;
 }
 
-function refereeSection(db: DatabaseSync, runId: string, pairs: Pair[]): { text: string; spot: string; stats: { n: number; jev: number; haiku: number; neither: number } } {
-  const sonnet = new Map((db.prepare(`SELECT repo, number, type_label, flags, reason FROM classifications WHERE classifier = 'sonnet' AND run_id = ?`).all(runId) as
+async function refereeSection(db: Db, runId: string, pairs: Pair[]): Promise<{ text: string; spot: string; stats: { n: number; jev: number; haiku: number; neither: number } }> {
+  const sonnet = new Map((await db.prepare(`SELECT repo, number, type_label, flags, reason FROM classifications WHERE classifier = 'sonnet' AND run_id = ?`).all(runId) as
     { repo: string; number: number; type_label: string; flags: string; reason: string }[]).map((r) => [ref(r), r]));
   const ps = pairs.filter((p) => sonnet.has(ref(p.r)));
   const side = (p: Pair) => { const v = sonnet.get(ref(p.r))!.type_label; return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
@@ -140,17 +140,17 @@ function refereeSection(db: DatabaseSync, runId: string, pairs: Pair[]): { text:
   return { text, spot, stats };
 }
 
-function compare(args: string[]): void {
+async function compare(args: string[]): Promise<void> {
   const f = flags(args, ["run-id", "reference", "pr-repo", "out"]);
   const runId = need(f, "run-id");
-  const db = connect();
-  const pairs = pairsOf(db, runId, f.reference, f["pr-repo"] ?? "photocraft");
-  const r = refereeSection(db, runId, pairs);
+  const db = await openDb();
+  const pairs = await pairsOf(db, runId, f.reference, f["pr-repo"] ?? "photocraft");
+  const r = await refereeSection(db, runId, pairs);
   const conf = pairs.filter((p) => p.ref && band(p.jev.top) === "≥0.9");
   const confOk = conf.filter((p) => p.jev.type_label === p.ref).length;
   const rule = `Rule inputs: Jev on confident items (top probability ≥0.9) with a reference: ${confOk}/${conf.length} = ${conf.length ? ((100 * confOk) / conf.length).toFixed(1) : "-"}% (needs ≥90%). ` +
     `In ${r.stats.n} refereed disagreements Jev was wrong ${r.stats.n - r.stats.jev} times and Haiku ${r.stats.n - r.stats.haiku} times.`;
-  const report = [`# Classification pilot ${runId}`, "", compareReport(pairs), "", "## Referee", "", r.text, "", "## Spot-check items", "", r.spot, "", "## Cost", "", costSection(db, runId, pairs), "", "## Rule", "", rule, ""].join("\n");
+  const report = [`# Classification pilot ${runId}`, "", compareReport(pairs), "", "## Referee", "", r.text, "", "## Spot-check items", "", r.spot, "", "## Cost", "", await costSection(db, runId, pairs), "", "## Rule", "", rule, ""].join("\n");
   if (f.out) writeFileSync(f.out, report);
   else console.log(report);
 }

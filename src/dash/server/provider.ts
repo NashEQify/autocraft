@@ -33,7 +33,7 @@ export class RevokeRefused extends Error {
 
 export interface Provider {
   /** With selectAccount the provider shows its account picker even when someone is already signed in there. */
-  authorizeUrl(state: string, challenge: string, redirectUri: string, selectAccount?: boolean, scopes?: string[]): string;
+  authorizeUrl(state: string, challenge: string, redirectUri: string, selectAccount?: boolean, scopes?: string[]): Promise<string>;
   // Each returns null when the provider rejects the code or refresh token, and
   // throws on a transport failure.
   exchange(code: string, verifier: string, redirectUri: string): Promise<Tokens | null>;
@@ -68,7 +68,7 @@ export class GitHubProvider implements Provider {
     this.#id = clientId;
     this.#secret = clientSecret;
   }
-  authorizeUrl(state: string, challenge: string, redirectUri: string, selectAccount = false, scopes: string[] = []): string {
+  async authorizeUrl(state: string, challenge: string, redirectUri: string, selectAccount = false, scopes: string[] = []): Promise<string> {
     // Dashboard sign-in asks for no scopes: the token reads public data, which is all a permission check on a public repo needs.
     const q = new URLSearchParams({
       client_id: this.#id, redirect_uri: redirectUri, state,
@@ -162,7 +162,7 @@ export class FakeProvider implements Provider {
     this.#permsFile = permsFile;
     this.tokenTtlMs = tokenTtlMs;
   }
-  authorizeUrl(state: string, challenge: string, redirectUri: string, _selectAccount = false, scopes: string[] = []): string {
+  async authorizeUrl(state: string, challenge: string, redirectUri: string, _selectAccount = false, scopes: string[] = []): Promise<string> {
     return `/auth/dev/authorize?${new URLSearchParams({ state, code_challenge: challenge, redirect_uri: redirectUri, ...(scopes.length ? { scope: scopes.join(" ") } : {}) })}`;
   }
   issueCode(login: string, challenge: string, redirectUri: string): string {
@@ -248,24 +248,24 @@ export function oauthProviderFor(config: Config): Provider {
  * The dashboard's sign-in provider. The identity (and the registered app) is read at every call, so a switch or a
  * registration takes effect without a restart. A GitHub App's user authorization uses the same endpoints as the OAuth App's.
  */
-export function providerFor(config: Config, identity: () => "box" | "app"): Provider {
+export function providerFor(config: Config, identity: () => Promise<"box" | "app">): Provider {
   if (config.devAuth) return new FakeProvider(config.devPermsFile, config.devTokenTtlMs ?? undefined);
-  const now = (): Provider => {
+  const now = async (): Promise<Provider> => {
     const { githubClientId, githubClientSecret, app } = config.secrets;
-    return identity() === "app" && app ? new GitHubProvider(app.clientId, app.clientSecret) : new GitHubProvider(githubClientId, githubClientSecret);
+    return await identity() === "app" && app ? new GitHubProvider(app.clientId, app.clientSecret) : new GitHubProvider(githubClientId, githubClientSecret);
   };
   // Sign-in under the app identity never falls back to the OAuth App: without app keys it fails.
-  const noFallback = (): Provider => {
-    if (identity() === "app" && !config.secrets.app) throw new Error("the GitHub identity is the app but no app keys are available");
-    return now();
+  const noFallback = async (): Promise<Provider> => {
+    if (await identity() === "app" && !config.secrets.app) throw new Error("the GitHub identity is the app but no app keys are available");
+    return await now();
   };
   return {
-    authorizeUrl: (...a) => noFallback().authorizeUrl(...a),
-    exchange: (...a) => noFallback().exchange(...a),
-    refresh: (...a) => now().refresh(...a),
-    identity: (...a) => now().identity(...a),
-    revoke: (...a) => now().revoke(...a),
-    revokeGrant: (...a) => now().revokeGrant(...a),
-    permission: (...a) => now().permission(...a),
+    authorizeUrl: async (...a) => await (await noFallback()).authorizeUrl(...a),
+    exchange: async (...a) => (await noFallback()).exchange(...a),
+    refresh: async (...a) => (await now()).refresh(...a),
+    identity: async (...a) => (await now()).identity(...a),
+    revoke: async (...a) => (await now()).revoke(...a),
+    revokeGrant: async (...a) => (await now()).revokeGrant(...a),
+    permission: async (...a) => (await now()).permission(...a),
   };
 }

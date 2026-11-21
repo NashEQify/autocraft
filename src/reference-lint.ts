@@ -4,7 +4,6 @@
 // Both only run for a repo that has a reference folder.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { isHalt } from "./agents/call.ts";
 import { jevAvailable } from "./agents/jev.ts";
 import { runModelStep } from "./agents/step.ts";
@@ -12,6 +11,7 @@ import { inferenceMode } from "./remote/mode.ts";
 import { REFERENCE_HAIKU, REFERENCE_JEV } from "./agents/steps.ts";
 import { QUOTE_WORDS, REFERENCE_JEV_ACCEPT, REFERENCE_JEV_REJECT, type LintProblem } from "./replylint.ts";
 import { REFERENCE_LEAK } from "./review/opus-parse.ts";
+import type { Db } from "./db/index.ts";
 
 /** Letters of other scripts that read as Latin ones; a quote written with them compares as the Latin text. */
 const LOOKALIKE: Record<string, string> = {
@@ -151,7 +151,7 @@ export type SemanticDeps = {
   /** Haiku's verdict (true: it refers); null when it gave no valid answer. */
   haiku(text: string): Promise<boolean | null>;
   /** False while Jev is unavailable: Haiku then decides alone. Absent means available. */
-  jevUsable?(): boolean;
+  jevUsable?(): Promise<boolean>;
 };
 
 /** The longest wait for a free account slot before the Haiku check gives up (counts as no): the fix turn must follow while the prompt cache is warm. */
@@ -162,17 +162,17 @@ export const HAIKU_WAIT_MS = 30_000;
  */
 export const HAIKU_WAIT_REMOTE_MS = 10 * 60_000;
 
-export function defaultSemanticDeps(db: DatabaseSync, ref: string): SemanticDeps {
+export function defaultSemanticDeps(db: Db, ref: string): SemanticDeps {
   return {
     async jev(text) {
       const r = await runModelStep(db, REFERENCE_JEV, { ref, text });
       return r.ok ? r.value : null;
     },
     async haiku(text) {
-      const r = await runModelStep(db, REFERENCE_HAIKU, [{ ref, text }], { maxWaitMs: inferenceMode(db) === "user-local" ? HAIKU_WAIT_REMOTE_MS : HAIKU_WAIT_MS });
+      const r = await runModelStep(db, REFERENCE_HAIKU, [{ ref, text }], { maxWaitMs: await inferenceMode(db) === "user-local" ? HAIKU_WAIT_REMOTE_MS : HAIKU_WAIT_MS });
       return r.ok ? r.value : null;
     },
-    jevUsable: () => jevAvailable(db),
+    jevUsable: async () => await jevAvailable(db),
   };
 }
 
@@ -182,7 +182,7 @@ export async function refersToDocumentation(text: string, deps: SemanticDeps): P
   const guard = async <T>(f: () => Promise<T>): Promise<T | null> => {
     try { return await f(); } catch (e) { if (isHalt(e)) throw e; console.log(`reference check failed: ${(e as Error).message}`); return null; }
   };
-  const p = (deps.jevUsable?.() ?? true) ? await guard(() => deps.jev(text)) : null;
+  const p = (await deps.jevUsable?.() ?? true) ? await guard(() => deps.jev(text)) : null;
   if (p !== null && p >= REFERENCE_JEV_ACCEPT) return true;
   if (p !== null && p < REFERENCE_JEV_REJECT) return false;
   return (await guard(() => deps.haiku(text))) === true;

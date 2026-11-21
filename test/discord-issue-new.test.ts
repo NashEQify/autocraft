@@ -6,7 +6,6 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
-import { connect } from "../src/db.ts";
 import type { Embedder } from "../src/embed/model.ts";
 import { toBlob } from "../src/embed/store.ts";
 import { VectorIndex } from "../src/embed/vectors.ts";
@@ -20,13 +19,14 @@ import { Search, type Ask } from "../src/discord/search.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-issue-"));
-const db = connect(join(dir, "d.db"));
+const db = await connectDb(join(dir, "d.db"));
 const keys = new DiscordKeys("k".repeat(40));
-useTestAccount(db);
-after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+await useTestAccount(db);
+after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
 const VOCAB = ["webp", "export", "quality", "dark", "mode", "layers"];
 const embedder: Embedder = {
@@ -89,13 +89,13 @@ const NONE = "None of these, file a new one";
 const draftUrl = (b: EditBody): URL => new URL(rows(b).find((x) => x.label === "Open on GitHub instead")!.url!);
 
 before(async () => {
-  db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('vectorcraft'), ('secret')").run();
-  db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public'), ('vectorcraft', 'storytold', 'public'), ('secret', 'storytold', 'private') ON CONFLICT(name) DO UPDATE SET visibility = excluded.visibility").run();
-  db.prepare("INSERT INTO release_apps (repo, name, stars, updated_at) VALUES ('vectorcraft', 'Vector Studio', 0, '2026-01-01')").run();
-  db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched, default_repo) VALUES ('c1', 'g1', 'G', 'dev', 1, 'photocraft')").run();
+  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('vectorcraft'), ('secret')").run();
+  await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public'), ('vectorcraft', 'storytold', 'public'), ('secret', 'storytold', 'private') ON CONFLICT(name) DO UPDATE SET visibility = excluded.visibility").run();
+  await db.prepare("INSERT INTO release_apps (repo, name, stars, updated_at) VALUES ('vectorcraft', 'Vector Studio', 0, '2026-01-01')").run();
+  await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched, default_repo) VALUES ('c1', 'g1', 'G', 'dev', 1, 'photocraft')").run();
   const recent = new Date().toISOString();
-  db.prepare("INSERT INTO items (repo, number, kind, state, title, body, url) VALUES ('photocraft', 1, 'issue', 'OPEN', 'Export to WebP ignores the quality setting', '', 'https://github.com/storytold/photocraft/issues/1')").run();
-  db.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('photocraft', 1, 'fake', 'h', ?, ?)").run(toBlob((await embedder.embed(["Export to WebP ignores the quality setting"], "item"))[0]!), recent);
+  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, url) VALUES ('photocraft', 1, 'issue', 'OPEN', 'Export to WebP ignores the quality setting', '', 'https://github.com/storytold/photocraft/issues/1')").run();
+  await db.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('photocraft', 1, 'fake', 'h', ?, ?)").run(toBlob((await embedder.embed(["Export to WebP ignores the quality setting"], "item"))[0]!), recent);
 });
 
 describe("search and filing flow", () => {
@@ -172,7 +172,7 @@ describe("search and filing flow", () => {
     await press("u4", fileId);
     assert.match(rest.callbacks[0]!.data!.content!, /expired/);
     // No prompt or reply text of the issue calls is left behind.
-    assert.equal((db.prepare("SELECT COUNT(*) AS c FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-issue')").get() as { c: number }).c, 0);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS c FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-issue')").get() as { c: number }).c, 0);
   });
 
   test("Edit reopens the draft in a form prefilled with title and body; the result replaces the draft", async () => {
@@ -197,7 +197,7 @@ describe("search and filing flow", () => {
   });
 
   test("over the daily cap no model is asked and the draft is built from the form", async () => {
-    db.prepare("INSERT INTO settings (key, value) VALUES ('discord_issue_daily_usd', '0') ON CONFLICT(key) DO UPDATE SET value = '0'").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('discord_issue_daily_usd', '0') ON CONFLICT(key) DO UPDATE SET value = '0'").run();
     calls.length = 0;
     pickReply = JSON.stringify({ picks: [] });
     await searchCmd("u6");
@@ -207,7 +207,7 @@ describe("search and filing flow", () => {
     const b = rest.edits[0]!;
     const u = draftUrl(b);
     assert.match(u.searchParams.get("body")!, /layers panel stays light/);
-    db.prepare("DELETE FROM settings WHERE key = 'discord_issue_daily_usd'").run();
+    await db.prepare("DELETE FROM settings WHERE key = 'discord_issue_daily_usd'").run();
     pickReply = JSON.stringify({ picks: [{ ref: "photocraft#1", reason: "Same problem" }] });
   });
 

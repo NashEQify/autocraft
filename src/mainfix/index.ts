@@ -12,9 +12,7 @@
 import { leaseItem } from "../runner/leases.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { actionable, ask, getDecision } from "../decisions.ts";
-import { connect } from "../db.ts";
 import { exec, fixupDir, type Exec } from "../fixup/git.ts";
 import { createIssue, ghRerunMainFailed, IssueError, type Writer } from "../github/write.ts";
 import { askClaude, saveUsage, type Usage } from "../classify/run.ts";
@@ -32,6 +30,8 @@ import { lintReady, openFixPrs, type FixPrDeps } from "./pr.ts";
 import { REASON_WORDS, VERDICTS, type MainFixInput, type MainFixVerdict } from "./types.ts";
 import { slugOf } from "../owners.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export { mainFixApprovalOf, setMainFixApproval } from "./approval.ts";
 export { autocraftText } from "./status.ts";
@@ -53,7 +53,7 @@ export type MainFixDeps = {
   gh: Gh;
   exec: Exec;
   /** Sorts the failed checks of one head; null when the model gave no usable answer. */
-  classify: (db: DatabaseSync, input: MainFixInput) => Promise<Verdict[] | null>;
+  classify: (db: Db, input: MainFixInput) => Promise<Verdict[] | null>;
   now: () => Date;
   /** What the fix PR step needs; without it no fix PR is made. */
   fix?: FixPrDeps;
@@ -87,7 +87,7 @@ export function defaultDeps(): MainFixDeps {
       const start = new Date().toISOString();
       const reply = await askClaude("mainfix.classify", model, [input], db);
       const usage = reply?.usage ?? ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null } as Usage);
-      saveUsage(db, `main-fix-${start.replace(/[-:]/g, "").slice(0, 15)}`, "main-fix", "main-fix", model, reply ? 1 : 0, usage, start, new Date().toISOString());
+      await saveUsage(db, `main-fix-${start.replace(/[-:]/g, "").slice(0, 15)}`, "main-fix", "main-fix", model, reply ? 1 : 0, usage, start, new Date().toISOString());
       return reply ? parseVerdicts(reply.text, input.checks.map((c) => c.check)) : null;
     },
   };
@@ -108,12 +108,12 @@ export function parseVerdicts(text: string, checks: string[]): Verdict[] | null 
 
 // ---- rows ---------------------------------------------------------------------
 
-const rowsAt = (db: DatabaseSync, repo: string, head: string): FixRow[] =>
-  db.prepare('SELECT * FROM main_fixes WHERE repo = ? AND head_sha = ? ORDER BY "check"').all(repo, head) as FixRow[];
+const rowsAt = async (db: Db, repo: string, head: string): Promise<FixRow[]> =>
+  await db.prepare('SELECT * FROM main_fixes WHERE repo = ? AND head_sha = ? ORDER BY "check"').all(repo, head) as FixRow[];
 
-function save(db: DatabaseSync, row: Omit<FixRow, "updated_at"> & { updated_at?: string }, at: string): void {
+async function save(db: Db, row: Omit<FixRow, "updated_at"> & { updated_at?: string }, at: string): Promise<void> {
   const { updated_at: _, ...r } = row;
-  db.prepare(`INSERT INTO main_fixes (repo, head_sha, "check", verdict, state, reason, run_id, run_url, excerpt, decision_id, issue_number, pr_number, pr_url, patch, files, lint_task, lint_round, lint_state, session, created_at, updated_at)
+  await db.prepare(`INSERT INTO main_fixes (repo, head_sha, "check", verdict, state, reason, run_id, run_url, excerpt, decision_id, issue_number, pr_number, pr_url, patch, files, lint_task, lint_round, lint_state, session, created_at, updated_at)
     VALUES (:repo, :head_sha, :check, :verdict, :state, :reason, :run_id, :run_url, :excerpt, :decision_id, :issue_number, :pr_number, :pr_url, :patch, :files, :lint_task, :lint_round, :lint_state, :session, :created_at, :at)
     ON CONFLICT (repo, head_sha, "check") DO UPDATE SET verdict = excluded.verdict, state = excluded.state, reason = excluded.reason, run_id = excluded.run_id,
       run_url = excluded.run_url, excerpt = excluded.excerpt, decision_id = excluded.decision_id, issue_number = excluded.issue_number, pr_number = excluded.pr_number, pr_url = excluded.pr_url,
@@ -121,27 +121,27 @@ function save(db: DatabaseSync, row: Omit<FixRow, "updated_at"> & { updated_at?:
     .run({ ...r, at });
 }
 
-const setState = (db: DatabaseSync, r: FixRow, state: string, reason: string | null, at: string, extra: Partial<FixRow> = {}): FixRow => {
+const setState = async (db: Db, r: FixRow, state: string, reason: string | null, at: string, extra: Partial<FixRow> = {}): Promise<FixRow> => {
   const next = { ...r, ...extra, state, reason };
-  save(db, next, at);
+  await save(db, next, at);
   return next;
 };
 
 /**
  * Where a code verdict goes. The row records `needs-fix`; the fix PR step takes its rows from here (state needs-fix, verdict code).
  */
-export function onCodeVerdict(db: DatabaseSync, row: FixRow, why: string, at: string): FixRow {
-  return setState(db, { ...row, verdict: "code" }, "needs-fix", oneLine(why), at);
+export async function onCodeVerdict(db: Db, row: FixRow, why: string, at: string): Promise<FixRow> {
+  return await setState(db, { ...row, verdict: "code" }, "needs-fix", oneLine(why), at);
 }
 
 // ---- the red head ---------------------------------------------------------------
 
 type Current = { headSha: string; branch: string; state: string; culprit: string; culpritPr: number | null; redSince: string; stateChangedAt: string };
 
-function currentOf(db: DatabaseSync, repo: string): Current | null {
-  const r = mainCiRepos(db).find((x) => x.repo === repo);
+async function currentOf(db: Db, repo: string): Promise<Current | null> {
+  const r = (await mainCiRepos(db)).find((x) => x.repo === repo);
   if (!r) return null;
-  const changed = db.prepare("SELECT state_changed_at AS at FROM main_ci WHERE repo = ? AND head_sha = ?").get(repo, r.headSha) as { at: string } | undefined;
+  const changed = await db.prepare("SELECT state_changed_at AS at FROM main_ci WHERE repo = ? AND head_sha = ?").get(repo, r.headSha) as { at: string } | undefined;
   const stateChangedAt = changed?.at ?? "";
   return { headSha: r.headSha, branch: r.branch, state: r.state, culprit: r.culprit?.sha ?? r.headSha, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, stateChangedAt };
 }
@@ -150,17 +150,17 @@ export const decisionId = (repo: string, check: string, culprit: string): string
 const isMainFixDecision = (repo: string, id: string): boolean => id.startsWith(`${repo}:main-fix:`);
 
 /** Whether a run of the step has something to do for the repo. */
-export function mainFixDue(db: DatabaseSync, repo: string): boolean {
-  if (!mainFixApprovalOf(db, repo)) return false;
-  if (actionable(db).some((a) => a.kind === "other" && isMainFixDecision(repo, a.id))) return true;
-  const cur = currentOf(db, repo);
+export async function mainFixDue(db: Db, repo: string): Promise<boolean> {
+  if (!await mainFixApprovalOf(db, repo)) return false;
+  if ((await actionable(db)).some((a) => a.kind === "other" && isMainFixDecision(repo, a.id))) return true;
+  const cur = await currentOf(db, repo);
   if (!cur) return false;
   // A stored patch is collected once its lint task ended, or closed when its head is no longer the current one.
-  if (cur.state !== "running" && lintReady(db, repo, cur.headSha)) return true;
-  const rows = rowsAt(db, repo, cur.headSha);
+  if (cur.state !== "running" && await lintReady(db, repo, cur.headSha)) return true;
+  const rows = await rowsAt(db, repo, cur.headSha);
   if (cur.state === "red") return rows.length === 0 || rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
   // A row left at needs-fix by an older head is closed by the next run.
-  return rows.some((r) => r.state === "rerun-requested") || (cur.state !== "running" && !!db.prepare("SELECT 1 FROM main_fixes WHERE repo = ? AND state = 'needs-fix'").get(repo));
+  return rows.some((r) => r.state === "rerun-requested") || (cur.state !== "running" && !!await db.prepare("SELECT 1 FROM main_fixes WHERE repo = ? AND state = 'needs-fix'").get(repo));
 }
 
 const issueTitle = (check: string): string => `Main CI fails: ${cleanLine(check, 100)}`;
@@ -183,20 +183,20 @@ const inputOf = (repo: string, f: CiFailure): MainFixInput => ({
 });
 
 /** A decision's state as the rows show it. */
-function fromDecision(db: DatabaseSync, id: string): { state: string; issue: number | null } {
-  const d = getDecision(db, id);
-  const issue = (db.prepare("SELECT issue_number AS n FROM main_fixes WHERE decision_id = ? AND issue_number IS NOT NULL LIMIT 1").get(id) as { n: number } | undefined)?.n ?? null;
+async function fromDecision(db: Db, id: string): Promise<{ state: string; issue: number | null }> {
+  const d = await getDecision(db, id);
+  const issue = (await db.prepare("SELECT issue_number AS n FROM main_fixes WHERE decision_id = ? AND issue_number IS NOT NULL LIMIT 1").get(id) as { n: number } | undefined)?.n ?? null;
   if (issue !== null) return { state: "issue-opened", issue };
   if (d?.answer === NOT_NOW && d.applied_at) return { state: "declined", issue: null };
   return { state: "asked", issue: null };
 }
 
-async function classifyHead(db: DatabaseSync, repo: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By = CLI_BY): Promise<boolean> {
+async function classifyHead(db: Db, repo: string, cur: Current, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By = CLI_BY): Promise<boolean> {
   const at = deps.now().toISOString();
-  const reading = await readFailure(deps.gh, repo, cur.headSha, optionalChecks(db, repo));
+  const reading = await readFailure(deps.gh, repo, cur.headSha, await optionalChecks(db, repo));
   const base = { repo, head_sha: cur.headSha, run_id: null, run_url: null, excerpt: null, decision_id: null, issue_number: null, pr_number: null, pr_url: null, patch: null, files: null, lint_task: null, lint_round: null, lint_state: null, session: null, created_at: at } as const;
   if (reading.kind === "skip") {
-    save(db, { ...base, check: "(none)", verdict: "code", state: "nothing-to-do", reason: oneLine(reading.why) }, at);
+    await save(db, { ...base, check: "(none)", verdict: "code", state: "nothing-to-do", reason: oneLine(reading.why) }, at);
     log(`  ${repo}: nothing to do: ${reading.why}`);
     return false;
   }
@@ -211,28 +211,28 @@ async function classifyHead(db: DatabaseSync, repo: string, cur: Current, deps: 
       ...base, check: c.name, verdict: v.verdict, state: "nothing-to-do", reason: v.reason || null, run_id: c.runId,
       run_url: c.runId ? `https://github.com/${slugOf(repo)}/actions/runs/${c.runId}` : null, excerpt: excerptOf(c) || null, updated_at: at,
     };
-    if (v.verdict === "code") { onCodeVerdict(db, row, v.reason || "a build, lint or test step failed", at); s.needsFix++; continue; }
+    if (v.verdict === "code") { await onCodeVerdict(db, row, v.reason || "a build, lint or test step failed", at); s.needsFix++; continue; }
     if (v.verdict === "infra") { await askInfra(db, row, cur, at, s); continue; }
     // flaky
-    if (row.run_id === null) { setState(db, row, "nothing-to-do", "no Actions run to rerun", at); continue; }
+    if (row.run_id === null) { await setState(db, row, "nothing-to-do", "no Actions run to rerun", at); continue; }
     // Recorded before the calls: one rerun per head, even if the process dies in the middle of them.
-    const saved = setState(db, row, "rerun-requested", row.reason, at);
+    const saved = await setState(db, row, "rerun-requested", row.reason, at);
     (rerunRuns.get(row.run_id) ?? rerunRuns.set(row.run_id, []).get(row.run_id)!).push(saved);
   }
   const w: Writer = { db, login: ACTOR };
   for (const [runId, rows] of rerunRuns) {
-    const g = guardRepo(db, repo, "main-fix", by);
+    const g = await guardRepo(db, repo, "main-fix", by);
     const res = "refused" in g ? { code: 1, stdout: "", stderr: g.refused } : await ghRerunMainFailed(w, g, deps.exec, { repo, head: cur.headSha, runId }, { checks: rows.map((r) => r.check) });
-    if (res.code !== 0) for (const r of rows) setState(db, r, "nothing-to-do", `GitHub refused the rerun: ${oneLine(res.stderr || res.stdout, 120)}`, deps.now().toISOString());
+    if (res.code !== 0) for (const r of rows) await setState(db, r, "nothing-to-do", `GitHub refused the rerun: ${oneLine(res.stderr || res.stdout, 120)}`, deps.now().toISOString());
     else { s.reran++; log(`  ${repo}: reran the failed jobs of run ${runId}`); }
   }
   return true;
 }
 
-async function askInfra(db: DatabaseSync, row: FixRow, cur: Current, at: string, s: MainFixSummary): Promise<void> {
+async function askInfra(db: Db, row: FixRow, cur: Current, at: string, s: MainFixSummary): Promise<void> {
   const id = decisionId(row.repo, row.check, cur.culprit);
-  if (!getDecision(db, id)) {
-    ask(db, [{
+  if (!await getDecision(db, id)) {
+    await ask(db, [{
       id, kind: "other", repo: row.repo, number: 0,
       question: `Open an upstream issue for the failing check "${cleanLine(row.check, 80)}" on ${row.repo}'s default branch?`,
       context: "The default branch's CI fails and the log reads as a failure outside the code. AutoCraft can open one issue with the check, the run link and a short log excerpt.",
@@ -249,54 +249,54 @@ async function askInfra(db: DatabaseSync, row: FixRow, cur: Current, at: string,
     }]);
     s.asked++;
   }
-  const d = fromDecision(db, id);
-  setState(db, row, d.state, row.reason, at, { decision_id: id, issue_number: d.issue });
+  const d = await fromDecision(db, id);
+  await setState(db, row, d.state, row.reason, at, { decision_id: id, issue_number: d.issue });
 }
 
 /** Rows waiting on a rerun: green is a pass; red again after a new reading, or after the wait, is a code failure. */
-function settleReruns(db: DatabaseSync, repo: string, cur: Current, deps: MainFixDeps, s: MainFixSummary): void {
+async function settleReruns(db: Db, repo: string, cur: Current, deps: MainFixDeps, s: MainFixSummary): Promise<void> {
   const at = deps.now().toISOString();
-  for (const r of rowsAt(db, repo, cur.headSha).filter((x) => x.state === "rerun-requested")) {
-    if (cur.state === "green" || cur.state === "optional") { setState(db, r, "rerun-passed", r.reason, at); continue; }
+  for (const r of (await rowsAt(db, repo, cur.headSha)).filter((x) => x.state === "rerun-requested")) {
+    if (cur.state === "green" || cur.state === "optional") { await setState(db, r, "rerun-passed", r.reason, at); continue; }
     if (cur.state !== "red") continue;
     const changedSince = cur.stateChangedAt > r.updated_at;
-    if (changedSince || deps.now().getTime() - Date.parse(r.updated_at) > RERUN_WAIT_MS) { onCodeVerdict(db, r, "red again after a rerun", at); s.needsFix++; }
+    if (changedSince || deps.now().getTime() - Date.parse(r.updated_at) > RERUN_WAIT_MS) { await onCodeVerdict(db, r, "red again after a rerun", at); s.needsFix++; }
   }
 }
 
 /** Opens the issues the operator asked for and records the "not now" answers. */
-async function applyAnswers(db: DatabaseSync, repo: string, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<void> {
-  for (const a of actionable(db).filter((x) => x.kind === "other" && isMainFixDecision(repo, x.id))) {
+async function applyAnswers(db: Db, repo: string, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<void> {
+  for (const a of (await actionable(db)).filter((x) => x.kind === "other" && isMainFixDecision(repo, x.id))) {
     const at = deps.now().toISOString();
-    const rows = db.prepare("SELECT * FROM main_fixes WHERE decision_id = ? ORDER BY created_at DESC, head_sha").all(a.id) as FixRow[];
-    const done = (): void => void db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
-    if (a.answer === NOT_NOW) { for (const r of rows) setState(db, r, "declined", r.reason, at); done(); continue; }
+    const rows = await db.prepare("SELECT * FROM main_fixes WHERE decision_id = ? ORDER BY created_at DESC, head_sha").all(a.id) as FixRow[];
+    const done = async (): Promise<void> => void await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+    if (a.answer === NOT_NOW) { for (const r of rows) await setState(db, r, "declined", r.reason, at); await done(); continue; }
     if (a.answer !== OPEN_ISSUE) continue;
     const row = rows[0];
-    if (!row) { done(); continue; }
-    if (rows.some((r) => r.issue_number !== null)) { done(); continue; }
+    if (!row) { await done(); continue; }
+    if (rows.some((r) => r.issue_number !== null)) { await done(); continue; }
     try {
-      const g = guardRepo(db, repo, "main-fix", by);
+      const g = await guardRepo(db, repo, "main-fix", by);
       if ("refused" in g) { log(`  ${repo}: issue for ${row.check} not opened: ${g.refused}`); continue; }
       const made = await createIssue({ db, login: ACTOR }, g, deps.exec, { repo, target: `${repo}:${row.head_sha.slice(0, 8)}`, title: issueTitle(row.check), body: issueBody(row) }, { by: "operator", model: NOTE_MODEL }, { decision: a.id });
-      for (const r of rows) setState(db, r, "issue-opened", r.reason, at, { issue_number: made.number });
-      done();
+      for (const r of rows) await setState(db, r, "issue-opened", r.reason, at, { issue_number: made.number });
+      await done();
       s.issues++;
       log(`  ${repo}: opened ${made.url}`);
     } catch (e) {
       // A refusal leaves the answer unapplied, so the next run tries again; a lost answer from GitHub may have left an issue, so it is not retried.
       const clear = e instanceof IssueError && e.clear;
       log(`  ${repo}: issue for ${row.check} not opened: ${oneLine(String((e as Error).message ?? e))}`);
-      if (!clear) { for (const r of rows) setState(db, r, "asked", `issue outcome unknown: ${oneLine(String((e as Error).message ?? e), 100)}`, at); done(); }
+      if (!clear) { for (const r of rows) await setState(db, r, "asked", `issue outcome unknown: ${oneLine(String((e as Error).message ?? e), 100)}`, at); await done(); }
     }
   }
 }
 
 /** One repo: nothing without the approval; then answers, rerun results and, for a red head with no rows, the reading and sorting. */
-export async function runMainFix(db: DatabaseSync, params: { repo: string; onHandled?: (n: number) => void; stopping?: () => boolean; by?: By }, log: (line: string) => void = console.log, deps: MainFixDeps = defaultDeps()): Promise<MainFixSummary> {
+export async function runMainFix(db: Db, params: { repo: string; onHandled?: (n: number) => void; stopping?: () => Promise<boolean>; by?: By }, log: (line: string) => void = console.log, deps: MainFixDeps = defaultDeps()): Promise<MainFixSummary> {
   const { repo } = params;
   const s: MainFixSummary = { repo, classified: 0, reran: 0, asked: 0, needsFix: 0, issues: 0, prs: 0, note: null };
-  if (!mainFixApprovalOf(db, repo)) {
+  if (!await mainFixApprovalOf(db, repo)) {
     s.note = `fixing a red main in ${repo} is not approved`;
     log(`main-fix ${repo}: ${s.note}; nothing done`);
     return s;
@@ -304,24 +304,24 @@ export async function runMainFix(db: DatabaseSync, params: { repo: string; onHan
   let handled = 0;
   const bump = (): void => params.onHandled?.(++handled);
   await applyAnswers(db, repo, deps, log, s, params.by ?? CLI_BY);
-  const cur = currentOf(db, repo);
+  const cur = await currentOf(db, repo);
   if (!cur) return s;
-  settleReruns(db, repo, cur, deps, s);
-  if (cur.state === "red" && rowsAt(db, repo, cur.headSha).length === 0 && !params.stopping?.()) {
-    const release = leaseItem(db, `head:${repo}@${cur.headSha}`, log);
+  await settleReruns(db, repo, cur, deps, s);
+  if (cur.state === "red" && (await rowsAt(db, repo, cur.headSha)).length === 0 && !await params.stopping?.()) {
+    const release = await leaseItem(db, `head:${repo}@${cur.headSha}`, log);
     // Another job may have classified the head before the lease was taken.
     if (release) {
       try {
-        if (rowsAt(db, repo, cur.headSha).length === 0) {
+        if ((await rowsAt(db, repo, cur.headSha)).length === 0) {
           bump();
           await classifyHead(db, repo, cur, deps, log, s, params.by ?? CLI_BY);
         }
-      } finally { release(); }
+      } finally { await release(); }
     }
   }
   if (deps.fix) {
     const asHead = (c: Current | null) => (c ? { headSha: c.headSha, branch: c.branch, state: c.state, redSince: c.redSince, culprit: c.culprit, culpritPr: c.culpritPr } : null);
-    const r = await openFixPrs({ db, repo, gh: deps.gh, exec: deps.exec, fix: deps.fix, now: deps.now, log, by: params.by, ...(params.stopping && { stopping: params.stopping }), setState: (r, state, reason, at, extra) => setState(db, r, state, reason, at, extra), current: () => asHead(currentOf(db, repo)) }, bump);
+    const r = await openFixPrs({ db, repo, gh: deps.gh, exec: deps.exec, fix: deps.fix, now: deps.now, log, by: params.by, ...(params.stopping && { stopping: params.stopping }), setState: async (r, state, reason, at, extra) => await setState(db, r, state, reason, at, extra), current: async () => asHead(await currentOf(db, repo)) }, bump);
     s.prs = r.opened;
   }
   log(`main-fix ${repo}: classified ${s.classified}, reran ${s.reran}, asked ${s.asked}, needs fix ${s.needsFix}, issues ${s.issues}, fix PRs ${s.prs}`);
@@ -335,20 +335,20 @@ export const commands = {
       const i = args.indexOf("--repo");
       if (i < 0 || !args[i + 1]) throw new Error("usage: main-fix --repo R [--apply]");
       const repo = args[i + 1]!;
-      const db = connect();
+      const db = await openDb();
       if (args.includes("--apply")) { await runMainFix(db, { repo }); return; }
-      for (const r of db.prepare('SELECT head_sha, "check", verdict, state, reason FROM main_fixes WHERE repo = ? ORDER BY created_at DESC LIMIT 50').all(repo) as { head_sha: string; check: string; verdict: string; state: string; reason: string | null }[])
+      for (const r of await db.prepare('SELECT head_sha, "check", verdict, state, reason FROM main_fixes WHERE repo = ? ORDER BY created_at DESC LIMIT 50').all(repo) as { head_sha: string; check: string; verdict: string; state: string; reason: string | null }[])
         console.log(`${r.head_sha.slice(0, 8)}\t${r.check}\t${r.verdict}\t${r.state}\t${r.reason ?? ""}`);
     },
   },
   "main-fix-approval": {
     summary: "main-fix-approval [--repo R]: which repos the operator approved for acting on a red default branch",
-    run(args: string[]): void {
+    async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
-      const db = connect();
-      const repos = i >= 0 ? [args[i + 1]!] : (db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const db = await openDb();
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
       for (const r of repos) {
-        const a = mainFixApprovalOf(db, r);
+        const a = await mainFixApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);
       }
     },

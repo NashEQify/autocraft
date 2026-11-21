@@ -5,12 +5,12 @@ import { WorkerApi } from "./client.ts";
 import { serve } from "./serve.ts";
 import { podPhase } from "./pod.ts";
 import { generateSigningKeys, storeServe } from "./store.ts";
-import { connect } from "../db.ts";
 import { requestUpdate, statusLines } from "../build/worker-update.ts";
 
 export { rustPlan, hasCargoLock } from "./rust.ts";
 export type { Capabilities, TaskStep, ClaimedTask } from "./types.ts";
 import { envVar } from "../env.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server worker serve [--config FILE]   (default: $AUTOCRAFT_WORKER_CONFIG)
        autocraft-server worker store serve [--config FILE]   (default: $AUTOCRAFT_STORE_CONFIG)
@@ -28,7 +28,7 @@ async function updateCode(args: string[]): Promise<void> {
     console.error(USAGE);
     process.exit(2);
   }
-  const db = connect();
+  const db = await openDb();
   try {
     const r = await requestUpdate(db, { sha, ssh, keyFile, gitDir });
     if (r.result === "current") console.log("-> Sandbox worker code is current.");
@@ -38,7 +38,7 @@ async function updateCode(args: string[]): Promise<void> {
     console.error(`!! sandbox worker update failed: ${(e as Error).message}`);
     process.exit(1);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -73,9 +73,9 @@ export const commands = {
     run: async (args: string[]) => {
       if (args[0] === "update-code") return updateCode(args.slice(1));
       if (args[0] === "status") {
-        const db = connect();
-        for (const l of statusLines(db)) console.log(l);
-        db.close();
+        const db = await openDb();
+        for (const l of await statusLines(db)) console.log(l);
+        await db.close();
         return;
       }
       if (args[0] === "store" && args[1] === "keygen") {

@@ -1,7 +1,7 @@
 // The Items browser (`GET /api/items`) and the top-bar search (`GET /api/search`),
 // both over the full-text tables items_fts and comments_fts (src/schema.sql).
 import { canSeeInternals } from "./staff.ts";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { SQLInputValue } from "node:sqlite";
 import type {
   ItemChecks, ItemPeek, ItemList, ItemListRow, ItemSort, SearchHit, SettledStatus, Snippet, Stage,
 } from "../../../web/src/api/types.ts";
@@ -21,6 +21,8 @@ import type { PlanView } from "../../core/plan-cache.ts";
 import type { CachedEntry } from "../../core/plan-read.ts";
 import { statusFromItem } from "../../core/item-status.ts";
 import { ITEM_PHASES, PHASE_SQL, type ItemPhase, type ItemStatus, type ItemStatusList, type ItemStatusRow } from "./home-types.ts";
+import { mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 const HAS_WORD = /[\p{L}\p{N}]/u;
 const quote = (s: string) => `"${s.replace(/"/g, "")}"`;
@@ -97,12 +99,11 @@ const list = (req: Req, key: string): string[] =>
 
 type Built = { where: string[]; statusWhere: string | null; statuses: SettledStatus[]; params: Record<string, SQLInputValue>; text: boolean };
 
-function build(db: DatabaseSync, req: Req, hidden: string[]): Built & { sort: ItemSort; desc: boolean; run: string | null } {
+async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort: ItemSort; desc: boolean; run: string | null }> {
   const q = req.query;
   const mode = q.get("mode") ?? "text";
   if (mode !== "text") throw new HttpError(400, "mode must be text");
-  const run = q.get("run") || latestRun(db);
-  settledTable(db, run);
+  const run = q.get("run") || await latestRun(db);
   const params: Record<string, SQLInputValue> = {};
   const where: string[] = [];
   const fts = ftsQuery(q.get("q") ?? "");
@@ -152,14 +153,14 @@ function build(db: DatabaseSync, req: Req, hidden: string[]): Built & { sort: It
   if (q.get("discord") === "1") where.push("EXISTS (SELECT 1 FROM main.discord_mentions d WHERE d.repo = i.repo AND d.number = i.number)");
   const flow = q.get("flow");
   if (flow) {
-    const refs = flowMembers(db, flow);
+    const refs = await flowMembers(db, flow);
     if (!refs) throw new HttpError(400, "flow must name a flowchart branch with its own items");
-    db.exec("CREATE TEMP TABLE IF NOT EXISTS flow_pick (repo TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo, number))");
-    db.exec("DELETE FROM temp.flow_pick");
+    await db.script("CREATE TEMP TABLE IF NOT EXISTS flow_pick (repo TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo, number))");
+    await db.script("DELETE FROM temp.flow_pick");
     const ins = db.prepare("INSERT OR IGNORE INTO temp.flow_pick VALUES (?, ?)");
     for (const r of refs) {
       const k = r.lastIndexOf("#");
-      ins.run(r.slice(0, k), Number(r.slice(k + 1)));
+      await ins.run(r.slice(0, k), Number(r.slice(k + 1)));
     }
     where.push("EXISTS (SELECT 1 FROM temp.flow_pick f WHERE f.repo = i.repo AND f.number = i.number)");
   }
@@ -176,6 +177,8 @@ function build(db: DatabaseSync, req: Req, hidden: string[]): Built & { sort: It
   let sort: ItemSort = sortQ ?? (fts ? "relevance" : state === BY_US ? "merged" : "updated");
   if (sort === "relevance" && !fts) sort = "updated";
   const desc = q.get("desc") !== "0";
+  // Last, after every parameter check: nothing is filled for a request that fails.
+  await settledTable(db, run);
   return { where, statusWhere, statuses: [...st] as SettledStatus[], params, text: !!fts, sort, desc, run };
 }
 
@@ -191,13 +194,13 @@ type Row = SettledRow & {
 
 const OPEN = "\u0002", CLOSE = "\u0003";
 
-function snippets(db: DatabaseSync, fts: string, rows: Row[]): Map<number, Snippet> {
+async function snippets(db: Db, fts: string, rows: Row[]): Promise<Map<number, Snippet>> {
   const out = new Map<number, Snippet>();
   if (!rows.length) return out;
   const ids = rows.map((r) => r.rid);
   const inList = ids.map(() => "?").join(",");
   const sn = (t: string, col: number) => `snippet(${t}, ${col}, '${OPEN}', '${CLOSE}', '…', 24)`;
-  const own = db.prepare(`SELECT rowid AS rid, ${sn("items_fts", 0)} AS t, ${sn("items_fts", 1)} AS b
+  const own = await db.prepare(`SELECT rowid AS rid, ${sn("items_fts", 0)} AS t, ${sn("items_fts", 1)} AS b
     FROM items_fts WHERE items_fts MATCH ? AND rowid IN (${inList})`).all(fts, ...ids) as { rid: number; t: string | null; b: string | null }[];
   for (const r of own) {
     if (r.b?.includes(OPEN)) out.set(r.rid, { field: "body", author: null, text: r.b });
@@ -206,7 +209,7 @@ function snippets(db: DatabaseSync, fts: string, rows: Row[]): Map<number, Snipp
   const rest = rows.filter((r) => !out.has(r.rid));
   if (!rest.length) return out;
   const pairs = rest.map(() => "(?, ?)").join(",");
-  const cm = db.prepare(`SELECT c.repo, c.number, c.author, ${sn("comments_fts", 0)} AS t FROM comments_fts
+  const cm = await db.prepare(`SELECT c.repo, c.number, c.author, ${sn("comments_fts", 0)} AS t FROM comments_fts
     JOIN main.comments c ON c.rowid = comments_fts.rowid
     WHERE comments_fts MATCH ? AND (c.repo, c.number) IN (VALUES ${pairs}) ORDER BY rank`)
     .all(fts, ...rest.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; author: string | null; t: string }[];
@@ -222,10 +225,10 @@ function snippets(db: DatabaseSync, fts: string, rows: Row[]): Map<number, Snipp
 // until a sync, a classification or a tracked-repo change, or for COUNTS_TTL at most.
 const COUNTS_TTL = 45_000;
 const COUNTS_MAX = 100;
-const countsCache = new WeakMap<DatabaseSync, { sig: string; at: number; byKey: Map<string, Record<SettledStatus, number>> }>();
+const countsCache = new WeakMap<Db, { sig: string; at: number; byKey: Map<string, Record<SettledStatus, number>> }>();
 
-function statusCounts(db: DatabaseSync, b: Built & { run: string | null }, sql: string, flow: string | null): Record<SettledStatus, number> {
-  const sig = JSON.stringify(db.prepare(`SELECT (SELECT value FROM main.settings WHERE key = 'org_high_water') AS hw,
+async function statusCounts(db: Db, b: Built & { run: string | null }, sql: string, flow: string | null): Promise<Record<SettledStatus, number>> {
+  const sig = JSON.stringify(await db.prepare(`SELECT (SELECT value FROM main.settings WHERE key = 'org_high_water') AS hw,
       (SELECT MAX(rowid) FROM main.classifications) AS cl, (SELECT group_concat(name) FROM main.tracked_repos) AS tr, (SELECT seq FROM main.change_seq WHERE topic = 'discord') AS dm`).get());
   const now = Date.now();
   let c = countsCache.get(db);
@@ -236,7 +239,7 @@ function statusCounts(db: DatabaseSync, b: Built & { run: string | null }, sql: 
   const key = JSON.stringify([sql, b.params, b.run, flow]);
   const hit = c.byKey.get(key);
   if (hit) return { ...hit };
-  const counts = db.prepare(sql).all(b.params) as { status: string | null; n: number }[];
+  const counts = await db.prepare(sql).all(b.params) as { status: string | null; n: number }[];
   const byStatus = Object.fromEntries(STATUSES.map((s) => [s, 0])) as Record<SettledStatus, number>;
   for (const r of counts) byStatus[(r.status ?? "unclassified") as SettledStatus] += r.n;
   if (c.byKey.size >= COUNTS_MAX) c.byKey.clear();
@@ -244,45 +247,51 @@ function statusCounts(db: DatabaseSync, b: Built & { run: string | null }, sql: 
   return { ...byStatus };
 }
 
-export async function listItems(db: DatabaseSync, req: Req): Promise<ItemList> {
-  const b = build(db, req, await hiddenRepos(db, req));
-  const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
-  const offset = Math.max(0, Number(req.query.get("offset")) || 0);
-  const from = (scored: boolean) => (b.text
-    ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
-    : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
-  const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
+export async function listItems(db: Db, req: Req): Promise<ItemList> {
+  const hidden = await hiddenRepos(db, req);
+  // build() fills the connection's temp tables (item_settled, flow_pick) that the counts and the page read, so all of
+  // it runs in one snapshot.
+  const { b, total, byStatus, rows } = await db.read(async () => {
+    const b = await build(db, req, hidden);
+    const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
+    const offset = Math.max(0, Number(req.query.get("offset")) || 0);
+    const from = (scored: boolean) => (b.text
+      ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
+      : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
+    const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
 
-  // Counts per status under every filter but the status one; the total follows from them.
-  const byStatus = statusCounts(db, b, from(false).replace("%COLS", "s.status, COUNT(*) AS n") + whereSql(b.where) + " GROUP BY 1", req.query.get("flow"));
-  const total = (b.statuses.length ? b.statuses : STATUSES).reduce((a, s) => a + byStatus[s], 0);
+    // Counts per status under every filter but the status one; the total follows from them.
+    const byStatus = await statusCounts(db, b, from(false).replace("%COLS", "s.status, COUNT(*) AS n") + whereSql(b.where) + " GROUP BY 1", req.query.get("flow"));
+    const total = (b.statuses.length ? b.statuses : STATUSES).reduce((a, s) => a + byStatus[s], 0);
 
-  // The page as rowids first, so only its rows are read in full.
-  const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
-  // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
-  const order = b.sort === "relevance" ? `h.score ${b.desc ? "ASC" : "DESC"}` : `${ORDER[b.sort]} ${b.desc ? "DESC" : "ASC"}`;
-  // Newest first within a state: main.items with its index named, because through the
-  // scoping view the planner walks the repo index and sorts every open item.
-  const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
-  const pageFrom = byUpdated
-    ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
-    : from(b.sort === "relevance");
-  const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
-  const ids = (db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
-    ` ORDER BY ${order}, i.repo, i.number DESC LIMIT :limit OFFSET :offset`).all({ ...b.params, limit, offset }) as { rid: number }[]).map((r) => r.rid);
-  const byId = new Map((ids.length ? db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
-      i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
-      s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
-    FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
-    .map((r) => [r.rid, r]));
-  const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
+    // The page as rowids first, so only its rows are read in full.
+    const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
+    // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
+    const order = b.sort === "relevance" ? `h.score ${b.desc ? "ASC" : "DESC"}` : `${ORDER[b.sort]} ${b.desc ? "DESC" : "ASC"}`;
+    // Newest first within a state: main.items with its index named, because through the
+    // scoping view the planner walks the repo index and sorts every open item.
+    const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
+    const pageFrom = byUpdated
+      ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
+      : from(b.sort === "relevance");
+    const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
+    const ids = (await db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
+      ` ORDER BY ${order}, i.repo, i.number DESC LIMIT :limit OFFSET :offset`).all({ ...b.params, limit, offset }) as { rid: number }[]).map((r) => r.rid);
+    const byId = new Map((ids.length ? await db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
+        i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
+        s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
+      FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
+      .map((r) => [r.rid, r]));
+    const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
+    return { b, total, byStatus, rows };
+  });
 
-  const stages = stagesOf(db, rows);
-  const snips = b.text ? snippets(db, b.params.q as string, rows) : new Map<number, Snippet>();
-  const how = mergedHow(db, rows);
-  const mentions = discordCounts(db, rows);
-  const quiet = quietFixPrs(db);
-  const slots = queueSlots(db, await visibleRepos(db, req));
+  const stages = await stagesOf(db, rows);
+  const snips = b.text ? await snippets(db, b.params.q as string, rows) : new Map<number, Snippet>();
+  const how = await mergedHow(db, rows);
+  const mentions = await discordCounts(db, rows);
+  const quiet = await quietFixPrs(db);
+  const slots = await queueSlots(db, await visibleRepos(db, req));
   return {
     total, byStatus, run: b.run,
     rows: rows.map((r): ItemListRow => ({
@@ -296,36 +305,36 @@ export async function listItems(db: DatabaseSync, req: Req): Promise<ItemList> {
   };
 }
 
-function discordCounts(db: DatabaseSync, rows: { repo: string; number: number }[]): Map<string, number> {
+async function discordCounts(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!rows.length) return out;
   const pairs = rows.map(() => "(?, ?)").join(",");
-  for (const m of db.prepare(`SELECT repo, number, COUNT(*) AS n FROM main.discord_mentions WHERE (repo, number) IN (VALUES ${pairs}) GROUP BY repo, number`)
+  for (const m of await db.prepare(`SELECT repo, number, COUNT(*) AS n FROM main.discord_mentions WHERE (repo, number) IN (VALUES ${pairs}) GROUP BY repo, number`)
     .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; n: number }[]) out.set(`${m.repo}#${m.number}`, m.n);
   return out;
 }
 
 // How AutoCraft merged each listed PR: its merge step's path (rule or operator), or batch when only a merged batch carried it.
-function mergedHow(db: DatabaseSync, rows: { repo: string; number: number; kind: string }[]): Map<string, "rule" | "operator" | "batch"> {
+async function mergedHow(db: Db, rows: { repo: string; number: number; kind: string }[]): Promise<Map<string, "rule" | "operator" | "batch">> {
   const out = new Map<string, "rule" | "operator" | "batch">();
   const prs = rows.filter((r) => r.kind === "pr");
   if (!prs.length) return out;
   const pairs = prs.map(() => "(?, ?)").join(",");
   const args = prs.flatMap((r) => [r.repo, r.number]);
-  for (const m of db.prepare(`SELECT repo, number, path FROM main.merges WHERE outcome = 'merged' AND (repo, number) IN (VALUES ${pairs}) ORDER BY at`).all(...args) as { repo: string; number: number; path: string }[])
+  for (const m of await db.prepare(`SELECT repo, number, path FROM main.merges WHERE outcome = 'merged' AND (repo, number) IN (VALUES ${pairs}) ORDER BY at`).all(...args) as { repo: string; number: number; path: string }[])
     out.set(`${m.repo}#${m.number}`, m.path === "operator" ? "operator" : "rule");
-  for (const b of db.prepare(`SELECT DISTINCT bb.repo, bp.number FROM main.merge_batch_prs bp JOIN main.merge_batches bb ON bb.id = bp.batch_id
+  for (const b of await db.prepare(`SELECT DISTINCT bb.repo, bp.number FROM main.merge_batch_prs bp JOIN main.merge_batches bb ON bb.id = bp.batch_id
     WHERE bb.state = 'merged' AND (bb.repo, bp.number) IN (VALUES ${pairs})`).all(...args) as { repo: string; number: number }[])
     if (!out.has(`${b.repo}#${b.number}`)) out.set(`${b.repo}#${b.number}`, "batch");
   return out;
 }
 
 // Latest stage of each listed item.
-function stagesOf(db: DatabaseSync, rows: { repo: string; number: number }[]): Map<string, string> {
+async function stagesOf(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!rows.length) return out;
   const pairs = rows.map(() => "(?, ?)").join(",");
-  const got = db.prepare(`SELECT repo, number, stage FROM main.item_stage WHERE (repo, number) IN (VALUES ${pairs})`)
+  const got = await db.prepare(`SELECT repo, number, stage FROM main.item_stage WHERE (repo, number) IN (VALUES ${pairs})`)
     .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; stage: string }[];
   for (const g of got) out.set(`${g.repo}#${g.number}`, g.stage);
   return out;
@@ -337,7 +346,7 @@ const likeEscape = (s: string): string => s.replace(/[\\%_]/g, (c) => `\\${c}`);
 type Hit = { repo: string; number: number; kind: string; title: string | null; author: string | null; state: string };
 const hitOf = (r: Hit): SearchHit => ({ repo: r.repo, number: r.number, kind: r.kind === "pr" ? "pr" : "issue", title: r.title ?? "", author: r.author ?? "", state: itemState(r.state) });
 
-export async function quickSearch(db: DatabaseSync, req: Req): Promise<SearchHit[]> {
+export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
   const q = (req.query.get("q") ?? "").trim().slice(0, 200);
   if (!q) return [];
   const ref = /^([A-Za-z0-9._-]+)?#(\d{1,9})$/.exec(q) ?? /^()(\d{1,9})$/.exec(q);
@@ -353,14 +362,14 @@ export async function quickSearch(db: DatabaseSync, req: Req): Promise<SearchHit
       where.push("repo LIKE :repo ESCAPE '\\'");
       params.repo = `${likeEscape(ref[1])}%`;
     }
-    rows = db.prepare(`SELECT repo, number, kind, title, author, state FROM items WHERE ${where.join(" AND ")}
+    rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM items WHERE ${where.join(" AND ")}
       ORDER BY length(CAST(number AS TEXT)), repo, number LIMIT 20`).all(params) as Hit[];
   } else {
     rows = [];
     // A single word may be a login: that author's latest items first.
     if (/^[A-Za-z0-9-]{2,39}$/.test(q)) {
       // main.items with the index named: through the scoping view the planner picks the repo index.
-      rows = db.prepare(`SELECT repo, number, kind, title, author, state FROM main.items INDEXED BY items_author_nocase
+      rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM main.items INDEXED BY items_author_nocase
         WHERE author LIKE :p AND repo IN (SELECT name FROM main.tracked_repos)${hide ? ` AND ${hide}` : ""}
         ORDER BY state <> 'OPEN', updated_at DESC LIMIT 5`).all({ p: `${q}%`, ...hp }) as Hit[];
     }
@@ -373,10 +382,10 @@ export async function quickSearch(db: DatabaseSync, req: Req): Promise<SearchHit
       SELECT i.repo, i.number, i.kind, i.title, i.author, i.state
       FROM hits h JOIN items i ON i.rowid = h.rid${hide ? ` WHERE ${hide.replace("repo", "i.repo")}` : ""}
       ORDER BY i.state <> 'OPEN', i.updated_at DESC LIMIT 20`);
-    let text = look.all({ q: `title : ${fts}`, ...hp }) as Hit[];
+    let text = await look.all({ q: `title : ${fts}`, ...hp }) as Hit[];
     if (text.length < 20) {
       const seenT = new Set(text.map((r) => `${r.repo}#${r.number}`));
-      text = [...text, ...(look.all({ q: fts, ...hp }) as Hit[]).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
+      text = [...text, ...(await look.all({ q: fts, ...hp }) as Hit[]).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
     }
     rows = [...rows, ...text.filter((r) => !have.has(`${r.repo}#${r.number}`))].slice(0, 20);
   }
@@ -394,18 +403,18 @@ function closesOf(json: string | null): number[] {
 }
 
 /** The merge queue's checks for a PR the plan holds a queue view for, with the same veiling as the queue (toRow); null otherwise. */
-function checksOf(db: DatabaseSync, r: StatusRowRaw, view: PlanView | undefined, reader: Reader, internals: boolean): ItemChecks | null {
+async function checksOf(db: Db, r: StatusRowRaw, view: PlanView | undefined, reader: Reader, internals: boolean): Promise<ItemChecks | null> {
   if (!view?.queue || !r.plan_state) return null;
   let outsideRule: string[] = [];
   try { outsideRule = JSON.parse(r.reasons ?? "[]") as string[]; } catch { /* none */ }
   const q = toRow({ ...view.queue, repo: r.repo, number: r.number, title: r.title ?? "", state: r.plan_state as CachedEntry["state"], outsideRule, note: null, gh: view.gh ?? "OPEN" }, reader);
-  return { verdict: q.verdict, ci: q.ci, mergeable: q.mergeable, verify: q.verify, size: q.size, prBuild: prBuildView(db, r.repo, r.number, q.head, internals) };
+  return { verdict: q.verdict, ci: q.ci, mergeable: q.mergeable, verify: q.verify, size: q.size, prBuild: await prBuildView(db, r.repo, r.number, q.head, internals) };
 }
 
 const DISCORD_SQL = "EXISTS (SELECT 1 FROM main.discord_mentions d WHERE d.repo = i.repo AND d.number = i.number)";
 
 /** `GET /api/items/status`: every item with its status line, newest update first. Filters: q, repo, kind (as /api/items), phase, discord=1 (mentioned in a watched Discord channel, asked about or not), cursor, limit. `byPhase` and `total` count every match except the phase filter. */
-export async function statusList(db: DatabaseSync, req: Req): Promise<ItemStatusList> {
+export async function statusList(db: Db, req: Req): Promise<ItemStatusList> {
   const phase = req.query.get("phase");
   if (phase && !(ITEM_PHASES as readonly string[]).includes(phase)) throw new HttpError(400, "unknown phase");
   const only = new URLSearchParams();
@@ -413,7 +422,7 @@ export async function statusList(db: DatabaseSync, req: Req): Promise<ItemStatus
   for (const r of list(req, "repo")) only.append("repo", r);
   only.set("state", "all");
   const reader = await readerOf(db, req);
-  const b = build(db, { ...req, query: only }, reader.hidden);
+  const b = await build(db, { ...req, query: only }, reader.hidden);
   const internals = canSeeInternals(req);
   const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
   const from = (cols: string) => (b.text ? `WITH ${HIT_IDS} SELECT ${cols} FROM hits h JOIN items i ON i.rowid = h.rid` : `SELECT ${cols} FROM items i`) +
@@ -423,7 +432,7 @@ export async function statusList(db: DatabaseSync, req: Req): Promise<ItemStatus
   const base = req.query.get("discord") === "1" ? [...b.where, DISCORD_SQL] : b.where;
 
   const byPhase = Object.fromEntries(ITEM_PHASES.map((x) => [x, 0])) as Record<ItemPhase, number>;
-  for (const r of db.prepare(from(`${PHASE_SQL} AS phase, COUNT(*) AS n`) + whereSql(base) + " GROUP BY 1").all(b.params) as { phase: ItemPhase; n: number }[])
+  for (const r of await db.prepare(from(`${PHASE_SQL} AS phase, COUNT(*) AS n`) + whereSql(base) + " GROUP BY 1").all(b.params) as { phase: ItemPhase; n: number }[])
     if (r.phase in byPhase) byPhase[r.phase] += r.n;
   const total = ITEM_PHASES.reduce((a, x) => a + byPhase[x], 0);
 
@@ -442,20 +451,20 @@ export async function statusList(db: DatabaseSync, req: Req): Promise<ItemStatus
     params.cr = m[2]!;
     params.cn = Number(m[3]);
   }
-  const got = db.prepare(from("i.repo, i.number, i.kind, i.state, i.title, i.author, i.updated_at, i.merged_at, i.closed_at, p.view, p.state AS plan_state, p.reasons, i.closing_issues") + whereSql(where) +
+  const got = await db.prepare(from("i.repo, i.number, i.kind, i.state, i.title, i.author, i.updated_at, i.merged_at, i.closed_at, p.view, p.state AS plan_state, p.reasons, i.closing_issues") + whereSql(where) +
     " ORDER BY COALESCE(i.updated_at, '') DESC, i.repo, i.number DESC LIMIT :limit").all(params) as StatusRowRaw[];
   const page = got.slice(0, limit);
   const last = page[page.length - 1];
   return {
     total, byPhase,
-    rows: page.map((r): ItemStatusRow => {
+    rows: await mapSeq(page, async (r): Promise<ItemStatusRow> => {
       let view: PlanView | undefined;
       try { view = r.view ? (JSON.parse(r.view) as PlanView) : undefined; } catch { /* a malformed view counts as none */ }
       const status = view?.status;
       return {
         repo: r.repo, number: r.number, kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), title: r.title ?? "", author: r.author ?? null,
         status: status ? statusFor(reader, r.repo, r.number, status) : statusFromItem(r, r.updated_at ?? ""), updatedAt: r.updated_at ?? "",
-        closes: r.kind === "pr" ? closesOf(r.closing_issues) : [], checks: r.kind === "pr" ? checksOf(db, r, view, reader, internals) : null,
+        closes: r.kind === "pr" ? closesOf(r.closing_issues) : [], checks: r.kind === "pr" ? await checksOf(db, r, view, reader, internals) : null,
       };
     }),
     nextCursor: got.length > limit && last ? `${last.updated_at ?? ""}|${last.repo}|${last.number}` : null,
@@ -463,12 +472,12 @@ export async function statusList(db: DatabaseSync, req: Req): Promise<ItemStatus
 }
 
 /** `GET /api/items/:repo/:n/peek`: the item in brief for the hover card on its number; the status text is veiled as in the lists. */
-export async function peek(db: DatabaseSync, req: Req): Promise<ItemPeek> {
+export async function peek(db: Db, req: Req): Promise<ItemPeek> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
-  const r = db.prepare(`SELECT i.repo, i.number, i.kind, i.state, i.title, i.author, i.labels, i.created_at, i.updated_at, i.merged_at, i.closed_at, i.closing_issues, p.view
+  const r = await db.prepare(`SELECT i.repo, i.number, i.kind, i.state, i.title, i.author, i.labels, i.created_at, i.updated_at, i.merged_at, i.closed_at, i.closing_issues, p.view
     FROM items i LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number WHERE i.repo = ? AND i.number = ?`).get(repo, n) as
     (Omit<StatusRowRaw, "plan_state" | "reasons"> & { labels: string | null; created_at: string | null }) | undefined;
   if (!r) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);

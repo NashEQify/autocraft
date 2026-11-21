@@ -1,7 +1,6 @@
 // What one dashboard reader may see of text the planner stores once for everyone: plan reasons and notes, wait texts,
 // status lines and queue rows. Staff (operators and maintainers) read it unless it names a repo hidden from them; viewers
 // read plain words without model or log text; a quiet pull request shows viewers none of it.
-import type { DatabaseSync } from "node:sqlite";
 import type { ItemStatus, QueueRow } from "../../../web/src/api/types.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { BLOCKS_REVIEW, blockersOfWait } from "../../review/blockers.ts";
@@ -9,12 +8,13 @@ import { quietFixPrs } from "../../security/quiet.ts";
 import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
+import type { Db } from "../../db/index.ts";
 
 export type Reader = { staff: boolean; hidden: HiddenRepos; /** Quiet pull requests as `repo#number`; empty for staff, who see them. */ quiet: Set<string> };
 
-export async function readerOf(db: DatabaseSync, req: Req): Promise<Reader> {
+export async function readerOf(db: Db, req: Req): Promise<Reader> {
   const staff = canSeeInternals(req);
-  return { staff, hidden: await hiddenRepos(db, req), quiet: staff ? new Set() : quietFixPrs(db) };
+  return { staff, hidden: await hiddenRepos(db, req), quiet: staff ? new Set() : await quietFixPrs(db) };
 }
 
 /** The reader of one item's trace context (src/dash/api/trace.ts): `veiled` there says the item is quiet for this reader. */

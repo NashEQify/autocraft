@@ -3,9 +3,9 @@
 // directory exists behind it.
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { syncAccounts } from "../src/agents/accounts.ts";
 import { SCRATCH } from "./scratch.ts";
+import type { Db } from "../src/db/index.ts";
 
 
 export type TestBox = { dir: string; accountsFile: string; usageDir: string; configDir: string };
@@ -32,9 +32,9 @@ export function writeReading(box: TestBox, id: string, r: { at?: number; five?: 
 }
 
 /** One enabled account "t" in the box config. */
-export function useTestAccount(db: DatabaseSync): TestBox {
+export async function useTestAccount(db: Db): Promise<TestBox> {
   const box = setupBox(["t"]);
-  syncAccounts(db);
-  db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
+  await syncAccounts(db);
+  await db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
   return box;
 }

@@ -1,5 +1,4 @@
 // Pre-merge review results (table premerge_reviews): one row per PR head, read by the merge queue.
-import type { DatabaseSync } from "node:sqlite";
 import { PREMERGE_MAX_TRIES } from "../core/rules.ts";
 
 /** A failed head counts as failed after this many tries. */
@@ -8,6 +7,7 @@ export { PREMERGE_MAX_TRIES };
 export type { PremergeFinding } from "./types.ts";
 import type { PremergeFinding } from "./types.ts";
 import type { Claim, StatementConflict } from "../review/opus-parse.ts";
+import type { Db } from "../db/index.ts";
 
 export type PremergeRow = {
   repo: string; number: number; head_oid: string;
@@ -49,22 +49,22 @@ export type PremergeSave = {
 };
 
 /** Stores a review (clears the error) or counts a failed try. */
-export function savePremerge(db: DatabaseSync, s: PremergeSave): void {
+export async function savePremerge(db: Db, s: PremergeSave): Promise<void> {
   const args = [s.repo, s.number, s.head, s.at, s.runId ?? null, s.model ?? null] as const;
   if (s.findings) {
-    db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, findings, searched, conflicts, unsure, claims, base_ref, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
+    await db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, findings, searched, conflicts, unsure, claims, base_ref, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
       ON CONFLICT (repo, number, head_oid) DO UPDATE SET at = excluded.at, run_id = excluded.run_id, model = excluded.model,
         findings = excluded.findings, searched = excluded.searched, conflicts = excluded.conflicts, unsure = excluded.unsure, claims = excluded.claims, base_ref = excluded.base_ref, error = NULL`).run(...args, JSON.stringify(s.findings), s.searched ?? null, s.conflicts?.length ? JSON.stringify(s.conflicts) : null, s.unsure ? 1 : 0, s.claims?.length ? JSON.stringify(s.claims) : null, s.baseRef ?? null);
     return;
   }
-  db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  await db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (repo, number, head_oid) DO UPDATE SET at = excluded.at, run_id = excluded.run_id, model = excluded.model,
       error = excluded.error, tries = CASE WHEN ? THEN excluded.tries ELSE tries + 1 END`).run(...args, s.error ?? "failed", s.final ? PREMERGE_MAX_TRIES : 1, s.final ? 1 : 0);
 }
 
 /** The pre-merge review of a head, when it read the diff against the base branch the head's Opus review read (a row or review that recorded none counts as matching). */
-export function premergeAt(db: DatabaseSync, repo: string, number: number, head: string): PremergeRow | null {
-  return (db.prepare(`${premergeSql("")} AND p.repo = ? AND p.number = ? AND p.head_oid = ?`).get(repo, number, head) as PremergeRow | undefined) ?? null;
+export async function premergeAt(db: Db, repo: string, number: number, head: string): Promise<PremergeRow | null> {
+  return (await db.prepare(`${premergeSql("")} AND p.repo = ? AND p.number = ? AND p.head_oid = ?`).get(repo, number, head) as PremergeRow | undefined) ?? null;
 }
 
 /** The pre-merge reviews that read the diff against the base branch their head's Opus review read (see premergeAt). */
@@ -73,9 +73,9 @@ const premergeSql = (extra: string): string => `SELECT p.*${extra} FROM premerge
     WHERE (p.base_ref IS NULL OR COALESCE(o.base_ref, r.default_branch) IS NULL OR p.base_ref = COALESCE(o.base_ref, r.default_branch))`;
 
 /** premergeAt() of every head, keyed by `repo#number@head`; `narrow` adds a condition on `p` with its named parameters. */
-export function premergeRows(db: DatabaseSync, narrow: { sql: string; p: Record<string, string> } = { sql: "", p: {} }): Map<string, PremergeRow> {
+export async function premergeRows(db: Db, narrow: { sql: string; p: Record<string, string> } = { sql: "", p: {} }): Promise<Map<string, PremergeRow>> {
   const out = new Map<string, PremergeRow>();
-  for (const row of db.prepare(`${premergeSql(", p.repo || '#' || p.number || '@' || p.head_oid AS k")}${narrow.sql}`).all(narrow.p) as (PremergeRow & { k?: string })[]) {
+  for (const row of await db.prepare(`${premergeSql(", p.repo || '#' || p.number || '@' || p.head_oid AS k")}${narrow.sql}`).all(narrow.p) as (PremergeRow & { k?: string })[]) {
     const k = row.k!;
     delete row.k;
     out.set(k, row);
@@ -84,8 +84,8 @@ export function premergeRows(db: DatabaseSync, narrow: { sql: string; p: Record<
 }
 
 /** The PR already had a pre-merge fix round (any fixups row with source premerge, pushed or not). */
-export function premergeFixUsed(db: DatabaseSync, repo: string, number: number): boolean {
-  return !!db.prepare("SELECT 1 FROM fixups WHERE repo = ? AND number = ? AND source = 'premerge' AND state NOT IN ('linting', 'superseded') LIMIT 1").get(repo, number);
+export async function premergeFixUsed(db: Db, repo: string, number: number): Promise<boolean> {
+  return !!await db.prepare("SELECT 1 FROM fixups WHERE repo = ? AND number = ? AND source = 'premerge' AND state NOT IN ('linting', 'superseded') LIMIT 1").get(repo, number);
 }
 
 /** premergeFixUsed() from the PR's fixups rows. */

@@ -6,7 +6,6 @@
 // same as on the dashboard: viewers read, maintainers and operators also send
 // feedback, and feedback is display-only until an operator answers. Operators
 // also get the Queue page's controls: queue, weight and withdraw a merge.
-import type { DatabaseSync } from "node:sqlite";
 import type { Decision, DecisionList } from "../../../web/src/api/types.ts";
 import { decisionPath, githubItemUrl, itemPath } from "../../../web/src/lib/links.ts";
 import { KINDS } from "../../decisions.ts";
@@ -24,6 +23,8 @@ import { isTier, TIERS } from "../../remote/mode.ts";
 import type { HarnessId, Tier } from "../../remote/protocol.ts";
 import { HttpError, RateLimiter } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
+import { mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BODY_MAX = 20_000;
@@ -37,9 +38,9 @@ const LIST_MAX = 25;
 export const answering = { enabled: false };
 
 export type McpEnv = {
-  db: DatabaseSync;
+  db: Db;
   /** The token's user; `forWrite` asks for permission checks fresh enough for a write. */
-  user: (forWrite: boolean) => User;
+  user: (forWrite: boolean) => Promise<User>;
   /** The dashboard's public origin, for links; null gives paths only. */
   baseUrl: string | null;
   /** Feedback posts per login per hour (maintainers; operators are not limited, as on the dashboard). */
@@ -334,9 +335,9 @@ const show = (header: string, label: string, data: unknown): ToolResult => ({ te
 
 async function listRepos(env: McpEnv): Promise<ToolResult> {
   spend(env);
-  const user = env.user(false);
+  const user = await env.user(false);
   const repos = await visibleTo(env.db, user);
-  const held = heldFixups(env.db, repos, null, 10_000);
+  const held = await heldFixups(env.db, repos, null, 10_000);
   const counts = new Map<string, number>();
   for (const h of held) counts.set(h.repo, (counts.get(h.repo) ?? 0) + 1);
   const rows = [];
@@ -349,7 +350,7 @@ async function listRepos(env: McpEnv): Promise<ToolResult> {
 
 async function listInbox(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { repo: "repo", kind: "kind", limit: "limit", cursor: "cursor" });
-  const user = env.user(false);
+  const user = await env.user(false);
   const l: DecisionList = await dec.listDecisions(env.db, reqOf(user, {
     // Every open decision the user may see: agents send feedback on any of them, not only the ones their user can settle.
     query: { status: "open", all: "1", repo: a.repo as string | undefined, kind: a.kind as string | undefined, limit: String(a.limit ?? 10), after: a.cursor as string | undefined },
@@ -366,7 +367,7 @@ async function listInbox(env: McpEnv, raw: unknown): Promise<ToolResult> {
 
 async function getItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { id: "id" }, ["id"]);
-  const user = env.user(false);
+  const user = await env.user(false);
   const r = reqOf(user, { params: { id: a.id as string } });
   const d = await dec.getOne(env.db, r);
   const thread = await dec.thread(env.db, r);
@@ -411,7 +412,7 @@ const feedbackDay = new RateLimiter(50, 24 * 3600_000);
 
 async function sendFeedback(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { id: "id", option: "option", text: "text" }, ["id"]);
-  const user = env.user(true);
+  const user = await env.user(true);
   const key = user.login.toLowerCase();
   const tooMuch = new HttpError(429, "too much feedback from agents: at most 10 an hour and 50 a day per user; leave it on the dashboard instead");
   if (!feedbackHour.allow(key)) throw tooMuch;
@@ -458,7 +459,7 @@ async function answerDecision(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const { exceptions, ...rest } = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
   if (exceptions !== undefined && exceptions !== null && (!Array.isArray(exceptions) || exceptions.length > 500)) throw new BadArgs(`"exceptions" must be a list of {repo, number, answer}`);
   const a = args(raw === undefined ? raw : rest, { id: "id", option: "option", note: "text", textsHash: "id" }, ["id", "option"]);
-  const user = env.user(true);
+  const user = await env.user(true);
   const d = await dec.answer(env.db, reqOf(user, {
     method: "POST", params: { id: a.id as string },
     json: { answer: a.option, note: a.note ?? null, exceptions: exceptions ?? null, textsHash: a.textsHash },
@@ -476,7 +477,7 @@ async function answerDecision(env: McpEnv, raw: unknown): Promise<ToolResult> {
 async function undoAnswer(env: McpEnv, raw: unknown): Promise<ToolResult> {
   requireAnswering(env);
   const a = args(raw, { id: "id" }, ["id"]);
-  const user = env.user(true);
+  const user = await env.user(true);
   const d = await dec.undo(env.db, reqOf(user, { method: "POST", params: { id: a.id as string } }), "mcp");
   if (!d) return { text: `The Backlog hold of ${a.id as string} is taken back; the item is back in the pipeline.` };
   return { text: `The answer to ${ref(d)} is taken back; the decision is open again.\nDecision: ${link(env, decisionPath(d))}` };
@@ -499,8 +500,8 @@ const itemArg = (s: unknown): FastRef => {
 const refText = (r: FastRef): string => `${r.repo}#${r.number}`;
 
 /** The item's place on the fast-track list in words, as the Queue page shows it. */
-function placeOf(env: McpEnv, r: FastRef): string {
-  const f = fastPositions(env.db).get(refText(r));
+async function placeOf(env: McpEnv, r: FastRef): Promise<string> {
+  const f = (await fastPositions(env.db)).get(refText(r));
   return f ? `${refText(r)} is fast-tracked with weight ${f.weight}, ${f.position} of ${f.of}.` : `${refText(r)} is not fast-tracked.`;
 }
 
@@ -508,32 +509,32 @@ async function queuePr(env: McpEnv, raw: unknown): Promise<ToolResult> {
   requireAnswering(env);
   const a = args(raw, { item: "item", weight: "weight" }, ["item"]);
   const r = itemArg(a.item);
-  const user = env.user(true);
+  const user = await env.user(true);
   // An operator, or a maintainer: queueAdd then checks that they settle on the repo (src/settlers.ts: write access, and for a maintainer maintainer writes and the app identity).
   if (user.role !== "operator" && user.role !== "maintainer") throw new HttpError(403, `only operators and maintainers who answer decisions queue items; ${user.login} is a ${user.role}`);
   const done = await queueAdd(env.db, reqOf(user, { method: "POST", json: { item: refText(r), weight: a.weight } }), "mcp");
-  return { text: `${done.label}. ${placeOf(env, r)}\nItem: ${link(env, itemPath(r.repo, r.number))}` };
+  return { text: `${done.label}. ${await placeOf(env, r)}\nItem: ${link(env, itemPath(r.repo, r.number))}` };
 }
 
 async function setWeight(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { item: "item", weight: "weight", remove: "flag" }, ["item"]);
   if (a.remove === true && a.weight !== undefined) throw new BadArgs(`give either "weight" or "remove", not both`);
   const r = itemArg(a.item);
-  const user = env.user(true);
+  const user = await env.user(true);
   requireOperator(user);
   await needVisible(env.db, reqOf(user), r.repo);
   // From here on nothing awaits: whether the item is listed and the write that follows see the same table, so a queue_pr that
   // lands meanwhile cannot leave its own weight in place of the one asked for here.
   try {
     if (a.remove === true) {
-      const { removed } = removeFastTrack(env.db, user.login, refText(r), "mcp");
+      const { removed } = await removeFastTrack(env.db, user.login, refText(r), "mcp");
       return { text: removed ? `Took ${refText(r)} off the fast-track list; it goes back to the work rank. An approved merge stays (cancel_queued withdraws it).` : `${refText(r)} was not fast-tracked.` };
     }
     const w = (a.weight as number | undefined) ?? WEIGHT_DEFAULT;
-    const listed = !!env.db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(r.repo, r.number);
-    if (listed) setFastTrackWeight(env.db, user.login, refText(r), w, "mcp");
-    else addFastTrack(env.db, user.login, refText(r), w, "mcp");
-    return { text: `${listed ? "Set the weight" : "Fast-tracked it; its merge is not approved by this (queue_pr does that)"}. ${placeOf(env, r)}` };
+    const listed = !!await env.db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(r.repo, r.number);
+    if (listed) await setFastTrackWeight(env.db, user.login, refText(r), w, "mcp");
+    else await addFastTrack(env.db, user.login, refText(r), w, "mcp");
+    return { text: `${listed ? "Set the weight" : "Fast-tracked it; its merge is not approved by this (queue_pr does that)"}. ${await placeOf(env, r)}` };
   } catch (e) {
     if (e instanceof FastTrackError) throw new HttpError(e.status, e.message);
     throw e;
@@ -544,10 +545,10 @@ async function cancelQueued(env: McpEnv, raw: unknown): Promise<ToolResult> {
   requireAnswering(env);
   const a = args(raw, { item: "item" }, ["item"]);
   const r = itemArg(a.item);
-  const user = env.user(true);
+  const user = await env.user(true);
   requireOperator(user);
   const p = await cancelItemPreapproval(env.db, reqOf(user, { method: "POST", params: { repo: r.repo, n: String(r.number) } }), "mcp");
-  return { text: `The pre-approved merge of ${refText(r)} is ${p.state}. ${placeOf(env, r)}${fastPositions(env.db).has(refText(r)) ? " set_weight with remove: true drops the weight." : ""}\nItem: ${link(env, itemPath(r.repo, r.number))}` };
+  return { text: `The pre-approved merge of ${refText(r)} is ${p.state}. ${await placeOf(env, r)}${(await fastPositions(env.db)).has(refText(r)) ? " set_weight with remove: true drops the weight." : ""}\nItem: ${link(env, itemPath(r.repo, r.number))}` };
 }
 
 async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
@@ -557,7 +558,7 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   if (a.cursor !== undefined && !c) throw new BadArgs(`"cursor" is not valid`);
   const limit = (a.limit as number | undefined) ?? 10;
   spend(env);
-  const user = env.user(false);
+  const user = await env.user(false);
   const staff = user.role !== "viewer";
   const rowsDone = c?.[1] === "x", pendingDone = c?.[2] === "x";
   // Rows done: the pre-approvals are all that is left, so the queue page is not built again.
@@ -575,9 +576,9 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
   // queue row anywhere, on any page and in any repo, is left out. They are the operators' own picks, so the list covers every
   // visible repo (or the one asked for), not only the pipeline's scope the queue rows default to.
   const visible = new Set(await visibleTo(env.db, user));
-  const queued = new Set(cachedQueue(env.db, { merged: "exclude" }).map(item));
+  const queued = new Set((await cachedQueue(env.db, { merged: "exclude" })).map(item));
   type Pending = { id: number; repo: string; number: number; state: string; by: string; at: string };
-  const pendingAll = (pendingDone ? [] : env.db.prepare("SELECT id, repo, number, state, by, at FROM preapprovals WHERE state IN ('fixup', 'review', 'ci') AND id > ? ORDER BY id").all(Number(c?.[2] ?? 0)) as Pending[])
+  const pendingAll = (pendingDone ? [] : await env.db.prepare("SELECT id, repo, number, state, by, at FROM preapprovals WHERE state IN ('fixup', 'review', 'ci') AND id > ? ORDER BY id").all(Number(c?.[2] ?? 0)) as Pending[])
     .filter((p) => visible.has(p.repo) && (a.repo === undefined || p.repo === a.repo) && !queued.has(item(p)));
   const shown = pendingAll.slice(0, limit);
   const pending = shown.map((p) => ({ item: item(p), state: p.state, by: staff ? p.by : null, at: p.at }));
@@ -596,12 +597,12 @@ async function listMergeQueue(env: McpEnv, raw: unknown): Promise<ToolResult> {
 type Held = { repo: string; number: number; head: string; title: string | null; author: string | null; note: string | null };
 
 /** Open PRs the planner left in the fix-up `hold` bucket at their current head that are not in a try of ours. */
-function heldFixups(db: DatabaseSync, repos: string[], repo: string | null, limit: number): Held[] {
+async function heldFixups(db: Db, repos: string[], repo: string | null, limit: number): Promise<Held[]> {
   const want = repo ? repos.filter((r) => r === repo) : repos;
   if (!want.length) return [];
   const params: Record<string, string | number> = { limit };
   const names = want.map((r, k) => ((params[`r${k}`] = r), `:r${k}`)).join(",");
-  return db.prepare(`SELECT p.repo, p.number, p.head, i.title, i.author, p.note FROM item_plans p
+  return await db.prepare(`SELECT p.repo, p.number, p.head, i.title, i.author, p.note FROM item_plans p
     JOIN items i ON i.repo = p.repo AND i.number = p.number
     WHERE p.kind = 'pr' AND p.repo IN (${names}) AND i.state = 'OPEN' AND p.head = i.head_oid
       AND json_valid(p.view) AND json_extract(p.view, '$.fixup') = 'hold'
@@ -612,16 +613,16 @@ function heldFixups(db: DatabaseSync, repos: string[], repo: string | null, limi
 async function listFixups(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { repo: "repo", limit: "limit" });
   spend(env);
-  const user = env.user(false);
+  const user = await env.user(false);
   const internals = user.role !== "viewer";
   const repos = await visibleTo(env.db, user);
   if (a.repo !== undefined && !repos.includes(a.repo as string)) throw new HttpError(404, `${a.repo} is not a tracked repo`);
   const limit = (a.limit as number | undefined) ?? 10;
-  const held = heldFixups(env.db, repos, (a.repo as string | undefined) ?? null, limit + 1);
+  const held = await heldFixups(env.db, repos, (a.repo as string | undefined) ?? null, limit + 1);
   const list = (s: string | null): unknown[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; } };
-  const rows = held.slice(0, limit).map((h) => {
-    const review = env.db.prepare("SELECT reason, fixes FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(h.repo, h.number, h.head) as { reason: string | null; fixes: string | null } | undefined;
-    const last = env.db.prepare("SELECT state, reason FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state <> 'superseded' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+  const rows = await mapSeq(held.slice(0, limit), async (h) => {
+    const review = await env.db.prepare("SELECT reason, fixes FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(h.repo, h.number, h.head) as { reason: string | null; fixes: string | null } | undefined;
+    const last = await env.db.prepare("SELECT state, reason FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state <> 'superseded' ORDER BY created_at DESC, rowid DESC LIMIT 1")
       .get(h.repo, h.number, h.head) as { state: string; reason: string | null } | undefined;
     return {
       item: `${h.repo}#${h.number}`, title: h.title, author: h.author, head: h.head.slice(0, 12),
@@ -642,7 +643,7 @@ const needLocal = (env: McpEnv): void => {
 async function listModelCalls(env: McpEnv, raw: unknown): Promise<ToolResult> {
   needLocal(env);
   args(raw, {});
-  const q = await modelQueue.get(env.db, reqOf(env.user(false)));
+  const q = await modelQueue.get(env.db, reqOf(await env.user(false)));
   const calls = q.calls.map((c) => ({
     id: String(c.id), items: c.items.map((i) => ({ item: `${i.repo}#${i.number}`, title: i.title })), step: c.kind, tier: c.tier, model: c.model, estCostUsd: c.estCostUsd,
     waitedMinutes: Math.round(c.waitedMs / 60_000), why: c.why.text, picked: c.picked === null ? null : c.picked.login ?? "a user", pickable: c.pickable,
@@ -655,7 +656,7 @@ async function listModelCalls(env: McpEnv, raw: unknown): Promise<ToolResult> {
 async function pickModelCall(env: McpEnv, raw: unknown, pick: boolean): Promise<ToolResult> {
   needLocal(env);
   const a = args(raw, { id: "id" }, ["id"]);
-  const req = reqOf(env.user(pick), { method: "POST", params: { id: a.id as string } });
+  const req = reqOf(await env.user(pick), { method: "POST", params: { id: a.id as string } });
   await (pick ? modelQueue.pick(env.db, req, "mcp") : modelQueue.unpick(env.db, req, "mcp"));
   return { text: pick ? `Picked model call ${a.id as string}: your user's Task Runners take it next.` : `Ended the pick of model call ${a.id as string}.` };
 }
@@ -681,9 +682,9 @@ async function nextTask(env: McpEnv, raw: unknown): Promise<ToolResult> {
     if (!m || typeof m !== "object" || Array.isArray(m) || !Object.entries(m).every(([k, v]) => isTier(k) && typeof v === "string" && v.length > 0 && v.length <= 100)) throw new BadArgs(`"models" must map model tiers (${TIERS.join(", ")}) to model names`);
     models = m as Partial<Record<Tier, string>>;
   }
-  const user = env.user(false);
+  const user = await env.user(false);
   // Task Runners that reported they take no calls (plan usage, a pause, a setup problem) would only print that again.
-  const runners = listHelpers(env.db, user.login);
+  const runners = await listHelpers(env.db, user.login);
   const fresh = runners.filter((h) => h.fresh);
   const ready = fresh.find((h) => h.readiness === "ready");
   const busy = fresh.find((h) => h.readiness && h.readiness !== "ready");
@@ -695,22 +696,22 @@ async function nextTask(env: McpEnv, raw: unknown): Promise<ToolResult> {
   return { text: `${queued} call${queued === 1 ? " is" : "s are"} queued that your user may take.\nRun \`autocraft run --detach\` (it claims one and prints its lease id), then \`autocraft wait <lease>\` until it reports the call ended, then call next_task again. Do not read or change the Task Runner's bundle or reply files.` };
 }
 
-function taskStatus(env: McpEnv, raw: unknown): ToolResult {
+async function taskStatus(env: McpEnv, raw: unknown): Promise<ToolResult> {
   needRun(env);
   const a = args(raw, { lease: "id" }, ["lease"]);
   const id = Number(a.lease);
-  const r = Number.isInteger(id) && id > 0 ? callStatus(env.db, id, env.user(false).login) : null;
+  const r = Number.isInteger(id) && id > 0 ? await callStatus(env.db, id, (await env.user(false)).login) : null;
   if (!r) throw new HttpError(404, "no call with that lease id belongs to your user");
   return { text: `${r.title}: ${r.state}${r.error ? `\n${frame("error", r.error)}` : ""}` };
 }
 
-function myWork(env: McpEnv, raw: unknown): ToolResult {
+async function myWork(env: McpEnv, raw: unknown): Promise<ToolResult> {
   needRun(env);
   args(raw, {});
-  const login = env.user(false).login;
+  const login = (await env.user(false)).login;
   const start = new Date();
   start.setUTCHours(0, 0, 0, 0);
-  const rows = (env.db.prepare(`SELECT id, prompt_id, items, state, started_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd FROM agent_runs
+  const rows = (await env.db.prepare(`SELECT id, prompt_id, items, state, started_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd FROM agent_runs
     WHERE user_login = ? COLLATE NOCASE AND started_at >= ? ORDER BY id DESC LIMIT 200`).all(login, start.toISOString()) as
     { id: number; prompt_id: string; items: string; state: string; started_at: string; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; cost_usd: number | null }[])
     .map((r) => ({
@@ -718,7 +719,7 @@ function myWork(env: McpEnv, raw: unknown): ToolResult {
       tokens: { input: r.input_tokens, output: r.output_tokens, cacheRead: r.cache_read_tokens, cacheWrite: r.cache_write_tokens }, costUsd: r.cost_usd,
     }));
   // The user's Task Runners with their last status: whether each takes calls now, and why not.
-  const runners = listHelpers(env.db, login).map((h) => ({
+  const runners = (await listHelpers(env.db, login)).map((h) => ({
     label: h.label, readiness: h.readiness, fresh: h.fresh, ...(h.until && { until: h.until }), ...(h.reason && { reason: h.reason }), lastSeen: h.lastSeen, harness: h.harness, models: h.models, reserve: h.reserve,
     usedPercent: h.usage ? { fiveHour: h.usage.fiveHour?.usedPercent ?? null, weekly: h.usage.weekly?.usedPercent ?? null, at: h.usage.at } : null,
   }));
@@ -734,8 +735,8 @@ async function callTool(env: McpEnv, name: unknown, raw: unknown): Promise<ToolR
       case "send_feedback": return await sendFeedback(env, raw);
       case "list_fixups": return await listFixups(env, raw);
       case "next_task": return await nextTask(env, raw);
-      case "task_status": return taskStatus(env, raw);
-      case "my_work": return myWork(env, raw);
+      case "task_status": return await taskStatus(env, raw);
+      case "my_work": return await myWork(env, raw);
       case "answer_decision": return await answerDecision(env, raw);
       case "undo_answer": return await undoAnswer(env, raw);
       case "list_merge_queue": return await listMergeQueue(env, raw);
@@ -822,9 +823,9 @@ export async function mcpReply(server: McpServerDef, msg: Msg): Promise<Reply | 
 export const ALL_TOOL_NAMES: readonly string[] = [...TOOLS, ...ANSWER_TOOLS, ...QUEUE_TOOLS, ...QUEUE_APPROVE_TOOLS, ...RUN_TOOLS, ...MODEL_CALL_TOOLS, ...MODEL_PICK_TOOLS].map((t) => t.name);
 
 /** The reply to one JSON-RPC message, or null for a notification or a response. */
-export function handleMcp(env: McpEnv, msg: Msg): Promise<Reply | null> {
+export async function handleMcp(env: McpEnv, msg: Msg): Promise<Reply | null> {
   // The role decides which tools are listed; each call checks it again.
-  const role = msg.method === "initialize" || msg.method === "tools/list" ? env.user(false).role : null;
+  const role = msg.method === "initialize" || msg.method === "tools/list" ? (await env.user(false)).role : null;
   const queue = role === "operator";
   const addsToQueue = env.canAnswer && (queue || role === "maintainer");
   const picks = !!env.userLocal && (role === "operator" || role === "maintainer");

@@ -42,7 +42,7 @@ describe("review.opus lint", () => {
 describe("semantic reference check", () => {
   const deps = (jev: number | null, haiku: boolean | null, usable = true) => {
     const calls = { jev: 0, haiku: 0 };
-    const d: SemanticDeps = { async jev() { calls.jev++; return jev; }, async haiku() { calls.haiku++; return haiku; }, jevUsable: () => usable };
+    const d: SemanticDeps = { async jev() { calls.jev++; return jev; }, async haiku() { calls.haiku++; return haiku; }, jevUsable: async () => usable };
     return { d, calls };
   };
 });

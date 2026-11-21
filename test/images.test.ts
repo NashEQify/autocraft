@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { join } from "node:path";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { addLogin } from "../src/access.ts";
-import { connect } from "../src/db.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { ImageProxy, MAX_IMAGE_BYTES, imageTokenSource } from "../src/dash/server/images.ts";
 import { SESSION_COOKIE, startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "images-test-"));
@@ -36,15 +36,15 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
 
 // The hrefs the proxy treats as present in the mirror; null: every URL is.
 let inMirror: Set<string> | null = null;
-const repos = (href: string) => (!inMirror || inMirror.has(href) ? ["photocraft"] : []);
+const repos = async (href: string) => (!inMirror || inMirror.has(href) ? ["photocraft"] : []);
 
-const db = connect(join(dir, "dash.db"));
+const db = await connectDb(join(dir, "dash.db"));
 let base = "";
 let close: () => Promise<void>;
 let cookie = "";
 
 before(async () => {
-  addLogin(db, "cli", "viewer1", "viewer", null);
+  await addLogin(db, "cli", "viewer1", "viewer", null);
   const config = loadConfig({
     AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: join(dir, "dash.db"), AUTOCRAFT_DEV_PERMS: permsFile,
     AUTOCRAFT_IMG_CACHE: "",
@@ -72,7 +72,7 @@ before(async () => {
 });
 after(async () => {
   await close();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 beforeEach(() => {

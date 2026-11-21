@@ -60,7 +60,7 @@ export class Interactions {
   #log: (line: string) => void;
   #commands = new Map<string, Entry>();
   #components = new Map<string, Entry>();
-  #completers = new Map<string, (call: Call) => Choice[]>();
+  #completers = new Map<string, (call: Call) => Promise<Choice[]>>();
   #defs: CommandDef[] = [];
   #appId: string | null = null;
   #registered = new Map<string, string>();
@@ -89,7 +89,7 @@ export class Interactions {
   }
 
   /** Adds the choices of the focused option of a command (same key as `command`); at most 25 are sent. Answered at once, never deferred. */
-  autocomplete(key: string, choices: (call: Call) => Choice[]): void {
+  autocomplete(key: string, choices: (call: Call) => Promise<Choice[]>): void {
     this.#completers.set(key, choices);
   }
 
@@ -140,7 +140,7 @@ export class Interactions {
       const opts = sub?.options ?? i.data?.options ?? [];
       const call = { interaction: i, userId: i.member?.user?.id ?? i.user?.id ?? null, option: () => undefined, targetText: () => undefined, edit: async () => {}, fields: () => ({}), values: () => [], ack: async () => {}, showModal: async () => {}, reply: async () => {}, defer: async () => {},
         focused: () => { const o = opts.find((x) => x.focused); return o ? { name: o.name, value: typeof o.value === "string" ? o.value : "" } : undefined; } } as Call;
-      await this.#rest.interactionCallback(i.id, i.token, 8, { choices: find(call).slice(0, 25) });
+      await this.#rest.interactionCallback(i.id, i.token, 8, { choices: (await find(call)).slice(0, 25) });
     } catch (e) {
       this.#log(`discord: autocomplete failed: ${(e as Error).message}`);
     }

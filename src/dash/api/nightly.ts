@@ -1,6 +1,5 @@
 // The Nightly page: per repo, the catalogue's checks with their last 14 nights and the benchmark series. Repos the
 // viewer cannot see are left out (a bench or selection request for one is a 404). Only operators change a selection.
-import type { DatabaseSync } from "node:sqlite";
 import type { NightlyBench, NightlyCell, NightlyCheckRow, NightlyGrid, NightlyRepo, NightlySeries } from "../../../web/src/api/types.ts";
 import { featureOn } from "../../build/features.ts";
 import { audit } from "../audit.ts";
@@ -8,6 +7,8 @@ import { BENCH_MIN_HISTORY, BENCH_WINDOW, NIGHTLY_CHECKS, benchSeries, checkOf, 
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { visibleRepos } from "./visible.ts";
+import { filterSeq, mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 const NIGHTS = 14;
 const SPARK_POINTS = 30;
@@ -23,10 +24,10 @@ const median = (xs: number[]): number => {
   return s.length % 2 ? s[(s.length - 1) / 2]! : (s[s.length / 2 - 1]! + s[s.length / 2]!) / 2;
 };
 
-function benchesOf(db: DatabaseSync, repo: string): NightlyBench[] {
-  const names = (db.prepare("SELECT DISTINCT bench FROM nightly_bench WHERE repo = ? ORDER BY bench").all(repo) as { bench: string }[]).map((r) => r.bench);
-  return names.map((name) => {
-    const s = benchSeries(db, repo, name);
+async function benchesOf(db: Db, repo: string): Promise<NightlyBench[]> {
+  const names = (await db.prepare("SELECT DISTINCT bench FROM nightly_bench WHERE repo = ? ORDER BY bench").all(repo) as { bench: string }[]).map((r) => r.bench);
+  return await mapSeq(names, async (name) => {
+    const s = await benchSeries(db, repo, name);
     const last = s[s.length - 1]!;
     const before = s.slice(-1 - BENCH_WINDOW, -1).map((p) => p.value);
     const base = before.length >= BENCH_MIN_HISTORY ? median(before) : 0;
@@ -34,9 +35,9 @@ function benchesOf(db: DatabaseSync, repo: string): NightlyBench[] {
   });
 }
 
-function repoOf(db: DatabaseSync, repo: string): NightlyRepo {
-  const runs = recentRuns(db, repo, NIGHTS);
-  const sel = selectionOf(db, repo);
+async function repoOf(db: Db, repo: string): Promise<NightlyRepo> {
+  const runs = await recentRuns(db, repo, NIGHTS);
+  const sel = await selectionOf(db, repo);
   const checks = NIGHTLY_CHECKS.map((c): NightlyCheckRow => {
     const s = sel.find((x) => x.checkId === c.id);
     const cells = runs.map((u): NightlyCell | null => {
@@ -45,24 +46,24 @@ function repoOf(db: DatabaseSync, repo: string): NightlyRepo {
     });
     return { id: c.id, label: c.label, enabled: s?.enabled ?? false, experimental: !!c.experimental, needs: c.needs ?? null, takes: takesOf(c.id), crates: s?.crates ?? [], targets: s?.targets ?? [], cells };
   });
-  return { repo, on: featureOn(db, "nightly", repo), nights: runs.map((u) => ({ runId: u.id, startedAt: u.startedAt, sha: u.sha })), checks, benches: benchesOf(db, repo) };
+  return { repo, on: await featureOn(db, "nightly", repo), nights: runs.map((u) => ({ runId: u.id, startedAt: u.startedAt, sha: u.sha })), checks, benches: await benchesOf(db, repo) };
 }
 
 /** Repos with the switch on, any selection row or any run. */
-const shown = (db: DatabaseSync, repo: string): boolean =>
-  featureOn(db, "nightly", repo) || !!db.prepare("SELECT 1 FROM nightly_selection WHERE repo = ? UNION ALL SELECT 1 FROM nightly_runs WHERE repo = ? LIMIT 1").get(repo, repo);
+const shown = async (db: Db, repo: string): Promise<boolean> =>
+  await featureOn(db, "nightly", repo) || !!await db.prepare("SELECT 1 FROM nightly_selection WHERE repo = ? UNION ALL SELECT 1 FROM nightly_runs WHERE repo = ? LIMIT 1").get(repo, repo);
 
-export const grid = async (db: DatabaseSync, req: Req): Promise<NightlyGrid> =>
-  ({ repos: (await visibleRepos(db, req)).filter((r) => shown(db, r)).map((r) => repoOf(db, r)) });
+export const grid = async (db: Db, req: Req): Promise<NightlyGrid> =>
+  ({ repos: await mapSeq((await filterSeq((await visibleRepos(db, req)), async (r) => await shown(db, r))), async (r) => await repoOf(db, r)) });
 
-async function visible(db: DatabaseSync, req: Req, repo: unknown): Promise<string> {
+async function visible(db: Db, req: Req, repo: unknown): Promise<string> {
   if (typeof repo !== "string" || !(await visibleRepos(db, req)).includes(repo)) throw new HttpError(404, "no such repo");
   return repo;
 }
 
-export const series = async (db: DatabaseSync, req: Req): Promise<NightlySeries> => {
+export const series = async (db: Db, req: Req): Promise<NightlySeries> => {
   const repo = await visible(db, req, req.params.repo);
-  const points = benchSeries(db, repo, req.params.bench ?? "");
+  const points = await benchSeries(db, repo, req.params.bench ?? "");
   if (!points.length) throw new HttpError(404, "no such benchmark");
   return { repo, bench: points[0]!.bench, unit: points[points.length - 1]!.unit, points: points.map(({ sha, at, value }) => ({ sha, at, value })) };
 };
@@ -73,14 +74,14 @@ function names(v: unknown, what: string): string[] | undefined {
   return [...new Set(v as string[])];
 }
 
-export const select = async (db: DatabaseSync, req: Req): Promise<NightlyGrid> => {
+export const select = async (db: Db, req: Req): Promise<NightlyGrid> => {
   const b = (req.json ?? {}) as { repo?: unknown; check?: unknown; enabled?: unknown; crates?: unknown; targets?: unknown };
   const repo = await visible(db, req, b.repo);
   if (typeof b.check !== "string" || !checkOf(b.check)) throw new HttpError(400, `check must be one of ${NIGHTLY_CHECKS.map((c) => c.id).join(", ")}`);
   if (typeof b.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
   const crates = names(b.crates, "crates");
   const targets = names(b.targets, "targets");
-  setSelection(db, repo, b.check, b.enabled, { crates, targets });
-  audit(db, req.user.login, "nightly-select", repo, { check: b.check, enabled: b.enabled, crates: crates ?? null, targets: targets ?? null });
+  await setSelection(db, repo, b.check, b.enabled, { crates, targets });
+  await audit(db, req.user.login, "nightly-select", repo, { check: b.check, enabled: b.enabled, crates: crates ?? null, targets: targets ?? null });
   return grid(db, req);
 };

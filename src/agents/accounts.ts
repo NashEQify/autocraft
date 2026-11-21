@@ -3,7 +3,6 @@
 //
 // Only accounts present in the box config (box.ts) are listed. Their config
 // directories stay in this process: nothing here returns one.
-import type { DatabaseSync } from "node:sqlite";
 import type { AccountAuth, AccountInput, ClaudeAccount } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { JEV_PARALLEL_DEFAULT } from "../prompts/index.ts";
@@ -11,6 +10,8 @@ import { loginInfo } from "./login.ts";
 import { credentialsNearExpiry, tokenView } from "./token.ts";
 import { boxAccounts, iso, readUsage, type BoxAccount, type Reading } from "./box.ts";
 import { setting } from "../settings-read.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export const USAGE_PAUSE_KEY = "usage_pause";
 export type UsagePause = { fiveHour: number; weekly: number };
@@ -40,9 +41,10 @@ export function validLabel(v: unknown): string {
 type Row = { id: string; label: string; enabled: number; max_concurrent: number };
 
 /** Adds a row (disabled, labelled with its id) for each account of the box config that has none. */
-export function syncAccounts(db: DatabaseSync, box: BoxAccount[] = boxAccounts(db)): void {
+export async function syncAccounts(db: Db, box?: BoxAccount[]): Promise<void> {
+  box ??= await boxAccounts(db);
   const ins = db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES (?, ?)");
-  for (const a of box) ins.run(a.id, a.id);
+  for (const a of box) await ins.run(a.id, a.id);
 }
 
 const fresh = (r: Reading | null, nowMs: number): Reading | null => (r && nowMs - r.writtenAt * 1000 <= STALE_MS ? r : null);
@@ -50,8 +52,8 @@ const fresh = (r: Reading | null, nowMs: number): Reading | null => (r && nowMs 
 const validPct = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= 100;
 
 /** The usage levels at which an account stops taking calls; absent or unreadable gives the defaults. */
-export function usagePause(db: DatabaseSync): UsagePause {
-  const row = db.prepare("SELECT value FROM settings WHERE key = ?").get(USAGE_PAUSE_KEY) as { value: string } | undefined;
+export async function usagePause(db: Db): Promise<UsagePause> {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = ?").get(USAGE_PAUSE_KEY) as { value: string } | undefined;
   if (!row) return USAGE_PAUSE_DEFAULT;
   try {
     const v = JSON.parse(row.value) as Partial<UsagePause> | null;
@@ -61,13 +63,13 @@ export function usagePause(db: DatabaseSync): UsagePause {
   }
 }
 
-export function setUsagePause(db: DatabaseSync, input: unknown, by: string): UsagePause {
+export async function setUsagePause(db: Db, input: unknown, by: string): Promise<UsagePause> {
   const v = input as Partial<UsagePause> | null;
   if (!v || typeof v !== "object" || !validPct(v.fiveHour) || !validPct(v.weekly)) throw new AccountError(400, "pause levels must be whole numbers from 1 to 100");
-  const was = usagePause(db);
+  const was = await usagePause(db);
   const next = { fiveHour: v.fiveHour, weekly: v.weekly };
-  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(USAGE_PAUSE_KEY, JSON.stringify(next));
-  if (next.fiveHour !== was.fiveHour || next.weekly !== was.weekly) audit(db, by, "account-change", "usage-pause", { ...next, was });
+  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(USAGE_PAUSE_KEY, JSON.stringify(next));
+  if (next.fiveHour !== was.fiveHour || next.weekly !== was.weekly) await audit(db, by, "account-change", "usage-pause", { ...next, was });
   return next;
 }
 
@@ -80,24 +82,24 @@ export function headroomReason(r: Reading | null, limits: UsagePause, nowMs: num
   return null;
 }
 
-function runningCounts(db: DatabaseSync, nowMs: number): Map<string, number> {
+async function runningCounts(db: Db, nowMs: number): Promise<Map<string, number>> {
   const since = new Date(nowMs - RUN_SLOT_MS).toISOString();
-  const rows = db.prepare("SELECT account_id AS id, COUNT(*) AS n FROM agent_runs WHERE state = 'running' AND account_id IS NOT NULL AND started_at >= ? GROUP BY account_id")
+  const rows = await db.prepare("SELECT account_id AS id, COUNT(*) AS n FROM agent_runs WHERE state = 'running' AND account_id IS NOT NULL AND started_at >= ? GROUP BY account_id")
     .all(since) as { id: string; n: number }[];
   return new Map(rows.map((r) => [r.id, r.n]));
 }
 
-function rows(db: DatabaseSync, box: BoxAccount[]): Row[] {
+async function rows(db: Db, box: BoxAccount[]): Promise<Row[]> {
   if (!box.length) return [];
-  const all = db.prepare("SELECT id, label, enabled, max_concurrent FROM claude_accounts").all() as Row[];
+  const all = await db.prepare("SELECT id, label, enabled, max_concurrent FROM claude_accounts").all() as Row[];
   const byId = new Map(all.map((r) => [r.id, r]));
   return box.flatMap((b) => (byId.has(b.id) ? [byId.get(b.id)!] : []));
 }
 
 type StatusRow = { logged_in: number; method: string | null; plan: string | null; login_expires_at: string | null; checked_at: string };
 
-function authOf(db: DatabaseSync, id: string): AccountAuth {
-  const s = db.prepare("SELECT logged_in, method, plan, login_expires_at, checked_at FROM claude_account_status WHERE account_id = ?").get(id) as StatusRow | undefined;
+async function authOf(db: Db, id: string): Promise<AccountAuth> {
+  const s = await db.prepare("SELECT logged_in, method, plan, login_expires_at, checked_at FROM claude_account_status WHERE account_id = ?").get(id) as StatusRow | undefined;
   return s
     ? { loggedIn: s.logged_in === 1, method: s.method, plan: s.plan, expiresAt: s.login_expires_at, checkedAt: s.checked_at }
     : { loggedIn: null, method: null, plan: null, expiresAt: null, checkedAt: null };
@@ -119,15 +121,15 @@ function toAccount(r: Row, token: ClaudeAccount["token"], running: number, readi
 }
 
 /** Every account of the box config, enabled or not, in config order. With `sync` false nothing is written: accounts without a stored row are left out. */
-export function listAccounts(db: DatabaseSync, nowMs: number = Date.now(), sync = true): ClaudeAccount[] {
-  const box = boxAccounts(db);
-  if (sync) syncAccounts(db, box);
-  const counts = runningCounts(db, nowMs), limits = usagePause(db);
-  return rows(db, box).map((r) => toAccount(r, tokenView(db, r.id, box.find((b) => b.id === r.id)!.configDir), counts.get(r.id) ?? 0, readUsage(r.id), nowMs, authOf(db, r.id), limits));
+export async function listAccounts(db: Db, nowMs: number = Date.now(), sync = true): Promise<ClaudeAccount[]> {
+  const box = await boxAccounts(db);
+  if (sync) await syncAccounts(db, box);
+  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
+  return await mapSeq((await rows(db, box)), async (r) => toAccount(r, await tokenView(db, r.id, box.find((b) => b.id === r.id)!.configDir), counts.get(r.id) ?? 0, readUsage(r.id), nowMs, await authOf(db, r.id), limits));
 }
 
-export function updateAccount(db: DatabaseSync, id: unknown, input: unknown, by: string): ClaudeAccount {
-  const box = boxAccounts(db);
+export async function updateAccount(db: Db, id: unknown, input: unknown, by: string): Promise<ClaudeAccount> {
+  const box = await boxAccounts(db);
   if (typeof id !== "string" || !box.some((b) => b.id === id)) throw new AccountError(404, "no such account");
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new AccountError(400, "the body must be a JSON object");
   const o = input as Record<string, unknown>;
@@ -140,21 +142,21 @@ export function updateAccount(db: DatabaseSync, id: unknown, input: unknown, by:
   if (o.maxConcurrent !== undefined && (typeof o.maxConcurrent !== "number" || !Number.isInteger(o.maxConcurrent) || o.maxConcurrent < 1 || o.maxConcurrent > MAX_CONCURRENT_LIMIT)) {
     throw new AccountError(400, `maxConcurrent must be a whole number from 1 to ${MAX_CONCURRENT_LIMIT}`);
   }
-  syncAccounts(db, box);
-  const before = rows(db, box).find((r) => r.id === id)!;
+  await syncAccounts(db, box);
+  const before = (await rows(db, box)).find((r) => r.id === id)!;
   const next = {
     label: (o.label as string | undefined) ?? before.label,
     enabled: (o.enabled as boolean | undefined) ?? before.enabled === 1,
     maxConcurrent: (o.maxConcurrent as number | undefined) ?? before.max_concurrent,
   };
-  db.prepare("UPDATE claude_accounts SET label = ?, enabled = ?, max_concurrent = ?, updated_by = ?, updated_at = ? WHERE id = ?")
+  await db.prepare("UPDATE claude_accounts SET label = ?, enabled = ?, max_concurrent = ?, updated_by = ?, updated_at = ? WHERE id = ?")
     .run(next.label, next.enabled ? 1 : 0, next.maxConcurrent, by, new Date().toISOString(), id);
-  audit(db, by, "account-change", `account:${id}`, {
+  await audit(db, by, "account-change", `account:${id}`, {
     ...(next.label !== before.label && { label: next.label, was: before.label }),
     ...(next.enabled !== (before.enabled === 1) && { enabled: next.enabled }),
     ...(next.maxConcurrent !== before.max_concurrent && { maxConcurrent: next.maxConcurrent }),
   });
-  return listAccounts(db).find((a) => a.id === id)!;
+  return (await listAccounts(db)).find((a) => a.id === id)!;
 }
 
 export type Choice =
@@ -168,12 +170,12 @@ export type Choice =
  * (a sandboxed call cannot refresh the token); it is named in the wait reason instead.
  * With `ignoreSlots`, full accounts count as available: whether a call could run once a slot frees, used for a waiter's eligibility in the call queue.
  */
-export function chooseAccount(db: DatabaseSync, nowMs: number = Date.now(), minTokenMs?: number, ignoreSlots = false): Choice {
-  const box = boxAccounts(db);
-  syncAccounts(db, box);
-  const enabled = rows(db, box).filter((r) => r.enabled === 1);
+export async function chooseAccount(db: Db, nowMs: number = Date.now(), minTokenMs?: number, ignoreSlots = false): Promise<Choice> {
+  const box = await boxAccounts(db);
+  await syncAccounts(db, box);
+  const enabled = (await rows(db, box)).filter((r) => r.enabled === 1);
   if (!enabled.length) return { none: true };
-  const counts = runningCounts(db, nowMs), limits = usagePause(db);
+  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
   const reasons: string[] = [];
   const ok: { r: Row; weekly: number; running: number }[] = [];
   for (const r of enabled) {
@@ -181,7 +183,7 @@ export function chooseAccount(db: DatabaseSync, nowMs: number = Date.now(), minT
     const why = headroomReason(reading, limits, nowMs);
     if (why) reasons.push(`${r.label}: ${why}`);
     else if (!ignoreSlots && running >= r.max_concurrent) reasons.push(`${r.label}: ${running} of ${r.max_concurrent} slots in use`);
-    else if (minTokenMs !== undefined && credentialsNearExpiry(db, r.id, box.find((b) => b.id === r.id)!.configDir, nowMs, minTokenMs)) reasons.push(`${r.label}: login token expires within ${Math.ceil(minTokenMs / 60_000)} min; waiting for its refresh`);
+    else if (minTokenMs !== undefined && await credentialsNearExpiry(db, r.id, box.find((b) => b.id === r.id)!.configDir, nowMs, minTokenMs)) reasons.push(`${r.label}: login token expires within ${Math.ceil(minTokenMs / 60_000)} min; waiting for its refresh`);
     else ok.push({ r, weekly: fresh(reading, nowMs)?.weekly?.pct ?? 0, running });
   }
   if (!ok.length) return { wait: reasons.join("; ") };
@@ -191,21 +193,21 @@ export function chooseAccount(db: DatabaseSync, nowMs: number = Date.now(), minT
 }
 
 /** Whether the given account is still enabled, has headroom and a free slot (a follow-up on its session may start). */
-export function accountHasRoom(db: DatabaseSync, accountId: string, nowMs: number = Date.now()): boolean {
-  const box = boxAccounts(db);
-  syncAccounts(db, box);
-  const r = rows(db, box).find((x) => x.id === accountId);
-  if (!r || r.enabled !== 1 || headroomReason(readUsage(r.id), usagePause(db), nowMs)) return false;
-  return (runningCounts(db, nowMs).get(r.id) ?? 0) < r.max_concurrent;
+export async function accountHasRoom(db: Db, accountId: string, nowMs: number = Date.now()): Promise<boolean> {
+  const box = await boxAccounts(db);
+  await syncAccounts(db, box);
+  const r = (await rows(db, box)).find((x) => x.id === accountId);
+  if (!r || r.enabled !== 1 || headroomReason(readUsage(r.id), await usagePause(db), nowMs)) return false;
+  return ((await runningCounts(db, nowMs)).get(r.id) ?? 0) < r.max_concurrent;
 }
 
 /** Calls the enabled accounts with headroom can take right now: the sum of their free slots. */
-export function freeSlots(db: DatabaseSync, nowMs: number = Date.now()): number {
-  const box = boxAccounts(db);
-  syncAccounts(db, box);
-  const counts = runningCounts(db, nowMs), limits = usagePause(db);
+export async function freeSlots(db: Db, nowMs: number = Date.now()): Promise<number> {
+  const box = await boxAccounts(db);
+  await syncAccounts(db, box);
+  const counts = await runningCounts(db, nowMs), limits = await usagePause(db);
   let free = 0;
-  for (const r of rows(db, box)) {
+  for (const r of await rows(db, box)) {
     if (r.enabled !== 1 || headroomReason(readUsage(r.id), limits, nowMs)) continue;
     free += Math.max(0, r.max_concurrent - (counts.get(r.id) ?? 0));
   }
@@ -217,16 +219,16 @@ export { JEV_PARALLEL_DEFAULT };
 export const JEV_PARALLEL_MAX = 100;
 
 /** Jev calls at once (Jev has no accounts, so no slots limit it). */
-export function jevParallel(db: DatabaseSync): number {
-  const v = Number(setting(db, JEV_PARALLEL_KEY));
+export async function jevParallel(db: Db): Promise<number> {
+  const v = Number(await setting(db, JEV_PARALLEL_KEY));
   return Number.isInteger(v) && v >= 1 && v <= JEV_PARALLEL_MAX ? v : JEV_PARALLEL_DEFAULT;
 }
 
-export function setJevParallel(db: DatabaseSync, n: unknown, by: string): number {
+export async function setJevParallel(db: Db, n: unknown, by: string): Promise<number> {
   if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > JEV_PARALLEL_MAX) throw new AccountError(400, `Jev calls at once must be a whole number from 1 to ${JEV_PARALLEL_MAX}`);
-  const was = jevParallel(db);
-  db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JEV_PARALLEL_KEY, String(n));
-  if (n !== was) audit(db, by, "account-change", "jev", { jevParallel: n, was });
+  const was = await jevParallel(db);
+  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(JEV_PARALLEL_KEY, String(n));
+  if (n !== was) await audit(db, by, "account-change", "jev", { jevParallel: n, was });
   return n;
 }
 
@@ -234,12 +236,12 @@ export function setJevParallel(db: DatabaseSync, n: unknown, by: string): number
  * Why Claude-model stages are paused, or null: no account is enabled, or every
  * enabled account is out of headroom. A busy account is not a pause; calls wait for a slot.
  */
-export function claudePauseReason(db: DatabaseSync, nowMs: number = Date.now()): string | null {
-  const box = boxAccounts(db);
-  syncAccounts(db, box);
-  const enabled = rows(db, box).filter((r) => r.enabled === 1);
+export async function claudePauseReason(db: Db, nowMs: number = Date.now()): Promise<string | null> {
+  const box = await boxAccounts(db);
+  await syncAccounts(db, box);
+  const enabled = (await rows(db, box)).filter((r) => r.enabled === 1);
   if (!enabled.length) return "paused: no Claude account is enabled";
-  const reasons: string[] = [], limits = usagePause(db);
+  const reasons: string[] = [], limits = await usagePause(db);
   for (const r of enabled) {
     const why = headroomReason(readUsage(r.id), limits, nowMs);
     if (!why) return null;
@@ -253,14 +255,14 @@ export function claudePauseReason(db: DatabaseSync, nowMs: number = Date.now()):
 export const SAMPLE_KEEP_MS = 30 * 86_400_000;
 
 /** Records each account's current reading once (keyed by the reading's time). Returns how many were new. */
-export function recordUsageSamples(db: DatabaseSync, nowMs: number = Date.now()): number {
+export async function recordUsageSamples(db: Db, nowMs: number = Date.now()): Promise<number> {
   const ins = db.prepare("INSERT OR IGNORE INTO account_usage_samples (account_id, t, five_hour_pct, weekly_pct) VALUES (?, ?, ?, ?)");
   let n = 0;
-  for (const a of boxAccounts(db)) {
+  for (const a of await boxAccounts(db)) {
     const r = readUsage(a.id);
     if (!r) continue;
-    n += Number(ins.run(a.id, iso(r.writtenAt), r.fiveHour?.pct ?? null, r.weekly?.pct ?? null).changes);
+    n += Number((await ins.run(a.id, iso(r.writtenAt), r.fiveHour?.pct ?? null, r.weekly?.pct ?? null)).changes);
   }
-  db.prepare("DELETE FROM account_usage_samples WHERE t < ?").run(new Date(nowMs - SAMPLE_KEEP_MS).toISOString());
+  await db.prepare("DELETE FROM account_usage_samples WHERE t < ?").run(new Date(nowMs - SAMPLE_KEEP_MS).toISOString());
   return n;
 }

@@ -5,13 +5,13 @@ import assert from "node:assert/strict";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { connect } from "../src/db.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { AppNotInstalledError, TOKEN_ENV } from "../src/github/install-token.ts";
 import { ghComment, pushOwnBranch } from "../src/github/write.ts";
 import type { GuardedItem, GuardedRepo } from "../src/core/guard.ts";
 import type { ExecOpts } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const BOX = "ghp_box_account_token";
 const APP = "ghs_installation_token";
@@ -21,8 +21,8 @@ const note = { by: "fixed" } as never;
 
 test("app identity: the installation token is the whole child environment; legacy and user grants are untouched", async () => {
   mkdirSync(SCRATCH, { recursive: true });
-  const db = connect(join(SCRATCH, `app-lane-${process.pid}.db`));
-  db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('lane')").run();
+  const db = await connectDb(join(SCRATCH, `app-lane-${process.pid}.db`));
+  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('lane')").run();
   process.env.GITHUB_TOKEN = BOX;
   process.env.GH_TOKEN = BOX;
   let mintFails = false;
@@ -37,7 +37,7 @@ test("app identity: the installation token is the whole child environment; legac
   assert.equal(seen.length, 1);
   assert.equal(seen.pop()!.env, undefined); // legacy: the call is as it always was (gh inherits the box environment)
 
-  setGithubIdentity(db, "op", "app");
+  await setGithubIdentity(db, "op", "app");
   await comment("app");
   const o = seen.pop()!;
   assert.equal(o.replaceEnv, true);
@@ -58,6 +58,6 @@ test("app identity: the installation token is the whole child environment; legac
   assert.equal(r.code, 1);
   assert.match(r.stderr, /not installed on storytold/);
   assert.equal(seen.length, 0);
-  const row = db.prepare("SELECT details FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { details: string };
+  const row = await db.prepare("SELECT details FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { details: string };
   assert.equal(JSON.parse(row.details).state, "failed");
 });

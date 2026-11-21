@@ -3,7 +3,6 @@
 // the runner reads the task, so no job waits on a build and the read is database work only. Nothing here changes a finding's
 // state or severity except a note on one whose test passed; only a person decides what that means.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { featureOn } from "../build/features.ts";
 import { BuildError } from "../build/envs.ts";
 import { TERMINAL, cancelTask, createTask, getTask, privateClockStart } from "../build/tasks.ts";
@@ -18,6 +17,7 @@ import { ROUND_BUILD_LIMIT_MS } from "./actions.ts";
 import { crateOf } from "./fix.ts";
 import { advance } from "./store.ts";
 import type { SecurityScanTestInput } from "./rules.ts";
+import type { Db } from "../db/index.ts";
 
 /** Build tasks of scan tests queue behind the work that waits for a person. */
 export const SCAN_TEST_PRIORITY = -5;
@@ -45,7 +45,7 @@ export type WriteOpts = {
  * Writes the finding's test and queues its build task. Returns true when a task was queued (the row is `building`), false
  * when the finding has none: the sink is not in a Rust crate, the model gave no test, or the test failed the patch check.
  */
-export async function writeAndQueue(db: DatabaseSync, o: WriteOpts): Promise<boolean> {
+export async function writeAndQueue(db: Db, o: WriteOpts): Promise<boolean> {
   const { repo, number: n } = o;
   if (!o.crates.ok || !o.crates.rust) return false;
   const crate = crateOf(o.crates.crates, o.finding.refs[0]?.path ?? "");
@@ -60,13 +60,13 @@ export async function writeAndQueue(db: DatabaseSync, o: WriteOpts): Promise<boo
   let id: number;
   try {
     const base = tasksFor({ repo, number: null, main_sha: o.sha, crate: crate.name, test: name }, patch, patch, "scan-test")[1]!;
-    id = createTask(db, { ...base, priority: SCAN_TEST_PRIORITY });
+    id = await createTask(db, { ...base, priority: SCAN_TEST_PRIORITY });
   } catch (e) {
     if (!(e instanceof BuildError)) throw e;
     o.log(`${repo} finding ${n}: no scan test: the build task was not queued: ${e.message}`);
     return false;
   }
-  db.prepare(`INSERT OR REPLACE INTO security_scan_tests (repo, number, test_path, crate, test_patch, test_source, task_id, retried, state, created_at)
+  await db.prepare(`INSERT OR REPLACE INTO security_scan_tests (repo, number, test_path, crate, test_patch, test_source, task_id, retried, state, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'building', ?)`).run(repo, n, path, crate.name, patch, written.value, id, now());
   o.log(`${repo} finding ${n}: scan test queued for build`);
   return true;
@@ -74,9 +74,9 @@ export async function writeAndQueue(db: DatabaseSync, o: WriteOpts): Promise<boo
 
 type Row = { repo: string; number: number; task_id: number; retried: number; created_at: string };
 
-function finish(db: DatabaseSync, r: Row, state: Exclude<ScanTestState, "building">, detail: string): void {
-  db.prepare("UPDATE security_scan_tests SET state = ?, detail = ?, ended_at = ? WHERE repo = ? AND number = ? AND state = 'building'").run(state, detail, now(), r.repo, r.number);
-  if (state === "not-shown") advance(db, r.repo, r.number, ["new"], "new", { note: NOT_SHOWN_NOTE });
+async function finish(db: Db, r: Row, state: Exclude<ScanTestState, "building">, detail: string): Promise<void> {
+  await db.prepare("UPDATE security_scan_tests SET state = ?, detail = ?, ended_at = ? WHERE repo = ? AND number = ? AND state = 'building'").run(state, detail, now(), r.repo, r.number);
+  if (state === "not-shown") await advance(db, r.repo, r.number, ["new"], "new", { note: NOT_SHOWN_NOTE });
 }
 
 /**
@@ -84,37 +84,37 @@ function finish(db: DatabaseSync, r: Row, state: Exclude<ScanTestState, "buildin
  * failure, a timeout or a second environment error is `could-not-build` (a first environment error queues the task again).
  * A task still running after ROUND_BUILD_LIMIT_MS is cancelled. Returns the tests that ended.
  */
-export function advanceScanTests(db: DatabaseSync): { repo: string; number: number; state: ScanTestState }[] {
-  if (!featureOn(db, "scan-tests")) return [];
-  const rows = db.prepare("SELECT repo, number, task_id, retried, created_at FROM security_scan_tests WHERE state = 'building' ORDER BY repo, number").all() as Row[];
+export async function advanceScanTests(db: Db): Promise<{ repo: string; number: number; state: ScanTestState }[]> {
+  if (!await featureOn(db, "scan-tests")) return [];
+  const rows = await db.prepare("SELECT repo, number, task_id, retried, created_at FROM security_scan_tests WHERE state = 'building' ORDER BY repo, number").all() as Row[];
   const ended: { repo: string; number: number; state: ScanTestState }[] = [];
-  const end = (r: Row, state: Exclude<ScanTestState, "building">, detail: string): void => { finish(db, r, state, detail); ended.push({ repo: r.repo, number: r.number, state }); };
+  const end = async (r: Row, state: Exclude<ScanTestState, "building">, detail: string): Promise<void> => { await finish(db, r, state, detail); ended.push({ repo: r.repo, number: r.number, state }); };
   for (const r of rows) {
-    const task = getTask(db, r.task_id);
-    if (!task) { end(r, "could-not-build", "the build task no longer exists"); continue; }
+    const task = await getTask(db, r.task_id);
+    if (!task) { await end(r, "could-not-build", "the build task no longer exists"); continue; }
     if (!TERMINAL.includes(task.state)) {
-      const since = privateClockStart(db, r.created_at);
+      const since = await privateClockStart(db, r.created_at);
       if (since === null || Date.now() - since <= ROUND_BUILD_LIMIT_MS) continue;
-      cancelTask(db, r.task_id, "security-scan");
-      end(r, "could-not-build", "the build did not finish in time");
+      await cancelTask(db, r.task_id, "security-scan");
+      await end(r, "could-not-build", "the build did not finish in time");
       continue;
     }
     const o = outcomeOf(task);
-    if (o.kind === "pass") { end(r, "not-shown", NOT_SHOWN_NOTE); continue; }
+    if (o.kind === "pass") { await end(r, "not-shown", NOT_SHOWN_NOTE); continue; }
     if (o.kind === "fail") {
-      if (o.step === "test" && !o.timedOut) end(r, "confirmed", "The test failed on the pinned commit.");
-      else end(r, "could-not-build", o.timedOut ? `the ${o.step} step timed out` : `the ${o.step} step failed before the test ran`);
+      if (o.step === "test" && !o.timedOut) await end(r, "confirmed", "The test failed on the pinned commit.");
+      else await end(r, "could-not-build", o.timedOut ? `the ${o.step} step timed out` : `the ${o.step} step failed before the test ran`);
       continue;
     }
     if (r.retried === 0) {
       try {
-        db.prepare("UPDATE security_scan_tests SET task_id = ?, retried = 1 WHERE repo = ? AND number = ?").run(cloneTask(db, r.task_id), r.repo, r.number);
+        await db.prepare("UPDATE security_scan_tests SET task_id = ?, retried = 1 WHERE repo = ? AND number = ?").run(await cloneTask(db, r.task_id), r.repo, r.number);
         continue;
       } catch (e) {
         if (!(e instanceof BuildError)) throw e;
       }
     }
-    end(r, "could-not-build", `build environment error: ${oneLine(o.reason, 200)}`);
+    await end(r, "could-not-build", `build environment error: ${oneLine(o.reason, 200)}`);
   }
   return ended;
 }
