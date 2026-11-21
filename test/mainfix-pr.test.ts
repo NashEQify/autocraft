@@ -41,7 +41,7 @@ async function world() {
   git(fork, "init", "-q", "--bare");
 
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
   await db.prepare("INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, first_seen_at, state_changed_at, updated_at) VALUES ('app', ?, 'main', 'red', '[]', '[]', ?, ?, ?)").run(head, T0, T0, T0);
   const row: FixRow = { repo: "app", head_sha: head, check: "gate / test", verdict: "code", state: "needs-fix", reason: null, run_id: 11, run_url: null, excerpt: null, decision_id: null, issue_number: null, pr_number: null, pr_url: null, patch: null, files: null, lint_task: null, lint_round: null, lint_state: null, session: null, created_at: T0, updated_at: T0 };
@@ -86,8 +86,8 @@ async function world() {
 
 /** Ends the repo's newest lint task with these clippy diagnostics (NDJSON). */
 async function finishLint(db: Db, clippy: string): Promise<number> {
-  const id = Number((await db.prepare("SELECT id FROM build_tasks ORDER BY id DESC LIMIT 1").get() as { id: number }).id);
-  await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T0, id);
+  const id = (await db.get(db.k.selectFrom("build_tasks").select("id").orderBy("id", "desc").limit(1)))!.id;
+  await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: T0 }).where("id", "=", id));
   const tmp = tempPath(id);
   writeFileSync(tmp, clippy);
   await storeArtifact(db, id, CLIPPY_ARTIFACT, tmp);

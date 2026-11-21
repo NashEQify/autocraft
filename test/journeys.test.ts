@@ -600,7 +600,7 @@ async function putLint(w: World, id: number, o: { format?: string; diagnostics?:
 
 async function endLint(w: World, id: number, o: Parameters<typeof putLint>[2] = {}): Promise<void> {
   await putLint(w, id, o);
-  await w.db.prepare("UPDATE build_tasks SET state = 'done', results = '[]', ended_at = ? WHERE id = ?").run(T1, id);
+  await w.db.run(w.db.k.updateTable("build_tasks").set({ state: "done", results: "[]", ended_at: T1 }).where("id", "=", id));
 }
 
 /** The sandbox finished a build task: every step passed, or the test step failed. */
@@ -612,7 +612,7 @@ async function endTask(w: World, id: number, end: "pass" | "fail-test"): Promise
     results.push({ step: s.name, exitCode: bad ? 101 : 0, durationMs: 1, timedOut: false });
     if (bad) break;
   }
-  await w.db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(end === "pass" ? "done" : "failed", JSON.stringify(results), T1, id);
+  await w.db.run(w.db.k.updateTable("build_tasks").set({ state: end === "pass" ? "done" : "failed", results: JSON.stringify(results), ended_at: T1 }).where("id", "=", id));
 }
 
 const sh = (cwd: string, ...args: string[]): string => {

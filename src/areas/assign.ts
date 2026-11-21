@@ -6,12 +6,12 @@ import { jobItem } from "../runner/job-items.ts";
 import { freeSlots } from "../agents/accounts.ts";
 import { takersFirst } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
-import { notOwnIntegrationSql } from "../dupes/held.ts";
+import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { refOf } from "../classify/parse.ts";
 import { pool } from "../classify/run.ts";
 import { runTiered } from "../agents/step.ts";
 import { AREAS } from "../agents/steps.ts";
-import { pilotSql } from "../pilot.ts";
+import { pilotExpr } from "../pilot.ts";
 import { cachedDiff, ghDiff, splitDiff } from "../review/diff.ts";
 import { settles } from "./parse.ts";
 import { currentList, setItemArea } from "./store.ts";
@@ -33,7 +33,7 @@ export const diffPaths = (db: Db): PathSource => async (repo, number, head) => {
   if (!head) return null;
   const key = `${repo}#${number}@${head}`;
   if (failedHeads.has(key)) return null;
-  const low = Number((await db.prepare("SELECT value FROM settings WHERE key = 'sync_rate_remaining'").get() as { value: string } | undefined)?.value ?? Infinity) < RATE_FLOOR;
+  const low = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "sync_rate_remaining")))?.value ?? Infinity) < RATE_FLOOR;
   const r = await cachedDiff(db, repo, number, head, low ? async () => ({ ok: false, tooLarge: false, error: "rate low" }) : ghDiff);
   if (!r.ok) {
     if (!low) failedHeads.add(key);
@@ -50,15 +50,20 @@ type Due = AreaItem & { head: string | null; version: number };
  * Operator-assigned items are never due. Items of repos no Task Runner takes come after the rest before the limit (takersFirst).
  */
 export async function dueForArea(db: Db, opts: { repo?: string; limit: number; rescan?: boolean }): Promise<Due[]> {
-  const due = await db.prepare(`SELECT i.repo, i.number, i.kind, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body,
-      i.additions + i.deletions AS lines_changed, i.changed_files AS files_changed, i.author_association, i.head_oid AS head, l.v AS version
-    FROM items i JOIN tracked_repos t ON t.name = i.repo
-    JOIN (SELECT repo, MAX(version) AS v FROM area_lists GROUP BY repo) l ON l.repo = i.repo
-    LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
-    WHERE i.state = 'OPEN' AND ${notOwnIntegrationSql(db, "i")} AND ${pilotSql(db, "i")} AND (CAST(:repo AS TEXT) IS NULL OR i.repo = :repo)
-      AND (a.number IS NULL OR (a.source <> 'operator' AND (a.list_version <> l.v OR (:rescan AND a.area IS NULL))))
-    ORDER BY t.pipeline DESC, i.updated_at DESC, i.repo, i.number`)
-    .all({ repo: opts.repo ?? null, rescan: opts.rescan ? 1 : 0 }) as unknown as Due[];
+  const due: Due[] = await db.all(db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
+    .innerJoin(db.k.selectFrom("area_lists").select(["repo", (eb) => eb.fn.max<number>("version").as("v")]).groupBy("repo").as("l"), (j) => j.onRef("l.repo", "=", "i.repo"))
+    .leftJoin("item_areas as a", (j) => j.onRef("a.repo", "=", "i.repo").onRef("a.number", "=", "i.number"))
+    .select((eb) => ["i.repo", "i.number", "i.kind", eb.fn.coalesce("i.title", eb.val("")).as("title"), eb.fn.coalesce("i.body", eb.val("")).as("body"),
+      eb("i.additions", "+", eb.ref("i.deletions")).as("lines_changed"), "i.changed_files as files_changed", "i.author_association", "i.head_oid as head", "l.v as version"])
+    .$narrowType<{ kind: "pr" | "issue" }>()
+    .where("i.state", "=", "OPEN")
+    .where((eb) => notOwnIntegrationExpr(db, eb, "i")).where((eb) => pilotExpr(db, eb, "i"))
+    .$if(!!opts.repo, (q) => q.where("i.repo", "=", opts.repo!))
+    .where((eb) => eb.or([
+      eb("a.number", "is", null),
+      eb.and([eb("a.source", "<>", "operator"), eb.or([eb("a.list_version", "<>", eb.ref("l.v")), ...(opts.rescan ? [eb("a.area", "is", null)] : [])])]),
+    ]))
+    .orderBy("t.pipeline", "desc").orderBy("i.updated_at", (o) => o.desc().nullsLast()).orderBy("i.repo").orderBy("i.number"));
   return (await takersFirst(db, due, (x) => [x.repo], (x) => [x], "areas.haiku")).slice(0, opts.limit);
 }
 

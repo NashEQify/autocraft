@@ -240,7 +240,7 @@ async function enqueueTest(db: Db, args: string[]): Promise<void> {
   if (!os || !repo || !sha) die(USAGE);
   if (!OS.includes(os)) die(`--env-requires must be one of ${OS.join(", ")}`);
   if (!(await trackedNames(db)).includes(repo)) die(`${repo} is not a tracked repo`);
-  const vis = (await db.prepare("SELECT visibility FROM main.repos WHERE name = ?").get(repo) as { visibility: string | null } | undefined)?.visibility;
+  const vis = (await db.get(db.k.selectFrom("main.repos").select("visibility").where("name", "=", repo)))?.visibility;
   if (vis?.toLowerCase() !== "public") die(`${repo} is not public; workers fetch source anonymously`);
   const id = await run(async () => await createTask(db, {
     step: "smoke-test", repo, headSha: sha, requires: { os: os as "linux" | "macos" | "windows" },

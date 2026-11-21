@@ -13,6 +13,7 @@ import { putConfig, type ScreenshotConfigBody } from "../src/verify/screenshot-c
 import { runVerify, type VerifyDeps } from "../src/verify/index.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
+import { excluded } from "../src/db/kx.ts";
 import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -38,13 +39,12 @@ async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   process.env.AUTOCRAFT_DIFF_CACHE = mkdtempSync(join(dir, "diffs-"));
   planCalls = 0; compareCalls = 0;
-  await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
-    VALUES ('app', 7, 'pr', 'OPEN', 'Show size', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(HEAD);
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Show size", author: "someone", additions: 5, deletions: 0, head_oid: HEAD, created_at: T0, updated_at: T0 }));
   await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(HEAD);
   await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
     VALUES ('app', 7, ?, 'OPEN', 0, 'success', '[]', 'MERGEABLE', 1, '${T0}')`).run(HEAD);
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await putConfig(db, "op", "app", CFG);
   return db;
 }
@@ -53,6 +53,8 @@ const verifyDeps: VerifyDeps = {
   baseOf: async () => BASE, mainHead: async () => null, model: "sonnet",
   screenshots: { plan: async () => { planCalls++; return parseScreenshotReply(JSON.stringify([{ ref: "app#7", screenshot: true, reason: "Dialog changes", steps: [{ cmd: "snap", args: { size: "1440x900" } }] }]), "app#7", CFG); } },
 };
+const tasks = async (db: Db, step?: string, state?: string): Promise<number> => (await db.all(db.k.selectFrom("build_tasks").select("id")
+  .$if(!!step, (q) => q.where("step", "=", step!)).$if(!!state, (q) => q.where("state", "=", state!)))).length;
 const count = async (db: Db, sql: string): Promise<number> => (await db.prepare(sql).all()).length;
 const switchOn = async (db: Db): Promise<void> => { await setFeature(db, "screenshots", true, "op"); await setFeature(db, "screenshots", true, "op", "app"); };
 
@@ -64,7 +66,7 @@ async function rendered(db: Db, shots: { head: string; base: string; headSize?: 
     const t = (await getTask(db, id))!;
     const results = t.plan.map((s, i) => ({ step: s.name, exitCode: fails && i === t.plan.length - 1 ? 1 : 0, timedOut: false, durationMs: 1 }));
     if (!fails) { const tmp = tempPath(id); writeFileSync(tmp, png(tag, ...(id === run.h ? shots.headSize ?? [10, 10] : [10, 10]))); await storeArtifact(db, id, "s1.png", tmp); }
-    await db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(fails ? "failed" : "done", JSON.stringify(results), T0, id);
+    await db.run(db.k.updateTable("build_tasks").set({ state: fails ? "failed" : "done", results: JSON.stringify(results), ended_at: T0 }).where("id", "=", id));
   }
   return { head: run.h, base: run.b };
 }
@@ -80,7 +82,7 @@ describe("screenshots switch off (test A)", () => {
     for (const on of [false, true]) {
       if (on) await setFeature(db, "screenshots", true, "op");   // global only: the repo's own switch is still off
       await runVerify(db, { repo: "app" }, () => {}, verifyDeps);
-      assert.deepEqual([await count(db, "SELECT 1 FROM build_tasks"), await count(db, "SELECT 1 FROM screenshot_runs"), planCalls], [0, 0, 0]);
+      assert.deepEqual([await tasks(db), await count(db, "SELECT 1 FROM screenshot_runs"), planCalls], [0, 0, 0]);
       assert.deepEqual((await db.prepare("SELECT kind, state FROM verifications").all()).map((r) => ({ ...r })), [{ kind: "ci-enough", state: "ci-enough" }]);
       await db.prepare("DELETE FROM verifications").run();
     }
@@ -90,9 +92,9 @@ describe("screenshots switch off (test A)", () => {
 
     await switchOn(db);
     const t = await rendered(db, { head: "x", base: "y" });
-    await db.prepare("UPDATE build_tasks SET state = 'queued', ended_at = NULL WHERE id = ?").run(t.head);
+    await db.run(db.k.updateTable("build_tasks").set({ state: "queued", ended_at: null }).where("id", "=", t.head));
     // Off by hand, so the collect-side guard is what ends the run (setFeature itself stops it at once).
-    await db.prepare("UPDATE settings SET value = 'off' WHERE key = 'build_feature:screenshots'").run();
+    await db.run(db.k.updateTable("settings").set({ value: "off" }).where("key", "=", "build_feature:screenshots"));
     assert.equal(await collectDue(db), true);
     await collect(db, reply("regression", true));
     assert.equal(compareCalls, 0);
@@ -131,7 +133,7 @@ describe("screenshots collect (test B)", () => {
 
     db = await fresh(); await switchOn(db);
     await rendered(db, { head: "broken", base: "fine" });
-    await collect(db, async () => { await db.prepare("UPDATE items SET head_oid = ? WHERE repo = 'app'").run("c".repeat(40)); await db.prepare("UPDATE pr_checks SET head_oid = ? WHERE repo = 'app'").run("c".repeat(40)); });
+    await collect(db, async () => { await db.run(db.k.updateTable("items").set({ head_oid: "c".repeat(40) }).where("repo", "=", "app")); await db.prepare("UPDATE pr_checks SET head_oid = ? WHERE repo = 'app'").run("c".repeat(40)); });
     assert.deepEqual({ ...await db.prepare("SELECT state, held FROM screenshot_runs").get() }, { state: "compared", held: 0 });
     assert.equal(await count(db, "SELECT 1 FROM merge_holds"), 0);
 
@@ -148,11 +150,11 @@ describe("screenshots review fixes", () => {
   test("a screenshot task does not use up the verification's retry", async () => {
     const db = await fresh(); await switchOn(db);
     await rendered(db, { head: "a", base: "b" });
-    assert.equal(await count(db, "SELECT 1 FROM build_tasks WHERE step = 'screenshot'"), 2);
-    assert.equal(await count(db, "SELECT 1 FROM build_tasks WHERE step = 'verify'"), 0);
+    assert.equal(await tasks(db, "screenshot"), 2);
+    assert.equal(await tasks(db, "verify"), 0);
     const lost = await createTask(db, { step: "verify", repo: "app", number: 7, headSha: HEAD, baseSha: BASE, requires: { os: "linux", toolchains: ["rust-stable"] },
       plan: [{ name: "fetch deps", cmd: ["true"], network: "fetch", timeoutSec: 10 }], warm: { key: "app", role: "use" } });
-    await db.prepare("UPDATE build_tasks SET state = 'lost', ended_at = ? WHERE id = ?").run(T0, lost);
+    await db.run(db.k.updateTable("build_tasks").set({ state: "lost", ended_at: T0 }).where("id", "=", lost));
     await db.prepare("DELETE FROM verifications").run();
     await db.prepare(`INSERT INTO verifications (repo, number, head_sha, base_sha, kind, reason, head_task_id, state, created_at) VALUES ('app', 7, ?, ?, 'tests', 'r', ?, 'planned', '${T0}')`).run(HEAD, BASE, lost);
     const s = await runCollect(db, {}, () => {}, { model: "haiku", screenshots: { compare: async () => null } });
@@ -168,11 +170,11 @@ describe("screenshots review fixes", () => {
 
     db = await fresh(); await switchOn(db);
     const t = await rendered(db, { head: "a", base: "b" });
-    await db.prepare("UPDATE build_tasks SET state = 'lost', results = '[]' WHERE id = ?").run(t.head);
+    await db.run(db.k.updateTable("build_tasks").set({ state: "lost", results: "[]" }).where("id", "=", t.head));
     await collect(db, reply("regression", true));
     assert.equal((await db.prepare("SELECT state FROM screenshot_runs").get())!.state, "planned");
-    assert.equal(await count(db, "SELECT 1 FROM build_tasks WHERE step = 'screenshot'"), 4);
-    await db.prepare("UPDATE build_tasks SET state = 'lost', results = '[]' WHERE state = 'queued'").run();
+    assert.equal(await tasks(db, "screenshot"), 4);
+    await db.run(db.k.updateTable("build_tasks").set({ state: "lost", results: "[]" }).where("state", "=", "queued"));
     await collect(db, reply("regression", true));
     assert.equal((await db.prepare("SELECT state FROM screenshot_runs").get())!.state, "error");
     assert.equal(await count(db, "SELECT 1 FROM merge_holds"), 0);
@@ -182,14 +184,14 @@ describe("screenshots review fixes", () => {
     const db = await fresh(); await switchOn(db);
     await createEnv(db, { id: "env-one", label: "env-one", kind: "local-sandbox", slots: 4 }, "op");
     await hello(db, "env-one", { version: "1", capabilities: { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: true, gpu: false, toolchains: ["rust-stable"] }, slots: 4 });
-    await db.prepare("INSERT INTO settings (key, value) VALUES ('base_scope', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+    await db.run(db.k.insertInto("settings").values({ key: "base_scope", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await runVerify(db, { repo: "app" }, () => {}, verifyDeps);
     // Off by hand (not through setFeature): the claim alone must refuse the queued render tasks.
-    await db.prepare("UPDATE settings SET value = 'off' WHERE key = 'build_feature:screenshots:app'").run();
+    await db.run(db.k.updateTable("settings").set({ value: "off" }).where("key", "=", "build_feature:screenshots:app"));
     assert.deepEqual((await claim(db, "env-one", 4)).tasks.filter((t) => t.repo === "app"), []);
     await setFeature(db, "screenshots", true, "op", "app");
     await setFeature(db, "screenshots", false, "op", "app");
-    assert.equal(await count(db, "SELECT 1 FROM build_tasks WHERE step = 'screenshot' AND state = 'cancelled'"), 2);
+    assert.equal(await tasks(db, "screenshot", "cancelled"), 2);
     assert.deepEqual({ ...await db.prepare("SELECT state, reason FROM screenshot_runs").get() }, { state: "skipped", reason: "screenshots switched off" });
   });
 });

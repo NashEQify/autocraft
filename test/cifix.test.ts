@@ -250,8 +250,8 @@ describe("format failure", () => {
   async function formatRun(w: World, diff: string | null, given?: Db) {
     const db = given ?? (await fresh(w.head));
     await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
-    const task = (await rows(db, "SELECT id FROM build_tasks"))[0]!;
-    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T2, Number(task.id));
+    const task = (await db.all(db.k.selectFrom("build_tasks").select("id")))[0]!;
+    await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: T2 }).where("id", "=", task.id));
     if (diff !== null) {
       const tmp = tempPath(Number(task.id));
       writeFileSync(tmp, diff);
@@ -346,8 +346,8 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     const comments = () => w.log.filter((l) => l.startsWith("comment:")).length;
     await run();
     assert.deepEqual(await states(), ["linting"], out.join("\n"));
-    const task = Number((await rows(db, "SELECT id FROM build_tasks"))[0]!.id);
-    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(new Date().toISOString(), task);
+    const task = (await db.all(db.k.selectFrom("build_tasks").select("id")))[0]!.id;
+    await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: new Date().toISOString() }).where("id", "=", task));
     const tmp = tempPath(task);
     writeFileSync(tmp, '{"reason":"build-finished","success":true}\n');
     await storeArtifact(db, task, CLIPPY_ARTIFACT, tmp);
@@ -367,7 +367,7 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     assert.equal(comments(), 2);
     assert.deepEqual(await states(), ["asked", "comment-unsent"]);
     assert.equal(w.log.filter((l) => l === "model").length, 1);
-    assert.equal((await rows(db, "SELECT id FROM build_tasks")).length, 1);
+    assert.equal((await db.all(db.k.selectFrom("build_tasks").select("id"))).length, 1);
   } finally {
     mock.timers.reset();
   }
