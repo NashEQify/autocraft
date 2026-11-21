@@ -10,6 +10,7 @@ import { operatorEditable, splitChanges } from "../src/fixup/patch.ts";
 import { operatorCommentText } from "../src/fixup/template.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
+import { excluded } from "../src/db/kx.ts";
 import { queueAdd, queueOrigins, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
@@ -192,11 +193,11 @@ describe("pre-approved merge", () => {
     await pushed(w, 40, "sha40b");
     await w.synced(40, "sha40b");
     await scopeToTracked(w.db);
-    await w.db.prepare("DELETE FROM main.tracked_repos WHERE name = 'app'").run();
+    await w.db.run(w.db.k.deleteFrom("main.tracked_repos").where("name", "=", "app"));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "fixup");
     assert.equal((await w.rows("SELECT state FROM operator_fixups WHERE number = 40"))[0]!.state, "queued");
-    await w.db.prepare("INSERT INTO main.tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', ?, ?, 1)").run(OPERATOR, T0);
+    await w.db.run(w.db.k.insertInto("main.tracked_repos").values({ name: "app", added_by: OPERATOR, added_at: T0, pipeline: 1 }));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "review");
   });
@@ -374,13 +375,13 @@ describe("queue items: an issue", () => {
 describe("queue items: who may add", () => {
   test("an operator; a maintainer only with maintainer writes on, the app identity and write access on the repo; never a viewer", async () => {
     const w = await (await (await (await fresh()).pr(51)).pr(52)).pr(53);
-    await w.db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES ('maint', 'maintainer'), ('view', 'viewer')").run();
+    await w.db.run(w.db.k.insertInto("access").values([{ login: "maint", role: "maintainer" }, { login: "view", role: "viewer" }]).onConflict((oc) => oc.doNothing()));
     const req = (n: number, login: string, role: string, write = true) =>
       ({ query: new URLSearchParams(), json: { item: `app#${n}` }, user: { login, role, canWrite: async () => write, canRead: async () => true } }) as unknown as Req;
     await assert.rejects(queueAdd(w.db, req(51, "maint", "maintainer")), (e: Error & { status?: number }) => e.status === 403);
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run();
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "maintainer_writes", value: "1" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await assert.rejects(queueAdd(w.db, req(51, "maint", "maintainer")), (e: Error & { status?: number }) => e.status === 403);
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await assert.rejects(queueAdd(w.db, req(51, "maint", "maintainer", false)), (e: Error & { status?: number }) => e.status === 403);
     await assert.rejects(queueAdd(w.db, req(51, "view", "viewer")), (e: Error & { status?: number }) => e.status === 403);
     assert.equal(await preapprovalOf(w.db, "app", 51), null);
@@ -398,8 +399,8 @@ describe("queue items: who may add", () => {
 describe("a maintainer's pre-approval after their dashboard session", () => {
   test("the pipeline reads the write permission again through the app: write keeps it, a failed read keeps it for an hour, read cancels it", async () => {
     const w = await (await (await fresh()).pr(61)).pr(62);
-    await w.db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
+    await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer" }).onConflict((oc) => oc.doNothing()));
+    await w.db.run(w.db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     const stale = new Date(Date.now() - 11 * 60_000).toISOString();
     const perm = async (permission: string, at: string) =>
       await w.db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?)").run(permission, at);

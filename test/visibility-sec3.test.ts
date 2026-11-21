@@ -66,7 +66,7 @@ before(async () => {
     { id: "open-app#10:scope", kind: "scope", repo: "open-app", number: 10, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
     { id: "open-app#2:scope", kind: "scope", repo: "open-app", number: 2, question: "A or B?", options: OPTS, recommended: "a", summary: "s" },
   ]);
-  await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('c1', 'open-app#2:scope', 'maint', ?, 'MARK-QUIET-COMMENT')").run(now);
+  await db.run(db.k.insertInto("decision_comments").values({ id: "c1", decision_id: "open-app#2:scope", login: "maint", at: now, body: "MARK-QUIET-COMMENT" }));
   // A model call recorded without item rows, about the hidden repo.
   await finishRun(db, await insertRun(db, { jobId: null, step: "dupes.compare-prs.opus", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [], prompt: "prompt about vault#7" }), { state: "done", output: "vault" });
   await addLogin(db, "cli", "boss", "operator", null);

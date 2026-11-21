@@ -40,10 +40,10 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   for (const n of [2, 3, 4, 5]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: `PR ${n}`, body: "Body", author: "someone", head_oid: "sha", created_at: T0, updated_at: T0, labels: "[]" }));
-  for (const [login, role] of [["op", "operator"], ["mia", "maintainer"], ["vi", "viewer"]]) await db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
+  for (const [login, role] of [["op", "operator"], ["mia", "maintainer"], ["vi", "viewer"]]) await db.run(db.k.insertInto("access").values({ login, role }));
   // Mia may settle while maintainer writes are on, the app acts for her on the repo and her write permission is fresh.
   await setMaintainerWrites(db, true);
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+  await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }));
   // The permission was read by a dashboard visit over a day ago: the alert pass reads it again from GitHub, once.
   await db.run(db.k.insertInto("repo_permissions").values({ login: "mia", repo: "app", permission: "write", checked_at: new Date(Date.now() - 30 * 3_600_000).toISOString() }));
   const reads: string[] = [];

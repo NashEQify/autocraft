@@ -310,12 +310,12 @@ describe("tools", () => {
     assert.equal(sent.isError, false, sent.text);
     assert.match(sent.text, /An operator answers/);
     assert.match(sent.text, /\(write\)/);
-    const o = await db.prepare("SELECT login, option, note, permission FROM decision_opinions WHERE decision_id = ? AND retracted_at IS NULL").get(P1) as Record<string, string>;
+    const o = await db.get(db.k.selectFrom("decision_opinions").select(["login", "option", "note", "permission"]).where("decision_id", "=", P1).where("retracted_at", "is", null));
     assert.deepEqual({ ...o }, { login: "maint", option: "plugin", note: "Checked against the reference app: it is a plugin there.", permission: "write" });
     const a = await db.prepare("SELECT details FROM audit WHERE action = 'opinion' AND login = 'maint' AND target = ?").get(P1) as { details: string };
     assert.equal(JSON.parse(a.details).via, "mcp");
     assert.equal((await call(t, "send_feedback", { id: P1, text: "Plain comment." })).isError, false);
-    assert.ok(await db.prepare("SELECT 1 FROM decision_comments WHERE decision_id = ? AND body = 'Plain comment.'").get(P1));
+    assert.ok(await db.get(db.k.selectFrom("decision_comments").select("id").where("decision_id", "=", P1).where("body", "=", "Plain comment.")));
     assert.equal((await call(t, "send_feedback", { id: P1, option: "nope" })).isError, true);
     assert.equal((await call(t, "send_feedback", { id: P1 })).isError, true);
     // Nothing is answered: the pipeline's actionable list stays empty.

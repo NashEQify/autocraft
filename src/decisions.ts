@@ -1,17 +1,17 @@
 // Decisions for people. The pipeline asks them with the CLI; only a signed-in
 // person on the dashboard answers them. The one command that sets answers is
 // the operator's bulk Backlog (`decisions backlog`), which only holds items.
-import { settledBy, settledBySql } from "./settlers.ts";
-import { lockLiveSql } from "./answers/hold.ts";
+import { settledBy, settledByExpr } from "./settlers.ts";
+import { lockLiveExpr } from "./answers/hold.ts";
 import { readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { audit } from "./dash/audit.ts";
 import { inPilot } from "./pilot.ts";
 import { filterSeq, someSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
-import { distinctFrom } from "./db/portable.ts";
 import * as kx from "./db/kx.ts";
-import type { AliasableExpression, SqlBool } from "kysely";
+import type { AliasableExpression, Expression, Insertable, SqlBool } from "kysely";
+import type { DB } from "./db/types.ts";
 import { openDb } from "./db/open.ts";
 
 export const KINDS = ["scope", "duplicate", "close", "merge", "hold", "split", "other", "backlog"] as const;
@@ -86,9 +86,9 @@ export function snoozedExpr(eb: kx.AnyEb, a = "decisions"): AliasableExpression<
 /** A settled decision makes the drafts still proposed on its item obsolete (the ask card, the other options' drafts) and replaces its own choices. */
 export async function replaceProposedCards(db: Db, repo: string | null, number: number | null, decisionId: string): Promise<void> {
   if (repo && number !== null) {
-    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE repo = ? AND number = ? AND state = 'proposed'").run(repo, number);
+    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("repo", "=", repo).where("number", "=", number).where("state", "=", "proposed"));
     // Only the choices of the decision that settled: another open decision of the item keeps its own.
-    await db.prepare("UPDATE main.decision_choices SET state = 'replaced' WHERE decision_id = ? AND state = 'current'").run(decisionId);
+    await db.run(db.k.updateTable("main.decision_choices").set({ state: "replaced" }).where("decision_id", "=", decisionId).where("state", "=", "current"));
   }
 }
 
@@ -105,8 +105,10 @@ export const exceptionsOf = (d: DecisionRow): Exception[] => j<Exception[]>(d.ex
 export const isBatch = (d: DecisionRow): boolean => d.number === null;
 export const reposOf = (d: DecisionRow): string[] => [...new Set(itemsOf(d).map((r) => r.repo).concat(d.repo ? [d.repo] : []))].sort();
 
+const decisionRows = (db: Db) => db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>();
+
 export async function getDecision(db: Db, id: string): Promise<DecisionRow | undefined> {
-  return await db.prepare("SELECT * FROM decisions WHERE id = ?").get(id) as DecisionRow | undefined;
+  return await db.get(decisionRows(db).where("id", "=", id));
 }
 
 const ASK_FIELDS = ["kind", "repo", "number", "items", "question", "context", "facts", "options", "recommended", "recommended_reason", "public_text", "asked_at", "asked_by", "docket", "summary", "summary_by", "summary_at"] as const;
@@ -117,7 +119,7 @@ const SUMMARY_FIELDS: readonly string[] = ["summary", "summary_by", "summary_at"
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 // Validates one question from the pipeline and returns the column values.
-export function validateAsk(q: Record<string, unknown>): Record<string, string | number | null> {
+export function validateAsk(q: Record<string, unknown>): Record<string, string | number | null> & Insertable<DB["main.decisions"]> {
   const err = (m: string) => new Error(`decision ${String(q.id ?? "?")}: ${m}`);
   if (typeof q.id !== "string" || !q.id) throw err("id is required");
   if (!KINDS.includes(q.kind as Kind) || q.kind === BACKLOG_KIND) throw err(`kind must be one of ${KINDS.filter((k) => k !== BACKLOG_KIND).join(", ")}`);
@@ -158,26 +160,28 @@ export function validateAsk(q: Record<string, unknown>): Record<string, string |
 // Inserts or updates the question by id; answer columns are never touched. A re-ask replaces the recommendation along with its reason and clears its author, except that a question and options the prepare step already covered keep its pick. A changed question or options clear the snooze and the prepare. A summary the new question lacks is kept.
 export async function ask(db: Db, questions: Record<string, unknown>[], inTransaction = false): Promise<{ inserted: number; updated: number }> {
   const rows = questions.map(validateAsk);
-  const cols = ["id", ...ASK_FIELDS];
-  const changed = `(${distinctFrom(db, "excluded.question", "decisions.question")} OR ${distinctFrom(db, "excluded.options", "decisions.options")})`;
-  const keepsPick = "(decisions.prepared_at IS NOT NULL AND NOT " + changed + ")";
-  // Postgres needs the existing row's columns qualified: bare names are ambiguous with `excluded`.
-  const set = (c: string): string =>
-    SUMMARY_FIELDS.includes(c) ? `${c} = COALESCE(excluded.${c}, decisions.${c})`
-    : c === "recommended" || c === "recommended_reason" ? `${c} = CASE WHEN ${keepsPick} THEN decisions.${c} ELSE excluded.${c} END`
-    : `${c} = excluded.${c}`;
-  const stmt = db.prepare(`INSERT INTO main.decisions (${cols.join(",")}) VALUES (${cols.map((c) => `:${c}`).join(",")})
-    ON CONFLICT(id) DO UPDATE SET ${ASK_FIELDS.map(set).join(", ")}, recommended_by = CASE WHEN ${keepsPick} THEN decisions.recommended_by ELSE NULL END,
-      prepared_at = CASE WHEN ${changed} THEN NULL ELSE decisions.prepared_at END,
-      recommend_failures = CASE WHEN ${changed} THEN NULL ELSE decisions.recommend_failures END,
-      snoozed_by = CASE WHEN ${changed} THEN NULL ELSE decisions.snoozed_by END,
-      snoozed_at = CASE WHEN ${changed} THEN NULL ELSE decisions.snoozed_at END`);
-  const exists = db.prepare("SELECT 1 FROM decisions WHERE id = ?");
   let inserted = 0, updated = 0;
   const write = async () => {
     for (const r of rows) {
-      if (await exists.get(r.id as string)) updated++; else inserted++;
-      await stmt.run(r);
+      if (await db.get(db.k.selectFrom("decisions").select("id").where("id", "=", r.id))) updated++; else inserted++;
+      await db.run(db.k.insertInto("main.decisions").values(r).onConflict((oc) => oc.column("id").doUpdateSet((eb) => {
+        const was = (c: string) => kx.exprOf(eb, `main.decisions.${c}`);
+        const changed = eb.or([eb("excluded.question", "is distinct from", was("question")), eb("excluded.options", "is distinct from", was("options"))]);
+        const keepsPick = eb.and([eb(was("prepared_at"), "is not", null), eb.not(changed)]);
+        const set: Record<string, Expression<unknown>> = {};
+        for (const c of ASK_FIELDS) {
+          set[c] = SUMMARY_FIELDS.includes(c) ? eb.fn.coalesce(`excluded.${c}`, `main.decisions.${c}`)
+            : c === "recommended" || c === "recommended_reason" ? eb.case().when(keepsPick).then(was(c)).else(eb.ref(`excluded.${c}`)).end()
+            : eb.ref(`excluded.${c}`);
+        }
+        const clearOnChange = (c: "prepared_at" | "recommend_failures" | "snoozed_by" | "snoozed_at") => eb.case().when(changed).then(eb.lit(null)).else(was(c)).end();
+        return {
+          ...set,
+          recommended_by: eb.case().when(keepsPick).then(was("recommended_by")).else(eb.lit(null)).end(),
+          prepared_at: clearOnChange("prepared_at"), recommend_failures: clearOnChange("recommend_failures"),
+          snoozed_by: clearOnChange("snoozed_by"), snoozed_at: clearOnChange("snoozed_at"),
+        };
+      })));
     }
   };
   if (inTransaction) await write(); else await db.write(write);
@@ -190,12 +194,12 @@ export async function ask(db: Db, questions: Record<string, unknown>[], inTransa
 export type Actionable = { id: string; kind: Kind; repo: string | null; number: number | null; items: Ref[]; answer: string; exceptions: Exception[] };
 
 export async function operators(db: Db): Promise<Set<string>> {
-  return new Set((await db.prepare("SELECT login FROM access WHERE role = 'operator'").all() as { login: string }[]).map((r) => r.login));
+  return new Set((await db.all(db.k.selectFrom("access").select("login").where("role", "=", "operator"))).map((r) => r.login));
 }
 
 export async function actionable(db: Db): Promise<Actionable[]> {
-  const rows = await db.prepare(`SELECT * FROM decisions WHERE answer IS NOT NULL AND answer <> '${BACKLOG.key}' AND applied_at IS NULL
-    AND ${settledBySql(db, "decisions")} ORDER BY answered_at`).all() as DecisionRow[];
+  const rows = await db.all(decisionRows(db).where("answer", "is not", null).where("answer", "<>", BACKLOG.key).where("applied_at", "is", null)
+    .where((eb) => settledByExpr(db, eb, "decisions")).orderBy("answered_at", (o) => o.asc().nullsFirst()));
   return rows.map((d) => ({
     id: d.id, kind: d.kind, repo: d.repo, number: d.number, items: itemsOf(d), answer: d.answer!,
     exceptions: exceptionsOf(d).map((e) => ({ repo: e.repo, number: e.number, answer: e.answer })),
@@ -208,14 +212,13 @@ export type BacklogResult = { applied: boolean; decisions: { id: string; kind: K
 /** Open decisions in scope: of the repo when given, and, with `outsidePilot`, none of whose items is in the pilot (with no pilot set, none is outside). */
 export async function backlogCandidates(db: Db, scope: BacklogScope): Promise<DecisionRow[]> {
   if (!scope.outsidePilot && !scope.repo) throw new Error("name a scope: outsidePilot or a repo");
-  const rows = await db.prepare("SELECT * FROM decisions WHERE answer IS NULL ORDER BY asked_at, id").all() as DecisionRow[];
-  const members = db.prepare("SELECT repo, number FROM dupe_group_items WHERE decision_id = ?");
+  const rows = await db.all(decisionRows(db).where("answer", "is", null).orderBy("asked_at").orderBy("id"));
   return await filterSeq(rows, async (d) => {
-    const refs = [...itemsOf(d), ...(await members.all(d.id) as Ref[])];
+    const refs = [...itemsOf(d), ...(await db.all(db.k.selectFrom("dupe_group_items").select(["repo", "number"]).where("decision_id", "=", d.id)))];
     if (scope.repo && !reposOf(d).includes(scope.repo) && !refs.some((x) => x.repo === scope.repo)) return false;
     // Outside the scope: no item in a repo whose pipeline is on and, with an item pilot, in that pilot.
     // An item held for its outside author (src/outside.ts) is in scope: the hold is temporary.
-    return !scope.outsidePilot || !await someSeq(refs, async (x) => await inPilot(db, x.repo, x.number) || !!await db.prepare("SELECT 1 FROM main.outside_holds WHERE repo = ? AND number = ?").get(x.repo, x.number));
+    return !scope.outsidePilot || !await someSeq(refs, async (x) => await inPilot(db, x.repo, x.number) || !!await db.get(db.k.selectFrom("main.outside_holds").select("repo").where("repo", "=", x.repo).where("number", "=", x.number)));
   });
 }
 
@@ -225,9 +228,11 @@ export async function backlogOpen(db: Db, scope: BacklogScope, by: string, apply
   const decisions = rows.map((d) => ({ id: d.id, kind: d.kind, repo: d.repo, number: d.number }));
   if (!apply) return { applied: false, decisions };
   await db.write(async () => {
-    const set = db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = NULL, exceptions = ?, answered_by = ?, answered_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL WHERE id = ? AND answer IS NULL AND NOT ${lockLiveSql("decisions")}`);
     for (const d of rows) {
-      if ((await set.run(BACKLOG.key, isBatch(d) ? "[]" : null, by, at, d.id)).changes === 1) await audit(db, by, "answer", d.id, { answer: BACKLOG.key, bulk: true });
+      const set = db.k.updateTable("main.decisions")
+        .set({ answer: BACKLOG.key, answer_note: null, exceptions: isBatch(d) ? "[]" : null, answered_by: by, answered_at: at, adopted_opinion: null, snoozed_by: null, snoozed_at: null })
+        .where("id", "=", d.id).where("answer", "is", null).where((eb) => eb.not(lockLiveExpr(db, eb, "decisions")));
+      if ((await db.run(set)).changes === 1) await audit(db, by, "answer", d.id, { answer: BACKLOG.key, bulk: true });
     }
     await audit(db, by, "backlog-bulk", null, { ...scope, count: rows.length });
   });
@@ -240,16 +245,13 @@ export async function backlogOpen(db: Db, scope: BacklogScope, by: string, apply
  * trigger only, so it is rebuilt from the remaining stages rows.
  */
 export function clearAskedStage(db: Db): (repo: string, number: number, decisionId: string) => Promise<void> {
-  const stage = db.prepare("DELETE FROM main.stages WHERE repo = ? AND number = ? AND stage = 'needs-decision' AND note = ?");
-  const latest = db.prepare("SELECT stage, at FROM stages WHERE repo = ? AND number = ? ORDER BY at DESC, rowid DESC LIMIT 1");
-  const reviewed = db.prepare("SELECT 1 FROM stages WHERE repo = ? AND number = ? AND stage = 'reviewed' LIMIT 1");
-  const put = db.prepare("UPDATE item_stage SET stage = ?, at = ?, reviewed = ? WHERE repo = ? AND number = ?");
-  const drop = db.prepare("DELETE FROM item_stage WHERE repo = ? AND number = ?");
   return async (repo, number, decisionId) => {
-    await stage.run(repo, number, `scope decision ${decisionId}`);
-    const l = await latest.get(repo, number) as { stage: string; at: string } | undefined;
-    if (l) await put.run(l.stage, l.at, await reviewed.get(repo, number) ? 1 : 0, repo, number);
-    else await drop.run(repo, number);
+    await db.run(db.k.deleteFrom("main.stages").where("repo", "=", repo).where("number", "=", number).where("stage", "=", "needs-decision").where("note", "=", `scope decision ${decisionId}`));
+    const l = await db.get(db.k.selectFrom("stages").select(["stage", "at"]).where("repo", "=", repo).where("number", "=", number).orderBy("at", "desc").orderBy(kx.rowid("stages"), "desc").limit(1));
+    if (l) {
+      const reviewed = await db.get(db.k.selectFrom("stages").select("stage").where("repo", "=", repo).where("number", "=", number).where("stage", "=", "reviewed").limit(1));
+      await db.run(db.k.updateTable("item_stage").set({ stage: l.stage, at: l.at, reviewed: reviewed ? 1 : 0 }).where("repo", "=", repo).where("number", "=", number));
+    } else await db.run(db.k.deleteFrom("item_stage").where("repo", "=", repo).where("number", "=", number));
   };
 }
 
@@ -263,12 +265,12 @@ export async function withdrawOpen(db: Db, scope: BacklogScope, by: string, appl
   const decisions = rows.map((d) => ({ id: d.id, kind: d.kind, repo: d.repo, number: d.number }));
   if (!apply) return { applied: false, decisions };
   await db.write(async () => {
-    const del = db.prepare("DELETE FROM main.decisions WHERE id = ? AND answer IS NULL");
-    const side = ["decision_opinions", "decision_comments", "decision_claims"].map((t) => db.prepare(`DELETE FROM ${t} WHERE decision_id = ?`));
     const clear = clearAskedStage(db);
     for (const d of rows) {
-      if ((await del.run(d.id)).changes !== 1) continue;
-      for (const s of side) await s.run(d.id);
+      if ((await db.run(db.k.deleteFrom("main.decisions").where("id", "=", d.id).where("answer", "is", null))).changes !== 1) continue;
+      await db.run(db.k.deleteFrom("decision_opinions").where("decision_id", "=", d.id));
+      await db.run(db.k.deleteFrom("decision_comments").where("decision_id", "=", d.id));
+      await db.run(db.k.deleteFrom("decision_claims").where("decision_id", "=", d.id));
       await clear(d.repo!, d.number!, d.id);
       await audit(db, by, "withdraw", d.id, { repo: d.repo, number: d.number, question: d.question });
     }
@@ -280,19 +282,19 @@ const testKey = (repo: string): string => `test_repo:${repo}`;
 
 /** Test repos accept answers from the CLI (`decisions answer`), so a session can run scenarios on them without a person pressing buttons. */
 export async function isTestRepo(db: Db, repo: string): Promise<boolean> {
-  return await db.prepare("SELECT 1 FROM main.settings WHERE key = ?").get(testKey(repo)) !== undefined;
+  return await db.get(db.k.selectFrom("main.settings").select("key").where("key", "=", testKey(repo))) !== undefined;
 }
 
 export async function testRepos(db: Db): Promise<string[]> {
-  return (await db.prepare("SELECT key FROM main.settings WHERE key LIKE 'test_repo:%' ORDER BY key").all() as { key: string }[]).map((r) => r.key.slice("test_repo:".length));
+  return (await db.all(db.k.selectFrom("main.settings").select("key").where((eb) => kx.like(db, "key", eb.val("test_repo:%"))).orderBy("key"))).map((r) => r.key.slice("test_repo:".length));
 }
 
 /** Returns false when nothing changed. */
 export async function setTestRepo(db: Db, by: string, repo: string, on: boolean): Promise<boolean> {
-  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", repo))) throw new Error(`${repo} is not tracked`);
   if (await isTestRepo(db, repo) === on) return false;
-  if (on) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, '1')").run(testKey(repo));
-  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(testKey(repo));
+  if (on) await db.run(db.k.insertInto("main.settings").values({ key: testKey(repo), value: "1" }));
+  else await db.run(db.k.deleteFrom("main.settings").where("key", "=", testKey(repo)));
   await audit(db, by, "test-repo", repo, { on });
   return true;
 }
@@ -309,7 +311,7 @@ export async function answerAsSession(db: Db, id: string, option: string, login:
   const { textsFor, textsHash } = await import("./dupes/texts.ts");
   const texts = d.id.includes(":dupegroup:") ? await textsFor(db, id, option) : [];
   await applyAnswer(db, d, login, { answer: option, note, ...(texts.length && { textsHash: textsHash(texts) }) }, "cli", "session");
-  await db.prepare("DELETE FROM decision_claims WHERE decision_id = ?").run(id);
+  await db.run(db.k.deleteFrom("decision_claims").where("decision_id", "=", id));
   return (await getDecision(db, id))!;
 }
 
@@ -341,7 +343,7 @@ function cardRepos(c: { repo: string; params: string }): string[] {
 
 /** Runs a proposed card as `login` the way the dashboard's button does; test repos only, operator logins only. */
 export async function cardAsSession(db: Db, id: number, login: string, opts: { note?: string; skip?: number[] } = {}): Promise<{ state: string; result: string | null; error: string | null }> {
-  const c = await db.prepare("SELECT id, repo, number, params, state FROM main.conversation_cards WHERE id = ?").get(id) as { id: number; repo: string; number: number; params: string; state: string } | undefined;
+  const c = await db.get(db.k.selectFrom("main.conversation_cards").select(["id", "repo", "number", "params", "state"]).where("id", "=", id));
   if (!c) throw new Error(`no card ${id}`);
   const outside = await filterSeq([...new Set(cardRepos(c))], async (r) => !await isTestRepo(db, r));
   if (outside.length) throw new Error(`refused: ${outside.join(", ")} is not marked as a test repo (decisions test-repo REPO on)`);
@@ -350,14 +352,15 @@ export async function cardAsSession(db: Db, id: number, login: string, opts: { n
   const { card, ran } = await doCard(db, id, login, opts);
   if (!ran) throw new Error(`card ${id} is ${card.state}, not proposed`);
   await audit(db, login, "card", `${c.repo}#${c.number}`, { card: id, source: "cli", via: "session" });
-  const after = await db.prepare("SELECT state, result, error FROM main.conversation_cards WHERE id = ?").get(id) as { state: string; result: string | null; error: string | null };
-  return after;
+  const after = await db.get(db.k.selectFrom("main.conversation_cards").select(["state", "result", "error"]).where("id", "=", id));
+  return after!;
 }
 
 async function cardsCmd(args: string[]): Promise<void> {
   const m = /^(.+)#(\d+)$/.exec(args[0] ?? "");
   if (!m) throw new Error("usage: decisions cards REPO#N");
-  const rows = await (await openDb()).prepare("SELECT id, kind, state, description FROM main.conversation_cards WHERE repo = ? AND number = ? ORDER BY id").all(m[1]!, Number(m[2])) as { id: number; kind: string; state: string; description: string | null }[];
+  const db = await openDb();
+  const rows = await db.all(db.k.selectFrom("main.conversation_cards").select(["id", "kind", "state", "description"]).where("repo", "=", m[1]!).where("number", "=", Number(m[2])).orderBy("id"));
   for (const r of rows) console.log(`${r.id}\t${r.kind}\t${r.state}\t${r.description ?? ""}`);
 }
 
@@ -439,12 +442,11 @@ async function list(args: string[]): Promise<void> {
   const which = args.includes("--all") ? "all" : args.includes("--answered") ? "answered" : "open";
   const ri = args.indexOf("--repo");
   const repo = ri >= 0 ? args[ri + 1] : undefined;
-  const where = [which === "open" ? "answer IS NULL" : which === "answered" ? "answer IS NOT NULL" : "1"];
-  if (repo) where.push("(repo = :repo OR items LIKE :like)");
-  const params: Record<string, string> = {};
-  if (repo) Object.assign(params, { repo, like: `%"repo":"${repo}"%` });
   const db = await openDb();
-  const rows = await db.prepare(`SELECT * FROM decisions WHERE ${where.join(" AND ")} ORDER BY asked_at`).all(params) as DecisionRow[];
+  const rows = await db.all(decisionRows(db)
+    .$if(which === "open", (q) => q.where("answer", "is", null)).$if(which === "answered", (q) => q.where("answer", "is not", null))
+    .$if(!!repo, (q) => q.where((eb) => eb.or([eb("repo", "=", repo!), kx.like(db, "items", eb.val(`%"repo":"${repo}"%`))])))
+    .orderBy("asked_at"));
   for (const d of rows) {
     const target = isBatch(d) ? `batch of ${itemsOf(d).length}` : `${d.repo}#${d.number}`;
     const by = isBacklog(d.answer) || await settledBy(db, d) ? "" : " (not actionable: not answered by someone who settles)";
