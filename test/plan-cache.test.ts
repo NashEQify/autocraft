@@ -96,10 +96,11 @@ describe("the cached next step of a PR outside the pipeline's scope", () => {
     const db = await connectDb(join(dir, "scope.db"));
     await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('off', 0)").run();
     const pr = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, is_draft, head_oid, created_at, updated_at) VALUES ('off', ?, 'pr', 'OPEN', 't', 'b', 0, ?, '${T0}', '${T0}')`);
-    const jev = db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('off', ?, 'jev', 'r1', '${T0}', 'bugfix', '[]', '{"top":0.95}')`);
+    const jev = async (number: number) => await db.run(db.k.insertInto("classifications")
+      .values({ repo: "off", number, classifier: "jev", run_id: "r1", at: T0, type_label: "bugfix", flags: "[]", probs: '{"top":0.95}' }));
     const review = db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, sure, mode) VALUES ('off', ?, ?, 'rv', '${T0}', 'sonnet', ?, 'why', 1, 'full')`);
-    for (const [n, verdict] of [[1, "hold"], [2, "take-fix"], [3, "take"]] as const) { await pr.run(n, `h${n}`); await jev.run(n); await review.run(n, `h${n}`, verdict); }
-    await pr.run(4, "h4"); await jev.run(4);
+    for (const [n, verdict] of [[1, "hold"], [2, "take-fix"], [3, "take"]] as const) { await pr.run(n, `h${n}`); await jev(n); await review.run(n, `h${n}`, verdict); }
+    await pr.run(4, "h4"); await jev(4);
     await db.prepare(`INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('off', 3, 'h3', 'tests', 'r', 'passed', '${T0}')`).run();
     await refreshPlanCache(db);
     const next = async (n: number) => JSON.parse((await db.prepare("SELECT view FROM item_plans WHERE repo = 'off' AND number = ?").get(n) as { view: string }).view).next;

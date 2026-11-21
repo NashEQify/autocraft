@@ -67,8 +67,7 @@ import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, w
 import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { groupConcat, inList, jsonText, upsert } from "../db/portable.ts";
-import { pairsFrom } from "../core/ref-filter.ts";
+import * as kx from "../db/kx.ts";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
@@ -230,12 +229,15 @@ const takersOf = async (db: Db): Promise<string> => (await inferenceMode(db) ===
 
 /** Sandbox tasks that ended, for lanes that read their results. */
 const tasksSig = async (db: Db): Promise<string> =>
-  String((await db.prepare("SELECT COUNT(*) AS n FROM main.build_tasks WHERE state IN ('done', 'failed', 'cancelled', 'lost')").get() as { n: number }).n);
+  String((await db.get(db.k.selectFrom("main.build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["done", "failed", "cancelled", "lost"])))!.n);
 
 /** Daily limits are not a topic of their own (they share `jobs`). */
 const limitsSig = async (db: Db): Promise<string> =>
-  String((await db.prepare(`SELECT ${groupConcat(db, "step || '=' || COALESCE(CAST(per_day AS TEXT), 'n')", ",", "step")} AS s FROM stage_limits`).get() as { s: string | null }).s ?? "")
-  + String((await db.prepare(`SELECT ${groupConcat(db, "key || '=' || value", ",", "key")} AS s FROM settings WHERE key LIKE '${KEY_RESET}%' OR key = 'step_parallel'`).get() as { s: string | null }).s ?? "");
+  String((await db.get(db.k.selectFrom("stage_limits")
+    .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s"))))!.s ?? "")
+  + String((await db.get(db.k.selectFrom("settings")
+    .select((eb) => kx.groupConcat(db, eb(eb("key", "||", eb.val("=")), "||", eb.ref("value")), ",", "key").as("s"))
+    .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")]))))!.s ?? "");
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
@@ -256,17 +258,21 @@ async function lastJobEnd(db: Db, step: string, repo: string | null, requestedBy
   const pass = passOf(db);
   if (pass) {
     // The newest ended job of each step, repo and requester; the answer is the newest of those that match.
-    pass.ends ??= await db.prepare(`SELECT id, step, repo, requested_by, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE id IN (
-      SELECT MAX(id) FROM jobs WHERE ended_at IS NOT NULL AND COALESCE(error, '') <> ? GROUP BY step, repo, requested_by)`).all(RUNNER_STOPPED) as NonNullable<PassReads["ends"]>;
+    pass.ends ??= await db.all(db.k.selectFrom("jobs")
+      .select(["id", "step", "repo", "requested_by", "ended_at as endedAt", "state", "items", "acted", "lease_skips", "lease_skip_keys"])
+      .where("id", "in", (eb) => eb.selectFrom("jobs").select((e) => e.fn.max<number>("id").as("m"))
+        .where((e) => e.and([e("ended_at", "is not", null), e(e.fn.coalesce("error", e.val("")), "<>", RUNNER_STOPPED)])).groupBy(["step", "repo", "requested_by"]))
+      .$narrowType<{ endedAt: string }>());
     let best: NonNullable<PassReads["ends"]>[number] | undefined;
     for (const e of pass.ends) if (e.step === step && (repo === null || e.repo === repo) && (requestedBy === undefined || e.requested_by === requestedBy) && (!best || e.id > best.id)) best = e;
     if (!best) return undefined;
     const { step: _s, repo: _r, requested_by: _b, ...end } = best;
     return end;
   }
-  return await db.prepare(`SELECT id, ended_at AS endedAt, state, items, acted, lease_skips, lease_skip_keys FROM jobs WHERE step = ? AND (CAST(? AS TEXT) IS NULL OR repo = ?)
-    AND ended_at IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR requested_by = ?) AND COALESCE(error, '') <> ? ORDER BY id DESC LIMIT 1`)
-    .get(step, repo, repo, requestedBy ?? null, requestedBy ?? null, RUNNER_STOPPED) as JobEnd | undefined;
+  return await db.get(db.k.selectFrom("jobs").select(["id", "ended_at as endedAt", "state", "items", "acted", "lease_skips", "lease_skip_keys"])
+    .where("step", "=", step).$if(repo !== null, (q) => q.where("repo", "=", repo!))
+    .where("ended_at", "is not", null).$if(requestedBy !== undefined, (q) => q.where("requested_by", "=", requestedBy!))
+    .where((eb) => eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED)).orderBy("id", "desc").limit(1).$narrowType<{ endedAt: string }>());
 }
 
 /** A job that changed nothing: it handled no items and made no other progress (a batch advanced, a PR opened, a decision asked). */
@@ -385,7 +391,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     // Open scope decisions without a recommendation (asked before recommendations existed) also need a job; an answered-null one has recommended_by set.
     detect: async (db, ctx) => {
       // A recommendation that failed is tried again once its backoff ends.
-      for (const r of await db.prepare("SELECT recommend_failed_at AS at FROM decisions WHERE answer IS NULL AND recommend_failed_at > ?").all(new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      for (const r of await db.all(db.k.selectFrom("decisions").select("recommend_failed_at as at").where("answer", "is", null)
+        .where("recommend_failed_at", ">", new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()).$narrowType<{ at: string }>())) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
       // A new scope decision is asked without a model; the prepare calls Opus.
       return (await servable(db, ctx, "decide", "decide", (p) => p.action.params?.source === "new")).length ? [{ step: "decide", params: {} }] : [];
     },
@@ -416,9 +423,9 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       }
       // A repo whose waiting heads have all been pending for more than an hour is read every 5 minutes instead.
       const waiting = (await plansOf(db, ctx)).prs.filter((p) => ciWait.has(p.facts.repo) && p.facts.reviewHold?.kind === "ci" && !p.facts.reviewHold.red);
-      const wp = pairsFrom(db, "?", "j");
-      const updated = new Map(waiting.length ? (await db.prepare(`SELECT i.repo || '#' || i.number AS k, i.updated_at FROM ${wp.from} JOIN items i ON i.repo = ${wp.repo} AND i.number = ${wp.number}`)
-        .all(JSON.stringify(waiting.map((p) => [p.facts.repo, p.facts.number]))) as { k: string; updated_at: string | null }[]).map((r) => [r.k, r.updated_at]) : []);
+      const updated = new Map(waiting.length ? (await db.all(db.k.selectFrom("items as i")
+        .innerJoin(kx.refPairs(db, waiting.map((p): [string, number] => [p.facts.repo, p.facts.number]), "j"), (jn) => jn.onRef("i.repo", "=", "j.repo").onRef("i.number", "=", "j.number"))
+        .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", eb.cast<string>("i.number", "text")).as("k"), "i.updated_at"]))).map((r) => [r.k, r.updated_at]) : []);
       const young = new Set(waiting.filter((p) => { const u = updated.get(`${p.facts.repo}#${p.facts.number}`); return !!u && Date.now() - Date.parse(u) <= 3600_000; })
         .map((p) => p.facts.repo));
       for (const repo of [...ciWait].sort()) {
@@ -615,7 +622,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "referee",
     detect: async (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
-      if (ctx.run) for (const r of await db.prepare(`SELECT ${jsonText(db, "probs", "$.opusFailedAt")} AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND ${jsonText(db, "probs", "$.opusFailedAt")} > ?`).all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
+      if (ctx.run) for (const r of await db.all(db.k.selectFrom("classifications").select(kx.jsonText(db, "probs", "$.opusFailedAt").as("at")).where("classifier", "=", "sonnet").where("run_id", "=", ctx.run)
+        .where(kx.bytewise(db, kx.jsonText(db, "probs", "$.opusFailedAt")), ">", new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()).$narrowType<{ at: string }>())) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
       return ctx.run && (await servable(db, ctx, "referee", "referee")).length ? [{ step: "referee", params: {} }] : [];
     },
   },
@@ -705,7 +713,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     // A rerun waits for the next reading of the head or a time limit; the clock moves with no change in the data.
     extra: async (db) => {
-      const n = (await db.prepare("SELECT COUNT(*) AS n FROM main.main_fixes WHERE state = 'rerun-requested'").get() as { n: number }).n;
+      const n = (await db.get(db.k.selectFrom("main.main_fixes").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "rerun-requested")))!.n;
       return n ? `${n}:${Math.floor(Date.now() / 300_000)}` : "";
     },
     detect: async (db, { tracked }) => (await filterSeq(tracked, async (repo) => await mainFixDue(db, repo))).sort().map((repo) => ({ step: "main-fix", params: { repo } })),
@@ -743,8 +751,8 @@ export const DEFAULT_PER_DAY: Record<string, number> = defaultPerDay();
 
 export const limitRow = async (db: Db, step: string): Promise<LimitRow> => {
   const pass = passOf(db);
-  const row = pass ? (pass.limits ??= new Map((await db.prepare("SELECT * FROM stage_limits").all() as LimitRow[]).map((r) => [r.step, r]))).get(step)
-    : await db.prepare("SELECT * FROM stage_limits WHERE step = ?").get(step) as LimitRow | undefined;
+  const row = pass ? (pass.limits ??= new Map((await db.all(db.k.selectFrom("stage_limits").select(kx.cols("stage_limits")))).map((r) => [r.step, r]))).get(step)
+    : await db.get(db.k.selectFrom("stage_limits").select(kx.cols("stage_limits")).where("step", "=", step));
   return row ?? { step, per_day: DEFAULT_PER_DAY[step] ?? null, updated_by: null, updated_at: null };
 };
 
@@ -755,11 +763,11 @@ export async function usageToday(db: Db, step: string, ms: number = Date.now()):
   const pass = passOf(db);
   if (pass) {
     // The jobs started since the start of the day, read once; a reset only moves the start later.
-    if (pass.started?.day !== day) pass.started = { day, rows: await db.prepare("SELECT step, started_at, items FROM jobs WHERE started_at >= ?").all(day) as NonNullable<PassReads["started"]>["rows"] };
+    if (pass.started?.day !== day) pass.started = { day, rows: await db.all(db.k.selectFrom("jobs").select(["step", "started_at", "items"]).where("started_at", ">=", day).$narrowType<{ started_at: string }>()) };
     const from = reset && reset > day ? reset : day;
     return pass.started.rows.reduce((n, j) => n + (j.step === step && j.started_at >= from ? j.items ?? 0 : 0), 0);
   }
-  return (await db.prepare("SELECT COALESCE(SUM(items), 0) AS n FROM jobs WHERE step = ? AND started_at >= ?").get(step, reset && reset > day ? reset : day) as { n: number }).n;
+  return (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("items"), eb.lit(0)).as("n")).where("step", "=", step).where("started_at", ">=", reset && reset > day ? reset : day)))!.n;
 }
 
 /**
@@ -767,7 +775,7 @@ export async function usageToday(db: Db, step: string, ms: number = Date.now()):
  * A queued job that waits for a Task Runner (untakenTest) keeps none.
  */
 export async function reservedByJobs(db: Db, step: string, untaken?: UntakenTest): Promise<number> {
-  const rows = await db.prepare("SELECT params, items, state, repo FROM jobs WHERE step = ? AND state IN ('queued', 'running')").all(step) as { params: string; items: number | null; state: string; repo: string | null }[];
+  const rows = await db.all(db.k.selectFrom("jobs").select(["params", "items", "state", "repo"]).where("step", "=", step).where("state", "in", ["queued", "running"]));
   let n = 0;
   for (const r of rows) {
     if (r.state === "queued" && await (untaken ??= await untakenTest(db))({ step, repo: r.repo, params: r.params })) continue;
@@ -807,7 +815,7 @@ const RELEASE_STEPS: Record<string, string[]> = {
 async function releasedAt(db: Db, step: string): Promise<string | null> {
   const actions = Object.keys(RELEASE_STEPS).filter((a) => RELEASE_STEPS[a]!.includes(step));
   if (!actions.length) return null;
-  return (await db.prepare(`SELECT MAX(at) AS at FROM audit WHERE action IN (${actions.map(() => "?").join(", ")})`).get(...actions) as { at: string | null }).at;
+  return (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.max<string | null>("at").as("at")).where("action", "in", actions)))!.at;
 }
 
 /** The least wait after a job stopped for running past its deadline. */
@@ -823,8 +831,10 @@ export const failureDelayMs = (failures: number): number => Math.min(FAIL_BACKOF
  * minute would otherwise retry a failing step at once, every time. Jobs a runner restart ended, and jobs that failed only because a write was paced (it is retried later anyway), do not count.
  */
 export async function failureBackoff(db: Db, step: string, ms: number = Date.now(), o: { repo?: string | null; fp?: string } = {}): Promise<{ until: number; failures: number } | null> {
-  const rows = await db.prepare(`SELECT id, state, ended_at, error FROM jobs WHERE step = ? AND (CAST(? AS TEXT) IS NULL OR repo = ?) AND requested_by = ? AND state IN ('done', 'failed')
-    AND COALESCE(error, '') <> ? AND COALESCE(error, '') NOT LIKE 'write paced:%' ORDER BY id DESC LIMIT 12`).all(step, o.repo ?? null, o.repo ?? null, AUTOPILOT_USER, RUNNER_STOPPED) as { id: number; state: string; ended_at: string | null; error: string | null }[];
+  const rows = await db.all(db.k.selectFrom("jobs").select(["id", "state", "ended_at", "error"]).where("step", "=", step).$if(o.repo != null, (q) => q.where("repo", "=", o.repo!))
+    .where("requested_by", "=", AUTOPILOT_USER).where("state", "in", ["done", "failed"])
+    .where((eb) => eb.and([eb(eb.fn.coalesce("error", eb.val("")), "<>", RUNNER_STOPPED), eb.not(kx.like(db, eb.fn.coalesce("error", eb.val("")), eb.val("write paced:%")))]))
+    .orderBy("id", "desc").limit(12));
   let failures = 0;
   while (failures < rows.length && rows[failures]!.state === "failed") failures++;
   if (!failures || !rows[0]!.ended_at) return null;
@@ -876,7 +886,7 @@ export async function setEnabled(db: Db, enabled: boolean, by: string, mode: "of
   await setSetting(db, KEY_AT, now());
   // Automatic jobs still waiting are dropped; running ones finish.
   if (!enabled) {
-    const waiting = await db.prepare("SELECT id, step FROM jobs WHERE state = 'queued' AND requested_by = ?").all(AUTOPILOT_USER) as { id: number; step: string }[];
+    const waiting = await db.all(db.k.selectFrom("jobs").select(["id", "step"]).where("state", "=", "queued").where("requested_by", "=", AUTOPILOT_USER));
     for (const j of waiting) {
       await requestCancel(db, j.id, by);
       await audit(db, by, "job-cancel", `job:${j.id}`, { step: j.step, state: "queued", reason: "pipeline switched off" });
@@ -891,20 +901,21 @@ const STOP_WINDOW = 5000;
 
 /** Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has beaten. */
 export async function deadlineStops(db: Db): Promise<{ step: string; jobId: number; error: string; endedAt: string; count: number }[]> {
-  const floor = Number((await db.prepare("SELECT MAX(id) AS m FROM jobs").get() as { m: number | null }).m ?? 0) - STOP_WINDOW;
-  const rows = await db.prepare("SELECT step, id, error, ended_at AS endedAt FROM jobs WHERE id > ? AND state = 'failed' AND (error LIKE 'stopped: ran past %' OR error LIKE 'stopped: no progress for %') ORDER BY id DESC").all(floor) as { step: string; id: number; error: string; endedAt: string }[];
-  const lastDone = db.prepare("SELECT MAX(id) AS m FROM jobs WHERE step = ? AND state = 'done'");
+  const floor = Number((await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m"))))!.m ?? 0) - STOP_WINDOW;
+  const rows = await db.all(db.k.selectFrom("jobs").select(["step", "id", "error", "ended_at as endedAt"]).where("id", ">", floor).where("state", "=", "failed")
+    .where((eb) => eb.or([kx.like(db, "error", eb.val("stopped: ran past %")), kx.like(db, "error", eb.val("stopped: no progress for %"))])).orderBy("id", "desc").$narrowType<{ error: string }>());
+  const lastDone = (step: string) => db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m")).where("step", "=", step).where("state", "=", "done"));
   // The acknowledgement is an audit row, which the header's query refetches on and the planner does not.
-  const acked = db.prepare("SELECT MAX(at) AS at FROM audit WHERE action = 'deadline-ack' AND target = ?");
+  const acked = (target: string) => db.get(db.k.selectFrom("audit").select((eb) => eb.fn.max<string | null>("at").as("at")).where("action", "=", "deadline-ack").where("target", "=", target));
   const out: { step: string; jobId: number; error: string; endedAt: string; count: number }[] = [];
   const steps = [...new Set(rows.map((r) => r.step))];
   for (const step of steps) {
     const mine = rows.filter((r) => r.step === step), latest = mine[0]!;
-    const done = Number((await lastDone.get(step) as { m: number | null }).m ?? 0);
+    const done = Number((await lastDone(step))!.m ?? 0);
     if (done > latest.id) continue;
-    const ack = (await acked.get(`step:${step}`) as { at: string | null }).at;
-    if (ack && ack >= latest.endedAt) continue;
-    out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt, count: mine.filter((r) => r.id > done).length });
+    const ack = (await acked(`step:${step}`))!.at;
+    if (ack && ack >= (latest.endedAt ?? "")) continue;
+    out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt ?? "", count: mine.filter((r) => r.id > done).length });
   }
   return out;
 }
@@ -933,9 +944,8 @@ export async function setLimit(db: Db, step: unknown, input: unknown, by: string
   if (perDay === undefined) throw new LimitError("perDay is required (null means no limit)");
   if (ZERO_ONLY.includes(step) && perDay !== null && perDay !== 0) throw new LimitError(`${step} cannot be sized by a daily limit: use none, or 0 to pause it`);
   if (perDay !== null && (typeof perDay !== "number" || !Number.isInteger(perDay) || perDay < 0 || perDay > 100_000)) throw new LimitError("perDay must be null or a whole number from 0 to 100000");
-  await db.prepare(`INSERT INTO stage_limits (step, per_day, updated_by, updated_at) VALUES (?, ?, ?, ?)
-    ON CONFLICT (step) DO UPDATE SET per_day = excluded.per_day, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-    .run(step, perDay, by, now());
+  await db.run(db.k.insertInto("stage_limits").values({ step, per_day: perDay, updated_by: by, updated_at: now() })
+    .onConflict((oc) => oc.column("step").doUpdateSet(kx.excluded(["per_day", "updated_by", "updated_at"]))));
   await audit(db, by, "stage-limit", `step:${step}`, { perDay });
   return { perDay };
 }
@@ -952,7 +962,8 @@ export async function resetLimitCount(db: Db, step: unknown, by: string): Promis
 
 /** What a stage is doing now: running, queued, or why it is not (the planner's last reading); null when unknown. */
 async function stepStatus(db: Db, step: string, why: string | undefined): Promise<string | null> {
-  const j = await db.prepare("SELECT state FROM jobs WHERE step = ? AND state IN ('running', 'queued') ORDER BY state = 'running' DESC LIMIT 1").get(step) as { state: string } | undefined;
+  const j = await db.get(db.k.selectFrom("jobs").select("state").where("step", "=", step).where("state", "in", ["running", "queued"])
+    .orderBy((eb) => eb.case().when("state", "=", "running").then(1).else(0).end(), "desc").limit(1));
   if (j) return j.state;
   return why ?? null;
 }
@@ -1139,8 +1150,9 @@ function leaseSkipKeys(keys: string | null): string[] | null {
 }
 
 /** True when a running job holds a lease on one of the keys a job skipped (a job from before the keys were recorded: on any lease). */
-async function skippedLeaseHeld(db: Db, keys: string | null): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM work_leases l JOIN jobs j ON j.id = l.job_id WHERE j.state = 'running'${keys ? ` AND ${inList(db, "l.key")}` : ""} LIMIT 1`).get(...(keys ? [keys] : []));
+async function skippedLeaseHeld(db: Db, keys: string[] | null): Promise<boolean> {
+  return !!await db.get(db.k.selectFrom("work_leases as l").innerJoin("jobs as j", "j.id", "l.job_id").select((eb) => eb.lit(1).as("one")).where("j.state", "=", "running")
+    .$if(keys !== null, (q) => q.where(kx.inList(db, "l.key", keys!))).limit(1));
 }
 
 /** True when the last autopilot job of the step (and repo) handled nothing and saw the input `fp` still describes. An operator release since then ends it. */
@@ -1150,7 +1162,7 @@ async function unchangedSinceIdle(db: Db, step: string, repo: string | null, fp:
   // A job that skipped items another job was working retries once no running job holds a lease on any of them. While one does, the step stays parked, so the planner does not queue it in a loop.
   // Skips for want of a taker do not count: such a step is woken by the taker signature in its fingerprint.
   const leaseKeys = leaseSkipKeys(last.lease_skip_keys);
-  if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys && JSON.stringify(leaseKeys))) return false;
+  if (last.lease_skips && leaseKeys?.length !== 0 && !await skippedLeaseHeld(db, leaseKeys)) return false;
   const rec = await fpRecord(db, step, repo);
   if (!rec || rec.job !== last.id || rec.fp !== fp) return false;
   return !((await releasedAt(db, step) ?? "") > last.endedAt);
@@ -1228,9 +1240,8 @@ export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boole
   const plannedAt = await getSetting(db, KEY_PLANNED_AT);
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
   const wake = await getSetting(db, KEY_WAKE_AT);
-  const finished = await db.prepare("SELECT 1 FROM jobs WHERE requested_by = ? AND ended_at > ?").get(AUTOPILOT_USER, plannedAt ?? "");
-  const released = await db.prepare(`SELECT 1 FROM audit WHERE action IN (${Object.keys(RELEASE_STEPS).map(() => "?").join(", ")}) AND at > ?`)
-    .get(...Object.keys(RELEASE_STEPS), plannedAt ?? "");
+  const finished = await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where("ended_at", ">", plannedAt ?? "").limit(1));
+  const released = await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where("at", ">", plannedAt ?? "").limit(1));
   const woken = wake !== null && Date.parse(wake) <= t;
   if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !released && !woken) return false;
   await setSetting(db, KEY_SEQS_SEEN, sig);
@@ -1324,24 +1335,23 @@ export type StoredLaneItems = Record<string, { total: number; items: LaneItem[] 
 
 /** Writes each lane's items as this pass sees them: only the lanes that changed. The table belongs to the `plans` topic, which the planner does not take as input. */
 async function storeLaneItems(db: Db, lanes: Lane[], ctx: PlanCtx): Promise<void> {
-  const old = new Map((await db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
-  const put = db.prepare(upsert(db, { table: "lane_next", cols: ["lane", "total", "items", "at"], key: ["lane"] }));
+  const old = new Map((await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]))).map((r) => [r.lane, r]));
   const at = new Date().toISOString();
   for (const lane of lanes) {
     const all = await laneItems(db, ctx, lane);
     const prev = old.get(lane.name);
     old.delete(lane.name);
-    if (!all.length) { if (prev) await db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane.name); continue; }
+    if (!all.length) { if (prev) await db.run(db.k.deleteFrom("lane_next").where("lane", "=", lane.name)); continue; }
     const items = JSON.stringify(all.slice(0, NEXT_PER_LANE));
-    if (!prev || prev.total !== all.length || prev.items !== items) await put.run(lane.name, all.length, items, at);
+    if (!prev || prev.total !== all.length || prev.items !== items) await db.run(db.k.insertInto("lane_next").values({ lane: lane.name, total: all.length, items, at }).onConflict((oc) => oc.column("lane").doUpdateSet(kx.excluded(["total", "items", "at"]))));
   }
-  for (const lane of old.keys()) await db.prepare("DELETE FROM lane_next WHERE lane = ?").run(lane);
+  for (const lane of old.keys()) await db.run(db.k.deleteFrom("lane_next").where("lane", "=", lane));
 }
 
 /** The lane lists of the planner's last pass, keyed by lane name. */
 export async function storedLaneItems(db: Db): Promise<StoredLaneItems> {
   const out: StoredLaneItems = {};
-  for (const r of await db.prepare("SELECT lane, total, items FROM lane_next").all() as { lane: string; total: number; items: string }[]) out[r.lane] = { total: r.total, items: JSON.parse(r.items) as LaneItem[] };
+  for (const r of await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]))) out[r.lane] = { total: r.total, items: JSON.parse(r.items) as LaneItem[] };
   return out;
 }
 
@@ -1351,7 +1361,7 @@ const HELD_LANES = ["act", "merge", "labels", "fixup", "fixissue"];
 export type Held = { reason: string; approval: boolean };
 /** Reads the stored lane lists once; call it once per request and ask per decision. */
 export async function heldLookup(db: Db): Promise<(repo: string, number: number, decisionId?: string) => Promise<Held | null>> {
-  const rows = new Map((await db.prepare(`SELECT lane, total, items FROM lane_next WHERE lane IN (${HELD_LANES.map(() => "?").join(",")})`).all(...HELD_LANES) as { lane: string; total: number; items: string }[]).map((r) => [r.lane, r]));
+  const rows = new Map((await db.all(db.k.selectFrom("lane_next").select(["lane", "total", "items"]).where("lane", "in", HELD_LANES))).map((r) => [r.lane, r]));
   const parsed = new Map<string, LaneItem[]>();
   const gateOf = new Map<string, Held | null>();
   const laneHold = async (name: string): Promise<Held | null> => {
