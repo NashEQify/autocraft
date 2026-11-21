@@ -12,6 +12,7 @@ import { needVisible } from "./visible.ts";
 import { ownerOf } from "../../owners.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { jsonText } from "../../db/portable.ts";
 
 type AuditRow = { rowid: number; at: string; login: string; action: string; target: string | null; details: string | null };
 
@@ -55,7 +56,7 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
   const audit = await db.prepare(
     `SELECT rowid, at, login, action, target, details FROM main.audit
       WHERE (target = ? AND action IN ('batch-start', 'batch-build-skip', 'batch-push', 'batch-pr', 'batch-stop', 'batch-rerun', 'batch-end-too-late', 'batch-merged-after-end'))
-         OR (action IN ('batch-remove', 'batch-hold', 'batch-blame') AND json_extract(details, '$.batch') = ? AND target IN (${marks(nums)}))
+         OR (action IN ('batch-remove', 'batch-hold', 'batch-blame') AND ${jsonText(db, "details", "$.batch")} = ? AND target IN (${marks(nums)}))
          ${b.pr_number === null ? "" : "OR (target = ? AND action IN ('ci-run-approve', 'ci-rerun'))"}
       ORDER BY at, rowid`,
   ).all(ref, b.branch, ...nums.map(prRef), ...(b.pr_number === null ? [] : [prRef(b.pr_number)])) as AuditRow[];

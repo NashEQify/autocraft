@@ -1,6 +1,7 @@
 // Shared queries for the Progress, Repo and Run and cost pages.
 import { latestRun, settledOn, settledTable } from "../../classify/settled.ts";
 import type { Db } from "../../db/index.ts";
+import { indexedBy } from "../../db/portable.ts";
 
 // Latest stage per item, from the item_stage table the stages trigger maintains.
 export const LATEST_SQL = `latest AS (SELECT repo, number, stage, reviewed FROM main.item_stage %W)`;
@@ -15,8 +16,8 @@ export async function trackingStart(db: Db): Promise<string> {
 
 // Closed items by date: main.items with its index named, because through the
 // scoping view the planner walks the repo index instead of the closed_at range.
-export const CLOSED_ITEMS = "main.items AS i INDEXED BY items_closed";
-export const CREATED_ITEMS = "main.items AS i INDEXED BY items_created";
+export const CLOSED_ITEMS = (db: Db): string => `main.items AS i${indexedBy(db, "items_closed")}`;
+export const CREATED_ITEMS = (db: Db): string => `main.items AS i${indexedBy(db, "items_created")}`;
 export const TRACKED = "repo IN (SELECT name FROM main.tracked_repos)";
 
 const p = (repo?: string, extra: Record<string, string | number> = {}): Record<string, string | number> => (repo ? { repo, ...extra } : extra);
@@ -51,7 +52,7 @@ export type DoneRow = { repo: string; merged_pipeline: number; closed_pipeline: 
 // Done since tracking began. Merged PRs carry closed_at too, so one range covers both.
 export async function doneByRepo(db: Db, start: string, repo?: string): Promise<DoneRow[]> {
   return (await db.prepare(`WITH ${latestCte(repo)}, d AS (
-      SELECT i.repo, i.state, l.stage FROM ${CLOSED_ITEMS} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
+      SELECT i.repo, i.state, l.stage FROM ${CLOSED_ITEMS(db)} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
       WHERE i.closed_at >= :start AND i.state <> 'OPEN' AND i.${TRACKED} ${repo ? "AND i.repo = :repo" : ""})
     SELECT repo,
       SUM(state = 'MERGED' AND stage = 'merged') AS merged_pipeline,
@@ -74,8 +75,8 @@ export async function trend(db: Db, start: string, openNow: Map<string, number>,
     if (d >= today || days.length > 365) break;
   }
   const r = repo ? "AND repo = :repo" : "";
-  const created = await db.prepare(`SELECT repo, substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM ${CREATED_ITEMS} WHERE created_at >= :start AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
-  const closed = await db.prepare(`SELECT repo, substr(closed_at, 1, 10) AS d, COUNT(*) AS n FROM ${CLOSED_ITEMS} WHERE closed_at >= :start AND state <> 'OPEN' AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
+  const created = await db.prepare(`SELECT repo, substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM ${CREATED_ITEMS(db)} WHERE created_at >= :start AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
+  const closed = await db.prepare(`SELECT repo, substr(closed_at, 1, 10) AS d, COUNT(*) AS n FROM ${CLOSED_ITEMS(db)} WHERE closed_at >= :start AND state <> 'OPEN' AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
   const delta = new Map<string, Map<string, number>>();
   const add = (repo: string, d: string, n: number) => {
     if (!delta.has(repo)) delta.set(repo, new Map());

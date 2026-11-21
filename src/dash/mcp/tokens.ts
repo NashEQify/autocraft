@@ -7,6 +7,7 @@ import type { Role } from "../types.ts";
 import { randomToken, sha256hex } from "../server/crypto.ts";
 import { HttpError } from "../server/util.ts";
 import type { Db } from "../../db/index.ts";
+import { nocase } from "../../db/portable.ts";
 
 const DAY = 86_400_000;
 export const MCP_TOKEN_TTL = 90 * DAY;
@@ -98,7 +99,7 @@ export async function endAnswerTokens(db: Db, login: string): Promise<number> {
 
 /** Every login's live tokens, for operators on the Access page. */
 export async function listAllTokens(db: Db): Promise<(McpTokenRow & { login: string })[]> {
-  return (await db.prepare(`SELECT login, ${COLS} FROM mcp_tokens WHERE expires_at > ? ORDER BY login COLLATE NOCASE, created_at DESC, id DESC`)
+  return (await db.prepare(`SELECT login, ${COLS} FROM mcp_tokens WHERE expires_at > ? ORDER BY ${nocase(db, "login")}, created_at DESC, id DESC`)
     .all(new Date().toISOString()) as (Raw & { login: string })[]).map((r) => ({ ...toRow(r), login: r.login }));
 }
 

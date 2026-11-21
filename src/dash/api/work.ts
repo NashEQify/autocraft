@@ -8,6 +8,7 @@ import type { Req } from "../types.ts";
 import { visibleRepos } from "./visible.ts";
 import { readerOf, veiledFor } from "./reader.ts";
 import type { Db } from "../../db/index.ts";
+import { jsonText } from "../../db/portable.ts";
 
 type Row = { repo: string; number: number; kind: string; title: string | null; score: number; breakdown: string; next: string | null; label: string | null; item_state: string | null };
 
@@ -24,7 +25,7 @@ export async function work(db: Db, req: Req): Promise<WorkList> {
   const where = `i.state = 'OPEN' AND i.repo IN (${repos.map(() => "?").join(",")})${kind ? " AND i.kind = ?" : ""}`;
   const args = [...repos, ...(kind ? [kind] : [])];
   const total = (await db.prepare(`SELECT COUNT(*) AS n FROM items i JOIN item_rank r ON r.repo = i.repo AND r.number = i.number WHERE ${where}`).get(...args) as { n: number }).n;
-  const rows = await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, r.score, r.breakdown, json_extract(p.view, '$.next') AS next, json_extract(p.view, '$.label') AS label, p.item_state
+  const rows = await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, r.score, r.breakdown, ${jsonText(db, "p.view", "$.next")} AS next, ${jsonText(db, "p.view", "$.label")} AS label, p.item_state
     FROM items i JOIN item_rank r ON r.repo = i.repo AND r.number = i.number LEFT JOIN item_plans p ON p.repo = i.repo AND p.number = i.number
     WHERE ${where} ORDER BY r.score DESC, i.repo, i.number LIMIT ? OFFSET ?`).all(...args, limit, offset) as Row[];
   const reader = await readerOf(db, req);

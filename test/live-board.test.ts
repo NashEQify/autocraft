@@ -12,10 +12,10 @@ const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
 test("the live board shows a running job with its call and build steps, an estimate from earlier runs, and drops idle ended jobs", async () => {
   const db = await connectDb(":memory:");
   await db.prepare("INSERT INTO items (repo, number, kind, state, title, updated_at) VALUES ('app', 7, 'pr', 'OPEN', 'Fix the thing', ?)").run(ago(1));
-  const job = db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, progress, summary) VALUES (?, '{}', 'pipeline', ?, ?, ?, ?, ?, ?)");
+  const job = db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, progress, summary) VALUES (?, '{}', 'pipeline', ?, ?, ?, ?, ?, ?) RETURNING id");
   // Earlier review jobs of 10, 12, 14 and 30 minutes and the 1-minute one below give the estimate.
   for (const m of [10, 12, 14, 30]) await job.run("review", ago(200), "done", ago(200), ago(200 - m), null, "old");
-  const running = Number((await job.run("review", ago(5), "running", ago(5), null, "Reviewing app#7", null)).lastInsertRowid);
+  const running = Number((await job.get("review", ago(5), "running", ago(5), null, "Reviewing app#7", null) as { id: number }).id);
   await job.run("review", ago(3), "done", ago(4), ago(3), null, "nothing to do");
   await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, 'app', 7, ?)").run(running, ago(5));
   await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, items, item_count, state, started_at, ended_at)
@@ -43,7 +43,7 @@ test("viewers see no account label and no progress line that names a repo hidden
   const db = await connectDb(":memory:");
   await db.script("INSERT INTO repos (name, visibility) VALUES ('app', 'public'), ('secret', 'private'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('app'), ('secret')");
   await db.prepare("INSERT INTO claude_accounts (id, label) VALUES ('acc', 'Team account B')").run();
-  const job = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, progress) VALUES ('review', '{}', 'pipeline', ?, 'running', ?, 'Reviewing app#7')").run(ago(5), ago(5))).lastInsertRowid);
+  const job = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, progress) VALUES ('review', '{}', 'pipeline', ?, 'running', ?, 'Reviewing app#7') RETURNING id").get(ago(5), ago(5)) as { id: number }).id);
   await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, 'app', 7, ?)").run(job, ago(5));
   const run = async (jobId: number | null, progress: string) => {
     const id = await insertRun(db, { jobId, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: "acc", items: [{ repo: "app", number: 7 }], prompt: "p" });

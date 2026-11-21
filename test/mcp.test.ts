@@ -43,7 +43,7 @@ before(async () => {
   await ins.run("photocraft", 9, "pr", "OPEN", "Fix-up being pushed", "t", "tess", now, now, "h9");
   await ins.run("photocraft", 10, "issue", "OPEN", "Add a sepia filter", "please", "ann", now, now, null);
   await db.script("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at) VALUES ('secretcraft', 'test', '2026-01-01T00:00:00Z')");
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('filmcraft', 'public'), ('secretcraft', 'private')");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('filmcraft', 'public'), ('secretcraft', 'private') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility");
   await ask(db, [P1, F3, S7, P10].map((id) => {
     const [repo, rest] = id.split("#");
     return { id, kind: "scope", repo, number: Number(rest!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "Adds a filter." };

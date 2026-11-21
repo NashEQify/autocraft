@@ -109,7 +109,7 @@ export async function disputeOn(db: Db, repo: string, number: number): Promise<b
 /** Records the dispute. False when the decision is no longer disputable (answered by the disputer, applied, running or already disputed). */
 export async function openDispute(db: Db, id: string, by: string, reason: string, at: string): Promise<boolean> {
   const r = await db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = NULL, dispute_by = ?, dispute_reason = ?, dispute_at = ?
-    WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND NOT ${ciEq(db, "answered_by", "?")}
+    WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND NOT (${ciEq(db, "answered_by", "?")})
       AND (exec_state IS NULL OR exec_state IN ('pending', 'waiting-token', 'waiting-permission', 'failed'))`).run(DISPUTED, by, reason, at, id, BACKLOG.key, by);
   if (r.changes !== 1) return false;
   await audit(db, by, "dispute", id, { reason });

@@ -38,7 +38,7 @@ async function phases(db: Db, hidden: string[]): Promise<Record<ItemPhase, numbe
 /** `total` is the nav badge's number: decisions, unanswered feedback and stopped items. `oldest` lists decisions and, for staff, high or critical findings still new (not in the total). */
 async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page: NeedsPage): Promise<Home["needs"]> {
   const params: Record<string, string> = {};
-  const hide = withoutHidden(hidden, params);
+  const hide = withoutHidden(db, hidden, params);
   const where = `${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`;
   const byKind: Partial<Record<NeedKind, number>> = {};
   for (const r of await db.prepare(`SELECT kind, COUNT(*) AS n FROM decisions WHERE ${where} GROUP BY kind`).all(params) as { kind: NeedKind; n: number }[]) byKind[r.kind] = r.n;

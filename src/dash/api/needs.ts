@@ -19,6 +19,7 @@ import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { chr, inList, jsonText, nocase } from "../../db/portable.ts";
 
 export const NEEDS_PAGE = 30;
 /** Older feedback is not asked for any more; the window also bounds the scans. */
@@ -26,14 +27,17 @@ const WINDOW_MS = 60 * 86_400_000;
 
 type Raw = { id: string; source: NeedsFeedbackRow["source"]; author: string; at: string; text: string; repo: string | null; number: number | null; decision: string | null; turn: number | null; comment: string | null; handled: number };
 
+/** `s` with spaces, newlines and tabs trimmed from both ends. */
+const trimText = (db: Db, s: string): string => db.dialect === "postgres" ? `btrim(${s}, ' ' || ${chr(db, 10, 9)})` : `TRIM(${s}, ' ' || char(10) || char(9))`;
+
 // One SELECT per source, each with a `handled` flag. They share the parameters :since, :cur (newest time wanted), :own (the box account), :owns (JSON list of every login that is ours) and :bots.
-const SOURCES: string[] = [
+const sources = (db: Db): string[] => [
   // Feedback on a decision from anyone but an operator; handled once the decision was answered afterwards.
-  `SELECT 'decision-comment:' || c.id AS id, 'decision' AS source, c.login AS author, c.at, c.body AS text, d.repo, d.number, d.id AS decision, NULL AS turn, c.id AS comment,
+  `SELECT 'decision-comment:' || c.id AS id, 'decision' AS source, c.login AS author, c.at, c.body AS text, d.repo, d.number, d.id AS decision, CAST(NULL AS INTEGER) AS turn, c.id AS comment,
      d.answered_at IS NOT NULL AND d.answered_at > c.at AS handled
    FROM decision_comments c JOIN decisions d ON d.id = c.decision_id
    WHERE c.at >= :since AND c.at <= :cur AND NOT EXISTS (SELECT 1 FROM access a WHERE a.login = c.login AND a.role = 'operator')`,
-  `SELECT 'decision-opinion:' || o.id, 'decision', o.login, o.at, o.note, d.repo, d.number, d.id, NULL, NULL,
+  `SELECT 'decision-opinion:' || o.id, 'decision', o.login, o.at, o.note, d.repo, d.number, d.id, CAST(NULL AS INTEGER), NULL,
      d.answered_at IS NOT NULL AND d.answered_at > o.at
    FROM decision_opinions o JOIN decisions d ON d.id = o.decision_id
    WHERE o.at >= :since AND o.at <= :cur AND o.retracted_at IS NULL AND TRIM(COALESCE(o.note, '')) <> ''
@@ -43,25 +47,25 @@ const SOURCES: string[] = [
    FROM conversation_turns t WHERE t.kind = 'operator' AND t.at >= :since AND t.at <= :cur`,
   // A GitHub comment or review that names the pipeline login (flagged when written, so an index finds them); handled once the
   // pipeline login posted on the item afterwards. Nothing without a pipeline login.
-  `SELECT 'comment:' || c.id, 'github', c.author, c.created_at, c.body, c.repo, c.number, NULL, NULL, c.id,
-     EXISTS (SELECT 1 FROM comments a WHERE a.repo = c.repo AND a.number = c.number AND a.author IN (SELECT value FROM json_each(:owns)) AND a.created_at > c.created_at)
+  `SELECT 'comment:' || c.id, 'github', c.author, c.created_at, c.body, c.repo, c.number, NULL, CAST(NULL AS INTEGER), c.id,
+     EXISTS (SELECT 1 FROM comments a WHERE a.repo = c.repo AND a.number = c.number AND ${inList(db, "a.author", ":owns")} AND a.created_at > c.created_at)
    FROM comments c
-   WHERE :own <> '' AND c.mentions_pipeline = 1 AND c.created_at >= :since AND c.created_at <= :cur AND c.author IS NOT NULL AND c.author NOT IN (SELECT value FROM json_each(:owns))`,
+   WHERE :own <> '' AND c.mentions_pipeline = 1 AND c.created_at >= :since AND c.created_at <= :cur AND c.author IS NOT NULL AND ${inList(db, "c.author", ":owns", "text", true)}`,
   // The comment right after one of AutoCraft's own (a comment the audit log recorded with its URL and text, or the review we posted (audit `review-post`); the account's older manual comments do not count), on an item it commented on; bots do not count as replies.
-  `SELECT 'comment:' || c.id, 'github', c.author, c.created_at, c.body, c.repo, c.number, NULL, NULL, c.id,
-     EXISTS (SELECT 1 FROM comments a WHERE a.repo = c.repo AND a.number = c.number AND a.author IN (SELECT value FROM json_each(:owns)) AND a.created_at > c.created_at)
-   FROM (SELECT DISTINCT repo, number FROM comments WHERE author IN (SELECT value FROM json_each(:owns))) o JOIN comments c ON c.repo = o.repo AND c.number = o.number
-   WHERE :own <> '' AND c.mentions_pipeline = 0 AND c.created_at >= :since AND c.created_at <= :cur AND c.author IS NOT NULL AND c.author NOT IN (SELECT value FROM json_each(:owns)) AND c.author NOT LIKE '%[bot]' AND lower(c.author) NOT IN (SELECT value FROM json_each(:bots)) AND TRIM(COALESCE(c.body, '')) <> ''
+  `SELECT 'comment:' || c.id, 'github', c.author, c.created_at, c.body, c.repo, c.number, NULL, CAST(NULL AS INTEGER), c.id,
+     EXISTS (SELECT 1 FROM comments a WHERE a.repo = c.repo AND a.number = c.number AND ${inList(db, "a.author", ":owns")} AND a.created_at > c.created_at)
+   FROM (SELECT DISTINCT repo, number FROM comments WHERE ${inList(db, "author", ":owns")}) o JOIN comments c ON c.repo = o.repo AND c.number = o.number
+   WHERE :own <> '' AND c.mentions_pipeline = 0 AND c.created_at >= :since AND c.created_at <= :cur AND c.author IS NOT NULL AND ${inList(db, "c.author", ":owns", "text", true)} AND c.author NOT LIKE '%[bot]' AND lower(c.author) ${inList(db, "NOT", ":bots")} AND TRIM(COALESCE(c.body, '')) <> ''
      AND EXISTS (SELECT 1 FROM (SELECT p.id, p.author, p.body FROM comments p WHERE p.repo = c.repo AND p.number = c.number AND p.created_at < c.created_at ORDER BY p.created_at DESC LIMIT 1) q
-       WHERE q.author IN (SELECT value FROM json_each(:owns)) AND EXISTS (SELECT 1 FROM audit a WHERE a.target = c.repo || '#' || c.number
-         AND ((json_extract(a.details, '$.url') IS NOT NULL AND TRIM(REPLACE(json_extract(a.details, '$.text'), char(13), ''), ' ' || char(10) || char(9)) = TRIM(REPLACE(q.body, char(13), ''), ' ' || char(10) || char(9)))
-           OR (a.action = 'review-post' AND json_extract(a.details, '$.review') = q.id))))`,
+       WHERE ${inList(db, "q.author", ":owns")} AND EXISTS (SELECT 1 FROM audit a WHERE a.target = c.repo || '#' || c.number
+         AND ((${jsonText(db, "a.details", "$.url")} IS NOT NULL AND ${trimText(db, `REPLACE(${jsonText(db, "a.details", "$.text")}, ${chr(db, 13)}, '')`)} = ${trimText(db, `REPLACE(q.body, ${chr(db, 13)}, '')`)})
+           OR (a.action = 'review-post' AND ${jsonText(db, "a.details", "$.review")} = q.id))))`,
 ];
 
 const ownLogin = async (db: Db): Promise<string> => (await db.prepare("SELECT value FROM main.settings WHERE key = 'pipeline_login'").get() as { value: string } | undefined)?.value ?? "";
 
-function hiddenSql(hidden: HiddenRepos, params: Record<string, SQLInputValue>): string {
-  if (!filtered(hidden)) return "1";
+function hiddenSql(db: Db, hidden: HiddenRepos, params: Record<string, SQLInputValue>): string {
+  if (!filtered(hidden)) return db.dialect === "postgres" ? "TRUE" : "1";
   const h = hiddenTest("repo", hidden);
   let k = 0;
   return `(repo IS NULL OR NOT (${h.sql.replace(/\?/g, () => { params[`h${k}`] = h.args[k]!; return `:h${k++}`; })}))`;
@@ -81,8 +85,8 @@ async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, me
 
 async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: string } | null, limit: number, staff: boolean): Promise<{ rows: Raw[]; more: boolean; unhandled: number }> {
   const params: Record<string, SQLInputValue> = { since: new Date(Date.now() - WINDOW_MS).toISOString(), own: await ownLogin(db), owns: JSON.stringify([...await allOwnLogins(db)]), bots: JSON.stringify(reviewBots()) };
-  const union = SOURCES.map((s) => `SELECT * FROM (${s})`).join(" UNION ALL ");
-  const where = hiddenSql(hidden, params);
+  const union = sources(db).map((s) => `SELECT * FROM (${s})`).join(" UNION ALL ");
+  const where = hiddenSql(db, hidden, params);
   const size = limit * 3 + 1;
   // Feedback on a batch decision is hidden when the batch holds an item of a hidden repo.
   const batches = new Map<string, boolean>();
@@ -107,7 +111,7 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
     if (batch.length < size || !tail) break;
     pos = { at: tail.at, id: tail.id };
   }
-  const open = await db.prepare(`SELECT source, number, decision, COUNT(*) AS n FROM (${union}) WHERE ${where} AND NOT handled GROUP BY source, number IS NULL, decision`).all({ ...params, cur: "9999" }) as { source: Raw["source"]; number: number | null; decision: string | null; n: number }[];
+  const open = await db.prepare(`SELECT source, MAX(number) AS number, decision, COUNT(*) AS n FROM (${union}) WHERE ${where} AND NOT handled GROUP BY source, number IS NULL, decision`).all({ ...params, cur: "9999" }) as { source: Raw["source"]; number: number | null; decision: string | null; n: number }[];
   const unhandled = await reduceSeq(open, async (sum, r) => sum + (await visible(r) ? r.n : 0), 0);
   // What staff wrote about a quiet pull request reaches viewers as the row only, as the decision and conversation APIs give it.
   const quiet = new Map<string, boolean>();
@@ -138,13 +142,15 @@ export async function stopped(db: Db, hidden: HiddenRepos): Promise<NeedsStopped
     if (a.enabled && a.pausedReason) out.push({ id: `account:${a.id}`, kind: "account", title: a.label, reason: blankIfHidden(a.pausedReason, hidden), since: null, resume: { type: "link", to: "/accounts" } });
   // Targets Act stopped after repeated failures, while the answer still stands: an operator retries them from here.
   for (const a of await db.prepare(`SELECT a.decision_id, a.repo, a.number, a.reason, a.created_at FROM main.actions a JOIN main.decisions d ON d.id = a.decision_id JOIN main.items i ON i.repo = a.repo AND i.number = a.number
-    WHERE a.state = 'stopped' AND d.answer IS NOT NULL AND d.applied_at IS NULL AND d.exec_state IS NOT 'disputed' AND d.id NOT LIKE '%~replaced-%' AND i.state = 'OPEN' ORDER BY a.created_at`).all() as { decision_id: string; repo: string; number: number; reason: string | null; created_at: string }[]) {
+    WHERE a.state = 'stopped' AND d.answer IS NOT NULL AND d.applied_at IS NULL AND d.exec_state IS DISTINCT FROM 'disputed' AND d.id NOT LIKE '%~replaced-%' AND i.state = 'OPEN' ORDER BY a.created_at`).all() as { decision_id: string; repo: string; number: number; reason: string | null; created_at: string }[]) {
     if (isHiddenRepo(hidden, a.repo)) continue;
     out.push({ id: `act:${a.decision_id}:${a.number}`, kind: "act", title: `${a.repo}#${a.number}`, reason: blankIfHidden(a.reason ?? "Act stopped after repeated failures", hidden), since: a.created_at, resume: { type: "retry", decision: a.decision_id } });
   }
   // Items held for an outside author's daily limit or a surge: one group row per author, listed by `/api/needs/outside/:author`.
-  for (const g of await db.prepare(`SELECT h.author, COUNT(*) AS n, SUM(h.kind = 'pr') AS prs, MIN(i.created_at) AS since, MAX(h.reason = 'surge') AS surge FROM main.outside_holds h
-    LEFT JOIN items i ON i.repo = h.repo AND i.number = h.number ${filtered(hidden) ? `WHERE NOT (${hiddenTest("h.repo", hidden).sql})` : ""} GROUP BY h.author COLLATE NOCASE ORDER BY n DESC, h.author`).all(...(filtered(hidden) ? hiddenTest("h.repo", hidden).args : [])) as { author: string; n: number; prs: number; since: string | null; surge: number }[]) {
+  // One spelling of the author per group: any on SQLite, the smallest on Postgres (which needs an aggregate).
+  const pg = db.dialect === "postgres";
+  for (const g of await db.prepare(`SELECT ${pg ? "MIN(h.author) AS author" : "h.author"}, COUNT(*) AS n, SUM(CAST(h.kind = 'pr' AS INTEGER)) AS prs, MIN(i.created_at) AS since, MAX(CAST(h.reason = 'surge' AS INTEGER)) AS surge FROM main.outside_holds h
+    LEFT JOIN items i ON i.repo = h.repo AND i.number = h.number ${filtered(hidden) ? `WHERE NOT (${hiddenTest("h.repo", hidden).sql})` : ""} GROUP BY ${nocase(db, "h.author")} ORDER BY n DESC, ${pg ? "author" : "h.author"}`).all(...(filtered(hidden) ? hiddenTest("h.repo", hidden).args : [])) as { author: string; n: number; prs: number; since: string | null; surge: number }[]) {
     const parts = [g.prs && `${g.prs} PR${g.prs === 1 ? "" : "s"}`, g.n - g.prs && `${g.n - g.prs} issue${g.n - g.prs === 1 ? "" : "s"}`].filter(Boolean).join(", ");
     out.push({ id: `outside:${g.author}`, kind: "outside-group", title: g.author, reason: `${parts} waiting for ${g.surge ? "the outside-surge breaker or " : ""}the author's daily limit`, since: g.since, count: g.n, resume: { type: "outside", author: g.author } });
   }
@@ -205,7 +211,7 @@ export async function needs(db: Db, req: Req): Promise<NeedsPage> {
   const fb = await feedback(db, hidden, cursor, q.get("feedback") === "1" ? limit : 1, canSeeInternals(req));
   // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
   const dp: Record<string, string> = {};
-  const hide = withoutHidden(hidden, dp);
+  const hide = withoutHidden(db, hidden, dp);
   const decisions = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE ${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`).get(dp) as { n: number }).n;
   const rows = await stopped(db, hidden);
   const last = fb.rows[fb.rows.length - 1];

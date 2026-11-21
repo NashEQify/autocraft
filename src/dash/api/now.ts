@@ -18,6 +18,7 @@ import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { filtered, hiddenTest, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { touchesHidden } from "../../agents/runs.ts";
 import type { Db } from "../../db/index.ts";
+import { inList, inTuples } from "../../db/portable.ts";
 
 const RECENT = 15;
 type Feed = { entries: NowEntry[]; also: string[]; nextCursor: string | null };
@@ -55,15 +56,15 @@ const groupBy = <T, K>(rows: T[], key: (r: T) => K): Map<K, T[]> => {
 /** The first `per` items of each run, by repo and number. */
 const runItems = async (db: Db, ids: number[], per: number): Promise<Map<number, { repo: string; number: number }[]>> =>
   groupBy(ids.length ? await all<{ run_id: number; repo: string; number: number }>(db, `SELECT run_id, repo, number FROM (SELECT run_id, repo, number, ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY repo, number) AS k
-    FROM agent_run_items WHERE run_id IN (SELECT value FROM json_each(?))) WHERE k <= ? ORDER BY run_id, repo, number`, JSON.stringify(ids), per) : [], (r) => r.run_id);
+    FROM agent_run_items WHERE ${inList(db, "run_id", "?", "bigint")}) WHERE k <= ? ORDER BY run_id, repo, number`, JSON.stringify(ids), per) : [], (r) => r.run_id);
 /** The PR numbers of each merge batch, in batch order. */
 const batchPrs = async (db: Db, ids: number[]): Promise<Map<number, { number: number }[]>> =>
-  groupBy(ids.length ? await all<{ batch_id: number; number: number }>(db, "SELECT batch_id, number FROM merge_batch_prs WHERE batch_id IN (SELECT value FROM json_each(?)) ORDER BY batch_id, position", JSON.stringify([...new Set(ids)])) : [], (r) => r.batch_id);
+  groupBy(ids.length ? await all<{ batch_id: number; number: number }>(db, `SELECT batch_id, number FROM merge_batch_prs WHERE ${inList(db, "batch_id", "?", "bigint")} ORDER BY batch_id, position`, JSON.stringify([...new Set(ids)])) : [], (r) => r.batch_id);
 /** Merge batch ids by repo and branch, joined by a NUL. */
 async function batchIdsOf(db: Db, keys: [string, string][]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!keys.length) return out;
-  for (const r of await all<{ id: number; repo: string; branch: string }>(db, "SELECT id, repo, branch FROM main.merge_batches WHERE (repo, branch) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?)) ORDER BY id", JSON.stringify(keys)))
+  for (const r of await all<{ id: number; repo: string; branch: string }>(db, `SELECT id, repo, branch FROM main.merge_batches WHERE ${inTuples(db, ["repo", "branch"], "?", ["text", "text"])} ORDER BY id`, JSON.stringify(keys)))
     if (!out.has(`${r.repo}\0${r.branch}`)) out.set(`${r.repo}\0${r.branch}`, r.id);
   return out;
 }
@@ -217,7 +218,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
   const jobEntries = new Map<number, { entry: NowEntry; its: Set<string>; from: number; to: number }>();
   const listed = [...running, ...finished].filter((j) => !(QUIET_STEPS.has(j.step) && j.state !== "failed"));
   const itemsOfJob = groupBy(listed.length ? await all<{ job_id: number; id: number; repo: string; number: number }>(db,
-    `SELECT job_id, id, repo, number FROM job_items WHERE job_id IN (SELECT value FROM json_each(?))${notHidden("repo", hidden)} ORDER BY id`, JSON.stringify(listed.map((j) => j.id)), ...hideArgs(hidden)) : [], (r) => r.job_id);
+    `SELECT job_id, id, repo, number FROM job_items WHERE ${inList(db, "job_id", "?", "bigint")}${notHidden("repo", hidden)} ORDER BY id`, JSON.stringify(listed.map((j) => j.id)), ...hideArgs(hidden)) : [], (r) => r.job_id);
   for (const j of [...running, ...finished]) {
     const live = j.state === "running";
     if (QUIET_STEPS.has(j.step) && j.state !== "failed") {

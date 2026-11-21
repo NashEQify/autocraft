@@ -24,6 +24,7 @@ import { ITEM_PHASES, PHASE_SQL, type ItemPhase, type ItemStatus, type ItemStatu
 import { mapSeq } from "../../async-seq.ts";
 import type { Db, Dialect } from "../../db/index.ts";
 import { commentMatchSql, commentRankOrder, itemMatchSql, parseSearch, searchParam, snippetSql } from "../../db/search.ts";
+import { indexedBy } from "../../db/portable.ts";
 
 // Items matching the query bound as :q in their title, body or any comment.
 const hitIds = (d: Dialect): string => `hits AS (
@@ -231,7 +232,7 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
     // scoping view the planner walks the repo index and sorts every open item.
     const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
     const pageFrom = byUpdated
-      ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
+      ? from(false).replace("FROM items i", `FROM main.items AS i${indexedBy(db, "items_state_updated")}`)
       : from(b.sort === "relevance");
     const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
     const ids = (await db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
@@ -328,7 +329,7 @@ export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
     // A single word may be a login: that author's latest items first.
     if (/^[A-Za-z0-9-]{2,39}$/.test(q)) {
       // main.items with the index named: through the scoping view the planner picks the repo index.
-      rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM main.items INDEXED BY items_author_nocase
+      rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM main.items${indexedBy(db, "items_author_nocase")}
         WHERE author LIKE :p AND repo IN (SELECT name FROM main.tracked_repos)${hide ? ` AND ${hide}` : ""}
         ORDER BY state <> 'OPEN', updated_at DESC LIMIT 5`).all({ p: `${q}%`, ...hp }) as Hit[];
     }

@@ -25,6 +25,7 @@ import { HttpError, RateLimiter } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { ciEq, jsonText, jsonValid } from "../../db/portable.ts";
 
 export const MCP_PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 const BODY_MAX = 20_000;
@@ -605,7 +606,7 @@ async function heldFixups(db: Db, repos: string[], repo: string | null, limit: n
   return await db.prepare(`SELECT p.repo, p.number, p.head, i.title, i.author, p.note FROM item_plans p
     JOIN items i ON i.repo = p.repo AND i.number = p.number
     WHERE p.kind = 'pr' AND p.repo IN (${names}) AND i.state = 'OPEN' AND p.head = i.head_oid
-      AND json_valid(p.view) AND json_extract(p.view, '$.fixup') = 'hold'
+      AND ${jsonValid(db, "p.view")} AND ${jsonText(db, "p.view", "$.fixup")} = 'hold'
       AND NOT EXISTS (SELECT 1 FROM fixups f WHERE f.repo = p.repo AND f.number = p.number AND f.from_head = p.head AND f.state IN ('pushing', 'linting', 'pushed'))
     ORDER BY i.created_at, p.repo, p.number LIMIT :limit`).all(params) as Held[];
 }
@@ -712,7 +713,7 @@ async function myWork(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const start = new Date();
   start.setUTCHours(0, 0, 0, 0);
   const rows = (await env.db.prepare(`SELECT id, prompt_id, items, state, started_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd FROM agent_runs
-    WHERE user_login = ? COLLATE NOCASE AND started_at >= ? ORDER BY id DESC LIMIT 200`).all(login, start.toISOString()) as
+    WHERE ${ciEq(env.db, "user_login", "?")} AND started_at >= ? ORDER BY id DESC LIMIT 200`).all(login, start.toISOString()) as
     { id: number; prompt_id: string; items: string; state: string; started_at: string; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; cost_usd: number | null }[])
     .map((r) => ({
       promptId: r.prompt_id, items: (JSON.parse(r.items) as { repo: string; number: number }[]).slice(0, 6).map((i) => `${i.repo}#${i.number}`), state: r.state, startedAt: r.started_at,

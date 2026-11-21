@@ -47,7 +47,7 @@ before(async () => {
   await db.prepare("UPDATE items SET additions = 40, deletions = 3, changed_files = 7 WHERE repo = 'photocraft' AND number = 1").run();
   await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 1, 'c1', 'comment', 'alice', ?, 'looks good')").run(now);
   await db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, want, reason) VALUES ('photocraft', 1, 'haiku', 'r1', ?, 'small extra', 'yes', 'adds a filter')").run(now);
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('filmcraft', 'public')");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('filmcraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility");
   await ask(db, [P1, P2, F3, P4].map((id) => {
     const [repo, rest] = id.split("#");
     return { id, kind: id.endsWith("close") ? "close" : "scope", repo, number: Number(rest!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "Adds a filter." };
@@ -255,8 +255,8 @@ describe("api", () => {
   });
 
   test("a maintainer settles only with maintainer_writes on, the app identity on the repo and write access; undo only their own", async () => {
-    const setting = async (on: boolean) => on ? await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run() : await db.prepare("DELETE FROM settings WHERE key = 'maintainer_writes'").run();
-    const identity = async (app: boolean) => app ? await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run() : await db.prepare("DELETE FROM settings WHERE key = 'github_identity'").run();
+    const setting = async (on: boolean) => on ? await db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run() : await db.prepare("DELETE FROM settings WHERE key = 'maintainer_writes'").run();
+    const identity = async (app: boolean) => app ? await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run() : await db.prepare("DELETE FROM settings WHERE key = 'github_identity'").run();
     const X1 = "photocraft#7:scope", X2 = "photocraft#8:scope";
     await ask(db, [X1, X2].map((id) => ({ id, kind: "scope" as const, repo: "photocraft", number: Number(id.split("#")[1]!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "s" })));
     const maint = await signedIn("maint"), pal = await signedIn("pal"), boss = await signedIn("boss");
@@ -279,7 +279,7 @@ describe("api", () => {
       assert.ok(!(await actionableIds()).includes(X1), "an answer on a repo that left the app identity stops counting");
       assert.equal(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql(db, "d")}`).get(X1), undefined, "nor at the SQL sites other than actionable()");
       // Work and answers the maintainer started count only while the conditions hold; a flip to legacy stops them everywhere.
-      await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'photocraft', 'write', ?)").run(new Date().toISOString());
+      await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'photocraft', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(new Date().toISOString());
       await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES ('photocraft', 7, 'h1', 'fix it', 'maint', ?)").run(new Date().toISOString());
       await identity(true);
       assert.ok(await queuedOperatorFix(db, "photocraft", 7, "h1"));

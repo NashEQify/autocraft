@@ -16,7 +16,7 @@ export async function pipelineSwitch(db: Db): Promise<PipelineSwitch> {
 export async function zeroLimits(db: Db): Promise<{ step: string; title: string }[]> {
   const steps = await loadSteps();
   const perDay = new Map((await db.prepare("SELECT step, per_day FROM stage_limits").all() as { step: string; per_day: number | null }[]).map((r) => [r.step, r.per_day]));
-  const tripped = new Set((await db.prepare("SELECT stage FROM stage_trips WHERE active").all() as { stage: string }[]).map((r) => r.stage));
+  const tripped = new Set((await db.prepare("SELECT stage FROM stage_trips WHERE active <> 0").all() as { stage: string }[]).map((r) => r.stage));
   return LIMIT_STEPS
     .filter((step) => (perDay.has(step) ? perDay.get(step) : (DEFAULT_PER_DAY[step] ?? null)) === 0 && !(STEP_STAGE[step] && tripped.has(STEP_STAGE[step]!)))
     .map((step) => ({ step, title: steps.get(step)?.title ?? step }));

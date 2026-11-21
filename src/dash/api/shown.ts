@@ -1,6 +1,7 @@
 // Kind, state and title of mirrored items, for rows that show an item reference.
 import type { ItemRef, ItemShown, ItemState } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
+import { inTuples } from "../../db/portable.ts";
 
 const STATE: Record<string, ItemState> = { OPEN: "open", MERGED: "merged", CLOSED: "closed" };
 export const itemState = (s: string | null | undefined): ItemState => STATE[s ?? ""] ?? "open";
@@ -21,7 +22,7 @@ export async function shownMap(db: Db, refs: Iterable<{ repo: string; number: nu
   for (const r of refs) keys.set(`${r.repo}#${r.number}`, [r.repo, r.number]);
   const out = new Map<string, ItemShown>();
   if (!keys.size) return out;
-  const rows = await db.prepare(`SELECT repo, number, kind, state, title FROM items WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))`)
+  const rows = await db.prepare(`SELECT repo, number, kind, state, title FROM items WHERE ${inTuples(db, ["repo", "number"], "?", ["text", "bigint"])}`)
     .all(JSON.stringify([...keys.values()])) as { repo: string; number: number; kind: string; state: string; title: string | null }[];
   for (const r of rows) out.set(`${r.repo}#${r.number}`, { kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), title: r.title });
   return out;
