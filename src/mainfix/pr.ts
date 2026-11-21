@@ -31,6 +31,8 @@ import { MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
 import type { Gh } from "../merge/safe-merge.ts";
 import { cleanLine } from "../review/post-template.ts";
 import type { FixRow } from "./index.ts";
+import type { MainFixVerdict } from "./types.ts";
+import * as kx from "../db/kx.ts";
 import { optionalChecks } from "../optional-checks.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { POOL_MAX, pool } from "../classify/run.ts";
@@ -53,7 +55,7 @@ const PATCH_MODEL = CLAUDE_PROMPTS["cifix.patch"].models[0]!;
 
 /** Whether a repo has stored patches to collect: the lint task of one ended, or its head is not the current one. */
 export async function lintReady(db: Db, repo: string, current: string): Promise<boolean> {
-  const rows = await db.prepare("SELECT head_sha, lint_task FROM main_fixes WHERE repo = ? AND state = 'linting'").all(repo) as { head_sha: string; lint_task: number | null }[];
+  const rows = await db.all(db.k.selectFrom("main_fixes").select(["head_sha", "lint_task"]).where("repo", "=", repo).where("state", "=", "linting"));
   return await someSeq(rows, async (r) => r.head_sha !== current || r.lint_task === null || (await readLint(db, r.lint_task)).kind !== "pending");
 }
 
@@ -99,11 +101,17 @@ export function prBody(r: { head: string; checks: { name: string; runUrl: string
  * open PR updated after the red that names a failing check or changes a file the failure names.
  */
 async function coveringPr(c: Ctx, checks: string[], files: string[], since: string): Promise<number | null> {
-  const ours = await c.db.prepare(`SELECT DISTINCT f.pr_number AS n FROM main_fixes f LEFT JOIN items i ON i.repo = f.repo AND i.number = f.pr_number
-    WHERE f.repo = ? AND f.state = 'pr-opened' AND f.pr_number IS NOT NULL AND f.updated_at >= ? AND COALESCE(i.state, 'OPEN') = 'OPEN' ORDER BY f.pr_number LIMIT 1`).get(c.repo, since) as { n: number } | undefined;
+  const ours = await c.db.get(c.db.k.selectFrom("main_fixes as f")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.pr_number"))
+    .select("f.pr_number as n").distinct()
+    .where("f.repo", "=", c.repo).where("f.state", "=", "pr-opened").where("f.pr_number", "is not", null).where("f.updated_at", ">=", since)
+    .where((eb) => eb(eb.fn.coalesce("i.state", eb.val("OPEN")), "=", "OPEN"))
+    .orderBy("f.pr_number").limit(1));
   if (ours) return ours.n;
-  const prs = await c.db.prepare(`SELECT number, title, body FROM items WHERE repo = ? AND kind = 'pr' AND state = 'OPEN'
-    AND (COALESCE(updated_at, '') > ? OR COALESCE(created_at, '') > ?) ORDER BY number LIMIT ${MAX_PRS}`).all(c.repo, since, since) as { number: number; title: string | null; body: string | null }[];
+  const prs = await c.db.all(c.db.k.selectFrom("items").select(["number", "title", "body"])
+    .where("repo", "=", c.repo).where("kind", "=", "pr").where("state", "=", "OPEN")
+    .where((eb) => eb.or([eb(eb.fn.coalesce("updated_at", eb.val("")), ">", since), eb(eb.fn.coalesce("created_at", eb.val("")), ">", since)]))
+    .orderBy("number").limit(MAX_PRS));
   const names = checks.map((x) => x.toLowerCase());
   for (const p of prs) {
     const text = `${p.title ?? ""}\n${p.body ?? ""}`.toLowerCase();
@@ -295,7 +303,9 @@ async function attempt(c: Ctx, rows: FixRow[], count: () => void, ledger: Sessio
 /** Takes the repo's `needs-fix` and `linting` rows head by head; `onHandled` is called once per head that reaches the model work. */
 export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ opened: number; skipped: number; failed: number; linting: number }> {
   const out = { opened: 0, skipped: 0, failed: 0, linting: 0 };
-  const rows = await c.db.prepare("SELECT * FROM main_fixes WHERE repo = ? AND state IN ('needs-fix', 'linting') AND verdict = 'code' ORDER BY created_at, head_sha, \"check\"").all(c.repo) as FixRow[];
+  const rows = await c.db.all(c.db.k.selectFrom("main_fixes").select(kx.cols("main_fixes")).$narrowType<{ verdict: MainFixVerdict }>()
+    .where("repo", "=", c.repo).where("state", "in", ["needs-fix", "linting"]).where("verdict", "=", "code")
+    .orderBy("created_at").orderBy("head_sha").orderBy("check"));
   const byHead = new Map<string, FixRow[]>();
   const ledger = new SessionLedger();
   for (const r of rows) (byHead.get(r.head_sha) ?? byHead.set(r.head_sha, []).get(r.head_sha)!).push(r);
@@ -313,7 +323,9 @@ export async function openFixPrs(c: Ctx, onHandled?: () => void): Promise<{ open
       if (!release) return;
       try {
         // Another job may have moved the rows on before the lease was taken.
-        const now = await c.db.prepare("SELECT * FROM main_fixes WHERE repo = ? AND head_sha = ? AND state IN ('needs-fix', 'linting') AND verdict = 'code' ORDER BY created_at, \"check\"").all(c.repo, group[0]!.head_sha) as FixRow[];
+        const now = await c.db.all(c.db.k.selectFrom("main_fixes").select(kx.cols("main_fixes")).$narrowType<{ verdict: MainFixVerdict }>()
+          .where("repo", "=", c.repo).where("head_sha", "=", group[0]!.head_sha).where("state", "in", ["needs-fix", "linting"]).where("verdict", "=", "code")
+          .orderBy("created_at").orderBy("check"));
         if (!now.length) return;
         // Rows that turned red after the patch was stored wait until it is collected.
         const stored = now.filter((r) => r.state === "linting");

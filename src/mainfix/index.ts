@@ -10,6 +10,7 @@
 //   autocraft-server main-fix --repo R [--apply]
 //   autocraft-server main-fix-approval [--repo R]
 import { leaseItem } from "../runner/leases.ts";
+import * as kx from "../db/kx.ts";
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardRepo } from "../core/guard.ts";
 import { actionable, ask, getDecision } from "../decisions.ts";
@@ -109,16 +110,21 @@ export function parseVerdicts(text: string, checks: string[]): Verdict[] | null 
 // ---- rows ---------------------------------------------------------------------
 
 const rowsAt = async (db: Db, repo: string, head: string): Promise<FixRow[]> =>
-  await db.prepare('SELECT * FROM main_fixes WHERE repo = ? AND head_sha = ? ORDER BY "check"').all(repo, head) as FixRow[];
+  await db.all(db.k.selectFrom("main_fixes").select(kx.cols("main_fixes")).$narrowType<{ verdict: MainFixVerdict }>()
+    .where("repo", "=", repo).where("head_sha", "=", head).orderBy("check"));
 
 async function save(db: Db, row: Omit<FixRow, "updated_at"> & { updated_at?: string }, at: string): Promise<void> {
   const { updated_at: _, ...r } = row;
-  await db.prepare(`INSERT INTO main_fixes (repo, head_sha, "check", verdict, state, reason, run_id, run_url, excerpt, decision_id, issue_number, pr_number, pr_url, patch, files, lint_task, lint_round, lint_state, session, created_at, updated_at)
-    VALUES (:repo, :head_sha, :check, :verdict, :state, :reason, :run_id, :run_url, :excerpt, :decision_id, :issue_number, :pr_number, :pr_url, :patch, :files, :lint_task, :lint_round, :lint_state, :session, :created_at, :at)
-    ON CONFLICT (repo, head_sha, "check") DO UPDATE SET verdict = excluded.verdict, state = excluded.state, reason = excluded.reason, run_id = excluded.run_id,
-      run_url = excluded.run_url, excerpt = excluded.excerpt, decision_id = excluded.decision_id, issue_number = excluded.issue_number, pr_number = excluded.pr_number, pr_url = excluded.pr_url,
-      patch = excluded.patch, files = excluded.files, lint_task = excluded.lint_task, lint_round = excluded.lint_round, lint_state = excluded.lint_state, session = excluded.session, updated_at = excluded.updated_at`)
-    .run({ ...r, at });
+  await db.run(db.k.insertInto("main_fixes")
+    .values({
+      repo: r.repo, head_sha: r.head_sha, check: r.check, verdict: r.verdict, state: r.state, reason: r.reason, run_id: r.run_id, run_url: r.run_url, excerpt: r.excerpt,
+      decision_id: r.decision_id, issue_number: r.issue_number, pr_number: r.pr_number, pr_url: r.pr_url, patch: r.patch, files: r.files, lint_task: r.lint_task,
+      lint_round: r.lint_round, lint_state: r.lint_state, session: r.session, created_at: r.created_at, updated_at: at,
+    })
+    .onConflict((oc) => oc.columns(["repo", "head_sha", "check"]).doUpdateSet(kx.excluded([
+      "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url",
+      "patch", "files", "lint_task", "lint_round", "lint_state", "session", "updated_at",
+    ]))));
 }
 
 const setState = async (db: Db, r: FixRow, state: string, reason: string | null, at: string, extra: Partial<FixRow> = {}): Promise<FixRow> => {
@@ -141,7 +147,7 @@ type Current = { headSha: string; branch: string; state: string; culprit: string
 async function currentOf(db: Db, repo: string): Promise<Current | null> {
   const r = (await mainCiRepos(db)).find((x) => x.repo === repo);
   if (!r) return null;
-  const changed = await db.prepare("SELECT state_changed_at AS at FROM main_ci WHERE repo = ? AND head_sha = ?").get(repo, r.headSha) as { at: string } | undefined;
+  const changed = await db.get(db.k.selectFrom("main_ci").select("state_changed_at as at").where("repo", "=", repo).where("head_sha", "=", r.headSha));
   const stateChangedAt = changed?.at ?? "";
   return { headSha: r.headSha, branch: r.branch, state: r.state, culprit: r.culprit?.sha ?? r.headSha, culpritPr: r.culprit?.pr ?? null, redSince: r.redSince ?? stateChangedAt, stateChangedAt };
 }
@@ -160,7 +166,7 @@ export async function mainFixDue(db: Db, repo: string): Promise<boolean> {
   const rows = await rowsAt(db, repo, cur.headSha);
   if (cur.state === "red") return rows.length === 0 || rows.some((r) => r.state === "rerun-requested" || r.state === "needs-fix");
   // A row left at needs-fix by an older head is closed by the next run.
-  return rows.some((r) => r.state === "rerun-requested") || (cur.state !== "running" && !!await db.prepare("SELECT 1 FROM main_fixes WHERE repo = ? AND state = 'needs-fix'").get(repo));
+  return rows.some((r) => r.state === "rerun-requested") || (cur.state !== "running" && !!await db.get(db.k.selectFrom("main_fixes").select("repo").where("repo", "=", repo).where("state", "=", "needs-fix").limit(1)));
 }
 
 const issueTitle = (check: string): string => `Main CI fails: ${cleanLine(check, 100)}`;
@@ -185,7 +191,7 @@ const inputOf = (repo: string, f: CiFailure): MainFixInput => ({
 /** A decision's state as the rows show it. */
 async function fromDecision(db: Db, id: string): Promise<{ state: string; issue: number | null }> {
   const d = await getDecision(db, id);
-  const issue = (await db.prepare("SELECT issue_number AS n FROM main_fixes WHERE decision_id = ? AND issue_number IS NOT NULL LIMIT 1").get(id) as { n: number } | undefined)?.n ?? null;
+  const issue = (await db.get(db.k.selectFrom("main_fixes").select("issue_number as n").where("decision_id", "=", id).where("issue_number", "is not", null).limit(1)))?.n ?? null;
   if (issue !== null) return { state: "issue-opened", issue };
   if (d?.answer === NOT_NOW && d.applied_at) return { state: "declined", issue: null };
   return { state: "asked", issue: null };
@@ -268,8 +274,9 @@ async function settleReruns(db: Db, repo: string, cur: Current, deps: MainFixDep
 async function applyAnswers(db: Db, repo: string, deps: MainFixDeps, log: (l: string) => void, s: MainFixSummary, by: By): Promise<void> {
   for (const a of (await actionable(db)).filter((x) => x.kind === "other" && isMainFixDecision(repo, x.id))) {
     const at = deps.now().toISOString();
-    const rows = await db.prepare("SELECT * FROM main_fixes WHERE decision_id = ? ORDER BY created_at DESC, head_sha").all(a.id) as FixRow[];
-    const done = async (): Promise<void> => void await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+    const rows = await db.all(db.k.selectFrom("main_fixes").select(kx.cols("main_fixes")).$narrowType<{ verdict: MainFixVerdict }>()
+      .where("decision_id", "=", a.id).orderBy("created_at", "desc").orderBy("head_sha"));
+    const done = async (): Promise<void> => void await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "=", a.id).where("applied_at", "is", null));
     if (a.answer === NOT_NOW) { for (const r of rows) await setState(db, r, "declined", r.reason, at); await done(); continue; }
     if (a.answer !== OPEN_ISSUE) continue;
     const row = rows[0];
@@ -337,7 +344,7 @@ export const commands = {
       const repo = args[i + 1]!;
       const db = await openDb();
       if (args.includes("--apply")) { await runMainFix(db, { repo }); return; }
-      for (const r of await db.prepare('SELECT head_sha, "check", verdict, state, reason FROM main_fixes WHERE repo = ? ORDER BY created_at DESC LIMIT 50').all(repo) as { head_sha: string; check: string; verdict: string; state: string; reason: string | null }[])
+      for (const r of await db.all(db.k.selectFrom("main_fixes").select(["head_sha", "check", "verdict", "state", "reason"]).where("repo", "=", repo).orderBy("created_at", "desc").limit(50)))
         console.log(`${r.head_sha.slice(0, 8)}\t${r.check}\t${r.verdict}\t${r.state}\t${r.reason ?? ""}`);
     },
   },
@@ -346,7 +353,7 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
       const db = await openDb();
-      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
       for (const r of repos) {
         const a = await mainFixApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);

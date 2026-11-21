@@ -43,7 +43,7 @@ async function world() {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setMainFixApproval(db, "op", "app", true);
-  await db.prepare("INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, first_seen_at, state_changed_at, updated_at) VALUES ('app', ?, 'main', 'red', '[]', '[]', ?, ?, ?)").run(head, T0, T0, T0);
+  await db.run(db.k.insertInto("main_ci").values({ repo: "app", head_sha: head, branch: "main", state: "red", failing: "[]", checks: "[]", first_seen_at: T0, state_changed_at: T0, updated_at: T0 }));
   const row: FixRow = { repo: "app", head_sha: head, check: "gate / test", verdict: "code", state: "needs-fix", reason: null, run_id: 11, run_url: null, excerpt: null, decision_id: null, issue_number: null, pr_number: null, pr_url: null, patch: null, files: null, lint_task: null, lint_round: null, lint_state: null, session: null, created_at: T0, updated_at: T0 };
   await onCodeVerdict(db, row, "a compile error", T0);
 
@@ -95,7 +95,7 @@ async function finishLint(db: Db, clippy: string): Promise<number> {
 }
 const CLEAN = '{"reason":"build-finished","success":true}\n';
 const FINDING = JSON.stringify({ reason: "compiler-message", message: { level: "warning", message: "redundant", code: { code: "clippy::redundant_clone" }, spans: [{ file_name: "src/lib.rs", line_start: 5, line_end: 5, is_primary: true }], rendered: "warning: redundant\n" } });
-const stateOf = async (db: Db) => (await db.prepare("SELECT state, lint_round AS round, pr_number AS pr, reason FROM main_fixes").get() as { state: string; round: number | null; pr: number | null; reason: string | null });
+const stateOf = async (db: Db) => (await db.get(db.k.selectFrom("main_fixes").select(["state", "lint_round as round", "pr_number as pr", "reason"])))!;
 
 test("the step stores the patch and ends; the next run opens the PR once lint is clean", async () => {
   const w = await world();
