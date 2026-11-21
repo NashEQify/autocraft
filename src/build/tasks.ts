@@ -17,6 +17,7 @@ import { featureOn } from "./features.ts";
 import { slugOf } from "../owners.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { greatest } from "../db/portable.ts";
 
 export const LOST_AFTER_MS = 2 * 60_000;
 /** A task is claimed at most this often: the first time and one requeue after a lost worker. */
@@ -141,10 +142,10 @@ export async function createTask(db: Db, t: NewTask): Promise<number> {
   const queued = (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE state = 'queued'").get() as { n: number }).n;
   if (queued >= MAX_QUEUED) throw new BuildError(429, `${MAX_QUEUED} tasks are already queued`);
   const r = await db.prepare(`INSERT INTO build_tasks (job_id, step, repo, number, head_sha, base_sha, requires, priority, plan, state, queued_at, patch, warm_key, warm_role)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`)
-    .run(t.jobId ?? currentJobId(), t.step, t.repo, t.number ?? null, t.headSha, t.baseSha ?? null, JSON.stringify(requires), priority, JSON.stringify(plan), nowIso(),
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?) RETURNING id`)
+    .get(t.jobId ?? currentJobId(), t.step, t.repo, t.number ?? null, t.headSha, t.baseSha ?? null, JSON.stringify(requires), priority, JSON.stringify(plan), nowIso(),
       patch, warm?.key ?? null, warm?.role ?? null);
-  return Number(r.lastInsertRowid);
+  return Number((r as { id: number }).id);
 }
 
 /** Whether an environment with these capabilities can run a task with these requirements. */
@@ -256,7 +257,7 @@ export async function loseTask(db: Db, id: number, reason: string, cancelled = "
 /** Undoes a claim whose task never started (its first pod could not be created): queued again, the claim not counted. */
 export async function releaseClaim(db: Db, envId: string, id: number): Promise<void> {
   await db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
-  await db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, attempts = MAX(0, attempts - 1), claimed_at = NULL, started_at = NULL, heartbeat_at = NULL,
+  await db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, attempts = ${greatest(db, "0", "attempts - 1")}, claimed_at = NULL, started_at = NULL, heartbeat_at = NULL,
     results = '[]', log_bytes = 0, summary = NULL WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')`).run(id, envId);
 }
 
@@ -548,7 +549,7 @@ export type { BuildSummary };
 export async function summary(db: Db, hidden: string[] = [], staff = true): Promise<BuildSummary> {
   const params: Record<string, SQLInputValue> = {};
   const hide = excludeHidden("repo", hidden, params);
-  const c = await db.prepare(`SELECT COALESCE(SUM(state = 'queued'), 0) AS queued, COALESCE(SUM(state IN ('claimed', 'running')), 0) AS running FROM build_tasks WHERE state IN ('queued', 'claimed', 'running')${staff ? "" : ` AND step NOT IN (${PRIVATE_STEPS_SQL})`}${hide ? ` AND ${hide}` : ""}`).get(params) as { queued: number; running: number };
+  const c = await db.prepare(`SELECT COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0) AS queued, COALESCE(SUM(CASE WHEN state IN ('claimed', 'running') THEN 1 ELSE 0 END), 0) AS running FROM build_tasks WHERE state IN ('queued', 'claimed', 'running')${staff ? "" : ` AND step NOT IN (${PRIVATE_STEPS_SQL})`}${hide ? ` AND ${hide}` : ""}`).get(params) as { queued: number; running: number };
   const all = await db.prepare("SELECT * FROM build_envs WHERE enabled = 1 AND last_seen_at > ?").all(new Date(Date.now() - 60_000).toISOString()) as { slots: number; reported_slots: number | null; id: string }[];
   const used = await db.prepare("SELECT env_id AS id, COUNT(*) AS n FROM build_tasks WHERE state IN ('claimed', 'running') GROUP BY env_id").all() as { id: string; n: number }[];
   const byEnv = new Map(used.map((u) => [u.id, u.n]));

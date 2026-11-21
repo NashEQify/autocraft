@@ -3,6 +3,7 @@
 import { scrub } from "../runner/scrub.ts";
 import { forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { upsert } from "../db/portable.ts";
 
 export const TOOL_ARGS_MAX = 4000;
 /** The check tool's name as the model sees it (MCP server `build`, tool `check`). */
@@ -98,7 +99,7 @@ export async function saveRemoteTools(db: Db, runId: number, callId: number, raw
 async function saveUses(db: Db, runId: number, uses: ToolUse[], clock?: ToolClock): Promise<void> {
   if (!uses.length) return;
   const checks = await db.prepare("SELECT id, command FROM model_checks WHERE run_id = ? ORDER BY id").all(runId) as { id: number; command: string }[];
-  const ins = db.prepare("INSERT OR REPLACE INTO agent_run_tools (run_id, seq, tool, args, result_bytes, is_error, started_at, ended_at, check_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  const ins = db.prepare(upsert(db, { table: "agent_run_tools", cols: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"], key: ["run_id", "seq"] }));
   await forEachSeq(uses, async (u, i) => {
     const k = u.command === null || u.noRow ? -1 : checks.findIndex((c) => c.command === u.command);
     const link = k >= 0 ? checks.splice(k, 1)[0]!.id : null;

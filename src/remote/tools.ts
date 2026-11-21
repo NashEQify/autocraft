@@ -19,6 +19,7 @@ import { relayCheck } from "./check-relay.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
 import type { DatabaseSync } from "node:sqlite";
 import type { Db } from "../db/index.ts";
+import { notDistinctFrom } from "../db/portable.ts";
 
 export type { ToolResult };
 
@@ -92,7 +93,7 @@ const reserved = new Map<string, number>();
 async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): Promise<ToolResult> {
   const repo = lease.referenceRepo;
   if (!repo) return { text: "this call has no reference documentation", isError: true };
-  const used = (await db.prepare("SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id = ? AND run_id IS ?").get(lease.id, lease.runId) as { n: number }).n;
+  const used = (await db.prepare(`SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id = ? AND ${notDistinctFrom(db, "run_id", "?")}`).get(lease.id, lease.runId) as { n: number }).n;
   const key = `${lease.id}:${lease.runId}`;
   const left = PASSAGES_PER_LEASE - Number(used) - (reserved.get(key) ?? 0);
   if (left <= 0) return { text: `refused: the ${PASSAGES_PER_LEASE} reference passages of this call are used up; answer with what you know`, isError: true };

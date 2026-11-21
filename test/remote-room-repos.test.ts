@@ -29,7 +29,7 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
     return id;
   };
   const perm = async (login: string, repo: string, permission: string) =>
-    await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)").run(login, repo, permission, at);
+    await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(login, repo, permission, at);
   const room = async (repos?: string[]) => await remoteRoom(db, 0, Date.now(), repos);
 
   // The operator takes deckcraft and designcraft only; no permission of theirs on designcraft is cached yet.

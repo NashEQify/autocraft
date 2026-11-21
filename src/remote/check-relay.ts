@@ -40,8 +40,8 @@ export async function endChecks(db: Db, callId: number): Promise<void> {
  * every 15 s while waiting.
  */
 export async function relayCheck(db: Db, call: { id: number; runId: number | null }, input: unknown, opts: { live: () => Promise<boolean>; signal?: AbortSignal; tick?: () => void }): Promise<CheckResult> {
-  const id = Number((await db.prepare("INSERT INTO main.remote_checks (call_id, run_id, input, state, requested_at) VALUES (?, ?, ?, 'requested', ?)")
-    .run(call.id, call.runId, JSON.stringify(input ?? null), Date.now())).lastInsertRowid);
+  const id = Number((await db.prepare("INSERT INTO main.remote_checks (call_id, run_id, input, state, requested_at) VALUES (?, ?, ?, 'requested', ?) RETURNING id")
+    .get(call.id, call.runId, JSON.stringify(input ?? null), Date.now()) as { id: number }).id);
   let lastTick = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, allocation.pollMs));

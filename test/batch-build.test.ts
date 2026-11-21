@@ -140,9 +140,9 @@ describe("a maintainer's Merge answer in a batch", () => {
     // The answer is a maintainer's, under maintainer writes and the app identity, with a write permission past its cache time.
     await w.db.prepare("UPDATE decisions SET answered_by = 'maint' WHERE id LIKE 'app#3:merge@%'").run();
     await w.db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
+    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const perm = async (permission: string, at: string) =>
-      await w.db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?)").run(permission, at);
+      await w.db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(permission, at);
     await perm("write", new Date(Date.now() - 11 * 60_000).toISOString());
     const reads: string[] = [];
     t.deps.permission = async (_db, login) => { reads.push(login); await perm("read", new Date().toISOString()); return { kind: "ok", permission: "read" }; };

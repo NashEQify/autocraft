@@ -13,14 +13,14 @@ const req = (role: "operator" | "viewer"): Req => ({
 test("Now lists running work with its items, reports a failing sync, and hides a private repo from a viewer", async () => {
   const db = await connectDb(":memory:");
   const at = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString();
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('secretcraft', 'private')");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('secretcraft', 'private') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility");
   await db.script("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('secretcraft')");
   for (const [repo, n] of [["photocraft", 1], ["secretcraft", 2]] as const) {
     await db.prepare("INSERT INTO items (repo, number, kind, state, title, author) VALUES (?, ?, 'pr', 'OPEN', ?, 'dev')").run(repo, n, `Title ${n}`);
   }
   const job = async (repo: string, n: number) => {
-    const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, progress, repo) VALUES ('opus-review', '{}', 'pipeline', ?, 'running', ?, 'reviewing 1 of 1', ?)")
-      .run(at(5), at(5), repo)).lastInsertRowid);
+    const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, progress, repo) VALUES ('opus-review', '{}', 'pipeline', ?, 'running', ?, 'reviewing 1 of 1', ?) RETURNING id")
+      .get(at(5), at(5), repo) as { id: number }).id);
     await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, ?, ?, ?)").run(id, repo, n, at(4));
     return id;
   };
@@ -67,7 +67,7 @@ test("Now lists running work with its items, reports a failing sync, and hides a
 test("Now attaches a job's writes to it, groups the other writes, leaves out housekeeping, and reports red mains only for pipeline repos", async () => {
   const db = await connectDb(":memory:");
   const at = (minAgo: number) => new Date(Date.now() - minAgo * 60_000).toISOString();
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('wordcraft', 'public')");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('wordcraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility");
   await db.script("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('wordcraft')");
   await db.script("UPDATE tracked_repos SET pipeline = 1 WHERE name = 'photocraft'");
   const audit = db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'autocraft', ?, ?, '{}')");
@@ -75,7 +75,7 @@ test("Now attaches a job's writes to it, groups the other writes, leaves out hou
   for (let n = 1; n <= 20; n++) await audit.run(at(3), "unassign", `photocraft#${n}`);
   await audit.run(at(2), "ci-run-approve", "photocraft#1");
   await audit.run(at(30), "act-close", "photocraft#9");
-  const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, summary, repo, items, acted) VALUES ('opus-review', '{}', 'pipeline', ?, 'done', ?, ?, 'Reviewed 1 PR: 1 take', 'photocraft', 1, 0)").run(at(60), at(60), at(50))).lastInsertRowid);
+  const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, summary, repo, items, acted) VALUES ('opus-review', '{}', 'pipeline', ?, 'done', ?, ?, 'Reviewed 1 PR: 1 take', 'photocraft', 1, 0) RETURNING id").get(at(60), at(60), at(50)) as { id: number }).id);
   await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, 'photocraft', 7, ?)").run(id, at(55));
   await audit.run(at(55), "review-post", "photocraft#7");
 
@@ -109,7 +109,7 @@ test("Now leaves out empty and idle jobs and lists running housekeeping jobs on 
 
 test("Now pages the feed by time without repeating or skipping an entry", async () => {
   const db = await connectDb(":memory:");
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public')");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility");
   await db.script("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')");
   const audit = db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'autocraft', 'act-close', ?, '{}')");
   // 40 minutes apart: far enough that no two rows group.

@@ -10,6 +10,7 @@
 // (a job about to start, a repo's takers) counts a filtered runner only for the repos that have an open matching item.
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
+import { ciEq } from "../db/portable.ts";
 
 export const TASK_ITEMS_KEY = "task_items";
 export const TASK_ITEMS = ["all", "fast", "mine"] as const;
@@ -48,8 +49,8 @@ export async function itemFilter(db: Db, login: string): Promise<ItemFilter> {
   if (choice === "all") return null;
   // The live pre-approval states are ACTIVE in src/preapproval/index.ts.
   const rows = await db.prepare(`SELECT f.repo, f.number FROM main.fast_track f JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN'
-    WHERE ? = 'fast' OR f.added_by = ? COLLATE NOCASE OR EXISTS (SELECT 1 FROM main.preapprovals p WHERE p.repo = f.repo AND p.number = f.number
-      AND p.by = ? COLLATE NOCASE AND p.state IN ('fixup', 'review', 'ci', 'queued'))`).all(choice, login, login) as { repo: string; number: number }[];
+    WHERE ? = 'fast' OR ${ciEq(db, "f.added_by", "?")} OR EXISTS (SELECT 1 FROM main.preapprovals p WHERE p.repo = f.repo AND p.number = f.number
+      AND ${ciEq(db, "p.by", "?")} AND p.state IN ('fixup', 'review', 'ci', 'queued'))`).all(choice, login, login) as { repo: string; number: number }[];
   return { refs: new Set(rows.map((r) => `${r.repo}#${r.number}`)), repos: new Set(rows.map((r) => r.repo)) };
 }
 

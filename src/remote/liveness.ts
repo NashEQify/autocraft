@@ -5,6 +5,7 @@ import { isBusy } from "../db.ts";
 import { scaled } from "./time-scale.ts";
 import { exclusive } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { least } from "../db/portable.ts";
 
 export const ALIVE_EVERY_MS = scaled(5_000);
 /** A stamp older than this means the dashboard is not serving: down, stalled or restarting. */
@@ -23,9 +24,9 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
     if (!r) await db.prepare("INSERT INTO main.remote_liveness (id, alive_at, since) VALUES (1, ?, ?)").run(nowMs, nowMs);
     else if (nowMs - Number(r.alive_at) > ALIVE_STALE_MS) {
       const gap = nowMs - Number(r.alive_at);
-      await db.prepare(`UPDATE main.remote_calls SET heartbeat_at = MIN(heartbeat_at + ?1, ?2), leased_at = MIN(leased_at + ?1, ?2),
-          started_at = CASE WHEN started_at IS NULL THEN NULL ELSE MIN(started_at + ?1, ?2) END
-        WHERE state = 'leased'`).run(gap, nowMs);
+      await db.prepare(`UPDATE main.remote_calls SET heartbeat_at = ${least(db, "heartbeat_at + ?", "?")}, leased_at = ${least(db, "leased_at + ?", "?")},
+          started_at = CASE WHEN started_at IS NULL THEN NULL ELSE ${least(db, "started_at + ?", "?")} END
+        WHERE state = 'leased'`).run(gap, nowMs, gap, nowMs, gap, nowMs);
       await db.prepare("UPDATE main.remote_liveness SET alive_at = ?, since = ? WHERE id = 1").run(nowMs, nowMs);
     } else await db.prepare("UPDATE main.remote_liveness SET alive_at = ? WHERE id = 1").run(nowMs);
   });
