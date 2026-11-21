@@ -28,15 +28,16 @@ test("a merge is refused when the base is not the one the review read", () => {
 });
 
 test("a diff is stored only for the head it was fetched at, and read again for another base", async () => {
+  const db = connect(join(dir, "diff.db"));
   let calls = 0;
   const moved: DiffFetcher = async () => { calls++; return { ok: false, tooLarge: false, error: "head moved" }; };
-  assert.equal((await cachedDiff("app", 7, HEAD, moved)).ok, false);
+  assert.equal((await cachedDiff(db, "app", 7, HEAD, moved)).ok, false);
   assert.equal(existsSync(join(diffCacheDir(), "app", `7-${HEAD}.diff`)), false);
   const at = (base: string): DiffFetcher => async () => { calls++; return { ok: true, text: `diff against ${base}`, base }; };
-  assert.equal((await cachedDiff("app", 7, HEAD, at("main"), "main") as { text: string }).text, "diff against main");
-  assert.equal((await cachedDiff("app", 7, HEAD, at("main"), "main") as { text: string }).text, "diff against main");
+  assert.equal((await cachedDiff(db, "app", 7, HEAD, at("main"), "main") as { text: string }).text, "diff against main");
+  assert.equal((await cachedDiff(db, "app", 7, HEAD, at("main"), "main") as { text: string }).text, "diff against main");
   assert.equal(calls, 2);
-  assert.equal((await cachedDiff("app", 7, HEAD, at("release"), "release") as { text: string }).text, "diff against release");
+  assert.equal((await cachedDiff(db, "app", 7, HEAD, at("release"), "release") as { text: string }).text, "diff against release");
   assert.equal(calls, 3);
 });
 

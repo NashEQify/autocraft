@@ -113,3 +113,8 @@ export function changesSince(db: DatabaseSync, seq: number): Changes {
 export function pruneChanges(db: DatabaseSync, seq: number): void {
   db.prepare("DELETE FROM main.item_changes WHERE seq <= ?").run(seq);
 }
+
+/** Logs the PRs with a review at `head` of `repo`: for a write the triggers cannot see (a file the fact loaders read beside the database). */
+export function logReviewedAt(db: DatabaseSync, repo: string, head: string): void {
+  db.prepare("INSERT INTO main.item_changes (repo, number) SELECT DISTINCT repo, number FROM main.opus_reviews WHERE repo = ? AND head_oid = ?").run(repo, head);
+}

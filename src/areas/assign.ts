@@ -34,7 +34,7 @@ export const diffPaths = (db: DatabaseSync): PathSource => async (repo, number, 
   const key = `${repo}#${number}@${head}`;
   if (failedHeads.has(key)) return null;
   const low = Number((db.prepare("SELECT value FROM settings WHERE key = 'sync_rate_remaining'").get() as { value: string } | undefined)?.value ?? Infinity) < RATE_FLOOR;
-  const r = await cachedDiff(repo, number, head, low ? async () => ({ ok: false, tooLarge: false, error: "rate low" }) : ghDiff);
+  const r = await cachedDiff(db, repo, number, head, low ? async () => ({ ok: false, tooLarge: false, error: "rate low" }) : ghDiff);
   if (!r.ok) {
     if (!low) failedHeads.add(key);
     return null;

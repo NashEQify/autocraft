@@ -93,6 +93,7 @@ export const PLAN_INPUTS: PlanInput[] = [
     refs: "SELECT r.repo AS repo, r.number AS number UNION SELECT d.repo, d.number FROM decisions d WHERE d.id = r.decision_id",
     columns: ["decision_id", "repo", "number", "state", "seen", "drafts", "added"],
   },
+  { table: "diff_facts", class: "item", why: "What the merge rule reads from one PR head's cached diff (sensitive reasons, changed lines, pending re-reads)." },
   { table: "dupe_carries", class: "item", why: "Carry-overs onto one PR." },
   { table: "duplicate_scans", class: "item", why: "The text hash one item was scanned at." },
   { table: "fixups", class: "item", why: "Fix-up rows of one PR (fix-up, operator fix-up, lint, push chain)." },

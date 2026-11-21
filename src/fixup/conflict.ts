@@ -306,7 +306,7 @@ export async function mergeConflict(db: DatabaseSync, x: ConflictRun, c: Conflic
         if (checkSize(checkSections([view], (s) => (s.ours.length > s.theirs.length ? s.ours : s.theirs))) > CHECK_PATCH_CAP) { refuse(`the conflict sections of ${path} are over the ${CHECK_PATCH_CAP} character limit for the check`); return; }
         shown.push({ view, content, mode: f.mode, crlf });
       }
-      const prDiff = await cachedDiff(x.repo, c.number, head, x.d.fetchDiff);
+      const prDiff = await cachedDiff(db, x.repo, c.number, head, x.d.fetchDiff);
       if (!prDiff.ok) { fail("failed", `no diff: ${oneLine(prDiff.error)}`); return; }
       await x.claim(c);
       if (!x.d.resolve) { fail("failed", "no resolver"); return; }

@@ -24,6 +24,7 @@ import { endJob, JOB_KEEP_MS, now, pruneJobs, RUNNER_STOPPED } from "./jobs.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
+import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params } from "./steps.ts";
 import { jobBlock } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
@@ -533,6 +534,12 @@ export class Runner {
   /** Polls until `signal` aborts, then stops running jobs. */
   async serve(signal: AbortSignal, pollMs = 2000): Promise<void> {
     this.recover();
+    try {
+      const read = buildDiffFacts(this.db);
+      if (read !== null) this.o.log(`diff facts: stored from the diff cache for ${read} reviewed heads`);
+    } catch (e) {
+      this.o.log(`diff facts: ${(e as Error).message}`);
+    }
     while (!signal.aborted) {
       try {
         await this.tick();

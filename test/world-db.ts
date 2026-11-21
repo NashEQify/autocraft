@@ -12,7 +12,7 @@ import { syncAccounts } from "../src/agents/accounts.ts";
 import { setRunner } from "../src/classify/run.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
 import { connect } from "../src/db.ts";
-import { diffCacheDir } from "../src/review/diff.ts";
+import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
 import { ask } from "../src/decisions.ts";
 import type { ActDeps } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
@@ -223,6 +223,7 @@ export function world() {
       // The real pre-merge review caches the diff it read; the merge rule reads it from there.
       mkdirSync(join(diffCacheDir(), "app"), { recursive: true });
       writeFileSync(join(diffCacheDir(), "app", `${n}-${headOf(n)}.diff`), "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\n");
+      recordDiffFacts(db, "app", n, headOf(n));
       return w;
     },
     /** The operator's answer to the PR's Merge? question at its head (asks it first when nobody did). */

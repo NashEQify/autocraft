@@ -34,7 +34,7 @@ export function mergeInAllowed(db: DatabaseSync, repo: string, number: number, h
  * against the live base (a review's own read), so it stays.
  */
 export function recordLiveBase(db: DatabaseSync, repo: string, number: number, head: string, liveBase: string, o: { by?: string; keepDiff?: boolean } = {}): void {
-  if (!o.keepDiff) dropCachedDiff(repo, number, head);
+  if (!o.keepDiff) dropCachedDiff(db, repo, number, head);
   const was = (db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, number) as { base_ref: string | null } | undefined)?.base_ref ?? null;
   if (was === liveBase) return;
   db.prepare("UPDATE main.items SET base_ref = ? WHERE repo = ? AND number = ?").run(liveBase, repo, number);

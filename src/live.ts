@@ -31,7 +31,7 @@ export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
 
 /** Settings the runner, the sync and the planner write for their own use; the dashboard shows none of them. */
 export const BOOKKEEPING_SETTINGS = [
-  "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "mentions_built", "item_stage_built", "tracking_started_at",
+  "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "diff_facts_built", "mentions_built", "item_stage_built", "tracking_started_at",
   "pipeline_planned_at", "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_sync_seen", "pipeline_sync_at", "pipeline_review_cursor", "pipeline_verify_cursor",
   "full_sync_cursor", "org_high_water", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "sync_rate_remaining", "sync_rate_reset_at",
   "flow_summary_marks", "liveness_at", "liveness_open", "classify_run", "worker_update_pending", "worker_update_failures",
@@ -63,7 +63,8 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "dupe_comparisons" }, { table: "dupe_groups" }, { table: "dupe_group_items" }, { table: "dupe_group_posts" }, { table: "dupe_group_texts" }],
   // Who is looking at which question: presence only, so a claim refetches the lists that show it and nothing else.
   claims: [{ table: "decision_claims" }],
-  reviews: [{ table: "opus_reviews" }, { table: "review_posts" }],
+  // diff_facts: what the merge rule reads from a reviewed head's diff (sensitive content, size, extras pending).
+  reviews: [{ table: "opus_reviews" }, { table: "review_posts" }, { table: "diff_facts" }],
   queue: [{ table: "merges" }, { table: "merge_batches" }, { table: "merge_batch_prs" }, { table: "merge_holds" }, { table: "premerge_reviews" }],
   fasttrack: [{ table: "fast_track" }],
   // An operator released an outside-author item from its hold: the planner plans for it at once.
@@ -120,6 +121,18 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "fix_attempts" }, { table: "postmerge_followups" }, { table: "premerge_reviews" }, { table: "pr_checks" }, { table: "push_outcomes" }, { table: "stage_trips" }, { table: "fast_track" }, { table: "merge_holds" }, { table: "merges" }, { table: "merge_batches" },
     { table: "merge_batch_prs" }, { table: "tracked_repos" },
     { table: "settings", when: "new_key IN ('pilot_items', 'classify_run', 'pipeline_login')" },
+  ],
+  // What runRank reads (src/rank/index.ts): the rank lane's work test. Only the columns and settings that move a score.
+  "rank-inputs": [
+    { table: "items", ops: ["INSERT", "DELETE"] },
+    { table: "items", ops: ["UPDATE"], when: "old.state IS NOT new.state OR old.kind IS NOT new.kind OR old.additions IS NOT new.additions OR old.deletions IS NOT new.deletions" },
+    { table: "item_priority", ops: ["INSERT", "DELETE"] },
+    { table: "item_priority", ops: ["UPDATE"], when: "old.impact IS NOT new.impact OR old.score IS NOT new.score" },
+    { table: "fix_attempts", ops: ["INSERT", "DELETE"] },
+    { table: "fix_attempts", ops: ["UPDATE"], when: "old.size IS NOT new.size" },
+    { table: "classifications" },
+    { table: "tracked_repos" },
+    { table: "settings", when: "new_key = 'classify_run'" },
   ],
   // What the item trace reads that no page topic watches. A model call's progress line is not a change here.
   trace: [
@@ -180,7 +193,7 @@ export function liveSql(db?: DatabaseSync): string {
     for (const { table, ops = ALL_OPS, when } of sources) {
       for (const op of ops) {
         // `steps`, `trace`, `limits`, `decision-snooze`, `build-features` and `remote-queue` read tables other topics already watch; their triggers need names of their own.
-        const name = `live_${topic === "steps" || topic === "trace" || topic === "limits" || topic === "decision-snooze" || topic === "build-features" || topic === "remote-queue" ? `${topic.replace(/\W/g, "_")}_` : ""}${table}_${op[0]!.toLowerCase()}`;
+        const name = `live_${topic === "steps" || topic === "trace" || topic === "limits" || topic === "decision-snooze" || topic === "build-features" || topic === "remote-queue" || topic === "rank-inputs" ? `${topic.replace(/\W/g, "_")}_` : ""}${table}_${op[0]!.toLowerCase()}`;
         const key = op === "DELETE" ? "old.key" : "new.key";
         let cond = when ? when.replaceAll("new_key", key) : "";
         if (op === "UPDATE" && !when) {

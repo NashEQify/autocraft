@@ -1716,6 +1716,20 @@ CREATE TABLE IF NOT EXISTS premerge_reviews (
   PRIMARY KEY (repo, number, head_oid)
 );
 
+-- What the merge rule reads from a PR's cached diff at one head (src/review/diff.ts), written by the code that writes or
+-- removes the cache files; one row while the diff of that head is cached. reasons: JSON string[] of sensitive-content
+-- reasons (the conservative ones while pending); lines: changed lines of the diff; pending: the diff waits for the
+-- files and workflow steps read beside it; last_read: ms of the last re-read for them.
+CREATE TABLE IF NOT EXISTS diff_facts (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  head_oid TEXT NOT NULL,
+  reasons TEXT NOT NULL,
+  lines INTEGER NOT NULL,
+  pending INTEGER NOT NULL,
+  last_read INTEGER,
+  PRIMARY KEY (repo, number, head_oid)
+);
+
 -- What operators said once, kept so reviews of related work see it (src/memory/). One row per source: the answer note of a
 -- decision, a comment (or review) of an operator on GitHub that AutoCraft did not post, or an operator's message in a conversation.
 -- source_id is the decision id, the comment's node id or the turn's id. embedding: float32 unit vector of the item title and the text, by `model`.

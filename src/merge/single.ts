@@ -51,7 +51,7 @@ export async function planSingles(db: DatabaseSync, repo: string, fetchDiff: Dif
   if (max === 0 || !ready.length || ready.length > max) return null;
   const seen = new Set<string>();
   for (const { facts, action } of ready) {
-    const d = await cachedDiff(repo, facts.number, action.head!, fetchDiff);
+    const d = await cachedDiff(db, repo, facts.number, action.head!, fetchDiff);
     if (!d.ok) return null;
     const paths = pathsOfDiff(d.text);
     if (!paths) return null;

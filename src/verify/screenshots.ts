@@ -75,7 +75,7 @@ export async function maybeScreenshot(db: DatabaseSync, c: Cand, deps: Env, log:
   if (!config) return false;
   if (db.prepare("SELECT 1 FROM screenshot_runs WHERE repo = ? AND number = ? AND head_sha = ?").get(c.repo, c.number, c.head_oid)) return false;
   const ref = refOf(c);
-  const d = await cachedDiff(c.repo, c.number, c.head_oid, deps.fetchDiff);
+  const d = await cachedDiff(db, c.repo, c.number, c.head_oid, deps.fetchDiff);
   if (!d.ok) { log(`  ${ref}: screenshots: no diff: ${d.error}`); return false; }
   if (!touchesUi(splitDiff(d.text).map((f) => f.path), config.ui_paths)) return false;
   const base = await deps.baseOf(c.repo, c.number);
