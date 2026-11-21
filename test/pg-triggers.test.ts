@@ -15,10 +15,10 @@ const T = "2026-01-01T00:00:00Z";
 
 /** Writes over most kinds of trigger: item, cross-item and global inputs, bookkeeping-only updates, malformed JSON, a transaction, a bulk write. */
 const STEPS: [string, (db: Db) => Promise<unknown>][] = [
-  ["new PR", (db) => db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', 1, 'pr', 'OPEN', 't1', ?)").run(T)],
-  ["new issue", (db) => db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', 2, 'issue', 'OPEN', 't2', ?)").run(T)],
-  ["text hash only", (db) => db.prepare("UPDATE items SET embed_hash = 'e2' WHERE number = 2").run()],
-  ["issue title", (db) => db.prepare("UPDATE items SET title = 'retitled' WHERE number = 2").run()],
+  ["new PR", (db) => db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN", title: "t1", created_at: T }))],
+  ["new issue", (db) => db.run(db.k.insertInto("items").values({ repo: "app", number: 2, kind: "issue", state: "OPEN", title: "t2", created_at: T }))],
+  ["text hash only", (db) => db.run(db.k.updateTable("items").set({ embed_hash: "e2" }).where("number", "=", 2))],
+  ["issue title", (db) => db.run(db.k.updateTable("items").set({ title: "retitled" }).where("number", "=", 2))],
   ["comment", (db) => db.prepare("INSERT INTO comments (repo, number, id, author, body, created_at) VALUES ('app', 2, 'c1', 'someone', 'hi', ?)").run(T)],
   ["bookkeeping setting", (db) => db.prepare("INSERT INTO settings (key, value) VALUES ('runner_heartbeat', ?)").run(T)],
   ["planner setting", (db) => db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_enabled', '1')").run()],
@@ -31,10 +31,10 @@ const STEPS: [string, (db: Db) => Promise<unknown>][] = [
   }],
   ["batch merged", (db) => db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = 1").run()],
   ["hold review", (db) => db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, blocked_by) VALUES ('app', 1, 'h1', ?, 'full', 'hold', '["app#2", 7, "app#2"]')`).run(T)],
-  ["blocker closes", (db) => db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run()],
-  ["decision with a list", (db) => db.prepare(`INSERT INTO decisions (id, kind, repo, number, items, asked_at, asked_by, question, options) VALUES ('d1', 'merge', 'app', 3, '[{"repo": "app", "number": 5}, "app#6"]', ?, 'x', 'q', '[]')`).run(T)],
-  ["decision list malformed", (db) => db.prepare(`UPDATE decisions SET items = '{"repo": "app"' WHERE id = 'd1'`).run()],
-  ["pair decision", (db) => db.prepare("INSERT INTO decisions (id, kind, repo, number, asked_at, asked_by, question, options) VALUES ('dup:app#3@12x', 'duplicate', 'app', 3, ?, 'x', 'q', '[]')").run(T)],
+  ["blocker closes", (db) => db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2))],
+  ["decision with a list", (db) => db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "merge", repo: "app", number: 3, items: '[{"repo": "app", "number": 5}, "app#6"]', asked_at: T, asked_by: "x", question: "q", options: "[]" }))],
+  ["decision list malformed", (db) => db.run(db.k.updateTable("decisions").set({ items: '{"repo": "app"' }).where("id", "=", "d1"))],
+  ["pair decision", (db) => db.run(db.k.insertInto("decisions").values({ id: "dup:app#3@12x", kind: "duplicate", repo: "app", number: 3, asked_at: T, asked_by: "x", question: "q", options: "[]" }))],
   ["assign", (db) => db.prepare("INSERT INTO audit (at, login, action, target) VALUES (?, 'op', 'assign', 'app#9')").run(T)],
   ["assign odd target", (db) => db.prepare("INSERT INTO audit (at, login, action, target) VALUES (?, 'op', 'assign', 'app#x9')").run(T)],
   ["fast track", (db) => db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 9, 'op', ?)").run(T)],
@@ -44,7 +44,7 @@ const STEPS: [string, (db: Db) => Promise<unknown>][] = [
   ["transaction", (db) => db.write(async () => {
     await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
     await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 12, 'op', ?)").run(T);
-    await db.prepare("UPDATE items SET title = 'again' WHERE number = 1").run();
+    await db.run(db.k.updateTable("items").set({ title: "again" }).where("number", "=", 1));
   })],
   ["bulk", (db) => bulkWrites(db, "test", async () => {
     await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 20, 1, '{}', ?)").run(T);

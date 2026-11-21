@@ -51,16 +51,26 @@ export async function fillClassHashes(db: Db): Promise<number> {
   return await fill(db, CLASS);
 }
 
-type Fill = { source: string; select: string; update: string; values: (r: Fields) => string[] };
+/** `select`, `update` and `values` are the SQL text of the synchronous fill; `read` and `write` are the same statements as builders. */
+type Fill = {
+  source: string; select: string; update: string; values: (r: Fields) => string[];
+  read: (db: Db) => Promise<Fields[]>; write: (db: Db, r: Fields) => Promise<unknown>;
+};
+
+const FIELD_COLUMNS = ["repo", "number", "kind", "title", "body", "additions", "deletions", "changed_files", "author_association"] as const;
 
 const EMBED: Fill = {
   source: "embed-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
   update: "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", values: (r) => [embedHash(r.title, r.body)],
+  read: (db) => db.all(db.k.selectFrom("main.items").select(FIELD_COLUMNS).where("embed_hash", "is", null).limit(BATCH)),
+  write: (db, r) => db.run(db.k.updateTable("main.items").set({ embed_hash: embedHash(r.title, r.body) }).where("repo", "=", r.repo).where("number", "=", r.number)),
 };
 
 const CLASS: Fill = {
   source: "class-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
   update: `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, values: (r) => [classifyHash(r)],
+  read: (db) => db.all(db.k.selectFrom("main.items").select(FIELD_COLUMNS).where("state", "=", "OPEN").where("class_scheme", "is distinct from", SCHEME_ID).limit(BATCH)),
+  write: (db, r) => db.run(db.k.updateTable("main.items").set({ class_hash: classifyHash(r), class_scheme: SCHEME_ID }).where("repo", "=", r.repo).where("number", "=", r.number)),
 };
 
 /** fillEmbedHashes() then fillClassHashes(), for connect()'s migrations, which stay synchronous. */
@@ -83,14 +93,13 @@ export function fillHashesSync(db: DatabaseSync): void {
   }
 }
 
-async function fill(db: Db, { source, select, update, values }: Fill): Promise<number> {
-  const sel = db.prepare(select), upd = db.prepare(update);
+async function fill(db: Db, { source, read, write: put }: Fill): Promise<number> {
   let total = 0;
   for (;;) {
-    const rows = await sel.all() as unknown as Fields[];
+    const rows = await read(db);
     if (!rows.length) return total;
     await db.write(async () => {
-      const write = async (): Promise<void> => { for (const r of rows) await upd.run(...values(r), r.repo, r.number); };
+      const write = async (): Promise<void> => { for (const r of rows) await put(db, r); };
       // A batch of a backfill takes one full-pass mark instead of a log row per item (src/core/plan-changes.ts).
       if (rows.length >= BULK_ROWS) await bulkWrites(db, source, write); else await write();
     });

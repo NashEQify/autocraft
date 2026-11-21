@@ -175,7 +175,7 @@ export function watchedColumns(table: string, columns: Map<string, string[]> | u
 export function columnsOf(db: DatabaseSync): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const { name } of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table'").all() as { name: string }[]) {
-    out.set(name, (db.prepare(`SELECT name FROM pragma_table_info('${name}', 'main')`).all() as { name: string }[]).map((c) => c.name));
+    out.set(name, (db.prepare(`PRAGMA main.table_info('${name}')`).all() as { name: string }[]).map((c) => c.name));
   }
   return out;
 }
@@ -232,6 +232,6 @@ export function liveSql(db?: DatabaseSync): string {
 /** The current counter of every topic. */
 export async function readSeqs(db: Db): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
-  for (const r of await db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[]) out[r.topic] = r.seq;
+  for (const r of await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]))) out[r.topic] = r.seq;
   return out;
 }
