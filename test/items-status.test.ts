@@ -6,12 +6,15 @@ import { connectDb } from "../src/db/open.ts";
 
 test("the status list counts every phase, filters by one, and gives an item without a plan its own status", async () => {
   const db = await connectDb(":memory:");
-  const add = db.prepare("INSERT INTO items (repo, number, kind, state, title, updated_at, merged_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-  await add.run("app", 1, "pr", "OPEN", "Planned", "2026-01-03", null);
-  await add.run("app", 2, "issue", "OPEN", "No plan", "2026-01-02", null);
-  await add.run("app", 3, "pr", "MERGED", "Done", "2026-01-01", "2026-01-01");
-  await db.prepare("INSERT INTO item_plans (repo, number, kind, state, actions, reasons, view, planned_at) VALUES ('app', 1, 'pr', 'needs-fix-up', '[]', '[]', ?, 'x')")
-    .run(JSON.stringify({ status: { phase: "Fixing", waiting: null, next: "Fix-up", since: "2026-01-03" } }));
+  await db.run(db.k.insertInto("items").values([
+    { repo: "app", number: 1, kind: "pr", state: "OPEN", title: "Planned", updated_at: "2026-01-03", merged_at: null },
+    { repo: "app", number: 2, kind: "issue", state: "OPEN", title: "No plan", updated_at: "2026-01-02", merged_at: null },
+    { repo: "app", number: 3, kind: "pr", state: "MERGED", title: "Done", updated_at: "2026-01-01", merged_at: "2026-01-01" },
+  ]));
+  await db.run(db.k.insertInto("item_plans").values({
+    repo: "app", number: 1, kind: "pr", state: "needs-fix-up", actions: "[]", reasons: "[]", planned_at: "x",
+    view: JSON.stringify({ status: { phase: "Fixing", waiting: null, next: "Fix-up", since: "2026-01-03" } }),
+  }));
   const req = (q: string) => ({ query: new URLSearchParams(q), user: { role: "operator", login: "o", canRead: async () => true } }) as unknown as Req;
   const all = await statusList(db, req(""));
   assert.equal(all.total, 3);
@@ -27,13 +30,13 @@ test("the status list counts every phase, filters by one, and gives an item with
 
 test("the item list shows a verdict written after an earlier list, and a failed request changes nothing", async () => {
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title, updated_at) VALUES ('app', 1, 'pr', 'OPEN', 'Fix', '2026-01-03')").run();
-  await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', 1, 'jev', 'r1', '2026-01-03', 'bugfix', '[]', '{"top":0.95}')`).run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN", title: "Fix", updated_at: "2026-01-03" }));
+  await db.run(db.k.insertInto("classifications").values({ repo: "app", number: 1, classifier: "jev", run_id: "r1", at: "2026-01-03", type_label: "bugfix", flags: "[]", probs: '{"top":0.95}' }));
   const req = (q: string) => ({ query: new URLSearchParams(q), user: { role: "operator", login: "o", canRead: async () => true } }) as unknown as Req;
   await assert.rejects(listItems(db, req("kind=bogus")));
   const list = await listItems(db, req(""));
   assert.equal(list.rows[0]?.settled.jevLabel, "bugfix");
-  await db.prepare(`UPDATE classifications SET type_label = 'feature', probs = '{"top":0.97}' WHERE repo = 'app' AND number = 1`).run();
+  await db.run(db.k.updateTable("classifications").set({ type_label: "feature", probs: '{"top":0.97}' }).where("repo", "=", "app").where("number", "=", 1));
   assert.equal((await listItems(db, req(""))).rows[0]?.settled.jevLabel, "feature");
 });

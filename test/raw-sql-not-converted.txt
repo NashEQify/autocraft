@@ -133,7 +133,6 @@ src/dash/api/item-page.ts
 
 src/dash/api/item-timeline.ts
 
-src/dash/api/items.ts
 
 src/dash/api/limits.ts
 
