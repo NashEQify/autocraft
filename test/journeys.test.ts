@@ -27,6 +27,7 @@ import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
 import { CHECK, T1, tmpdir, world, type World } from "./world-db.ts";
 import { excluded } from "../src/db/kx.ts";
+import * as kx from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("diffs"), "cache");
 
@@ -145,7 +146,7 @@ describe("PR journeys", () => {
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     assert.equal((await plan()).state, "out-of-scope");
-    for (const n of [1, 2]) await w.db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', ?, 'op', ?)").run(n, "2026-01-02T00:00:00Z");
+    for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("fast_track").values({ repo: "app", number: n, added_by: "op", added_at: "2026-01-02T00:00:00Z" }));
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
   });
 
@@ -382,8 +383,8 @@ describe("issue journey", () => {
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.equal(inputs.length, 2);
     assert.ok(!inputs[0]!.includes("<previous>") && inputs[1]!.includes("<previous>") && inputs[1]!.includes("is not one of the offered choices"));
-    assert.deepEqual(await w.rows("SELECT state, json_extract(pick, '$.core') AS core FROM decision_choices"), [{ state: "current", core: "o:take" }]);
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'app:scope:7' AND recommended = 'take'")).length, 1);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(["state", kx.jsonText(w.db, "pick", "$.core").as("core")])), [{ state: "current", core: "o:take" }]);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "=", "take"))).length, 1);
   });
 
   test("a pick whose core was dropped is asked again once; a pick still without a core is stored as no pick", async () => {
@@ -398,21 +399,21 @@ describe("issue journey", () => {
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.equal(inputs.length, 2);
     assert.ok(inputs[1]!.includes('your pick "x:review"'));
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'app:scope:7' AND recommended IS NULL")).length, 1);
-    assert.deepEqual(await w.rows("SELECT json_extract(pick, '$.core') AS core FROM decision_choices WHERE state = 'current'"), [{ core: null }]);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "is", null))).length, 1);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(kx.jsonText(w.db, "pick", "$.core").as("core")).where("state", "=", "current")), [{ core: null }]);
   });
 
   test("a duplicate group whose kept item is closed is prepared while a member it would close is open", async () => {
     const w = await (await (await fresh()).issue(7)).issue(8);
     await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-    await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', 8, 'issue', 'close', 7, 'close', 7)").run();
+    await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:7", repo: "app", number: 8, kind: "issue", role: "close", target: 7, base_role: "close", base_target: 7 }));
     await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 7));
     assert.deepEqual(await prepareIds(w.db), ["app:dupegroup:7"]);
     assert.equal(await preparing(w.db, (await getDecision(w.db, "app:dupegroup:7"))!), true);
     await w.models(() => `Both issues report the same crash when opening an empty file, and #7 already has the fix, so #8 can be closed as its duplicate.${choices({ pick: { core: "o:accept", reason: "same report." } })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.deepEqual(await prepareIds(w.db), []);
-    await w.db.prepare("UPDATE decisions SET prepared_at = NULL").run();
+    await w.db.run(w.db.k.updateTable("decisions").set({ prepared_at: null }));
     await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 8));
     assert.deepEqual(await prepareIds(w.db), []);
   });
@@ -420,10 +421,10 @@ describe("issue journey", () => {
   test("an accepted duplicate group lists an act action for the member it closes until the Act step has closed it", async () => {
     const w = await (await (await fresh()).issue(7)).issue(8);
     await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-    await w.db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES ('app:dupegroup:7', 'app', 'model')").run();
+    await w.db.run(w.db.k.insertInto("dupe_groups").values({ decision_id: "app:dupegroup:7", repo: "app", source: "model" }));
     for (const [n, role, target] of [[7, "keep", null], [8, "close", 7]] as const)
-      await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', ?, 'issue', ?, ?, ?, ?)").run(n, role, target, role, target);
-    await w.db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES ('app:dupegroup:7', 'accept', 8, 'close', 'Duplicate of #7.')").run();
+      await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:7", repo: "app", number: n, kind: "issue", role, target, base_role: role, base_target: target }));
+    await w.db.run(w.db.k.insertInto("dupe_group_texts").values({ decision_id: "app:dupegroup:7", option: "accept", number: 8, step: "close", text: "Duplicate of #7." }));
     await w.answerDecision("app:dupegroup:7", "accept");
     const acts = async () => (await w.plan()).items.filter((i) => i.plan.actions.some((a) => a.kind === "act")).map((i) => i.facts.number);
     assert.deepEqual(await acts(), []);
@@ -439,41 +440,42 @@ describe("issue journey", () => {
     const r = await runDecide(w.db, {}, quiet);
     assert.equal(r.asked, 1);
     assert.equal(r.prepared, 0);
-    const [d] = await w.rows("SELECT id, prepared_at, recommend_failures FROM decisions WHERE kind = 'scope'");
+    const [d] = await w.db.all(w.db.k.selectFrom("decisions").select(["id", "prepared_at", "recommend_failures"]).where("kind", "=", "scope"));
     assert.equal(d!.prepared_at, null);
     assert.equal(d!.recommend_failures, 1);
     // Within the hour nothing is due; after it the prepare runs again.
     assert.equal((await prepareIds(w.db)).length, 0);
     // A repo with its pipeline off is neither due nor shown as preparing.
-    await w.db.prepare("UPDATE decisions SET recommend_failures = NULL, recommend_failed_at = NULL").run();
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failures: null, recommend_failed_at: null }));
     assert.equal((await prepareIds(w.db)).length, 1);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), true);
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }));
     assert.equal((await prepareIds(w.db)).length, 0);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), false);
     await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 1 }));
-    await w.db.prepare("UPDATE decisions SET recommend_failures = 1").run();
-    await w.db.prepare("UPDATE decisions SET recommend_failed_at = ?").run(new Date(Date.now() - 2 * 3_600_000).toISOString());
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failures: 1 }));
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failed_at: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
     await w.models(() => `It reports a panic on an empty slice. The reference app has no such case, so a fix is wanted.${choices({ pick: { core: "o:take", reason: "The reference app has this case." }, cores: [{ core: "o:take", extras: [] }] })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
-    const [p] = await w.rows("SELECT recommended, recommended_reason, recommended_by, summary, prepared_at FROM decisions WHERE kind = 'scope'");
+    const [p] = await w.db.all(w.db.k.selectFrom("decisions").select(["recommended", "recommended_reason", "recommended_by", "summary", "prepared_at"]).where("kind", "=", "scope"));
     assert.equal(p!.recommended, "take");
     assert.match(String(p!.summary), /panic on an empty slice/);
     assert.ok(p!.prepared_at);
-    assert.equal((await w.rows("SELECT 1 FROM conversation_turns WHERE number = 5 AND kind = 'opus'")).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("conversation_turns").select((eb) => eb.lit(1).as("one")).where("number", "=", 5).where("kind", "=", "opus"))).length, 1);
     // The review-text refresh leaves a prepared decision alone.
-    await w.db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, mode, verdict, sure, reason, summary, model, at) VALUES ('app', 5, 'h', 'final', 'take', 1, 'r', 'review text', 'opus', ?)").run(new Date().toISOString());
-    await w.db.prepare("UPDATE decisions SET kind = 'merge', facts = ? WHERE kind = 'scope'").run(JSON.stringify(["head: h"]));
+    await w.db.run(w.db.k.insertInto("opus_reviews").values({ repo: "app", number: 5, head_oid: "h", mode: "final", verdict: "take", sure: 1, reason: "r", summary: "review text", model: "opus", at: new Date().toISOString() }));
+    await w.db.run(w.db.k.updateTable("decisions").set({ kind: "merge", facts: JSON.stringify(["head: h"]) }).where("kind", "=", "scope"));
     await fillReviewSummaries(w.db, new Date().toISOString());
-    const [q] = await w.rows("SELECT summary, recommended FROM decisions WHERE number = 5");
+    const [q] = await w.db.all(w.db.k.selectFrom("decisions").select(["summary", "recommended"]).where("number", "=", 5));
     assert.match(String(q!.summary), /panic on an empty slice/);
     assert.equal(q!.recommended, "take");
     // An older open decision of the same item is prepared with summary and pick only: no second turn replaces the first one's cards.
-    await w.db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, asked_by) SELECT 'older', 'other', repo, number, 'Older?', options, '2000-01-01T00:00:00Z', asked_by FROM decisions WHERE number = 5").run();
+    const base = (await w.db.get(w.db.k.selectFrom("decisions").select(["repo", "number", "options", "asked_by"]).where("number", "=", 5)))!;
+    await w.db.run(w.db.k.insertInto("decisions").values({ id: "older", kind: "other", repo: base.repo, number: base.number, question: "Older?", options: base.options, asked_at: "2000-01-01T00:00:00Z", asked_by: base.asked_by }));
     await w.models(() => `The older question concerns the same panic on an empty slice and the answer is the same.${choices({ pick: { core: "o:take", reason: "still wanted." } })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
-    assert.equal((await w.rows("SELECT 1 FROM conversation_turns WHERE number = 5 AND kind = 'opus'")).length, 1);
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'older' AND prepared_at IS NOT NULL AND recommended = 'take'")).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("conversation_turns").select((eb) => eb.lit(1).as("one")).where("number", "=", 5).where("kind", "=", "opus"))).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "older").where("prepared_at", "is not", null).where("recommended", "=", "take"))).length, 1);
   });
 
   test("a classified issue gets a scope decision; once an operator says take, a fix is built, checked and opened as a PR", async () => {

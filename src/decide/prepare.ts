@@ -11,7 +11,7 @@ import { dropTexts } from "../replylint.ts";
 import { referenceDir } from "../reference.ts";
 import { SUMMARY_MIN, summaryInput } from "../classify/parse.ts";
 import { pool } from "../classify/run.ts";
-import { itemsOf, optionsOf, factsOf, type DecisionRow } from "../decisions.ts";
+import { itemsOf, optionsOf, factsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import { openDecision, type NewCard } from "../conversations/cards.ts";
 import { choicesTexts, parseChoices, type ParsedChoices } from "./choices-parse.ts";
 import { coreSummaries } from "./choices.ts";
@@ -21,15 +21,15 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { codeDiff } from "../review/diff.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { applicableSteps } from "../conversations/cards.ts";
-import { pilotSql } from "../pilot.ts";
-import { notOwnIntegrationSql } from "../dupes/held.ts";
+import { pilotExpr } from "../pilot.ts";
+import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { judgementModel } from "./judgement.ts";
 import { loadSummaryItems } from "./index.ts";
-import { lockLiveSql } from "../answers/hold.ts";
-import { discussionKeySql, openSubjectSql, prepareDue, prepareStateSql, utcDayStart, type PrepareColumns } from "./prepared.ts";
+import { lockLiveExpr } from "../answers/hold.ts";
+import { discussionKeyExpr, openSubjectExpr, prepareDue, prepareStateExpr, utcDayStart, type PrepareColumns } from "./prepared.ts";
 import { PREPARE_DIFF_LIMIT, PREPARE_MEMBERS, PREPARE_STOPPED_LIMIT, PREPARE_SUMMARY_MAX, PREPARE_TURNS_LIMIT, type PrepareInput } from "./prepare-types.ts";
 import type { Db } from "../db/index.ts";
-import { inList, jsonEach, notDistinctFrom } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export const PREPARE_PROMPT = CLAUDE_PROMPTS["decide.prepare"];
 
@@ -108,11 +108,18 @@ export const PREPARE_AGING_MS = 24 * 3600_000;
  * (P0 first), then oldest first. A decision whose press is running or queued is locked and not prepared. The item's Plan says whether the decide step has work; this reads the decisions themselves.
  */
 export async function prepareIds(db: Db, repos?: string[], nowMs: number = Date.now()): Promise<string[]> {
-  const rows = await db.prepare(`SELECT d.id, d.repo, d.asked_at, d.number, d.prepare_requested_at, d.prepared_at, d.prepared_head, d.prepare_failed_head, d.recommend_failures, d.recommend_failed_at, i.kind AS item_kind, i.head_oid, d.kind, d.prepared_discussion, ${prepareStateSql(db, "d")},
-      COALESCE(CAST(rk.score / 10000 AS INTEGER), 2) AS band
-    FROM decisions d LEFT JOIN items i ON i.repo = d.repo AND i.number = d.number LEFT JOIN item_rank rk ON rk.repo = d.repo AND rk.number = d.number
-    WHERE d.answer IS NULL AND d.kind <> 'backlog' AND d.repo IS NOT NULL AND d.number IS NOT NULL AND ${openSubjectSql("d", "i")} AND ${pilotSql(db, "i")} AND ${notOwnIntegrationSql(db, "i")} AND NOT ${lockLiveSql("d")}
-    ORDER BY d.prepare_requested_at IS NULL, d.prepare_requested_at, d.asked_at, d.id`).all(utcDayStart(nowMs)) as (DueRow & { band: number })[];
+  const rows = (await db.all(db.k.selectFrom("decisions as d")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+    .leftJoin("item_rank as rk", (j) => j.onRef("rk.repo", "=", "d.repo").onRef("rk.number", "=", "d.number"))
+    .select((eb) => ["d.id", "d.repo", "d.asked_at", "d.number", "d.prepare_requested_at", "d.prepared_at", "d.prepared_head", "d.prepare_failed_head", "d.recommend_failures", "d.recommend_failed_at", "i.kind as item_kind", "i.head_oid", "d.kind", "d.prepared_discussion",
+      ...prepareStateExpr(db, eb, "d", utcDayStart(nowMs)),
+      eb.fn.coalesce(eb.cast<number>(eb("rk.score", "/", 10000), "bigint"), eb.lit(2)).as("band")])
+    .$narrowType<{ repo: string; prepares_today: number }>()
+    .where((eb) => eb.and([
+      eb("d.answer", "is", null), eb("d.kind", "<>", "backlog"), eb("d.repo", "is not", null), eb("d.number", "is not", null),
+      openSubjectExpr(db, eb, "d", "i"), pilotExpr(db, eb, "i"), notOwnIntegrationExpr(db, eb, "i"), eb.not(lockLiveExpr(db, eb, "d")),
+    ]))
+    .orderBy((eb) => eb("d.prepare_requested_at", "is", null)).orderBy("d.prepare_requested_at", (o) => o.asc().nullsFirst()).orderBy("d.asked_at").orderBy("d.id"))).map((r) => ({ ...r, review_queued: Number(r.review_queued) }));
   const due = rows.filter((r) => !repos?.length || repos.includes(r.repo)).filter((r) => prepareDue(r, headOf(r), nowMs));
   const level = (r: { band: number; asked_at: string }): number => r.band + Math.min(4, Math.floor(Math.max(0, nowMs - Date.parse(r.asked_at)) / PREPARE_AGING_MS) || 0);
   // Within a repo the best (aged level, then oldest) comes first, so its round numbers follow that order.
@@ -136,17 +143,21 @@ export async function stoppedBy(db: Db, d: DecisionRow, head: string | null): Pr
   const out: Record<string, unknown> = {};
   if (d.context) out.context = cut(d.context, 1000);
   if (d.number === null || !d.repo) return out;
-  const review = await db.prepare(`SELECT head_oid, verdict, sure, reason, fixes, risks FROM opus_reviews WHERE repo = ? AND number = ? AND verdict IS NOT NULL
-    ORDER BY (head_oid = ?) DESC, at DESC LIMIT 1`).get(d.repo, d.number, head ?? "") as { head_oid: string; verdict: string; sure: number | null; reason: string | null; fixes: string | null; risks: string | null } | undefined;
+  const review = await db.get(db.k.selectFrom("opus_reviews").select(["head_oid", "verdict", "sure", "reason", "fixes", "risks"]).$narrowType<{ verdict: string }>()
+    .where("repo", "=", d.repo).where("number", "=", d.number).where("verdict", "is not", null)
+    .orderBy((eb) => eb("head_oid", "=", head ?? ""), "desc").orderBy("at", "desc").limit(1));
   if (review) out.review = { at_head: review.head_oid === head, verdict: review.verdict, sure: review.sure === null ? null : review.sure === 1, reason: cut(review.reason, 1500), fixes: arr(review.fixes).slice(0, 10), risks: arr(review.risks).slice(0, 10).map((r) => cut(String(r), 400)) };
-  const cls = await db.prepare("SELECT classifier, at, type_label, want, reference, flags, reason, dup_of FROM classifications WHERE repo = ? AND number = ? ORDER BY at DESC").all(d.repo, d.number) as { classifier: string; type_label: string | null; want: string | null; reference: string | null; flags: string | null; reason: string | null; dup_of: number | null }[];
+  const cls = await db.all(db.k.selectFrom("classifications").select(["classifier", "at", "type_label", "want", "reference", "flags", "reason", "dup_of"])
+    .where("repo", "=", d.repo).where("number", "=", d.number).orderBy("at", "desc"));
   const seen = new Set<string>();
   const classifications = cls.filter((c) => !seen.has(c.classifier) && seen.add(c.classifier)).map((c) => ({ classifier: c.classifier, type_label: c.type_label, want: c.want, reference_claim: cut(c.reference, 300) || null, flags: arr(c.flags), reason: cut(c.reason, 400), duplicate_of: c.dup_of }));
   if (classifications.length) out.classifications = classifications;
-  const cmp = await db.prepare(`SELECT kind, members, source, reason, result FROM dupe_comparisons WHERE repo = ? AND EXISTS (SELECT 1 FROM ${jsonEach(db, "members", "m")} WHERE m.value = ?) ORDER BY at DESC LIMIT 2`).all(d.repo, d.number) as { kind: string; members: string; source: string; reason: string | null; result: string | null }[];
+  const cmp = await db.all(db.k.selectFrom("dupe_comparisons").select(["kind", "members", "source", "reason", "result"]).where("repo", "=", d.repo)
+    .where((eb) => eb.exists(eb.selectFrom(kx.jsonEach(db, "dupe_comparisons.members", "m", "bigint")).select(eb.lit(1).as("one")).where("m.value", "=", d.number!)))
+    .orderBy("at", "desc").limit(2));
   if (cmp.length) out.duplicate_comparisons = cmp.map((c) => ({ kind: c.kind, members: arr(c.members), by: c.source, reason: cut(c.reason, 600), result: cut(c.result, 1500) }));
   if (d.id.includes(":dupegroup:")) {
-    const members = await db.prepare("SELECT number, kind, role, target, detail FROM dupe_group_items WHERE decision_id = ? ORDER BY number").all(d.id) as { number: number; kind: string; role: string; target: number | null; detail: string | null }[];
+    const members = await db.all(db.k.selectFrom("dupe_group_items").select(["number", "kind", "role", "target", "detail"]).where("decision_id", "=", d.id).orderBy("number"));
     if (members.length) out.group_members = members.map((m) => ({ number: m.number, kind: m.kind, role: m.role, target: m.target, detail: cut(m.detail, 400) || null }));
   }
   return out;
@@ -177,7 +188,6 @@ export type PrepareParams = {
 
 export type PrepareResult = { /** Decisions prepared and stored. */ stored: number; failed: number };
 
-type Row = DecisionRow & PrepareColumns;
 type ItemRow = { kind: string; state: string; mergeable: string | null; head_oid: string | null; additions: number | null; deletions: number | null; changed_files: number | null };
 
 const now = () => new Date().toISOString();
@@ -192,22 +202,25 @@ function liveState(it: ItemRow, c: { head_oid: string | null; overall: string | 
 export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<PrepareResult> {
   const model = p.model ?? await judgementModel(db);
   const checkouts = new Map<string, Promise<string | null>>();
-  const select = db.prepare("SELECT * FROM decisions WHERE id = ? AND answer IS NULL");
-  const itemOf = db.prepare("SELECT kind, state, mergeable, head_oid, additions, deletions, changed_files FROM items WHERE repo = ? AND number = ?");
-  const checksOf = db.prepare("SELECT head_oid, overall, mergeable FROM pr_checks WHERE repo = ? AND number = ?");
-  const failed = db.prepare(`UPDATE main.decisions SET recommend_failures = CASE WHEN ${notDistinctFrom(db, "prepare_failed_head", "?")} THEN COALESCE(recommend_failures, 0) + 1 ELSE 1 END,
-    recommend_failed_at = ?, prepare_failed_head = ? WHERE id = ?`);
-  const store = db.prepare(`UPDATE main.decisions SET recommended = ?, recommended_reason = ?, recommended_by = ?, summary = ?, summary_by = ?, summary_at = ?,
-    prepared_at = ?, prepared_head = ?, prepared_discussion = ?, recommend_failures = NULL, recommend_failed_at = NULL, prepare_failed_head = NULL, prepare_requested_at = NULL
-    WHERE id = ? AND answer IS NULL AND question = ? AND options = ?`);
+  const select = (id: string) => db.get(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>().where("id", "=", id).where("answer", "is", null));
+  const itemOf = (repo: string, n: number) => db.get(db.k.selectFrom("items").select(["kind", "state", "mergeable", "head_oid", "additions", "deletions", "changed_files"]).where("repo", "=", repo).where("number", "=", n));
+  const checksOf = (repo: string, n: number) => db.get(db.k.selectFrom("pr_checks").select(["head_oid", "overall", "mergeable"]).where("repo", "=", repo).where("number", "=", n));
+  const failed = (head: string | null, at: string, id: string) => db.run(db.k.updateTable("main.decisions").set((eb) => ({
+    recommend_failures: eb.case().when("prepare_failed_head", "is not distinct from", head).then(eb(eb.fn.coalesce("recommend_failures", eb.lit(0)), "+", 1)).else(1).end(),
+    recommend_failed_at: at, prepare_failed_head: head,
+  })).where("id", "=", id));
+  const store = (v: { pick: string | null; reason: string | null; by: string; summary: string; at: string; head: string | null; readKey: string; id: string; question: string; options: string }) => db.run(db.k.updateTable("main.decisions").set({
+    recommended: v.pick, recommended_reason: v.reason, recommended_by: v.by, summary: v.summary, summary_by: v.by, summary_at: v.at,
+    prepared_at: v.at, prepared_head: v.head, prepared_discussion: v.readKey, recommend_failures: null, recommend_failed_at: null, prepare_failed_head: null, prepare_requested_at: null,
+  }).where("id", "=", v.id).where("answer", "is", null).where("question", "=", v.question).where("options", "=", v.options));
   const res: PrepareResult = { stored: 0, failed: 0 };
-  const rowOf = new Map((await db.prepare(`SELECT id, repo, number FROM decisions WHERE ${inList(db, "id")}`).all(JSON.stringify(ids)) as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r]));
+  const rowOf = new Map((await db.all(db.k.selectFrom("decisions").select(["id", "repo", "number"]).where(kx.inList(db, "id", ids)))).map((r) => [r.id, r]));
   await pool(ids.map((id, k) => async () => {
     if (await p.cancelled?.()) return;
-    const d = await select.get(id) as Row | undefined;
+    const d = await select(id);
     if (!d || !d.repo || d.number === null) return;
     const repo = d.repo, n = d.number;
-    const it = await itemOf.get(repo, n) as ItemRow | undefined;
+    const it = await itemOf(repo, n);
     if (!it) return;
     const isPr = it.kind === "pr";
     const head = isPr ? it.head_oid : null;
@@ -217,7 +230,7 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const options = optionsOf(d);
     const [item] = await loadSummaryItems(db, [{ repo, number: n }]);
     if (!item) return;
-    const members = group ? await loadSummaryItems(db, (await db.prepare("SELECT number FROM dupe_group_items WHERE decision_id = ? ORDER BY number LIMIT ?").all(d.id, PREPARE_MEMBERS) as { number: number }[]).map((m) => ({ repo, number: m.number }))) : [];
+    const members = group ? await loadSummaryItems(db, (await db.all(db.k.selectFrom("dupe_group_items").select("number").where("decision_id", "=", d.id).orderBy("number").limit(PREPARE_MEMBERS))).map((m) => ({ repo, number: m.number }))) : [];
     const start = now();
     p.onSent?.();
     let prDiff: string | null = null;
@@ -243,7 +256,7 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
       cores: single ? await coreSummaries(db, d) : [],
       stopped: await stoppedBy(db, d, head),
       ...(!single && { group: true }), ...(group && { members: members.map(summaryInput) }),
-      ...(isPr && { pr: { head, lines: { additions: it.additions, deletions: it.deletions, files: it.changed_files }, diff: prDiff, live: liveState(it, await checksOf.get(repo, n) as { head_oid: string | null; overall: string | null; mergeable: string | null } | undefined) } }),
+      ...(isPr && { pr: { head, lines: { additions: it.additions, deletions: it.deletions, files: it.changed_files }, diff: prDiff, live: liveState(it, await checksOf(repo, n)) } }),
     };
     const turns = group ? "" : await operatorTurns(db, repo, n);
     if (turns) input.operator_turns = turns;
@@ -251,8 +264,8 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const dir = referenceDir(repo);
     const semantic = p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`);
     // What the call reads of the discussion, kept with the prepare; the call counts against the decision's daily cap unless an operator asked for it.
-    const readKey = (await db.prepare(`SELECT ${discussionKeySql(db, "d")} AS k FROM decisions d WHERE d.id = ?`).get(d.id) as { k: string | null }).k ?? "";
-    const tried = (await db.prepare("INSERT INTO main.decision_prepares (decision_id, at, manual) VALUES (?, ?, ?) RETURNING rowid").get(d.id, now(), d.prepare_requested_at ? 1 : 0) as { rowid: number }).rowid;
+    const readKey = (await db.get(db.k.selectFrom("decisions as d").select((eb) => discussionKeyExpr(db, eb, "d").as("k")).where("d.id", "=", d.id)))!.k ?? "";
+    const tried = (await db.get(db.k.insertInto("main.decision_prepares").values({ decision_id: d.id, at: now(), manual: d.prepare_requested_at ? 1 : 0 }).returning(kx.rowid("main.decision_prepares").as("rowid"))))!.rowid;
     let r;
     try {
       r = await runModelStep(db, PREPARE, input, {
@@ -264,12 +277,12 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
       });
     } catch (e) {
       // A call no Task Runner took was not a try: it uses none of the decision's daily cap.
-      if (e instanceof NoTakerError) await db.prepare("DELETE FROM main.decision_prepares WHERE rowid = ?").run(tried);
+      if (e instanceof NoTakerError) await db.run(db.k.deleteFrom("main.decision_prepares").where(kx.rowid("main.decision_prepares"), "=", tried));
       throw e;
     }
     if (!r.ok) {
       if (await p.cancelled?.()) return;
-      await failed.run(head, now(), head, d.id);
+      await failed(head, now(), d.id);
       res.failed++;
       p.log(`decide: no valid prepare for ${d.id}; retried in an hour, at most 3 tries`);
       return;
@@ -277,26 +290,26 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const got = r.value;
     const by = r.model ?? model;
     // The PR moved on while the call ran: the next pass prepares it for the new head. A group's kept item may be closed; prepareIds decides whether the group is still open.
-    const after = await itemOf.get(repo, n) as ItemRow | undefined;
+    const after = await itemOf(repo, n);
     if (!after || (!group && after.state !== "OPEN") || (isPr && (d.kind === "merge" || d.kind === "hold") && after.head_oid !== head)) {
       // Counted as a try at the head it was asked for: a new head is prepared at once, anything else waits like a failure instead of repeating every pass.
-      await failed.run(head, now(), head, d.id);
+      await failed(head, now(), d.id);
       p.log(`decide: ${d.id}: head moved on during the call; prepared again next pass`);
       return;
     }
     // The decision was answered or asked again while the call ran: nothing is stored, the next pass prepares what is still open.
-    if (!await db.prepare("SELECT 1 FROM decisions WHERE id = ? AND answer IS NULL AND question = ? AND options = ?").get(d.id, d.question, d.options)) return;
+    if (!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", d.id).where("answer", "is", null).where("question", "=", d.question).where("options", "=", d.options))) return;
     const at = now();
     try {
       if (single) {
         const cards = got.ask ? [got.ask] : [];
         await insertTurn(db, repo, n, { kind: "opus", login: "opus", body: got.text, block: opusBlock(got.text, cards, got.choices), notes: got.notes, cards, ...(got.choices && { choices: { decision: d, parsed: got.choices, source: "prepare" as const, by } }) }, { diff: p.diff });
       }
-      await store.run(got.pick, got.pick ? got.reason || null : null, by, got.summary, by, at, at, head, readKey, d.id, d.question, d.options);
+      await store({ pick: got.pick, reason: got.pick ? got.reason || null : null, by, summary: got.summary, at, head, readKey, id: d.id, question: d.question, options: d.options });
       res.stored++;
     } catch (e) {
       p.log(`decide: could not store the prepare of ${d.id}: ${(e as Error).message}`);
-      try { await failed.run(head, now(), head, d.id); } catch { /* the next pass tries again */ }
+      try { await failed(head, now(), d.id); } catch { /* the next pass tries again */ }
       res.failed++;
     }
   }), poolRoom(db, (i) => { const repo = rowOf.get(ids[i]!)?.repo; return repo ? [repo] : undefined; }, (i) => decisionRefs(rowOf.get(ids[i]!)), { promptId: "decide.prepare" }), { first: true });
