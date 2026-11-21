@@ -84,9 +84,9 @@ export async function answerPending(db: DatabaseSync, p: ConversationParams): Pr
 }
 
 /** PR diffs from the diff cache or GitHub; null when unavailable. */
-export const githubDiff: DiffSource = async (repo, n, head) => {
+export const githubDiff = (db: DatabaseSync): DiffSource => async (repo, n, head) => {
   const { cachedDiff, ghDiff } = await import("../review/diff.ts");
-  const r = await cachedDiff(repo, n, head, ghDiff);
+  const r = await cachedDiff(db, repo, n, head, ghDiff);
   return r.ok ? r.text : null;
 };
 
@@ -96,7 +96,7 @@ export async function runConversations(db: DatabaseSync, p: { limit: number; onH
   const usageRun = `conversation-${now().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
   const waiting = pendingConversations(db).length;
   const answered = await answerPending(db, {
-    ...p, usageRun, log, diff: githubDiff,
+    ...p, usageRun, log, diff: githubDiff(db),
     checkout: (repo) => import("../dupes/compare.ts").then((m) => m.baseCheckout(db, repo)),
   });
   log(`conversation: ${answered} of ${waiting} messages answered`);

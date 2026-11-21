@@ -436,7 +436,7 @@ async function runFixupWith(db: DatabaseSync, params: FixupParams, log: (line: s
       }
       let carried: FixupPr["carried_from"];
       if (c.carry) {
-        const w = await carryWork(c, d.fetchDiff);
+        const w = await carryWork(db, c, d.fetchDiff);
         if (!w.ok) { fail("refused", w.reason); return; }
         c.fixes = w.fixes;
         carried = w.carried;
@@ -447,7 +447,7 @@ async function runFixupWith(db: DatabaseSync, params: FixupParams, log: (line: s
       const scripts = await buildScriptsAt(git, head);
       if (!c.carry && files.some((f) => !fixupEditable(f, scripts))) { hold("too-large", "the fixes name files a fix-up may not edit"); return; }
 
-      const diff = await cachedDiff(repo, c.number, head, d.fetchDiff);
+      const diff = await cachedDiff(db, repo, c.number, head, d.fetchDiff);
       if (!diff.ok) { fail("failed", `no diff: ${oneLine(diff.error)}`); return; }
       if (diff.text.length > DIFF_CAP) { hold("too-large", `the PR diff is over the ${DIFF_CAP} character limit`); return; }
       // An operator's fix-up may edit any file of the repository a fix-up may touch: the instructions name no file. The PR's own files are the ones shown.
@@ -627,12 +627,12 @@ const CARRY_MAX_FIXES = 8;
  * The fixes and the source diffs for a carry-over: each point is tied to the editable files of the source PR's diff it
  * names, or to all of that PR's editable files when it names none. Reads the source diffs (cached by head).
  */
-async function carryWork(c: FixCandidate, fetchDiff: DiffFetcher): Promise<{ ok: true; fixes: FixCandidate["fixes"]; carried: NonNullable<FixupPr["carried_from"]> } | { ok: false; reason: string }> {
+async function carryWork(db: DatabaseSync, c: FixCandidate, fetchDiff: DiffFetcher): Promise<{ ok: true; fixes: FixCandidate["fixes"]; carried: NonNullable<FixupPr["carried_from"]> } | { ok: false; reason: string }> {
   const fixes: FixCandidate["fixes"] = [];
   const carried: NonNullable<FixupPr["carried_from"]> = [];
   for (const src of c.carry!.sources) {
     if (!src.head) return { ok: false, reason: `#${src.number} has no recorded head` };
-    const diff = await cachedDiff(c.repo, src.number, src.head, fetchDiff);
+    const diff = await cachedDiff(db, c.repo, src.number, src.head, fetchDiff);
     if (!diff.ok) return { ok: false, reason: `no diff of #${src.number}: ${oneLine(diff.error)}` };
     if (diff.text.length > DIFF_CAP) return { ok: false, reason: `the diff of #${src.number} is over the ${DIFF_CAP} character limit` };
     const paths = [...new Set([...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!))].filter((p) => fixupEditable(p));

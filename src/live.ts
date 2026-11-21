@@ -31,7 +31,7 @@ export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
 
 /** Settings the runner, the sync and the planner write for their own use; the dashboard shows none of them. */
 const BOOKKEEPING_SETTINGS = [
-  "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "mentions_built", "item_stage_built", "tracking_started_at",
+  "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "diff_facts_built", "mentions_built", "item_stage_built", "tracking_started_at",
   "pipeline_planned_at", "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_sync_seen", "pipeline_sync_at", "pipeline_review_cursor", "pipeline_verify_cursor",
   "full_sync_cursor", "org_high_water", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "sync_rate_remaining", "sync_rate_reset_at",
   "flow_summary_marks", "liveness_at", "liveness_open", "classify_run", "worker_update_pending", "worker_update_failures",
@@ -63,7 +63,8 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "dupe_comparisons" }, { table: "dupe_groups" }, { table: "dupe_group_items" }, { table: "dupe_group_posts" }, { table: "dupe_group_texts" }],
   // Who is looking at which question: presence only, so a claim refetches the lists that show it and nothing else.
   claims: [{ table: "decision_claims" }],
-  reviews: [{ table: "opus_reviews" }, { table: "review_posts" }],
+  // diff_facts: what the merge rule reads from a reviewed head's diff (sensitive content, size, extras pending).
+  reviews: [{ table: "opus_reviews" }, { table: "review_posts" }, { table: "diff_facts" }],
   queue: [{ table: "merges" }, { table: "merge_batches" }, { table: "merge_batch_prs" }, { table: "merge_holds" }, { table: "premerge_reviews" }],
   fasttrack: [{ table: "fast_track" }],
   // An operator released an outside-author item from its hold: the planner plans for it at once.

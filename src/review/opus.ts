@@ -172,7 +172,7 @@ export type PreparedOpus =
  */
 export async function prepareOpusInput(db: DatabaseSync, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean } = {}): Promise<PreparedOpus> {
   const liveBase = (db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, c.number) as { base_ref: string | null } | undefined)?.base_ref;
-  const d = await cachedDiff(repo, c.number, c.head_oid, deps.fetchDiff, liveBase);
+  const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff, liveBase);
   if (!d.ok) return d.tooLarge ? { kind: "large", mode: "full", base: null, baseRef: liveBase ?? null } : { kind: "no-diff", error: d.error };
   const baseRef = d.base ?? liveBase ?? null;
   // The read saw the PR's live base: the mirror takes it at once, so the review is not compared with a base the next sync would replace.

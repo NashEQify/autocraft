@@ -5,8 +5,6 @@ import { pipelineWrites } from "./rules.ts";
 import { quietFixPrs } from "../security/quiet.ts";
 export { quietFixPrs };
 import type { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
 import { commentApprovalOf } from "../act/approval.ts";
 import { actionable } from "../decisions.ts";
 import { ownLogins } from "../github/identity.ts";
@@ -38,9 +36,9 @@ import { getRule, STATS_SQL, tierOf, tierKey, tiersOf, type AuthorRef, type Tier
 import { findingsOf, premergeFixUsedIn, premergeRows } from "../premerge/store.ts";
 import { headOf } from "../review/candidates.ts";
 import { parsePublic } from "../review/opus-parse.ts";
-import { cachedDiffExtras, diffRereads, extrasPending, rereadPaceAt, diffCacheDir, splitDiff } from "../review/diff.ts";
+import { rereadPaceAt } from "../review/diff.ts";
 import { ownerOf, slugOf } from "../owners.ts";
-import { EXTRAS_PENDING_REASON, sensitiveReasons } from "./sensitive.ts";
+import { EXTRAS_PENDING_REASON } from "./sensitive.ts";
 import { CARRIED, carriedReview } from "../review/carry.ts";
 import { postSourcesOf } from "../review/post-source.ts";
 import { staleReviews } from "../review/discussion.ts";
@@ -76,6 +74,8 @@ type Row = {
   r_public: string | null;
   /** Read only when `overall` is failure, the one case effectiveCi() looks at them. */
   c_checks: string | null;
+  /** The `diff_facts` row of the review's head: null columns when its diff is not cached. */
+  d_reasons: string | null; d_lines: number | null; d_pending: number | null; d_last_read: number | null;
   assignees: string | null; score: number | null; in_pilot: number; not_integration: number; batch_pr: number; held_backlog: number; held_dup: number;
 };
 
@@ -87,6 +87,7 @@ const SELECT = `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i
     c.head_oid AS c_head, c.fetched_at AS c_at, c.state AS c_state, c.is_draft AS c_draft, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS c_checks, c.mergeable AS c_mergeable, c.maintainer_can_modify AS c_can,
     l.head_oid AS r_head, l.at AS r_at, l.verdict AS r_verdict, l.sure AS r_sure, l.mode AS r_mode, l.reason AS r_reason, l.fixes AS r_fixes, CASE WHEN l.public_review IS NULL THEN NULL WHEN json_valid(l.public_review) AND json_type(l.public_review, '$.summary') = 'text'
       AND json_type(l.public_review, '$.points') = 'array' THEN json_extract(l.public_review, '$.summary') ELSE '' END AS r_public, l.conflicts AS r_conflicts,
+    df.reasons AS d_reasons, df.lines AS d_lines, df.pending AS d_pending, df.last_read AS d_last_read,
     ${fastScoreSql("i.repo", "i.number", "p.score")} AS score,
     ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration,
     EXISTS (SELECT 1 FROM main.merge_batches mb WHERE mb.repo = i.repo AND mb.pr_number = i.number) AS batch_pr,
@@ -98,33 +99,9 @@ const SELECT = `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i
   LEFT JOIN item_rank p ON p.repo = i.repo AND p.number = i.number
   LEFT JOIN opus_reviews l ON l.repo = i.repo AND l.number = i.number AND l.head_oid = (
     SELECT r.head_oid FROM opus_reviews r WHERE r.repo = i.repo AND r.number = i.number AND r.verdict IS NOT NULL ORDER BY r.at DESC, r.rowid DESC LIMIT 1)
+  LEFT JOIN diff_facts df ON df.repo = l.repo AND df.number = l.number AND df.head_oid = l.head_oid
   WHERE i.kind = 'pr' AND (i.state = 'OPEN' OR (i.state = 'MERGED' AND l.verdict IN ('take', 'take-fix'))
     OR EXISTS (SELECT 1 FROM merges mm WHERE mm.repo = i.repo AND mm.number = i.number AND mm.outcome = 'merged'))`;
-
-const sensitiveMemo = new Map<string, { reasons: string[]; lines: number; pending: boolean; lastRead: number | null }>();
-/** A file's identity for the memo: modification time and size, without reading it. */
-const stamp = (f: string): string => { try { const st = statSync(f); return `${st.mtimeMs}/${st.size}`; } catch { return "-"; } };
-/**
- * The sensitive-content reasons and the changed-line count of the diff cached for this head; null when it is not cached (a
- * review or pre-merge review caches it). The count is the rule's size fact: it is of this head, not of the mirror's row.
- * `pending`: the diff waits for what the rule reads beside it (whole files, workflow steps); its reasons are then the
- * conservative ones, holding the PR for whatever could not be read, until a re-read settles them.
- */
-function diffFactsAt(repo: string, number: number, head: string): { reasons: string[]; lines: number; pending: boolean; lastRead: number | null } | null {
-  const file = join(diffCacheDir(), repo, `${number}-${head}.diff`);
-  const key = `${repo}#${number}@${head}:${stamp(file)}:${stamp(`${file}.base`)}:${stamp(`${file}.files.json`)}:${stamp(`${file}.reread`)}`;
-  const hit = sensitiveMemo.get(key);
-  if (hit) return hit;
-  if (!existsSync(file)) return null;
-  const text = readFileSync(file, "utf8");
-  const extras = cachedDiffExtras(repo, number, head), rereads = diffRereads(repo, number, head);
-  const out = {
-    reasons: sensitiveReasons(text, ownerOf(repo), extras ?? {}), lines: splitDiff(text).reduce((n, f) => n + f.lines, 0),
-    pending: extrasPending(text, extras, rereads.count), lastRead: rereads.at,
-  };
-  sensitiveMemo.set(key, out);
-  return out;
-}
 
 /** The statements named by the given stored `conflicts` values (JSON [{id, reason}]), one entry per id with the first reason; unknown ids and unreadable values count for nothing. */
 function statementConflicts(find: { get(id: number): unknown }, stored: unknown[]): PrFacts["statementConflicts"] {
@@ -400,7 +377,8 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     base.decision.hold = holdQuestionOf(ref, holdDecisionId(r.repo, r.number, r.r_head));
     if (r.state === "OPEN" && head && head !== r.r_head && (ourFixupHead.has(`${ref}@${head}`) || ourSameDiffMerge.has(`${ref}@${head}`)) && carriedReview(db, { repo: r.repo, number: r.number, head_oid: head }, stale)) base.carriable = true;
     if (r.state === "OPEN" && (chain.length > 1 || (!!head && pushedHere.has(`${ref}@${head}`)))) base.inFlight = true;
-    const diffFacts = diffFactsAt(r.repo, r.number, r.r_head);
+    // The facts of the review head's cached diff (src/review/diff.ts writes them with the cache); null when it is not cached.
+    const diffFacts = r.d_lines === null ? null : { reasons: parseList(r.d_reasons) as string[], lines: r.d_lines, pending: r.d_pending === 1, lastRead: r.d_last_read };
     // While the extras are pending the reasons are the conservative ones, and the wait itself keeps the PR off the rule.
     base.sensitive = diffFacts ? (diffFacts.pending ? [...diffFacts.reasons, EXTRAS_PENDING_REASON] : diffFacts.reasons) : null;
     if (diffFacts?.pending) base.diffPending = { lastRead: diffFacts.lastRead, paceAt: paceAt ??= rereadPaceAt(now) };

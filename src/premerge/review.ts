@@ -111,7 +111,7 @@ export async function runPremerge(db: DatabaseSync, params: PremergeParams, log:
         return;
       }
       const liveBase = (db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, e.number) as { base_ref: string | null } | undefined)?.base_ref;
-      const d = await rereadDiff(repo, e.number, head, deps.fetchDiff, liveBase, deps.now?.() ?? Date.now());
+      const d = await rereadDiff(db, repo, e.number, head, deps.fetchDiff, liveBase, deps.now?.() ?? Date.now());
       if (d.ok && d.base && liveBase !== undefined && d.base !== liveBase) recordLiveBase(db, repo, e.number, head, d.base, { by: "premerge", keepDiff: true });
       jobItem(db, repo, e.number, d.ok ? "diff read again for the merge rule" : `diff not read again: ${d.error}`, log);
       params.onHandled?.(++handled);

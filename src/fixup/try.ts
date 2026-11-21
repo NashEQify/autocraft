@@ -44,7 +44,7 @@ export async function runFixupTry(db: DatabaseSync, repo: string, number: number
   const scripts = await buildScriptsAt(git, head);
   const bad = files.find((f) => !fixupEditable(f, scripts));
   if (bad) throw new Error(`the fixes name ${bad}, which a fix-up may not edit`);
-  const diff = await cachedDiff(repo, number, head, d.fetchDiff);
+  const diff = await cachedDiff(db, repo, number, head, d.fetchDiff);
   if (!diff.ok) throw new Error(`no diff: ${diff.error}`);
   if (diff.text.length > DIFF_CAP) throw new Error(`the PR diff is over the ${DIFF_CAP} character limit`);
   const checkout = (await d.checkout?.(repo, number, head)) ?? undefined;
