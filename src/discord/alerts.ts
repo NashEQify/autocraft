@@ -158,7 +158,7 @@ export type AlertDeps = {
 
 export class DecisionAlerts {
   #d: AlertDeps;
-  #busy = false;
+  #running: Promise<void> | null = null;
   #again = false;
   #last = "";
   #lastSlow = "";
@@ -198,18 +198,21 @@ export class DecisionAlerts {
     signal.addEventListener("abort", () => clearInterval(t), { once: true });
   }
 
-  /** One pass: new decisions are sent, changed choices and answers are edited in. Passes never overlap; a request during a pass runs another after it. */
-  async sync(): Promise<void> {
-    if (this.#busy) { this.#again = true; return; }
-    this.#busy = true;
-    try {
-      do {
-        this.#again = false;
-        try { await this.#pass(); } catch (e) { this.#d.log(`discord: alert pass failed: ${(e as Error).message}`); }
-      } while (this.#again);
-    } finally {
-      this.#busy = false;
-    }
+  /** One pass: new decisions are sent, changed choices and answers are edited in. Passes never overlap; a request during a pass runs another after it, and its promise resolves when that one has finished. */
+  sync(): Promise<void> {
+    if (this.#running) { this.#again = true; return this.#running; }
+    const run = (async () => {
+      try {
+        do {
+          this.#again = false;
+          try { await this.#pass(); } catch (e) { this.#d.log(`discord: alert pass failed: ${(e as Error).message}`); }
+        } while (this.#again);
+      } finally {
+        this.#running = null;
+      }
+    })();
+    this.#running = run;
+    return run;
   }
 
   async #alerters(): Promise<Alerter[]> {
