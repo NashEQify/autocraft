@@ -37,7 +37,7 @@ import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
-import { resumedRun } from "../runner/resuming.ts";
+import { adoptableCallExpr, earlierRunCallExpr, resumedRun, resumingJobsExpr } from "../runner/resuming.ts";
 import type { Db, Dialect } from "../db/index.ts";
 import { ciEq as ciEqExpr, greatest, inList, least, ref, type Eb, type Ex } from "../db/kx.ts";
 import { ciEq, indexedBy } from "../db/portable.ts";
@@ -97,14 +97,6 @@ const COLS = ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_ve
 const rowOf = async (db: Db, id: number): Promise<Row | undefined> =>
   await db.get(db.k.selectFrom("main.remote_calls").select(COLS).where("id", "=", id).$narrowType<{ tier: Tier; state: Row["state"] }>());
 
-/** The jobs waiting in the queue to resume (src/runner/resuming.ts RESUMING_JOBS). */
-const resumingJobs = (db: Db) => db.k.selectFrom("main.jobs").select("id").where("state", "=", "queued").where("resumes", ">", 0);
-/** A remote_calls row of an earlier run of a resumed job that has not ended (src/runner/resuming.ts EARLIER_RUN_CALL), on `remote_calls`. */
-const earlierRunCall = (db: Db, eb: Eb): AliasableExpression<SqlBool> =>
-  eb.exists(db.k.selectFrom("main.jobs as j").select(eb.lit(1).as("one")).where("j.id", "=", ref<number>("remote_calls.job_id")).where("j.resumes", ">", 0)
-    .where((e) => e.or([e("j.state", "=", "queued"), e.and([e("j.state", "=", "running"),
-      e(ref<number>("remote_calls.since"), "<", e(e(e.fn<number>("julianday", [e.ref("j.started_at")]), "-", e.lit(2440587.5)), "*", e.lit(86400000)))])])));
-
 export type NewCall = {
   promptId: string; promptVersion: string; tier: Tier; effort: string; askedModel: string;
   bundle: Omit<TaskBundle, "callId">; items: ItemRef[]; level: number; maxAttempts: number;
@@ -140,7 +132,7 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
     const taken = [...adopted];
     const parent = (eb: Eb) => (c.parentId === undefined ? eb("parent_id", "is", null) : eb("parent_id", "=", c.parentId));
     const earlier = await db.get(db.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
-      .where("prompt_version", "=", c.promptVersion).where("bundle_hash", "=", hash).where(parent).where("state", "in", ["queued", "leased", "done"]).where("consumed_at", "is", null)
+      .where("prompt_version", "=", c.promptVersion).where("bundle_hash", "=", hash).where(parent).where((e) => adoptableCallExpr(e))
       .$if(taken.length > 0, (q) => q.where("id", "not in", taken)).orderBy("id").limit(1));
     if (earlier) {
       const id = Number(earlier.id);
@@ -207,7 +199,7 @@ export async function withdrawCall(db: Db, id: number, reason: string, states: (
  */
 export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): Promise<number> {
   const ids = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"])
-    .where((eb) => (jobId === undefined ? eb("job_id", "is not", null) : eb("job_id", "=", jobId))).where("job_id", "not in", resumingJobs(db)));
+    .where((eb) => (jobId === undefined ? eb("job_id", "is not", null) : eb("job_id", "=", jobId))).where("job_id", "not in", resumingJobsExpr(db)));
   return (await filterSeq(ids, async (r) => await withdrawCall(db, Number(r.id), reason))).length;
 }
 
@@ -279,7 +271,7 @@ export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: numb
   }
   // The calls of a resumed job's earlier runs have no caller until the resumed run adopts them; they end with the job (endJob).
   const gone = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"]).where("seen_at", "<", nowMs - CALLER_GONE_MS)
-    .$if(id !== undefined, (q) => q.where("id", "=", id!)).where((eb) => eb.not(earlierRunCall(db, eb))));
+    .$if(id !== undefined, (q) => q.where("id", "=", id!)).where((eb) => eb.not(earlierRunCallExpr(db, eb))));
   for (const r of gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
 }
 
@@ -316,7 +308,8 @@ export async function liveLease(db: Db, secret: string | undefined, nowMs: numbe
     await unlease(db, { id: Number(r.id), runId: r.run_id, hash }, "returned to the queue: the Task Runner that claimed it was removed or may no longer run tasks", nowMs);
     return null;
   }
-  return r ? { id: Number(r.id), jobId: r.job_id, runId: r.run_id, login: r.user_login!, promptId: r.prompt_id, items: JSON.parse(r.items) as ItemRef[], repo: r.repo, root: r.root } : null;
+  // A claim always records its login; a leased row without one has no one to act for.
+  return r && r.user_login !== null ? { id: Number(r.id), jobId: r.job_id, runId: r.run_id, login: r.user_login, promptId: r.prompt_id, items: JSON.parse(r.items) as ItemRef[], repo: r.repo, root: r.root } : null;
 }
 
 /**
@@ -862,8 +855,10 @@ const rootless = (v: unknown, root: string | null): unknown => (root && v !== un
 export async function bundleOf(db: Db, secret: string | undefined): Promise<TaskBundle | null> {
   const l = await liveLease(db, secret);
   if (!l) return null;
-  const r = (await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "harness"]).where("id", "=", l.id).$narrowType<{ harness: HarnessId | null }>()))!;
-  return { ...forHarness(JSON.parse(r.bundle) as Omit<TaskBundle, "callId">, r.harness!, l.root ?? ""), callId: l.id };
+  const r = await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "harness"]).where("id", "=", l.id).$narrowType<{ harness: HarnessId | null }>());
+  // A claim always records its harness.
+  if (!r || r.harness === null) return null;
+  return { ...forHarness(JSON.parse(r.bundle) as Omit<TaskBundle, "callId">, r.harness, l.root ?? ""), callId: l.id };
 }
 
 /** A plain one-line progress text from the helper: control characters removed, scrubbed, cut. */
