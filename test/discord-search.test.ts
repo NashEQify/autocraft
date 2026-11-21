@@ -77,6 +77,9 @@ const msg = (id: string, over: Record<string, unknown> = {}) => ({
   message_reference: { message_id: "q1" }, referenced_message: { content: QUESTION }, ...over,
 });
 
+const emb = async (repo: string, number: number, vec: Uint8Array, at: string) =>
+  await db.run(db.k.insertInto("item_embeddings").values({ repo, number, model: "fake", hash: "h", vec, at }));
+
 before(async () => {
   await db.run(db.k.insertInto("tracked_repos").values([{ name: "photocraft" }, { name: "secret" }]).onConflict((oc) => oc.doNothing()));
   await db.run(db.k.insertInto("repos").values([{ name: "photocraft", owner: "storytold", visibility: "public" }, { name: "secret", owner: "storytold", visibility: "private" }])
@@ -86,7 +89,6 @@ before(async () => {
     { channel_id: "c2", guild_id: "g1", guild_name: "G", name: "off", watched: 0, default_repo: null },
   ]));
   const recent = new Date(Date.now() - 5 * 86_400_000).toISOString();
-  const emb = (repo: string, number: number, vec: Uint8Array, at: string) => db.run(db.k.insertInto("item_embeddings").values({ repo, number, model: "fake", hash: "h", vec, at }));
   const rows: [string, number, string, string, string | null, string | null, string][] = [
     ["photocraft", 1, "issue", "OPEN", null, null, "Export to WebP ignores the quality setting"],
     ["photocraft", 2, "issue", "OPEN", null, null, "Dark mode for the layers panel"],

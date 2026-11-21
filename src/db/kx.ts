@@ -13,8 +13,8 @@
  * - `.orderBy("x", (o) => o.asc().nullsFirst())`, `eb("a", "is distinct from", b)`, `eb.and/or/not`, `$if`
  * - `eb.fn.count/sum/max/min/coalesce`, `eb.case()`, `eb.exists(...)`, `with(...)`, `union(...)`, `returning(...)`
  */
-import type { AliasedRawBuilder, Expression, ExpressionBuilder, RawBuilder, SqlBool } from "kysely";
-import type { Dialect, Param } from "./index.ts";
+import type { AliasedRawBuilder, Expression, ExpressionBuilder, InsertObject, RawBuilder, SqlBool } from "kysely";
+import type { Db, Dialect, Param } from "./index.ts";
 import { nowParam, pgPath, quote, rowidOf } from "./portable.ts";
 import { fts5Query, tsQueryText, type Search } from "./search.ts";
 import { sql } from "./sql.ts";
@@ -254,6 +254,22 @@ export function cols<T extends keyof DB & string, A extends string | undefined =
  */
 export function excluded<C extends string>(cols: readonly C[]): (eb: ExpressionBuilder<any, any>) => Record<C, Expression<any>> {
   return (eb) => Object.fromEntries(cols.map((c) => [c, eb.ref(`excluded.${c}`) as Expression<any>]) as [C, Expression<any>][]) as Record<C, Expression<any>>;
+}
+
+/**
+ * INSERT OR REPLACE of one row, for a table whose readers follow rowid changes: the row ends up with a rowid above every
+ * other. SQLite runs the statement itself (REPLACE allocates the new rowid before it deletes the old row, so even the row
+ * that held the highest rowid gets a higher one). Postgres deletes the row by `key` and inserts it again; its identity
+ * rowid only increases. Postgres runs two statements: call it inside `db.write`.
+ */
+export async function replaceRow<T extends keyof DB & string>(db: Db, table: T, key: readonly string[], row: InsertObject<DB, T>): Promise<void> {
+  const k = db.k as any;
+  if (db.dialect !== "postgres") {
+    await db.run(k.insertInto(table).orReplace().values(row));
+    return;
+  }
+  await db.run(k.deleteFrom(table).where((eb: ExpressionBuilder<any, any>) => eb.and(key.map((c) => eb(c, "=", (row as Record<string, unknown>)[c])))));
+  await db.run(k.insertInto(table).values(row));
 }
 
 // ---- full-text search -----------------------------------------------------------------------------------------------

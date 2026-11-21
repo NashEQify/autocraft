@@ -39,22 +39,25 @@ export function textRefs(title: string | null, body: string | null): string {
 const NO_REFS = JSON.stringify([[], []]);
 
 // Open PRs that can hold an issue. The text is read only where text_refs is missing (a writer other than sync, or a row written before the column existed).
-const OPEN_PRS = `SELECT repo, number, author, closing_issues, text_refs,
-    CASE WHEN text_refs IS NULL THEN title END AS title, CASE WHEN text_refs IS NULL THEN body END AS body
-  FROM items WHERE kind = 'pr' AND state = 'OPEN' AND (text_refs IS NULL OR text_refs <> '${NO_REFS}' OR (closing_issues IS NOT NULL AND closing_issues <> '[]'))`;
+const openPrs = (db: Db) => db.k.selectFrom("items")
+  .select((eb) => ["repo", "number", "author", "closing_issues", "text_refs",
+    eb.case().when("text_refs", "is", null).then(eb.ref("title")).end().as("title"),
+    eb.case().when("text_refs", "is", null).then(eb.ref("body")).end().as("body")])
+  .where("kind", "=", "pr").where("state", "=", "OPEN")
+  .where((eb) => eb.or([eb("text_refs", "is", null), eb("text_refs", "<>", NO_REFS), eb.and([eb("closing_issues", "is not", null), eb("closing_issues", "<>", "[]")])]));
 
 /**
  * Issues an open PR in the repo closes or addresses (any author), and issues a person's open PR mentions by number
  * (a bot's PR, such as a dependency update, is not asked about its mentions). A PR that closes an issue wins over one that mentions it.
  */
 export async function issuesWithOpenPr(db: Db, repo: string): Promise<Map<number, OpenPr>> {
-  return openPrMap(await db.prepare(`${OPEN_PRS} AND repo = ? ORDER BY number DESC`).all(repo) as OpenPrRow[]);
+  return openPrMap(await db.all(openPrs(db).where("repo", "=", repo).orderBy("number", "desc")));
 }
 
 /** issuesWithOpenPr() for every repo, from one reading of the open PRs. */
 export async function issuesWithOpenPrAll(db: Db): Promise<(repo: string) => Map<number, OpenPr>> {
   const by = new Map<string, OpenPrRow[]>();
-  for (const p of await db.prepare(`${OPEN_PRS} ORDER BY repo, number DESC`).all() as (OpenPrRow & { repo: string })[])
+  for (const p of await db.all(openPrs(db).orderBy("repo").orderBy("number", "desc")))
     (by.get(p.repo) ?? by.set(p.repo, []).get(p.repo)!).push(p);
   return (repo) => openPrMap(by.get(repo) ?? []);
 }
