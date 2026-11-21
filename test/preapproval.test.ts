@@ -11,12 +11,10 @@ import { operatorCommentText } from "../src/fixup/template.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { excluded } from "../src/db/kx.ts";
 import { OPERATOR, T0, world, type World } from "./world-db.ts";
-import { excluded } from "../src/db/kx.ts";
 import { queueAdd, queueOrigins, queuePage } from "../src/dash/api/queue-page.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { CachedEntry } from "../src/core/plan-read.ts";
 import { refreshPlanCache } from "../src/core/plan-cache.ts";
-import { excluded } from "../src/db/kx.ts";
 
 let current: World | null = null;
 const fresh = async (): Promise<World> => (current = await (await world()).repo());
