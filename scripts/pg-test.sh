@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE="${AUTOCRAFT_TEST_PG_IMAGE:-postgres:18}"
-DEFAULT_TESTS=(test/pg-db.test.ts)
+DEFAULT_TESTS=(test/pg-db.test.ts test/itemtools-pg.test.ts)
 
 # Rootless Docker listens on a per-user socket; use it when DOCKER_HOST is unset and it exists.
 if [[ -z "${DOCKER_HOST:-}" && -S "/run/user/$(id -u)/docker.sock" ]]; then

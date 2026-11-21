@@ -54,7 +54,7 @@ export async function embedCommand(args: string[], onEmbedded?: (n: number) => v
   await db.close();
   console.log(`embedded ${r.embedded} items, removed ${r.pruned} stale vectors, ${(r.ms / 1000).toFixed(1)} s`);
   // The item snapshot carries the vectors; similar_items sees new ones after this.
-  if (r.embedded > 0) refreshSnapshot();
+  if (r.embedded > 0) await refreshSnapshot();
   return r.embedded;
 }
 

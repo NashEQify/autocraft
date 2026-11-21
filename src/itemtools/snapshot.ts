@@ -6,9 +6,10 @@
 // lists, tokens or host paths goes in. Only public repositories are copied.
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { dataDir } from "../db.ts";
-import { dbTarget, isPgUrl } from "../db/open.ts";
+import type { Db } from "../db/index.ts";
+import { connectDb, dbTarget, isPgUrl } from "../db/open.ts";
 import { envVar } from "../env.ts";
 
 export function snapshotDir(): string {
@@ -19,7 +20,7 @@ export const snapshotFile = (): string => join(snapshotDir(), "items.db");
 /** The SQLite database the snapshot is copied from: the configured one. */
 function snapshotSource(): string {
   const target = dbTarget();
-  if (isPgUrl(target)) throw new Error("the item snapshot is copied from a SQLite database; building it from Postgres (AUTOCRAFT_DB_URL) is not implemented");
+  if (isPgUrl(target)) throw new Error("the configured database is Postgres: build the snapshot with buildSnapshot(), which reads it through a Db handle");
   return target;
 }
 
@@ -188,6 +189,88 @@ export function writeSnapshot(src: string = snapshotSource(), dest: string = sna
   }
 }
 
+const INTEGER_COLUMNS = new Set(["number", "is_draft", "comments_count", "additions", "deletions", "changed_files"]);
+const PAGE = 2000;
+
+/** A Postgres bigint may arrive as a string or bigint; the snapshot stores integers. */
+const cell = (name: string, v: unknown): unknown => (INTEGER_COLUMNS.has(name) && v !== null && v !== undefined ? Number(v) : v ?? null);
+
+/**
+ * Builds the snapshot at `dest` from a Db handle (the Postgres app database). The same rows as the SQLite path, read in
+ * one snapshot and keyset-paged, are written into a new file in one transaction, renamed over `dest`. A refresh always
+ * rewrites the file, so `changed` counts the rows written.
+ */
+export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
+  mkdirSync(dirname(dest), { recursive: true });
+  recoverJournal(dest);
+  const target = `${dest}.${process.pid}.tmp`;
+  rmSync(target, { force: true });
+  const out = new DatabaseSync(target, { timeout: 30_000 });
+  try {
+    out.exec("PRAGMA journal_mode=DELETE");
+    out.exec(DDL);
+    out.prepare("INSERT INTO meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
+    out.exec("BEGIN");
+    const counts = { items: 0, comments: 0, embeddings: 0 };
+    await db.read(async () => {
+      const pub = "repo IN (SELECT name FROM repos WHERE visibility = 'public')";
+      const copy = async (table: string, columns: string[], key: string[], where: string, into: string, count: keyof typeof counts | null) => {
+        const ins = out.prepare(`INSERT INTO ${into} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`);
+        const after = key.length === 1 ? `${key[0]} > ?` : `(${key.join(", ")}) > (${key.map(() => "?").join(", ")})`;
+        const q = (first: boolean) => `SELECT ${columns.join(", ")} FROM ${table} WHERE ${where}${first ? "" : ` AND ${after}`} ORDER BY ${key.join(", ")} LIMIT ${pageSize}`;
+        let last: (string | number)[] | null = null;
+        for (;;) {
+          const rows: Record<string, unknown>[] = await db.prepare(q(!last)).all<Record<string, unknown>>(...(last ?? []));
+          for (const r of rows) ins.run(...(columns.map((c) => cell(c, r[c])) as SQLInputValue[]));
+          if (count) counts[count] += rows.length;
+          if (rows.length < pageSize) break;
+          const lr: Record<string, unknown> = rows[rows.length - 1]!;
+          last = key.map((k) => (INTEGER_COLUMNS.has(k) ? Number(lr[k]) : String(lr[k])));
+        }
+      };
+      await copy("items", ITEM_COLUMNS, ["repo", "number"], pub, "items", "items");
+      // A review still pending is the author's draft and is not public.
+      await copy("comments", COMMENT_COLUMNS, ["id"], `${pub} AND (review_state IS NULL OR review_state <> 'PENDING')`, "comments", null);
+      await copy("item_embeddings", ["repo", "number", "model", "at", "vec"], ["repo", "number"], pub, "item_embeddings", "embeddings");
+      const rows = await db.prepare(`SELECT kind, repo, number, items, options, answer, exceptions, answered_at FROM decisions
+        WHERE answer IS NOT NULL AND answered_at IS NOT NULL`).all<DecisionRow>();
+      const have = new Set((out.prepare("SELECT repo, number FROM items").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+      const ins = out.prepare("INSERT INTO decision_outcomes (repo, number, kind, answer, answer_label, answered_at) VALUES (?,?,?,?,?,?)");
+      for (const o of outcomes(rows.map((r) => ({ ...r, number: r.number === null ? null : Number(r.number) }))).filter((o) => have.has(`${o.repo}#${o.number}`))) {
+        ins.run(o.repo, o.number, o.kind, o.answer, o.label, o.at);
+      }
+    });
+    out.prepare("INSERT OR REPLACE INTO meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
+    const n = (t: string) => Number((out.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);
+    const result = { items: n("items"), comments: n("comments") };
+    out.exec("COMMIT");
+    out.close();
+    dropJournal(dest);
+    renameSync(target, dest);
+    return { ...result, bytes: statSync(dest).size, rebuilt: true, changed: { items: result.items, comments: result.comments, embeddings: counts.embeddings } };
+  } catch (e) {
+    try { out.close(); } catch { /* already closed */ }
+    rmSync(target, { force: true });
+    throw e;
+  }
+}
+
+/**
+ * Updates the snapshot from the configured database: a SQLite file by the incremental ATTACH copy, Postgres through a
+ * Db handle (`db` if given and Postgres, else a connection opened and closed here).
+ */
+export async function buildSnapshot(db?: Db, dest: string = snapshotFile()): Promise<SnapshotStats> {
+  if (db?.dialect === "postgres") return writeSnapshotFromDb(db, dest);
+  const target = dbTarget();
+  if (!isPgUrl(target)) return writeSnapshot(target, dest);
+  const own = await connectDb(target, { role: "cli", migrate: false });
+  try {
+    return await writeSnapshotFromDb(own, dest);
+  } finally {
+    await own.close();
+  }
+}
+
 /**
  * A writer killed mid-transaction leaves `<file>-journal`. Readers cannot open
  * the file until a read-write open has rolled it back, and a journal left next
@@ -225,9 +308,9 @@ function hasVersion(file: string): boolean {
 }
 
 /** Rebuilds the snapshot after a sync that changed something; a failure is logged, never thrown into the sync. */
-export function refreshSnapshot(log: (line: string) => void = console.log): void {
+export async function refreshSnapshot(log: (line: string) => void = console.log, db?: Db): Promise<void> {
   try {
-    const r = writeSnapshot();
+    const r = await buildSnapshot(db);
     log(`item snapshot${r.rebuilt ? " (rebuilt)" : ""}: ${r.items} items, ${r.comments} comments, changed ${r.changed.items}/${r.changed.comments}/${r.changed.embeddings} (items/comments/embeddings), ${Math.round(r.bytes / 1e6)} MB`);
   } catch (e) {
     log(`item snapshot failed: ${String((e as Error).message).slice(0, 200)}`);
