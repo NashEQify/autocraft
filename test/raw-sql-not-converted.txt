@@ -247,7 +247,6 @@ src/discord/search.ts
 src/discord/signals.ts
 
 
-src/downloads/poll.ts
 
 src/downloads/report.ts
 

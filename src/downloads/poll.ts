@@ -8,6 +8,7 @@ import { ownerOf } from "../owners.ts";
 import { appNameOf, classifyAsset } from "./classify.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 const run = promisify(execFile);
 
@@ -40,10 +41,11 @@ export const ghFetcher = (db?: Db): Fetcher => async (owner, repo) => {
   return { stars: Number(info.stdout.trim()) || 0, releases };
 };
 
+const addDelta = (db: Db, assetId: number, t: string, span: "h" | "d", delta: number) => db.run(db.k.insertInto("download_deltas").values({ asset_id: assetId, t, span, delta })
+  .onConflict((oc) => oc.columns(["asset_id", "t", "span"]).doUpdateSet((eb) => ({ delta: eb("download_deltas.delta", "+", eb.ref("excluded.delta")) }))));
+
 const hourOf = (ms: number): string => new Date(ms - (ms % 3600_000)).toISOString().replace(/\.\d+Z$/, "Z");
 const dayOf = (ms: number): string => new Date(ms - (ms % 86400_000)).toISOString().replace(/\.\d+Z$/, "Z");
-
-type AssetRow = { asset_id: number; downloads: number; repo: string };
 
 /**
  * Stores one repo's reading. A repo never read before, or last read more than STALE_MS ago, gets a baseline: counts are kept,
@@ -52,16 +54,11 @@ type AssetRow = { asset_id: number; downloads: number; repo: string };
 export async function recordRepo(db: Db, repo: string, data: RepoReleases, now: number): Promise<void> {
   const at = new Date(now).toISOString();
   const bucket = hourOf(now);
-  const known = new Map((await db.prepare("SELECT asset_id, downloads, repo FROM release_assets").all() as AssetRow[]).map((r) => [r.asset_id, r]));
+  const known = new Map((await db.all(db.k.selectFrom("release_assets").select(["asset_id", "downloads", "repo"]))).map((r) => [r.asset_id, r]));
   const mine = [...known.values()].filter((r) => r.repo === repo);
-  const lastRead = (await db.prepare("SELECT MAX(updated_at) AS t FROM release_assets WHERE repo = ?").get(repo) as { t: string | null }).t;
+  const lastRead = (await db.get(db.k.selectFrom("release_assets").select((eb) => eb.fn.max<string | null>("updated_at").as("t")).where("repo", "=", repo)))!.t;
   const baseline = mine.length === 0 || (lastRead !== null && now - Date.parse(lastRead) > STALE_MS);
   const live = data.releases.filter((r) => !r.draft);
-  const upsert = db.prepare(`INSERT INTO release_assets (asset_id, repo, release_id, tag, release_name, published_at, prerelease, name, platform, processor, format, downloads, first_seen, updated_at, gone_at)
-    VALUES (:id, :repo, :release, :tag, :rname, :published, :pre, :name, :platform, :processor, :format, :downloads, :at, :at, NULL)
-    ON CONFLICT (asset_id) DO UPDATE SET repo = excluded.repo, release_id = excluded.release_id, tag = excluded.tag, release_name = excluded.release_name, published_at = excluded.published_at, prerelease = excluded.prerelease,
-      name = excluded.name, platform = excluded.platform, processor = excluded.processor, format = excluded.format, downloads = excluded.downloads, updated_at = excluded.updated_at, gone_at = NULL`);
-  const addDelta = db.prepare("INSERT INTO download_deltas (asset_id, t, span, delta) VALUES (?, ?, 'h', ?) ON CONFLICT (asset_id, t, span) DO UPDATE SET delta = delta + excluded.delta");
   const seen = new Set<number>();
   await db.write(async () => {
     for (const rel of live) {
@@ -70,26 +67,29 @@ export async function recordRepo(db: Db, repo: string, data: RepoReleases, now: 
         const c = classifyAsset(a.name);
         const prev = known.get(a.id)?.downloads;
         const count = a.download_count ?? 0;
-        await upsert.run({
-          id: a.id, repo, release: rel.id, tag: rel.tag_name, rname: rel.name, published: rel.published_at ?? rel.created_at ?? null, pre: rel.prerelease ? 1 : 0,
-          name: a.name, platform: c?.platform ?? null, processor: c?.processor ?? null, format: c?.format ?? null, downloads: count, at,
-        });
+        await db.run(db.k.insertInto("release_assets")
+          .values({
+            asset_id: a.id, repo, release_id: rel.id, tag: rel.tag_name, release_name: rel.name, published_at: rel.published_at ?? rel.created_at ?? null, prerelease: rel.prerelease ? 1 : 0,
+            name: a.name, platform: c?.platform ?? null, processor: c?.processor ?? null, format: c?.format ?? null, downloads: count, first_seen: at, updated_at: at, gone_at: null,
+          })
+          .onConflict((oc) => oc.column("asset_id").doUpdateSet((eb) => ({ ...excluded(["repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "updated_at"])(eb), gone_at: null }))));
         const delta = baseline ? 0 : prev === undefined ? count : count - prev;
-        if (delta > 0 && c) await addDelta.run(a.id, bucket, delta);
+        if (delta > 0 && c) await addDelta(db, a.id, bucket, "h", delta);
       }
     }
-    const gone = db.prepare("UPDATE release_assets SET gone_at = ? WHERE asset_id = ? AND gone_at IS NULL");
-    for (const r of mine) if (!seen.has(r.asset_id)) await gone.run(at, r.asset_id);
+    for (const r of mine) if (!seen.has(r.asset_id)) await db.run(db.k.updateTable("release_assets").set({ gone_at: at }).where("asset_id", "=", r.asset_id).where("gone_at", "is", null));
     const counted = live.filter((r) => r.assets.some((a) => classifyAsset(a.name)));
     if (counted.length) {
       const latest = [...counted].sort((a, b) => Date.parse(b.published_at ?? b.created_at ?? "") - Date.parse(a.published_at ?? a.created_at ?? ""))[0]!;
-      await db.prepare(`INSERT INTO release_apps (repo, name, stars, updated_at) VALUES (?, ?, ?, ?)
-        ON CONFLICT (repo) DO UPDATE SET name = excluded.name, stars = excluded.stars, updated_at = excluded.updated_at`).run(repo, appNameOf(latest.name, repo), data.stars, at);
-      const last = await db.prepare("SELECT stars FROM star_samples WHERE repo = ? ORDER BY t DESC LIMIT 1").get(repo) as { stars: number } | undefined;
-      if (!last || last.stars !== data.stars) await db.prepare("INSERT OR REPLACE INTO star_samples (repo, t, stars) VALUES (?, ?, ?)").run(repo, bucket, data.stars);
+      await db.run(db.k.insertInto("release_apps").values({ repo, name: appNameOf(latest.name, repo), stars: data.stars, updated_at: at })
+        .onConflict((oc) => oc.column("repo").doUpdateSet(excluded(["name", "stars", "updated_at"]))));
+      const last = await db.get(db.k.selectFrom("star_samples").select("stars").where("repo", "=", repo).orderBy("t", "desc").limit(1));
+      if (!last || last.stars !== data.stars) await db.run(db.k.insertInto("star_samples").values({ repo, t: bucket, stars: data.stars })
+        .onConflict((oc) => oc.columns(["repo", "t"]).doUpdateSet(excluded(["stars"]))));
     } else {
       // Releases that vanished keep their history, so the app stays while any counted file is stored.
-      await db.prepare("DELETE FROM release_apps WHERE repo = ? AND NOT EXISTS (SELECT 1 FROM release_assets WHERE repo = ? AND format IS NOT NULL)").run(repo, repo);
+      await db.run(db.k.deleteFrom("release_apps").where("repo", "=", repo).where((eb) => eb.not(eb.exists(
+        eb.selectFrom("release_assets").select(eb.lit(1).as("one")).where("repo", "=", repo).where("format", "is not", null)))));
     }
   });
 }
@@ -97,12 +97,11 @@ export async function recordRepo(db: Db, repo: string, data: RepoReleases, now: 
 /** Folds hour buckets older than 48 hours into day buckets. */
 export async function foldDeltas(db: Db, now: number): Promise<void> {
   const cutoff = hourOf(now - HOUR_KEEP_MS);
-  const old = await db.prepare("SELECT asset_id, t, delta FROM download_deltas WHERE span = 'h' AND t < ?").all(cutoff) as { asset_id: number; t: string; delta: number }[];
+  const old = await db.all(db.k.selectFrom("download_deltas").select(["asset_id", "t", "delta"]).where("span", "=", "h").where("t", "<", cutoff));
   if (!old.length) return;
   await db.write(async () => {
-    const add = db.prepare("INSERT INTO download_deltas (asset_id, t, span, delta) VALUES (?, ?, 'd', ?) ON CONFLICT (asset_id, t, span) DO UPDATE SET delta = delta + excluded.delta");
-    for (const r of old) await add.run(r.asset_id, dayOf(Date.parse(r.t)), r.delta);
-    await db.prepare("DELETE FROM download_deltas WHERE span = 'h' AND t < ?").run(cutoff);
+    for (const r of old) await addDelta(db, r.asset_id, dayOf(Date.parse(r.t)), "d", r.delta);
+    await db.run(db.k.deleteFrom("download_deltas").where("span", "=", "h").where("t", "<", cutoff));
   });
 }
 
@@ -129,9 +128,9 @@ export async function pollReleases(db: Db, fetcher: Fetcher = ghFetcher(db), now
     }
   };
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, order.length) }, worker));
-  const put = db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
-  await put.run(KEY_OFFSET, String(repos.length ? (offset + next) % repos.length : 0));
-  await put.run(KEY_POLLED_AT, new Date(now).toISOString());
+  const put = (key: string, value: string) => db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+  await put(KEY_OFFSET, String(repos.length ? (offset + next) % repos.length : 0));
+  await put(KEY_POLLED_AT, new Date(now).toISOString());
   try {
     await foldDeltas(db, now);
   } catch (e) {
