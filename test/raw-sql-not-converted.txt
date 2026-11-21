@@ -309,9 +309,7 @@ src/merge/verify-override.ts
 src/mirror.ts
 
 
-src/operator-actions.ts
 
-src/optional-checks.ts
 
 src/outside.ts
 
