@@ -44,8 +44,7 @@ import { envVar } from "../env.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
 import { findSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import type { Param } from "../db/index.ts";
-import { upsert } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export function loadRefs(file: string): { repo: string; number: number }[] {
   const out: { repo: string; number: number }[] = [];
@@ -59,10 +58,10 @@ export function loadRefs(file: string): { repo: string; number: number }[] {
 }
 
 export async function loadItems(db: Db, refs: { repo: string; number: number }[]): Promise<Item[]> {
-  const q = db.prepare(`SELECT repo, number, kind, title, body, additions + deletions AS lines_changed,
-    changed_files AS files_changed, author_association FROM items WHERE repo = ? AND number = ?`);
   return await mapSeq(refs, async (r) => {
-    const row = await q.get(r.repo, r.number) as Item | undefined;
+    const row = await db.get(db.k.selectFrom("items").select((eb) => ["repo", "number", "kind", eb.fn.coalesce("title", eb.val("")).as("title"), eb.fn.coalesce("body", eb.val("")).as("body"),
+      eb("additions", "+", eb.ref("deletions")).as("lines_changed"), "changed_files as files_changed", "author_association"])
+      .$narrowType<{ kind: "pr" | "issue" }>().where("repo", "=", r.repo).where("number", "=", r.number));
     if (!row) throw new Error(`${refOf(r)} is not in the database`);
     return row;
   });
@@ -237,23 +236,25 @@ export async function saveVerdict(db: Db, classifier: string, runId: string, v: 
  * Stores one verdict (repo, number, classifier, run_id, at, type_label, flags, reason, probs), replacing the row for the
  * same key with a new one: a new rowid, which src/classify/settled.ts reads as "changed since".
  */
-export async function replaceClassification(db: Db, row: Param[]): Promise<void> {
+export async function replaceClassification(db: Db, row: [string, number, string, string, string, string | null, string, string | null, string | null]): Promise<void> {
+  const [repo, number, classifier, run_id, at, type_label, flags, reason, probs] = row;
   await db.write(async () => {
-    await db.prepare("DELETE FROM main.classifications WHERE repo = ? AND number = ? AND classifier = ? AND run_id = ?").run(row[0]!, row[1]!, row[2]!, row[3]!);
-    await db.prepare(`INSERT INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, reason, probs)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(...row);
+    await db.run(db.k.deleteFrom("main.classifications").where("repo", "=", repo).where("number", "=", number).where("classifier", "=", classifier).where("run_id", "=", run_id));
+    await db.run(db.k.insertInto("main.classifications").values({ repo, number, classifier, run_id, at, type_label, flags, reason, probs }));
   });
 }
 
-const USAGE_COLS = ["run_id", "agent", "stage", "model", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"];
+const USAGE_COLS = ["stage", "model", "items", "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "started_at", "ended_at", "cost_usd"] as const;
 
 export async function saveUsage(db: Db, runId: string, agent: string, stage: string, model: string, items: number, u: Usage, start: string, end: string): Promise<void> {
-  await db.prepare(upsert(db, { table: "main.token_usage", cols: USAGE_COLS, key: ["run_id", "agent"] }))
-    .run(runId, agent, stage, model, items, u.input, u.output, u.cacheRead, u.cacheWrite, start, end, u.cost);
+  await db.run(db.k.insertInto("main.token_usage")
+    .values({ run_id: runId, agent, stage, model, items, input_tokens: u.input, output_tokens: u.output, cache_read_tokens: u.cacheRead, cache_write_tokens: u.cacheWrite, started_at: start, ended_at: end, cost_usd: u.cost })
+    .onConflict((oc) => oc.columns(["run_id", "agent"]).doUpdateSet(kx.excluded(USAGE_COLS))));
   // Subagent models get their own rows (same run and stage), so the Cost page splits by model and its totals stay whole.
   for (const e of u.extra ?? []) {
-    await db.prepare(upsert(db, { table: "main.token_usage", cols: USAGE_COLS, key: ["run_id", "agent"] }))
-      .run(runId, `${agent}+${e.model}`, stage, e.model, 0, e.usage.input, e.usage.output, e.usage.cacheRead, e.usage.cacheWrite, start, end, e.usage.cost);
+    await db.run(db.k.insertInto("main.token_usage")
+      .values({ run_id: runId, agent: `${agent}+${e.model}`, stage, model: e.model, items: 0, input_tokens: e.usage.input, output_tokens: e.usage.output, cache_read_tokens: e.usage.cacheRead, cache_write_tokens: e.usage.cacheWrite, started_at: start, ended_at: end, cost_usd: e.usage.cost })
+      .onConflict((oc) => oc.columns(["run_id", "agent"]).doUpdateSet(kx.excluded(USAGE_COLS))));
   }
 }
 
@@ -370,7 +371,7 @@ export type AskOptions = { check?: CheckTool; lint?: Lint; onProgress?: (line: s
 async function docsOf(db: Db, checkout: string): Promise<string | undefined> {
   const repo = repoOfCheckout(checkout);
   if (!repo) return undefined;
-  const branch = (await db.prepare("SELECT default_branch FROM main.repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
+  const branch = (await db.get(db.k.selectFrom("main.repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
   return (await repoDocsFor(repo, branch)) ?? undefined;
 }
 
@@ -748,7 +749,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
       }
       const turns = sandboxed && o.turns !== null ? o.turns : undefined;
       if (o.runId !== null) await finishRun(db, o.runId, { state: "done", tokens, costUsd: o.costUsd, summary: (after !== null ? "fix turn answered" : turns === undefined ? replySummary(stored, items.length) : `answered in ${turns} turns`) + (after === null && checkTool && checkTool.calls ? `, ${checkTool.calls} checks (${Math.round(checkTool.usedMs / 1000)} s)` : ""), output: stored });
-      const ran = o.runId !== null ? (await db.prepare("SELECT reported_model FROM main.agent_runs WHERE id = ?").get(o.runId) as { reported_model: string | null } | undefined)?.reported_model ?? null : null;
+      const ran = o.runId !== null ? (await db.get(db.k.selectFrom("main.agent_runs").select("reported_model").where("id", "=", o.runId)))?.reported_model ?? null : null;
       return { reply: { text, usage, ...(turns !== undefined && { turns }), ...(ran && { model: ran }), ...(o.sessionId && { sessionId: o.sessionId }) }, callId };
     };
 

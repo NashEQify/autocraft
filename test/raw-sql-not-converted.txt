@@ -59,19 +59,13 @@ src/build/tasks.ts
 
 src/build/worker-update.ts
 
-src/checktool/index.ts
 
 src/cifix/index.ts
 
-src/cifix/select.ts
 
-src/classify/index.ts
 
-src/classify/referee.ts
 
-src/classify/report.ts
 
-src/classify/run.ts
 
 
 src/conversations/act.ts
