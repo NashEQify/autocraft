@@ -139,7 +139,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   const comments = await db.all(db.k.selectFrom("comments").select(["id", "author", "created_at as at", "body", "kind", "review_state as reviewState"])
     .where("repo", "=", repo).where("number", "=", n)
     .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "=", "")])))
-    .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] }>());
+    .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] | null }>());
   const decisionIds = (await db.all(db.k.selectFrom("decisions").select("id").where((eb) => eb.or([
     eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
     eb.and([eb("number", "is", null), eb.exists(
@@ -165,7 +165,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     // Stage notes quote review reasons, verification summaries and fix-up reasons: staff only.
     stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: canSeeInternals(req) ? s.note : null })),
     discord: await discord.discordOf(db, repo, n),
-    comments: comments.map((x) => ({ ...x, at: x.at ?? "", author: x.author ?? "", body: x.body ?? "" })),
+    comments: comments.map((x) => ({ ...x, kind: x.kind ?? "comment", at: x.at ?? "", author: x.author ?? "", body: x.body ?? "" })),
     decisionIds, settled: unflagged(await settledOf(db, repo, n), await isQuiet(db, repo, n), !veil) as Item["settled"], priority: await priorityOf(db, repo, n),
     ...(it.kind === "pr" ? await prWork(db, repo, n, canSeeInternals(req)) : { verification: null, fixups: [], prBuild: null }),
     // The reviewer's reasons quote the patch, so viewers get the verdict only.
@@ -248,7 +248,7 @@ async function conflictsNamed(db: Db, repo: string, n: number, head: string, int
 async function reviewsOf(db: Db, repo: string, n: number, internals: boolean, hidden: HiddenRepos): Promise<ItemReviews | null> {
   // The view holds the rows of opus_reviews that have a verdict; its head, time and mode columns are NOT NULL there.
   const o = await db.get(db.k.selectFrom("final_reviews").select(["head_oid", "at", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks"])
-    .where("repo", "=", repo).where("number", "=", n).orderBy("at", (x) => x.desc().nullsLast()).orderBy("head_oid", (x) => x.desc().nullsLast()).limit(1)
+    .where("repo", "=", repo).where("number", "=", n).orderBy("at", "desc").orderBy("head_oid", "desc").limit(1)
     .$narrowType<{ head_oid: string; at: string; mode: "full" | "delta"; verdict: ReviewSide["verdict"] }>());
   if (!o) return null;
   const list = <T>(s: string | null): T[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? (v as T[]) : []; } catch { return []; } };
