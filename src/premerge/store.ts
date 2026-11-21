@@ -7,7 +7,9 @@ export { PREMERGE_MAX_TRIES };
 export type { PremergeFinding } from "./types.ts";
 import type { PremergeFinding } from "./types.ts";
 import type { Claim, StatementConflict } from "../review/opus-parse.ts";
+import type { Expression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import { cols, excluded, type Eb } from "../db/kx.ts";
 
 export type PremergeRow = {
   repo: string; number: number; head_oid: string;
@@ -50,42 +52,45 @@ export type PremergeSave = {
 
 /** Stores a review (clears the error) or counts a failed try. */
 export async function savePremerge(db: Db, s: PremergeSave): Promise<void> {
-  const args = [s.repo, s.number, s.head, s.at, s.runId ?? null, s.model ?? null] as const;
+  const key = { repo: s.repo, number: s.number, head_oid: s.head };
   if (s.findings) {
-    await db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, findings, searched, conflicts, unsure, claims, base_ref, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 0)
-      ON CONFLICT (repo, number, head_oid) DO UPDATE SET at = excluded.at, run_id = excluded.run_id, model = excluded.model,
-        findings = excluded.findings, searched = excluded.searched, conflicts = excluded.conflicts, unsure = excluded.unsure, claims = excluded.claims, base_ref = excluded.base_ref, error = NULL`).run(...args, JSON.stringify(s.findings), s.searched ?? null, s.conflicts?.length ? JSON.stringify(s.conflicts) : null, s.unsure ? 1 : 0, s.claims?.length ? JSON.stringify(s.claims) : null, s.baseRef ?? null);
+    await db.run(db.k.insertInto("premerge_reviews")
+      .values({ ...key, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, findings: JSON.stringify(s.findings), searched: s.searched ?? null, conflicts: s.conflicts?.length ? JSON.stringify(s.conflicts) : null, unsure: s.unsure ? 1 : 0, claims: s.claims?.length ? JSON.stringify(s.claims) : null, base_ref: s.baseRef ?? null, error: null, tries: 0 })
+      .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet((eb) => ({ ...excluded(["at", "run_id", "model", "findings", "searched", "conflicts", "unsure", "claims", "base_ref"])(eb), error: null }))));
     return;
   }
-  await db.prepare(`INSERT INTO premerge_reviews (repo, number, head_oid, at, run_id, model, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number, head_oid) DO UPDATE SET at = excluded.at, run_id = excluded.run_id, model = excluded.model,
-      error = excluded.error, tries = CASE WHEN ? THEN excluded.tries ELSE tries + 1 END`).run(...args, s.error ?? "failed", s.final ? PREMERGE_MAX_TRIES : 1, s.final ? 1 : 0);
+  await db.run(db.k.insertInto("premerge_reviews")
+    .values({ ...key, at: s.at, run_id: s.runId ?? null, model: s.model ?? null, error: s.error ?? "failed", tries: s.final ? PREMERGE_MAX_TRIES : 1 })
+    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet((eb) => ({
+      ...excluded(["at", "run_id", "model", "error"])(eb), tries: s.final ? eb.ref("excluded.tries") : eb("premerge_reviews.tries", "+", 1),
+    }))));
 }
 
 /** The pre-merge review of a head, when it read the diff against the base branch the head's Opus review read (a row or review that recorded none counts as matching). */
 export async function premergeAt(db: Db, repo: string, number: number, head: string): Promise<PremergeRow | null> {
-  return (await db.prepare(`${premergeSql("")} AND p.repo = ? AND p.number = ? AND p.head_oid = ?`).get(repo, number, head) as PremergeRow | undefined) ?? null;
+  return (await db.get(premergeQuery(db).select(cols("premerge_reviews", "p")).where("p.repo", "=", repo).where("p.number", "=", number).where("p.head_oid", "=", head))) ?? null;
 }
 
 /** The pre-merge reviews that read the diff against the base branch their head's Opus review read (see premergeAt). */
-const premergeSql = (extra: string): string => `SELECT p.*${extra} FROM premerge_reviews p
-    LEFT JOIN opus_reviews o ON o.repo = p.repo AND o.number = p.number AND o.head_oid = p.head_oid LEFT JOIN repos r ON r.name = p.repo
-    WHERE (p.base_ref IS NULL OR COALESCE(o.base_ref, r.default_branch) IS NULL OR p.base_ref = COALESCE(o.base_ref, r.default_branch))`;
+const premergeQuery = (db: Db) => db.k.selectFrom("premerge_reviews as p")
+  .leftJoin("opus_reviews as o", (j) => j.onRef("o.repo", "=", "p.repo").onRef("o.number", "=", "p.number").onRef("o.head_oid", "=", "p.head_oid"))
+  .leftJoin("repos as r", "r.name", "p.repo")
+  .where((eb) => eb.or([eb("p.base_ref", "is", null), eb(eb.fn.coalesce("o.base_ref", "r.default_branch"), "is", null), eb("p.base_ref", "=", eb.fn.coalesce("o.base_ref", "r.default_branch"))]));
 
-/** premergeAt() of every head, keyed by `repo#number@head`; `narrow` adds a condition on `p` with its named parameters. */
-export async function premergeRows(db: Db, narrow: { sql: string; p: Record<string, string> } = { sql: "", p: {} }): Promise<Map<string, PremergeRow>> {
+/** premergeAt() of every head, keyed by `repo#number@head`; `narrow` adds a condition on `p`. */
+export async function premergeRows(db: Db, narrow?: (eb: Eb) => Expression<SqlBool>): Promise<Map<string, PremergeRow>> {
   const out = new Map<string, PremergeRow>();
-  for (const row of await db.prepare(`${premergeSql(", p.repo || '#' || p.number || '@' || p.head_oid AS k")}${narrow.sql}`).all(narrow.p) as (PremergeRow & { k?: string })[]) {
-    const k = row.k!;
-    delete row.k;
-    out.set(k, row);
+  const q = premergeQuery(db).select((eb) => [...cols("premerge_reviews", "p"), eb(eb(eb(eb(eb.ref("p.repo"), "||", eb.val("#")), "||", eb.cast<string>("p.number", "text")), "||", eb.val("@")), "||", eb.ref("p.head_oid")).as("k")]);
+  for (const row of await db.all(narrow ? q.where(narrow) : q)) {
+    const { k, ...rest } = row;
+    out.set(k, rest);
   }
   return out;
 }
 
 /** The PR already had a pre-merge fix round (any fixups row with source premerge, pushed or not). */
 export async function premergeFixUsed(db: Db, repo: string, number: number): Promise<boolean> {
-  return !!await db.prepare("SELECT 1 FROM fixups WHERE repo = ? AND number = ? AND source = 'premerge' AND state NOT IN ('linting', 'superseded') LIMIT 1").get(repo, number);
+  return !!await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("source", "=", "premerge").where("state", "not in", ["linting", "superseded"]).limit(1));
 }
 
 /** premergeFixUsed() from the PR's fixups rows. */

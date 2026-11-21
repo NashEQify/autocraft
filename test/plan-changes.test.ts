@@ -29,29 +29,28 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   let seq = await changeCursor(db);
 
   // Item-keyed: the row's own item.
-  await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 7, 1, '{}', ?)").run(T);
+  await db.run(db.k.insertInto("item_rank").values({ repo: "app", number: 7, score: 1, breakdown: "{}", computed_at: T }));
   let c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#7"], false]);
   seq = c.cursor;
 
   // A bookkeeping column alone: nothing.
-  await db.prepare("UPDATE item_rank SET computed_at = '2026-01-02T00:00:00Z' WHERE repo = 'app' AND number = 7").run();
+  await db.run(db.k.updateTable("item_rank").set({ computed_at: "2026-01-02T00:00:00Z" }).where("repo", "=", "app").where("number", "=", 7));
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [[], false]);
   assert.deepEqual(c.cursor, seq);
 
   // A key move logs the old and the new item.
-  await db.prepare("UPDATE item_rank SET number = 8 WHERE repo = 'app' AND number = 7").run();
+  await db.run(db.k.updateTable("item_rank").set({ number: 8 }).where("repo", "=", "app").where("number", "=", 7));
   c = await since(seq);
   assert.deepEqual(c.refs, ["app#7", "app#8"]);
   seq = c.cursor;
 
   // Cross-item: a batch row reaches its integration PR and every member.
-  const batch = Number((await db.prepare(`INSERT INTO merge_batches (repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at)
-    VALUES ('app', 'integration-1', 'open', 'b', 'c', 50, ?, ?) RETURNING id`).get(T, T) as { id: number }).id);
-  await db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (?, 3, 'h3', 0), (?, 4, 'h4', 1)").run(batch, batch);
+  const batch = Number((await db.get(db.k.insertInto("merge_batches").values({ repo: "app", branch: "integration-1", state: "open", base_sha: "b", commit_sha: "c", pr_number: 50, created_at: T, updated_at: T }).returning("id")))!.id);
+  await db.run(db.k.insertInto("merge_batch_prs").values([{ batch_id: batch, number: 3, head_oid: "h3", position: 0 }, { batch_id: batch, number: 4, head_oid: "h4", position: 1 }]));
   seq = (await since(seq)).cursor;
-  await db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = ?").run(batch);
+  await db.run(db.k.updateTable("merge_batches").set({ state: "merged" }).where("id", "=", batch));
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#3", "app#4", "app#50"], false]);
   seq = c.cursor;
@@ -146,9 +145,9 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
     await w.pr(4);
     assert.equal((await pass()).kind, "full:marker");
     await w.review(4, { verdict: "hold" });
-    await w.db.prepare("INSERT INTO comments (id, repo, number, author, body, created_at) VALUES ('c1', 'app', 3, 'someone', 'still broken', ?)").run(T);
+    await w.db.run(w.db.k.insertInto("comments").values({ id: "c1", repo: "app", number: 3, author: "someone", body: "still broken", created_at: T }));
     assert.deepEqual(await pass(), { kind: "incremental", refs: 2 });
-    await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE repo = 'app' AND number = 2").run();
+    await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 2));
     await pass();
     await w.db.prepare("INSERT INTO settings (key, value) VALUES ('plan_shadow', 'on')").run();
     assert.deepEqual(await pass(), { kind: "incremental", refs: 0 });
@@ -164,23 +163,22 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
 test("a held PR is logged when its blocker closes; a bulk write logs nothing and takes one full mark; malformed rows and a lost marker row fail no write", async () => {
   const db = await connectDb(join(dir, "robust.db"));
   const since = async (cursor: ChangeCursor) => { const c = await changesSince(db, cursor); return { ...c, refs: [...c.refs].sort() }; };
-  const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', ?, 'pr', 'OPEN', 't', ?)");
-  for (const n of [1, 2, 3]) await item.run(n, T);
+  for (const n of [1, 2, 3]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "t", created_at: T }));
   await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "h1", at: T, mode: "full", verdict: "hold", blocked_by: '["app#2", 7, "app#2"]' }));
   let seq = await changeCursor(db);
-  await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
+  await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2));
   let c = await since(seq);
   assert.ok(c.full || c.refs.includes("app#1"), "the PR held for app#2 is decided again");
   seq = c.cursor;
 
   // A decision whose items are not a list of objects is still written and logs its own item.
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, asked_at, asked_by, question, options) VALUES ('d1', 'merge', 'app', 3, '[\"app#1\", 5]', ?, 'x', 'q', '[]')").run(T);
-  await db.prepare("UPDATE decisions SET items = '{\"repo\": \"app\"}' WHERE id = 'd1'").run();
+  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "merge", repo: "app", number: 3, items: '["app#1", 5]', asked_at: T, asked_by: "x", question: "q", options: "[]" }));
+  await db.run(db.k.updateTable("decisions").set({ items: '{"repo": "app"}' }).where("id", "=", "d1"));
   c = await since(seq);
   assert.ok(c.full || c.refs.includes("app#3"));
   seq = c.cursor;
 
-  await bulkWrites(db, "test", async () => { for (const n of [1, 3]) await db.prepare("UPDATE items SET embed_hash = ? WHERE number = ?").run(`e${n}`, n); });
+  await bulkWrites(db, "test", async () => { for (const n of [1, 3]) await db.run(db.k.updateTable("items").set({ embed_hash: `e${n}` }).where("number", "=", n)); });
   c = await since(seq);
   assert.equal(c.full, true);
   assert.deepEqual((await db.prepare("SELECT seq FROM item_changes").all() as { seq: number }[]).filter((r) => !seq.seen.has(r.seq)), []);

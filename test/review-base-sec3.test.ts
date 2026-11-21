@@ -40,7 +40,7 @@ test("a retarget makes the review stale like a push, and the re-review against t
 
 test("a Merge answer carried across a clean base merge ends when the review there asks for fixes", async () => {
   const w = (current = await (await (await (await (await world()).repo()).pr(30)).review(30, { verdict: "take" })).answer(30, "merge"));
-  await w.db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, state, attempt, created_at, own_diff) VALUES ('app', 30, 'sha30', 'sha30m', 'merged', 1, ?, 'same')").run(T0);
+  await w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number: 30, from_head: "sha30", to_head: "sha30m", state: "merged", attempt: 1, created_at: T0, own_diff: "same" }));
   await w.synced(30, "sha30m");
   await advancePreapprovals(w.db);
   assert.equal((await preapprovalOf(w.db, "app", 30))?.state, "review");
@@ -51,7 +51,7 @@ test("a Merge answer carried across a clean base merge ends when the review ther
   assert.deepEqual(await answerOf(w, 30, "sha30m"), [{ answer: null }]);
 
   // The review's fix-up pushes model-written code: nothing answers Merge there in the operator's name.
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at) VALUES ('app', 30, 'sha30m', 'sha30f', 'pushed', 1, ?)").run(T0);
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 30, from_head: "sha30m", to_head: "sha30f", state: "pushed", attempt: 1, created_at: T0 }));
   await (await w.synced(30, "sha30f")).review(30, { head: "sha30f" });
   for (let i = 0; i < 3; i++) await advancePreapprovals(w.db);
   assert.equal((await w.rows("SELECT 1 FROM preapprovals WHERE number = 30 AND state NOT IN ('asked', 'cancelled')")).length, 0);

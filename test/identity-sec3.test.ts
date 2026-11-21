@@ -28,8 +28,7 @@ const issue = (number: number, login: string, id: number) => ({
 test("history and an allow count only for their own account, and the pipeline's own PR only at a head it pushed", async () => {
   const db = await fresh();
   const tier = async (login: string, id: number | null) => (await tiersOf(db, [{ login, id }])).get(tierKey({ login, id }));
-  const ins = db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, merged_at) VALUES ('r', ?, 'pr', 'MERGED', 't', ?, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z')");
-  for (let i = 1; i <= 6; i++) await ins.run(i, "old-dev");
+  for (let i = 1; i <= 6; i++) await db.run(db.k.insertInto("items").values({ repo: "r", number: i, kind: "pr", state: "MERGED", title: "t", author: "old-dev", created_at: "2026-01-01T00:00:00Z", merged_at: "2026-01-02T00:00:00Z" }));
   // A new holder of the login writes an issue before the history is bound: no binding, and no tier for anyone while unbound.
   await writeItemNode(db, "r", issue(50, "old-dev", 999));
   assert.deepEqual(await db.prepare("SELECT id FROM author_ids WHERE login = 'old-dev'").all(), []);
@@ -51,16 +50,16 @@ test("history and an allow count only for their own account, and the pipeline's 
   assert.equal(await tier("old-dev", 42), "deny");
 
   const w = (current = await (await world()).repo());
-  await w.db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'pipeline-bot')").run();
+  await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: "pipeline-bot" }));
   await (await w.pr(9, { author: "pipeline-bot", head: "a".repeat(40) })).review(9, { verdict: "take", head: "a".repeat(40) });
-  await w.db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, created_at, updated_at, pr_url) VALUES ('app', 3, 'm', 'h', 'pr-opened', ?, ?, 'https://github.com/storytold/app/pull/9')").run(T0, T0);
+  await w.db.run(w.db.k.insertInto("fix_attempts").values({ repo: "app", number: 3, main_sha: "m", text_hash: "h", state: "pr-opened", created_at: T0, updated_at: T0, pr_url: "https://github.com/storytold/app/pull/9" }));
   const prTier = async () => (await loadPrFact(w.db, "app", 9))?.tier;
   assert.equal(await prTier(), "not", "no record that the pipeline pushed this head");
-  await w.db.prepare("INSERT INTO own_commits (repo, sha, action, at) VALUES ('app', ?, 'fixissue-push', ?)").run("a".repeat(40), T0);
+  await w.db.run(w.db.k.insertInto("own_commits").values({ repo: "app", sha: "a".repeat(40), action: "fixissue-push", at: T0 }));
   assert.equal(await prTier(), "whitelisted");
   await w.synced(9, "b".repeat(40));
   assert.equal(await prTier(), "not", "someone else pushed to the branch");
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at) VALUES ('app', 9, ?, ?, 'pushed', 1, ?)").run("a".repeat(40), "c".repeat(40), T0);
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 9, from_head: "a".repeat(40), to_head: "c".repeat(40), state: "pushed", attempt: 1, created_at: T0 }));
   await w.synced(9, "c".repeat(40));
   assert.equal(await prTier(), "whitelisted", "our own fix-up of our commit");
 });
