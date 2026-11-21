@@ -59,5 +59,5 @@ test("the planner's diff facts follow the cached diff's writes, re-reads and rem
   rmSync(join(diffCacheDir(), "facts-built"));
   await w.db.run(w.db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "sha2", at: "2027-01-01T00:00:00Z", mode: "full", verdict: "take" }));
   assert.equal(await buildDiffFacts(w.db), 2);
-  assert.deepEqual(await w.rows("SELECT head_oid FROM diff_facts"), [{ head_oid: "sha1" }]);
+  assert.deepEqual(await w.db.all(w.db.k.selectFrom("diff_facts").select("head_oid")), [{ head_oid: "sha1" }]);
 });

@@ -6,8 +6,8 @@ import { T0, T1, world } from "./world-db.ts";
 test("a review carried over our fix-up is posted with the source review's points, naming both heads", async () => {
   const w = await (await (await (await world()).repo()).pr(1, { head: "bbbbbbb2222" })).review(1, { head: "aaaaaaa1111", verdict: "take-fix" });
   const pub = JSON.stringify({ summary: "The change is right; one call can fail.", points: ["`src/net.rs:42`: send() unwraps the result."] });
-  await w.db.prepare("UPDATE opus_reviews SET public_review = ?, model = 'claude-opus-5-5' WHERE repo = 'app' AND number = 1").run(pub);
-  await w.db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, at, model, mode, base_head, verdict, sure, reason) VALUES ('app', 1, 'bbbbbbb2222', ?, 'carried', 'carried', 'aaaaaaa1111', 'take', 1, 'carried')`).run(T1);
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ public_review: pub, model: "claude-opus-5-5" }).where("repo", "=", "app").where("number", "=", 1));
+  await w.db.run(w.db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "bbbbbbb2222", at: T1, model: "carried", mode: "carried", base_head: "aaaaaaa1111", verdict: "take", sure: 1, reason: "carried" }));
   assert.ok(T0 < T1);
   const c = await postCandidates(w.db, "app");
   assert.equal(c.length, 1);
@@ -24,9 +24,9 @@ test("a review carried over our fix-up is posted with the source review's points
 
 test("a review posted by the box account is not edited once the repo writes as the app", async () => {
   const w = await (await (await (await world()).repo()).pr(1, { head: "bbbbbbb2222" })).review(1, { head: "bbbbbbb2222", verdict: "take" });
-  await w.db.prepare("UPDATE opus_reviews SET public_review = ? WHERE repo = 'app' AND number = 1").run(JSON.stringify({ summary: "Fine.", points: [] }));
-  await w.db.prepare("INSERT INTO review_posts (repo, number, review_id, head_oid, posted_at) VALUES ('app', 1, 'R1', 'aaaaaaa1111', ?)").run(T0);
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ public_review: JSON.stringify({ summary: "Fine.", points: [] }) }).where("repo", "=", "app").where("number", "=", 1));
+  await w.db.run(w.db.k.insertInto("review_posts").values({ repo: "app", number: 1, review_id: "R1", head_oid: "aaaaaaa1111", posted_at: T0 }));
   assert.equal((await postCandidates(w.db, "app"))[0]!.editId, "R1");
-  await w.db.prepare("INSERT INTO main.settings (key, value) VALUES ('github_identity', 'app')").run();
+  await w.db.run(w.db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }));
   assert.equal((await postCandidates(w.db, "app"))[0]!.editId, null);
 });

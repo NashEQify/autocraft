@@ -5,8 +5,7 @@ import { factsOf, type DecisionRow } from "../decisions.ts";
 import { inPilot } from "../pilot.ts";
 import { firstSentence, WHY_MAX_WORDS, wordCount } from "../prose.ts";
 import type { Db } from "../db/index.ts";
-
-type Row = { model: string | null; verdict: string; sure: number | null; reason: string | null; fixes: string | null; summary: string | null; why: string | null };
+import * as kx from "../db/kx.ts";
 
 const squash = (s: string | null | undefined): string => (s ?? "").replace(/\s+/g, " ").trim();
 
@@ -31,7 +30,8 @@ export type ReviewText = {
 
 /** The review of one PR head as decision text; null when there is no review text. */
 export async function reviewText(db: Db, repo: string, number: number, head: string): Promise<ReviewText | null> {
-  const o = await db.prepare("SELECT model, verdict, sure, reason, fixes, summary, why FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(repo, number, head) as Row | undefined;
+  const o = await db.get(db.k.selectFrom("opus_reviews").select(["model", "verdict", "sure", "reason", "fixes", "summary", "why"])
+    .$narrowType<{ verdict: string }>().where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).where("verdict", "is not", null));
   if (!o) return null;
   const summary = squash(o.summary), reason = squash(o.reason);
   if (!summary && !reason) return null;
@@ -49,11 +49,10 @@ export const reviewFact = (r: ReviewText): string => `review: ${r.verdict}: ${r.
  * Skips decisions the prepare step has written or that have choices (their summary and pick are the judgement model's). Writes only what differs, so a second run changes nothing. Returns how many decisions it changed.
  */
 export async function fillReviewSummaries(db: Db, at: string, repo?: string): Promise<number> {
-  const rows = await db.prepare(`SELECT * FROM decisions WHERE kind IN ('merge', 'close', 'hold') AND answer IS NULL AND number IS NOT NULL AND prepared_at IS NULL
-    AND NOT EXISTS (SELECT 1 FROM main.decision_choices c WHERE c.decision_id = decisions.id AND c.state = 'current')
-    ${repo ? "AND repo = ?" : ""}`).all(...(repo ? [repo] : [])) as DecisionRow[];
-  const upd = db.prepare(`UPDATE main.decisions SET summary = ?, summary_by = ?, summary_at = ?, facts = ?, recommended = ?, recommended_reason = ?, recommended_by = NULL
-    WHERE id = ? AND answer IS NULL`);
+  const rows = await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: DecisionRow["kind"] }>()
+    .where("kind", "in", ["merge", "close", "hold"]).where("answer", "is", null).where("number", "is not", null).where("prepared_at", "is", null)
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("main.decision_choices as c").select(eb.lit(1).as("one")).whereRef("c.decision_id", "=", "decisions.id").where("c.state", "=", "current"))))
+    .$if(!!repo, (q) => q.where("repo", "=", repo!)));
   let n = 0;
   for (const d of rows) {
     if (!await inPilot(db, d.repo!, d.number!)) continue;
@@ -67,7 +66,10 @@ export async function fillReviewSummaries(db: Db, at: string, repo?: string): Pr
     const recommended = d.kind === "hold" ? null : r.why && (d.kind === "close" || (r.sure && !preMerge)) ? (d.kind === "close" ? "close" : "merge") : null;
     const same = d.summary === r.summary && (d.summary_by ?? "") === r.by && d.facts === facts && d.recommended === recommended && d.recommended_reason === (recommended ? r.why : null);
     if (same) continue;
-    await upd.run(r.summary, r.by || null, d.summary === r.summary ? (d.summary_at ?? at) : at, facts, recommended, recommended ? r.why : null, d.id);
+    await db.run(db.k.updateTable("main.decisions").set({
+      summary: r.summary, summary_by: r.by || null, summary_at: d.summary === r.summary ? (d.summary_at ?? at) : at, facts, recommended,
+      recommended_reason: recommended ? r.why : null, recommended_by: null,
+    }).where("id", "=", d.id).where("answer", "is", null));
     n++;
   }
   return n;
