@@ -6,6 +6,7 @@ import { gh } from "../review/diff.ts";
 import { sameRepo } from "./pushable.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export const AUTHOR_PERMISSION_TTL_MS = 24 * 3600_000;
 const WRITE = new Set(["write", "maintain", "admin"]);
@@ -16,7 +17,7 @@ export type AuthorWrite = "yes" | "no" | "unknown";
 
 type Row = { author: string | null; author_type: string | null; author_id: number | null };
 const authorOf = async (db: Db, repo: string, number: number): Promise<Row | undefined> =>
-  await db.prepare("SELECT author, author_type, author_id FROM items WHERE repo = ? AND number = ?").get(repo, number) as Row | undefined;
+  await db.get(db.k.selectFrom("items").select(["author", "author_type", "author_id"]).where("repo", "=", repo).where("number", "=", number));
 
 /** The pipeline's own account and bots write to the repository by construction. */
 function writesByRole(me: string | undefined, r: Row): boolean {
@@ -29,7 +30,7 @@ type Cached = { permission: string | null; checked_at: string | null; failures: 
 const ownEntry = (c: Cached | undefined, r: Row): Cached | undefined =>
   c && c.permission && c.author_id !== null && r.author_id !== null && c.author_id !== r.author_id ? { ...c, permission: null, checked_at: null } : c;
 const cached = async (db: Db, repo: string, r: Row & { author: string }): Promise<Cached | undefined> =>
-  ownEntry(await db.prepare("SELECT permission, checked_at, failures, first_failure_at, author_id FROM main.author_permissions WHERE login = ? AND repo = ?").get(r.author, repo) as Cached | undefined, r);
+  ownEntry(await db.get(db.k.selectFrom("main.author_permissions").select(["permission", "checked_at", "failures", "first_failure_at", "author_id"]).where("login", "=", r.author).where("repo", "=", repo)), r);
 const old = (at: string | null, nowMs: number = Date.now()): boolean => !at || nowMs - Date.parse(at) > AUTHOR_PERMISSION_TTL_MS;
 /** The reads have failed too often or for too long. */
 const gaveUp = (c: Cached, nowMs: number = Date.now()): boolean => c.failures >= AUTHOR_READ_FAILURES || (!!c.first_failure_at && old(c.first_failure_at, nowMs));
@@ -56,7 +57,7 @@ export async function authorWrites(db: Db, repo: string, number: number): Promis
  */
 export async function authorWritesOf(db: Db, nowMs: number = Date.now()): Promise<(repo: string, r: Row, change?: (at: number) => void) => AuthorWrite> {
   const me = await setting(db, PIPELINE_LOGIN_KEY);
-  const entries = new Map((await db.prepare("SELECT login, repo, permission, checked_at, failures, first_failure_at, author_id FROM main.author_permissions").all() as (Cached & { login: string; repo: string })[])
+  const entries = new Map((await db.all(db.k.selectFrom("main.author_permissions").select(["login", "repo", "permission", "checked_at", "failures", "first_failure_at", "author_id"])))
     .map(({ login, repo, ...c }) => [`${repo}\n${login}`, c]));
   return (repo, r, change) => {
     if (!r.author) return "no";
@@ -105,10 +106,10 @@ export async function ensureAuthorWrites(db: Db, repo: string, number: number, h
     if (!c?.permission || old(c.checked_at)) {
       const now = new Date().toISOString();
       const p = await read(repo, r.author).catch(() => null);
-      if (p) await db.prepare(`INSERT INTO main.author_permissions (login, repo, permission, checked_at, failures, first_failure_at, author_id) VALUES (?, ?, ?, ?, 0, NULL, ?)
-        ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at, failures = 0, first_failure_at = NULL, author_id = excluded.author_id`).run(r.author, repo, p, now, r.author_id);
-      else await db.prepare(`INSERT INTO main.author_permissions (login, repo, failures, first_failure_at) VALUES (?, ?, 1, ?)
-        ON CONFLICT (login, repo) DO UPDATE SET failures = failures + 1, first_failure_at = COALESCE(first_failure_at, excluded.first_failure_at)`).run(r.author, repo, now);
+      if (p) await db.run(db.k.insertInto("main.author_permissions").values({ login: r.author, repo, permission: p, checked_at: now, failures: 0, first_failure_at: null, author_id: r.author_id })
+        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet((eb) => ({ ...kx.excluded(["permission", "checked_at", "author_id"])(eb), failures: 0, first_failure_at: null }))));
+      else await db.run(db.k.insertInto("main.author_permissions").values({ login: r.author, repo, failures: 1, first_failure_at: now })
+        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet((eb) => ({ failures: eb("main.author_permissions.failures", "+", 1), first_failure_at: eb.fn.coalesce("main.author_permissions.first_failure_at", "excluded.first_failure_at") }))));
     }
   }
   return await authorWrites(db, repo, number);

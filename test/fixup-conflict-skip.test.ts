@@ -18,14 +18,14 @@ const FIXES = JSON.stringify([{ file: "src/lib.rs", change: "rename a to b" }]);
 // Mirrored mergeable state is stale (UNKNOWN, no checks row) while GitHub reports the first three PRs as conflicting.
 test("PRs found conflicting live go to the conflict merge and do not use up the fix-up limit", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   const heads = new Map<number, string>();
   for (const n of [1, 2, 3, 4]) {
     const head = String(n).repeat(40);
     heads.set(n, head);
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, head_repo, base_ref, maintainer_can_modify, mergeable, created_at, updated_at)
-      VALUES ('app', ?, 'pr', 'OPEN', 'Fix a thing', 'someone', 5, 0, ?, 'fix', 'contrib/app', 'main', 1, 'UNKNOWN', '${T0}', '${T0}')`).run(n, head);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head, head_ref: "fix", head_repo: "contrib/app", base_ref: "main",
+      maintainer_can_modify: 1, mergeable: "UNKNOWN", created_at: T0, updated_at: T0 }));
     await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take-fix', 'nearly right', ?, 1, 'full')`).run(n, head, FIXES);
   }
   const querier: Querier = validating({

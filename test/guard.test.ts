@@ -73,7 +73,7 @@ test("the global pipeline switch gates the pipeline's writes, not an operator's"
   const db = await fresh([{ n: 1 }]);
   assert.match(why(await guard(db, ref, MERGE, "pipeline", live())), /pipeline is off/i);
   assert.ok(ok(await guard(db, ref, MERGE, OP, live())));
-  await db.prepare("UPDATE main.settings SET value = '1' WHERE key = 'pipeline_enabled'").run();
+  await db.run(db.k.updateTable("main.settings").set({ value: "1" }).where("key", "=", "pipeline_enabled"));
   assert.ok(ok(await guard(db, ref, MERGE, "pipeline", live())));
 });
 

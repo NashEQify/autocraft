@@ -48,11 +48,11 @@ async function setup(calls = 2) {
   for (const n of [7, 8]) git(fork, "update-ref", `refs/pull/${n}/head`, heads[n]!);
   const db = await connectDb(join(root, "t.db"));
   for (const n of [7, 8]) {
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at) VALUES ('app', ?, 'pr', 'OPEN', 'Rename', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(n, heads[n]);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Rename", author: "someone", additions: 5, deletions: 0, head_oid: heads[n]!, created_at: T0, updated_at: T0 }));
     await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(n, heads[n]);
     await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at) VALUES ('app', ?, ?, 'OPEN', 0, 'failure', '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', 1, '${T1}')`).run(n, heads[n]);
   }
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   await db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES ('a1', 'a1')").run();
   await db.prepare("UPDATE claude_accounts SET enabled = 1, max_concurrent = 8 WHERE id = 'a1'").run();
@@ -104,7 +104,7 @@ test("two PRs of one cifix job make their model calls at once", { timeout: 120_0
 
 test("a PR whose lease another running job holds is skipped", { timeout: 120_000 }, async () => {
   const w = await setup(1);
-  const add = async (step: string): Promise<number> => Number((await w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES (?, '{}', 'pipeline', ?, 'running', ?)").run(step, T0, T0)).lastInsertRowid);
+  const add = async (step: string): Promise<number> => (await w.db.get(w.db.k.insertInto("jobs").values({ step, params: "{}", requested_by: "pipeline", requested_at: T0, state: "running", started_at: T0 }).returning("id")))!.id;
   const mine = await add("cifix"), other = await add("fixup");
   assert.ok(await take(w.db, "pr:app#8", other, "fixup"));
   setCallContext({ jobId: mine, step: "cifix", stage: 1, cancelled: async () => false });

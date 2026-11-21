@@ -17,7 +17,7 @@ const HEAD = "a".repeat(40);
 
 test("a merge is refused when the base is not the one the review read", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await db.prepare("INSERT INTO repos (name, default_branch) VALUES ('app', 'main')").run();
+  await db.run(db.k.insertInto("repos").values({ name: "app", default_branch: "main" }));
   await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, base_ref) VALUES ('app', 7, ?, 't', 'full', 'take', 'main')").run(HEAD);
   assert.equal(await baseRefusal(db, "app", HEAD, 7, "main"), null);
   assert.match((await baseRefusal(db, "app", HEAD, 7, "release"))!, /release.*main/);
@@ -43,8 +43,8 @@ test("a diff is stored only for the head it was fetched at, and read again for a
 
 test("a private-org member's PR is pushable once the author's permission is read, and is waiting before", async () => {
   const db = await connectDb(join(dir, "perm.db"));
-  await db.prepare("INSERT INTO repos (name, default_branch) VALUES ('app', 'main')").run();
-  await db.prepare("INSERT INTO items (repo, number, kind, state, author, author_association, head_repo, head_ref) VALUES ('app', 9, 'pr', 'OPEN', 'ana', 'CONTRIBUTOR', 'storytold/app', 'ana/fix')").run();
+  await db.run(db.k.insertInto("repos").values({ name: "app", default_branch: "main" }));
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 9, kind: "pr", state: "OPEN", author: "ana", author_association: "CONTRIBUTOR", head_repo: "storytold/app", head_ref: "ana/fix" }));
   assert.equal(await authorWrites(db, "app", 9), "unknown");
   let reads = 0;
   const read = async (_repo: string, login: string) => { reads++; return login === "ana" ? "write" : "read"; };
@@ -52,11 +52,11 @@ test("a private-org member's PR is pushable once the author's permission is read
   assert.equal(await ensureAuthorWrites(db, "app", 9, "storytold/app", read), "yes");
   assert.equal(reads, 1);
   // An entry over a day old is read again.
-  await db.prepare("UPDATE author_permissions SET checked_at = '2020-01-01T00:00:00.000Z'").run();
+  await db.run(db.k.updateTable("author_permissions").set({ checked_at: "2020-01-01T00:00:00.000Z" }));
   await ensureAuthorWrites(db, "app", 9, "storytold/app", async () => "read");
   assert.equal(await authorWrites(db, "app", 9), "no");
   // An author whose permission cannot be read waits, then counts as unable to write after three failed reads.
-  await db.prepare("INSERT INTO items (repo, number, kind, state, author, head_repo, head_ref) VALUES ('app', 10, 'pr', 'OPEN', 'bo', 'storytold/app', 'bo/x')").run();
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 10, kind: "pr", state: "OPEN", author: "bo", head_repo: "storytold/app", head_ref: "bo/x" }));
   for (const want of ["unknown", "unknown", "no"]) assert.equal(await ensureAuthorWrites(db, "app", 10, "storytold/app", async () => null), want);
 });
 
