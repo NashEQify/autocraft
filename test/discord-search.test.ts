@@ -79,7 +79,10 @@ const msg = (id: string, over: Record<string, unknown> = {}) => ({
 before(async () => {
   await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('secret')").run();
   await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public'), ('secret', 'storytold', 'private') ON CONFLICT(name) DO UPDATE SET visibility = excluded.visibility").run();
-  await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched, default_repo) VALUES ('c1', 'g1', 'G', 'dev', 1, 'photocraft'), ('c2', 'g1', 'G', 'off', 0, NULL)").run();
+  await db.run(db.k.insertInto("discord_channels").values([
+    { channel_id: "c1", guild_id: "g1", guild_name: "G", name: "dev", watched: 1, default_repo: "photocraft" },
+    { channel_id: "c2", guild_id: "g1", guild_name: "G", name: "off", watched: 0, default_repo: null },
+  ]));
   const recent = new Date(Date.now() - 5 * 86_400_000).toISOString();
   const item = db.prepare("INSERT INTO items (repo, number, kind, state, state_reason, closed_at, title, body, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
   const emb = db.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES (?, ?, 'fake', 'h', ?, ?)");
@@ -182,7 +185,7 @@ describe("ping replies", () => {
     await dispatch("MESSAGE_DELETE", { id: "q8" });
     await pings.idle();
     assert.deepEqual(rest.deleted.sort(), [idOf(n - 2), idOf(n - 1)].sort());
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_replies WHERE ping_hash IN (?, ?)").get(keys.hash("message", "p7"), keys.hash("message", "p8")) as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("discord_replies").select((eb) => eb.fn.countAll<number>().as("n")).where("ping_hash", "in", [keys.hash("message", "p7"), keys.hash("message", "p8")])))!.n, 0);
   });
 
   test("no question text is stored in any table", { skip: sqliteOnly("reads sqlite_master") }, async () => {

@@ -8,6 +8,7 @@ import { CODE_TTL_MS, createLinkCode, forgetLink, loginOf, redeemLinkCode } from
 import { publicStats, publicStatus } from "../src/public/status.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { cols } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-links-"));
@@ -34,7 +35,7 @@ describe("link codes", () => {
     assert.equal(await redeemLinkCode(db, keys, first, "77"), null);
     assert.equal(await redeemLinkCode(db, keys, second, "77", Date.now() + CODE_TTL_MS + 1000), null);
     assert.equal(await loginOf(db, keys, "77"), null);
-    const stored = JSON.stringify([await db.prepare("SELECT * FROM discord_links").all(), await db.prepare("SELECT * FROM discord_link_codes").all()]);
+    const stored = JSON.stringify([await db.all(db.k.selectFrom("discord_links").select(cols("discord_links"))), await db.all(db.k.selectFrom("discord_link_codes").select(cols("discord_link_codes")))]);
     assert.ok(!stored.includes("1234") && !stored.includes(code) && !stored.includes(second), "neither the Discord user id nor a code is stored");
     assert.equal(await forgetLink(db, keys, "1234"), 1);
     assert.equal(await loginOf(db, keys, "1234"), null);

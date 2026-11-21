@@ -18,8 +18,8 @@ export const plain = (s: string): string => s.replace(/[[\]()<>*_`~|\\#:@]/g, " 
 
 /** The repo whose new-issue page the button opens: the channel's setting (a thread uses its parent's), else the top result's, else the only public tracked repo. Never a private repo. */
 export async function fileRepoUrl(db: Db, channelId: string | undefined, matches: Match[]): Promise<string | null> {
-  const set = channelId === undefined ? undefined : (await db.prepare(`SELECT COALESCE(c.default_repo, p.default_repo) AS r FROM discord_channels c
-    LEFT JOIN discord_channels p ON p.channel_id = c.parent_id WHERE c.channel_id = ?`).get(channelId) as { r: string | null } | undefined)?.r;
+  const set = channelId === undefined ? undefined : (await db.get(db.k.selectFrom("discord_channels as c").leftJoin("discord_channels as p", "p.channel_id", "c.parent_id")
+    .select((eb) => eb.fn.coalesce("c.default_repo", "p.default_repo").as("r")).where("c.channel_id", "=", channelId)))?.r;
   const names = new Set(await publicRepoNames(db));
   const tracked = (await trackedRepos(db)).filter((t) => names.has(t.name));
   const name = (set && names.has(set) ? set : null) ?? (matches[0] && names.has(matches[0].repo) ? matches[0].repo : null) ?? (tracked.length === 1 ? tracked[0]!.name : null);

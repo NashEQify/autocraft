@@ -17,7 +17,7 @@ after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true
 
 test("one reaction per newly recorded message", async () => {
   await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES (?)").run("photocraft");
-  await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, watched) VALUES ('c1', 'g1', 1), ('c2', 'g1', 0)").run();
+  await db.run(db.k.insertInto("discord_channels").values([{ channel_id: "c1", guild_id: "g1", watched: 1 }, { channel_id: "c2", guild_id: "g1", watched: 0 }]));
   const calls: string[][] = [];
   let fail: RestError | null = null;
   const logs: string[] = [];
@@ -33,12 +33,12 @@ test("one reaction per newly recorded message", async () => {
   await settle();
   assert.deepEqual(calls, [["c1", "m1", "✅"]]);
 
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('discord_react', 'off')").run();
+  await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: "off" }));
   await dispatch("MESSAGE_CREATE", msg("m4", "photocraft#2"));
   await settle();
   assert.equal(calls.length, 1);
 
-  await db.prepare("UPDATE settings SET value = 'on' WHERE key = 'discord_react'").run();
+  await db.run(db.k.updateTable("settings").set({ value: "on" }).where("key", "=", "discord_react"));
   fail = new RestError(403, "forbidden");
   await dispatch("MESSAGE_CREATE", msg("m5", "photocraft#3"));
   await dispatch("MESSAGE_CREATE", msg("m6", "photocraft#4"));
