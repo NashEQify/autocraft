@@ -35,6 +35,7 @@ export const unpackText = (v: unknown): string | null => (typeof v === "string" 
 import { shownLookup } from "../dash/api/shown.ts";
 import { scrub } from "../runner/scrub.ts";
 import { mapSeq } from "../async-seq.ts";
+import { KEPT_RUNS } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
 
 const now = (): string => new Date().toISOString();
@@ -76,11 +77,14 @@ export async function setRunProgress(db: Db, id: number, line: string): Promise<
   await db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ? AND state = 'running'").run(line, id);
 }
 
-/** Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. */
+/**
+ * Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. The
+ * runs of remote calls that a resuming job may adopt stay running (KEPT_RUNS): a Task Runner may still answer them.
+ */
 export async function failRunning(db: Db, reason: string, jobId?: number): Promise<number> {
   const r = jobId === undefined
-    ? await db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running'").run(now(), reason, reason)
-    : await db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND job_id = ?").run(now(), reason, reason, jobId);
+    ? await db.prepare(`UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND id NOT IN (${KEPT_RUNS})`).run(now(), reason, reason)
+    : await db.prepare(`UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND job_id = ? AND id NOT IN (${KEPT_RUNS})`).run(now(), reason, reason, jobId);
   return Number(r.changes);
 }
 

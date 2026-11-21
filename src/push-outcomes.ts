@@ -43,7 +43,8 @@ const parse = (s: string | null | undefined): CheckRow => { try { const v = JSON
 /**
  * Records a push that succeeded: the required-check result at the head before it (from the stored checks, when they are for that head).
  * A branch the push created has no earlier head: it takes the CI result of the commit it was built on (`base`), else of the default branch's latest CI
- * (a red or unknown baseline is no baseline for "broke"). Pushes of other kinds (batches, main fixes) are not recorded.
+ * (a red or unknown baseline is no baseline for "broke"). Pushes of other kinds (batches, main fixes) are not recorded. A push
+ * is recorded once: a resumed job (src/runner/resuming.ts) records the push its earlier run made, unless that run did.
  */
 export async function recordPush(db: Db, action: string, o: { repo: string; number: number | null; from: string | null; to: string; base?: string | null }, at = new Date().toISOString()): Promise<void> {
   const stage = PUSH_STAGE[action];
@@ -58,8 +59,9 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
     const row = await db.prepare("SELECT head_oid, checks FROM pr_checks WHERE repo = ? AND number = ?").get(o.repo, o.number) as { head_oid: string; checks: string } | undefined;
     if (row && row.head_oid === o.from) before = requiredResult(parse(row.checks), await optionalChecks(db, o.repo));
   }
-  await db.prepare("INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(at, stage, action, o.repo, o.number, o.from, o.to, before);
+  await db.prepare(`INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) SELECT ?, ?, ?, ?, ?, ?, ?, ?
+    WHERE NOT EXISTS (SELECT 1 FROM push_outcomes WHERE repo = ? AND number IS ? AND to_oid = ? AND action = ?)`)
+    .run(at, stage, action, o.repo, o.number, o.from, o.to, before, o.repo, o.number, o.to, action);
 }
 
 /**
