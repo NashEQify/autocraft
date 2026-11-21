@@ -119,7 +119,7 @@ both("onConflict skips a duplicate key or updates the row in place; INSERT ... S
   return [rows, copied];
 });
 
-both("ciEq, nocase and like compare as SQLite's NOCASE; a backslash in a pattern is literal", async (db) => {
+both("ciEq, nocase and like compare as SQLite's NOCASE, bytewise by code point; a backslash in a pattern is literal", async (db) => {
   const sel = () => k(db).selectFrom("t").select("id").orderBy("id");
   const col = async (q: ReturnType<typeof sel>) => (await db.all(q)).map((r) => r.id);
   const out = [
@@ -130,8 +130,9 @@ both("ciEq, nocase and like compare as SQLite's NOCASE; a backslash in a pattern
     await col(sel().where((eb) => kx.like(db, "name", eb.val(`${kx.likeEscape("a\\")}%`), "\\"))),
     await col(sel().where((eb) => kx.like(db, "name", eb.val(`%${kx.likeEscape("_")}%`), "\\"))),
     (await db.all(k(db).selectFrom("t").select("name").orderBy(kx.nocase(db, "name")))).map((r) => r.name),
+    (await db.all(k(db).selectFrom(kx.jsonEach(db, kx.json(["b", "B", "a"]), "e")).select("e.value").orderBy(kx.bytewise(db, "e.value")))).map((r) => r.value),
   ];
-  assert.deepEqual(out, [[1], [1, 2], [2], [3], [3], [], ["a\\b", "alice", "Bob"]]);
+  assert.deepEqual(out, [[1], [1, 2], [2], [3], [3], [], ["a\\b", "alice", "Bob"], ["B", "a", "b"]]);
   return out;
 });
 

@@ -159,6 +159,15 @@ export function nocase<T = string>(d: D, e: Ex): RawBuilder<T> {
 }
 
 /**
+ * `e` compared and sorted by code point, as SQLite compares text. App columns sort that way on Postgres too (COLLATE "C"),
+ * but text Postgres computes from no column (JSON fields, jsonEach values, literals) takes the database's collation,
+ * which may sort "B" after "a": wrap such an ORDER BY, GROUP BY, MIN/MAX or comparison term in it.
+ */
+export function bytewise<T = string>(d: D, e: Ex): RawBuilder<T> {
+  return pgOf(d) ? sql`(${x(e)}) COLLATE "C"` : sql`${x(e)}`;
+}
+
+/**
  * Case-insensitive LIKE (ASCII). With no `escape`, every character of the pattern but `%` and `_` is literal on both
  * (Postgres would otherwise treat a backslash as the escape). A pattern from a JS value: `eb.val(...)`; escape user text
  * in it with `likeEscape`.
