@@ -5,7 +5,7 @@ import { isBusy } from "../db.ts";
 import { scaled } from "./time-scale.ts";
 import { exclusive } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { least } from "../db/portable.ts";
+import { least } from "../db/kx.ts";
 
 export const ALIVE_EVERY_MS = scaled(5_000);
 /** A stamp older than this means the dashboard is not serving: down, stalled or restarting. */
@@ -20,15 +20,17 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
   // Called inside a transaction: the next tick stamps.
   if (db.inTransaction()) return;
   await db.write(async () => {
-    const r = await db.prepare("SELECT alive_at FROM main.remote_liveness WHERE id = 1").get() as { alive_at: number } | undefined;
-    if (!r) await db.prepare("INSERT INTO main.remote_liveness (id, alive_at, since) VALUES (1, ?, ?)").run(nowMs, nowMs);
+    const r = await db.get(db.k.selectFrom("main.remote_liveness").select("alive_at").where("id", "=", 1));
+    if (!r) await db.run(db.k.insertInto("main.remote_liveness").values({ id: 1, alive_at: nowMs, since: nowMs }));
     else if (nowMs - Number(r.alive_at) > ALIVE_STALE_MS) {
       const gap = nowMs - Number(r.alive_at);
-      await db.prepare(`UPDATE main.remote_calls SET heartbeat_at = ${least(db, "heartbeat_at + ?", "?")}, leased_at = ${least(db, "leased_at + ?", "?")},
-          started_at = CASE WHEN started_at IS NULL THEN NULL ELSE ${least(db, "started_at + ?", "?")} END
-        WHERE state = 'leased'`).run(gap, nowMs, gap, nowMs, gap, nowMs);
-      await db.prepare("UPDATE main.remote_liveness SET alive_at = ?, since = ? WHERE id = 1").run(nowMs, nowMs);
-    } else await db.prepare("UPDATE main.remote_liveness SET alive_at = ? WHERE id = 1").run(nowMs);
+      await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+        heartbeat_at: least(db, eb("heartbeat_at", "+", gap), eb.val(nowMs)),
+        leased_at: least(db, eb("leased_at", "+", gap), eb.val(nowMs)),
+        started_at: eb.case().when("started_at", "is", null).then(eb.lit(null)).else(least(db, eb("started_at", "+", gap), eb.val(nowMs))).end(),
+      })).where("state", "=", "leased"));
+      await db.run(db.k.updateTable("main.remote_liveness").set({ alive_at: nowMs, since: nowMs }).where("id", "=", 1));
+    } else await db.run(db.k.updateTable("main.remote_liveness").set({ alive_at: nowMs }).where("id", "=", 1));
   });
 }
 
@@ -37,7 +39,7 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
  * dashboard has run against it) counts as always alive.
  */
 export async function dashboardAlive(db: Db, nowMs: number): Promise<{ alive: boolean; since: number }> {
-  const r = await db.prepare("SELECT alive_at, since FROM main.remote_liveness WHERE id = 1").get() as { alive_at: number; since: number } | undefined;
+  const r = await db.get(db.k.selectFrom("main.remote_liveness").select(["alive_at", "since"]).where("id", "=", 1));
   if (!r) return { alive: true, since: -Infinity };
   return { alive: nowMs - Number(r.alive_at) <= ALIVE_STALE_MS, since: Number(r.since) };
 }

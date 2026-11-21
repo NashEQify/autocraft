@@ -81,7 +81,7 @@ describe("picks and Manual only", async () => {
     await pickCall(db, user("bob"), a);
     assert.equal((await db.prepare("SELECT pick_until FROM remote_calls WHERE id = ?").get(a) as { pick_until: number | null }).pick_until, null);
     assert.equal(await leased("alice"), null, "no time limit: still bob's");
-    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login = 'bob'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "=", "bob"));
     assert.equal(await leased("alice"), a, "none of bob's runners is fresh: the pick no longer counts");
     await ready("bob");
     await setPickMinutes(db, 15, "test");
@@ -136,7 +136,7 @@ describe("picks and Manual only", async () => {
   test("a Manual only user's runners take only their picks and are no room", async () => {
     const a = await q();
     // Both runners asked for work a moment ago (active), so both are room.
-    for (const login of ["alice", "bob", "olga"]) await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE login = ?").run(Date.now(), login);
+    for (const login of ["alice", "bob", "olga"]) await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("login", "=", login));
     const room = await remoteRoom(db, 0);
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { manualOnly: true } }));
     assert.equal((await userSettings.settings(db, req("alice", "maintainer"))).manualOnly, true);
@@ -220,7 +220,7 @@ describe("picks and Manual only", async () => {
     await step(later, "opus-review");
     dropQueueCache(db);
     await put(all);
-    assert.equal(await db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'skip_tasks'").get(), undefined, "every task ticked again stores nothing");
+    assert.equal(await db.get(db.k.selectFrom("user_settings").select((eb) => eb.lit(1).as("one")).where("login", "=", "alice").where("key", "=", "skip_tasks")), undefined, "every task ticked again stores nothing");
     assert.equal(await leased("alice"), later);
     await clear();
   });
@@ -235,7 +235,7 @@ describe("picks and Manual only", async () => {
     const at = (n: number) => [{ repo: "photocraft", number: n }];
     const takes = () => takerTest(db, Date.now());
     // Only alice's runner is fresh, so the taker rule reads her choice alone.
-    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "<>", "alice"));
     assert.equal(await takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review" }), false, "no fast-tracked item on the repo: no taker before the items are known");
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");
     assert.equal(await remoteRoom(db, 0), 0, "no open fast-tracked item at all: no room, even for a question about no repo or task");
@@ -270,7 +270,7 @@ describe("picks and Manual only", async () => {
     assert.equal(whyWaiting({ ...c, refs: at(12) }, [r], 0, () => true).code, "behind");
     assert.equal(whyWaiting({ ...c, refs: at(10) }, [{ ...r, items: { refs: new Set(), repos: new Set() } }], 0, () => true).code, "items-off", "no fast-tracked item on the repo is still about items, not repo access");
     await put("all");
-    assert.equal(await db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'task_items'").get(), undefined, "every item again stores nothing");
+    assert.equal(await db.get(db.k.selectFrom("user_settings").select((eb) => eb.lit(1).as("one")).where("login", "=", "alice").where("key", "=", "task_items")), undefined, "every item again stores nothing");
     await clear();
   });
 
@@ -280,7 +280,7 @@ describe("picks and Manual only", async () => {
     for (const n of units) await ins.run(n);
     await addFastTrack(db, "bob", "photocraft#20");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "fast" } }));
-    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "<>", "alice"));
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");
     const refs = (i: number) => [{ repo: "photocraft", number: units[i]! }];
     const started: number[] = [];

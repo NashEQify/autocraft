@@ -71,21 +71,23 @@ export const showCode = (code: string): string => `${code.slice(0, 4)}-${code.sl
 
 /** Stores a new login and returns what the runner shows; `baseUrl` is the dashboard's origin. */
 export async function startLogin(db: Db, start: LoginStart, ip: string, baseUrl: string, nowMs: number = Date.now()): Promise<LoginStartReply> {
-  const pending = (await db.prepare("SELECT ip FROM main.runner_logins WHERE state = 'pending' AND expires_at > ?").all(nowMs) as { ip: string | null }[]);
+  const pending = await db.all(db.k.selectFrom("main.runner_logins").select("ip").where("state", "=", "pending").where("expires_at", ">", nowMs));
   if (pending.length >= MAX_PENDING) throw new HttpError(429, "too many Task Runner logins are waiting; try again in a few minutes");
   const key = addressKey(ip);
   if (pending.filter((r) => r.ip !== null && addressKey(r.ip) === key).length >= MAX_PENDING_PER_ADDRESS) {
     throw new HttpError(429, "too many Task Runner logins from this address are waiting; approve or deny them, or wait a few minutes");
   }
-  if (await db.prepare("SELECT 1 FROM main.runner_logins WHERE secret_hash = ? UNION ALL SELECT 1 FROM main.mcp_tokens WHERE token_hash = ?").get(start.credentialHash, start.credentialHash)) {
+  if (await db.get(db.k.selectFrom("main.runner_logins").select((eb) => eb.lit(1).as("one")).where("secret_hash", "=", start.credentialHash)
+    .unionAll(db.k.selectFrom("main.mcp_tokens").select((eb) => eb.lit(1).as("one")).where("token_hash", "=", start.credentialHash)))) {
     throw new HttpError(409, "this credential was already used for a login; make a new one");
   }
   const label = cleanLabel(start.label) ?? start.machine.hostname.slice(0, 60);
-  const insert = db.prepare(`INSERT INTO main.runner_logins (user_code, secret_hash, label, machine, ip, helper_version, created_at, expires_at, want_agent, want_answer)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user_code) DO NOTHING RETURNING id`);
   for (let i = 0; i < 8; i++) {
     const code = Array.from({ length: 8 }, () => CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]).join("");
-    if (await insert.get(code, start.credentialHash, label, JSON.stringify(start.machine), ip, start.helperVersion, nowMs, nowMs + LOGIN_TTL_MS, start.scopes?.agent === false ? 0 : 1, start.scopes?.answer === true ? 1 : 0)) {
+    if (await db.get(db.k.insertInto("main.runner_logins").values({
+      user_code: code, secret_hash: start.credentialHash, label, machine: JSON.stringify(start.machine), ip, helper_version: start.helperVersion, created_at: nowMs,
+      expires_at: nowMs + LOGIN_TTL_MS, want_agent: start.scopes?.agent === false ? 0 : 1, want_answer: start.scopes?.answer === true ? 1 : 0,
+    }).onConflict((oc) => oc.column("user_code").doNothing()).returning("id"))) {
       return { userCode: showCode(code), verifyUrl: `${baseUrl}/connect?runner=${showCode(code)}`, interval: POLL_INTERVAL_S, expiresIn: LOGIN_TTL_MS / 1000 };
     }
   }
@@ -95,13 +97,13 @@ export async function startLogin(db: Db, start: LoginStart, ip: string, baseUrl:
 /** The state of the login a credential started, or null when the server knows neither the login nor the credential. */
 export async function pollLogin(db: Db, credential: string, nowMs: number = Date.now()): Promise<LoginPollReply | null> {
   const hash = sha256hex(credential);
-  const row = await db.prepare("SELECT id, state, expires_at FROM main.runner_logins WHERE secret_hash = ?").get(hash) as { id: number; state: LoginState; expires_at: number } | undefined;
+  const row = await db.get(db.k.selectFrom("main.runner_logins").select(["id", "state", "expires_at"]).$narrowType<{ state: LoginState }>().where("secret_hash", "=", hash));
   if (!row) {
     // The login's row is pruned an hour after it expired; its approved credential still answers.
-    return await db.prepare("SELECT 1 FROM main.mcp_tokens WHERE token_hash = ? AND kind = 'runner' AND expires_at > ?").get(hash, new Date(nowMs).toISOString()) ? { state: "approved" } : null;
+    return await db.get(db.k.selectFrom("main.mcp_tokens").select((eb) => eb.lit(1).as("one")).where("token_hash", "=", hash).where("kind", "=", "runner").where("expires_at", ">", new Date(nowMs).toISOString())) ? { state: "approved" } : null;
   }
   if (row.state === "pending" && Number(row.expires_at) <= nowMs) {
-    await db.prepare("UPDATE main.runner_logins SET state = 'expired' WHERE id = ? AND state = 'pending'").run(row.id);
+    await db.run(db.k.updateTable("main.runner_logins").set({ state: "expired" }).where("id", "=", row.id).where("state", "=", "pending"));
     return { state: "expired" };
   }
   return { state: row.state };
@@ -110,8 +112,8 @@ export async function pollLogin(db: Db, credential: string, nowMs: number = Date
 type Row = { id: number; secret_hash: string; label: string | null; machine: string | null; ip: string | null; helper_version: string | null; created_at: number; expires_at: number; want_agent: number; want_answer: number };
 
 async function pendingRow(db: Db, code: string, nowMs: number): Promise<Row | null> {
-  return (await db.prepare("SELECT id, secret_hash, label, machine, ip, helper_version, created_at, expires_at, want_agent, want_answer FROM main.runner_logins WHERE user_code = ? AND state = 'pending' AND expires_at > ?")
-    .get(code, nowMs) as Row | undefined) ?? null;
+  return (await db.get(db.k.selectFrom("main.runner_logins").select(["id", "secret_hash", "label", "machine", "ip", "helper_version", "created_at", "expires_at", "want_agent", "want_answer"])
+    .where("user_code", "=", code).where("state", "=", "pending").where("expires_at", ">", nowMs))) ?? null;
 }
 
 const machineOf = (r: Row): Machine | null => (r.machine ? JSON.parse(r.machine) as Machine : null);
@@ -142,7 +144,7 @@ export async function approveLogin(db: Db, login: string, code: string, rawLabel
       throw new HttpError(409, "this login was started from another address than yours; approve it only if you started it on another machine, and say so (otherMachine)");
     }
     const row = await addRunnerToken(db, login, r.secret_hash, label ?? r.label, r.machine, scopes);
-    await db.prepare("UPDATE main.runner_logins SET state = 'approved', login = ?, token_id = ? WHERE id = ?").run(login, row.id, r.id);
+    await db.run(db.k.updateTable("main.runner_logins").set({ state: "approved", login, token_id: row.id }).where("id", "=", r.id));
     return { row, machine: machineOf(r), ip: r.ip };
   });
 }
@@ -151,6 +153,6 @@ export async function approveLogin(db: Db, login: string, code: string, rawLabel
 export async function denyLogin(db: Db, login: string, code: string, nowMs: number = Date.now()): Promise<{ label: string | null; machine: Machine | null; ip: string | null } | null> {
   const r = await pendingRow(db, code, nowMs);
   if (!r) return null;
-  if ((await db.prepare("UPDATE main.runner_logins SET state = 'denied', login = ? WHERE id = ? AND state = 'pending'").run(login, r.id)).changes !== 1) return null;
+  if ((await db.run(db.k.updateTable("main.runner_logins").set({ state: "denied", login }).where("id", "=", r.id).where("state", "=", "pending"))).changes !== 1) return null;
   return { label: r.label, machine: machineOf(r), ip: r.ip };
 }

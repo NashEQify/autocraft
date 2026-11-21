@@ -12,6 +12,7 @@ import { setUserRepos } from "../src/remote/my-repos.ts";
 import { noRunnerFor } from "../src/runner/concurrency.ts";
 import { detectAutopilot, LANES } from "../src/runner/autopilot.ts";
 import { OPERATOR, T0, world } from "./world-db.ts";
+import { excluded } from "../src/db/kx.ts";
 
 test("prioritize waits for a Task Runner or Jev while its items need one", async () => {
   const w = await (await (await world()).repo()).issue(1);
@@ -26,8 +27,8 @@ test("prioritize waits for a Task Runner or Jev while its items need one", async
   assert.deepEqual(idle.proposals, [], "no Task Runner and no Jev: a job would rate nothing");
   assert.equal(idle.status?.prioritize, noRunnerFor("app"), "the stage names the wait");
   await setJevEnabled(w.db, true, "test");
-  await w.db.prepare("INSERT INTO settings (key, value) VALUES ('jev_unavailable', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value")
-    .run(JSON.stringify({ kind: "account", reason: "out of credit", since: new Date().toISOString(), at: new Date().toISOString() }));
+  await w.db.run(w.db.k.insertInto("settings").values({ key: "jev_unavailable", value: JSON.stringify({ kind: "account", reason: "out of credit", since: new Date().toISOString(), at: new Date().toISOString() }) })
+    .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   assert.deepEqual(await proposed(), [], "Jev's account failed a moment ago");
 
   const token = (await createToken(w.db, OPERATOR, "helper", { kind: "runner" })).row.id;

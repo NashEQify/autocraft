@@ -24,6 +24,7 @@ import { PROTOCOL_VERSION, type Claim } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-calls-"));
@@ -56,7 +57,7 @@ describe("user-local remote calls", async () => {
   };
   /** `login`'s helper asked for top-tier work a moment ago and found none; its write permission on the repo is cached. */
   const idle = async (login: string) => {
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ?, idle_tiers = '[\"top\"]', idle_repos = NULL WHERE login = ?").run(Date.now(), login);
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now(), idle_tiers: '["top"]', idle_repos: null }).where("login", "=", login));
     await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(login, new Date().toISOString());
   };
   const req = (login: string, role: string, json?: unknown) => ({ user: { login, role, canWrite: async () => true }, json }) as unknown as Req;
@@ -96,7 +97,7 @@ describe("user-local remote calls", async () => {
   });
 
   test("with no other helper asking for work, the PR's author gets the review", async () => {
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL").run();
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     const lease = (await leaseFor("alice"))!;
     assert.ok(lease, "the author's helper takes it");
@@ -243,7 +244,7 @@ describe("user-local remote calls", async () => {
   });
 
   test("a user's repo picks limit their claims and next_task; the helper's own list narrows them, never widens them", async () => {
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL").run();
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
     await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1), ('fontcraft', 1), ('gridcraft', 0) ON CONFLICT (name) DO UPDATE SET pipeline = excluded.pipeline").run();
     const pick = (repos: string[]) => userSettings.setSettings(db, req("bob", "maintainer", { repos }));
     const got = await pick(["fontcraft", "gridcraft"]);
@@ -252,12 +253,12 @@ describe("user-local remote calls", async () => {
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     while (!await db.prepare("SELECT 1 FROM remote_calls WHERE state = 'queued'").get()) await sleep(5);
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "photocraft is not picked");
-    assert.equal((await db.prepare("SELECT idle_repos FROM mcp_tokens WHERE id = ?").get(callers.bob!.tokenId) as { idle_repos: string }).idle_repos, '["fontcraft","gridcraft"]', "the idle helper records what it takes");
+    assert.equal((await db.get(db.k.selectFrom("mcp_tokens").select("idle_repos").where("id", "=", callers.bob!.tokenId)))!.idle_repos, '["fontcraft","gridcraft"]', "the idle helper records what it takes");
     assert.equal(await claimableCalls(db, callers.bob!, {}, canWrite), 0);
     await pick(["photocraft"]);
     assert.equal(await claimableCalls(db, callers.bob!, {}, canWrite), 1);
     assert.equal((await claimCall(db, callers.bob!, { ...claim(), repos: ["fontcraft"] }, canWrite)).lease, null, "the helper's list narrows");
-    assert.equal((await db.prepare("SELECT idle_repos FROM mcp_tokens WHERE id = ?").get(callers.bob!.tokenId) as { idle_repos: string }).idle_repos, "[]");
+    assert.equal((await db.get(db.k.selectFrom("mcp_tokens").select("idle_repos").where("id", "=", callers.bob!.tokenId)))!.idle_repos, "[]");
     const lease = (await claimCall(db, callers.bob!, { ...claim(), repos: ["photocraft", "fontcraft"] }, canWrite)).lease!;
     assert.match(lease.title, /photocraft#1287/);
     await done(lease.secret, "picked");
@@ -268,7 +269,7 @@ describe("user-local remote calls", async () => {
   const stateOf = async (id: number) => (await db.prepare("SELECT state FROM remote_calls WHERE id = ?").get(id) as { state: string }).state;
 
   test("a repeated claim gets the same lease, and a dashboard outage ends no lease", async () => {
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL").run();
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
     const ask = askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
     while (!await db.prepare("SELECT 1 FROM remote_calls WHERE state = 'queued'").get()) await sleep(5);
     const c = claim();
@@ -278,13 +279,13 @@ describe("user-local remote calls", async () => {
     assert.deepEqual(await claimCall(db, callers.bob!, c, canWrite), a, "a repeat after the reply was lost");
     const id = a.lease!.id, now = Date.now();
     // The dashboard's last stamp is 5 minutes old; the lease's last heartbeat 3 minutes.
-    await db.prepare("INSERT INTO remote_liveness (id, alive_at, since) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET alive_at = excluded.alive_at, since = excluded.since").run(now - 5 * 60_000, now - 3600_000);
-    await db.prepare("UPDATE remote_calls SET heartbeat_at = ? WHERE id = ?").run(now - 3 * 60_000, id);
+    await db.run(db.k.insertInto("remote_liveness").values({ id: 1, alive_at: now - 5 * 60_000, since: now - 3600_000 }).onConflict((oc) => oc.column("id").doUpdateSet(excluded(["alive_at", "since"]))));
+    await db.run(db.k.updateTable("remote_calls").set({ heartbeat_at: now - 3 * 60_000 }).where("id", "=", id));
     await expireLeases(db, now);
     assert.equal(await stateOf(id), "leased", "nothing expires while the dashboard is down");
     await stampAlive(db, now);
-    assert.equal((await db.prepare("SELECT heartbeat_at FROM remote_calls WHERE id = ?").get(id) as { heartbeat_at: number }).heartbeat_at, now, "the dashboard came back: the heartbeat moved forward by the gap, up to now");
-    await db.prepare("DELETE FROM remote_liveness").run();
+    assert.equal((await db.get(db.k.selectFrom("remote_calls").select("heartbeat_at").where("id", "=", id)))!.heartbeat_at, now, "the dashboard came back: the heartbeat moved forward by the gap, up to now");
+    await db.run(db.k.deleteFrom("remote_liveness"));
     await done(a.lease!.secret, "after the outage");
     assert.equal((await ask)?.text, "after the outage");
   });
@@ -298,7 +299,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false });
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "not offered to the user whose helper failed it");
     assert.equal((await db.prepare("SELECT failures FROM remote_cooloffs WHERE login = 'bob'").get() as { failures: number }).failures, 1, "counts toward bob's cool-off");
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL").run();
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
     const second = (await leaseFor("alice"))!;
     assert.equal(second.id, first.id);
     await done(second.secret, "second try");
