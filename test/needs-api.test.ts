@@ -4,6 +4,7 @@ import { needs } from "../src/dash/api/needs.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { NeedsPage } from "../web/src/api/types.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 const as = (role: "viewer" | "operator", query: Record<string, string> = {}): Req => ({
   method: "GET", path: "", params: {}, query: new URLSearchParams(query), form: new URLSearchParams(),
@@ -18,27 +19,27 @@ test("needs lists feedback newest first with handled state, shows a tripped brea
     await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES (?)").run(name);
     await db.prepare("INSERT INTO repos (name, visibility) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET visibility = excluded.visibility").run(name, vis);
   }
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot')").run();
+  await db.run(db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
   for (const [repo, n] of [["photocraft", 1], ["photocraft", 2], ["photocraft", 4], ["secret", 3]] as const)
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES (?, ?, 'pr', 'OPEN', ?)").run(repo, n, `Title ${n}`);
+    await db.run(db.k.insertInto("items").values({ repo, number: n, kind: "pr", state: "OPEN", title: `Title ${n}` }));
   // Item 1: a comment that mentions AutoCraft, answered by AutoCraft later. Item 2: a reply to an AutoCraft comment, unanswered.
-  const c = db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES (?, ?, ?, 'comment', ?, ?, ?)");
-  await c.run("photocraft", 1, "c1", "dev", at(10), "@bot please recheck");
-  await c.run("photocraft", 1, "c2", "bot", at(9), "Rechecked");
-  await c.run("photocraft", 2, "c3", "bot", at(8), "Review");
-  await c.run("photocraft", 2, "c4", "dev", at(2), "I disagree");
-  await c.run("photocraft", 2, "c5", "other", at(1), "unrelated chatter after a person");
+  const c = (repo: string, number: number, id: string, author: string, created_at: string, body: string) => db.run(db.k.insertInto("comments").values({ repo, number, id, kind: "comment", author, created_at, body }));
+  await c("photocraft", 1, "c1", "dev", at(10), "@bot please recheck");
+  await c("photocraft", 1, "c2", "bot", at(9), "Rechecked");
+  await c("photocraft", 2, "c3", "bot", at(8), "Review");
+  await c("photocraft", 2, "c4", "dev", at(2), "I disagree");
+  await c("photocraft", 2, "c5", "other", at(1), "unrelated chatter after a person");
   // The comment text was recorded with CRLF line endings; a review we posted is recorded by its node id only.
-  await c.run("photocraft", 4, "R_node1", "bot", at(8), "A review");
-  await c.run("photocraft", 4, "c7", "dev", at(3), "I disagree with the review");
-  const au = db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'bot', ?, ?, ?)");
-  await au.run(at(8), "act-comment", "photocraft#2", JSON.stringify({ url: "https://example.test/c3", text: "Review\r\n" }));
-  await au.run(at(8), "review-post", "photocraft#4", JSON.stringify({ review: "R_node1" }));
-  await c.run("secret", 3, "c6", "dev", at(3), "@bot hidden one");
-  await db.prepare("UPDATE comments SET mentions_pipeline = 1 WHERE body LIKE '@bot%'").run(); // what the mirror sets when it writes the comment
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, answer, answered_at) VALUES ('d1', 'scope', 'photocraft', 2, 'Q?', '[]', ?, 'yes', ?)").run(at(20), at(5));
-  await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('dc1', 'd1', 'maint', ?, 'before the answer')").run(at(6));
-  await db.prepare("INSERT INTO stage_trips (stage, active, reason, evidence, tripped_at) VALUES ('merge', 1, 'two merges broke main', '[]', ?)").run(at(1));
+  await c("photocraft", 4, "R_node1", "bot", at(8), "A review");
+  await c("photocraft", 4, "c7", "dev", at(3), "I disagree with the review");
+  const au = (at: string, action: string, target: string, details: string) => db.run(db.k.insertInto("audit").values({ at, login: "bot", action, target, details }));
+  await au(at(8), "act-comment", "photocraft#2", JSON.stringify({ url: "https://example.test/c3", text: "Review\r\n" }));
+  await au(at(8), "review-post", "photocraft#4", JSON.stringify({ review: "R_node1" }));
+  await c("secret", 3, "c6", "dev", at(3), "@bot hidden one");
+  await db.run(db.k.updateTable("comments").set({ mentions_pipeline: 1 }).where((eb) => kx.like(db, "body", eb.val("@bot%")))); // what the mirror sets when it writes the comment
+  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "scope", repo: "photocraft", number: 2, question: "Q?", options: "[]", asked_at: at(20), answer: "yes", answered_at: at(5) }));
+  await db.run(db.k.insertInto("decision_comments").values({ id: "dc1", decision_id: "d1", login: "maint", at: at(6), body: "before the answer" }));
+  await db.run(db.k.insertInto("stage_trips").values({ stage: "merge", active: 1, reason: "two merges broke main", evidence: "[]", tripped_at: at(1) }));
 
   const op = (await needs(db, as("operator", { feedback: "1" }))) as NeedsPage;
   assert.deepEqual(op.feedback!.rows.map((r) => [r.id, r.handled]), [["comment:c4", false], ["comment:c7", false], ["comment:c6", false], ["decision-comment:dc1", true], ["comment:c1", true]]);

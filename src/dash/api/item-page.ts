@@ -1,14 +1,14 @@
 // The item page: one GET with everything the two-sided page draws (status, header, Opus reviews, result cards, AutoCraft's history and
 // the GitHub side). Built from the item API (`itemCore`), the item trace and the write records. Redaction follows the helpers it reuses:
 // viewers get no review text, card details or job errors; a quiet pull request is veiled by the trace context; costs stay visible.
-import { isHiddenRepo } from "../../hidden-sql.ts";
+import { filtered, isHiddenRepo } from "../../hidden-sql.ts";
 import { prBuildView } from "../../prbuild/view.ts";
 import { createHash } from "node:crypto";
 import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemKind, ItemPrBuild, ItemRef, ItemReleases, ItemState, Preapproval, QueueSlot, RepoName, ScreenshotRun, Tier } from "../../../web/src/api/types.ts";
 import { statusFromItem, type ItemStatus } from "../../core/item-status.ts";
 import { triggerWhy } from "../../review/trigger.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
-import { fingerprint, rowValues, context, gather, obj, arr, type Ctx, type Ev, hiddenSql, hiddenArgs } from "./trace.ts";
+import { fingerprint, rowValues, context, gather, obj, arr, type Ctx, type Ev, hiddenExpr } from "./trace.ts";
 import { timelineOf } from "./item-timeline.ts";
 import { barOf } from "./item-bar.ts";
 import { discordOf } from "./discord.ts";
@@ -23,6 +23,7 @@ import type { Req } from "../types.ts";
 import { backlogHeld } from "../../dupes/held.ts";
 import { canSettleCached } from "../../settlers.ts";
 import type { Db } from "../../db/index.ts";
+import { cols, least, rowid } from "../../db/kx.ts";
 
 export type ItemPhase = ItemStatus["phase"];
 export type { ItemStatus };
@@ -65,7 +66,6 @@ type Json = Record<string, any>;
 type Item = Awaited<ReturnType<typeof itemCore>>;
 
 const short = (s: string | null | undefined): string => (s ?? "").slice(0, 7);
-const q = async <T>(db: Db, sql: string, ...args: (string | number)[]): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 
 /** Comment text from GitHub, cleaned for display: no HTML comments or tags, cut at `max` characters. */
 const clean = (s: string, max = 1500): string => {
@@ -96,7 +96,7 @@ const EXTRA = [
 ];
 
 const prBuildOf = async (c: Ctx): Promise<ItemPrBuild | null> => {
-  const r = await c.db.prepare("SELECT kind, head_oid FROM items WHERE repo = ? AND number = ?").get(c.repo, c.n) as { kind: string; head_oid: string | null } | undefined;
+  const r = await c.db.get(c.db.k.selectFrom("items").select(["kind", "head_oid"]).where("repo", "=", c.repo).where("number", "=", c.n));
   return r?.kind === "pr" ? await prBuildView(c.db, c.repo, c.n, r.head_oid, c.staff) : null;
 };
 
@@ -116,13 +116,13 @@ const backlogOf = async (c: Ctx, req: Req): Promise<ItemPageHeader["backlog"]> =
 async function headerOf(c: Ctx, it: Item, queue: QueueSlot | null, req: Req): Promise<ItemPageHeader> {
   const { db, repo, n } = c;
   const lines = it.additions + it.deletions;
-  const assignees = arr<string>((await db.prepare("SELECT assignees FROM items WHERE repo = ? AND number = ?").get(repo, n) as { assignees: string | null }).assignees).filter((x) => typeof x === "string");
+  const assignees = arr<string>((await db.get(db.k.selectFrom("items").select("assignees").where("repo", "=", repo).where("number", "=", n)))!.assignees).filter((x) => typeof x === "string");
   const pre = it.kind === "pr" ? (it as { preapproval?: Preapproval | null }).preapproval ?? null : null;
   return {
     labels: it.labels, assignees,
     autocraftAssigned: c.box !== "" && assignees.includes(c.box), pipelineOn: it.pipelineOn === true, discord: it.discord ?? null, queue,
-    fastTracked: await db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(repo, n) !== undefined,
-    held: await db.prepare("SELECT 1 FROM main.merge_holds WHERE repo = ? AND number = ?").get(repo, n) !== undefined,
+    fastTracked: await db.get(db.k.selectFrom("main.fast_track").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n)) !== undefined,
+    held: await db.get(db.k.selectFrom("main.merge_holds").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n)) !== undefined,
     preapproval: pre, releases: it.releases, tier: it.tier,
     size: it.kind !== "pr" ? null : lines < 50 ? "S" : lines < 300 ? "M" : lines < 1000 ? "L" : "XL",
     backlog: await backlogOf(c, req),
@@ -130,7 +130,7 @@ async function headerOf(c: Ctx, it: Item, queue: QueueSlot | null, req: Req): Pr
 }
 
 async function statusOf(c: Ctx, it: Item): Promise<ItemStatus> {
-  const row = await c.db.prepare("SELECT view FROM item_plans WHERE repo = ? AND number = ?").get(c.repo, c.n) as { view: string } | undefined;
+  const row = await c.db.get(c.db.k.selectFrom("item_plans").select("view").where("repo", "=", c.repo).where("number", "=", c.n));
   const stored = obj(row?.view).status as Partial<ItemStatus> | undefined;
   const since = it.mergedAt ?? it.closedAt ?? it.updatedAt ?? it.createdAt;
   const s = stored && typeof stored.phase === "string" ? ({ waiting: null, next: null, since, ...stored } as ItemStatus) : statusFromItem({ merged_at: it.mergedAt, closed_at: it.closedAt }, since);
@@ -145,12 +145,14 @@ type ReviewRow = { key: string; head_oid: string; at: string; model: string | nu
 
 async function reviewsOf(c: Ctx, headNow: string | null, events: Ev[]): Promise<ReviewHistory> {
   const { db, repo, n } = c;
-  const rows = await q<ReviewRow & { rowid: number }>(db, `SELECT rowid, 'opus:' || rowid AS key, head_oid, at, model, verdict, sure, reason, summary, risks, fixes, claims, blocked_by, trigger
-    FROM opus_review_history WHERE repo = ? AND number = ? AND verdict IS NOT NULL`, repo, n);
+  const rows: (ReviewRow & { rowid: number })[] = (await db.all(db.k.selectFrom("opus_review_history")
+    .select([rowid("opus_review_history").as("rowid"), "head_oid", "at", "model", "verdict", "sure", "reason", "summary", "risks", "fixes", "claims", "blocked_by", "trigger"])
+    .where("repo", "=", repo).where("number", "=", n).where("verdict", "is not", null))).map((r) => ({ ...r, key: `opus:${r.rowid}` }));
   // Reviews stored before the history table existed.
   const seen = new Set(rows.map((r) => `${r.head_oid}|${r.at}`));
-  for (const r of await q<ReviewRow>(db, `SELECT 'opus-latest:' || head_oid AS key, head_oid, at, model, verdict, sure, reason, NULL AS summary, risks, fixes, claims, NULL AS blocked_by, NULL AS trigger
-    FROM opus_reviews WHERE repo = ? AND number = ? AND verdict IS NOT NULL`, repo, n)) if (!seen.has(`${r.head_oid}|${r.at}`)) rows.push({ ...r, rowid: 0 });
+  for (const r of await db.all(db.k.selectFrom("opus_reviews").select(["head_oid", "at", "model", "verdict", "sure", "reason", "risks", "fixes", "claims"])
+    .where("repo", "=", repo).where("number", "=", n).where("verdict", "is not", null).orderBy("head_oid")))
+    if (!seen.has(`${r.head_oid}|${r.at}`)) rows.push({ ...r, key: `opus-latest:${r.head_oid}`, summary: null, blocked_by: null, trigger: null, rowid: 0 });
   rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.rowid - a.rowid));
   const costs = new Map(events.filter((e) => e.kind === "review").map((e) => [e.id, e.costUsd ?? 0]));
   const staff = c.staff;
@@ -194,8 +196,9 @@ async function githubOf(c: Ctx, it: Item, ev: Ev[], url: string, syncedAt: strin
   const byComment = new Map(writes.filter((w) => w.comment).map((w) => [w.comment!.id, w]));
   const used = new Set<number>();
   const own = c.own;
-  const comments = await q<{ id: string; kind: string | null; author: string | null; created_at: string; body: string | null; review_state: string | null }>(db,
-    "SELECT id, kind, author, created_at, body, review_state FROM comments WHERE repo = ? AND number = ? AND created_at IS NOT NULL AND NOT (kind = 'review' AND COALESCE(TRIM(body), '') = '')", repo, n);
+  const comments = await db.all(db.k.selectFrom("comments").select(["id", "kind", "author", "created_at", "body", "review_state"]).where("repo", "=", repo).where("number", "=", n)
+    .where("created_at", "is not", null).$narrowType<{ created_at: string }>()
+    .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn<string | null>("trim", ["body"]), eb.val("")), "=", "")]))));
   if (it.createdAt) events.push({ id: "gh:opened", type: "opened", at: it.createdAt, actor: it.author, body: clean(it.body, 1500), autocraft: null });
   for (const m of comments) {
     const w = byComment.get(m.id);
@@ -206,8 +209,7 @@ async function githubOf(c: Ctx, it: Item, ev: Ev[], url: string, syncedAt: strin
       body: clean(m.body ?? ""), autocraft: ours ? { as: asOf(w), historyId: w ? `audit:${w.rowid}` : `comment:${m.id}` } : null,
     });
   }
-  const acts = await q<{ id: string; kind: string; at: string; actor: string | null; label: string | null; before_oid: string | null; after_oid: string | null }>(db,
-    "SELECT id, kind, at, actor, label, before_oid, after_oid FROM item_activity WHERE repo = ? AND number = ?", repo, n);
+  const acts = await db.all(db.k.selectFrom("item_activity").select(["id", "kind", "at", "actor", "label", "before_oid", "after_oid"]).where("repo", "=", repo).where("number", "=", n).orderBy("id"));
   const labelWrites = writes.filter((w) => w.action === "labels-apply" || w.action === "act-unlabel");
   for (const a of acts) {
     const ours = !!a.actor && own.has(a.actor);
@@ -230,8 +232,9 @@ async function githubOf(c: Ctx, it: Item, ev: Ev[], url: string, syncedAt: strin
   }
   events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
   const pushed = await pushedCommits(db, repo, n);
-  const commits = (await q<{ oid: string; message: string | null; author: string | null; at: string }>(db,
-    "SELECT oid, message, author, MIN(committed_at, COALESCE(first_seen_at, committed_at)) AS at FROM pr_commits WHERE repo = ? AND number = ? ORDER BY at, oid", repo, n))
+  const commits = (await db.all(db.k.selectFrom("pr_commits")
+    .select((eb) => ["oid", "message", "author", least<string>(db, "committed_at", eb.fn.coalesce("first_seen_at", "committed_at")).as("at")])
+    .$narrowType<{ at: string }>().where("repo", "=", repo).where("number", "=", n).orderBy("at").orderBy("oid")))
     .map((m) => ({ sha: short(m.oid), message: clean(m.message ?? "", 500), author: m.author ?? "unknown", at: m.at, byAutoCraft: (!!m.author && own.has(m.author)) || pushed.has(m.oid) }));
   return {
     description: clean(it.body, 6000), events, checks: it.ciChecks.filter((x) => x.state !== "none").map((x) => ({ name: x.name, state: x.state })), commits,
@@ -241,14 +244,13 @@ async function githubOf(c: Ctx, it: Item, ev: Ev[], url: string, syncedAt: strin
 
 // ---- screenshots -----------------------------------------------------------------------------------------------------
 
-type ShotRow = { head_sha: string; state: string; reason: string | null; plan: string | null; head_task_id: number | null; base_task_id: number | null; verdict: string | null; clear: number | null; comparison: string | null; model: string | null; held: number; created_at: string; finished_at: string | null };
-
 /** The latest screenshot run of the PR: one entry for staff, none for anyone else or a veiled PR. Images are served by the task artifact route. */
 async function screenshotsOf(c: Ctx, headNow: string | null): Promise<ScreenshotRun[]> {
   if (!c.staff || c.veiled) return [];
-  const r = await c.db.prepare("SELECT * FROM screenshot_runs WHERE repo = ? AND number = ? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(c.repo, c.n) as ShotRow | undefined;
+  const r = await c.db.get(c.db.k.selectFrom("screenshot_runs").select(cols("screenshot_runs")).where("repo", "=", c.repo).where("number", "=", c.n)
+    .orderBy("created_at", "desc").orderBy(rowid("screenshot_runs"), "desc").limit(1));
   if (!r) return [];
-  const names = async (id: number | null): Promise<Set<string>> => new Set(id === null ? [] : (await c.db.prepare("SELECT name FROM build_artifacts WHERE task_id = ? AND content_type = 'image/png'").all(id) as { name: string }[]).map((x) => x.name));
+  const names = async (id: number | null): Promise<Set<string>> => new Set(id === null ? [] : (await c.db.all(c.db.k.selectFrom("build_artifacts").select("name").where("task_id", "=", id).where("content_type", "=", "image/png"))).map((x) => x.name));
   const before = await names(r.base_task_id), after = await names(r.head_task_id);
   const shots = [...after].filter((n) => before.has(n)).sort((a, b) => parseInt(a.slice(1), 10) - parseInt(b.slice(1), 10))
     .map((name) => ({ name, before: { taskId: r.base_task_id!, name }, after: { taskId: r.head_task_id!, name } }));
@@ -266,9 +268,10 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
   if (req.query.get("since") === stamp) return { unchanged: true, stamp };
   const it = await itemCore(db, req);
   const ev = await gather(c, null);
-  const row = await db.prepare("SELECT url, head_oid, (SELECT synced_at FROM item_reads r WHERE r.repo = items.repo AND r.number = items.number) AS synced_at FROM items WHERE repo = ? AND number = ?").get(c.repo, c.n) as { url: string | null; head_oid: string | null; synced_at: string | null };
-  const cost = (await db.prepare(`SELECT COALESCE(SUM(r.cost_usd), 0) AS cost FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ?${hiddenSql(c.hidden)}`)
-    .get(c.repo, c.n, ...hiddenArgs(c.hidden)) as { cost: number }).cost;
+  const row = (await db.get(db.k.selectFrom("items").select(["url", "head_oid", (eb) => eb.selectFrom("item_reads as r").select("r.synced_at").whereRef("r.repo", "=", "items.repo").whereRef("r.number", "=", "items.number").as("synced_at")])
+    .where("repo", "=", c.repo).where("number", "=", c.n)))!;
+  const cost = (await db.get(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("r.cost_usd"), eb.lit(0)).as("cost"))
+    .where("i.repo", "=", c.repo).where("i.number", "=", c.n).$if(filtered(c.hidden), (q) => q.where((eb) => hiddenExpr(db, eb, c.hidden)!))))!.cost;
   const status = await statusOf(c, it);
   return {
     repo: c.repo, number: c.n, kind: it.kind, state: it.state, title: it.title, author: it.author, stamp,
