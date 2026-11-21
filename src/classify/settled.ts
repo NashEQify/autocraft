@@ -153,9 +153,9 @@ async function settledFrom(j: ClsRow | undefined, h0: ClsRow | undefined, refere
   const h = h0 && (j || h0.input_hash !== null) ? h0 : undefined;
   const r = j && h ? await referee() : undefined;
   return settle(
-    j ? { label: j.type_label!, flags: parseFlags(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
-    h ? { label: h.type_label!, flags: parseFlags(h.flags) } : null,
-    r && j && h && r.at >= j.at && r.at >= h.at ? refereeOf(r.type_label!, r.probs, r.reason) : null,
+    j && j.type_label !== null ? { label: j.type_label, flags: parseFlags(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
+    h && h.type_label !== null ? { label: h.type_label, flags: parseFlags(h.flags) } : null,
+    r && r.type_label !== null && j && h && r.at >= j.at && r.at >= h.at ? refereeOf(r.type_label, r.probs, r.reason) : null,
   );
 }
 
@@ -229,17 +229,12 @@ export function topOf(probs: string | null): number | null {
 // Items without a Jev or Haiku verdict have no row ("unclassified"). A run is built in full on first use; after that the
 // triggers on classifications mark changed items in item_settled_dirty and a refresh works out only those again.
 
-/** Dirty marks and rows per statement: far below the parameter limits of both engines. */
-const MARKS_PER_DELETE = 100;
-const ROWS_PER_INSERT = 500;
-
 type VerdictRow = { repo: string; number: number; jl: string | null; jf: string | null; probs: string | null; hl: string | null; hf: string | null; sl: string | null; ss: number | null; sr: string | null; sf: number | null; sx: number | null };
 
 /** Items with a Jev or a Haiku verdict in `run` (Haiku alone settles an item when Jev was unavailable), narrowed to `keys` when given. */
 function verdictRows(db: Db, run: string, keys?: readonly (readonly [string, number])[]): Promise<VerdictRow[]> {
-  const d = db;
   // The Sonnet row's probs when they are valid JSON.
-  const sp = (eb: kx.AnyEb) => eb.case().when(kx.jsonValid(d, "s.probs")).then(eb.ref("s.probs")).end();
+  const sp = (eb: kx.AnyEb) => eb.case().when(kx.jsonValid(db, "s.probs")).then(eb.ref("s.probs")).end();
   return db.all(db.k
     .selectFrom((eb) => eb.selectFrom("main.classifications").select(["repo", "number"]).where("run_id", "=", run).where("classifier", "=", "jev")
       .union(eb.selectFrom("main.classifications").select(["repo", "number"]).where("run_id", "=", run).where("classifier", "=", "haiku").where("input_hash", "is not", null))
@@ -247,10 +242,10 @@ function verdictRows(db: Db, run: string, keys?: readonly (readonly [string, num
     .leftJoin("main.classifications as j", (j) => j.onRef("j.repo", "=", "k.repo").onRef("j.number", "=", "k.number").on("j.classifier", "=", "jev").on("j.run_id", "=", run))
     .leftJoin("main.classifications as h", (j) => j.onRef("h.repo", "=", "k.repo").onRef("h.number", "=", "k.number").on("h.classifier", "=", "haiku").on("h.run_id", "=", run))
     .leftJoin("main.classifications as s", (j) => j.onRef("s.repo", "=", "k.repo").onRef("s.number", "=", "k.number").on("s.classifier", "=", "sonnet").on("s.run_id", "=", run)
-      .onRef("s.at", ">=", "j.at").onRef("s.at", ">=", "h.at").on((eb) => eb(kx.jsonBool(d, sp(eb), "$.sure"), "is not", null)))
+      .onRef("s.at", ">=", "j.at").onRef("s.at", ">=", "h.at").on((eb) => eb(kx.jsonBool(db, sp(eb), "$.sure"), "is not", null)))
     .select(["k.repo", "k.number", "j.type_label as jl", "j.flags as jf", "j.probs", "h.type_label as hl", "h.flags as hf", "s.type_label as sl", "s.reason as sr"])
-    .select((eb) => [kx.jsonBool(d, sp(eb), "$.sure").as("ss"), kx.jsonBool(d, sp(eb), "$.final").as("sf"), kx.jsonNum(d, sp(eb), "$.opusFailures").as("sx")])
-    .$if(!!keys, (q) => q.where(kx.refIn(d, "k", keys!))));
+    .select((eb) => [kx.jsonBool(db, sp(eb), "$.sure").as("ss"), kx.jsonBool(db, sp(eb), "$.final").as("sf"), kx.jsonNum(db, sp(eb), "$.opusFailures").as("sx")])
+    .$if(!!keys, (q) => q.where(kx.refIn(db, "k", keys!))));
 }
 
 /**
@@ -279,7 +274,7 @@ export function settledOnExpr(eb: kx.AnyEb, run: string | null, alias: string, i
 }
 
 async function refreshSettled(db: Db, run: string): Promise<void> {
-  const built = !!await db.get(db.k.selectFrom("main.item_settled_runs").select((eb) => eb.lit(1).as("one")).where("run", "=", run).limit(1));
+  const built = !!await db.get(db.k.selectFrom("main.item_settled_runs").select((eb) => eb.lit(1).as("one")).where("run", "=", run));
   const rows: Insertable<DB["main.item_settled"]>[] = [];
   const put = (r: VerdictRow) => {
     const ref = r.sl !== null && r.ss !== null ? { label: r.sl, sure: !!r.ss, reason: r.sr ?? "", ...(r.sf ? { final: true } : {}), ...(r.sx ? { failures: r.sx } : {}) } : null;
@@ -307,17 +302,23 @@ async function refreshSettled(db: Db, run: string): Promise<void> {
     await db.run(db.k.deleteFrom("main.item_settled").where("run", "=", run).where(kx.refIn(db, "item_settled", keys)));
     for (const r of await verdictRows(db, run, keys)) put(r);
     // Only the marks read above: an item marked again since then (n moved) stays marked.
-    for (let i = 0; i < dirty.length; i += MARKS_PER_DELETE) {
-      const part = dirty.slice(i, i + MARKS_PER_DELETE);
-      await db.run(db.k.deleteFrom("main.item_settled_dirty").where("run_id", "=", run)
-        .where((eb) => eb.or(part.map((k) => eb.and([eb("repo", "=", k.repo), eb("number", "=", k.number), eb("n", "=", k.n)])))));
-    }
+    await db.run(db.k.deleteFrom("main.item_settled_dirty").where("run_id", "=", run)
+      .where(kx.tupleIn(db, ["repo", "number", "n"], dirty.map((k) => [k.repo, k.number, k.n]), ["text", "bigint", "bigint"])));
   }
   // Marks of runs that are not built: a run is built in full on first use. This run's are kept, built or not: a mark
   // committed during a first build covers a change that build may not have read.
   await db.run(db.k.deleteFrom("main.item_settled_dirty").where("run_id", "<>", run)
     .where("run_id", "not in", (eb) => eb.selectFrom("main.item_settled_runs").select("run")));
-  for (let i = 0; i < rows.length; i += ROWS_PER_INSERT) await db.run(db.k.insertInto("main.item_settled").values(rows.slice(i, i + ROWS_PER_INSERT)));
+  if (rows.length) {
+    await db.run(db.k.insertInto("main.item_settled")
+      .columns(["run", "repo", "number", "status", "label", "source", "top", "jev_label", "haiku_label", "flags", "security", "needs_decision", "referee_label", "referee_sure", "referee_reason", "referee_final"])
+      .expression((eb) => eb.selectFrom(kx.jsonEach(db, kx.json(rows), "v")).select(() => {
+        const text = (c: string) => kx.jsonText(db, "v.value", `$.${c}`).as(c);
+        const num = (c: string) => kx.jsonNum(db, "v.value", `$.${c}`).as(c);
+        return [text("run"), text("repo"), num("number"), text("status"), text("label"), text("source"), num("top"), text("jev_label"), text("haiku_label"), text("flags"),
+          num("security"), num("needs_decision"), text("referee_label"), num("referee_sure"), text("referee_reason"), num("referee_final")];
+      })));
+  }
   await db.run(db.k.insertInto("main.item_settled_runs").values({ run, refreshed_at: new Date().toISOString() })
     .onConflict((oc) => oc.column("run").doUpdateSet(kx.excluded(["refreshed_at"]))));
 }
