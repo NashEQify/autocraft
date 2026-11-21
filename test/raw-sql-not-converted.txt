@@ -148,15 +148,10 @@ src/dash/mcp/index.ts
 
 src/dash/mcp/tokens.ts
 
-src/dash/server/github-app.ts
 
-src/dash/server/github-setup.ts
 
-src/dash/server/image-index.ts
 
-src/dash/server/index.ts
 
-src/dash/server/reseal.ts
 
 
 

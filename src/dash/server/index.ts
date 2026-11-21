@@ -420,8 +420,8 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
 
   async function startOAuth(returnTo: string, selectAccount: boolean, scopes?: string[], p: Provider = provider): Promise<{ r: Res; cookies: string[] }> {
     const state = randomToken(24), verifier = randomToken(48);
-    await db.prepare("INSERT INTO oauth_states (state, verifier, return_to, identity, created_at) VALUES (?, ?, ?, ?, ?)")
-      .run(state, verifier, returnTo, await githubIdentity(db), new Date().toISOString());
+    await db.run(db.k.insertInto("oauth_states")
+      .values({ state, verifier, return_to: returnTo, identity: await githubIdentity(db), created_at: new Date().toISOString() }));
     return {
       r: { redirect: await p.authorizeUrl(state, pkceChallenge(verifier), callbackUrl, selectAccount, scopes) },
       cookies: [cookie(STATE_COOKIE, state, 600)],
@@ -468,11 +468,10 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       }
       const state = url.searchParams.get("state") ?? "";
       const code = url.searchParams.get("code") ?? "";
-      const row = await db.prepare("SELECT verifier, return_to, identity, created_at FROM oauth_states WHERE state = ?").get(state) as
-        { verifier: string; return_to: string | null; identity: string | null; created_at: string } | undefined;
+      const row = await db.get(db.k.selectFrom("oauth_states").select(["verifier", "return_to", "identity", "created_at"]).where("state", "=", state));
       const cookieState = cookies.get(STATE_COOKIE) ?? "";
       const stateOk = !!row && safeEqual(cookieState, state);
-      if (stateOk) await db.prepare("DELETE FROM oauth_states WHERE state = ?").run(state);
+      if (stateOk) await db.run(db.k.deleteFrom("oauth_states").where("state", "=", state));
       if (!row || !code || !stateOk || Date.now() - Date.parse(row.created_at) > 600_000) {
         return { r: errorPage(nonce, 400, "Sign-in expired", "Start again from the sign-in link."), cookies: clear };
       }
@@ -597,7 +596,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         void vault.sweepRevocations().catch(() => {});
       }
       // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep.
-      if (await db.prepare("SELECT 1 FROM user_token_revocations WHERE attempts = 0 LIMIT 1").get()) void vault.sweepRevocations(true).catch(() => {});
+      if (await db.get(db.k.selectFrom("user_token_revocations").select("id").where("attempts", "=", 0).limit(1))) void vault.sweepRevocations(true).catch(() => {});
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
       if (config.devAuth && (req.headers["x-forwarded-for"] !== undefined || !isLoopbackHost(req.headers.host))) {

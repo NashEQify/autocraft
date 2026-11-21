@@ -27,9 +27,9 @@ test("legacy-sealed values are re-sealed at startup, then open; open alone refus
   const box = new TokenBox(KEY);
   const legacy = sealLegacy("{}", "user_tokens:alice");
   assert.equal(box.open(legacy, "user_tokens:alice"), null);
-  await db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('Alice', 1, ?, 1, 'x', 'ok')").run(legacy);
+  await db.run(db.k.insertInto("user_tokens").values({ login: "Alice", github_id: 1, token_enc: legacy, version: 1, updated_at: "x", status: "ok" }));
   assert.deepEqual(await resealLegacyValues(db, box), { user_tokens: 1 });
-  const now = (await db.prepare("SELECT token_enc FROM user_tokens").get() as { token_enc: string }).token_enc;
+  const now = (await db.get(db.k.selectFrom("user_tokens").select("token_enc")))!.token_enc;
   assert.equal(box.open(now, "user_tokens:alice"), "{}");
   assert.deepEqual(await resealLegacyValues(db, box), {});
   await db.close();
@@ -38,10 +38,10 @@ test("legacy-sealed values are re-sealed at startup, then open; open alone refus
 test("switching the identity queues revocation of stored user tokens", async () => {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(SCRATCH, `hardening-b-${process.pid}.db`));
-  await db.prepare("INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES ('bob', 2, 'enc', 1, 'x', 'ok')").run();
+  await db.run(db.k.insertInto("user_tokens").values({ login: "bob", github_id: 2, token_enc: "enc", version: 1, updated_at: "x", status: "ok" }));
   assert.equal(await setGithubIdentity(db, "op", "app"), true);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM user_tokens").get() as { n: number }).n, 0);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM user_token_revocations WHERE login = 'bob'").get() as { n: number }).n, 1);
+  assert.equal((await db.get(db.k.selectFrom("user_tokens").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
+  assert.equal((await db.get(db.k.selectFrom("user_token_revocations").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "bob")))!.n, 1);
   await db.close();
 });
 
