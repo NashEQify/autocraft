@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { settledLookup, settledTable } from "../src/classify/settled.ts";
+import { settledLookup, settledSet, settledTable } from "../src/classify/settled.ts";
 import { connect } from "../src/db.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb, dbFor } from "../src/db/open.ts";
@@ -8,34 +8,42 @@ import { connectDb, dbFor } from "../src/db/open.ts";
 const RUN = "r1";
 
 async function seed(db: Db): Promise<void> {
-  const cls = db.prepare("INSERT INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, probs, reason, input_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  await cls.run("app", 1, "jev", RUN, "2026-01-01", "bugfix", "[]", '{"top":0.95}', null, null);
-  await cls.run("app", 2, "jev", RUN, "2026-01-01", "feature", "[]", '{"top":0.6}', null, null);
-  await cls.run("app", 2, "haiku", RUN, "2026-01-02", "feature", "[]", null, null, null);
-  await cls.run("app", 3, "jev", RUN, "2026-01-01", "feature", "[]", '{"top":0.5,"security":0.95}', null, null);
-  await cls.run("app", 3, "haiku", RUN, "2026-01-02", "bugfix", '["security"]', null, null, null);
-  await cls.run("app", 3, "sonnet", RUN, "2026-01-03", "bugfix", "[]", '{"sure":true}', "a fix", null);
-  await cls.run("app", 4, "haiku", RUN, "2026-01-02", "docs", "[]", null, null, "h");
-  await cls.run("app", 5, "jev", "old", "2026-01-01", "docs", "[]", '{"top":0.99}', null, null);
+  const cls = (repo: string, number: number, classifier: string, run_id: string, at: string, type_label: string, probs: string | null, flags = "[]", reason: string | null = null, input_hash: string | null = null) =>
+    db.run(db.k.insertInto("main.classifications").values({ repo, number, classifier, run_id, at, type_label, flags, probs, reason, input_hash }));
+  await cls("app", 1, "jev", RUN, "2026-01-01", "bugfix", '{"top":0.95}');
+  await cls("app", 2, "jev", RUN, "2026-01-01", "feature", '{"top":0.6}');
+  await cls("app", 2, "haiku", RUN, "2026-01-02", "feature", null);
+  await cls("app", 3, "jev", RUN, "2026-01-01", "feature", '{"top":0.5,"security":0.95}');
+  await cls("app", 3, "haiku", RUN, "2026-01-02", "bugfix", null, '["security"]');
+  await cls("app", 3, "sonnet", RUN, "2026-01-03", "bugfix", '{"sure":true}', "[]", "a fix");
+  await cls("app", 4, "haiku", RUN, "2026-01-02", "docs", null, "[]", null, "h");
+  await cls("app", 5, "jev", "old", "2026-01-01", "docs", '{"top":0.99}');
 }
 
-const rows = async (db: Db) => await db.prepare("SELECT repo, number, status, label, source, top, jev_label, haiku_label, flags, security, needs_decision, referee_label, referee_sure, referee_reason, referee_final FROM item_settled WHERE run = ? ORDER BY repo, number").all(RUN);
+const rows = async (db: Db) => await db.all(db.k.selectFrom("item_settled")
+  .select(["repo", "number", "status", "label", "source", "top", "jev_label", "haiku_label", "flags", "security", "needs_decision", "referee_label", "referee_sure", "referee_reason", "referee_final"])
+  .where("run", "=", RUN).orderBy("repo").orderBy("number"));
 
 /** item_settled after a first build and after changes, checked against the per-item rule. */
 async function states(db: Db): Promise<unknown[]> {
   await seed(db);
   await settledTable(db, RUN);
   const first = await rows(db);
-  await db.prepare("DELETE FROM main.classifications WHERE repo = 'app' AND number = 2 AND classifier = 'haiku'").run();
-  await db.prepare(`UPDATE main.classifications SET probs = '{"top":0.4}' WHERE repo = 'app' AND number = 1`).run();
-  await db.prepare("INSERT INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', 6, 'jev', ?, '2026-01-04', 'bugfix', '[]', '{\"top\":0.92}')").run(RUN);
-  await db.prepare("INSERT INTO main.classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', 7, 'jev', 'old', '2026-01-04', 'bugfix', '[]', '{\"top\":0.92}')").run();
+  await db.run(db.k.deleteFrom("main.classifications").where("repo", "=", "app").where("number", "=", 2).where("classifier", "=", "haiku"));
+  await db.run(db.k.updateTable("main.classifications").set({ probs: '{"top":0.4}' }).where("repo", "=", "app").where("number", "=", 1));
+  const jev = (number: number, run_id: string) => ({ repo: "app", number, classifier: "jev", run_id, at: "2026-01-04", type_label: "bugfix", flags: "[]", probs: '{"top":0.92}' });
+  await db.run(db.k.insertInto("main.classifications").values([jev(6, RUN), jev(7, "old")]));
   await settledTable(db, RUN);
   const second = await rows(db);
   const one = settledLookup(db, RUN);
+  const all = await settledSet(db, RUN);
+  const some = await settledSet(db, RUN, ["app#3"]);
+  assert.deepEqual(await some("app", 3), await one("app", 3));
+  assert.equal((await some("app", 1)).status, "unclassified", "an item outside refs reads as unclassified");
   for (const r of second as { repo: string; number: number; status: string; label: string | null }[]) {
     const s = await one(r.repo, r.number);
     assert.deepEqual([r.status, r.label], [s.status, s.label], `${r.repo}#${r.number} as the per-item rule settles it`);
+    assert.deepEqual(await all(r.repo, r.number), s, `${r.repo}#${r.number} read in one query`);
   }
   return [first, second];
 }
