@@ -15,8 +15,8 @@ const release = (id: number, tag: string, published: string, assets: ReturnType<
   ({ id, tag_name: tag, name: `PhotoCraft ${tag}`, draft: false, prerelease: false, published_at: published, assets });
 const setup = async () => {
   const db = await connectDb(":memory:");
-  await db.run(db.k.insertInto("main.repos").values({ name: "photocraft", visibility: "public" }));
-  await db.run(db.k.insertInto("main.tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "photocraft", visibility: "public" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
   let data: RepoReleases = { stars: 10, releases: [] };
   const poll = (now: number) => pollReleases(db, async (_o, repo) => (repo === "photocraft" ? data : { stars: 0, releases: [] }), now, (l) => { if (!l.includes("repos read")) throw new Error(l); });
   return { db, poll, set: (d: RepoReleases) => { data = d; } };
@@ -73,7 +73,7 @@ test("range sums count issues, merged PRs and release health from the mirror", a
   set({ stars: 5, releases: [a, b] });
   await poll(now - 5 * H);
   const ins = (number: number, kind: string, state: string, created_at: string, closed_at: string | null, merged_at: string | null) =>
-    db.run(db.k.insertInto("main.items").values({ repo: "photocraft", number, kind, state, title: "t", author: "u", created_at, closed_at, merged_at }));
+    db.run(db.k.insertInto("items").values({ repo: "photocraft", number, kind, state, title: "t", author: "u", created_at, closed_at, merged_at }));
   await ins(1, "issue", "OPEN", "2026-11-05T00:00:00Z", null, null);   // while v1.0.0 was newest
   await ins(2, "issue", "CLOSED", "2026-11-08T05:00:00Z", "2026-11-09T01:00:00Z", null);   // while v1.1.0 was newest
   await ins(3, "issue", "OPEN", "2026-11-09T02:00:00Z", null, null);

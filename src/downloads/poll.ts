@@ -89,7 +89,7 @@ export async function recordRepo(db: Db, repo: string, data: RepoReleases, now: 
     } else {
       // Releases that vanished keep their history, so the app stays while any counted file is stored.
       await db.run(db.k.deleteFrom("release_apps").where("repo", "=", repo).where((eb) => eb.not(eb.exists(
-        eb.selectFrom("release_assets").select(eb.lit(1).as("one")).where("repo", "=", repo).where("format", "is not", null)))));
+        eb.selectFrom("release_assets").select(eb.lit(1).as("one")).where("release_assets.repo", "=", repo).where("release_assets.format", "is not", null)))));
     }
   });
 }
