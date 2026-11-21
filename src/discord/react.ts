@@ -9,7 +9,7 @@ export const REACTION = "✅";
 
 /** The operators' switch on the Discord page; on unless switched off. */
 export const reactOn = async (db: Db): Promise<boolean> =>
-  (await db.prepare("SELECT value FROM settings WHERE key = 'discord_react'").get() as { value: string } | undefined)?.value !== "off";
+  (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "discord_react")))?.value !== "off";
 
 export class Reactor {
   #d: { db: Db; rest: ReactRest; log: (l: string) => void };

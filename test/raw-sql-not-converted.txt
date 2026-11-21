@@ -163,15 +163,10 @@ src/discord/alerts.ts
 
 
 
-src/discord/links.ts
 
-src/discord/pings.ts
 
-src/discord/react.ts
 
-src/discord/replies.ts
 
-src/discord/reply.ts
 
 src/discord/reporter.ts
 
