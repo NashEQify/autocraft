@@ -253,14 +253,15 @@ describe("over HTTP", async () => {
     const { token, row } = await createToken(db, "maint", "old box", { kind: "runner" });
     const secret = `aclease_${randomToken(32)}`;
     const now = Date.now();
-    const call = Number((await db.prepare(`INSERT INTO remote_calls (step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, since, seen_at, max_attempts, timeout_ms,
-        user_login, lease_secret_hash, token_id, leased_at, heartbeat_at) VALUES ('review', 0, 'p', '1', 'top', 'high', 'opus', '{}', 'leased', ?, ?, 3, 600000, 'maint', ?, ?, ?, ?) RETURNING id`)
-      .get(now, now, sha256hex(secret), row.id, now, now) as { id: number }).id);
+    const call = Number((await db.get(db.k.insertInto("remote_calls").values({
+      step: "review", stage: 0, prompt_id: "p", prompt_version: "1", tier: "top", effort: "high", asked_model: "opus", bundle: "{}", state: "leased", since: now, seen_at: now, max_attempts: 3, timeout_ms: 600000,
+      user_login: "maint", lease_secret_hash: sha256hex(secret), token_id: row.id, leased_at: now, heartbeat_at: now,
+    }).returning("id")))!.id);
     const beat = () => post(ROUTES.heartbeat, {}, secret);
     assert.equal((await beat()).status, 200);
     await maint("POST", "/api/runners/revoke", { id: row.id });
     assert.equal((await beat()).status, 410);
-    const after = await db.prepare("SELECT state, attempt, token_id FROM remote_calls WHERE id = ?").get(call) as { state: string; attempt: number; token_id: number | null };
+    const after = (await db.get(db.k.selectFrom("remote_calls").select(["state", "attempt", "token_id"]).where("id", "=", call)))!;
     assert.deepEqual([after.state, after.attempt, after.token_id], ["queued", 1, null]);
     assert.equal((await claim(token)).status, 401);
   });
@@ -270,15 +271,16 @@ describe("over HTTP", async () => {
     assert.deepEqual((await claim(token)).body.encodings, ["gzip+base64"]);
     const secret = `aclease_${randomToken(32)}`;
     const now = Date.now();
-    const call = Number((await db.prepare(`INSERT INTO remote_calls (step, stage, prompt_id, prompt_version, tier, effort, asked_model, model, bundle, state, since, seen_at, max_attempts, timeout_ms,
-        user_login, lease_secret_hash, token_id, leased_at, heartbeat_at) VALUES ('review', 0, 'p', '1', 'top', 'high', 'opus', 'opus', '{}', 'leased', ?, ?, 3, 600000, 'maint', ?, ?, ?, ?) RETURNING id`)
-      .get(now, now, sha256hex(secret), row.id, now, now) as { id: number }).id);
+    const call = Number((await db.get(db.k.insertInto("remote_calls").values({
+      step: "review", stage: 0, prompt_id: "p", prompt_version: "1", tier: "top", effort: "high", asked_model: "opus", model: "opus", bundle: "{}", state: "leased", since: now, seen_at: now, max_attempts: 3, timeout_ms: 600000,
+      user_login: "maint", lease_secret_hash: sha256hex(secret), token_id: row.id, leased_at: now, heartbeat_at: now,
+    }).returning("id")))!.id);
     const enc = (body: unknown) => ({ encoding: "gzip+base64", body: gzipSync(JSON.stringify(body)).toString("base64") });
     const reply = { ok: true, text: "<script>alert(1)</script> UNION SELECT", model: "claude-opus-4-5", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 5 };
     assert.equal((await post(ROUTES.submit, enc({ ...reply, text: "x".repeat(8 * 1024 * 1024) }), secret)).status, 413);
     assert.equal((await post(ROUTES.heartbeat, enc({ phase: "running", progress: "Reading /etc/passwd" }), secret)).status, 200);
     assert.deepEqual(await post(ROUTES.submit, enc(reply), secret), { status: 200, body: { accepted: true } });
-    assert.equal((await db.prepare("SELECT reply FROM remote_calls WHERE id = ?").get(call) as { reply: string }).reply, reply.text);
+    assert.equal((await db.get(db.k.selectFrom("remote_calls").select("reply").where("id", "=", call)))!.reply, reply.text);
   });
 
   test("a valid envelope with invalid base64 or gzip gets 400; any other shape is plain JSON", async () => {
