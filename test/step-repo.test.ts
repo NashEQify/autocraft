@@ -70,8 +70,8 @@ test("a proposal reserves the step it is gated on: at step_parallel 1 another re
   await db.script("DELETE FROM jobs");
   await setStepParallel(db, 1, "test");
   const lanes = [
-    { name: "first", steps: ["test-repo"], detect: () => [{ step: "test-repo", params: { repo: "a" }, gate: { step: "test-urgent", params: { repo: "a" } } }] },
-    { name: "second", steps: ["test-urgent"], detect: () => [{ step: "test-urgent", params: { repo: "b" } }] },
+    { name: "first", steps: ["test-repo"], detect: async () => [{ step: "test-repo", params: { repo: "a" }, gate: { step: "test-urgent", params: { repo: "a" } } }] },
+    { name: "second", steps: ["test-urgent"], detect: async () => [{ step: "test-urgent", params: { repo: "b" } }] },
   ];
   const found = await detectAutopilot(db, { lanes });
   const ids = await applyProposals(db, found.proposals, { lanes });

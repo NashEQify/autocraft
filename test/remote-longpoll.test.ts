@@ -152,7 +152,7 @@ describe("long-polling claims", async () => {
     const empty = () => ({ lease: null, retryAfter: CLAIM_RETRY_S }) as never;
     const reply = waits.hold(new Ticket(new AbortController().signal), Date.now() + 60_000, {
       attempt: async (_now, { live }) => { started(); await gate; leased = live(); return null; },
-      idle: () => {}, empty, blocked: () => false,
+      idle: async () => {}, empty, blocked: () => false,
     });
     await inTry;
     waits.close();

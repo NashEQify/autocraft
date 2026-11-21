@@ -101,7 +101,7 @@ describe("private fix and landing", () => {
     const seen: { resume?: { id: string; message: string }; previous: unknown }[] = [];
     const stores: string[] = [];
     const deps: FixDeps = {
-      exec: fake().exec, root: SCRATCH, log: () => {}, cancelled: () => false,
+      exec: fake().exec, root: SCRATCH, log: () => {}, cancelled: async () => false,
       fetchCrates: async () => ({ ok: true, rust: true, crates: [{ name: "psd", dir: "crates/psd" }] }) as never,
       checkout: async () => "/checkout",
       who: async () => ({ login: "pipeline-bot", email: "bot@example.com" }),

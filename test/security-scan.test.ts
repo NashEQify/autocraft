@@ -116,7 +116,7 @@ function fakeModel(costs = { model: 1, area: 2, verify: 0.5 }, calls: string[] =
     const disproved = input.finding?.title === "Name read unchecked";
     return { cost: costs.verify, text: JSON.stringify({ verdict: disproved ? "disproved" : "confirmed", score: disproved ? 2 : 9, result: "Followed the path in layer.rs:118.", notes: "", proposed_test: disproved ? undefined : "parse a layer with len = u32::MAX" }) };
   }) as Ask;
-  return { ask, checkout: async () => ({ dir: tree, sha: "a".repeat(40) }), cancelled: () => false, log: () => {} };
+  return { ask, checkout: async () => ({ dir: tree, sha: "a".repeat(40) }), cancelled: async () => false, log: () => {} };
 }
 
 const newScan = async (cap: number | null): Promise<number> => Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES ('photocraft', 'modeling', ?, 'boss', '2026-11-05T00:00:00Z')").run(cap)).lastInsertRowid);

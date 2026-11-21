@@ -41,8 +41,8 @@ test("older tokens a helper used become runners, the others connectors, and can_
     VALUES ('review', 0, 'p', '1', 'top', 'high', 'opus', '{}', 'done', 0, 0, 1, 1, ?)`).run(leased);
   await db.prepare("DELETE FROM settings WHERE key = 'runner_tokens_split'").run();
 
-  splitRunnerTokens(db);
-  splitRunnerTokens(db);
+  splitRunnerTokens(db.sync!);
+  splitRunnerTokens(db.sync!);
 
   const rows = await db.prepare("SELECT id, kind, can_run FROM mcp_tokens ORDER BY id").all() as { id: number; kind: string; can_run: number }[];
   assert.deepEqual(rows.map((r) => [r.id, r.kind, r.can_run]), [[status, "runner", 1], [idle, "runner", 1], [leased, "runner", 1], [unused, "connector", 0], [plain, "connector", 0]]);

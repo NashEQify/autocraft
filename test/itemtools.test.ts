@@ -9,11 +9,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { connectDb } from "../src/db/open.ts";
 import { writeSnapshot } from "../src/itemtools/snapshot.ts";
 import { callTool, openDb } from "../src/itemtools/server/tools.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
-import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "itemtools-"));
@@ -22,7 +21,7 @@ const diffs = join(dir, "diffs");
 const cfg = { db: snap, diffs };
 const vec = (...x: number[]) => new Uint8Array(new Float32Array(x).buffer);
 const PRIVATE = "dashboard-only-note-x9";
-let db: Db;
+let db: DatabaseSync;
 let first: ReturnType<typeof writeSnapshot>;
 const mirror = () => new DatabaseSync(join(dir, "mirror.db"));
 
@@ -54,13 +53,13 @@ before(async () => {
 });
 
 describe("snapshot", () => {
-  test("holds items, comments and decision outcomes, and nothing private", async () => {
-    const tables = (await db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name);
+  test("holds items, comments and decision outcomes, and nothing private", () => {
+    const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as { name: string }[]).map((t) => t.name);
     for (const t of ["settings", "audit", "access", "sessions", "decisions", "decision_comments", "decision_opinions"]) assert.ok(!tables.includes(t), t);
-    const dump = JSON.stringify([await db.prepare("SELECT * FROM decision_outcomes").all(), await db.prepare("SELECT * FROM meta").all()]);
+    const dump = JSON.stringify([db.prepare("SELECT * FROM decision_outcomes").all(), db.prepare("SELECT * FROM meta").all()]);
     assert.ok(!dump.includes(PRIVATE) && !dump.includes("SETTING-VALUE") && !dump.includes("AUDIT-VALUE"));
-    assert.deepEqual((await db.prepare("SELECT kind, answer, answer_label FROM decision_outcomes").all()).map((r) => ({ ...r })), [{ kind: "scope", answer: "take", answer_label: "Take it" }]);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM comments").get() as { n: number }).n, 2);
+    assert.deepEqual(db.prepare("SELECT kind, answer, answer_label FROM decision_outcomes").all().map((r) => ({ ...r })), [{ kind: "scope", answer: "take", answer_label: "Take it" }]);
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM comments").get() as { n: number }).n, 2);
   });
 });
 
@@ -94,8 +93,8 @@ describe("tools", () => {
     ] as const) assert.equal(callTool(db, cfg, tool, a).isError, true, `${tool} ${JSON.stringify(a)}`);
   });
 
-  test("the snapshot is opened read-only", async () => {
-    await assert.rejects(async () => await db.script("DELETE FROM items"), /readonly/i);
+  test("the snapshot is opened read-only", () => {
+    assert.throws(() => db.exec("DELETE FROM items"), /readonly/i);
   });
 });
 
@@ -122,17 +121,17 @@ describe("stdio server", () => {
 
 // Last: it changes the mirror and the snapshot the other tests read.
 describe("refresh", () => {
-  test("only public repositories are copied", async () => {
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM items WHERE repo = 'secretcraft'").get() as { n: number }).n, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM comments WHERE repo = 'secretcraft'").get() as { n: number }).n, 0);
+  test("only public repositories are copied", () => {
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM items WHERE repo = 'secretcraft'").get() as { n: number }).n, 0);
+    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM comments WHERE repo = 'secretcraft'").get() as { n: number }).n, 0);
     assert.equal(callTool(db, cfg, "search_items", { query: "roadmap" }).text, "No matches.");
   });
 
 
-  test("a snapshot of another schema version is rebuilt", async () => {
+  test("a snapshot of another schema version is rebuilt", () => {
     const x = new DatabaseSync(snap);
-    await x.script("UPDATE meta SET value = 'old' WHERE key = 'schema'");
-    await x.close();
+    x.exec("UPDATE meta SET value = 'old' WHERE key = 'schema'");
+    x.close();
     assert.equal(writeSnapshot(join(dir, "mirror.db"), snap).rebuilt, true);
   });
 });

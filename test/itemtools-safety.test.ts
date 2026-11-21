@@ -9,7 +9,6 @@ import { describe, test } from "node:test";
 import { writeSnapshot } from "../src/itemtools/snapshot.ts";
 import { callTool, frame, openDb } from "../src/itemtools/server/tools.ts";
 import { SCRATCH } from "./scratch.ts";
-import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -29,27 +28,27 @@ await src.prepare("INSERT INTO comments (repo, number, id, kind, author, body, r
 await src.prepare("INSERT INTO comments (repo, number, id, kind, author, body, review_state) VALUES ('open', 1, 'r2', 'review', 'a', 'final thoughts', 'APPROVED')").run();
 await src.close();
 
-const ids = async (db: Db, table: string) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+const ids = (db: DatabaseSync, table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 describe("snapshot safety", () => {
-  test("a pending review is not copied", async () => {
+  test("a pending review is not copied", () => {
     writeSnapshot(mirrorFile, snap);
     const db = openDb(snap);
-    assert.equal(await ids(db, "comments WHERE id = 'r1'"), 0);
-    assert.equal(await ids(db, "comments WHERE id = 'r2'"), 1);
-    await db.close();
+    assert.equal(ids(db, "comments WHERE id = 'r1'"), 0);
+    assert.equal(ids(db, "comments WHERE id = 'r2'"), 1);
+    db.close();
   });
 
-  test("a repository turning private is removed by a refresh with nothing else changed", async () => {
+  test("a repository turning private is removed by a refresh with nothing else changed", () => {
     const m = new DatabaseSync(mirrorFile);
-    await m.prepare("UPDATE repos SET visibility = 'private' WHERE name = 'later'").run();
-    await m.close();
+    m.prepare("UPDATE repos SET visibility = 'private' WHERE name = 'later'").run();
+    m.close();
     const r = writeSnapshot(mirrorFile, snap);
     assert.equal(r.rebuilt, false);
     const db = openDb(snap);
-    assert.equal(await ids(db, "items WHERE repo = 'later'"), 0);
+    assert.equal(ids(db, "items WHERE repo = 'later'"), 0);
     assert.equal(callTool(db, cfg, "search_items", { query: "glitter" }).text, "No matches.");
-    await db.close();
+    db.close();
   });
 
 });

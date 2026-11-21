@@ -36,7 +36,7 @@ const fakeFetch = (async (input: string | URL | Request, init?: RequestInit) => 
 
 // The hrefs the proxy treats as present in the mirror; null: every URL is.
 let inMirror: Set<string> | null = null;
-const repos = (href: string) => (!inMirror || inMirror.has(href) ? ["photocraft"] : []);
+const repos = async (href: string) => (!inMirror || inMirror.has(href) ? ["photocraft"] : []);
 
 const db = await connectDb(join(dir, "dash.db"));
 let base = "";

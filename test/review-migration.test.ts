@@ -5,15 +5,14 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
+import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
-
-const { connect } = await import("../src/db.ts");
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "review-migration-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-const exists = async (db: ReturnType<typeof connect>, name: string) => !!await db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+const exists = async (db: Db, name: string) => !!await db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
 test("the first-pass review's leftovers are removed once and never come back", async () => {
   const path = join(dir, "m.db");

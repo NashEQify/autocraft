@@ -54,7 +54,7 @@ function world(n: number, replies: (round: number) => string): World {
     return { code: 0, stdout: "", stderr: "" };
   };
   const deps: FixDeps = {
-    exec, root: SCRATCH, log: () => {}, cancelled: () => false,
+    exec, root: SCRATCH, log: () => {}, cancelled: async () => false,
     fetchCrates: async () => ({ ok: true, rust: true, crates: [{ name: "psd", dir: "crates/psd" }] }) as never,
     checkout: async () => "/checkout",
     who: async () => ({ login: "pipeline-bot", email: "bot@example.com" }),

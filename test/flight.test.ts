@@ -8,7 +8,7 @@ import type { PlanSet } from "../src/core/plan-set.ts";
 import { planned } from "../src/core/select.ts";
 import { carriedReview } from "../src/review/carry.ts";
 import { prFacts } from "./world.ts";
-import { connectDb } from "../src/db/open.ts";
+import { connectDb, dbFor } from "../src/db/open.ts";
 
 test("selection order: our broken push, then work in flight, then score", async () => {
   const mk = (n: number, over: Parameters<typeof prFacts>[0]) => { const facts = prFacts({ number: n, review: { head: "old" }, head: "h", ...over }); return { facts, plan: decidePr(facts) }; };
@@ -16,7 +16,7 @@ test("selection order: our broken push, then work in flight, then score", async 
     run: null, now: 0, pass: { rereadPaceAt: 0 }, items: [],
     prs: [mk(1, { score: 900 }), mk(2, { score: 10, inFlight: true }), mk(3, { score: 5, brokeByUs: true, inFlight: true }), mk(4, { score: 500, inFlight: true, mergeHeld: true })],
   };
-  const order = (await planned(new DatabaseSync(":memory:"), "review", { plans })).map((p) => p.facts.number);
+  const order = (await planned(await dbFor(new DatabaseSync(":memory:")), "review", { plans })).map((p) => p.facts.number);
   assert.deepEqual(order, [3, 2, 1, 4]);
 });
 

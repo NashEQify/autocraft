@@ -248,7 +248,8 @@ describe("format failure", () => {
   const forced = `${hdr}-fn a() {}\n-fn main() { b(); }\n+fn b() {}\n+fn main() { b(); }\n`;
 
   /** Runs the step to the queued formatter task, gives the task `diff` as its result and applies it. */
-  async function formatRun(w: World, diff: string | null, db = fresh(w.head)) {
+  async function formatRun(w: World, diff: string | null, given?: Db) {
+    const db = given ?? (await fresh(w.head));
     await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
     const task = (await rows(db, "SELECT id FROM build_tasks"))[0]!;
     await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T2, Number(task.id));

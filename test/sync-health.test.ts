@@ -80,7 +80,7 @@ async function recoveryScenarios(): Promise<void> {
   await db2.script("INSERT INTO repos (name, owner, synced_at, high_water, reconciled_at) VALUES ('c','other','2026-11-02T08:00:00Z','2026-11-02T08:00:00Z','2026-11-02T09:00:00Z')");
   await db2.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T10:00:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
   await db2.script("INSERT INTO sync_repo_errors VALUES ('c','transient','x','','2026-11-02T08:30:00Z','2026-11-02T10:00:00Z')");
-  loadOwners(db2);
+  loadOwners(db2.sync!);
   const c2 = {
     spent: 0, remaining: 4000 as number | null,
     async query(query: string, v: Record<string, unknown>) {

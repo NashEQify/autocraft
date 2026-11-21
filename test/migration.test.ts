@@ -14,11 +14,11 @@ const cols = async (db: Db, table: string): Promise<string[]> => (await db.prepa
 test("the first release's database migrates in place and keeps its rows", async () => {
   const path = join(tmpdir("migration"), "old.db");
   const old = new DatabaseSync(path);
-  await old.script(readFileSync(new URL("./fixtures/oldest-schema.sql", import.meta.url), "utf8"));
-  await old.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', 1, 'pr', 'OPEN', 'Fix the crash', 'a body about wombats', 'alice', 'a', 'a')").run();
-  await old.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, topics, area, flags) VALUES ('app', 1, 'haiku', 'r', 'a', 'bugfix', '1', 'ui', '[]')").run();
-  await old.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('app', 1, 'c1', 'comment', 'bob', 'a', 'looks good')").run();
-  await old.close();
+  old.exec(readFileSync(new URL("./fixtures/oldest-schema.sql", import.meta.url), "utf8"));
+  old.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', 1, 'pr', 'OPEN', 'Fix the crash', 'a body about wombats', 'alice', 'a', 'a')").run();
+  old.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, topics, area, flags) VALUES ('app', 1, 'haiku', 'r', 'a', 'bugfix', '1', 'ui', '[]')").run();
+  old.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('app', 1, 'c1', 'comment', 'bob', 'a', 'looks good')").run();
+  old.close();
 
   const db = await connectDb(path);
   assert.ok((await cols(db, "items")).includes("head_oid"), "items gained the head column");

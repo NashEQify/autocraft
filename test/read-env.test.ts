@@ -3,9 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { ownerOfArgs, ownerOfVariables, readEnv, readEnvFor } from "../src/github/read.ts";
 import type { Db } from "../src/db/index.ts";
+import { dbFor } from "../src/db/open.ts";
 
 const dbWith = async (identity?: string): Promise<Db> => {
-  const db = new DatabaseSync(":memory:");
+  const db = await dbFor(new DatabaseSync(":memory:"));
   await db.script("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)");
   if (identity) await db.prepare("INSERT INTO settings VALUES ('github_identity', ?)").run(identity);
   return db;

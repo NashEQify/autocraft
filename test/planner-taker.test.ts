@@ -32,7 +32,7 @@ test("a Task Runner that takes only deckcraft: deckcraft is planned, photocraft 
   await setUserRepos(db, "olga", ["deckcraft"]);
   await setStepParallel(db, 1, "test");
 
-  const lane = (repos: string[]) => [{ name: "model", steps: ["test-model"], perRepo: true, detect: () => repos.map((repo) => ({ step: "test-model", params: { repo } })) }];
+  const lane = (repos: string[]) => [{ name: "model", steps: ["test-model"], perRepo: true, detect: async () => repos.map((repo) => ({ step: "test-model", params: { repo } })) }];
   const both = await detectAutopilot(db, { lanes: lane(["photocraft", "deckcraft"]) });
   assert.deepEqual(both.proposals.map((p) => p.params.repo), ["deckcraft"]);
   const photo = await detectAutopilot(db, { lanes: lane(["photocraft"]) });
@@ -60,7 +60,7 @@ test("a Task Runner whose user unticked the step's task: nothing is planned, a q
   await storeStatus(db, token, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
   await setUserTasks(db, "olga", TASK_CHOICES.map((t) => t.id).filter((t) => t !== taskOfStep("test-model")));
 
-  const lane = [{ name: "model", steps: ["test-model"], perRepo: true, detect: () => [{ step: "test-model", params: { repo: "deckcraft" } }] }];
+  const lane = [{ name: "model", steps: ["test-model"], perRepo: true, detect: async () => [{ step: "test-model", params: { repo: "deckcraft" } }] }];
   const found = await detectAutopilot(db, { lanes: lane });
   assert.equal(found.proposals.length, 0);
   assert.equal(found.status?.["test-model"], noRunnerForTask("deckcraft", "test-model"));

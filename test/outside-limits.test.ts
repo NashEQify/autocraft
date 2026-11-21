@@ -21,10 +21,10 @@ async function setup() {
 
 test("an outside author's 6th PR in 24 hours waits; members and the pipeline's own account do not; Release lets it through", async () => {
   const { db, add } = await setup();
-  const outsider = await Array.from({ length: 6 }, async (_, k) => await add("outsider", "pr", 600 - k * 10));
-  const member = await Array.from({ length: 8 }, async (_, k) => await add("regular", "pr", 300 - k, "MEMBER"));
+  const outsider = await mapSeq(Array.from({ length: 6 }, (_, k) => k), async (k) => await add("outsider", "pr", 600 - k * 10));
+  const member = await mapSeq(Array.from({ length: 8 }, (_, k) => k), async (k) => await add("regular", "pr", 300 - k, "MEMBER"));
   const own = await add("bot", "pr", 5);
-  const app = await Array.from({ length: 7 }, async (_, k) => await add("renovate[bot]", "pr", 100 - k));
+  const app = await mapSeq(Array.from({ length: 7 }, (_, k) => k), async (k) => await add("renovate[bot]", "pr", 100 - k));
   const old = await add("outsider", "pr", 30 * 60); // older than 24 hours: outside the window
   await refreshOutsideHolds(db, NOW);
   assert.deepEqual(await mapSeq(outsider, async (n) => await inPilot(db, "app", n)), [true, true, true, true, true, false]);

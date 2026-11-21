@@ -4,9 +4,10 @@ import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { dbReady, serveHealth } from "../src/health.ts";
+import { dbFor } from "../src/db/open.ts";
 
 test("healthz answers while the process is up; readyz follows the database", async () => {
-  const db = new DatabaseSync(":memory:");
+  const db = await dbFor(new DatabaseSync(":memory:"));
   const server = createServer(async (req, res) => {
     if (!await serveHealth(req, res, async () => await dbReady(db))) res.writeHead(404).end();
   });

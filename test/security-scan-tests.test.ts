@@ -39,7 +39,7 @@ function deps(spy: Spy, withTests: boolean): ScanDeps {
     if (id === "security.area") return { cost: 1, text: JSON.stringify({ findings: LINES.map((line) => ({ title: `Finding at ${line}`, severity: "high", urgent: false, confidence: 0.9, category: `cat_${line}`, refs: [{ path: "crates/psd/src/layer.rs", line, claim: "shows it" }], reach: "open file", impact: "bad" })) }) };
     return { cost: 0.5, text: JSON.stringify({ verdict: "confirmed", score: 9, result: "Followed the path.", notes: "", proposed_test: "read a record with a long length" }) };
   }) as Ask;
-  const base: ScanDeps = { ask, checkout: async () => ({ dir: tree, sha: SHA }), cancelled: () => false, log: () => {}, confirmed: undefined };
+  const base: ScanDeps = { ask, checkout: async () => ({ dir: tree, sha: SHA }), cancelled: async () => false, log: () => {}, confirmed: undefined };
   if (!withTests) return base;
   return {
     ...base,

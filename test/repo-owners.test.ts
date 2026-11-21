@@ -19,7 +19,7 @@ test("a tracked repo of another owner is written to under its own owner; storyto
   await trackRepo(db, "t", "designcraft");
   assert.equal(ownerOf("autocraft-sandbox"), "example-org");
   assert.equal(ownerOf("designcraft"), "storytold");
-  assert.deepEqual(trackedOwners(db), ["example-org", "storytold"]);
+  assert.deepEqual(trackedOwners(db.sync!), ["example-org", "storytold"]);
   await assert.rejects(async () => await trackRepo(db, "t", "other/designcraft"), RepoError);
   await assert.rejects(async () => await trackRepo(db, "t", "bad owner/x"), RepoError);
 
