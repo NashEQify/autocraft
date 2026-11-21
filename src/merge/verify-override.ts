@@ -11,7 +11,7 @@ export async function verifyOverride(db: Db, repo: string, number: number, head:
   if (!v) return false;
   const id = mergeDecisionId(repo, number, head);
   if (await db.prepare("SELECT 1 FROM audit WHERE target = ? AND action = 'answer' AND json_extract(details, '$.source') = 'preapproval' LIMIT 1").get(id)) return false;
-  return !!await db.prepare(`SELECT 1 FROM decisions WHERE id = ? AND kind = 'merge' AND answer = 'merge' AND answered_at > ? AND ${settledBySql("decisions")}`).get(id, v.finished_at);
+  return !!await db.prepare(`SELECT 1 FROM decisions WHERE id = ? AND kind = 'merge' AND answer = 'merge' AND answered_at > ? AND ${settledBySql(db, "decisions")}`).get(id, v.finished_at);
 }
 
 /** A Merge answer given before the verification failed does not cover the failure: it is set aside so the Merge? question is asked again with the failure as a reason. */

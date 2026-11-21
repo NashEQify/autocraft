@@ -206,7 +206,7 @@ export async function needs(db: Db, req: Req): Promise<NeedsPage> {
   // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
   const dp: Record<string, string> = {};
   const hide = withoutHidden(hidden, dp);
-  const decisions = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE ${needingSql(req)}${hide ? ` AND ${hide}` : ""}`).get(dp) as { n: number }).n;
+  const decisions = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE ${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`).get(dp) as { n: number }).n;
   const rows = await stopped(db, hidden);
   const last = fb.rows[fb.rows.length - 1];
   return {

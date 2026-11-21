@@ -10,6 +10,7 @@ import { coreSummaries } from "../decide/choices.ts";
 import { ITEM_BODY_LIMIT, ITEM_COMMENT_LIMIT, ITEM_COMMENTS, ITEM_DIFF_LIMIT, MESSAGE_MAX, OPENING_MAX, type TurnKind } from "./types.ts";
 import { flatMapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { inList, like } from "../db/portable.ts";
 
 export class ConversationError extends Error {
   status: number;
@@ -109,12 +110,12 @@ const labelsOf = (i: { labels: string | null }): string[] => {
 type Snapshot = { head: string | null; title: string; body: string; state: string; labels: string[]; comments: number; last_comment: string | null; decision: string | null; answer: string | null };
 
 // The app's bot (the mirror stores its bare slug) is the pipeline itself: its posts are no news for the conversation.
-const COMMENTS_WHERE = `repo = ? AND number = ? AND COALESCE(TRIM(body), '') <> '' AND COALESCE(author, '') NOT LIKE '%[bot]'
-  AND COALESCE(author, '') NOT IN (SELECT value FROM json_each(COALESCE((SELECT value FROM main.settings WHERE key = 'app_slugs'), '[]')))`;
+const commentsWhere = (db: Db): string => `repo = ? AND number = ? AND COALESCE(TRIM(body), '') <> '' AND NOT ${like(db, "COALESCE(author, '')", "'%[bot]'")}
+  AND ${inList(db, "COALESCE(author, '')", "COALESCE((SELECT value FROM main.settings WHERE key = 'app_slugs'), '[]')", "text", true)}`;
 
 async function snapshotOf(db: Db, i: ItemRow): Promise<Snapshot> {
-  const cnt = await db.prepare(`SELECT COUNT(*) AS n FROM comments WHERE ${COMMENTS_WHERE}`).get(i.repo, i.number) as { n: number };
-  const last = await db.prepare(`SELECT id FROM comments WHERE ${COMMENTS_WHERE} ORDER BY created_at DESC, id DESC LIMIT 1`).get(i.repo, i.number) as { id: string } | undefined;
+  const cnt = await db.prepare(`SELECT COUNT(*) AS n FROM comments WHERE ${commentsWhere(db)}`).get(i.repo, i.number) as { n: number };
+  const last = await db.prepare(`SELECT id FROM comments WHERE ${commentsWhere(db)} ORDER BY created_at DESC, id DESC LIMIT 1`).get(i.repo, i.number) as { id: string } | undefined;
   const d = await openDecision(db, i.repo, i.number) ?? await latestDecision(db, i.repo, i.number);
   return { head: i.head_oid, title: hash(i.title), body: hash(i.body), state: i.state, labels: labelsOf(i).sort(), comments: Number(cnt.n), last_comment: last?.id ?? null, decision: d?.id ?? null, answer: d?.answer ?? null };
 }
@@ -144,7 +145,7 @@ export async function staleOf(db: Db, repo: string, n: number, seen: string | nu
 }
 
 /**
- * Whether a person commented after the comment a card was written against. Stricter than COMMENTS_WHERE, which also
+ * Whether a person commented after the comment a card was written against. Stricter than commentsWhere, which also
  * drives update turns and must not change: review bots and our own posts (made through an account a person also
  * uses, so recognised by their note line, never by login) are news for Opus but do not make a decision card stale.
  * When the seen comment is gone, any change in the newest counted comment counts, as before.
@@ -152,7 +153,7 @@ export async function staleOf(db: Db, repo: string, n: number, seen: string | nu
 async function newerPersonComment(db: Db, repo: string, n: number, seenId: string | null): Promise<boolean> {
   const at = seenId === null ? null : (await db.prepare("SELECT created_at, id FROM comments WHERE repo = ? AND number = ? AND id = ?").get(repo, n, seenId) as { created_at: string; id: string } | undefined);
   if (seenId !== null && !at) return true;
-  const rows = await db.prepare(`SELECT author, body FROM comments WHERE ${COMMENTS_WHERE}${at ? " AND (created_at > ? OR (created_at = ? AND id > ?))" : ""}`)
+  const rows = await db.prepare(`SELECT author, body FROM comments WHERE ${commentsWhere(db)}${at ? " AND (created_at > ? OR (created_at = ? AND id > ?))" : ""}`)
     .all(...[repo, n, ...(at ? [at.created_at, at.created_at, at.id] : [])]) as { author: string | null; body: string }[];
   return rows.some((r) => !(r.author && isBotLogin(r.author)) && !OWN_NOTE_PREFIXES.some((p) => r.body.trimStart().startsWith(p)));
 }
@@ -177,7 +178,7 @@ export async function buildItemBlock(db: Db, repo: string, n: number, deps?: Sto
   const i = await itemRow(db, repo, n);
   if (!i) throw new ConversationError(404, `no item ${repo}#${n} in the mirror`);
   const pr = i.kind === "pr";
-  const comments = await db.prepare(`SELECT author, body FROM comments WHERE ${COMMENTS_WHERE} ORDER BY created_at, id LIMIT ?`).all(repo, n, ITEM_COMMENTS) as { author: string | null; body: string }[];
+  const comments = await db.prepare(`SELECT author, body FROM comments WHERE ${commentsWhere(db)} ORDER BY created_at, id LIMIT ?`).all(repo, n, ITEM_COMMENTS) as { author: string | null; body: string }[];
   let diff: string | null = null;
   if (pr && i.head_oid && deps?.diff) diff = await deps.diff(repo, n, i.head_oid).catch(() => null);
   const data = {
@@ -219,8 +220,8 @@ async function inTx<T>(db: Db, f: () => Promise<T>): Promise<T> {
 }
 
 async function insertRow(db: Db, repo: string, n: number, t: NewTurn, seq: number | null, status: string | null, deps?: StoreDeps, seenAt?: string | null): Promise<number> {
-  const id = Number((await db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block, status, error, notes, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)")
-    .run(repo, n, t.kind, t.login, nowOf(deps), t.body, t.block, status, t.notes?.length ? JSON.stringify(t.notes) : null, seq)).lastInsertRowid);
+  const id = Number((await db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block, status, error, notes, seq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?) RETURNING id")
+    .get(repo, n, t.kind, t.login, nowOf(deps), t.body, t.block, status, t.notes?.length ? JSON.stringify(t.notes) : null, seq) as { id: number }).id);
   // One current set: a new Opus turn replaces the proposals of the earlier ones.
   if (t.kind === "opus") await db.prepare("UPDATE conversation_cards SET state = 'replaced' WHERE repo = ? AND number = ? AND state = 'proposed'").run(repo, n);
   // A reply's cards are stamped with what Opus was told when its prompt was built, not with a later refresh.
@@ -280,7 +281,7 @@ export async function refreshItem(db: Db, repo: string, n: number, deps?: StoreD
   if (JSON.stringify(was.labels) !== JSON.stringify(now.labels)) { changed.push("labels"); data.labels = labelsOf(i); }
   if (was.comments !== now.comments || was.last_comment !== now.last_comment) {
     changed.push("comments");
-    const rows = await db.prepare(`SELECT author, body FROM comments WHERE ${COMMENTS_WHERE} ORDER BY created_at DESC, id DESC LIMIT 3`).all(repo, n) as { author: string | null; body: string }[];
+    const rows = await db.prepare(`SELECT author, body FROM comments WHERE ${commentsWhere(db)} ORDER BY created_at DESC, id DESC LIMIT 3`).all(repo, n) as { author: string | null; body: string }[];
     data.comments = { total: now.comments, newest: rows.reverse().map((r) => ({ author: r.author, body: cut(r.body, ITEM_COMMENT_LIMIT) })) };
   }
   if (was.decision !== now.decision || was.answer !== now.answer) {

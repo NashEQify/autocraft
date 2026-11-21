@@ -58,10 +58,10 @@ type Row = {
 const sameAsText = (col: string): string => `CASE WHEN ${col} = i.embed_hash THEN '' ELSE ${col} END`;
 const asText = (h: string | null, text: string | null): string | null => (h === "" ? text : h);
 
-const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
+const select = (db: Db): string => `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
     CASE WHEN i.class_scheme = '${SCHEME_ID}' THEN i.class_hash END AS class_hash,
     ${fastScoreSql("i.repo", "i.number", "r.score")} AS score,
-    ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration, ${backlogHeldSql("i")} AS held_backlog,
+    ${pilotSql(db, "i")} AS in_pilot, ${notOwnIntegrationSql(db, "i")} AS not_integration, ${backlogHeldSql(db, "i")} AS held_backlog,
     (EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = i.repo AND dh.number = i.number AND (dh.answer IS NULL OR dh.answer = 'close'))
       OR ${groupHeldSql("i")}) AS held_dup,
     ${sameAsText("p.text_hash")} AS pr_hash, p.impact, ${sameAsText("e.hash")} AS e_hash, ${sameAsText("s.hash")} AS scan_hash, st.stage,
@@ -110,7 +110,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
   // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
-  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
+  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql(db, "decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
     WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
     (PrepareColumns & { locked: number; lock_at: string | null; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
     const dupegroup = d.id.includes(":dupegroup:");
@@ -183,7 +183,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
   if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
-  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  const rows = await db.prepare(`${select(db)}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {

@@ -159,12 +159,12 @@ export async function screenshotsDue(db: Db): Promise<boolean> {
     LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
     LEFT JOIN build_tasks h ON h.id = r.head_task_id
     LEFT JOIN build_tasks b ON b.id = r.base_task_id
-    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")} AND (
+    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor(db, "r.repo", "r.number")} AND NOT ${backlogHeldSql(db, "r")} AND (
       i.state IS NOT 'OPEN' OR (${CURRENT_HEAD_SQL}) IS NOT r.head_sha
       OR (h.state IN (${TERMINAL_SQL}) AND (b.id IS NULL OR b.state IN (${TERMINAL_SQL})))
       OR (r.state = 'planned' AND (h.state IN ('claimed', 'running') OR b.state IN ('claimed', 'running'))))
     LIMIT 1`).get()) return true;
-  const repos = await db.prepare(`SELECT DISTINCT r.repo FROM screenshot_runs r WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")}`).all() as { repo: string }[];
+  const repos = await db.prepare(`SELECT DISTINCT r.repo FROM screenshot_runs r WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor(db, "r.repo", "r.number")} AND NOT ${backlogHeldSql(db, "r")}`).all() as { repo: string }[];
   return await someSeq(repos, async (r) => !await featureOn(db, "screenshots", r.repo));
 }
 
@@ -186,7 +186,7 @@ export async function collectScreenshots(db: Db, deps: Pick<CollectDeps, "screen
   const rows = await db.prepare(`SELECT r.*, i.state AS item_state, ${CURRENT_HEAD_SQL} AS item_head, i.title AS title, i.body AS body FROM screenshot_runs r
     LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number
     LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
-    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")} ORDER BY r.created_at, r.number`).all() as Run[];
+    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor(db, "r.repo", "r.number")} AND NOT ${backlogHeldSql(db, "r")} ORDER BY r.created_at, r.number`).all() as Run[];
   let changed = 0;
   for (const r of rows) {
     if (await stopping?.()) break;

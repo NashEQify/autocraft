@@ -97,7 +97,7 @@ export type PendingDefect = { repo: string; number: number; review_at: string; f
 export async function pendingDefects(db: Db, repo?: string, now = Date.now()): Promise<PendingDefect[]> {
   const only = repo !== undefined ? [repo] : [];
   const rows = await db.prepare(`SELECT r.repo, r.number, r.at, r.model, r.findings FROM postmerge_reviews r
-    WHERE ${repo !== undefined ? "r.repo = ? AND " : ""}r.error IS NULL AND ${pilotSqlFor("r.repo", "r.number")} ORDER BY r.at, r.number`).all(...only) as { repo: string; number: number; at: string; model: string | null; findings: string | null }[];
+    WHERE ${repo !== undefined ? "r.repo = ? AND " : ""}r.error IS NULL AND ${pilotSqlFor(db, "r.repo", "r.number")} ORDER BY r.at, r.number`).all(...only) as { repo: string; number: number; at: string; model: string | null; findings: string | null }[];
   const out: PendingDefect[] = [];
   const quiet = await quietFixPrs(db, repo);
   // The follow-ups of each PR and the Fix PR links of follow-up issues, read once (followupsOf and fixesFollowup per PR).

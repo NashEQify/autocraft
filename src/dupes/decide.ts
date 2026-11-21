@@ -270,9 +270,9 @@ export async function groupsToAsk(db: Db, repo?: string): Promise<GroupPlan[]> {
  */
 export async function answersToApply(db: Db): Promise<{ id: string; refs: string[] }[]> {
   const rows = await db.prepare(`SELECT d.id, d.repo, d.number FROM decisions d WHERE d.kind = 'duplicate' AND d.answer IS NOT NULL AND d.answer <> 'backlog' AND d.applied_at IS NULL
-    AND ${settledBySql("d")}
-    AND ((d.id NOT LIKE '%:dupegroup:%' AND d.answer <> 'close' AND ${pilotSqlFor("d.repo", "d.number")})
-      OR (d.id LIKE '%:dupegroup:%' AND EXISTS (SELECT 1 FROM dupe_group_items gi WHERE gi.decision_id = d.id AND ${pilotSqlFor("gi.repo", "gi.number")}) AND COALESCE((SELECT g.applied_answer FROM dupe_groups g WHERE g.decision_id = d.id), '') <> d.answer))`).all() as
+    AND ${settledBySql(db, "d")}
+    AND ((d.id NOT LIKE '%:dupegroup:%' AND d.answer <> 'close' AND ${pilotSqlFor(db, "d.repo", "d.number")})
+      OR (d.id LIKE '%:dupegroup:%' AND EXISTS (SELECT 1 FROM dupe_group_items gi WHERE gi.decision_id = d.id AND ${pilotSqlFor(db, "gi.repo", "gi.number")}) AND COALESCE((SELECT g.applied_answer FROM dupe_groups g WHERE g.decision_id = d.id), '') <> d.answer))`).all() as
     { id: string; repo: string | null; number: number | null }[];
   const members = db.prepare("SELECT repo, number FROM dupe_group_items WHERE decision_id = ?");
   return await mapSeq(rows, async (d) => {

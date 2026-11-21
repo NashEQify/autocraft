@@ -8,6 +8,7 @@ import { writeEffect } from "../act/index.ts";
 import { queuePlace } from "../conversations/queue.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { ciEq, distinctFrom } from "../db/portable.ts";
 
 export const SETTLING = "settling";
 export const DISPUTED = "disputed";
@@ -21,7 +22,7 @@ export const RUNNING_STALE_MS = 10 * 60_000;
  */
 export const lockLiveSql = (t = "decisions", now: Date = new Date()): string =>
   // CASE, not AND: in a select list SQLite evaluates both sides of AND, and the card scan would run for every row.
-  `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN EXISTS (SELECT 1 FROM main.conversation_cards lc WHERE (lc.state = 'queued' OR (lc.state = 'running' AND lc.acted_at > '${new Date(now.getTime() - RUNNING_STALE_MS).toISOString()}')) AND ${t}.exec_reason LIKE lc.id || ':%') ELSE 0 END)`;
+  `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN EXISTS (SELECT 1 FROM main.conversation_cards lc WHERE (lc.state = 'queued' OR (lc.state = 'running' AND lc.acted_at > '${new Date(now.getTime() - RUNNING_STALE_MS).toISOString()}')) AND ${t}.exec_reason LIKE lc.id || ':%') ELSE FALSE END)`;
 
 /** SQL: when the running card that holds the lock of `t` started (its lock is not live from RUNNING_STALE_MS later); null when no running card holds it. */
 export const lockRunningAtSql = (t = "decisions"): string =>
@@ -108,7 +109,7 @@ export async function disputeOn(db: Db, repo: string, number: number): Promise<b
 /** Records the dispute. False when the decision is no longer disputable (answered by the disputer, applied, running or already disputed). */
 export async function openDispute(db: Db, id: string, by: string, reason: string, at: string): Promise<boolean> {
   const r = await db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = NULL, dispute_by = ?, dispute_reason = ?, dispute_at = ?
-    WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND answered_by <> ? COLLATE NOCASE
+    WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND NOT ${ciEq(db, "answered_by", "?")}
       AND (exec_state IS NULL OR exec_state IN ('pending', 'waiting-token', 'waiting-permission', 'failed'))`).run(DISPUTED, by, reason, at, id, BACKLOG.key, by);
   if (r.changes !== 1) return false;
   await audit(db, by, "dispute", id, { reason });
@@ -123,14 +124,14 @@ export async function clearDispute(db: Db, id: string): Promise<void> {
  * SQL (decisions unaliased): an answered, unapplied decision the viewer has to look at: a disputed one (the answerer, or any operator), or one an
  * operator has to reassign because its answerer no longer settles and its option writes to GitHub.
  */
-export function heldOpenSql(login: string, operator: boolean): string {
+export function heldOpenSql(db: Db, login: string, operator: boolean): string {
   const me = `'${login.replace(/'/g, "''")}'`;
   const writes = `((decisions.answer = 'close' AND decisions.kind IN ('scope', 'close', 'duplicate', 'merge', 'hold')) OR (decisions.answer = 'merge' AND decisions.kind = 'merge')
     OR (decisions.kind = 'duplicate' AND (decisions.answer = 'accept' OR decisions.answer LIKE 'keep:%')))`;
   // An open decision whose queued press someone disputed: the presser and operators look at it.
   const queuedDispute = `(decisions.answer IS NULL AND decisions.exec_state = '${SETTLING}' AND EXISTS (SELECT 1 FROM main.conversation_cards hc WHERE hc.state = 'queued' AND hc.dispute_by IS NOT NULL
-    AND decisions.exec_reason LIKE hc.id || ':%' AND ${operator ? "1" : `hc.acted_by = ${me} COLLATE NOCASE`}))`;
+    AND decisions.exec_reason LIKE hc.id || ':%' AND ${operator ? "TRUE" : ciEq(db, "hc.acted_by", me)}))`;
   return `(${queuedDispute} OR decisions.answer IS NOT NULL AND decisions.applied_at IS NULL AND decisions.answer <> '${BACKLOG.key}' AND decisions.id NOT LIKE '%~replaced-%'
-    AND ((decisions.exec_state = '${DISPUTED}' AND ${operator ? "1" : `decisions.answered_by = ${me} COLLATE NOCASE`})
-      OR (${operator ? "1" : "0"} AND decisions.exec_state IS NOT '${DISPUTED}' AND decisions.answered_by IS NOT NULL AND decisions.answered_by <> 'pipeline' AND ${writes} AND NOT ${settledBySql("decisions")})))`;
+    AND ((decisions.exec_state = '${DISPUTED}' AND ${operator ? "TRUE" : ciEq(db, "decisions.answered_by", me)})
+      OR (${operator ? "TRUE" : "FALSE"} AND ${distinctFrom(db, "decisions.exec_state", `'${DISPUTED}'`)} AND decisions.answered_by IS NOT NULL AND decisions.answered_by <> 'pipeline' AND ${writes} AND NOT ${settledBySql(db, "decisions")})))`;
 }

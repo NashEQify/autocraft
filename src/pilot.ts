@@ -7,6 +7,7 @@ import { quietSqlFor } from "./security/quiet.ts";
 import { audit } from "./dash/audit.ts";
 import { setting } from "./settings-read.ts";
 import type { Db } from "./db/index.ts";
+import { jsonArrayLength, jsonEach, jsonValid } from "./db/portable.ts";
 
 export const PILOT_KEY = "pilot_items";
 
@@ -87,29 +88,31 @@ export async function setPilot(db: Db, by: string, input: unknown): Promise<stri
   return refs;
 }
 
-const LIST = `(SELECT CASE WHEN json_valid(ps.value) THEN ps.value ELSE '[]' END FROM main.settings ps WHERE ps.key = '${PILOT_KEY}')`;
+const list = (db: Db): string => `(SELECT CASE WHEN ${jsonValid(db, "ps.value")} THEN ps.value ELSE '[]' END FROM main.settings ps WHERE ps.key = '${PILOT_KEY}')`;
 
 /** SQL condition on an item given by its repo and number expressions: it is fast-tracked, or its repo's pipeline flag is on, an outside-author hold (src/outside.ts) does not keep it back and, with a pilot set, it is a pilot item, the Fix PR of a pilot issue, a follow-up issue of a pilot PR or the Fix PR of such an issue. */
-export const pilotSqlFor = (repo: string, number: string): string =>
-  `(EXISTS (SELECT 1 FROM main.fast_track pft WHERE pft.repo = ${repo} AND pft.number = ${number})
+export const pilotSqlFor = (db: Db, repo: string, number: string): string => {
+  const LIST = list(db);
+  return `(EXISTS (SELECT 1 FROM main.fast_track pft WHERE pft.repo = ${repo} AND pft.number = ${number})
     OR (EXISTS (SELECT 1 FROM main.tracked_repos pt WHERE pt.name = ${repo} AND pt.pipeline = 1)
     AND NOT EXISTS (SELECT 1 FROM main.outside_holds oh WHERE oh.repo = ${repo} AND oh.number = ${number})
-    AND (COALESCE(json_array_length(${LIST}), 0) = 0
-      OR EXISTS (SELECT 1 FROM json_each(${LIST}) pj WHERE pj.value = ${repo} || '#' || ${number})
+    AND (COALESCE(${jsonArrayLength(db, LIST)}, 0) = 0
+      OR EXISTS (SELECT 1 FROM ${jsonEach(db, LIST, "pj")} WHERE pj.value = ${repo} || '#' || ${number})
       OR ${quietSqlFor(repo, number)}
-      OR EXISTS (SELECT 1 FROM main.fix_attempts pf, json_each(${LIST}) pj WHERE pf.repo = ${repo} AND pf.pr_url LIKE '%/pull/' || ${number}
+      OR EXISTS (SELECT 1 FROM main.fix_attempts pf, ${jsonEach(db, LIST, "pj")} WHERE pf.repo = ${repo} AND pf.pr_url LIKE '%/pull/' || ${number}
         AND pj.value = pf.repo || '#' || pf.number)
-      OR EXISTS (SELECT 1 FROM main.fix_attempts pf2 JOIN main.postmerge_followups pm2 ON pm2.repo = pf2.repo AND pm2.issue_number = pf2.number, json_each(${LIST}) pj
+      OR EXISTS (SELECT 1 FROM main.fix_attempts pf2 JOIN main.postmerge_followups pm2 ON pm2.repo = pf2.repo AND pm2.issue_number = pf2.number, ${jsonEach(db, LIST, "pj")}
         WHERE pf2.repo = ${repo} AND pf2.pr_url LIKE '%/pull/' || ${number} AND pj.value = pm2.repo || '#' || pm2.number)
-      OR EXISTS (SELECT 1 FROM main.postmerge_followups pm, json_each(${LIST}) pj WHERE pm.repo = ${repo} AND pm.issue_number = ${number}
+      OR EXISTS (SELECT 1 FROM main.postmerge_followups pm, ${jsonEach(db, LIST, "pj")} WHERE pm.repo = ${repo} AND pm.issue_number = ${number}
         AND pj.value = pm.repo || '#' || pm.number)))
     OR EXISTS (SELECT 1 FROM main.fix_attempts pg JOIN main.fast_track pgt ON pgt.repo = pg.repo AND pgt.number = pg.number
       WHERE pg.repo = ${repo} AND pg.pr_url LIKE '%/pull/' || ${number}))`;
+};
 
 /** The same for a row `alias` of items. */
-export const pilotSql = (alias: string): string => pilotSqlFor(`${alias}.repo`, `${alias}.number`);
+export const pilotSql = (db: Db, alias: string): string => pilotSqlFor(db, `${alias}.repo`, `${alias}.number`);
 
 /** True when the item is in scope. */
 export async function inPilot(db: Db, repo: string, number: number): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 WHERE ${pilotSqlFor("?1", "CAST(?2 AS INTEGER)")}`).get(repo, number);
+  return !!await db.prepare(`SELECT 1 WHERE ${pilotSqlFor(db, "?1", "CAST(?2 AS INTEGER)")}`).get(repo, number);
 }

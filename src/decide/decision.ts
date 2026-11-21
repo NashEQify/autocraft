@@ -3,6 +3,7 @@
 import { STATS_SQL, TIER_LABEL, tierKey, tiersOf } from "../whitelist.ts";
 import type { Candidate } from "./select.ts";
 import type { Db } from "../db/index.ts";
+import { jsonEach } from "../db/portable.ts";
 
 /**
  * Answer keys of a scope decision. The step that applies answers reads these
@@ -93,7 +94,7 @@ export async function factsOf(db: Db, c: Candidate, now = Date.now()): Promise<s
   if (fixes.length) linked.push(`fixes ${fixes.map((n) => `#${n}`).join(", ")}`);
   if (i.kind === "issue") {
     const prs = await db.prepare(`SELECT number FROM items WHERE repo = ? AND kind = 'pr' AND state = 'OPEN'
-      AND EXISTS (SELECT 1 FROM json_each(closing_issues) WHERE value = ?) ORDER BY number`).all(c.repo, c.number) as { number: number }[];
+      AND EXISTS (SELECT 1 FROM ${jsonEach(db, "closing_issues", "ci")} WHERE ci.value = ?) ORDER BY number`).all(c.repo, c.number) as { number: number }[];
     if (prs.length) linked.push(`open PRs that fix it: ${prs.map((p) => `#${p.number}`).join(", ")}`);
   }
   const dups = await db.prepare(`SELECT DISTINCT dup_of FROM classifications WHERE repo = ? AND number = ? AND dup_of IS NOT NULL`).all(c.repo, c.number) as { dup_of: number }[];

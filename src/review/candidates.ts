@@ -49,12 +49,12 @@ async function scopeRows(db: Db, extra: string): Promise<Map<string, string>> {
  */
 export async function scopeAnswers(db: Db, operatorsOnly = false): Promise<Map<string, string>> {
   // A disputed answer does not count until it is kept.
-  return await scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql("decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")})`}`);
+  return await scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql(db, "decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql(db, "decisions")})`}`);
 }
 
 /** Items whose latest scope answer is a maintainer's that no longer counts: the item waits for a decision again instead of being reviewed on it. */
 export async function unsettledScope(db: Db): Promise<Set<string>> {
-  return new Set((await scopeRows(db, `AND ${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}`)).keys());
+  return new Set((await scopeRows(db, `AND ${MAINTAINER_ANSWER} AND NOT ${settledBySql(db, "decisions")}`)).keys());
 }
 
 /**
@@ -66,7 +66,7 @@ export async function settledScope(db: Db, repo: string, number: number): Promis
   const answer = (await scopeAnswers(db)).get(ref);
   if (!answer || !KEEP_IN_CORE.includes(answer)) return null;
   const rows = await db.prepare(`SELECT answered_by, answer_note, repo, number, items FROM decisions
-    WHERE kind = 'scope' AND answer = ? AND answered_by IS NOT NULL AND answered_by <> 'pipeline' AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}) ORDER BY answered_at DESC`).all(answer) as
+    WHERE kind = 'scope' AND answer = ? AND answered_by IS NOT NULL AND answered_by <> 'pipeline' AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql(db, "decisions")}) ORDER BY answered_at DESC`).all(answer) as
     { answered_by: string; answer_note: string | null; repo: string | null; number: number | null; items: string | null }[];
   const r = rows.find((x) => (x.number !== null ? x.repo === repo && x.number === number : parseRefs(x.items).some((i) => i.repo === repo && i.number === number)));
   if (!r) return null;

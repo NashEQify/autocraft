@@ -118,7 +118,7 @@ export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISO
 
 /** Fetches and stores the checks of the given PRs (all open PRs of the repo when none are given). */
 export async function refreshChecks(db: Db, client: Querier, repo: string, numbers?: number[], log: (line: string) => void = () => {}): Promise<PrChecks[]> {
-  const list = numbers ?? (await db.prepare(`SELECT number FROM items i WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND ${pilotSql("i")} ORDER BY number`).all(repo) as { number: number }[]).map((r) => r.number);
+  const list = numbers ?? (await db.prepare(`SELECT number FROM items i WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND ${pilotSql(db, "i")} ORDER BY number`).all(repo) as { number: number }[]).map((r) => r.number);
   const all: PrChecks[] = [];
   for (let i = 0; i < list.length; i += CHECKS_PER_QUERY) {
     const chunk = list.slice(i, i + CHECKS_PER_QUERY);
