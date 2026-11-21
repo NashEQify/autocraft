@@ -111,7 +111,7 @@ describe("webhook", () => {
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5005 }), null);
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5006, login: "bad login" }));
     assert.deepEqual(await rows(w), [{ comment_id: 5000, number: 1, pr: 1, weight: 7, login: OPERATOR, state: "queued", result: null, reply: null }]);
-    const cols = (await w.db.prepare("SELECT name FROM pragma_table_info('github_commands')").all() as { name: string }[]).map((c) => c.name);
+    const cols = (await w.db.k.introspection.getTables()).find((t) => t.name === "github_commands")!.columns.map((c) => c.name);
     assert.ok(!cols.includes("body"), "the comment's text has no column");
     assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 1 }], "the item is still re-read");
   });
