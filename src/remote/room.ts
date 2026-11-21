@@ -9,7 +9,7 @@
 // only user (manual-only.ts) take only the user's own picks and follow-ups, so they are no room.
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { queueSnapshot, runnerTakes } from "./calls.ts";
+import { leasedBy, queueSnapshot, runnerTakes } from "./calls.ts";
 import { claimClass } from "./claim-class.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { manualSql } from "./manual-only.ts";
@@ -21,6 +21,7 @@ import { scaled } from "./time-scale.ts";
 import { HEARTBEAT_S } from "./protocol.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { inList } from "../db/portable.ts";
 
 /** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
 export const IDLE_FRESH_MS = scaled(45_000);
@@ -55,7 +56,7 @@ export async function remoteRoom(db: Db, cls: number, nowMs: number = Date.now()
  */
 export async function roomCanWrite(db: Db, logins: readonly string[], nowMs: number): Promise<(login: string, repo: string) => boolean> {
   const denied = new Set<string>();
-  for (const p of await db.prepare("SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE login IN (SELECT value FROM json_each(?))").all(JSON.stringify([...new Set(logins)])) as { login: string; repo: string; permission: string; checked_at: string }[])
+  for (const p of await db.prepare(`SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE ${inList(db, "login", "?", "citext")}`).all(JSON.stringify([...new Set(logins)])) as { login: string; repo: string; permission: string; checked_at: string }[])
     if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
   return (login, repo) => !denied.has(`${login.toLowerCase()}\n${repo}`);
 }
@@ -125,7 +126,7 @@ export async function roomOf(db: Db, st: RoomState, cls: number, nowMs: number, 
     let left = st.left.get(login);
     if (left === undefined) {
       const max = await userMaxCalls(db, login);
-      left = max === null ? Infinity : Math.max(0, max - Number((await db.prepare("SELECT COUNT(*) AS n FROM main.remote_calls INDEXED BY remote_calls_leased WHERE state = 'leased' AND user_login = ? COLLATE NOCASE").get(login) as { n: number }).n));
+      left = max === null ? Infinity : Math.max(0, max - await leasedBy(db, login));
       st.left.set(login, left);
     }
     if (filtered) some += Math.min(n, left);

@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { dataDir } from "../db.ts";
 import { envVar } from "../env.ts";
 import type { Db } from "../db/index.ts";
+import { upsert } from "../db/portable.ts";
 
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 export const MAX_TASK_ARTIFACT_BYTES = 200 * 1024 * 1024;
@@ -86,7 +87,7 @@ export async function storeArtifact(db: Db, taskId: number, name: string, tmp: s
     const rel = fileFor(taskId, name);
     renameSync(tmp, join(artifactDir(), rel));
     await db.write(async () => {
-      await db.prepare("INSERT OR REPLACE INTO build_artifacts (task_id, name, bytes, content_type, file) VALUES (?, ?, ?, ?, ?)").run(taskId, name, bytes, type, rel);
+      await db.prepare(upsert(db, { table: "build_artifacts", cols: ["task_id", "name", "bytes", "content_type", "file"], key: ["task_id", "name"] })).run(taskId, name, bytes, type, rel);
       await db.prepare("UPDATE build_tasks SET artifact_bytes = artifact_bytes - ? + ? WHERE id = ?").run(old?.bytes ?? 0, bytes, taskId);
     });
     return { bytes, contentType: type };

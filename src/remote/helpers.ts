@@ -8,6 +8,7 @@ import { isTier } from "./mode.ts";
 import { scaled } from "./time-scale.ts";
 import { READINESS, STATUS_EVERY_S, type HarnessId, type HelperInfo, type HelperStatus, type Machine, type Readiness, type Reserve, type Tier, type UsageReading, type UsageWindow } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
+import { distinctFrom } from "../db/portable.ts";
 
 /** A status this old no longer counts: one report interval and a minute of slack. */
 export const STATUS_FRESH_MS = scaled((STATUS_EVERY_S + 60) * 1000);
@@ -84,7 +85,7 @@ export async function storeStatus(db: Db, tokenId: number, login: string, s: Hel
       models = excluded.models, reserve = excluded.reserve, usage = excluded.usage, reported_at = excluded.reported_at,
       slots = excluded.slots, busy = excluded.busy, last_error = excluded.last_error, helper_version = COALESCE(excluded.helper_version, remote_helpers.helper_version)`)
     .run(tokenId, login, s.readiness, s.until ?? null, s.reason ?? null, s.harness, JSON.stringify(s.models), JSON.stringify(s.reserve), s.usage ? JSON.stringify(s.usage) : null, nowMs, s.slots, s.busy, s.lastError ? JSON.stringify(s.lastError) : null, s.helperVersion ?? null);
-  if (s.machine) await db.prepare("UPDATE main.mcp_tokens SET machine = ? WHERE id = ? AND machine IS NOT ?").run(JSON.stringify(s.machine), tokenId, JSON.stringify(s.machine));
+  if (s.machine) await db.prepare(`UPDATE main.mcp_tokens SET machine = ? WHERE id = ? AND ${distinctFrom(db, "machine", "?")}`).run(JSON.stringify(s.machine), tokenId, JSON.stringify(s.machine));
 }
 
 /** Whether the login has a Task Runner whose last status is fresh (the MCP Connector then offers the task tools). */

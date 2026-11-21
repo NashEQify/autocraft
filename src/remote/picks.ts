@@ -139,7 +139,7 @@ export async function pickCall(db: Db, user: Picker, id: number, nowMs: number =
     // Parallel picks of one user cannot pass the most picks together.
     if (await livePicks(db, user.login, nowMs, id) >= state.pickMax) throw new HttpError(409, `you hold ${state.pickMax} picks, your most`);
     return Number((await db.prepare(`UPDATE main.remote_calls SET picked_by = ?, picked_at = ?, pick_until = ?
-      WHERE id = ? AND state = 'queued' AND parent_id IS NULL AND (picked_by IS NULL OR picked_by = ? OR ${pickLapsedSql})`)
+      WHERE id = ? AND state = 'queued' AND parent_id IS NULL AND (picked_by IS NULL OR picked_by = ? OR ${pickLapsedSql(db)})`)
       .run(user.login, nowMs, cap === null ? null : nowMs + cap, id, user.login, ...pickLapsedArgs(nowMs))).changes);
   });
   if (changed !== 1) throw new HttpError(409, "another user picked it, or it is no longer queued");

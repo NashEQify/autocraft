@@ -308,7 +308,7 @@ export async function startClaudeRun(db: Db, s: RunInput, log: (line: string) =>
   const first = s.items[0];
   const w: Waiter = { id: 0, cls: currentClass(s.promptId), level: await levelBand(db, first?.repo, first?.number), step: stepOf(s.promptId).step, repo: context?.repo ?? null, since: began };
   // The row exists before the first poll returns, so queueRoom() is exact right after a call is made.
-  w.id = Number((await db.prepare("INSERT INTO model_waits (provider, class, level, job_id, step, repo, since, seen_at, eligible) VALUES ('claude', ?, ?, ?, ?, ?, ?, ?, 0)").run(w.cls, w.level, context?.jobId ?? null, w.step, w.repo, began, began)).lastInsertRowid);
+  w.id = Number((await db.prepare("INSERT INTO model_waits (provider, class, level, job_id, step, repo, since, seen_at, eligible) VALUES ('claude', ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id").get(w.cls, w.level, context?.jobId ?? null, w.step, w.repo, began, began) as { id: number }).id);
   let claimed = false;
   try {
     for (;;) {

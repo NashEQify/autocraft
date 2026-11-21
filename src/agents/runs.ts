@@ -54,8 +54,8 @@ export const packPrompt = (prompt: string): Uint8Array => packText(scrub(prompt.
 export async function insertRun(db: Db, s: RunStart): Promise<number> {
   const refs = s.items.slice(0, MAX_ITEM_REFS);
   const id = Number((await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, account_id, items, item_count, state, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-    .run(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now())).lastInsertRowid);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?) RETURNING id`)
+    .get(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now()) as { id: number }).id);
   const ins = db.prepare("INSERT OR IGNORE INTO agent_run_items (run_id, repo, number) VALUES (?, ?, ?)");
   for (const r of s.items) await ins.run(id, r.repo, r.number);
   await db.prepare("INSERT INTO agent_run_texts (run_id, prompt) VALUES (?, ?)").run(id, typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt);
@@ -217,7 +217,10 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
   const end = Math.floor(nowMs / step) * step + step;
   const start = end - n * step;
   const from = new Date(start).toISOString();
-  const fmt = hourly ? "%Y-%m-%dT%H:00:00.000Z" : "%Y-%m-%dT00:00:00.000Z";
+  // The start of the bucket an ISO time falls in, as ISO text.
+  const bucket = (col: string) => db.dialect === "postgres"
+    ? `to_char((${col})::timestamptz AT TIME ZONE 'UTC', '${hourly ? 'YYYY-MM-DD"T"HH24":00:00.000Z"' : 'YYYY-MM-DD"T00:00:00.000Z"'}')`
+    : `strftime('${hourly ? "%Y-%m-%dT%H:00:00.000Z" : "%Y-%m-%dT00:00:00.000Z"}', ${col})`;
   const keys = Array.from({ length: n }, (_, i) => new Date(start + i * step).toISOString());
 
   const jobHide = hiddenTest("repo", hidden), runHide = touchesHidden(hidden);
@@ -225,13 +228,13 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
   const byStep = new Map<string, Map<string, RateBucket>>();
   const bucketsOf = (s: string) => byStep.get(s) ?? (byStep.set(s, empty()), byStep.get(s)!);
 
-  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COALESCE(SUM(items), 0) AS items FROM jobs
+  for (const r of await db.prepare(`SELECT step, ${bucket("started_at")} AS t, COALESCE(SUM(items), 0) AS items FROM jobs
     WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND (repo IS NULL OR NOT (${jobHide.sql}))` : ""} GROUP BY step, t`)
     .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? jobHide.args : [])) as { step: string; t: string; items: number }[]) {
     const b = bucketsOf(r.step).get(r.t);
     if (b) b.items = r.items;
   }
-  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COUNT(*) AS runs, COALESCE(SUM(state = 'failed'), 0) AS failed FROM agent_runs r
+  for (const r of await db.prepare(`SELECT step, ${bucket("started_at")} AS t, COUNT(*) AS runs, COALESCE(SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END), 0) AS failed FROM agent_runs r
     WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND ${runHide.sql}` : ""} GROUP BY step, t`)
     .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? runHide.args : [])) as { step: string; t: string; runs: number; failed: number }[]) {
     const b = bucketsOf(r.step).get(r.t);
@@ -245,7 +248,7 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
 
   const accounts = await mapSeq((await db.prepare("SELECT id, label FROM claude_accounts WHERE enabled = 1 ORDER BY id").all() as { id: string; label: string }[]), async (a) => ({
     id: a.id, label: a.label,
-    samples: (await db.prepare(`SELECT strftime('${fmt}', t) AS t, MAX(five_hour_pct) AS fiveHourPct, MAX(weekly_pct) AS weeklyPct FROM account_usage_samples
+    samples: (await db.prepare(`SELECT ${bucket("t")} AS t, MAX(five_hour_pct) AS fiveHourPct, MAX(weekly_pct) AS weeklyPct FROM account_usage_samples
       WHERE account_id = ? AND t >= ? GROUP BY 1 ORDER BY 1`).all(a.id, from) as { t: string; fiveHourPct: number | null; weeklyPct: number | null }[]),
   }));
   return { window, bucket: hourly ? "hour" : "day", stages, accounts };

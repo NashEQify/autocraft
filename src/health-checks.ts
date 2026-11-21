@@ -289,7 +289,7 @@ async function remoteStarvedCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[
 /** User-local mode: calls have waited past remoteQueuedMs while every fresh, ready Task Runner is Manual only: they wait for a person to pick them. */
 async function remoteManualCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]> {
   if ((mode ?? await inferenceMode(db)) !== "user-local") return [];
-  const r = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(${manualSql("t.login")}), 0) AS manual FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
+  const r = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(CASE WHEN ${manualSql("t.login")} THEN 1 ELSE 0 END), 0) AS manual FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
     WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ?`).get(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as { n: number; manual: number };
   if (!r.n || Number(r.manual) < Number(r.n)) return [ok("remote-manual", "/model-queue")];
   const q = await db.prepare("SELECT COUNT(*) AS n, MIN(queued_since) AS oldest FROM main.remote_calls WHERE state = 'queued' AND queued_since < ? AND seen_at >= ?").get(nowMs - THRESHOLDS.remoteQueuedMs, nowMs - CALLER_STALE_MS) as { n: number; oldest: number | null };

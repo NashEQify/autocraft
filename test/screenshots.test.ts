@@ -182,7 +182,7 @@ describe("screenshots review fixes", () => {
     const db = await fresh(); await switchOn(db);
     await createEnv(db, { id: "env-one", label: "env-one", kind: "local-sandbox", slots: 4 }, "op");
     await hello(db, "env-one", { version: "1", capabilities: { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: true, gpu: false, toolchains: ["rust-stable"] }, slots: 4 });
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('base_scope', 'app')").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('base_scope', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     await runVerify(db, { repo: "app" }, () => {}, verifyDeps);
     // Off by hand (not through setFeature): the claim alone must refuse the queued render tasks.
     await db.prepare("UPDATE settings SET value = 'off' WHERE key = 'build_feature:screenshots:app'").run();

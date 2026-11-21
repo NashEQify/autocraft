@@ -19,6 +19,7 @@ import type { ItemRef } from "../../web/src/api/types.ts";
 import { scaled } from "./time-scale.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { groupConcat, inList } from "../db/portable.ts";
 
 /** How long a queued call may have no taker before it is withdrawn, and a pipeline-on repo before the health check warns. */
 export const NO_TAKER_MS = scaled(10 * 60_000);
@@ -51,18 +52,18 @@ const takerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs).
  * oldest check among their cached non-write permissions that still count (roomCanWrite), so it changes when that one expires.
  */
 export async function takerSignature(db: Db, nowMs: number = Date.now()): Promise<string> {
-  const r = await db.prepare(`SELECT group_concat(k, ';') AS s FROM (SELECT DISTINCT lower(t.login) || ':' || COALESCE(a.role, '') || ':' || COALESCE(us.value, '') || ':' || COALESCE(t.idle_repos, '') || ':' || COALESCE(sk.value, '') AS k
+  const r = await db.prepare(`SELECT ${groupConcat(db, "k", ";", "k")} AS s FROM (SELECT DISTINCT lower(t.login) || ':' || COALESCE(a.role, '') || ':' || COALESCE(us.value, '') || ':' || COALESCE(t.idle_repos, '') || ':' || COALESCE(sk.value, '') AS k
       FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id LEFT JOIN main.access a ON a.login = t.login
       LEFT JOIN main.user_settings us ON us.login = t.login AND us.key = 'repos'
       LEFT JOIN main.user_settings sk ON sk.login = t.login AND sk.key = '${SKIP_TASKS_KEY}'
-      WHERE ${TAKER_SQL} ORDER BY k)`).get(...takerArgs(nowMs)) as { s: string | null };
+      WHERE ${TAKER_SQL}) AS ks`).get(...takerArgs(nowMs)) as { s: string | null };
   if (!r.s) return "";
-  const denied = await db.prepare(`SELECT MIN(p.checked_at) AS at FROM main.repo_permissions p WHERE p.permission NOT IN (SELECT value FROM json_each(?)) AND p.checked_at > ?
+  const denied = await db.prepare(`SELECT MIN(p.checked_at) AS at FROM main.repo_permissions p WHERE ${inList(db, "p.permission", "?", "text", true)} AND p.checked_at > ?
       AND p.login IN (SELECT t.login FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id WHERE ${TAKER_SQL})`)
     .get(JSON.stringify([...WRITE_PERMISSIONS]), new Date(nowMs - PERM_READ_TTL).toISOString(), ...takerArgs(nowMs)) as { at: string | null };
   // A runner that takes only some items is a taker on the repos of those items, which change as items are fast-tracked.
-  const filtered = await mapSeq((await db.prepare(`SELECT DISTINCT t.login FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
-      JOIN main.user_settings ti ON ti.login = t.login AND ti.key = '${TASK_ITEMS_KEY}' WHERE ${TAKER_SQL} ORDER BY lower(t.login)`).all(...takerArgs(nowMs)) as { login: string }[]), async ({ login }) => `${login.toLowerCase()}=${[...(await itemFilter(db, login))?.repos ?? []].sort().join(",")}`);
+  const filtered = await mapSeq((await db.prepare(`SELECT t.login FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
+      JOIN main.user_settings ti ON ti.login = t.login AND ti.key = '${TASK_ITEMS_KEY}' WHERE ${TAKER_SQL} GROUP BY t.login ORDER BY lower(t.login), t.login`).all(...takerArgs(nowMs)) as { login: string }[]), async ({ login }) => `${login.toLowerCase()}=${[...(await itemFilter(db, login))?.repos ?? []].sort().join(",")}`);
   const s = filtered.length ? `${r.s}|items:${filtered.join(";")}` : r.s;
   return denied.at ? `${s}|${denied.at}` : s;
 }
@@ -110,9 +111,9 @@ export async function batchKey(db: Db): Promise<(refs: readonly { repo: string; 
  * superset of the takers and the room's helpers at `nowMs`), so units of one repo share answers when no connected runner filters.
  */
 export async function roomKey(db: Db, nowMs: number = Date.now()): Promise<(refs: readonly { repo: string; number: number }[]) => string> {
-  return await filterKey(db, (await db.prepare(`SELECT DISTINCT t.login FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
+  return await filterKey(db, (await db.prepare(`SELECT t.login FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
       JOIN main.user_settings ti ON ti.login = t.login AND ti.key = '${TASK_ITEMS_KEY}'
-      WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ? ORDER BY lower(t.login)`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as { login: string }[]).map((r) => r.login));
+      WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ? GROUP BY t.login ORDER BY lower(t.login), t.login`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as { login: string }[]).map((r) => r.login));
 }
 
 /**
@@ -148,7 +149,7 @@ export async function sweepTakers(db: Db, nowMs: number = Date.now()): Promise<n
   const takes = takerTest(db, nowMs);
   const repos = (await db.prepare("SELECT name FROM main.tracked_repos WHERE pipeline = 1").all() as { name: string }[]).map((r) => r.name);
   const untaken = await filterSeq(repos, async (repo) => !await takes({ prompt_id: "", repos: [repo], someTask: true }));
-  await db.prepare("DELETE FROM main.remote_no_taker WHERE repo NOT IN (SELECT value FROM json_each(?))").run(JSON.stringify(untaken));
+  await db.prepare(`DELETE FROM main.remote_no_taker WHERE ${inList(db, "repo", "?", "text", true)}`).run(JSON.stringify(untaken));
   const mark = db.prepare("INSERT OR IGNORE INTO main.remote_no_taker (repo, since) VALUES (?, ?)");
   for (const repo of untaken) await mark.run(repo, nowMs);
 

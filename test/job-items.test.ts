@@ -17,7 +17,7 @@ const db = await connectDb(join(mkdtempSync(join(SCRATCH, "job-items-")), "t.db"
 after(() => setCallContext(null));
 
 test("a job records the items it handled, tags their log lines, and stamps the build tasks it queues", async () => {
-  const job = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, ended_at) VALUES ('fixup', '{}', 'cli', 't', 'done', '2020-01-01T00:00:00Z')").run()).lastInsertRowid);
+  const job = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, ended_at) VALUES ('fixup', '{}', 'cli', 't', 'done', '2020-01-01T00:00:00Z') RETURNING id").get() as { id: number }).id);
   const lines: string[] = [];
   await jobItem(db, "o/app", 7, "outside a job", (l) => lines.push(l));
   assert.deepEqual(await itemJobs(db, "o/app", 7), [], "nothing is stored outside a job");
@@ -39,7 +39,7 @@ test("a job records the items it handled, tags their log lines, and stamps the b
 test("merge-ask records the PR it asked about together with the decision id", async () => {
   const w = await (await (await (await (await (await world()).repo()).pr(1)).review(1, { sure: false })).verified(1)).premerge(1, "clean");
   try {
-    const job = Number((await w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state) VALUES ('merge-ask', '{}', 'cli', 't', 'running')").run()).lastInsertRowid);
+    const job = Number((await w.db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state) VALUES ('merge-ask', '{}', 'cli', 't', 'running') RETURNING id").get() as { id: number }).id);
     setCallContext({ jobId: job, step: "merge-ask", stage: 10, cancelled: async () => false });
     const ids = await askMergeDecisions(w.db, { log: () => {} });
     assert.equal(ids.length, 1);
