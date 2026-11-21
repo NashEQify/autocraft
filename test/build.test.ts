@@ -31,7 +31,7 @@ let n = 0;
 /** A registered, enabled environment that has said hello. */
 function env(opts: { slots?: number; caps?: Partial<typeof CAPS>; enabled?: boolean } = {}) {
   const id = `env-${++n}`;
-  const { key } = createEnv(db, { id, label: id, kind: "local-sandbox", slots: opts.slots ?? 2 }, "op");
+  const key = createEnv(db, { id, label: id, kind: "local-sandbox", slots: opts.slots ?? 2 }, "op").key!;
   hello(db, id, { version: "1.0", capabilities: { ...CAPS, ...opts.caps }, slots: 8 });
   if (opts.enabled === false) updateEnv(db, id, { enabled: false }, "op");
   return { id, key };

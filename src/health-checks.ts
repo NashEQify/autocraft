@@ -81,12 +81,32 @@ function runnerCheck({ db, nowMs }: CheckCtx): Check[] {
   return [{ id: "runner", state: "fail", text, brief: text, since: hb, to: "/pipeline" }];
 }
 
-type Env = { id: string; label: string; last_seen_at: string | null; created_at: string };
-const enabledEnvs = (db: DatabaseSync): Env[] => all<Env>(db, "SELECT id, label, last_seen_at, created_at FROM build_envs WHERE enabled = 1 ORDER BY id");
+type Env = { id: string; label: string; kind: string; last_seen_at: string | null; created_at: string; health: string | null; health_at: string | null };
+const enabledEnvs = (db: DatabaseSync): Env[] => all<Env>(db, "SELECT id, label, kind, last_seen_at, created_at, health, health_at FROM build_envs WHERE enabled = 1 ORDER BY id");
 const seenRecently = (e: Env, nowMs: number): boolean => e.last_seen_at !== null && nowMs - Date.parse(e.last_seen_at) <= THRESHOLDS.workerStaleMs;
+
+/** A kubernetes environment: the runner's pod launcher reports for it each pass (src/build/launcher.ts). */
+function kubeCheck(e: Env, nowMs: number): Check {
+  const id = `worker:${e.id}`;
+  const at = e.health_at ? Date.parse(e.health_at) : NaN;
+  if (Number.isNaN(at) || nowMs - at > THRESHOLDS.workerStaleMs) {
+    const text = Number.isNaN(at) ? `The runner has not started build pods for ${e.label} yet` : `The runner has not checked the build pods of ${e.label} for ${minutes(nowMs - at)}`;
+    return { id, state: "fail", text, brief: "A build environment is not reporting", since: e.health_at ?? e.created_at, to: "/envs", group: "workers" };
+  }
+  const h = ((): { state?: unknown; text?: unknown; since?: unknown } | null => {
+    try {
+      return e.health ? (JSON.parse(e.health) as { state?: unknown }) : null;
+    } catch {
+      return null;
+    }
+  })();
+  if (!h || (h.state !== "warn" && h.state !== "fail") || typeof h.text !== "string") return ok(id, "/envs", { group: "workers" });
+  return { id, state: h.state, text: `${e.label}: ${clip(h.text, 300)}`, brief: "A build environment has a problem", since: typeof h.since === "string" ? h.since : null, to: "/envs", group: "workers" };
+}
 
 function workerChecks({ db, nowMs }: CheckCtx): Check[] {
   return enabledEnvs(db).map((e) => {
+    if (e.kind === "kubernetes") return kubeCheck(e, nowMs);
     const id = `worker:${e.id}`;
     if (seenRecently(e, nowMs)) return ok(id, "/envs", { group: "workers" });
     const text = e.last_seen_at ? `Build worker ${e.label} has not reported for ${minutes(nowMs - Date.parse(e.last_seen_at))}` : `Build worker ${e.label} has never reported`;

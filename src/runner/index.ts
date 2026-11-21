@@ -2,6 +2,7 @@
 import { writeSetting } from "../settings-read.ts";
 import { resumeStage, TripError } from "../push-outcomes.ts";
 import { startWorkerServer } from "../build/worker-api.ts";
+import { startPodLauncher } from "../build/launcher.ts";
 import { acquireLock } from "../mirror.ts";
 import { connect } from "../db.ts";
 import { audit } from "../dash/audit.ts";
@@ -58,6 +59,8 @@ async function serve(): Promise<void> {
     (w) => (console.log(`runner: worker API on ${w.url}`), w),
     (e: Error) => (console.error(`runner: worker API not started: ${e.message}`), null),
   );
+  // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
+  startPodLauncher(db, ac.signal, (l) => console.log(l));
   // Optional: counts Discord mentions of tracked items when a bot token file is configured. A failure is logged and never stops the runner.
   try {
     startDiscord(db, ac.signal, (l) => console.log(l));

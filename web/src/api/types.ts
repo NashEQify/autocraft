@@ -1753,7 +1753,7 @@ export type Capabilities = {
 export type Requires = Partial<Pick<Capabilities, "os" | "arch" | "display" | "gpu">> & {
   toolchains?: string[]; minMemGb?: number; minDiskGb?: number;
 };
-export type EnvKind = "local-sandbox" | "remote";
+export type EnvKind = "local-sandbox" | "remote" | "kubernetes";
 export type BuildEnv = {
   id: string; label: string; kind: EnvKind;
   enabled: boolean; online: boolean; lastSeenAt: string | null;
@@ -1763,9 +1763,29 @@ export type BuildEnv = {
   pausedReason: string | null;         // e.g. "disk 12 GB free (needs 20)"
   /** Set by an operator: the only environments that take the security lane's private tasks, and they take no PR code. */
   confidential: boolean;
+  /** A kubernetes environment's settings; null for the other kinds. */
+  settings: KubeSettings | null;
 };
-export type EnvInput = { label?: string; enabled?: boolean; slots?: number; confidential?: boolean };
-export type EnvCreate = { id: string; label: string; kind: EnvKind; slots: number; confidential?: boolean };
+/** A kubernetes environment: where and how the runner starts a task's build pods (src/build/pods.ts). */
+export type KubeSettings = {
+  namespace: string;
+  /** The AutoCraft image for the task, source and upload pods; null: the runner's own (AUTOCRAFT_IMAGE). */
+  image: string | null;
+  /** Toolchain name → image the steps run in. Empty until a toolchain image is published; the environment then takes no task that names a toolchain. */
+  toolchainImages: Record<string, string>;
+  workerUrl: string;
+  cpuRequest: string; cpuLimit: string;
+  memoryRequest: string; memoryLimit: string;
+  ephemeralRequest: string; ephemeralLimit: string;
+  /** Size and storage class of the task's volume. */
+  storage: string; storageClass: string;
+  /** Longest a task may take from its first pod to its last. */
+  deadlineSec: number;
+  runtimeClassName: string | null;
+  arch: "x86_64" | "aarch64";
+};
+export type EnvInput = { label?: string; enabled?: boolean; slots?: number; confidential?: boolean; settings?: Partial<KubeSettings> };
+export type EnvCreate = { id: string; label: string; kind: EnvKind; slots: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type TaskStep = {
   name: string;                         // "fetch deps", "build", "test", "screenshot"
   cmd: string[];                        // argv, run inside the container

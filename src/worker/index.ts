@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { detectCapabilities, loadWorkerConfig, readKey } from "./config.ts";
 import { WorkerApi } from "./client.ts";
 import { serve } from "./serve.ts";
+import { podPhase } from "./pod.ts";
 import { generateSigningKeys, storeServe } from "./store.ts";
 import { connect } from "../db.ts";
 import { requestUpdate, statusLines } from "../build/worker-update.ts";
@@ -15,7 +16,8 @@ const USAGE = `usage: autocraft-server worker serve [--config FILE]   (default: 
        autocraft-server worker store serve [--config FILE]   (default: $AUTOCRAFT_STORE_CONFIG)
        autocraft-server worker store keygen --private FILE --public FILE
        autocraft-server worker update-code --sha SHA --ssh USER@HOST --key FILE --git-dir BARE_REPO
-       autocraft-server worker status`;
+       autocraft-server worker status
+       autocraft-server worker pod task|source|upload   (inside a build pod the runner started)`;
 
 /** Updates the sandbox worker now, or records the update when its tasks are still running. */
 async function updateCode(args: string[]): Promise<void> {
@@ -67,7 +69,7 @@ async function workerServe(args: string[]): Promise<void> {
 
 export const commands = {
   worker: {
-    summary: "build worker: serve [--config FILE] | update-code | status",
+    summary: "build worker: serve [--config FILE] | update-code | status | pod <phase>",
     run: async (args: string[]) => {
       if (args[0] === "update-code") return updateCode(args.slice(1));
       if (args[0] === "status") {
@@ -94,6 +96,10 @@ export const commands = {
           process.exit(2);
         }
         return storeServe(path);
+      }
+      if (args[0] === "pod") {
+        process.exitCode = await podPhase(args[1]);
+        return;
       }
       if (args[0] !== "serve") {
         console.error(USAGE);
