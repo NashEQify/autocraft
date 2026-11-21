@@ -22,7 +22,7 @@ import { dropPlanChanges } from "../core/plan-changes.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
-import { openDb } from "../db/open.ts";
+import { openDb, setDbRole } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server runner serve
        autocraft-server runner steps
@@ -39,6 +39,7 @@ async function serve(): Promise<void> {
   const lock = runnerLockPath();
   const release = acquireLock(lock);
   if (!release) die("another runner is running on this database");
+  setDbRole("runner");
   const db = await openDb();
   await scopeToTracked(db);
   // Once per database: open decisions' proposed cards become choices. Here rather than in db.ts migrations, which cannot import the decision modules.

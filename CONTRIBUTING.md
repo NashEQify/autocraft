@@ -18,6 +18,7 @@ Key directories:
 
 ```sh
 pnpm test        # Run the test suite
+pnpm test:pg     # Run the Postgres tests against a throwaway Postgres in Docker (scripts/pg-test.sh)
 pnpm check       # TypeScript and generated-document checks
 pnpm docs        # Regenerate marked documentation blocks
 pnpm -C web dev  # Frontend development server with mock data; no backend integration
