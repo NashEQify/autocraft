@@ -11,14 +11,16 @@ import type { Db } from "../db/index.ts";
 const TICK_MS = scaled(15_000);
 
 const over = async (db: Db, id: number, r: CheckResult, nowMs = Date.now()): Promise<void> => {
-  await db.prepare("UPDATE main.remote_checks SET state = 'done', result = ?, ended_at = ? WHERE id = ? AND state != 'done'").run(JSON.stringify(r), nowMs, id);
+  await db.run(db.k.updateTable("main.remote_checks").set({ state: "done", result: JSON.stringify(r), ended_at: nowMs }).where("id", "=", id).where("state", "!=", "done"));
 };
 
 /** Job side, on each poll of a leased call: starts the call's requested checks on `tool`, each recorded under the run the request names. A request made under an earlier lease's run is stale and left alone. */
 export async function serveChecks(db: Db, callId: number, tool: Pick<CheckTool, "run">): Promise<void> {
-  const rows = await db.prepare("SELECT id, run_id, input FROM main.remote_checks WHERE call_id = ? AND state = 'requested' AND run_id IS (SELECT run_id FROM main.remote_calls WHERE id = ?) ORDER BY id").all(callId, callId) as { id: number; run_id: number | null; input: string }[];
+  const rows = await db.all(db.k.selectFrom("main.remote_checks").select(["id", "run_id", "input"]).where("call_id", "=", callId).where("state", "=", "requested")
+    .where((eb) => eb("run_id", "is not distinct from", eb.selectFrom("main.remote_calls").select("run_id").where("id", "=", callId)))
+    .orderBy("id"));
   for (const r of rows) {
-    if (Number((await db.prepare("UPDATE main.remote_checks SET state = 'running' WHERE id = ? AND state = 'requested'").run(r.id)).changes) !== 1) continue;
+    if (Number((await db.run(db.k.updateTable("main.remote_checks").set({ state: "running" }).where("id", "=", r.id).where("state", "=", "requested"))).changes) !== 1) continue;
     let input: unknown;
     try { input = JSON.parse(r.input); } catch { input = null; }
     void tool.run(input, r.run_id).then(
@@ -30,8 +32,8 @@ export async function serveChecks(db: Db, callId: number, tool: Pick<CheckTool, 
 
 /** Job side, when the call has ended: requests nobody will run get an answer. */
 export async function endChecks(db: Db, callId: number): Promise<void> {
-  await db.prepare("UPDATE main.remote_checks SET state = 'done', result = ?, ended_at = ? WHERE call_id = ? AND state = 'requested'")
-    .run(JSON.stringify({ text: "refused: the model call is over", isError: true }), Date.now(), callId);
+  await db.run(db.k.updateTable("main.remote_checks").set({ state: "done", result: JSON.stringify({ text: "refused: the model call is over", isError: true }), ended_at: Date.now() })
+    .where("call_id", "=", callId).where("state", "=", "requested"));
 }
 
 /**
@@ -40,17 +42,16 @@ export async function endChecks(db: Db, callId: number): Promise<void> {
  * every 15 s while waiting.
  */
 export async function relayCheck(db: Db, call: { id: number; runId: number | null }, input: unknown, opts: { live: () => Promise<boolean>; signal?: AbortSignal; tick?: () => void }): Promise<CheckResult> {
-  const id = Number((await db.prepare("INSERT INTO main.remote_checks (call_id, run_id, input, state, requested_at) VALUES (?, ?, ?, 'requested', ?) RETURNING id")
-    .get(call.id, call.runId, JSON.stringify(input ?? null), Date.now()) as { id: number }).id);
+  const id = Number((await db.get(db.k.insertInto("main.remote_checks").values({ call_id: call.id, run_id: call.runId, input: JSON.stringify(input ?? null), state: "requested", requested_at: Date.now() }).returning("id")))!.id);
   let lastTick = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, allocation.pollMs));
-    const r = await db.prepare("SELECT state, result FROM main.remote_checks WHERE id = ?").get(id) as { state: string; result: string | null } | undefined;
+    const r = await db.get(db.k.selectFrom("main.remote_checks").select(["state", "result"]).where("id", "=", id));
     if (r?.state === "done" && r.result) return JSON.parse(r.result) as CheckResult;
     const gone = opts.signal?.aborted ? "the request was cancelled" : !await opts.live() ? "the lease is gone" : null;
     if (gone || !r) {
       // A running check is left to finish on the job side; only a request nobody took is withdrawn.
-      await db.prepare("UPDATE main.remote_checks SET state = 'done', result = ?, ended_at = ? WHERE id = ? AND state = 'requested'").run(JSON.stringify({ text: `refused: ${gone}`, isError: true }), Date.now(), id);
+      await db.run(db.k.updateTable("main.remote_checks").set({ state: "done", result: JSON.stringify({ text: `refused: ${gone}`, isError: true }), ended_at: Date.now() }).where("id", "=", id).where("state", "=", "requested"));
       return { text: `the check did not run to the end: ${gone ?? "the request is gone"}`, isError: true };
     }
     if (opts.tick && Date.now() - lastTick >= TICK_MS) {

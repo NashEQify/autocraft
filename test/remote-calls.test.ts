@@ -34,11 +34,11 @@ describe("user-local remote calls", async () => {
   allocation.pollMs = 10;
   await setInferenceMode(db, "user-local", "test");
   const T0 = new Date().toISOString();
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at) VALUES ('photocraft', 1287, 'pr', 'OPEN', 't', 'alice', ?, ?)").run(T0, T0);
-  await db.prepare("INSERT INTO pr_commits (repo, number, oid, committed_at, author, co_authors) VALUES ('photocraft', 1287, 'abc', ?, 'carol', ?)").run(T0, JSON.stringify(["carol", "Dave"]));
+  await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 1287, kind: "pr", state: "OPEN", title: "t", author: "alice", created_at: T0, updated_at: T0 }));
+  await db.run(db.k.insertInto("pr_commits").values({ repo: "photocraft", number: 1287, oid: "abc", committed_at: T0, author: "carol", co_authors: JSON.stringify(["carol", "Dave"]) }));
   const callers: Record<string, Caller> = {};
   for (const login of ["alice", "bob", "carol", "dave"]) {
-    await db.prepare("INSERT INTO access (login, role) VALUES (?, 'maintainer')").run(login);
+    await db.run(db.k.insertInto("access").values({ login, role: "maintainer" }));
     callers[login] = { tokenId: (await createToken(db, login, "helper", { kind: "runner" })).row.id, login, role: "maintainer" };
   }
   let claims = 0;
@@ -117,7 +117,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false }, "a requeued lease's secret is known: 410, not 401");
     assert.equal(await leaseState(db, "aclease_never-issued"), null);
     assert.equal((await db.prepare("SELECT attempt FROM remote_calls WHERE id = ?").get(first.id) as { attempt: number }).attempt, 2);
-    assert.equal(await db.prepare("SELECT 1 FROM remote_lease_drops WHERE login = 'bob'").get(), undefined, "a lease that never had a heartbeat (its claim's reply was likely lost) is no drop");
+    assert.equal(await db.get(db.k.selectFrom("remote_lease_drops").select("token_id").where("login", "=", "bob")), undefined, "a lease that never had a heartbeat (its claim's reply was likely lost) is no drop");
     // A reply from another model family than the claim declared is refused.
     assert.equal((await submitCall(db, second!.secret, { ok: true, text: "x", model: "claude-sonnet-4-5", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 }))?.accepted, false);
     assert.equal(await ask, null, "both attempts are used up");
@@ -127,7 +127,7 @@ describe("user-local remote calls", async () => {
   });
 
   test("three lost leases of distinct calls of one login within two hours cool its helpers off for six hours; its next claim says why and until when; an operator clears it", async () => {
-    await db.prepare("INSERT INTO access (login, role) VALUES ('erin', 'maintainer')").run();
+    await db.run(db.k.insertInto("access").values({ login: "erin", role: "maintainer" }));
     // A token's drops count once in 10 minutes: three helpers of the same user each lose one.
     const tokens = await mapSeq([1, 2, 3], async () => (await createToken(db, "erin", "helper", { kind: "runner" })).row.id);
     let erin: Caller = { tokenId: tokens[0]!, login: "erin", role: "maintainer" };
@@ -146,7 +146,7 @@ describe("user-local remote calls", async () => {
     const again = (await mine())!;
     assert.equal(again.id, lease!.id, "a lost lease is not a failed call: the call goes back to the queue");
     await lose(again.id, t0 + 1000);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM remote_lease_drops WHERE login = 'erin'").get())!.n, 1, "the same call lost again counts once");
+    assert.equal((await db.get(db.k.selectFrom("remote_lease_drops").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "erin")))!.n, 1, "the same call lost again counts once");
     erin = { ...erin, tokenId: tokens[2]! };
     assert.equal(await ask, null, "the call used its attempts");
     const take = async () => { for (let i = 0; i < 200; i++) { const l = await mine(); if (l) return l; await sleep(5); } throw new Error("no lease"); };
@@ -238,9 +238,10 @@ describe("user-local remote calls", async () => {
     assert.equal(h?.readiness, "quota-held");
     assert.equal(h?.fresh, true);
     assert.equal(h?.usage?.fiveHour?.usedPercent, 70);
-    await db.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('bob', ?, 'test') ON CONFLICT (login) DO UPDATE SET until = excluded.until, reason = excluded.reason, failures = 0, failures_since = NULL").run(Date.now() + 3600_000);
+    await db.run(db.k.insertInto("remote_cooloffs").values({ login: "bob", until: Date.now() + 3600_000, reason: "test" })
+      .onConflict((oc) => oc.column("login").doUpdateSet((eb) => ({ ...excluded(["until", "reason"])(eb), failures: 0, failures_since: null }))));
     assert.equal((await listHelpers(db, "bob"))[0]?.readiness, "cooled-off", "the server's cool-off shows before the helper reports it");
-    await db.prepare("DELETE FROM remote_cooloffs WHERE login = 'bob'").run();
+    await db.run(db.k.deleteFrom("remote_cooloffs").where("login", "=", "bob"));
   });
 
   test("a user's repo picks limit their claims and next_task; the helper's own list narrows them, never widens them", async () => {
@@ -298,7 +299,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual({ ...await db.prepare("SELECT state, attempt, released_by, started_at FROM remote_calls WHERE id = ?").get(first.id) }, { state: "queued", attempt: 2, released_by: "bob", started_at: null });
     assert.deepEqual(await leaseState(db, first.secret), { id: first.id, live: false });
     assert.equal((await claimCall(db, callers.bob!, claim(), canWrite)).lease, null, "not offered to the user whose helper failed it");
-    assert.equal((await db.prepare("SELECT failures FROM remote_cooloffs WHERE login = 'bob'").get() as { failures: number }).failures, 1, "counts toward bob's cool-off");
+    assert.equal((await db.get(db.k.selectFrom("remote_cooloffs").select("failures").where("login", "=", "bob")))!.failures, 1, "counts toward bob's cool-off");
     await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
     const second = (await leaseFor("alice"))!;
     assert.equal(second.id, first.id);

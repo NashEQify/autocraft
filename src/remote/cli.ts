@@ -53,7 +53,7 @@ async function makeToken(args: string[]): Promise<void> {
     process.exit(1);
   }
   const db = await openDb();
-  const role = (await db.prepare("SELECT role FROM access WHERE login = ?").get(login) as { role: string } | undefined)?.role;
+  const role = (await db.get(db.k.selectFrom("access").select("role").where("login", "=", login)))?.role;
   if (role !== "maintainer" && role !== "operator") {
     console.error(`refused: ${login} is ${role ? `a ${role}` : "not on the access list"}; only maintainers and operators run model calls`);
     process.exit(1);
