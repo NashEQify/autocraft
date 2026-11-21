@@ -203,13 +203,13 @@ export function planChangesSql(db?: DatabaseSync): string {
 
 /** The current full-pass generation (0 without a marker row). */
 async function generation(db: Db): Promise<number> {
-  return (await db.prepare("SELECT seq FROM plan_full WHERE id = 1").get() as { seq: number } | undefined)?.seq ?? 0;
+  return (await db.get(db.k.selectFrom("plan_full").select("seq").where("id", "=", 1)))?.seq ?? 0;
 }
 
 /** What a full pass that starts now covers: the generation and every logged row. Read it in the pass's snapshot. */
 export async function changeCursor(db: Db): Promise<ChangeCursor> {
   const gen = await generation(db);
-  const seqs = await db.prepare("SELECT seq FROM item_changes").all() as { seq: number }[];
+  const seqs = await db.all(db.k.selectFrom("item_changes").select("seq"));
   return { gen, seen: new Set(seqs.map((r) => r.seq)) };
 }
 
@@ -217,7 +217,9 @@ export async function changeCursor(db: Db): Promise<ChangeCursor> {
 export async function changesSince(db: Db, cursor: ChangeCursor): Promise<Changes> {
   if (await generation(db) !== cursor.gen) return { refs: [], full: true, cause: "marker", cursor: await changeCursor(db) };
   // Rows read before and not yet deleted come back first; whatever the limit leaves out is read next time.
-  const rows = await db.prepare("SELECT seq, repo || '#' || number AS ref FROM item_changes ORDER BY seq LIMIT ?").all(cursor.seen.size + CHANGES_CAP + 1) as { seq: number; ref: string }[];
+  const rows = await db.all(db.k.selectFrom("item_changes")
+    .select((eb) => ["seq", eb(eb("repo", "||", eb.val("#")), "||", eb.cast<string>("number", "text")).as("ref")])
+    .orderBy("seq").limit(cursor.seen.size + CHANGES_CAP + 1));
   const fresh = rows.filter((r) => !cursor.seen.has(r.seq));
   if (fresh.length > CHANGES_CAP) return { refs: [], full: true, cause: "cap", cursor: await changeCursor(db) };
   const seen = new Set(cursor.seen);
@@ -243,14 +245,15 @@ export async function pruneChanges(db: Db, cursor: ChangeCursor): Promise<void> 
   }
   for (let i = 0; i < runs.length; i += PRUNE_RANGES) {
     const part = runs.slice(i, i + PRUNE_RANGES);
-    await db.prepare(`DELETE FROM item_changes WHERE ${part.map(() => "seq BETWEEN ? AND ?").join(" OR ")}`).run(...part.flat());
+    await db.run(db.k.deleteFrom("item_changes").where((eb) => eb.or(part.map(([from, to]) => eb.between("seq", from, to)))));
   }
   for (const q of seqs) cursor.seen.delete(q);
 }
 
 /** Logs the PRs with a review at `head` of `repo`: for a write the triggers cannot see (a file the fact loaders read beside the database). */
 export async function logReviewedAt(db: Db, repo: string, head: string): Promise<void> {
-  await db.prepare("INSERT INTO item_changes (repo, number) SELECT DISTINCT repo, number FROM opus_reviews WHERE repo = ? AND head_oid = ?").run(repo, head);
+  await db.run(db.k.insertInto("item_changes").columns(["repo", "number"])
+    .expression((eb) => eb.selectFrom("opus_reviews").select(["repo", "number"]).distinct().where("repo", "=", repo).where("head_oid", "=", head)));
 }
 
 /** A write of more rows than this goes through bulkWrites: one full-pass mark costs less than logging every row. */
@@ -259,21 +262,33 @@ export const BULK_ROWS = 500;
 /** Turns the bulk marker on or off in the open write transaction; off also takes the full-pass mark for `source`. */
 const bulk = {
   isOn: async (db: Db): Promise<boolean> => db.dialect === "postgres"
-    ? (await db.prepare(`SELECT current_setting('${PG_BULK}', true) AS v`).get() as { v: string | null }).v === "1"
-    : !!await db.prepare("SELECT 1 FROM plan_bulk").get(),
-  on: async (db: Db): Promise<void> => db.dialect === "postgres"
-    ? void await db.prepare(`SELECT set_config('${PG_BULK}', '1', true)`).get()
-    : await db.script("INSERT INTO plan_bulk (id) VALUES (1)"),
+    ? (await db.get(db.k.selectNoFrom((eb) => eb.fn<string | null>("current_setting", [eb.val(PG_BULK), eb.lit(true)]).as("v"))))!.v === "1"
+    : !!await db.get(db.k.selectFrom("plan_bulk").select((eb) => eb.lit(1).as("one"))),
+  on: async (db: Db): Promise<void> => {
+    if (db.dialect === "postgres") await db.get(db.k.selectNoFrom((eb) => eb.fn("set_config", [eb.val(PG_BULK), eb.val("1"), eb.lit(true)]).as("v")));
+    else await db.run(db.k.insertInto("plan_bulk").values({ id: 1 }));
+  },
   off: async (db: Db, source: string): Promise<void> => {
     if (db.dialect === "postgres") {
-      await db.prepare(`SELECT set_config('${PG_BULK}', '', true)`).get();
-      await db.prepare("SELECT ac_mark_full(?)").get(`bulk:${source}`);
+      await db.get(db.k.selectNoFrom((eb) => eb.fn("set_config", [eb.val(PG_BULK), eb.val(""), eb.lit(true)]).as("v")));
+      await db.get(db.k.selectNoFrom((eb) => eb.fn("ac_mark_full", [eb.val(`bulk:${source}`)]).as("v")));
     } else {
-      await db.script("DELETE FROM plan_bulk");
-      await db.script(markFull(`bulk:${source}`));
+      await db.run(db.k.deleteFrom("plan_bulk"));
+      await markFullNow(db, `bulk:${source}`);
     }
   },
 };
+
+/** markFull() run as statements, for SQLite. */
+async function markFullNow(db: Db, source: string): Promise<void> {
+  await db.run(db.k.insertInto("plan_full").columns(["id", "seq"])
+    .expression(db.k.selectNoFrom((eb) => [eb.lit(1).as("id"), eb.lit(0).as("seq")])
+      .where((eb) => eb.not(eb.exists(eb.selectFrom("plan_full").select(eb.lit(1).as("one")).where("id", "=", 1))))));
+  await db.run(db.k.updateTable("plan_full").set((eb) => ({ seq: eb("seq", "+", 1) })).where("id", "=", 1));
+  await db.run(db.k.insertInto("plan_full_causes")
+    .values((eb) => ({ source, n: 1, last_seq: eb.fn.coalesce(eb.selectFrom("plan_full").select("seq").where("id", "=", 1), eb.lit(0)) }))
+    .onConflict((oc) => oc.column("source").doUpdateSet((eb) => ({ n: eb("plan_full_causes.n", "+", 1), last_seq: eb.ref("excluded.last_seq") }))));
+}
 
 /**
  * Runs `fn` with the logging triggers off and takes one full-pass mark for `source`, in the caller's transaction or one of its
@@ -320,9 +335,9 @@ export async function dropPlanChanges(db: Db): Promise<number> {
   const triggers = await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[];
   await db.write(async () => {
     for (const { name } of triggers) await db.script(`DROP TRIGGER IF EXISTS main.${name}`);
-    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"]) await db.script(`DROP TABLE IF EXISTS main.${t}`);
+    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"] as const) await db.run(db.k.schema.dropTable(`main.${t}`).ifExists());
     await db.script("DELETE FROM main.sqlite_sequence WHERE name = 'item_changes'");
-    await db.script("DELETE FROM main.settings WHERE key = 'schema_stamp'");
+    await db.run(db.k.deleteFrom("main.settings").where("key", "=", "schema_stamp"));
   });
   return triggers.length;
 }

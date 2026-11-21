@@ -67,7 +67,7 @@ async function observe(db: Db): Promise<string[]> {
     seqs = now;
     cursor = c.cursor;
   }
-  assert.equal((await db.prepare("SELECT count(*) AS n FROM item_changes").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   return out;
 }
 
@@ -143,7 +143,7 @@ test("a log row that commits after a later seq is read once, by the next pass, a
     assert.deepEqual(c.refs, ["app#3"]);
     c = await pass(c.cursor);
     assert.deepEqual(c.refs, []);
-    assert.equal((await db.prepare("SELECT count(*) AS n FROM item_changes").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   } finally {
     await a.end();
     await b.end();
@@ -157,8 +157,8 @@ test("counters move once per transaction, at commit, and not for a rolled-back s
   try {
     const seqs = async () => {
       const s = await readSeqs(db);
-      const gen = (await db.prepare("SELECT seq FROM plan_full").get() as { seq: number }).seq;
-      const n = (await db.prepare("SELECT n FROM plan_full_causes WHERE source = 'plan_items_full_i'").get() as { n: number } | undefined)?.n ?? 0;
+      const gen = (await db.get(db.k.selectFrom("plan_full").select("seq")))!.seq;
+      const n = (await db.get(db.k.selectFrom("plan_full_causes").select("n").where("source", "=", "plan_items_full_i")))?.n ?? 0;
       return { items: s.items!, fasttrack: s.fasttrack!, gen, n };
     };
     const before = await seqs();

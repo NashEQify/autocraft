@@ -61,7 +61,7 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   assert.equal(c.full, true);
   assert.ok(c.cursor.gen > seq.gen);
   // The mark is counted under the trigger that made it, with the generation it made.
-  assert.deepEqual({ ...await db.prepare("SELECT n, last_seq FROM plan_full_causes WHERE source = 'plan_fast_track_full_i'").get() }, { n: 1, last_seq: c.cursor.gen });
+  assert.deepEqual({ ...await db.get(db.k.selectFrom("plan_full_causes").select(["n", "last_seq"]).where("source", "=", "plan_fast_track_full_i")) }, { n: 1, last_seq: c.cursor.gen });
   seq = c.cursor;
 
   // Global: a planner input setting forces a full pass; the planner's own bookkeeping setting does not.
@@ -74,7 +74,7 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
 
   // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
-  assert.equal((await db.prepare("SELECT count(*) AS n FROM item_changes").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#11"], false]);
@@ -181,12 +181,13 @@ test("a held PR is logged when its blocker closes; a bulk write logs nothing and
   await bulkWrites(db, "test", async () => { for (const n of [1, 3]) await db.run(db.k.updateTable("items").set({ embed_hash: `e${n}` }).where("number", "=", n)); });
   c = await since(seq);
   assert.equal(c.full, true);
-  assert.deepEqual((await db.prepare("SELECT seq FROM item_changes").all() as { seq: number }[]).filter((r) => !seq.seen.has(r.seq)), []);
+  assert.deepEqual((await db.all(db.k.selectFrom("item_changes").select("seq"))).filter((r) => !seq.seen.has(r.seq)), []);
   seq = c.cursor;
 
+  await db.run(db.k.deleteFrom("plan_full"));
   await db.script(db.dialect === "postgres"
-    ? "DELETE FROM plan_full; SELECT setval(pg_get_serial_sequence('item_changes', 'seq'), 1, false)"
-    : "DELETE FROM plan_full; DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
+    ? "SELECT setval(pg_get_serial_sequence('item_changes', 'seq'), 1, false)"
+    : "DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
   await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('other', 'op', ?, 1)").run(T);
   assert.equal((await changesSince(db, seq)).full, true);
 });
