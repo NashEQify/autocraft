@@ -166,9 +166,9 @@ async function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } =
 
   const w = (current = await (await (await world()).repo(o.off)).pr(1, { head }));
   await w.db.prepare("UPDATE access SET github_id = 101 WHERE login = ?").run(OPERATOR);
-  await w.db.prepare("INSERT INTO tracked_repos (name, added_by, added_at) VALUES ('libs', ?, '2026-01-01T00:00:00Z')").run(OPERATOR);
-  await w.db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('libs', 'public', 'main')").run();
-  await w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 12, 'pr', 'OPEN', 'lib change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
+  await w.db.run(w.db.k.insertInto("tracked_repos").values({ name: "libs", added_by: OPERATOR, added_at: "2026-01-01T00:00:00Z" }));
+  await w.db.run(w.db.k.insertInto("repos").values({ name: "libs", visibility: "public", default_branch: "main" }));
+  await w.db.run(w.db.k.insertInto("items").values({ repo: "libs", number: 12, kind: "pr", state: "OPEN", title: "lib change", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
 
   const s: Setup = {
     w, fork, head, comments: [], pushes: 0, live: { head, state: "OPEN", ref: "MERGED", base: "main", sha: SHA, mergedAt: new Date().toISOString() },
@@ -200,13 +200,13 @@ async function setup(o: { lock?: boolean; off?: Parameters<World["repo"]>[0] } =
 }
 
 const set = (s: Setup, branch: string | null = null) => requestRepin(s.w.db, { login: OPERATOR, githubId: 101, role: "operator", canWrite: true, repo: "app", number: 1, pr: true, ref: { owner: "storytold", name: "libs", number: 12 }, branch });
-const merged = async (s: Setup, state = "MERGED") => await s.w.db.prepare("UPDATE items SET state = ? WHERE repo = 'libs' AND number = 12").run(state);
+const merged = async (s: Setup, state = "MERGED") => await s.w.db.run(s.w.db.k.updateTable("items").set({ state }).where("repo", "=", "libs").where("number", "=", 12));
 const row = async (s: Setup) => ({ ...await s.w.db.prepare("SELECT state, tries, to_head, result, notice FROM autorepins").get() }) as { state: string; tries: number; to_head: string | null; result: string | null; notice: string | null };
-const task = async (s: Setup) => await s.w.db.prepare("SELECT id, patch, plan, head_sha FROM build_tasks WHERE step = 'autorepin' ORDER BY id DESC").get() as { id: number; patch: string; plan: string; head_sha: string } | undefined;
+const task = async (s: Setup) => await s.w.db.get(s.w.db.k.selectFrom("build_tasks").select(["id", "patch", "plan", "head_sha"]).where("step", "=", "autorepin").orderBy("id", "desc").limit(1));
 /** The lockfile task ended with `lock` as its Cargo.lock. */
 async function locked(s: Setup, lock: string | null, state = "done"): Promise<void> {
   const id = (await task(s))!.id;
-  await s.w.db.prepare("UPDATE build_tasks SET state = ?, ended_at = '2026-01-03T00:00:00Z' WHERE id = ?").run(state, id);
+  await s.w.db.run(s.w.db.k.updateTable("build_tasks").set({ state, ended_at: "2026-01-03T00:00:00Z" }).where("id", "=", id));
   if (lock === null) return;
   const tmp = tempPath(id);
   writeFileSync(tmp, lock);
@@ -247,7 +247,7 @@ describe("autorepin", () => {
     const t = (await task(s))!;
     assert.equal((await row(s)).state, "locking");
     assert.equal(t.head_sha, s.head);
-    assert.ok(t.patch.includes(`+craft-ui = { git = "${LIBS}", rev = "${SHA}" }`) && !t.patch.includes("Cargo.lock"), t.patch);
+    assert.ok(t.patch!.includes(`+craft-ui = { git = "${LIBS}", rev = "${SHA}" }`) && !t.patch!.includes("Cargo.lock"), t.patch!);
     assert.equal((JSON.parse(t.plan) as { network: string }[])[0]!.network, "fetch");
     assert.equal(s.pushes, 0, "nothing is pushed before the lockfile is back");
     assert.equal(await anyRepinDue(s.w.db), false, "it waits for the task");
@@ -388,7 +388,7 @@ describe("autorepin", () => {
     const later = { ...s.deps, now: () => new Date(last + 20 * 60_000) };
     await drainRepins(s.w.db, later);
     const t = (await task(s))!;
-    assert.ok(t.patch.includes(`rev = "${SYNC}"`), t.patch);
+    assert.ok(t.patch!.includes(`rev = "${SYNC}"`), t.patch!);
     await locked(s, lockOf(SYNC));
     await drainRepins(s.w.db, later);
     assert.equal((await row(s)).state, "pushed");
@@ -476,7 +476,7 @@ describe("autorepin", () => {
 
   test("is refused while the repo is outside the pipeline's scope and the pull request is not fast-tracked, since no worker would take its task", async () => {
     const s = await setup();
-    await s.w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
+    await s.w.db.run(s.w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     await assert.rejects(set(s), /pipeline is off for storytold\/app/);
     assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
   });
@@ -517,7 +517,7 @@ describe("autorepin", () => {
 
   test("a comment edited to name another pull request before it is carried out sets nothing", async () => {
     const s = await setup();
-    await s.w.db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at, updated_at) VALUES ('libs', 13, 'pr', 'OPEN', 'other change', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')").run();
+    await s.w.db.run(s.w.db.k.insertInto("items").values({ repo: "libs", number: 13, kind: "pr", state: "OPEN", title: "other change", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
     await comment(s, `@${SLUG} autorepin storytold/libs#12`, `@${SLUG} autorepin storytold/libs#13`);
     assert.equal((await s.w.db.prepare("SELECT COUNT(*) AS n FROM autorepins").get())!.n, 0);
     assert.equal((await s.w.db.prepare("SELECT state FROM github_commands").get())!.state, "ignored");

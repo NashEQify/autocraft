@@ -36,28 +36,22 @@ src/answers/hold.ts
 
 src/answers/sweep.ts
 
-src/areas/assign.ts
 
-src/areas/propose.ts
 
 src/areas/store.ts
 
 src/author-ids.ts
 
-src/build/artifacts.ts
 
-src/build/cli.ts
 
 src/build/envs.ts
 
 
 src/build/launcher.ts
 
-src/build/rounds.ts
 
 src/build/tasks.ts
 
-src/build/worker-update.ts
 
 src/checktool/index.ts
 

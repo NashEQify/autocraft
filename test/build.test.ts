@@ -37,11 +37,15 @@ async function env(opts: { slots?: number; caps?: Partial<typeof CAPS>; enabled?
   return { id, key };
 }
 const task = async (over: Partial<Parameters<typeof createTask>[1]> = {}) => await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, plan: PLAN, ...over });
-const clear = async () => await db.script("DELETE FROM build_tasks; DELETE FROM build_task_logs; DELETE FROM build_artifacts");
+const clear = async () => {
+  await db.run(db.k.deleteFrom("build_tasks"));
+  await db.run(db.k.deleteFrom("build_task_logs"));
+  await db.run(db.k.deleteFrom("build_artifacts"));
+};
 
 before(async () => {
-  await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 0)");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'internal')");
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "open-app", pipeline: 1 }, { name: "vault", pipeline: 0 }]));
+  await db.run(db.k.insertInto("repos").values([{ name: "open-app", visibility: "public" }, { name: "vault", visibility: "internal" }]));
 });
 after(async () => {
   await db.close();
@@ -91,7 +95,7 @@ describe("worker API", () => {
     const { key } = await rotateKey(db, a.id, "op");
     assert.equal((await call(a.key, "/worker/claim", { free: 1 })).status, 401);
     assert.equal((await call(key, "/worker/claim", { free: 1 })).status, 200);
-    assert.ok(!(await db.prepare("SELECT key_hash FROM build_envs WHERE id = ?").get(a.id) as { key_hash: string }).key_hash.includes(key));   // only a hash is stored
+    assert.ok(!(await db.get(db.k.selectFrom("build_envs").select("key_hash").where("id", "=", a.id)))!.key_hash.includes(key));   // only a hash is stored
   });
 
   test("a task of another environment cannot be touched", async () => {
@@ -115,8 +119,8 @@ describe("worker API", () => {
     let last = { truncated: false };
     for (let i = 0; i < Math.ceil(MAX_LOG_BYTES / chunk.length) + 3; i++) last = await appendLog(db, e.id, id, "t", chunk);
     assert.equal(last.truncated, true);
-    assert.equal((await db.prepare("SELECT log_bytes FROM build_tasks WHERE id = ?").get(id) as { log_bytes: number }).log_bytes, MAX_LOG_BYTES);
-    const stored = (await db.prepare("SELECT SUM(LENGTH(chunk)) AS n FROM build_task_logs WHERE task_id = ?").get(id) as { n: number }).n;
+    assert.equal((await db.get(db.k.selectFrom("build_tasks").select("log_bytes").where("id", "=", id)))!.log_bytes, MAX_LOG_BYTES);
+    const stored = (await db.get(db.k.selectFrom("build_task_logs").select((eb) => eb.fn.sum<number>(eb.fn("length", ["chunk"])).as("n")).where("task_id", "=", id)))!.n;
     assert.ok(stored <= MAX_LOG_BYTES + 100, `stored ${stored}`);
   });
 
@@ -157,7 +161,7 @@ describe("dashboard API", () => {
   let hiddenTask = 0, openTask = 0;
   before(async () => {
     await clear();
-    await db.script("DELETE FROM build_envs");
+    await db.run(db.k.deleteFrom("build_envs"));
     await addLogin(db, "cli", "boss", "operator", null);
     await addLogin(db, "cli", "viewer1", "viewer", null);
     await addLogin(db, "cli", "maint1", "maintainer", null);

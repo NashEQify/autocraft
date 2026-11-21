@@ -42,13 +42,12 @@ type Opts = { canModify?: boolean; push?: boolean; comment?: boolean; ci?: boole
 /** One PR (#7) at `head` whose gate check failed. */
 async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
-    VALUES ('app', 7, 'pr', 'OPEN', 'Rename a to b', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(head);
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Rename a to b", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
   await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', ?, 'looks right', '[]', 1, 'full')`)
     .run(head, o.verdict ?? "take");
   await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
     VALUES ('app', 7, ?, 'OPEN', 0, ?, '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', ?, '${T1}')`).run(head, o.overall ?? "failure", o.canModify === false ? 0 : 1);
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1) ON CONFLICT DO NOTHING").run(T0);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   if (o.push !== false) await setPushApproval(db, "op", "app", true);
   if (o.comment) await setCommentApproval(db, "op", "app", true);
   if (o.ci) await setCiApproval(db, "op", "app", true);
@@ -251,8 +250,8 @@ describe("format failure", () => {
   async function formatRun(w: World, diff: string | null, given?: Db) {
     const db = given ?? (await fresh(w.head));
     await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
-    const task = (await rows(db, "SELECT id FROM build_tasks"))[0]!;
-    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T2, Number(task.id));
+    const task = (await db.all(db.k.selectFrom("build_tasks").select("id")))[0]!;
+    await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: T2 }).where("id", "=", task.id));
     if (diff !== null) {
       const tmp = tempPath(Number(task.id));
       writeFileSync(tmp, diff);
@@ -347,8 +346,8 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     const comments = () => w.log.filter((l) => l.startsWith("comment:")).length;
     await run();
     assert.deepEqual(await states(), ["linting"], out.join("\n"));
-    const task = Number((await rows(db, "SELECT id FROM build_tasks"))[0]!.id);
-    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(new Date().toISOString(), task);
+    const task = (await db.all(db.k.selectFrom("build_tasks").select("id")))[0]!.id;
+    await db.run(db.k.updateTable("build_tasks").set({ state: "done", ended_at: new Date().toISOString() }).where("id", "=", task));
     const tmp = tempPath(task);
     writeFileSync(tmp, '{"reason":"build-finished","success":true}\n');
     await storeArtifact(db, task, CLIPPY_ARTIFACT, tmp);
@@ -368,7 +367,7 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     assert.equal(comments(), 2);
     assert.deepEqual(await states(), ["asked", "comment-unsent"]);
     assert.equal(w.log.filter((l) => l === "model").length, 1);
-    assert.equal((await rows(db, "SELECT id FROM build_tasks")).length, 1);
+    assert.equal((await db.all(db.k.selectFrom("build_tasks").select("id"))).length, 1);
   } finally {
     mock.timers.reset();
   }

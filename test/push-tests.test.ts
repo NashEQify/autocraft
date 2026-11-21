@@ -21,10 +21,10 @@ const db = async () => await connectDb(join(mkdtempSync(join(SCRATCH, "db-")), "
 
 /** A finished lint task with the given artifacts (clippy output clean unless named). */
 async function finished(d: Db, repo: string, files: Record<string, string>, o: { state?: string; timedOut?: boolean } = {}): Promise<number> {
-  const id = Number((await d.prepare("SELECT id FROM build_tasks WHERE repo = ? ORDER BY id DESC LIMIT 1").get(repo))!.id);
+  const id = (await d.get(d.k.selectFrom("build_tasks").select("id").where("repo", "=", repo).orderBy("id", "desc").limit(1)))!.id;
   const results = [{ step: "fetch deps", exitCode: 0, durationMs: 1, timedOut: false }, { step: "format", exitCode: 0, durationMs: 1, timedOut: false }, { step: "clippy", exitCode: 0, durationMs: 1, timedOut: false },
     { step: "tests", exitCode: o.timedOut ? null : 0, durationMs: 1, timedOut: !!o.timedOut }];
-  await d.prepare("UPDATE build_tasks SET state = ?, results = ? WHERE id = ?").run(o.state ?? "done", JSON.stringify(results), id);
+  await d.run(d.k.updateTable("build_tasks").set({ state: o.state ?? "done", results: JSON.stringify(results) }).where("id", "=", id));
   for (const [name, text] of Object.entries({ [CLIPPY_ARTIFACT]: '{"reason":"build-finished","success":true}\n', ...files })) {
     const tmp = tempPath(id);
     writeFileSync(tmp, text);

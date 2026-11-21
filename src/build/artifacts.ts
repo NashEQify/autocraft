@@ -8,7 +8,7 @@ import { createHash } from "node:crypto";
 import { dataDir } from "../db.ts";
 import { envVar } from "../env.ts";
 import type { Db } from "../db/index.ts";
-import { upsert } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 export const MAX_TASK_ARTIFACT_BYTES = 200 * 1024 * 1024;
@@ -76,10 +76,10 @@ export async function storeArtifact(db: Db, taskId: number, name: string, tmp: s
     if (!NAME_RE.test(name)) throw new ArtifactError(400, "artifact names are 1 to 100 letters, digits, dots, underscores or hyphens");
     const bytes = statSync(tmp).size;
     if (bytes === 0) throw new ArtifactError(400, "the artifact is empty");
-    const t = await db.prepare("SELECT artifact_bytes FROM build_tasks WHERE id = ?").get(taskId) as { artifact_bytes: number } | undefined;
+    const t = await db.get(db.k.selectFrom("build_tasks").select("artifact_bytes").where("id", "=", taskId));
     if (!t) throw new ArtifactError(404, "no such task");
-    const old = await db.prepare("SELECT bytes FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { bytes: number } | undefined;
-    const count = (await db.prepare("SELECT COUNT(*) AS n FROM build_artifacts WHERE task_id = ?").get(taskId) as { n: number }).n;
+    const old = await db.get(db.k.selectFrom("build_artifacts").select("bytes").where("task_id", "=", taskId).where("name", "=", name));
+    const count = (await db.get(db.k.selectFrom("build_artifacts").select((eb) => eb.fn.countAll<number>().as("n")).where("task_id", "=", taskId)))!.n;
     if (!old && count >= MAX_ARTIFACTS_PER_TASK) throw new ArtifactError(413, `at most ${MAX_ARTIFACTS_PER_TASK} artifacts per task`);
     if (t.artifact_bytes - (old?.bytes ?? 0) + bytes > MAX_TASK_ARTIFACT_BYTES) throw new ArtifactError(413, "the task's artifacts would exceed 200 MB");
     const type = sniff(readFileSync(tmp));
@@ -87,8 +87,9 @@ export async function storeArtifact(db: Db, taskId: number, name: string, tmp: s
     const rel = fileFor(taskId, name);
     renameSync(tmp, join(artifactDir(), rel));
     await db.write(async () => {
-      await db.prepare(upsert(db, { table: "build_artifacts", cols: ["task_id", "name", "bytes", "content_type", "file"], key: ["task_id", "name"] })).run(taskId, name, bytes, type, rel);
-      await db.prepare("UPDATE build_tasks SET artifact_bytes = artifact_bytes - ? + ? WHERE id = ?").run(old?.bytes ?? 0, bytes, taskId);
+      await db.run(db.k.insertInto("build_artifacts").values({ task_id: taskId, name, bytes, content_type: type, file: rel })
+        .onConflict((oc) => oc.columns(["task_id", "name"]).doUpdateSet(kx.excluded(["bytes", "content_type", "file"]))));
+      await db.run(db.k.updateTable("build_tasks").set((eb) => ({ artifact_bytes: eb(eb("artifact_bytes", "-", old?.bytes ?? 0), "+", bytes) })).where("id", "=", taskId));
     });
     return { bytes, contentType: type };
   } catch (e) {
@@ -102,8 +103,8 @@ export async function storeArtifact(db: Db, taskId: number, name: string, tmp: s
 /** Deletes the artifact files and rows of tasks. */
 export async function removeArtifacts(db: Db, taskIds: number[]): Promise<void> {
   for (const id of taskIds) {
-    await db.prepare("DELETE FROM build_artifacts WHERE task_id = ?").run(id);
-    await db.prepare("UPDATE build_tasks SET artifact_bytes = 0 WHERE id = ?").run(id);
+    await db.run(db.k.deleteFrom("build_artifacts").where("task_id", "=", id));
+    await db.run(db.k.updateTable("build_tasks").set({ artifact_bytes: 0 }).where("id", "=", id));
     const dir = absolute(String(id));
     if (dir) rmSync(dir, { recursive: true, force: true });
   }
