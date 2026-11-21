@@ -501,9 +501,7 @@ src/security/scan.ts
 src/security/scantest.ts
 
 
-src/settings-read.ts
 
-src/settlers.ts
 
 src/sql-cache.ts
 

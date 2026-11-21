@@ -15,15 +15,15 @@ import type { AliasableExpression, Expression, SqlBool } from "kysely";
 export const MAINTAINER_WRITES_KEY = "maintainer_writes";
 
 export const maintainerWritesOn = async (db: Db): Promise<boolean> =>
-  (await db.prepare("SELECT value FROM main.settings WHERE key = ?").get(MAINTAINER_WRITES_KEY) as { value: string } | undefined)?.value === "1";
+  (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", MAINTAINER_WRITES_KEY)))?.value === "1";
 
 /** Maintainers settle now where they have write access: `maintainer_writes` on and the app's identity (which is instance-wide, as `allAppIdentity` reads it). */
 export const maintainersSettle = async (db: Db): Promise<boolean> => await maintainerWritesOn(db) && await githubIdentity(db) === "app";
 
 export async function setMaintainerWrites(db: Db, on: boolean): Promise<boolean> {
   if (await maintainerWritesOn(db) === on) return false;
-  if (on) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = '1'").run(MAINTAINER_WRITES_KEY);
-  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(MAINTAINER_WRITES_KEY);
+  if (on) await db.run(db.k.insertInto("main.settings").values({ key: MAINTAINER_WRITES_KEY, value: "1" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "1" })));
+  else await db.run(db.k.deleteFrom("main.settings").where("key", "=", MAINTAINER_WRITES_KEY));
   return true;
 }
 
@@ -32,7 +32,7 @@ export const SETTLER_LOGINS_SQL = `(SELECT login FROM main.access WHERE role = '
   OR (role = 'maintainer' AND EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')))`;
 
 export async function settlerLogins(db: Db): Promise<Set<string>> {
-  return new Set((await db.prepare(`SELECT login FROM ${SETTLER_LOGINS_SQL}`).all() as { login: string }[]).map((r) => r.login));
+  return new Set((await db.all(db.k.selectFrom((eb) => settlerLoginsQuery(eb).as("s")).select("s.login"))).map((r) => r.login));
 }
 
 /**
@@ -45,7 +45,7 @@ export const settleKey = (login: string, repo: string): string => `${login}\n${r
 
 const roles = async (db: Db, m: SettleMemo): Promise<void> => {
   if (m.operators) return;
-  const rows = await db.prepare("SELECT login, role FROM main.access WHERE role IN ('operator', 'maintainer')").all() as { login: string; role: string }[];
+  const rows = await db.all(db.k.selectFrom("main.access").select(["login", "role"]).where("role", "in", ["operator", "maintainer"]));
   m.operators = new Set(rows.filter((r) => r.role === "operator").map((r) => r.login));
   m.maintainers = new Set(rows.filter((r) => r.role === "maintainer").map((r) => r.login));
   m.on = await maintainerWritesOn(db);
@@ -67,7 +67,7 @@ async function cachedWrite(db: Db, login: string, repo: string, m: SettleMemo): 
   const k = settleKey(login, repo);
   let v = m.write.get(k);
   if (v === undefined) {
-    const row = await db.prepare(`SELECT checked_at FROM main.repo_permissions WHERE login = ? AND repo = ? AND permission IN ${WRITE}`).get(login, repo) as { checked_at: string } | undefined;
+    const row = await db.get(db.k.selectFrom("main.repo_permissions").select("checked_at").where("login", "=", login).where("repo", "=", repo).where("permission", "in", WRITE_PERMISSIONS));
     m.write.set(k, (v = !!row && (Date.now() - Date.parse(row.checked_at) < PERM_READ_TTL || !!m.held?.has(k))));
   }
   return v;
