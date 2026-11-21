@@ -24,9 +24,10 @@ export const PERMANENT: readonly string[] = [
 
 export const TODO_FILE = join(ROOT, "test/raw-sql-not-converted.txt");
 
-// Statement text, Kysely's raw `sql` tag, and DatabaseSync's exec with literal text.
+// Statement text, Kysely's raw `sql` tag, and DatabaseSync's exec with literal SQL text (other `.exec("...")` calls, such as a command runner's, are not SQL).
 const USE = /\.prepare\(|\.script\(|\bsql(?:<[^>\n]*>)?`|\bsql\.(?:raw|lit)\(|\.exec\(\s*[`"']/g;
 // SQLite maintenance that has no builder form and runs on SQLite only: PRAGMA, ATTACH/DETACH, sqlite_master.
+const SQL_START = /^\s*[`"']\s*(?:SELECT|INSERT|UPDATE|DELETE|REPLACE|WITH|CREATE|DROP|ALTER|PRAGMA|ATTACH|DETACH|BEGIN|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|VACUUM|ANALYZE|REINDEX)\b/i;
 const MAINTENANCE = /^\s*[`"'](?:PRAGMA|ATTACH|DETACH)\b|^[^;]*?\bsqlite_master\b/;
 
 /** The raw SQL uses in `text` (comment lines skipped), each as its 1-based line number. */
@@ -35,6 +36,7 @@ export function rawSqlUses(text: string): number[] {
   const out: number[] = [];
   for (const m of code.matchAll(USE)) {
     const after = code.slice(m.index + m[0].length, m.index + m[0].length + 200);
+    if (m[0].startsWith(".exec(") && !SQL_START.test(m[0].slice(5) + after)) continue;
     if (m[0].startsWith(".prepare(") || m[0].startsWith(".exec(")) {
       const arg = m[0].startsWith(".exec(") ? m[0].slice(5) + after : after;
       if (MAINTENANCE.test(arg.split("\n").slice(0, 2).join(" "))) continue;

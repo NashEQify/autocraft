@@ -71,7 +71,6 @@ import { openDb } from "../db/open.ts";
 export { type IssueCandidate } from "./candidates.ts";
 
 const ACTOR = "fixissue";
-const GH = "gh";
 const MAX_UNCLAIM_TRIES = 3;
 const TRIAGE = CLAUDE_PROMPTS["fixissue.triage"];
 const PATCH = CLAUDE_PROMPTS["fixissue.patch"];
@@ -294,7 +293,7 @@ async function startAttempt(x: Ctx, c: IssueCandidate): Promise<"started" | "ski
   }
   const at = iso(d);
   const row = async (state: string, reason: string, extra: Partial<AttemptRow> = {}): Promise<AttemptRow> => {
-    // The REPLACE reset the columns it did not name: the upsert writes them.
+    // A new attempt starts from a clean row: columns the triage does not set go back to NULL or 0.
     await db.run(db.k.insertInto("fix_attempts").values({
       repo: c.repo, number: c.number, main_sha: main, text_hash: c.hash, state, round: 0, files: extra.files ?? null, crate: extra.crate ?? null,
       crate_dir: extra.crate_dir ?? null, patch: null, test_patch: null, head_task_id: null, base_task_id: null, retries: 0, push_tries: 0,
@@ -683,7 +682,7 @@ const urlOk = (url: string, repo: string): boolean => new RegExp(`^https://githu
 
 /** The issue's state on GitHub now; null when the read fails, in which case the mirror's state stands. */
 async function liveIssueState(d: FixIssueDeps, repo: string, number: number): Promise<string | null> {
-  const r = await d.exec(GH, ["api", `repos/${slugOf(repo)}/issues/${number}`, "--jq", ".state"]);
+  const r = await d.exec("gh", ["api", `repos/${slugOf(repo)}/issues/${number}`, "--jq", ".state"]);
   const v = r.code === 0 ? r.stdout.trim().toLowerCase() : "";
   return v === "open" ? "OPEN" : v === "closed" ? "CLOSED" : null;
 }
@@ -738,7 +737,7 @@ export async function openPr(x: Ctx, r: AttemptRow): Promise<boolean> {
     // On an app repo the branch lives in the base repository, so its head owner is the org.
     const headOwners = [who.login, ...(await githubIdentity(db) === "app" ? [ownerOf(r.repo)] : [])];
     const sel = await ownPrSelect(db, r.repo, headOwners, await branchOf(db, r.repo));
-    const found = await d.exec(GH, ["pr", "list", "--repo", `${slugOf(r.repo)}`, "--state", "open", "--head", branch, "--json", sel.json, "--jq", sel.jq]);
+    const found = await d.exec("gh", ["pr", "list", "--repo", `${slugOf(r.repo)}`, "--state", "open", "--head", branch, "--json", sel.json, "--jq", sel.jq]);
     const existing = found.code === 0 ? found.stdout.trim().split("\n")[0] ?? "" : "";
     if (existing && urlOk(existing, r.repo)) {
       const ag = await guardItem(db, { repo: r.repo, number: r.number }, { kind: "fixissue-collect" }, x.by ?? CLI_BY);
