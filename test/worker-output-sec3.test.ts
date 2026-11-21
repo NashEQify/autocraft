@@ -77,10 +77,9 @@ test("a security fix waits, with a warning, until a confidential environment has
   assert.equal((await getTask(db, fix))!.summary, "Waiting for a confidential build environment.");
   assert.deepEqual((await claim(db, "vault", 4)).tasks.map((x) => x.id), [pr, batch]);
   // The fix itself waits before its model call; the job ends at once.
-  await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, created_at, updated_at)
-    VALUES ('app', 1, 1, 'a', 't', 'high', 'fixing', '[]', 'r', 'i', 'f', '2026-01-01', '2026-01-01')`).run();
+  await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 1, scan_id: 1, area: "a", title: "t", severity: "high", state: "fixing", refs: "[]", reach: "r", impact: "i", fingerprint: "f", created_at: "2026-01-01", updated_at: "2026-01-01" }));
   assert.match(await runFix(db, "app", 1, { log: () => {} } as unknown as FixDeps), /waiting for a confidential build environment/);
-  assert.equal((await db.prepare("SELECT note FROM security_findings WHERE number = 1").get() as { note: string }).note, "Waiting for a confidential build environment.");
+  assert.equal((await db.get(db.k.selectFrom("security_findings").select("note").where("number", "=", 1)))!.note, "Waiting for a confidential build environment.");
   const warn = async () => (await computeChecks(db)).find((c) => c.id === "confidential-env")!;
   assert.equal((await warn()).state, "warn");
   assert.equal((await warn()).text, "1 security fix and 1 security build task are waiting for a confidential build environment");
@@ -94,7 +93,7 @@ test("a security fix waits, with a warning, until a confidential environment has
   assert.ok(start !== null && await privateClockStart(db, "2026-01-01T00:00:00Z") === start);
   assert.equal((await warn()).state, "ok");
   assert.equal(await advanceSecurityFixes(db, false), 0, "a fix the pipeline started waits for the switch");
-  await db.prepare("UPDATE security_findings SET decided_by = 'boss'").run();
+  await db.run(db.k.updateTable("security_findings").set({ decided_by: "boss" }));
   assert.equal(await advanceSecurityFixes(db, false), 1);
   await db.prepare("UPDATE build_tasks SET state = 'queued', env_id = NULL WHERE id IN (?, ?)").run(pr, batch);
   assert.equal((await getTask(db, fix))!.summary, null);

@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { featureOn } from "../build/features.ts";
 import { BuildError } from "../build/envs.ts";
+import { excluded } from "../db/kx.ts";
 import { TERMINAL, cancelTask, createTask, getTask, privateClockStart } from "../build/tasks.ts";
 import { tasksFor } from "../fixissue/index.ts";
 import { cloneTask } from "../verify/tasks.ts";
@@ -66,8 +67,10 @@ export async function writeAndQueue(db: Db, o: WriteOpts): Promise<boolean> {
     o.log(`${repo} finding ${n}: no scan test: the build task was not queued: ${e.message}`);
     return false;
   }
-  await db.prepare(`INSERT OR REPLACE INTO security_scan_tests (repo, number, test_path, crate, test_patch, test_source, task_id, retried, state, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'building', ?)`).run(repo, n, path, crate.name, patch, written.value, id, now());
+  // Every column is written: a new test replaces the earlier one's detail and end time.
+  await db.run(db.k.insertInto("security_scan_tests")
+    .values({ repo, number: n, test_path: path, crate: crate.name, test_patch: patch, test_source: written.value, task_id: id, retried: 0, state: "building", detail: null, created_at: now(), ended_at: null })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["test_path", "crate", "test_patch", "test_source", "task_id", "retried", "state", "detail", "created_at", "ended_at"]))));
   o.log(`${repo} finding ${n}: scan test queued for build`);
   return true;
 }
@@ -75,7 +78,7 @@ export async function writeAndQueue(db: Db, o: WriteOpts): Promise<boolean> {
 type Row = { repo: string; number: number; task_id: number; retried: number; created_at: string };
 
 async function finish(db: Db, r: Row, state: Exclude<ScanTestState, "building">, detail: string): Promise<void> {
-  await db.prepare("UPDATE security_scan_tests SET state = ?, detail = ?, ended_at = ? WHERE repo = ? AND number = ? AND state = 'building'").run(state, detail, now(), r.repo, r.number);
+  await db.run(db.k.updateTable("security_scan_tests").set({ state, detail, ended_at: now() }).where("repo", "=", r.repo).where("number", "=", r.number).where("state", "=", "building"));
   if (state === "not-shown") await advance(db, r.repo, r.number, ["new"], "new", { note: NOT_SHOWN_NOTE });
 }
 
@@ -86,7 +89,7 @@ async function finish(db: Db, r: Row, state: Exclude<ScanTestState, "building">,
  */
 export async function advanceScanTests(db: Db): Promise<{ repo: string; number: number; state: ScanTestState }[]> {
   if (!await featureOn(db, "scan-tests")) return [];
-  const rows = await db.prepare("SELECT repo, number, task_id, retried, created_at FROM security_scan_tests WHERE state = 'building' ORDER BY repo, number").all() as Row[];
+  const rows = await db.all(db.k.selectFrom("security_scan_tests").select(["repo", "number", "task_id", "retried", "created_at"]).where("state", "=", "building").orderBy("repo").orderBy("number"));
   const ended: { repo: string; number: number; state: ScanTestState }[] = [];
   const end = async (r: Row, state: Exclude<ScanTestState, "building">, detail: string): Promise<void> => { await finish(db, r, state, detail); ended.push({ repo: r.repo, number: r.number, state }); };
   for (const r of rows) {
@@ -108,7 +111,8 @@ export async function advanceScanTests(db: Db): Promise<{ repo: string; number: 
     }
     if (r.retried === 0) {
       try {
-        await db.prepare("UPDATE security_scan_tests SET task_id = ?, retried = 1 WHERE repo = ? AND number = ?").run(await cloneTask(db, r.task_id), r.repo, r.number);
+        const task_id = await cloneTask(db, r.task_id);
+        await db.run(db.k.updateTable("security_scan_tests").set({ task_id, retried: 1 }).where("repo", "=", r.repo).where("number", "=", r.number));
         continue;
       } catch (e) {
         if (!(e instanceof BuildError)) throw e;

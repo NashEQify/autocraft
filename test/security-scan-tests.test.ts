@@ -10,6 +10,7 @@ import { getTask } from "../src/build/tasks.ts";
 import { autoFixConfirmed } from "../src/security/actions.ts";
 import { runScan, type Ask, type ScanDeps } from "../src/security/scan.ts";
 import { advanceScanTests, NOT_SHOWN_NOTE } from "../src/security/scantest.ts";
+import * as kx from "../src/db/kx.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 
@@ -23,8 +24,8 @@ const db = await connectDb(join(dir, "dash.db"));
 await db.prepare("INSERT INTO build_envs (id, label, kind, slots, key_hash, confidential, confidential_since, confidential_online_at, created_at) VALUES ('vault', 'vault', 'remote', 1, 'x', 1, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')").run();
 after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
-for (const r of ["plain", "wired", "on"]) await db.prepare("INSERT INTO repos (name, visibility, default_branch, open_prs, open_issues) VALUES (?, 'public', 'main', 0, 0)").run(r);
-await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('plain', 'cli', 'x'), ('wired', 'cli', 'x'), ('on', 'cli', 'x')").run();
+for (const r of ["plain", "wired", "on"]) await db.run(db.k.insertInto("repos").values({ name: r, visibility: "public", default_branch: "main", open_prs: 0, open_issues: 0 }));
+await db.run(db.k.insertInto("main.tracked_repos").values(["plain", "wired", "on"].map((name) => ({ name, added_by: "cli", added_at: "x" }))).onConflict((oc) => oc.doNothing()));
 await scopeToTracked(db);
 
 const SHA = "a".repeat(40);
@@ -47,9 +48,9 @@ function deps(spy: Spy, withTests: boolean): ScanDeps {
     crates: async () => { spy.crates++; return { ok: true, rust: true, crates: [{ name: "psd", dir: "crates/psd" }] }; },
   };
 }
-const newScan = async (repo: string): Promise<number> => Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES (?, 'modeling', NULL, 'boss', '2026-11-05T00:00:00Z')").run(repo)).lastInsertRowid);
-const findings = async (repo: string) => await db.prepare("SELECT number, title, severity, state, verification FROM security_findings WHERE repo = ? ORDER BY number").all(repo) as { number: number; title: string; severity: string; state: string; verification: string }[];
-const testRow = async (repo: string, n: number) => await db.prepare("SELECT * FROM security_scan_tests WHERE repo = ? AND number = ?").get(repo, n) as { state: string; task_id: number; retried: number } | undefined;
+const newScan = async (repo: string): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo, state: "modeling", cap_usd: null, started_by: "boss", started_at: "2026-11-05T00:00:00Z" }).returning("id")))!.id;
+const findings = async (repo: string) => await db.all(db.k.selectFrom("security_findings").select(["number", "title", "severity", "state", "verification"]).where("repo", "=", repo).orderBy("number"));
+const testRow = async (repo: string, n: number) => await db.get(db.k.selectFrom("security_scan_tests").select(kx.cols("security_scan_tests")).where("repo", "=", repo).where("number", "=", n));
 const result = (step: string, exitCode: number | null, timedOut = false) => ({ step, exitCode, durationMs: 1, timedOut });
 
 describe("scan tests", () => {
@@ -60,7 +61,7 @@ describe("scan tests", () => {
     assert.deepEqual([wired.tests, wired.crates], [0, 0]);
     assert.ok(!wired.ids.includes("security.scantest"));
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM build_tasks").get() as { n: number }).n, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_scan_tests").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("security_scan_tests").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_calls WHERE kind = 'test'").get() as { n: number }).n, 0);
     assert.deepEqual(wired.ids, plain.ids);
     const strip = (rows: Awaited<ReturnType<typeof findings>>) => rows.map(({ number: _n, ...r }) => r);
@@ -115,7 +116,7 @@ describe("scan tests", () => {
     // Findings are kept as they were; only the passing test leaves a note.
     const after = await findings("on");
     assert.deepEqual(after.map((r) => [r.state, r.severity]), [["new", "high"], ["new", "high"], ["new", "high"], ["new", "high"]]);
-    assert.equal((await db.prepare("SELECT note FROM security_findings WHERE repo = 'on' AND number = ?").get(b) as { note: string }).note, NOT_SHOWN_NOTE);
+    assert.equal((await db.get(db.k.selectFrom("security_findings").select("note").where("repo", "=", "on").where("number", "=", b)))!.note, NOT_SHOWN_NOTE);
     // The automatic fix skips the finding whose test passed and starts the others.
     assert.equal(await autoFixConfirmed(db, "on"), 3);
     const started = (await db.prepare("SELECT json_extract(params, '$.number') AS n FROM jobs WHERE step = 'security-fix' ORDER BY n").all() as { n: number }[]).map((r) => r.n);
@@ -124,8 +125,7 @@ describe("scan tests", () => {
 
   test("a test that builds for over four hours is cancelled and read as could-not-build", async () => {
     const n = (await findings("on"))[0]!.number;
-    await db.prepare("INSERT OR REPLACE INTO security_scan_tests (repo, number, test_path, crate, test_patch, test_source, task_id, state, created_at) VALUES ('stuck', ?, 'p', 'psd', 'x', 'x', ?, 'building', ?)")
-      .run(n, (await testRow("on", n))!.task_id, new Date(Date.now() - 5 * 3_600_000).toISOString());
+    await db.run(db.k.insertInto("security_scan_tests").values({ repo: "stuck", number: n, test_path: "p", crate: "psd", test_patch: "x", test_source: "x", task_id: (await testRow("on", n))!.task_id, state: "building", created_at: new Date(Date.now() - 5 * 3_600_000).toISOString() }));
     await db.prepare("UPDATE build_tasks SET state = 'queued', results = '[]' WHERE id = ?").run((await testRow("on", n))!.task_id);
     assert.deepEqual(await advanceScanTests(db), [{ repo: "stuck", number: n, state: "could-not-build" }]);
     assert.equal((await getTask(db, (await testRow("on", n))!.task_id))!.state, "cancelled");
