@@ -496,7 +496,6 @@ src/security/quiet.ts
 
 src/security/real.ts
 
-src/security/scan.ts
 
 src/security/scantest.ts
 
