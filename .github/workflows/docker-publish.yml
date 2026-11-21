@@ -37,3 +37,22 @@ jobs:
       cache-from: type=gha
       cache-to: type=gha,mode=max
       timeout-minutes: 45
+
+  # Toolchain image for build pods (docs/operations.md "Build pods"), pushed as
+  # docker.io/storytold/autocraft:rust-stable so the cluster pulls it with the
+  # same pull secret. Register its digest with `envs add --toolchain-image`.
+  rust-stable:
+    uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@0bef64f155fcea81edbd9542381777358bfbdcf4
+    secrets:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      images: |
+        docker.io/storytold/autocraft
+      dockerfile: deploy/container/Containerfile.rust-stable
+      context: deploy/container
+      tags: |
+        type=raw,value=rust-stable,enable=${{ github.ref_name == github.event.repository.default_branch }}
+      cache-from: type=gha,scope=rust-stable
+      cache-to: type=gha,scope=rust-stable,mode=max
+      timeout-minutes: 60
