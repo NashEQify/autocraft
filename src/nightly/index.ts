@@ -20,6 +20,7 @@ import { outcomeOf } from "../verify/results.ts";
 import { checkOf, NIGHTLY_CHECKS, type CheckOpts, type NightlyCheck } from "./checks.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { cols, excluded } from "../db/kx.ts";
 
 export { NIGHTLY_CHECKS, checkOf } from "./checks.ts";
 export type { NightlyCheck, CheckOpts } from "./checks.ts";
@@ -62,7 +63,6 @@ export type NightlySummary = { repo: string; queued: number; skipped: number; co
 
 // ---- selection ----------------------------------------------------------------
 
-type SelRow = { repo: string; check_id: string; enabled: number; params: string | null };
 const paramsOf = (s: string | null): { crates: string[]; targets: string[] } => {
   try {
     const o = JSON.parse(s ?? "{}") as { crates?: unknown; targets?: unknown };
@@ -73,7 +73,7 @@ const paramsOf = (s: string | null): { crates: string[]; targets: string[] } => 
 
 /** The repo's rows for checks the catalogue knows, in catalogue order. */
 export async function selectionOf(db: Db, repo: string): Promise<NightlySelection[]> {
-  const rows = await db.prepare("SELECT * FROM nightly_selection WHERE repo = ?").all(repo) as SelRow[];
+  const rows = await db.all(db.k.selectFrom("nightly_selection").select(cols("nightly_selection")).where("repo", "=", repo));
   return NIGHTLY_CHECKS.flatMap((c) => {
     const r = rows.find((x) => x.check_id === c.id);
     return r ? [{ repo, checkId: c.id, enabled: r.enabled === 1, ...paramsOf(r.params) }] : [];
@@ -85,8 +85,8 @@ export async function setSelection(db: Db, repo: string, checkId: string, enable
   if (!checkOf(checkId)) throw new Error(`unknown nightly check ${checkId}`);
   const old = (await selectionOf(db, repo)).find((s) => s.checkId === checkId);
   const params = JSON.stringify({ crates: o.crates ?? old?.crates ?? [], targets: o.targets ?? old?.targets ?? [] });
-  await db.prepare("INSERT INTO nightly_selection (repo, check_id, enabled, params) VALUES (?, ?, ?, ?) ON CONFLICT(repo, check_id) DO UPDATE SET enabled = excluded.enabled, params = excluded.params")
-    .run(repo, checkId, enabled ? 1 : 0, params);
+  await db.run(db.k.insertInto("nightly_selection").values({ repo, check_id: checkId, enabled: enabled ? 1 : 0, params })
+    .onConflict((oc) => oc.columns(["repo", "check_id"]).doUpdateSet(excluded(["enabled", "params"]))));
 }
 
 const enabledChecks = async (db: Db, repo: string): Promise<{ check: NightlyCheck; opts: CheckOpts }[]> =>
@@ -99,11 +99,10 @@ const headOf = async (db: Db, repo: string): Promise<string | null> => (await ma
 
 /** A run started since `since`, or one still running that started since `staleSince`. */
 const recentRun = async (db: Db, repo: string, since: string, staleSince: string): Promise<boolean> =>
-  !!await db.prepare("SELECT 1 FROM nightly_runs WHERE repo = ? AND (started_at > ? OR (state = 'running' AND started_at > ?)) LIMIT 1").get(repo, since, staleSince);
+  !!await db.get(db.k.selectFrom("nightly_runs").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo)
+    .where((eb) => eb.or([eb("started_at", ">", since), eb.and([eb("state", "=", "running"), eb("started_at", ">", staleSince)])])).limit(1));
 
 const nightlyDecision = (repo: string, id: string): boolean => id.startsWith(`${repo}:nightly:`);
-
-const TERMINAL_SQL = TERMINAL.map((s) => `'${s}'`).join(", ");
 
 /**
  * Whether a run of the step has work for the repo: an answered issue decision, a result whose task ended, or (the
@@ -112,8 +111,8 @@ const TERMINAL_SQL = TERMINAL.map((s) => `'${s}'`).join(", ");
 export async function nightlyDue(db: Db, repo: string, nowMs: number = Date.now()): Promise<boolean> {
   if (!await featureOn(db, "nightly", repo)) return false;
   if ((await actionable(db)).some((a) => a.kind === "other" && nightlyDecision(repo, a.id))) return true;
-  if (await db.prepare(`SELECT 1 FROM nightly_results r JOIN nightly_runs u ON u.id = r.run_id JOIN build_tasks t ON t.id = r.task_id
-    WHERE u.repo = ? AND r.state = 'queued' AND t.state IN (${TERMINAL_SQL}) LIMIT 1`).get(repo)) return true;
+  if (await db.get(db.k.selectFrom("nightly_results as r").innerJoin("nightly_runs as u", "u.id", "r.run_id").innerJoin("build_tasks as t", "t.id", "r.task_id")
+    .select((eb) => eb.lit(1).as("one")).where("u.repo", "=", repo).where("r.state", "=", "queued").where("t.state", "in", TERMINAL).limit(1))) return true;
   if (!(await enabledChecks(db, repo)).length) return false;
   const since = new Date(nowMs - NIGHTLY_EVERY_MS).toISOString();
   if (await recentRun(db, repo, since, new Date(nowMs - STALE_RUN_MS).toISOString())) return false;
@@ -131,16 +130,18 @@ const resultOf = (r: ResRow): NightlyResult => ({ runId: r.run_id, checkId: r.ch
 
 /** Newest runs of a repo with their results; for the Nightly page. */
 export async function recentRuns(db: Db, repo: string, limit = 14): Promise<(NightlyRun & { results: NightlyResult[] })[]> {
-  const runs = await db.prepare("SELECT * FROM nightly_runs WHERE repo = ? ORDER BY id DESC LIMIT ?").all(repo, limit) as { id: number; repo: string; sha: string; started_at: string; state: "running" | "done" }[];
+  const runs = await db.all(db.k.selectFrom("nightly_runs").select(cols("nightly_runs")).$narrowType<{ state: "running" | "done" }>()
+    .where("repo", "=", repo).orderBy("id", "desc").limit(limit));
   return await mapSeq(runs, async (u) => ({
     id: u.id, repo: u.repo, sha: u.sha, startedAt: u.started_at, state: u.state,
-    results: (await db.prepare("SELECT * FROM nightly_results WHERE run_id = ? ORDER BY check_id").all(u.id) as ResRow[]).map(resultOf),
+    results: (await db.all(db.k.selectFrom("nightly_results").select(cols("nightly_results")).$narrowType<{ state: ResultState }>()
+      .where("run_id", "=", u.id).orderBy("check_id"))).map(resultOf),
   }));
 }
 
 /** A bench's points, oldest first. */
 export async function benchSeries(db: Db, repo: string, bench: string): Promise<BenchPoint[]> {
-  return (await db.prepare("SELECT * FROM nightly_bench WHERE repo = ? AND bench = ? ORDER BY at, sha").all(repo, bench) as BenchPoint[]);
+  return await db.all(db.k.selectFrom("nightly_bench").select(cols("nightly_bench")).where("repo", "=", repo).where("bench", "=", bench).orderBy("at").orderBy("sha"));
 }
 
 export function defaultDeps(): NightlyDeps {
@@ -148,7 +149,7 @@ export function defaultDeps(): NightlyDeps {
     now: () => new Date(),
     toolchains: async (db) => new Set((await listEnvs(db)).filter((e) => e.enabled && e.online).flatMap((e) => e.capabilities?.toolchains ?? [])),
     readArtifact: async (db, taskId, name) => {
-      const row = await db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { file: string } | undefined;
+      const row = await db.get(db.k.selectFrom("build_artifacts").select("file").where("task_id", "=", taskId).where("name", "=", name));
       const path = row ? absolute(row.file) : null;
       if (!path) return null;
       try { return readFileSync(path, "utf8"); } catch { return null; }
@@ -182,21 +183,22 @@ const median = (xs: number[]): number => {
 /** Stores the points and returns the benches more than 10% above the median of their last 7 earlier nights. */
 async function storeBench(db: Db, repo: string, sha: string, at: string, points: { bench: string; value: number; unit: string }[]): Promise<{ bench: string; pct: number }[]> {
   const slow: { bench: string; pct: number }[] = [];
-  const earlier = db.prepare("SELECT value FROM nightly_bench WHERE repo = ? AND bench = ? AND sha <> ? AND at < ? ORDER BY at DESC LIMIT ?");
   for (const p of points) {
-    const prior = (await earlier.all(repo, p.bench, sha, at, BENCH_WINDOW) as { value: number }[]).map((r) => r.value);
+    const prior = (await db.all(db.k.selectFrom("nightly_bench").select("value").where("repo", "=", repo).where("bench", "=", p.bench)
+      .where("sha", "<>", sha).where("at", "<", at).orderBy("at", "desc").limit(BENCH_WINDOW))).map((r) => r.value);
     if (prior.length >= BENCH_MIN_HISTORY) {
       const m = median(prior);
       if (m > 0 && p.value > m * BENCH_WARN_RATIO) slow.push({ bench: p.bench, pct: Math.round((p.value / m - 1) * 100) });
     }
-    await db.prepare("INSERT OR REPLACE INTO nightly_bench (repo, bench, sha, at, value, unit) VALUES (?, ?, ?, ?, ?, ?)").run(repo, p.bench, sha, at, p.value, p.unit);
+    await db.run(db.k.insertInto("nightly_bench").values({ repo, bench: p.bench, sha, at, value: p.value, unit: p.unit })
+      .onConflict((oc) => oc.columns(["repo", "bench", "sha"]).doUpdateSet(excluded(["at", "value", "unit"]))));
   }
   return slow;
 }
 
 /** Drops benchmark points older than BENCH_KEEP_MS. */
 export async function pruneBench(db: Db, nowMs: number = Date.now()): Promise<number> {
-  return Number((await db.prepare("DELETE FROM nightly_bench WHERE at < ?").run(new Date(nowMs - BENCH_KEEP_MS).toISOString())).changes);
+  return (await db.run(db.k.deleteFrom("nightly_bench").where("at", "<", new Date(nowMs - BENCH_KEEP_MS).toISOString()))).changes;
 }
 
 // ---- collecting ---------------------------------------------------------------
@@ -231,7 +233,8 @@ async function judge(db: Db, c: NightlyCheck, t: BuildTask, run: NightlyRun, at:
 
 /** The earlier results of one check, newest first, from runs before `runId`. */
 const history = async (db: Db, repo: string, checkId: string, runId: number): Promise<ResRow[]> =>
-  await db.prepare("SELECT r.* FROM nightly_results r JOIN nightly_runs u ON u.id = r.run_id WHERE u.repo = ? AND r.check_id = ? AND r.run_id < ? ORDER BY r.run_id DESC").all(repo, checkId, runId) as ResRow[];
+  await db.all(db.k.selectFrom("nightly_results as r").innerJoin("nightly_runs as u", "u.id", "r.run_id").select(cols("nightly_results", "r")).$narrowType<{ state: ResultState }>()
+    .where("u.repo", "=", repo).where("r.check_id", "=", checkId).where("r.run_id", "<", runId).orderBy("r.run_id", "desc"));
 
 const decisionIdOf = (repo: string, checkId: string, startRun: number): string => `${repo}:nightly:${checkId}@${startRun}`;
 
@@ -272,28 +275,29 @@ async function afterFailure(db: Db, c: NightlyCheck, run: NightlyRun, summary: s
     }]);
     s.asked++;
   }
-  const issue = (await db.prepare("SELECT issue_number AS n FROM nightly_results WHERE decision_id = ? AND issue_number IS NOT NULL LIMIT 1").get(id) as { n: number } | undefined)?.n ?? null;
-  await db.prepare("UPDATE nightly_results SET decision_id = ?, issue_number = ? WHERE run_id = ? AND check_id = ?").run(id, issue, run.id, c.id);
+  const issue = (await db.get(db.k.selectFrom("nightly_results").select("issue_number as n").where("decision_id", "=", id).where("issue_number", "is not", null).limit(1)))?.n ?? null;
+  await db.run(db.k.updateTable("nightly_results").set({ decision_id: id, issue_number: issue }).where("run_id", "=", run.id).where("check_id", "=", c.id));
   // The streak's earlier failures point at the same decision.
-  await db.prepare("UPDATE nightly_results SET decision_id = ? WHERE decision_id IS NULL AND state = 'fail' AND check_id = ? AND run_id >= ? AND run_id IN (SELECT id FROM nightly_runs WHERE repo = ?)").run(id, c.id, start, run.repo);
+  await db.run(db.k.updateTable("nightly_results").set({ decision_id: id }).where("decision_id", "is", null).where("state", "=", "fail").where("check_id", "=", c.id).where("run_id", ">=", start)
+    .where("run_id", "in", (eb) => eb.selectFrom("nightly_runs").select("id").where("repo", "=", run.repo)));
 }
 
 async function collect(db: Db, repo: string, deps: NightlyDeps, s: NightlySummary): Promise<void> {
   const at = deps.now().toISOString();
-  const runs = await db.prepare("SELECT * FROM nightly_runs WHERE repo = ? AND state = 'running' ORDER BY id").all(repo) as { id: number; repo: string; sha: string; started_at: string; state: "running" }[];
+  const runs = await db.all(db.k.selectFrom("nightly_runs").select(cols("nightly_runs")).$narrowType<{ state: "running" }>().where("repo", "=", repo).where("state", "=", "running").orderBy("id"));
   for (const u of runs) {
     const run: NightlyRun = { id: u.id, repo: u.repo, sha: u.sha, startedAt: u.started_at, state: u.state };
-    for (const r of await db.prepare("SELECT * FROM nightly_results WHERE run_id = ? AND state = 'queued' ORDER BY check_id").all(u.id) as ResRow[]) {
+    for (const r of await db.all(db.k.selectFrom("nightly_results").select(cols("nightly_results")).$narrowType<{ state: ResultState }>().where("run_id", "=", u.id).where("state", "=", "queued").orderBy("check_id"))) {
       const c = checkOf(r.check_id);
       const t = r.task_id === null ? null : await getTask(db, r.task_id);
-      if (!c || !t) { await db.prepare("UPDATE nightly_results SET state = 'error', summary = ?, finished_at = ? WHERE run_id = ? AND check_id = ?").run(!c ? "check no longer in the catalogue" : "the build task is gone", at, u.id, r.check_id); s.collected++; continue; }
+      if (!c || !t) { await db.run(db.k.updateTable("nightly_results").set({ state: "error", summary: !c ? "check no longer in the catalogue" : "the build task is gone", finished_at: at }).where("run_id", "=", u.id).where("check_id", "=", r.check_id)); s.collected++; continue; }
       if (!TERMINAL.includes(t.state)) continue;
       const j = await judge(db, c, t, run, t.endedAt ?? at, deps);
-      await db.prepare("UPDATE nightly_results SET state = ?, summary = ?, finished_at = ? WHERE run_id = ? AND check_id = ?").run(j.state, j.summary, at, u.id, r.check_id);
+      await db.run(db.k.updateTable("nightly_results").set({ state: j.state, summary: j.summary, finished_at: at }).where("run_id", "=", u.id).where("check_id", "=", r.check_id));
       s.collected++;
       if (j.state === "fail") await afterFailure(db, c, run, j.summary, at, s);
     }
-    if (!await db.prepare("SELECT 1 FROM nightly_results WHERE run_id = ? AND state = 'queued'").get(u.id)) await db.prepare("UPDATE nightly_runs SET state = 'done' WHERE id = ?").run(u.id);
+    if (!await db.get(db.k.selectFrom("nightly_results").select((eb) => eb.lit(1).as("one")).where("run_id", "=", u.id).where("state", "=", "queued").limit(1))) await db.run(db.k.updateTable("nightly_runs").set({ state: "done" }).where("id", "=", u.id));
   }
 }
 
@@ -301,16 +305,17 @@ async function collect(db: Db, repo: string, deps: NightlyDeps, s: NightlySummar
 async function applyAnswers(db: Db, repo: string, deps: NightlyDeps, log: (l: string) => void, s: NightlySummary, by: By): Promise<void> {
   for (const a of (await actionable(db)).filter((x) => x.kind === "other" && nightlyDecision(repo, x.id))) {
     const at = deps.now().toISOString();
-    const done = async (): Promise<void> => void await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+    const done = async (): Promise<void> => void await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "=", a.id).where("applied_at", "is", null));
     if (a.answer === NOT_NOW) { await done(); continue; }
     if (a.answer !== OPEN_ISSUE) continue;
-    const rows = await db.prepare("SELECT r.*, u.sha FROM nightly_results r JOIN nightly_runs u ON u.id = r.run_id WHERE r.decision_id = ? ORDER BY r.run_id DESC").all(a.id) as (ResRow & { sha: string })[];
+    const rows = await db.all(db.k.selectFrom("nightly_results as r").innerJoin("nightly_runs as u", "u.id", "r.run_id").select([...cols("nightly_results", "r"), "u.sha"]).$narrowType<{ state: ResultState }>()
+      .where("r.decision_id", "=", a.id).orderBy("r.run_id", "desc"));
     const last = rows[0];
     const c = last && checkOf(last.check_id);
     if (!last || !c || rows.some((r) => r.issue_number !== null)) { await done(); continue; }
     try {
       const made = await deps.openIssue(db, { repo, title: issueTitle(c), body: nightlyIssueBody(c, last.sha, last.summary), decisionId: a.id, by });
-      await db.prepare("UPDATE nightly_results SET issue_number = ? WHERE decision_id = ?").run(made.number, a.id);
+      await db.run(db.k.updateTable("nightly_results").set({ issue_number: made.number }).where("decision_id", "=", a.id));
       await done();
       s.issues++;
       log(`  ${repo}: opened ${made.url}`);
@@ -332,15 +337,15 @@ async function queueRun(db: Db, repo: string, deps: NightlyDeps, s: NightlySumma
   if (!sha || !checks.length) return;
   const nowMs = deps.now().getTime();
   if (await recentRun(db, repo, new Date(nowMs - NIGHTLY_EVERY_MS).toISOString(), new Date(nowMs - STALE_RUN_MS).toISOString())) return;
-  const queued = (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE state = 'queued'").get() as { n: number }).n;
+  const queued = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "queued")))!.n;
   if (queued + checks.length > MAX_QUEUED) { s.note = "the build queue is full; tried again at the next run"; return; }
   const have = await deps.toolchains(db);
   const at = new Date(nowMs).toISOString();
   await db.write(async () => {
-    const runId = Number((await db.prepare("INSERT INTO nightly_runs (repo, sha, started_at, state) VALUES (?, ?, ?, 'running')").run(repo, sha, at)).lastInsertRowid);
+    const runId = (await db.get(db.k.insertInto("nightly_runs").values({ repo, sha, started_at: at, state: "running" }).returning("id")))!.id;
     for (const { check, opts } of checks) {
       const insert = async (taskId: number | null, state: ResultState, summary: string | null): Promise<void> =>
-        void await db.prepare("INSERT INTO nightly_results (run_id, check_id, task_id, state, summary, finished_at) VALUES (?, ?, ?, ?, ?, ?)").run(runId, check.id, taskId, state, summary, state === "queued" ? null : at);
+        void await db.run(db.k.insertInto("nightly_results").values({ run_id: runId, check_id: check.id, task_id: taskId, state, summary, finished_at: state === "queued" ? null : at }));
       if (!have.has(check.toolchain)) { await insert(null, "skipped", "no toolchain"); s.skipped++; continue; }
       const plan = check.steps(opts);
       if (!plan) { await insert(null, "skipped", check.id === "fuzz" ? "no fuzz targets chosen" : "no crates chosen"); s.skipped++; continue; }
