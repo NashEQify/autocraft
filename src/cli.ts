@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Each module exports commands: { name: { summary, run(args) } }.
+import { openDb } from "./db/open.ts";
 type Command = { summary: string; run: (args: string[]) => Promise<void> | void };
 type Module = { commands: Record<string, Command> };
 
@@ -28,8 +29,8 @@ async function main(): Promise<void> {
   if (req) {
     const { connect } = await import("./db.ts");
     const { scopeToTracked } = await import("./repos.ts");
-    const db = connect();
-    scopeToTracked(db);
+    const db = await openDb();
+    await scopeToTracked(db);
     process.exit(await runCliJob(db, req));
   }
   await cmd.run(args);

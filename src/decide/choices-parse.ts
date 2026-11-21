@@ -1,6 +1,5 @@
 // Reading the model's fenced `choices` block: every extra is checked with the step checkers, every core with its extras through
 // compose and validateCard. What fails is dropped with a note; what survives is what `writeChoices` and `mergeChoices` store.
-import type { DatabaseSync } from "node:sqlite";
 import { applicableSteps, cleanComment, decisionStamp, openDecision, parseReply, type Parsed, commentText, labelStep, assignStep, reviewersStep, unlabelStep, openIssueStep, validateCard, type NewCard, type Step } from "../conversations/cards.ts";
 import { optionsOf, type DecisionRow } from "../decisions.ts";
 import {
@@ -9,6 +8,7 @@ import {
 import { coreKey, type ChoicesBlockExtra, type ChoicesRow, type CoreKey, type ExtraKind, type StoredDraft } from "./choices-types.ts";
 import { cardsToDrafts } from "./choices-convert.ts";
 import { PREPARE_REASON_MAX } from "./prepare-types.ts";
+import type { Db } from "../db/index.ts";
 
 /** A validated `choices` block: what a prepare writes whole and a conversation turn merges. */
 export interface ParsedChoices {
@@ -49,7 +49,7 @@ function blockOf(reply: string): { text: string; json: string | null } {
 }
 
 /** One drafted extra checked with its step checker, or why it is dropped. */
-function checkExtra(db: DatabaseSync, repo: string, n: number, raw: unknown, removing: string[], drop: ReadonlySet<string>): { extra: ChoicesBlockExtra } | { note: string } {
+async function checkExtra(db: Db, repo: string, n: number, raw: unknown, removing: string[], drop: ReadonlySet<string>): Promise<{ extra: ChoicesBlockExtra } | { note: string }> {
   if (!isObj(raw)) return { note: "an extra is not an object" };
   const kind = raw.kind as ExtraKind;
   if (!KINDS.includes(kind)) return { note: `unknown extra "${String(raw.kind).slice(0, 40)}"` };
@@ -61,19 +61,19 @@ function checkExtra(db: DatabaseSync, repo: string, n: number, raw: unknown, rem
       return "note" in t ? { note: plain(t.note) } : { extra: { kind, on, text: t.value } };
     }
     case "label": {
-      const r = step(labelStep(db, repo, n, raw.label, removing));
+      const r = step(await labelStep(db, repo, n, raw.label, removing));
       return "note" in r ? r : { extra: { kind, on, label: (r.value as Extract<Step, { kind: "label" }>).label } };
     }
     case "unlabel": {
-      const r = step(unlabelStep(db, repo, n, raw.label));
+      const r = step(await unlabelStep(db, repo, n, raw.label));
       return "note" in r ? r : { extra: { kind, on, label: (r.value as Extract<Step, { kind: "unlabel" }>).label } };
     }
     case "assign": {
-      const r = step(assignStep(db, repo, n, raw.login));
+      const r = step(await assignStep(db, repo, n, raw.login));
       return "note" in r ? r : { extra: { kind, on, login: (r.value as Extract<Step, { kind: "assign" }>).login } };
     }
     case "request_reviewers": {
-      const r = step(reviewersStep(db, repo, n, raw.logins));
+      const r = step(await reviewersStep(db, repo, n, raw.logins));
       return "note" in r ? r : { extra: { kind, on, logins: (r.value as Extract<Step, { kind: "request_reviewers" }>).logins } };
     }
     case "open_issue": {
@@ -91,7 +91,7 @@ const composeExtra = (e: ChoicesBlockExtra) => ({ ...e, id: extraId(e) });
  * A core with its drafted params and extras. The core alone is validated first (a core that fails is dropped), then the extras
  * one at a time on top of the ones kept, so an extra that breaks the card is dropped alone.
  */
-function checkCore(db: DatabaseSync, repo: string, n: number, core: Core, raw: { reason?: unknown; instructions?: unknown; extras?: unknown }, drop: ReadonlySet<string>, notes: string[]): { draft: { params?: StoredDraft["params"]; extras: ChoicesBlockExtra[] } } | null {
+async function checkCore(db: Db, repo: string, n: number, core: Core, raw: { reason?: unknown; instructions?: unknown; extras?: unknown }, drop: ReadonlySet<string>, notes: string[]): Promise<{ draft: { params?: StoredDraft["params"]; extras: ChoicesBlockExtra[] } } | null> {
   const params: { reason?: string; instructions?: string } = {};
   if (core.closing && typeof raw.reason === "string") {
     const r = cleanComment(raw.reason);
@@ -101,7 +101,7 @@ function checkCore(db: DatabaseSync, repo: string, n: number, core: Core, raw: {
   if (core.params && "instructions" in core.params && typeof raw.instructions === "string") params.instructions = raw.instructions.trim();
   const base = compose(core, [], params);
   if ("note" in base) { notes.push(`dropped the choice ${core.key}: ${base.note}`); return null; }
-  const v = validateCard(db, repo, n, base.card, drop);
+  const v = await validateCard(db, repo, n, base.card, drop);
   if ("note" in v) { notes.push(`dropped the choice ${core.key}: ${plain(v.note)}`); return null; }
   const settle = v.card.params.kind === "resolution" ? v.card.params.settle : null;
   const stored: StoredDraft["params"] = {};
@@ -112,13 +112,13 @@ function checkCore(db: DatabaseSync, repo: string, n: number, core: Core, raw: {
   const removing = list.flatMap((x) => (isObj(x) && x.kind === "unlabel" && typeof x.label === "string" ? [x.label] : []));
   const kept: ChoicesBlockExtra[] = [];
   for (const x of list) {
-    const c = checkExtra(db, repo, n, x, removing, drop);
+    const c = await checkExtra(db, repo, n, x, removing, drop);
     if ("note" in c) { notes.push(`dropped the ${isObj(x) ? String(x.kind).slice(0, 20) : "?"} extra of ${core.key} (${c.note})`); continue; }
     if (!core.allowed.includes(c.extra.kind)) { notes.push(`dropped the ${c.extra.kind} extra of ${core.key}: it is not offered with that choice`); continue; }
     const trial = [...kept, c.extra];
     const comp = compose(core, trial.map(composeExtra), params);
     if ("note" in comp) { notes.push(`dropped the ${c.extra.kind} extra of ${core.key} (${comp.note})`); continue; }
-    const tv = validateCard(db, repo, n, comp.card, drop);
+    const tv = await validateCard(db, repo, n, comp.card, drop);
     if ("note" in tv) { notes.push(`dropped the ${c.extra.kind} extra of ${core.key} (${plain(tv.note)})`); continue; }
     kept.push(c.extra);
   }
@@ -147,7 +147,7 @@ const reasonOf = (v: unknown): string | null => {
  * takes the pick only, as `o:<option key>`; its drafts are ignored.
  * `drop`: cleaned texts the reply lint still flagged after the fix turn; extras with them are dropped.
  */
-export function parseChoices(db: DatabaseSync, repo: string, n: number, d: DecisionRow, reply: string, drop: ReadonlySet<string> = new Set(), o: { fresh?: boolean; pickOnly?: boolean } = {}): ChoicesReply | null {
+export async function parseChoices(db: Db, repo: string, n: number, d: DecisionRow, reply: string, drop: ReadonlySet<string> = new Set(), o: { fresh?: boolean; pickOnly?: boolean } = {}): Promise<ChoicesReply | null> {
   const { text, json } = blockOf(reply);
   if (!text) return null;
   const out: ChoicesReply = { text, choices: null, ask: null, notes: [], pickLost: null, hasBlock: json !== null };
@@ -157,11 +157,11 @@ export function parseChoices(db: DatabaseSync, repo: string, n: number, d: Decis
   if (!isObj(raw)) { out.notes.push("dropped the choices block: it is not a JSON object"); return out; }
   if (!isObj(raw.pick) || (raw.pick.core !== null && typeof raw.pick.core !== "string")) { out.notes.push("dropped the choices block: it has no pick with a core or null"); return out; }
   const pickRaw = raw.pick.core as string | null, reason = reasonOf(raw.pick.reason);
-  const offered = coresFor(db, d);
+  const offered = await coresFor(db, d);
   const notes = out.notes;
-  const ask = (() => {
+  const ask = await (async () => {
     if (!isObj(raw.ask)) return null;
-    const v = validateCard(db, repo, n, { kind: "resolution", steps: [{ kind: "comment" }], settle: null, text: raw.ask.text }, drop);
+    const v = await validateCard(db, repo, n, { kind: "resolution", steps: [{ kind: "comment" }], settle: null, text: raw.ask.text }, drop);
     if ("note" in v) { notes.push(`dropped the question to the author: ${plain(v.note)}`); return null; }
     return v.card;
   })();
@@ -175,14 +175,14 @@ export function parseChoices(db: DatabaseSync, repo: string, n: number, d: Decis
     return out;
   }
 
-  const applicable = new Set(applicableSteps(db, repo, n));
-  const cur = o.fresh ? undefined : currentChoices(db, d.id);
+  const applicable = new Set(await applicableSteps(db, repo, n));
+  const cur = o.fresh ? undefined : await currentChoices(db, d.id);
   const dropRaw = Array.isArray(raw.drop) ? raw.drop.filter((k): k is string => typeof k === "string") : [];
   const drops = dropRaw.filter((k) => cur?.added.includes(k));
   const existing: Core[] = [...offered];
   for (const k of cur?.added ?? []) {
     if (drops.includes(k)) continue;
-    const c = addedCore(db, d, k, applicable);
+    const c = await addedCore(db, d, k, applicable);
     if (c) existing.push(c);
   }
   const lost = new Set<CoreKey>();
@@ -198,9 +198,9 @@ export function parseChoices(db: DatabaseSync, repo: string, n: number, d: Decis
     if (!key) { notes.push("dropped an added choice without a valid end (close, duplicate, transfer, fixup or review)"); continue; }
     const known = [...existing, ...newCores].find((c) => c.key === key);
     if (!known && room <= 0) { notes.push(`left out the added choice ${key}: at most ${MAX_ADDED_CORES} are kept`); capped.add(key); continue; }
-    const core = known ?? addedCore(db, d, key, applicable);
+    const core = known ?? await addedCore(db, d, key, applicable);
     if (!core) { notes.push(`left out the added choice ${key}: it does not apply to this item now`); lost.add(key); continue; }
-    const r = checkCore(db, repo, n, core, { instructions: a.instructions, extras: a.extras }, drop, notes);
+    const r = await checkCore(db, repo, n, core, { instructions: a.instructions, extras: a.extras }, drop, notes);
     if (!r) { lost.add(key); continue; }
     if (!known) { newCores.push(core); room--; }
     out_.add = out_.add.filter((x) => x.key !== key);
@@ -214,7 +214,7 @@ export function parseChoices(db: DatabaseSync, repo: string, n: number, d: Decis
     if (!core) { notes.push(`dropped the choice ${c.core.slice(0, 60)}: it is not one of the offered choices`); continue; }
     if (seen.has(core.key)) { notes.push(`dropped a second entry for the choice ${core.key}`); continue; }
     seen.add(core.key);
-    const r = checkCore(db, repo, n, core, c, drop, notes);
+    const r = await checkCore(db, repo, n, core, c, drop, notes);
     if (!r) { lost.add(core.key); continue; }
     out_.cores[core.key] = r.draft;
   }
@@ -280,9 +280,9 @@ export interface SettlingDrafts {
  * Settling action cards of a conversation turn become drafts through `cardsToDrafts`; cards that map to no core are dropped with a note.
  * Tests or other callers may replace the hook.
  */
-export const hooks: { settlingCardsToDrafts: (db: DatabaseSync, repo: string, n: number, d: DecisionRow, cards: NewCard[]) => SettlingDrafts } = {
-  settlingCardsToDrafts: (db, _repo, _n, d, cards) => {
-    const r = cardsToDrafts(db, d, cards.map((c) => ({ params: c.params, text: c.text })));
+export const hooks: { settlingCardsToDrafts: (db: Db, repo: string, n: number, d: DecisionRow, cards: NewCard[]) => Promise<SettlingDrafts> } = {
+  settlingCardsToDrafts: async (db, _repo, _n, d, cards) => {
+    const r = await cardsToDrafts(db, d, cards.map((c) => ({ params: c.params, text: c.text })));
     const notes = [...r.notes];
     const unmapped = cards.length - r.used.length;
     if (unmapped > 0) notes.push(`dropped ${unmapped === 1 ? "a card" : `${unmapped} cards`} that settle the decision without matching one of its choices`);
@@ -302,10 +302,10 @@ const isAsk = (c: NewCard): boolean => c.params.kind === "resolution" && !c.para
  * A conversation reply. On an item whose open decision has cores the reply's block is `choices`; settling cards of an `actions`
  * block go through `hooks.settlingCardsToDrafts`, a card that only asks the author is kept. Otherwise it is `parseReply`.
  */
-export function parseTurn(db: DatabaseSync, repo: string, n: number, reply: string, drop: ReadonlySet<string> = new Set()): TurnReply | null {
-  const d = openDecision(db, repo, n);
-  if (!d || !coresFor(db, d).length) return parseReply(db, repo, n, reply, drop);
-  const c = parseChoices(db, repo, n, d, reply, drop);
+export async function parseTurn(db: Db, repo: string, n: number, reply: string, drop: ReadonlySet<string> = new Set()): Promise<TurnReply | null> {
+  const d = await openDecision(db, repo, n);
+  if (!d || !(await coresFor(db, d)).length) return await parseReply(db, repo, n, reply, drop);
+  const c = await parseChoices(db, repo, n, d, reply, drop);
   if (!c) return null;
   const notes = [...c.notes];
   const cards: NewCard[] = c.ask ? [c.ask] : [];
@@ -313,16 +313,16 @@ export function parseTurn(db: DatabaseSync, repo: string, n: number, reply: stri
   let text = c.text;
   let choices = c.choices ?? undefined;
   if (!c.hasBlock) {
-    const r = parseReply(db, repo, n, reply, drop);
+    const r = await parseReply(db, repo, n, reply, drop);
     if (r) {
       text = r.text;
       notes.push(...r.notes);
       if (!cards.length) cards.push(...r.cards.filter(isAsk).slice(0, 1));
       const settling = r.cards.filter((x) => !isAsk(x));
       if (settling.length) {
-        const h = hooks.settlingCardsToDrafts(db, repo, n, d, settling);
+        const h = await hooks.settlingCardsToDrafts(db, repo, n, d, settling);
         notes.push(...h.notes);
-        if (h.patch) choices = { cores: h.patch.cores, add: h.patch.add, drop: [], pick: h.patch.pick ?? currentChoices(db, d.id)?.pick ?? { core: null, reason: null } };
+        if (h.patch) choices = { cores: h.patch.cores, add: h.patch.add, drop: [], pick: h.patch.pick ?? (await currentChoices(db, d.id))?.pick ?? { core: null, reason: null } };
       }
     }
   }
@@ -333,22 +333,22 @@ export function parseTurn(db: DatabaseSync, repo: string, n: number, reply: stri
  * Stores validated choices for a decision: a prepare writes a whole new row, a conversation turn merges into the current one.
  * Call inside the transaction that inserts the turn (`turnId`); `seen` is the item snapshot JSON the turn was written against.
  */
-export function storeParsedChoices(db: DatabaseSync, d: DecisionRow, p: ParsedChoices, o: { turnId: number | null; seen: string | null; source: "prepare" | "conversation"; by?: string | null; /** The decision's stamp when the reply's prompt was built. */ stampThen?: string | null }): void {
+export async function storeParsedChoices(db: Db, d: DecisionRow, p: ParsedChoices, o: { turnId: number | null; seen: string | null; source: "prepare" | "conversation"; by?: string | null; /** The decision's stamp when the reply's prompt was built. */ stampThen?: string | null }): Promise<void> {
   // A late reply: the decision was answered, undone or asked again while the call ran.
-  const now = db.prepare("SELECT * FROM main.decisions WHERE id = ?").get(d.id) as unknown as DecisionRow | undefined;
-  if (!now || now.answer !== null || (o.stampThen != null && decisionStamp(db, now) !== o.stampThen)) return;
+  const now = await db.prepare("SELECT * FROM main.decisions WHERE id = ?").get(d.id) as unknown as DecisionRow | undefined;
+  if (!now || now.answer !== null || (o.stampThen != null && await decisionStamp(db, now) !== o.stampThen)) return;
   let seen: ChoicesRow["seen"] = { head: null, lastComment: null };
   try { const v = JSON.parse(o.seen ?? "{}") as { head?: string | null; last_comment?: string | null }; seen = { head: v.head ?? null, lastComment: v.last_comment ?? null }; } catch { /* no snapshot */ }
-  const stamp = decisionStamp(db, d);
+  const stamp = await decisionStamp(db, d);
   const by = o.by === undefined ? {} : { by: o.by };
   if (o.source === "conversation") {
-    mergeChoices(db, d.id, { turnId: o.turnId, stamp, seen, cores: p.cores, add: p.add, drop: p.drop, pick: p.pick }, by);
+    await mergeChoices(db, d.id, { turnId: o.turnId, stamp, seen, cores: p.cores, add: p.add, drop: p.drop, pick: p.pick }, by);
     return;
   }
   const drafts: ChoicesRow["drafts"] = {};
   for (const [k, v] of Object.entries(p.cores)) drafts[k] = { ...(v.params && { params: v.params }), extras: withIds(v.extras) };
   for (const a of p.add) drafts[a.key] = { ...(a.draft.params && { params: a.draft.params }), extras: withIds(a.draft.extras) };
-  writeChoices(db, { decisionId: d.id, repo: d.repo!, number: d.number!, turnId: o.turnId, stamp, seen, source: "prepare", drafts, added: p.add.map((a) => a.key), pick: p.pick }, by);
+  await writeChoices(db, { decisionId: d.id, repo: d.repo!, number: d.number!, turnId: o.turnId, stamp, seen, source: "prepare", drafts, added: p.add.map((a) => a.key), pick: p.pick }, by);
 }
 
 /** The compact `<choices>` JSON a turn block carries: the pick and the drafts as validated. */

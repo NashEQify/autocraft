@@ -8,19 +8,19 @@ import { runReferee } from "../src/classify/referee.ts";
 import type { Pair, Row } from "../src/classify/report.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { runHaiku, runJev, setRunner, type Runner } from "../src/classify/run.ts";
-import { connect } from "../src/db.ts";
 import { JEV_ARGS, claudeArgs, claudeParts, renderClaude, renderJev, untrustedJson } from "../src/prompts/index.ts";
 import { SAMPLE_ITEMS } from "../src/prompts/samples.ts";
 import { SAMPLE_VERIFY_PLAN } from "../src/verify/types.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
-const db = connect(join(mkdtempSync(join(SCRATCH, "prompts-test-")), "t.db"));
-useTestAccount(db);
+const db = await connectDb(join(mkdtempSync(join(SCRATCH, "prompts-test-")), "t.db"));
+await useTestAccount(db);
 const ins = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, additions, deletions, changed_files, author_association, created_at, updated_at)
   VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`);
 for (const i of SAMPLE_ITEMS)
-  ins.run(i.repo, i.number, i.kind, i.title, i.body, i.lines_changed === null ? null : i.lines_changed - 6, i.lines_changed === null ? null : 6, i.files_changed, i.author_association);
+  await ins.run(i.repo, i.number, i.kind, i.title, i.body, i.lines_changed === null ? null : i.lines_changed - 6, i.lines_changed === null ? null : 6, i.files_changed, i.author_association);
 
 type Call = { cmd: string; args: string[]; input: string };
 
@@ -56,7 +56,7 @@ describe("prompt registry", () => {
       { cmd: "claude", args: claudeArgs("referee.sonnet", "sonnet", false, undefined, claudeParts("referee.sonnet", SAMPLE_ITEMS, false).system), input: claudeParts("referee.sonnet", SAMPLE_ITEMS, false).stdin },
     ];
     assert.deepEqual(calls, want);
-    const n = db.prepare("SELECT classifier, count(*) AS n FROM classifications WHERE run_id = 't' GROUP BY classifier ORDER BY classifier").all();
+    const n = await db.prepare("SELECT classifier, count(*) AS n FROM classifications WHERE run_id = 't' GROUP BY classifier ORDER BY classifier").all();
     assert.deepEqual(n.map((r) => ({ ...r })), [{ classifier: "haiku", n: 2 }, { classifier: "jev", n: 2 }, { classifier: "sonnet", n: 2 }]);
   });
 

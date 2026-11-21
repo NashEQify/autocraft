@@ -2,11 +2,10 @@
 // in `user_settings` under `skip_tasks` as a JSON list of the tasks the user unticked, so no row means every task, and a task
 // added later starts ticked. Picks ("Run on my Task Runner") and follow-ups of the user's own sessions do not go by it, as with
 // My repos (my-repos.ts).
-import type { DatabaseSync } from "node:sqlite";
-import { prep } from "../sql-cache.ts";
 import { audit } from "../dash/audit.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { STAGES, stageOfStep } from "../stages/registry.ts";
+import type { Db } from "../db/index.ts";
 
 export const SKIP_TASKS_KEY = "skip_tasks";
 /** The task of a call whose step belongs to no stage that makes model calls (security scans, Discord, and a step not known). */
@@ -43,8 +42,8 @@ export function taskOfStep(step: string): string {
 }
 
 /** The tasks the user unticked; empty when they take every task. Ids no longer offered are dropped. */
-export function userSkips(db: DatabaseSync, login: string): Set<string> {
-  const row = prep(db, "SELECT value FROM main.user_settings WHERE login = ? AND key = ?").get(login, SKIP_TASKS_KEY) as { value: string } | undefined;
+export async function userSkips(db: Db, login: string): Promise<Set<string>> {
+  const row = await db.prepare("SELECT value FROM main.user_settings WHERE login = ? AND key = ?").get(login, SKIP_TASKS_KEY) as { value: string } | undefined;
   if (!row) return new Set();
   try {
     const v = JSON.parse(row.value) as unknown;
@@ -55,8 +54,8 @@ export function userSkips(db: DatabaseSync, login: string): Set<string> {
 }
 
 /** The tasks the user takes, in TASK_CHOICES order. */
-export const userTasks = (db: DatabaseSync, login: string): string[] => {
-  const skip = userSkips(db, login);
+export const userTasks = async (db: Db, login: string): Promise<string[]> => {
+  const skip = await userSkips(db, login);
   return TASK_CHOICES.map((t) => t.id).filter((id) => !skip.has(id));
 };
 
@@ -69,14 +68,14 @@ export function parseTasks(raw: unknown): string[] {
 }
 
 /** Stores the ticked tasks as the unticked rest (every task ticked removes the row); a change is audited. */
-export function setUserTasks(db: DatabaseSync, login: string, tasks: readonly string[]): string[] {
-  const was = userTasks(db, login);
+export async function setUserTasks(db: Db, login: string, tasks: readonly string[]): Promise<string[]> {
+  const was = await userTasks(db, login);
   const on = new Set(tasks);
   const skip = TASK_CHOICES.map((t) => t.id).filter((id) => !on.has(id));
-  if (!skip.length) prep(db, "DELETE FROM main.user_settings WHERE login = ? AND key = ?").run(login, SKIP_TASKS_KEY);
-  else prep(db, "INSERT INTO main.user_settings (login, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+  if (!skip.length) await db.prepare("DELETE FROM main.user_settings WHERE login = ? AND key = ?").run(login, SKIP_TASKS_KEY);
+  else await db.prepare("INSERT INTO main.user_settings (login, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
     .run(login, SKIP_TASKS_KEY, JSON.stringify(skip), new Date().toISOString());
-  const now = userTasks(db, login);
-  if (was.join("\n") !== now.join("\n")) audit(db, login, "my-tasks", login, { tasks: now, was });
+  const now = await userTasks(db, login);
+  if (was.join("\n") !== now.join("\n")) await audit(db, login, "my-tasks", login, { tasks: now, was });
   return now;
 }

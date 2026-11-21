@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 // Every user-local window, the hold included, at a fifth: a 25 s hold is 5 s, the full retry every second. Read on import.
 process.env.AUTOCRAFT_REMOTE_TIME_SCALE = "0.2";
@@ -30,20 +31,20 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 describe("long-polling claims", async () => {
   const file = join(dir, "t.db"), perms = join(dir, "perms.json");
   writeFileSync(perms, "{}");
-  const db = connect(file), remoteDb = connect(file, { busyTimeoutMs: 100 }), other = connect(file);
-  setInferenceMode(db, "user-local", "test");
+  const db = await connectDb(file), remoteDb = await connectDb(file, { busyTimeoutMs: 100 }), other = await connectDb(file);
+  await setInferenceMode(db, "user-local", "test");
   const tokens: Record<string, { token: string; id: number }> = {};
   for (const login of ["bob", "carol", "dave", "erin", "frank"]) {
-    addLogin(db, "cli", login, "maintainer", null);
-    const t = createToken(db, login, "runner", { kind: "runner" });
+    await addLogin(db, "cli", login, "maintainer", null);
+    const t = await createToken(db, login, "runner", { kind: "runner" });
     tokens[login] = { token: t.token, id: t.row.id };
-    db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?)").run(login, new Date().toISOString());
+    await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?)").run(login, new Date().toISOString());
   }
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: file, AUTOCRAFT_DEV_PERMS: perms });
   const limiter = new RateLimiter(60, 3600_000);
   const s = await startServer({ config, db, remoteDb, provider: new FakeProvider(perms), feedbackLimiter: limiter, routes: apiRoutes({ limiter }) });
   let closed = false;
-  after(async () => { if (!closed) await s.close(); for (const c of [other, remoteDb, db]) c.close(); });
+  after(async () => { if (!closed) await s.close(); for (const c of [other, remoteDb, db]) await c.close(); });
 
   let n = 0;
   const claim = async (login: string, extra: Record<string, unknown> = {}, signal?: AbortSignal) => {
@@ -54,12 +55,12 @@ describe("long-polling claims", async () => {
     return { reply: await r.json() as { lease: { id: number; secret: string } | null; retryAfter?: number; reason?: string }, ms: Date.now() - t, held: Number(r.headers.get("x-held-ms")) };
   };
   /** Queues a call through another connection, as a job process does. */
-  const enqueue = (): number => enqueueCall(other, {
+  const enqueue = async (): Promise<number> => await enqueueCall(other, {
     promptId: "review.opus", promptVersion: "t", tier: "top", effort: "high", askedModel: "opus", items: [{ repo: "photocraft", number: 1 }], level: 2, maxAttempts: 2,
     bundle: { promptId: "review.opus", promptVersion: "t", tier: "top", effort: "high", timeoutSeconds: 600, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} },
   });
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-  const state = (id: number) => (db.prepare("SELECT state FROM remote_calls WHERE id = ?").get(id) as { state: string }).state;
+  const state = async (id: number) => (await db.prepare("SELECT state FROM remote_calls WHERE id = ?").get(id) as { state: string }).state;
 
   test("a held claim takes a call queued by another process within a second; a repeat of its request id gets the same lease", async () => {
     const first = claim("bob", { requestId: "longpoll-same-0001" });
@@ -67,7 +68,7 @@ describe("long-polling claims", async () => {
     const again = claim("bob", { requestId: "longpoll-same-0001" });
     await sleep(200);
     const at = Date.now();
-    const id = enqueue();
+    const id = await enqueue();
     const [a, b] = await Promise.all([first, again]);
     assert.equal(a.reply.lease?.id, id);
     assert.equal(b.reply.lease?.secret, a.reply.lease?.secret);
@@ -79,12 +80,12 @@ describe("long-polling claims", async () => {
   test("a held claim with nothing to take answers empty at its deadline and records its helper as idle", async () => {
     const r = claim("bob", { wait: 2 });
     await sleep(100);
-    db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL WHERE id = ?").run(tokens.bob!.id);
+    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL WHERE id = ?").run(tokens.bob!.id);
     const { reply, held } = await r;
     assert.equal(reply.lease, null);
     assert.equal(reply.retryAfter, 0.2);
     assert.ok(held >= 350 && held < 1500, `held ${held} ms of a 400 ms hold`);
-    assert.ok((db.prepare("SELECT idle_claim_at FROM mcp_tokens WHERE id = ?").get(tokens.bob!.id) as { idle_claim_at: number | null }).idle_claim_at !== null);
+    assert.ok((await db.prepare("SELECT idle_claim_at FROM mcp_tokens WHERE id = ?").get(tokens.bob!.id) as { idle_claim_at: number | null }).idle_claim_at !== null);
   });
 
   test("a protocol 3 claim is answered at once, whatever it sends as wait", async () => {
@@ -102,22 +103,22 @@ describe("long-polling claims", async () => {
     ac.abort();
     await gone;
     await sleep(100);
-    const id = enqueue();
+    const id = await enqueue();
     await sleep(400);
-    assert.equal(state(id), "queued");
+    assert.equal(await state(id), "queued");
     const { reply } = await claim("bob", { requestId: "longpoll-gone-0001" });
     assert.equal(reply.lease?.id, id);
   });
 
   test("the user's max calls at once and a cool-off end a held claim with their reason", async () => {
-    setUserMaxCalls(db, "carol", 1);
+    await setUserMaxCalls(db, "carol", 1);
     const full = claim("carol");
     await sleep(200);
     // Another of carol's helpers leases a call meanwhile: queued and leased in one transaction, so the held claim never sees it queued.
-    other.exec("BEGIN IMMEDIATE");
-    const id = enqueue();
-    other.prepare("UPDATE remote_calls SET state = 'leased', user_login = 'carol', leased_at = ?, heartbeat_at = ? WHERE id = ?").run(Date.now(), Date.now(), id);
-    other.exec("COMMIT");
+    await other.write(async () => {
+    const id = await enqueue();
+    await other.prepare("UPDATE remote_calls SET state = 'leased', user_login = 'carol', leased_at = ?, heartbeat_at = ? WHERE id = ?").run(Date.now(), Date.now(), id);
+    });
     const a = await full;
     assert.equal(a.reply.lease, null);
     assert.match(a.reply.reason ?? "", /limit of calls at once/);
@@ -125,7 +126,7 @@ describe("long-polling claims", async () => {
 
     const cooled = claim("dave");
     await sleep(200);
-    other.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('dave', ?, 'testing cool-off')").run(Date.now() + 60_000);
+    await other.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('dave', ?, 'testing cool-off')").run(Date.now() + 60_000);
     const b = await cooled;
     assert.equal(b.reply.reason, "testing cool-off");
     assert.ok(b.ms < 2500, `answered after ${b.ms} ms of a 5 s hold`);
@@ -134,13 +135,13 @@ describe("long-polling claims", async () => {
   test("a held claim whose credential is removed meanwhile leases nothing", async () => {
     const r = claim("frank");
     await sleep(200);
-    other.prepare("DELETE FROM mcp_tokens WHERE id = ?").run(tokens.frank!.id);
-    const id = enqueue();
+    await other.prepare("DELETE FROM mcp_tokens WHERE id = ?").run(tokens.frank!.id);
+    const id = await enqueue();
     const { reply } = await r;
     assert.equal(reply.lease, null);
     assert.match(reply.reason ?? "", /credential was removed/);
-    assert.equal(state(id), "queued");
-    other.prepare("DELETE FROM remote_calls WHERE id = ?").run(id);
+    assert.equal(await state(id), "queued");
+    await other.prepare("DELETE FROM remote_calls WHERE id = ?").run(id);
   });
 
   test("a try in flight when shutdown answers its claim leases nothing", async () => {

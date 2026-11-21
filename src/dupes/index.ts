@@ -5,8 +5,6 @@
 // nothing to GitHub. The close itself is the act step.
 //
 //   autocraft-server dupes [--limit N] [--dry-run]
-import type { DatabaseSync } from "node:sqlite";
-import { connect } from "../db.ts";
 import { localEmbedder, modelName } from "../embed/model.ts";
 import { VectorIndex } from "../embed/vectors.ts";
 import { plannedItems } from "../core/select-items.ts";
@@ -15,6 +13,9 @@ import { checkPairs, defaultCheckDeps, uncheckedPairs, type CheckDeps, type Pair
 import { applyDuplicateAnswers, askGroupDecisions } from "./decide.ts";
 import { fillEmbedHashes } from "../itemhash.ts";
 import { scanItem, type ScanItem } from "./scan.ts";
+import { filterSeq, mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export { duplicateCount, duplicateHeld, notHeldSql } from "./held.ts";
 
@@ -35,50 +36,50 @@ export type DupesSummary = {
   unanswered: number; asked: string[]; answersApplied: number; dryRun: boolean;
 };
 
-export function defaultDeps(db: DatabaseSync): DupesDeps {
+export function defaultDeps(db: Db): DupesDeps {
   return { index: new VectorIndex(localEmbedder({ name: modelName(), threads: 1 })), check: defaultCheckDeps(db) };
 }
 
 /** Items to scan, from the Plans: those with a stored vector at their current text and no scan at it. */
-function scanItems(db: DatabaseSync, model: string, max: number): ScanItem[] {
+async function scanItems(db: Db, model: string, max: number): Promise<ScanItem[]> {
   const get = db.prepare("SELECT repo, number, kind, state, embed_hash, closed_at, merged_at, closing_issues FROM items WHERE repo = ? AND number = ?");
-  return plannedItems(db, "dupes", { model }).filter((p) => p.action.params?.scan).slice(0, max).map((p) => get.get(p.facts.repo, p.facts.number) as ScanItem);
+  return await mapSeq((await plannedItems(db, "dupes", { model })).filter((p) => p.action.params?.scan).slice(0, max), async (p) => await get.get(p.facts.repo, p.facts.number) as ScanItem);
 }
 
 /**
  * Unchecked pairs of the items the Plans send to the pair check, most similar first. Pairs of a repo no Task Runner takes are
  * left out: their Haiku half could not run, so Jev is not asked either and they stay for a later job.
  */
-function pairsToCheck(db: DatabaseSync, model: string, limit: number): PairKey[] {
-  const refs = new Set(plannedItems(db, "dupes", { model }).filter((p) => (p.action.params?.pairs as number) > 0).map((p) => `${p.facts.repo}#${p.facts.number}`));
-  const taker = queueRoomPass(db).taker;
-  return uncheckedPairs(db, -1).filter((k) => (refs.has(`${k.repo}#${k.a}`) || refs.has(`${k.repo}#${k.b}`)) && taker([k.repo], undefined, [{ repo: k.repo, number: k.a }, { repo: k.repo, number: k.b }])).slice(0, limit);
+async function pairsToCheck(db: Db, model: string, limit: number): Promise<PairKey[]> {
+  const refs = new Set((await plannedItems(db, "dupes", { model })).filter((p) => (p.action.params?.pairs as number) > 0).map((p) => `${p.facts.repo}#${p.facts.number}`));
+  const taker = (await queueRoomPass(db)).taker;
+  return (await filterSeq((await uncheckedPairs(db, -1)), async (k) => (refs.has(`${k.repo}#${k.a}`) || refs.has(`${k.repo}#${k.b}`)) && await taker([k.repo], undefined, [{ repo: k.repo, number: k.a }, { repo: k.repo, number: k.b }]))).slice(0, limit);
 }
 
-export async function runDupes(db: DatabaseSync, params: DupesParams = {}, log: (line: string) => void = console.log, deps?: DupesDeps): Promise<DupesSummary> {
+export async function runDupes(db: Db, params: DupesParams = {}, log: (line: string) => void = console.log, deps?: DupesDeps): Promise<DupesSummary> {
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const limit = params.limit ?? DEFAULT_LIMIT;
   const d = deps ?? defaultDeps(db);
   const s: DupesSummary = { scanned: 0, pairsAdded: 0, checked: 0, jev: 0, haiku: 0, verdicts: {}, unanswered: 0, asked: [], answersApplied: 0, dryRun: !!params.dryRun };
   const at = () => d.check.now();
   const model = d.index.embedder.id;
-  if (!params.dryRun) fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
-  const todo = scanItems(db, model, SCAN_MAX);
+  if (!params.dryRun) await fillEmbedHashes(db); // planning writes nothing; a row whose hash was cleared by an edit outside sync would drop out of the scan and its pairs
+  const todo = await scanItems(db, model, SCAN_MAX);
   if (params.dryRun) {
     s.scanned = todo.length;
-    log(`dupes: ${todo.length} items to scan, ${pairsToCheck(db, model, limit).length} pairs to check; dry run, nothing written`);
+    log(`dupes: ${todo.length} items to scan, ${(await pairsToCheck(db, model, limit)).length} pairs to check; dry run, nothing written`);
     return s;
   }
-  s.answersApplied = applyDuplicateAnswers(db, at().toISOString());
+  s.answersApplied = await applyDuplicateAnswers(db, at().toISOString());
   if (todo.length) {
     await d.index.ready(db);
     for (const it of todo) {
-      s.pairsAdded += scanItem(db, d.index, it, at());
+      s.pairsAdded += await scanItem(db, d.index, it, at());
       s.scanned++;
     }
     log(`dupes: scanned ${s.scanned} items, ${s.pairsAdded} new pairs`);
   }
-  const keys = pairsToCheck(db, model, limit);
+  const keys = await pairsToCheck(db, model, limit);
   if (keys.length) {
     const c = await checkPairs(db, keys, d.check, params.onHandled);
     Object.assign(s, { checked: c.checked, jev: c.jev, haiku: c.haiku, verdicts: c.verdicts, unanswered: c.unanswered });
@@ -86,7 +87,7 @@ export async function runDupes(db: DatabaseSync, params: DupesParams = {}, log: 
     if (c.haikuAlone) log(`dupes: Jev unavailable: Haiku decided ${c.haikuAlone} pairs`);
   }
   const when = at().toISOString();
-  s.asked = askGroupDecisions(db, undefined, when);
+  s.asked = await askGroupDecisions(db, undefined, when);
   log(`dupes: ${s.asked.length} duplicate decisions asked, ${s.answersApplied} answers applied`);
   return s;
 }
@@ -106,7 +107,7 @@ export const commands = {
   dupes: {
     summary: "dupes [--limit N] [--dry-run]: find duplicate issues and PRs (Jev, then Haiku); the dupe-compare step compares each group and asks its decision",
     async run(args: string[]): Promise<void> {
-      const db = connect();
+      const db = await openDb();
       const r = await runDupes(db, parseArgs(args), (l) => console.error(l));
       console.log(JSON.stringify(r));
     },

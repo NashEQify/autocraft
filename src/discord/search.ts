@@ -3,13 +3,13 @@
 // is used up, or the call fails, the closest three from the embedding search are the answer. The question is
 // kept only for the length of the call: it is not stored, logged or sent anywhere but that one model call, and the
 // prompt and reply texts the call records are deleted when it ends.
-import type { DatabaseSync } from "node:sqlite";
 import { askClaude } from "../classify/run.ts";
 import type { Embedder } from "../embed/model.ts";
 import type { VectorIndex } from "../embed/vectors.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { hiddenSql, isPublicRepo, publicRepoNames } from "../public/status.ts";
 import { PICK_CANDIDATES, PICK_MAX, parsePicks, type PickInput } from "./pick.ts";
+import type { Db } from "../db/index.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
 /** How many nearest vectors are read before the filters (pull requests, private repos and old closed issues are dropped). */
@@ -35,7 +35,7 @@ function byActivity(a: Candidate, b: Candidate): number {
 }
 
 /** The model step; tests replace it. Returns the reply text, or null when the call failed or got no answer. */
-export type Ask = (db: DatabaseSync, input: PickInput) => Promise<string | null>;
+export type Ask = (db: Db, input: PickInput) => Promise<string | null>;
 
 export const askHaiku: Ask = async (db, input) => {
   const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS });
@@ -43,33 +43,33 @@ export const askHaiku: Ask = async (db, input) => {
 };
 
 export type SearchDeps = {
-  db: DatabaseSync; embedder: Embedder; index: VectorIndex; log: (line: string) => void;
+  db: Db; embedder: Embedder; index: VectorIndex; log: (line: string) => void;
   ask?: Ask; now?: () => number;
 };
 
 const oneLine = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-export function dailyCapUsd(db: DatabaseSync): number {
-  const v = Number((db.prepare("SELECT value FROM settings WHERE key = ?").get(DAILY_CAP_KEY) as { value: string } | undefined)?.value);
+export async function dailyCapUsd(db: Db): Promise<number> {
+  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(DAILY_CAP_KEY) as { value: string } | undefined)?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_DAILY_CAP_USD;
 }
 
 /** What today's (UTC) search calls cost, from the agent runs. */
-export function spentTodayUsd(db: DatabaseSync, now: number): number {
+export async function spentTodayUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-search' AND started_at >= ?").get(day) as { c: number }).c);
+  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-search' AND started_at >= ?").get(day) as { c: number }).c);
 }
 
 /** The prompt and reply of a search call hold the question. After a call, the rows of finished calls are removed; `all` (at startup, when no call can be running) removes every row. */
-export function dropTexts(db: DatabaseSync, all = false): void {
-  db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-search'${all ? "" : " AND state <> 'running'"})`).run();
+export async function dropTexts(db: Db, all = false): Promise<void> {
+  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-search'${all ? "" : " AND state <> 'running'"})`).run();
 }
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /** The one public tracked repo a question names as a whole word (case-insensitive), with the question minus that word; null when none or several are named. */
-export function namedRepo(db: DatabaseSync, question: string): { repo: string; rest: string } | null {
-  const hits = publicRepoNames(db).filter((r) => new RegExp(`(?<![\\w-])${escapeRe(r)}(?![\\w-])`, "i").test(question));
+export async function namedRepo(db: Db, question: string): Promise<{ repo: string; rest: string } | null> {
+  const hits = (await publicRepoNames(db)).filter((r) => new RegExp(`(?<![\\w-])${escapeRe(r)}(?![\\w-])`, "i").test(question));
   const repo = hits.length === 1 ? hits[0]! : null;
   if (!repo) return null;
   const rest = question.replace(new RegExp(`(?<![\\w-])${escapeRe(repo)}(?![\\w-])`, "gi"), " ").replace(/\s+/g, " ").trim();
@@ -105,10 +105,10 @@ export class Search {
   async candidates(question: string, repo?: string): Promise<Candidate[]> {
     const { db, embedder, index } = this.#d;
     // An explicit repo wins; otherwise a repo named in the question restricts the search and its word is left out of the embedded text.
-    let only = repo && isPublicRepo(db, repo) ? repo : undefined;
+    let only = repo && await isPublicRepo(db, repo) ? repo : undefined;
     let text = question;
     if (!only) {
-      const n = namedRepo(db, question);
+      const n = await namedRepo(db, question);
       if (n) { only = n.repo; text = n.rest; }
     }
     const [vec] = await embedder.embed([text], "query");
@@ -120,10 +120,10 @@ export class Search {
     const isPublic = new Map<string, boolean>();
     const now = (this.#d.now ?? Date.now)();
     const out: Candidate[] = [];
-    for (const h of index.nearest(db, vec, SCAN, undefined, only)) {
-      if (!isPublic.has(h.repo)) isPublic.set(h.repo, isPublicRepo(db, h.repo));
+    for (const h of await index.nearest(db, vec, SCAN, undefined, only)) {
+      if (!isPublic.has(h.repo)) isPublic.set(h.repo, await isPublicRepo(db, h.repo));
       if (!isPublic.get(h.repo)) continue;
-      const r = get.get(h.repo, h.number) as { title: string | null; body: string | null; state: string; state_reason: string | null; closed_at: string | null; updated_at: string | null; comments_count: number | null; reactions_count: number | null; url: string } | undefined;
+      const r = await get.get(h.repo, h.number) as { title: string | null; body: string | null; state: string; state_reason: string | null; closed_at: string | null; updated_at: string | null; comments_count: number | null; reactions_count: number | null; url: string } | undefined;
       if (!r) continue;
       const open = r.state === "OPEN";
       if (!open && !(r.state === "CLOSED" && r.state_reason === "COMPLETED" && now - Date.parse(r.closed_at ?? "") <= CLOSED_WINDOW_MS)) continue;
@@ -142,7 +142,7 @@ export class Search {
     const strip = ({ body: _b, score: _s, activity: _a, updatedAt: _u, ...m }: Candidate): Match => m;
     const fallback = (): Found => ({ matches: cands.filter((c) => c.score >= FALLBACK_MIN_SCORE).slice(0, PICK_MAX).sort(byActivity).map(strip), judged: false });
     if (!cands.length) return { matches: [], judged: true };
-    if (spentTodayUsd(db, (this.#d.now ?? Date.now)()) >= dailyCapUsd(db)) return fallback();
+    if (await spentTodayUsd(db, (this.#d.now ?? Date.now)()) >= await dailyCapUsd(db)) return fallback();
     const input: PickInput = { ref: "discord", question: q, candidates: cands.map((c) => ({ ref: `${c.repo}#${c.number}`, title: c.title, body: c.body, closed: c.closed })) };
     try {
       const text = await (this.#d.ask ?? askHaiku)(db, input);
@@ -155,7 +155,7 @@ export class Search {
       log(`discord: search model call failed: ${oneLine((e as Error).message, 200)}`);
       return fallback();
     } finally {
-      try { dropTexts(db); } catch (e) { log(`discord: removing search texts failed: ${(e as Error).message}`); }
+      try { await dropTexts(db); } catch (e) { log(`discord: removing search texts failed: ${(e as Error).message}`); }
     }
   }
 }

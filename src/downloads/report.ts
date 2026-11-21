@@ -1,6 +1,7 @@
 // The Downloads report: totals, breakdowns and release health over a time range, from the recorded polls (poll.ts) and the item mirror.
-import type { DatabaseSync } from "node:sqlite";
 import { FORMAT_LABELS, PLATFORM_LABELS, PROCESSOR_LABELS, type Format, type Platform, type Processor } from "./classify.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export const RANGES = ["all", "today", "yesterday", "7d", "30d", "90d", "12m", "1h", "3h", "6h", "12h"] as const;
 export type DownloadsRange = (typeof RANGES)[number];
@@ -42,16 +43,16 @@ const bars = (rows: { key: string | null; n: number }[], labels: Record<string, 
   rows.filter((r) => r.key && r.n > 0).sort((a, b) => b.n - a.n).map((r) => ({ key: r.key!, label: labels[r.key!] ?? r.key!, count: r.n }));
 
 /** `repos` are the visible tracked repos; `app` narrows the figures to one of them. */
-export function downloadsReport(db: DatabaseSync, repos: string[], range: DownloadsRange, app: string | null, now = Date.now()): DownloadsReport {
+export async function downloadsReport(db: Db, repos: string[], range: DownloadsRange, app: string | null, now = Date.now()): Promise<DownloadsReport> {
   const { from, to } = rangeBounds(range, now);
-  const appRows = (db.prepare("SELECT repo, name, stars FROM release_apps ORDER BY name COLLATE NOCASE").all() as { repo: string; name: string; stars: number }[]).filter((a) => repos.includes(a.repo));
+  const appRows = (await db.prepare("SELECT repo, name, stars FROM release_apps ORDER BY name COLLATE NOCASE").all() as { repo: string; name: string; stars: number }[]).filter((a) => repos.includes(a.repo));
   const scope = app && appRows.some((a) => a.repo === app) ? [app] : appRows.map((a) => a.repo);
   const list = scope.length ? scope.map(() => "?").join(",") : "NULL";
-  const firstSeen = (db.prepare(`SELECT MIN(first_seen) AS t FROM release_assets WHERE repo IN (${list})`).get(...scope) as { t: string | null }).t;
+  const firstSeen = (await db.prepare(`SELECT MIN(first_seen) AS t FROM release_assets WHERE repo IN (${list})`).get(...scope) as { t: string | null }).t;
   const historyFrom = firstSeen ? iso(Date.parse(firstSeen)) : null;
 
   // Downloads per counted asset in range: the running count for "all", the recorded increases otherwise.
-  const perAsset = (db.prepare(
+  const perAsset = (await db.prepare(
     from === null
       ? `SELECT a.asset_id, a.repo, a.tag, a.release_id, a.platform, a.processor, a.format, a.downloads AS n FROM release_assets a WHERE a.format IS NOT NULL AND a.gone_at IS NULL AND a.repo IN (${list})`
       : `SELECT a.asset_id, a.repo, a.tag, a.release_id, a.platform, a.processor, a.format, SUM(d.delta) AS n FROM download_deltas d JOIN release_assets a ON a.asset_id = d.asset_id
@@ -66,25 +67,25 @@ export function downloadsReport(db: DatabaseSync, repos: string[], range: Downlo
   const downloads = perAsset.reduce((s, r) => s + r.n, 0);
 
   // Stars: the total for "all", else what was gained since the range start (against the first reading when history starts later).
-  const starsOf = (repo: string): number => {
+  const starsOf = async (repo: string): Promise<number> => {
     const cur = appRows.find((a) => a.repo === repo)?.stars ?? 0;
     if (from === null) return cur;
-    const before = db.prepare("SELECT stars FROM star_samples WHERE repo = ? AND t < ? ORDER BY t DESC LIMIT 1").get(repo, from) as { stars: number } | undefined;
-    const first = before ?? (db.prepare("SELECT stars FROM star_samples WHERE repo = ? ORDER BY t LIMIT 1").get(repo) as { stars: number } | undefined);
+    const before = await db.prepare("SELECT stars FROM star_samples WHERE repo = ? AND t < ? ORDER BY t DESC LIMIT 1").get(repo, from) as { stars: number } | undefined;
+    const first = before ?? (await db.prepare("SELECT stars FROM star_samples WHERE repo = ? ORDER BY t LIMIT 1").get(repo) as { stars: number } | undefined);
     if (!first) return 0;
     if (range === "yesterday") {
-      const end = db.prepare("SELECT stars FROM star_samples WHERE repo = ? AND t < ? ORDER BY t DESC LIMIT 1").get(repo, to) as { stars: number } | undefined;
+      const end = await db.prepare("SELECT stars FROM star_samples WHERE repo = ? AND t < ? ORDER BY t DESC LIMIT 1").get(repo, to) as { stars: number } | undefined;
       return Math.max(0, (end?.stars ?? first.stars) - first.stars);
     }
     return Math.max(0, cur - first.stars);
   };
 
-  const byApp = appRows.filter((a) => scope.includes(a.repo)).map((a) => ({
-    repo: a.repo, name: a.name, downloads: perAsset.filter((r) => r.repo === a.repo).reduce((s, r) => s + r.n, 0), stars: starsOf(a.repo),
-  })).sort((a, b) => b.downloads - a.downloads || a.name.localeCompare(b.name));
+  const byApp = (await mapSeq(appRows.filter((a) => scope.includes(a.repo)), async (a) => ({
+    repo: a.repo, name: a.name, downloads: perAsset.filter((r) => r.repo === a.repo).reduce((s, r) => s + r.n, 0), stars: await starsOf(a.repo),
+  }))).sort((a, b) => b.downloads - a.downloads || a.name.localeCompare(b.name));
 
   // Releases with counted files, newest first.
-  const relAll = db.prepare(`SELECT repo, tag, release_id, MAX(published_at) AS published, MAX(prerelease) AS pre, MAX(gone_at IS NULL) AS live FROM release_assets WHERE format IS NOT NULL AND repo IN (${list}) GROUP BY repo, release_id`)
+  const relAll = await db.prepare(`SELECT repo, tag, release_id, MAX(published_at) AS published, MAX(prerelease) AS pre, MAX(gone_at IS NULL) AS live FROM release_assets WHERE format IS NOT NULL AND repo IN (${list}) GROUP BY repo, release_id`)
     .all(...scope) as { repo: string; tag: string; release_id: number; published: string | null; pre: number; live: number }[];
   relAll.sort((a, b) => (b.published ?? "").localeCompare(a.published ?? ""));
   const nameOf = new Map(appRows.map((a) => [a.repo, a.name]));
@@ -114,15 +115,15 @@ export function downloadsReport(db: DatabaseSync, repos: string[], range: Downlo
     const end = nextNewer ?? "9999";
     const start = (r.published ?? "") > lo ? (r.published ?? "") : lo;
     const upper = end < hi ? end : hi;
-    const inRange = start < upper ? (issuesIn.get(r.repo, start, upper) as { n: number }).n : 0;
+    const inRange = start < upper ? (await issuesIn.get(r.repo, start, upper) as { n: number }).n : 0;
     const n = perRelease.get(r.release_id) ?? 0;
     releases.push({ repo: r.repo, app: nameOf.get(r.repo) ?? r.repo, tag: r.tag, publishedAt: r.published ?? "", latest: newest.get(r.repo) === r.tag, downloads: n, issues: inRange, per1k: n > 0 ? (inRange / n) * 1000 : null });
   }
 
-  const count = (kind: string, col: string): number => (db.prepare(`SELECT COUNT(*) AS n FROM main.items WHERE kind = ? AND repo IN (${list}) AND ${col} IS NOT NULL AND ${col} >= ? AND ${col} < ?`).get(kind, ...scope, lo, hi) as { n: number }).n;
-  const issuesOpened = count("issue", "created_at");
-  const issuesClosed = count("issue", "closed_at");
-  const prsMerged = count("pr", "merged_at");
+  const count = async (kind: string, col: string): Promise<number> => (await db.prepare(`SELECT COUNT(*) AS n FROM main.items WHERE kind = ? AND repo IN (${list}) AND ${col} IS NOT NULL AND ${col} >= ? AND ${col} < ?`).get(kind, ...scope, lo, hi) as { n: number }).n;
+  const issuesOpened = await count("issue", "created_at");
+  const issuesClosed = await count("issue", "closed_at");
+  const prsMerged = await count("pr", "merged_at");
 
   return {
     range, from, to, historyFrom,

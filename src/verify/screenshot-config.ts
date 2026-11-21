@@ -1,9 +1,9 @@
 // Per-repo setup for before/after UI screenshots. Operators write it (JSON, validated here on every write and
 // read); the planning model only picks command names and argument values, so every command line a task runs comes
 // from this config and from validated arguments, never from model text.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import type { ParamSpec } from "./types.ts";
+import type { Db } from "../db/index.ts";
 
 export const SCREENSHOT_DRIVERS = ["args", "jsonl"] as const;
 export type ScreenshotDriver = (typeof SCREENSHOT_DRIVERS)[number];
@@ -228,32 +228,32 @@ const safeJson = (s: string): unknown => {
 };
 
 /** The repo's config, or null when none is stored (or the stored row no longer validates). */
-export function getConfig(db: DatabaseSync, repo: string): ScreenshotConfig | null {
-  const r = db.prepare("SELECT * FROM screenshot_config WHERE repo = ?").get(repo) as Row | undefined;
+export async function getConfig(db: Db, repo: string): Promise<ScreenshotConfig | null> {
+  const r = await db.prepare("SELECT * FROM screenshot_config WHERE repo = ?").get(repo) as Row | undefined;
   return r ? fromRow(r) : null;
 }
 
-export function listConfigs(db: DatabaseSync): ScreenshotConfig[] {
-  return (db.prepare("SELECT * FROM screenshot_config ORDER BY repo").all() as Row[]).map(fromRow).filter((c): c is ScreenshotConfig => c !== null);
+export async function listConfigs(db: Db): Promise<ScreenshotConfig[]> {
+  return (await db.prepare("SELECT * FROM screenshot_config ORDER BY repo").all() as Row[]).map(fromRow).filter((c): c is ScreenshotConfig => c !== null);
 }
 
 /** Validates and stores the repo's config; throws ScreenshotConfigError with the reason. Audited. */
-export function putConfig(db: DatabaseSync, by: string, repo: string, raw: unknown): ScreenshotConfig {
+export async function putConfig(db: Db, by: string, repo: string, raw: unknown): Promise<ScreenshotConfig> {
   const p = parseScreenshotConfig(raw);
   if ("error" in p) throw new ScreenshotConfigError(p.error);
   const v = p.value;
   const at = new Date().toISOString();
-  db.prepare(`INSERT INTO screenshot_config (repo, package, example, driver, commands, ui_paths, size, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  await db.prepare(`INSERT INTO screenshot_config (repo, package, example, driver, commands, ui_paths, size, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(repo) DO UPDATE SET package = excluded.package, example = excluded.example, driver = excluded.driver, commands = excluded.commands,
       ui_paths = excluded.ui_paths, size = excluded.size, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
     .run(repo, v.package, v.example, v.driver, JSON.stringify(v.commands), JSON.stringify(v.ui_paths), v.size ?? null, by, at);
-  audit(db, by, "screenshot-config", repo, { package: v.package, example: v.example, driver: v.driver, commands: Object.keys(v.commands) });
+  await audit(db, by, "screenshot-config", repo, { package: v.package, example: v.example, driver: v.driver, commands: Object.keys(v.commands) });
   return { ...v, repo, updatedBy: by, updatedAt: at };
 }
 
 /** Removes the repo's config; false when there was none. Audited. */
-export function deleteConfig(db: DatabaseSync, by: string, repo: string): boolean {
-  const gone = db.prepare("DELETE FROM screenshot_config WHERE repo = ?").run(repo).changes > 0;
-  if (gone) audit(db, by, "screenshot-config", repo, { removed: true });
+export async function deleteConfig(db: Db, by: string, repo: string): Promise<boolean> {
+  const gone = (await db.prepare("DELETE FROM screenshot_config WHERE repo = ?").run(repo)).changes > 0;
+  if (gone) await audit(db, by, "screenshot-config", repo, { removed: true });
   return gone;
 }

@@ -9,7 +9,6 @@ import { jevImpact, parseHaikuImpacts, SURE, type Impact, type JevImpactAnswers 
 import { renderAreaJev, renderReferenceJev } from "../prompts/index.ts";
 import type { ReferenceLintInput } from "../replylint.ts";
 import type { ClaudeStep, JevStep, TieredStep } from "./step.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { parseRefereeReply, type Referee } from "../classify/parse.ts";
 import { lintOpusReply, parseOpusReply, publicTexts as opusTexts, rawReason, type OpusPr, type OpusReview } from "../review/opus-parse.ts";
 import { lintPremerge, parsePremerge, premergeTexts, type PremergeReview } from "../premerge/parse.ts";
@@ -24,6 +23,7 @@ import type { ScreenshotCompareInput, ScreenshotPlanInput, VerifyPlanInput } fro
 import { referenceProblems, statementProblems, type SemanticDeps } from "../reference-lint.ts";
 import { dropTexts } from "../replylint.ts";
 import { wholeReplyJson } from "../core/reply-json.ts";
+import type { Db } from "../db/index.ts";
 
 /** The part of `xs` whose key is in `missing`, or undefined when none is: the `rest` of a batch parse. */
 export function leftOf<T>(xs: T[], key: (x: T) => string, missing: string[]): T[] | undefined {
@@ -37,7 +37,7 @@ const single = <V,>(v: V | null) => (v === null ? null : { value: v });
 // Classify: Jev per item, Haiku per batch (the two run as separate passes of the classify pipeline).
 export const CLASSIFY_HAIKU: ClaudeStep<Item[], Verdict[]> = {
   provider: "claude", id: "classify.haiku",
-  parse: (text, todo) => {
+  parse: async (text, todo) => {
     const { verdicts, missing } = parseHaikuReply(text, todo.map(refOf));
     return { value: verdicts, rest: leftOf(todo, refOf, missing) };
   },
@@ -59,7 +59,7 @@ export const PRIORITY: TieredStep<Item, JevImpact, HaikuImpactValue> = {
   },
   haiku: {
     provider: "claude", id: "priority.haiku",
-    parse: (text, ask) => {
+    parse: async (text, ask) => {
       const { answers, missing } = parseHaikuImpacts(text, ask.map(refOf));
       return { value: answers.map((a): [string, HaikuImpactValue] => [a.ref, { impact: a.impact, reason: a.reason }]), rest: leftOf(ask, refOf, missing) };
     },
@@ -85,7 +85,7 @@ export const AREAS: TieredStep<AreaItem, AreaAnswer, string | null, AreasCtx, Ar
     provider: "claude", id: "areas.haiku",
     toPrompt: (b) => [b],
     size: (b) => b.items.length,
-    parse: (text, b) => {
+    parse: async (text, b) => {
       const { answers, missing } = parseAreaReply(text, b.items.map(refOf), b.areas);
       const left = leftOf(b.items, refOf, missing);
       return { value: [...answers], rest: left && { ...b, items: left } };
@@ -107,7 +107,7 @@ export const DUPES_JEV: JevStep<DupePair, number> = {
 };
 export const DUPES_HAIKU: ClaudeStep<DupePair[], PairAnswer[]> = {
   provider: "claude", id: "dupes.haiku",
-  parse: (text, pairs) => {
+  parse: async (text, pairs) => {
     const { answers, missing } = parsePairReply(text, pairs.map((p) => p.ref));
     return { value: answers, rest: leftOf(pairs, (p) => p.ref, missing) };
   },
@@ -127,14 +127,14 @@ export const COMPARE_PRS: ClaudeStep<PrCompareInput, PrComparison, ReferenceCtx>
     return own === null ? null : [...own, ...await referenceProblems(carryTexts(text, x.numbers), c?.dir, c?.semantic, { stage, otherProblems: own.length })];
   } },
   // Anything the fix turn did not clear is cut to its first sentence, or left out for a flagged carry point; the call is never repeated for it.
-  parse: (text, x, ctx) => single(parsePrComparison(text, x.numbers, true, dropTexts(ctx.problems))),
+  parse: async (text, x, ctx) => single(parsePrComparison(text, x.numbers, true, dropTexts(ctx.problems))),
 };
 export const COMPARE_ISSUES: ClaudeStep<IssueCompareInput, IssueComparison> = {
   provider: "claude", id: "dupes.compare-issues.sonnet",
   toPrompt: (x) => [x.input],
   size: () => 1,
   // An over-long summary fails the reply until the last attempt, which cuts it; when no attempt is valid, the first lenient reading is used.
-  parse: (text, x, ctx) => single(parseIssueComparison(text, x.numbers, ctx.last)),
+  parse: async (text, x, ctx) => single(parseIssueComparison(text, x.numbers, ctx.last)),
   fallback: (text, x) => parseIssueComparison(text, x.numbers, true),
 };
 
@@ -146,7 +146,7 @@ export const REFERENCE_JEV: JevStep<ReferenceLintInput, number> = {
 };
 export const REFERENCE_HAIKU: ClaudeStep<ReferenceLintInput[], boolean> = {
   provider: "claude", id: "lint.reference.haiku",
-  parse: (text, input) => {
+  parse: async (text, input) => {
     // An unreadable reply is asked for again.
     const arr = wholeReplyJson(text);
     const o = Array.isArray(arr) ? arr[0] as { ref?: unknown; refers?: unknown } | undefined : undefined;
@@ -175,7 +175,7 @@ export const REVIEW_OPUS: ClaudeStep<OpusPr, OpusValue, ReferenceCtx> = {
     const texts = opusTexts(text), stated = statementProblems(texts, x.statements);
     return [...own, ...stated, ...await referenceProblems(texts, c.dir, c.semantic, { stage, otherProblems: own.length + stated.length })];
   } },
-  parse: (text, x, ctx) => {
+  parse: async (text, x, ctx) => {
     const review = parseOpusReply(text, x.ref, true, dropTexts(ctx.problems), false, x.statements, x.body, x.files);
     return review === null ? null : { value: { review, text } };
   },
@@ -192,7 +192,7 @@ export const PREMERGE_OPUS: ClaudeStep<OpusPr & { ref: string }, PremergeReview,
     const texts = premergeTexts(text, x.ref), stated = statementProblems(texts, x.statements);
     return [...own, ...stated, ...await referenceProblems(texts, c.dir, c.semantic, { stage, otherProblems: own.length + stated.length })];
   } },
-  parse: (text, x, ctx) => { const r = parsePremerge(text, x.ref, dropTexts(ctx.problems), x.statements, x.body, x.files); return r === null ? null : { value: r }; },
+  parse: async (text, x, ctx) => { const r = parsePremerge(text, x.ref, dropTexts(ctx.problems), x.statements, x.body, x.files); return r === null ? null : { value: r }; },
 };
 
 export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReferenceCtx> = {
@@ -202,16 +202,16 @@ export const POSTMERGE_OPUS: ClaudeStep<PostmergePr, Finding[], ReferenceCtx> = 
     const own = lintReply(text);
     return own === null ? null : [...own, ...await referenceProblems(postmergeTexts(text), c.dir, c.semantic, { stage, otherProblems: own.length })];
   } },
-  parse: (text, _x, ctx) => { const r = parseFindings(text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+  parse: async (text, _x, ctx) => { const r = parseFindings(text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
 };
 
 /** Comment cards are public text: a reference mention or quote goes back to the model as one fix turn. A reply without text is not linted and keeps the whole-call retry. */
-export type ConversationCtx = ReferenceCtx & { db: DatabaseSync; repo: string; n: number };
+export type ConversationCtx = ReferenceCtx & { db: Db; repo: string; n: number };
 export const CONVERSATION: ClaudeStep<ConversationInput, ConversationReply, ConversationCtx> = {
   provider: "claude", id: "conversation.turn",
   toPrompt: (x) => [x], size: () => 1,
-  lint: { fields: ["cards[].text", "cards[].steps[].body", "cards[].steps[].title", "cores[].reason", "cores[].extras[].text", "cores[].extras[].title", "cores[].extras[].body", "add[].extras[].text", "add[].extras[].title", "add[].extras[].body", "ask.text"], make: (_x, c) => async (text, stage) => (parseTurn(c.db, c.repo, c.n, text) ? referenceProblems([...commentTexts(text), ...choicesTexts(text)], c.dir, c.semantic, { stage }) : null) },
-  parse: (text, _x, ctx, c) => { const r = parseTurn(c.db, c.repo, c.n, text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
+  lint: { fields: ["cards[].text", "cards[].steps[].body", "cards[].steps[].title", "cores[].reason", "cores[].extras[].text", "cores[].extras[].title", "cores[].extras[].body", "add[].extras[].text", "add[].extras[].title", "add[].extras[].body", "ask.text"], make: (_x, c) => async (text, stage) => (await parseTurn(c.db, c.repo, c.n, text) ? referenceProblems([...commentTexts(text), ...choicesTexts(text)], c.dir, c.semantic, { stage }) : null) },
+  parse: async (text, _x, ctx, c) => { const r = await parseTurn(c.db, c.repo, c.n, text, dropTexts(ctx.problems)); return r === null ? null : { value: r }; },
 };
 
 /** The plan reply as parsed, valid or not: an invalid plan is asked for again (the last reading stands after the last attempt). */
@@ -219,7 +219,7 @@ export type PlanCtx = { ref: string; crates: Crate[]; label: string | null; ci: 
 export const VERIFY_PLAN: ClaudeStep<VerifyPlanInput, PlanReply, PlanCtx> = {
   provider: "claude", id: "verify.plan",
   toPrompt: (x) => [x], size: () => 1,
-  parse: (text, x, _ctx, c) => {
+  parse: async (text, x, _ctx, c) => {
     const value = parsePlanReply(text, c.ref, c.crates, c.label, c.ci);
     return { value, ...(!value.ok && { rest: x }) };
   },
@@ -230,7 +230,7 @@ export type ScreenshotCtx = { ref: string; config: Pick<ScreenshotConfigBody, "c
 export const VERIFY_SCREENSHOT: ClaudeStep<ScreenshotPlanInput, ScreenshotParsed, ScreenshotCtx> = {
   provider: "claude", id: "verify.screenshot", attempts: 2,
   toPrompt: (x) => [x], size: () => 1,
-  parse: (text, x, _ctx, c) => {
+  parse: async (text, x, _ctx, c) => {
     const value = parseScreenshotReply(text, c.ref, c.config);
     return { value, ...(!value.ok && { rest: x }) };
   },
@@ -241,7 +241,7 @@ export type CompareCtx = { ref: string };
 export const VERIFY_COMPARE: ClaudeStep<ScreenshotCompareInput, CompareParsed, CompareCtx> = {
   provider: "claude", id: "verify.compare", attempts: 2,
   toPrompt: (x) => [x], size: () => 1,
-  parse: (text, x, _ctx, c) => {
+  parse: async (text, x, _ctx, c) => {
     const value = parseCompareReply(text, c.ref);
     return { value, ...(!value.ok && { rest: x }) };
   },
@@ -250,7 +250,7 @@ export const VERIFY_COMPARE: ClaudeStep<ScreenshotCompareInput, CompareParsed, C
 /** The Sonnet referee between Jev and Haiku: a batch per call; items without a verdict are asked again. */
 export const REFEREE_SONNET: ClaudeStep<Item[], Referee[]> = {
   provider: "claude", id: "referee.sonnet",
-  parse: (text, todo) => {
+  parse: async (text, todo) => {
     const verdicts = parseRefereeReply(text, todo.map(refOf));
     const got = verdicts.map((v) => v.ref);
     return { value: verdicts, rest: leftOf(todo, refOf, todo.map(refOf).filter((r) => !got.includes(r))) };
@@ -258,4 +258,4 @@ export const REFEREE_SONNET: ClaudeStep<Item[], Referee[]> = {
 };
 
 /** A call whose reply the caller reads itself: one attempt, the text as the value (the fix-issue prompts). */
-export const textStep = <I,>(id: ClaudeStep<I, string>["id"]): ClaudeStep<I, string> => ({ provider: "claude", id, attempts: 1, toPrompt: (x) => [x], size: () => 1, parse: (text) => ({ value: text }) });
+export const textStep = <I,>(id: ClaudeStep<I, string>["id"]): ClaudeStep<I, string> => ({ provider: "claude", id, attempts: 1, toPrompt: (x) => [x], size: () => 1, parse: async (text) => ({ value: text }) });

@@ -14,11 +14,11 @@ import { tmpdir, world } from "./world-db.ts";
 
 const keys = <T>() => (...k: (keyof T & string)[]): string[] => k;
 
-const w = world().repo().pr(1).review(1).verified(1).premerge(1, "clean").pr(2, { ci: "failure" }).issue(3);
-w.db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (900, 'app', 'done', 'op', '2026-01-01T00:00:00Z')").run();
-w.db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_attempts, last_failure, created_at, updated_at)
+const w = await (await (await (await (await (await (await (await world()).repo()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2, { ci: "failure" })).issue(3);
+await w.db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (900, 'app', 'done', 'op', '2026-01-01T00:00:00Z')").run();
+await w.db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_attempts, last_failure, created_at, updated_at)
   VALUES ('app', 1, 900, 'a', 't', 'high', 0, 'new', '[]', 'r', 'i', 'fp1', 1, 'the test passes without the fix', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`).run();
-w.db.prepare("INSERT INTO security_fix_log (repo, number, attempt, round, state, failure, title, created_at, ended_at) VALUES ('app', 1, 1, 1, 'failed', 'the test passes without the fix', 't', '2026-01-01T00:00:00Z', '2026-01-01T00:10:00Z')").run();
+await w.db.prepare("INSERT INTO security_fix_log (repo, number, attempt, round, state, failure, title, created_at, ended_at) VALUES ('app', 1, 1, 1, 'failed', 'the test passes without the fix', 't', '2026-01-01T00:00:00Z', '2026-01-01T00:10:00Z')").run();
 let base = "";
 let stop: () => Promise<void>;
 const jar = new Map<string, string>();

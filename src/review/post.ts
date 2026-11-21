@@ -5,7 +5,6 @@
 //   autocraft-server review-post --repo R [--limit N] [--apply]
 //
 // Without --apply it is a dry run: it reads the local tables only and lists what would be posted.
-import type { DatabaseSync } from "node:sqlite";
 import { commentApprovalOf } from "../act/approval.ts";
 import { type Note, editReview, postReview, type Writer } from "../github/write.ts";
 import { guard } from "../core/guard.ts";
@@ -19,6 +18,8 @@ import { prInfo } from "../merge/index.ts";
 import { postSource } from "./post-source.ts";
 import { reviewBody, recommendation } from "./post-template.ts";
 import { jobItem } from "../runner/job-items.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 const ACTOR = "review-post";
 const REVIEW_NOTE = (c: { model: string | null }): Note => ({ by: "model", kind: "review", model: c.model });
@@ -43,20 +44,20 @@ export const defaultPostDeps = (): PostDeps => ({ querier: new Client(1000), now
  * their current head that no review of ours describes yet. The Plan leaves out PRs by the pipeline's own account, batch PRs,
  * held duplicates and items outside the pilot.
  */
-export function postCandidates(db: DatabaseSync, repo: string): PostCandidate[] {
+export async function postCandidates(db: Db, repo: string): Promise<PostCandidate[]> {
   const posted = db.prepare("SELECT review_id, posted_as FROM review_posts WHERE repo = ? AND number = ?");
   // A review is edited only by the lane that posted it: a NULL `posted_as` is a row from before it was recorded, written by the box account.
   const lane = (as: string | null | undefined): "legacy" | "app" => (as && as !== "legacy" ? "app" : "legacy");
-  const nowLane = githubIdentity(db) === "app" ? "app" : "legacy";
+  const nowLane = await githubIdentity(db) === "app" ? "app" : "legacy";
   const out: PostCandidate[] = [];
-  for (const { facts: f, plan, action } of planned(db, "post-review", { repo })) {
+  for (const { facts: f, plan, action } of await planned(db, "post-review", { repo })) {
     const head = action.head!;
-    const o = postSource(db, repo, f.number, head);
+    const o = await postSource(db, repo, f.number, head);
     if (!o) continue;
     // A newer review with no public text still edits an earlier post, so the verdict line stays current.
     const pub = o.public;
     if (!pub) continue;
-    const prev = posted.get(repo, f.number) as { review_id: string | null; posted_as: string | null } | undefined;
+    const prev = await posted.get(repo, f.number) as { review_id: string | null; posted_as: string | null } | undefined;
     const editId = prev && lane(prev.posted_as) === nowLane ? prev.review_id ?? null : null;
     out.push({
       repo, number: f.number, head_oid: head, editId, opusAt: o.at, model: o.model,
@@ -77,17 +78,17 @@ function reviewUneditable(e: unknown): boolean {
 
 const refOf = (c: { repo: string; number: number }) => `${c.repo}#${c.number}`;
 
-export async function runReviewPost(db: DatabaseSync, params: PostParams, log: (line: string) => void = console.log, deps?: PostDeps): Promise<PostSummary> {
+export async function runReviewPost(db: Db, params: PostParams, log: (line: string) => void = console.log, deps?: PostDeps): Promise<PostSummary> {
   const { repo } = params;
   const dryRun = params.dryRun ?? true;
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const s: PostSummary = { repo, dryRun, candidates: 0, posted: [], edited: [], skipped: [], failed: [], note: null };
-  if (!commentApprovalOf(db, repo)) {
+  if (!await commentApprovalOf(db, repo)) {
     s.note = `commenting in ${repo} is not approved`;
     log(`review-post ${repo}: ${s.note}; nothing done`);
     return s;
   }
-  let todo = postCandidates(db, repo);
+  let todo = await postCandidates(db, repo);
   s.candidates = todo.length;
   if (params.limit !== undefined) todo = todo.slice(0, params.limit);
   if (dryRun) {
@@ -99,21 +100,21 @@ export async function runReviewPost(db: DatabaseSync, params: PostParams, log: (
   const w: Writer = { db, login: ACTOR };
   let handled = 0;
   for (const c of todo) {
-    const skip = (reason: string) => { s.skipped.push({ ref: refOf(c), reason }); jobItem(db, c.repo, c.number, `skipped: ${reason}`, log); };
+    const skip = async (reason: string) => { s.skipped.push({ ref: refOf(c), reason }); await jobItem(db, c.repo, c.number, `skipped: ${reason}`, log); };
     try {
       const live = await prInfo(d.querier, repo, c.number);
-      if (!live) { skip("not found on GitHub"); continue; }
-      if (live.state !== "OPEN") { skip(`now ${live.state}`); continue; }
-      if (live.head !== c.head_oid) { skip(`head moved to ${live.head.slice(0, 7)}`); continue; }
+      if (!live) { await skip("not found on GitHub"); continue; }
+      if (live.state !== "OPEN") { await skip(`now ${live.state}`); continue; }
+      if (live.head !== c.head_oid) { await skip(`head moved to ${live.head.slice(0, 7)}`); continue; }
       const g = await guard(db, { repo, number: c.number }, { kind: "post-review", head: c.head_oid }, params.by ?? CLI_BY);
-      if ("refused" in g) { skip(g.refused); continue; }
+      if ("refused" in g) { await skip(g.refused); continue; }
       const at = d.now().toISOString();
-      const as = auditIdentity(db, g);
+      const as = await auditIdentity(db, g);
       let edited = false;
       if (c.editId) {
         try {
           await editReview(w, d.querier, g, c.editId, REVIEW_NOTE(c), c.body);
-          db.prepare("UPDATE review_posts SET head_oid = ?, edited_at = ?, opus_at = ?, posted_as = ? WHERE repo = ? AND number = ?").run(c.head_oid, at, c.opusAt, as, repo, c.number);
+          await db.prepare("UPDATE review_posts SET head_oid = ?, edited_at = ?, opus_at = ?, posted_as = ? WHERE repo = ? AND number = ?").run(c.head_oid, at, c.opusAt, as, repo, c.number);
           s.edited.push(refOf(c));
           edited = true;
         } catch (e) {
@@ -124,15 +125,15 @@ export async function runReviewPost(db: DatabaseSync, params: PostParams, log: (
       if (!edited) {
         const id = await postReview(w, d.querier, g, live.id, REVIEW_NOTE(c), c.body);
         if (!id) throw new Error("GitHub returned no review");
-        db.prepare("INSERT OR REPLACE INTO review_posts (repo, number, review_id, head_oid, posted_at, opus_at, posted_as) VALUES (?, ?, ?, ?, ?, ?, ?)").run(repo, c.number, id, c.head_oid, at, c.opusAt, as);
+        await db.prepare("INSERT OR REPLACE INTO review_posts (repo, number, review_id, head_oid, posted_at, opus_at, posted_as) VALUES (?, ?, ?, ?, ?, ?, ?)").run(repo, c.number, id, c.head_oid, at, c.opusAt, as);
         s.posted.push(refOf(c));
       }
-      jobItem(db, c.repo, c.number, `${edited ? "edited" : "posted"} review at ${c.head_oid.slice(0, 7)}`, log);
+      await jobItem(db, c.repo, c.number, `${edited ? "edited" : "posted"} review at ${c.head_oid.slice(0, 7)}`, log);
       params.onHandled?.(++handled);
     } catch (e) {
       const reason = String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 300);
       s.failed.push({ ref: refOf(c), reason });
-      jobItem(db, c.repo, c.number, `failed: ${reason}`, log);
+      await jobItem(db, c.repo, c.number, `failed: ${reason}`, log);
     }
   }
   log(`review-post ${repo}: ${s.posted.length} posted, ${s.edited.length} edited, ${s.skipped.length} skipped, ${s.failed.length} failed`);
@@ -155,7 +156,7 @@ export const commands = {
       if (!repo) throw new Error("missing --repo");
       if (limit !== undefined && !(Number.isInteger(limit) && limit > 0)) throw new Error("--limit is a positive whole number");
       const { connect } = await import("../db.ts");
-      await runReviewPost(connect(), { repo, limit, dryRun: !apply });
+      await runReviewPost(await openDb(), { repo, limit, dryRun: !apply });
     },
   },
 };

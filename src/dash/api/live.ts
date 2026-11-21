@@ -2,7 +2,6 @@
 // integration batches) on one time axis, with the model calls and build steps inside it and how long the same work took before. Jobs that
 // ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); account
 // labels are for operators only.
-import type { DatabaseSync } from "node:sqlite";
 import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../../web/src/api/types.ts";
 import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
 import { touchesHidden } from "../../agents/runs.ts";
@@ -13,6 +12,8 @@ import { shownLookup } from "./shown.ts";
 import { canSeeInternals } from "./staff.ts";
 import { stepTitle } from "./trace.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
+import { flatMapSeq, mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 /** Ended jobs stay on the board this long. */
 const RECENT_MS = 20 * 60_000;
@@ -24,7 +25,7 @@ const SAMPLES = 60;
 const MIN_SAMPLES = 3;
 
 type Args = (string | number)[];
-const all = <T>(db: DatabaseSync, sql: string, ...args: Args): T[] => db.prepare(sql).all(...args) as T[];
+const all = async <T>(db: Db, sql: string, ...args: Args): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 const notHidden = (col: string, hidden: HiddenRepos, nullOk = false): string =>
   filtered(hidden) ? ` AND (${nullOk ? `${col} IS NULL OR ` : ""}NOT (${hiddenTest(col, hidden).sql}))` : "";
 const hideArgs = (hidden: HiddenRepos): string[] => (filtered(hidden) ? hiddenTest("x", hidden).args : []);
@@ -49,32 +50,32 @@ export function buildKind(name: string): LiveOpKind {
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
-export async function live(db: DatabaseSync, req: Req): Promise<LiveBoard> {
+export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
   const nowMs = Date.now();
   const shown = shownLookup(db);
-  const item = (repo: string, number: number): ItemRef & ItemShown => ({ repo, number, ...shown(repo, number) });
+  const item = async (repo: string, number: number): Promise<ItemRef & ItemShown> => ({ repo, number, ...await shown(repo, number) });
 
   // Estimates, read once per key.
   const memo = new Map<string, LiveEstimate | null>();
-  const memoized = (key: string, read: () => number[]) => (memo.has(key) ? memo.get(key)! : memo.set(key, estimateOf(read())).get(key)!);
-  const jobEstimate = (step: string) => memoized(`job:${step}`, () =>
-    all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM jobs WHERE step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, SAMPLES).map((r) => r.ms));
-  const callEstimate = (step: string, model: string) => memoized(`call:${step}:${model}`, () =>
-    all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM agent_runs WHERE step = ? AND model = ? AND state = 'done' AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, model, SAMPLES).map((r) => r.ms));
-  const taskEstimate = (repo: string, step: string) => memoized(`task:${repo}:${step}`, () =>
-    all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM build_tasks WHERE repo = ? AND step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, repo, step, SAMPLES).map((r) => r.ms));
+  const memoized = async (key: string, read: () => Promise<number[]>) => (memo.has(key) ? memo.get(key)! : memo.set(key, estimateOf(await read())).get(key)!);
+  const jobEstimate = async (step: string) => await memoized(`job:${step}`, async () =>
+    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM jobs WHERE step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, SAMPLES)).map((r) => r.ms));
+  const callEstimate = async (step: string, model: string) => await memoized(`call:${step}:${model}`, async () =>
+    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM agent_runs WHERE step = ? AND model = ? AND state = 'done' AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, model, SAMPLES)).map((r) => r.ms));
+  const taskEstimate = async (repo: string, step: string) => await memoized(`task:${repo}:${step}`, async () =>
+    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM build_tasks WHERE repo = ? AND step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, repo, step, SAMPLES)).map((r) => r.ms));
 
   const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
   type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
-  const callOp = (c: Call): LiveOp => ({
+  const callOp = async (c: Call): Promise<LiveOp> => ({
     kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
-    start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
+    start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? await callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
   });
   type Task = { id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; ended_at: string | null; results: string; summary: string | null; current: string | null };
   /** A finished task as one op per step (from its recorded durations); a running one as one op named by the step its log is on. */
-  const taskOps = (t: Task): LiveOp[] => {
+  const taskOps = async (t: Task): Promise<LiveOp[]> => {
     if (!t.started_at) return [];
     const start = Date.parse(t.started_at);
     if (t.ended_at) {
@@ -88,7 +89,7 @@ export async function live(db: DatabaseSync, req: Req): Promise<LiveBoard> {
         return op;
       });
     }
-    return [{ kind: t.current ? buildKind(t.current) : "build", label: t.current ?? "Build task", detail: stepTitle(t.step), start: t.started_at, end: null, estimate: taskEstimate(t.repo, t.step) }];
+    return [{ kind: t.current ? buildKind(t.current) : "build", label: t.current ?? "Build task", detail: stepTitle(t.step), start: t.started_at, end: null, estimate: await taskEstimate(t.repo, t.step) }];
   };
   const taskCols = `t.id, t.job_id, t.step, t.repo, t.number, t.state, t.queued_at, t.started_at, t.ended_at, t.results, t.summary,
     (SELECT l.step FROM build_task_logs l WHERE l.task_id = t.id ORDER BY l.seq DESC LIMIT 1) AS current`;
@@ -102,58 +103,58 @@ export async function live(db: DatabaseSync, req: Req): Promise<LiveBoard> {
   const quiet = [...QUIET_STEPS];
   const loud = ` AND (state = 'failed' OR step NOT IN (${quiet.map(() => "?").join(", ")}))`;
   const jobs = [
-    ...all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'running'${loud}${notHidden("repo", hidden, true)} ORDER BY id`, ...quiet, ...hideArgs(hidden)),
-    ...all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'queued'${loud}${notHidden("repo", hidden, true)} ORDER BY id LIMIT ?`, ...quiet, ...hideArgs(hidden), QUEUED_MAX),
-    ...all<Job>(db, `SELECT ${cols} FROM jobs WHERE state IN ('done', 'failed') AND ended_at > ? AND started_at IS NOT NULL${loud}${notHidden("repo", hidden, true)} ORDER BY ended_at DESC LIMIT ?`, since, ...quiet, ...hideArgs(hidden), RECENT_MAX * 3),
+    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'running'${loud}${notHidden("repo", hidden, true)} ORDER BY id`, ...quiet, ...hideArgs(hidden)),
+    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'queued'${loud}${notHidden("repo", hidden, true)} ORDER BY id LIMIT ?`, ...quiet, ...hideArgs(hidden), QUEUED_MAX),
+    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state IN ('done', 'failed') AND ended_at > ? AND started_at IS NOT NULL${loud}${notHidden("repo", hidden, true)} ORDER BY ended_at DESC LIMIT ?`, since, ...quiet, ...hideArgs(hidden), RECENT_MAX * 3),
   ];
 
   const lanes: LiveLane[] = [];
   let recent = 0;
   for (const j of jobs) {
     const ended = j.state === "done" || j.state === "failed";
-    const its = all<{ repo: string; number: number }>(db, `SELECT repo, number FROM job_items WHERE job_id = ?${notHidden("repo", hidden)} ORDER BY id`, j.id, ...hideArgs(hidden));
+    const its = await all<{ repo: string; number: number }>(db, `SELECT repo, number FROM job_items WHERE job_id = ?${notHidden("repo", hidden)} ORDER BY id`, j.id, ...hideArgs(hidden));
     if (ended && its.length === 0 && j.state !== "failed") continue;
     if (ended && ++recent > RECENT_MAX) continue;
-    const calls = all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
+    const calls = await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.job_id = ?${hiddenRuns} ORDER BY r.id`, j.id, ...hideArgs(hidden));
-    const tasks = all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.job_id = ?${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, j.id, ...hideArgs(hidden));
+    const tasks = await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.job_id = ?${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, j.id, ...hideArgs(hidden));
     const line = j.state === "running" ? blankIfHidden(j.progress, hidden) : j.state === "failed" ? (staff && j.error ? blankIfHidden(j.error, hidden) : "Failed") : j.state === "done" ? blankIfHidden(j.summary, hidden) : null;
     lanes.push({
       key: `job:${j.id}`, title: stepTitle(j.step), state: j.state === "running" ? "running" : j.state === "queued" ? "queued" : j.state === "failed" ? "failed" : "done",
       start: j.started_at ?? j.requested_at, end: j.ended_at, line: line || null,
-      item: its[0] ? item(its[0].repo, its[0].number) : null, itemCount: its.length, repo: j.repo, detail: `/pipeline/${j.id}`,
-      estimate: j.state === "running" ? jobEstimate(j.step) : null,
-      ops: [...calls.map(callOp), ...tasks.flatMap(taskOps)].sort((a, b) => a.start.localeCompare(b.start)),
+      item: its[0] ? await item(its[0].repo, its[0].number) : null, itemCount: its.length, repo: j.repo, detail: `/pipeline/${j.id}`,
+      estimate: j.state === "running" ? await jobEstimate(j.step) : null,
+      ops: [...await mapSeq(calls, callOp), ...await flatMapSeq(tasks, taskOps)].sort((a, b) => a.start.localeCompare(b.start)),
     });
   }
 
   // Calls and build tasks that run without a job.
-  for (const c of all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
+  for (const c of await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.state = 'running' AND r.job_id IS NULL${hiddenRuns} ORDER BY r.id`, ...hideArgs(hidden))) {
-    const it = all<{ repo: string; number: number }>(db, "SELECT repo, number FROM agent_run_items WHERE run_id = ? ORDER BY repo, number LIMIT 1", c.id)[0];
-    const op = callOp(c);
-    lanes.push({ key: `run:${c.id}`, title: stepTitle(c.step), state: "running", start: c.started_at, end: null, line: blankIfHidden(c.progress, hidden) || null, item: it ? item(it.repo, it.number) : null, itemCount: it ? 1 : 0, repo: it?.repo ?? null, detail: `/agents/${c.id}`, estimate: op.estimate, ops: [op] });
+    const it = (await all<{ repo: string; number: number }>(db, "SELECT repo, number FROM agent_run_items WHERE run_id = ? ORDER BY repo, number LIMIT 1", c.id))[0];
+    const op = await callOp(c);
+    lanes.push({ key: `run:${c.id}`, title: stepTitle(c.step), state: "running", start: c.started_at, end: null, line: blankIfHidden(c.progress, hidden) || null, item: it ? await item(it.repo, it.number) : null, itemCount: it ? 1 : 0, repo: it?.repo ?? null, detail: `/agents/${c.id}`, estimate: op.estimate, ops: [op] });
   }
   // Open integration batches, with the build task of their combined tree; that task gets no lane of its own.
   type Batch = { id: number; repo: string; state: string; created_at: string; summary: string | null; task_id: number | null; pr_number: number | null };
-  const batches = all<Batch>(db, `SELECT id, repo, state, created_at, summary, task_id, pr_number FROM merge_batches WHERE state IN ('checking', 'open')${notHidden("repo", hidden)} ORDER BY id`, ...hideArgs(hidden));
+  const batches = await all<Batch>(db, `SELECT id, repo, state, created_at, summary, task_id, pr_number FROM merge_batches WHERE state IN ('checking', 'open')${notHidden("repo", hidden)} ORDER BY id`, ...hideArgs(hidden));
   const batchTasks = new Set(batches.map((b) => b.task_id).filter((id): id is number => id !== null));
   for (const b of batches) {
-    const prs = all<{ number: number }>(db, "SELECT number FROM merge_batch_prs WHERE batch_id = ? ORDER BY position", b.id);
-    const tasks = b.task_id === null ? [] : all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.id = ?${privateTasks}`, b.task_id);
-    const ops = tasks.flatMap(taskOps);
+    const prs = await all<{ number: number }>(db, "SELECT number FROM merge_batch_prs WHERE batch_id = ? ORDER BY position", b.id);
+    const tasks = b.task_id === null ? [] : await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.id = ?${privateTasks}`, b.task_id);
+    const ops = await flatMapSeq(tasks, taskOps);
     lanes.push({
       key: `batch:${b.id}`, title: "Integration batch", state: "running", start: b.created_at, end: null,
       line: blankIfHidden(b.summary, hidden) || (b.state === "checking" ? "Checking the combined tree" : b.pr_number !== null ? `Batch pull request #${b.pr_number} is open` : null),
-      item: prs[0] ? item(b.repo, prs[0].number) : null, itemCount: prs.length, repo: b.repo, detail: `/batches/${b.id}`, estimate: null, ops,
+      item: prs[0] ? await item(b.repo, prs[0].number) : null, itemCount: prs.length, repo: b.repo, detail: `/batches/${b.id}`, estimate: null, ops,
     });
   }
-  for (const t of all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.state IN ('queued', 'claimed', 'running') AND t.job_id IS NULL${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, ...hideArgs(hidden))) {
+  for (const t of await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.state IN ('queued', 'claimed', 'running') AND t.job_id IS NULL${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, ...hideArgs(hidden))) {
     if (batchTasks.has(t.id)) continue;
-    const ops = taskOps(t);
+    const ops = await taskOps(t);
     lanes.push({
       key: `task:${t.id}`, title: `Build task, ${stepTitle(t.step)}`, state: t.state === "queued" ? "queued" : "running", start: t.started_at ?? t.queued_at, end: null, line: t.summary,
-      item: t.number === null ? null : item(t.repo, t.number), itemCount: t.number === null ? 0 : 1, repo: t.repo, detail: `/envs/${t.id}`, estimate: ops[0]?.estimate ?? null, ops,
+      item: t.number === null ? null : await item(t.repo, t.number), itemCount: t.number === null ? 0 : 1, repo: t.repo, detail: `/envs/${t.id}`, estimate: ops[0]?.estimate ?? null, ops,
     });
   }
   return { lanes };

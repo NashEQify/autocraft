@@ -1,7 +1,6 @@
 // The Security list and the finding page. Staff only; everyone else gets 404, as the other security endpoints do. A
 // finding's open question is built here from its state (never stored as a decision), and answers go to
 // `POST /api/security/findings/:repo/:n`.
-import type { DatabaseSync } from "node:sqlite";
 import type { ChoiceCore, Decision, DecisionChoices, FindingAction, FindingSeverity, FindingState, FindingView } from "../../../web/src/api/types.ts";
 import { FIX_ROUNDS } from "../../security/rules.ts";
 import { findingRow, INTERNAL_FINDING_STATES, reconcileFindings, toFinding, type FindingRow as StoredFinding } from "../../security/store.ts";
@@ -9,6 +8,7 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
+import type { Db } from "../../db/index.ts";
 
 export type ItemPhase = "Triage" | "Waiting for a person" | "Review" | "Fixing" | "Verifying" | "In queue" | "Merged" | "Closed" | "Held" | "Out of scope";
 export interface ItemStatus { phase: ItemPhase; waiting: string | null; next: string | null; since: string }
@@ -78,10 +78,10 @@ const CORE: Record<FindingAction, { label: string; autocraft: string; writes: Ch
 type LogRound = { attempt: number; round: number; state: string; failure: string | null; created_at: string; ended_at: string };
 type LiveRound = { round: number; state: string; failure: string | null; created_at: string };
 
-const logRounds = (db: DatabaseSync, repo: string, n: number): LogRound[] =>
-  db.prepare("SELECT attempt, round, state, failure, created_at, ended_at FROM security_fix_log WHERE repo = ? AND number = ? ORDER BY attempt, round").all(repo, n) as LogRound[];
-const liveRounds = (db: DatabaseSync, repo: string, n: number): LiveRound[] =>
-  db.prepare("SELECT round, state, failure, created_at FROM security_fix_rounds WHERE repo = ? AND number = ? ORDER BY round").all(repo, n) as LiveRound[];
+const logRounds = async (db: Db, repo: string, n: number): Promise<LogRound[]> =>
+  await db.prepare("SELECT attempt, round, state, failure, created_at, ended_at FROM security_fix_log WHERE repo = ? AND number = ? ORDER BY attempt, round").all(repo, n) as LogRound[];
+const liveRounds = async (db: Db, repo: string, n: number): Promise<LiveRound[]> =>
+  await db.prepare("SELECT round, state, failure, created_at FROM security_fix_rounds WHERE repo = ? AND number = ? ORDER BY round").all(repo, n) as LiveRound[];
 
 /** Rounds the last attempt ran, from the log; null when the log has none. */
 function lastAttemptRounds(log: LogRound[]): number | null {
@@ -100,14 +100,14 @@ function rowOf(r: StoredFinding, log: LogRound[], live: LiveRound[]): FindingRow
 }
 
 /** Findings of the repos the reader can see, grouped by what they wait for; most severe first. */
-export async function securityFindings(db: DatabaseSync, req: Req): Promise<SecurityList> {
+export async function securityFindings(db: Db, req: Req): Promise<SecurityList> {
   needStaff(req);
   const repos = await visibleRepos(db, req);
   const rows: FindingRow[] = [];
   for (const repo of repos) {
-    reconcileFindings(db, repo);
-    const stored = db.prepare(`SELECT * FROM security_findings WHERE repo = ? AND state NOT IN (${HIDDEN})`).all(repo) as StoredFinding[];
-    for (const r of stored) rows.push(rowOf(r, logRounds(db, r.repo, r.number), liveRounds(db, r.repo, r.number)));
+    await reconcileFindings(db, repo);
+    const stored = await db.prepare(`SELECT * FROM security_findings WHERE repo = ? AND state NOT IN (${HIDDEN})`).all(repo) as StoredFinding[];
+    for (const r of stored) rows.push(rowOf(r, await logRounds(db, r.repo, r.number), await liveRounds(db, r.repo, r.number)));
   }
   const byRank = (a: FindingRow, b: FindingRow) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity] || a.repo.localeCompare(b.repo) || a.number - b.number;
   return { groups: GROUPS.map((group) => ({ group, rows: rows.filter((r) => GROUP[r.state] === group).sort(byRank) })).filter((g) => g.rows.length) };
@@ -153,17 +153,17 @@ function synthesize(f: FindingView, row: StoredFinding, status: ItemStatus, roun
   return { decision, choices: { id: `ch-f-${f.repo}-${f.number}-${f.state}`, decisionId: id, pick: null, cores, source: "prepare", at: f.updatedAt } };
 }
 
-export async function findingPage(db: DatabaseSync, req: Req): Promise<FindingPageData> {
+export async function findingPage(db: Db, req: Req): Promise<FindingPageData> {
   needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
-  reconcileFindings(db, repo);
+  await reconcileFindings(db, repo);
   const n = Number(req.params.n);
-  const stored = Number.isInteger(n) ? findingRow(db, repo, n) : undefined;
+  const stored = Number.isInteger(n) ? await findingRow(db, repo, n) : undefined;
   if (!stored) throw new HttpError(404, NOT_FOUND);
-  const finding = toFinding(db, stored);
-  const log = logRounds(db, repo, n);
-  const live = liveRounds(db, repo, n);
+  const finding = await toFinding(db, stored);
+  const log = await logRounds(db, repo, n);
+  const live = await liveRounds(db, repo, n);
   const row = rowOf(stored, log, live);
   const { decision, choices } = synthesize(finding, stored, row.status, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), req.user.role === "operator");
   return {

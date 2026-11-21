@@ -7,6 +7,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { BOOKKEEPING_COLUMNS, columnsOf } from "../live.ts";
 import { PLAN_INPUTS, type PlanInput } from "./plan-inputs.ts";
+import type { Db } from "../db/index.ts";
 
 /** More logged rows than this since the caller's seq: a full pass costs less than re-deciding them one by one. */
 export const CHANGES_CAP = 50_000;
@@ -142,19 +143,19 @@ export function planChangesSql(db?: DatabaseSync): string {
 }
 
 /** The newest seq taken (logged item or full-pass mark): what a full pass that starts now covers. */
-export function changeSeq(db: DatabaseSync): number {
-  return (db.prepare("SELECT seq FROM main.sqlite_sequence WHERE name = 'item_changes'").get() as { seq: number } | undefined)?.seq ?? 0;
+export async function changeSeq(db: Db): Promise<number> {
+  return (await db.prepare("SELECT seq FROM main.sqlite_sequence WHERE name = 'item_changes'").get() as { seq: number } | undefined)?.seq ?? 0;
 }
 
 /** What changed after `seq`: the items to decide again, or `full`. */
-export function changesSince(db: DatabaseSync, seq: number): Changes {
+export async function changesSince(db: Db, seq: number): Promise<Changes> {
   // Read the bound first: rows and marks up to it were committed with it, later ones are the next call's.
-  const top = changeSeq(db);
-  const full = (db.prepare("SELECT seq FROM main.plan_full WHERE id = 1").get() as { seq: number } | undefined)?.seq ?? 0;
+  const top = await changeSeq(db);
+  const full = (await db.prepare("SELECT seq FROM main.plan_full WHERE id = 1").get() as { seq: number } | undefined)?.seq ?? 0;
   if (full > seq && full <= top) return { refs: [], full: true, cause: "marker", seq: top };
-  const n = (db.prepare("SELECT count(*) AS n FROM (SELECT 1 FROM main.item_changes WHERE seq > ? AND seq <= ? LIMIT ?)").get(seq, top, CHANGES_CAP + 1) as { n: number }).n;
+  const n = (await db.prepare("SELECT count(*) AS n FROM (SELECT 1 FROM main.item_changes WHERE seq > ? AND seq <= ? LIMIT ?)").get(seq, top, CHANGES_CAP + 1) as { n: number }).n;
   if (n > CHANGES_CAP) return { refs: [], full: true, cause: "cap", seq: top };
-  const refs = (db.prepare("SELECT DISTINCT repo || '#' || number AS ref FROM main.item_changes WHERE seq > ? AND seq <= ?").all(seq, top) as { ref: string }[]).map((r) => r.ref);
+  const refs = (await db.prepare("SELECT DISTINCT repo || '#' || number AS ref FROM main.item_changes WHERE seq > ? AND seq <= ?").all(seq, top) as { ref: string }[]).map((r) => r.ref);
   return { refs, full: false, seq: top };
 }
 
@@ -162,13 +163,13 @@ export function changesSince(db: DatabaseSync, seq: number): Changes {
  * Deletes the log rows at or below `seq`. The log has one consumer: the runner's planner (src/core/plan-engine.ts). A second
  * consumer would lose the rows the first one pruned; other readers take full passes.
  */
-export function pruneChanges(db: DatabaseSync, seq: number): void {
-  db.prepare("DELETE FROM main.item_changes WHERE seq <= ?").run(seq);
+export async function pruneChanges(db: Db, seq: number): Promise<void> {
+  await db.prepare("DELETE FROM main.item_changes WHERE seq <= ?").run(seq);
 }
 
 /** Logs the PRs with a review at `head` of `repo`: for a write the triggers cannot see (a file the fact loaders read beside the database). */
-export function logReviewedAt(db: DatabaseSync, repo: string, head: string): void {
-  db.prepare("INSERT INTO main.item_changes (repo, number) SELECT DISTINCT repo, number FROM main.opus_reviews WHERE repo = ? AND head_oid = ?").run(repo, head);
+export async function logReviewedAt(db: Db, repo: string, head: string): Promise<void> {
+  await db.prepare("INSERT INTO main.item_changes (repo, number) SELECT DISTINCT repo, number FROM main.opus_reviews WHERE repo = ? AND head_oid = ?").run(repo, head);
 }
 
 /** A write of more rows than this goes through bulkWrites: one full-pass mark costs less than logging every row. */
@@ -178,19 +179,19 @@ export const BULK_ROWS = 500;
  * Runs `fn` with the logging triggers off and takes one full-pass mark for `source`, in the caller's transaction or one of its
  * own. The marker row exists only inside that transaction, so other connections never see the triggers off.
  */
-export function bulkWrites<T>(db: DatabaseSync, source: string, fn: () => T): T {
-  const own = !db.isTransaction;
+export async function bulkWrites<T>(db: Db, source: string, fn: () => Promise<T>): Promise<T> {
+  const own = !db.inTransaction();
   if (own) db.exec("BEGIN IMMEDIATE");
-  const nested = !!db.prepare("SELECT 1 FROM main.plan_bulk").get();
+  const nested = !!await db.prepare("SELECT 1 FROM main.plan_bulk").get();
   try {
-    if (!nested) db.exec("INSERT INTO main.plan_bulk (id) VALUES (1)");
-    const out = fn();
-    if (!nested) { db.exec("DELETE FROM main.plan_bulk"); db.exec(markFull(`bulk:${source}`)); }
+    if (!nested) await db.script("INSERT INTO main.plan_bulk (id) VALUES (1)");
+    const out = await fn();
+    if (!nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
     if (own) db.exec("COMMIT");
     return out;
   } catch (e) {
-    if (own) { if (db.isTransaction) db.exec("ROLLBACK"); }
-    else if (!nested) { db.exec("DELETE FROM main.plan_bulk"); db.exec(markFull(`bulk:${source}`)); }
+    if (own) { if (db.inTransaction()) db.exec("ROLLBACK"); }
+    else if (!nested) { await db.script("DELETE FROM main.plan_bulk"); await db.script(markFull(`bulk:${source}`)); }
     throw e;
   }
 }
@@ -199,18 +200,13 @@ export function bulkWrites<T>(db: DatabaseSync, source: string, fn: () => T): T 
  * Removes the change log, its triggers and the incremental planner's tables, and clears the schema stamp so the next connect
  * migrates. For a rollback to a release without the incremental planner, whose migration would leave the triggers logging.
  */
-export function dropPlanChanges(db: DatabaseSync): number {
-  const triggers = db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[];
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    for (const { name } of triggers) db.exec(`DROP TRIGGER IF EXISTS main.${name}`);
-    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"]) db.exec(`DROP TABLE IF EXISTS main.${t}`);
-    db.exec("DELETE FROM main.sqlite_sequence WHERE name = 'item_changes'");
-    db.exec("DELETE FROM main.settings WHERE key = 'schema_stamp'");
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+export async function dropPlanChanges(db: Db): Promise<number> {
+  const triggers = await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[];
+  await db.write(async () => {
+    for (const { name } of triggers) await db.script(`DROP TRIGGER IF EXISTS main.${name}`);
+    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"]) await db.script(`DROP TABLE IF EXISTS main.${t}`);
+    await db.script("DELETE FROM main.sqlite_sequence WHERE name = 'item_changes'");
+    await db.script("DELETE FROM main.settings WHERE key = 'schema_stamp'");
+  });
   return triggers.length;
 }

@@ -4,9 +4,9 @@
 // A fast-tracked item (src/fasttrack.ts) is in scope whatever its repo's flag and the pilot say.
 // No Node imports besides the type, so candidate queries can use the SQL fragments.
 import { quietSqlFor } from "./security/quiet.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "./dash/audit.ts";
 import { setting } from "./settings-read.ts";
+import type { Db } from "./db/index.ts";
 
 export const PILOT_KEY = "pilot_items";
 
@@ -18,8 +18,8 @@ const REF = /^([A-Za-z0-9._-]+)(?:#([1-9][0-9]*))?$/;
 const NAME = /^[A-Za-z0-9._-]+$/;
 
 /** The stored list; an unreadable value counts as no pilot. */
-export function pilotItems(db: DatabaseSync): string[] {
-  const value = setting(db, PILOT_KEY);
+export async function pilotItems(db: Db): Promise<string[]> {
+  const value = await setting(db, PILOT_KEY);
   if (value === undefined) return [];
   try {
     const v = JSON.parse(value) as unknown;
@@ -30,42 +30,42 @@ export function pilotItems(db: DatabaseSync): string[] {
 }
 
 /** Tracked repos whose pipeline flag is on. */
-export function pipelineRepos(db: DatabaseSync): Set<string> {
-  return new Set((db.prepare("SELECT name FROM main.tracked_repos WHERE pipeline = 1").all() as { name: string }[]).map((r) => r.name));
+export async function pipelineRepos(db: Db): Promise<Set<string>> {
+  return new Set((await db.prepare("SELECT name FROM main.tracked_repos WHERE pipeline = 1").all() as { name: string }[]).map((r) => r.name));
 }
 
-export const pipelineOn = (db: DatabaseSync, repo: string): boolean =>
-  db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ? AND pipeline = 1").get(repo) !== undefined;
+export const pipelineOn = async (db: Db, repo: string): Promise<boolean> =>
+  await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ? AND pipeline = 1").get(repo) !== undefined;
 
 /** Sets a tracked repo's pipeline flag. Returns false when nothing changed. */
-export function setRepoPipeline(db: DatabaseSync, by: string, repo: string, on: boolean): boolean {
-  if (!NAME.test(repo) || !db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new PilotError(`${repo} is not tracked`);
-  const changed = Number(db.prepare("UPDATE main.tracked_repos SET pipeline = ? WHERE name = ? AND pipeline <> ?").run(on ? 1 : 0, repo, on ? 1 : 0).changes) > 0;
-  if (changed) audit(db, by, "repo-pipeline", repo, { on });
+export async function setRepoPipeline(db: Db, by: string, repo: string, on: boolean): Promise<boolean> {
+  if (!NAME.test(repo) || !await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new PilotError(`${repo} is not tracked`);
+  const changed = Number((await db.prepare("UPDATE main.tracked_repos SET pipeline = ? WHERE name = ? AND pipeline <> ?").run(on ? 1 : 0, repo, on ? 1 : 0)).changes) > 0;
+  if (changed) await audit(db, by, "repo-pipeline", repo, { on });
   return changed;
 }
 
 /** The repos in scope without fast track: pipeline flag on, and, with a pilot set, named by one of its items. */
-export function baseScopeRepos(db: DatabaseSync): Set<string> {
-  const on = pipelineRepos(db);
-  const items = pilotItems(db);
+export async function baseScopeRepos(db: Db): Promise<Set<string>> {
+  const on = await pipelineRepos(db);
+  const items = await pilotItems(db);
   return items.length ? new Set([...on].filter((r) => new Set(items.map((i) => i.split("#")[0]!)).has(r))) : on;
 }
 
 /** The repos that take part: those of `baseScopeRepos` and those with a fast-tracked open item. */
-export function scopeRepos(db: DatabaseSync): Set<string> {
-  const out = baseScopeRepos(db);
+export async function scopeRepos(db: Db): Promise<Set<string>> {
+  const out = await baseScopeRepos(db);
   // A repo with a fast-tracked open item takes part for that item alone (see pilotSqlFor).
-  for (const r of db.prepare(`SELECT DISTINCT f.repo FROM main.fast_track f JOIN main.tracked_repos t ON t.name = f.repo
+  for (const r of await db.prepare(`SELECT DISTINCT f.repo FROM main.fast_track f JOIN main.tracked_repos t ON t.name = f.repo
     JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN'`).all() as { repo: string }[]) out.add(r.repo);
   return out;
 }
 
 /** Parses refs (repo#number) separated by whitespace or commas; throws on a malformed one, a whole-repo entry or an untracked repo. */
-export function parsePilotRefs(db: DatabaseSync, input: unknown): string[] {
+export async function parsePilotRefs(db: Db, input: unknown): Promise<string[]> {
   const parts = Array.isArray(input) ? input : typeof input === "string" ? input.split(/[\s,]+/).filter(Boolean) : null;
   if (!parts || parts.some((p) => typeof p !== "string")) throw new PilotError("items must be a list of repo#number");
-  const tracked = new Set((db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]).map((r) => r.name));
+  const tracked = new Set((await db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]).map((r) => r.name));
   const out: string[] = [];
   for (const p of parts as string[]) {
     const m = REF.exec(p);
@@ -79,11 +79,11 @@ export function parsePilotRefs(db: DatabaseSync, input: unknown): string[] {
 }
 
 /** Replaces the list; an empty list clears the pilot. Returns the stored list. */
-export function setPilot(db: DatabaseSync, by: string, input: unknown): string[] {
-  const refs = parsePilotRefs(db, input);
-  if (refs.length) db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(PILOT_KEY, JSON.stringify(refs));
-  else db.prepare("DELETE FROM main.settings WHERE key = ?").run(PILOT_KEY);
-  audit(db, by, refs.length ? "pilot-set" : "pilot-clear", PILOT_KEY, { items: refs });
+export async function setPilot(db: Db, by: string, input: unknown): Promise<string[]> {
+  const refs = await parsePilotRefs(db, input);
+  if (refs.length) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(PILOT_KEY, JSON.stringify(refs));
+  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(PILOT_KEY);
+  await audit(db, by, refs.length ? "pilot-set" : "pilot-clear", PILOT_KEY, { items: refs });
   return refs;
 }
 
@@ -110,6 +110,6 @@ export const pilotSqlFor = (repo: string, number: string): string =>
 export const pilotSql = (alias: string): string => pilotSqlFor(`${alias}.repo`, `${alias}.number`);
 
 /** True when the item is in scope. */
-export function inPilot(db: DatabaseSync, repo: string, number: number): boolean {
-  return !!db.prepare(`SELECT 1 WHERE ${pilotSqlFor("?1", "CAST(?2 AS INTEGER)")}`).get(repo, number);
+export async function inPilot(db: Db, repo: string, number: number): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 WHERE ${pilotSqlFor("?1", "CAST(?2 AS INTEGER)")}`).get(repo, number);
 }

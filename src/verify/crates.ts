@@ -7,8 +7,8 @@ import { diffCacheDir } from "../review/diff.ts";
 import type { Crate } from "./types.ts";
 import { slugOf } from "../owners.ts";
 import { readEnvFor } from "../github/read.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { logReviewedAt } from "../core/plan-changes.ts";
+import type { Db } from "../db/index.ts";
 
 const REPO_DIR = fileURLToPath(new URL("../..", import.meta.url));
 const MAX_MANIFESTS = 80;
@@ -87,7 +87,7 @@ export function cachedCratesOf(repo: string, sha: string): CrateInfo | null {
  * verification-unavailable fact of a repo without CI), so a write with `db` logs the PRs reviewed at that head for it; the
  * callers without a database fetch for commits no review is at (main heads, pre-push commits).
  */
-export async function cachedCrates(repo: string, sha: string, fetch: CratesFetcher, db?: DatabaseSync): Promise<CratesResult> {
+export async function cachedCrates(repo: string, sha: string, fetch: CratesFetcher, db?: Db): Promise<CratesResult> {
   const hit = cachedCratesOf(repo, sha);
   if (hit) return { ok: true, ...hit };
   const r = await fetch(repo, sha);
@@ -96,7 +96,7 @@ export async function cachedCrates(repo: string, sha: string, fetch: CratesFetch
     mkdirSync(join(diffCacheDir(), repo), { recursive: true });
     writeFileSync(`${f}.tmp`, JSON.stringify({ rust: r.rust, crates: r.crates }));
     renameSync(`${f}.tmp`, f);
-    if (db) logReviewedAt(db, repo, sha);
+    if (db) await logReviewedAt(db, repo, sha);
   }
   return r;
 }

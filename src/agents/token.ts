@@ -14,8 +14,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { claudeBin } from "./box.ts";
 import { childEnv } from "./status.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { tokenNearExpiry } from "../sandbox/index.ts";
+import type { Db } from "../db/index.ts";
 
 export const TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 /** The CLI states a validity of one year. */
@@ -123,38 +123,38 @@ export function deleteToken(configDir: string): void {
 }
 
 type Row = { set_at: string; rejected_at: string | null };
-const rowOf = (db: DatabaseSync, id: string) => db.prepare("SELECT set_at, rejected_at FROM claude_account_tokens WHERE account_id = ?").get(id) as Row | undefined;
+const rowOf = async (db: Db, id: string) => await db.prepare("SELECT set_at, rejected_at FROM claude_account_tokens WHERE account_id = ?").get(id) as Row | undefined;
 
 /** Records a new token (clearing any rejection). */
-export function recordTokenSet(db: DatabaseSync, id: string, now = new Date()): void {
-  db.prepare("INSERT INTO claude_account_tokens (account_id, set_at, rejected_at) VALUES (?, ?, NULL) ON CONFLICT (account_id) DO UPDATE SET set_at = excluded.set_at, rejected_at = NULL").run(id, now.toISOString());
+export async function recordTokenSet(db: Db, id: string, now = new Date()): Promise<void> {
+  await db.prepare("INSERT INTO claude_account_tokens (account_id, set_at, rejected_at) VALUES (?, ?, NULL) ON CONFLICT (account_id) DO UPDATE SET set_at = excluded.set_at, rejected_at = NULL").run(id, now.toISOString());
 }
 
-export function recordTokenRemoved(db: DatabaseSync, id: string): void {
-  db.prepare("DELETE FROM claude_account_tokens WHERE account_id = ?").run(id);
+export async function recordTokenRemoved(db: Db, id: string): Promise<void> {
+  await db.prepare("DELETE FROM claude_account_tokens WHERE account_id = ?").run(id);
 }
 
 /** Marks the token rejected; calls then take the regular sign-in path. */
-export function markTokenRejected(db: DatabaseSync, id: string, now = new Date()): void {
-  db.prepare("UPDATE claude_account_tokens SET rejected_at = ? WHERE account_id = ?").run(now.toISOString(), id);
+export async function markTokenRejected(db: Db, id: string, now = new Date()): Promise<void> {
+  await db.prepare("UPDATE claude_account_tokens SET rejected_at = ? WHERE account_id = ?").run(now.toISOString(), id);
 }
 
 /** Whether model calls on this account carry its token: the file exists and the token is not marked rejected. */
-export function usesToken(db: DatabaseSync, id: string, configDir: string): boolean {
-  return !rowOf(db, id)?.rejected_at && readToken(configDir) !== null;
+export async function usesToken(db: Db, id: string, configDir: string): Promise<boolean> {
+  return !(await rowOf(db, id))?.rejected_at && readToken(configDir) !== null;
 }
 
 /** The extra environment of a model call on this account: its token, when it uses one. */
-export function tokenEnv(db: DatabaseSync, id: string, configDir: string): Record<string, string> {
-  if (!usesToken(db, id, configDir)) return {};
+export async function tokenEnv(db: Db, id: string, configDir: string): Promise<Record<string, string>> {
+  if (!await usesToken(db, id, configDir)) return {};
   const t = readToken(configDir);
   return t ? { [TOKEN_ENV]: t } : {};
 }
 
 /** The token state shown on the Accounts page. */
-export function tokenView(db: DatabaseSync, id: string, configDir: string): { state: "none" | "set" | "rejected"; setAt: string | null; expiresAt: string | null; rejectedAt: string | null } {
+export async function tokenView(db: Db, id: string, configDir: string): Promise<{ state: "none" | "set" | "rejected"; setAt: string | null; expiresAt: string | null; rejectedAt: string | null }> {
   if (!existsSync(tokenFile(configDir))) return { state: "none", setAt: null, expiresAt: null, rejectedAt: null };
-  const r = rowOf(db, id);
+  const r = await rowOf(db, id);
   const expiresAt = r ? new Date(Date.parse(r.set_at) + TOKEN_LIFE_MS).toISOString() : null;
   return { state: r?.rejected_at ? "rejected" : "set", setAt: r?.set_at ?? null, expiresAt, rejectedAt: r?.rejected_at ?? null };
 }
@@ -164,6 +164,6 @@ export function tokenView(db: DatabaseSync, id: string, configDir: string): { st
  * for an account whose token is in use (it needs no refresh), else the login's
  * access token expiring within `marginMs`.
  */
-export function credentialsNearExpiry(db: DatabaseSync, id: string, configDir: string, now: number, marginMs: number): boolean {
-  return !usesToken(db, id, configDir) && tokenNearExpiry(join(configDir, ".credentials.json"), now, marginMs);
+export async function credentialsNearExpiry(db: Db, id: string, configDir: string, now: number, marginMs: number): Promise<boolean> {
+  return !await usesToken(db, id, configDir) && tokenNearExpiry(join(configDir, ".credentials.json"), now, marginMs);
 }

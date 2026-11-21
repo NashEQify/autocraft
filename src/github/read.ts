@@ -8,16 +8,17 @@ import { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
+import type { Db } from "../db/index.ts";
 
 export type ReadEnv = Record<string, string>;
-export type ReadDeps = { db?: DatabaseSync; mint?: (owner: string) => Promise<string>; defaultOwner?: () => string };
+export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
 
-let shared: { path: string; db: DatabaseSync } | null = null;
+let shared: { path: string; db: Db } | null = null;
 /**
  * A read-only handle on the instance database, opened on first use. Null only when there is no database file (nothing
  * configured the identity); a file that cannot be opened is an error, never a silent read as the box account.
  */
-function sharedDb(): DatabaseSync | null {
+function sharedDb(): Db | null {
   const path = dbPath();
   if (shared?.path === path) return shared.db;
   if (!existsSync(path)) return null;
@@ -32,27 +33,27 @@ function sharedDb(): DatabaseSync | null {
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
-function settingOf(db: DatabaseSync): string | undefined {
+async function settingOf(db: Db): Promise<string | undefined> {
   let last: unknown;
   for (let i = 0; i < 3; i++) {
     try {
-      return (db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value;
+      return (await db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value;
     } catch (e) { last = e; }
   }
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
 /** Whether reads go through the GitHub App right now. Throws when the setting exists to be read but cannot be. */
-export function readsUseApp(db?: DatabaseSync): boolean {
+export async function readsUseApp(db?: Db): Promise<boolean> {
   const d = db ?? sharedDb();
-  return d !== null && settingOf(d) === "app";
+  return d !== null && await settingOf(d) === "app";
 }
 
 /** The owner of the tracked repos: the default owner when it has any, else the first tracked one. */
-export function trackedOwner(db?: DatabaseSync): string {
+export async function trackedOwner(db?: Db): Promise<string> {
   const d = db ?? sharedDb();
   try {
-    const rows = d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
+    const rows = await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
     const owners = (rows ?? []).map((r) => r.owner).filter((o) => OWNER.test(o));
     if (owners.some((o) => o.toLowerCase() === DEFAULT_OWNER)) return DEFAULT_OWNER;
     if (owners[0]) return owners[0];
@@ -61,7 +62,7 @@ export function trackedOwner(db?: DatabaseSync): string {
 }
 
 /** The owner whose installation serves a read: `owner` when valid, else the tracked owner's. */
-export const resolveOwner = (owner?: string, db?: DatabaseSync): string => (owner && OWNER.test(owner) ? owner : trackedOwner(db));
+export const resolveOwner = async (owner?: string, db?: Db): Promise<string> => (owner && OWNER.test(owner) ? owner : await trackedOwner(db));
 
 const slugOwner = (v: string | undefined): string | undefined => {
   const o = v?.includes("/") ? v.split("/")[0] : undefined;
@@ -105,8 +106,8 @@ export class AppReadError extends Error {
 export async function readEnv(owner?: string, deps: ReadDeps = {}): Promise<ReadEnv | undefined> {
   // A process that was started with an identity of its own (a merge child that acts as a person) keeps it.
   if (process.env[TOKEN_ENV]) return undefined;
-  if (!readsUseApp(deps.db)) return undefined;
-  const o = owner && OWNER.test(owner) ? owner : (deps.defaultOwner ?? (() => trackedOwner(deps.db)))();
+  if (!await readsUseApp(deps.db)) return undefined;
+  const o = owner && OWNER.test(owner) ? owner : await (deps.defaultOwner ?? (async () => await trackedOwner(deps.db)))();
   try {
     return appChildEnv(await (deps.mint ?? installationToken)(o));
   } catch (e) {

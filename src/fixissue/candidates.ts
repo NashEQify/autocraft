@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
+import type { Db } from "../db/index.ts";
 
 export const ATTEMPT_STATES = ["retry", "testing", "passed", "pr-opened", "skipped", "failed"] as const;
 
@@ -46,14 +47,14 @@ const OPEN_PRS = `SELECT repo, number, author, closing_issues, text_refs,
  * Issues an open PR in the repo closes or addresses (any author), and issues a person's open PR mentions by number
  * (a bot's PR, such as a dependency update, is not asked about its mentions). A PR that closes an issue wins over one that mentions it.
  */
-export function issuesWithOpenPr(db: DatabaseSync, repo: string): Map<number, OpenPr> {
-  return openPrMap(db.prepare(`${OPEN_PRS} AND repo = ? ORDER BY number DESC`).all(repo) as OpenPrRow[]);
+export async function issuesWithOpenPr(db: Db, repo: string): Promise<Map<number, OpenPr>> {
+  return openPrMap(await db.prepare(`${OPEN_PRS} AND repo = ? ORDER BY number DESC`).all(repo) as OpenPrRow[]);
 }
 
 /** issuesWithOpenPr() for every repo, from one reading of the open PRs. */
-export function issuesWithOpenPrAll(db: DatabaseSync): (repo: string) => Map<number, OpenPr> {
+export async function issuesWithOpenPrAll(db: Db): Promise<(repo: string) => Map<number, OpenPr>> {
   const by = new Map<string, OpenPrRow[]>();
-  for (const p of db.prepare(`${OPEN_PRS} ORDER BY repo, number DESC`).all() as (OpenPrRow & { repo: string })[])
+  for (const p of await db.prepare(`${OPEN_PRS} ORDER BY repo, number DESC`).all() as (OpenPrRow & { repo: string })[])
     (by.get(p.repo) ?? by.set(p.repo, []).get(p.repo)!).push(p);
   return (repo) => openPrMap(by.get(repo) ?? []);
 }
@@ -85,7 +86,7 @@ function openPrMap(prs: OpenPrRow[]): Map<number, OpenPr> {
 }
 
 /** Whether an open PR in the repo closes issue `n` or a person's open PR mentions it. */
-export const hasOpenPr = (db: DatabaseSync, repo: string, n: number): boolean => issuesWithOpenPr(db, repo).has(n);
+export const hasOpenPr = async (db: Db, repo: string, n: number): Promise<boolean> => (await issuesWithOpenPr(db, repo)).has(n);
 
 /** Writes text_refs of the open PRs without one, in batches so other processes can write between them. */
 export function fillTextRefs(db: DatabaseSync): void {

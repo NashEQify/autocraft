@@ -2,9 +2,9 @@
 // is open or was answered "close as duplicate", or any decision about them was
 // answered Backlog. An answer of "not a duplicate"
 // or "keep both" releases them. No Node imports besides the type and the app-slug lookup.
-import type { DatabaseSync } from "node:sqlite";
 import { pilotSql } from "../pilot.ts";
 import { appSlug } from "../github/identity.ts";
+import type { Db } from "../db/index.ts";
 
 /** The fact line that names the original; the act step reads it. */
 export const DUP_FACT = "duplicate of ";
@@ -52,20 +52,20 @@ export const notHeldSql = (alias: string): string =>
   `${notOwnIntegrationSql(alias)} AND ${pilotSql(alias)} AND NOT EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = ${alias}.repo AND dh.number = ${alias}.number AND (dh.answer IS NULL OR dh.answer = 'close')) AND NOT ${groupHeldSql(alias)} AND NOT ${backlogHeldSql(alias)}`;
 
 /** True when a Backlog answer holds the item. */
-export function backlogHeld(db: DatabaseSync, repo: string, number: number): boolean {
-  return !!db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${backlogHeldSql("i")}`).get(repo, number);
+export async function backlogHeld(db: Db, repo: string, number: number): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${backlogHeldSql("i")}`).get(repo, number);
 }
 
-export function duplicateHeld(db: DatabaseSync, repo: string, number: number): boolean {
-  return !!db.prepare(`SELECT 1 FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND number = ? AND (answer IS NULL OR answer = 'close')`).get(repo, number)
-    || !!db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND (${groupHeldSql("i")} OR ${backlogHeldSql("i")})`).get(repo, number);
+export async function duplicateHeld(db: Db, repo: string, number: number): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND number = ? AND (answer IS NULL OR answer = 'close')`).get(repo, number)
+    || !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND (${groupHeldSql("i")} OR ${backlogHeldSql("i")})`).get(repo, number);
 }
 
 /** Open duplicates pointing at the canonical item: items held by a decision that names it as the original. */
-export function duplicateCount(db: DatabaseSync, repo: string, canonical: number): number {
-  const pairs = (db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND (answer IS NULL OR answer = 'close')
+export async function duplicateCount(db: Db, repo: string, canonical: number): Promise<number> {
+  const pairs = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND (answer IS NULL OR answer = 'close')
     AND EXISTS (SELECT 1 FROM json_each(facts) WHERE value = ?)`).get(repo, `${DUP_FACT}${repo}#${canonical}`) as { n: number }).n;
-  const groups = (db.prepare(`SELECT COUNT(*) AS n FROM dupe_group_items gi JOIN decisions dg ON dg.id = gi.decision_id
+  const groups = (await db.prepare(`SELECT COUNT(*) AS n FROM dupe_group_items gi JOIN decisions dg ON dg.id = gi.decision_id
     WHERE gi.repo = ? AND gi.target = ? AND gi.role = 'close' AND (dg.answer IS NULL OR dg.answer = 'accept' OR dg.answer LIKE 'keep:%')`).get(repo, canonical) as { n: number }).n;
   return pairs + groups;
 }

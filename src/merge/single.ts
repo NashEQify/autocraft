@@ -1,6 +1,5 @@
 // Merging a few clean ready PRs one at a time instead of through an integration batch. Only the way a PR that
 // may merge already does changes here: the merge rule, per-repo approval, Verify and the final review still decide whether.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { cachedDiff, ghDiff, type DiffFetcher } from "../review/diff.ts";
 import { mergeApprovalOf } from "./approval.ts";
@@ -9,23 +8,25 @@ import type { By } from "../core/gates.ts";
 import { runMerge, type MergeDeps, type MergeSummary } from "./index.ts";
 import { planned } from "../core/select.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export const SINGLE_MERGE_KEY = "single_merge_max";
 export const SINGLE_MERGE_DEFAULT = 3;
 export const SINGLE_MERGE_LIMIT = 100;
 
 /** Most ready PRs of a repo that merge one at a time; above it, or at 0, they go through a batch. */
-export function singleMergeMax(db: DatabaseSync): number {
-  const value = setting(db, SINGLE_MERGE_KEY);
+export async function singleMergeMax(db: Db): Promise<number> {
+  const value = await setting(db, SINGLE_MERGE_KEY);
   const n = value === undefined ? NaN : Number(value);
   return Number.isInteger(n) && n >= 0 && n <= SINGLE_MERGE_LIMIT ? n : SINGLE_MERGE_DEFAULT;
 }
 
-export function setSingleMergeMax(db: DatabaseSync, n: unknown, by: string): number {
+export async function setSingleMergeMax(db: Db, n: unknown, by: string): Promise<number> {
   if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > SINGLE_MERGE_LIMIT) throw new Error(`the single-merge limit must be a whole number from 0 to ${SINGLE_MERGE_LIMIT}`);
-  const was = singleMergeMax(db);
-  db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(SINGLE_MERGE_KEY, String(n));
-  if (n !== was) audit(db, by, "single-merge-max", "merge", { max: n, was });
+  const was = await singleMergeMax(db);
+  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(SINGLE_MERGE_KEY, String(n));
+  if (n !== was) await audit(db, by, "single-merge-max", "merge", { max: n, was });
   return n;
 }
 
@@ -44,10 +45,10 @@ export function pathsOfDiff(text: string): string[] | null {
  * limit, a diff that cannot be read, or two PRs changing one file. A workspace manifest or lockfile is a file
  * like any other here, so two PRs that both change one overlap. The diffs are the ones the reviews cached.
  */
-export async function planSingles(db: DatabaseSync, repo: string, fetchDiff: DiffFetcher = ghDiff): Promise<Set<number> | null> {
-  const max = singleMergeMax(db);
+export async function planSingles(db: Db, repo: string, fetchDiff: DiffFetcher = ghDiff): Promise<Set<number> | null> {
+  const max = await singleMergeMax(db);
   // A PR aimed at a non-default branch merges singly on its own path and takes no part in this count or the file overlap.
-  const ready = planned(db, "merge", { repo }).filter((p) => !p.facts.baseOffDefault);
+  const ready = (await planned(db, "merge", { repo })).filter((p) => !p.facts.baseOffDefault);
   if (max === 0 || !ready.length || ready.length > max) return null;
   const seen = new Set<string>();
   for (const { facts, action } of ready) {
@@ -69,11 +70,11 @@ export async function planSingles(db: DatabaseSync, repo: string, fetchDiff: Dif
  * with green checks ends the round.
  */
 export async function runSingles(
-  db: DatabaseSync, params: { repo: string; limit?: number; onMerged?: (n: number) => void; by?: By },
+  db: Db, params: { repo: string; limit?: number; onMerged?: (n: number) => void; by?: By },
   log: (line: string) => void = console.log, deps?: MergeDeps, fetchDiff?: DiffFetcher,
 ): Promise<MergeSummary | null> {
-  if (!mergeApprovalOf(db, params.repo)) throw new Error(`merging in ${params.repo} is not approved`);
-  if (activeBatches(db, params.repo).length) return null;
+  if (!await mergeApprovalOf(db, params.repo)) throw new Error(`merging in ${params.repo} is not approved`);
+  if ((await activeBatches(db, params.repo)).length) return null;
   const plan = await planSingles(db, params.repo, fetchDiff);
   if (!plan) return null;
   log(`merge ${params.repo}: ${plan.size} PRs ready, none sharing a file; merging them one at a time`);
@@ -85,13 +86,13 @@ export const commands = {
     summary: "merge-single [N]: show or set how many ready PRs of a repo merge one at a time instead of in a batch (0 = always batch)",
     async run(args: string[]): Promise<void> {
       const { connect } = await import("../db.ts");
-      const db = connect();
+      const db = await openDb();
       if (args.length > 1) throw new Error("usage: merge-single [N]");
       if (args[0] !== undefined) {
         if (!/^\d{1,3}$/.test(args[0])) throw new Error("N must be a whole number from 0 to 100");
-        setSingleMergeMax(db, Number(args[0]), "cli");
+        await setSingleMergeMax(db, Number(args[0]), "cli");
       }
-      console.log(`single-merge limit: ${singleMergeMax(db)}`);
+      console.log(`single-merge limit: ${await singleMergeMax(db)}`);
     },
   },
 };

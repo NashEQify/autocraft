@@ -2,7 +2,6 @@
 // tree. The formatter's changes are folded into the patch; clippy diagnostics on lines the patch added or changed go back to the model.
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import type { TaskStep } from "../../web/src/api/types.ts";
 import { absolute } from "../build/artifacts.ts";
 import { createTask, getTask, warmKeyOf, type Warm } from "../build/tasks.ts";
@@ -12,6 +11,7 @@ import type { Git } from "../fixup/git.ts";
 import { rustPlan } from "../worker/rust.ts";
 import { ghCrates, type CratesFetcher } from "../verify/crates.ts";
 import { classifyTests, testFindings, testsFeatureCrates, testsStep, TESTS_ARTIFACT, TESTS_EXIT_ARTIFACT, TESTS_RERUN_ARTIFACT, TESTS_RERUN_EXIT_ARTIFACT, TESTS_STEP } from "./tests.ts";
+import type { Db } from "../db/index.ts";
 
 export const CLIPPY_ARTIFACT = "clippy.txt";
 export const CLIPPY_ERR_ARTIFACT = "clippy-err.txt";
@@ -60,19 +60,19 @@ export type LintJob = {
 };
 
 /** Queues the lint task for the patch; null when it changes no `.rs` file. */
-export function queueLint(db: DatabaseSync, j: LintJob): number | null {
+export async function queueLint(db: Db, j: LintJob): Promise<number | null> {
   const plan = lintPlan(j.files ?? changedRsFiles(j.patch ?? ""), j.crates);
   if (!plan) return null;
-  return createTask(db, {
+  return await createTask(db, {
     step: j.step, repo: j.repo, number: j.number, headSha: j.head, baseSha: j.base, requires: { os: "linux", toolchains: ["rust-stable"] },
     warm: j.warm ?? { key: warmKeyOf(j.repo), role: "use" }, plan, ...(j.patch ? { patch: j.patch } : {}),
   });
 }
 
 /** queueLint, with the affected crates' tests added when Tests before push is on for the repo. Off: no crate lookup, today's plan. */
-export async function queueLintFor(db: DatabaseSync, j: LintJob, fetch: CratesFetcher = ghCrates): Promise<number | null> {
+export async function queueLintFor(db: Db, j: LintJob, fetch: CratesFetcher = ghCrates): Promise<number | null> {
   const crates = await testsFeatureCrates(db, j, fetch);
-  return queueLint(db, crates ? { ...j, crates } : j);
+  return await queueLint(db, crates ? { ...j, crates } : j);
 }
 
 export type Finding = { level: "warning" | "error"; code: string | null; message: string; file: string; line: number; rendered: string };
@@ -151,29 +151,29 @@ export function formatErrorFindings(text: string): Finding[] {
   return out;
 }
 
-export const artifactText = (db: DatabaseSync, taskId: number, name: string): string | null => {
-  const row = db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { file: string } | undefined;
+export const artifactText = async (db: Db, taskId: number, name: string): Promise<string | null> => {
+  const row = await db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { file: string } | undefined;
   const path = row ? absolute(row.file) : null;
   return path ? readFileSync(path, "utf8") : null;
 };
 
 /** The lint task's state, and once it is done the formatter diff (git format) and the findings on the patch's own lines. */
-export function readLint(db: DatabaseSync, taskId: number, o: { /** A diff whose added lines count; default: the task's own patch. */ against?: string } = {}): LintRead {
-  const t = getTask(db, taskId);
+export async function readLint(db: Db, taskId: number, o: { /** A diff whose added lines count; default: the task's own patch. */ against?: string } = {}): Promise<LintRead> {
+  const t = await getTask(db, taskId);
   if (!t) return { kind: "infra-failed", reason: "the lint task is gone" };
   if (t.state === "queued" || t.state === "claimed" || t.state === "running") return { kind: "pending" };
   // A tests step that timed out fails the task, but everything before it finished: its output is read as an inconclusive test run.
   const testsTimedOut = t.state === "failed" && t.plan.some((p) => p.name === TESTS_STEP) && t.results.some((r) => r.step === TESTS_STEP && r.timedOut) && t.results.filter((r) => r.step !== TESTS_STEP).every((r) => r.exitCode === 0 && !r.timedOut);
   if (t.state !== "done" && !testsTimedOut) return { kind: "infra-failed", reason: `the lint task ${t.state}${t.summary ? `: ${t.summary.slice(0, 200)}` : ""}` };
-  const patch = (db.prepare("SELECT patch FROM build_tasks WHERE id = ?").get(taskId) as { patch: string | null } | undefined)?.patch ?? "";
-  const fmt = artifactText(db, taskId, FORMAT_ARTIFACT);
-  const clippy = artifactText(db, taskId, CLIPPY_ARTIFACT);
+  const patch = (await db.prepare("SELECT patch FROM build_tasks WHERE id = ?").get(taskId) as { patch: string | null } | undefined)?.patch ?? "";
+  const fmt = await artifactText(db, taskId, FORMAT_ARTIFACT);
+  const clippy = await artifactText(db, taskId, CLIPPY_ARTIFACT);
   if (clippy === null) return { kind: "infra-failed", reason: "the lint task returned no clippy output" };
-  const findings = [...formatErrorFindings(artifactText(db, taskId, FORMAT_ERR_ARTIFACT) ?? ""), ...findingsOf(clippy, artifactText(db, taskId, CLIPPY_ERR_ARTIFACT) ?? "", o.against ?? patch)];
+  const findings = [...formatErrorFindings(await artifactText(db, taskId, FORMAT_ERR_ARTIFACT) ?? ""), ...findingsOf(clippy, await artifactText(db, taskId, CLIPPY_ERR_ARTIFACT) ?? "", o.against ?? patch)];
   let testsNote: string | undefined;
   if (t.plan.some((p) => p.name === TESTS_STEP)) {
-    const num = (name: string): number | null => { const v = artifactText(db, taskId, name); const n = v === null ? NaN : Number(v.trim()); return Number.isInteger(n) ? n : null; };
-    const c = classifyTests({ text: artifactText(db, taskId, TESTS_ARTIFACT), exit: num(TESTS_EXIT_ARTIFACT), rerunText: artifactText(db, taskId, TESTS_RERUN_ARTIFACT), rerunExit: num(TESTS_RERUN_EXIT_ARTIFACT), timedOut: testsTimedOut });
+    const num = async (name: string): Promise<number | null> => { const v = await artifactText(db, taskId, name); const n = v === null ? NaN : Number(v.trim()); return Number.isInteger(n) ? n : null; };
+    const c = classifyTests({ text: await artifactText(db, taskId, TESTS_ARTIFACT), exit: await num(TESTS_EXIT_ARTIFACT), rerunText: await artifactText(db, taskId, TESTS_RERUN_ARTIFACT), rerunExit: await num(TESTS_RERUN_EXIT_ARTIFACT), timedOut: testsTimedOut });
     if (c.kind === "failed") findings.push(...testFindings(c));
     else if (c.kind === "inconclusive") testsNote = c.note;
   }

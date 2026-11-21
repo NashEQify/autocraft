@@ -1,12 +1,12 @@
 // Liveness and readiness probes for the dashboard and the runner. No auth and no data in the answer.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { DatabaseSync } from "node:sqlite";
 import { parseListen } from "./dash/server/config.ts";
+import type { Db } from "./db/index.ts";
 
 /** True when the database answers a trivial query. */
-export function dbReady(db: DatabaseSync): boolean {
+export async function dbReady(db: Db): Promise<boolean> {
   try {
-    db.prepare("SELECT 1").get();
+    await db.prepare("SELECT 1").get();
     return true;
   } catch {
     return false;
@@ -17,10 +17,10 @@ export function dbReady(db: DatabaseSync): boolean {
 export const PROBE_HEADERS = { "x-content-type-options": "nosniff", "x-frame-options": "DENY", "content-security-policy": "default-src 'none'" };
 
 /** Answers GET/HEAD /healthz (process up) and /readyz (`ready()`); returns false for any other request. */
-export function serveHealth(req: IncomingMessage, res: ServerResponse, ready: () => boolean): boolean {
+export async function serveHealth(req: IncomingMessage, res: ServerResponse, ready: () => Promise<boolean>): Promise<boolean> {
   const path = (req.url ?? "").split("?")[0];
   if ((req.method !== "GET" && req.method !== "HEAD") || (path !== "/healthz" && path !== "/readyz")) return false;
-  const ok = path === "/healthz" || ready();
+  const ok = path === "/healthz" || await ready();
   const body = ok ? "ok\n" : "not ready\n";
   res.writeHead(ok ? 200 : 503, { ...PROBE_HEADERS, "content-type": "text/plain; charset=utf-8", "cache-control": "no-store", "content-length": Buffer.byteLength(body) });
   res.end(req.method === "HEAD" ? undefined : body);
@@ -28,10 +28,10 @@ export function serveHealth(req: IncomingMessage, res: ServerResponse, ready: ()
 }
 
 /** A listener that serves only the probes (AUTOCRAFT_HEALTH_LISTEN, host:port). */
-export async function startHealthServer(listen: string, ready: () => boolean): Promise<{ url: string; close: () => Promise<void> }> {
+export async function startHealthServer(listen: string, ready: () => Promise<boolean>): Promise<{ url: string; close: () => Promise<void> }> {
   const { host, port } = parseListen(listen);
-  const server: Server = createServer({ requestTimeout: 10_000, headersTimeout: 5_000, maxHeaderSize: 4 * 1024 }, (req, res) => {
-    if (!serveHealth(req, res, ready)) {
+  const server: Server = createServer({ requestTimeout: 10_000, headersTimeout: 5_000, maxHeaderSize: 4 * 1024 }, async (req, res) => {
+    if (!await serveHealth(req, res, ready)) {
       res.writeHead(404, { ...PROBE_HEADERS, "content-type": "text/plain; charset=utf-8" });
       res.end("not found\n");
     }

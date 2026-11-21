@@ -10,18 +10,18 @@ import { sniff } from "../src/build/artifacts.ts";
 import { authenticate, createEnv, hello, listEnvs, rotateKey, updateEnv } from "../src/build/envs.ts";
 import { appendLog, MAX_LOG_BYTES, cancelTask, claim, createTask, getTask } from "../src/build/tasks.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
-import { connect } from "../src/db.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "build-test-"));
 process.env.AUTOCRAFT_ARTIFACT_DIR = join(dir, "artifacts");
-const db = connect(join(dir, "build.db"));
+const db = await connectDb(join(dir, "build.db"));
 const SHA = "a".repeat(40);
 const PLAN = [{ name: "t", cmd: ["true"], network: "none" as const, timeoutSec: 10 }];
 const CAPS = { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: false, gpu: false, toolchains: ["rust-stable", "node-24"] };
@@ -29,22 +29,22 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 
 let n = 0;
 /** A registered, enabled environment that has said hello. */
-function env(opts: { slots?: number; caps?: Partial<typeof CAPS>; enabled?: boolean } = {}) {
+async function env(opts: { slots?: number; caps?: Partial<typeof CAPS>; enabled?: boolean } = {}) {
   const id = `env-${++n}`;
-  const key = createEnv(db, { id, label: id, kind: "local-sandbox", slots: opts.slots ?? 2 }, "op").key!;
-  hello(db, id, { version: "1.0", capabilities: { ...CAPS, ...opts.caps }, slots: 8 });
-  if (opts.enabled === false) updateEnv(db, id, { enabled: false }, "op");
+  const key = (await createEnv(db, { id, label: id, kind: "local-sandbox", slots: opts.slots ?? 2 }, "op")).key!;
+  await hello(db, id, { version: "1.0", capabilities: { ...CAPS, ...opts.caps }, slots: 8 });
+  if (opts.enabled === false) await updateEnv(db, id, { enabled: false }, "op");
   return { id, key };
 }
-const task = (over: Partial<Parameters<typeof createTask>[1]> = {}) => createTask(db, { step: "verify", repo: "open-app", headSha: SHA, plan: PLAN, ...over });
-const clear = () => db.exec("DELETE FROM build_tasks; DELETE FROM build_task_logs; DELETE FROM build_artifacts");
+const task = async (over: Partial<Parameters<typeof createTask>[1]> = {}) => await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, plan: PLAN, ...over });
+const clear = async () => await db.script("DELETE FROM build_tasks; DELETE FROM build_task_logs; DELETE FROM build_artifacts");
 
-before(() => {
-  db.exec("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 0)");
-  db.exec("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'internal')");
+before(async () => {
+  await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 0)");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'internal')");
 });
-after(() => {
-  db.close();
+after(async () => {
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -81,24 +81,24 @@ describe("worker API", () => {
     });
 
   test("keys: missing, wrong, other environment's and rotated keys are refused", async () => {
-    const a = env(), b = env();
+    const a = await env(), b = await env();
     assert.equal((await call(null, "/worker/claim", { free: 1 })).status, 401);
     assert.equal((await call("cwk_nope_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "/worker/claim", { free: 1 })).status, 401);
     assert.equal((await call(a.key.slice(0, -1) + "x", "/worker/claim", { free: 1 })).status, 401);
     assert.equal((await call(a.key, "/worker/claim", { free: 1 })).status, 200);
-    assert.equal(authenticate(db, a.key)!.id, a.id);
-    assert.equal(authenticate(db, b.key)!.id, b.id);
-    const { key } = rotateKey(db, a.id, "op");
+    assert.equal((await authenticate(db, a.key))!.id, a.id);
+    assert.equal((await authenticate(db, b.key))!.id, b.id);
+    const { key } = await rotateKey(db, a.id, "op");
     assert.equal((await call(a.key, "/worker/claim", { free: 1 })).status, 401);
     assert.equal((await call(key, "/worker/claim", { free: 1 })).status, 200);
-    assert.ok(!(db.prepare("SELECT key_hash FROM build_envs WHERE id = ?").get(a.id) as { key_hash: string }).key_hash.includes(key));   // only a hash is stored
+    assert.ok(!(await db.prepare("SELECT key_hash FROM build_envs WHERE id = ?").get(a.id) as { key_hash: string }).key_hash.includes(key));   // only a hash is stored
   });
 
   test("a task of another environment cannot be touched", async () => {
-    clear();
-    const a = env(), b = env();
-    const id = task();
-    claim(db, a.id, 1);
+    await clear();
+    const a = await env(), b = await env();
+    const id = await task();
+    await claim(db, a.id, 1);
     assert.equal((await call(b.key, `/worker/tasks/${id}/heartbeat`)).status, 409);
     assert.equal((await call(b.key, `/worker/tasks/${id}/log`, { step: "t", chunk: "x" })).status, 409);
     assert.equal((await call(a.key, `/worker/tasks/${id}/start`)).status, 200);
@@ -106,34 +106,34 @@ describe("worker API", () => {
 
 
 
-  test("log appends stop at the cap and the stored bytes never pass it", () => {
-    clear();
-    const e = env();
-    const id = task();
-    claim(db, e.id, 1);
+  test("log appends stop at the cap and the stored bytes never pass it", async () => {
+    await clear();
+    const e = await env();
+    const id = await task();
+    await claim(db, e.id, 1);
     const chunk = "x".repeat(60 * 1024);
     let last = { truncated: false };
-    for (let i = 0; i < Math.ceil(MAX_LOG_BYTES / chunk.length) + 3; i++) last = appendLog(db, e.id, id, "t", chunk);
+    for (let i = 0; i < Math.ceil(MAX_LOG_BYTES / chunk.length) + 3; i++) last = await appendLog(db, e.id, id, "t", chunk);
     assert.equal(last.truncated, true);
-    assert.equal((db.prepare("SELECT log_bytes FROM build_tasks WHERE id = ?").get(id) as { log_bytes: number }).log_bytes, MAX_LOG_BYTES);
-    const stored = (db.prepare("SELECT SUM(LENGTH(chunk)) AS n FROM build_task_logs WHERE task_id = ?").get(id) as { n: number }).n;
+    assert.equal((await db.prepare("SELECT log_bytes FROM build_tasks WHERE id = ?").get(id) as { log_bytes: number }).log_bytes, MAX_LOG_BYTES);
+    const stored = (await db.prepare("SELECT SUM(LENGTH(chunk)) AS n FROM build_task_logs WHERE task_id = ?").get(id) as { n: number }).n;
     assert.ok(stored <= MAX_LOG_BYTES + 100, `stored ${stored}`);
   });
 
   test("hello stores capabilities; bad ones are refused", async () => {
-    const e = env();
+    const e = await env();
     assert.equal((await call(e.key, "/worker/hello", { version: "2.1", slots: 3, capabilities: { ...CAPS, os: "plan9" } })).status, 400);
     const ok = await call(e.key, "/worker/hello", { version: "2.1", slots: 3, capabilities: CAPS });
     assert.deepEqual(await ok.json(), { envId: e.id, label: e.id, slots: 2 });
-    assert.equal(listEnvs(db).find((x) => x.id === e.id)!.version, "2.1");
+    assert.equal((await listEnvs(db)).find((x) => x.id === e.id)!.version, "2.1");
   });
 
 
   test("artifacts: only PNG, JSON, JUnit XML and UTF-8 text are accepted; the type comes from the bytes", async () => {
-    clear();
-    const e = env();
-    const id = task();
-    claim(db, e.id, 1);
+    await clear();
+    const e = await env();
+    const id = await task();
+    await claim(db, e.id, 1);
     const put = (name: string, body: Buffer | string, type = "application/octet-stream") => call(e.key, `/worker/tasks/${id}/artifacts/${name}`, body, "PUT", type);
     assert.equal((await put("shot.png", PNG, "text/html")).status, 200);
     assert.equal((await put("r.json", '{"a":1}')).status, 200);
@@ -144,7 +144,7 @@ describe("worker API", () => {
     assert.equal((await put("empty.txt", "")).status, 400);
     assert.equal((await put("..%2Fescape", "x")).status, 400);
     assert.equal((await put(".hidden", "x")).status, 400);
-    const types = Object.fromEntries(getTask(db, id)!.artifacts.map((a) => [a.name, a.contentType]));
+    const types = Object.fromEntries((await getTask(db, id))!.artifacts.map((a) => [a.name, a.contentType]));
     assert.deepEqual(types, { "junit.xml": "application/xml", "page.html": "text/plain", "r.json": "application/json", "shot.png": "image/png" });
     assert.equal(sniff(Buffer.from("<html>")), "text/plain");
     assert.equal(sniff(Buffer.from("{broken")), "text/plain");
@@ -156,12 +156,12 @@ describe("dashboard API", () => {
   let stop: () => Promise<void>;
   let hiddenTask = 0, openTask = 0;
   before(async () => {
-    clear();
-    db.exec("DELETE FROM build_envs");
-    addLogin(db, "cli", "boss", "operator", null);
-    addLogin(db, "cli", "viewer1", "viewer", null);
-    addLogin(db, "cli", "maint1", "maintainer", null);
-    scopeToTracked(db);
+    await clear();
+    await db.script("DELETE FROM build_envs");
+    await addLogin(db, "cli", "boss", "operator", null);
+    await addLogin(db, "cli", "viewer1", "viewer", null);
+    await addLogin(db, "cli", "maint1", "maintainer", null);
+    await scopeToTracked(db);
     const perms = join(dir, "perms.json");
     writeFileSync(perms, "{}");
     const s = await startServer({
@@ -170,8 +170,8 @@ describe("dashboard API", () => {
     });
     base = s.url;
     stop = s.close;
-    openTask = task({ repo: "open-app" });
-    hiddenTask = task({ repo: "vault" });
+    openTask = await task({ repo: "open-app" });
+    hiddenTask = await task({ repo: "vault" });
   });
   after(() => stop());
 
@@ -231,17 +231,17 @@ describe("dashboard API", () => {
     assert.deepEqual(await v.get("/api/envs"), []);
     const rot = (await (await o.send(`/api/envs/${e.id}/rotate-key`, { method: "POST", body: {} })).json()) as { key: string };
     assert.notEqual(rot.key, key);
-    assert.equal(authenticate(db, key), null);
+    assert.equal(await authenticate(db, key), null);
     assert.equal((await o.send(`/api/tasks/${openTask}/cancel`, { method: "POST", body: {} })).status, 200);
-    const actions = (db.prepare("SELECT action FROM audit WHERE action LIKE 'env-%' OR action = 'task-cancel' ORDER BY rowid").all() as { action: string }[]).map((r) => r.action);
+    const actions = (await db.prepare("SELECT action FROM audit WHERE action LIKE 'env-%' OR action = 'task-cancel' ORDER BY rowid").all() as { action: string }[]).map((r) => r.action);
     assert.ok(["env-create", "env-change", "env-rotate-key", "task-cancel"].every((a) => actions.includes(a)), actions.join());
   });
 
   test("artifact downloads are attachments with nosniff and a sandbox policy; PNG is inline", async () => {
-    clear();
-    const e = env();
-    const id = task({ repo: "open-app" });
-    claim(db, e.id, 1);
+    await clear();
+    const e = await env();
+    const id = await task({ repo: "open-app" });
+    await claim(db, e.id, 1);
     const w = await startWorkerServer({ db, listen: "127.0.0.1:0" });
     try {
       const put = (name: string, body: Buffer | string) => fetch(`${w.url}/worker/tasks/${id}/artifacts/${name}`, { method: "PUT", headers: { authorization: `Bearer ${e.key}` }, body: typeof body === "string" ? body : new Uint8Array(body) });
@@ -264,26 +264,26 @@ describe("dashboard API", () => {
     assert.equal(png.headers.get("content-security-policy"), "sandbox");
     assert.equal((await v.send(`/api/tasks/${id}/artifacts/missing.txt`)).status, 404);
     assert.equal((await v.send(`/api/tasks/${id}/artifacts/..%2F..%2Fbuild.db`)).status, 404);
-    const hidden = task({ repo: "vault" });
+    const hidden = await task({ repo: "vault" });
     assert.equal((await v.send(`/api/tasks/${hidden}/artifacts/x.txt`)).status, 404);
   });
 });
 
 describe("cancel and the worker API limiter", () => {
-  test("cancelling a claimed task records the cancel; a finished task is a 409 with no audit row", () => {
-    clear();
-    const e = env();
-    const id = task();
-    claim(db, e.id, 1);
-    assert.equal(getTask(db, id)!.state, "claimed");
-    const t = cancelTask(db, id, "op");
+  test("cancelling a claimed task records the cancel; a finished task is a 409 with no audit row", async () => {
+    await clear();
+    const e = await env();
+    const id = await task();
+    await claim(db, e.id, 1);
+    assert.equal((await getTask(db, id))!.state, "claimed");
+    const t = await cancelTask(db, id, "op");
     assert.equal(t.state, "cancelled");
     assert.equal(t.cancelRequested, true);
     assert.equal(t.summary, "Cancelled by an operator.");
-    const audits = () => (db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'task-cancel'").get() as { n: number }).n;
-    const before = audits();
-    assert.throws(() => cancelTask(db, id, "op"), /already cancelled/);
-    assert.equal(audits(), before);
+    const audits = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'task-cancel'").get() as { n: number }).n;
+    const before = await audits();
+    await assert.rejects(async () => await cancelTask(db, id, "op"), /already cancelled/);
+    assert.equal(await audits(), before);
   });
 
   test("the failed-key limiter persists across requests: the 31st wrong key is a 429", async () => {

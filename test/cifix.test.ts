@@ -3,11 +3,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, mock, test } from "node:test";
-import type { DatabaseSync } from "node:sqlite";
 import { spawnSync } from "node:child_process";
 import { setCommentApproval } from "../src/act/approval.ts";
 import { storeArtifact, tempPath } from "../src/build/artifacts.ts";
-import { connect } from "../src/db.ts";
 import { FORMAT_ARTIFACT, gitFormatDiff, runCifix, type CifixDeps } from "../src/cifix/index.ts";
 import { formattingOnly, guardPatch } from "../src/cifix/guard.ts";
 import { parseFailedLog } from "../src/cifix/logs.ts";
@@ -22,6 +20,8 @@ import type { Querier } from "../src/mirror.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
+import type { Db } from "../src/db/index.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "cifix-test-"));
@@ -40,18 +40,18 @@ function git(cwd: string, ...args: string[]): string {
 type Opts = { canModify?: boolean; push?: boolean; comment?: boolean; ci?: boolean; verdict?: string; overall?: string; head?: string };
 
 /** One PR (#7) at `head` whose gate check failed. */
-function fresh(head: string, o: Opts = {}): DatabaseSync {
-  const db = connect(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
+async function fresh(head: string, o: Opts = {}): Promise<Db> {
+  const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
+  await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
     VALUES ('app', 7, 'pr', 'OPEN', 'Rename a to b', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(head);
-  db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', ?, 'looks right', '[]', 1, 'full')`)
+  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', ?, 'looks right', '[]', 1, 'full')`)
     .run(head, o.verdict ?? "take");
-  db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
+  await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
     VALUES ('app', 7, ?, 'OPEN', 0, ?, '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', ?, '${T1}')`).run(head, o.overall ?? "failure", o.canModify === false ? 0 : 1);
-  db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1) ON CONFLICT DO NOTHING").run(T0);
-  if (o.push !== false) setPushApproval(db, "op", "app", true);
-  if (o.comment) setCommentApproval(db, "op", "app", true);
-  if (o.ci) setCiApproval(db, "op", "app", true);
+  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1) ON CONFLICT DO NOTHING").run(T0);
+  if (o.push !== false) await setPushApproval(db, "op", "app", true);
+  if (o.comment) await setCommentApproval(db, "op", "app", true);
+  if (o.ci) await setCiApproval(db, "op", "app", true);
   return db;
 }
 
@@ -212,7 +212,7 @@ function world(opts: { log?: string; reply?: string | null; check?: string | nul
 }
 
 const spreadDiff = (path: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n` + Array.from({ length: 24 }, (_, i) => 1 + i * 250).map((n) => `@@ -${n} +${n} @@\n-x\n+fn f${n}() {}\n`).join("");
-const rows = (db: DatabaseSync, sql: string) => (db.prepare(sql).all() as Record<string, unknown>[]).map((r) => ({ ...r }));
+const rows = async (db: Db, sql: string) => (await db.prepare(sql).all() as Record<string, unknown>[]).map((r) => ({ ...r }));
 
 describe("code failure", () => {
   test("a file over the size limit fails without a checkout and is listed by path alone with one", async () => {
@@ -221,14 +221,14 @@ describe("code failure", () => {
     const asked: CifixPr[] = [];
     held.deps.fetchDiff = async () => ({ ok: true, text: spreadDiff("src/lib.rs") });
     held.deps.ask = async (_db, input) => { asked.push(...input); return GOOD; };
-    await runCifix(fresh(held.head), { repo: "app", dryRun: false }, () => {}, held.deps);
+    await runCifix(await fresh(held.head), { repo: "app", dryRun: false }, () => {}, held.deps);
     assert.equal(asked.length, 0);
 
     const w = world({ lib });
     w.deps.fetchDiff = async () => ({ ok: true, text: spreadDiff("src/lib.rs") });
     w.deps.ask = async (_db, input) => { asked.push(...input); return GOOD; };
     w.deps.checkout = async () => "/checkout";
-    await runCifix(fresh(w.head), { repo: "app", dryRun: false }, () => {}, w.deps);
+    await runCifix(await fresh(w.head), { repo: "app", dryRun: false }, () => {}, w.deps);
     assert.equal(asked.length, 1);
     assert.deepEqual(asked[0]!.files, [{ path: "src/lib.rs" }]);
     assert.equal(asked[0]!.repo_dir, REPO_PATH);
@@ -250,12 +250,12 @@ describe("format failure", () => {
   /** Runs the step to the queued formatter task, gives the task `diff` as its result and applies it. */
   async function formatRun(w: World, diff: string | null, db = fresh(w.head)) {
     await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps);
-    const task = rows(db, "SELECT id FROM build_tasks")[0]!;
-    db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T2, Number(task.id));
+    const task = (await rows(db, "SELECT id FROM build_tasks"))[0]!;
+    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(T2, Number(task.id));
     if (diff !== null) {
       const tmp = tempPath(Number(task.id));
       writeFileSync(tmp, diff);
-      storeArtifact(db, Number(task.id), FORMAT_ARTIFACT, tmp);
+      await storeArtifact(db, Number(task.id), FORMAT_ARTIFACT, tmp);
     }
     return { db, summary: await runCifix(db, { repo: "app", dryRun: false }, () => {}, w.deps) };
   }
@@ -288,7 +288,7 @@ describe("format failure", () => {
     const mk = (from: string, to: string) => `diff -uN a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,2 @@\n-${from}\n+${to}\n fn main() { b(); }\n`;
     for (const [from, to] of [["fn a() {}", 'fn a() { let s = "a b"; }'], ["fn a() {}", "fn a() { x / *p; }"]]) {
       const w = world({ log: FMT_LOG });
-      const db = fresh(w.head);
+      const db = await fresh(w.head);
       // The head holds the spaced version; the "formatter" result drops the space.
       git(w.fork, "update-ref", "refs/heads/unused", w.head);
       const spaced = mk(from!, to!);
@@ -315,7 +315,7 @@ describe("infrastructure failure", () => {
 
 describe("unsure carries across the pushed head", () => {
   const review = (sure: boolean) => ({ ref: "x", verdict: "take" as const, sure, reason: sure ? "sure" : "unsure", fixes: [], risks: ["r"], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] });
-  const save = (db: DatabaseSync, head: string, sure: boolean) => saveOpus(db, null, { repo: "app", number: 1, head_oid: head }, { mode: "full", base: null, model: "m", review: review(sure) });
+  const save = async (db: Db, head: string, sure: boolean) => await saveOpus(db, null, { repo: "app", number: 1, head_oid: head }, { mode: "full", base: null, model: "m", review: review(sure) });
 
 });
 
@@ -339,35 +339,35 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     const opts = { canModify: false, commentUnsent: true };
     const w = world(opts);
     w.deps.now = () => new Date();
-    const db = fresh(w.head, { canModify: false, comment: true });
+    const db = await fresh(w.head, { canModify: false, comment: true });
     const out: string[] = [];
     const run = () => runCifix(db, { repo: "app", dryRun: false }, (l) => out.push(l), w.deps);
-    const states = () => rows(db, "SELECT state FROM ci_fixes ORDER BY rowid").map((r) => r.state);
+    const states = async () => (await rows(db, "SELECT state FROM ci_fixes ORDER BY rowid")).map((r) => r.state);
     const comments = () => w.log.filter((l) => l.startsWith("comment:")).length;
     await run();
-    assert.deepEqual(states(), ["linting"], out.join("\n"));
-    const task = Number(rows(db, "SELECT id FROM build_tasks")[0]!.id);
-    db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(new Date().toISOString(), task);
+    assert.deepEqual(await states(), ["linting"], out.join("\n"));
+    const task = Number((await rows(db, "SELECT id FROM build_tasks"))[0]!.id);
+    await db.prepare("UPDATE build_tasks SET state = 'done', ended_at = ? WHERE id = ?").run(new Date().toISOString(), task);
     const tmp = tempPath(task);
     writeFileSync(tmp, '{"reason":"build-finished","success":true}\n');
-    storeArtifact(db, task, CLIPPY_ARTIFACT, tmp);
+    await storeArtifact(db, task, CLIPPY_ARTIFACT, tmp);
 
     await run();
     assert.equal(comments(), 1);
-    assert.deepEqual(states(), ["linting", "comment-unsent"], "the stored patch keeps its row, a try");
+    assert.deepEqual(await states(), ["linting", "comment-unsent"], "the stored patch keeps its row, a try");
 
     mock.timers.setTime(at + 5 * 60_000);
     await run();
     assert.equal(comments(), 1, "not before the backoff ends");
-    assert.deepEqual(states(), ["linting", "comment-unsent"]);
+    assert.deepEqual(await states(), ["linting", "comment-unsent"]);
 
     mock.timers.setTime(at + 11 * 60_000);
     opts.commentUnsent = false;
     await run();
     assert.equal(comments(), 2);
-    assert.deepEqual(states(), ["asked", "comment-unsent"]);
+    assert.deepEqual(await states(), ["asked", "comment-unsent"]);
     assert.equal(w.log.filter((l) => l === "model").length, 1);
-    assert.equal(rows(db, "SELECT id FROM build_tasks").length, 1);
+    assert.equal((await rows(db, "SELECT id FROM build_tasks")).length, 1);
   } finally {
     mock.timers.reset();
   }

@@ -5,10 +5,8 @@
 // from a shell. Idempotent: items with a decision or a later stage are
 // skipped, so a re-run or an interrupted run asks only what is still missing.
 import { jobItem } from "../runner/job-items.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type { Item } from "../classify/parse.ts";
 import { loadItems } from "../classify/run.ts";
-import { connect } from "../db.ts";
 import { trackedNames } from "../repos.ts";
 import { buildDecision } from "./decision.ts";
 import { ask } from "../decisions.ts";
@@ -22,6 +20,9 @@ import { setAsideLapsedScope } from "../merge/withdraw.ts";
 import { plannedItems } from "../core/select-items.ts";
 import { ownLogins } from "../github/identity.ts";
 import { isBotLogin } from "../review/bots.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export type DecideParams = {
   /** Repo names; empty or missing means every tracked repo. */
@@ -50,18 +51,18 @@ export type Log = (line: string) => void;
 const now = () => new Date().toISOString();
 
 /** Items with their GitHub labels and first non-bot comments, for the summary prompt. */
-export function loadSummaryItems(db: DatabaseSync, refs: { repo: string; number: number }[]): Item[] {
+export async function loadSummaryItems(db: Db, refs: { repo: string; number: number }[]): Promise<Item[]> {
   const labels = db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?");
   const comments = db.prepare(`SELECT author, body FROM comments WHERE repo = ? AND number = ? AND COALESCE(TRIM(body), '') <> ''
     ORDER BY created_at LIMIT 100`);
   // The mirror stores bot logins without `[bot]`: drop our own logins and known bots by name.
-  const own = ownLogins(db, "");
-  return loadItems(db, refs).map((i) => {
+  const own = await ownLogins(db, "");
+  return await mapSeq((await loadItems(db, refs)), async (i) => {
     let l: unknown = [];
-    try { l = JSON.parse((labels.get(i.repo, i.number) as { labels: string | null }).labels ?? "[]"); } catch { /* none */ }
+    try { l = JSON.parse((await labels.get(i.repo, i.number) as { labels: string | null }).labels ?? "[]"); } catch { /* none */ }
     return {
       ...i, labels: Array.isArray(l) ? l.filter((x): x is string => typeof x === "string") : [],
-      comments: (comments.all(i.repo, i.number) as { author: string | null; body: string }[]).filter((x) => !x.author || (!own.has(x.author) && !isBotLogin(x.author))).slice(0, 3),
+      comments: (await comments.all(i.repo, i.number) as { author: string | null; body: string }[]).filter((x) => !x.author || (!own.has(x.author) && !isBotLogin(x.author))).slice(0, 3),
     };
   });
 }
@@ -70,21 +71,20 @@ function count(byRepo: Record<string, RepoCount>, repo: string): RepoCount {
   return (byRepo[repo] ??= { candidates: 0, needsDecision: 0, scopeDisagreement: 0, asked: 0 });
 }
 
-export async function runDecide(db: DatabaseSync, params: DecideParams = {}, log: Log = console.log): Promise<DecideResult> {
+export async function runDecide(db: Db, params: DecideParams = {}, log: Log = console.log): Promise<DecideResult> {
   if (params.limit !== undefined && !(Number.isInteger(params.limit) && params.limit >= 0)) throw new Error("limit must be a whole number ≥ 0");
   const total = params.limit ?? DEFAULT_LIMIT;
-  const tracked = new Set(trackedNames(db));
+  const tracked = new Set(await trackedNames(db));
   const untracked = (params.repos ?? []).filter((r) => !tracked.has(r));
   if (untracked.length) throw new Error(`not tracked: ${untracked.join(", ")}`);
-  const run = params.run ?? latestRun(db);
+  const run = params.run ?? await latestRun(db);
   const result: DecideResult = { run, dryRun: !!params.dryRun, byRepo: {}, asked: 0, prepared: 0, usageRun: null };
   const picked: Candidate[] = [];
   if (!run) log("decide: no classification run with Jev verdicts");
   else {
     const lookup = settledLookup(db, run);
-    const all: Candidate[] = plannedItems(db, "decide", { run, bucket: "new" })
-      .filter((p) => !params.repos?.length || params.repos.includes(p.facts.repo))
-      .map((p) => ({ repo: p.facts.repo, number: p.facts.number, reason: scopeReason(p.facts)!, settled: lookup(p.facts.repo, p.facts.number) }));
+    const all: Candidate[] = await mapSeq((await plannedItems(db, "decide", { run, bucket: "new" }))
+      .filter((p) => !params.repos?.length || params.repos.includes(p.facts.repo)), async (p) => ({ repo: p.facts.repo, number: p.facts.number, reason: scopeReason(p.facts)!, settled: await lookup(p.facts.repo, p.facts.number) }));
     picked.push(...all.slice(0, total));
     const reasonKey: Record<Reason, "needsDecision" | "scopeDisagreement"> = { "needs-decision": "needsDecision", "scope-disagreement": "scopeDisagreement" };
     for (const c of picked) {
@@ -101,19 +101,19 @@ export async function runDecide(db: DatabaseSync, params: DecideParams = {}, log
   // New decisions are asked first, without a model call; the prepare step below gives them (and every other open decision) its summary, pick and drafts.
   const at = now();
   const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'needs-decision', ?, 'decide', ?)");
-  const lapsed = unsettledScope(db);
+  const lapsed = await unsettledScope(db);
   for (const c of picked) {
-    const q = buildDecision(db, c);
+    const q = await buildDecision(db, c);
     // A maintainer's answer that no longer counts is set aside, so a fresh question takes its id.
-    if (lapsed.has(`${c.repo}#${c.number}`)) setAsideLapsedScope(db, q.id, at);
-    ask(db, [{ ...q, asked_at: at }]);
-    stage.run(c.repo, c.number, at, `scope decision ${q.id}`);
+    if (lapsed.has(`${c.repo}#${c.number}`)) await setAsideLapsedScope(db, q.id, at);
+    await ask(db, [{ ...q, asked_at: at }]);
+    await stage.run(c.repo, c.number, at, `scope decision ${q.id}`);
     count(result.byRepo, c.repo).asked++;
-    jobItem(db, c.repo, c.number, "asked a scope decision", log, q.id);
+    await jobItem(db, c.repo, c.number, "asked a scope decision", log, q.id);
   }
-  const due = prepareIds(db, params.repos);
-  const rowOf = due.length > total ? new Map((db.prepare("SELECT id, repo, number FROM decisions").all() as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r])) : new Map<string, { repo: string | null; number: number | null }>();
-  const ids = (due.length > total ? takersFirst(db, due, (id) => { const r = rowOf.get(id)?.repo; return r ? [r] : undefined; }, (id) => decisionRefs(rowOf.get(id)), "decide.prepare") : due).slice(0, total);
+  const due = await prepareIds(db, params.repos);
+  const rowOf = due.length > total ? new Map((await db.prepare("SELECT id, repo, number FROM decisions").all() as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r])) : new Map<string, { repo: string | null; number: number | null }>();
+  const ids = (due.length > total ? await takersFirst(db, due, (id) => { const r = rowOf.get(id)?.repo; return r ? [r] : undefined; }, (id) => decisionRefs(rowOf.get(id)), "decide.prepare") : due).slice(0, total);
   if (ids.length) {
     result.usageRun = usageRun;
     const r = await prepare(db, ids, {
@@ -155,7 +155,7 @@ export const commands = {
   decide: {
     summary: `decide [--repo R ...] [--limit N] [--run ID] [--dry-run]: ask scope decisions and prepare every open decision`,
     async run(args: string[]): Promise<void> {
-      const r = await runDecide(connect(), parseArgs(args), (l) => console.error(l));
+      const r = await runDecide(await openDb(), parseArgs(args), (l) => console.error(l));
       console.log(table(r));
     },
   },

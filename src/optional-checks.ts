@@ -1,8 +1,9 @@
 // Per-repo list of optional checks, set by an operator: checks whose failure does not stop a merge, make main red
 // or count as a failure to fix. Exact check names. Every other check must still be green.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "./dash/audit.ts";
 import { setting } from "./settings-read.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 const key = (repo: string) => `optional_checks:${repo}`;
 
@@ -16,30 +17,30 @@ const parseList = (value: string | undefined): string[] => {
   }
 };
 
-export function optionalChecks(db: DatabaseSync, repo: string): string[] {
-  return parseList(setting(db, key(repo)));
+export async function optionalChecks(db: Db, repo: string): Promise<string[]> {
+  return parseList(await setting(db, key(repo)));
 }
 
 /** optionalChecks() of every repo, read in one query. */
-export function optionalChecksOf(db: DatabaseSync): (repo: string) => string[] {
-  const rows = new Map((db.prepare("SELECT key, value FROM main.settings WHERE key LIKE 'optional!_checks:%' ESCAPE '!'").all() as { key: string; value: string }[]).map((r) => [r.key, r.value]));
+export async function optionalChecksOf(db: Db): Promise<(repo: string) => string[]> {
+  const rows = new Map((await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE 'optional!_checks:%' ESCAPE '!'").all() as { key: string; value: string }[]).map((r) => [r.key, r.value]));
   return (repo) => parseList(rows.get(key(repo)));
 }
 
-function save(db: DatabaseSync, repo: string, names: string[]): void {
-  if (!names.length) db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
-  else db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key(repo), JSON.stringify(names));
+async function save(db: Db, repo: string, names: string[]): Promise<void> {
+  if (!names.length) await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  else await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key(repo), JSON.stringify(names));
 }
 
 /** Returns false when nothing changed. */
-export function setOptionalCheck(db: DatabaseSync, by: string, repo: string, name: string, on: boolean): boolean {
+export async function setOptionalCheck(db: Db, by: string, repo: string, name: string, on: boolean): Promise<boolean> {
   const check = name.trim();
   if (!check) throw new Error("the check name is empty");
-  if (!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
-  const cur = optionalChecks(db, repo);
+  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  const cur = await optionalChecks(db, repo);
   if (cur.includes(check) === on) return false;
-  save(db, repo, on ? [...cur, check] : cur.filter((c) => c !== check));
-  audit(db, by, on ? "optional-check-add" : "optional-check-remove", repo, { check });
+  await save(db, repo, on ? [...cur, check] : cur.filter((c) => c !== check));
+  await audit(db, by, on ? "optional-check-add" : "optional-check-remove", repo, { check });
   return true;
 }
 
@@ -60,9 +61,9 @@ export function effectiveOverall(overall: string, checks: CheckLike[], optional:
 }
 
 /** effectiveOverall with the repo's list and the PR's stored checks (JSON text or parsed). */
-export function effectiveCi(db: DatabaseSync, repo: string, overall: string, checks: string | CheckLike[] | null | undefined): string {
+export async function effectiveCi(db: Db, repo: string, overall: string, checks: string | CheckLike[] | null | undefined): Promise<string> {
   if (overall !== "failure") return overall;
-  return effectiveCiWith(optionalChecks(db, repo), overall, checks);
+  return effectiveCiWith(await optionalChecks(db, repo), overall, checks);
 }
 
 /** effectiveCi with the repo's optional list given (optionalChecksOf). */
@@ -74,11 +75,11 @@ export function effectiveCiWith(optional: string[], overall: string, checks: str
 }
 
 /** Check names seen on the repo's recent PRs and default-branch heads, for the add control. */
-export function seenChecks(db: DatabaseSync, repo: string): string[] {
+export async function seenChecks(db: Db, repo: string): Promise<string[]> {
   const names = new Set<string>();
   const rows = [
-    ...db.prepare("SELECT checks FROM main.pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT 40").all(repo),
-    ...db.prepare("SELECT checks FROM main.main_ci WHERE repo = ? ORDER BY updated_at DESC LIMIT 10").all(repo),
+    ...await db.prepare("SELECT checks FROM main.pr_checks WHERE repo = ? ORDER BY fetched_at DESC LIMIT 40").all(repo),
+    ...await db.prepare("SELECT checks FROM main.main_ci WHERE repo = ? ORDER BY updated_at DESC LIMIT 10").all(repo),
   ] as { checks: string }[];
   for (const r of rows) {
     try { for (const c of JSON.parse(r.checks) as { name?: string }[]) if (c.name) names.add(c.name); } catch { /* skip */ }
@@ -91,13 +92,13 @@ export const commands = {
     summary: "optional-checks [--repo R] | add R NAME | remove R NAME: the checks whose failure does not stop a merge",
     async run(args: string[]): Promise<void> {
       const { connect } = await import("./db.ts");
-      const db = connect();
+      const db = await openDb();
       const [verb, repo, ...rest] = args;
       if (verb === "add" || verb === "remove") {
         const name = rest.join(" ");
         if (!repo || !name) { console.error("usage: autocraft-server optional-checks add|remove REPO NAME"); process.exit(2); }
         try {
-          const changed = setOptionalCheck(db, "cli", repo, name, verb === "add");
+          const changed = await setOptionalCheck(db, "cli", repo, name, verb === "add");
           console.log(changed ? `${repo}: ${verb === "add" ? "added" : "removed"} ${name}` : `${repo}: ${name} was ${verb === "add" ? "already" : "not"} listed`);
         } catch (e) {
           console.error((e as Error).message);
@@ -107,9 +108,9 @@ export const commands = {
       }
       const only = verb === "--repo" ? repo : undefined;
       if (verb && !only) { console.error("usage: autocraft-server optional-checks [--repo R] | add R NAME | remove R NAME"); process.exit(2); }
-      const repos = (db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name).filter((r) => !only || r === only);
+      const repos = (await db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name).filter((r) => !only || r === only);
       for (const r of repos) {
-        const list = optionalChecks(db, r);
+        const list = await optionalChecks(db, r);
         if (list.length || only) console.log(`${r}: ${list.length ? list.join("; ") : "none"}`);
       }
     },

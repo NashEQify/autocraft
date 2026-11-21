@@ -57,34 +57,34 @@ export function eventLines(e: Event): string[] {
 }
 
 /** Feeds raw stdout lines; calls `emit` for each progress line. Lines that are not JSON are ignored. */
-export function lineFeed(emit: (line: string) => void): (raw: string) => void {
-  return (raw) => {
+export function lineFeed(emit: (line: string) => Promise<void>): (raw: string) => Promise<void> {
+  return async (raw) => {
     if (!raw.startsWith("{")) return;
     try {
-      for (const l of eventLines(JSON.parse(raw) as Event)) emit(l);
+      for (const l of eventLines(JSON.parse(raw) as Event)) await emit(l);
     } catch { /* a partial or foreign line */ }
   };
 }
 
 /** Collapses bursts into at most one `write` per `ms`: the first call writes at once, later ones keep only the newest value and write when the interval has passed. `flush` writes a waiting value now. */
-export function coalesce<T>(write: (v: T) => void, ms = 1000, clock: () => number = Date.now): { push(v: T): void; flush(): void } {
+export function coalesce<T>(write: (v: T) => Promise<void>, ms = 1000, clock: () => number = Date.now): { push(v: T): Promise<void>; flush(): Promise<void> } {
   let last = -Infinity, waiting: { v: T } | null = null, timer: NodeJS.Timeout | null = null;
-  const run = () => {
+  const run = async () => {
     if (timer) clearTimeout(timer);
     timer = null;
     if (!waiting) return;
     const { v } = waiting;
     waiting = null;
     last = clock();
-    try { write(v); } catch { /* progress is best effort */ }
+    try { await write(v); } catch { /* progress is best effort */ }
   };
   return {
-    push(v) {
+    async push(v) {
       waiting = { v };
       const due = last + ms - clock();
-      if (due <= 0) run();
+      if (due <= 0) await run();
       else if (!timer) { timer = setTimeout(run, due); timer.unref(); }
     },
-    flush() { if (timer) run(); },
+    async flush() { if (timer) await run(); },
   };
 }

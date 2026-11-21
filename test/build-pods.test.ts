@@ -11,16 +11,16 @@ import type { KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { createTask, getTask } from "../src/build/tasks.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
-import { connect } from "../src/db.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "build-pods-"));
 process.env.AUTOCRAFT_ARTIFACT_DIR = join(dir, "artifacts");
-const db = connect(join(dir, "pods.db"));
-db.exec("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1); INSERT INTO repos (name, visibility) VALUES ('open-app', 'public')");
-after(() => {
-  db.close();
+const db = await connectDb(join(dir, "pods.db"));
+await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1); INSERT INTO repos (name, visibility) VALUES ('open-app', 'public')");
+after(async () => {
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -70,10 +70,10 @@ const kube = new FakeKube();
 const state = new LauncherState();
 const pass = () => launcherPass({ db, api: kube, defaultImage: null, log: () => {}, now: () => clock }, state);
 
-createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 2, settings: { image: "autocraft:test", toolchainImages: { "rust-stable": "rust-stable:test" } } }, "op");
+await createEnv(db, { id: "pods", label: "Pods", kind: "kubernetes", slots: 2, settings: { image: "autocraft:test", toolchainImages: { "rust-stable": "rust-stable:test" } } }, "op");
 
 test("a task runs through its pods and its results come from pod status", async () => {
-  const id = createTask(db, {
+  const id = await createTask(db, {
     step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] },
     plan: [
       { name: "fetch deps", cmd: ["cargo", "fetch"], network: "fetch", timeoutSec: 600 },
@@ -82,7 +82,7 @@ test("a task runs through its pods and its results come from pod status", async 
     ],
   });
   await pass();
-  assert.equal(getTask(db, id)!.state, "running");
+  assert.equal((await getTask(db, id))!.state, "running");
   assert.equal(kube.pvcs.size, 1);
   const taskPod = kube.only(id);
   const spec = taskPod.spec;
@@ -98,7 +98,7 @@ test("a task runs through its pods and its results come from pod status", async 
   assert.equal(c.image, "autocraft:test");
   assert.ok(c.resources.limits.cpu && c.resources.limits.memory && c.resources.limits["ephemeral-storage"]);
   const key = envOf(c).AUTOCRAFT_POD_KEY!;
-  assert.equal(authenticate(db, key)?.taskId, id);
+  assert.equal((await authenticate(db, key))?.taskId, id);
 
   // The key reads its task and nothing else: no result, no claim, no other task.
   const w = await startWorkerServer({ db, listen: "127.0.0.1:0" });
@@ -116,7 +116,7 @@ test("a task runs through its pods and its results come from pod status", async 
 
   kube.end(taskPod);
   await pass();
-  assert.equal(authenticate(db, key), null, "the task pod's key dies before repository code runs");
+  assert.equal(await authenticate(db, key), null, "the task pod's key dies before repository code runs");
   const source = kube.only(id);
   assert.equal(source.metadata.labels!["craft.build/network"], "fetch");
   assert.equal(envOf(source.spec.containers[0]).AUTOCRAFT_POD_KEY, undefined);
@@ -142,20 +142,20 @@ test("a task runs through its pods and its results come from pod status", async 
   await pass();
   const upload = kube.only(id);
   assert.equal(upload.metadata.labels!["craft.build/network"], "api");
-  assert.ok(authenticate(db, envOf(upload.spec.containers[0]).AUTOCRAFT_POD_KEY!));
+  assert.ok(await authenticate(db, envOf(upload.spec.containers[0]).AUTOCRAFT_POD_KEY!));
 
   kube.end(upload);
   await pass();
-  const t = getTask(db, id)!;
+  const t = (await getTask(db, id))!;
   assert.equal(t.state, "done");
   assert.deepEqual(t.results.map((r) => [r.step, r.exitCode]), [["fetch deps", 0], ["build", 0], ["test", 0]]);
   assert.equal(kube.pods.size, 0);
   assert.equal(kube.pvcs.size, 0);
-  assert.equal(authenticate(db, envOf(upload.spec.containers[0]).AUTOCRAFT_POD_KEY!), null);
+  assert.equal(await authenticate(db, envOf(upload.spec.containers[0]).AUTOCRAFT_POD_KEY!), null);
 });
 
 test("a failing step ends the task without running later pods", async () => {
-  const id = createTask(db, {
+  const id = await createTask(db, {
     step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] },
     plan: [
       { name: "build", cmd: ["cargo", "build"], network: "none", timeoutSec: 600 },
@@ -169,60 +169,60 @@ test("a failing step ends the task without running later pods", async () => {
   await pass();
   kube.end(kube.only(id), { "step-0": { exitCode: 101 } });
   await pass();
-  const t = getTask(db, id)!;
+  const t = (await getTask(db, id))!;
   assert.equal(t.state, "failed");
   assert.match(t.summary ?? "", /build failed \(exit 101\)/);
   assert.equal(kube.pods.size, 0);
 });
 
 test("a task whose pod disappears is requeued once, then failed", async () => {
-  const id = createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
+  const id = await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
   await pass();
   kube.pods.delete(kube.only(id).metadata.name);
   clock += 60_000;
   await pass();
   // Requeued, and claimed again in the same pass.
-  assert.equal((db.prepare("SELECT attempts FROM build_tasks WHERE id = ?").get(id) as { attempts: number }).attempts, 2);
+  assert.equal((await db.prepare("SELECT attempts FROM build_tasks WHERE id = ?").get(id) as { attempts: number }).attempts, 2);
   kube.pods.delete(kube.only(id).metadata.name);
   clock += 60_000;
   await pass();
-  const t = getTask(db, id)!;
+  const t = (await getTask(db, id))!;
   assert.equal(t.state, "failed");
   assert.match(t.summary ?? "", /disappeared/);
   assert.equal(kube.pods.size, 0);
   assert.equal(kube.pvcs.size, 0);
 });
 
-const queued = (id: number) => db.prepare("SELECT state, attempts FROM build_tasks WHERE id = ?").get(id) as { state: string; attempts: number };
-const runOf = (id: number) => db.prepare("SELECT stage, pod FROM build_pod_runs WHERE task_id = ?").get(id) as { stage: number; pod: string | null } | undefined;
-const simple = () => createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
+const queued = async (id: number) => await db.prepare("SELECT state, attempts FROM build_tasks WHERE id = ?").get(id) as { state: string; attempts: number };
+const runOf = async (id: number) => await db.prepare("SELECT stage, pod FROM build_pod_runs WHERE task_id = ?").get(id) as { stage: number; pod: string | null } | undefined;
+const simple = async () => await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
 const SOURCE_OK = JSON.stringify({ ok: true, env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null });
 
 test("claims that cannot start go back to the queue without using an attempt", async () => {
-  const a = simple(), b = simple();
+  const a = await simple(), b = await simple();
   kube.refuse = (kind) => kind === "pvc";
   await pass();
   kube.refuse = null;
-  for (const id of [a, b]) assert.deepEqual({ ...queued(id) }, { state: "queued", attempts: 0 });
-  assert.equal(runOf(a) ?? runOf(b), undefined);
+  for (const id of [a, b]) assert.deepEqual({ ...await queued(id) }, { state: "queued", attempts: 0 });
+  assert.equal(await runOf(a) ?? await runOf(b), undefined);
   clock += 61_000;
   await pass();
-  assert.equal(queued(a).state, "running");
-  assert.equal(queued(b).state, "running");
-  db.exec(`UPDATE build_tasks SET state = 'cancelled' WHERE id IN (${a}, ${b})`);
+  assert.equal((await queued(a)).state, "running");
+  assert.equal((await queued(b)).state, "running");
+  await db.script(`UPDATE build_tasks SET state = 'cancelled' WHERE id IN (${a}, ${b})`);
   await pass();
   assert.equal(kube.pods.size, 0);
 });
 
 test("a stage's pod that cannot be created is retried, not given up at once", async () => {
-  const id = simple();
+  const id = await simple();
   await pass();
   kube.end(kube.only(id));
   kube.refuse = (kind, labels) => kind === "pod" && labels["craft.build/stage"] === "1";
   await pass();
   kube.refuse = null;
-  assert.equal(queued(id).state, "running");
-  assert.deepEqual({ ...runOf(id) }, { stage: 1, pod: null });
+  assert.equal((await queued(id)).state, "running");
+  assert.deepEqual({ ...await runOf(id) }, { stage: 1, pod: null });
   await pass();
   assert.equal(kube.pods.size, 0, "waits for the backoff");
   clock += 20_000;
@@ -232,25 +232,25 @@ test("a stage's pod that cannot be created is retried, not given up at once", as
   await pass();
   kube.end(kube.only(id));
   await pass();
-  assert.equal(queued(id).state, "done");
+  assert.equal((await queued(id)).state, "done");
 });
 
 test("a pod on a lost node loses its task", async () => {
-  const id = simple();
+  const id = await simple();
   await pass();
   const first = kube.only(id);
   first.status = { phase: "Running" };
   first.metadata.deletionTimestamp = new Date(clock - 6 * 60_000).toISOString();
   await pass();
-  assert.equal(queued(id).attempts, 2, "requeued and claimed again");
+  assert.equal((await queued(id)).attempts, 2, "requeued and claimed again");
   const second = kube.only(id);
   assert.notEqual(second.metadata.name, first.metadata.name);
   second.status = { phase: "Unknown" };
   await pass();
-  assert.equal(queued(id).state, "running");
+  assert.equal((await queued(id)).state, "running");
   clock += 6 * 60_000;
   await pass();
-  const t = getTask(db, id)!;
+  const t = (await getTask(db, id))!;
   assert.equal(t.state, "failed");
   assert.match(t.summary ?? "", /stopped reporting/);
   assert.equal(kube.pods.size, 0);

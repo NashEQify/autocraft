@@ -4,7 +4,7 @@
 //   3. the one with clearly more activity: ACTIVITY_MARGIN more comments;
 //   4. the older one;
 //   5. the lower number.
-import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../db/index.ts";
 
 export const ACTIVITY_MARGIN = 5;
 
@@ -22,9 +22,9 @@ export function compareCanonical(x: CanonInfo, y: CanonInfo): number {
 }
 
 /** CanonInfo of the items, keyed by `repo#number`, in one query; an item not in the database has no entry. */
-export function canonInfoAll(db: DatabaseSync, items: { repo: string; number: number }[]): Map<string, CanonInfo> {
+export async function canonInfoAll(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, CanonInfo>> {
   // The issues merged PRs of these repos close, with each PR's list parsed once.
-  const rows = db.prepare(`WITH fixed AS MATERIALIZED (SELECT DISTINCT p.repo, f.value AS number FROM items p,
+  const rows = await db.prepare(`WITH fixed AS MATERIALIZED (SELECT DISTINCT p.repo, f.value AS number FROM items p,
       json_each(CASE WHEN json_valid(p.closing_issues) THEN p.closing_issues ELSE '[]' END) f
       WHERE p.kind = 'pr' AND p.state = 'MERGED' AND p.repo IN (SELECT value ->> 0 FROM json_each(?1)))
     SELECT i.repo || '#' || i.number AS k, i.number, i.state, i.created_at, COALESCE(i.comments_count, 0) AS comments,
@@ -34,7 +34,7 @@ export function canonInfoAll(db: DatabaseSync, items: { repo: string; number: nu
   return new Map(rows.map((r) => [r.k, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
 }
 
-export function canonInfo(db: DatabaseSync, repo: string, numbers: number[], known: Map<string, CanonInfo> = canonInfoAll(db, numbers.map((number) => ({ repo, number })))): CanonInfo[] {
+export function canonInfo(db: Db, repo: string, numbers: number[], known: Map<string, CanonInfo> = canonInfoAll(db, numbers.map((number) => ({ repo, number })))): CanonInfo[] {
   return numbers.map((n) => {
     const r = known.get(`${repo}#${n}`);
     if (!r) throw new Error(`${repo}#${n} is not in the database`);
@@ -43,7 +43,7 @@ export function canonInfo(db: DatabaseSync, repo: string, numbers: number[], kno
 }
 
 /** The item to keep, and a short reason for the decision card. */
-export function pickCanonical(db: DatabaseSync, repo: string, numbers: number[], known?: Map<string, CanonInfo>): { number: number; why: string } {
+export function pickCanonical(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): { number: number; why: string } {
   const sorted = canonInfo(db, repo, numbers, known).sort(compareCanonical);
   const [best, next] = sorted as [CanonInfo, CanonInfo | undefined];
   const why = !next ? "the only one"

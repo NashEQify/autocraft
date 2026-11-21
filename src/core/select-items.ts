@@ -1,13 +1,13 @@
 // The work of the item steps (classify, referee, prioritize, embed, dupes, decide, label, act, fix issue and their collect), taken from
 // the item Plans: facts are loaded once, decideItem decides, and the items whose plan holds the action come back in the order the
 // step works in. The steps keep their own work; none of them selects items on its own any more.
-import type { DatabaseSync } from "node:sqlite";
 import type { Item } from "../classify/parse.ts";
 import { decideItem } from "./decide-item.ts";
 import { inFlightNow } from "./select.ts";
 import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
 import type { PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
+import type { Db } from "../db/index.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
 
@@ -34,36 +34,36 @@ const score: Cmp = (a, b) => (a.facts.score === null ? 1 : 0) - (b.facts.score =
 const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind === "pr" ? 1 : 0);
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */
-function sortKeysOf(db: DatabaseSync, items: { repo: string; number: number }[]): Map<string, Keys> {
-  const rows = db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.created_at, '') AS created, COALESCE(i.updated_at, '') AS updated
+async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
+  const rows = await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.created_at, '') AS created, COALESCE(i.updated_at, '') AS updated
     FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as (Keys & { ref: string })[];
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
 /** The sort keys of a PlanSet's items, read on first use and kept with the set. */
 const planKeys = new WeakMap<PlanSet, Map<string, Keys>>();
-function planSortKeys(db: DatabaseSync, plans: PlanSet, items: { repo: string; number: number }[]): Map<string, Keys> {
+async function planSortKeys(db: Db, plans: PlanSet, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
   let m = planKeys.get(plans);
   if (!m) planKeys.set(plans, (m = new Map()));
   const missing = new Map<string, { repo: string; number: number }>();
   for (const x of items) if (!m.has(`${x.repo}#${x.number}`)) missing.set(`${x.repo}#${x.number}`, x);
-  if (missing.size) for (const [k, v] of sortKeysOf(db, [...missing.values()])) m.set(k, v);
+  if (missing.size) for (const [k, v] of await sortKeysOf(db, [...missing.values()])) m.set(k, v);
   return m;
 }
 
 /** Items the Plans say are due for `kind`, one entry per due action. */
-export function plannedItems(db: DatabaseSync, kind: ActionKind, opts: PlannedOptions = {}): PlannedItem[] {
+export async function plannedItems(db: Db, kind: ActionKind, opts: PlannedOptions = {}): Promise<PlannedItem[]> {
   const out: PlannedItem[] = [];
   let source: Iterable<{ facts: ItemFacts; plan: ItemPlan }>;
   if (opts.plans) {
     const refs = opts.refs ? new Set(opts.refs) : null;
     source = opts.plans.items.filter((p) => (!opts.repo || p.facts.repo === opts.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
-  } else source = loadItemFacts(db, opts).map((facts) => ({ facts, plan: decideItem(facts) }));
+  } else source = (await loadItemFacts(db, opts)).map((facts) => ({ facts, plan: decideItem(facts) }));
   for (const { facts, plan } of source) {
     for (const action of plan.actions) if (action.kind === kind && (opts.bucket === undefined || bucketOf(action) === opts.bucket)) out.push({ facts, plan, action });
   }
   if (out.length < 2) return out;
-  const stored = opts.plans ? planSortKeys(db, opts.plans, out.map((p) => p.facts)) : sortKeysOf(db, out.map((p) => p.facts));
+  const stored = opts.plans ? await planSortKeys(db, opts.plans, out.map((p) => p.facts)) : await sortKeysOf(db, out.map((p) => p.facts));
   const keys = new Map<PlannedItem, Keys>(out.map((p) => [p, stored.get(`${p.facts.repo}#${p.facts.number}`)!]));
   const created: Cmp = (a, b) => str(keys.get(a)!.created, keys.get(b)!.created);
   const updatedDesc: Cmp = (a, b) => str(keys.get(b)!.updated, keys.get(a)!.updated);
@@ -86,8 +86,8 @@ export function plannedItems(db: DatabaseSync, kind: ActionKind, opts: PlannedOp
 }
 
 /** The item as the model steps read it. */
-export function itemOf(db: DatabaseSync, repo: string, number: number): Item {
-  const r = db.prepare(`SELECT repo, number, kind, COALESCE(title, '') AS title, COALESCE(body, '') AS body, additions + deletions AS lines_changed,
+export async function itemOf(db: Db, repo: string, number: number): Promise<Item> {
+  const r = await db.prepare(`SELECT repo, number, kind, COALESCE(title, '') AS title, COALESCE(body, '') AS body, additions + deletions AS lines_changed,
     changed_files AS files_changed, author_association FROM items WHERE repo = ? AND number = ?`).get(repo, number) as Item | undefined;
   if (!r) throw new Error(`${repo}#${number} is not in the database`);
   return r;

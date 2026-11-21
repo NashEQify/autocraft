@@ -1,10 +1,10 @@
 // `autocraft-server embed`: embed new and changed tracked items for similar items and
 // semantic search.
 import { refreshSnapshot } from "../itemtools/snapshot.ts";
-import { connect } from "../db.ts";
 import { localEmbedder, modelCacheDir, modelName } from "./model.ts";
 import { embedItems } from "./store.ts";
 import { envVar } from "../env.ts";
+import { openDb } from "../db/open.ts";
 
 const USAGE = "usage: autocraft-server embed [--all] [--threads N] [--batch N]";
 const MAX_THREADS = 8;
@@ -35,7 +35,7 @@ export async function embedCommand(args: string[], onEmbedded?: (n: number) => v
   }
   const threads = Math.min(intArg(args, "--threads", Number(envVar("EMBED_THREADS")) || MAX_THREADS), MAX_THREADS);
   const batch = intArg(args, "--batch", 32);
-  const db = connect();
+  const db = await openDb();
   const embedder = localEmbedder({ name: modelName(), threads });
   console.error(`model ${embedder.id}, ${threads} threads, cache ${modelCacheDir()}`);
   let last = 0;
@@ -51,7 +51,7 @@ export async function embedCommand(args: string[], onEmbedded?: (n: number) => v
       console.error(`${done}/${total} items, ${rate.toFixed(1)}/s${done < total ? `, about ${Math.ceil(left / 60)} min left` : ""}`);
     },
   });
-  db.close();
+  await db.close();
   console.log(`embedded ${r.embedded} items, removed ${r.pruned} stale vectors, ${(r.ms / 1000).toFixed(1)} s`);
   // The item snapshot carries the vectors; similar_items sees new ones after this.
   if (r.embedded > 0) refreshSnapshot();

@@ -1,6 +1,5 @@
 // The model call queue as the dashboard shows it (GET /api/model-queue, src/dash/api/model-queue.ts): every queued call with
 // a live caller in claim order, why it waits, and the ready Task Runners. Reads only; picks are in picks.ts.
-import type { DatabaseSync } from "node:sqlite";
 import type { ItemRef, ModelQueueWhyCode } from "../../web/src/api/types.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { pickerLogins, pickCounts, queueSnapshot, runnerTakes } from "./calls.ts";
@@ -15,37 +14,38 @@ import { taskOfStep, TASK_CHOICES, userSkips } from "./my-tasks.ts";
 import { itemFilter, itemsFit, type ItemFilter } from "./task-items.ts";
 import type { Tier } from "./protocol.ts";
 import { CALLER_STALE_MS } from "./room.ts";
+import type { Db } from "../db/index.ts";
 
 /** A fresh, ready Task Runner of a user who is not cooled off. `free`: slots without the fast lane its token does not use, within the user's Max calls at once. */
 export type ReadyRunner = { login: string; role: string; manual: boolean; tiers: ReadonlySet<Tier>; free: number; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items?: ItemFilter };
 
-export function readyRunners(db: DatabaseSync, nowMs: number): ReadyRunner[] {
-  const rows = db.prepare(`SELECT t.id, t.login, a.role, h.models, COALESCE(h.slots, 1) AS slots, ${manualSql("t.login")} AS manual,
+export async function readyRunners(db: Db, nowMs: number): Promise<ReadyRunner[]> {
+  const rows = await db.prepare(`SELECT t.id, t.login, a.role, h.models, COALESCE(h.slots, 1) AS slots, ${manualSql("t.login")} AS manual,
       (SELECT COUNT(*) FROM main.remote_calls c WHERE c.state = 'leased' AND c.token_id = t.id) AS leased
     FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id JOIN main.access a ON a.login = t.login
     WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ?`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as
     { id: number; login: string; role: string; models: string; slots: number; manual: number; leased: number }[];
-  const accepted = acceptedModels(db);
+  const accepted = await acceptedModels(db);
   const userLeft = new Map<string, number>();
-  const left = (login: string): number => {
+  const left = async (login: string): Promise<number> => {
     const key = login.toLowerCase();
     let n = userLeft.get(key);
     if (n === undefined) {
-      const max = userMaxCalls(db, login);
-      n = max === null ? Infinity : Math.max(0, max - Number((db.prepare("SELECT COUNT(*) AS n FROM main.remote_calls INDEXED BY remote_calls_leased WHERE state = 'leased' AND user_login = ? COLLATE NOCASE").get(login) as { n: number }).n));
+      const max = await userMaxCalls(db, login);
+      n = max === null ? Infinity : Math.max(0, max - Number((await db.prepare("SELECT COUNT(*) AS n FROM main.remote_calls INDEXED BY remote_calls_leased WHERE state = 'leased' AND user_login = ? COLLATE NOCASE").get(login) as { n: number }).n));
       userLeft.set(key, n);
     }
     return n;
   };
   const out: ReadyRunner[] = [];
   for (const r of rows) {
-    if (cooloffOf(db, r.login, nowMs)) continue;
+    if (await cooloffOf(db, r.login, nowMs)) continue;
     let models: Record<string, unknown> = {};
     try { models = JSON.parse(r.models) as Record<string, unknown>; } catch { /* no models */ }
     const tiers = new Set<Tier>();
     for (const [t, m] of Object.entries(models)) if (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null) tiers.add(t);
     const slots = Number(r.slots) - (Number(r.slots) >= 2 ? 1 : 0);
-    out.push({ login: r.login, role: r.role, manual: Number(r.manual) === 1, tiers, free: Math.min(left(r.login), Math.max(0, slots - Number(r.leased))), repos: claimRepos(db, r.login, undefined), skip: userSkips(db, r.login), items: itemFilter(db, r.login) });
+    out.push({ login: r.login, role: r.role, manual: Number(r.manual) === 1, tiers, free: Math.min(await left(r.login), Math.max(0, slots - Number(r.leased))), repos: await claimRepos(db, r.login, undefined), skip: await userSkips(db, r.login), items: await itemFilter(db, r.login) });
   }
   return out;
 }
@@ -89,23 +89,23 @@ export type QueuedCall = {
  * The queued calls with a live caller in claim order, why each waits (`showPicker`: name the picker), and the ready runners.
  * Write permission is the one last confirmed, unless `canWriteOf` gives the rule for the runners' logins.
  */
-export function queueView(db: DatabaseSync, nowMs: number, showPicker: boolean, canWriteOf?: (logins: string[]) => (login: string, repo: string) => boolean): { calls: QueuedCall[]; runners: ReadyRunner[] } {
-  const snap = queueSnapshot(db, nowMs).filter((r) => r.seen_at >= nowMs - CALLER_STALE_MS);
-  const runners = readyRunners(db, nowMs);
+export async function queueView(db: Db, nowMs: number, showPicker: boolean, canWriteOf?: (logins: string[]) => (login: string, repo: string) => boolean): Promise<{ calls: QueuedCall[]; runners: ReadyRunner[] }> {
+  const snap = (await queueSnapshot(db, nowMs)).filter((r) => r.seen_at >= nowMs - CALLER_STALE_MS);
+  const runners = await readyRunners(db, nowMs);
   if (!snap.length) return { calls: [], runners };
-  const extra = new Map((db.prepare("SELECT id, asked_model, queued_ms, queued_since, error FROM main.remote_calls WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(snap.map((r) => r.id))) as
+  const extra = new Map((await db.prepare("SELECT id, asked_model, queued_ms, queued_since, error FROM main.remote_calls WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(snap.map((r) => r.id))) as
     { id: number; asked_model: string; queued_ms: number; queued_since: number | null; error: string | null }[]).map((r) => [Number(r.id), r]));
   const writable = new Set<string>();
-  if (!canWriteOf) for (const p of db.prepare("SELECT login, repo, permission FROM main.repo_permissions WHERE login IN (SELECT value FROM json_each(?))").all(JSON.stringify(runners.map((r) => r.login))) as { login: string; repo: string; permission: string }[])
+  if (!canWriteOf) for (const p of await db.prepare("SELECT login, repo, permission FROM main.repo_permissions WHERE login IN (SELECT value FROM json_each(?))").all(JSON.stringify(runners.map((r) => r.login))) as { login: string; repo: string; permission: string }[])
     if (WRITE_PERMISSIONS.has(p.permission)) writable.add(`${p.login.toLowerCase()}\n${p.repo}`);
   const canWrite = canWriteOf?.(runners.map((r) => r.login)) ?? ((l: string, repo: string) => writable.has(`${l.toLowerCase()}\n${repo}`));
-  const fresh = pickerLogins(db, nowMs);
+  const fresh = await pickerLogins(db, nowMs);
   const ahead = new Map<Tier, number>();
   const calls: QueuedCall[] = [];
   for (const r of snap) {
     const x = extra.get(r.id);
     if (!x) continue;
-    const picked = pickCounts(r, nowMs, (l) => fresh.has(l)) ? r.pickedBy : null;
+    const picked = await pickCounts(r, nowMs, async (l) => fresh.has(l)) ? r.pickedBy : null;
     const followUp = r.parent_id !== null;
     const n = ahead.get(r.tier) ?? 0;
     const why = whyWaiting({ tier: r.tier, promptId: r.prompt_id, step: r.step, repos: r.repos, refs: r.refs, followUp, picked: picked === null ? null : { login: showPicker ? picked : null } }, runners, n, canWrite);

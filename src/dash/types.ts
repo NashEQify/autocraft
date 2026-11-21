@@ -1,7 +1,7 @@
 // The contract between the server (auth, sessions, routing: src/dash/server/)
 // and the API handlers (src/dash/api/). The server authenticates every request and
 // checks CSRF on every POST before a handler runs.
-import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../db/index.ts";
 
 export type Role = "operator" | "maintainer" | "viewer";
 
@@ -16,7 +16,7 @@ export type User = {
   canRead(repo: string): Promise<boolean>;
   // Why the permission on <owner>/<repo> could not be told after a check
   // (GitHub error, no token), or null when the last check got an answer.
-  permissionError?(repo: string): string | null;
+  permissionError?(repo: string): Promise<string | null>;
 };
 
 export type Req = {
@@ -52,5 +52,5 @@ export type Route = {
   expensive?: true | ((query: URLSearchParams) => boolean);
   /** A GET list narrowed to the web app's picked project (`Req.scope`); every other route sees every repo the requester may see. */
   scoped?: true;
-  handler: (db: DatabaseSync, req: Req) => Res | Promise<Res>;
+  handler: (db: Db, req: Req) => Promise<Res | Promise<Res>>;
 };

@@ -3,9 +3,7 @@
 // reads (src/decisions.ts `actionable`) touches their tables. Feedback reaches a prompt only when an operator includes
 // it in a conversation (`<included>` blocks, src/conversations/store.ts).
 import { preparedEarlier, preparing, prepareStates, type PrepareState } from "../../decide/prepared.ts";
-import { prep } from "../../sql-cache.ts";
 import { priorityOf } from "../../priority/read.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type {
   Claim, Classification, Decision, ExecState, ItemShown, DecisionComment, DecisionKind, DecisionList, DuplicateMember, ItemState, OpenDecisionCounts, Opinion, QueueSlot, RelatedItem, Relation,
 } from "../../../web/src/api/types.ts";
@@ -47,6 +45,8 @@ export { itemState, shownLookup, withShown } from "./shown.ts";
 import { HEAD_FACT } from "../../merge/queue.ts";
 import { itemState, shownMap, withShown } from "./shown.ts";
 import { slugOf } from "../../owners.ts";
+import { mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 const json = <T>(s: string | null | undefined, d: T): T => {
   if (!s) return d;
@@ -58,8 +58,8 @@ const json = <T>(s: string | null | undefined, d: T): T => {
 };
 
 // A decision that covers a repo the requester may not see does not exist for them.
-async function needDecision(db: DatabaseSync, req: Req, id: string): Promise<DecisionRow> {
-  const d = getDecision(db, id);
+async function needDecision(db: Db, req: Req, id: string): Promise<DecisionRow> {
+  const d = await getDecision(db, id);
   if (!d) throw new HttpError(404, `no decision ${id}`);
   const visible = new Set(await visibleRepos(db, req));
   if (reposOf(d).some((r) => !visible.has(r))) throw new HttpError(404, `no decision ${id}`);
@@ -90,10 +90,10 @@ async function blockedRepos(req: Req, d: DecisionRow): Promise<string[]> {
 }
 
 /** An operator settles with write access on every repo; a maintainer only under the rule of src/settlers.ts. */
-const requireRepoSettler = (db: DatabaseSync, req: Req, repos: string[]): Promise<void> => requireSettle(db, req.user, repos, "settles decisions");
+const requireRepoSettler = (db: Db, req: Req, repos: string[]): Promise<void> => requireSettle(db, req.user, repos, "settles decisions");
 
 /** `requireRepoSettler` on the decision's repos. `own`: the decision's answer must be this login's (undo, retry, reopen), unless an operator asks. */
-async function requireSettler(db: DatabaseSync, req: Req, d: DecisionRow, own = false): Promise<void> {
+async function requireSettler(db: Db, req: Req, d: DecisionRow, own = false): Promise<void> {
   await requireRepoSettler(db, req, reposOf(d));
   if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase()) throw new HttpError(403, "only an operator takes back someone else's answer");
 }
@@ -116,9 +116,9 @@ type ClassRow = {
   reason: string | null; dup_of: number | null;
 };
 
-export function classificationsOf(db: DatabaseSync, repo: string, n: number): Classification[] {
+export async function classificationsOf(db: Db, repo: string, n: number): Promise<Classification[]> {
   // Latest verdict per classifier, picked here: a correlated MAX(at) subquery makes SQLite walk the (classifier, at) index.
-  return latestClassifications(prep(db, `SELECT classifier, at, type_label, want, reference, reason, dup_of FROM classifications
+  return latestClassifications(await db.prepare(`SELECT classifier, at, type_label, want, reference, reason, dup_of FROM classifications
     WHERE repo = ? AND number = ? ORDER BY classifier`).all(repo, n) as ClassRow[]);
 }
 
@@ -138,45 +138,45 @@ function latestClassifications(all: ClassRow[]): Classification[] {
  * The PR read uses the covering partial index `items_closing`.
  */
 export type RelatedIndex = { duplicatedBy: Map<string, number[]>; linkedBy: Map<string, number[]> };
-export function relatedIndex(db: DatabaseSync): RelatedIndex {
+export async function relatedIndex(db: Db): Promise<RelatedIndex> {
   const duplicatedBy = new Map<string, number[]>();
-  for (const r of prep(db, "SELECT DISTINCT repo, dup_of, number FROM classifications WHERE dup_of IS NOT NULL ORDER BY number").all() as { repo: string; dup_of: number; number: number }[]) {
+  for (const r of await db.prepare("SELECT DISTINCT repo, dup_of, number FROM classifications WHERE dup_of IS NOT NULL ORDER BY number").all() as { repo: string; dup_of: number; number: number }[]) {
     const k = `${r.repo}#${r.dup_of}`;
     duplicatedBy.set(k, [...(duplicatedBy.get(k) ?? []), r.number]);
   }
   const linkedBy = new Map<string, number[]>();
-  for (const p of prep(db, "SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[])
+  for (const p of await db.prepare("SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[])
     for (const x of json<unknown[]>(p.closing_issues, [])) if (typeof x === "number") linkedBy.set(`${p.repo}#${x}`, [...(linkedBy.get(`${p.repo}#${x}`) ?? []), p.number]);
   return { duplicatedBy, linkedBy };
 }
 
 // Duplicates from the classifiers, issues a PR closes, and PRs that close this issue. `idx` answers the two unindexed lookups from a page-wide read.
-export function relatedOf(db: DatabaseSync, repo: string, n: number, idx?: RelatedIndex, page?: DecisionPage): RelatedItem[] {
-  const look = prep(db, "SELECT title, state, kind FROM items WHERE repo = ? AND number = ?");
+export async function relatedOf(db: Db, repo: string, n: number, idx?: RelatedIndex, page?: DecisionPage): Promise<RelatedItem[]> {
+  const look = db.prepare("SELECT title, state, kind FROM items WHERE repo = ? AND number = ?");
   const res: RelatedItem[] = [];
-  for (const { number, relation } of relatedNumbers(db, repo, n, idx, page)) {
-    const row = page ? page.items.get(`${repo}#${number}`) : (look.get(repo, number) as { title: string | null; state: string; kind: string } | undefined);
+  for (const { number, relation } of await relatedNumbers(db, repo, n, idx, page)) {
+    const row = page ? page.items.get(`${repo}#${number}`) : (await look.get(repo, number) as { title: string | null; state: string; kind: string } | undefined);
     if (row) res.push({ repo, number, relation, title: row.title ?? "", state: itemState(row.state), kind: row.kind === "pr" ? "pr" : "issue" });
   }
   return res;
 }
 
 /** The numbers relatedOf shows, before their items are read; `page` answers the per-item reads from a page-wide one. */
-function relatedNumbers(db: DatabaseSync, repo: string, n: number, idx?: RelatedIndex, page?: DecisionPage): { number: number; relation: Relation }[] {
+async function relatedNumbers(db: Db, repo: string, n: number, idx?: RelatedIndex, page?: DecisionPage): Promise<{ number: number; relation: Relation }[]> {
   const out = new Map<string, { number: number; relation: Relation }>();
   const add = (number: number, relation: Relation) => {
     if (number !== n && Number.isInteger(number) && !out.has(String(number))) out.set(String(number), { number, relation });
   };
-  for (const d of page ? (page.dupOf.get(`${repo}#${n}`) ?? []) : (prep(db, "SELECT DISTINCT dup_of FROM classifications WHERE repo = ? AND number = ? AND dup_of IS NOT NULL").all(repo, n) as { dup_of: number }[]).map((r) => r.dup_of))
+  for (const d of page ? (page.dupOf.get(`${repo}#${n}`) ?? []) : (await db.prepare("SELECT DISTINCT dup_of FROM classifications WHERE repo = ? AND number = ? AND dup_of IS NOT NULL").all(repo, n) as { dup_of: number }[]).map((r) => r.dup_of))
     add(d, "duplicate-of");
-  for (const x of idx ? (idx.duplicatedBy.get(`${repo}#${n}`) ?? []).slice(0, 10) : (prep(db, "SELECT DISTINCT number FROM classifications WHERE repo = ? AND dup_of = ? LIMIT 10").all(repo, n) as { number: number }[]).map((r) => r.number))
+  for (const x of idx ? (idx.duplicatedBy.get(`${repo}#${n}`) ?? []).slice(0, 10) : (await db.prepare("SELECT DISTINCT number FROM classifications WHERE repo = ? AND dup_of = ? LIMIT 10").all(repo, n) as { number: number }[]).map((r) => r.number))
     add(x, "duplicated-by");
-  const it = page ? page.items.get(`${repo}#${n}`) : (prep(db, "SELECT kind, closing_issues FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; closing_issues: string | null } | undefined);
+  const it = page ? page.items.get(`${repo}#${n}`) : (await db.prepare("SELECT kind, closing_issues FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; closing_issues: string | null } | undefined);
   for (const x of json<unknown[]>(it?.closing_issues, [])) if (typeof x === "number") add(x, "fixes");
   if (it?.kind === "issue") {
     if (idx) for (const p of (idx.linkedBy.get(`${repo}#${n}`) ?? []).slice(0, 50)) add(p, "links");
     else {
-      const prs = prep(db, `SELECT number, closing_issues FROM items WHERE repo = ? AND kind = 'pr' AND closing_issues LIKE ? LIMIT 50`)
+      const prs = await db.prepare(`SELECT number, closing_issues FROM items WHERE repo = ? AND kind = 'pr' AND closing_issues LIKE ? LIMIT 50`)
         .all(repo, `%${n}%`) as { number: number; closing_issues: string }[];
       for (const p of prs) if (json<unknown[]>(p.closing_issues, []).includes(n)) add(p.number, "links");
     }
@@ -192,7 +192,7 @@ function contextOf(c: string | null): string[] {
   return c.split(/\n+/).map((s) => s.trim()).filter(Boolean);
 }
 
-export type Viewer = { login: string; role: string; operator: boolean; staff: boolean; slots?: Map<string, QueueSlot>; held?: (repo: string, number: number, decisionId?: string) => Held | null; memo?: SettleMemo;
+export type Viewer = { login: string; role: string; operator: boolean; staff: boolean; slots?: Map<string, QueueSlot>; held?: (repo: string, number: number, decisionId?: string) => Promise<Held | null>; memo?: SettleMemo;
   /** Per-page lookups a list fills once so toDecision does not query per row. */
   prep?: Map<string, PrepareState>; blocks?: Map<string, string[]>; related?: RelatedIndex; page?: DecisionPage;
   /** Repos the viewer may not see; facts naming their items are left out (without it, a non-operator gets none of those facts). */
@@ -207,20 +207,20 @@ export function execReasonFor(state: ExecState, stored: string | null, repo: str
 }
 /** Where an answer's write stands. A write the planner holds back (repo approval, pipeline switch, stage breaker, daily limit) is shown with its reason; operators also get the repo whose approvals to open. */
 /** The press that waits for room under the daily GitHub write limit and holds the open decision's lock. The place is read now; a disputed press has none. */
-function queuedOf(db: DatabaseSync, d: DecisionRow, viewer: Viewer): Decision["queued"] {
+async function queuedOf(db: Db, d: DecisionRow, viewer: Viewer): Promise<Decision["queued"]> {
   if (d.answer !== null) return null;
-  const id = queuedLock(db, d);
+  const id = await queuedLock(db, d);
   if (id === null) return null;
-  const c = prep(db, "SELECT acted_by, dispute_by, dispute_reason, dispute_at FROM main.conversation_cards WHERE id = ?").get(id) as { acted_by: string | null; dispute_by: string | null; dispute_reason: string | null; dispute_at: string | null };
+  const c = await db.prepare("SELECT acted_by, dispute_by, dispute_reason, dispute_at FROM main.conversation_cards WHERE id = ?").get(id) as { acted_by: string | null; dispute_by: string | null; dispute_reason: string | null; dispute_at: string | null };
   const place = queuePlace(db, id);
   return { card: id, by: c.acted_by ?? "", place, reason: queueReason(place), dispute: c.dispute_by ? { by: c.dispute_by, reason: viewer.staff ? (c.dispute_reason ?? "") : "", at: c.dispute_at ?? "" } : null };
 }
 
-export function execOf(db: DatabaseSync, d: DecisionRow, repo: string | null, viewer: Viewer): Decision["exec"] {
+export async function execOf(db: Db, d: DecisionRow, repo: string | null, viewer: Viewer): Promise<Decision["exec"]> {
   if (!d.answer || d.applied_at || d.exec_state === "done" || d.exec_state === DISPUTED) return null;
   const state = (d.exec_state ?? "pending") as ExecState;
   if (state !== "pending") return { state, reason: execReasonFor(state, d.exec_reason ?? null, repo, viewer.staff) };
-  let held = d.repo && d.number !== null && !isBatch(d) ? (viewer.held ??= heldLookup(db))(d.repo, d.number, d.id) : null;
+  let held = d.repo && d.number !== null && !isBatch(d) ? await (viewer.held ??= await heldLookup(db))(d.repo, d.number, d.id) : null;
   // Viewers read only the repo-approval and pipeline-off sentences; backoff and limit texts stay with staff.
   if (held && !viewer.staff && !held.approval && held.reason !== "The pipeline is off") held = null;
   if (!held) return d.exec_state ? { state, reason: null } : null;
@@ -228,28 +228,28 @@ export function execOf(db: DatabaseSync, d: DecisionRow, repo: string | null, vi
 }
 export const viewerOf = (req: Req): Viewer => ({ login: req.user.login, role: req.user.role, operator: isOperator(req), staff: canSeeInternals(req) });
 /** The viewer with the queue places of the items they may see, computed once for the response. */
-const viewerWith = async (db: DatabaseSync, req: Req): Promise<Viewer> => ({ ...viewerOf(req), slots: queueSlots(db, await visibleRepos(db, req)), held: heldLookup(db), memo: settleMemo(), hidden: await hiddenRepos(db, req) });
+const viewerWith = async (db: Db, req: Req): Promise<Viewer> => ({ ...viewerOf(req), slots: await queueSlots(db, await visibleRepos(db, req)), held: await heldLookup(db), memo: settleMemo(), hidden: await hiddenRepos(db, req) });
 
 /** Whether Undo would succeed: answered, not acted on, and no GitHub write for the answer exists: no act comment, no group post, no write by the card that gave the answer. */
-export const canUndo = (db: DatabaseSync, d: DecisionRow): boolean =>
-  !!d.answer && !d.id.includes("~replaced-") && (!d.applied_at || directHandled(db, d)) && !wroteToGithub(db, d);
+export const canUndo = async (db: Db, d: DecisionRow): Promise<boolean> =>
+  !!d.answer && !d.id.includes("~replaced-") && (!d.applied_at || await directHandled(db, d)) && !await wroteToGithub(db, d);
 
 /** Whether a GitHub write already exists for the answer: Act's comment, a duplicate group's post, or another step of the card that answered. */
-export function wroteToGithub(db: DatabaseSync, d: DecisionRow): boolean {
-  if (prep(db, "SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND url IS NOT NULL LIMIT 1").get(d.id)) return true;
-  if (prep(db, "SELECT 1 FROM actions WHERE decision_id = ? AND comment_url IS NOT NULL LIMIT 1").get(d.id)) return true;
+export async function wroteToGithub(db: Db, d: DecisionRow): Promise<boolean> {
+  if (await db.prepare("SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND url IS NOT NULL LIMIT 1").get(d.id)) return true;
+  if (await db.prepare("SELECT 1 FROM actions WHERE decision_id = ? AND comment_url IS NOT NULL LIMIT 1").get(d.id)) return true;
   // Only the card that gave the answer counts: a later card on the item is another action.
-  const row = prep(db, "SELECT details FROM audit WHERE target = ? AND action = 'answer' ORDER BY rowid DESC LIMIT 1").get(d.id) as { details: string | null } | undefined;
+  const row = await db.prepare("SELECT details FROM audit WHERE target = ? AND action = 'answer' ORDER BY rowid DESC LIMIT 1").get(d.id) as { details: string | null } | undefined;
   let card: number | undefined;
   try { card = (JSON.parse(row?.details ?? "{}") as { card?: number }).card; } catch { /* no card */ }
   if (card === undefined) return false;
-  const c = prep(db, "SELECT result FROM conversation_cards WHERE id = ? AND state = 'done'").get(card) as { result: string | null } | undefined;
+  const c = await db.prepare("SELECT result FROM conversation_cards WHERE id = ? AND state = 'done'").get(card) as { result: string | null } | undefined;
   return (c?.result ?? "").split("; ").some((seg) => seg && !seg.startsWith("Answered the decision") && !seg.startsWith("Decision closed as handled"));
 }
 
 /** An operator's own "handled" answer, recorded by its audit source: nothing was written anywhere, so Undo stays possible although it is marked applied (a conversation card's handled answer follows GitHub writes and stays final). A withdrawn question's renamed row (`~replaced-`) never reopens. */
-const directHandled = (db: DatabaseSync, d: DecisionRow): boolean =>
-  d.answer === HANDLED.key && !d.id.includes("~replaced-") && !!prep(db, "SELECT 1 FROM audit WHERE target = ? AND action = 'answer' AND details LIKE '%\"source\":\"dashboard\"%' LIMIT 1").get(d.id);
+const directHandled = async (db: Db, d: DecisionRow): Promise<boolean> =>
+  d.answer === HANDLED.key && !d.id.includes("~replaced-") && !!await db.prepare("SELECT 1 FROM audit WHERE target = ? AND action = 'answer' AND details LIKE '%\"source\":\"dashboard\"%' LIMIT 1").get(d.id);
 
 const ROLE_ORDER: Record<DuplicateMember["role"], number> = { keep: 0, close: 1, stay: 2 };
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()) : []);
@@ -259,9 +259,9 @@ type GroupRow = { number: number; kind: string; role: string; detail: string | n
 const GROUP_SQL = `SELECT gi.decision_id, gi.number, gi.kind, gi.role, gi.detail, i.title, i.state FROM dupe_group_items gi
     LEFT JOIN items i ON i.repo = gi.repo AND i.number = gi.number`;
 
-function groupOf(db: DatabaseSync, d: DecisionRow, page?: DecisionPage): DuplicateMember[] {
+async function groupOf(db: Db, d: DecisionRow, page?: DecisionPage): Promise<DuplicateMember[]> {
   if (!isGroup(d)) return [];
-  const rows = page ? (page.groups.get(d.id) ?? []) : (prep(db, `${GROUP_SQL} WHERE gi.decision_id = ?`).all(d.id) as GroupRow[]);
+  const rows = page ? (page.groups.get(d.id) ?? []) : (await db.prepare(`${GROUP_SQL} WHERE gi.decision_id = ?`).all(d.id) as GroupRow[]);
   return rows.map((r) => {
     let detail: Record<string, unknown> = {};
     try { detail = (JSON.parse(r.detail ?? "{}") as Record<string, unknown>) ?? {}; } catch { /* no detail */ }
@@ -277,25 +277,25 @@ function riskHead(d: DecisionRow): string | null {
   return factsOf(d).find((f) => f.startsWith(HEAD_FACT))?.slice(HEAD_FACT.length).trim() || null;
 }
 
-function risksOf(db: DatabaseSync, d: DecisionRow, page?: DecisionPage): string[] {
+async function risksOf(db: Db, d: DecisionRow, page?: DecisionPage): Promise<string[]> {
   const head = riskHead(d);
   if (!head) return [];
-  const o = page ? page.risks.get(`${d.repo}#${d.number}@${head}`) : (prep(db, "SELECT risks FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(d.repo, d.number, head) as { risks: string | null } | undefined);
+  const o = page ? page.risks.get(`${d.repo}#${d.number}@${head}`) : (await db.prepare("SELECT risks FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(d.repo, d.number, head) as { risks: string | null } | undefined);
   try { return strings(JSON.parse(o?.risks ?? "[]")); } catch { return []; }
 }
 
-function snoozedOf(db: DatabaseSync, d: DecisionRow): { by: string; at: string } | null {
+async function snoozedOf(db: Db, d: DecisionRow): Promise<{ by: string; at: string } | null> {
   if (d.answer || !d.snoozed_at) return null;
-  const row = prep(db, `SELECT ${SNOOZED_SQL} AS s FROM decisions WHERE id = ?`).get(d.id) as { s: number } | undefined;
+  const row = await db.prepare(`SELECT ${SNOOZED_SQL} AS s FROM decisions WHERE id = ?`).get(d.id) as { s: number } | undefined;
   return row?.s ? { by: d.snoozed_by ?? "", at: d.snoozed_at } : null;
 }
 
 /** True when any item the decision concerns (its own, a batch member or a duplicate-group member) is a quiet pull request. */
-export function touchesQuiet(db: DatabaseSync, d: DecisionRow, page?: DecisionPage): boolean {
-  const quiet = page ? (repo: string, number: number) => page.quiet!.has(`${repo}#${number}`) : (repo: string, number: number) => isQuiet(db, repo, number);
+export async function touchesQuiet(db: Db, d: DecisionRow, page?: DecisionPage): Promise<boolean> {
+  const quiet = page ? (repo: string, number: number) => page.quiet!.has(`${repo}#${number}`) : async (repo: string, number: number) => await isQuiet(db, repo, number);
   if (d.repo !== null && d.number !== null && quiet(d.repo, d.number)) return true;
   if (itemsOf(d).some((r) => quiet(r.repo, r.number))) return true;
-  const members = page ? (page.members.get(d.id) ?? []) : (prep(db, "SELECT repo, number FROM dupe_group_items WHERE decision_id = ?").all(d.id) as { repo: string; number: number }[]);
+  const members = page ? (page.members.get(d.id) ?? []) : (await db.prepare("SELECT repo, number FROM dupe_group_items WHERE decision_id = ?").all(d.id) as { repo: string; number: number }[]);
   return members.some((m) => quiet(m.repo, m.number));
 }
 
@@ -307,26 +307,26 @@ type PageItem = { title: string | null; body: string | null; kind: string; state
 export type DecisionPage = {
   items: Map<string, PageItem>; shown: Map<string, ItemShown>; opinions: Map<string, OpinionRow[]>; adopted: Map<string, OpinionRow>;
   claims: Map<string, Claim>; comments: Map<string, number>; classes: Map<string, ClassRow[]>; dupOf: Map<string, number[]>;
-  areas: Map<string, string | null>; priority: Map<string, NonNullable<ReturnType<typeof priorityOf>>>;
-  risks: Map<string, { risks: string | null }>; groups: Map<string, GroupRow[]>; texts: Map<string, ReturnType<typeof optionTextsOf>>;
+  areas: Map<string, string | null>; priority: Map<string, NonNullable<Awaited<ReturnType<typeof priorityOf>>>>;
+  risks: Map<string, { risks: string | null }>; groups: Map<string, GroupRow[]>; texts: Map<string, Awaited<ReturnType<typeof optionTextsOf>>>;
   quiet?: Set<string>; members: Map<string, { repo: string; number: number }[]>;
 };
 
 const pushTo = <K, V>(m: Map<K, V[]>, k: K, v: V): void => void (m.get(k) ?? m.set(k, []).get(k)!).push(v);
 const keyOf = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
 
-export function decisionPage(db: DatabaseSync, ds: DecisionRow[], viewer: Viewer): DecisionPage {
+export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): Promise<DecisionPage> {
   const ids = JSON.stringify(ds.map((d) => d.id));
   const singles = ds.filter((d) => !isBatch(d)).map((d) => ({ repo: d.repo!, number: d.number! }));
   const refs = JSON.stringify(singles.map((r) => [r.repo, r.number]));
   const inRefs = (repo: string, number: string) => `(${repo}, ${number}) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:refs))`;
-  const rows = <T>(sql: string, args: Record<string, string>): T[] => db.prepare(sql).all(args) as T[];
+  const rows = async <T>(sql: string, args: Record<string, string>): Promise<T[]> => await db.prepare(sql).all(args) as T[];
   const itemSql = "SELECT repo, number, title, body, kind, state, closing_issues FROM items WHERE ";
   const items = new Map<string, PageItem>();
-  for (const r of rows<PageItem & { repo: string; number: number }>(`${itemSql}${inRefs("repo", "number")}`, { refs })) items.set(keyOf(r), r);
+  for (const r of await rows<PageItem & { repo: string; number: number }>(`${itemSql}${inRefs("repo", "number")}`, { refs })) items.set(keyOf(r), r);
   const dupOf = new Map<string, number[]>();
   // In dup_of order, as the (repo, dup_of) index gives them to the one-item read.
-  for (const r of rows<{ repo: string; number: number; dup_of: number }>(`SELECT DISTINCT repo, number, dup_of FROM classifications WHERE ${inRefs("repo", "number")} AND dup_of IS NOT NULL ORDER BY repo, number, dup_of`, { refs }))
+  for (const r of await rows<{ repo: string; number: number; dup_of: number }>(`SELECT DISTINCT repo, number, dup_of FROM classifications WHERE ${inRefs("repo", "number")} AND dup_of IS NOT NULL ORDER BY repo, number, dup_of`, { refs }))
     pushTo(dupOf, keyOf(r), r.dup_of);
   const page: DecisionPage = {
     items, shown: new Map(), opinions: new Map(), adopted: new Map(), claims: new Map(), comments: new Map(), classes: new Map(), dupOf,
@@ -334,112 +334,112 @@ export function decisionPage(db: DatabaseSync, ds: DecisionRow[], viewer: Viewer
   };
   // The related lists' items, read once for every decision of the page.
   const related = new Map<string, [string, number]>();
-  for (const r of singles) for (const x of relatedNumbers(db, r.repo, r.number, viewer.related, page)) if (!items.has(`${r.repo}#${x.number}`)) related.set(`${r.repo}#${x.number}`, [r.repo, x.number]);
-  if (related.size) for (const r of rows<PageItem & { repo: string; number: number }>(`${itemSql}${inRefs("repo", "number")}`, { refs: JSON.stringify([...related.values()]) })) items.set(keyOf(r), r);
+  for (const r of singles) for (const x of await relatedNumbers(db, r.repo, r.number, viewer.related, page)) if (!items.has(`${r.repo}#${x.number}`)) related.set(`${r.repo}#${x.number}`, [r.repo, x.number]);
+  if (related.size) for (const r of await rows<PageItem & { repo: string; number: number }>(`${itemSql}${inRefs("repo", "number")}`, { refs: JSON.stringify([...related.values()]) })) items.set(keyOf(r), r);
 
   const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
-  if (batchRefs.length) page.shown = shownMap(db, batchRefs);
-  for (const o of rows<OpinionRow & { decision_id: string }>(`SELECT decision_id, id, login, option, note, at, permission, via FROM decision_opinions
+  if (batchRefs.length) page.shown = await shownMap(db, batchRefs);
+  for (const o of await rows<OpinionRow & { decision_id: string }>(`SELECT decision_id, id, login, option, note, at, permission, via FROM decision_opinions
     WHERE decision_id IN (SELECT value FROM json_each(:ids)) AND retracted_at IS NULL ORDER BY decision_id, at DESC`, { ids })) {
     const { decision_id, ...op } = o;
     pushTo(page.opinions, decision_id, op);
   }
   const adopted = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
-  if (adopted.length) for (const o of rows<OpinionRow>("SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE id IN (SELECT value FROM json_each(:ids))", { ids: JSON.stringify(adopted) })) page.adopted.set(o.id, o);
-  for (const c of rows<Claim & { decision_id: string }>(`SELECT decision_id, login, since FROM decision_claims WHERE decision_id IN (SELECT value FROM json_each(:ids)) AND at > :fresh AND login <> :me ORDER BY decision_id, at DESC`,
+  if (adopted.length) for (const o of await rows<OpinionRow>("SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE id IN (SELECT value FROM json_each(:ids))", { ids: JSON.stringify(adopted) })) page.adopted.set(o.id, o);
+  for (const c of await rows<Claim & { decision_id: string }>(`SELECT decision_id, login, since FROM decision_claims WHERE decision_id IN (SELECT value FROM json_each(:ids)) AND at > :fresh AND login <> :me ORDER BY decision_id, at DESC`,
     { ids, fresh: new Date(Date.now() - CLAIM_TTL).toISOString(), me: viewer.login }))
     if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
-  for (const c of rows<{ decision_id: string; n: number }>("SELECT decision_id, COUNT(*) AS n FROM decision_comments WHERE decision_id IN (SELECT value FROM json_each(:ids)) GROUP BY decision_id", { ids })) page.comments.set(c.decision_id, c.n);
+  for (const c of await rows<{ decision_id: string; n: number }>("SELECT decision_id, COUNT(*) AS n FROM decision_comments WHERE decision_id IN (SELECT value FROM json_each(:ids)) GROUP BY decision_id", { ids })) page.comments.set(c.decision_id, c.n);
   if (singles.length) {
     // In the primary key's order within an item, as the one-item read walks it.
-    for (const c of rows<ClassRow & { repo: string; number: number }>(`SELECT repo, number, classifier, at, type_label, want, reference, reason, dup_of FROM classifications
+    for (const c of await rows<ClassRow & { repo: string; number: number }>(`SELECT repo, number, classifier, at, type_label, want, reference, reason, dup_of FROM classifications
       WHERE ${inRefs("repo", "number")} ORDER BY repo, number, classifier, run_id`, { refs })) {
       const { repo, number, ...row } = c;
       pushTo(page.classes, `${repo}#${number}`, row);
     }
-    for (const a of rows<{ repo: string; number: number; area: string | null }>(`SELECT repo, number, area FROM item_areas WHERE ${inRefs("repo", "number")}`, { refs })) page.areas.set(keyOf(a), a.area);
-    for (const p of rows<{ repo: string; number: number; impact: NonNullable<ReturnType<typeof priorityOf>>["level"]; model: string; reason: string | null }>(`SELECT repo, number, impact, model, reason FROM item_priority WHERE ${inRefs("repo", "number")}`, { refs }))
+    for (const a of await rows<{ repo: string; number: number; area: string | null }>(`SELECT repo, number, area FROM item_areas WHERE ${inRefs("repo", "number")}`, { refs })) page.areas.set(keyOf(a), a.area);
+    for (const p of await rows<{ repo: string; number: number; impact: NonNullable<Awaited<ReturnType<typeof priorityOf>>>["level"]; model: string; reason: string | null }>(`SELECT repo, number, impact, model, reason FROM item_priority WHERE ${inRefs("repo", "number")}`, { refs }))
       page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
   }
   const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h]] : []; });
-  if (heads.length) for (const o of rows<{ repo: string; number: number; head_oid: string; risks: string | null }>(`SELECT repo, number, head_oid, risks FROM opus_reviews
+  if (heads.length) for (const o of await rows<{ repo: string; number: number; head_oid: string; risks: string | null }>(`SELECT repo, number, head_oid, risks FROM opus_reviews
     WHERE (repo, number, head_oid) IN (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:heads)) AND verdict IS NOT NULL`, { heads: JSON.stringify(heads) }))
     page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
   const groups = ds.filter(isGroup).map((d) => d.id);
   if (groups.length) {
-    for (const g of rows<GroupRow & { decision_id: string }>(`${GROUP_SQL} WHERE gi.decision_id IN (SELECT value FROM json_each(:ids))`, { ids: JSON.stringify(groups) })) {
+    for (const g of await rows<GroupRow & { decision_id: string }>(`${GROUP_SQL} WHERE gi.decision_id IN (SELECT value FROM json_each(:ids))`, { ids: JSON.stringify(groups) })) {
       const { decision_id, ...row } = g;
       pushTo(page.groups, decision_id, row);
     }
-    page.texts = optionTextsMany(db, groups);
+    page.texts = await optionTextsMany(db, groups);
   }
   if (!viewer.staff) {
-    page.quiet = quietFixPrs(db);
-    for (const m of rows<{ decision_id: string; repo: string; number: number }>("SELECT decision_id, repo, number FROM dupe_group_items WHERE decision_id IN (SELECT value FROM json_each(:ids))", { ids }))
+    page.quiet = await quietFixPrs(db);
+    for (const m of await rows<{ decision_id: string; repo: string; number: number }>("SELECT decision_id, repo, number FROM dupe_group_items WHERE decision_id IN (SELECT value FROM json_each(:ids))", { ids }))
       pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
   }
   return page;
 }
 
-export function toDecision(db: DatabaseSync, d: DecisionRow, viewer: Viewer): Decision {
+export async function toDecision(db: Db, d: DecisionRow, viewer: Viewer): Promise<Decision> {
   const batch = isBatch(d);
   const refs = itemsOf(d);
   const page = viewer.page;
-  const look = prep(db, "SELECT title, body, kind, state FROM items WHERE repo = ? AND number = ?");
-  const item = batch ? undefined : page ? page.items.get(`${d.repo}#${d.number}`) : (look.get(d.repo, d.number) as { title: string | null; body: string | null; kind: string; state: string } | undefined);
-  const opinions = (page ? (page.opinions.get(d.id) ?? []) : (prep(db, `SELECT id, login, option, note, at, permission, via FROM decision_opinions
+  const look = db.prepare("SELECT title, body, kind, state FROM items WHERE repo = ? AND number = ?");
+  const item = batch ? undefined : page ? page.items.get(`${d.repo}#${d.number}`) : (await look.get(d.repo, d.number) as { title: string | null; body: string | null; kind: string; state: string } | undefined);
+  const opinions = (page ? (page.opinions.get(d.id) ?? []) : (await db.prepare(`SELECT id, login, option, note, at, permission, via FROM decision_opinions
     WHERE decision_id = ? AND retracted_at IS NULL ORDER BY at DESC`).all(d.id) as OpinionRow[])).map(toOpinion);
   const adopted = d.adopted_opinion
-    ? (page ? page.adopted.get(d.adopted_opinion) : (prep(db, "SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE id = ?").get(d.adopted_opinion) as OpinionRow | undefined))
+    ? (page ? page.adopted.get(d.adopted_opinion) : (await db.prepare("SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE id = ?").get(d.adopted_opinion) as OpinionRow | undefined))
     : undefined;
-  const claimRow = page ? page.claims.get(d.id) : (prep(db, `SELECT login, since FROM decision_claims WHERE decision_id = ? AND at > ? AND login <> ? ORDER BY at DESC LIMIT 1`)
+  const claimRow = page ? page.claims.get(d.id) : (await db.prepare(`SELECT login, since FROM decision_claims WHERE decision_id = ? AND at > ? AND login <> ? ORDER BY at DESC LIMIT 1`)
     .get(d.id, new Date(Date.now() - CLAIM_TTL).toISOString(), viewer.login) as Claim | undefined);
   const pstate = viewer.prep?.get(d.id) ?? (viewer.prep && (d.answer !== null || d.number === null) ? { preparing: false, preparedEarlier: false } : undefined);
-  const commentCount = page ? (page.comments.get(d.id) ?? 0) : (prep(db, "SELECT COUNT(*) AS n FROM decision_comments WHERE decision_id = ?").get(d.id) as { n: number }).n;
+  const commentCount = page ? (page.comments.get(d.id) ?? 0) : (await db.prepare("SELECT COUNT(*) AS n FROM decision_comments WHERE decision_id = ?").get(d.id) as { n: number }).n;
   // Viewers get none of the model text of a decision about a quiet pull request.
-  const veil = !viewer.staff && touchesQuiet(db, d, page?.quiet ? page : undefined);
+  const veil = !viewer.staff && await touchesQuiet(db, d, page?.quiet ? page : undefined);
   const out: Decision = {
     id: d.id, kind: d.kind as DecisionKind,
     repo: d.repo ?? refs[0]?.repo ?? "",
     number: d.number,
-    items: batch ? withShown(db, refs, page?.shown) : [],
+    items: batch ? await withShown(db, refs, page?.shown) : [],
     shown: batch ? null : { kind: item ? (item.kind === "pr" ? "pr" : "issue") : null, state: item ? itemState(item.state) : null, title: item?.title ?? null },
     title: batch ? d.question : (item?.title ?? `${d.repo}#${d.number}`),
     question: d.question,
     summary: d.summary ?? "", summaryBy: d.summary_by ?? "", summaryAt: d.summary_at ?? d.asked_at,
     body: batch ? null : (item?.body ?? null),
     context: contextOf(d.context),
-    facts: [...factsOf(d), ...(d.answer !== null ? [] : viewer.blocks ? (viewer.blocks.get(`${d.repo}#${d.number}`) ?? []) : blocksFacts(db, d.repo, d.number, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)))],
+    facts: [...factsOf(d), ...(d.answer !== null ? [] : viewer.blocks ? (viewer.blocks.get(`${d.repo}#${d.number}`) ?? []) : await blocksFacts(db, d.repo, d.number, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)))],
     // An answer the pipeline or a conversation gave is not one of the asked options; it is listed so every view can name it.
     options: [...optionsOf(d), ...[HANDLED, WITHDRAWN_OPTION].filter((o) => o.key === d.answer)].map((o) => ({ ...o, writes: writeEffect(d.kind, o.key) ?? undefined })),
     recommended: d.recommended ?? "",
     recommendedReason: d.recommended ? (d.recommended_reason ?? "") : "",
-    group: groupOf(db, d, page), risks: risksOf(db, d, page), undoable: canUndo(db, d),
-    canSettle: canSettleCached(db, viewer.login, viewer.role, reposOf(d), viewer.memo),
+    group: await groupOf(db, d, page), risks: await risksOf(db, d, page), undoable: await canUndo(db, d),
+    canSettle: await canSettleCached(db, viewer.login, viewer.role, reposOf(d), viewer.memo),
     publicText: commentPreview(d),
-    optionTexts: isGroup(d) ? (page ? (page.texts.get(d.id) ?? []) : optionTextsOf(db, d.id)) : [],
+    optionTexts: isGroup(d) ? (page ? (page.texts.get(d.id) ?? []) : await optionTextsOf(db, d.id)) : [],
     askedAt: d.asked_at, askedBy: d.asked_by ?? "the pipeline",
     docket: d.docket,
     answer: d.answer,
     answerNote: viewer.staff ? d.answer_note : null,
     answeredBy: d.answered_by, answeredAt: d.answered_at, appliedAt: d.applied_at,
-    exec: execOf(db, d, d.repo ?? refs[0]?.repo ?? null, viewer),
-    settling: settlingBy(db, d),
-    queued: queuedOf(db, d, viewer),
+    exec: await execOf(db, d, d.repo ?? refs[0]?.repo ?? null, viewer),
+    settling: await settlingBy(db, d),
+    queued: await queuedOf(db, d, viewer),
     dispute: isDisputed(d) ? { by: d.dispute_by ?? "", reason: viewer.staff ? (d.dispute_reason ?? "") : "", at: d.dispute_at ?? "" } : null,
-    orphaned: !!d.answer && !d.applied_at && !isBacklog(d.answer) && !isDisputed(d) && !!d.answered_by && d.answered_by !== "pipeline" && writeEffect(d.kind, d.answer) !== null && !settledBy(db, d, viewer.memo),
+    orphaned: !!d.answer && !d.applied_at && !isBacklog(d.answer) && !isDisputed(d) && !!d.answered_by && d.answered_by !== "pipeline" && writeEffect(d.kind, d.answer) !== null && !await settledBy(db, d, viewer.memo),
     adoptedOpinion: adopted ? toOpinion(adopted) : null,
     opinions,
     exceptions: exceptionsOf(d),
-    snoozed: snoozedOf(db, d),
-    preparing: pstate ? pstate.preparing : preparing(db, d),
-    preparedEarlier: pstate ? pstate.preparedEarlier : preparedEarlier(db, d),
+    snoozed: await snoozedOf(db, d),
+    preparing: pstate ? pstate.preparing : await preparing(db, d),
+    preparedEarlier: pstate ? pstate.preparedEarlier : await preparedEarlier(db, d),
     claim: d.answer ? null : (claimRow ? { login: claimRow.login, since: claimRow.since } : null),
     commentCount,
-    related: batch ? [] : relatedOf(db, d.repo!, d.number!, viewer.related, page),
-    classifications: batch ? [] : page ? latestClassifications(page.classes.get(`${d.repo}#${d.number}`) ?? []) : classificationsOf(db, d.repo!, d.number!),
-    area: batch ? null : page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : areaNameOf(db, d.repo!, d.number!),
-    priority: batch ? null : page ? (page.priority.get(`${d.repo}#${d.number}`) ?? null) : priorityOf(db, d.repo!, d.number!),
+    related: batch ? [] : await relatedOf(db, d.repo!, d.number!, viewer.related, page),
+    classifications: batch ? [] : page ? latestClassifications(page.classes.get(`${d.repo}#${d.number}`) ?? []) : await classificationsOf(db, d.repo!, d.number!),
+    area: batch ? null : page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : await areaNameOf(db, d.repo!, d.number!),
+    priority: batch ? null : page ? (page.priority.get(`${d.repo}#${d.number}`) ?? null) : await priorityOf(db, d.repo!, d.number!),
     queue: batch ? null : (viewer.slots?.get(`${d.repo}#${d.number}`) ?? null),
   };
   if (!veil) return out;
@@ -489,10 +489,10 @@ export function needingSql(req: Req, everything = false): string {
  * The requester's decisions inbox count (the Needs you page's), in total and per repo, over every repo they may see.
  * A batch counts once in the total and once for each repo it names.
  */
-export async function openCounts(db: DatabaseSync, req: Req): Promise<OpenDecisionCounts> {
+export async function openCounts(db: Db, req: Req): Promise<OpenDecisionCounts> {
   const params: Record<string, string> = {};
   const hide = withoutHidden(await hiddenRepos(db, req), params);
-  const rows = db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
+  const rows = await db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
   const byRepo: Record<string, number> = {};
   for (const r of rows) for (const repo of reposOf(r as DecisionRow)) byRepo[repo] = (byRepo[repo] ?? 0) + 1;
   return { total: rows.length, byRepo };
@@ -500,7 +500,7 @@ export async function openCounts(db: DatabaseSync, req: Req): Promise<OpenDecisi
 
 // Pages are cut by keyset: `after` is the `next` of the previous page, "<sort key>|<id>".
 // Open decisions run by priority level, then unclaimed before claimed, then oldest asked; answered ones newest answer first.
-export async function listDecisions(db: DatabaseSync, req: Req): Promise<DecisionList> {
+export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   const q = req.query;
   const status = q.get("status") ?? "open";
   if (!["open", "opinions", "answered", "backlog", "snoozed"].includes(status)) throw new HttpError(400, "status must be open, opinions, answered, backlog or snoozed");
@@ -540,7 +540,7 @@ export async function listDecisions(db: DatabaseSync, req: Req): Promise<Decisio
   }
 
   // Counts and the oldest ask cover every match, not just the page.
-  const kindRows = db.prepare(`SELECT kind, COUNT(*) AS n, MIN(asked_at) AS oldest FROM decisions WHERE ${where.join(" AND ")} GROUP BY kind`).all(params) as
+  const kindRows = await db.prepare(`SELECT kind, COUNT(*) AS n, MIN(asked_at) AS oldest FROM decisions WHERE ${where.join(" AND ")} GROUP BY kind`).all(params) as
     { kind: DecisionKind; n: number; oldest: string }[];
   const byKind: Partial<Record<DecisionKind, number>> = {};
   let total = 0;
@@ -568,7 +568,7 @@ export async function listDecisions(db: DatabaseSync, req: Req): Promise<Decisio
       params.cid = after.slice(k + 1);
       page.push("(answered_at < :ck OR (answered_at = :ck AND id > :cid))");
     }
-    ids = (db.prepare(`SELECT id, answered_at || '|' || id AS cursor FROM decisions WHERE ${page.join(" AND ")} ORDER BY answered_at DESC, id LIMIT :limit`)
+    ids = (await db.prepare(`SELECT id, answered_at || '|' || id AS cursor FROM decisions WHERE ${page.join(" AND ")} ORDER BY answered_at DESC, id LIMIT :limit`)
       .all({ ...params, limit: limit + 1 }) as { id: string; cursor: string }[]);
   } else {
     // Open ones: priority level (security raised), then ones nobody else is looking at, then the oldest ask. The cursor carries all four keys.
@@ -583,77 +583,72 @@ export async function listDecisions(db: DatabaseSync, req: Req): Promise<Decisio
       params.cl = m[1]!; params.cc = m[2]!; params.ca = m[3]!; params.ci = m[4]!;
       page.push("(lvl < CAST(:cl AS INTEGER) OR (lvl = CAST(:cl AS INTEGER) AND (claimed > CAST(:cc AS INTEGER) OR (claimed = CAST(:cc AS INTEGER) AND (asked_at > :ca OR (asked_at = :ca AND id > :ci))))))");
     }
-    ids = (db.prepare(`SELECT id, lvl || '|' || claimed || '|' || asked_at || '|' || id AS cursor FROM (${keyed})${page.length ? ` WHERE ${page.join(" AND ")}` : ""} ORDER BY lvl DESC, claimed, asked_at, id LIMIT :limit`)
+    ids = (await db.prepare(`SELECT id, lvl || '|' || claimed || '|' || asked_at || '|' || id AS cursor FROM (${keyed})${page.length ? ` WHERE ${page.join(" AND ")}` : ""} ORDER BY lvl DESC, claimed, asked_at, id LIMIT :limit`)
       .all({ ...params, fresh, limit: limit + 1 }) as { id: string; cursor: string }[]);
   }
   const more = ids.length > limit;
   const shownIds = ids.slice(0, limit);
-  const rowOf = new Map((shownIds.length ? db.prepare("SELECT * FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(shownIds.map((r) => r.id))) as DecisionRow[] : []).map((d) => [d.id, d]));
+  const rowOf = new Map((shownIds.length ? await db.prepare("SELECT * FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(shownIds.map((r) => r.id))) as DecisionRow[] : []).map((d) => [d.id, d]));
   const shown = shownIds.map((r) => rowOf.get(r.id)!);
   const viewer = shown.length ? await viewerWith(db, req) : viewerOf(req);
-  viewer.prep = prepareStates(db, shown);
-  if (shown.some((d) => d.answer === null)) viewer.blocks = blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN));
-  if (shown.some((d) => d.number !== null)) viewer.related = relatedIndex(db);
-  if (shown.length) viewer.page = decisionPage(db, shown, viewer);
+  viewer.prep = await prepareStates(db, shown);
+  if (shown.some((d) => d.answer === null)) viewer.blocks = await blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN));
+  if (shown.some((d) => d.number !== null)) viewer.related = await relatedIndex(db);
+  if (shown.length) viewer.page = await decisionPage(db, shown, viewer);
   return {
-    decisions: shown.map((d) => toDecision(db, d, viewer)), total, byKind, oldestAskedAt,
+    decisions: await mapSeq(shown, async (d) => await toDecision(db, d, viewer)), total, byKind, oldestAskedAt,
     next: more ? shownIds[shownIds.length - 1]!.cursor : null,
   };
 }
 
-export async function getOne(db: DatabaseSync, req: Req): Promise<Decision> {
-  return toDecision(db, await needDecision(db, req, req.params.id!), await viewerWith(db, req));
+export async function getOne(db: Db, req: Req): Promise<Decision> {
+  return await toDecision(db, await needDecision(db, req, req.params.id!), await viewerWith(db, req));
 }
 
 /** The decision a readable link `/decisions/<repo>/<n>` opens, or null when the item has none the viewer may see. */
-export async function forItem(db: DatabaseSync, req: Req): Promise<Decision | null> {
+export async function forItem(db: Db, req: Req): Promise<Decision | null> {
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   const repo = shortRepo(req.params.repo!);
   const visible = new Set(await visibleRepos(db, req));
-  const rows = db.prepare(`SELECT * FROM decisions WHERE (repo = :repo AND number = :n) OR (number IS NULL AND EXISTS (
+  const rows = await db.prepare(`SELECT * FROM decisions WHERE (repo = :repo AND number = :n) OR (number IS NULL AND EXISTS (
       SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j
       WHERE json_extract(j.value, '$.repo') = :repo AND json_extract(j.value, '$.number') = :n))`).all({ repo, n }) as unknown as DecisionRow[];
   const viewer = await viewerWith(db, req);
   // A batch that also covers the item counts only when no single-item decision exists; it is the item's decision only by membership.
   const single = rows.filter((d) => d.number === n);
   const kind = req.query.get("kind");
-  const shown = (single.length ? single : rows).filter((d) => !kind || d.kind === kind).filter((d) => reposOf(d).every((r) => visible.has(r))).map((d) => toDecision(db, d, viewer));
+  const shown = await mapSeq((single.length ? single : rows).filter((d) => !kind || d.kind === kind).filter((d) => reposOf(d).every((r) => visible.has(r))), async (d) => await toDecision(db, d, viewer));
   return pickDecision(shown) ?? null;
 }
 
-export async function thread(db: DatabaseSync, req: Req): Promise<DecisionComment[]> {
+export async function thread(db: Db, req: Req): Promise<DecisionComment[]> {
   const d = await needDecision(db, req, req.params.id!);
-  const veil = !canSeeInternals(req) && touchesQuiet(db, d);
-  return (db.prepare("SELECT id, login, at, body, via FROM decision_comments WHERE decision_id = ? ORDER BY at, rowid").all(req.params.id!) as { id: string; login: string; at: string; body: string; via: string | null }[])
+  const veil = !canSeeInternals(req) && await touchesQuiet(db, d);
+  return (await db.prepare("SELECT id, login, at, body, via FROM decision_comments WHERE decision_id = ? ORDER BY at, rowid").all(req.params.id!) as { id: string; login: string; at: string; body: string; via: string | null }[])
     .map(({ via, ...c }): DecisionComment => ({ ...c, ...(veil ? { body: "" } : {}), ...(via === "mcp" ? { via: "mcp" as const } : {}) }));
 }
 
 // ---- operator writes -----------------------------------------------------
 
-async function settled(db: DatabaseSync, req: Req, id: string): Promise<Decision> {
-  db.prepare("DELETE FROM decision_claims WHERE decision_id = ?").run(id);
-  return toDecision(db, getDecision(db, id)!, await viewerWith(db, req));
+async function settled(db: Db, req: Req, id: string): Promise<Decision> {
+  await db.prepare("DELETE FROM decision_claims WHERE decision_id = ?").run(id);
+  return await toDecision(db, (await getDecision(db, id))!, await viewerWith(db, req));
 }
 
 /** Runs `fn` in one write transaction, so a check and the write it guards cannot be separated by another process. */
-function inTransaction<T>(db: DatabaseSync, fn: () => T): T {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const r = fn();
-    db.exec("COMMIT");
+async function inTransaction<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+  return await db.write(async () => {
+    const r = await fn();
     return r;
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 /** `via` names the Inbox MCP server in the audit row when an operator's agent answered with an answering token. */
-export async function answer(db: DatabaseSync, req: Req, via?: "mcp"): Promise<Decision> {
+export async function answer(db: Db, req: Req, via?: "mcp"): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d);
-  applyAnswer(db, d, req.user.login, body(req), "dashboard", via);
+  await applyAnswer(db, d, req.user.login, body(req), "dashboard", via);
   return await settled(db, req, d.id);
 }
 
@@ -661,9 +656,9 @@ export async function answer(db: DatabaseSync, req: Req, via?: "mcp"): Promise<D
  * Validates and records an answer for `login`; the caller has already checked that the login may answer. `b` holds the
  * request fields (answer, note, exceptions, textsHash). `source` and `via` go to the audit row.
  */
-export function applyAnswer(db: DatabaseSync, d: DecisionRow, login: string, b: Record<string, unknown>, source: string, via?: string): void {
+export async function applyAnswer(db: Db, d: DecisionRow, login: string, b: Record<string, unknown>, source: string, via?: string): Promise<void> {
   if (d.answer) throw new HttpError(409, `already answered by ${d.answered_by}`);
-  if (settlingBy(db, d)) throw new HttpError(409, lockMessage(db, d));
+  if (await settlingBy(db, d)) throw new HttpError(409, await lockMessage(db, d));
   const keys = new Set(optionsOf(d).map((o) => o.key));
   const handled = b.answer === HANDLED.key;
   if (typeof b.answer !== "string" || !(keys.has(b.answer) || (handled && !isBatch(d) && !d.id.includes(":dupegroup:")))) throw new HttpError(400, "answer must be one of the option keys");
@@ -687,83 +682,83 @@ export function applyAnswer(db: DatabaseSync, d: DecisionRow, login: string, b: 
   }
   if (isBatch(d) && (exceptions === null || ans === BACKLOG.key)) exceptions = [];
   // A group answer approves the texts stored for its option; a page showing other texts is stale. Checked and written in one transaction.
-  inTransaction(db, () => {
-    const stored = d.kind === "duplicate" && d.id.includes(":dupegroup:") ? textsFor(db, d.id, ans) : [];
+  await inTransaction(db, async () => {
+    const stored = d.kind === "duplicate" && d.id.includes(":dupegroup:") ? await textsFor(db, d.id, ans) : [];
     if (stored.length && b.textsHash !== textsHash(stored)) throw new HttpError(409, "the comments for this answer changed; reload the decision");
     const at = new Date().toISOString();
     // Handled writes nothing and no step acts on it, so it counts as applied at once (Undo still works, see directHandled).
-    const r = db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = ?, answered_by = ?, answered_at = ?, applied_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
+    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = ?, answered_by = ?, answered_at = ?, applied_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
       WHERE id = ? AND answer IS NULL AND NOT ${lockLiveSql("decisions")}`).run(ans, note, exceptions ? JSON.stringify(exceptions) : null, login, at, handled ? at : null, d.id);
-    if (r.changes !== 1) throw new HttpError(409, settlingBy(db, getDecision(db, d.id) ?? d) ? lockMessage(db, getDecision(db, d.id) ?? d) : "someone answered this a moment ago");
-    replaceProposedCards(db, d.repo, d.number, d.id);
-    resetActTries(db, d.id);
+    if (r.changes !== 1) throw new HttpError(409, await settlingBy(db, await getDecision(db, d.id) ?? d) ? await lockMessage(db, await getDecision(db, d.id) ?? d) : "someone answered this a moment ago");
+    await replaceProposedCards(db, d.repo, d.number, d.id);
+    await resetActTries(db, d.id);
   });
-  if (writeEffect(d.kind, ans)) initExecState(db, d.id);
-  audit(db, login, "answer", d.id, { answer: ans, source, ...(via ? { via } : {}), exceptions: exceptions?.length ? exceptions : undefined, note: note ? true : undefined });
+  if (writeEffect(d.kind, ans)) await initExecState(db, d.id);
+  await audit(db, login, "answer", d.id, { answer: ans, source, ...(via ? { via } : {}), exceptions: exceptions?.length ? exceptions : undefined, note: note ? true : undefined });
   // The thread keeps the choice (and the note) when the item has a conversation.
-  if (d.repo && d.number !== null && conversationOf(db, d.repo, d.number)) {
+  if (d.repo && d.number !== null && await conversationOf(db, d.repo, d.number)) {
     const label = optionsOf(d).find((o) => o.key === ans)?.label ?? (handled ? HANDLED.label : ans);
     const said = `${login} answered "${d.question}" with "${label}"`;
     // A maintainer's note is stored and shown but never reaches the model: only an operator's words may.
-    const operator = !!db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(login);
-    insertTurn(db, d.repo, d.number, { kind: "system", login: "system", body: note ? `${said}: ${note}` : said, block: systemBlock(`The ${operator ? "operator" : "maintainer"} ${login} answered the open question "${d.question.replace(/[\r\n<]+/g, " ")}" with "${label.replace(/[\r\n<]+/g, " ")}".`, note && operator ? { operator_note: note } : undefined) });
+    const operator = !!await db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(login);
+    await insertTurn(db, d.repo, d.number, { kind: "system", login: "system", body: note ? `${said}: ${note}` : said, block: systemBlock(`The ${operator ? "operator" : "maintainer"} ${login} answered the open question "${d.question.replace(/[\r\n<]+/g, " ")}" with "${label.replace(/[\r\n<]+/g, " ")}".`, note && operator ? { operator_note: note } : undefined) });
   }
 }
 
 /** Operator: snooze (`on`) or wake an open decision. It stays open for the pipeline; only the inbox hides it until the item has new activity. */
-export async function snooze(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function snooze(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireOperator(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be snoozed");
   const b = body(req);
   if (typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
   const at = new Date().toISOString();
-  db.prepare("UPDATE main.decisions SET snoozed_by = ?, snoozed_at = ? WHERE id = ? AND answer IS NULL").run(b.on ? req.user.login : null, b.on ? at : null, d.id);
-  audit(db, req.user.login, b.on ? "snooze" : "unsnooze", d.id);
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await db.prepare("UPDATE main.decisions SET snoozed_by = ?, snoozed_at = ? WHERE id = ? AND answer IS NULL").run(b.on ? req.user.login : null, b.on ? at : null, d.id);
+  await audit(db, req.user.login, b.on ? "snooze" : "unsnooze", d.id);
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /**
  * Operator: prepare an open decision again. Clears what marks it prepared or failed, so the next pass runs the prepare step for
  * it before the other due ones; its current choices stay until the new ones replace them.
  */
-export async function reprepare(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function reprepare(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireOperator(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be prepared again");
-  if (!d.repo || d.number === null || !db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ?").get(d.repo, d.number)) throw new HttpError(409, "the decision has no item to prepare it for");
-  db.prepare(`UPDATE main.decisions SET prepared_at = NULL, prepared_head = NULL, recommend_failures = NULL, recommend_failed_at = NULL, prepare_failed_head = NULL, prepare_requested_at = ?
+  if (!d.repo || d.number === null || !await db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ?").get(d.repo, d.number)) throw new HttpError(409, "the decision has no item to prepare it for");
+  await db.prepare(`UPDATE main.decisions SET prepared_at = NULL, prepared_head = NULL, recommend_failures = NULL, recommend_failed_at = NULL, prepare_failed_head = NULL, prepare_requested_at = ?
     WHERE id = ? AND answer IS NULL`).run(new Date().toISOString(), d.id);
-  audit(db, req.user.login, "reprepare", d.id);
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await audit(db, req.user.login, "reprepare", d.id);
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /** Null when the answer was a Backlog press on an item with no question: that decision is gone (see `releaseBacklogItem`). */
-export async function undo(db: DatabaseSync, req: Req, via?: "mcp"): Promise<Decision | null> {
+export async function undo(db: Db, req: Req, via?: "mcp"): Promise<Decision | null> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d, true);
   if (!d.answer) throw new HttpError(409, "that decision has no answer to undo");
-  if (d.kind === BACKLOG_KIND) return releaseBacklogItem(db, d, req.user.login, "undo", via);
+  if (d.kind === BACKLOG_KIND) return await releaseBacklogItem(db, d, req.user.login, "undo", via);
   if (d.id.includes("~replaced-")) throw new HttpError(409, "a withdrawn question stays closed");
-  if (d.applied_at && !directHandled(db, d)) throw new HttpError(409, "the pipeline already acted on this answer");
-  inTransaction(db, () => {
-    if (!canUndo(db, d)) throw new HttpError(409, "the pipeline already wrote to GitHub for this answer");
-    const r = db.prepare(`UPDATE main.decisions SET answer = NULL, answer_note = NULL, exceptions = NULL, answered_by = NULL, answered_at = NULL, applied_at = NULL, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL
+  if (d.applied_at && !await directHandled(db, d)) throw new HttpError(409, "the pipeline already acted on this answer");
+  await inTransaction(db, async () => {
+    if (!await canUndo(db, d)) throw new HttpError(409, "the pipeline already wrote to GitHub for this answer");
+    const r = await db.prepare(`UPDATE main.decisions SET answer = NULL, answer_note = NULL, exceptions = NULL, answered_by = NULL, answered_at = NULL, applied_at = NULL, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL
       WHERE id = ? AND answer IS NOT NULL AND (applied_at IS NULL OR answer = '${HANDLED.key}')`).run(d.id);
     if (r.changes !== 1) throw new HttpError(409, "the pipeline acted on this a moment ago");
-    resetGroupAnswer(db, d.id);
-    resetActTries(db, d.id);
+    await resetGroupAnswer(db, d.id);
+    await resetActTries(db, d.id);
   });
-  audit(db, req.user.login, "undo", d.id, { answer: d.answer, adopted: d.adopted_opinion ?? undefined, ...(via ? { via } : {}) });
-  if (d.exec_state === DISPUTED) audit(db, req.user.login, "dispute-resolve", d.id, { resolution: "undo", disputedBy: d.dispute_by ?? undefined });
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await audit(db, req.user.login, "undo", d.id, { answer: d.answer, adopted: d.adopted_opinion ?? undefined, ...(via ? { via } : {}) });
+  if (d.exec_state === DISPUTED) await audit(db, req.user.login, "dispute-resolve", d.id, { resolution: "undo", disputedBy: d.dispute_by ?? undefined });
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /**
  * Someone who can settle, and did not give the answer, disputes an answer the pipeline has not applied. The pipeline stops reading it
  * until the answerer or an operator keeps it or takes it back. `reason` is required.
  */
-export async function dispute(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function dispute(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d);
   const reason = optionalText(body(req).reason, NOTE_MAX, "reason");
@@ -771,45 +766,45 @@ export async function dispute(db: DatabaseSync, req: Req): Promise<Decision> {
   if (!d.answer || isBacklog(d.answer) || d.applied_at || d.id.includes("~replaced-")) throw new HttpError(409, "only an answer the pipeline has not applied yet can be disputed");
   if (d.answered_by?.toLowerCase() === req.user.login.toLowerCase()) throw new HttpError(409, "you gave this answer: undo it instead");
   if (d.exec_state === DISPUTED) throw new HttpError(409, `already disputed by ${d.dispute_by}`);
-  if (wroteToGithub(db, d)) throw new HttpError(409, "the pipeline already wrote to GitHub for this answer");
-  if (d.kind === "merge" && d.repo && d.number !== null && (mergeRunning(db, d.repo) || inActiveBatch(db, d.repo, d.number))) throw new HttpError(409, "the merge is already in progress");
-  if (!openDispute(db, d.id, req.user.login, reason, new Date().toISOString())) throw new HttpError(409, "the pipeline acted on this a moment ago");
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  if (await wroteToGithub(db, d)) throw new HttpError(409, "the pipeline already wrote to GitHub for this answer");
+  if (d.kind === "merge" && d.repo && d.number !== null && (await mergeRunning(db, d.repo) || await inActiveBatch(db, d.repo, d.number))) throw new HttpError(409, "the merge is already in progress");
+  if (!await openDispute(db, d.id, req.user.login, reason, new Date().toISOString())) throw new HttpError(409, "the pipeline acted on this a moment ago");
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /** The answerer, or an operator, keeps a disputed answer: the pipeline reads it again. */
-export async function keepAnswer(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function keepAnswer(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d, true);
   if (!isDisputed(d)) throw new HttpError(409, "that answer is not disputed");
-  clearDispute(db, d.id);
-  resetActTries(db, d.id);
-  initExecState(db, d.id);
-  audit(db, req.user.login, "dispute-resolve", d.id, { resolution: "keep", answer: d.answer, disputedBy: d.dispute_by ?? undefined });
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await clearDispute(db, d.id);
+  await resetActTries(db, d.id);
+  await initExecState(db, d.id);
+  await audit(db, req.user.login, "dispute-resolve", d.id, { resolution: "keep", answer: d.answer, disputedBy: d.dispute_by ?? undefined });
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /** Operator: tries the GitHub write of a waiting or failed answer again. Its merge or close is still made as the operator who answered. */
-export async function retry(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function retry(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d, true);
   if (!d.answer || d.applied_at) throw new HttpError(409, "that decision has nothing waiting to run");
-  if (!retryDecision(db, d.id)) throw new HttpError(409, "that decision is not waiting or failed");
-  audit(db, req.user.login, "retry", d.id, { answer: d.answer });
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  if (!await retryDecision(db, d.id)) throw new HttpError(409, "that decision is not waiting or failed");
+  await audit(db, req.user.login, "retry", d.id, { answer: d.answer });
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /** Null for a Backlog press on an item with no question: that decision is gone (see `releaseBacklogItem`). */
-export async function reopen(db: DatabaseSync, req: Req): Promise<Decision | null> {
+export async function reopen(db: Db, req: Req): Promise<Decision | null> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d, true);
   if (d.answer !== BACKLOG.key) throw new HttpError(409, "that decision is not in the Backlog");
-  if (d.kind === BACKLOG_KIND) return releaseBacklogItem(db, d, req.user.login, "reopen");
-  const r = db.prepare(`UPDATE main.decisions SET answer = NULL, answer_note = NULL, exceptions = NULL, answered_by = NULL, answered_at = NULL, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL
+  if (d.kind === BACKLOG_KIND) return await releaseBacklogItem(db, d, req.user.login, "reopen");
+  const r = await db.prepare(`UPDATE main.decisions SET answer = NULL, answer_note = NULL, exceptions = NULL, answered_by = NULL, answered_at = NULL, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL
     WHERE id = ? AND answer = ?`).run(d.id, BACKLOG.key);
   if (r.changes !== 1) throw new HttpError(409, "someone changed this a moment ago");
-  audit(db, req.user.login, "reopen", d.id, { answer: d.answer });
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await audit(db, req.user.login, "reopen", d.id, { answer: d.answer });
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 /**
@@ -817,58 +812,58 @@ export async function reopen(db: DatabaseSync, req: Req): Promise<Decision | nul
  * item itself is answered Backlog. Without one a decision of kind `backlog` is written already answered Backlog, so the hold
  * (src/dupes/held.ts) reads the same answer; it is never asked or prepared. Nothing is written to GitHub.
  */
-export function backlogItem(db: DatabaseSync, repo: string, n: number, login: string, source: string, via?: string): DecisionRow {
-  const it = db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?").get(repo, n) as { state: string } | undefined;
+export async function backlogItem(db: Db, repo: string, n: number, login: string, source: string, via?: string): Promise<DecisionRow> {
+  const it = await db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?").get(repo, n) as { state: string } | undefined;
   if (!it) throw new HttpError(404, `no item ${slugOf(repo)}#${n}`);
   if (it.state !== "OPEN") throw new HttpError(409, `${slugOf(repo)}#${n} is not open`);
-  if (backlogHeld(db, repo, n)) throw new HttpError(409, `${slugOf(repo)}#${n} is already in the Backlog`);
-  const open = (db.prepare("SELECT * FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%~replaced-%'").all(repo, n) as DecisionRow[])
+  if (await backlogHeld(db, repo, n)) throw new HttpError(409, `${slugOf(repo)}#${n} is already in the Backlog`);
+  const open = (await db.prepare("SELECT * FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%~replaced-%'").all(repo, n) as DecisionRow[])
     .map((d) => ({ d, kind: d.kind as DecisionKind, answer: d.answer, askedAt: d.asked_at }));
   const first = pickDecision(open)?.d;
   if (first) {
-    applyAnswer(db, first, login, { answer: BACKLOG.key }, source, via);
-    return getDecision(db, first.id)!;
+    await applyAnswer(db, first, login, { answer: BACKLOG.key }, source, via);
+    return (await getDecision(db, first.id))!;
   }
   const id = backlogDecisionId(repo, n);
   const at = new Date().toISOString();
-  inTransaction(db, () => {
-    if (getDecision(db, id)) throw new HttpError(409, `${slugOf(repo)}#${n} is already in the Backlog`);
-    db.prepare("INSERT INTO main.decisions (id, kind, repo, number, question, facts, options, asked_at, asked_by) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)")
+  await inTransaction(db, async () => {
+    if (await getDecision(db, id)) throw new HttpError(409, `${slugOf(repo)}#${n} is already in the Backlog`);
+    await db.prepare("INSERT INTO main.decisions (id, kind, repo, number, question, facts, options, asked_at, asked_by) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, ?)")
       .run(id, BACKLOG_KIND, repo, n, BACKLOG_QUESTION, JSON.stringify([BACKLOG]), at, login);
     // Answered by an update, so the answered_role trigger records the answerer's role.
-    db.prepare("UPDATE main.decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(BACKLOG.key, login, at, id);
+    await db.prepare("UPDATE main.decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(BACKLOG.key, login, at, id);
   });
-  audit(db, login, "answer", id, { answer: BACKLOG.key, source, ...(via ? { via } : {}) });
-  if (conversationOf(db, repo, n)) {
-    const operator = !!db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(login);
-    insertTurn(db, repo, n, { kind: "system", login: "system", body: `${login} put this item on the Backlog`, block: systemBlock(`The ${operator ? "operator" : "maintainer"} ${login} put the item on the Backlog.`) });
+  await audit(db, login, "answer", id, { answer: BACKLOG.key, source, ...(via ? { via } : {}) });
+  if (await conversationOf(db, repo, n)) {
+    const operator = !!await db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(login);
+    await insertTurn(db, repo, n, { kind: "system", login: "system", body: `${login} put this item on the Backlog`, block: systemBlock(`The ${operator ? "operator" : "maintainer"} ${login} put the item on the Backlog.`) });
   }
-  return getDecision(db, id)!;
+  return (await getDecision(db, id))!;
 }
 
 /** POST /api/items/:repo/:n/backlog: `backlogItem` for the requester, who must settle on the repo. */
-export async function backlogItemRoute(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function backlogItemRoute(db: Db, req: Req): Promise<Decision> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
   await requireRepoSettler(db, req, [repo]);
-  const d = backlogItem(db, repo, n, req.user.login, "dashboard");
+  const d = await backlogItem(db, repo, n, req.user.login, "dashboard");
   return await settled(db, req, d.id);
 }
 
 /** Reopen or Undo of a `backlog` decision deletes it with its feedback and claims, so the item counts as never held. */
-function releaseBacklogItem(db: DatabaseSync, d: DecisionRow, login: string, action: "undo" | "reopen", via?: string): null {
-  inTransaction(db, () => {
-    if (db.prepare("DELETE FROM main.decisions WHERE id = ? AND kind = ? AND answer = ?").run(d.id, BACKLOG_KIND, BACKLOG.key).changes !== 1) throw new HttpError(409, "someone changed this a moment ago");
-    for (const t of ["decision_opinions", "decision_comments", "decision_claims"]) db.prepare(`DELETE FROM main.${t} WHERE decision_id = ?`).run(d.id);
+async function releaseBacklogItem(db: Db, d: DecisionRow, login: string, action: "undo" | "reopen", via?: string): Promise<null> {
+  await inTransaction(db, async () => {
+    if ((await db.prepare("DELETE FROM main.decisions WHERE id = ? AND kind = ? AND answer = ?").run(d.id, BACKLOG_KIND, BACKLOG.key)).changes !== 1) throw new HttpError(409, "someone changed this a moment ago");
+    for (const t of ["decision_opinions", "decision_comments", "decision_claims"]) await db.prepare(`DELETE FROM main.${t} WHERE decision_id = ?`).run(d.id);
   });
-  audit(db, login, action, d.id, { answer: d.answer, repo: d.repo, number: d.number, ...(via ? { via } : {}) });
+  await audit(db, login, action, d.id, { answer: d.answer, repo: d.repo, number: d.number, ...(via ? { via } : {}) });
   return null;
 }
 
 /** Operator bulk: answers every open decision in scope (`outsidePilot`, `repo`) with Backlog. Dry run unless `apply` is true. */
-export async function backlogBulk(db: DatabaseSync, req: Req): Promise<{ applied: boolean; count: number; decisions: { id: string; kind: string; repo: string | null; number: number | null }[] }> {
+export async function backlogBulk(db: Db, req: Req): Promise<{ applied: boolean; count: number; decisions: { id: string; kind: string; repo: string | null; number: number | null }[] }> {
   if (!isOperator(req)) throw new HttpError(403, "only operators put decisions in the Backlog");
   const b = body(req);
   const repo = typeof b.repo === "string" && b.repo ? b.repo : undefined;
@@ -876,32 +871,32 @@ export async function backlogBulk(db: DatabaseSync, req: Req): Promise<{ applied
   if (b.apply !== undefined && typeof b.apply !== "boolean") throw new HttpError(400, "apply must be true or false");
   if (b.outsidePilot !== undefined && typeof b.outsidePilot !== "boolean") throw new HttpError(400, "outsidePilot must be true or false");
   if (!b.outsidePilot && !repo) throw new HttpError(400, "give outsidePilot: true or a repo");
-  const res = backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo }, req.user.login, b.apply === true);
+  const res = await backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo }, req.user.login, b.apply === true);
   return { applied: res.applied, count: res.decisions.length, decisions: res.decisions };
 }
 
-export async function adopt(db: DatabaseSync, req: Req): Promise<Decision> {
+export async function adopt(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
   await requireSettler(db, req, d);
   if (d.answer) throw new HttpError(409, `already answered by ${d.answered_by}`);
-  if (settlingBy(db, d)) throw new HttpError(409, lockMessage(db, d));
+  if (await settlingBy(db, d)) throw new HttpError(409, await lockMessage(db, d));
   const oid = body(req).opinionId;
   if (typeof oid !== "string") throw new HttpError(400, "opinionId is required");
-  const o = db.prepare("SELECT id, login, option FROM decision_opinions WHERE id = ? AND decision_id = ? AND retracted_at IS NULL").get(oid, d.id) as
+  const o = await db.prepare("SELECT id, login, option FROM decision_opinions WHERE id = ? AND decision_id = ? AND retracted_at IS NULL").get(oid, d.id) as
     { id: string; login: string; option: string | null } | undefined;
   if (!o) throw new HttpError(404, "no such live opinion on this decision");
   if (!o.option || !optionsOf(d).some((x) => x.key === o.option)) throw new HttpError(400, "that opinion picks no option");
   const option = o.option;
-  inTransaction(db, () => {
-    const stored = d.kind === "duplicate" && d.id.includes(":dupegroup:") ? textsFor(db, d.id, option) : [];
+  await inTransaction(db, async () => {
+    const stored = d.kind === "duplicate" && d.id.includes(":dupegroup:") ? await textsFor(db, d.id, option) : [];
     if (stored.length && body(req).textsHash !== textsHash(stored)) throw new HttpError(409, "the comments for this answer changed; reload the decision");
-    const r = db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = NULL, exceptions = ?, answered_by = ?, answered_at = ?, adopted_opinion = ?, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
+    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = NULL, exceptions = ?, answered_by = ?, answered_at = ?, adopted_opinion = ?, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
       WHERE id = ? AND answer IS NULL AND NOT ${lockLiveSql("decisions")}`).run(option, isBatch(d) ? "[]" : null, req.user.login, new Date().toISOString(), o.id, d.id);
-    if (r.changes !== 1) throw new HttpError(409, settlingBy(db, getDecision(db, d.id) ?? d) ? lockMessage(db, getDecision(db, d.id) ?? d) : "someone answered this a moment ago");
-    resetActTries(db, d.id);
+    if (r.changes !== 1) throw new HttpError(409, await settlingBy(db, await getDecision(db, d.id) ?? d) ? await lockMessage(db, await getDecision(db, d.id) ?? d) : "someone answered this a moment ago");
+    await resetActTries(db, d.id);
   });
-  if (writeEffect(d.kind, option)) initExecState(db, d.id);
-  audit(db, req.user.login, "adopt", d.id, { answer: o.option, opinion: o.id, of: o.login });
+  if (writeEffect(d.kind, option)) await initExecState(db, d.id);
+  await audit(db, req.user.login, "adopt", d.id, { answer: o.option, opinion: o.id, of: o.login });
   return await settled(db, req, d.id);
 }
 
@@ -922,7 +917,7 @@ function limited(req: Req, limiter: RateLimiter): void {
  * login's live opinion (its text is the note); text alone is a comment in the thread. `via` names
  * the Inbox MCP server in the audit row when an agent sent it for its user.
  */
-export async function feedback(db: DatabaseSync, req: Req, limiter: RateLimiter, via?: "mcp"): Promise<Decision> {
+export async function feedback(db: Db, req: Req, limiter: RateLimiter, via?: "mcp"): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
   limited(req, limiter);
@@ -934,53 +929,48 @@ export async function feedback(db: DatabaseSync, req: Req, limiter: RateLimiter,
   const at = new Date().toISOString();
   if (option === null) {
     const id = randomToken(12);
-    db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body, via) VALUES (?, ?, ?, ?, ?, ?)").run(id, d.id, req.user.login, at, text, via ?? null);
-    audit(db, req.user.login, "comment", d.id, { comment: id, length: text!.length, ...(via ? { via } : {}) });
-    return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+    await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body, via) VALUES (?, ?, ?, ?, ?, ?)").run(id, d.id, req.user.login, at, text, via ?? null);
+    await audit(db, req.user.login, "comment", d.id, { comment: id, length: text!.length, ...(via ? { via } : {}) });
+    return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
   }
   if (d.answer) throw new HttpError(409, "the decision is answered; picks are closed");
   const permission = (await blockedRepos(req, d)).length ? "none" : "write";
-  db.exec("BEGIN IMMEDIATE");
-  try {
+  await db.write(async () => {
     // The permission check above can wait on GitHub; the operator may have answered meanwhile.
-    if ((db.prepare("SELECT answer FROM decisions WHERE id = ?").get(d.id) as { answer: string | null }).answer !== null)
+    if ((await db.prepare("SELECT answer FROM decisions WHERE id = ?").get(d.id) as { answer: string | null }).answer !== null)
       throw new HttpError(409, "the decision is answered; picks are closed");
     // A new pick without text keeps the login's earlier note.
-    const earlier = db.prepare("SELECT note FROM decision_opinions WHERE decision_id = ? AND login = ? AND retracted_at IS NULL").get(d.id, req.user.login) as { note: string | null } | undefined;
+    const earlier = await db.prepare("SELECT note FROM decision_opinions WHERE decision_id = ? AND login = ? AND retracted_at IS NULL").get(d.id, req.user.login) as { note: string | null } | undefined;
     const note = text ?? earlier?.note ?? null;
-    db.prepare("UPDATE decision_opinions SET retracted_at = ? WHERE decision_id = ? AND login = ? AND retracted_at IS NULL").run(at, d.id, req.user.login);
-    db.prepare("INSERT INTO decision_opinions (id, decision_id, login, option, note, at, permission, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    await db.prepare("UPDATE decision_opinions SET retracted_at = ? WHERE decision_id = ? AND login = ? AND retracted_at IS NULL").run(at, d.id, req.user.login);
+    await db.prepare("INSERT INTO decision_opinions (id, decision_id, login, option, note, at, permission, via) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
       .run(randomToken(12), d.id, req.user.login, option, note, at, permission, via ?? null);
-    audit(db, req.user.login, "opinion", d.id, { option, note: note ? true : undefined, ...(via ? { via } : {}) });
-    db.exec("COMMIT");
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+    await audit(db, req.user.login, "opinion", d.id, { option, note: note ? true : undefined, ...(via ? { via } : {}) });
+  });
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
-export async function retract(db: DatabaseSync, req: Req, limiter: RateLimiter): Promise<Decision> {
+export async function retract(db: Db, req: Req, limiter: RateLimiter): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
   limited(req, limiter);
   if (d.answer) throw new HttpError(409, "the decision is answered; picks are closed");
-  const r = db.prepare("UPDATE decision_opinions SET retracted_at = ? WHERE decision_id = ? AND login = ? AND retracted_at IS NULL")
+  const r = await db.prepare("UPDATE decision_opinions SET retracted_at = ? WHERE decision_id = ? AND login = ? AND retracted_at IS NULL")
     .run(new Date().toISOString(), d.id, req.user.login);
   if (r.changes !== 1) throw new HttpError(404, "you have no opinion on this decision");
-  audit(db, req.user.login, "opinion-retract", d.id);
-  return toDecision(db, getDecision(db, d.id)!, await viewerWith(db, req));
+  await audit(db, req.user.login, "opinion-retract", d.id);
+  return await toDecision(db, (await getDecision(db, d.id))!, await viewerWith(db, req));
 }
 
 // Presence, not content: refreshed while someone has the decision open, so
 // it is neither audited nor counted against the hourly limit.
-export async function claim(db: DatabaseSync, req: Req): Promise<void> {
+export async function claim(db: Db, req: Req): Promise<void> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
   if (d.answer) return;
   const now = new Date().toISOString();
   const lapsed = new Date(Date.now() - CLAIM_TTL).toISOString();
-  db.prepare(`INSERT INTO decision_claims (decision_id, login, since, at) VALUES (?, ?, ?, ?)
+  await db.prepare(`INSERT INTO decision_claims (decision_id, login, since, at) VALUES (?, ?, ?, ?)
     ON CONFLICT (decision_id, login) DO UPDATE SET since = CASE WHEN at <= ? THEN excluded.since ELSE since END, at = excluded.at`)
     .run(d.id, req.user.login, now, now, lapsed);
 }

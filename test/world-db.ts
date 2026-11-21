@@ -7,11 +7,9 @@
 //   w.models((input) => reply | undefined)
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { syncAccounts } from "../src/agents/accounts.ts";
 import { setRunner } from "../src/classify/run.ts";
 import { loadPlanSet, type PlanSet } from "../src/core/plan-set.ts";
-import { connect } from "../src/db.ts";
 import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
 import { ask } from "../src/decisions.ts";
 import type { ActDeps } from "../src/act/index.ts";
@@ -28,6 +26,8 @@ import { savePremerge } from "../src/premerge/store.ts";
 import type { PremergeFinding } from "../src/premerge/types.ts";
 import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
+import type { Db } from "../src/db/index.ts";
+import { connectDb } from "../src/db/open.ts";
 
 export const T0 = "2026-01-01T00:00:00Z";
 export const T1 = "2026-01-02T00:00:00Z";
@@ -49,12 +49,12 @@ export const REGULAR_ID = 7;
 export type ReviewOpts = { verdict?: "take" | "take-fix" | "hold" | "close"; head?: string; sure?: boolean; fixes?: { file: string; change: string }[]; reason?: string };
 export type IssueOpts = { label?: string; flags?: string[]; title?: string; body?: string; impact?: string };
 
-export function world() {
-  const db: DatabaseSync = connect(join(tmpdir("world"), "t.db"));
+export async function world() {
+  const db: Db = await connectDb(join(tmpdir("world"), "t.db"));
   const restore: (() => void)[] = [];
   const live = new Map<number, Live>();
   const writes: Write[] = [];
-  const headOf = (n: number): string => db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n)?.head_oid as string;
+  const headOf = async (n: number): Promise<string> => (await db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n))?.head_oid as string;
 
   // ---- fake GitHub ----
   const querier: Querier = validating({
@@ -129,7 +129,7 @@ export function world() {
               while (a[0] === "-c") a.splice(0, 2);
               if (a[0] === "rev-parse" && a[1] === "--git-dir") return ok(".\n");
               if (a[0] === "fetch") return ok();
-              if (a[0] === "rev-parse") return ok((a[1] === "refs/batch/main" ? MAIN : headOf(Number(a[1]!.split("pr-")[1]))) + "\n");
+              if (a[0] === "rev-parse") return ok((a[1] === "refs/batch/main" ? MAIN : await headOf(Number(a[1]!.split("pr-")[1]))) + "\n");
               if (a[0] === "merge-tree") return ok(`tree-${a.at(-1)}\n`);
               if (a[0] === "commit-tree") { tip = `${"b".repeat(39)}${++commits}`; live.get(900)!.head = tip; return ok(`${tip}\n`); }
               if (a[0] === "diff") return ok("diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n");
@@ -150,108 +150,108 @@ export function world() {
 
     // ---- tracked repo, operators, switch ----
     /** The tracked repo "app" with the pipeline on for it, an operator, and the repo approvals (all on unless named in `off`). */
-    repo(off: ("merge" | "push" | "comment" | "ci" | "fixissue")[] = []) {
-      db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', ?, ?, 1)").run(OPERATOR, T0);
-      db.prepare("UPDATE tracked_repos SET pipeline = 1 WHERE name = 'app'").run();
-      db.prepare("INSERT OR IGNORE INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-      db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'operator')").run(OPERATOR);
-      db.prepare("INSERT OR IGNORE INTO whitelist_overrides (login, status, by, at, github_id) VALUES ('regular', 'allow', ?, ?, ?)").run(OPERATOR, T0, REGULAR_ID);
+    async repo(off: ("merge" | "push" | "comment" | "ci" | "fixissue")[] = []) {
+      await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', ?, ?, 1)").run(OPERATOR, T0);
+      await db.prepare("UPDATE tracked_repos SET pipeline = 1 WHERE name = 'app'").run();
+      await db.prepare("INSERT OR IGNORE INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
+      await db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES (?, 'operator')").run(OPERATOR);
+      await db.prepare("INSERT OR IGNORE INTO whitelist_overrides (login, status, by, at, github_id) VALUES ('regular', 'allow', ?, ?, ?)").run(OPERATOR, T0, REGULAR_ID);
       const on = (k: string) => !off.includes(k as never);
-      setMergeApproval(db, OPERATOR, "app", on("merge"));
-      setPushApproval(db, OPERATOR, "app", on("push"));
-      setCommentApproval(db, OPERATOR, "app", on("comment"));
-      setCiApproval(db, OPERATOR, "app", on("ci"));
-      setFixIssueApproval(db, OPERATOR, "app", on("fixissue"));
-      return w.pipeline(true);
+      await setMergeApproval(db, OPERATOR, "app", on("merge"));
+      await setPushApproval(db, OPERATOR, "app", on("push"));
+      await setCommentApproval(db, OPERATOR, "app", on("comment"));
+      await setCiApproval(db, OPERATOR, "app", on("ci"));
+      await setFixIssueApproval(db, OPERATOR, "app", on("fixissue"));
+      return await w.pipeline(true);
     },
     /** The global pipeline switch. */
-    pipeline(on: boolean) {
-      db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_enabled', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(on ? "1" : "0");
+    async pipeline(on: boolean) {
+      await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_enabled', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(on ? "1" : "0");
       return w;
     },
 
     // ---- what sync writes ----
     /** An open PR with its classification and its checks at its head. */
-    pr(n: number, o: PrOpts = {}) {
+    async pr(n: number, o: PrOpts = {}) {
       const head = o.head ?? `sha${n}`;
       const author = o.author ?? "regular";
-      db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, author_id, additions, deletions, head_oid, head_ref, created_at, updated_at)
+      await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, author_id, additions, deletions, head_oid, head_ref, created_at, updated_at)
         VALUES ('app', ?, 'pr', 'OPEN', ?, ?, ?, ?, 0, ?, ?, ?, ?)`).run(n, `PR ${n}`, author, o.authorId !== undefined ? o.authorId : author === "regular" ? REGULAR_ID : null, o.lines ?? 20, head, `fix-${n}`, T0, T0);
-      db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, '{"top":0.95}')`)
+      await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, '{"top":0.95}')`)
         .run(n, T0, o.label ?? "bugfix", JSON.stringify(o.flags ?? []));
-      db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
+      await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
         VALUES ('app', ?, ?, 'OPEN', 0, ?, ?, ?, ?, ?)`).run(n, head, o.ci ?? "success", o.ci === "failure" ? JSON.stringify([{ name: CHECK, state: "failure" }]) : "[]", o.mergeable ?? "MERGEABLE", o.canModify === false ? 0 : 1, T1);
       live.set(n, { head, state: "OPEN", mergeable: o.mergeable ?? "MERGEABLE", ci: o.ci ?? "success", authors: [o.author ?? "regular"], assignees: [] });
       return w;
     },
     /** Sync saw a push: the PR has a new head, with green checks at it. */
-    synced(n: number, head: string) {
-      db.prepare("UPDATE items SET head_oid = ? WHERE repo = 'app' AND number = ?").run(head, n);
-      db.prepare("UPDATE pr_checks SET head_oid = ?, overall = 'success', mergeable = 'MERGEABLE', fetched_at = ? WHERE repo = 'app' AND number = ?").run(head, T1, n);
+    async synced(n: number, head: string) {
+      await db.prepare("UPDATE items SET head_oid = ? WHERE repo = 'app' AND number = ?").run(head, n);
+      await db.prepare("UPDATE pr_checks SET head_oid = ?, overall = 'success', mergeable = 'MERGEABLE', fetched_at = ? WHERE repo = 'app' AND number = ?").run(head, T1, n);
       live.get(n)!.head = head;
       return w;
     },
     /** An open issue with its classification. */
-    issue(n: number, o: IssueOpts = {}) {
-      db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, ?, 'someone', ?, ?)")
+    async issue(n: number, o: IssueOpts = {}) {
+      await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, ?, 'someone', ?, ?)")
         .run(n, o.title ?? "Panic when the slice is empty", o.body ?? "first() indexes element 0.", T0, T0);
-      db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
+      await db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, ?, ?, ?)`)
         .run(n, T0, o.label ?? "bugfix", JSON.stringify(o.flags ?? []), JSON.stringify({ top: 0.97, ...(o.flags?.includes("needs decision") ? { needs_decision: 0.9 } : {}) }));
-      if (o.impact) db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.impact, T0);
+      if (o.impact) await db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', ?, 'h', ?, 0, 'jev', ?)").run(n, o.impact, T0);
       live.set(n, { head: "", state: "OPEN", mergeable: "UNKNOWN", ci: "success", authors: [], assignees: [] });
       return w;
     },
 
     // ---- what the stages write ----
     /** The Opus review of the PR (at its head by default). */
-    review(n: number, o: ReviewOpts = {}) {
+    async review(n: number, o: ReviewOpts = {}) {
       const verdict = o.verdict ?? "take";
       const fixes = o.fixes ?? (verdict === "take-fix" ? [{ file: "src/lib.rs", change: "rename a to b" }] : []);
-      db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', ?, 'm', ?, ?, ?, ?, 'full')`)
-        .run(n, o.head ?? headOf(n), T0, verdict, o.reason ?? "looks right", fixes.length ? JSON.stringify(fixes) : null, o.sure === false ? 0 : 1);
+      await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', ?, 'm', ?, ?, ?, ?, 'full')`)
+        .run(n, o.head ?? await headOf(n), T0, verdict, o.reason ?? "looks right", fixes.length ? JSON.stringify(fixes) : null, o.sure === false ? 0 : 1);
       return w;
     },
     /** The verification result at the head. */
-    verified(n: number, state = "passed") {
-      db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('app', ?, ?, 'tests', 'r', ?, ?)").run(n, headOf(n), state, T0);
+    async verified(n: number, state = "passed") {
+      await db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('app', ?, ?, 'tests', 'r', ?, ?)").run(n, await headOf(n), state, T0);
       return w;
     },
     /** The pre-merge review at the head: clean, or with one defect (a fix when `fixable`). */
-    premerge(n: number, kind: "clean" | "defect", fixable = true) {
+    async premerge(n: number, kind: "clean" | "defect", fixable = true) {
       const findings: PremergeFinding[] = kind === "clean" ? [] : [{ severity: "defect", file: "src/lib.rs", line: 3, title: "off by one", scenario: "an empty list panics", ...(fixable ? { fix: { file: "src/lib.rs", change: "check the bound" } } : {}) }];
-      savePremerge(db, { repo: "app", number: n, head: headOf(n), at: T0, runId: "pm", model: "test", findings, searched: "" });
+      await savePremerge(db, { repo: "app", number: n, head: await headOf(n), at: T0, runId: "pm", model: "test", findings, searched: "" });
       // The real pre-merge review caches the diff it read; the merge rule reads it from there.
       mkdirSync(join(diffCacheDir(), "app"), { recursive: true });
-      writeFileSync(join(diffCacheDir(), "app", `${n}-${headOf(n)}.diff`), "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\n");
-      recordDiffFacts(db, "app", n, headOf(n));
+      writeFileSync(join(diffCacheDir(), "app", `${n}-${await headOf(n)}.diff`), "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\n");
+      await recordDiffFacts(db, "app", n, await headOf(n));
       return w;
     },
     /** The operator's answer to the PR's Merge? question at its head (asks it first when nobody did). */
-    answer(n: number, key: "merge" | "hold" | "close") {
-      const id = mergeDecisionId("app", n, headOf(n));
-      ask(db, [{
-        id, kind: "merge", repo: "app", number: n, question: "Merge this PR?", facts: [`${HEAD_FACT}${headOf(n)}`],
+    async answer(n: number, key: "merge" | "hold" | "close") {
+      const id = mergeDecisionId("app", n, await headOf(n));
+      await ask(db, [{
+        id, kind: "merge", repo: "app", number: n, question: "Merge this PR?", facts: [`${HEAD_FACT}${await headOf(n)}`],
         options: Object.values(MERGE_OPTIONS).map((x) => ({ ...x })), asked_by: "merge", asked_at: T0,
       }]);
-      db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
+      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
       return w;
     },
     /** An operator's answer to a decision asked earlier (by id). */
-    answerDecision(id: string, key: string) {
-      db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
+    async answerDecision(id: string, key: string) {
+      await db.prepare("UPDATE decisions SET answer = ?, answered_by = ?, answered_at = ? WHERE id = ?").run(key, OPERATOR, T1, id);
       return w;
     },
 
     // ---- models ----
     /** Installs a model runner: it gets each prompt's text and returns the reply text, or undefined for "no reply". One enabled Claude account is set up. */
-    models(reply: (input: string) => string | undefined) {
+    async models(reply: (input: string) => string | undefined) {
       const dir = tmpdir("box");
       mkdirSync(join(dir, "usage"));
       writeFileSync(join(dir, "accounts.json"), JSON.stringify([{ id: "t", configDir: join(dir, "config-t") }]));
       process.env.AUTOCRAFT_ACCOUNTS = join(dir, "accounts.json");
       process.env.AUTOCRAFT_USAGE_DIR = join(dir, "usage");
-      syncAccounts(db);
-      db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
+      await syncAccounts(db);
+      await db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = 't'").run();
       restore.push(setRunner(async (_cmd, _args, input) => {
         const text = reply(input);
         return text === undefined
@@ -263,12 +263,12 @@ export function world() {
 
     // ---- reading back ----
     /** The planner's pass: every PR and item decided once. */
-    plan(): PlanSet { return loadPlanSet(db); },
+    async plan(): Promise<PlanSet> { return await loadPlanSet(db); },
     /** The Plan of one PR. */
-    prPlan(n: number) { return loadPlanSet(db).prs.find((p) => p.facts.number === n)!.plan; },
-    rows: (sql: string, ...args: (string | number)[]) => (db.prepare(sql).all(...args) as Record<string, unknown>[]).map((r) => ({ ...r })),
+    async prPlan(n: number) { return (await loadPlanSet(db)).prs.find((p) => p.facts.number === n)!.plan; },
+    rows: async (sql: string, ...args: (string | number)[]) => (await db.prepare(sql).all(...args) as Record<string, unknown>[]).map((r) => ({ ...r })),
     close() { for (const r of restore.splice(0)) r(); },
   };
   return w;
 }
-export type World = ReturnType<typeof world>;
+export type World = Awaited<ReturnType<typeof world>>;

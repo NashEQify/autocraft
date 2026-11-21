@@ -2,7 +2,6 @@
 // where Jev is unsure or unavailable). A step is declared once (src/agents/steps.ts) with its parser, retries,
 // lint and fallbacks; the runner does the calls, retries, lint and fix turn (askClaude), the Jev reply parse, the
 // usage rows and the error result.
-import type { DatabaseSync } from "node:sqlite";
 import { NoTakerError, poolRoom, repoBatches } from "./call.ts";
 import { jevAvailable } from "./jev.ts";
 import { jevParallel } from "./accounts.ts";
@@ -11,6 +10,7 @@ import { CLAUDE_PROMPTS, JEV_PROMPTS, JEV_USD_PER_INPUT_TOKEN, renderJev, type C
 import type { DupePair } from "../dupes/pair.ts";
 import type { Item } from "../classify/parse.ts";
 import type { Lint, LintProblem } from "../replylint.ts";
+import type { Db } from "../db/index.ts";
 
 /** What a parser knows about the reply it reads. */
 export type ParseCtx = {
@@ -44,7 +44,7 @@ export type ClaudeStep<I, V, C = void> = StepBase<I, V> & {
   /** The input as `askClaude` takes it (a list of the prompt's inputs); default: the input itself. */
   toPrompt?: (input: I) => unknown[];
   /** Text of the reply; null is a parse error (the call is repeated). */
-  parse: (text: string, input: I, ctx: ParseCtx, c: C) => Parsed<I, V> | null;
+  parse: (text: string, input: I, ctx: ParseCtx, c: C) => Promise<Parsed<I, V> | null>;
   /** Lint of the parsed reply, with the fields it covers. Problems after the fix turn go to `parse` in `ctx.problems`; `onFail: "retry"` treats them as a parse error instead. The fix turn itself is the prompt's `lint` registration (src/prompts). */
   lint?: { fields: string[]; make: (input: I, c: C) => Lint; onFail?: "accept" | "retry" };
   /** The value to use when every attempt failed to parse and this returns one for the first reply that did not (a lenient reading of the reply). */
@@ -72,7 +72,7 @@ export type UsageSave = {
   /** Rows of an earlier pass under the same agent name are renamed first, so the replace does not overwrite their cost. */
   keepEarlier?: boolean;
   /** No row when the step got no usage at all (Jev: no reply with a usage field). */
-  skipWhen?: (r: { ok: boolean }) => boolean;
+  skipWhen?: (r: { ok: boolean }) => Promise<boolean>;
   /** Jev: also save the row (with zero tokens) when no reply carried a usage field. */
   withoutUsage?: boolean;
 };
@@ -83,7 +83,7 @@ export type StepOpts<I, C = void> = Omit<AskOptions, "lint"> & {
   /** Jev: what `request` needs besides the input. */
   ctx?: C;
   usage?: UsageSave;
-  cancelled?: () => boolean;
+  cancelled?: () => Promise<boolean>;
   /** The call itself, in place of the real model call (tests, injected dependencies). Gets the lint the step declares. */
   ask?: (input: I, lint: Lint | undefined) => Promise<LintedReply | null>;
   /** Called before each call with the input still to answer (the first call included). */
@@ -109,7 +109,7 @@ type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: b
  * a taker (NoTakerError) ends the attempts: with earlier answers they are returned with the rest unanswered, as when the
  * attempts run out; without, the usage of what ran is saved and the error is thrown.
  */
-export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C> = {}): Promise<StepResult<I, V>> {
+export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C> = {}): Promise<StepResult<I, V>> {
   const reg = step.provider === "jev" ? JEV_PROMPTS[step.id] : CLAUDE_PROMPTS[step.id];
   const attempts = step.attempts ?? reg.limits.attempts;
   const start = new Date().toISOString();
@@ -119,8 +119,8 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
   let fallback: V | null = null, error = "no answer", sawUsage = false;
   let ran: string | undefined, untaken: NoTakerError | undefined;
   for (let attempt = 0; attempt < attempts && todo !== undefined; attempt++) {
-    if (opts.cancelled?.()) break;
-    if (step.provider === "jev" && !jevAvailable(db)) { error = "jev unavailable"; break; }
+    if (await opts.cancelled?.()) break;
+    if (step.provider === "jev" && !await jevAvailable(db)) { error = "jev unavailable"; break; }
     if (attempt > 0 && step.backoffMs) await sleep(step.backoffMs);
     opts.onAttempt?.(todo, attempt);
     let r: Reply | null;
@@ -149,14 +149,14 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
   }
   if (!untaken && !values.length && fallback !== null) { values.push(fallback); rest = undefined; }
   const ok = values.length > 0;
-  if (opts.usage && !(opts.usage.skipWhen?.({ ok }) ?? false) && (sawUsage || opts.usage.withoutUsage)) {
+  if (opts.usage && !(await opts.usage.skipWhen?.({ ok }) ?? false) && (sawUsage || opts.usage.withoutUsage)) {
     const u = opts.usage;
     const total = sizeOf(step, input);
     const items = u.items ? u.items(ok, total, rest === undefined ? 0 : sizeOf(step, rest)) : total - (rest === undefined ? 0 : sizeOf(step, rest));
     const model = u.model ?? reg.models[0]!;
     const saved = step.provider === "jev" ? { ...usage, cost: usage.input * JEV_USD_PER_INPUT_TOKEN } : usage;
-    if (u.keepEarlier) db.prepare("UPDATE main.token_usage SET agent = agent || '@' || COALESCE(started_at, '') WHERE run_id = ? AND agent = ?").run(u.run, u.agent);
-    saveUsage(db, u.run, u.agent, u.stage, model, items, saved, start, new Date().toISOString());
+    if (u.keepEarlier) await db.prepare("UPDATE main.token_usage SET agent = agent || '@' || COALESCE(started_at, '') WHERE run_id = ? AND agent = ?").run(u.run, u.agent);
+    await saveUsage(db, u.run, u.agent, u.stage, model, items, saved, start, new Date().toISOString());
   }
   if (untaken) throw untaken;
   const runId = opts.usage?.run;
@@ -164,7 +164,7 @@ export async function runModelStep<I, V, C = void>(db: DatabaseSync, step: Claud
   return { ok: true, value: values[values.length - 1]!, values, ...(rest !== undefined && { rest }), usage, runId, ...(ran && { model: ran }) };
 }
 
-async function call<I, V, C>(db: DatabaseSync, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C>): Promise<Reply | null> {
+async function call<I, V, C>(db: Db, step: ClaudeStep<I, V, C> | JevStep<I, V, C>, input: I, opts: StepOpts<I, C>): Promise<Reply | null> {
   if (step.provider === "claude") {
     const lint = step.lint?.make(input, opts.ctx as C);
     const { ctx: _c, usage: _u, cancelled: _x, ask, model: m, onAttempt: _a, onReply: _r, ...ask_ } = opts;
@@ -202,14 +202,14 @@ export type TieredStep<It, JV, HV, C = void, B = It[]> = {
 export type TieredOpts<It, C> = {
   ctx?: C;
   /** Jev call width (default: the Jev parallelism setting). */
-  jevWidth?: number | (() => number);
+  jevWidth?: number | (() => Promise<number>);
   jevUsage?: (item: It) => UsageSave;
   /** Haiku batch size; default: the prompt's `perCall`. */
   perCall?: number;
   haikuUsage?: (batch: It[], n: number) => UsageSave;
   /** Start the first Haiku batch alone (a failure that stops all calls then shows early). */
   first?: boolean;
-  cancelled?: () => boolean;
+  cancelled?: () => Promise<boolean>;
 };
 
 export type TieredResult<JV, HV> = {
@@ -224,16 +224,16 @@ export type TieredResult<JV, HV> = {
   skipped: Set<string>;
 };
 
-export async function runTiered<It, JV, HV, C = void, B = It[]>(db: DatabaseSync, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C> = {}): Promise<TieredResult<JV, HV>> {
+export async function runTiered<It, JV, HV, C = void, B = It[]>(db: Db, tier: TieredStep<It, JV, HV, C, B>, items: It[], opts: TieredOpts<It, C> = {}): Promise<TieredResult<JV, HV>> {
   const out: TieredResult<JV, HV> = { jev: new Map(), haiku: new Map(), alone: new Set(), asked: new Set(), skipped: new Set() };
-  if (jevAvailable(db)) {
+  if (await jevAvailable(db)) {
     await pool(items.map((x) => async () => {
-      if (!jevAvailable(db)) return;
+      if (!await jevAvailable(db)) return;
       const r = await runModelStep(db, tier.jev, x, { ctx: opts.ctx, usage: opts.jevUsage?.(x), cancelled: opts.cancelled });
       out.jev.set(tier.ref(x), r.ok ? r.value : null);
-    }), opts.jevWidth ?? (() => jevParallel(db)));
+    }), opts.jevWidth ?? (async () => await jevParallel(db)));
   }
-  const down = !jevAvailable(db);
+  const down = !await jevAvailable(db);
   const ask: It[] = [];
   for (const x of items) {
     const jv = out.jev.get(tier.ref(x)) ?? null;
@@ -242,9 +242,9 @@ export async function runTiered<It, JV, HV, C = void, B = It[]>(db: DatabaseSync
     if (jv === null && down) out.alone.add(tier.ref(x));
     ask.push(x);
   }
-  if (!ask.length || opts.cancelled?.()) return out;
+  if (!ask.length || await opts.cancelled?.()) return out;
   const per = opts.perCall ?? CLAUDE_PROMPTS[tier.haiku.id].limits.perCall;
-  const batches = repoBatches(db, ask, per, tier.repo, (x) => [tier.item(x)]);
+  const batches = await repoBatches(db, ask, per, tier.repo, (x) => [tier.item(x)]);
   await pool(batches.map((batch, n) => async () => {
     for (const x of batch) out.asked.add(tier.ref(x));
     const r = await runModelStep(db, tier.haiku, tier.batch ? tier.batch(batch, opts.ctx as C) : (batch as unknown as B), {

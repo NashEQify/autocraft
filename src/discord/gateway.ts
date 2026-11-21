@@ -11,16 +11,16 @@ export type Socket = {
   send(data: string): void;
   close(code?: number): void;
   onopen: (() => void) | null;
-  onmessage: ((e: { data: unknown }) => void) | null;
-  onclose: ((e: { code: number }) => void) | null;
+  onmessage: ((e: { data: unknown }) => Promise<void>) | null;
+  onclose: ((e: { code: number }) => Promise<void>) | null;
   onerror: (() => void) | null;
 };
 
 export type GatewayDeps = {
   token: string;
   /** Called for every dispatch: READY, GUILD_CREATE, GUILD_ROLE_*, CHANNEL_*, MESSAGE_*, INTERACTION_CREATE and GUILD_DELETE. */
-  onDispatch: (type: string, data: unknown) => void;
-  onState: (state: "connecting" | "connected" | "reconnecting" | "failed", detail: string | null) => void;
+  onDispatch: (type: string, data: unknown) => Promise<void>;
+  onState: (state: "connecting" | "connected" | "reconnecting" | "failed", detail: string | null) => Promise<void>;
   log: (line: string) => void;
   fetch?: typeof fetch;
   open?: (url: string) => Socket;
@@ -52,9 +52,9 @@ export class Gateway {
   }
 
   /** The callbacks write to the database; a failure there is logged and must never escape into a socket listener, which would end the process. */
-  #state(state: Parameters<GatewayDeps["onState"]>[0], detail: string | null): void {
+  async #state(state: Parameters<GatewayDeps["onState"]>[0], detail: string | null): Promise<void> {
     try {
-      this.#d.onState(state, detail);
+      await this.#d.onState(state, detail);
     } catch (e) {
       this.#d.log(`discord: recording state failed: ${(e as Error).message}`);
     }
@@ -64,7 +64,7 @@ export class Gateway {
   async run(signal: AbortSignal): Promise<void> {
     let failures = 0;
     while (!signal.aborted) {
-      this.#state(failures ? "reconnecting" : "connecting", null);
+      await this.#state(failures ? "reconnecting" : "connecting", null);
       let fatal = false;
       try {
         const connectedFor = await this.#connectOnce(signal);
@@ -104,7 +104,7 @@ export class Gateway {
       url = await this.#gatewayUrl(signal);
     } catch (e) {
       if (e instanceof FatalError) {
-        this.#state("failed", e.message);
+        await this.#state("failed", e.message);
         this.#d.log(`discord: ${e.message}; not reconnecting`);
         return { ok: false, fatal: true };
       }
@@ -152,7 +152,7 @@ export class Gateway {
         acked = false;
         try { send(1, this.#seq); } catch { drop(4000); }
       };
-      const onMessage = (e: { data: unknown }): void => {
+      const onMessage = async (e: { data: unknown }): Promise<void> => {
         let p: { op: number; d: unknown; s: number | null; t: string | null };
         try {
           p = JSON.parse(String(e.data));
@@ -181,30 +181,30 @@ export class Gateway {
             this.#session = r.session_id;
             this.#resumeUrl = `${r.resume_gateway_url}/?v=10&encoding=json`;
             ready = true;
-            this.#state("connected", null);
+            await this.#state("connected", null);
           } else if (p.t === "RESUMED") {
             ready = true;
-            this.#state("connected", null);
+            await this.#state("connected", null);
           }
           try {
-            this.#d.onDispatch(p.t, p.d);
+            await this.#d.onDispatch(p.t, p.d);
           } catch (err) {
             this.#d.log(`discord: handling ${p.t} failed: ${(err as Error).message}`);
           }
         }
       };
       // An exception in a socket listener ends the process, so nothing may escape from here.
-      sock.onmessage = (e) => {
+      sock.onmessage = async (e) => {
         try {
-          onMessage(e);
+          await onMessage(e);
         } catch (err) {
           this.#d.log(`discord: socket message failed: ${(err as Error).message}`);
         }
       };
       sock.onerror = () => this.#d.log("discord: socket error");
-      sock.onclose = (e) => {
+      sock.onclose = async (e) => {
         if (FATAL.has(e.code)) {
-          this.#state("failed", `Discord closed the connection with code ${e.code}${e.code === 4014 ? " (enable the Message Content intent for the bot)" : ""}`);
+          await this.#state("failed", `Discord closed the connection with code ${e.code}${e.code === 4014 ? " (enable the Message Content intent for the bot)" : ""}`);
           this.#d.log(`discord: closed with code ${e.code}; not reconnecting`);
           return finish({ ok: false, fatal: true });
         }

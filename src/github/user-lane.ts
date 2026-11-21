@@ -7,7 +7,6 @@
 // (`decisions.exec_state` waiting-token / waiting-permission, with a plain reason) and runs again after that operator
 // signs in or authorizes again, or when someone presses Retry.
 import { statSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import { AppError, call, GITHUB_API } from "./app.ts";
 import { identityOfDecision, githubIdentity } from "./identity.ts";
 import { openVault, type Vault } from "./vault.ts";
@@ -16,6 +15,7 @@ import { appChildEnv } from "./install-token.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { Client, GithubError, Transient, type Querier } from "../mirror.ts";
 import { slugOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
 
 export type ExecState = "pending" | "waiting-token" | "waiting-permission" | "done" | "failed";
 export const WAITING: readonly ExecState[] = ["waiting-token", "waiting-permission"];
@@ -24,43 +24,43 @@ export const SIGN_IN_REASON = "Sign in to let AutoCraft finish this as you";
 export const noWriteReason = (repo: string): string => `You have no write access to ${slugOf(repo)}`;
 
 /** Sets the state shown on the decision. Writes nothing when it is already that, so the planner is not woken for nothing. */
-export function setExecState(db: DatabaseSync, id: string, state: ExecState, reason: string | null = null): void {
-  db.prepare("UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND exec_state IS NOT 'disputed' AND (exec_state IS NOT ? OR exec_reason IS NOT ?)").run(state, reason, id, state, reason);
+export async function setExecState(db: Db, id: string, state: ExecState, reason: string | null = null): Promise<void> {
+  await db.prepare("UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND exec_state IS NOT 'disputed' AND (exec_state IS NOT ? OR exec_reason IS NOT ?)").run(state, reason, id, state, reason);
 }
 
 /** Decisions the pipeline applied are done. */
-export function markExecDone(db: DatabaseSync): void {
-  db.prepare("UPDATE main.decisions SET exec_state = 'done', exec_reason = NULL WHERE applied_at IS NOT NULL AND exec_state IS NOT NULL AND exec_state <> 'done'").run();
+export async function markExecDone(db: Db): Promise<void> {
+  await db.prepare("UPDATE main.decisions SET exec_state = 'done', exec_reason = NULL WHERE applied_at IS NOT NULL AND exec_state IS NOT NULL AND exec_state <> 'done'").run();
 }
 
 /**
  * Sets a decision answered under an app repo to pending, or to waiting-token when its operator has no stored token set
  * (a database read only: the network checks happen when the write runs).
  */
-export function initExecState(db: DatabaseSync, id: string): void {
-  const d = db.prepare("SELECT repo, answered_by FROM main.decisions WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL").get(id) as { repo: string | null; answered_by: string | null } | undefined;
-  if (!d?.repo || !d.answered_by || githubIdentity(db) !== "app") return;
-  const has = db.prepare("SELECT 1 FROM main.user_tokens WHERE login = ? AND status = 'ok'").get(d.answered_by);
-  if (has) setExecState(db, id, "pending");
-  else setExecState(db, id, "waiting-token", SIGN_IN_REASON);
+export async function initExecState(db: Db, id: string): Promise<void> {
+  const d = await db.prepare("SELECT repo, answered_by FROM main.decisions WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL").get(id) as { repo: string | null; answered_by: string | null } | undefined;
+  if (!d?.repo || !d.answered_by || await githubIdentity(db) !== "app") return;
+  const has = await db.prepare("SELECT 1 FROM main.user_tokens WHERE login = ? AND status = 'ok'").get(d.answered_by);
+  if (has) await setExecState(db, id, "pending");
+  else await setExecState(db, id, "waiting-token", SIGN_IN_REASON);
 }
 
 /** Puts the waiting (and, for one decision, failed) decisions back to pending so the stages take them up again. Returns how many changed. */
-export function retryWaiting(db: DatabaseSync, login?: string): number {
-  const r = db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
+export async function retryWaiting(db: Db, login?: string): Promise<number> {
+  const r = await db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
     WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL AND answer IS NOT NULL AND (? IS NULL OR answered_by = ? COLLATE NOCASE)`).run(login ?? null, login ?? null);
   return Number(r.changes);
 }
 
 /** Act's tries of a decision start again: a target it stopped after repeated failures is planned once more. Used when the answer is undone, given again, kept after a dispute, or retried. */
-export function resetActTries(db: DatabaseSync, id: string): void {
-  db.prepare("UPDATE main.actions SET state = CASE WHEN state = 'stopped' THEN 'failed' ELSE state END, attempts = 0 WHERE decision_id = ? AND state IN ('stopped', 'failed')").run(id);
+export async function resetActTries(db: Db, id: string): Promise<void> {
+  await db.prepare("UPDATE main.actions SET state = CASE WHEN state = 'stopped' THEN 'failed' ELSE state END, attempts = 0 WHERE decision_id = ? AND state IN ('stopped', 'failed')").run(id);
 }
 
-export function retryDecision(db: DatabaseSync, id: string): boolean {
-  const r = db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
+export async function retryDecision(db: Db, id: string): Promise<boolean> {
+  const r = await db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
     WHERE id = ? AND exec_state IN ('waiting-token', 'waiting-permission', 'failed') AND applied_at IS NULL AND answer IS NOT NULL`).run(id);
-  if (Number(r.changes) > 0) resetActTries(db, id);
+  if (Number(r.changes) > 0) await resetActTries(db, id);
   return Number(r.changes) > 0;
 }
 
@@ -105,17 +105,17 @@ export async function githubPermission(token: string, repo: string, apiBase = GI
   }
 }
 
-const memo = new WeakMap<DatabaseSync, { key: string; deps: LaneDeps }>();
+const memo = new WeakMap<Db, { key: string; deps: LaneDeps }>();
 /**
  * The vault of the secrets file (null without a registered app) and GitHub's own permission read. A vault is kept per
  * database connection while the secrets file is the same one (path, mtime, size); when none could be opened nothing is kept.
  */
-export function defaultLaneDeps(db: DatabaseSync): LaneDeps {
+export async function defaultLaneDeps(db: Db): Promise<LaneDeps> {
   const key = secretsKey();
   const m = memo.get(db);
   if (m && m.key === key) return m.deps;
   let vault: Vault | null = null;
-  try { vault = openVault(db); } catch { /* no readable secrets: no token can be had */ }
+  try { vault = await openVault(db); } catch { /* no readable secrets: no token can be had */ }
   const deps: LaneDeps = { vault };
   if (vault) memo.set(db, { key, deps }); else memo.delete(db);
   return deps;
@@ -163,36 +163,36 @@ export async function resolveLane(deps: LaneDeps, login: string, repos: string[]
 }
 
 const NOT_APP_REASON = "This answer was given by a maintainer and can only be carried out as that person: the repo does not use the app identity";
-const answeredByMaintainer = (db: DatabaseSync, decisionId: string): boolean =>
-  !!db.prepare("SELECT 1 FROM main.decisions d JOIN main.access a ON a.login = d.answered_by WHERE d.id = ? AND a.role = 'maintainer'").get(decisionId);
+const answeredByMaintainer = async (db: Db, decisionId: string): Promise<boolean> =>
+  !!await db.prepare("SELECT 1 FROM main.decisions d JOIN main.access a ON a.login = d.answered_by WHERE d.id = ? AND a.role = 'maintainer'").get(decisionId);
 
 /**
  * The lane for the operator who answered `decisionId`, or null when every repo is on the box account (`legacy`): the
  * caller then uses its own transports and nothing changes. Only the repos on `app` are checked.
  */
-export async function laneForDecision(db: DatabaseSync, deps: LaneDeps | undefined, decisionId: string, repos: string[]): Promise<LaneResult | null> {
-  const app = (githubIdentity(db) === "app" ? repos : []);
+export async function laneForDecision(db: Db, deps: LaneDeps | undefined, decisionId: string, repos: string[]): Promise<LaneResult | null> {
+  const app = (await githubIdentity(db) === "app" ? repos : []);
   // A maintainer's answer is never carried out by the box account: a repo off the app identity refuses the write.
-  if (app.length < repos.length && answeredByMaintainer(db, decisionId)) return { state: "waiting-permission", reason: NOT_APP_REASON };
+  if (app.length < repos.length && await answeredByMaintainer(db, decisionId)) return { state: "waiting-permission", reason: NOT_APP_REASON };
   if (!app.length) return null;
   // A decision that waits stays put until its operator signs in or someone retries it: no network call per run.
-  const row = db.prepare("SELECT exec_state, exec_reason FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null; exec_reason: string | null } | undefined;
+  const row = await db.prepare("SELECT exec_state, exec_reason FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null; exec_reason: string | null } | undefined;
   if (row && (row.exec_state === "waiting-token" || row.exec_state === "waiting-permission")) return { state: row.exec_state, reason: row.exec_reason ?? SIGN_IN_REASON };
-  const who = identityOfDecision(db, decisionId);
+  const who = await identityOfDecision(db, decisionId);
   if (who === "app") return { state: "waiting-token", reason: SIGN_IN_REASON };
-  return resolveLane(deps ?? defaultLaneDeps(db), who.slice("user:".length), app);
+  return resolveLane(deps ?? await defaultLaneDeps(db), who.slice("user:".length), app);
 }
 
 /** The lane for an operator acting right now (a conversation card), or null when every repo is on the box account. */
-export async function laneForOperator(db: DatabaseSync, deps: LaneDeps | undefined, login: string, repos: string[]): Promise<LaneResult | null> {
-  const app = (githubIdentity(db) === "app" ? repos : []);
-  return app.length ? resolveLane(deps ?? defaultLaneDeps(db), login, app) : null;
+export async function laneForOperator(db: Db, deps: LaneDeps | undefined, login: string, repos: string[]): Promise<LaneResult | null> {
+  const app = (await githubIdentity(db) === "app" ? repos : []);
+  return app.length ? resolveLane(deps ?? await defaultLaneDeps(db), login, app) : null;
 }
 
 /** A decision that waits for its operator's token or access, or whose answer is disputed: the stages leave it out of their work until it is retried or the dispute is settled. */
-export function isWaiting(db: DatabaseSync, decisionId: string | null | undefined): boolean {
+export async function isWaiting(db: Db, decisionId: string | null | undefined): Promise<boolean> {
   if (!decisionId) return false;
-  const r = db.prepare("SELECT exec_state FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null } | undefined;
+  const r = await db.prepare("SELECT exec_state FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null } | undefined;
   return r?.exec_state === "waiting-token" || r?.exec_state === "waiting-permission" || r?.exec_state === "disputed";
 }
 

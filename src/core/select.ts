@@ -1,10 +1,10 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
-import type { DatabaseSync } from "node:sqlite";
 import { decidePr } from "./decide.ts";
 import { loadPass, loadPrFacts } from "./facts.ts";
 import type { PlanSet } from "./plan-set.ts";
 import { WAITS_ON_PERSON, inFlightNow } from "./assignment.ts";
 import type { Action, ActionKind, Plan, PrFacts } from "./plan.ts";
+import type { Db } from "../db/index.ts";
 
 export type Planned = { facts: PrFacts; plan: Plan; action: Action };
 
@@ -30,7 +30,7 @@ export { WAITS_ON_PERSON, inFlightNow };
  * The PRs with an action of `kind` due, in selection order: fast-track or rank score descending (unranked last), then repo and number.
  * Our own broken pushes come first, then work in flight, then fast-track or rank score. Facts are loaded once for all of them.
  */
-export function planned(db: DatabaseSync, kind: ActionKind, opts: PlannedOptions = {}): Planned[] {
+export async function planned(db: Db, kind: ActionKind, opts: PlannedOptions = {}): Promise<Planned[]> {
   const { bucket, onPlan, plans, ...load } = opts;
   const out: Planned[] = [];
   let source: Iterable<{ facts: PrFacts; plan: Plan }>;
@@ -39,7 +39,7 @@ export function planned(db: DatabaseSync, kind: ActionKind, opts: PlannedOptions
     source = plans.prs.filter((p) => (!load.repo || p.facts.repo === load.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
   } else {
     const pass = loadPass(load.now);
-    source = loadPrFacts(db, load).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
+    source = (await loadPrFacts(db, load)).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
   }
   for (const { facts, plan } of source) {
     onPlan?.(facts, plan);

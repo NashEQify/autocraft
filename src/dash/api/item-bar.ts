@@ -126,9 +126,9 @@ function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean):
   return live;
 }
 
-export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: string | null; pipelineOn: boolean }, status: ItemStatus): ItemBar {
+export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: string | null; pipelineOn: boolean }, status: ItemStatus): Promise<ItemBar> {
   const { db, repo, n } = c;
-  const q: Q = (sql, ...args) => db.prepare(sql).all(...args) as never;
+  const q: Q = async (sql, ...args) => await db.prepare(sql).all(...args) as never;
   if (c.veiled) return { headline: { tone: "idle", text: status.phase, next: null, model: null, startedAt: null, jobId: null }, steps: [] };
 
   // A job_items row of a running job means the item is finished, so running work is matched by the job's params and by the item's own running calls.
@@ -140,7 +140,7 @@ export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: 
   const run = runs.find((r) => job && r.job_id === job.id) ?? runs[0];
   const queued = active.find((j) => j.state === "queued");
 
-  const mergedByUs = it.state === "merged" && db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged'").get(repo, n) !== undefined;
+  const mergedByUs = it.state === "merged" && await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged'").get(repo, n) !== undefined;
   const evidence = evidenceOf(c, q, it.mergedAt, mergedByUs);
   const costs = new Map<StageId, number>();
   for (const r of q<{ step: string; cost: number | null }>(`SELECT r.step, r.cost_usd AS cost FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.cost_usd IS NOT NULL${hiddenSql(c.hidden)}`, repo, n, ...hiddenArgs(c.hidden))) {
@@ -163,7 +163,7 @@ export function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: 
   const failText = (label: string, reason: string | null) => `${label} failed${reason ? `: ${reason}` : ""}`;
   if (open && runningStep) headline = { tone: "running", text: `${nameOf(runningStep)} running`, next: status.next, model: run?.model ?? null, startedAt: job?.started_at ?? run?.started_at ?? null, jobId: job?.id ?? run?.job_id ?? null };
   else if (open && queued) {
-    const pos = (db.prepare("SELECT COUNT(*) AS k FROM jobs WHERE state = 'queued' AND step = ? AND id < ?").get(queued.step, queued.id) as { k: number }).k + 1;
+    const pos = (await db.prepare("SELECT COUNT(*) AS k FROM jobs WHERE state = 'queued' AND step = ? AND id < ?").get(queued.step, queued.id) as { k: number }).k + 1;
     headline = { ...base, tone: "queued", text: `Queued for ${nameOf(queued.step)} · #${pos} in line`, jobId: queued.id };
   } else if (open && status.outside) headline = { ...base, tone: "waiting", text: `Waiting: ${status.waiting ?? "an operator's release"}`, outside: status.outside };
   else if (preFailed) headline = { ...base, tone: "failed", text: failText(preFailed.label, preFailed.reason) };

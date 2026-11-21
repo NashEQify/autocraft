@@ -6,20 +6,20 @@ import { readSeqs } from "../src/live.ts";
 import { OPERATOR, world } from "./world-db.ts";
 
 test("a step paused until an operator acts sets no wake time", async () => {
-  const w = world().repo().issue(1);
+  const w = await (await (await world()).repo()).issue(1);
   const lanes = LANES.filter((l) => l.name === "priority");
-  setLimit(w.db, "prioritize", { perDay: 0 }, OPERATOR);
-  assert.equal(pauseOf(w.db, "prioritize")?.wakeAt, null);
+  await setLimit(w.db, "prioritize", { perDay: 0 }, OPERATOR);
+  assert.equal((await pauseOf(w.db, "prioritize"))?.wakeAt, null);
   const r = await detectAutopilot(w.db, { lanes });
   assert.equal(r.wakeAt ?? null, null, "only a write lifts a limit of 0");
 });
 
-test("a write to flow_summary leaves the planner's input unchanged", () => {
-  const w = world().repo().issue(1);
-  const fp = () => fingerprintOf(w.db, { topics: INPUT_TOPICS }, "prioritize", {}, readSeqs(w.db));
-  const before = fp();
-  const flow = readSeqs(w.db).flow;
-  w.db.prepare("INSERT INTO flow_summary (repo, counts, counted_at, stale, decisions_sig) VALUES ('app', '{}', 'now', 0, '')").run();
-  assert.notEqual(readSeqs(w.db).flow, flow, "the flow topic moved");
-  assert.equal(fp(), before);
+test("a write to flow_summary leaves the planner's input unchanged", async () => {
+  const w = await (await (await world()).repo()).issue(1);
+  const fp = async () => await fingerprintOf(w.db, { topics: INPUT_TOPICS }, "prioritize", {}, await readSeqs(w.db));
+  const before = await fp();
+  const flow = (await readSeqs(w.db)).flow;
+  await w.db.prepare("INSERT INTO flow_summary (repo, counts, counted_at, stale, decisions_sig) VALUES ('app', '{}', 'now', 0, '')").run();
+  assert.notEqual((await readSeqs(w.db)).flow, flow, "the flow topic moved");
+  assert.equal(await fp(), before);
 });

@@ -2,13 +2,13 @@
 // question is the quoted message, or the ping's own text without mentions. The question is searched and dropped; the
 // only record of a reply is a keyed hash of the ping and of the quoted message with the sealed id of our reply, kept so
 // the reply can be deleted when either message is deleted. See docs/pipeline.md.
-import type { DatabaseSync } from "node:sqlite";
 import type { DiscordKeys } from "./keys.ts";
 import { deleteRepliesOf } from "./replies.ts";
 import { renderMatches } from "./reply.ts";
 import type { DiscordRest } from "./rest.ts";
 import { QUESTION_CHARS, type Search } from "./search.ts";
 import { isWatched } from "./store.ts";
+import type { Db } from "../db/index.ts";
 
 type Mentionable = { id: string };
 export type PingMessage = {
@@ -25,7 +25,7 @@ const PING_MATCHES = 3;
 const MENTION = /<@[!&]?\d+>/g;
 const strip = (s: string): string => s.replace(MENTION, " ").replace(/\s+/g, " ").trim();
 
-export type PingDeps = { db: DatabaseSync; keys: DiscordKeys; rest: DiscordRest; search: Search; log: (line: string) => void };
+export type PingDeps = { db: Db; keys: DiscordKeys; rest: DiscordRest; search: Search; log: (line: string) => void };
 
 export class Pings {
   #d: PingDeps;
@@ -45,7 +45,7 @@ export class Pings {
   }
 
   /** Gateway events. Returns at once; the work runs on its own and never throws. */
-  dispatch(type: string, d: unknown): void {
+  async dispatch(type: string, d: unknown): Promise<void> {
     const x = d as Record<string, unknown>;
     if (type === "READY") {
       this.#botId = (x.user as Mentionable | undefined)?.id ?? null;
@@ -55,7 +55,7 @@ export class Pings {
       if (x.role) this.#role(x.role as Role);
     } else if (type === "MESSAGE_CREATE") {
       const m = d as PingMessage;
-      if (this.#isPing(m)) this.#run(() => this.#ping(m));
+      if (await this.#isPing(m)) this.#run(() => this.#ping(m));
     } else if (type === "MESSAGE_DELETE") {
       if (typeof x.id === "string") this.#run(() => this.#deleted([x.id as string]));
     } else if (type === "MESSAGE_DELETE_BULK") {
@@ -77,20 +77,20 @@ export class Pings {
    * Discord also lists the author of a replied-to message in `mentions`, so that list does not count, and a reply to one of
    * the bot's own messages is not a ping. Bots, webhooks, edits and system messages are not pings.
    */
-  #isPing(m: PingMessage): boolean {
+  async #isPing(m: PingMessage): Promise<boolean> {
     if (!this.#botId || typeof m.id !== "string" || typeof m.channel_id !== "string") return false;
     if (!m.author?.id || m.author.bot || m.webhook_id) return false;
     if (m.type !== undefined && m.type !== 0 && m.type !== 19) return false;
     if (m.referenced_message?.author?.id === this.#botId) return false;
     const text = m.content ?? "";
     if (!(text.includes(`<@${this.#botId}>`) || text.includes(`<@!${this.#botId}>`) || [...this.#roles].some((r) => text.includes(`<@&${r}>`)))) return false;
-    return isWatched(this.#d.db, m.channel_id);
+    return await isWatched(this.#d.db, m.channel_id);
   }
 
   async #ping(m: PingMessage): Promise<void> {
     const { db, keys, rest, search } = this.#d;
     const pingHash = keys.hash("message", m.id);
-    if (this.#inflight.has(pingHash) || db.prepare("SELECT 1 FROM discord_replies WHERE ping_hash = ?").get(pingHash)) return;
+    if (this.#inflight.has(pingHash) || await db.prepare("SELECT 1 FROM discord_replies WHERE ping_hash = ?").get(pingHash)) return;
     const quotedId = m.message_reference?.message_id;
     const question = (quotedId ? strip(m.referenced_message?.content ?? "") : "") || strip(m.content ?? "");
     if (!question) return;
@@ -99,7 +99,7 @@ export class Pings {
     try {
       const found = await search.find(question.slice(0, QUESTION_CHARS));
       // A ping reply is public in the channel: the best few only.
-      const r = renderMatches(db, found.matches.slice(0, PING_MATCHES), question, m.channel_id);
+      const r = await renderMatches(db, found.matches.slice(0, PING_MATCHES), question, m.channel_id);
       const quoted = quotedId ? keys.hash("message", quotedId) : null;
       // Deleted while the search ran: nothing to reply to.
       if (this.#deletedMeanwhile.has(pingHash) || (quoted && this.#deletedMeanwhile.has(quoted))) return;
@@ -108,7 +108,7 @@ export class Pings {
         ...(r.components.length && { components: r.components }),
       });
       const sealed = keys.seal({ guildId: m.guild_id ?? "", channelId: m.channel_id, messageId: sent.id, at: new Date().toISOString() }, pingHash);
-      db.prepare("INSERT OR REPLACE INTO discord_replies (ping_hash, quoted_hash, channel_hash, sealed) VALUES (?, ?, ?, ?)").run(pingHash, quoted, keys.hash("channel", m.channel_id), sealed);
+      await db.prepare("INSERT OR REPLACE INTO discord_replies (ping_hash, quoted_hash, channel_hash, sealed) VALUES (?, ?, ?, ?)").run(pingHash, quoted, keys.hash("channel", m.channel_id), sealed);
       // Deleted while the reply was being sent.
       if (this.#deletedMeanwhile.has(pingHash) || (quoted && this.#deletedMeanwhile.has(quoted))) await this.#deleted([m.id, ...(quotedId ? [quotedId] : [])]);
     } finally {

@@ -1,15 +1,15 @@
 // Per-repo approval for the pipeline to merge pull requests there. Set only
 // from the dashboard by an operator (src/dash/api/admin.ts). Tracked repos
 // include ones we do not maintain, so merging is opt-in per repo.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
 
 export type MergeApproval = { by: string; at: string };
 const key = (repo: string) => `merge_approved:${repo}`;
 
-export function mergeApprovalOf(db: DatabaseSync, repo: string): MergeApproval | null {
-  const value = setting(db, key(repo));
+export async function mergeApprovalOf(db: Db, repo: string): Promise<MergeApproval | null> {
+  const value = await setting(db, key(repo));
   if (value === undefined) return null;
   try {
     return JSON.parse(value) as MergeApproval;
@@ -19,11 +19,11 @@ export function mergeApprovalOf(db: DatabaseSync, repo: string): MergeApproval |
 }
 
 // Returns false when nothing changed.
-export function setMergeApproval(db: DatabaseSync, by: string, repo: string, approved: boolean): boolean {
-  if (!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
-  if ((mergeApprovalOf(db, repo) !== null) === approved) return false;
-  if (approved) db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
-  else db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
-  audit(db, by, approved ? "merge-approve" : "merge-revoke", repo);
+export async function setMergeApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {
+  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if ((await mergeApprovalOf(db, repo) !== null) === approved) return false;
+  if (approved) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
+  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  await audit(db, by, approved ? "merge-approve" : "merge-revoke", repo);
   return true;
 }

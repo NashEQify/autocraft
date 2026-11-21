@@ -10,13 +10,13 @@
 //  4. a refresh the endpoint rejects may mean another process used the token first: reread a few times, and only
 //     when the row stays unchanged mark it `refresh-failed`, also by compare-and-swap.
 // There is never a fallback to another identity: a final failure answers "needs sign-in".
-import type { DatabaseSync } from "node:sqlite";
 import { envVar } from "../env.ts";
 import { TokenBox } from "../dash/server/crypto.ts";
 import { resealLegacyValues } from "../dash/server/reseal.ts";
 import { readSecrets } from "../dash/server/config.ts";
 import { GitHubProvider, RevokeRefused, type Provider, type Tokens } from "../dash/server/provider.ts";
 import { failUserTokens, readUserTokens, revocationAad, shareRefresh, swapUserTokens } from "../dash/server/user-tokens.ts";
+import type { Db } from "../db/index.ts";
 
 export type NeedsSignIn = { ok: false; needsSignIn: true; why: "no-token" | "refresh-failed" | "expired" };
 /** A transient failure (GitHub unreachable): try again later, the token set is untouched. */
@@ -28,7 +28,7 @@ const REREADS = 4;
 const MAX_REVOKE_ATTEMPTS = 5;
 
 export class Vault {
-  #db: DatabaseSync;
+  #db: Db;
   #box: TokenBox;
   #providerOf: () => Provider;
   get #provider(): Provider { return this.#providerOf(); }
@@ -38,7 +38,7 @@ export class Vault {
   waitMs = 300;
 
   /** `provider` may be a function, read at each use, so the GitHub App's registration can change while the vault lives. */
-  constructor(db: DatabaseSync, box: TokenBox, provider: Provider | (() => Provider)) {
+  constructor(db: Db, box: TokenBox, provider: Provider | (() => Provider)) {
     this.#db = db;
     this.#box = box;
     this.#providerOf = typeof provider === "function" ? provider : () => provider;
@@ -57,13 +57,13 @@ export class Vault {
 
   async #obtain(login: string, rejected: string | undefined): Promise<UserTokenResult> {
     for (let attempt = 0; attempt < REREADS; attempt++) {
-      const row = readUserTokens(this.#db, this.#box, login);
+      const row = await readUserTokens(this.#db, this.#box, login);
       if (!row?.tokens) return { ok: false, needsSignIn: true, why: "no-token" };
       if (row.status !== "ok") return { ok: false, needsSignIn: true, why: "refresh-failed" };
       const t = row.tokens;
       if (t.access !== rejected && (t.expiresAt === null || t.expiresAt - EXPIRY_MARGIN > Date.now())) return { ok: true, access: t.access };
       if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) {
-        failUserTokens(this.#db, login, row.version);
+        await failUserTokens(this.#db, login, row.version);
         return { ok: false, needsSignIn: true, why: "expired" };
       }
       let next: Tokens | null;
@@ -74,8 +74,8 @@ export class Vault {
         return { ok: false, needsSignIn: false };
       }
       if (next) {
-        if (swapUserTokens(this.#db, this.#box, login, row.version, next)) {
-          shareRefresh(this.#db, this.#box, login, t.refresh, next);
+        if (await swapUserTokens(this.#db, this.#box, login, row.version, next)) {
+          await shareRefresh(this.#db, this.#box, login, t.refresh, next);
           return { ok: true, access: next.access };
         }
         // Another writer stored a pair first; its pair is the one to use.
@@ -83,10 +83,10 @@ export class Vault {
       }
       // Rejected: either the refresh token is dead, or another process just used it and is about to store the new pair.
       if (this.waitMs) await new Promise((r) => setTimeout(r, this.waitMs));
-      const again = readUserTokens(this.#db, this.#box, login);
+      const again = await readUserTokens(this.#db, this.#box, login);
       if (again && again.version !== row.version) continue;
       if (attempt < REREADS - 1 && this.waitMs) continue;
-      if (failUserTokens(this.#db, login, row.version)) return { ok: false, needsSignIn: true, why: "refresh-failed" };
+      if (await failUserTokens(this.#db, login, row.version)) return { ok: false, needsSignIn: true, why: "refresh-failed" };
     }
     return { ok: false, needsSignIn: true, why: "refresh-failed" };
   }
@@ -101,11 +101,11 @@ export class Vault {
     if (this.#sweeping) return 0;
     this.#sweeping = true;
     try {
-      const rows = this.#db.prepare(`SELECT id, login, token_enc, kind, aad, attempts FROM user_token_revocations ${fresh ? "WHERE attempts = 0 " : ""}ORDER BY id`)
+      const rows = await this.#db.prepare(`SELECT id, login, token_enc, kind, aad, attempts FROM user_token_revocations ${fresh ? "WHERE attempts = 0 " : ""}ORDER BY id`)
         .all() as { id: number; login: string; token_enc: string; kind: string; aad: string | null; attempts: number }[];
       for (const r of rows) {
         // Claim the attempt first: a concurrent sweep (another process) that read the same row changes nothing here and skips it.
-        if (this.#db.prepare("UPDATE user_token_revocations SET attempts = attempts + 1 WHERE id = ? AND attempts = ?").run(r.id, r.attempts).changes !== 1) continue;
+        if ((await this.#db.prepare("UPDATE user_token_revocations SET attempts = attempts + 1 WHERE id = ? AND attempts = ?").run(r.id, r.attempts)).changes !== 1) continue;
         let done = false;
         try {
           done = await this.#revokeRow(r);
@@ -113,10 +113,10 @@ export class Vault {
           console.error(`revocation for ${r.login}: ${(e as Error).message}`);
         }
         if (done) {
-          this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
+          await this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
         } else if (r.attempts + 1 >= MAX_REVOKE_ATTEMPTS) {
           console.error(`revocation for ${r.login}: given up after ${r.attempts + 1} failed attempts`);
-          this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
+          await this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
         }
       }
       return rows.length;
@@ -135,7 +135,7 @@ export class Vault {
     if (!t) return true;
     const revoke = (access: string): Promise<void> => (r.kind === "token" ? this.#provider.revoke(access) : this.#provider.revokeGrant(access));
     // The login's user_tokens row written by the same sign-in holds this very token set and dies with it.
-    const own = r.kind === "token" ? readUserTokens(this.#db, this.#box, r.login) : null;
+    const own = r.kind === "token" ? await readUserTokens(this.#db, this.#box, r.login) : null;
     const sameSignIn = !!own?.tokens && (own.tokens.access === t.access || (!!t.refresh && own.tokens.refresh === t.refresh));
     const refreshed = async (): Promise<string | null> => {
       if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) return null;
@@ -156,17 +156,17 @@ export class Vault {
       if (!access) return false;
       await revoke(access);
     }
-    if (sameSignIn) this.#db.prepare("DELETE FROM user_tokens WHERE login = ?").run(r.login);
+    if (sameSignIn) await this.#db.prepare("DELETE FROM user_tokens WHERE login = ?").run(r.login);
     return true;
   }
 }
 
 /** The runner's vault: the app's client credentials and the session key from the secrets file, as the dashboard reads them. Null without the GitHub App secrets. */
-export function openVault(db: DatabaseSync, env: NodeJS.ProcessEnv = process.env): Vault | null {
+export async function openVault(db: Db, env: NodeJS.ProcessEnv = process.env): Promise<Vault | null> {
   const secrets = readSecrets(envVar("SECRETS_FILE", env));
   if (!secrets.app) return null;
   const box = new TokenBox(secrets.sessionKey);
   // The runner may start before the dashboard has re-sealed values under the current key.
-  resealLegacyValues(db, box);
+  await resealLegacyValues(db, box);
   return new Vault(db, box, new GitHubProvider(secrets.app.clientId, secrets.app.clientSecret));
 }

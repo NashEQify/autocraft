@@ -1,6 +1,6 @@
 // Which autorepins (src/repin/index.ts) have something to do now. Read from the database alone and without the modules the
 // work needs, so the runner can ask on every tick.
-import type { DatabaseSync } from "node:sqlite";
+import type { Db } from "../db/index.ts";
 
 /** An attempt that did not finish is tried again after this long. */
 export const RETRY_MS = 60_000;
@@ -27,10 +27,10 @@ const DUE = `(a.state = 'waiting' AND (a.tried_at IS NULL OR a.tried_at <= ?1) A
 const before = (now: Date): [string, string] => [new Date(now.getTime() - RETRY_MS).toISOString(), new Date(now.getTime() - LOCK_MAX_MS).toISOString()];
 
 /** The autorepins with a step to take, oldest first. */
-export function repinsDue(db: DatabaseSync, now: Date = new Date()): RepinRow[] {
-  return db.prepare(`SELECT a.* FROM main.autorepins a WHERE ${DUE} ORDER BY a.requested_at, a.repo, a.number`).all(...before(now)) as RepinRow[];
+export async function repinsDue(db: Db, now: Date = new Date()): Promise<RepinRow[]> {
+  return await db.prepare(`SELECT a.* FROM main.autorepins a WHERE ${DUE} ORDER BY a.requested_at, a.repo, a.number`).all(...before(now)) as RepinRow[];
 }
 
-export function anyRepinDue(db: DatabaseSync, now: Date = new Date()): boolean {
-  return !!db.prepare(`SELECT 1 FROM main.autorepins a WHERE ${DUE} LIMIT 1`).get(...before(now));
+export async function anyRepinDue(db: Db, now: Date = new Date()): Promise<boolean> {
+  return !!await db.prepare(`SELECT 1 FROM main.autorepins a WHERE ${DUE} LIMIT 1`).get(...before(now));
 }

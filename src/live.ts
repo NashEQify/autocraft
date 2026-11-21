@@ -3,6 +3,7 @@
 // sync, sandbox worker, dashboard), so no code path can forget to signal.
 import type { DatabaseSync } from "node:sqlite";
 import { GITHUB_ACTIONS } from "./github/actions.ts";
+import type { Db } from "./db/index.ts";
 
 type Source = { table: string; ops?: ("INSERT" | "UPDATE" | "DELETE")[]; when?: string };
 
@@ -212,8 +213,8 @@ export function liveSql(db?: DatabaseSync): string {
 }
 
 /** The current counter of every topic. */
-export function readSeqs(db: DatabaseSync): Record<string, number> {
+export async function readSeqs(db: Db): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
-  for (const r of db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[]) out[r.topic] = r.seq;
+  for (const r of await db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[]) out[r.topic] = r.seq;
   return out;
 }

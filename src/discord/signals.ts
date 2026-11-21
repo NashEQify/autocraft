@@ -3,7 +3,6 @@
 // unavailable, under a daily dollar cap. The text is used for that call only: only a flag is kept on the mention row, the
 // recorded prompt and reply are deleted when the call ends, and an edit asks again. A deleted message takes its row, and
 // so its flag, with it (store.ts). Display only: nothing in the pipeline reads the flag.
-import type { DatabaseSync } from "node:sqlite";
 import { jevAvailable } from "../agents/jev.ts";
 import { runModelStep, type ClaudeStep, type JevStep } from "../agents/step.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
@@ -11,6 +10,7 @@ import type { DiscordKeys } from "./keys.ts";
 import { jevSignal, parseSignal, signalBand, signalState, type SignalAsk } from "./signal-ask.ts";
 import { isWatched, trackedRepos, type DiscordLink } from "./store.ts";
 import { parseRefs, type ItemKey } from "./refs.ts";
+import type { Db } from "../db/index.ts";
 
 export const SIGNAL_CAP_KEY = "discord_signal_daily_usd";
 export const DEFAULT_SIGNAL_CAP_USD = 1;
@@ -25,7 +25,7 @@ const MAX_CALLS = 2;
 const MODEL_WAIT_MS = 20_000;
 
 /** The model calls; tests replace them. Jev gives the yes-probability, Haiku the answer; null when there was none. */
-export type Judge = { jev: (db: DatabaseSync, ask: SignalAsk) => Promise<number | null>; haiku: (db: DatabaseSync, ask: SignalAsk) => Promise<boolean | null> };
+export type Judge = { jev: (db: Db, ask: SignalAsk) => Promise<number | null>; haiku: (db: Db, ask: SignalAsk) => Promise<boolean | null> };
 
 const JEV_STEP: JevStep<SignalAsk, number> = {
   provider: "jev", id: "discord.signal.jev",
@@ -38,7 +38,7 @@ const JEV_STEP: JevStep<SignalAsk, number> = {
 const HAIKU_STEP: ClaudeStep<SignalAsk, boolean> = {
   provider: "claude", id: "discord.signal.haiku",
   toPrompt: (a) => [a],
-  parse: (text) => {
+  parse: async (text) => {
     const v = parseSignal(text);
     return v === null ? null : { value: v };
   },
@@ -55,23 +55,23 @@ export const modelJudge: Judge = {
   },
 };
 
-export function signalCapUsd(db: DatabaseSync): number {
-  const v = Number((db.prepare("SELECT value FROM settings WHERE key = ?").get(SIGNAL_CAP_KEY) as { value: string } | undefined)?.value);
+export async function signalCapUsd(db: Db): Promise<number> {
+  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(SIGNAL_CAP_KEY) as { value: string } | undefined)?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_SIGNAL_CAP_USD;
 }
 
 /** What today's (UTC) signal calls cost, from the agent runs. */
-export function signalSpentUsd(db: DatabaseSync, now: number): number {
+export async function signalSpentUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-signal' AND started_at >= ?").get(day) as { c: number }).c);
+  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-signal' AND started_at >= ?").get(day) as { c: number }).c);
 }
 
 /** The prompt and reply of a signal call hold the message. Rows of finished calls are removed; `all` (at startup, when no call can be running) removes every row. */
-export function dropSignalTexts(db: DatabaseSync, all = false): void {
-  db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-signal'${all ? "" : " AND state <> 'running'"})`).run();
+export async function dropSignalTexts(db: Db, all = false): Promise<void> {
+  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-signal'${all ? "" : " AND state <> 'running'"})`).run();
 }
 
-export type SignalDeps = { db: DatabaseSync; keys: DiscordKeys; log: (line: string) => void; judge?: Judge; now?: () => number };
+export type SignalDeps = { db: Db; keys: DiscordKeys; log: (line: string) => void; judge?: Judge; now?: () => number };
 type Msg = { id: string; channel_id: string; content?: string; type?: number; webhook_id?: string; edited_timestamp?: string | null; author?: { id: string; bot?: boolean } };
 
 export class Signals {
@@ -91,16 +91,16 @@ export class Signals {
   }
 
   /** Gateway events, handled after the mention rows changed. Returns at once; the work never throws. */
-  dispatch(type: string, d: unknown): void {
+  async dispatch(type: string, d: unknown): Promise<void> {
     if (type !== "MESSAGE_CREATE" && type !== "MESSAGE_UPDATE") return;
     const m = d as Msg;
     if (typeof m.id !== "string" || typeof m.channel_id !== "string" || typeof m.content !== "string" || !m.content) return;
     if (m.author?.bot || m.webhook_id || (m.type !== undefined && m.type !== 0 && m.type !== 19)) return;
     // An update without an edit time is Discord adding a link preview: the text is the same.
     if (type === "MESSAGE_UPDATE" && !m.edited_timestamp) return;
-    if (!isWatched(this.#d.db, m.channel_id)) return;
+    if (!await isWatched(this.#d.db, m.channel_id)) return;
     // Only a message that names one to MAX_ITEMS items is checked, so only those use up the limits.
-    const refs = parseRefs(m.content, trackedRepos(this.#d.db));
+    const refs = parseRefs(m.content, await trackedRepos(this.#d.db));
     if (!refs.length || refs.length > MAX_ITEMS) return;
     if (!this.#allow(m.author?.id ? this.#d.keys.hash("author", m.author.id) : "", this.#d.keys.hash("channel", m.channel_id))) return;
     const hash = this.#d.keys.hash("message", m.id);
@@ -138,12 +138,12 @@ export class Signals {
     const rows = db.prepare("SELECT 1 FROM discord_mentions WHERE msg_hash = ? AND repo = ? AND number = ?");
     const set = db.prepare("UPDATE discord_mentions SET signal = ? WHERE msg_hash = ? AND repo = ? AND number = ?");
     for (const r of refs) {
-      const it = title.get(r.repo, r.number) as { title: string | null } | undefined;
+      const it = await title.get(r.repo, r.number) as { title: string | null } | undefined;
       // No row: the message was deleted, or the item is not named any more.
-      if (!it || !rows.get(hash, r.repo, r.number)) continue;
+      if (!it || !await rows.get(hash, r.repo, r.number)) continue;
       const v = await this.#asks({ ref: `${r.repo}#${r.number}`, title: it.title ?? "", text });
       // A delete during the call removed the row, so this changes nothing then.
-      if (v !== null) set.run(v ? 1 : 0, hash, r.repo, r.number);
+      if (v !== null) await set.run(v ? 1 : 0, hash, r.repo, r.number);
     }
   }
 
@@ -157,8 +157,8 @@ export class Signals {
     const judge = this.#d.judge ?? modelJudge;
     try {
       // The daily cap comes first: a spent cap (or a cap of 0) makes no Jev or model call.
-      if (signalSpentUsd(db, (this.#d.now ?? Date.now)()) >= signalCapUsd(db)) return null;
-      if (jevAvailable(db)) {
+      if (await signalSpentUsd(db, (this.#d.now ?? Date.now)()) >= await signalCapUsd(db)) return null;
+      if (await jevAvailable(db)) {
         const p = await judge.jev(db, a);
         const band = p === null ? "unsure" : signalBand(p);
         if (band === "yes") return true;
@@ -169,7 +169,7 @@ export class Signals {
       log(`discord: signal model call failed: ${(e as Error).message.slice(0, 200)}`);
       return null;
     } finally {
-      try { dropSignalTexts(db); } catch (e) { log(`discord: removing signal texts failed: ${(e as Error).message}`); }
+      try { await dropSignalTexts(db); } catch (e) { log(`discord: removing signal texts failed: ${(e as Error).message}`); }
     }
   }
 }
@@ -177,14 +177,14 @@ export class Signals {
 const open = (url: { guildId: string; channelId: string; messageId: string }): string => `https://discord.com/channels/${url.guildId}/${url.channelId}/${url.messageId}`;
 
 /** Messages that asked for attention on an item, newest first. Empty when the key is missing or a row does not open. */
-export function signalLinks(db: DatabaseSync, keys: DiscordKeys | null, repo: string, number: number): DiscordLink[] {
+export async function signalLinks(db: Db, keys: DiscordKeys | null, repo: string, number: number): Promise<DiscordLink[]> {
   if (!keys) return [];
-  const rows = db.prepare("SELECT msg_hash, sealed FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").all(repo, number) as { msg_hash: string; sealed: string }[];
+  const rows = await db.prepare("SELECT msg_hash, sealed FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").all(repo, number) as { msg_hash: string; sealed: string }[];
   return rows.flatMap((r) => {
     const v = keys.open(r.sealed, r.msg_hash);
     return v ? [{ url: open(v), at: v.at }] : [];
   }).sort((a, b) => b.at.localeCompare(a.at));
 }
 
-export const signalCountOf = (db: DatabaseSync, repo: string, number: number): number =>
-  (db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").get(repo, number) as { n: number }).n;
+export const signalCountOf = async (db: Db, repo: string, number: number): Promise<number> =>
+  (await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").get(repo, number) as { n: number }).n;

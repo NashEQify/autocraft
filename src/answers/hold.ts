@@ -1,12 +1,13 @@
 // One answer per question. While a conversation card settles a decision, the decision is locked ("settling"); once it is answered
 // and before the pipeline applies it, another person can dispute it ("disputed") instead of answering again. Both states live in
 // decisions.exec_state; the pipeline reads a disputed answer as no answer (see settlers.ts).
-import type { DatabaseSync } from "node:sqlite";
 import { BACKLOG, getDecision, optionsOf, type DecisionRow } from "../decisions.ts";
 import { audit } from "../dash/audit.ts";
 import { settledBy, settledBySql } from "../settlers.ts";
 import { writeEffect } from "../act/index.ts";
 import { queuePlace } from "../conversations/queue.ts";
+import { findSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export const SETTLING = "settling";
 export const DISPUTED = "disputed";
@@ -27,9 +28,9 @@ export const lockRunningAtSql = (t = "decisions"): string =>
   `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN (SELECT max(lc.acted_at) FROM main.conversation_cards lc WHERE lc.state = 'running' AND ${t}.exec_reason LIKE lc.id || ':%') END)`;
 
 /** The login of the person whose card is settling an open decision right now, or null. */
-export function settlingBy(db: DatabaseSync, d: Pick<DecisionRow, "id" | "answer" | "exec_state" | "exec_reason">): string | null {
+export async function settlingBy(db: Db, d: Pick<DecisionRow, "id" | "answer" | "exec_state" | "exec_reason">): Promise<string | null> {
   if (d.answer !== null || d.exec_state !== SETTLING) return null;
-  if (!db.prepare(`SELECT 1 FROM main.decisions WHERE id = ? AND ${lockLiveSql("decisions")}`).get(d.id)) return null;
+  if (!await db.prepare(`SELECT 1 FROM main.decisions WHERE id = ? AND ${lockLiveSql("decisions")}`).get(d.id)) return null;
   const r = d.exec_reason ?? "";
   return r.slice(r.indexOf(":") + 1) || "someone";
 }
@@ -37,17 +38,17 @@ export function settlingBy(db: DatabaseSync, d: Pick<DecisionRow, "id" | "answer
 export const settlingMessage = (by: string): string => `${by} is applying their answer`;
 
 /** The queued card that holds the open decision's lock, if any. */
-export function queuedLock(db: DatabaseSync, d: Pick<DecisionRow, "id" | "exec_state" | "exec_reason">): number | null {
+export async function queuedLock(db: Db, d: Pick<DecisionRow, "id" | "exec_state" | "exec_reason">): Promise<number | null> {
   if (d.exec_state !== SETTLING) return null;
   const id = Number((d.exec_reason ?? "").split(":")[0]);
   if (!Number.isInteger(id)) return null;
-  return db.prepare("SELECT 1 FROM main.conversation_cards WHERE id = ? AND state = 'queued'").get(id) ? id : null;
+  return await db.prepare("SELECT 1 FROM main.conversation_cards WHERE id = ? AND state = 'queued'").get(id) ? id : null;
 }
 
 /** Why an answer to the locked decision is refused: a card is running, or the press waits for room (the place is read now). */
-export function lockMessage(db: DatabaseSync, d: DecisionRow): string {
-  const by = settlingBy(db, d) ?? "someone";
-  const card = queuedLock(db, d);
+export async function lockMessage(db: Db, d: DecisionRow): Promise<string> {
+  const by = await settlingBy(db, d) ?? "someone";
+  const card = await queuedLock(db, d);
   if (card === null) return settlingMessage(by);
   const place = queuePlace(db, card);
   return `${by}'s answer waits for the daily GitHub write limit${place ? ` (#${place})` : ""}`;
@@ -57,23 +58,23 @@ export function lockMessage(db: DatabaseSync, d: DecisionRow): string {
  * Claims the open decision for the card inside the transaction that queues the card or starts its run. A lock the card already holds
  * (it was queued) is taken over. Throws when another live card holds it. A decision that is answered or missing is left alone: the run reports "the decision changed".
  */
-export function claimSettling(db: DatabaseSync, decisionId: string, cardId: number, login: string): void {
-  const r = db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND answer IS NULL AND (NOT ${lockLiveSql("decisions")} OR (exec_state = ? AND exec_reason LIKE ?))`)
+export async function claimSettling(db: Db, decisionId: string, cardId: number, login: string): Promise<void> {
+  const r = await db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND answer IS NULL AND (NOT ${lockLiveSql("decisions")} OR (exec_state = ? AND exec_reason LIKE ?))`)
     .run(SETTLING, `${cardId}:${login}`, decisionId, SETTLING, `${cardId}:%`);
   if (r.changes === 1) return;
-  const d = getDecision(db, decisionId);
-  if (d && settlingBy(db, d)) throw new Error(lockMessage(db, d));
+  const d = await getDecision(db, decisionId);
+  if (d && await settlingBy(db, d)) throw new Error(await lockMessage(db, d));
 }
 
 /** Clears the lock of the card. The answer's own exec state replaces it when the card answered the decision. */
-export function releaseSettling(db: DatabaseSync, decisionId: string, cardId: number): void {
-  db.prepare("UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL WHERE id = ? AND exec_state = ? AND exec_reason LIKE ?").run(decisionId, SETTLING, `${cardId}:%`);
+export async function releaseSettling(db: Db, decisionId: string, cardId: number): Promise<void> {
+  await db.prepare("UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL WHERE id = ? AND exec_state = ? AND exec_reason LIKE ?").run(decisionId, SETTLING, `${cardId}:%`);
 }
 
 /** Locks left by a card that no longer runs (a crashed process). A queued card keeps its lock. */
-export function sweepSettling(db: DatabaseSync): number {
-  return Number(db.prepare(`UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL WHERE exec_state = ?
-    AND NOT EXISTS (SELECT 1 FROM main.conversation_cards c WHERE c.state IN ('running', 'queued') AND decisions.exec_reason LIKE c.id || ':%')`).run(SETTLING).changes);
+export async function sweepSettling(db: Db): Promise<number> {
+  return Number((await db.prepare(`UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL WHERE exec_state = ?
+    AND NOT EXISTS (SELECT 1 FROM main.conversation_cards c WHERE c.state IN ('running', 'queued') AND decisions.exec_reason LIKE c.id || ':%')`).run(SETTLING)).changes);
 }
 
 export const isDisputed = (d: Pick<DecisionRow, "exec_state" | "answer" | "applied_at">): boolean => d.exec_state === DISPUTED && d.answer !== null && !d.applied_at;
@@ -83,15 +84,15 @@ export const isDisputed = (d: Pick<DecisionRow, "exec_state" | "answer" | "appli
  * Backlog only holds, an option without a write (take, small-extra, need-info) leaves nothing to race, and an answer whose answerer no longer
  * settles is not carried out.
  */
-export function pendingAnswerOn(db: DatabaseSync, repo: string, number: number): DecisionRow | null {
-  const rows = db.prepare(`SELECT * FROM main.decisions WHERE repo = ? AND number = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND id NOT LIKE '%~replaced-%'
+export async function pendingAnswerOn(db: Db, repo: string, number: number): Promise<DecisionRow | null> {
+  const rows = await db.prepare(`SELECT * FROM main.decisions WHERE repo = ? AND number = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND id NOT LIKE '%~replaced-%'
     ORDER BY answered_at DESC`).all(repo, number, BACKLOG.key) as DecisionRow[];
-  return rows.find((d) => writeEffect(d.kind, d.answer!) !== null && (isDisputed(d) || settledBy(db, d))) ?? null;
+  return await findSeq(rows, async (d) => writeEffect(d.kind, d.answer!) !== null && (isDisputed(d) || await settledBy(db, d))) ?? null;
 }
 
 /** The reason a card of `by` that writes to the item must not run, or null. */
-export function pendingAnswerRefusal(db: DatabaseSync, repo: string, number: number, by: string): string | null {
-  const d = pendingAnswerOn(db, repo, number);
+export async function pendingAnswerRefusal(db: Db, repo: string, number: number, by: string): Promise<string | null> {
+  const d = await pendingAnswerOn(db, repo, number);
   if (!d) return null;
   const label = optionsOf(d).find((o) => o.key === d.answer)?.label ?? d.answer;
   if (isDisputed(d)) return `${d.answered_by}'s answer "${label}" is disputed by ${d.dispute_by}; it has to be kept or undone first`;
@@ -100,22 +101,22 @@ export function pendingAnswerRefusal(db: DatabaseSync, repo: string, number: num
 }
 
 /** True while any answer on the item is disputed: no pipeline write for the item goes ahead. */
-export function disputeOn(db: DatabaseSync, repo: string, number: number): boolean {
-  return !!db.prepare("SELECT 1 FROM main.decisions WHERE repo = ? AND number = ? AND exec_state = ? AND answer IS NOT NULL AND applied_at IS NULL LIMIT 1").get(repo, number, DISPUTED);
+export async function disputeOn(db: Db, repo: string, number: number): Promise<boolean> {
+  return !!await db.prepare("SELECT 1 FROM main.decisions WHERE repo = ? AND number = ? AND exec_state = ? AND answer IS NOT NULL AND applied_at IS NULL LIMIT 1").get(repo, number, DISPUTED);
 }
 
 /** Records the dispute. False when the decision is no longer disputable (answered by the disputer, applied, running or already disputed). */
-export function openDispute(db: DatabaseSync, id: string, by: string, reason: string, at: string): boolean {
-  const r = db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = NULL, dispute_by = ?, dispute_reason = ?, dispute_at = ?
+export async function openDispute(db: Db, id: string, by: string, reason: string, at: string): Promise<boolean> {
+  const r = await db.prepare(`UPDATE main.decisions SET exec_state = ?, exec_reason = NULL, dispute_by = ?, dispute_reason = ?, dispute_at = ?
     WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL AND answer <> ? AND answered_by <> ? COLLATE NOCASE
       AND (exec_state IS NULL OR exec_state IN ('pending', 'waiting-token', 'waiting-permission', 'failed'))`).run(DISPUTED, by, reason, at, id, BACKLOG.key, by);
   if (r.changes !== 1) return false;
-  audit(db, by, "dispute", id, { reason });
+  await audit(db, by, "dispute", id, { reason });
   return true;
 }
 
-export function clearDispute(db: DatabaseSync, id: string): void {
-  db.prepare("UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND exec_state = ?").run(id, DISPUTED);
+export async function clearDispute(db: Db, id: string): Promise<void> {
+  await db.prepare("UPDATE main.decisions SET exec_state = NULL, exec_reason = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND exec_state = ?").run(id, DISPUTED);
 }
 
 /**

@@ -5,19 +5,19 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
 import { askClaude, FIX_TURN_MAX_TURNS, setRunner } from "../src/classify/run.ts";
-import { connect } from "../src/db.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
 import { mergeFixFields, type Lint } from "../src/replylint.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "lint-fix-"));
 process.env.AUTOCRAFT_CLAUDE_BIN = "/usr/bin/true";
 
-describe("reply lint fix turn", () => {
-  const db = connect(join(dir, "t.db"));
-  const box = useTestAccount(db);
+describe("reply lint fix turn", async () => {
+  const db = await connectDb(join(dir, "t.db"));
+  const box = await useTestAccount(db);
   mkdirSync(box.configDir + "t", { recursive: true });
   writeFileSync(join(box.configDir + "t", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "a", refreshToken: "b", expiresAt: Date.now() + 6 * 3600_000 } }));
   const first = JSON.stringify({ verdict: "take", summary: "too long", why: "fine.", public: { summary: "ok", points: ["a leaky point", "second"] } });

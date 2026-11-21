@@ -2,12 +2,12 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { connect } from "../src/db.ts";
 import { ScreenshotConfigError, deleteConfig, getConfig, paramValueError, parseScreenshotConfig, putConfig } from "../src/verify/screenshot-config.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
-const fresh = () => connect(join(mkdtempSync(join(SCRATCH, "sc-")), "t.db"));
+const fresh = async () => await connectDb(join(mkdtempSync(join(SCRATCH, "sc-")), "t.db"));
 
 const good = () => ({
   package: "photocraft-ui-egui", example: "snapshot", driver: "args", size: "1440x900", ui_paths: ["crates/ui*/**"],
@@ -42,16 +42,16 @@ test("a valid setup parses; unknown placeholders, shell characters and validator
   assert.ok("error" in mutate((c) => { c.ui_paths = ["../x"]; }));
 });
 
-test("put, get and delete are audited; a bad config is not stored; arguments are checked against their validators", () => {
-  const db = fresh();
-  assert.throws(() => putConfig(db, "op", "app", { ...good(), driver: "nope" }), ScreenshotConfigError);
-  assert.equal(getConfig(db, "app"), null);
-  const c = putConfig(db, "op", "app", good());
-  assert.equal(getConfig(db, "app")?.commands.snap?.capture, true);
-  assert.equal(getConfig(db, "app")?.updatedBy, c.updatedBy);
-  assert.equal(deleteConfig(db, "op", "app"), true);
-  assert.equal(getConfig(db, "app"), null);
-  assert.equal((db.prepare("SELECT count(*) AS n FROM audit WHERE action = 'screenshot-config'").get() as { n: number }).n, 2);
+test("put, get and delete are audited; a bad config is not stored; arguments are checked against their validators", async () => {
+  const db = await fresh();
+  await assert.rejects(async () => await putConfig(db, "op", "app", { ...good(), driver: "nope" }), ScreenshotConfigError);
+  assert.equal(await getConfig(db, "app"), null);
+  const c = await putConfig(db, "op", "app", good());
+  assert.equal((await getConfig(db, "app"))?.commands.snap?.capture, true);
+  assert.equal((await getConfig(db, "app"))?.updatedBy, c.updatedBy);
+  assert.equal(await deleteConfig(db, "op", "app"), true);
+  assert.equal(await getConfig(db, "app"), null);
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM audit WHERE action = 'screenshot-config'").get() as { n: number }).n, 2);
   assert.equal(paramValueError({ enum: ["a"] }, "a"), null);
   assert.notEqual(paramValueError({ chars: "a-z-", min: 1, max: 5 }, "-x"), null);
   assert.equal(paramValueError({ chars: "a-z-", min: 1, max: 5 }, "ab-c"), null);

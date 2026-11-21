@@ -1,8 +1,7 @@
 // Area lists (one saved version per change), item areas and model proposals. Plain SQL over the
 // tables area_lists, item_areas and area_proposals; the assignment itself is in assign.ts.
-import { prep } from "../sql-cache.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { AREAS_MAX, AREA_DESCRIPTION_MAX, AREA_NAME_MAX, NONE_OF_THESE, type Area } from "./types.ts";
+import type { Db } from "../db/index.ts";
 
 export class AreaError extends Error {}
 
@@ -31,13 +30,13 @@ export function lenientAreas(v: unknown, max = AREAS_MAX): Area[] {
 
 export type AreaList = { repo: string; version: number; areas: Area[]; at: string; by: string | null; note: string | null };
 
-export function currentList(db: DatabaseSync, repo: string): AreaList | null {
-  const r = db.prepare("SELECT version, areas, at, by, note FROM area_lists WHERE repo = ? ORDER BY version DESC LIMIT 1").get(repo) as { version: number; areas: string; at: string; by: string | null; note: string | null } | undefined;
+export async function currentList(db: Db, repo: string): Promise<AreaList | null> {
+  const r = await db.prepare("SELECT version, areas, at, by, note FROM area_lists WHERE repo = ? ORDER BY version DESC LIMIT 1").get(repo) as { version: number; areas: string; at: string; by: string | null; note: string | null } | undefined;
   return r ? { repo, version: r.version, areas: JSON.parse(r.areas) as Area[], at: r.at, by: r.by, note: r.note } : null;
 }
 
-export function listVersions(db: DatabaseSync, repo: string): Omit<AreaList, "repo">[] {
-  return (db.prepare("SELECT version, areas, at, by, note FROM area_lists WHERE repo = ? ORDER BY version DESC").all(repo) as { version: number; areas: string; at: string; by: string | null; note: string | null }[])
+export async function listVersions(db: Db, repo: string): Promise<Omit<AreaList, "repo">[]> {
+  return (await db.prepare("SELECT version, areas, at, by, note FROM area_lists WHERE repo = ? ORDER BY version DESC").all(repo) as { version: number; areas: string; at: string; by: string | null; note: string | null }[])
     .map((r) => ({ version: r.version, areas: JSON.parse(r.areas) as Area[], at: r.at, by: r.by, note: r.note }));
 }
 
@@ -46,30 +45,25 @@ export function listVersions(db: DatabaseSync, repo: string): Omit<AreaList, "re
  * (rename, merge) or null (removed: the item becomes unassigned and is asked again). Items whose area is
  * still in the list move to the new version; unassigned ones stay on the version they were asked against.
  */
-function save(db: DatabaseSync, repo: string, areas: Area[], by: string | null, note: string, moved: Map<string, string | null>): number {
+async function save(db: Db, repo: string, areas: Area[], by: string | null, note: string, moved: Map<string, string | null>): Promise<number> {
   if (areas.length > AREAS_MAX) throw new AreaError(`a list holds at most ${AREAS_MAX} areas`);
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const version = (currentList(db, repo)?.version ?? 0) + 1;
-    db.prepare("INSERT INTO area_lists (repo, version, areas, at, by, note) VALUES (?, ?, ?, ?, ?, ?)").run(repo, version, JSON.stringify(areas), now(), by, note);
+  return await db.write(async () => {
+    const version = ((await currentList(db, repo))?.version ?? 0) + 1;
+    await db.prepare("INSERT INTO area_lists (repo, version, areas, at, by, note) VALUES (?, ?, ?, ?, ?, ?)").run(repo, version, JSON.stringify(areas), now(), by, note);
     const move = db.prepare("UPDATE item_areas SET area = ? WHERE repo = ? AND area = ?");
     // An operator's choice of a removed area is dropped, so the item is asked again.
     const dropOperator = db.prepare("DELETE FROM item_areas WHERE repo = ? AND area = ? AND source = 'operator'");
     for (const [from, to] of moved) {
-      if (to === null) dropOperator.run(repo, from);
-      move.run(to, repo, from);
+      if (to === null) await dropOperator.run(repo, from);
+      await move.run(to, repo, from);
     }
     // A pass that was running during the edit may have written a name that is gone: unassign it. Rows with a name in the list move to the new version.
     const marks = areas.map(() => "?").join(",") || "NULL";
     const names = areas.map((a) => a.name);
-    db.prepare(`UPDATE item_areas SET area = NULL WHERE repo = ? AND area IS NOT NULL AND area NOT IN (${marks})`).run(repo, ...names);
-    db.prepare(`UPDATE item_areas SET list_version = ? WHERE repo = ? AND area IN (${marks})`).run(version, repo, ...names);
-    db.exec("COMMIT");
+    await db.prepare(`UPDATE item_areas SET area = NULL WHERE repo = ? AND area IS NOT NULL AND area NOT IN (${marks})`).run(repo, ...names);
+    await db.prepare(`UPDATE item_areas SET list_version = ? WHERE repo = ? AND area IN (${marks})`).run(version, repo, ...names);
     return version;
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 export type AreaEdit =
@@ -102,9 +96,9 @@ function validDescription(v: unknown): string {
 }
 
 /** Applies one edit to the current list and saves the result as a new version. Returns the version. */
-export function editAreas(db: DatabaseSync, repo: string, edit: AreaEdit, by: string | null): number {
-  if (!db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo)) throw new AreaError(`${repo} is not tracked`);
-  const areas = (currentList(db, repo)?.areas ?? []).map((a) => ({ ...a }));
+export async function editAreas(db: Db, repo: string, edit: AreaEdit, by: string | null): Promise<number> {
+  if (!await db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo)) throw new AreaError(`${repo} is not tracked`);
+  const areas = ((await currentList(db, repo))?.areas ?? []).map((a) => ({ ...a }));
   const moved = new Map<string, string | null>();
   let note: string;
   switch (edit.op) {
@@ -156,34 +150,34 @@ export function editAreas(db: DatabaseSync, repo: string, edit: AreaEdit, by: st
     }
   }
   if (areas.length > AREAS_MAX) throw new AreaError(`a list holds at most ${AREAS_MAX} areas`);
-  return save(db, repo, areas, by, note, moved);
+  return await save(db, repo, areas, by, note, moved);
 }
 
 export type ItemArea = { area: string | null; source: string; confidence: number | null; listVersion: number; at: string };
 
-export function itemAreaOf(db: DatabaseSync, repo: string, number: number): ItemArea | null {
-  const r = prep(db, "SELECT area, source, confidence, list_version, at FROM item_areas WHERE repo = ? AND number = ?").get(repo, number) as { area: string | null; source: string; confidence: number | null; list_version: number; at: string } | undefined;
+export async function itemAreaOf(db: Db, repo: string, number: number): Promise<ItemArea | null> {
+  const r = await db.prepare("SELECT area, source, confidence, list_version, at FROM item_areas WHERE repo = ? AND number = ?").get(repo, number) as { area: string | null; source: string; confidence: number | null; list_version: number; at: string } | undefined;
   return r ? { area: r.area, source: r.source, confidence: r.confidence, listVersion: r.list_version, at: r.at } : null;
 }
 
 /** The item's area name, or null when it has none. */
-export const areaNameOf = (db: DatabaseSync, repo: string, number: number): string | null => itemAreaOf(db, repo, number)?.area ?? null;
+export const areaNameOf = async (db: Db, repo: string, number: number): Promise<string | null> => (await itemAreaOf(db, repo, number))?.area ?? null;
 
-export function setItemArea(db: DatabaseSync, repo: string, number: number, area: string | null, source: "jev" | "haiku" | "operator", confidence: number | null, version: number): void {
-  db.prepare(`INSERT INTO item_areas (repo, number, area, source, confidence, list_version, at) VALUES (?, ?, ?, ?, ?, ?, ?)
+export async function setItemArea(db: Db, repo: string, number: number, area: string | null, source: "jev" | "haiku" | "operator", confidence: number | null, version: number): Promise<void> {
+  await db.prepare(`INSERT INTO item_areas (repo, number, area, source, confidence, list_version, at) VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (repo, number) DO UPDATE SET area = excluded.area, source = excluded.source, confidence = excluded.confidence, list_version = excluded.list_version, at = excluded.at`)
     .run(repo, number, area, source, confidence, version, now());
 }
 
 /** Open items of the repo without an area: never asked, asked and answered "none of these", or unassigned by a removed area. */
-export function unassignedCount(db: DatabaseSync, repo: string): number {
-  return (db.prepare(`SELECT COUNT(*) AS n FROM items i LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
+export async function unassignedCount(db: Db, repo: string): Promise<number> {
+  return (await db.prepare(`SELECT COUNT(*) AS n FROM items i LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
     WHERE i.repo = ? AND i.state = 'OPEN' AND a.area IS NULL`).get(repo) as { n: number }).n;
 }
 
 export type AreaCount = { area: string; open: number };
-export function areaCounts(db: DatabaseSync, repo: string): AreaCount[] {
-  return db.prepare(`SELECT a.area AS area, COUNT(*) AS open FROM items i JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
+export async function areaCounts(db: Db, repo: string): Promise<AreaCount[]> {
+  return await db.prepare(`SELECT a.area AS area, COUNT(*) AS open FROM items i JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
     WHERE i.repo = ? AND i.state = 'OPEN' AND a.area IS NOT NULL GROUP BY a.area ORDER BY open DESC, area`).all(repo) as AreaCount[];
 }
 
@@ -193,55 +187,55 @@ type ProposalRow = { id: number; repo: string; kind: string; areas: string; crea
 const toProposal = (r: ProposalRow): Proposal => ({ id: r.id, repo: r.repo, kind: r.kind as Proposal["kind"], areas: JSON.parse(r.areas) as ProposalArea[], createdAt: r.created_at, createdBy: r.created_by, state: r.state as Proposal["state"], decidedBy: r.decided_by, decidedAt: r.decided_at });
 
 /** Stores a model's proposal. An older open proposal of the same kind is dismissed: the new one replaces it. */
-export function saveProposal(db: DatabaseSync, repo: string, kind: Proposal["kind"], areas: Area[], by: string | null): number {
-  db.prepare("UPDATE area_proposals SET state = 'dismissed', decided_at = ? WHERE repo = ? AND kind = ? AND state = 'open'").run(now(), repo, kind);
-  const r = db.prepare("INSERT INTO area_proposals (repo, kind, areas, created_at, created_by) VALUES (?, ?, ?, ?, ?)")
+export async function saveProposal(db: Db, repo: string, kind: Proposal["kind"], areas: Area[], by: string | null): Promise<number> {
+  await db.prepare("UPDATE area_proposals SET state = 'dismissed', decided_at = ? WHERE repo = ? AND kind = ? AND state = 'open'").run(now(), repo, kind);
+  const r = await db.prepare("INSERT INTO area_proposals (repo, kind, areas, created_at, created_by) VALUES (?, ?, ?, ?, ?)")
     .run(repo, kind, JSON.stringify(areas.map((a) => ({ ...a, state: "open" }))), now(), by);
   return Number(r.lastInsertRowid);
 }
 
-export function proposalsOf(db: DatabaseSync, repo: string, open = true): Proposal[] {
-  return (db.prepare(`SELECT * FROM area_proposals WHERE repo = ? ${open ? "AND state = 'open'" : ""} ORDER BY id DESC LIMIT 20`).all(repo) as ProposalRow[]).map(toProposal);
+export async function proposalsOf(db: Db, repo: string, open = true): Promise<Proposal[]> {
+  return (await db.prepare(`SELECT * FROM area_proposals WHERE repo = ? ${open ? "AND state = 'open'" : ""} ORDER BY id DESC LIMIT 20`).all(repo) as ProposalRow[]).map(toProposal);
 }
 
-export function proposalById(db: DatabaseSync, id: number): Proposal {
-  const r = db.prepare("SELECT * FROM area_proposals WHERE id = ?").get(id) as ProposalRow | undefined;
+export async function proposalById(db: Db, id: number): Promise<Proposal> {
+  const r = await db.prepare("SELECT * FROM area_proposals WHERE id = ?").get(id) as ProposalRow | undefined;
   if (!r) throw new AreaError(`there is no proposal ${id}`);
   return toProposal(r);
 }
 
-const settle = (db: DatabaseSync, p: Proposal, areas: ProposalArea[], by: string | null): void => {
+const settle = async (db: Db, p: Proposal, areas: ProposalArea[], by: string | null): Promise<void> => {
   const open = areas.some((a) => a.state === "open");
   const state = open ? "open" : areas.some((a) => a.state === "accepted") ? "accepted" : "dismissed";
-  db.prepare("UPDATE area_proposals SET areas = ?, state = ?, decided_by = ?, decided_at = ? WHERE id = ?").run(JSON.stringify(areas), state, open ? null : by, open ? null : now(), p.id);
+  await db.prepare("UPDATE area_proposals SET areas = ?, state = ?, decided_by = ?, decided_at = ? WHERE id = ?").run(JSON.stringify(areas), state, open ? null : by, open ? null : now(), p.id);
 };
 
 /** Accepts a whole-list proposal, as stored or with the operator's edits. Returns the new list version. */
-export function acceptProposal(db: DatabaseSync, id: number, by: string | null, edited?: Area[]): number {
-  const p = proposalById(db, id);
+export async function acceptProposal(db: Db, id: number, by: string | null, edited?: Area[]): Promise<number> {
+  const p = await proposalById(db, id);
   if (p.kind !== "propose" || p.state !== "open") throw new AreaError("this proposal is not open");
-  const version = editAreas(db, p.repo, { op: "replace", areas: edited ?? p.areas }, by);
-  db.prepare("UPDATE area_proposals SET state = 'accepted', decided_by = ?, decided_at = ? WHERE id = ?").run(by, now(), id);
+  const version = await editAreas(db, p.repo, { op: "replace", areas: edited ?? p.areas }, by);
+  await db.prepare("UPDATE area_proposals SET state = 'accepted', decided_by = ?, decided_at = ? WHERE id = ?").run(by, now(), id);
   return version;
 }
 
-export function dismissProposal(db: DatabaseSync, id: number, by: string | null): void {
-  const p = proposalById(db, id);
+export async function dismissProposal(db: Db, id: number, by: string | null): Promise<void> {
+  const p = await proposalById(db, id);
   if (p.state !== "open") throw new AreaError("this proposal is not open");
-  db.prepare("UPDATE area_proposals SET state = 'dismissed', decided_by = ?, decided_at = ? WHERE id = ?").run(by, now(), id);
+  await db.prepare("UPDATE area_proposals SET state = 'dismissed', decided_by = ?, decided_at = ? WHERE id = ?").run(by, now(), id);
 }
 
 /** Accepts the named areas of a suggestion (one new list version) and ignores `ignore`. Returns the version, or null when nothing was accepted. */
-export function decideSuggestion(db: DatabaseSync, id: number, by: string | null, accept: string[], ignore: string[] = []): number | null {
-  const p = proposalById(db, id);
+export async function decideSuggestion(db: Db, id: number, by: string | null, accept: string[], ignore: string[] = []): Promise<number | null> {
+  const p = await proposalById(db, id);
   if (p.kind !== "suggest" || p.state !== "open") throw new AreaError("this suggestion is not open");
   const pick = (names: string[]) => names.map((n) => { const a = p.areas.find((x) => x.state === "open" && same(x.name, n)); if (!a) throw new AreaError(`"${n}" is not an open suggestion`); return a; });
   const take = pick(accept), skip = pick(ignore);
   let version: number | null = null;
   if (take.length) {
-    const current = currentList(db, p.repo)?.areas ?? [];
-    version = editAreas(db, p.repo, { op: "replace", areas: [...current, ...take.map(({ name, description }) => ({ name, description }))] }, by);
+    const current = (await currentList(db, p.repo))?.areas ?? [];
+    version = await editAreas(db, p.repo, { op: "replace", areas: [...current, ...take.map(({ name, description }) => ({ name, description }))] }, by);
   }
-  settle(db, p, p.areas.map((a) => (take.includes(a) ? { ...a, state: "accepted" as const } : skip.includes(a) ? { ...a, state: "ignored" as const } : a)), by);
+  await settle(db, p, p.areas.map((a) => (take.includes(a) ? { ...a, state: "accepted" as const } : skip.includes(a) ? { ...a, state: "ignored" as const } : a)), by);
   return version;
 }

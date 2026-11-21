@@ -7,7 +7,6 @@
 // a call ends, and at startup. Model output is data: questions are picked by id from a fixed list, and the draft is
 // length-capped and stripped of mentions and foreign links before it is shown.
 import { randomBytes } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { askClaude } from "../classify/run.ts";
 import { publicRepoNames } from "../public/status.ts";
 import { BUTTON_URL_MAX, ISSUE_URL_MAX, cleanDraft, followUp, formDraft, issueUrl, sanitize, seedOf, type PublicRepo } from "./issue-draft.ts";
@@ -18,6 +17,8 @@ import { FILING_IN_DISCORD, fileIssue, type FileDeps, type FileRequest, type Fil
 import { fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { trackedRepos } from "./store.ts";
+import { findSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export const ISSUE_CAP_KEY = "discord_issue_daily_usd";
 export const DEFAULT_ISSUE_CAP_USD = 2;
@@ -33,25 +34,25 @@ const USED = "That button was already used. Start again with /autocraft search."
 
 /** The model step; tests replace it. Null when the call failed or got no answer. */
 export type IssueAsk = {
-  (db: DatabaseSync, id: "discord.issue-questions", input: IssueQuestionsInput): Promise<string | null>;
-  (db: DatabaseSync, id: "discord.issue-draft", input: IssueDraftInput): Promise<string | null>;
+  (db: Db, id: "discord.issue-questions", input: IssueQuestionsInput): Promise<string | null>;
+  (db: Db, id: "discord.issue-draft", input: IssueDraftInput): Promise<string | null>;
 };
-export const askIssueModel: IssueAsk = (async (db: DatabaseSync, id: "discord.issue-questions", input: IssueQuestionsInput) =>
+export const askIssueModel: IssueAsk = (async (db: Db, id: "discord.issue-questions", input: IssueQuestionsInput) =>
   (await askClaude(id, "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS }))?.text ?? null) as IssueAsk;
 
-export function issueCapUsd(db: DatabaseSync): number {
-  const v = Number((db.prepare("SELECT value FROM settings WHERE key = ?").get(ISSUE_CAP_KEY) as { value: string } | undefined)?.value);
+export async function issueCapUsd(db: Db): Promise<number> {
+  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(ISSUE_CAP_KEY) as { value: string } | undefined)?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_ISSUE_CAP_USD;
 }
 
-export function issueSpentTodayUsd(db: DatabaseSync, now: number): number {
+export async function issueSpentTodayUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = ? AND started_at >= ?").get(ISSUE_STEP, day) as { c: number }).c);
+  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = ? AND started_at >= ?").get(ISSUE_STEP, day) as { c: number }).c);
 }
 
 /** The prompt and reply of an issue call hold what the person typed: finished calls lose their texts; `all` (at startup) removes every row. */
-export function dropIssueTexts(db: DatabaseSync, all = false): void {
-  db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = ?${all ? "" : " AND state <> 'running'"})`).run(ISSUE_STEP);
+export async function dropIssueTexts(db: Db, all = false): Promise<void> {
+  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = ?${all ? "" : " AND state <> 'running'"})`).run(ISSUE_STEP);
 }
 
 type Session = {
@@ -72,7 +73,7 @@ type Session = {
 };
 
 export type IssueNewDeps = {
-  db: DatabaseSync; keys: DiscordKeys; search: Search; log: (line: string) => void; ask?: IssueAsk; now?: () => number;
+  db: Db; keys: DiscordKeys; search: Search; log: (line: string) => void; ask?: IssueAsk; now?: () => number;
   /** Replaced in tests. */
   file?: (deps: FileDeps, req: FileRequest) => Promise<FileResult>;
   /** Whether the draft offers File it; FILING_IN_DISCORD unless a test sets it. */
@@ -117,9 +118,9 @@ export class IssueNew {
     return pass;
   }
 
-  #repos(): PublicRepo[] {
-    const names = new Set(publicRepoNames(this.#d.db));
-    return trackedRepos(this.#d.db).filter((t) => names.has(t.name)).map((t) => ({ owner: t.owner, name: t.name }));
+  async #repos(): Promise<PublicRepo[]> {
+    const names = new Set(await publicRepoNames(this.#d.db));
+    return (await trackedRepos(this.#d.db)).filter((t) => names.has(t.name)).map((t) => ({ owner: t.owner, name: t.name }));
   }
 
   #session(call: Call, sid: string | undefined): Session | null {
@@ -129,8 +130,8 @@ export class IssueNew {
     return s && s.user === call.userId ? s : null;
   }
 
-  #overCap(): boolean {
-    return issueSpentTodayUsd(this.#d.db, this.#now()) >= issueCapUsd(this.#d.db);
+  async #overCap(): Promise<boolean> {
+    return await issueSpentTodayUsd(this.#d.db, this.#now()) >= await issueCapUsd(this.#d.db);
   }
 
   async #model(id: "discord.issue-questions", input: IssueQuestionsInput): Promise<string | null>;
@@ -143,15 +144,15 @@ export class IssueNew {
       log(`discord: issue model call failed: ${(e as Error).message.slice(0, 200)}`);
       return null;
     } finally {
-      try { dropIssueTexts(db); } catch (e) { log(`discord: removing issue texts failed: ${(e as Error).message}`); }
+      try { await dropIssueTexts(db); } catch (e) { log(`discord: removing issue texts failed: ${(e as Error).message}`); }
     }
   }
 
   /** The public tracked repos as choices: app name (release_apps) else repo name. Discord allows 25 options; with more repos the ones with the most open issues stay, and the preselected repo always does. */
-  #apps(preselect: string | null): { name: string; label: string }[] {
+  async #apps(preselect: string | null): Promise<{ name: string; label: string }[]> {
     const { db } = this.#d;
-    const names = new Set(publicRepoNames(db));
-    const rows = db.prepare(`SELECT r.name AS name, COALESCE(a.name, r.name) AS label, COALESCE(r.open_issues, 0) AS open
+    const names = new Set(await publicRepoNames(db));
+    const rows = await db.prepare(`SELECT r.name AS name, COALESCE(a.name, r.name) AS label, COALESCE(r.open_issues, 0) AS open
       FROM repos r JOIN tracked_repos t ON t.name = r.name LEFT JOIN release_apps a ON a.repo = r.name`).all() as { name: string; label: string; open: number }[];
     const mine = rows.filter((r) => names.has(r.name)).sort((x, y) => Number(y.name === preselect) - Number(x.name === preselect) || y.open - x.open || x.name.localeCompare(y.name));
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
@@ -159,7 +160,7 @@ export class IssueNew {
 
   /** `/autocraft search` and the "File a new issue" button: the form with the app select (`repo` preselected) and the description box. */
   async open(call: Call, repo: string | null, question = ""): Promise<void> {
-    const apps = this.#apps(repo);
+    const apps = await this.#apps(repo);
     if (!apps.length) return void (await call.reply({ content: "No public repo to search yet." }));
     if (!call.userId) return void (await call.reply({ content: "Something went wrong. Try again in a moment." }));
     const sid = randomBytes(6).toString("base64url");
@@ -184,7 +185,7 @@ export class IssueNew {
     if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft search." }));
     if (s.stage !== "form") return void (await call.edit({ content: USED }));
     const f = call.fields();
-    const repo = trackedRepos(db).find((t) => t.name === f.app && publicRepoNames(db).includes(t.name));
+    const repo = await findSeq((await trackedRepos(db)), async (t) => t.name === f.app && (await publicRepoNames(db)).includes(t.name));
     const description = (f.description ?? "").trim().slice(0, ISSUE_FORM_BODY_CHARS);
     if (!repo || !description) return void (await call.edit({ content: "Pick an app and describe the problem. Start again with /autocraft search." }));
     const userKey = keys.hash("author", s.user), channelKey = keys.hash("channel", call.interaction.channel_id ?? "?");
@@ -192,7 +193,7 @@ export class IssueNew {
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
     s.description = description; s.title = titleOf(description);
     s.stage = "matched";
-    s.capped = this.#overCap();
+    s.capped = await this.#overCap();
     if (!s.capped) s.calls++;
     const asking = s.capped ? Promise.resolve(null) : this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description });
     const [found, reply] = await Promise.all([this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo), asking]);
@@ -208,7 +209,7 @@ export class IssueNew {
       }
       return void (await call.edit({ content: "No existing issue looks like this.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     }
-    const r = renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
+    const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
     await call.edit({ content: r.content, components: r.components });
   }
 
@@ -241,9 +242,9 @@ export class IssueNew {
   }
 
   async #finish(call: Call, s: Session, sid: string): Promise<void> {
-    const repos = this.#repos();
+    const repos = await this.#repos();
     let draft: { title: string; body: string } | null = null;
-    if (!s.capped && s.calls < MAX_CALLS && !this.#overCap()) {
+    if (!s.capped && s.calls < MAX_CALLS && !await this.#overCap()) {
       s.calls++;
       const text = await this.#model("discord.issue-draft", { ref: "discord", repo: s.repo, title: s.title, description: s.description, answers: s.answers });
       const raw = text === null ? null : parseDraft(text);
@@ -337,7 +338,7 @@ export class IssueNew {
     const s = this.#session(call, sid);
     if (!s?.draft) return void (await call.edit({ content: "This draft has expired. Start again with /autocraft search." }));
     const f = call.fields();
-    const d = cleanDraft({ title: f.title ?? "", body: f.body ?? "" }, this.#repos());
+    const d = cleanDraft({ title: f.title ?? "", body: f.body ?? "" }, await this.#repos());
     if (d) s.draft = d;
     await call.edit(this.#render(s, sid));
   }
@@ -348,7 +349,7 @@ export function installIssueNew(ix: Interactions, deps: IssueNewDeps): IssueNew 
   const flow = new IssueNew(deps);
   // No fields: Discord shows the command's form at once, and the form is the first response.
   ix.command("autocraft search", { name: "autocraft", type: 1, description: "AutoCraft", dm_permission: false, options: [{ type: 1, name: "search", description: "Find existing issues or report a new one" }] }, async (call) => {
-    await flow.open(call, fileRepoUrl(db, call.interaction.channel_id, [])?.split("/").pop() ?? null);
+    await flow.open(call, (await fileRepoUrl(db, call.interaction.channel_id, []))?.split("/").pop() ?? null);
   }, { immediate: true });
   // The "File a new issue" button of search results: `inewi:open:<repo>[:<seed>]`; the other actions belong to a session.
   ix.component("inewi", async (call) => {

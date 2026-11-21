@@ -2,7 +2,6 @@
 // over it, the composition of a chosen core and ticked extras into one resolution card, and the `decision_choices` store.
 // Only Opus's drafts and pick are stored; the offered cores are computed whenever they are read.
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { writeEffect } from "../act/index.ts";
 import { applicableSteps } from "../conversations/cards.ts";
 import { getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
@@ -11,6 +10,8 @@ import {
   type ActionTag, type ChoiceCore, type ChoiceExtra, type ChoicesBlockExtra, type ChoicesRow, type ChoicesSource, type CoreKey, type ExtraKind,
   type ParsedCoreKey, type StoredDraft, type StoredExtra,
 } from "./choices-types.ts";
+import { filterSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** Most cores Opus may add on top of the offered ones. */
 export { MAX_ADDED_CORES };
@@ -67,8 +68,8 @@ export function withIds(extras: ChoicesBlockExtra[]): StoredExtra[] {
   });
 }
 
-const itemOf = (db: DatabaseSync, repo: string, n: number): { kind: string } | undefined =>
-  db.prepare("SELECT kind FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string } | undefined;
+const itemOf = async (db: Db, repo: string, n: number): Promise<{ kind: string } | undefined> =>
+  await db.prepare("SELECT kind FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string } | undefined;
 
 /** The GitHub writes an option makes when it is the answer. */
 function optionWrites(kind: Kind, key: string): ActionTag[] {
@@ -112,17 +113,17 @@ export function autocraftLine(p: ParsedCoreKey, kind: string, itemKind: string):
   return "records the answer";
 }
 
-const labelsOf = (db: DatabaseSync, repo: string, n: number): string[] => {
-  try { return JSON.parse((db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined)?.labels ?? "[]") as string[]; } catch { return []; }
+const labelsOf = async (db: Db, repo: string, n: number): Promise<string[]> => {
+  try { return JSON.parse((await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined)?.labels ?? "[]") as string[]; } catch { return []; }
 };
 
-const mk = (db: DatabaseSync, d: DecisionRow, key: CoreKey, label: string, o: { writes: ActionTag[]; base: ExtraKind[]; applicable: Set<string>; closing?: boolean }): Core => {
+const mk = async (db: Db, d: DecisionRow, key: CoreKey, label: string, o: { writes: ActionTag[]; base: ExtraKind[]; applicable: Set<string>; closing?: boolean }): Promise<Core> => {
   const parsed = parseCoreKey(key)!;
   const allowed = o.base.filter((k) => o.applicable.has(k));
   return {
-    key, label, writes: o.writes, autocraft: autocraftLine(parsed, d.kind, itemOf(db, d.repo!, d.number!)?.kind ?? "issue"), extras: [], drafted: false, parsed, decision: d.id, allowed, closing: !!o.closing,
+    key, label, writes: o.writes, autocraft: autocraftLine(parsed, d.kind, (await itemOf(db, d.repo!, d.number!))?.kind ?? "issue"), extras: [], drafted: false, parsed, decision: d.id, allowed, closing: !!o.closing,
     keepsInCore: d.kind === "scope" && (parsed.type === "fixup-merge" || parsed.type === "fixup"),
-    hasSmallExtra: labelsOf(db, d.repo!, d.number!).some((l) => String(l).toLowerCase() === "small extra"),
+    hasSmallExtra: (await labelsOf(db, d.repo!, d.number!)).some((l) => String(l).toLowerCase() === "small extra"),
     ...(o.closing && { params: { reason: "" } }),
   };
 };
@@ -131,47 +132,47 @@ const mk = (db: DatabaseSync, d: DecisionRow, key: CoreKey, label: string, o: { 
  * The cores offered for a decision about one item: the options (not Backlog), "Fix up first, then merge" where it applies, then Backlog.
  * Extras are not filled in; `applyDrafts` adds Opus's drafts and the always-offered extras. A group or batch decision has no cores here.
  */
-export function coresFor(db: DatabaseSync, d: DecisionRow): Core[] {
-  if (!d.repo || !d.number || d.id.includes(":dupegroup:") || !itemOf(db, d.repo, d.number)) return [];
-  const applicable = new Set(applicableSteps(db, d.repo, d.number));
+export async function coresFor(db: Db, d: DecisionRow): Promise<Core[]> {
+  if (!d.repo || !d.number || d.id.includes(":dupegroup:") || !await itemOf(db, d.repo, d.number)) return [];
+  const applicable = new Set(await applicableSteps(db, d.repo, d.number));
   const out: Core[] = [];
   // A Hold question always offers a new review first: the other cores follow the options.
-  if (d.kind === "hold") { const c = addedCore(db, d, coreKey.review, applicable); if (c) out.push(c); }
+  if (d.kind === "hold") { const c = await addedCore(db, d, coreKey.review, applicable); if (c) out.push(c); }
   for (const o of optionsOf(d)) {
     if (o.key === "backlog") continue;
     const effect = writeEffect(d.kind, o.key);
     const base: ExtraKind[] = effect
       ? ["label", "unlabel", "assign", "open_issue", ...(/\bmerges\b/.test(effect) ? ["comment" as const] : [])]
       : ["comment", "label", "unlabel", "assign", "request_reviewers", ...(NO_ISSUE_OPTIONS(o.key) ? [] : ["open_issue" as const])];
-    out.push(mk(db, d, coreKey.option(o.key), o.label, { writes: optionWrites(d.kind, o.key).filter((t) => t !== "comment" || applicable.has("comment")), base, applicable, closing: /\bcloses\b/.test(effect ?? "") && applicable.has("comment") }));
+    out.push(await mk(db, d, coreKey.option(o.key), o.label, { writes: optionWrites(d.kind, o.key).filter((t) => t !== "comment" || applicable.has("comment")), base, applicable, closing: /\bcloses\b/.test(effect ?? "") && applicable.has("comment") }));
   }
   if (applicable.has("fixup with merge")) {
-    const c = mk(db, d, coreKey.fixupMerge, "Fix up first, then merge", { writes: ["push", "merge"], base: NON_ENDING, applicable });
+    const c = await mk(db, d, coreKey.fixupMerge, "Fix up first, then merge", { writes: ["push", "merge"], base: NON_ENDING, applicable });
     c.params = { instructions: "" };
     out.push(c);
   }
-  out.push(mk(db, d, coreKey.backlog, "Later", { writes: [], base: [], applicable }));
+  out.push(await mk(db, d, coreKey.backlog, "Later", { writes: [], base: [], applicable }));
   return out;
 }
 
 /** The cores as the prompt lists them: key, label and the extra kinds each takes. */
-export function coreSummaries(db: DatabaseSync, d: DecisionRow): { key: CoreKey; label: string; extras: ExtraKind[] }[] {
-  return coresFor(db, d).map((c) => ({ key: c.key, label: c.label, extras: c.allowed }));
+export async function coreSummaries(db: Db, d: DecisionRow): Promise<{ key: CoreKey; label: string; extras: ExtraKind[] }[]> {
+  return (await coresFor(db, d)).map((c) => ({ key: c.key, label: c.label, extras: c.allowed }));
 }
 
 /** A core only Opus adds, or null when its key is outside the scheme or cannot apply to the item now. */
-export function addedCore(db: DatabaseSync, d: DecisionRow, key: CoreKey, applicable: Set<string>): Core | null {
+export async function addedCore(db: Db, d: DecisionRow, key: CoreKey, applicable: Set<string>): Promise<Core | null> {
   const p = parseCoreKey(key);
   if (!p) return null;
-  const isPr = itemOf(db, d.repo!, d.number!)?.kind === "pr";
-  const c = (label: string, step: string, writes: ActionTag[], base: ExtraKind[], params?: Core["params"]): Core | null =>
-    applicable.has(step) ? { ...mk(db, d, key, label, { writes, base, applicable }), ...(params && { params }) } : null;
+  const isPr = (await itemOf(db, d.repo!, d.number!))?.kind === "pr";
+  const c = async (label: string, step: string, writes: ActionTag[], base: ExtraKind[], params?: Core["params"]): Promise<Core | null> =>
+    applicable.has(step) ? { ...await mk(db, d, key, label, { writes, base, applicable }), ...(params && { params }) } : null;
   switch (p.type) {
-    case "close": return c(isPr ? "Close PR" : `Close issue as ${p.reason === "completed" ? "completed" : "not planned"}`, "close", ["close"], ["comment", "label", "unlabel", "open_issue"]);
-    case "duplicate": return c(`Close as duplicate of #${p.of}`, "duplicate", ["close"], ["comment", "label", "unlabel"], { target: String(p.of) });
-    case "transfer": return c(`Move issue to ${p.repo}`, "transfer", ["move"], ["comment", "label"], { target: p.repo });
-    case "fixup": return c("Fix up the PR", "fixup", ["push"], NON_ENDING, { instructions: "" });
-    case "review": return c("Review the PR again", "review", [], ["comment", "label", "request_reviewers"]);
+    case "close": return await c(isPr ? "Close PR" : `Close issue as ${p.reason === "completed" ? "completed" : "not planned"}`, "close", ["close"], ["comment", "label", "unlabel", "open_issue"]);
+    case "duplicate": return await c(`Close as duplicate of #${p.of}`, "duplicate", ["close"], ["comment", "label", "unlabel"], { target: String(p.of) });
+    case "transfer": return await c(`Move issue to ${p.repo}`, "transfer", ["move"], ["comment", "label"], { target: p.repo });
+    case "fixup": return await c("Fix up the PR", "fixup", ["push"], NON_ENDING, { instructions: "" });
+    case "review": return await c("Review the PR again", "review", [], ["comment", "label", "request_reviewers"]);
     default: return null;
   }
 }
@@ -191,15 +192,15 @@ const viewExtra = (e: StoredExtra, core: Core, d: DecisionRow): ChoiceExtra => (
  * Puts Opus's drafts over the offered cores: params and extras per core, the cores Opus added, and an empty comment and open_issue
  * extra where a core takes them. A drafted extra the core does not take for this item now is left out. Returns new cores.
  */
-export function applyDrafts(db: DatabaseSync, d: DecisionRow, cores: Core[], row: ChoicesRow | undefined): Core[] {
-  const applicable = new Set(applicableSteps(db, d.repo!, d.number!));
+export async function applyDrafts(db: Db, d: DecisionRow, cores: Core[], row: ChoicesRow | undefined): Promise<Core[]> {
+  const applicable = new Set(await applicableSteps(db, d.repo!, d.number!));
   const all = [...cores];
   if (row) {
     const at = all.findIndex((c) => c.key === coreKey.backlog);
     const extra: Core[] = [];
     for (const key of row.added.slice(0, MAX_ADDED_CORES)) {
       if (all.some((c) => c.key === key) || extra.some((c) => c.key === key)) continue;
-      const c = addedCore(db, d, key, applicable);
+      const c = await addedCore(db, d, key, applicable);
       if (c) extra.push(c);
     }
     all.splice(at < 0 ? all.length : at, 0, ...extra);
@@ -289,13 +290,13 @@ function rowOf(r: Raw): ChoicesRow {
 export const seenJson = (s: ChoicesRow["seen"]): string => JSON.stringify({ head: s.head, last_comment: s.lastComment });
 
 /** The decision's current choices, or undefined. */
-export function currentChoices(db: DatabaseSync, decisionId: string): ChoicesRow | undefined {
-  const r = db.prepare("SELECT * FROM main.decision_choices WHERE decision_id = ? AND state = 'current' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(decisionId) as Raw | undefined;
+export async function currentChoices(db: Db, decisionId: string): Promise<ChoicesRow | undefined> {
+  const r = await db.prepare("SELECT * FROM main.decision_choices WHERE decision_id = ? AND state = 'current' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(decisionId) as Raw | undefined;
   return r && rowOf(r);
 }
 
-export function choicesById(db: DatabaseSync, id: string): ChoicesRow | undefined {
-  const r = db.prepare("SELECT * FROM main.decision_choices WHERE id = ?").get(id) as Raw | undefined;
+export async function choicesById(db: Db, id: string): Promise<ChoicesRow | undefined> {
+  const r = await db.prepare("SELECT * FROM main.decision_choices WHERE id = ?").get(id) as Raw | undefined;
   return r && rowOf(r);
 }
 
@@ -303,23 +304,23 @@ export function choicesById(db: DatabaseSync, id: string): ChoicesRow | undefine
  * Stores a new full row as the decision's current choices; earlier ones become replaced. An option pick also sets the decision's
  * recommendation (and `recommended_by` when `by` is given), any other pick clears it. Runs in its own transaction unless the caller has one.
  */
-export function writeChoices(db: DatabaseSync, row: Omit<ChoicesRow, "id" | "state" | "createdAt">, o: { by?: string | null; now?: Date } = {}): ChoicesRow {
+export async function writeChoices(db: Db, row: Omit<ChoicesRow, "id" | "state" | "createdAt">, o: { by?: string | null; now?: Date } = {}): Promise<ChoicesRow> {
   const id = randomUUID(), at = (o.now ?? new Date()).toISOString();
-  const own = !db.isTransaction;
+  const own = !db.inTransaction();
   if (own) db.exec("BEGIN IMMEDIATE");
   try {
-    db.prepare("UPDATE main.decision_choices SET state = 'replaced' WHERE decision_id = ? AND state = 'current'").run(row.decisionId);
-    db.prepare(`INSERT INTO main.decision_choices (id, decision_id, repo, number, turn_id, stamp, seen, source, drafts, added, pick, state, created_at)
+    await db.prepare("UPDATE main.decision_choices SET state = 'replaced' WHERE decision_id = ? AND state = 'current'").run(row.decisionId);
+    await db.prepare(`INSERT INTO main.decision_choices (id, decision_id, repo, number, turn_id, stamp, seen, source, drafts, added, pick, state, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)`)
       .run(id, row.decisionId, row.repo, row.number, row.turnId, row.stamp, seenJson(row.seen), row.source, JSON.stringify(row.drafts), JSON.stringify(row.added), JSON.stringify(row.pick), at);
     const opt = row.pick.core ? parseCoreKey(row.pick.core) : null;
     // Backlog is an option of every decision, so a Later pick is the recommendation "backlog".
     const recommended = opt?.type === "option" ? opt.option : opt?.type === "backlog" ? "backlog" : null;
     if (recommended !== null) {
-      db.prepare(`UPDATE main.decisions SET recommended = ?, recommended_reason = ?${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
+      await db.prepare(`UPDATE main.decisions SET recommended = ?, recommended_reason = ?${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
         .run(...[recommended, row.pick.reason, ...(o.by !== undefined ? [o.by] : []), row.decisionId] as (string | null)[]);
     } else {
-      db.prepare(`UPDATE main.decisions SET recommended = NULL, recommended_reason = NULL${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
+      await db.prepare(`UPDATE main.decisions SET recommended = NULL, recommended_reason = NULL${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
         .run(...[...(o.by !== undefined ? [o.by] : []), row.decisionId] as (string | null)[]);
     }
     if (own) db.exec("COMMIT");
@@ -327,7 +328,7 @@ export function writeChoices(db: DatabaseSync, row: Omit<ChoicesRow, "id" | "sta
     if (own) db.exec("ROLLBACK");
     throw e;
   }
-  return choicesById(db, id)!;
+  return (await choicesById(db, id))!;
 }
 
 /** What a conversation turn's validated `choices` block changes. */
@@ -347,16 +348,16 @@ export interface ChoicesUpdate {
 }
 
 /** Writes a new current row: the current one with the update's drops, replaced drafts, added cores and pick. Returns the row and why an added core was left out. */
-export function mergeChoices(db: DatabaseSync, decisionId: string, u: ChoicesUpdate, o: { by?: string | null; now?: Date } = {}): { row: ChoicesRow; notes: string[] } {
-  const cur = currentChoices(db, decisionId);
-  const d = db.prepare("SELECT repo, number FROM main.decisions WHERE id = ?").get(decisionId) as { repo: string; number: number } | undefined;
+export async function mergeChoices(db: Db, decisionId: string, u: ChoicesUpdate, o: { by?: string | null; now?: Date } = {}): Promise<{ row: ChoicesRow; notes: string[] }> {
+  const cur = await currentChoices(db, decisionId);
+  const d = await db.prepare("SELECT repo, number FROM main.decisions WHERE id = ?").get(decisionId) as { repo: string; number: number } | undefined;
   if (!d) throw new Error(`no decision ${decisionId}`);
   const drafts: ChoicesRow["drafts"] = { ...(cur?.drafts ?? {}) };
   let added = [...(cur?.added ?? [])];
   // The cap counts the stored added cores that still apply to the item, as the parser does.
-  const dec = getDecision(db, decisionId);
-  const applicable = dec ? new Set(applicableSteps(db, d.repo, d.number)) : null;
-  const live = (ks: CoreKey[]): number => (dec && applicable ? ks.filter((k) => addedCore(db, dec, k, applicable)).length : ks.length);
+  const dec = await getDecision(db, decisionId);
+  const applicable = dec ? new Set(await applicableSteps(db, d.repo, d.number)) : null;
+  const live = async (ks: CoreKey[]): Promise<number> => (dec && applicable ? (await filterSeq(ks, async (k) => await addedCore(db, dec, k, applicable))).length : ks.length);
   const notes: string[] = [];
   for (const k of u.drop ?? []) {
     if (added.includes(k)) { added = added.filter((x) => x !== k); delete drafts[k]; }
@@ -364,12 +365,12 @@ export function mergeChoices(db: DatabaseSync, decisionId: string, u: ChoicesUpd
   for (const [k, v] of Object.entries(u.cores)) drafts[k] = { ...(v.params && { params: v.params }), extras: withIds(v.extras) };
   for (const a of u.add ?? []) {
     if (!added.includes(a.key)) {
-      if (dec && applicable && !addedCore(db, dec, a.key, applicable)) { notes.push(`left out the added choice ${a.key}: it does not apply to this item now`); continue; }
-      if (live(added) >= MAX_ADDED_CORES) { notes.push(`left out the added choice ${a.key}: at most ${MAX_ADDED_CORES} are kept`); continue; }
+      if (dec && applicable && !await addedCore(db, dec, a.key, applicable)) { notes.push(`left out the added choice ${a.key}: it does not apply to this item now`); continue; }
+      if (await live(added) >= MAX_ADDED_CORES) { notes.push(`left out the added choice ${a.key}: at most ${MAX_ADDED_CORES} are kept`); continue; }
       added.push(a.key);
     }
     drafts[a.key] = { ...(a.draft.params && { params: a.draft.params }), extras: withIds(a.draft.extras) };
   }
-  const row = writeChoices(db, { decisionId, repo: d.repo, number: d.number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
+  const row = await writeChoices(db, { decisionId, repo: d.repo, number: d.number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
   return { row, notes };
 }

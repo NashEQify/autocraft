@@ -1,6 +1,5 @@
 // The Now page: what is wrong, what is running and what just happened, in one read.
 // Every query leaves out repos the viewer cannot see, as the pipeline, agents and build endpoints do.
-import type { DatabaseSync } from "node:sqlite";
 import type { ItemRef, ItemShown, Now, NowEntry, NowFeed, NowHealth, NowProblem } from "../../../web/src/api/types.ts";
 import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
 import { listAccounts } from "../../agents/accounts.ts";
@@ -18,6 +17,7 @@ import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { filtered, hiddenTest, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { touchesHidden } from "../../agents/runs.ts";
+import type { Db } from "../../db/index.ts";
 
 const RECENT = 15;
 type Feed = { entries: NowEntry[]; also: string[]; nextCursor: string | null };
@@ -39,7 +39,7 @@ const GROUPED: Record<string, (n: number) => string> = {
 
 type Item = ItemRef & ItemShown;
 type Args = (string | number)[];
-const all = <T>(db: DatabaseSync, sql: string, ...args: Args): T[] => db.prepare(sql).all(...args) as T[];
+const all = async <T>(db: Db, sql: string, ...args: Args): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 const minutes = (ms: number): string => (ms < 90 * 60_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / HOUR_MS)} h`);
 const marks = (xs: unknown[]): string => xs.map(() => "?").join(",");
 /** ` AND <col> is not hidden`, or nothing when no repo is filtered; its `?` arguments come from `hideArgs`. */
@@ -53,17 +53,17 @@ const groupBy = <T, K>(rows: T[], key: (r: T) => K): Map<K, T[]> => {
   return out;
 };
 /** The first `per` items of each run, by repo and number. */
-const runItems = (db: DatabaseSync, ids: number[], per: number): Map<number, { repo: string; number: number }[]> =>
-  groupBy(ids.length ? all<{ run_id: number; repo: string; number: number }>(db, `SELECT run_id, repo, number FROM (SELECT run_id, repo, number, ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY repo, number) AS k
+const runItems = async (db: Db, ids: number[], per: number): Promise<Map<number, { repo: string; number: number }[]>> =>
+  groupBy(ids.length ? await all<{ run_id: number; repo: string; number: number }>(db, `SELECT run_id, repo, number FROM (SELECT run_id, repo, number, ROW_NUMBER() OVER (PARTITION BY run_id ORDER BY repo, number) AS k
     FROM agent_run_items WHERE run_id IN (SELECT value FROM json_each(?))) WHERE k <= ? ORDER BY run_id, repo, number`, JSON.stringify(ids), per) : [], (r) => r.run_id);
 /** The PR numbers of each merge batch, in batch order. */
-const batchPrs = (db: DatabaseSync, ids: number[]): Map<number, { number: number }[]> =>
-  groupBy(ids.length ? all<{ batch_id: number; number: number }>(db, "SELECT batch_id, number FROM merge_batch_prs WHERE batch_id IN (SELECT value FROM json_each(?)) ORDER BY batch_id, position", JSON.stringify([...new Set(ids)])) : [], (r) => r.batch_id);
+const batchPrs = async (db: Db, ids: number[]): Promise<Map<number, { number: number }[]>> =>
+  groupBy(ids.length ? await all<{ batch_id: number; number: number }>(db, "SELECT batch_id, number FROM merge_batch_prs WHERE batch_id IN (SELECT value FROM json_each(?)) ORDER BY batch_id, position", JSON.stringify([...new Set(ids)])) : [], (r) => r.batch_id);
 /** Merge batch ids by repo and branch, joined by a NUL. */
-function batchIdsOf(db: DatabaseSync, keys: [string, string][]): Map<string, number> {
+async function batchIdsOf(db: Db, keys: [string, string][]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!keys.length) return out;
-  for (const r of all<{ id: number; repo: string; branch: string }>(db, "SELECT id, repo, branch FROM main.merge_batches WHERE (repo, branch) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?)) ORDER BY id", JSON.stringify(keys)))
+  for (const r of await all<{ id: number; repo: string; branch: string }>(db, "SELECT id, repo, branch FROM main.merge_batches WHERE (repo, branch) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?)) ORDER BY id", JSON.stringify(keys)))
     if (!out.has(`${r.repo}\0${r.branch}`)) out.set(`${r.repo}\0${r.branch}`, r.id);
   return out;
 }
@@ -71,45 +71,45 @@ function batchIdsOf(db: DatabaseSync, keys: [string, string][]): Map<string, num
 // ---- health ------------------------------------------------------------------
 
 /** The health checks that are not ok, as the warnings list shows them; viewers get the short text and no checks of repos they cannot see. */
-export function checkProblems(db: DatabaseSync, hidden: HiddenRepos, internals: boolean, nowMs: number): NowProblem[] {
+export async function checkProblems(db: Db, hidden: HiddenRepos, internals: boolean, nowMs: number): Promise<NowProblem[]> {
   const area = (id: string): NowProblem["area"] =>
     id === "runner" ? "runner" : id.startsWith("deadline:") ? "deadline" : id === "liveness" ? "liveness" : id.startsWith("worker:") || id === "build-queue" ? "workers" : id === "accounts" ? "account" : "sync";
-  return computeChecks(db, nowMs)
+  return (await computeChecks(db, nowMs))
     .filter((c) => c.state !== "ok" && !(c.repo !== undefined && isHiddenRepo(hidden, c.repo)))
     .map((c) => ({ id: c.id, area: area(c.id), tone: c.state === "fail" ? "bad" : "warn", text: internals ? c.text : c.brief, to: c.to, since: c.since, ...(c.ackStep ? { ackStep: c.ackStep } : {}) }));
 }
 
-export async function healthOf(db: DatabaseSync, hidden: HiddenRepos, internals: boolean, nowMs: number): Promise<NowHealth> {
-  const state = pipelineSwitch(db);
+export async function healthOf(db: Db, hidden: HiddenRepos, internals: boolean, nowMs: number): Promise<NowHealth> {
+  const state = await pipelineSwitch(db);
   const out: NowProblem[] = [];
   // Repos with the pipeline off are off by design; their red mains stay on the Main CI page.
-  const on = pipelineRepos(db);
+  const on = await pipelineRepos(db);
   const add = (p: NowProblem) => void out.push(p);
 
   if (!state.enabled) add({ id: "pipeline", area: "pipeline", tone: "warn", text: `Pipeline is ${state.draining ? "draining" : "off"}${state.changedBy ? `, switched ${state.draining ? "to drain" : "off"} by ${state.changedBy}` : ""}`, to: "/pipeline", since: state.changedAt });
-  for (const p of checkProblems(db, hidden, internals, nowMs)) add(p);
+  for (const p of await checkProblems(db, hidden, internals, nowMs)) add(p);
 
-  for (const t of all<{ stage: string; reason: string; tripped_at: string }>(db, "SELECT stage, reason, tripped_at FROM stage_trips WHERE active = 1 ORDER BY tripped_at")) {
+  for (const t of await all<{ stage: string; reason: string; tripped_at: string }>(db, "SELECT stage, reason, tripped_at FROM stage_trips WHERE active = 1 ORDER BY tripped_at")) {
     const why = blankIfHidden(t.reason, hidden);
     add({ id: `breaker:${t.stage}`, area: "breaker", tone: "bad", text: `${stepTitle(t.stage)} is stopped by its breaker${why ? `: ${clip(why, 120)}` : ""}`, to: "/pipeline", since: t.tripped_at });
   }
   for (const l of await zeroLimits(db)) add({ id: `limit:${l.step}`, area: "limit", tone: "warn", text: `${l.title} is paused (limit 0 a day)`, to: "/pipeline", since: null });
 
-  for (const a of listAccounts(db).filter((x) => x.enabled)) {
+  for (const a of (await listAccounts(db)).filter((x) => x.enabled)) {
     if (a.auth.loggedIn === false) add({ id: `account:${a.id}`, area: "account", tone: "bad", text: `Account ${a.label} is signed out`, to: "/accounts", since: null });
     else if (a.pausedReason) add({ id: `account:${a.id}`, area: "account", tone: "warn", text: `Account ${a.label} is paused${blankIfHidden(a.pausedReason, hidden) ? `: ${clip(a.pausedReason, 100)}` : ""}`, to: "/accounts", since: null });
   }
-  const outage = jevEnabled(db) ? jevOutage(db) : null;
+  const outage = await jevEnabled(db) ? await jevOutage(db) : null;
   if (outage) add({ id: "jev", area: "jev", tone: "warn", text: `Jev is unavailable: ${clip(outage.reason, 100)}`, to: "/accounts", since: outage.since });
 
-  for (const r of mainCiRepos(db, hidden).filter((x) => x.state === "red" && on.has(x.repo))) {
+  for (const r of (await mainCiRepos(db, hidden)).filter((x) => x.state === "red" && on.has(x.repo))) {
     const names = r.failing.map((f) => f.name).slice(0, 2).join(", ");
     add({ id: `main-ci:${r.repo}`, area: "main-ci", tone: "bad", text: `Main is red in ${r.repo}${names ? `: ${names}` : ""}`, to: "/main-ci", since: r.redSince });
   }
 
   const since = new Date(nowMs - HOUR_MS).toISOString();
   const onList = [...on];
-  const failed = all<{ step: string; n: number }>(db, `SELECT step, COUNT(*) AS n FROM jobs WHERE state = 'failed' AND ended_at > ?${notHidden("repo", hidden, true)}${onList.length ? ` AND (repo IS NULL OR repo IN (${marks(onList)}))` : " AND repo IS NULL"} GROUP BY step ORDER BY n DESC`, since, ...hideArgs(hidden), ...onList);
+  const failed = await all<{ step: string; n: number }>(db, `SELECT step, COUNT(*) AS n FROM jobs WHERE state = 'failed' AND ended_at > ?${notHidden("repo", hidden, true)}${onList.length ? ` AND (repo IS NULL OR repo IN (${marks(onList)}))` : " AND repo IS NULL"} GROUP BY step ORDER BY n DESC`, since, ...hideArgs(hidden), ...onList);
   const nFailed = failed.reduce((a, f) => a + f.n, 0);
   if (nFailed) {
     const steps = failed.slice(0, 3).map((f) => stepTitle(f.step)).join(", ");
@@ -147,7 +147,7 @@ const lines = (ws: Write[]): { summary: string; items: Item[]; more: number }[] 
   });
 };
 
-function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: boolean, before: string | null, nowMs: number): Feed {
+async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boolean, before: string | null, nowMs: number): Promise<Feed> {
   // Item references get their kind, state and title in one read at the end.
   const shown = shownLater(db);
   const item = shown.item;
@@ -172,7 +172,7 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
   const actions = [...Object.keys(GITHUB_ACTIONS).filter((a) => a !== "merge" && !HOUSEKEEPING.has(a)), ...(staff ? Object.keys(BATCH_ACTIONS) : [])];
   // Events of a merge batch (details.batch, or a `repo:branch` target) show as one row per batch and action, linking to the batch page.
   const batchEvents = new Map<string, { id: number; repo: string; action: string; at: string; oldest: string; key: string }>();
-  const audit = all<{ rowid: number; at: string; login: string; action: string; target: string | null; details: string | null }>(db,
+  const audit = await all<{ rowid: number; at: string; login: string; action: string; target: string | null; details: string | null }>(db,
     `SELECT rowid, at, login, action, target, details FROM audit WHERE action IN (${marks(actions)})${cut("at")} ORDER BY at DESC LIMIT ?`, ...actions, ...when, SCAN);
   bound(audit);
   const parsed = audit.map((a) => {
@@ -184,7 +184,7 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
     if (t && !ref) branch = t[2]!;
     return { a, ref, repo, branch };
   });
-  const batchIds = batchIdsOf(db, parsed.flatMap((p) => (p.repo && p.branch ? [[p.repo, p.branch] as [string, string]] : [])));
+  const batchIds = await batchIdsOf(db, parsed.flatMap((p) => (p.repo && p.branch ? [[p.repo, p.branch] as [string, string]] : [])));
   for (const { a, ref, repo, branch } of parsed) {
     const bid = repo && branch ? batchIds.get(`${repo}\0${branch}`) : undefined;
     if (repo && isHiddenRepo(hidden, repo)) continue;
@@ -199,7 +199,7 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
     const e = writeEvent(a, staff);
     writes.push({ at: a.at, action: a.action, label: GITHUB_ACTIONS[a.action]!, item: item(ref.repo, ref.number), key: e.id, summary: e.summary, login: a.login });
   }
-  const merges = all<{ rowid: number; repo: string; number: number; at: string; path: string; method: string | null }>(db,
+  const merges = await all<{ rowid: number; repo: string; number: number; at: string; path: string; method: string | null }>(db,
     `SELECT rowid, repo, number, at, path, method FROM merges WHERE outcome = 'merged'${notHidden("repo", hidden)}${cut("at")} ORDER BY at DESC LIMIT ?`, ...hideArgs(hidden), ...when, SCAN);
   bound(merges);
   for (const m of merges) {
@@ -211,12 +211,12 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
   // Jobs. Running ones always show on the first page; finished ones by start time.
   type JobRow = { id: number; step: string; state: string; at: string; ended_at: string | null; progress: string | null; summary: string | null; error: string | null; repo: string | null; items: number | null; acted: number | null };
   const jobCols = "id, step, state, COALESCE(started_at, requested_at) AS at, ended_at, progress, summary, error, repo, items, acted";
-  const running = all<JobRow>(db, `SELECT ${jobCols} FROM jobs WHERE state = 'running'${notHidden("repo", hidden, true)}${cut("COALESCE(started_at, requested_at)")} ORDER BY id DESC`, ...hideArgs(hidden), ...when);
-  const finished = all<JobRow>(db, `SELECT ${jobCols} FROM jobs WHERE state IN ('done', 'failed') AND started_at IS NOT NULL${notHidden("repo", hidden, true)}${cut("started_at")} ORDER BY started_at DESC LIMIT ?`, ...hideArgs(hidden), ...when, SCAN);
+  const running = await all<JobRow>(db, `SELECT ${jobCols} FROM jobs WHERE state = 'running'${notHidden("repo", hidden, true)}${cut("COALESCE(started_at, requested_at)")} ORDER BY id DESC`, ...hideArgs(hidden), ...when);
+  const finished = await all<JobRow>(db, `SELECT ${jobCols} FROM jobs WHERE state IN ('done', 'failed') AND started_at IS NOT NULL${notHidden("repo", hidden, true)}${cut("started_at")} ORDER BY started_at DESC LIMIT ?`, ...hideArgs(hidden), ...when, SCAN);
   bound(finished);
   const jobEntries = new Map<number, { entry: NowEntry; its: Set<string>; from: number; to: number }>();
   const listed = [...running, ...finished].filter((j) => !(QUIET_STEPS.has(j.step) && j.state !== "failed"));
-  const itemsOfJob = groupBy(listed.length ? all<{ job_id: number; id: number; repo: string; number: number }>(db,
+  const itemsOfJob = groupBy(listed.length ? await all<{ job_id: number; id: number; repo: string; number: number }>(db,
     `SELECT job_id, id, repo, number FROM job_items WHERE job_id IN (SELECT value FROM json_each(?))${notHidden("repo", hidden)} ORDER BY id`, JSON.stringify(listed.map((j) => j.id)), ...hideArgs(hidden)) : [], (r) => r.job_id);
   for (const j of [...running, ...finished]) {
     const live = j.state === "running";
@@ -247,10 +247,10 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
   };
   // Calls and build tasks nest under a running job; those without a job stand alone.
   if (!before) {
-    const liveRuns = all<{ id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; progress: string | null; item_count: number; user_login: string | null; harness: string | null; reported_model: string | null }>(db,
+    const liveRuns = await all<{ id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; progress: string | null; item_count: number; user_login: string | null; harness: string | null; reported_model: string | null }>(db,
       `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.progress, r.item_count, r.user_login, r.harness, r.reported_model
        FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.state = 'running'${hiddenRuns} ORDER BY r.id`, ...hideArgs(hidden));
-    const itemsOfRun = runItems(db, liveRuns.map((r) => r.id), PER_KIND);
+    const itemsOfRun = await runItems(db, liveRuns.map((r) => r.id), PER_KIND);
     for (const r of liveRuns) {
       const its = itemsOfRun.get(r.id) ?? [];
       placeChild(r.job_id, base({
@@ -259,7 +259,7 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
         ...(staff && r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }),
       }));
     }
-    for (const t of all<{ id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; summary: string | null; label: string | null }>(db,
+    for (const t of await all<{ id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; summary: string | null; label: string | null }>(db,
       `SELECT t.id, t.job_id, t.step, t.repo, t.number, t.state, t.queued_at, t.started_at, t.summary, e.label FROM build_tasks t LEFT JOIN build_envs e ON e.id = t.env_id
        WHERE t.state IN ('queued', 'claimed', 'running')${notHidden("t.repo", hidden)}${staff ? "" : ` AND t.step NOT IN (${PRIVATE_STEPS_SQL})`} ORDER BY t.id`, ...hideArgs(hidden))) {
       const one = t.number === null ? null : item(t.repo, t.number);
@@ -268,9 +268,9 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
         item: one, items: one ? [one] : [], itemCount: one ? 1 : 0, event: one ? `task:${t.id}` : null, detail: `/envs/${t.id}`,
       }));
     }
-    const openBatches = all<{ id: number; repo: string; branch: string; state: string; created_at: string; summary: string | null }>(db,
+    const openBatches = await all<{ id: number; repo: string; branch: string; state: string; created_at: string; summary: string | null }>(db,
       `SELECT id, repo, branch, state, created_at, summary FROM merge_batches WHERE state IN ('checking', 'open')${notHidden("repo", hidden)} ORDER BY id DESC`, ...hideArgs(hidden));
-    const prsOfOpen = batchPrs(db, openBatches.map((b) => b.id));
+    const prsOfOpen = await batchPrs(db, openBatches.map((b) => b.id));
     for (const b of openBatches) {
       const prs = prsOfOpen.get(b.id) ?? [];
       out.push(base({
@@ -311,7 +311,7 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
     out.push(e);
   }
 
-  const prsOfEvent = batchPrs(db, [...batchEvents.values()].map((ev) => ev.id));
+  const prsOfEvent = await batchPrs(db, [...batchEvents.values()].map((ev) => ev.id));
   for (const ev of batchEvents.values()) {
     const prs = prsOfEvent.get(ev.id) ?? [];
     const e = base({
@@ -323,10 +323,10 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
     out.push(e);
   }
 
-  const decisions = all<{ id: string; repo: string | null; number: number | null; items: string | null; question: string; answer: string | null; at: string; answered_by: string | null }>(db,
+  const decisions = await all<{ id: string; repo: string | null; number: number | null; items: string | null; question: string; answer: string | null; at: string; answered_by: string | null }>(db,
     `SELECT id, repo, number, items, question, answer, answered_at AS at, answered_by FROM decisions WHERE answered_at IS NOT NULL${cut("answered_at")} ORDER BY answered_at DESC LIMIT ?`, ...when, SCAN);
   bound(decisions);
-  const quietPrs = decisions.length ? quietFixPrs(db) : new Set<string>();
+  const quietPrs = decisions.length ? await quietFixPrs(db) : new Set<string>();
   const isQuiet = (repo: string, number: number): boolean => quietPrs.has(`${repo}#${number}`);
   for (const d of decisions) {
     let ref: { repo: string; number: number } | null = d.repo && d.number !== null ? { repo: d.repo, number: d.number } : null;
@@ -349,16 +349,16 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
   }
 
   // Failed calls and tasks of a job show on the job; only those without one stand alone.
-  const runs = all<{ id: number; step: string; model: string; at: string; error: string | null }>(db,
+  const runs = await all<{ id: number; step: string; model: string; at: string; error: string | null }>(db,
     `SELECT r.id, r.step, r.model, COALESCE(r.ended_at, r.started_at) AS at, r.error FROM agent_runs r WHERE r.state = 'failed' AND r.job_id IS NULL${hiddenRuns}${cut("COALESCE(r.ended_at, r.started_at)")} ORDER BY at DESC LIMIT ?`, ...hideArgs(hidden), ...when, SCAN);
   bound(runs);
-  const firstOfRun = runItems(db, runs.map((r) => r.id), 1);
+  const firstOfRun = await runItems(db, runs.map((r) => r.id), 1);
   for (const r of runs) {
     const i = firstOfRun.get(r.id)?.[0];
     out.push(base({ key: `failed-run:${r.id}`, kind: "failure", state: "failed", at: r.at, actor: r.model, item: i ? item(i.repo, i.number) : null, event: i ? `run:${r.id}` : null, detail: `/agents/${r.id}`,
       title: `${stepTitle(r.step)}: model call failed${r.error && staff ? `, ${clip(r.error, 100)}` : ""}` }));
   }
-  const tasks = all<{ id: number; step: string; repo: string; number: number | null; state: string; at: string; summary: string | null }>(db,
+  const tasks = await all<{ id: number; step: string; repo: string; number: number | null; state: string; at: string; summary: string | null }>(db,
     `SELECT id, step, repo, number, state, COALESCE(ended_at, queued_at) AS at, summary FROM build_tasks WHERE state IN ('failed', 'lost') AND job_id IS NULL${staff ? "" : ` AND step NOT IN (${PRIVATE_STEPS_SQL})`}${notHidden("repo", hidden)}${cut("COALESCE(ended_at, queued_at)")} ORDER BY at DESC LIMIT ?`, ...hideArgs(hidden), ...when, SCAN);
   bound(tasks);
   for (const t of tasks) {
@@ -374,20 +374,20 @@ function feed(db: DatabaseSync, hidden: HiddenRepos, staff: boolean, operator: b
   // The next page starts before the oldest entry shown (all members of a group count), or before the bound when nothing is complete yet.
   const last = rest[rest.length - 1];
   const more = rest.length === RECENT || completeFrom !== "";
-  shown.fill();
+  await shown.fill();
   return { entries: page, also, nextCursor: more ? (last ? (oldestOf.get(last) ?? last.at) : completeFrom) : null };
 }
 
 /** One page of the feed older than `before`, for infinite scroll. */
-export async function nowFeed(db: DatabaseSync, req: Req): Promise<NowFeed> {
+export async function nowFeed(db: Db, req: Req): Promise<NowFeed> {
   const before = req.query.get("before");
-  const { entries, nextCursor } = feed(db, await hiddenRepos(db, req), canSeeInternals(req), req.user.role === "operator", before && !Number.isNaN(Date.parse(before)) ? before : null, Date.now());
+  const { entries, nextCursor } = await feed(db, await hiddenRepos(db, req), canSeeInternals(req), req.user.role === "operator", before && !Number.isNaN(Date.parse(before)) ? before : null, Date.now());
   return { entries, nextCursor };
 }
 
-export async function now(db: DatabaseSync, req: Req): Promise<Now> {
+export async function now(db: Db, req: Req): Promise<Now> {
   const hidden = await hiddenRepos(db, req);
   const nowMs = Date.now();
-  const f = feed(db, hidden, canSeeInternals(req), req.user.role === "operator", null, nowMs);
+  const f = await feed(db, hidden, canSeeInternals(req), req.user.role === "operator", null, nowMs);
   return { health: await healthOf(db, hidden, canSeeInternals(req), nowMs), alsoRunning: f.also, entries: f.entries, nextCursor: f.nextCursor };
 }

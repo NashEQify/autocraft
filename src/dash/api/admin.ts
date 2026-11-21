@@ -4,7 +4,6 @@
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
 import { filtered, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type {
   AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
 } from "../../../web/src/api/types.ts";
@@ -33,6 +32,8 @@ import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { pipelineState } from "../../runner/autopilot.ts";
 import { PilotError, setPilot } from "../../pilot.ts";
 import { canSeeInternals } from "./staff.ts";
+import { mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;
@@ -76,9 +77,9 @@ const required = (v: unknown, what: string): string => {
 
 // Library errors (AccessError, RepoError, setRule's range checks) are messages
 // for the operator.
-function refused<T>(f: () => T): T {
+async function refused<T>(f: () => Promise<T>): Promise<T> {
   try {
-    return f();
+    return await f();
   } catch (e) {
     if (e instanceof AccessError || e instanceof RepoError) throw new HttpError(400, e.message);
     throw e;
@@ -131,19 +132,19 @@ function int(v: string | null, def: number, min: number, max: number, what: stri
 // The whole-mirror aggregate is reused for at least a minute, and after that
 // until the next sync moves the high water. An override or rule change drops it.
 const CONTRIBUTORS_TTL = 60_000;
-const contributorCache = new WeakMap<DatabaseSync, Map<string, { at: number; hw: string | null; rows: Row[] }>>();
-export function clearContributorCache(db: DatabaseSync): void {
+const contributorCache = new WeakMap<Db, Map<string, { at: number; hw: string | null; rows: Row[] }>>();
+export function clearContributorCache(db: Db): void {
   contributorCache.delete(db);
 }
-function cachedContributors(db: DatabaseSync, repo: string | undefined): Row[] {
-  const hw = (db.prepare("SELECT value FROM main.settings WHERE key = 'org_high_water'").get() as { value: string } | undefined)?.value ?? null;
+async function cachedContributors(db: Db, repo: string | undefined): Promise<Row[]> {
+  const hw = (await db.prepare("SELECT value FROM main.settings WHERE key = 'org_high_water'").get() as { value: string } | undefined)?.value ?? null;
   const byRepo = contributorCache.get(db) ?? new Map<string, { at: number; hw: string | null; rows: Row[] }>();
   contributorCache.set(db, byRepo);
   const key = repo ?? "";
   const hit = byRepo.get(key);
   const now = Date.now();
   if (hit && (now - hit.at < CONTRIBUTORS_TTL || hit.hw === hw)) return hit.rows.map((r) => ({ ...r }));
-  const rows = contributors(db, { repo });
+  const rows = await contributors(db, { repo });
   byRepo.set(key, { at: now, hw, rows });
   return rows.map((r) => ({ ...r }));
 }
@@ -162,7 +163,7 @@ function withoutHidden(rows: Row[], hidden: HiddenRepos): Row[] {
   return out;
 }
 
-export async function listContributors(db: DatabaseSync, req: Req): Promise<ContributorList> {
+export async function listContributors(db: Db, req: Req): Promise<ContributorList> {
   const q = req.query;
   const repo = q.get("repo") || undefined;
   const tier = q.get("tier") || undefined;
@@ -175,9 +176,9 @@ export async function listContributors(db: DatabaseSync, req: Req): Promise<Cont
   const offset = int(q.get("offset"), 0, 0, 1e9, "offset");
   const needle = (q.get("q") ?? "").trim().toLowerCase().slice(0, 100);
 
-  const rule = getRule(db);
+  const rule = await getRule(db);
   const hidden = await hiddenRepos(db, req);
-  let rows = (repo !== undefined && isHiddenRepo(hidden, repo)) ? [] : withoutHidden(cachedContributors(db, repo), hidden);
+  let rows = (repo !== undefined && isHiddenRepo(hidden, repo)) ? [] : withoutHidden(await cachedContributors(db, repo), hidden);
   if (needle) rows = rows.filter((c) => c.login.toLowerCase().includes(needle));
   const byTier = Object.fromEntries(TIERS.map((t) => [t, 0])) as Record<Tier, number>;
   for (const c of rows) byTier[TIER[c.tier]]++;
@@ -195,11 +196,11 @@ function ruleOf(v: Record<string, unknown>): WhitelistRule {
   return { minMerged, minRate };
 }
 
-export function previewRule(db: DatabaseSync, req: Req): RulePreview {
+export async function previewRule(db: Db, req: Req): Promise<RulePreview> {
   requireOperator(req, "change the whitelist rule");
   const next = ruleOf({ minMerged: req.query.get("minMerged"), minRate: req.query.get("minRate") });
-  const now = getRule(db);
-  const rows = contributors(db).sort((a, b) => b.merged - a.merged || a.login.localeCompare(b.login));
+  const now = await getRule(db);
+  const rows = (await contributors(db)).sort((a, b) => b.merged - a.merged || a.login.localeCompare(b.login));
   const allowed = (c: Row, r: Rule) => {
     const t = tierOf(c.merged, c.closed, c.override_in_effect ? c.override : null, r);
     return t === "whitelisted" || t === "allow";
@@ -219,15 +220,15 @@ export function previewRule(db: DatabaseSync, req: Req): RulePreview {
   };
 }
 
-export function saveRule(db: DatabaseSync, req: Req): WhitelistRule {
+export async function saveRule(db: Db, req: Req): Promise<WhitelistRule> {
   requireOperator(req, "change the whitelist rule");
   const r = ruleOf(body(req));
-  setRule(db, r, req.user.login);
+  await setRule(db, r, req.user.login);
   clearContributorCache(db);
-  return getRule(db);
+  return await getRule(db);
 }
 
-export async function override(db: DatabaseSync, req: Req, lookup: GithubUserLookup): Promise<Contributor> {
+export async function override(db: Db, req: Req, lookup: GithubUserLookup): Promise<Contributor> {
   requireOperator(req, "change the whitelist");
   const login = req.params.login!;
   const b = body(req);
@@ -235,8 +236,8 @@ export async function override(db: DatabaseSync, req: Req, lookup: GithubUserLoo
   if (status !== "allow" && status !== "deny" && status !== null) throw new HttpError(400, "status must be allow, deny or null");
   if (!OVERRIDE_LOGIN.test(login)) throw new HttpError(400, `not a GitHub login: ${login}`);
   // Without a note field the override keeps the note it has.
-  const kept = () => (db.prepare("SELECT note FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").get(login) as { note: string | null } | undefined)?.note ?? null;
-  const note = status === null ? null : b.note === undefined ? kept() : text(b.note, NOTE_MAX, "note");
+  const kept = async () => (await db.prepare("SELECT note FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").get(login) as { note: string | null } | undefined)?.note ?? null;
+  const note = status === null ? null : b.note === undefined ? await kept() : text(b.note, NOTE_MAX, "note");
   // An allow belongs to the account that holds the login now; a deny holds for any account, so it does not wait for GitHub.
   let id: number | null = null;
   if (status !== null) {
@@ -248,13 +249,13 @@ export async function override(db: DatabaseSync, req: Req, lookup: GithubUserLoo
     if (id === null && status === "allow") throw new HttpError(400, `${login} is not a GitHub user`);
   }
   try {
-    setOverride(db, login, status, note, req.user.login, id);
+    await setOverride(db, login, status, note, req.user.login, id);
     clearContributorCache(db);
   } catch (e) {
     throw new HttpError(400, (e as Error).message);
   }
-  const rule = getRule(db);
-  const c = contributors(db, { login }).find((x) => x.login === login);
+  const rule = await getRule(db);
+  const c = (await contributors(db, { login })).find((x) => x.login === login);
   return c ? toContributor(c, rule, true) : {
     login, tier: "not", autoTier: "not", override: null, overrideInEffect: false, overrideNote: null, overrideBy: null, overrideAt: null,
     merged: 0, closedUnmerged: 0, open: 0, mergeRate: null, lastMerge: null, repos: [],
@@ -263,196 +264,196 @@ export async function override(db: DatabaseSync, req: Req, lookup: GithubUserLoo
 
 // ---- tracked repos ---------------------------------------------------------
 
-export function allRepos(db: DatabaseSync, req: Req): TrackedRepo[] {
+export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  return listAll(db).map((r) => toTrackedRepo(db, r));
+  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r));
 }
 
-function toTrackedRepo(db: DatabaseSync, r: RepoRow): TrackedRepo {
+async function toTrackedRepo(db: Db, r: RepoRow): Promise<TrackedRepo> {
   return {
     name: r.name, owner: r.owner, tracked: !!r.tracked, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
-    labels: r.tracked ? labelsInfo(db, r.name) : null,
-    merging: r.tracked ? mergeInfo(db, r.name) : null,
-    pushing: r.tracked ? approvalInfo(pushApprovalOf(db, r.name)) : null,
-    commenting: r.tracked ? approvalInfo(commentApprovalOf(db, r.name)) : null,
-    fixing: r.tracked ? approvalInfo(fixIssueApprovalOf(db, r.name)) : null,
-    mainFixing: r.tracked ? approvalInfo(mainFixApprovalOf(db, r.name)) : null,
-    ciApproving: r.tracked ? approvalInfo(ciApprovalOf(db, r.name)) : null,
-    optionalChecks: r.tracked ? optionalChecks(db, r.name) : [],
-    seenChecks: r.tracked ? seenChecks(db, r.name) : [],
+    labels: r.tracked ? await labelsInfo(db, r.name) : null,
+    merging: r.tracked ? await mergeInfo(db, r.name) : null,
+    pushing: r.tracked ? approvalInfo(await pushApprovalOf(db, r.name)) : null,
+    commenting: r.tracked ? approvalInfo(await commentApprovalOf(db, r.name)) : null,
+    fixing: r.tracked ? approvalInfo(await fixIssueApprovalOf(db, r.name)) : null,
+    mainFixing: r.tracked ? approvalInfo(await mainFixApprovalOf(db, r.name)) : null,
+    ciApproving: r.tracked ? approvalInfo(await ciApprovalOf(db, r.name)) : null,
+    optionalChecks: r.tracked ? await optionalChecks(db, r.name) : [],
+    seenChecks: r.tracked ? await seenChecks(db, r.name) : [],
     pipeline: !!r.tracked && !!r.pipeline,
   };
 }
 
 // One repo, for the endpoints that change a single repo's settings: the web patches it into its list, so the answer skips every other repo's label plan.
-function oneRepo(db: DatabaseSync, name: string): TrackedRepo {
-  const r = listAll(db).find((x) => x.name === name);
+async function oneRepo(db: Db, name: string): Promise<TrackedRepo> {
+  const r = (await listAll(db)).find((x) => x.name === name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return toTrackedRepo(db, r);
+  return await toTrackedRepo(db, r);
 }
 
 function approvalInfo(a: { by: string; at: string } | null): RepoApproval {
   return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null };
 }
 
-function mergeInfo(db: DatabaseSync, repo: string): RepoApproval {
-  const a = mergeApprovalOf(db, repo);
+async function mergeInfo(db: Db, repo: string): Promise<RepoApproval> {
+  const a = await mergeApprovalOf(db, repo);
   return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null };
 }
 
-function labelsInfo(db: DatabaseSync, repo: string): RepoLabels {
-  const a = approvalOf(db, repo);
-  const c = countPlan(planLabels(db, repo));
+async function labelsInfo(db: Db, repo: string): Promise<RepoLabels> {
+  const a = await approvalOf(db, repo);
+  const c = countPlan(await planLabels(db, repo));
   return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null, toAdd: c.toAdd, skipped: c.already + c.unsettled, conflicts: c.conflicts };
 }
 
 // Only an operator lets the Label stage write to a repo on GitHub.
-export function labelsApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function labelsApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve labelling");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setApproval(db, req.user.login, name, approved);
+      return await setApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for labelling`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator lets the pipeline merge pull requests in a repo.
-export function mergeApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function mergeApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve merging");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setMergeApproval(db, req.user.login, name, approved);
+      return await setMergeApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for merging`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator lets the pipeline approve the CI runs GitHub holds for outside contributors' PRs in a repo.
-export function ciApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function ciApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve CI runs");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setCiApproval(db, req.user.login, name, approved);
+      return await setCiApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for approving CI runs`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
-export async function workspaceInfo(db: DatabaseSync, req: Req): Promise<{ excluded: string[] }> {
+export async function workspaceInfo(db: Db, req: Req): Promise<{ excluded: string[] }> {
   const visible = new Set(await visibleRepos(db, req));
-  return { excluded: workspaceExcluded(db).filter((r) => visible.has(r)) };
+  return { excluded: (await workspaceExcluded(db)).filter((r) => visible.has(r)) };
 }
 
 // Only an operator changes which tracked repositories Opus calls cannot read.
-export function setWorkspaceInfo(db: DatabaseSync, req: Req): { excluded: string[] } {
+export async function setWorkspaceInfo(db: Db, req: Req): Promise<{ excluded: string[] }> {
   requireOperator(req, "change the workspace");
   try {
-    return { excluded: setWorkspaceExcluded(db, body(req).excluded, req.user.login) };
+    return { excluded: await setWorkspaceExcluded(db, body(req).excluded, req.user.login) };
   } catch (e) {
     throw new HttpError(400, (e as Error).message);
   }
 }
 
-export const singleMerge = (db: DatabaseSync): { max: number } => ({ max: singleMergeMax(db) });
+export const singleMerge = async (db: Db): Promise<{ max: number }> => ({ max: await singleMergeMax(db) });
 
 // Only an operator changes how many ready PRs merge one at a time.
-export function setSingleMerge(db: DatabaseSync, req: Req): { max: number } {
+export async function setSingleMerge(db: Db, req: Req): Promise<{ max: number }> {
   requireOperator(req, "change the single-merge limit");
   try {
-    return { max: setSingleMergeMax(db, body(req).max, req.user.login) };
+    return { max: await setSingleMergeMax(db, body(req).max, req.user.login) };
   } catch (e) {
     throw new HttpError(400, (e as Error).message);
   }
 }
 
 // Only an operator lets the pipeline comment on and close items in a repo.
-export function commentApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function commentApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve commenting");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setCommentApproval(db, req.user.login, name, approved);
+      return await setCommentApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for commenting`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator lets the pipeline push fix-up commits to contributors' branches in a repo.
-export function pushApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function pushApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve pushing");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setPushApproval(db, req.user.login, name, approved);
+      return await setPushApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for pushing`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator lets the pipeline open fix PRs for issues in a repo.
-export function fixIssueApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve fixing issues");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setFixIssueApproval(db, req.user.login, name, approved);
+      return await setFixIssueApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing issues`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator switches the pipeline stages on or off for a repo (off: sync only).
-export function pipelineSwitch(db: DatabaseSync, req: Req, on: boolean): TrackedRepo {
+export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
   requireOperator(req, "switch the pipeline");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setRepoPipeline(db, req.user.login, name, on);
+      return await setRepoPipeline(db, req.user.login, name, on);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `the pipeline is already ${on ? "on" : "off"} for ${name}`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
-export async function track(db: DatabaseSync, req: Req, on: boolean): Promise<TrackedRepo[]> {
+export async function track(db: Db, req: Req, on: boolean): Promise<TrackedRepo[]> {
   requireOperator(req, "manage tracked repos");
   const name = required(body(req).name, "name");
   const changed = await refusedAsync(async () => (on ? trackRepoChecked : untrackRepo)(db, req.user.login, name));
   if (!changed) throw new HttpError(409, `${name} is ${on ? "already" : "not"} tracked`);
   clearContributorCache(db);
-  return allRepos(db, req);
+  return await allRepos(db, req);
 }
 
 // ---- access, sessions, audit -----------------------------------------------
 
-export function accessOverview(db: DatabaseSync, req: Req): AccessOverview {
+export async function accessOverview(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const nowMs = Date.now();
-  const sessions = (db.prepare(`SELECT s.rowid AS id, s.login, s.csrf, s.created_at, s.last_seen, s.expires_at, s.user_agent, a.role
+  const sessions = (await db.prepare(`SELECT s.rowid AS id, s.login, s.csrf, s.created_at, s.last_seen, s.expires_at, s.user_agent, a.role
     FROM sessions s JOIN access a ON a.login = s.login
     WHERE s.expires_at > ? ORDER BY s.last_seen DESC`).all(new Date(nowMs).toISOString()) as
     { id: number; login: string; csrf: string; created_at: string; last_seen: string; expires_at: string; user_agent: string | null; role: Role }[])
@@ -460,14 +461,14 @@ export function accessOverview(db: DatabaseSync, req: Req): AccessOverview {
   const perLogin = new Map<string, number>();
   for (const s of sessions) perLogin.set(s.login.toLowerCase(), (perLogin.get(s.login.toLowerCase()) ?? 0) + 1);
   return {
-    entries: listAccess(db).map((r) => ({
+    entries: (await listAccess(db)).map((r) => ({
       login: r.login, role: r.role, addedBy: r.added_by, addedAt: r.added_at, note: r.note, sessions: perLogin.get(r.login.toLowerCase()) ?? 0,
     })),
     sessions: sessions.map((s) => ({
       id: s.id, login: s.login, createdAt: s.created_at, lastSeen: s.last_seen, expiresAt: s.expires_at,
       userAgent: s.user_agent ? s.user_agent.slice(0, 200) : null, current: s.csrf === req.csrf,
     })),
-    tokens: listAllTokens(db),
+    tokens: await listAllTokens(db),
   };
 }
 
@@ -479,16 +480,16 @@ const roleOf = (v: unknown) => {
 /** The numeric GitHub id of a login: null when GitHub has no such user; throws when GitHub can't be reached. */
 export type GithubUserLookup = (login: string) => Promise<number | null>;
 
-export async function accessAdd(db: DatabaseSync, req: Req, lookup: GithubUserLookup): Promise<AccessOverview> {
+export async function accessAdd(db: Db, req: Req, lookup: GithubUserLookup): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const b = body(req);
   const login = required(b.login, "login");
   const role = roleOf(b.role);
   const note = text(b.note, ACCESS_NOTE_MAX, "note");
   // Validates and rejects duplicates before GitHub is asked.
-  refused(() => {
+  await refused(async () => {
     if (!LOGIN.test(login)) throw new AccessError(`not a GitHub login: ${JSON.stringify(login)}`);
-    if (getAccess(db, login)) throw new AccessError(`${login} is already on the access list`);
+    if (await getAccess(db, login)) throw new AccessError(`${login} is already on the access list`);
   });
   let id: number | null;
   try {
@@ -497,51 +498,51 @@ export async function accessAdd(db: DatabaseSync, req: Req, lookup: GithubUserLo
     throw new HttpError(502, "GitHub could not be reached to look up that login. Try again.");
   }
   if (id === null) throw new HttpError(400, `${login} is not a GitHub user`);
-  refused(() => addLogin(db, req.user.login, login, role, note, id));
-  return accessOverview(db, req);
+  await refused(async () => await addLogin(db, req.user.login, login, role, note, id));
+  return await accessOverview(db, req);
 }
 
-export function accessRemove(db: DatabaseSync, req: Req): AccessOverview {
+export async function accessRemove(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
-  refused(() => removeLogin(db, req.user.login, required(body(req).login, "login"), { keepOperator: true }));
-  return accessOverview(db, req);
+  await refused(async () => await removeLogin(db, req.user.login, required(body(req).login, "login"), { keepOperator: true }));
+  return await accessOverview(db, req);
 }
 
-export function accessRole(db: DatabaseSync, req: Req): AccessOverview {
+export async function accessRole(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const b = body(req);
   const login = required(b.login, "login");
-  const changed = refused(() => setRole(db, req.user.login, login, roleOf(b.role), { keepOperator: true }));
+  const changed = await refused(async () => await setRole(db, req.user.login, login, roleOf(b.role), { keepOperator: true }));
   if (!changed) throw new HttpError(409, `${login} already has that role`);
-  return accessOverview(db, req);
+  return await accessOverview(db, req);
 }
 
-export function revokeSession(db: DatabaseSync, req: Req): AccessOverview {
+export async function revokeSession(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const id = body(req).id;
   if (!Number.isInteger(id)) throw new HttpError(400, "id must be a session id");
-  const s = db.prepare("DELETE FROM sessions WHERE rowid = ? RETURNING id_hash, login, created_at, token_enc").get(id as number) as
+  const s = await db.prepare("DELETE FROM sessions WHERE rowid = ? RETURNING id_hash, login, created_at, token_enc").get(id as number) as
     { id_hash: string; login: string; created_at: string; token_enc: string | null } | undefined;
   if (!s) throw new HttpError(404, "that session has already ended");
   // Revoking a session cuts off the login's agent tokens too: they act with that login's permissions.
-  const mcpTokens = endTokens(db, s.login);
+  const mcpTokens = await endTokens(db, s.login);
   // ...and the GitHub App token this session signed in with, but not the login's authorization: its other sign-ins keep working.
-  const userTokens = dropSessionTokens(db, s.login, s.id_hash, s.token_enc);
-  audit(db, req.user.login, "session-revoke", s.login, { created_at: s.created_at, ...(mcpTokens ? { mcpTokens } : {}), ...(userTokens ? { userTokens } : {}) });
-  return accessOverview(db, req);
+  const userTokens = await dropSessionTokens(db, s.login, s.id_hash, s.token_enc);
+  await audit(db, req.user.login, "session-revoke", s.login, { created_at: s.created_at, ...(mcpTokens ? { mcpTokens } : {}), ...(userTokens ? { userTokens } : {}) });
+  return await accessOverview(db, req);
 }
 
-export function revokeAgentToken(db: DatabaseSync, req: Req): AccessOverview {
+export async function revokeAgentToken(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const id = body(req).id;
   if (!Number.isInteger(id)) throw new HttpError(400, "id must be a token id");
-  const gone = revokeAnyToken(db, id as number);
+  const gone = await revokeAnyToken(db, id as number);
   if (!gone) throw new HttpError(404, "that token has already ended");
-  audit(db, req.user.login, gone.kind === "runner" ? "runner-revoke" : "mcp-token-revoke", gone.login, { id, kind: gone.kind });
-  return accessOverview(db, req);
+  await audit(db, req.user.login, gone.kind === "runner" ? "runner-revoke" : "mcp-token-revoke", gone.login, { id, kind: gone.kind });
+  return await accessOverview(db, req);
 }
 
-export async function auditLog(db: DatabaseSync, req: Req): Promise<AuditPage> {
+export async function auditLog(db: Db, req: Req): Promise<AuditPage> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the audit log");
   const q = req.query;
   const login = (q.get("login") ?? "").trim().slice(0, 100);
@@ -573,8 +574,8 @@ export async function auditLog(db: DatabaseSync, req: Req): Promise<AuditPage> {
     args.push("", ...visible);
   }
   const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const total = Number((db.prepare(`SELECT COUNT(*) AS n FROM audit ${w}`).get(...args) as { n: number }).n);
-  const rows = db.prepare(`SELECT at, login, action, target, details FROM audit ${w} ORDER BY at DESC, rowid DESC LIMIT ? OFFSET ?`)
+  const total = Number((await db.prepare(`SELECT COUNT(*) AS n FROM audit ${w}`).get(...args) as { n: number }).n);
+  const rows = await db.prepare(`SELECT at, login, action, target, details FROM audit ${w} ORDER BY at DESC, rowid DESC LIMIT ? OFFSET ?`)
     .all(...args, limit, offset) as { at: string; login: string; action: string; target: string | null; details: string | null }[];
   const entries: AuditEntry[] = rows.map((r) => {
     let details: Record<string, unknown> | null = null;
@@ -588,12 +589,12 @@ export async function auditLog(db: DatabaseSync, req: Req): Promise<AuditPage> {
 }
 
 // Only an operator limits the pipeline to a list of items. An empty list clears the pilot.
-export async function putPilot(db: DatabaseSync, req: Req) {
+export async function putPilot(db: Db, req: Req) {
   requireOperator(req, "set the pilot");
   const items = body(req).items;
   if (!Array.isArray(items)) throw new HttpError(400, "items must be a list of repo#number");
   try {
-    setPilot(db, req.user.login, items);
+    await setPilot(db, req.user.login, items);
   } catch (e) {
     if (e instanceof PilotError) throw new HttpError(e.status, e.message);
     throw e;
@@ -602,32 +603,32 @@ export async function putPilot(db: DatabaseSync, req: Req) {
 }
 
 // Only an operator sets the checks whose failure does not stop a merge.
-export function optionalCheck(db: DatabaseSync, req: Req, on: boolean): TrackedRepo {
+export async function optionalCheck(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
   requireOperator(req, "set optional checks");
   const name = required(body(req).name, "name");
   const check = required(body(req).check, "check");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setOptionalCheck(db, req.user.login, name, check, on);
+      return await setOptionalCheck(db, req.user.login, name, check, on);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${check} is ${on ? "already" : "not"} an optional check of ${name}`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }
 
 // Only an operator lets the pipeline act on a red default branch in a repo: rerun failed jobs, and open an issue on an operator's answer.
-export function mainFixApproval(db: DatabaseSync, req: Req, approved: boolean): TrackedRepo {
+export async function mainFixApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   requireOperator(req, "approve fixing a red main");
   const name = required(body(req).name, "name");
-  const changed = refused(() => {
+  const changed = await refused(async () => {
     try {
-      return setMainFixApproval(db, req.user.login, name, approved);
+      return await setMainFixApproval(db, req.user.login, name, approved);
     } catch (e) {
       throw new RepoError((e as Error).message);
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing a red main`);
-  return oneRepo(db, name);
+  return await oneRepo(db, name);
 }

@@ -1,9 +1,9 @@
 // When an open decision counts as prepared. Only items in scope (pipeline on for the repo, not our own integration PR) are prepared.
-import type { DatabaseSync } from "node:sqlite";
 import { pilotSql } from "../pilot.ts";
 import { notOwnIntegrationSql } from "../dupes/held.ts";
 import { OWN_NOTE_PREFIXES } from "../conversations/store.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
+import type { Db } from "../db/index.ts";
 
 /** The columns of a decision that say what its prepare step did. */
 export type PrepareColumns = {
@@ -131,19 +131,19 @@ function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; 
   return { cols, head: it.kind === "pr" ? it.head_oid : null, open: true };
 }
 
-function columnsOf(db: DatabaseSync, d: Open): { cols: PrepareColumns; head: string | null; open: true } | null {
+async function columnsOf(db: Db, d: Open): Promise<{ cols: PrepareColumns; head: string | null; open: true } | null> {
   if (d.answer !== null || d.number === null) return null;
-  return columnsFrom(d, db.prepare(`${subjectSql()} AND d.id = ?`).get(utcDayStart(Date.now()), d.id) as Subject | undefined);
+  return columnsFrom(d, await db.prepare(`${subjectSql()} AND d.id = ?`).get(utcDayStart(Date.now()), d.id) as Subject | undefined);
 }
 
 export type PrepareState = { preparing: boolean; preparedEarlier: boolean };
 
 /** `preparing` and `preparedEarlier` of every open single-item decision in `ds` from one statement, for a page of rows. */
-export function prepareStates(db: DatabaseSync, ds: Open[]): Map<string, PrepareState> {
+export async function prepareStates(db: Db, ds: Open[]): Promise<Map<string, PrepareState>> {
   const open = ds.filter((d) => d.answer === null && d.number !== null);
   const out = new Map<string, PrepareState>();
   if (!open.length) return out;
-  const rows = db.prepare(`${subjectSql()} AND d.id IN (SELECT value FROM json_each(?))`).all(utcDayStart(Date.now()), JSON.stringify(open.map((d) => d.id))) as (Subject & { did: string })[];
+  const rows = await db.prepare(`${subjectSql()} AND d.id IN (SELECT value FROM json_each(?))`).all(utcDayStart(Date.now()), JSON.stringify(open.map((d) => d.id))) as (Subject & { did: string })[];
   const by = new Map(rows.map((r) => [r.did, r]));
   for (const d of open) {
     const x = columnsFrom(d, by.get(d.id));
@@ -155,13 +155,13 @@ export function prepareStates(db: DatabaseSync, ds: Open[]): Map<string, Prepare
 const stateEarlier = (x: { cols: PrepareColumns; head: string | null }): boolean =>
   (x.cols.prepared_at !== null || x.cols.stale_choices != null) && !isPrepared(x.cols, x.head) && prepareHeld(x.cols, x.head) === "capped";
 
-export function preparing(db: DatabaseSync, d: Open): boolean {
-  const x = columnsOf(db, d);
+export async function preparing(db: Db, d: Open): Promise<boolean> {
+  const x = await columnsOf(db, d);
   return !!x && isPreparing(x.cols, x.head);
 }
 
 /** The decision keeps choices from an earlier prepare because its prepares of the day are used up; an operator's Re-prepare updates them. */
-export function preparedEarlier(db: DatabaseSync, d: Open): boolean {
-  const x = columnsOf(db, d);
+export async function preparedEarlier(db: Db, d: Open): Promise<boolean> {
+  const x = await columnsOf(db, d);
   return !!x && stateEarlier(x);
 }

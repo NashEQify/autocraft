@@ -1,30 +1,31 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { connect } from "../src/db.ts";
 import { insertRun } from "../src/agents/runs.ts";
 import { activity } from "../src/dash/api/activity.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { ActivityPage } from "../web/src/api/types.ts";
+import type { Db } from "../src/db/index.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const as = (role: "viewer" | "operator", query: Record<string, string> = {}): Req => ({
   method: "GET", path: "", params: {}, query: new URLSearchParams(query), form: new URLSearchParams(), csrf: "", nonce: "",
   user: { login: "u", role, canWrite: async () => true, canRead: async (r: string) => r !== "secret" },
 });
-const get = async (db: ReturnType<typeof connect>, role: "viewer" | "operator", q: Record<string, string> = {}) => (await activity(db, as(role, q))) as ActivityPage;
+const get = async (db: Db, role: "viewer" | "operator", q: Record<string, string> = {}) => (await activity(db, as(role, q))) as ActivityPage;
 
 test("the stream merges the sources of every item newest first, pages by cursor and hides what the viewer may not see", async () => {
-  const db = connect(":memory:");
-  db.exec("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('secret', 'private'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('secret')");
+  const db = await connectDb(":memory:");
+  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('secret', 'private'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('secret')");
   for (const [repo, n] of [["photocraft", 1], ["photocraft", 2], ["secret", 3]] as const)
-    db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at) VALUES (?, ?, 'pr', 'OPEN', ?, 'dev', '2026-01-01T00:00:00Z')").run(repo, n, `Item ${n}`);
-  db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 1, 'c1', 'comment', 'dev', '2026-01-01T01:00:00Z', 'hi')").run();
-  const run = insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 2 }, { repo: "photocraft", number: 1 }], prompt: "p" });
-  db.prepare("UPDATE agent_runs SET started_at = '2026-01-01T02:00:00Z'").run();
-  db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 2, ?, '2026-01-01T03:00:00Z', 'opus', 'full', 'take', 1, 'ok')").run("a".repeat(40));
-  db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T04:00:00Z', 'bot', 'review-post', 'photocraft#1', '{}')").run();
-  db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T05:00:00Z', 'maint', 'set-priority', 'photocraft#2', '{}')").run();
-  db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T06:00:00Z', 'bot', 'review-post', 'secret#3', '{}')").run();
-  db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('secret', 3, 'c2', 'comment', 'dev', '2026-01-01T07:00:00Z', 'hidden')").run();
+    await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at) VALUES (?, ?, 'pr', 'OPEN', ?, 'dev', '2026-01-01T00:00:00Z')").run(repo, n, `Item ${n}`);
+  await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 1, 'c1', 'comment', 'dev', '2026-01-01T01:00:00Z', 'hi')").run();
+  const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 2 }, { repo: "photocraft", number: 1 }], prompt: "p" });
+  await db.prepare("UPDATE agent_runs SET started_at = '2026-01-01T02:00:00Z'").run();
+  await db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 2, ?, '2026-01-01T03:00:00Z', 'opus', 'full', 'take', 1, 'ok')").run("a".repeat(40));
+  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T04:00:00Z', 'bot', 'review-post', 'photocraft#1', '{}')").run();
+  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T05:00:00Z', 'maint', 'set-priority', 'photocraft#2', '{}')").run();
+  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T06:00:00Z', 'bot', 'review-post', 'secret#3', '{}')").run();
+  await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('secret', 3, 'c2', 'comment', 'dev', '2026-01-01T07:00:00Z', 'hidden')").run();
 
   const op = await get(db, "operator");
   const ids = op.events.map((e) => e.id);

@@ -105,27 +105,27 @@ test("the Hold question is written once per head, prepared like other questions,
   const { world } = await import("./world-db.ts");
   const { askHoldDecisions } = await import("../src/act/index.ts");
   const { saveOpus } = await import("../src/review/opus.ts");
-  const w = world().repo().pr(1).review(1, { verdict: "hold", reason: "needs a design call" });
+  const w = await (await (await (await world()).repo()).pr(1)).review(1, { verdict: "hold", reason: "needs a design call" });
   try {
-    assert.equal(w.prPlan(1).state, "opus-hold");
-    const ids = askHoldDecisions(w.db, new Date().toISOString());
-    assert.deepEqual(ids, ["app#1:hold@" + (w.prPlan(1).head ?? "")]);
-    const d = w.rows("SELECT kind, question, options, facts FROM decisions WHERE id = ?", ids[0]!)[0]!;
+    assert.equal((await w.prPlan(1)).state, "opus-hold");
+    const ids = await askHoldDecisions(w.db, new Date().toISOString());
+    assert.deepEqual(ids, ["app#1:hold@" + ((await w.prPlan(1)).head ?? "")]);
+    const d = (await w.rows("SELECT kind, question, options, facts FROM decisions WHERE id = ?", ids[0]!))[0]!;
     assert.equal(d.kind, "hold");
     assert.deepEqual((JSON.parse(String(d.options)) as { key: string }[]).map((o) => o.key), ["wait", "close"]);
     assert.ok(String(d.facts).includes("needs a design call"));
     // Asked: the plan waits on a person and does not ask again.
-    assert.deepEqual(w.prPlan(1).actions.filter((a) => a.kind === "ask-merge"), []);
-    assert.equal(w.prPlan(1).waitKind, "person");
-    assert.deepEqual(askHoldDecisions(w.db, new Date().toISOString()), []);
+    assert.deepEqual((await w.prPlan(1)).actions.filter((a) => a.kind === "ask-merge"), []);
+    assert.equal((await w.prPlan(1)).waitKind, "person");
+    assert.deepEqual(await askHoldDecisions(w.db, new Date().toISOString()), []);
     // A new review at the same head sets the question aside; a hold again asks it anew.
-    saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: w.prPlan(1).head! }, { mode: "full", base: null, model: "m", review: { ref: "app#1", verdict: "hold", sure: true, reason: "still open", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] } });
+    await saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: (await w.prPlan(1)).head! }, { mode: "full", base: null, model: "m", review: { ref: "app#1", verdict: "hold", sure: true, reason: "still open", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] } });
     // A review made again that still says hold keeps the open question (its prepare is redone from the newer review time).
-    assert.equal(w.rows("SELECT 1 FROM decisions WHERE id LIKE '%:hold@%~replaced-%'").length, 0);
-    assert.deepEqual(askHoldDecisions(w.db, new Date().toISOString()), []);
+    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id LIKE '%:hold@%~replaced-%'")).length, 0);
+    assert.deepEqual(await askHoldDecisions(w.db, new Date().toISOString()), []);
     // A changed verdict sets it aside.
-    saveOpus(w.db, "rv3", { repo: "app", number: 1, head_oid: w.prPlan(1).head! }, { mode: "full", base: null, model: "m", review: { ref: "app#1", verdict: "take", sure: true, reason: "fine now", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] } });
-    assert.equal(w.rows("SELECT 1 FROM decisions WHERE id LIKE '%:hold@%~replaced-%'").length, 1);
+    await saveOpus(w.db, "rv3", { repo: "app", number: 1, head_oid: (await w.prPlan(1)).head! }, { mode: "full", base: null, model: "m", review: { ref: "app#1", verdict: "take", sure: true, reason: "fine now", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: [] } });
+    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id LIKE '%:hold@%~replaced-%'")).length, 1);
   } finally { w.close(); }
 });
 
@@ -137,9 +137,9 @@ test("a hold review whose item has another open question waits for it instead of
 
 test("from database rows: red CI at a new head with an earlier non-take review asks the contributor once", async () => {
   const { world } = await import("./world-db.ts");
-  const w = world().repo().pr(1, { ci: "failure" }).review(1, { verdict: "close", head: "oldhead" });
+  const w = await (await (await (await world()).repo()).pr(1, { ci: "failure" })).review(1, { verdict: "close", head: "oldhead" });
   try {
-    const p = w.prPlan(1);
+    const p = await w.prPlan(1);
     assert.deepEqual(p.actions.filter((a) => a.kind === "cifix").map((a) => a.params?.bucket), ["ask"]);
   } finally { w.close(); }
 });
@@ -147,20 +147,20 @@ test("from database rows: red CI at a new head with an earlier non-take review a
 test("from database rows: a Merge answer given while verification ran does not cover its failure; the question is asked again", async () => {
   const { world } = await import("./world-db.ts");
   const { setAsideAnswerBeforeFailure, verifyOverride } = await import("../src/merge/verify-override.ts");
-  const w = world().repo().pr(1, { ci: "success" }).review(1, { verdict: "take" }).verified(1, "running").answer(1, "merge");
+  const w = await (await (await (await (await (await world()).repo()).pr(1, { ci: "success" })).review(1, { verdict: "take" })).verified(1, "running")).answer(1, "merge");
   try {
-    const head = w.prPlan(1).head!;
+    const head = (await w.prPlan(1)).head!;
     // The verification fails after the answer.
-    w.db.prepare("UPDATE verifications SET state = 'failed', summary = 'tests fail', finished_at = '2999-01-01T00:00:00.000Z' WHERE repo = 'app' AND number = 1").run();
-    assert.equal(verifyOverride(w.db, "app", 1, head), false);
-    assert.ok(!w.prPlan(1).actions.some((a) => a.kind === "merge"));
-    assert.equal(setAsideAnswerBeforeFailure(w.db, "app", 1, head, new Date().toISOString()), true);
-    const p = w.prPlan(1);
+    await w.db.prepare("UPDATE verifications SET state = 'failed', summary = 'tests fail', finished_at = '2999-01-01T00:00:00.000Z' WHERE repo = 'app' AND number = 1").run();
+    assert.equal(await verifyOverride(w.db, "app", 1, head), false);
+    assert.ok(!(await w.prPlan(1)).actions.some((a) => a.kind === "merge"));
+    assert.equal(await setAsideAnswerBeforeFailure(w.db, "app", 1, head, new Date().toISOString()), true);
+    const p = await w.prPlan(1);
     assert.equal(p.state, "needs-decision");
     assert.ok(p.actions.some((a) => a.kind === "ask-merge"));
     // An answer given after the result stands.
-    w.db.prepare("UPDATE verifications SET finished_at = '2000-01-01T00:00:00.000Z' WHERE repo = 'app' AND number = 1").run();
-    w.answer(1, "merge");
-    assert.equal(verifyOverride(w.db, "app", 1, head), true);
+    await w.db.prepare("UPDATE verifications SET finished_at = '2000-01-01T00:00:00.000Z' WHERE repo = 'app' AND number = 1").run();
+    await w.answer(1, "merge");
+    assert.equal(await verifyOverride(w.db, "app", 1, head), true);
   } finally { w.close(); }
 });

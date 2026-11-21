@@ -4,11 +4,11 @@
 //   class_hash: the classifier's input hash (scheme, title, body, size); decides re-classifying.
 //     class_scheme names the scheme it was computed under, so a changed scheme rehashes lazily.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { BULK_ROWS, bulkWrites } from "./core/plan-changes.ts";
 import { itemInput, type Item } from "./classify/parse.ts";
 import { LABELS, RULES } from "./classify/rules.ts";
 import { itemText, textHash } from "./embed/text.ts";
+import type { Db } from "./db/index.ts";
 
 export const SCHEME = createHash("sha256").update(JSON.stringify(LABELS)).update(RULES).digest("hex");
 export const SCHEME_ID = SCHEME.slice(0, 16);
@@ -41,33 +41,28 @@ const FIELDS = "repo, number, kind, title, body, additions, deletions, changed_f
 const BATCH = 2000;
 
 /** Fills embed_hash where it is missing. Returns the number of rows written. */
-export function fillEmbedHashes(db: DatabaseSync): number {
-  return fill(db, "embed-hashes", `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
+export async function fillEmbedHashes(db: Db): Promise<number> {
+  return await fill(db, "embed-hashes", `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
     "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", (r) => [embedHash(r.title, r.body)]);
 }
 
 /** Fills class_hash where it is missing or was computed under another scheme. Only open items: the classifier reads no others. */
-export function fillClassHashes(db: DatabaseSync): number {
-  return fill(db, "class-hashes", `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
+export async function fillClassHashes(db: Db): Promise<number> {
+  return await fill(db, "class-hashes", `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
     `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, (r) => [classifyHash(r)]);
 }
 
-function fill(db: DatabaseSync, source: string, select: string, update: string, values: (r: Fields) => string[]): number {
+async function fill(db: Db, source: string, select: string, update: string, values: (r: Fields) => string[]): Promise<number> {
   const sel = db.prepare(select), upd = db.prepare(update);
   let total = 0;
   for (;;) {
-    const rows = sel.all() as unknown as Fields[];
+    const rows = await sel.all() as unknown as Fields[];
     if (!rows.length) return total;
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const write = (): void => { for (const r of rows) upd.run(...values(r), r.repo, r.number); };
+    await db.write(async () => {
+      const write = async (): Promise<void> => { for (const r of rows) await upd.run(...values(r), r.repo, r.number); };
       // A batch of a backfill takes one full-pass mark instead of a log row per item (src/core/plan-changes.ts).
-      if (rows.length >= BULK_ROWS) bulkWrites(db, source, write); else write();
-      db.exec("COMMIT");
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
+      if (rows.length >= BULK_ROWS) await bulkWrites(db, source, write); else await write();
+    });
     total += rows.length;
   }
 }

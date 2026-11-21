@@ -5,7 +5,6 @@ import { githubIdentity } from "../github/identity.ts";
 import { claimSettling, pendingAnswerRefusal, releaseSettling, RUNNING_STALE_MS, sweepSettling } from "../answers/hold.ts";
 import { initExecState, laneForOperator, type Lane, type LaneDeps } from "../github/user-lane.ts";
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { readLive, writeEffect } from "../act/index.ts";
 import { duplicateComment } from "../act/templates.ts";
 import { audit } from "../dash/audit.ts";
@@ -26,6 +25,7 @@ import { isQuiet } from "../security/quiet.ts";
 import { ConversationError, insertTurn, staleOf, systemBlock, type StoreDeps } from "./store.ts";
 import { COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, NOTE_MAX, type CloseReason } from "./types.ts";
 import { ownerOf, slugOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
 
 export type CardRow = {
   seen: string | null;
@@ -40,11 +40,11 @@ export type CardRow = {
 /** `canWrite` is the signed-in operator's write access to a repo; the shell has none to check. */
 export type ActDeps = StoreDeps & { querier?: Querier; /** Runs `gh` for the open_issue step. */ exec?: Exec; canWrite?: (repo: string) => Promise<boolean>; /** Indexes into a resolution's steps the operator removed. */ skip?: number[]; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** The note with the choice. */ note?: string; /** The presser's role, named in the conversation block (default operator). */ role?: string; /** The presser is not an operator: the note is stored and shown but never put in the model's block. */ noteStaysOut?: boolean; /** Set by the Act step's drain: run the queued card as its presser pressed it. */ drain?: boolean };
 
-export const cardOf = (db: DatabaseSync, id: number): CardRow | undefined =>
-  db.prepare("SELECT * FROM conversation_cards WHERE id = ?").get(id) as CardRow | undefined;
+export const cardOf = async (db: Db, id: number): Promise<CardRow | undefined> =>
+  await db.prepare("SELECT * FROM conversation_cards WHERE id = ?").get(id) as CardRow | undefined;
 
-function need(db: DatabaseSync, id: number): CardRow {
-  const c = cardOf(db, id);
+async function need(db: Db, id: number): Promise<CardRow> {
+  const c = await cardOf(db, id);
   if (!c) throw new ConversationError(404, `no card ${id}`);
   return c;
 }
@@ -64,8 +64,8 @@ export const cardRepos = (c: CardRow, params: CardParams): string[] =>
 export const cardDigest = (c: Pick<CardRow, "text" | "params">): string => createHash("sha256").update(JSON.stringify([c.text, c.params])).digest("hex").slice(0, 16);
 
 /** Replaces the drafts of a card that has not run: the comment text, the open_issue step's title and body, the fixup step's instructions. A field left out stays. */
-export function editCard(db: DatabaseSync, id: number, by: string, edit: CardEdit, deps?: StoreDeps): CardRow {
-  const c = need(db, id);
+export async function editCard(db: Db, id: number, by: string, edit: CardEdit, deps?: StoreDeps): Promise<CardRow> {
+  const c = await need(db, id);
   if (edit.text === undefined && edit.issue === undefined && edit.instructions === undefined) throw new ConversationError(400, "nothing to edit");
   let text: string | null = c.text;
   if (edit.text !== undefined) {
@@ -98,55 +98,50 @@ export function editCard(db: DatabaseSync, id: number, by: string, edit: CardEdi
     params = JSON.stringify({ ...p, steps });
   }
   const at = (deps?.now?.() ?? new Date()).toISOString();
-  const r = db.prepare("UPDATE conversation_cards SET text = ?, params = ?, edited_by = ?, edited_at = ? WHERE id = ? AND state = 'proposed'").run(text, params, by, at, id);
+  const r = await db.prepare("UPDATE conversation_cards SET text = ?, params = ?, edited_by = ?, edited_at = ? WHERE id = ? AND state = 'proposed'").run(text, params, by, at, id);
   if (r.changes !== 1) throw new ConversationError(409, `the card is already ${c.state}`);
-  audit(db, by, "conversation-card-edit", ref(c.repo, c.number), { card: id });
-  return need(db, id);
+  await audit(db, by, "conversation-card-edit", ref(c.repo, c.number), { card: id });
+  return await need(db, id);
 }
 
 /** Dismisses a proposed card, or a queued press (which releases the lock of the decision it settles). The presser of a queued card stays on the card as `queued_by` in the audit. */
-export function dismissCard(db: DatabaseSync, id: number, by: string, deps?: StoreDeps & { role?: string }): CardRow {
-  const c = need(db, id);
+export async function dismissCard(db: Db, id: number, by: string, deps?: StoreDeps & { role?: string }): Promise<CardRow> {
+  const c = await need(db, id);
   const at = (deps?.now?.() ?? new Date()).toISOString();
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const r = db.prepare("UPDATE conversation_cards SET state = 'dismissed', acted_by = ?, acted_at = ? WHERE id = ? AND state IN ('proposed', 'queued')").run(by, at, id);
+  await db.write(async () => {
+    const r = await db.prepare("UPDATE conversation_cards SET state = 'dismissed', acted_by = ?, acted_at = ? WHERE id = ? AND state IN ('proposed', 'queued')").run(by, at, id);
     if (r.changes !== 1) throw new ConversationError(409, `the card is already ${c.state}`);
     const settles = c.state === "queued" ? settledDecisionOf(JSON.parse(c.params) as CardParams) : undefined;
-    if (settles) releaseSettling(db, settles, id);
-    db.exec("COMMIT");
-  } catch (e) {
-    if (db.isTransaction) db.exec("ROLLBACK");
-    throw e;
-  }
-  audit(db, by, "conversation-card-dismiss", ref(c.repo, c.number), { card: id, ...(c.state === "queued" && { queuedBy: c.acted_by ?? undefined }) });
-  insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${by} dismissed the card: ${c.description}.`, block: systemBlock(`The ${deps?.role ?? "operator"} ${by} dismissed the proposed action: ${c.description}.`) }, deps);
-  return need(db, id);
+    if (settles) await releaseSettling(db, settles, id);
+  });
+  await audit(db, by, "conversation-card-dismiss", ref(c.repo, c.number), { card: id, ...(c.state === "queued" && { queuedBy: c.acted_by ?? undefined }) });
+  await insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${by} dismissed the card: ${c.description}.`, block: systemBlock(`The ${deps?.role ?? "operator"} ${by} dismissed the proposed action: ${c.description}.`) }, deps);
+  return await need(db, id);
 }
 
 type Outcome = { result: string; url: string | null };
 
 /** Answers the decision the card was written for, like a dashboard answer: one transaction, the decision's claims cleared. */
-async function answerDecision(db: DatabaseSync, c: CardRow, decisionId: string | undefined, stamp: string | undefined, key: string, by: string, at: string, canWrite?: ActDeps["canWrite"], note?: string, publicReason?: string): Promise<Outcome> {
+async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined, stamp: string | undefined, key: string, by: string, at: string, canWrite?: ActDeps["canWrite"], note?: string, publicReason?: string): Promise<Outcome> {
   if (!decisionId) throw new Error("the card names no decision: the decision changed");
-  const d0 = getDecision(db, decisionId);
-  if (!d0 || d0.answer !== null || d0.repo !== c.repo || d0.number !== c.number || (stamp !== undefined && decisionStamp(db, d0) !== stamp)) throw new Error("the decision changed");
+  const d0 = await getDecision(db, decisionId);
+  if (!d0 || d0.answer !== null || d0.repo !== c.repo || d0.number !== c.number || (stamp !== undefined && await decisionStamp(db, d0) !== stamp)) throw new Error("the decision changed");
   if (canWrite) for (const r of reposOf(d0)) if (!(await canWrite(r).catch(() => false))) throw new Error(`no write access to ${slugOf(r)}`);
   db.exec("BEGIN IMMEDIATE");
   try {
-    const d = getDecision(db, decisionId);
-    if (!d || d.answer !== null || (stamp !== undefined && decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
+    const d = await getDecision(db, decisionId);
+    if (!d || d.answer !== null || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
     const o = optionsOf(d).find((x) => x.key === key);
     if (!o) throw new Error(`"${key}" is not an option of the decision`);
-    const r = db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL,
+    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL,
       public_text = COALESCE(?, public_text)
       WHERE id = ? AND answer IS NULL`).run(key, note ?? null, by, at, publicReason ?? null, d.id);
     if (r.changes !== 1) throw new Error("the decision changed");
-    db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
-    replaceProposedCards(db, d.repo, d.number, d.id);
-    audit(db, by, "answer", d.id, { answer: key, source: "conversation", card: c.id });
+    await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
+    await replaceProposedCards(db, d.repo, d.number, d.id);
+    await audit(db, by, "answer", d.id, { answer: key, source: "conversation", card: c.id });
     db.exec("COMMIT");
-    if (writeEffect(d.kind, key)) initExecState(db, d.id);
+    if (writeEffect(d.kind, key)) await initExecState(db, d.id);
     return { result: `Answered the decision with "${o.label}"`, url: null };
   } catch (e) {
     db.exec("ROLLBACK");
@@ -155,24 +150,19 @@ async function answerDecision(db: DatabaseSync, c: CardRow, decisionId: string |
 }
 
 /** Closes the card's decision as handled in the conversation: the answer is HANDLED with the summary as its note, already applied, so no step acts on it. Writes nothing to GitHub. */
-function resolveDecision(db: DatabaseSync, c: CardRow, decisionId: string | undefined, stamp: string | undefined, summary: string, by: string, at: string): Outcome {
+async function resolveDecision(db: Db, c: CardRow, decisionId: string | undefined, stamp: string | undefined, summary: string, by: string, at: string): Promise<Outcome> {
   if (!decisionId) throw new Error("the card names no decision: the decision changed");
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const d = getDecision(db, decisionId);
-    if (!d || d.answer !== null || d.repo !== c.repo || d.number !== c.number || (stamp !== undefined && decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
-    const r = db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, applied_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
+  return await db.write(async () => {
+    const d = await getDecision(db, decisionId);
+    if (!d || d.answer !== null || d.repo !== c.repo || d.number !== c.number || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
+    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, applied_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
       WHERE id = ? AND answer IS NULL`).run(HANDLED.key, summary, by, at, at, d.id);
     if (r.changes !== 1) throw new Error("the decision changed");
-    db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
-    replaceProposedCards(db, d.repo, d.number, d.id);
-    audit(db, by, "answer", d.id, { answer: HANDLED.key, source: "conversation", card: c.id });
-    db.exec("COMMIT");
+    await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
+    await replaceProposedCards(db, d.repo, d.number, d.id);
+    await audit(db, by, "answer", d.id, { answer: HANDLED.key, source: "conversation", card: c.id });
     return { result: "Decision closed as handled in the conversation", url: null };
-  } catch (e) {
-    db.exec("ROLLBACK");
-    throw e;
-  }
+  });
 }
 
 async function liveOpen(q: Querier, repo: string, n: number) {
@@ -191,22 +181,22 @@ class StepError extends Error {
 type Ctx = {
   exec: Exec;
   /** The transport for a write in `repo`: the operator's lane on a repo with the app's identity, the box's own on a legacy repo. */
-  execFor: (repo: string) => Exec;
+  execFor: (repo: string) => Promise<Exec>;
   /** Labels the same card removes: a type label among them does not block adding another. */
   unlabeling?: string[];
   /** The operator's note: kept on the decision it settles, never posted to GitHub. */
-  note?: string; db: DatabaseSync; c: CardRow; by: string; q: Querier; at: string; w: Writer; source: { source: string; card: number } };
+  note?: string; db: Db; c: CardRow; by: string; q: Querier; at: string; w: Writer; source: { source: string; card: number } };
 
 async function postComment({ db, c, by, q, w, source }: Ctx, text: string): Promise<Outcome> {
-  const g = actGrant(db, c.repo, by);
+  const g = await actGrant(db, c.repo, by);
   const live = await liveOpen(q, c.repo, c.number);
   const url = await commentOn(w, g, q, "act-comment", { repo: c.repo, number: c.number, id: live.id }, CARD_NOTE, text, source);
   return { result: "Comment posted", url: url || null };
 }
 
 async function addLabel({ db, c, by, q, at, w, source, unlabeling }: Ctx, label: string): Promise<Outcome> {
-  const g = actGrant(db, c.repo, by, "labels");
-  const other = otherTypeLabel(db, c.repo, c.number, label, unlabeling);
+  const g = await actGrant(db, c.repo, by, "labels");
+  const other = await otherTypeLabel(db, c.repo, c.number, label, unlabeling);
   if (other) throw new Error(`the item already has the type label "${other}" and an item has one type label`);
   const live = await liveOpen(q, c.repo, c.number);
   const have = await repoLabels(q, c.repo);
@@ -214,56 +204,56 @@ async function addLabel({ db, c, by, q, at, w, source, unlabeling }: Ctx, label:
   if (!id) throw new Error(`the label "${label}" does not exist on ${c.repo}`);
   const done = await addLabels(w, q, c.repo, [{ number: c.number, id: live.id, labelIds: [id], names: [label], g }], undefined, source);
   if (!done.includes(c.number)) throw new Error("GitHub did not add the label");
-  db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, ?, ?)").run(c.repo, c.number, at, by, `added: ${label}`);
+  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, ?, ?)").run(c.repo, c.number, at, by, `added: ${label}`);
   return { result: `Label "${label}" added`, url: null };
 }
 
 /** Closes the item (after the optional comment) and returns how it was closed, for notes. Settling the decisions is the caller's. */
 async function closeThe({ db, c, by, q, at, w, source }: Ctx, p: { reason: CloseReason }, text: string | null): Promise<{ how: string; url: string }> {
-  const g = actGrant(db, c.repo, by);
-  const refusal = closeRefusal(db, c.repo, c.number);
+  const g = await actGrant(db, c.repo, by);
+  const refusal = await closeRefusal(db, c.repo, c.number);
   if (refusal) throw new Error(refusal);
   const live = await liveOpen(q, c.repo, c.number);
   const item = { repo: c.repo, number: c.number, id: live.id };
   const url = text ? await commentOn(w, g, q, "act-comment", item, CARD_NOTE, text, source) : "";
   await closeItem(w, g, q, { ...item, pr: live.type === "PullRequest" }, { ...source, head: live.head }, p.reason === "completed" ? "COMPLETED" : "NOT_PLANNED");
   const how = live.type === "PullRequest" ? "" : p.reason === "completed" ? " as completed" : " as not planned";
-  db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed${how} from a conversation`);
+  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed${how} from a conversation`);
   return { how, url };
 }
 
 /** The item is closed or moved: its open decisions (but `except`) are settled now, not at the next sync's withdrawal. `what` is the phrase after "Closed" or the whole summary when it starts with "Moved". */
-function settleOthers(db: DatabaseSync, c: CardRow, how: string, by: string, at: string, except?: string): void {
-  const open = db.prepare("SELECT id FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'").all(c.repo, c.number) as { id: string }[];
+async function settleOthers(db: Db, c: CardRow, how: string, by: string, at: string, except?: string): Promise<void> {
+  const open = await db.prepare("SELECT id FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'").all(c.repo, c.number) as { id: string }[];
   for (const d of open) {
     if (d.id === except) continue;
-    try { resolveDecision(db, c, d.id, undefined, how.startsWith("Moved") ? `${how} in the conversation` : `Closed${how} in the conversation`, by, at); } catch { /* answered meanwhile; the next sync withdraws what is left */ }
+    try { await resolveDecision(db, c, d.id, undefined, how.startsWith("Moved") ? `${how} in the conversation` : `Closed${how} in the conversation`, by, at); } catch { /* answered meanwhile; the next sync withdraws what is left */ }
   }
 }
 
 /** Closes the item as a duplicate: Act's comment and close, recorded in `actions`. */
 async function closeDuplicate({ db, c, by, q, at, w, source }: Ctx, of: number): Promise<{ url: string }> {
-  const g = actGrant(db, c.repo, by);
-  const refusal = closeRefusal(db, c.repo, c.number);
+  const g = await actGrant(db, c.repo, by);
+  const refusal = await closeRefusal(db, c.repo, c.number);
   if (refusal) throw new Error(refusal);
   const live = await liveOpen(q, c.repo, c.number);
   const orig = await readLive(q, c.repo, of);
   if (!orig) throw new Error(`GitHub returned no ${ref(c.repo, of)}`);
   const url = await commentOn(w, g, q, "act-comment", { repo: c.repo, number: c.number, id: live.id }, CARD_NOTE, duplicateComment({ repo: c.repo, original: ref(c.repo, of), closed: orig.state !== "OPEN" }), source);
   // Recorded like Act's close: saved after the comment so the failed close shows what was posted.
-  const action = (state: string, reason: string | null) => db.prepare(`INSERT INTO main.actions (decision_id, repo, number, kind, state, comment_url, reason, created_at) VALUES (?, ?, ?, 'comment-close', ?, ?, ?, ?)
+  const action = async (state: string, reason: string | null) => await db.prepare(`INSERT INTO main.actions (decision_id, repo, number, kind, state, comment_url, reason, created_at) VALUES (?, ?, ?, 'comment-close', ?, ?, ?, ?)
     ON CONFLICT (decision_id, repo, number, kind) DO UPDATE SET state = excluded.state, reason = excluded.reason, created_at = excluded.created_at`).run(`conversation-card:${c.id}`, c.repo, c.number, state, url || null, reason, at);
-  action("failed", "comment posted; close not done yet");
+  await action("failed", "comment posted; close not done yet");
   await closeItem(w, g, q, { repo: c.repo, number: c.number, id: live.id, pr: live.type === "PullRequest" }, { ...source, head: live.head });
-  action("done", null);
-  db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed as a duplicate of ${ref(c.repo, of)} from a conversation`);
+  await action("done", null);
+  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed as a duplicate of ${ref(c.repo, of)} from a conversation`);
   return { url };
 }
 
 /** The Act approval of `repo` for the operator's write. Room under the daily limit was taken for the whole card before its first write (doCard), so a card never stops halfway for it. */
-function actGrant(db: DatabaseSync, repo: string, by: string, need: "comment" | "labels" = "comment") {
+async function actGrant(db: Db, repo: string, by: string, need: "comment" | "labels" = "comment") {
   // The grant names the presser; only a close is made as them (src/github/identity.ts).
-  const g = guardRepo(db, repo, need, { operator: by }, undefined, by);
+  const g = await guardRepo(db, repo, need, { operator: by }, undefined, by);
   if ("refused" in g) throw new Error(g.refused);
   return g;
 }
@@ -310,24 +300,24 @@ export async function liveWrite(q: Querier, repo: string, login: string): Promis
 
 async function unlabel(ctx: Ctx, label: string): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
-  const g = actGrant(db, c.repo, by, "labels");
+  const g = await actGrant(db, c.repo, by, "labels");
   const live = await liveOpen(q, c.repo, c.number);
   const id = (await repoLabels(q, c.repo)).labels.get(label.toLowerCase());
   if (!id) throw new Error(`the label "${label}" does not exist on ${c.repo}`);
   await removeLabel(w, g, q, { repo: c.repo, number: c.number, id: live.id }, { id, name: label }, source);
   // The mirror catches up at the next sync; later steps of this card read it now.
-  const row = db.prepare("SELECT labels FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { labels: string | null } | undefined;
+  const row = await db.prepare("SELECT labels FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { labels: string | null } | undefined;
   try {
     const have = JSON.parse(row?.labels ?? "[]") as unknown[];
-    db.prepare("UPDATE main.items SET labels = ? WHERE repo = ? AND number = ?").run(JSON.stringify(have.filter((x) => String(x).toLowerCase() !== label.toLowerCase())), c.repo, c.number);
+    await db.prepare("UPDATE main.items SET labels = ? WHERE repo = ? AND number = ?").run(JSON.stringify(have.filter((x) => String(x).toLowerCase() !== label.toLowerCase())), c.repo, c.number);
   } catch { /* unreadable labels stay for the sync to rewrite */ }
   return { result: `Label "${label}" removed`, url: null };
 }
 
 async function reopen(ctx: Ctx): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
-  const g = actGrant(db, c.repo, by);
-  const refusal = closeRefusal(db, c.repo, c.number);
+  const g = await actGrant(db, c.repo, by);
+  const refusal = await closeRefusal(db, c.repo, c.number);
   if (refusal) throw new Error(refusal);
   const live = await readLive(q, c.repo, c.number);
   if (!live) throw new Error("GitHub returned no such item");
@@ -339,8 +329,8 @@ async function reopen(ctx: Ctx): Promise<Outcome> {
 
 async function openIssue(ctx: Ctx, st: Extract<Step, { kind: "open_issue" }>): Promise<Outcome> {
   const { db, c, by, w, source } = ctx;
-  const exec = ctx.execFor(st.repo);
-  const g = actGrant(db, st.repo, by);
+  const exec = await ctx.execFor(st.repo);
+  const g = await actGrant(db, st.repo, by);
   try {
     const made = await createIssue(w, g, exec, { repo: st.repo, target: ref(c.repo, c.number), title: st.title, body: st.body, action: "act-open-issue" }, CARD_NOTE, source);
     return { result: `Opened ${ref(st.repo, made.number)}`, url: made.url };
@@ -352,9 +342,9 @@ async function openIssue(ctx: Ctx, st: Extract<Step, { kind: "open_issue" }>): P
 
 async function transfer(ctx: Ctx, st: Extract<Step, { kind: "transfer" }>): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
-  const g = actGrant(db, c.repo, by);
-  const gTo = actGrant(db, st.to, by);
-  const refusal = closeRefusal(db, c.repo, c.number);
+  const g = await actGrant(db, c.repo, by);
+  const gTo = await actGrant(db, st.to, by);
+  const refusal = await closeRefusal(db, c.repo, c.number);
   if (refusal) throw new Error(refusal);
   const live = await liveOpen(q, c.repo, c.number);
   if (live.type !== "Issue") throw new Error("only an issue can be moved to another repository");
@@ -367,9 +357,9 @@ async function transfer(ctx: Ctx, st: Extract<Step, { kind: "transfer" }>): Prom
 
 async function assign(ctx: Ctx, login: string): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
-  const g = actGrant(db, c.repo, by);
+  const g = await actGrant(db, c.repo, by);
   const live = await liveOpen(q, c.repo, c.number);
-  const author = (db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
+  const author = (await db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
   if (author?.toLowerCase() !== login.toLowerCase()) await needLiveWrite(q, c.repo, login);
   await assignTo(w, g, q, { repo: c.repo, number: c.number, id: live.id }, await userOf(q, login), source);
   return { result: `Assigned ${login}`, url: null };
@@ -377,10 +367,10 @@ async function assign(ctx: Ctx, login: string): Promise<Outcome> {
 
 async function askReviewers(ctx: Ctx, logins: string[]): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
-  const g = actGrant(db, c.repo, by);
+  const g = await actGrant(db, c.repo, by);
   const live = await liveOpen(q, c.repo, c.number);
   if (live.type !== "PullRequest") throw new Error("reviewers can be requested on a PR only");
-  const author = (db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
+  const author = (await db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
   const users: { id: string; login: string }[] = [];
   for (const l of logins) {
     if (author?.toLowerCase() === l.toLowerCase()) throw new Error(`${l} is the PR's author`);
@@ -392,9 +382,9 @@ async function askReviewers(ctx: Ctx, logins: string[]): Promise<Outcome> {
 }
 
 /** Fails before any step runs when the decision a resolution settles has changed. */
-async function checkSettle(db: DatabaseSync, c: CardRow, s: Settle, canWrite?: ActDeps["canWrite"]): Promise<void> {
-  const d = getDecision(db, s.decision);
-  if (!d || d.answer !== null || d.repo !== c.repo || d.number !== c.number || decisionStamp(db, d) !== s.stamp) throw new Error("the decision changed");
+async function checkSettle(db: Db, c: CardRow, s: Settle, canWrite?: ActDeps["canWrite"]): Promise<void> {
+  const d = await getDecision(db, s.decision);
+  if (!d || d.answer !== null || d.repo !== c.repo || d.number !== c.number || await decisionStamp(db, d) !== s.stamp) throw new Error("the decision changed");
   if (s.kind === "answer" && !optionsOf(d).some((x) => x.key === s.option)) throw new Error(`"${s.option}" is not an option of the decision`);
   if (s.kind !== "handled" && canWrite) for (const r of reposOf(d)) if (!(await canWrite(r).catch(() => false))) throw new Error(`no write access to ${slugOf(r)}`);
 }
@@ -403,7 +393,7 @@ async function checkSettle(db: DatabaseSync, c: CardRow, s: Settle, canWrite?: A
 async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, canWrite?: ActDeps["canWrite"]): Promise<Outcome> {
   const { db, c, by, at } = ctx;
   if (p.settle) await checkSettle(db, c, p.settle, canWrite);
-  else if (!(p.steps.length === 1 && p.steps[0]!.kind === "comment") && openDecision(db, c.repo, c.number)) throw new Error("the decision changed");
+  else if (!(p.steps.length === 1 && p.steps[0]!.kind === "comment") && await openDecision(db, c.repo, c.number)) throw new Error("the decision changed");
   ctx.unlabeling = p.steps.flatMap((x) => (x.kind === "unlabel" ? [x.label] : []));
   const done: string[] = [];
   const results: string[] = [];
@@ -418,7 +408,7 @@ async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, c
   const answerNow = async (s: NonNullable<typeof early>): Promise<void> => {
     results.push((await answerDecision(db, c, s.decision, s.stamp, s.option, by, at, canWrite, ctx.note, s.reason)).result);
     answered = true;
-    done.push(settleLine(db, s));
+    done.push(await settleLine(db, s));
   };
   try {
     for (const st of p.steps) {
@@ -449,7 +439,7 @@ async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, c
         case "open_issue": {
           // Filed by the Act step once the PR merged (src/conversations/held.ts); stored after the card's other steps and its answer.
           if (holding) {
-            actGrant(db, st.repo, by);
+            await actGrant(db, st.repo, by);
             hold.push(st);
             results.push(`After the merge: opens an issue in ${st.repo}`);
             continue;
@@ -481,37 +471,37 @@ async function runResolution(ctx: Ctx, p: CardParams & { kind: "resolution" }, c
     if (s && !answered) {
       results.push((s.kind === "answer" ? await answerDecision(db, c, s.decision, s.stamp, s.option, by, at, canWrite, ctx.note, s.reason)
         : s.kind === "backlog" ? await answerDecision(db, c, s.decision, s.stamp, BACKLOG.key, by, at, canWrite, ctx.note)
-        : resolveDecision(db, c, s.decision, s.stamp, ctx.note ? `${s.summary}: ${ctx.note}` : s.summary, by, at)).result);
+        : await resolveDecision(db, c, s.decision, s.stamp, ctx.note ? `${s.summary}: ${ctx.note}` : s.summary, by, at)).result);
     }
     if (hold.length) {
       // Bound to the merge path this press made: the pre-approved merge it started, or its Merge answer as the decision's answer history now stands.
       const decision = preapproval === null && p.settle?.kind === "answer" ? p.settle.decision : null;
-      const answerSeq = decision === null ? null : answerSeqOf(db, decision);
-      for (const st of hold) holdFollowup(db, { card_id: c.id, choice_id: c.choice_id ?? null, decision_id: decision, answer_seq: answerSeq, preapproval_id: preapproval, repo: c.repo, number: c.number, issue_repo: st.repo, title: st.title, body: st.body, by, at });
+      const answerSeq = decision === null ? null : await answerSeqOf(db, decision);
+      for (const st of hold) await holdFollowup(db, { card_id: c.id, choice_id: c.choice_id ?? null, decision_id: decision, answer_seq: answerSeq, preapproval_id: preapproval, repo: c.repo, number: c.number, issue_repo: st.repo, title: st.title, body: st.body, by, at });
     }
   } catch (e) {
     const msg = String((e as Error).message ?? e);
     throw new StepError(done.length ? `Already done: ${done.join("; ")}. ${msg}${answered ? ". The question is answered" : ". The question stays open"}` : msg, done.includes(stepLine({ kind: "comment" })));
   }
-  if (closedHow !== null) settleOthers(db, c, closedHow, by, at, p.settle?.decision);
+  if (closedHow !== null) await settleOthers(db, c, closedHow, by, at, p.settle?.decision);
   return { result: results.join("; "), url };
 }
 
-async function run(db: DatabaseSync, c: CardRow, p: CardParams, by: string, boxQ: Querier, at: string, canWrite?: ActDeps["canWrite"], note?: string, boxExec: Exec = defaultExec, lane: Lane | null = null): Promise<Outcome> {
+async function run(db: Db, c: CardRow, p: CardParams, by: string, boxQ: Querier, at: string, canWrite?: ActDeps["canWrite"], note?: string, boxExec: Exec = defaultExec, lane: Lane | null = null): Promise<Outcome> {
   // Under the app's identity only a close uses the presser's lane (write.ts); every other write is the app's.
-  const laneFor = (repo: string): Lane | null => (lane && githubIdentity(db) === "app" ? lane : null);
-  const q = laneFor(c.repo)?.querier ?? boxQ;
-  const ctx: Ctx = { exec: laneFor(c.repo)?.exec ?? boxExec, execFor: (repo) => laneFor(repo)?.exec ?? boxExec, note, db, c, by, q, at, w: { db, login: by }, source: { source: "conversation", card: c.id } };
+  const laneFor = async (repo: string): Promise<Lane | null> => (lane && await githubIdentity(db) === "app" ? lane : null);
+  const q = (await laneFor(c.repo))?.querier ?? boxQ;
+  const ctx: Ctx = { exec: (await laneFor(c.repo))?.exec ?? boxExec, execFor: async (repo) => (await laneFor(repo))?.exec ?? boxExec, note, db, c, by, q, at, w: { db, login: by }, source: { source: "conversation", card: c.id } };
   switch (p.kind) {
     case "resolution": return runResolution(ctx, p, canWrite);
     case "answer": return answerDecision(db, c, p.decision, p.stamp, p.option, by, at, canWrite, note);
-    case "resolve": return resolveDecision(db, c, p.decision, p.stamp, note ? `${p.summary}: ${note}` : p.summary, by, at);
+    case "resolve": return await resolveDecision(db, c, p.decision, p.stamp, note ? `${p.summary}: ${note}` : p.summary, by, at);
     case "backlog": return answerDecision(db, c, p.decision, p.stamp, BACKLOG.key, by, at, canWrite, note);
     case "comment": return postComment(ctx, c.text ?? p.text);
     case "label": return addLabel(ctx, p.label);
     case "close": {
       const r = await closeThe(ctx, p, c.text);
-      settleOthers(db, c, r.how, by, at);
+      await settleOthers(db, c, r.how, by, at);
       return { result: `Closed${r.how}`, url: r.url || null };
     }
     case "duplicate": {
@@ -525,20 +515,20 @@ async function run(db: DatabaseSync, c: CardRow, p: CardParams, by: string, boxQ
  * Runs the card once. A card that is not `proposed` is returned unchanged, so a second press (or a double click) does nothing.
  * A failure is stored on the card; the card does not run again.
  */
-export async function doCard(db: DatabaseSync, id: number, by: string, deps: ActDeps = {}): Promise<{ card: CardRow; ran: boolean }> {
-  const c = need(db, id);
+export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {}): Promise<{ card: CardRow; ran: boolean }> {
+  const c = await need(db, id);
   if (c.state === "replaced") throw new ConversationError(409, "replaced by a later reply");
   const draining = deps.drain === true && c.state === "queued";
   if (c.state === "queued" && !draining) return { card: c, ran: false };
   let params = JSON.parse(c.params) as CardParams;
-  if ((c.state === "proposed" || draining) && staleOf(db, c.repo, c.number, c.seen) === "pr-changed" && dependsOnCode(params, c.text)) throw new ConversationError(409, "the PR changed since this was proposed");
+  if ((c.state === "proposed" || draining) && await staleOf(db, c.repo, c.number, c.seen) === "pr-changed" && dependsOnCode(params, c.text)) throw new ConversationError(409, "the PR changed since this was proposed");
   const note = deps.note?.trim() || undefined;
   if (note && note.length > NOTE_MAX) throw new ConversationError(400, `the note is longer than ${NOTE_MAX} characters`);
   const skipped: string[] = [];
   let noteIsSummary = false;
   // A card drafted before the PR became quiet (a security fix not yet published) must not post model-written text any more.
   if ((params.kind === "comment") || (params.kind === "close" && c.text) || (params.kind === "resolution" && params.steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)))) {
-    if (isQuiet(db, c.repo, c.number)) throw new ConversationError(409, "this card posts text, and the pull request is quiet until its fix is published");
+    if (await isQuiet(db, c.repo, c.number)) throw new ConversationError(409, "this card posts text, and the pull request is quiet until its fix is published");
   }
   if (deps.skip?.length) {
     if (params.kind !== "resolution") throw new ConversationError(400, "only a resolution has steps to skip");
@@ -563,10 +553,10 @@ export async function doCard(db: DatabaseSync, id: number, by: string, deps: Act
   const nowMs = (deps.now?.() ?? new Date()).getTime();
   // A press from the queue is carried out as its presser if they still may: their role and write access are read again now.
   if (draining) {
-    if (writes && !settlesNow(db, by, repos)) throw new ConversationError(409, `${by} no longer has write access`);
+    if (writes && !await settlesNow(db, by, repos)) throw new ConversationError(409, `${by} no longer has write access`);
     if (writes) {
       const q = deps.querier ?? new Client(1000);
-      for (const r of githubIdentity(db) === "app" ? [] : repos) {
+      for (const r of await githubIdentity(db) === "app" ? [] : repos) {
         const live = await liveWrite(q, r, by);
         if (live === "no") throw new ConversationError(409, `${by} no longer has write access to ${slugOf(r)}`);
         if (live === "transient") throw new ConversationError(503, "GitHub could not be reached to check the presser's access");
@@ -582,8 +572,8 @@ export async function doCard(db: DatabaseSync, id: number, by: string, deps: Act
   const settles = settledDecisionOf(params);
   const needW = cardWriteCount(params, c.text);
   // Refusals a press that has to wait would only meet at the drain are given now.
-  if (!draining && needW > 0 && (!actRoom(db, needW, nowMs) || queuedAhead(db, id))) {
-    const g = guardRepo(db, c.repo, grantNeed(params), { operator: by }, undefined, by);
+  if (!draining && needW > 0 && (!await actRoom(db, needW, nowMs) || await queuedAhead(db, id))) {
+    const g = await guardRepo(db, c.repo, grantNeed(params), { operator: by }, undefined, by);
     if ("refused" in g) throw new ConversationError(409, g.refused);
     if (params.kind === "resolution" && params.settle) await checkSettle(db, c, params.settle, deps.canWrite).catch((e) => { throw new ConversationError(409, String((e as Error).message ?? e)); });
   }
@@ -592,34 +582,34 @@ export async function doCard(db: DatabaseSync, id: number, by: string, deps: Act
   try {
     const from = draining ? "queued" : "proposed";
     // Room is taken in this transaction, for all the card's writes at once. A press queues behind the presses already waiting.
-    const wait = needW > 0 && (!actRoom(db, needW, nowMs) || (!draining && queuedAhead(db, id)));
+    const wait = needW > 0 && (!await actRoom(db, needW, nowMs) || (!draining && await queuedAhead(db, id)));
     if (wait && draining) { db.exec("ROLLBACK"); return { card: c, ran: false }; }
     if (wait) {
-      const block = actBlockedReason(db, c.repo);
+      const block = await actBlockedReason(db, c.repo);
       if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);
     }
     const claim = wait
-      ? db.prepare("UPDATE conversation_cards SET state = 'queued', acted_by = ?, acted_at = ?, queued_at = ?, queue_args = ?, error = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'proposed'")
+      ? await db.prepare("UPDATE conversation_cards SET state = 'queued', acted_by = ?, acted_at = ?, queued_at = ?, queue_args = ?, error = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'proposed'")
         .run(by, at, at, JSON.stringify({ ...(deps.skip?.length && { skip: deps.skip }), ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) } satisfies QueueArgs), id)
-      : db.prepare("UPDATE conversation_cards SET state = 'running', acted_by = ?, acted_at = ? WHERE id = ? AND state = ? AND dispute_by IS NULL").run(by, at, id, from);
-    if (claim.changes !== 1) { db.exec("ROLLBACK"); return { card: need(db, id), ran: false }; }
+      : await db.prepare("UPDATE conversation_cards SET state = 'running', acted_by = ?, acted_at = ? WHERE id = ? AND state = ? AND dispute_by IS NULL").run(by, at, id, from);
+    if (claim.changes !== 1) { db.exec("ROLLBACK"); return { card: await need(db, id), ran: false }; }
     // Checked inside the transaction that starts the run, so an answer written a moment ago is seen.
-    const refusal = writing ? pendingAnswerRefusal(db, c.repo, c.number, by) : null;
+    const refusal = writing ? await pendingAnswerRefusal(db, c.repo, c.number, by) : null;
     if (refusal) throw new Error(refusal);
-    if (settles) claimSettling(db, settles, id, by);
+    if (settles) await claimSettling(db, settles, id, by);
     db.exec("COMMIT");
     queued = wait;
   } catch (e) {
-    if (db.isTransaction) db.exec("ROLLBACK");
+    if (db.inTransaction()) db.exec("ROLLBACK");
     throw new ConversationError(409, String((e as Error).message ?? e));
   }
   if (queued) {
-    audit(db, by, "conversation-card-queue", ref(c.repo, c.number), { card: id, kind: c.kind });
-    insertTurn(db, c.repo, c.number, {
+    await audit(db, by, "conversation-card-queue", ref(c.repo, c.number), { card: id, kind: c.kind });
+    await insertTurn(db, c.repo, c.number, {
       kind: "system", login: "system", body: `${by} pressed the card: ${c.description}. Queued: daily GitHub write limit.` + (note ? ` Note: ${note}` : ""),
       block: systemBlock(`The ${deps.role ?? "operator"} ${by} chose the proposed action: ${c.description}. It is queued behind the daily limit of GitHub writes and runs in order when room returns.`),
     }, deps);
-    return { card: need(db, id), ran: false };
+    return { card: await need(db, id), ran: false };
   }
   let out: Outcome | null = null, error: string | null = null, posted = false;
   try {
@@ -628,43 +618,43 @@ export async function doCard(db: DatabaseSync, id: number, by: string, deps: Act
     error = oneLine(String((e as Error).message ?? e));
     posted = e instanceof StepError && e.posted;
   }
-  if (settles) releaseSettling(db, settles, id);
+  if (settles) await releaseSettling(db, settles, id);
   if (out && skipped.length) out = { ...out, result: `${out.result} (skipped: ${skipped.join("; ")})` };
   const end = (deps.now?.() ?? new Date()).toISOString();
-  db.prepare("UPDATE conversation_cards SET state = ?, result = ?, result_url = ?, error = ?, acted_at = ? WHERE id = ?")
+  await db.prepare("UPDATE conversation_cards SET state = ?, result = ?, result_url = ?, error = ?, acted_at = ? WHERE id = ?")
     .run(out ? "done" : "failed", out?.result ?? null, out?.url ?? null, error, end, id);
-  audit(db, by, "conversation-card", ref(c.repo, c.number), { card: id, kind: c.kind, state: out ? "done" : "failed", error: error ?? undefined, ...(skipped.length && { skipped }), ...(note && { note: true }) });
+  await audit(db, by, "conversation-card", ref(c.repo, c.number), { card: id, kind: c.kind, state: out ? "done" : "failed", error: error ?? undefined, ...(skipped.length && { skipped }), ...(note && { note: true }) });
   const who = deps.role ?? "operator";
   const sentence = out ? `The ${who} ${by} ran the proposed action: ${c.description}. Result: ${out.result}.` : `The ${who} ${by} tried the proposed action: ${c.description}${skipped.length ? ` (without: ${skipped.join("; ")})` : ""}. It failed: ${error}.`;
   // Only text that was posted, and only text no non-operator wrote, goes into the model's block.
-  const editedByOperator = !c.edited_by || !!db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(c.edited_by);
+  const editedByOperator = !c.edited_by || !!await db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(c.edited_by);
   const posted_text = !(out || posted) || !editedByOperator ? undefined : params.kind === "comment" ? c.text ?? params.text : (params.kind === "close" || (params.kind === "resolution" && params.steps.some((x) => x.kind === "comment") && (out || posted))) && c.text ? c.text : undefined;
   const modelNote = deps.noteStaysOut ? undefined : note;
   const data = posted_text !== undefined || modelNote ? { ...(posted_text !== undefined && { posted_text }), ...(modelNote && { operator_note: modelNote }) } : undefined;
-  insertTurn(db, c.repo, c.number, {
+  await insertTurn(db, c.repo, c.number, {
     kind: "system", login: "system", body: (out ? `${by} ran the card: ${c.description}. ${out.result}.` : `${by} tried the card: ${c.description}. It failed: ${error}.`) + (note ? ` Note: ${note}` : ""),
     block: systemBlock(sentence, data),
   }, deps);
-  return { card: need(db, id), ran: true };
+  return { card: await need(db, id), ran: true };
 }
 
 /** Ends a queued card that cannot run, with the reason, and frees the decision it held. */
-function failQueued(db: DatabaseSync, c: CardRow, error: string, deps: StoreDeps): void {
+async function failQueued(db: Db, c: CardRow, error: string, deps: StoreDeps): Promise<void> {
   const at = (deps.now?.() ?? new Date()).toISOString();
   let settles: string | undefined;
   try { settles = settledDecisionOf(JSON.parse(c.params) as CardParams); } catch { /* a card with unreadable parameters settles nothing */ }
   db.exec("BEGIN IMMEDIATE");
   try {
-    const r = db.prepare("UPDATE conversation_cards SET state = 'failed', error = ?, acted_at = ? WHERE id = ? AND state = 'queued'").run(error, at, c.id);
-    if (r.changes === 1 && settles) releaseSettling(db, settles, c.id);
+    const r = await db.prepare("UPDATE conversation_cards SET state = 'failed', error = ?, acted_at = ? WHERE id = ? AND state = 'queued'").run(error, at, c.id);
+    if (r.changes === 1 && settles) await releaseSettling(db, settles, c.id);
     db.exec("COMMIT");
     if (r.changes !== 1) return;
   } catch (e) {
-    if (db.isTransaction) db.exec("ROLLBACK");
+    if (db.inTransaction()) db.exec("ROLLBACK");
     throw e;
   }
-  audit(db, c.acted_by ?? "system", "conversation-card", ref(c.repo, c.number), { card: c.id, kind: c.kind, state: "failed", error, queued: true });
-  insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${c.acted_by}'s queued card could not run: ${c.description}. ${error}.`, block: systemBlock(`The queued action chosen by ${c.acted_by} could not run: ${c.description}. ${error}.`) }, deps);
+  await audit(db, c.acted_by ?? "system", "conversation-card", ref(c.repo, c.number), { card: c.id, kind: c.kind, state: "failed", error, queued: true });
+  await insertTurn(db, c.repo, c.number, { kind: "system", login: "system", body: `${c.acted_by}'s queued card could not run: ${c.description}. ${error}.`, block: systemBlock(`The queued action chosen by ${c.acted_by} could not run: ${c.description}. ${error}.`) }, deps);
 }
 
 /**
@@ -674,11 +664,11 @@ function failQueued(db: DatabaseSync, c: CardRow, error: string, deps: StoreDeps
  * reason and frees its decision; a transient GitHub error leaves it queued. `writes` is how many GitHub writes the caller still allows
  * (the Act job's limit). Returns the cards run and the writes they were counted for.
  */
-export async function drainQueuedCards(db: DatabaseSync, deps: ActDeps = {}, o: { writes?: number } = {}): Promise<{ ran: number; writes: number }> {
+export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?: number } = {}): Promise<{ ran: number; writes: number }> {
   let ran = 0, used = 0;
-  for (const q of queuedCards(db, { all: true })) {
+  for (const q of await queuedCards(db, { all: true })) {
     if (q.dispute_by) continue;
-    const c = cardOf(db, q.id);
+    const c = await cardOf(db, q.id);
     // Read again now: a dispute that landed since the list was taken stops the press.
     if (!c || c.state !== "queued" || !c.acted_by || c.dispute_by) continue;
     const nowMs = (deps.now?.() ?? new Date()).getTime();
@@ -688,22 +678,22 @@ export async function drainQueuedCards(db: DatabaseSync, deps: ActDeps = {}, o: 
       params = JSON.parse(c.params) as CardParams;
       need = needOf(c);
     } catch (e) {
-      failQueued(db, c, oneLine(`the queued press cannot be read: ${(e as Error).message}`), deps);
+      await failQueued(db, c, oneLine(`the queued press cannot be read: ${(e as Error).message}`), deps);
       continue;
     }
-    const block = actBlockedReason(db, c.repo);
-    if (block) { failQueued(db, c, `Act cannot run for ${c.repo} now: ${block}`, deps); continue; }
-    if (!actRoom(db, need, nowMs) || (o.writes !== undefined && used + need > o.writes)) break;
-    const item = db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { state: string } | undefined;
-    if (item && item.state !== "OPEN") { failQueued(db, c, `the item is already ${item.state.toLowerCase()}`, deps); continue; }
+    const block = await actBlockedReason(db, c.repo);
+    if (block) { await failQueued(db, c, `Act cannot run for ${c.repo} now: ${block}`, deps); continue; }
+    if (!await actRoom(db, need, nowMs) || (o.writes !== undefined && used + need > o.writes)) break;
+    const item = await db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { state: string } | undefined;
+    if (item && item.state !== "OPEN") { await failQueued(db, c, `the item is already ${item.state.toLowerCase()}`, deps); continue; }
     try {
       const r = await doCard(db, c.id, c.acted_by, { ...deps, drain: true, skip: args.skip, note: args.note, noteStaysOut: args.noteStaysOut, role: args.role, canWrite: undefined });
       if (r.ran) { ran++; used += need; }
       // Room was taken by someone else between the check and the claim: a smaller card behind this one does not jump it.
-      else if (cardOf(db, c.id)?.state === "queued" && !cardOf(db, c.id)?.dispute_by) break;
+      else if ((await cardOf(db, c.id))?.state === "queued" && !(await cardOf(db, c.id))?.dispute_by) break;
     } catch (e) {
       if (e instanceof ConversationError && e.status === 503) continue;
-      failQueued(db, c, oneLine(String((e as Error).message ?? e)), deps);
+      await failQueued(db, c, oneLine(String((e as Error).message ?? e)), deps);
     }
   }
   return { ran, writes: used };
@@ -724,9 +714,9 @@ const writesItem = (p: CardParams): boolean =>
 
 /** A card left 'running' by a crashed process is marked failed: what it did on GitHub is unknown. */
 export { RUNNING_STALE_MS };
-export function sweepRunningCards(db: DatabaseSync, deps?: StoreDeps): number {
+export async function sweepRunningCards(db: Db, deps?: StoreDeps): Promise<number> {
   const cutoff = new Date((deps?.now?.() ?? new Date()).getTime() - RUNNING_STALE_MS).toISOString();
-  const n = db.prepare("UPDATE conversation_cards SET state = 'failed', error = 'outcome unknown; see the GitHub activity page' WHERE state = 'running' AND acted_at < ?").run(cutoff).changes as number;
-  sweepSettling(db);
+  const n = (await db.prepare("UPDATE conversation_cards SET state = 'failed', error = 'outcome unknown; see the GitHub activity page' WHERE state = 'running' AND acted_at < ?").run(cutoff)).changes as number;
+  await sweepSettling(db);
   return n;
 }

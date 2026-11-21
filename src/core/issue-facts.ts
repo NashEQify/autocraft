@@ -6,7 +6,6 @@ import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
 import { activeTrips } from "../push-outcomes.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { notOwnIntegrationSql, groupHeldSql, backlogHeldSql } from "../dupes/held.ts";
 import { FAST_FLOOR, fastScoreSql } from "../fasttrack.ts";
 import { latestRun, needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
@@ -30,6 +29,8 @@ import { DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP, isPreparing, prepareSta
 import { nextUtcMidnight } from "../review/discussion.ts";
 import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export type { ItemFacts } from "./plan.ts";
 
@@ -88,32 +89,32 @@ const refsOf = (d: { repo: string | null; number: number | null; items: string |
 type Cls = { classifier: string; at: string; type_label: string; flags: string | null; probs: string | null; input_hash: string | null };
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
-export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): ItemFacts[] {
+export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise<ItemFacts[]> {
   const now = opts.now ?? Date.now();
   // Clock-driven changes of the facts below (a card's lock going stale, daily prepare counts, duplicate retries and pauses), per item.
   const refresh = refreshTimes(now);
   const model = opts.model ?? embedderId(modelName());
-  const pipelineOn = pipelineWrites(setting(db, "pipeline_enabled"));
+  const pipelineOn = pipelineWrites(await setting(db, "pipeline_enabled"));
 
   // Values read once for all items.
-  const tripped = activeTrips(db);
-  const run = opts.run !== undefined ? opts.run : latestRun(db);
+  const tripped = await activeTrips(db);
+  const run = opts.run !== undefined ? opts.run : await latestRun(db);
   const memo = settleMemo();
-  const outsideHolds = holdMap(db);
-  const answers = scopeAnswers(db);
-  const operatorAnswers = scopeAnswers(db, true);
-  const unsettled = unsettledScope(db);
+  const outsideHolds = await holdMap(db);
+  const answers = await scopeAnswers(db);
+  const operatorAnswers = await scopeAnswers(db, true);
+  const unsettled = await unsettledScope(db);
   const latestScope = new Map<string, { answer: string | null; byOperator: boolean }>(), securityIds = new Set<string>();
   // Kind and head of every item an open decision is about.
-  const heads = new Map((db.prepare(`SELECT DISTINCT i.repo || '#' || i.number AS k, i.kind, i.head_oid FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
+  const heads = new Map((await db.prepare(`SELECT DISTINCT i.repo || '#' || i.number AS k, i.kind, i.head_oid FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
     WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
   // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
-  for (const d of db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
+  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
     WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
     (PrepareColumns & { locked: number; lock_at: string | null; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
     const dupegroup = d.id.includes(":dupegroup:");
-    if (d.kind === "scope" && d.number !== null && !(d.answer === "withdrawn" && d.answered_by === "pipeline")) latestScope.set(`${d.repo}#${d.number}`, { answer: d.answer, byOperator: settledBy(db, d, memo) });
+    if (d.kind === "scope" && d.number !== null && !(d.answer === "withdrawn" && d.answered_by === "pipeline")) latestScope.set(`${d.repo}#${d.number}`, { answer: d.answer, byOperator: await settledBy(db, d, memo) });
     if (d.asked_by === SECURITY_ASKER) securityIds.add(d.id);
     if (d.kind === "scope" && d.answer === null) {
       for (const r of refsOf(d)) openScope.add(r);
@@ -138,29 +139,29 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     const lapsed = d.kind === "scope" && d.answer !== null && refsOf(d).every((r) => unsettled.has(r));
     if ((d.answer === null || d.kind === "scope" || d.answer === "backlog") && (!dupegroup || d.answer === null) && !withdrawn && !lapsed) for (const r of refsOf(d)) covered.add(r);
   }
-  const labeled = new Map((db.prepare("SELECT repo, number, note FROM stages WHERE stage = 'labeled' ORDER BY at, rowid").all() as { repo: string; number: number; note: string | null }[])
+  const labeled = new Map((await db.prepare("SELECT repo, number, note FROM stages WHERE stage = 'labeled' ORDER BY at, rowid").all() as { repo: string; number: number; note: string | null }[])
     .map((s) => [`${s.repo}#${s.number}`, s.note]));
-  const own = ownFixPrs(db, opts.repo);
-  const assigned = assignmentsOf(db, opts.repo);
-  const pairs = uncheckedPairCounts(db);
+  const own = await ownFixPrs(db, opts.repo);
+  const assigned = await assignmentsOf(db, opts.repo);
+  const pairs = await uncheckedPairCounts(db);
   const dupeAnswers = new Map<string, string[]>();
-  for (const a of answersToApply(db)) for (const r of a.refs) (dupeAnswers.get(r) ?? dupeAnswers.set(r, []).get(r)!).push(a.id);
+  for (const a of await answersToApply(db)) for (const r of a.refs) (dupeAnswers.get(r) ?? dupeAnswers.set(r, []).get(r)!).push(a.id);
   // Group-level work (which groups to ask about, which sets to compare) is planned per group by dupes/decide.ts and dupes/plan.ts; the items carry its result.
-  const inGroup = new Set(groupsToAsk(db, opts.repo).flatMap((g) => g.group.members.map((n) => `${g.repo}#${n}`)));
+  const inGroup = new Set((await groupsToAsk(db, opts.repo)).flatMap((g) => g.group.members.map((n) => `${g.repo}#${n}`)));
   const inCompare = new Map<string, "rule" | "model">();
   const dueAt = (s: { repo: string; members: { number: number }[] }, at: number): void => { for (const m of s.members) refresh.soon(`${s.repo}#${m.number}`, at); };
-  for (const s of dueSets(db, opts.repo, now, dueAt)) {
+  for (const s of await dueSets(db, opts.repo, now, dueAt)) {
     const how = ruleOutcome(s) === null ? "model" : "rule";
     for (const m of s.members) { const ref = `${s.repo}#${m.number}`; if (inCompare.get(ref) !== "model") inCompare.set(ref, how); }
   }
   const approved = new Map<string, boolean>();
-  const labelsApproved = (repo: string) => approved.get(repo) ?? (approved.set(repo, labelsApprovalOf(db, repo) !== null), approved.get(repo)!);
+  const labelsApproved = async (repo: string) => approved.get(repo) ?? (approved.set(repo, await labelsApprovalOf(db, repo) !== null), approved.get(repo)!);
   // Act: answers an operator gave that close an item (decisions.ts actionable, as act/index.ts targetsOf reads them).
-  const actionState = new Map((db.prepare("SELECT decision_id, repo, number, state FROM actions WHERE kind = ?").all(ACT_KIND) as { decision_id: string; repo: string; number: number; state: string }[])
+  const actionState = new Map((await db.prepare("SELECT decision_id, repo, number, state FROM actions WHERE kind = ?").all(ACT_KIND) as { decision_id: string; repo: string; number: number; state: string }[])
     .map((a) => [`${a.decision_id}|${a.repo}#${a.number}`, a.state]));
-  const waitingExec = new Set((db.prepare("SELECT id FROM main.decisions WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL").all() as { id: string }[]).map((r) => r.id));
+  const waitingExec = new Set((await db.prepare("SELECT id FROM main.decisions WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL").all() as { id: string }[]).map((r) => r.id));
   const answeredClose = new Map<string, ItemFacts["answeredClose"]>();
-  for (const a of actionable(db)) {
+  for (const a of await actionable(db)) {
     if (a.kind !== "scope" && a.kind !== "close" && a.kind !== "duplicate" && a.kind !== "merge" && a.kind !== "hold") continue;
     if (a.kind !== "scope" && a.number === null) continue;
     for (const it of a.items) {
@@ -171,7 +172,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     }
   }
   // Duplicate group answers: the Act step closes the members the group decision names; each member without a close record is a target.
-  for (const g of groupClosersPending(db)) {
+  for (const g of await groupClosersPending(db)) {
     if (opts.repo && g.repo !== opts.repo) continue;
     const k = `${g.repo}#${g.number}`;
     (answeredClose.get(k) ?? answeredClose.set(k, []).get(k)!).push({ decisionId: g.decisionId, kind: "duplicate", security: false, action: null, group: true, ...(waitingExec.has(g.decisionId) ? { waiting: true } : {}) });
@@ -182,11 +183,11 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
   if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
-  const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {
-    for (const c of db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
+    for (const c of await db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
         CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN json_remove(c.probs, '$.type') ELSE c.probs END AS probs, c.input_hash
       FROM classifications c WHERE c.run_id = :run AND ${refIn("c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
       const k = `${c.repo}#${c.number}`;
@@ -194,7 +195,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     }
   }
   const closeReview = new Map<string, NonNullable<ItemFacts["closeReview"]>>();
-  for (const r of db.prepare(`SELECT r.repo, r.number, r.head_oid, i.head_oid AS i_head, i.updated_at, c.head_oid AS c_head, c.fetched_at AS c_at,
+  for (const r of await db.prepare(`SELECT r.repo, r.number, r.head_oid, i.head_oid AS i_head, i.updated_at, c.head_oid AS c_head, c.fetched_at AS c_at,
       EXISTS (SELECT 1 FROM decisions d WHERE d.id = r.repo || '#' || r.number || ':close@' || r.head_oid) AS asked
     FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number AND i.kind = 'pr' AND i.state = 'OPEN'
     LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
@@ -204,12 +205,12 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   const repoMemo = new Map<string, { comment: boolean; fix: boolean; pub: boolean; notRust: boolean; openPrs: Map<number, OpenPr> }>();
   // Public repos and open PRs, read once for every repo on first use.
   let tables: { pub: Set<string>; openPrs: (repo: string) => Map<number, OpenPr> } | undefined;
-  const repoOf = (repo: string) => {
+  const repoOf = async (repo: string) => {
     let m = repoMemo.get(repo);
     if (!m) {
-      const t = (tables ??= { pub: new Set((db.prepare("SELECT name FROM repos WHERE visibility = 'public'").all() as { name: string }[]).map((x) => x.name)), openPrs: issuesWithOpenPrAll(db) });
-      m = { comment: commentApprovalOf(db, repo) !== null, fix: fixIssueApprovalOf(db, repo) !== null, pub: t.pub.has(repo),
-        notRust: hasSetting(db, notRustKey(repo)), openPrs: t.openPrs(repo) };
+      const t = (tables ??= { pub: new Set((await db.prepare("SELECT name FROM repos WHERE visibility = 'public'").all() as { name: string }[]).map((x) => x.name)), openPrs: await issuesWithOpenPrAll(db) });
+      m = { comment: await commentApprovalOf(db, repo) !== null, fix: await fixIssueApprovalOf(db, repo) !== null, pub: t.pub.has(repo),
+        notRust: await hasSetting(db, notRustKey(repo)), openPrs: t.openPrs(repo) };
       repoMemo.set(repo, m);
     }
     return m;
@@ -218,16 +219,16 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   type Text = { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null };
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
   const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
-  const texts = new Map(needText.length ? (db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
+  const texts = new Map(needText.length ? (await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
     FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
   const mirrored = db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ? AND kind = 'pr'");
   // The fix PR we just opened counts as open until a sync mirrors it: the mirror's open-PR list doesn't have it yet.
-  const ownPrUnmirrored = (state: string | null, url: string | null): OpenPr | null => {
+  const ownPrUnmirrored = async (state: string | null, url: string | null): Promise<OpenPr | null> => {
     const m = state === "pr-opened" ? /\/([^/]+)\/pull\/(\d+)$/.exec(url ?? "") : null;
-    return m && !mirrored.get(m[1]!, Number(m[2])) ? { number: Number(m[2]), closes: true } : null;
+    return m && !await mirrored.get(m[1]!, Number(m[2])) ? { number: Number(m[2]), closes: true } : null;
   };
 
-  return rows.map((r): ItemFacts => {
+  return await mapSeq(rows, async (r): Promise<ItemFacts> => {
     const ref = `${r.repo}#${r.number}`;
     const refreshAt = refresh.at(ref);
     const cls = byItem.get(ref) ?? [];
@@ -264,10 +265,10 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     const embedHash = r.embed_hash ?? (() => { const b = texts.get(ref)!; return hashOfText(b.title, b.body); })();
     const note = labeled.get(ref) ?? null;
     return {
-      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped, inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
+      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped, inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
       inScope: !!r.in_pilot, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration: !r.not_integration,
       held: r.held_backlog ? "backlog" : r.held_dup ? "duplicate" : null,
-      fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: labelsApproved(r.repo), commentApproved: repoOf(r.repo).comment, fixIssueApproved: repoOf(r.repo).fix },
+      fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: await labelsApproved(r.repo), commentApproved: (await repoOf(r.repo)).comment, fixIssueApproved: (await repoOf(r.repo)).fix },
       run,
       classification: {
         status: settled.status, label: settled.label, flags: settled.flags, jevLabel: settled.jevLabel, haikuLabel: settled.haikuLabel,
@@ -286,7 +287,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
           headDone: r.h_state !== null && (TERMINAL as string[]).includes(r.h_state),
           baseDone: r.a_base === null || (r.b_state !== null && (TERMINAL as string[]).includes(r.b_state)),
         },
-        publicRepo: repoOf(r.repo).pub, notRust: repoOf(r.repo).notRust, openPr: r.kind === "issue" ? repoOf(r.repo).openPrs.get(r.number) ?? ownPrUnmirrored(r.a_state, r.a_pr) : null, impact: r.impact,
+        publicRepo: (await repoOf(r.repo)).pub, notRust: (await repoOf(r.repo)).notRust, openPr: r.kind === "issue" ? (await repoOf(r.repo)).openPrs.get(r.number) ?? await ownPrUnmirrored(r.a_state, r.a_pr) : null, impact: r.impact,
         scopeDecision: latestScope.get(ref) ?? null,
       },
     };
@@ -294,6 +295,6 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
 }
 
 /** Facts of one open item, or null. */
-export function loadItemFact(db: DatabaseSync, repo: string, number: number, opts: Omit<ItemLoadOptions, "repo" | "refs"> = {}): ItemFacts | null {
-  return loadItemFacts(db, { ...opts, repo, refs: [`${repo}#${number}`] })[0] ?? null;
+export async function loadItemFact(db: Db, repo: string, number: number, opts: Omit<ItemLoadOptions, "repo" | "refs"> = {}): Promise<ItemFacts | null> {
+  return (await loadItemFacts(db, { ...opts, repo, refs: [`${repo}#${number}`] }))[0] ?? null;
 }

@@ -5,8 +5,8 @@
 import { execFile } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { claudeBin, usageDir, ACCOUNT_ID } from "./box.ts";
+import type { Db } from "../db/index.ts";
 
 export type AuthStatus = { loggedIn: boolean; method: string | null; plan: string | null; expiresAt: string | null };
 
@@ -54,10 +54,10 @@ export async function readAuthStatus(configDir: string): Promise<AuthStatus | nu
 }
 
 /** Stores the account's current sign-in state. A failed read leaves the old state. */
-export async function refreshStatus(db: DatabaseSync, id: string, configDir: string): Promise<AuthStatus | null> {
+export async function refreshStatus(db: Db, id: string, configDir: string): Promise<AuthStatus | null> {
   const st = await readAuthStatus(configDir);
   if (!st) return null;
-  db.prepare(`INSERT INTO claude_account_status (account_id, logged_in, method, plan, login_expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?)
+  await db.prepare(`INSERT INTO claude_account_status (account_id, logged_in, method, plan, login_expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT (account_id) DO UPDATE SET logged_in = excluded.logged_in, method = excluded.method, plan = excluded.plan, login_expires_at = excluded.login_expires_at, checked_at = excluded.checked_at`)
     .run(id, st.loggedIn ? 1 : 0, st.method, st.plan, st.expiresAt, new Date().toISOString());
   return st;

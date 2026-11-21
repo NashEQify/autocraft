@@ -11,22 +11,22 @@ import { runTiered } from "../src/agents/step.ts";
 import { PRIORITY } from "../src/agents/steps.ts";
 import { setJevEnabled } from "../src/agents/jev.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
-import { connect } from "../src/db.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
 test("a pool skips a unit nobody may take and runs the later ones", async () => {
-  const db = connect(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
-  setInferenceMode(db, "user-local", "test");
-  db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
-  const id = createToken(db, "olga", "helper", { kind: "runner" }).row.id;
-  storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
-  setUserRepos(db, "olga", ["deckcraft"]);
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await setInferenceMode(db, "user-local", "test");
+  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+  await setUserRepos(db, "olga", ["deckcraft"]);
 
   const repos = ["photocraft", "deckcraft", "deckcraft"];
   const started: number[] = [];
@@ -36,31 +36,31 @@ test("a pool skips a unit nobody may take and runs the later ones", async () => 
   // Work no Task Runner may take is neither counted as sent nor stored as answered.
   const photo = [{ repo: "photocraft", number: 7, kind: "issue", title: "t", body: "" }] as unknown as Item[];
   assert.equal(await runHaiku(db, "run-1", photo), 0, "no item of a skipped batch counts as sent");
-  setJevEnabled(db, false, "test");
+  await setJevEnabled(db, false, "test");
   const t = await runTiered(db, PRIORITY, photo);
   assert.deepEqual([...t.skipped], ["photocraft#7"]);
   assert.equal(t.alone.size + t.haiku.size, 0, "a skipped item is not one Haiku decided alone");
 });
 
-test("user-local batches hold one repo's items in the order of their first item; server-account batches mix repos", () => {
-  const db = connect(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+test("user-local batches hold one repo's items in the order of their first item; server-account batches mix repos", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
   const items = ["deck:1", "photo:1", "deck:2", "deck:3", "photo:2", "deck:4", "design:1"].map((x) => ({ repo: x.split(":")[0]!, id: x }));
-  const ids = () => repoBatches(db, items, 2, (x) => x.repo, (x) => [{ repo: x.repo, number: Number(x.id.split(":")[1]) }]).map((b) => b.map((x) => x.id));
-  assert.deepEqual(ids(), [["deck:1", "photo:1"], ["deck:2", "deck:3"], ["photo:2", "deck:4"], ["design:1"]]);
-  setInferenceMode(db, "user-local", "test");
-  assert.deepEqual(ids(), [["deck:1", "deck:2"], ["photo:1", "photo:2"], ["deck:3", "deck:4"], ["design:1"]]);
+  const ids = async () => (await repoBatches(db, items, 2, (x) => x.repo, (x) => [{ repo: x.repo, number: Number(x.id.split(":")[1]) }])).map((b) => b.map((x) => x.id));
+  assert.deepEqual(await ids(), [["deck:1", "photo:1"], ["deck:2", "deck:3"], ["photo:2", "deck:4"], ["design:1"]]);
+  await setInferenceMode(db, "user-local", "test");
+  assert.deepEqual(await ids(), [["deck:1", "deck:2"], ["photo:1", "photo:2"], ["deck:3", "deck:4"], ["design:1"]]);
 });
 
-test("a limited selection takes the items with a taker before the ones nobody may take", () => {
-  const db = connect(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
-  setInferenceMode(db, "user-local", "test");
-  db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
-  const id = createToken(db, "olga", "helper", { kind: "runner" }).row.id;
-  storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
-  setUserRepos(db, "olga", ["deckcraft"]);
+test("a limited selection takes the items with a taker before the ones nobody may take", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
+  await setInferenceMode(db, "user-local", "test");
+  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
+  await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+  await setUserRepos(db, "olga", ["deckcraft"]);
   const items = [{ repo: "photocraft", n: 1 }, { repo: "deckcraft", n: 2 }, { repo: "photocraft", n: 3 }, { repo: "deckcraft", n: 4 }];
-  const picked = takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }]).slice(0, 1);
+  const picked = (await takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }])).slice(0, 1);
   assert.deepEqual(picked, [{ repo: "deckcraft", n: 2 }]);
-  assert.deepEqual(takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }]).map((x) => x.n), [2, 4, 1, 3], "stable within each group, none dropped");
+  assert.deepEqual((await takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }])).map((x) => x.n), [2, 4, 1, 3], "stable within each group, none dropped");
 });

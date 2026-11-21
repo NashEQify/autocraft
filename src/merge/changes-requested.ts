@@ -6,8 +6,8 @@
 // Live reads (GraphQL `latestOpinionatedReviews(writersOnly: true)`) are decided on write access, because
 // `authorAssociation` is relative to the viewer: a private org member can show as CONTRIBUTOR or NONE.
 // The mirror stores only the association, so there a reviewer blocks unless the association says a stranger.
-import type { DatabaseSync } from "node:sqlite";
 import type { Querier } from "../mirror.ts";
+import type { Db } from "../db/index.ts";
 
 export type ReviewFact = { id?: string | null; author: string | null; association: string | null; state: string | null; at: string | null };
 
@@ -66,23 +66,23 @@ export const GATE_FAILURES = 3;
 export type Gate = { blocked: boolean; by: string[]; readAt: string; failures: number };
 
 /** What the live reads stored for the PRs, as `repo#number`. */
-export function gatesOf(db: DatabaseSync, repo?: string): Map<string, Gate> {
-  const rows = db.prepare(`SELECT repo, number, blocked, by_login, read_at, failures FROM review_gates ${repo ? "WHERE repo = ?" : ""}`).all(...(repo ? [repo] : [])) as
+export async function gatesOf(db: Db, repo?: string): Promise<Map<string, Gate>> {
+  const rows = await db.prepare(`SELECT repo, number, blocked, by_login, read_at, failures FROM review_gates ${repo ? "WHERE repo = ?" : ""}`).all(...(repo ? [repo] : [])) as
     { repo: string; number: number; blocked: number | null; by_login: string | null; read_at: string | null; failures: number }[];
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, { blocked: r.blocked === 1, by: r.by_login ? r.by_login.split(",") : [], readAt: r.read_at ?? "", failures: r.failures }]));
 }
 
 /** Stores a successful live read. The table is ours, so a sync cannot wipe it; the queue trusts it over the mirror until the PR changes. */
-export function recordGate(db: DatabaseSync, repo: string, number: number, formal: ReviewFact[], decision: string | null | undefined, at = new Date().toISOString()): string | null {
+export async function recordGate(db: Db, repo: string, number: number, formal: ReviewFact[], decision: string | null | undefined, at = new Date().toISOString()): Promise<string | null> {
   const reason = refuseLive(formal, decision);
-  db.prepare(`INSERT INTO review_gates (repo, number, blocked, by_login, read_at, failures) VALUES (?, ?, ?, ?, ?, 0)
+  await db.prepare(`INSERT INTO review_gates (repo, number, blocked, by_login, read_at, failures) VALUES (?, ?, ?, ?, ?, 0)
     ON CONFLICT (repo, number) DO UPDATE SET blocked = excluded.blocked, by_login = excluded.by_login, read_at = excluded.read_at, failures = 0`)
     .run(repo, number, reason ? 1 : 0, blockedByWriters(formal).join(","), at);
   return reason;
 }
 
-export function recordGateFailure(db: DatabaseSync, repo: string, number: number): void {
-  db.prepare("INSERT INTO review_gates (repo, number, failures) VALUES (?, ?, 1) ON CONFLICT (repo, number) DO UPDATE SET failures = failures + 1").run(repo, number);
+export async function recordGateFailure(db: Db, repo: string, number: number): Promise<void> {
+  await db.prepare("INSERT INTO review_gates (repo, number, failures) VALUES (?, ?, 1) ON CONFLICT (repo, number) DO UPDATE SET failures = failures + 1").run(repo, number);
 }
 
 const SMALL_QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewDecision ${FORMAL_REVIEWS} } } }`;
@@ -93,14 +93,14 @@ export const factsOf = (nodes: Formal[]): ReviewFact[] =>
   nodes.map((n) => ({ id: n.id ?? null, author: n.author?.login ?? null, association: n.authorAssociation ?? null, state: n.state ?? null, at: n.submittedAt ?? n.createdAt ?? null }));
 
 /** A small live read of one PR's formal reviews, stored. Returns the block reason or null; a failed read is counted and returns undefined. */
-export async function readGate(db: DatabaseSync, q: Querier, owner: string, repo: string, number: number, log: (line: string) => void = () => {}): Promise<string | null | undefined> {
+export async function readGate(db: Db, q: Querier, owner: string, repo: string, number: number, log: (line: string) => void = () => {}): Promise<string | null | undefined> {
   try {
     const res = await q.query(SMALL_QUERY, { owner, name: repo, number });
     const pr = res?.repository?.pullRequest;
     if (!pr) throw new Error("no such PR");
-    return recordGate(db, repo, number, factsOf((pr.latestOpinionatedReviews?.nodes ?? []) as Formal[]), pr.reviewDecision);
+    return await recordGate(db, repo, number, factsOf((pr.latestOpinionatedReviews?.nodes ?? []) as Formal[]), pr.reviewDecision);
   } catch (e) {
-    recordGateFailure(db, repo, number);
+    await recordGateFailure(db, repo, number);
     log(`  ${repo}#${number}: could not read its reviews (${String((e as Error).message ?? e).replace(/\s+/g, " ").slice(0, 200)})`);
     return undefined;
   }

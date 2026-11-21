@@ -5,12 +5,12 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { addLogin, removeLogin, setRole } from "../src/access.ts";
-import { connect } from "../src/db.ts";
 import type { Route } from "../src/dash/types.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { defaultRoutes, SESSION_COOKIE, startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "server-test-"));
@@ -30,7 +30,7 @@ writeFileSync(join(dir, "secret.txt"), SECRET_MARKER);
 let handlerRuns = 0;
 // Stand-ins for the API's decision writes, which check permission the same way.
 const testRoutes: Route[] = [
-  { method: "GET", pattern: "/api/test/me", handler: (_db, req) => ({ json: { login: req.user.login, csrf: req.csrf } }) },
+  { method: "GET", pattern: "/api/test/me", handler: async (_db, req) => ({ json: { login: req.user.login, csrf: req.csrf } }) },
   { method: "GET", pattern: "/api/test/can/:repo", handler: async (_db, req) => ({ json: { can: await req.user.canWrite(req.params.repo!) } }) },
   {
     method: "POST", pattern: "/api/test/answer/:repo",
@@ -50,7 +50,7 @@ const testRoutes: Route[] = [
   },
 ];
 
-const db = connect(join(dir, "dash.db"));
+const db = await connectDb(join(dir, "dash.db"));
 const provider = new FakeProvider(permsFile);
 let base = "";
 let close: () => Promise<void>;
@@ -58,9 +58,9 @@ let allRoutes: Route[];
 
 before(async () => {
   setPerms({ maint: { photocraft: "write" }, boss: {} });
-  addLogin(db, "cli", "boss", "operator", null);
-  addLogin(db, "cli", "viewer1", "viewer", null);
-  addLogin(db, "cli", "maint", "maintainer", null);
+  await addLogin(db, "cli", "boss", "operator", null);
+  await addLogin(db, "cli", "viewer1", "viewer", null);
+  await addLogin(db, "cli", "maint", "maintainer", null);
   const config = loadConfig({
     AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: join(dir, "dash.db"), AUTOCRAFT_DEV_PERMS: permsFile,
     AUTOCRAFT_WEB_DIST: webDist,
@@ -72,7 +72,7 @@ before(async () => {
 });
 after(async () => {
   await close();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -122,7 +122,7 @@ async function signedIn(login: string): Promise<Client> {
 }
 
 const sample = (pattern: string) => pattern.replace(/:[a-z]+/gi, "x");
-const audits = (action: string) => db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ?").get(action) as { n: number };
+const audits = async (action: string) => await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ?").get(action) as { n: number };
 
 describe("without a session", () => {
   test("every page leads to sign-in, everything else gets 401", async () => {
@@ -151,8 +151,8 @@ describe("sign-in", () => {
     assert.equal(r.status, 403);
     assert.match(await r.text(), /Not authorised/);
     assert.equal(c.jar.has(SESSION_COOKIE), false);
-    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE login = 'stranger'").get() as { n: number }).n, 0);
-    assert.equal(audits("sign-in-refused").n, 1);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE login = 'stranger'").get() as { n: number }).n, 0);
+    assert.equal((await audits("sign-in-refused")).n, 1);
   });
 
   test("a session cookie is HttpOnly, Secure, SameSite=Lax; the token stays encrypted", async () => {
@@ -168,7 +168,7 @@ describe("sign-in", () => {
     assert.match(page.headers.get("content-security-policy")!, /script-src 'self' 'nonce-[\w-]+'/);
     assert.equal(page.headers.get("x-frame-options"), "DENY");
     assert.equal(page.headers.get("referrer-policy"), "same-origin");
-    const rows = db.prepare("SELECT token_enc FROM sessions").all() as { token_enc: string }[];
+    const rows = await db.prepare("SELECT token_enc FROM sessions").all() as { token_enc: string }[];
     for (const row of rows) assert.doesNotMatch(row.token_enc, /dev_/);
   });
 
@@ -194,7 +194,7 @@ describe("permissions", () => {
     assert.equal((await c.get("/")).status, 200);
     assert.equal((await c.get("/api/access", false)).status, 403);
     let csrf = await c.csrf();
-    const before = (db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get() as { n: number }).n;
+    const before = (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get() as { n: number }).n;
     const posts = allRoutes.filter((r) => r.method === "POST");
     for (const [i, r] of posts.entries()) {
       // A new session every 50 routes stays under the per-session write limit.
@@ -206,7 +206,7 @@ describe("permissions", () => {
       else assert.ok(status >= 400, `${r.pattern}: ${status}`);
     }
     assert.equal((await c.post("/api/test/answer/photocraft", { csrf })).status, 403);
-    assert.equal((db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get() as { n: number }).n, before);
+    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get() as { n: number }).n, before);
   });
 
   test("a maintainer answers only in repos where they have write", async () => {
@@ -251,7 +251,7 @@ describe("tokens", () => {
     const c = await signedIn("maint");
     provider.tokenTtlMs = 8 * 3_600_000;
     await sleep(350);
-    db.prepare("DELETE FROM repo_permissions").run();
+    await db.prepare("DELETE FROM repo_permissions").run();
     const refreshes = provider.refreshes;
     assert.deepEqual(await (await c.get("/api/test/can/photocraft", false)).json(), { can: true });
     assert.equal(provider.refreshes, refreshes + 1);
@@ -262,7 +262,7 @@ describe("tokens", () => {
     const c = await signedIn("maint");
     provider.tokenTtlMs = 8 * 3_600_000;
     await sleep(350);
-    db.prepare("DELETE FROM repo_permissions").run();
+    await db.prepare("DELETE FROM repo_permissions").run();
     provider.rejectRefresh = true;
     try {
       assert.deepEqual(await (await c.get("/api/test/can/photocraft", false)).json(), { can: false });
@@ -275,11 +275,11 @@ describe("tokens", () => {
 
 describe("access changes", () => {
   test("changing a role ends the login's sessions", async () => {
-    addLogin(db, "cli", "promoted", "viewer", null);
+    await addLogin(db, "cli", "promoted", "viewer", null);
     const c = await signedIn("promoted");
-    setRole(db, "cli", "promoted", "operator");
+    await setRole(db, "cli", "promoted", "operator");
     assert.match(await (await c.get("/")).text(), /http-equiv="refresh" content="0;url=\/auth\/signin/);
-    removeLogin(db, "cli", "promoted");
+    await removeLogin(db, "cli", "promoted");
   });
 });
 

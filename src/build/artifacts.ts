@@ -5,9 +5,9 @@
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, rmSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
 import { envVar } from "../env.ts";
+import type { Db } from "../db/index.ts";
 
 export const MAX_ARTIFACT_BYTES = 50 * 1024 * 1024;
 export const MAX_TASK_ARTIFACT_BYTES = 200 * 1024 * 1024;
@@ -70,30 +70,25 @@ export class ArtifactError extends Error {
 }
 
 /** Checks an uploaded temp file and files it under the task; removes the temp file when refused. */
-export function storeArtifact(db: DatabaseSync, taskId: number, name: string, tmp: string): { bytes: number; contentType: string } {
+export async function storeArtifact(db: Db, taskId: number, name: string, tmp: string): Promise<{ bytes: number; contentType: string }> {
   try {
     if (!NAME_RE.test(name)) throw new ArtifactError(400, "artifact names are 1 to 100 letters, digits, dots, underscores or hyphens");
     const bytes = statSync(tmp).size;
     if (bytes === 0) throw new ArtifactError(400, "the artifact is empty");
-    const t = db.prepare("SELECT artifact_bytes FROM build_tasks WHERE id = ?").get(taskId) as { artifact_bytes: number } | undefined;
+    const t = await db.prepare("SELECT artifact_bytes FROM build_tasks WHERE id = ?").get(taskId) as { artifact_bytes: number } | undefined;
     if (!t) throw new ArtifactError(404, "no such task");
-    const old = db.prepare("SELECT bytes FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { bytes: number } | undefined;
-    const count = (db.prepare("SELECT COUNT(*) AS n FROM build_artifacts WHERE task_id = ?").get(taskId) as { n: number }).n;
+    const old = await db.prepare("SELECT bytes FROM build_artifacts WHERE task_id = ? AND name = ?").get(taskId, name) as { bytes: number } | undefined;
+    const count = (await db.prepare("SELECT COUNT(*) AS n FROM build_artifacts WHERE task_id = ?").get(taskId) as { n: number }).n;
     if (!old && count >= MAX_ARTIFACTS_PER_TASK) throw new ArtifactError(413, `at most ${MAX_ARTIFACTS_PER_TASK} artifacts per task`);
     if (t.artifact_bytes - (old?.bytes ?? 0) + bytes > MAX_TASK_ARTIFACT_BYTES) throw new ArtifactError(413, "the task's artifacts would exceed 200 MB");
     const type = sniff(readFileSync(tmp));
     if (!type) throw new ArtifactError(415, "only PNG, JSON, JUnit XML and UTF-8 text artifacts are accepted");
     const rel = fileFor(taskId, name);
     renameSync(tmp, join(artifactDir(), rel));
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      db.prepare("INSERT OR REPLACE INTO build_artifacts (task_id, name, bytes, content_type, file) VALUES (?, ?, ?, ?, ?)").run(taskId, name, bytes, type, rel);
-      db.prepare("UPDATE build_tasks SET artifact_bytes = artifact_bytes - ? + ? WHERE id = ?").run(old?.bytes ?? 0, bytes, taskId);
-      db.exec("COMMIT");
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
+    await db.write(async () => {
+      await db.prepare("INSERT OR REPLACE INTO build_artifacts (task_id, name, bytes, content_type, file) VALUES (?, ?, ?, ?, ?)").run(taskId, name, bytes, type, rel);
+      await db.prepare("UPDATE build_tasks SET artifact_bytes = artifact_bytes - ? + ? WHERE id = ?").run(old?.bytes ?? 0, bytes, taskId);
+    });
     return { bytes, contentType: type };
   } catch (e) {
     try {
@@ -104,10 +99,10 @@ export function storeArtifact(db: DatabaseSync, taskId: number, name: string, tm
 }
 
 /** Deletes the artifact files and rows of tasks. */
-export function removeArtifacts(db: DatabaseSync, taskIds: number[]): void {
+export async function removeArtifacts(db: Db, taskIds: number[]): Promise<void> {
   for (const id of taskIds) {
-    db.prepare("DELETE FROM build_artifacts WHERE task_id = ?").run(id);
-    db.prepare("UPDATE build_tasks SET artifact_bytes = 0 WHERE id = ?").run(id);
+    await db.prepare("DELETE FROM build_artifacts WHERE task_id = ?").run(id);
+    await db.prepare("UPDATE build_tasks SET artifact_bytes = 0 WHERE id = ?").run(id);
     const dir = absolute(String(id));
     if (dir) rmSync(dir, { recursive: true, force: true });
   }

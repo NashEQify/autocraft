@@ -1,7 +1,8 @@
 // Tool uses of a model call, read from the `claude -p` event stream (or reported by a remote call's helper) and stored per agent run (agent_run_tools).
 // Arguments are scrubbed and capped; results are never stored, only their size.
-import type { DatabaseSync } from "node:sqlite";
 import { scrub } from "../runner/scrub.ts";
+import { forEachSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export const TOOL_ARGS_MAX = 4000;
 /** The check tool's name as the model sees it (MCP server `build`, tool `check`). */
@@ -59,8 +60,8 @@ export function clockLine(clock: ToolClock, raw: string, at: string = new Date()
  * Stores the tool uses of a finished call. A check-tool use is linked to the next unlinked model_checks row of the
  * run with the same command, skipping uses whose reply shows the tool wrote no row (refusals, nothing to check).
  */
-export function saveTools(db: DatabaseSync, runId: number, events: unknown, clock?: ToolClock): void {
-  saveUses(db, runId, toolUses(events), clock);
+export async function saveTools(db: Db, runId: number, events: unknown, clock?: ToolClock): Promise<void> {
+  await saveUses(db, runId, toolUses(events), clock);
 }
 
 const MAX_REMOTE_TOOLS = 1000;
@@ -72,9 +73,9 @@ const time = (v: unknown): string | null => (typeof v === "string" && ISO.test(v
  * source: the lease's own tools (items, reference, check) appear in it as MCP tool uses. Whether a check use wrote a
  * model_checks row comes from the relay's reply to it (remote_checks), in request order, not from the helper.
  */
-export function saveRemoteTools(db: DatabaseSync, runId: number, callId: number, raw: unknown): void {
+export async function saveRemoteTools(db: Db, runId: number, callId: number, raw: unknown): Promise<void> {
   if (!Array.isArray(raw)) return;
-  const relayed = (db.prepare("SELECT result FROM main.remote_checks WHERE call_id = ? AND run_id = ? ORDER BY id").all(callId, runId) as { result: string | null }[])
+  const relayed = (await db.prepare("SELECT result FROM main.remote_checks WHERE call_id = ? AND run_id = ? ORDER BY id").all(callId, runId) as { result: string | null }[])
     .map((r) => { try { return textOf((JSON.parse(r.result ?? "null") as { text?: unknown } | null)?.text); } catch { return ""; } });
   const clock: ToolClock = { start: new Map(), end: new Map() };
   const uses: ToolUse[] = [];
@@ -91,16 +92,16 @@ export function saveRemoteTools(db: DatabaseSync, runId: number, callId: number,
     if (s) clock.start.set(id, s);
     if (e) clock.end.set(id, e);
   }
-  saveUses(db, runId, uses, clock);
+  await saveUses(db, runId, uses, clock);
 }
 
-function saveUses(db: DatabaseSync, runId: number, uses: ToolUse[], clock?: ToolClock): void {
+async function saveUses(db: Db, runId: number, uses: ToolUse[], clock?: ToolClock): Promise<void> {
   if (!uses.length) return;
-  const checks = db.prepare("SELECT id, command FROM model_checks WHERE run_id = ? ORDER BY id").all(runId) as { id: number; command: string }[];
+  const checks = await db.prepare("SELECT id, command FROM model_checks WHERE run_id = ? ORDER BY id").all(runId) as { id: number; command: string }[];
   const ins = db.prepare("INSERT OR REPLACE INTO agent_run_tools (run_id, seq, tool, args, result_bytes, is_error, started_at, ended_at, check_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  uses.forEach((u, i) => {
+  await forEachSeq(uses, async (u, i) => {
     const k = u.command === null || u.noRow ? -1 : checks.findIndex((c) => c.command === u.command);
     const link = k >= 0 ? checks.splice(k, 1)[0]!.id : null;
-    ins.run(runId, i + 1, u.name, u.args, u.resultBytes, u.isError ? 1 : 0, clock?.start.get(u.id) ?? null, clock?.end.get(u.id) ?? null, link);
+    await ins.run(runId, i + 1, u.name, u.args, u.resultBytes, u.isError ? 1 : 0, clock?.start.get(u.id) ?? null, clock?.end.get(u.id) ?? null, link);
   });
 }

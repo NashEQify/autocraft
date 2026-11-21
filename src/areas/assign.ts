@@ -3,7 +3,6 @@
 // decides alone while Jev is unavailable. Repos without a list are skipped. An item asked against the current
 // list version is not asked again unless a re-scan asks for the unassigned ones.
 import { jobItem } from "../runner/job-items.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { freeSlots } from "../agents/accounts.ts";
 import { takersFirst } from "../agents/call.ts";
 import { jevAvailable } from "../agents/jev.ts";
@@ -17,6 +16,7 @@ import { cachedDiff, ghDiff, splitDiff } from "../review/diff.ts";
 import { settles } from "./parse.ts";
 import { currentList, setItemArea } from "./store.ts";
 import { AREA_PATHS_MAX, type Area, type AreaItem } from "./types.ts";
+import type { Db } from "../db/index.ts";
 
 const CHUNK = 40;
 
@@ -29,11 +29,11 @@ export const RATE_FLOOR = 500;
 const failedHeads = new Set<string>();
 
 /** From the diff cache or `gh pr diff` (a read). `db` supplies the stored sync rate reading. */
-export const diffPaths = (db: DatabaseSync): PathSource => async (repo, number, head) => {
+export const diffPaths = (db: Db): PathSource => async (repo, number, head) => {
   if (!head) return null;
   const key = `${repo}#${number}@${head}`;
   if (failedHeads.has(key)) return null;
-  const low = Number((db.prepare("SELECT value FROM settings WHERE key = 'sync_rate_remaining'").get() as { value: string } | undefined)?.value ?? Infinity) < RATE_FLOOR;
+  const low = Number((await db.prepare("SELECT value FROM settings WHERE key = 'sync_rate_remaining'").get() as { value: string } | undefined)?.value ?? Infinity) < RATE_FLOOR;
   const r = await cachedDiff(db, repo, number, head, low ? async () => ({ ok: false, tooLarge: false, error: "rate low" }) : ghDiff);
   if (!r.ok) {
     if (!low) failedHeads.add(key);
@@ -49,8 +49,8 @@ type Due = AreaItem & { head: string | null; version: number };
  * list version and unassigned. With `rescan`: also the ones answered "none of these" for the current version.
  * Operator-assigned items are never due. Items of repos no Task Runner takes come after the rest before the limit (takersFirst).
  */
-export function dueForArea(db: DatabaseSync, opts: { repo?: string; limit: number; rescan?: boolean }): Due[] {
-  const due = db.prepare(`SELECT i.repo, i.number, i.kind, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body,
+export async function dueForArea(db: Db, opts: { repo?: string; limit: number; rescan?: boolean }): Promise<Due[]> {
+  const due = await db.prepare(`SELECT i.repo, i.number, i.kind, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body,
       i.additions + i.deletions AS lines_changed, i.changed_files AS files_changed, i.author_association, i.head_oid AS head, l.v AS version
     FROM items i JOIN tracked_repos t ON t.name = i.repo
     JOIN (SELECT repo, MAX(version) AS v FROM area_lists GROUP BY repo) l ON l.repo = i.repo
@@ -59,7 +59,7 @@ export function dueForArea(db: DatabaseSync, opts: { repo?: string; limit: numbe
       AND (a.number IS NULL OR (a.source <> 'operator' AND (a.list_version <> l.v OR (:rescan AND a.area IS NULL))))
     ORDER BY t.pipeline DESC, i.updated_at DESC, i.repo, i.number`)
     .all({ repo: opts.repo ?? null, rescan: opts.rescan ? 1 : 0 }) as unknown as Due[];
-  return takersFirst(db, due, (x) => [x.repo], (x) => [x], "areas.haiku").slice(0, opts.limit);
+  return (await takersFirst(db, due, (x) => [x.repo], (x) => [x], "areas.haiku")).slice(0, opts.limit);
 }
 
 export type AssignParams = {
@@ -69,8 +69,8 @@ export type AssignParams = {
   paths?: PathSource;
   usageRun: string;
   onSent?: (n: number) => void;
-  cancelled?: () => boolean;
-  progress?: (line: string) => void;
+  cancelled?: () => Promise<boolean>;
+  progress?: (line: string) => Promise<void>;
   log?: (line: string) => void;
 };
 export type AssignResult = { due: number; jev: number; haiku: number; none: number; left: number };
@@ -86,20 +86,20 @@ async function withPaths(items: Due[], source: PathSource): Promise<AreaItem[]> 
 }
 
 /** Asks the due items of one repo and stores the answers. */
-async function assignRepo(db: DatabaseSync, repo: string, due: Due[], p: AssignParams, r: AssignResult): Promise<void> {
-  const list = currentList(db, repo)!;
+async function assignRepo(db: Db, repo: string, due: Due[], p: AssignParams, r: AssignResult): Promise<void> {
+  const list = (await currentList(db, repo))!;
   const version = list.version;
-  const store = (x: AreaItem, area: string | null, source: "jev" | "haiku", conf: number | null) => {
+  const store = async (x: AreaItem, area: string | null, source: "jev" | "haiku", conf: number | null) => {
     // The list was edited while this pass ran: the answer is for a list that is gone.
-    if (currentList(db, repo)?.version !== version) return;
-    setItemArea(db, x.repo, x.number, area, source, conf, version);
+    if ((await currentList(db, repo))?.version !== version) return;
+    await setItemArea(db, x.repo, x.number, area, source, conf, version);
     if (source === "jev") r.jev++; else r.haiku++;
     if (area === null) r.none++;
-    jobItem(db, x.repo, x.number, area === null ? "fits none of the areas" : `assigned area ${area}`, p.log);
+    await jobItem(db, x.repo, x.number, area === null ? "fits none of the areas" : `assigned area ${area}`, p.log);
   };
-  for (let i = 0; i < due.length && !p.cancelled?.(); i += CHUNK) {
+  for (let i = 0; i < due.length && !await p.cancelled?.(); i += CHUNK) {
     // With neither model available there is nothing to ask, so no diff is fetched.
-    if (!jevAvailable(db) && freeSlots(db) <= 0 && !p.paths) { p.log?.(`areas: no model available for ${repo}`); break; }
+    if (!await jevAvailable(db) && await freeSlots(db) <= 0 && !p.paths) { p.log?.(`areas: no model available for ${repo}`); break; }
     const chunk = await withPaths(due.slice(i, i + CHUNK), p.paths ?? diffPaths(db));
     const t = await runTiered(db, AREAS, chunk, {
       ctx: { repo, areas: list.areas },
@@ -110,21 +110,21 @@ async function assignRepo(db: DatabaseSync, repo: string, due: Due[], p: AssignP
     p.onSent?.(chunk.length - t.skipped.size);
     for (const x of chunk) {
       const a = t.jev.get(refOf(x));
-      if (a && settles(a.top)) store(x, a.area, "jev", a.top);
-      else if (t.haiku.has(refOf(x))) store(x, t.haiku.get(refOf(x))!, "haiku", null);
+      if (a && settles(a.top)) await store(x, a.area, "jev", a.top);
+      else if (t.haiku.has(refOf(x))) await store(x, t.haiku.get(refOf(x))!, "haiku", null);
     }
-    p.progress?.(`Areas ${repo}: ${Math.min(i + CHUNK, due.length)} of ${due.length} items`);
+    await p.progress?.(`Areas ${repo}: ${Math.min(i + CHUNK, due.length)} of ${due.length} items`);
   }
 }
 
 /** Assigns areas to the due items. Returns counts; `left` is the due items that got no answer in this pass. */
-export async function assignAreas(db: DatabaseSync, p: AssignParams): Promise<AssignResult> {
-  const due = dueForArea(db, { repo: p.repo, limit: p.limit, rescan: p.rescan });
+export async function assignAreas(db: Db, p: AssignParams): Promise<AssignResult> {
+  const due = await dueForArea(db, { repo: p.repo, limit: p.limit, rescan: p.rescan });
   const r: AssignResult = { due: due.length, jev: 0, haiku: 0, none: 0, left: 0 };
   const byRepo = new Map<string, Due[]>();
   for (const x of due) byRepo.set(x.repo, [...(byRepo.get(x.repo) ?? []), x]);
   for (const [repo, items] of byRepo) {
-    if (p.cancelled?.()) break;
+    if (await p.cancelled?.()) break;
     await assignRepo(db, repo, items, p, r);
   }
   r.left = r.due - r.jev - r.haiku;

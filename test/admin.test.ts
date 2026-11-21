@@ -7,13 +7,13 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { AccessOverview, AuditPage, Contributor, ContributorList, RulePreview, TrackedRepo } from "../web/src/api/types.ts";
 import { addLogin } from "../src/access.ts";
-import { connect } from "../src/db.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const NOTE = "OVERRIDE-NOTE-m4x";
 mkdirSync(SCRATCH, { recursive: true });
@@ -22,28 +22,28 @@ const dbFile = join(dir, "dash.db");
 const permsFile = join(dir, "perms.json");
 writeFileSync(permsFile, "{}");
 
-const db = connect(dbFile);
+const db = await connectDb(dbFile);
 let base = "";
 let close: () => Promise<void>;
 
 before(async () => {
   const ins = db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at, merged_at) VALUES (?,?,?,?,?,?,?,?,?)");
   let n = 0;
-  const prs = (author: string, merged: number, closed: number, open = 0) => {
+  const prs = async (author: string, merged: number, closed: number, open = 0) => {
     for (const [state, k] of [["MERGED", merged], ["CLOSED", closed], ["OPEN", open]] as const) {
-      for (let i = 0; i < k; i++) ins.run("photocraft", ++n, "pr", state, "t", author, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", state === "MERGED" ? "2026-10-02T00:00:00Z" : null);
+      for (let i = 0; i < k; i++) await ins.run("photocraft", ++n, "pr", state, "t", author, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", state === "MERGED" ? "2026-10-02T00:00:00Z" : null);
     }
   };
-  prs("veteran", 10, 1);
-  prs("steady", 4, 1, 2);
-  prs("newbie", 1, 3);
+  await prs("veteran", 10, 1);
+  await prs("steady", 4, 1, 2);
+  await prs("newbie", 1, 3);
   // Each login's history is bound to the account the lookup below gives it.
-  for (const l of ["veteran", "steady", "newbie"]) db.prepare("INSERT INTO author_ids (login, id) VALUES (?, ?)").run(l, 5000 + l.length);
-  db.prepare("INSERT INTO repos (name, visibility, open_prs, open_issues) VALUES ('photocraft', 'public', 2, 0), ('not-yet', 'public', 5, 7)").run();
-  addLogin(db, "cli", "boss", "operator", null);
-  addLogin(db, "cli", "viewer1", "viewer", null);
-  addLogin(db, "cli", "maint", "maintainer", null);
-  scopeToTracked(db);
+  for (const l of ["veteran", "steady", "newbie"]) await db.prepare("INSERT INTO author_ids (login, id) VALUES (?, ?)").run(l, 5000 + l.length);
+  await db.prepare("INSERT INTO repos (name, visibility, open_prs, open_issues) VALUES ('photocraft', 'public', 2, 0), ('not-yet', 'public', 5, 7)").run();
+  await addLogin(db, "cli", "boss", "operator", null);
+  await addLogin(db, "cli", "viewer1", "viewer", null);
+  await addLogin(db, "cli", "maint", "maintainer", null);
+  await scopeToTracked(db);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
   const provider = new FakeProvider(permsFile);
   // The id GitHub would give a login: the one the fake provider signs it in with.
@@ -59,7 +59,7 @@ before(async () => {
 });
 after(async () => {
   await close();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -99,8 +99,8 @@ async function signedIn(login: string): Promise<Client> {
   return c;
 }
 
-const auditRows = () => (db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action NOT IN ('sign-in')").get() as { n: number }).n;
-const lastAudit = () => db.prepare("SELECT login, action, target FROM audit ORDER BY rowid DESC LIMIT 1").get() as { login: string; action: string; target: string };
+const auditRows = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action NOT IN ('sign-in')").get() as { n: number }).n;
+const lastAudit = async () => await db.prepare("SELECT login, action, target FROM audit ORDER BY rowid DESC LIMIT 1").get() as { login: string; action: string; target: string };
 const row = (l: ContributorList, login: string) => l.contributors.find((c) => c.login === login)!;
 
 const WRITES: [string, unknown][] = [
@@ -120,10 +120,10 @@ describe("admin api", () => {
     await boss.post("/api/contributors/steady/override", { status: "deny", note: NOTE });
     for (const login of ["viewer1", "maint"]) {
       const c = await signedIn(login);
-      const before = auditRows();
+      const before = await auditRows();
       for (const [path, body] of WRITES) await c.post(path, body, 403);
       for (const path of ["/api/contributors/rule-preview?minMerged=1&minRate=0", "/api/access"]) await c.get(path, 403);
-      assert.equal(auditRows(), before, login);
+      assert.equal(await auditRows(), before, login);
       const list = await c.get<ContributorList>("/api/contributors");
       assert.equal(row(list, "steady").override, "deny");
       assert.equal(JSON.stringify(list).includes(NOTE), login === "maint", login);
@@ -136,12 +136,12 @@ describe("admin api", () => {
     const boss = await signedIn("boss");
     let c = row(await boss.get<ContributorList>("/api/contributors"), "veteran");
     assert.deepEqual([c.tier, c.autoTier, c.override], ["whitelisted", "whitelisted", null]);
-    const before = auditRows();
+    const before = await auditRows();
     c = await boss.post<Contributor>("/api/contributors/veteran/override", { status: "deny", note: NOTE });
     assert.deepEqual([c.tier, c.autoTier, c.override, c.overrideBy], ["override-deny", "whitelisted", "deny", "boss"]);
-    assert.equal(auditRows(), before + 1);
-    assert.deepEqual({ ...lastAudit() }, { login: "boss", action: "override", target: "veteran" });
-    const details = (db.prepare("SELECT details FROM audit ORDER BY rowid DESC LIMIT 1").get() as { details: string }).details;
+    assert.equal(await auditRows(), before + 1);
+    assert.deepEqual({ ...await lastAudit() }, { login: "boss", action: "override", target: "veteran" });
+    const details = (await db.prepare("SELECT details FROM audit ORDER BY rowid DESC LIMIT 1").get() as { details: string }).details;
     assert.ok(!details.includes(NOTE));
     const denied = await boss.get<ContributorList>("/api/contributors?tier=override-deny");
     assert.deepEqual(denied.contributors.map((x) => x.login), ["veteran"]);
@@ -158,18 +158,18 @@ describe("admin api", () => {
     const now = await boss.get<ContributorList>("/api/contributors");
     assert.deepEqual(now.rule, { minMerged: 5, minRate: 0.6 });
     assert.equal(now.byTier.whitelisted, 1);
-    const quiet = auditRows();
+    const quiet = await auditRows();
     const p = await boss.get<RulePreview>("/api/contributors/rule-preview?minMerged=3&minRate=0.7");
     assert.deepEqual([p.authors, p.allowedNow, p.allowedAfter], [3, 1, 2]);
     assert.deepEqual(p.gained, { count: 1, logins: ["steady"] });
     assert.deepEqual(p.lost, { count: 0, logins: [] });
-    assert.equal(auditRows(), quiet, "a preview writes nothing");
+    assert.equal(await auditRows(), quiet, "a preview writes nothing");
     await boss.get("/api/contributors/rule-preview?minMerged=-1&minRate=0.7", 400);
     await boss.post("/api/contributors/rule", { minMerged: 3, minRate: 1.5 }, 400);
-    const before = auditRows();
+    const before = await auditRows();
     assert.deepEqual(await boss.post("/api/contributors/rule", { minMerged: 3, minRate: 0.7 }), { minMerged: 3, minRate: 0.7 });
-    assert.equal(auditRows(), before + 1);
-    assert.equal(lastAudit().action, "rule");
+    assert.equal(await auditRows(), before + 1);
+    assert.equal((await lastAudit()).action, "rule");
     const after = await boss.get<ContributorList>("/api/contributors?sort=login&desc=0");
     assert.deepEqual(after.contributors.map((c) => [c.login, c.tier]), [["newbie", "not"], ["steady", "whitelisted"], ["veteran", "whitelisted"]]);
     assert.equal((await boss.get<ContributorList>("/api/contributors?q=STEA")).total, 1);
@@ -181,23 +181,23 @@ describe("admin api", () => {
     const repos = await boss.get<TrackedRepo[]>("/api/repos/all");
     const nyet = repos.find((r) => r.name === "not-yet")!;
     assert.deepEqual([nyet.tracked, nyet.openPrs, nyet.mirrored], [false, 5, 0]);
-    const before = auditRows();
+    const before = await auditRows();
     const after = await boss.post<TrackedRepo[]>("/api/repos/track", { name: "not-yet" });
     assert.equal(after.find((r) => r.name === "not-yet")!.tracked, true);
     await boss.post("/api/repos/track", { name: "not-yet" }, 409);
     await boss.post("/api/repos/track", { name: "bad name" }, 400);
     await boss.post("/api/repos/untrack", { name: "not-yet" });
-    assert.equal(auditRows(), before + 2);
-    assert.equal(lastAudit().action, "repo-untrack");
+    assert.equal(await auditRows(), before + 2);
+    assert.equal((await lastAudit()).action, "repo-untrack");
   });
 
 
   test("access: add, change role, revoke a session; the last operator can't be removed or demoted", async () => {
     const boss = await signedIn("boss");
-    const before = auditRows();
+    const before = await auditRows();
     await boss.post("/api/access/remove", { login: "boss" }, 400);
     await boss.post("/api/access/role", { login: "boss", role: "viewer" }, 400);
-    assert.equal(auditRows(), before);
+    assert.equal(await auditRows(), before);
     let a = await boss.post<AccessOverview>("/api/access/add", { login: "second", role: "operator", note: "backup" });
     assert.equal(a.entries.find((e) => e.login === "second")!.role, "operator");
     await boss.post("/api/access/add", { login: "second", role: "viewer" }, 400);
@@ -218,7 +218,7 @@ describe("admin api", () => {
     await boss.post("/api/access/role", { login: "second", role: "viewer" }, 409);
     await boss.post("/api/access/role", { login: "boss", role: "maintainer" }, 400);
     await boss.post("/api/access/remove", { login: "second" });
-    assert.equal(auditRows(), before + 4);
+    assert.equal(await auditRows(), before + 4);
 
     const log = await boss.get<AuditPage>("/api/audit?action=access-role");
     assert.equal(log.total, 1);

@@ -7,9 +7,9 @@
 // The state is one settings row, settings.jev_unavailable, shown on the Accounts page.
 import { accessSync, constants } from "node:fs";
 import { delimiter, join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { jevCloudflareConfig } from "./jev-cloudflare.ts";
 import { audit } from "../dash/audit.ts";
+import type { Db } from "../db/index.ts";
 
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
@@ -18,19 +18,19 @@ export const JEV_RETRY_MS = 60 * 60_000;
 
 export type JevOutage = { kind: "off" | "missing" | "account"; reason: string; since: string; at: string };
 
-const get = (db: DatabaseSync, key: string): string | undefined => (db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined)?.value;
-const put = (db: DatabaseSync, key: string, value: string): void => void db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+const get = async (db: Db, key: string): Promise<string | undefined> => (await db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined)?.value;
+const put = async (db: Db, key: string, value: string): Promise<void> => void await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
 
-export const jevEnabled = (db: DatabaseSync): boolean => get(db, JEV_ENABLED_KEY) !== "no";
+export const jevEnabled = async (db: Db): Promise<boolean> => await get(db, JEV_ENABLED_KEY) !== "no";
 
-export function jevOutage(db: DatabaseSync): JevOutage | null {
+export async function jevOutage(db: Db): Promise<JevOutage | null> {
   try {
-    const o = JSON.parse(get(db, JEV_UNAVAILABLE_KEY) ?? "null") as JevOutage | null;
+    const o = JSON.parse(await get(db, JEV_UNAVAILABLE_KEY) ?? "null") as JevOutage | null;
     return o && typeof o.since === "string" && typeof o.reason === "string" ? o : null;
   } catch { return null; }
 }
 
-const clear = (db: DatabaseSync): void => void db.prepare("DELETE FROM settings WHERE key = ?").run(JEV_UNAVAILABLE_KEY);
+const clear = async (db: Db): Promise<void> => void await db.prepare("DELETE FROM settings WHERE key = ?").run(JEV_UNAVAILABLE_KEY);
 
 /** True when Jev can be reached: Cloudflare Workers AI is configured, or an executable `jev` is on PATH. */
 export function jevInstalled(): boolean {
@@ -54,18 +54,18 @@ export function jevEnv(env: NodeJS.ProcessEnv = process.env): Record<string, str
 }
 
 /** Turns Jev on or off; turning it on also forgets an earlier failure so the next pass tries it. */
-export function setJevEnabled(db: DatabaseSync, on: boolean, by: string): void {
-  const was = jevEnabled(db);
-  put(db, JEV_ENABLED_KEY, on ? "yes" : "no");
-  if (on) clear(db);
-  else put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind: "off", reason: "switched off", since: new Date().toISOString(), at: new Date().toISOString() } satisfies JevOutage));
-  if (on !== was) audit(db, by, "account-change", "jev", { jevEnabled: on, was });
+export async function setJevEnabled(db: Db, on: boolean, by: string): Promise<void> {
+  const was = await jevEnabled(db);
+  await put(db, JEV_ENABLED_KEY, on ? "yes" : "no");
+  if (on) await clear(db);
+  else await put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind: "off", reason: "switched off", since: new Date().toISOString(), at: new Date().toISOString() } satisfies JevOutage));
+  if (on !== was) await audit(db, by, "account-change", "jev", { jevEnabled: on, was });
 }
 
 /** Whether a pass may call Jev now, without writing: for readers such as the planner. */
-export function jevUsable(db: DatabaseSync, nowMs: number = Date.now()): boolean {
-  if (!jevEnabled(db)) return false;
-  const o = jevOutage(db);
+export async function jevUsable(db: Db, nowMs: number = Date.now()): Promise<boolean> {
+  if (!await jevEnabled(db)) return false;
+  const o = await jevOutage(db);
   if (!o) return true;
   if (o.kind === "missing") return jevInstalled();
   if (o.kind === "account") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
@@ -73,28 +73,28 @@ export function jevUsable(db: DatabaseSync, nowMs: number = Date.now()): boolean
 }
 
 /** Whether a pass may call Jev now. Also keeps the stored state in step with the switch and the installed command. */
-export function jevAvailable(db: DatabaseSync, nowMs: number = Date.now()): boolean {
-  if (!jevEnabled(db)) {
-    if (jevOutage(db)?.kind !== "off") put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind: "off", reason: "switched off", since: new Date(nowMs).toISOString(), at: new Date(nowMs).toISOString() } satisfies JevOutage));
+export async function jevAvailable(db: Db, nowMs: number = Date.now()): Promise<boolean> {
+  if (!await jevEnabled(db)) {
+    if ((await jevOutage(db))?.kind !== "off") await put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind: "off", reason: "switched off", since: new Date(nowMs).toISOString(), at: new Date(nowMs).toISOString() } satisfies JevOutage));
     return false;
   }
-  const usable = jevUsable(db, nowMs), o = jevOutage(db);
+  const usable = await jevUsable(db, nowMs), o = await jevOutage(db);
   // A switch turned back on or a command installed since the outage was recorded ends it; an account outage ends with a call that works.
-  if (usable && o && o.kind !== "account") clear(db);
+  if (usable && o && o.kind !== "account") await clear(db);
   return usable;
 }
 
 /** Records a failure; `since` stays at the first failure of an outage. */
-export function markJevUnavailable(db: DatabaseSync, kind: "missing" | "account", reason: string, nowMs: number = Date.now()): void {
-  const prev = jevOutage(db);
+export async function markJevUnavailable(db: Db, kind: "missing" | "account", reason: string, nowMs: number = Date.now()): Promise<void> {
+  const prev = await jevOutage(db);
   const at = new Date(nowMs).toISOString();
-  put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind, reason, since: prev?.kind === kind ? prev.since : at, at } satisfies JevOutage));
+  await put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind, reason, since: prev?.kind === kind ? prev.since : at, at } satisfies JevOutage));
 }
 
 /** A call that started at `startedMs` went through: an earlier outage is over. An outage recorded after the call started (by a parallel call) stays. */
-export function markJevWorking(db: DatabaseSync, startedMs: number): void {
-  const o = jevOutage(db);
-  if (o && o.kind !== "off" && Date.parse(o.at) < startedMs) clear(db);
+export async function markJevWorking(db: Db, startedMs: number): Promise<void> {
+  const o = await jevOutage(db);
+  if (o && o.kind !== "off" && Date.parse(o.at) < startedMs) await clear(db);
 }
 
 /**

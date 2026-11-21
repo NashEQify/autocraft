@@ -24,7 +24,7 @@ export const steps: StepDef[] = [
       if (ctx.params.mode === "fail") throw new Error("echo failed on purpose");
       ctx.usageRun("test-run");
       const t = new Date().toISOString();
-      ctx.db.prepare(`INSERT INTO token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd)
+      await ctx.db.prepare(`INSERT INTO token_usage (run_id, agent, stage, model, items, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, started_at, ended_at, cost_usd)
         VALUES ('test-run', ?, 'test', 'fake', 1, 100, 10, 0, 0, ?, ?, 0.01)`).run(`echo-${ctx.job.id}`, t, t);
       return `echo ${ctx.params.n}`;
     },
@@ -40,7 +40,7 @@ export const steps: StepDef[] = [
     run: async (ctx) => {
       const ms = Number(ctx.params.ms);
       for (let t = 0; t < ms; t += 50) {
-        ctx.progress(`slept ${t} ms`);
+        await ctx.progress(`slept ${t} ms`);
         await sleep(50);
       }
       return `slept ${ms} ms`;

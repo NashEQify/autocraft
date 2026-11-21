@@ -7,12 +7,13 @@
 // nothing a person types can reach a model's prompt or a shell.
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import type { DatabaseSync } from "node:sqlite";
 import { byOfJob } from "../core/gates.ts";
 import { featureOn } from "../build/features.ts";
 import { envVar } from "../env.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { stepDeadlineMin } from "./deadlines.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 type Base = { name: string; label: string; help?: string; required?: boolean };
 export type ParamDef =
@@ -26,11 +27,11 @@ export type Params = Record<string, string | number>;
 export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 export type StepContext = {
-  db: DatabaseSync;
+  db: Db;
   job: { id: number; requestedBy: string; startedAt: string };
   params: Params;
   /** One line shown on the dashboard while the job runs. */
-  progress(text: string): void;
+  progress(text: string): Promise<void>;
   /** A line in the job's log. Logs are shown to everyone signed in: no secrets. */
   log(line: string): void;
   /** Model calls recorded in token_usage under this run id (from the job's start) count as the job's usage. */
@@ -40,9 +41,9 @@ export type StepContext = {
   /** Progress that is not an item: a batch started, opened or advanced, a decision asked. A job with no items and no acted is recorded as having done nothing, and the autopilot does not queue it again until its input changes. */
   acted(n: number): void;
   /** Set when a cancel was requested; long loops should stop between units of work. */
-  cancelled(): boolean;
+  cancelled(): Promise<boolean>;
   /** True when no new item should start: a cancel was requested, the deadline passed, or a pipeline job runs while the pipeline is not on. The current item finishes. */
-  stopping(): boolean;
+  stopping(): Promise<boolean>;
 };
 
 export type StepDef = {
@@ -68,17 +69,17 @@ export type StepDef = {
   /** null when the step can run; otherwise why not, shown on the page. */
   available?: () => string | null;
   /** Checks a request beyond the schema (null = fine), at request time and again before the run. */
-  check?: (db: DatabaseSync, params: Params) => Promise<string | null> | string | null;
+  check?: (db: Db, params: Params) => Promise<Promise<string | null> | string | null>;
   /** Runs the step in the job's child process and returns a one-line summary. */
   run: (ctx: StepContext) => Promise<string>;
 };
 
 /** Labelling writes to GitHub only for repos in the pipeline scope that an operator approved on the Repos page. */
-async function checkApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkApproved(db: Db, p: Params): Promise<string | null> {
   const { approvalOf } = await import("../labels/approval.ts");
   const { scopeRepos } = await import("../pilot.ts");
-  if (!scopeRepos(db).has(String(p.repo))) return `${p.repo} is not in the pipeline scope`;
-  return approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
+  if (!(await scopeRepos(db)).has(String(p.repo))) return `${p.repo} is not in the pipeline scope`;
+  return await approvalOf(db, String(p.repo)) ? null : `labelling ${p.repo} is not approved`;
 }
 
 export function modelsOf(step: StepDef | undefined, params: Params): string[] {
@@ -90,45 +91,45 @@ export function modelsOf(step: StepDef | undefined, params: Params): string[] {
 export const usesClaude = (models: string[]): boolean => models.some((m) => m !== "jev");
 
 /** Merging is opt-in per repo: tracked repos include ones we do not maintain. */
-async function checkMergeApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkMergeApproved(db: Db, p: Params): Promise<string | null> {
   const { mergeApprovalOf } = await import("../merge/approval.ts");
-  return mergeApprovalOf(db, String(p.repo)) ? null : `merging in ${p.repo} is not approved`;
+  return await mergeApprovalOf(db, String(p.repo)) ? null : `merging in ${p.repo} is not approved`;
 }
 
 /** Approving workflow runs of outside contributors' PRs is opt-in per repo. */
-async function checkCiApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkCiApproved(db: Db, p: Params): Promise<string | null> {
   const { ciApprovalOf } = await import("../merge/ci-approval.ts");
-  return ciApprovalOf(db, String(p.repo)) ? null : `approving CI runs in ${p.repo} is not approved`;
+  return await ciApprovalOf(db, String(p.repo)) ? null : `approving CI runs in ${p.repo} is not approved`;
 }
 
 /** The nightly checks run only for repos whose build feature is switched on. */
-function checkNightlyOn(db: DatabaseSync, p: Params): string | null {
-  return featureOn(db, "nightly", String(p.repo)) ? null : `the Nightly checks feature is off for ${p.repo}`;
+async function checkNightlyOn(db: Db, p: Params): Promise<string | null> {
+  return await featureOn(db, "nightly", String(p.repo)) ? null : `the Nightly checks feature is off for ${p.repo}`;
 }
 
 /** Acting on a red default branch is opt-in per repo. */
-async function checkMainFixApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkMainFixApproved(db: Db, p: Params): Promise<string | null> {
   const { mainFixApprovalOf } = await import("../mainfix/approval.ts");
-  return mainFixApprovalOf(db, String(p.repo)) ? null : `fixing a red main in ${p.repo} is not approved`;
+  return await mainFixApprovalOf(db, String(p.repo)) ? null : `fixing a red main in ${p.repo} is not approved`;
 }
 
 /** Comments and closes are opt-in per repo: tracked repos include ones we do not maintain. */
-async function checkCommentApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkCommentApproved(db: Db, p: Params): Promise<string | null> {
   const { commentApprovalOf } = await import("../act/approval.ts");
-  return commentApprovalOf(db, String(p.repo)) ? null : `commenting in ${p.repo} is not approved`;
+  return await commentApprovalOf(db, String(p.repo)) ? null : `commenting in ${p.repo} is not approved`;
 }
 
 /** Pushing to contributors' branches and commenting the fixes are each opt-in per repo; the fix-up step needs either. */
-async function checkPushApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
   const { pushApprovalOf } = await import("../fixup/approval.ts");
   const { commentApprovalOf } = await import("../act/approval.ts");
-  return pushApprovalOf(db, String(p.repo)) || commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
+  return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
-async function checkFixIssueApproved(db: DatabaseSync, p: Params): Promise<string | null> {
+async function checkFixIssueApproved(db: Db, p: Params): Promise<string | null> {
   const { fixIssueApprovalOf } = await import("../fixissue/approval.ts");
-  return fixIssueApprovalOf(db, String(p.repo)) ? null : `fixing issues in ${p.repo} is not approved`;
+  return await fixIssueApprovalOf(db, String(p.repo)) ? null : `fixing issues in ${p.repo} is not approved`;
 }
 
 const SECURITY_FINDING_PARAMS: ParamDef[] = [
@@ -137,8 +138,8 @@ const SECURITY_FINDING_PARAMS: ParamDef[] = [
 ];
 
 /** The finding exists and is in a state the step works on. */
-async function securityFindingCheck(db: DatabaseSync, p: Params, states: string[]): Promise<string | null> {
-  const row = db.prepare("SELECT state FROM security_findings WHERE repo = ? AND number = ?").get(String(p.repo), Number(p.number)) as { state: string } | undefined;
+async function securityFindingCheck(db: Db, p: Params, states: string[]): Promise<string | null> {
+  const row = await db.prepare("SELECT state FROM security_findings WHERE repo = ? AND number = ?").get(String(p.repo), Number(p.number)) as { state: string } | undefined;
   if (!row) return "no such finding";
   return states.includes(row.state) ? null : `the finding is ${row.state}`;
 }
@@ -234,7 +235,7 @@ export const STEPS: StepDef[] = [
       const refused = await checkApproved(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const { latestRun } = await import("../classify/settled.ts");
-      const runId = latestRun(ctx.db);
+      const runId = await latestRun(ctx.db);
       if (!runId) throw new Error("there is no classification run yet");
       const { applyLabels, ensureLabels } = await import("../labels/github.ts");
       const { Client } = await import("../mirror.ts");
@@ -344,7 +345,7 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { askMergeDecisions } = await import("../merge/index.ts");
       const { trackedNames } = await import("../repos.ts");
-      const ids = askMergeDecisions(ctx.db, { repos: trackedNames(ctx.db), log: ctx.log });
+      const ids = await askMergeDecisions(ctx.db, { repos: await trackedNames(ctx.db), log: ctx.log });
       ctx.handled(ids.length);
       return `Asked Merge? on ${ids.length} PR${ids.length === 1 ? "" : "s"}`;
     },
@@ -532,7 +533,7 @@ export const STEPS: StepDef[] = [
       { name: "scan", label: "Scan", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the scan row the API created" },
     ],
     check: async (db, p) => {
-      const row = db.prepare("SELECT repo, state FROM security_scans WHERE id = ?").get(Number(p.scan)) as { repo: string; state: string } | undefined;
+      const row = await db.prepare("SELECT repo, state FROM security_scans WHERE id = ?").get(Number(p.scan)) as { repo: string; state: string } | undefined;
       if (!row || row.repo !== p.repo) return "no such scan";
       return ["modeling", "scanning", "verifying"].includes(row.state) ? null : `the scan already ended (${row.state})`;
     },
@@ -555,20 +556,20 @@ export const STEPS: StepDef[] = [
     requires: "operator",
     models: ["opus"],
     params: SECURITY_FINDING_PARAMS,
-    check: (db, p) => securityFindingCheck(db, p, ["fixing"]),
+    check: async (db, p) => securityFindingCheck(db, p, ["fixing"]),
     run: async (ctx) => {
       const { runFix, defaultFixDeps } = await import("../security/fix.ts");
       const { usageRunId } = await import("../security/real.ts");
       const { rawFinding } = await import("../security/store.ts");
       const repo = String(ctx.params.repo), n = Number(ctx.params.number);
-      const scan = rawFinding(ctx.db, repo, n)!.scan_id;
+      const scan = (await rawFinding(ctx.db, repo, n))!.scan_id;
       ctx.usageRun(usageRunId(scan));
       const { leaseItem } = await import("./leases.ts");
-      const release = leaseItem(ctx.db, `finding:${repo}#${n}`, ctx.log);
+      const release = await leaseItem(ctx.db, `finding:${repo}#${n}`, ctx.log);
       if (!release) return `${repo}#${n}: another job is working this finding`;
       try {
         return await runFix(ctx.db, repo, n, defaultFixDeps(ctx.db, scan, { cancelled: ctx.cancelled, log: ctx.log }));
-      } finally { release(); }
+      } finally { await release(); }
     },
   },
   {
@@ -580,7 +581,7 @@ export const STEPS: StepDef[] = [
     requires: "operator",
     exclusive: "security-write",
     params: SECURITY_FINDING_PARAMS,
-    check: (db, p) => securityFindingCheck(db, p, ["landing"]),
+    check: async (db, p) => securityFindingCheck(db, p, ["landing"]),
     run: async (ctx) => {
       const { runLand } = await import("../security/land.ts");
       return runLand(ctx.db, String(ctx.params.repo), Number(ctx.params.number), byOfJob(ctx.job.requestedBy), await securityLandDeps(ctx));
@@ -595,7 +596,7 @@ export const STEPS: StepDef[] = [
     requires: "operator",
     exclusive: "security-write",
     params: SECURITY_FINDING_PARAMS,
-    check: (db, p) => securityFindingCheck(db, p, ["landing"]),
+    check: async (db, p) => securityFindingCheck(db, p, ["landing"]),
     run: async (ctx) => {
       const { runAdvisory } = await import("../security/land.ts");
       return runAdvisory(ctx.db, String(ctx.params.repo), Number(ctx.params.number), byOfJob(ctx.job.requestedBy), await securityLandDeps(ctx));
@@ -610,7 +611,7 @@ export const STEPS: StepDef[] = [
     requires: "operator",
     exclusive: "security-write",
     params: [...SECURITY_FINDING_PARAMS, { name: "cve", label: "CVE", kind: "int", min: 0, max: 1, default: 0, help: "1 to request a CVE" }],
-    check: (db, p) => securityFindingCheck(db, p, ["landed", "advisory"]),
+    check: async (db, p) => securityFindingCheck(db, p, ["landed", "advisory"]),
     run: async (ctx) => {
       const { runPublish } = await import("../security/land.ts");
       return runPublish(ctx.db, String(ctx.params.repo), Number(ctx.params.number), byOfJob(ctx.job.requestedBy), Number(ctx.params.cve) === 1, await securityLandDeps(ctx));
@@ -627,7 +628,7 @@ export const STEPS: StepDef[] = [
     params: [],
     run: async (ctx) => {
       const { runRank } = await import("../rank/index.ts");
-      const r = runRank(ctx.db);
+      const r = await runRank(ctx.db);
       ctx.handled(r.changed + r.removed);
       return `${r.items} open items ranked, ${r.changed} changed, ${r.removed} removed`;
     },
@@ -644,13 +645,13 @@ export const STEPS: StepDef[] = [
       const { latestRun } = await import("../classify/settled.ts");
       const { refereeItems } = await import("../classify/referee.ts");
       const { itemOf, plannedItems } = await import("../core/select-items.ts");
-      const run = latestRun(ctx.db);
+      const run = await latestRun(ctx.db);
       if (!run) throw new Error("There is no classification run yet; start a classification pass first.");
       const { takersFirst } = await import("../agents/call.ts");
-      const due = takersFirst(ctx.db, plannedItems(ctx.db, "referee", { run }), (p) => [p.facts.repo], (p) => [p.facts]).slice(0, Number(ctx.params.limit));
+      const due = (await takersFirst(ctx.db, await plannedItems(ctx.db, "referee", { run }), (p) => [p.facts.repo], (p) => [p.facts])).slice(0, Number(ctx.params.limit));
       if (!due.length) return `Nothing to referee in run ${run}.`;
-      const asked = (source: string) => due.filter((p) => p.action.params?.source === source).map((p) => itemOf(ctx.db, p.facts.repo, p.facts.number));
-      const sonnet = asked("sonnet"), opus = asked("opus");
+      const asked = async (source: string) => await mapSeq(due.filter((p) => p.action.params?.source === source), async (p) => await itemOf(ctx.db, p.facts.repo, p.facts.number));
+      const sonnet = await asked("sonnet"), opus = await asked("opus");
       let sent = 0;
       const onSent = (n: number) => ctx.handled(sent + n);
       const gotSonnet = sonnet.length ? await refereeItems(ctx.db, run, sonnet, { pipeline: true, onSent, cancelled: ctx.cancelled }) : 0;
@@ -690,7 +691,7 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { runCarry } = await import("../review/carry-step.ts");
       const repo = String(ctx.params.repo);
-      return `${repo}: carried ${runCarry(ctx.db, repo, ctx.log)} reviews`;
+      return `${repo}: carried ${await runCarry(ctx.db, repo, ctx.log)} reviews`;
     },
   },
   {
@@ -962,10 +963,10 @@ export const STEPS: StepDef[] = [
     stage: runStage("nightly"),
     requires: "operator",
     params: [{ name: "repo", label: "Repo", kind: "repo", required: true }],
-    check: (db, p) => checkNightlyOn(db, p),
+    check: async (db, p) => await checkNightlyOn(db, p),
     run: async (ctx) => {
       const { runNightly } = await import("../nightly/index.ts");
-      const refused = checkNightlyOn(ctx.db, ctx.params);
+      const refused = await checkNightlyOn(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const r = await runNightly(ctx.db, { repo: String(ctx.params.repo), onHandled: ctx.handled, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
       ctx.acted(r.queued + r.issues);

@@ -7,14 +7,14 @@ import { detectAutopilot, LANES } from "../src/runner/autopilot.ts";
 import { world } from "./world-db.ts";
 
 test("labels-apply waits while the repo's write budget is used up", async () => {
-  const w = world().repo().issue(1, { label: "bugfix" });
-  setApproval(w.db, "op", "app", true);
+  const w = await (await (await world()).repo()).issue(1, { label: "bugfix" });
+  await setApproval(w.db, "op", "app", true);
   const lanes = LANES.filter((l) => l.name === "labels");
   assert.deepEqual((await detectAutopilot(w.db, { lanes })).proposals.map((p) => p.step), ["labels-apply"]);
 
   const add = w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'pipeline', 'comment', 'app#2', ?)");
   const now = Date.now();
-  for (let i = 0; i < 60; i++) add.run(new Date(now - 30_000 + i * 100).toISOString(), JSON.stringify({ identity: "legacy", paceOwner: "", state: "done" }));
+  for (let i = 0; i < 60; i++) await add.run(new Date(now - 30_000 + i * 100).toISOString(), JSON.stringify({ identity: "legacy", paceOwner: "", state: "done" }));
   const held = await detectAutopilot(w.db, { lanes });
   assert.deepEqual(held.proposals, []);
   assert.match(held.status?.["labels-apply"] ?? "", /write budget for app is used up until/);

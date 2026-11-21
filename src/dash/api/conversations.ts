@@ -1,5 +1,4 @@
 // Opus conversations on items. Everyone who may see the repo reads them; only operators write, edit, run and dismiss.
-import type { DatabaseSync } from "node:sqlite";
 import type { CardEdit, Conversation, ConversationCard, ConversationTurn, DecisionChoices } from "../../../web/src/api/types.ts";
 import { buttonLabel, cardEffect, cardLines, decisionStamp, dependsOnCode, headline, isSettling, openDecision, stepLine, validateCard, type CardParams } from "../../conversations/cards.ts";
 import { applyDrafts, choicesById, compose, coresFor, currentChoices, seenJson, type ComposeExtra, type Core } from "../../decide/choices.ts";
@@ -16,12 +15,14 @@ import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle } from "../../settlers.ts";
+import { mapSeq } from "../../async-seq.ts";
+import type { Db } from "../../db/index.ts";
 
 const isOperator = (req: Req): boolean => req.user.role === "operator";
 
-function guard<T>(f: () => T): T {
+async function guard<T>(f: () => Promise<T>): Promise<T> {
   try {
-    return f();
+    return await f();
   } catch (e) {
     if (e instanceof ConversationError) throw new HttpError(e.status, e.message);
     throw e;
@@ -37,22 +38,22 @@ async function guardAsync<T>(f: () => Promise<T>): Promise<T> {
   }
 }
 
-function queuedView(db: DatabaseSync, c: CardRow, staff: boolean): NonNullable<ConversationCard["queued"]> {
+function queuedView(db: Db, c: CardRow, staff: boolean): NonNullable<ConversationCard["queued"]> {
   const place = c.dispute_by ? null : queuePlace(db, c.id);
   return { place, reason: queueReason(place), dispute: c.dispute_by ? { by: c.dispute_by, reason: staff ? (c.dispute_reason ?? "") : "", at: c.dispute_at ?? "" } : null };
 }
 
 /** `who`: the viewer, for the card's `canSettle` (an operator, or a maintainer under the rule of src/settlers.ts, from cached permissions). */
-export function cardView(db: DatabaseSync, c: CardRow, who?: { login: string; role: string }): ConversationCard {
+export async function cardView(db: Db, c: CardRow, who?: { login: string; role: string }): Promise<ConversationCard> {
   const params = JSON.parse(c.params) as CardParams;
-  const effect = c.kind === "answer" || c.kind === "close" || c.kind === "resolution" ? cardEffect(db, params) : null;
-  const lines = cardLines(db, params, c.description);
+  const effect = c.kind === "answer" || c.kind === "close" || c.kind === "resolution" ? await cardEffect(db, params) : null;
+  const lines = await cardLines(db, params, c.description);
   const commentStep = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "comment") : params.kind === "comment" || (params.kind === "close" && c.text !== null) ? 0 : -1;
   const issueAt = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "open_issue") : -1;
   const fixupAt = params.kind === "resolution" ? params.steps.findIndex((x) => x.kind === "fixup") : -1;
   const issueStep = params.kind === "resolution" ? params.steps[issueAt] : undefined;
   const fixupStep = params.kind === "resolution" ? params.steps[fixupAt] : undefined;
-  const stale = c.state === "proposed" ? staleOf(db, c.repo, c.number, c.seen) : undefined;
+  const stale = c.state === "proposed" ? await staleOf(db, c.repo, c.number, c.seen) : undefined;
   const one = (t: string) => t.replace(/\s+/g, " ").trim();
   const settleReason = params.kind === "resolution" && params.settle?.kind === "answer" ? params.settle.reason : undefined;
   const previews: [string, string | undefined | null][] = [
@@ -71,10 +72,10 @@ export function cardView(db: DatabaseSync, c: CardRow, who?: { login: string; ro
     ...(params.kind === "resolution" && params.settle?.kind === "answer" && { option: params.settle.option }),
     ...(stale && { stale }),
     ...(lines.settles && { settles: lines.settles }),
-    label: buttonLabel(db, params),
-    headline: headline(db, params),
+    label: await buttonLabel(db, params),
+    headline: await headline(db, params),
     ...(preview && { preview }),
-    canSettle: !!who && canSettleCached(db, who.login, who.role, cardRepos(c, params)),
+    canSettle: !!who && await canSettleCached(db, who.login, who.role, cardRepos(c, params)),
     id: c.id, kind: c.kind as ConversationCard["kind"], title: c.description, state: c.state as ConversationCard["state"], digest: cardDigest(c),
     ...(c.text !== null && { text: c.text }),
     ...(effect && { writes: effect }),
@@ -93,16 +94,16 @@ export function cardView(db: DatabaseSync, c: CardRow, who?: { login: string; ro
  * Null when the item has no such decision or cores, or when the decision has no current choices row written for its present state
  * (the web then offers the plain answer path and Re-prepare).
  */
-export function choicesView(db: DatabaseSync, repo: string, n: number): DecisionChoices | null {
-  const d = openDecision(db, repo, n);
+export async function choicesView(db: Db, repo: string, n: number): Promise<DecisionChoices | null> {
+  const d = await openDecision(db, repo, n);
   if (!d) return null;
-  const base = coresFor(db, d);
+  const base = await coresFor(db, d);
   if (base.length === 0) return null;
-  const row = currentChoices(db, d.id);
-  if (!row || row.stamp !== decisionStamp(db, d)) return null;
-  const cores = applyDrafts(db, d, base, row);
+  const row = await currentChoices(db, d.id);
+  if (!row || row.stamp !== await decisionStamp(db, d)) return null;
+  const cores = await applyDrafts(db, d, base, row);
   const strip = ({ parsed: _p, decision: _d, allowed: _a, closing: _c, ...view }: Core) => view;
-  const run = (db.prepare("SELECT id, state, error FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as { id: number; state: string; error: string | null } | undefined);
+  const run = (await db.prepare("SELECT id, state, error FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as { id: number; state: string; error: string | null } | undefined);
   const pick = row.pick.core && cores.some((c) => c.key === row.pick.core) ? { core: row.pick.core, reason: row.pick.reason ?? "" } : null;
   return {
     id: row.id, decisionId: d.id, pick, cores: cores.map(strip),
@@ -114,22 +115,22 @@ export function choicesView(db: DatabaseSync, repo: string, n: number): Decision
 /** The conversation plus the maintainer posts shared with Opus. */
 export type ConversationView = Conversation & { includes: IncludeRow[] };
 
-export function conversationView(db: DatabaseSync, repo: string, n: number, who?: { login: string; role: string }): ConversationView {
+export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<ConversationView> {
   // A card left Running by a crash must not show as running until the next restart.
-  sweepRunningCards(db);
-  const c = conversationOf(db, repo, n);
-  const includes = includesOf(db, repo, n);
-  const choices = choicesView(db, repo, n);
+  await sweepRunningCards(db);
+  const c = await conversationOf(db, repo, n);
+  const includes = await includesOf(db, repo, n);
+  const choices = await choicesView(db, repo, n);
   if (!c) return { repo, number: n, exists: false, pending: false, startedBy: null, turns: [], includes, choices };
-  const cards = db.prepare("SELECT * FROM conversation_cards WHERE repo = ? AND number = ? ORDER BY id").all(repo, n) as unknown as CardRow[];
-  const turns: ConversationTurn[] = turnsOf(db, repo, n).map((t) => ({
+  const cards = await db.prepare("SELECT * FROM conversation_cards WHERE repo = ? AND number = ? ORDER BY id").all(repo, n) as unknown as CardRow[];
+  const turns: ConversationTurn[] = await mapSeq((await turnsOf(db, repo, n)), async (t) => ({
     id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,
-    actions: cards.filter((x) => x.turn_id === t.id).map((x) => cardView(db, x, who)),
+    actions: await mapSeq(cards.filter((x) => x.turn_id === t.id), async (x) => await cardView(db, x, who)),
     notes: t.notes ? (JSON.parse(t.notes) as string[]) : [],
     ...(t.status && { status: t.status as ConversationTurn["status"] }),
     ...(t.error && { error: t.error }),
   }));
-  const wait = pendingTurn(db, repo, n);
+  const wait = await pendingTurn(db, repo, n);
   const progress = wait?.status === "answering" && wait.progress ? (JSON.parse(wait.progress) as string[]) : [];
   return { repo, number: n, exists: true, pending: !!wait, ...(progress.length > 0 && { progress }), startedBy: c.created_by, turns, includes, choices };
 }
@@ -173,11 +174,11 @@ function needOperator(req: Req): void {
   if (!isOperator(req)) throw new HttpError(403, "only operators write in conversations");
 }
 
-export async function getConversation(db: DatabaseSync, req: Req): Promise<ConversationView> {
+export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
-  const view = conversationView(db, repo, n, req.user);
-  return !canSeeInternals(req) && isQuiet(db, repo, n) ? veilConversation(view) : view;
+  const view = await conversationView(db, repo, n, req.user);
+  return !canSeeInternals(req) && await isQuiet(db, repo, n) ? veilConversation(view) : view;
 }
 
 /** A viewer's copy of a quiet pull request's conversation: who spoke and when stays; the text, cards, choices and their reasons go. */
@@ -186,41 +187,41 @@ function veilConversation(v: ConversationView): ConversationView {
   return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })), includes: [], choices: null };
 }
 
-export async function postMessage(db: DatabaseSync, req: Req, deps?: StoreDeps): Promise<ConversationView> {
+export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
   needOperator(req);
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
   await guardAsync(() => addOperatorMessage(db, repo, n, req.user.login, text(req), deps, ask(req)));
-  return conversationView(db, repo, n, req.user);
+  return await conversationView(db, repo, n, req.user);
 }
 
 /** Shares a maintainer post with Opus (`on`) or stops sharing it; the next asked message carries it. */
-export async function postInclude(db: DatabaseSync, req: Req, deps?: StoreDeps): Promise<ConversationView> {
+export async function postInclude(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
   needOperator(req);
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
   const b = req.json as { source?: unknown; on?: unknown } | null;
   if (!b || typeof b !== "object" || typeof b.source !== "string" || typeof b.on !== "boolean") throw new HttpError(400, "the body must be an object with a source and on (true or false)");
-  guard(() => setInclude(db, repo, n, b.source as string, b.on as boolean, req.user.login, deps));
-  return conversationView(db, repo, n, req.user);
+  await guard(async () => await setInclude(db, repo, n, b.source as string, b.on as boolean, req.user.login, deps));
+  return await conversationView(db, repo, n, req.user);
 }
 
 /** The card, for someone who settles it on every repo it writes to (src/settlers.ts: an operator with write access, or a maintainer under its rule). */
-async function needCard(db: DatabaseSync, req: Req): Promise<CardRow> {
+async function needCard(db: Db, req: Req): Promise<CardRow> {
   const id = Number(req.params.id);
-  const c = Number.isInteger(id) ? cardOf(db, id) : undefined;
+  const c = Number.isInteger(id) ? await cardOf(db, id) : undefined;
   if (!c) throw new HttpError(404, `no card ${req.params.id}`);
   await needVisible(db, req, c.repo);
   await requireSettle(db, req.user, cardRepos(c, JSON.parse(c.params) as CardParams), "runs cards");
   return c;
 }
 
-export async function editCardText(db: DatabaseSync, req: Req): Promise<ConversationCard> {
+export async function editCardText(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   const edit = cardEdit(req);
   // The fix-up instructions go to the fix-up model: only an operator writes them.
   if (edit.instructions !== undefined && !isOperator(req)) throw new HttpError(403, "only operators edit a fix-up's instructions");
-  return cardView(db, guard(() => editCard(db, c.id, req.user.login, edit)), req.user);
+  return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, edit)), req.user);
 }
 
 /** A queued press is the presser's: only they and operators dismiss, keep or take it back; anyone who settles may dispute it. */
@@ -228,39 +229,39 @@ function ownsPress(req: Req, c: CardRow): boolean {
   return isOperator(req) || c.acted_by?.toLowerCase() === req.user.login.toLowerCase();
 }
 
-export async function dismiss(db: DatabaseSync, req: Req): Promise<ConversationCard> {
+export async function dismiss(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   if (c.state === "queued" && !ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, dismisses a queued press; dispute it instead");
-  return cardView(db, guard(() => dismissCard(db, c.id, req.user.login, { role: req.user.role })), req.user);
+  return await cardView(db, await guard(async () => await dismissCard(db, c.id, req.user.login, { role: req.user.role })), req.user);
 }
 
 /** Someone else who settles disputes a queued press: it stays queued, the drain skips it, and the presser or an operator keeps or dismisses it. A reason is required. */
-export async function disputePress(db: DatabaseSync, req: Req): Promise<ConversationCard> {
+export async function disputePress(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   const reason = typeof (req.json as { reason?: unknown } | null)?.reason === "string" ? ((req.json as { reason: string }).reason).trim() : "";
   if (!reason) throw new HttpError(400, "a dispute needs a reason");
   if (reason.length > NOTE_MAX) throw new HttpError(400, `the reason is longer than ${NOTE_MAX} characters`);
   if (c.state !== "queued") throw new HttpError(409, "only a queued press can be disputed");
   if (c.acted_by?.toLowerCase() === req.user.login.toLowerCase()) throw new HttpError(409, "you pressed this: dismiss it instead");
-  if (!disputeCard(db, c.id, req.user.login, reason, new Date().toISOString())) throw new HttpError(409, c.dispute_by ? `already disputed by ${c.dispute_by}` : "the press ran a moment ago");
-  audit(db, req.user.login, "dispute", `card:${c.id}`, { reason, queuedBy: c.acted_by ?? undefined });
-  return cardView(db, cardOf(db, c.id)!, req.user);
+  if (!await disputeCard(db, c.id, req.user.login, reason, new Date().toISOString())) throw new HttpError(409, c.dispute_by ? `already disputed by ${c.dispute_by}` : "the press ran a moment ago");
+  await audit(db, req.user.login, "dispute", `card:${c.id}`, { reason, queuedBy: c.acted_by ?? undefined });
+  return await cardView(db, (await cardOf(db, c.id))!, req.user);
 }
 
 /** The presser, or an operator, keeps a disputed queued press: the drain takes it up again. */
-export async function keepPress(db: DatabaseSync, req: Req): Promise<ConversationCard> {
+export async function keepPress(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   if (!ownsPress(req, c)) throw new HttpError(403, "only the person who pressed it, or an operator, keeps a disputed press");
-  if (!keepCard(db, c.id)) throw new HttpError(409, "that press is not disputed");
-  audit(db, req.user.login, "dispute-resolve", `card:${c.id}`, { resolution: "keep", disputedBy: c.dispute_by ?? undefined });
-  return cardView(db, cardOf(db, c.id)!, req.user);
+  if (!await keepCard(db, c.id)) throw new HttpError(409, "that press is not disputed");
+  await audit(db, req.user.login, "dispute-resolve", `card:${c.id}`, { resolution: "keep", disputedBy: c.dispute_by ?? undefined });
+  return await cardView(db, (await cardOf(db, c.id))!, req.user);
 }
 
 /**
  * Runs the card once; a second press returns the card as it is. The press carries the digest of the card it was made on,
  * so an edit by someone else in between is refused instead of running under this press.
  */
-export async function doIt(db: DatabaseSync, req: Req, deps?: ActDeps): Promise<ConversationCard> {
+export async function doIt(db: Db, req: Req, deps?: ActDeps): Promise<ConversationCard> {
   const c = await needCard(db, req);
   const b = req.json as { skip?: unknown; note?: unknown; digest?: unknown } | null;
   if (typeof b?.digest !== "string") throw new HttpError(400, "digest must be the digest of the card as shown");
@@ -268,7 +269,7 @@ export async function doIt(db: DatabaseSync, req: Req, deps?: ActDeps): Promise<
   if (b?.note !== undefined && typeof b.note !== "string") throw new HttpError(400, "note must be a string");
   if (b?.skip !== undefined && (!Array.isArray(b.skip) || b.skip.some((k) => !Number.isInteger(k)))) throw new HttpError(400, "skip must be a list of step positions");
   const skip = (b?.skip as number[] | undefined) ?? [];
-  return cardView(db, (await guardAsync(() => doCard(db, c.id, req.user.login, { ...deps, skip, note: b?.note as string | undefined, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }))).card, req.user);
+  return await cardView(db, (await guardAsync(() => doCard(db, c.id, req.user.login, { ...deps, skip, note: b?.note as string | undefined, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }))).card, req.user);
 }
 
 /** The request body of a choice run, checked for shape only. */
@@ -297,21 +298,21 @@ function choiceBody(req: Req): { core: CoreKey; params: { reason?: string; instr
  * (`choice_id` set) and runs it like Do it. The user's own edited texts go through the card edit, so they are not cleaned and
  * show as edited; a maintainer may not edit fix-up instructions.
  */
-export async function doChoice(db: DatabaseSync, req: Req, deps?: ActDeps): Promise<ConversationCard> {
-  const row = choicesById(db, req.params.id!);
+export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<ConversationCard> {
+  const row = await choicesById(db, req.params.id!);
   if (!row) throw new HttpError(404, `no choices ${req.params.id}`);
   await needVisible(db, req, row.repo);
   const body = choiceBody(req);
   if (row.state !== "current") throw new HttpError(409, "replaced by newer choices");
-  const d = getDecision(db, row.decisionId);
+  const d = await getDecision(db, row.decisionId);
   if (!d || d.answer !== null) throw new HttpError(409, "the decision is already settled");
-  if (decisionStamp(db, d) !== row.stamp || openDecision(db, row.repo, row.number)?.id !== d.id) throw new HttpError(409, "the decision changed since these choices were written");
-  const priorOf = (): CardRow | undefined => db.prepare("SELECT * FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as unknown as CardRow | undefined;
+  if (await decisionStamp(db, d) !== row.stamp || (await openDecision(db, row.repo, row.number))?.id !== d.id) throw new HttpError(409, "the decision changed since these choices were written");
+  const priorOf = async (): Promise<CardRow | undefined> => await db.prepare("SELECT * FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as unknown as CardRow | undefined;
   // A card for these choices that is already running or done is returned as it is (a second press).
-  const first = priorOf();
-  if (first && (first.state === "running" || first.state === "done" || first.state === "queued")) return cardView(db, first, req.user);
+  const first = await priorOf();
+  if (first && (first.state === "running" || first.state === "done" || first.state === "queued")) return await cardView(db, first, req.user);
 
-  const core = applyDrafts(db, d, coresFor(db, d), row).find((c) => c.key === body.core);
+  const core = (await applyDrafts(db, d, await coresFor(db, d), row)).find((c) => c.key === body.core);
   if (!core) throw new HttpError(400, `"${body.core}" is not one of the choices`);
   const user = (id: string) => body.extras.find((x) => x.id === id);
   const extras: ComposeExtra[] = body.extras.map((x) => {
@@ -326,10 +327,10 @@ export async function doChoice(db: DatabaseSync, req: Req, deps?: ActDeps): Prom
   if (body.params.instructions !== undefined && body.params.instructions.trim() !== drafted.trim() && !isOperator(req)) throw new HttpError(403, "only operators edit a fix-up's instructions");
   const composed = compose(core, extras, params);
   if ("note" in composed) throw new HttpError(400, composed.note);
-  const v = validateCard(db, row.repo, row.number, composed.card);
+  const v = await validateCard(db, row.repo, row.number, composed.card);
   if (!("card" in v)) throw new HttpError(400, v.note);
   // After a push only cards that do not rest on the code (backlog, hold, label, close, plain answers) run; a drafted text or a fix-up waits for the updated choices.
-  if (staleOf(db, row.repo, row.number, seenJson(row.seen)) === "pr-changed" && dependsOnCode(v.card.params, v.card.text)) throw new HttpError(409, "the PR changed since these choices were written; Opus is updating the choices");
+  if (await staleOf(db, row.repo, row.number, seenJson(row.seen)) === "pr-changed" && dependsOnCode(v.card.params, v.card.text)) throw new HttpError(409, "the PR changed since these choices were written; Opus is updating the choices");
 
   const probe = { repo: row.repo } as CardRow;
   await requireSettle(db, req.user, cardRepos(probe, v.card.params), "runs choices");
@@ -339,18 +340,18 @@ export async function doChoice(db: DatabaseSync, req: Req, deps?: ActDeps): Prom
   let failedBefore: CardRow | undefined;
   db.exec("BEGIN IMMEDIATE");
   try {
-    if (choicesById(db, row.id)?.state !== "current") throw new HttpError(409, "replaced by newer choices");
-    const prior = priorOf();
-    if (prior && (prior.state === "running" || prior.state === "done" || prior.state === "queued")) { db.exec("COMMIT"); return cardView(db, prior, req.user); }
+    if ((await choicesById(db, row.id))?.state !== "current") throw new HttpError(409, "replaced by newer choices");
+    const prior = await priorOf();
+    if (prior && (prior.state === "running" || prior.state === "done" || prior.state === "queued")) { db.exec("COMMIT"); return await cardView(db, prior, req.user); }
     // A run whose outcome is unknown may have repeated writes: the operator prepares again or says what else to do.
     if (prior?.state === "failed" && /^outcome unknown/.test(prior.error ?? "")) throw new HttpError(409, "the last run of these choices stopped after some of its steps; Re-prepare, or tell Opus what to do next");
     failedBefore = prior?.state === "failed" ? prior : undefined;
-    db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE choice_id = ? AND state = 'proposed'").run(row.id);
-    id = Number(db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?)")
-      .run(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id).lastInsertRowid);
+    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE choice_id = ? AND state = 'proposed'").run(row.id);
+    id = Number((await db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?)")
+      .run(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id)).lastInsertRowid);
     db.exec("COMMIT");
   } catch (e) {
-    if (db.isTransaction) db.exec("ROLLBACK");
+    if (db.inTransaction()) db.exec("ROLLBACK");
     throw e;
   }
   try {
@@ -364,9 +365,9 @@ export async function doChoice(db: DatabaseSync, req: Req, deps?: ActDeps): Prom
     if (issue?.kind === "open_issue" && typedIssue && (typedIssue.title!.trim() !== issue.title || typedIssue.body!.trim() !== issue.body)) edit.issue = { title: typedIssue.title!, body: typedIssue.body! };
     const fix = steps.find((x) => x.kind === "fixup");
     if (fix?.kind === "fixup" && body.params.instructions !== undefined && body.params.instructions.trim() !== fix.instructions) edit.instructions = body.params.instructions;
-    if (Object.keys(edit).length) guard(() => editCard(db, id, req.user.login, edit));
+    if (Object.keys(edit).length) await guard(async () => await editCard(db, id, req.user.login, edit));
   } catch (e) {
-    db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
+    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
     throw e;
   }
   // Steps a failed earlier press of these choices completed (its error names them) are not run again.
@@ -379,8 +380,8 @@ export async function doChoice(db: DatabaseSync, req: Req, deps?: ActDeps): Prom
     ran = await guardAsync(() => doCard(db, id, req.user.login, { ...deps, skip: alreadyDone, note: body.note, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }));
   } catch (e) {
     // Refused before the claim (lane, approval): the card never ran and must not stay proposed.
-    db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
+    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
     throw e;
   }
-  return cardView(db, ran.card, req.user);
+  return await cardView(db, ran.card, req.user);
 }

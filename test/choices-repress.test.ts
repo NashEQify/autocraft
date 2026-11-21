@@ -12,14 +12,14 @@ import type { Req } from "../src/dash/types.ts";
 import { OPERATOR, world } from "./world-db.ts";
 
 test("pressing Fix up first, then merge again after a press that applied the label and failed runs the rest", async () => {
-  const w = world().repo().pr(5, { label: "plugin candidate" });
+  const w = await (await (await world()).repo()).pr(5, { label: "plugin candidate" });
   try {
     const db = w.db;
-    setLabelApproval(db, OPERATOR, "app", true);
-    ask(db, [{ id: "app#5:scope", kind: "scope", repo: "app", number: 5, question: "Scope?", options: Object.values(SCOPE_OPTIONS).map((o) => ({ key: o.key, label: o.label })) }]);
-    const d = getDecision(db, "app#5:scope")!;
-    const row = writeChoices(db, {
-      decisionId: d.id, repo: "app", number: 5, turnId: null, stamp: decisionStamp(db, d), seen: { head: "sha5", lastComment: null }, source: "prepare",
+    await setLabelApproval(db, OPERATOR, "app", true);
+    await ask(db, [{ id: "app#5:scope", kind: "scope", repo: "app", number: 5, question: "Scope?", options: Object.values(SCOPE_OPTIONS).map((o) => ({ key: o.key, label: o.label })) }]);
+    const d = (await getDecision(db, "app#5:scope"))!;
+    const row = await writeChoices(db, {
+      decisionId: d.id, repo: "app", number: 5, turnId: null, stamp: await decisionStamp(db, d), seen: { head: "sha5", lastComment: null }, source: "prepare",
       drafts: { "fixup-merge": { params: { instructions: "Rename a to b." }, extras: [{ id: "label:small extra", kind: "label", on: true, label: "small extra" }] } }, added: [], pick: { core: "fixup-merge", reason: "Small." },
     });
     const labelWrites: string[] = [];
@@ -40,13 +40,13 @@ test("pressing Fix up first, then merge again after a press that applied the lab
     assert.equal(failed.state, "failed");
     assert.match(failed.error ?? "", /Already done: Add the label "small extra"/);
     assert.equal(labelWrites.length, 1);
-    assert.equal(getDecision(db, "app#5:scope")!.answer, null);
+    assert.equal((await getDecision(db, "app#5:scope"))!.answer, null);
 
     broken = false;
     const again = await doChoice(db, press(), { querier: querier as never, exec: (async () => ({ code: 0, stdout: "", stderr: "" })) as never });
     assert.equal(again.state, "done", again.error ?? "");
     assert.equal(labelWrites.length, 1, "the label step that already ran is skipped");
-    assert.equal(getDecision(db, "app#5:scope")!.answer, "small-extra");
-    assert.equal(w.rows("SELECT id FROM operator_fixups WHERE number = 5").length, 1);
+    assert.equal((await getDecision(db, "app#5:scope"))!.answer, "small-extra");
+    assert.equal((await w.rows("SELECT id FROM operator_fixups WHERE number = 5")).length, 1);
   } finally { w.close(); }
 });

@@ -3,7 +3,6 @@
 import { CLI_BY, type By } from "../core/gates.ts";
 import { guardItem, guardRepo, type GuardedItem } from "../core/guard.ts";
 import { setTimeout as sleepMs } from "node:timers/promises";
-import type { DatabaseSync } from "node:sqlite";
 import { addLabels, createLabel, WritePacedError, type Writer } from "../github/write.ts";
 import { Transient, type Querier } from "../mirror.ts";
 import { approvalOf } from "./approval.ts";
@@ -11,6 +10,7 @@ import { plannedItems } from "../core/select-items.ts";
 import { ALL_LABELS, type LabelDef } from "./set.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf } from "../owners.ts";
+import type { Db } from "../db/index.ts";
 
 export const BATCH = 10;          // mutations per request
 export const WRITES_PER_MIN = 40; // below GitHub's content-creating limit, leaving the write pacing budget room for other writes
@@ -52,7 +52,7 @@ export async function ensureLabels(client: Querier, repo: string, apply: boolean
   const have = await repoLabels(client, repo, wait);
   const missing = ALL_LABELS.filter((l) => !have.labels.has(l.name.toLowerCase()));
   if (apply && missing.length) {
-    const g = guardRepo(w.db, repo, "labels", by);
+    const g = await guardRepo(w.db, repo, "labels", by);
     if ("refused" in g) throw new LabelsError(g.refused);
     for (const l of missing) {
       await createLabel(w, g, client, repo, have.id, { name: l.name, color: l.color, description: l.description }, (f) => retrying(f, wait));
@@ -73,15 +73,15 @@ export type ApplyOpts = { runId: string; limit?: number; apply: boolean; login?:
 /** An item the Plans give labels to, and the labels to add. */
 type Todo = { number: number; add: string[] };
 
-export async function applyLabels(db: DatabaseSync, client: Querier, repo: string, o: ApplyOpts): Promise<ApplyResult> {
+export async function applyLabels(db: Db, client: Querier, repo: string, o: ApplyOpts): Promise<ApplyResult> {
   const wait = o.wait ?? (sleepMs as Wait);
   const log = o.log ?? (() => {});
   const w: Writer = { db, login: o.login ?? "cli" };
-  const approval = approvalOf(db, repo);
+  const approval = await approvalOf(db, repo);
   if (o.apply && !approval) {
     throw new LabelsError(`${repo} is not approved for labelling. An operator approves it on the dashboard Repos page.`);
   }
-  let todo: Todo[] = plannedItems(db, "label", { repo, run: o.runId }).map((p) => ({ number: p.facts.number, add: p.action.params!.add as string[] }));
+  let todo: Todo[] = (await plannedItems(db, "label", { repo, run: o.runId })).map((p) => ({ number: p.facts.number, add: p.action.params!.add as string[] }));
   if (o.limit !== undefined) todo = todo.slice(0, o.limit);
   const res: ApplyResult = { planned: todo.length, labeled: 0, failed: [], skipped: 0, batches: 0, dryRun: !o.apply };
   if (!o.apply) {
@@ -101,7 +101,7 @@ export async function applyLabels(db: DatabaseSync, client: Querier, repo: strin
     const live = (r: Todo) => ids.get(r.number);
     const gone = chunk.filter((r) => live(r)?.id && live(r)!.state && live(r)!.state !== "OPEN");
     for (const r of gone) {
-      db.prepare("UPDATE main.items SET state = ? WHERE repo = ? AND number = ? AND state = 'OPEN'").run(live(r)!.state, repo, r.number);
+      await db.prepare("UPDATE main.items SET state = ? WHERE repo = ? AND number = ? AND state = 'OPEN'").run(live(r)!.state, repo, r.number);
       log(`${repo}#${r.number}: skipped, now ${live(r)!.state} on GitHub`);
     }
     res.skipped += gone.length;
@@ -128,13 +128,13 @@ export async function applyLabels(db: DatabaseSync, client: Querier, repo: strin
     const ok = guarded.filter((r) => done.includes(r.number));
     if (ok.length) {
       const at = new Date().toISOString();
-      db.exec("BEGIN IMMEDIATE");
+      await db.write(async () => {
       for (const r of ok) {
-        db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, 'labels', ?)")
+        await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, 'labels', ?)")
           .run(repo, r.number, at, `added: ${r.add.join(", ")}`);
       }
-      db.exec("COMMIT");
-      for (const r of ok) jobItem(db, repo, r.number, `labelled ${r.add.join(", ")}`, log);
+      });
+      for (const r of ok) await jobItem(db, repo, r.number, `labelled ${r.add.join(", ")}`, log);
       res.labeled += ok.length;
       o.onLabeled?.(res.labeled);
     }

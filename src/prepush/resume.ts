@@ -2,9 +2,9 @@
 // The session store of a sandboxed patch call is kept with the stored patch row until the row's lint outcome is known or the window passes.
 import { rmSync, utimesSync } from "node:fs";
 import { isAbsolute } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { CHECK_MAX_WALL_MS } from "../core/rules.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
+import type { Db } from "../db/index.ts";
 
 /** How long after its last use a kept session is resumed: the prompt cache window. */
 export const RESUME_WINDOW_MS = 60 * 60_000;
@@ -86,22 +86,22 @@ export class SessionLedger {
 }
 
 /** Removes the kept sessions whose row is no longer waiting for its lint result (pushed, failed, dropped) or is past the window. */
-export function sweepSessions(db: DatabaseSync, now: Date): number {
+export async function sweepSessions(db: Db, now: Date): Promise<number> {
   let n = 0;
   // A store that a row still waiting on its lint references stays, even when a sibling row (same head) left that state.
   const live = new Set<string>();
   for (const t of SESSION_TABLES) {
-    for (const r of db.prepare(`SELECT session FROM ${t} WHERE session IS NOT NULL AND state = '${WAITING[t]}'`).all() as { session: string }[]) {
+    for (const r of await db.prepare(`SELECT session FROM ${t} WHERE session IS NOT NULL AND state = '${WAITING[t]}'`).all() as { session: string }[]) {
       for (const s of Object.values(parseSessions(r.session))) if (now.getTime() - Date.parse(s.at) <= RESUME_WINDOW_MS + LONGEST_CALL_MS) live.add(s.dir);
     }
   }
   for (const t of SESSION_TABLES) {
-    const rows = db.prepare(`SELECT rowid AS id, state, session FROM ${t} WHERE session IS NOT NULL`).all() as { id: number; state: string; session: string }[];
+    const rows = await db.prepare(`SELECT rowid AS id, state, session FROM ${t} WHERE session IS NOT NULL`).all() as { id: number; state: string; session: string }[];
     for (const r of rows) {
       const all = Object.values(parseSessions(r.session));
       if (all.length && r.state === WAITING[t] && all.every((s) => live.has(s.dir))) continue;
       for (const s of all) if (!live.has(s.dir)) remove(s.dir);
-      db.prepare(`UPDATE ${t} SET session = NULL WHERE rowid = ?`).run(r.id);
+      await db.prepare(`UPDATE ${t} SET session = NULL WHERE rowid = ?`).run(r.id);
       n++;
     }
   }

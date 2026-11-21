@@ -7,13 +7,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec, Git } from "../src/fixup/git.ts";
 import { checkFormat, foldFormat } from "../src/prepush/index.ts";
-import { connect } from "../src/db.ts";
 import { claim, createTask, getTask, privateClockStart } from "../src/build/tasks.ts";
 import { createEnv, hello, touch, updateEnv } from "../src/build/envs.ts";
 import { computeChecks } from "../src/health-checks.ts";
 import { runFix, type FixDeps } from "../src/security/fix.ts";
 import { advanceSecurityFixes } from "../src/security/actions.ts";
 import { rustPlan } from "../src/worker/rust.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const HEAD = [
   "fn add(a: i32, b: i32) -> i32 { a + b }",
@@ -61,43 +61,43 @@ test("a formatter diff folds in only when every file it writes is the patched fi
 });
 
 test("a security fix waits, with a warning, until a confidential environment has reported; that environment takes no PR code", async () => {
-  const db = connect(":memory:");
-  db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
+  const db = await connectDb(":memory:");
+  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
   const caps = { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: false, gpu: false, toolchains: ["rust-stable"] };
   for (const id of ["plain", "vault"]) {
-    createEnv(db, { id, label: id, kind: "remote", slots: 4 }, "op");
+    await createEnv(db, { id, label: id, kind: "remote", slots: 4 }, "op");
     // What the worker says about itself never makes it confidential.
-    hello(db, id, { version: "1", capabilities: { ...caps, confidential: true }, slots: 4 });
+    await hello(db, id, { version: "1", capabilities: { ...caps, confidential: true }, slots: 4 });
   }
   const t = { repo: "app", plan: rustPlan(), requires: { os: "linux" as const } };
-  const fix = createTask(db, { ...t, step: "fix-check", headSha: "a".repeat(40), patch: "secret" });
-  const pr = createTask(db, { ...t, step: "fixup", number: 7, headSha: "b".repeat(40) });
-  const batch = createTask(db, { ...t, step: "merge-batch", headSha: "c".repeat(40) });
-  assert.equal(getTask(db, fix)!.summary, "Waiting for a confidential build environment.");
-  assert.deepEqual(claim(db, "vault", 4).tasks.map((x) => x.id), [pr, batch]);
+  const fix = await createTask(db, { ...t, step: "fix-check", headSha: "a".repeat(40), patch: "secret" });
+  const pr = await createTask(db, { ...t, step: "fixup", number: 7, headSha: "b".repeat(40) });
+  const batch = await createTask(db, { ...t, step: "merge-batch", headSha: "c".repeat(40) });
+  assert.equal((await getTask(db, fix))!.summary, "Waiting for a confidential build environment.");
+  assert.deepEqual((await claim(db, "vault", 4)).tasks.map((x) => x.id), [pr, batch]);
   // The fix itself waits before its model call; the job ends at once.
-  db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, created_at, updated_at)
+  await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, created_at, updated_at)
     VALUES ('app', 1, 1, 'a', 't', 'high', 'fixing', '[]', 'r', 'i', 'f', '2026-01-01', '2026-01-01')`).run();
   assert.match(await runFix(db, "app", 1, { log: () => {} } as unknown as FixDeps), /waiting for a confidential build environment/);
-  assert.equal((db.prepare("SELECT note FROM security_findings WHERE number = 1").get() as { note: string }).note, "Waiting for a confidential build environment.");
-  const warn = () => computeChecks(db).find((c) => c.id === "confidential-env")!;
-  assert.equal(warn().state, "warn");
-  assert.equal(warn().text, "1 security fix and 1 security build task are waiting for a confidential build environment");
+  assert.equal((await db.prepare("SELECT note FROM security_findings WHERE number = 1").get() as { note: string }).note, "Waiting for a confidential build environment.");
+  const warn = async () => (await computeChecks(db)).find((c) => c.id === "confidential-env")!;
+  assert.equal((await warn()).state, "warn");
+  assert.equal((await warn()).text, "1 security fix and 1 security build task are waiting for a confidential build environment");
   // Flagged but not yet reported: still waiting. The build limit starts at its first call and an edit does not move it.
-  updateEnv(db, "vault", { confidential: true }, "op");
-  assert.equal(privateClockStart(db, "2026-01-01T00:00:00Z"), null);
-  touch(db, "vault");
-  const start = privateClockStart(db, "2026-01-01T00:00:00Z");
-  updateEnv(db, "vault", { label: "renamed" }, "op");
-  touch(db, "vault");
-  assert.ok(start !== null && privateClockStart(db, "2026-01-01T00:00:00Z") === start);
-  assert.equal(warn().state, "ok");
+  await updateEnv(db, "vault", { confidential: true }, "op");
+  assert.equal(await privateClockStart(db, "2026-01-01T00:00:00Z"), null);
+  await touch(db, "vault");
+  const start = await privateClockStart(db, "2026-01-01T00:00:00Z");
+  await updateEnv(db, "vault", { label: "renamed" }, "op");
+  await touch(db, "vault");
+  assert.ok(start !== null && await privateClockStart(db, "2026-01-01T00:00:00Z") === start);
+  assert.equal((await warn()).state, "ok");
   assert.equal(await advanceSecurityFixes(db, false), 0, "a fix the pipeline started waits for the switch");
-  db.prepare("UPDATE security_findings SET decided_by = 'boss'").run();
+  await db.prepare("UPDATE security_findings SET decided_by = 'boss'").run();
   assert.equal(await advanceSecurityFixes(db, false), 1);
-  db.prepare("UPDATE build_tasks SET state = 'queued', env_id = NULL WHERE id IN (?, ?)").run(pr, batch);
-  assert.equal(getTask(db, fix)!.summary, null);
-  assert.deepEqual(claim(db, "plain", 4).tasks.map((x) => x.id), [pr, batch]);
-  assert.deepEqual(claim(db, "vault", 4).tasks.map((x) => x.id), [fix]);
+  await db.prepare("UPDATE build_tasks SET state = 'queued', env_id = NULL WHERE id IN (?, ?)").run(pr, batch);
+  assert.equal((await getTask(db, fix))!.summary, null);
+  assert.deepEqual((await claim(db, "plain", 4)).tasks.map((x) => x.id), [pr, batch]);
+  assert.deepEqual((await claim(db, "vault", 4)).tasks.map((x) => x.id), [fix]);
 });

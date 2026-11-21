@@ -4,13 +4,13 @@
 // makes an answering token (`answer: true`): its agent may also answer decisions and undo answers, and it lasts 7 days.
 // Task Runner credentials come from a device login instead (runners.ts).
 import { maintainerWritesOn } from "../../settlers.ts";
-import type { DatabaseSync } from "node:sqlite";
 import type { McpTokenCreated, McpTokens } from "../../../web/src/api/types.ts";
 import { audit } from "../audit.ts";
 import { answering } from "../mcp/index.ts";
 import { createToken, listTokens, MCP_TOKENS_PER_LOGIN, revokeToken } from "../mcp/tokens.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
+import type { Db } from "../../db/index.ts";
 
 const body = (req: Req): Record<string, unknown> => {
   const b = req.json;
@@ -19,24 +19,24 @@ const body = (req: Req): Record<string, unknown> => {
   return b as Record<string, unknown>;
 };
 
-export const tokens = (db: DatabaseSync, req: Req): McpTokens => ({ tokens: listTokens(db, req.user.login, "connector"), max: MCP_TOKENS_PER_LOGIN, path: "/mcp", answering: answering.enabled });
+export const tokens = async (db: Db, req: Req): Promise<McpTokens> => ({ tokens: await listTokens(db, req.user.login, "connector"), max: MCP_TOKENS_PER_LOGIN, path: "/mcp", answering: answering.enabled });
 
-export function create(db: DatabaseSync, req: Req): McpTokenCreated {
+export async function create(db: Db, req: Req): Promise<McpTokenCreated> {
   if (req.user.role === "viewer") throw new HttpError(403, "viewers cannot make agent tokens");
   const b = body(req);
   if (b.answer !== undefined && typeof b.answer !== "boolean") throw new HttpError(400, "answer must be true or false");
   if (b.answer === true && !answering.enabled) throw new HttpError(403, "answering from an agent is not available yet");
   if (b.run === true) throw new HttpError(400, "a Task Runner gets its credential with `autocraft login`, approved on the Connect page");
-  if (b.answer === true && req.user.role !== "operator" && !(req.user.role === "maintainer" && maintainerWritesOn(db))) throw new HttpError(403, "only operators, and maintainers where they may settle decisions, make tokens that answer decisions");
-  const { token, row } = createToken(db, req.user.login, b.label, { canAnswer: b.answer === true });
-  audit(db, req.user.login, "mcp-token-create", req.user.login, { id: row.id, label: row.label ?? undefined, ...(row.canAnswer ? { canAnswer: true } : {}) });
-  return { ...tokens(db, req), token, id: row.id };
+  if (b.answer === true && req.user.role !== "operator" && !(req.user.role === "maintainer" && await maintainerWritesOn(db))) throw new HttpError(403, "only operators, and maintainers where they may settle decisions, make tokens that answer decisions");
+  const { token, row } = await createToken(db, req.user.login, b.label, { canAnswer: b.answer === true });
+  await audit(db, req.user.login, "mcp-token-create", req.user.login, { id: row.id, label: row.label ?? undefined, ...(row.canAnswer ? { canAnswer: true } : {}) });
+  return { ...await tokens(db, req), token, id: row.id };
 }
 
-export function revoke(db: DatabaseSync, req: Req): McpTokens {
+export async function revoke(db: Db, req: Req): Promise<McpTokens> {
   const id = body(req).id;
   if (!Number.isInteger(id)) throw new HttpError(400, "id must be a token id");
-  if (!revokeToken(db, req.user.login, id as number, "connector")) throw new HttpError(404, "you have no such token");
-  audit(db, req.user.login, "mcp-token-revoke", req.user.login, { id });
-  return tokens(db, req);
+  if (!await revokeToken(db, req.user.login, id as number, "connector")) throw new HttpError(404, "you have no such token");
+  await audit(db, req.user.login, "mcp-token-revoke", req.user.login, { id });
+  return await tokens(db, req);
 }

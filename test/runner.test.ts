@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));
 
@@ -20,39 +21,39 @@ const { inputHash } = await import("../src/runner/classify.ts");
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "runner-test-"));
 const dbFile = join(dir, "runner.db");
-const db = connect(dbFile);
-db.exec("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES ('app', 1); UPDATE tracked_repos SET pipeline = 1");
+const db = await connectDb(dbFile);
+await db.script("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES ('app', 1); UPDATE tracked_repos SET pipeline = 1");
 const runner = new Runner({ db, dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} });
 
 after(async () => {
   await runner.stop();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
-async function until(cond: () => boolean, ms = 20_000): Promise<void> {
+async function until(cond: () => Promise<boolean>, ms = 20_000): Promise<void> {
   const end = Date.now() + ms;
-  while (!cond()) {
+  while (!await cond()) {
     if (Date.now() > end) throw new Error("timed out");
     await runner.tick();
     await new Promise((r) => setTimeout(r, 50));
   }
 }
 
-const state = (id: number) => getJob(db, id).state;
+const state = async (id: number) => (await getJob(db, id)).state;
 
 describe("runner", () => {
   test("runs a queued job and records its summary, usage and a scrubbed log; a failing job is failed", async () => {
     const ok = await enqueue(db, "test-echo", { n: 7 }, "boss");
     const bad = await enqueue(db, "test-echo", { mode: "fail" }, "boss");
-    await until(() => state(ok.id) === "done" && state(bad.id) === "failed");
-    const j = jobDetail(db, ok.id);
+    await until(async () => await state(ok.id) === "done" && await state(bad.id) === "failed");
+    const j = await jobDetail(db, ok.id);
     assert.equal(j.summary, "echo 7");
     assert.deepEqual(j.usage, { calls: 1, input: 100, output: 10, costUsd: 0.01 });
     assert.ok(j.startedAt && j.endedAt);
     assert.ok(j.log!.includes("token in the log: [hidden]"), j.log!);
     assert.ok(!j.log!.includes(FAKE_TOKEN));
-    assert.equal(getJob(db, bad.id).error, "echo failed on purpose");
+    assert.equal((await getJob(db, bad.id)).error, "echo failed on purpose");
   });
 
 

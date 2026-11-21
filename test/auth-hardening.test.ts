@@ -6,25 +6,25 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { addLogin } from "../src/access.ts";
-import { connect } from "../src/db.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { OPERATOR_SESSION_MAX, SESSION_MAX, loadSession } from "../src/dash/server/sessions.ts";
 import { safeReturnTo } from "../src/dash/server/util.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "hardening-test-"));
-const db = connect(join(dir, "dash.db"));
+const db = await connectDb(join(dir, "dash.db"));
 const provider = new FakeProvider(null);
 let base = "";
 let port = 0;
 let close: () => Promise<void>;
 
 before(async () => {
-  addLogin(db, "cli", "alice", "viewer", null);
-  addLogin(db, "cli", "boss", "operator", null);
+  await addLogin(db, "cli", "alice", "viewer", null);
+  await addLogin(db, "cli", "boss", "operator", null);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: join(dir, "dash.db") });
   const s = await startServer({ config, db, provider, routes: [] });
   base = s.url;
@@ -33,7 +33,7 @@ before(async () => {
 });
 after(async () => {
   await close();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -77,14 +77,14 @@ describe("dev auth guard", () => {
 describe("GitHub id binding", () => {
   test("the first sign-in stores the id; a different id is refused and audited", async () => {
     assert.equal((await signIn("alice")).status, 303);
-    const stored = (db.prepare("SELECT github_id FROM access WHERE login = 'alice'").get() as { github_id: number }).github_id;
+    const stored = (await db.prepare("SELECT github_id FROM access WHERE login = 'alice'").get() as { github_id: number }).github_id;
     assert.equal(stored, provider.ids.get("alice"));
     assert.equal((await signIn("alice")).status, 303);
     provider.ids.set("alice", stored + 1);
     const refused = await signIn("alice");
     assert.equal(refused.status, 403);
     assert.equal(refused.cookie, null);
-    const row = db.prepare("SELECT details FROM audit WHERE action = 'sign-in-refused' AND login = 'alice'").get() as { details: string };
+    const row = await db.prepare("SELECT details FROM audit WHERE action = 'sign-in-refused' AND login = 'alice'").get() as { details: string };
     assert.match(row.details, /github-id-mismatch/);
     provider.ids.set("alice", stored);
     assert.equal((await signIn("alice")).status, 303);
@@ -99,12 +99,12 @@ describe("session lifetime", () => {
     const sid = async (login: string) => (await signIn(login)).cookie!.split("=")[1]!;
     const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
     const viewer = await sid("alice"), op = await sid("boss");
-    assert.ok(loadSession(db, viewer));
-    assert.ok(loadSession(db, op));
-    db.prepare("UPDATE sessions SET created_at = ?").run(ago(OPERATOR_SESSION_MAX + 1000));
-    assert.ok(loadSession(db, viewer), "a viewer's session outlives the operator limit");
-    assert.equal(loadSession(db, op), null);
-    db.prepare("UPDATE sessions SET created_at = ?").run(ago(SESSION_MAX + 1000));
-    assert.equal(loadSession(db, viewer), null);
+    assert.ok(await loadSession(db, viewer));
+    assert.ok(await loadSession(db, op));
+    await db.prepare("UPDATE sessions SET created_at = ?").run(ago(OPERATOR_SESSION_MAX + 1000));
+    assert.ok(await loadSession(db, viewer), "a viewer's session outlives the operator limit");
+    assert.equal(await loadSession(db, op), null);
+    await db.prepare("UPDATE sessions SET created_at = ?").run(ago(SESSION_MAX + 1000));
+    assert.equal(await loadSession(db, viewer), null);
   });
 });

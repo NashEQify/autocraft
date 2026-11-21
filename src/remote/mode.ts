@@ -1,11 +1,10 @@
 // The instance's inference mode. `server`: Claude model calls run on this host with the registered accounts.
 // `user-local`: they are queued as remote calls that maintainers' helpers claim, run on their own machines and
 // submit (src/remote/calls.ts). Jev calls and embeddings run on this host in both modes.
-import type { DatabaseSync } from "node:sqlite";
-import { prep } from "../sql-cache.ts";
 import { audit } from "../dash/audit.ts";
 import { EFFORTS, type Effort, type HarnessId, type Tier } from "./protocol.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
 
 export const INFERENCE_MODES = ["server", "user-local"] as const;
 export type InferenceMode = (typeof INFERENCE_MODES)[number];
@@ -13,15 +12,15 @@ export const INFERENCE_KEY = "inference";
 
 export const isInferenceMode = (v: unknown): v is InferenceMode => typeof v === "string" && (INFERENCE_MODES as readonly string[]).includes(v);
 
-export const inferenceMode = (db: DatabaseSync): InferenceMode =>
-  setting(db, INFERENCE_KEY) === "user-local" ? "user-local" : "server";
+export const inferenceMode = async (db: Db): Promise<InferenceMode> =>
+  await setting(db, INFERENCE_KEY) === "user-local" ? "user-local" : "server";
 
 /** Sets the mode and audits the change as `by`; false when it already was `mode`. */
-export function setInferenceMode(db: DatabaseSync, mode: InferenceMode, by: string): boolean {
-  if (inferenceMode(db) === mode) return false;
-  if (mode === "server") prep(db, "DELETE FROM main.settings WHERE key = ?").run(INFERENCE_KEY);
-  else prep(db, "INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(INFERENCE_KEY, mode);
-  audit(db, by, "inference", INFERENCE_KEY, { value: mode });
+export async function setInferenceMode(db: Db, mode: InferenceMode, by: string): Promise<boolean> {
+  if (await inferenceMode(db) === mode) return false;
+  if (mode === "server") await db.prepare("DELETE FROM main.settings WHERE key = ?").run(INFERENCE_KEY);
+  else await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(INFERENCE_KEY, mode);
+  await audit(db, by, "inference", INFERENCE_KEY, { value: mode });
   return true;
 }
 
@@ -43,8 +42,8 @@ export const CODEX_TOP_PLACEHOLDER = "astra";
 export const DEFAULT_REMOTE_MODELS: Record<Tier, string[]> = { top: ["opus", CODEX_TOP_PLACEHOLDER], mid: ["sonnet"], small: ["haiku"] };
 const FAMILY = /^[a-z0-9][a-z0-9.-]{0,39}$/;
 
-const rawModels = (db: DatabaseSync): Record<string, unknown> => {
-  const raw = setting(db, REMOTE_MODELS_KEY);
+const rawModels = async (db: Db): Promise<Record<string, unknown>> => {
+  const raw = await setting(db, REMOTE_MODELS_KEY);
   if (!raw) return {};
   try {
     const v = JSON.parse(raw) as unknown;
@@ -52,16 +51,16 @@ const rawModels = (db: DatabaseSync): Record<string, unknown> => {
   } catch { return {}; }
 };
 
-export function acceptedModels(db: DatabaseSync): Record<Tier, string[]> {
-  const { minEffort: _, ...fams } = rawModels(db);
+export async function acceptedModels(db: Db): Promise<Record<Tier, string[]>> {
+  const { minEffort: _, ...fams } = await rawModels(db);
   try { return { ...DEFAULT_REMOTE_MODELS, ...checkModels(fams) }; } catch { return DEFAULT_REMOTE_MODELS; }
 }
 
 export const isEffort = (v: unknown): v is Effort => typeof v === "string" && (EFFORTS as readonly string[]).includes(v);
 
 /** The lowest effort each tier accepts, for the tiers that set one (stored as `minEffort` beside the families in the `remote_models` setting). */
-export function minEfforts(db: DatabaseSync): Partial<Record<Tier, Effort>> {
-  try { return checkEfforts(rawModels(db).minEffort ?? {}); } catch { return {}; }
+export async function minEfforts(db: Db): Promise<Partial<Record<Tier, Effort>>> {
+  try { return checkEfforts((await rawModels(db)).minEffort ?? {}); } catch { return {}; }
 }
 
 /** `{tier: effort}` for some or all tiers, checked; throws with the reason. */
@@ -103,9 +102,9 @@ function checkModels(v: unknown): Partial<Record<Tier, string[]>> {
  * Replaces the accepted families and minimum efforts of the tiers given (audited as `by`). `minEffort` maps a tier to an
  * effort, or to null to remove its floor. Returns the families table.
  */
-export function setAcceptedModels(db: DatabaseSync, raw: unknown, by: string, minEffort?: unknown): Record<Tier, string[]> {
-  const next = raw === undefined ? acceptedModels(db) : { ...acceptedModels(db), ...checkModels(raw) };
-  let floors = minEfforts(db);
+export async function setAcceptedModels(db: Db, raw: unknown, by: string, minEffort?: unknown): Promise<Record<Tier, string[]>> {
+  const next = raw === undefined ? await acceptedModels(db) : { ...await acceptedModels(db), ...checkModels(raw) };
+  let floors = await minEfforts(db);
   if (minEffort !== undefined) {
     if (!minEffort || typeof minEffort !== "object" || Array.isArray(minEffort)) throw new Error("minEffort must map a tier to an effort");
     const set: Record<string, unknown> = {}, clear: string[] = [];
@@ -117,8 +116,8 @@ export function setAcceptedModels(db: DatabaseSync, raw: unknown, by: string, mi
     for (const t of clear) { if (!isTier(t)) throw new Error(`unknown tier ${t}`); delete floors[t]; }
   }
   const stored = { ...next, ...(Object.keys(floors).length && { minEffort: floors }) };
-  prep(db, "INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(REMOTE_MODELS_KEY, JSON.stringify(stored));
-  audit(db, by, "remote-models", REMOTE_MODELS_KEY, stored);
+  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(REMOTE_MODELS_KEY, JSON.stringify(stored));
+  await audit(db, by, "remote-models", REMOTE_MODELS_KEY, stored);
   return next;
 }
 

@@ -2,7 +2,6 @@
 // Descriptions are built here from the parameters; the model never writes them.
 import { ownerOf, splitSlug } from "../owners.ts";
 import { REFERENCE_LEAK } from "../review/opus-parse.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { writeEffect } from "../act/index.ts";
 import { cleanReason } from "../act/templates.ts";
 import { optionsOf, getDecision, type DecisionRow, type Kind } from "../decisions.ts";
@@ -13,6 +12,8 @@ import { pilotSql } from "../pilot.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { LOGIN } from "../access.ts";
 import { CLOSE_REASONS, COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, RESOLVE_MAX, type CardKind, type CloseReason } from "./types.ts";
+import { findSeq, someSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /**
  * One step of a resolution. The comment step's text is the card's `text`. Every kind but `review` and `fixup` is one GitHub write
@@ -62,25 +63,25 @@ export type NewCard = { params: CardParams; text: string | null; description: st
 const ref = (repo: string, n: number) => `${repo}#${n}`;
 
 /** The item's open decision: the newest unanswered one that is about this item alone and is not a duplicate-group decision. */
-export function openDecision(db: DatabaseSync, repo: string, n: number): DecisionRow | undefined {
-  return db.prepare(`SELECT * FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'
+export async function openDecision(db: Db, repo: string, n: number): Promise<DecisionRow | undefined> {
+  return await db.prepare(`SELECT * FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'
     ORDER BY asked_at DESC, id DESC LIMIT 1`).get(repo, n) as DecisionRow | undefined;
 }
 
 /** Identifies the state of a decision a card was written for: its ask time and how often it was answered, undone or reopened. A re-ask or Reopen keeps the id, so the id alone cannot tell. */
-export function decisionStamp(db: DatabaseSync, d: DecisionRow): string {
-  const n = (db.prepare("SELECT COUNT(*) AS n FROM audit WHERE target = ? AND action IN ('answer', 'undo', 'reopen')").get(d.id) as { n: number }).n;
+export async function decisionStamp(db: Db, d: DecisionRow): Promise<string> {
+  const n = (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE target = ? AND action IN ('answer', 'undo', 'reopen')").get(d.id) as { n: number }).n;
   return `${d.asked_at}|${n}`;
 }
 
 const closeEffect = (p: { reason: CloseReason; pr: boolean }): string => p.pr ? "closes the PR on GitHub" : `closes the issue as ${p.reason === "completed" ? "completed" : "not planned"} on GitHub`;
-const decisionWrite = (db: DatabaseSync, decision: string, option: string): string | null => {
-  const d = getDecision(db, decision);
+const decisionWrite = async (db: Db, decision: string, option: string): Promise<string | null> => {
+  const d = await getDecision(db, decision);
   return d ? writeEffect(d.kind as Kind, option) : null;
 };
 
 /** The GitHub write that answering with this card's option causes later (the Act step does it), or null when it writes nothing. For a resolution: every closing write it makes, joined. */
-export function cardEffect(db: DatabaseSync, p: CardParams): string | null {
+export async function cardEffect(db: Db, p: CardParams): Promise<string | null> {
   if (p.kind === "resolution") {
     const parts: string[] = [];
     for (const st of p.steps) {
@@ -90,14 +91,14 @@ export function cardEffect(db: DatabaseSync, p: CardParams): string | null {
       else if (st.kind === "fixup" && st.merge) parts.push("merges the PR on GitHub once the fix-up, the review and CI pass");
     }
     if (p.settle?.kind === "answer") {
-      const w = decisionWrite(db, p.settle.decision, p.settle.option);
+      const w = await decisionWrite(db, p.settle.decision, p.settle.option);
       if (w) parts.push(w);
     }
     return parts.length ? parts.join("; ") : null;
   }
   if (p.kind === "close") return closeEffect(p);
   if (p.kind !== "answer" || !p.decision) return null;
-  return decisionWrite(db, p.decision, p.option);
+  return await decisionWrite(db, p.decision, p.option);
 }
 
 /** The word for a decision in the card lines: "scope", "close", "merge" ... ; "open" for kinds without a name of their own. */
@@ -130,8 +131,8 @@ export function stepLine(st: Step, held = false): string {
 }
 
 /** One plain line for how a card ends the open decision. */
-export function settleLine(db: DatabaseSync, s: Settle): string {
-  const d = getDecision(db, s.decision);
+export async function settleLine(db: Db, s: Settle): Promise<string> {
+  const d = await getDecision(db, s.decision);
   switch (s.kind) {
     case "answer": return `Answers the ${questionWord(d)} question with "${optionLabel(d, s.option)}"${s.reason ? `, giving the reason: ${s.reason}` : ""}`;
     case "handled": return `Closes the ${questionWord(d)} question as handled: "${s.summary}"`;
@@ -140,20 +141,20 @@ export function settleLine(db: DatabaseSync, s: Settle): string {
 }
 
 /** The steps and settlement lines of any card, resolution or legacy (`description` is the legacy card's one line). */
-export function cardLines(db: DatabaseSync, p: CardParams, description: string): { steps: string[]; settles?: string } {
-  if (p.kind === "resolution") return { steps: p.steps.map((x) => stepLine(x, holdsIssues(p))), ...(p.settle && { settles: settleLine(db, p.settle) }) };
+export async function cardLines(db: Db, p: CardParams, description: string): Promise<{ steps: string[]; settles?: string }> {
+  if (p.kind === "resolution") return { steps: p.steps.map((x) => stepLine(x, holdsIssues(p))), ...(p.settle && { settles: await settleLine(db, p.settle) }) };
   const steps = [description];
   switch (p.kind) {
-    case "answer": return { steps: [], settles: settleLine(db, { kind: "answer", decision: p.decision, option: p.option, stamp: p.stamp ?? "" }) };
+    case "answer": return { steps: [], settles: await settleLine(db, { kind: "answer", decision: p.decision, option: p.option, stamp: p.stamp ?? "" }) };
     case "backlog": return { steps: [], settles: "Moves the item to the Backlog" };
-    case "resolve": return { steps: [], settles: settleLine(db, { kind: "handled", decision: p.decision, summary: p.summary, stamp: p.stamp ?? "" }) };
+    case "resolve": return { steps: [], settles: await settleLine(db, { kind: "handled", decision: p.decision, summary: p.summary, stamp: p.stamp ?? "" }) };
     case "close": case "duplicate": return { steps, settles: "Closes the open questions as handled" };
     default: return { steps };
   }
 }
 
 /** The primary button's label: the action in a few words, from the parameters and the item. Server-written. */
-export function buttonLabel(db: DatabaseSync, p: CardParams): string {
+export async function buttonLabel(db: Db, p: CardParams): Promise<string> {
   switch (p.kind) {
     case "resolution": {
       const close = p.steps.find((x) => x.kind === "close");
@@ -163,7 +164,7 @@ export function buttonLabel(db: DatabaseSync, p: CardParams): string {
       const fix = p.steps.find((x) => x.kind === "fixup");
       if (fix) return fix.merge ? "Fix up and merge" : "Fix up";
       if (p.steps.some((x) => x.kind === "review")) return "Review again";
-      if (p.settle?.kind === "answer") return `Answer "${optionLabel(getDecision(db, p.settle.decision), p.settle.option)}"`;
+      if (p.settle?.kind === "answer") return `Answer "${optionLabel(await getDecision(db, p.settle.decision), p.settle.option)}"`;
       if (p.settle?.kind === "backlog") return "Move to Backlog";
       if (p.steps.some((x) => x.kind === "open_issue")) return "Open issue";
       if (p.settle) return "Close question";
@@ -173,7 +174,7 @@ export function buttonLabel(db: DatabaseSync, p: CardParams): string {
     }
     case "comment": return "Post comment";
     case "answer": {
-      const d = getDecision(db, p.decision);
+      const d = await getDecision(db, p.decision);
       return `Answer "${optionLabel(d, p.option)}"`;
     }
     case "label": return "Add label";
@@ -185,7 +186,7 @@ export function buttonLabel(db: DatabaseSync, p: CardParams): string {
 }
 
 /** The card's first line: the button's action plus its key parameter ("Close issue as completed", "Close as duplicate of #12", "Move issue to <repo>"). Server-written. */
-export function headline(db: DatabaseSync, p: CardParams): string {
+export async function headline(db: Db, p: CardParams): Promise<string> {
   const closeOf = (pr: boolean, reason: CloseReason) => (pr ? "Close PR" : `Close issue as ${reason === "completed" ? "completed" : "not planned"}`);
   switch (p.kind) {
     case "resolution": {
@@ -196,18 +197,18 @@ export function headline(db: DatabaseSync, p: CardParams): string {
       const move = p.steps.find((x) => x.kind === "transfer");
       if (move?.kind === "transfer") return `Move issue to ${move.to}`;
       const open = p.steps.find((x) => x.kind === "open_issue");
-      if (open?.kind === "open_issue" && buttonLabel(db, p) === "Open issue") return `Open issue in ${open.repo}`;
-      return buttonLabel(db, p);
+      if (open?.kind === "open_issue" && await buttonLabel(db, p) === "Open issue") return `Open issue in ${open.repo}`;
+      return await buttonLabel(db, p);
     }
     case "duplicate": return `Close as duplicate of #${p.of}`;
     case "close": return closeOf(p.pr, p.reason);
-    default: return buttonLabel(db, p);
+    default: return await buttonLabel(db, p);
   }
 }
 
 /** The one-line description stored with a resolution: its steps and settlement. */
-export function describe(db: DatabaseSync, repo: string, n: number, p: CardParams & { kind: "resolution" }): string {
-  const lines = cardLines(db, p, "");
+export async function describe(db: Db, repo: string, n: number, p: CardParams & { kind: "resolution" }): Promise<string> {
+  const lines = await cardLines(db, p, "");
   return `On ${ref(repo, n)}: ${[...lines.steps, ...(lines.settles ? [lines.settles] : [])].join("; ")}`;
 }
 
@@ -252,19 +253,19 @@ export function cleanComment(s: string): string {
 }
 
 /** Why Act would not close this item (an integration PR of ours, held by Backlog, outside the pilot), or null. */
-export function closeRefusal(db: DatabaseSync, repo: string, n: number): string | null {
-  const has = (cond: string) => !!db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${cond}`).get(repo, n);
-  if (!has("1 = 1")) return `${ref(repo, n)} is not in the mirror`;
-  if (!has(notOwnIntegrationSql("i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
-  if (!has(pilotSql("i"))) return `${ref(repo, n)} is outside the pilot`;
-  if (has(backlogHeldSql("i"))) return `${ref(repo, n)} is held by a Backlog answer`;
+export async function closeRefusal(db: Db, repo: string, n: number): Promise<string | null> {
+  const has = async (cond: string) => !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${cond}`).get(repo, n);
+  if (!await has("1 = 1")) return `${ref(repo, n)} is not in the mirror`;
+  if (!await has(notOwnIntegrationSql("i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
+  if (!await has(pilotSql("i"))) return `${ref(repo, n)} is outside the pilot`;
+  if (await has(backlogHeldSql("i"))) return `${ref(repo, n)} is held by a Backlog answer`;
   return null;
 }
 
 /** The type label the item has besides `label` (type labels are exclusive), or null. */
-export function otherTypeLabel(db: DatabaseSync, repo: string, n: number, label: string, removing: readonly string[] = []): string | null {
+export async function otherTypeLabel(db: Db, repo: string, n: number, label: string, removing: readonly string[] = []): Promise<string | null> {
   if (!isTypeLabel(label)) return null;
-  const row = db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
+  const row = await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
   let have: unknown[] = [];
   try { have = JSON.parse(row?.labels ?? "[]") as unknown[]; } catch { /* unreadable labels count as none */ }
   return have.map(String).find((l) => isTypeLabel(l) && !sameLabel(l, label) && !removing.some((r) => sameLabel(r, l))) ?? null;
@@ -281,50 +282,50 @@ export function commentText(raw: unknown, drop: ReadonlySet<string>): Checked<st
   return { value: text };
 }
 
-export function labelStep(db: DatabaseSync, repo: string, n: number, raw: unknown, removing: readonly string[]): Checked<Step> {
+export async function labelStep(db: Db, repo: string, n: number, raw: unknown, removing: readonly string[]): Promise<Checked<Step>> {
   const l = typeof raw === "string" ? ALL_LABELS.find((x) => sameLabel(x.name, raw)) : undefined;
   if (!l) return { note: `dropped a resolution: "${String(raw).slice(0, 40)}" is not a label the pipeline manages` };
-  const other = otherTypeLabel(db, repo, n, l.name, removing);
+  const other = await otherTypeLabel(db, repo, n, l.name, removing);
   if (other) return { note: `dropped a resolution: the item already has the type label "${other}" and an item has one type label` };
   return { value: { kind: "label", label: l.name } };
 }
 
-export function closeStep(db: DatabaseSync, repo: string, n: number, reason: unknown): Checked<Step> {
+export async function closeStep(db: Db, repo: string, n: number, reason: unknown): Promise<Checked<Step>> {
   if (!CLOSE_REASONS.includes(reason as CloseReason)) return { note: "dropped a resolution whose close step has no reason of completed or not_planned" };
-  const why = closeRefusal(db, repo, n);
+  const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };
-  const row = db.prepare("SELECT kind, state FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; state: string };
+  const row = await db.prepare("SELECT kind, state FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; state: string };
   if (row.state !== "OPEN") return { note: `dropped a resolution: ${ref(repo, n)} is not open` };
   return { value: { kind: "close", reason: reason as CloseReason, pr: row.kind === "pr" } };
 }
 
-export function duplicateStep(db: DatabaseSync, repo: string, n: number, of: unknown): Checked<Step> {
+export async function duplicateStep(db: Db, repo: string, n: number, of: unknown): Promise<Checked<Step>> {
   if (!Number.isInteger(of) || of === n) return { note: "dropped a resolution whose duplicate step names no other item number" };
-  if (!db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ?").get(repo, of as number)) return { note: `dropped a resolution: ${ref(repo, of as number)} is not in the mirror` };
-  const why = closeRefusal(db, repo, n);
+  if (!await db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ?").get(repo, of as number)) return { note: `dropped a resolution: ${ref(repo, of as number)} is not in the mirror` };
+  const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };
   return { value: { kind: "duplicate", of: of as number } };
 }
 
 type ItemFacts = { kind: string; state: string; author: string | null };
-const itemFacts = (db: DatabaseSync, repo: string, n: number): ItemFacts | undefined =>
-  db.prepare("SELECT kind, state, author FROM items WHERE repo = ? AND number = ?").get(repo, n) as ItemFacts | undefined;
+const itemFacts = async (db: Db, repo: string, n: number): Promise<ItemFacts | undefined> =>
+  await db.prepare("SELECT kind, state, author FROM items WHERE repo = ? AND number = ?").get(repo, n) as ItemFacts | undefined;
 /** A repository name as the model wrote it, without a leading `owner/`. An owner that is not the repo's own leaves the value as written, which is no tracked repo. */
 const bareRepo = (v: unknown): unknown => {
   if (typeof v !== "string" || !v.includes("/")) return v;
   const { owner, name } = splitSlug(v);
   return owner.toLowerCase() === ownerOf(name).toLowerCase() ? name : v;
 };
-const isTracked = (db: DatabaseSync, repo: unknown): repo is string => typeof repo === "string" && !!db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo);
+const isTracked = (db: Db, repo: unknown): repo is string => typeof repo === "string" && !!db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo);
 const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLowerCase() === b.toLowerCase();
 
 /**
  * Whether the mirror says `login` can write to `repo`: a cached permission of write or higher, or an association of owner,
  * member or collaborator on an item or comment in the repo. The association is a hint only; Act reads the live permission before it writes.
  */
-export function mayWrite(db: DatabaseSync, repo: string, login: string): boolean {
-  if (db.prepare("SELECT 1 FROM repo_permissions WHERE repo = ? AND login = ? AND permission IN ('write', 'maintain', 'admin')").get(repo, login)) return true;
-  return !!db.prepare(`SELECT 1 FROM items WHERE repo = ? AND author = ? COLLATE NOCASE AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR')
+export async function mayWrite(db: Db, repo: string, login: string): Promise<boolean> {
+  if (await db.prepare("SELECT 1 FROM repo_permissions WHERE repo = ? AND login = ? AND permission IN ('write', 'maintain', 'admin')").get(repo, login)) return true;
+  return !!await db.prepare(`SELECT 1 FROM items WHERE repo = ? AND author = ? COLLATE NOCASE AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR')
     UNION ALL SELECT 1 FROM comments WHERE repo = ? AND author = ? COLLATE NOCASE AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') LIMIT 1`).get(repo, login, repo, login);
 }
 
@@ -339,7 +340,7 @@ function issueText(raw: unknown, max: number, what: string, drop: ReadonlySet<st
   return { value: t };
 }
 
-export function openIssueStep(db: DatabaseSync, st: Record<string, unknown>, drop: ReadonlySet<string>): Checked<Step> {
+export function openIssueStep(db: Db, st: Record<string, unknown>, drop: ReadonlySet<string>): Checked<Step> {
   const repo = bareRepo(st.repo);
   if (!isTracked(db, repo)) return { note: `dropped a resolution: "${String(st.repo).slice(0, 40)}" is not a tracked repository` };
   const title = issueText(st.title, ISSUE_TITLE_MAX, "title", drop, true);
@@ -349,54 +350,54 @@ export function openIssueStep(db: DatabaseSync, st: Record<string, unknown>, dro
   return { value: { kind: "open_issue", repo, title: title.value, body: body.value } };
 }
 
-export function transferStep(db: DatabaseSync, repo: string, n: number, toRaw: unknown): Checked<Step> {
+export async function transferStep(db: Db, repo: string, n: number, toRaw: unknown): Promise<Checked<Step>> {
   const to = bareRepo(toRaw);
-  const f = itemFacts(db, repo, n);
+  const f = await itemFacts(db, repo, n);
   if (pr(f)) return { note: "dropped a resolution: only an issue can be moved to another repository" };
   if (!isTracked(db, to) || to === repo) return { note: `dropped a resolution: "${String(to).slice(0, 40)}" is not another tracked repository` };
   if (ownerOf(to).toLowerCase() !== ownerOf(repo).toLowerCase()) return { note: "dropped a resolution: an issue moves only between repositories of one owner" };
-  const why = closeRefusal(db, repo, n);
+  const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };
   if (f?.state !== "OPEN") return { note: `dropped a resolution: ${ref(repo, n)} is not open` };
   return { value: { kind: "transfer", to } };
 }
 
-export function assignStep(db: DatabaseSync, repo: string, n: number, login: unknown): Checked<Step> {
+export async function assignStep(db: Db, repo: string, n: number, login: unknown): Promise<Checked<Step>> {
   if (typeof login !== "string" || !LOGIN.test(login)) return { note: "dropped a resolution whose assign step has no GitHub login" };
-  if (!sameLogin(itemFacts(db, repo, n)?.author ?? null, login) && !mayWrite(db, repo, login)) return { note: `dropped a resolution: ${login} is neither the author nor known to have write access to ${repo}` };
+  if (!sameLogin((await itemFacts(db, repo, n))?.author ?? null, login) && !await mayWrite(db, repo, login)) return { note: `dropped a resolution: ${login} is neither the author nor known to have write access to ${repo}` };
   return { value: { kind: "assign", login } };
 }
 
-export function reviewersStep(db: DatabaseSync, repo: string, n: number, raw: unknown): Checked<Step> {
-  const f = itemFacts(db, repo, n);
+export async function reviewersStep(db: Db, repo: string, n: number, raw: unknown): Promise<Checked<Step>> {
+  const f = await itemFacts(db, repo, n);
   if (!pr(f)) return { note: "dropped a resolution: reviewers can be requested on a PR only" };
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 3 || raw.some((x) => typeof x !== "string" || !LOGIN.test(x))) return { note: "dropped a resolution whose request_reviewers step does not list one to three GitHub logins" };
   const logins = raw as string[];
   if (new Set(logins.map((x) => x.toLowerCase())).size !== logins.length) return { note: "dropped a resolution that requests the same reviewer twice" };
-  const bad = logins.find((x) => sameLogin(f!.author, x) || !mayWrite(db, repo, x));
+  const bad = await findSeq(logins, async (x) => sameLogin(f!.author, x) || !await mayWrite(db, repo, x));
   if (bad) return { note: `dropped a resolution: ${bad} is the PR's author or not known to have write access to ${repo}` };
   return { value: { kind: "request_reviewers", logins } };
 }
 
-export function unlabelStep(db: DatabaseSync, repo: string, n: number, raw: unknown): Checked<Step> {
+export async function unlabelStep(db: Db, repo: string, n: number, raw: unknown): Promise<Checked<Step>> {
   const l = typeof raw === "string" ? ALL_LABELS.find((x) => sameLabel(x.name, raw)) : undefined;
   if (!l) return { note: `dropped a resolution: "${String(raw).slice(0, 40)}" is not a label the pipeline manages` };
-  const row = db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
+  const row = await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
   let have: unknown[] = [];
   try { have = JSON.parse(row?.labels ?? "[]") as unknown[]; } catch { /* unreadable labels count as none */ }
   if (!have.some((x) => sameLabel(String(x), l.name))) return { note: `dropped a resolution: the item does not have the label "${l.name}"` };
   return { value: { kind: "unlabel", label: l.name } };
 }
 
-function reopenStep(db: DatabaseSync, repo: string, n: number): Checked<Step> {
-  const f = itemFacts(db, repo, n);
+async function reopenStep(db: Db, repo: string, n: number): Promise<Checked<Step>> {
+  const f = await itemFacts(db, repo, n);
   if (f?.state !== "CLOSED") return { note: `dropped a resolution: ${ref(repo, n)} is not closed` };
-  const why = closeRefusal(db, repo, n);
+  const why = await closeRefusal(db, repo, n);
   return why ? { note: `dropped a resolution: ${why}` } : { value: { kind: "reopen" } };
 }
 
-export function pipelineStep(db: DatabaseSync, repo: string, n: number, st: Record<string, unknown>): Checked<Step> {
-  const f = itemFacts(db, repo, n);
+export async function pipelineStep(db: Db, repo: string, n: number, st: Record<string, unknown>): Promise<Checked<Step>> {
+  const f = await itemFacts(db, repo, n);
   if (!pr(f) || f?.state !== "OPEN") return { note: `dropped a resolution: a ${String(st.kind)} step needs an open PR` };
   if (st.kind === "review") return { value: { kind: "review" } };
   const instructions = typeof st.instructions === "string" ? st.instructions.trim() : "";
@@ -425,29 +426,29 @@ export function dependsOnCode(params: CardParams, text: string | null): boolean 
 export const PUBLIC_TEXT_STEPS: ReadonlySet<string> = new Set(["comment", "open_issue", "transfer"]);
 
 /** The step kinds that can validate for the item as it is now, from the same facts and refusals as validateResolution; "fixup with merge" is listed apart. */
-export function applicableSteps(db: DatabaseSync, repo: string, n: number): string[] {
-  const f = itemFacts(db, repo, n);
+export async function applicableSteps(db: Db, repo: string, n: number): Promise<string[]> {
+  const f = await itemFacts(db, repo, n);
   if (!f) return [];
   const open = f.state === "OPEN", isPr = pr(f), out: string[] = ["open_issue"];
-  const quiet = isQuiet(db, repo, n);
+  const quiet = await isQuiet(db, repo, n);
   if (open) {
     out.push("comment", "label", "assign");
-    if (ALL_LABELS.some((l) => !("note" in unlabelStep(db, repo, n, l.name)))) out.push("unlabel");
-    if (!closeRefusal(db, repo, n)) out.push("close", "duplicate");
+    if (await someSeq(ALL_LABELS, async (l) => !("note" in await unlabelStep(db, repo, n, l.name)))) out.push("unlabel");
+    if (!await closeRefusal(db, repo, n)) out.push("close", "duplicate");
     if (isPr) {
       out.push("request_reviewers", "review", "fixup");
-      const d = openDecision(db, repo, n);
+      const d = await openDecision(db, repo, n);
       if (d && (d.kind === "merge" || d.kind === "scope" || d.kind === "hold")) out.push("fixup with merge");
-    } else if (!closeRefusal(db, repo, n)) out.push("transfer");
-  } else if (f.state === "CLOSED" && !("note" in reopenStep(db, repo, n))) out.push("reopen");
+    } else if (!await closeRefusal(db, repo, n)) out.push("transfer");
+  } else if (f.state === "CLOSED" && !("note" in await reopenStep(db, repo, n))) out.push("reopen");
   return quiet ? out.filter((k) => !PUBLIC_TEXT_STEPS.has(k)) : out;
 }
 
 /** The settlement the model asked for, checked against the item's open decision `d`. */
-function settleOf(db: DatabaseSync, d: DecisionRow, raw: unknown): Checked<Settle> {
+async function settleOf(db: Db, d: DecisionRow, raw: unknown): Promise<Checked<Settle>> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { note: "dropped a resolution whose settle is not an object" };
   const s = raw as Record<string, unknown>;
-  const stamp = decisionStamp(db, d);
+  const stamp = await decisionStamp(db, d);
   switch (s.kind) {
     case "answer":
       if (typeof s.option !== "string" || !optionsOf(d).some((o) => o.key === s.option)) return { note: `dropped a resolution: "${String(s.option).slice(0, 40)}" is not an option of the open decision` };
@@ -456,7 +457,7 @@ function settleOf(db: DatabaseSync, d: DecisionRow, raw: unknown): Checked<Settl
       // Only an option that closes with a comment takes a reason; for any other the field is ignored.
       if (!/\bcloses\b/.test(writeEffect(d.kind as Kind, s.option) ?? "")) return { value: { kind: "answer", decision: d.id, option: s.option, stamp } };
       // The reason goes into the closing comment, which a quiet pull request never gets.
-      if (d.repo && d.number !== null && isQuiet(db, d.repo, d.number)) return { note: "dropped a resolution: a quiet pull request's closing comment takes no reason" };
+      if (d.repo && d.number !== null && await isQuiet(db, d.repo, d.number)) return { note: "dropped a resolution: a quiet pull request's closing comment takes no reason" };
       const reason = cleanReason(cleanComment(s.reason));
       if (!reason) return { value: { kind: "answer", decision: d.id, option: s.option, stamp } };
       if (REFERENCE_LEAK.test(reason)) return { note: "dropped a resolution whose settle reason mentions the reference folder or its documentation" };
@@ -479,13 +480,13 @@ function settleOf(db: DatabaseSync, d: DecisionRow, raw: unknown): Checked<Settl
 type Settling = Extract<Step, { kind: "close" | "duplicate" | "transfer" | "review" | "fixup" }>;
 export const isSettling = (x: Step): x is Settling => x.kind === "close" || x.kind === "duplicate" || x.kind === "transfer" || x.kind === "review" || x.kind === "fixup";
 
-function closeSettle(db: DatabaseSync, repo: string, d: DecisionRow, st: Settling): Settle {
+async function closeSettle(db: Db, repo: string, d: DecisionRow, st: Settling): Promise<Settle> {
   const summary = st.kind === "duplicate" ? `Closed as a duplicate of ${ref(repo, st.of)} in the conversation`
     : st.kind === "transfer" ? `Moved to ${st.to} in the conversation`
     : st.kind === "review" ? "Reviewed again"
     : st.kind === "fixup" ? (st.merge ? "Fixed up and queued to merge" : "Fixed up")
     : st.pr ? "Closed in the conversation" : `Closed as ${st.reason === "completed" ? "completed" : "not planned"} in the conversation`;
-  return { kind: "handled", decision: d.id, summary, stamp: decisionStamp(db, d), fromClose: true };
+  return { kind: "handled", decision: d.id, summary, stamp: await decisionStamp(db, d), fromClose: true };
 }
 
 /**
@@ -497,7 +498,7 @@ function closeSettle(db: DatabaseSync, repo: string, d: DecisionRow, st: Settlin
  * without an open decision there is no settlement. At most one step of each kind except label and unlabel; close, duplicate and
  * transfer end the item (at most one, last); reopen comes first and only on a closed item; a fixup that merges needs an open merge or scope decision on a PR.
  */
-function validateResolution(db: DatabaseSync, repo: string, n: number, c: Record<string, unknown>, drop: ReadonlySet<string>): { card: NewCard } | { note: string } {
+async function validateResolution(db: Db, repo: string, n: number, c: Record<string, unknown>, drop: ReadonlySet<string>): Promise<{ card: NewCard } | { note: string }> {
   if (!Array.isArray(c.steps) || c.steps.length > MAX_STEPS) return { note: "dropped a resolution without a list of steps" };
   const steps: Step[] = [];
   const removing = c.steps.flatMap((x) => (x && (x as { kind?: unknown }).kind === "unlabel" && typeof (x as { label?: unknown }).label === "string" ? [(x as { label: string }).label] : []));
@@ -506,22 +507,22 @@ function validateResolution(db: DatabaseSync, repo: string, n: number, c: Record
     let r: Checked<Step>;
     switch (st.kind) {
       case "comment": r = { value: { kind: "comment" } }; break;
-      case "label": r = labelStep(db, repo, n, st.label, removing); break;
-      case "close": r = closeStep(db, repo, n, st.reason); break;
-      case "duplicate": r = duplicateStep(db, repo, n, st.of); break;
-      case "unlabel": r = unlabelStep(db, repo, n, st.label); break;
-      case "reopen": r = reopenStep(db, repo, n); break;
+      case "label": r = await labelStep(db, repo, n, st.label, removing); break;
+      case "close": r = await closeStep(db, repo, n, st.reason); break;
+      case "duplicate": r = await duplicateStep(db, repo, n, st.of); break;
+      case "unlabel": r = await unlabelStep(db, repo, n, st.label); break;
+      case "reopen": r = await reopenStep(db, repo, n); break;
       case "open_issue": r = openIssueStep(db, st, drop); break;
-      case "transfer": r = transferStep(db, repo, n, st.to); break;
-      case "assign": r = assignStep(db, repo, n, st.login); break;
-      case "request_reviewers": r = reviewersStep(db, repo, n, st.logins); break;
-      case "review": case "fixup": r = pipelineStep(db, repo, n, st); break;
+      case "transfer": r = await transferStep(db, repo, n, st.to); break;
+      case "assign": r = await assignStep(db, repo, n, st.login); break;
+      case "request_reviewers": r = await reviewersStep(db, repo, n, st.logins); break;
+      case "review": case "fixup": r = await pipelineStep(db, repo, n, st); break;
       default: r = { note: `dropped a resolution with unknown step "${String(st.kind).slice(0, 40)}"` };
     }
     if ("note" in r) return r;
     steps.push(r.value);
   }
-  if (steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)) && isQuiet(db, repo, n)) return { note: "dropped a resolution that posts text on a quiet pull request" };
+  if (steps.some((x) => PUBLIC_TEXT_STEPS.has(x.kind)) && await isQuiet(db, repo, n)) return { note: "dropped a resolution that posts text on a quiet pull request" };
   const labels = steps.flatMap((x) => (x.kind === "label" ? [x.label] : []));
   if (new Set(labels).size !== labels.length) return { note: "dropped a resolution that adds the same label twice" };
   if (labels.filter(isTypeLabel).length > 1) return { note: "dropped a resolution that adds more than one type label" };
@@ -544,11 +545,11 @@ function validateResolution(db: DatabaseSync, repo: string, n: number, c: Record
     text = t.value;
   } else if (c.text !== undefined && c.text !== null && c.text !== "") return { note: "dropped a resolution with a comment text but no comment step" };
 
-  const d = openDecision(db, repo, n);
+  const d = await openDecision(db, repo, n);
   let settle: Settle | null = null;
   if (c.settle !== undefined && c.settle !== null) {
     if (!d) return { note: "dropped a resolution: the item has no open decision to settle" };
-    const s = settleOf(db, d, c.settle);
+    const s = await settleOf(db, d, c.settle);
     if ("note" in s) return s;
     settle = s.value;
   }
@@ -558,10 +559,10 @@ function validateResolution(db: DatabaseSync, repo: string, n: number, c: Record
   if (settling) {
     const keeps = settling.kind === "fixup" && d?.kind === "scope" && settle?.kind === "answer" && KEEP_IN_CORE.includes(settle.option);
     if (settle && settle.kind !== "handled" && !keeps) return { note: `dropped a resolution that has a ${settling.kind} step and settles the question another way than handled` };
-    if (d && !settle) settle = closeSettle(db, repo, d, settling);
+    if (d && !settle) settle = await closeSettle(db, repo, d, settling);
   }
   if (settle?.kind === "answer") {
-    const effect = decisionWrite(db, settle.decision, settle.option);
+    const effect = await decisionWrite(db, settle.decision, settle.option);
     // Merging takes a comment too (posted before the answer); closing options use their reason as the comment.
     const merges = /\bmerges\b/.test(effect ?? "");
     if (effect && steps.some((x) => ["close", "duplicate", "transfer", "reopen", "request_reviewers", "review", "fixup", ...(merges ? [] : ["comment"])].includes(x.kind))) {
@@ -571,15 +572,15 @@ function validateResolution(db: DatabaseSync, repo: string, n: number, c: Record
   if (d && !settle && !(steps.length === 1 && steps[0]!.kind === "comment")) return { note: "dropped a resolution that leaves the open decision unsettled" };
   if (!settle && steps.length === 0) return { note: "dropped a resolution without steps or settlement" };
   const params: CardParams = { kind: "resolution", steps, settle };
-  return { card: { params, text, description: describe(db, repo, n, params) } };
+  return { card: { params, text, description: await describe(db, repo, n, params) } };
 }
 
 /** One card as the model wrote it, checked against the item, or why it is dropped. Only resolutions are accepted. */
-export function validateCard(db: DatabaseSync, repo: string, n: number, raw: unknown, drop: ReadonlySet<string> = new Set()): { card: NewCard } | { note: string } {
+export async function validateCard(db: Db, repo: string, n: number, raw: unknown, drop: ReadonlySet<string> = new Set()): Promise<{ card: NewCard } | { note: string }> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { note: "dropped a card that is not an object" };
   const c = raw as Record<string, unknown>;
   if (c.kind !== "resolution") return { note: `dropped a card with unknown action "${String(c.kind).slice(0, 40)}"` };
-  return validateResolution(db, repo, n, c, drop);
+  return await validateResolution(db, repo, n, c, drop);
 }
 
 /** The "ask and keep the question open" card: a lone comment step on an item with an open decision. */
@@ -616,7 +617,7 @@ export function commentTexts(reply: string): { field: string; text: string }[] {
 }
 
 /** The reply's text and its valid cards. A reply with no text gets null. `drop`: cleaned comment texts the reply lint still flagged after the fix turn; their cards are dropped. */
-export function parseReply(db: DatabaseSync, repo: string, n: number, reply: string, drop: ReadonlySet<string> = new Set()): Parsed | null {
+export async function parseReply(db: Db, repo: string, n: number, reply: string, drop: ReadonlySet<string> = new Set()): Promise<Parsed | null> {
   const m = FENCE.exec(reply.trimEnd());
   const text = (m ? reply.trimEnd().slice(0, m.index) : reply).trim();
   if (!text) return null;
@@ -627,11 +628,11 @@ export function parseReply(db: DatabaseSync, repo: string, n: number, reply: str
     try { list = JSON.parse(m[1]!); } catch { list = null; }
     if (!Array.isArray(list)) notes.push("dropped the actions block: it is not a JSON list");
     else {
-      const hasDecision = !!openDecision(db, repo, n);
+      const hasDecision = !!await openDecision(db, repo, n);
       let asks = 0, extras = 0;
       const options = new Set<string>();
       for (const raw of list.slice(0, 20)) {
-        const v = validateCard(db, repo, n, raw, drop);
+        const v = await validateCard(db, repo, n, raw, drop);
         if (!("card" in v)) { notes.push(v.note); continue; }
         if (hasDecision && isAsk(v.card)) {
           if (asks++ >= 1) notes.push("dropped a second card that only asks and keeps the question open");

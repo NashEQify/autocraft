@@ -20,7 +20,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { absolute } from "../build/artifacts.ts";
 import { cancelTask, createTask, getTask, TERMINAL } from "../build/tasks.ts";
 import { guardRepo } from "../core/guard.ts";
@@ -44,6 +43,7 @@ import { settleRefusal } from "../settlers.ts";
 import { fetchScript } from "../worker/rust.ts";
 import { BRANCH_MAX_MS, BRANCH_POLL_MS, LOCK_MAX_MS, RETRY_MS, repinsDue, type RepinRow } from "./due.ts";
 import { lockRefusal, repinManifest, safePath, type PrRef } from "./manifest.ts";
+import type { Db } from "../db/index.ts";
 
 /** Attempts that may end unfinished (GitHub unreadable, the head moved, the lockfile task failed) before the repin is given up. */
 export const MAX_TRIES = 5;
@@ -87,8 +87,8 @@ const short = (sha: string): string => sha.slice(0, 12);
 const refOf = (r: { repo: string; number: number }): string => `${r.repo}#${r.number}`;
 const depRefOf = (r: { ref_repo: string; ref_number: number }): string => `${slugOf(r.ref_repo)}#${r.ref_number}`;
 type Item = { kind: string; state: string };
-const itemOf = (db: DatabaseSync, repo: string, number: number): Item | undefined =>
-  db.prepare("SELECT kind, state FROM main.items WHERE repo = ? AND number = ?").get(repo, number) as Item | undefined;
+const itemOf = async (db: Db, repo: string, number: number): Promise<Item | undefined> =>
+  await db.prepare("SELECT kind, state FROM main.items WHERE repo = ? AND number = ?").get(repo, number) as Item | undefined;
 
 // ---- the command ---------------------------------------------------------------
 
@@ -96,14 +96,14 @@ const itemOf = (db: DatabaseSync, repo: string, number: number): Item | undefine
  * Why no build worker would take the pull request's lockfile task, or null: workers take pipeline tasks only for repos in
  * scope or for fast-tracked items (claim in src/build/tasks.ts).
  */
-function outOfBuildScope(db: DatabaseSync, repo: string, number: number): string | null {
-  return baseScopeRepos(db).has(repo) || isFastTracked(db, repo, number) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
+async function outOfBuildScope(db: Db, repo: string, number: number): Promise<string | null> {
+  return (await baseScopeRepos(db)).has(repo) || await isFastTracked(db, repo, number) ? null : `AutoCraft's pipeline is off for ${slugOf(repo)}, so no build worker would write its lockfile`;
 }
 
 /** Cancels a lockfile task that is no longer wanted; one that already ended is left as it is. */
-function stopTask(db: DatabaseSync, id: number | null): void {
+async function stopTask(db: Db, id: number | null): Promise<void> {
   if (id === null) return;
-  try { cancelTask(db, id, AUDIT_LOGIN); } catch { /* already ended, or gone */ }
+  try { await cancelTask(db, id, AUDIT_LOGIN); } catch { /* already ended, or gone */ }
 }
 
 /** A refusal worded for the answer on GitHub. */
@@ -115,35 +115,35 @@ const refused = (why: string): HttpError => new HttpError(409, why);
  * reason when refused. `at` orders the commands of a pull request: a command older than an `off` or than the command that set
  * the row sets nothing.
  */
-export async function requestRepin(db: DatabaseSync, o: { login: string; githubId: number; role: string; canWrite: boolean; repo: string; number: number; pr: boolean; ref: PrRef | null; /** Reads the `via` branch when the command is accepted; without it, or when the read fails, the branch is not checked. */ querier?: Querier; /** `via <branch>`, validated by the parser (parseBranch). */ branch?: string | null; /** When the command was given (the comment's time). */ at?: Date }): Promise<string> {
+export async function requestRepin(db: Db, o: { login: string; githubId: number; role: string; canWrite: boolean; repo: string; number: number; pr: boolean; ref: PrRef | null; /** Reads the `via` branch when the command is accepted; without it, or when the read fails, the branch is not checked. */ querier?: Querier; /** `via <branch>`, validated by the parser (parseBranch). */ branch?: string | null; /** When the command was given (the comment's time). */ at?: Date }): Promise<string> {
   if (!o.pr) throw refused("autorepin is for pull requests");
   const refusal = await settleRefusal(db, { login: o.login, role: o.role, canWrite: async (r) => r === o.repo && o.canWrite }, [o.repo], `sets autorepin on ${o.repo}`);
   if (refusal) throw refused(refusal);
   const at = (o.at ?? new Date()).toISOString();
-  const me = itemOf(db, o.repo, o.number);
+  const me = await itemOf(db, o.repo, o.number);
   if (me?.kind !== "pr" || me.state !== "OPEN") throw refused("this pull request is not open");
   if (!o.ref) {
     // Kept even when nothing waits, so an older `autorepin` command still to be carried out (a retry) does not set it again.
-    db.prepare(`INSERT INTO main.autorepin_offs (repo, number, off_at) VALUES (?, ?, ?)
+    await db.prepare(`INSERT INTO main.autorepin_offs (repo, number, off_at) VALUES (?, ?, ?)
       ON CONFLICT (repo, number) DO UPDATE SET off_at = excluded.off_at WHERE excluded.off_at > autorepin_offs.off_at`).run(o.repo, o.number, at);
-    const tasks = db.prepare("SELECT task_id FROM main.autorepins WHERE repo = ?2 AND number = ?3 AND state = 'locking' AND requested_at <= ?1").all(at, o.repo, o.number) as { task_id: number | null }[];
-    const n = db.prepare("UPDATE main.autorepins SET state = 'cancelled', result = NULL, done_at = ?1, requested_at = ?1, notice = 'none' WHERE repo = ?2 AND number = ?3 AND state IN ('waiting', 'locking') AND requested_at <= ?1").run(at, o.repo, o.number).changes;
-    for (const t of tasks) stopTask(db, t.task_id);
-    audit(db, o.login, "autorepin-off", refOf(o), { cancelled: Number(n) });
+    const tasks = await db.prepare("SELECT task_id FROM main.autorepins WHERE repo = ?2 AND number = ?3 AND state = 'locking' AND requested_at <= ?1").all(at, o.repo, o.number) as { task_id: number | null }[];
+    const n = (await db.prepare("UPDATE main.autorepins SET state = 'cancelled', result = NULL, done_at = ?1, requested_at = ?1, notice = 'none' WHERE repo = ?2 AND number = ?3 AND state IN ('waiting', 'locking') AND requested_at <= ?1").run(at, o.repo, o.number)).changes;
+    for (const t of tasks) await stopTask(db, t.task_id);
+    await audit(db, o.login, "autorepin-off", refOf(o), { cancelled: Number(n) });
     return n ? "Autorepin is off for this pull request" : "No autorepin was waiting on this pull request; it stays off";
   }
-  const off = (db.prepare("SELECT off_at FROM main.autorepin_offs WHERE repo = ? AND number = ?").get(o.repo, o.number) as { off_at: string } | undefined)?.off_at;
+  const off = (await db.prepare("SELECT off_at FROM main.autorepin_offs WHERE repo = ? AND number = ?").get(o.repo, o.number) as { off_at: string } | undefined)?.off_at;
   if (off !== undefined && off > at) throw refused("a later autorepin off on this pull request stands");
-  const dep = (db.prepare("SELECT name FROM main.tracked_repos WHERE name = ? COLLATE NOCASE").get(o.ref.name) as { name: string } | undefined)?.name;
+  const dep = (await db.prepare("SELECT name FROM main.tracked_repos WHERE name = ? COLLATE NOCASE").get(o.ref.name) as { name: string } | undefined)?.name;
   if (!dep || (o.ref.owner !== null && o.ref.owner.toLowerCase() !== ownerOf(dep).toLowerCase())) throw refused(`${o.ref.owner ? `${o.ref.owner}/` : ""}${o.ref.name} is not a repository AutoCraft tracks`);
   const depRef = `${slugOf(dep)}#${o.ref.number}`;
   if (dep === o.repo) throw refused("the pull request to wait for must be in another repository");
-  const other = itemOf(db, dep, o.ref.number);
+  const other = await itemOf(db, dep, o.ref.number);
   if (other?.kind !== "pr") throw refused(`${depRef} is not a pull request AutoCraft has read`);
   if (other.state === "CLOSED") throw refused(`${depRef} was closed without merging`);
-  const g = guardRepo(db, o.repo, "push", { operator: o.login }, undefined, o.login);
+  const g = await guardRepo(db, o.repo, "push", { operator: o.login }, undefined, o.login);
   if ("refused" in g) throw refused(g.refused);
-  const scope = outOfBuildScope(db, o.repo, o.number);
+  const scope = await outOfBuildScope(db, o.repo, o.number);
   if (scope) throw refused(scope);
   if (o.branch && o.querier) {
     const here = await o.querier.query(BRANCH_QUERY, { owner: ownerOf(dep), name: dep, ref: `refs/heads/${o.branch}` }).then((x) => (x as { repository?: { ref?: unknown } | null }).repository, () => undefined);
@@ -151,13 +151,13 @@ export async function requestRepin(db: DatabaseSync, o: { login: string; githubI
   }
   // Only over a row of an earlier command: a later `off`, or a later command for the same repository, stands.
   const branch = o.branch ?? null;
-  const set = db.prepare(`INSERT INTO main.autorepins (repo, number, ref_repo, ref_number, ref_branch, login, github_id, requested_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
+  const set = (await db.prepare(`INSERT INTO main.autorepins (repo, number, ref_repo, ref_number, ref_branch, login, github_id, requested_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'waiting')
     ON CONFLICT (repo, number, ref_repo) DO UPDATE SET ref_number = excluded.ref_number, ref_branch = excluded.ref_branch, login = excluded.login, github_id = excluded.github_id, requested_at = excluded.requested_at, state = 'waiting',
       sha = NULL, head = NULL, task_id = NULL, tries = 0, tried_at = NULL, to_head = NULL, result = NULL, done_at = NULL, notice = NULL
       WHERE excluded.requested_at >= autorepins.requested_at`)
-    .run(o.repo, o.number, dep, o.ref.number, branch, o.login, o.githubId, at).changes;
+    .run(o.repo, o.number, dep, o.ref.number, branch, o.login, o.githubId, at)).changes;
   if (!set) throw refused(`a later autorepin command for ${slugOf(dep)} on this pull request stands`);
-  audit(db, o.login, "autorepin-set", refOf(o), { on: depRef, ...(branch ? { via: branch } : {}) });
+  await audit(db, o.login, "autorepin-set", refOf(o), { on: depRef, ...(branch ? { via: branch } : {}) });
   if (branch) {
     const to = `the first \`${branch}\` commit that contains it`;
     return other.state === "MERGED"
@@ -209,33 +209,33 @@ class Wait extends Error {}
 class Superseded extends Error {}
 
 /** True while the row still holds the request `r` was read with: an `off` and a new command both move requested_at, and an end moves the state. */
-const still = (db: DatabaseSync, r: RepinRow): boolean =>
-  !!db.prepare(`SELECT 1 FROM main.autorepins WHERE ${KEY} AND state = ? AND requested_at = ?`).get(...keyOf(r), r.state, r.requested_at);
+const still = async (db: Db, r: RepinRow): Promise<boolean> =>
+  !!await db.prepare(`SELECT 1 FROM main.autorepins WHERE ${KEY} AND state = ? AND requested_at = ?`).get(...keyOf(r), r.state, r.requested_at);
 
 const KEY = "repo = ? AND number = ? AND ref_repo = ?";
 const keyOf = (r: RepinRow): [string, number, string] => [r.repo, r.number, r.ref_repo];
 
-function finish(db: DatabaseSync, r: RepinRow, e: Ended, at: Date): void {
-  stopTask(db, r.task_id);
-  db.prepare(`UPDATE main.autorepins SET state = ?, result = ?, done_at = ?, to_head = ?, notice = ? WHERE ${KEY}`).run(e.state, e.message || null, at.toISOString(), e.toHead, e.notice, ...keyOf(r));
-  audit(db, AUDIT_LOGIN, "autorepin", refOf(r), { on: depRefOf(r), by: r.login, state: e.state, ...(e.message ? { result: e.message } : {}), ...(e.toHead ? { commit: e.toHead } : {}) });
+async function finish(db: Db, r: RepinRow, e: Ended, at: Date): Promise<void> {
+  await stopTask(db, r.task_id);
+  await db.prepare(`UPDATE main.autorepins SET state = ?, result = ?, done_at = ?, to_head = ?, notice = ? WHERE ${KEY}`).run(e.state, e.message || null, at.toISOString(), e.toHead, e.notice, ...keyOf(r));
+  await audit(db, AUDIT_LOGIN, "autorepin", refOf(r), { on: depRefOf(r), by: r.login, state: e.state, ...(e.message ? { result: e.message } : {}), ...(e.toHead ? { commit: e.toHead } : {}) });
 }
 
 /** One step of an autorepin: from `waiting` it queues the lockfile task (or pushes, without a lockfile); from `locking` it takes the task's lockfile and pushes. Throws `Ended` when it is over, anything else to try again. */
-async function step(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<void> {
+async function step(db: Db, r: RepinRow, d: RepinDeps): Promise<void> {
   const q = d.querier, run = d.exec ?? defaultExec;
   const dep = slugOf(r.ref_repo), depRef = depRefOf(r);
   if (r.state === "locking" && r.task_id !== null) {
     // A task no build worker finished in time ends the autorepin instead of holding it.
-    const t = getTask(db, r.task_id);
+    const t = await getTask(db, r.task_id);
     if (t && !TERMINAL.includes(t.state) && (d.now ?? (() => new Date()))().getTime() - Date.parse(t.queuedAt) > LOCK_MAX_MS) {
-      try { cancelTask(db, t.id, AUDIT_LOGIN); } catch { /* it ended meanwhile */ }
+      try { await cancelTask(db, t.id, AUDIT_LOGIN); } catch { /* it ended meanwhile */ }
       throw failed("the lockfile task did not end within 3 hours");
     }
   }
-  const me = itemOf(db, r.repo, r.number);
+  const me = await itemOf(db, r.repo, r.number);
   if (me?.kind !== "pr" || me.state !== "OPEN") throw new Ended("cancelled", null, { notice: "none" });
-  const other = itemOf(db, r.ref_repo, r.ref_number);
+  const other = await itemOf(db, r.ref_repo, r.ref_number);
   if (!other) throw failed(`AutoCraft no longer has ${depRef}`);
   if (other.state === "CLOSED") throw new Ended("cancelled", `${depRef} was closed without merging, so nothing was repinned`);
 
@@ -297,12 +297,12 @@ async function step(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<void> 
   });
   const p = await permission(q, r.repo, r.login).catch(() => "transient" as const);
   if (p === "transient") throw new Retry(`GitHub could not tell ${r.login}'s access to ${slugOf(r.repo)}`);
-  const access = boundAccess(db, r);
+  const access = await boundAccess(db, r);
   if (!access) throw failed(`${r.login} no longer has an AutoCraft login bound to the GitHub account that asked`);
-  if (access.role !== "operator" && isQuiet(db, r.repo, r.number)) throw failed("the pull request is quiet until its fix is published");
+  if (access.role !== "operator" && await isQuiet(db, r.repo, r.number)) throw failed("the pull request is quiet until its fix is published");
   const refusal = await settleRefusal(db, { login: r.login, role: access.role, canWrite: async (x) => x === r.repo && p === "ok" }, [r.repo], `repins on ${r.repo}`);
   if (refusal) throw failed(refusal);
-  const g = guardRepo(db, r.repo, "push", { operator: r.login }, undefined, r.login);
+  const g = await guardRepo(db, r.repo, "push", { operator: r.login }, undefined, r.login);
   if ("refused" in g) throw failed(g.refused);
 
   const l = await q.query(PR_QUERY, { owner: ownerOf(r.repo), name: r.repo, n: r.number }) as PrRead;
@@ -314,7 +314,7 @@ async function step(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<void> 
   const headRepo = pr.headRepository?.nameWithOwner;
   const writes = headRepo ? await ensureAuthorWrites(db, r.repo, r.number, headRepo, d.authorPermission) : "no";
   if (writes === "unknown") throw new Retry("the author's permission could not be read yet");
-  if (!headRepo || !pushable(headRepo, r.repo, pr.maintainerCanModify, pr.headRefName, longLivedOf(db, r.repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) {
+  if (!headRepo || !pushable(headRepo, r.repo, pr.maintainerCanModify, pr.headRefName, await longLivedOf(db, r.repo), !!pr.headRef?.branchProtectionRule, writes === "yes")) {
     throw failed("AutoCraft cannot push to this pull request's branch (a fork that does not allow maintainer edits, or a protected or shared branch)");
   }
 
@@ -366,22 +366,22 @@ async function step(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<void> 
         throw failed(`${LOCK} could not be read`);
       }
       if (r.state !== "locking") {
-        const scope = outOfBuildScope(db, r.repo, r.number);
+        const scope = await outOfBuildScope(db, r.repo, r.number);
         if (scope) throw failed(scope);
         const patch = await git.diffText(head, tree);
         // From here to the row's update nothing awaits, so the task is queued only for a request that still stands.
-        if (!still(db, r)) throw new Superseded("the request changed during the try");
-        const id = createTask(db, {
+        if (!await still(db, r)) throw new Superseded("the request changed during the try");
+        const id = await createTask(db, {
           step: "autorepin", repo: r.repo, number: r.number, headSha: head, requires: { os: "linux", toolchains: ["rust-stable"] }, patch,
           plan: [{ name: "lock", cmd: ["sh", "-c", LOCK_SCRIPT], network: "fetch", timeoutSec: 900, artifacts: [LOCK] }],
         });
-        db.prepare(`UPDATE main.autorepins SET state = 'locking', sha = ?, head = ?, to_head = NULL, task_id = ? WHERE ${KEY}`).run(target, head, id, ...keyOf(r));
+        await db.prepare(`UPDATE main.autorepins SET state = 'locking', sha = ?, head = ?, to_head = NULL, task_id = ? WHERE ${KEY}`).run(target, head, id, ...keyOf(r));
         d.log?.(`autorepin ${refOf(r)}: lockfile task ${id} queued for ${dep} at ${short(target)}`);
         return;
       }
-      const t = db.prepare("SELECT state FROM main.build_tasks WHERE id = ?").get(r.task_id) as { state: string } | undefined;
+      const t = await db.prepare("SELECT state FROM main.build_tasks WHERE id = ?").get(r.task_id) as { state: string } | undefined;
       if (t?.state !== "done") throw new Retry(`the lockfile task ${t ? t.state : "is gone"}`);
-      const art = db.prepare("SELECT file FROM main.build_artifacts WHERE task_id = ? AND name = ?").get(r.task_id, LOCK) as { file: string } | undefined;
+      const art = await db.prepare("SELECT file FROM main.build_artifacts WHERE task_id = ? AND name = ?").get(r.task_id, LOCK) as { file: string } | undefined;
       const file = art ? absolute(art.file) : null;
       if (!file) throw new Retry("the lockfile task returned no Cargo.lock");
       const after = readFileSync(file, "utf8");
@@ -397,9 +397,9 @@ async function step(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<void> 
     // The commit is exactly the rewritten manifests and the lockfile: contents of files that exist, nothing added, removed or re-moded.
     const changes = await git.rawChanges(head, commit);
     if (changes.some((x) => x[2] !== "M" || x[0] !== x[1]) || changes.map((x) => x[3]!).sort().join("\n") !== [...changed].sort().join("\n")) throw failed("the commit would change more than the revs and the lockfile");
-    if (!still(db, r)) throw new Superseded("the request changed before the push");
+    if (!await still(db, r)) throw new Superseded("the request changed before the push");
     // Written before the push, so a head that reaches the mirror before the outcome is recorded is already known as this commit (ownPush in src/preapproval).
-    db.prepare(`UPDATE main.autorepins SET head = ?, to_head = ? WHERE ${KEY}`).run(head, commit, ...keyOf(r));
+    await db.prepare(`UPDATE main.autorepins SET head = ?, to_head = ? WHERE ${KEY}`).run(head, commit, ...keyOf(r));
     const push = await pushRepin({ db, login: AUDIT_LOGIN }, g, git, { repo: r.repo, number: r.number, remote: headRepo, branch: pr.headRefName, head, sha: commit }, { on: depRef, rev: target, files: changed, by: r.login });
     if (push.code !== 0) {
       const err = oneLine(push.stderr);
@@ -447,13 +447,13 @@ export function noticeText(r: Pick<RepinRow, "login" | "state" | "result" | "ref
 }
 
 /** Posts the outcome. A paced write leaves it for the next drain; any other failure is logged and not retried. Nothing is posted on a quiet pull request. */
-async function notify(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<"posted" | "failed" | "paced" | "none"> {
+async function notify(db: Db, r: RepinRow, d: RepinDeps): Promise<"posted" | "failed" | "paced" | "none"> {
   // A quiet pull request (a security fix not yet published) gets no comment.
-  if (isQuiet(db, r.repo, r.number)) {
-    db.prepare(`UPDATE main.autorepins SET notice = 'none' WHERE ${KEY}`).run(...keyOf(r));
+  if (await isQuiet(db, r.repo, r.number)) {
+    await db.prepare(`UPDATE main.autorepins SET notice = 'none' WHERE ${KEY}`).run(...keyOf(r));
     return "none";
   }
-  const g = guardRepo(db, r.repo, null, { operator: r.login }, undefined, r.login);
+  const g = await guardRepo(db, r.repo, null, { operator: r.login }, undefined, r.login);
   let notice: "posted" | "failed" = "failed";
   if ("refused" in g) d.log?.(`autorepin ${refOf(r)}: no comment: ${g.refused}`);
   else {
@@ -466,15 +466,15 @@ async function notify(db: DatabaseSync, r: RepinRow, d: RepinDeps): Promise<"pos
       d.log?.(`autorepin ${refOf(r)}: the comment failed: ${oneLine(String((e as Error)?.message ?? e))}`);
     }
   }
-  db.prepare(`UPDATE main.autorepins SET notice = ? WHERE ${KEY}`).run(notice, ...keyOf(r));
+  await db.prepare(`UPDATE main.autorepins SET notice = ? WHERE ${KEY}`).run(notice, ...keyOf(r));
   return notice;
 }
 
 /** Takes the next step of every autorepin that has one (src/repin/due.ts) and posts the outcomes. Returns how many ended. */
-export async function drainRepins(db: DatabaseSync, deps: RepinDeps): Promise<number> {
+export async function drainRepins(db: Db, deps: RepinDeps): Promise<number> {
   const clock = deps.now ?? (() => new Date());
   let ended = 0, calls = 0;
-  for (const r0 of repinsDue(db, clock())) {
+  for (const r0 of await repinsDue(db, clock())) {
     if (calls++ >= (deps.limit ?? 5)) break;
     let r = r0;
     if (r.state === "waiting" || r.state === "locking") {
@@ -485,16 +485,16 @@ export async function drainRepins(db: DatabaseSync, deps: RepinDeps): Promise<nu
         if (e instanceof WritePacedError) break;
         // An `off` or a newer command came while the step awaited GitHub or git: the row is theirs now, so nothing of this
         // step is written (a Wait or a try would make an `off` row due again). A push that already went out was audited by pushRepin.
-        if (!still(db, r)) {
-          if (!(e instanceof Ended && e.state === "pushed")) stopTask(db, r.task_id);
+        if (!await still(db, r)) {
+          if (!(e instanceof Ended && e.state === "pushed")) await stopTask(db, r.task_id);
           deps.log?.(`autorepin ${refOf(r)}: the request changed during the try; its outcome is not recorded: ${oneLine(String((e as Error)?.message ?? e))}`);
           continue;
         }
-        if (e instanceof Ended) finish(db, r, e, clock());
+        if (e instanceof Ended) await finish(db, r, e, clock());
         else if (e instanceof Wait) {
           // Not a try, and it clears the count, so MAX_TRIES counts consecutive failures only: tried_at is set ahead, so the row is due again (repinsDue: a minute after tried_at) in BRANCH_POLL_MS.
-          stopTask(db, r.task_id);
-          db.prepare(`UPDATE main.autorepins SET state = 'waiting', task_id = NULL, tries = 0, tried_at = ? WHERE ${KEY}`).run(new Date(clock().getTime() + BRANCH_POLL_MS - RETRY_MS).toISOString(), ...keyOf(r));
+          await stopTask(db, r.task_id);
+          await db.prepare(`UPDATE main.autorepins SET state = 'waiting', task_id = NULL, tries = 0, tried_at = ? WHERE ${KEY}`).run(new Date(clock().getTime() + BRANCH_POLL_MS - RETRY_MS).toISOString(), ...keyOf(r));
           deps.log?.(`autorepin ${refOf(r)}: ${e.message}`);
           continue;
         } else {
@@ -502,16 +502,16 @@ export async function drainRepins(db: DatabaseSync, deps: RepinDeps): Promise<nu
           // worded here (Retry) is posted. head and to_head stay: a push that went out before the error is still known as ours.
           const raw = oneLine(String((e as Error)?.message ?? e));
           deps.log?.(`autorepin ${refOf(r)}: try ${r.tries + 1} of ${MAX_TRIES}: ${raw}`);
-          if (r.tries + 1 >= MAX_TRIES) finish(db, r, failed(e instanceof Retry ? raw : UNEXPECTED), clock());
+          if (r.tries + 1 >= MAX_TRIES) await finish(db, r, failed(e instanceof Retry ? raw : UNEXPECTED), clock());
           else {
-            stopTask(db, r.task_id);
-            db.prepare(`UPDATE main.autorepins SET state = 'waiting', task_id = NULL, tries = tries + 1, tried_at = ? WHERE ${KEY}`).run(clock().toISOString(), ...keyOf(r));
+            await stopTask(db, r.task_id);
+            await db.prepare(`UPDATE main.autorepins SET state = 'waiting', task_id = NULL, tries = tries + 1, tried_at = ? WHERE ${KEY}`).run(clock().toISOString(), ...keyOf(r));
             continue;
           }
         }
       }
       ended++;
-      r = db.prepare(`SELECT * FROM main.autorepins WHERE ${KEY}`).get(...keyOf(r)) as RepinRow;
+      r = await db.prepare(`SELECT * FROM main.autorepins WHERE ${KEY}`).get(...keyOf(r)) as RepinRow;
       deps.log?.(`autorepin ${refOf(r)}: ${r.state}${r.result ? `: ${r.result}` : ""}`);
     }
     if (r.notice === null && (await notify(db, r, deps)) === "paced") break;

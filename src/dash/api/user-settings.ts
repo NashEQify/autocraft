@@ -1,6 +1,5 @@
 // The signed-in user's own settings (GET and PUT /api/me/settings); their Task Runners are listed by GET /api/runners (runners.ts).
 // Maintainers and operators set their own settings; a viewer writes nothing.
-import type { DatabaseSync } from "node:sqlite";
 import { pipelineRepos } from "../../pilot.ts";
 import { manualOnly, parseManualOnly, setManualOnly } from "../../remote/manual-only.ts";
 import { parseMaxCalls, setUserMaxCalls, userMaxCalls } from "../../remote/max-calls.ts";
@@ -11,10 +10,11 @@ import { parseTaskItems, setUserTaskItems, userTaskItems, type TaskItems } from 
 import { parseReserve, setUserReserve, userReserve } from "../../remote/reserve.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
+import type { Db } from "../../db/index.ts";
 
 /** Repos with the pipeline on where the user has write permission, the permission a claim requires. */
-async function repoChoices(db: DatabaseSync, req: Req): Promise<string[]> {
-  const repos = [...pipelineRepos(db)].sort();
+async function repoChoices(db: Db, req: Req): Promise<string[]> {
+  const repos = [...await pipelineRepos(db)].sort();
   const ok = await Promise.all(repos.map((r) => req.user.canWrite(r).catch(() => false)));
   return repos.filter((_, i) => ok[i]);
 }
@@ -22,10 +22,10 @@ async function repoChoices(db: DatabaseSync, req: Req): Promise<string[]> {
 /** The reply: the protocol's settings, `manualOnly` (manual-only.ts), the ticked `tasks` of `taskChoices` (my-tasks.ts) and `taskItems` (task-items.ts). */
 type SettingsReply = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: readonly TaskChoice[]; taskItems: TaskItems };
 
-export const settings = async (db: DatabaseSync, req: Req): Promise<SettingsReply> =>
-  ({ reserve: userReserve(db, req.user.login), repos: userRepos(db, req.user.login), maxCalls: userMaxCalls(db, req.user.login), manualOnly: manualOnly(db, req.user.login), tasks: userTasks(db, req.user.login), taskChoices: TASK_CHOICES, taskItems: userTaskItems(db, req.user.login), repoChoices: await repoChoices(db, req) });
+export const settings = async (db: Db, req: Req): Promise<SettingsReply> =>
+  ({ reserve: await userReserve(db, req.user.login), repos: await userRepos(db, req.user.login), maxCalls: await userMaxCalls(db, req.user.login), manualOnly: await manualOnly(db, req.user.login), tasks: await userTasks(db, req.user.login), taskChoices: TASK_CHOICES, taskItems: await userTaskItems(db, req.user.login), repoChoices: await repoChoices(db, req) });
 
-export async function setSettings(db: DatabaseSync, req: Req): Promise<SettingsReply> {
+export async function setSettings(db: Db, req: Req): Promise<SettingsReply> {
   if (req.user.role === "viewer") throw new HttpError(403, "viewers have no settings to change");
   const b = req.json;
   if (!b || typeof b !== "object" || Array.isArray(b)) throw new HttpError(400, "the body must be a UserSettings object");
@@ -36,17 +36,17 @@ export async function setSettings(db: DatabaseSync, req: Req): Promise<SettingsR
   let reserve, repos, tasks, maxCalls: number | null | undefined, manual: boolean | undefined, items: TaskItems | undefined;
   try {
     if (body.reserve !== undefined) reserve = parseReserve(body.reserve);
-    if (body.repos !== undefined) repos = parseRepos(db, body.repos);
+    if (body.repos !== undefined) repos = await parseRepos(db, body.repos);
     if (body.maxCalls !== undefined) maxCalls = parseMaxCalls(body.maxCalls);
     if (body.manualOnly !== undefined) manual = parseManualOnly(body.manualOnly);
     if (body.tasks !== undefined) tasks = parseTasks(body.tasks);
     if (body.taskItems !== undefined) items = parseTaskItems(body.taskItems);
   } catch (e) { throw new HttpError(400, (e as Error).message); }
-  if (reserve) setUserReserve(db, req.user.login, reserve);
-  if (repos) setUserRepos(db, req.user.login, repos);
-  if (maxCalls !== undefined) setUserMaxCalls(db, req.user.login, maxCalls);
-  if (manual !== undefined) setManualOnly(db, req.user.login, manual);
-  if (tasks) setUserTasks(db, req.user.login, tasks);
-  if (items) setUserTaskItems(db, req.user.login, items);
+  if (reserve) await setUserReserve(db, req.user.login, reserve);
+  if (repos) await setUserRepos(db, req.user.login, repos);
+  if (maxCalls !== undefined) await setUserMaxCalls(db, req.user.login, maxCalls);
+  if (manual !== undefined) await setManualOnly(db, req.user.login, manual);
+  if (tasks) await setUserTasks(db, req.user.login, tasks);
+  if (items) await setUserTaskItems(db, req.user.login, items);
   return settings(db, req);
 }

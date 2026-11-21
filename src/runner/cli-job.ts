@@ -5,12 +5,12 @@
 // Commands not listed in CLI_STEPS, and runs with options a step has no parameter for, keep their own direct path.
 import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, mkdirSync, openSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
 import { cliGate, jobLimit } from "./autopilot.ts";
 import { checkRequest, endJob, JobError, now } from "./jobs.ts";
 import { logsDir } from "./runner.ts";
 import { loadSteps, type StepDef } from "./steps.ts";
+import type { Db } from "../db/index.ts";
 
 /** How a command maps to a step. `apply`: a job only with --apply (a dry run without it stays read-only); `dry-run`: a job unless --dry-run; `always`: always. */
 export type CliStep = { step: string; when: "apply" | "dry-run" | "always" };
@@ -48,41 +48,36 @@ export function cliRequest(command: string, args: string[], steps: Map<string, S
 }
 
 /** Runs the request as an operator job here and returns the exit code. */
-export async function runCliJob(db: DatabaseSync, req: CliRequest): Promise<number> {
+export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
   const steps = await loadSteps();
   let job: number;
   try {
     const { step, params } = await checkRequest(db, req.step, req.params);
     // The gate and the insert are one write transaction, so two CLI runs cannot both pass the gate.
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const why = cliGate(db, step, steps, params);
+    await db.write(async () => {
+      const why = await cliGate(db, step, steps, params);
       if (why) throw new JobError(409, why);
-      const lim = jobLimit(db, step, Date.now(), typeof params.limit === "number" ? params.limit : undefined);
+      const lim = await jobLimit(db, step, Date.now(), typeof params.limit === "number" ? params.limit : undefined);
       if (!lim) throw new JobError(409, `the daily limit of ${step.name} leaves too little for a run`);
       const full: Record<string, unknown> = { ...params, ...lim };
       mkdirSync(logsDir(), { recursive: true });
       const t = now();
       const repo = typeof full.repo === "string" ? full.repo : null;
-      job = Number(db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?)")
-        .run(step.name, JSON.stringify(full), repo, t, t).lastInsertRowid);
-      db.exec("COMMIT");
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
+      job = Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?)")
+        .run(step.name, JSON.stringify(full), repo, t, t)).lastInsertRowid);
+    });
   } catch (e) {
     if (e instanceof JobError) { console.error(`${req.step}: ${e.message}`); return 1; }
     throw e;
   }
   const logPath = `${logsDir()}/job-${job}.log`;
   closeSync(openSync(logPath, "a"));
-  db.prepare("UPDATE jobs SET log_path = ? WHERE id = ?").run(logPath, job);
+  await db.prepare("UPDATE jobs SET log_path = ? WHERE id = ?").run(logPath, job);
   const log = createWriteStream(logPath, { flags: "a" });
   const child = spawn(process.execPath, [new URL("../cli.ts", import.meta.url).pathname, "runner", "exec", String(job)], {
     stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, AUTOCRAFT_DB: dbPath() },
   });
-  db.prepare("UPDATE jobs SET pid = ? WHERE id = ?").run(child.pid ?? null, job);
+  await db.prepare("UPDATE jobs SET pid = ? WHERE id = ?").run(child.pid ?? null, job);
   child.stdout.on("data", (b: Buffer) => { log.write(b); process.stdout.write(b); });
   child.stderr.on("data", (b: Buffer) => { log.write(b); process.stderr.write(b); });
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => child.kill(sig));
@@ -90,7 +85,7 @@ export async function runCliJob(db: DatabaseSync, req: CliRequest): Promise<numb
   child.on("error", (e) => (spawnError = e.message));
   const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve) => child.on("close", (c, s) => resolve([c, s])));
   log.end();
-  const r = endJob(db, job, code, signal, spawnError);
+  const r = await endJob(db, job, code, signal, spawnError);
   console.error(`job ${job}: ${r?.state ?? "ended"}${r?.error ? `: ${r.error}` : ""}`);
   return r?.state === "done" ? 0 : 1;
 }

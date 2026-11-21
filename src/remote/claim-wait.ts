@@ -2,13 +2,12 @@
 // for a call. Calls are queued by job processes, not by the dashboard, so a waiting claim cannot be woken in-process: while
 // any claim waits, one timer reads the `remote-queue` topic's change counter (src/live.ts) and, when it moved, tries the
 // waiting claims one at a time, oldest first. Each claim is also tried in full every RETRY_MS and once at its deadline.
-import type { DatabaseSync } from "node:sqlite";
 import { isBusy } from "../db.ts";
-import { prep } from "../sql-cache.ts";
 import type { ClaimReply } from "./protocol.ts";
 
 export type EmptyReply = Extract<ClaimReply, { lease: null }>;
 import { scaled, scaledS } from "./time-scale.ts";
+import type { Db } from "../db/index.ts";
 
 /** The longest a claim is held, in seconds, whatever its `wait` asks. */
 export const HOLD_MAX_S = 25;
@@ -79,7 +78,7 @@ export const heldMsOf = (r: ClaimReply): number => held.get(r) ?? 0;
 
 /** The waiting claims of one dashboard process. */
 export class ClaimWaits {
-  #db: DatabaseSync;
+  #db: Db;
   #tickMs: number;
   #retryMs: number;
   #waiters: Waiter[] = [];
@@ -88,7 +87,7 @@ export class ClaimWaits {
   #closed = false;
 
   /** `db`: the helper routes' connection (short busy timeout); a busy database skips a tick. */
-  constructor(db: DatabaseSync, opts: { tickMs?: number; retryMs?: number } = {}) {
+  constructor(db: Db, opts: { tickMs?: number; retryMs?: number } = {}) {
     this.#db = db;
     this.#tickMs = opts.tickMs ?? TICK_MS;
     this.#retryMs = opts.retryMs ?? RETRY_MS;
@@ -144,7 +143,7 @@ export class ClaimWaits {
     try {
       let seq: number;
       try {
-        seq = Number((prep(this.#db, "SELECT seq FROM main.change_seq WHERE topic = 'remote-queue'").get() as { seq: number } | undefined)?.seq ?? 0);
+        seq = Number((await this.#db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'remote-queue'").get() as { seq: number } | undefined)?.seq ?? 0);
       } catch (e) {
         if (isBusy(e)) return;
         throw e;

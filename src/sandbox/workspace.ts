@@ -6,7 +6,6 @@
 // for it only briefly: it mounts the previous checkout when the new one is
 // not ready.
 import { existsSync, rmSync, statSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { trackedNames } from "../repos.ts";
 import { SHARED_NAME } from "./command.ts";
@@ -14,6 +13,8 @@ import { checkoutHeld, touchCheckout } from "./checkout.ts";
 import { checkoutForCommit, sandboxAvailable } from "./index.ts";
 import { envVar } from "../env.ts";
 import { setting } from "../settings-read.ts";
+import type { Db } from "../db/index.ts";
+import { openDb } from "../db/open.ts";
 
 export const EXCLUDE_KEY = "workspace_exclude";
 export const EXCLUDE_MAX = 100;
@@ -21,8 +22,8 @@ export const EXCLUDE_MAX = 100;
 const clean = (names: unknown[]): string[] => [...new Set(names.map((n) => String(n).trim()))].sort();
 
 /** Repositories left out of the workspace (sorted); none until the setting is saved. */
-export function workspaceExcluded(db: DatabaseSync): string[] {
-  const value = setting(db, EXCLUDE_KEY);
+export async function workspaceExcluded(db: Db): Promise<string[]> {
+  const value = await setting(db, EXCLUDE_KEY);
   if (value === undefined) return [];
   try {
     const v = JSON.parse(value) as unknown;
@@ -31,14 +32,14 @@ export function workspaceExcluded(db: DatabaseSync): string[] {
   return [];
 }
 
-export function setWorkspaceExcluded(db: DatabaseSync, names: unknown, by: string): string[] {
+export async function setWorkspaceExcluded(db: Db, names: unknown, by: string): Promise<string[]> {
   if (!Array.isArray(names) || names.length > EXCLUDE_MAX || !names.every((x) => typeof x === "string" && SHARED_NAME.test(x.trim()))) {
     throw new Error(`the excluded repositories must be a list of at most ${EXCLUDE_MAX} repository names (letters, digits, . _ -)`);
   }
   const list = clean(names);
-  const was = workspaceExcluded(db);
-  db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(EXCLUDE_KEY, JSON.stringify(list));
-  if (JSON.stringify(list) !== JSON.stringify(was)) audit(db, by, "workspace-exclude", "sandbox", { repos: list, was });
+  const was = await workspaceExcluded(db);
+  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(EXCLUDE_KEY, JSON.stringify(list));
+  if (JSON.stringify(list) !== JSON.stringify(was)) await audit(db, by, "workspace-exclude", "sandbox", { repos: list, was });
   return list;
 }
 
@@ -119,24 +120,24 @@ export class WorkspaceCache {
 
 const cache = new WorkspaceCache();
 
-function branchOf(db: DatabaseSync, repo: string): string {
-  return (db.prepare("SELECT default_branch FROM main.repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
+async function branchOf(db: Db, repo: string): Promise<string> {
+  return (await db.prepare("SELECT default_branch FROM main.repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
 }
 
 /** Checkouts of every public tracked repository's default branch (sorted by name) that could be had; the others are left out. */
-export async function workspaceCheckouts(db: DatabaseSync, log: (line: string) => void = console.log, deps: WorkspaceDeps = defaultWorkspaceDeps(), c: WorkspaceCache = cache): Promise<{ name: string; dir: string }[]> {
-  const skip = new Set(workspaceExcluded(db));
+export async function workspaceCheckouts(db: Db, log: (line: string) => void = console.log, deps: WorkspaceDeps = defaultWorkspaceDeps(), c: WorkspaceCache = cache): Promise<{ name: string; dir: string }[]> {
+  const skip = new Set(await workspaceExcluded(db));
   // Opus replies reach everyone who may view the dashboard, so only public repositories are mounted.
-  const pub = new Set((db.prepare("SELECT name FROM main.repos WHERE visibility = 'public'").all() as { name: string }[]).map((r) => r.name));
-  const names = trackedNames(db).filter((n) => pub.has(n) && !skip.has(n) && SHARED_NAME.test(n));
-  const dirs = await Promise.all(names.map((n) => c.dirOf(n, branchOf(db, n), deps, log).catch(() => null)));
+  const pub = new Set((await db.prepare("SELECT name FROM main.repos WHERE visibility = 'public'").all() as { name: string }[]).map((r) => r.name));
+  const names = (await trackedNames(db)).filter((n) => pub.has(n) && !skip.has(n) && SHARED_NAME.test(n));
+  const dirs = await Promise.all(names.map(async (n) => c.dirOf(n, await branchOf(db, n), deps, log).catch(() => null)));
   const out: { name: string; dir: string }[] = [];
   names.forEach((name, i) => { if (dirs[i]) out.push({ name, dir: dirs[i]! }); else log(`  workspace ${name}: no checkout yet; left out`); });
   return out;
 }
 
 /** The workspace for a call, or none when tool mode is unavailable. */
-export async function defaultWorkspace(db: DatabaseSync): Promise<{ name: string; dir: string }[]> {
+export async function defaultWorkspace(db: Db): Promise<{ name: string; dir: string }[]> {
   if (!sandboxAvailable() || envVar("WORKSPACE") === "off") return [];
   try { return await workspaceCheckouts(db); } catch { return []; }
 }
@@ -146,9 +147,9 @@ export const commands = {
     summary: "workspace-exclude [NAME...|none]: show or set the tracked repositories left out of the read-only workspace of Opus calls (default none)",
     async run(args: string[]): Promise<void> {
       const { connect } = await import("../db.ts");
-      const db = connect();
-      if (args.length) setWorkspaceExcluded(db, args[0] === "none" && args.length === 1 ? [] : args, "cli");
-      console.log(`left out of the workspace: ${workspaceExcluded(db).join(" ") || "none"}`);
+      const db = await openDb();
+      if (args.length) await setWorkspaceExcluded(db, args[0] === "none" && args.length === 1 ? [] : args, "cli");
+      console.log(`left out of the workspace: ${(await workspaceExcluded(db)).join(" ") || "none"}`);
     },
   },
 };

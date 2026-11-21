@@ -4,15 +4,15 @@ import { createServer } from "node:http";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { connect } from "../src/db.ts";
 import { appPermission, clearPermissionCache } from "../src/remote/permission.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
 test("the app token path answers without a session and one request serves parallel lookups", async () => {
-  const db = connect(join(mkdtempSync(join(SCRATCH, "remote-permission-")), "t.db"));
-  db.prepare("INSERT INTO repos (name, owner) VALUES ('photocraft', 'acme')").run();
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-permission-")), "t.db"));
+  await db.prepare("INSERT INTO repos (name, owner) VALUES ('photocraft', 'acme')").run();
   const seen: string[] = [];
   const srv = createServer((req, res) => {
     seen.push(`${req.url} ${req.headers.authorization}`);
@@ -27,7 +27,7 @@ test("the app token path answers without a session and one request serves parall
     assert.deepEqual(all.map((a) => a.kind === "ok" && a.permission), ["maintain", "maintain", "maintain"]);
     await appPermission(db, "alice", "photocraft", deps);
     assert.deepEqual(seen, ["/repos/acme/photocraft/collaborators/Alice/permission Bearer tok"]);
-    const row = db.prepare("SELECT permission FROM repo_permissions WHERE login = 'Alice' AND repo = 'photocraft'").get() as { permission: string };
+    const row = await db.prepare("SELECT permission FROM repo_permissions WHERE login = 'Alice' AND repo = 'photocraft'").get() as { permission: string };
     assert.equal(row.permission, "maintain");
     clearPermissionCache();
     assert.equal((await appPermission(db, "bob", "photocraft", { ...deps, mint: async () => { throw new Error("no app"); } })).kind, "unavailable");

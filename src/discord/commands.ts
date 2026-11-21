@@ -1,6 +1,5 @@
 // `/autocraft link`, `unlink`, `stats` and `status`. Replies are visible to the caller only. Everything they say about
 // items and counts comes from the public status layer (src/public/status.ts).
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { publicRepoNames, publicStats, publicStatus, type PublicStats, type PublicStatus } from "../public/status.ts";
 import type { Call, Interactions } from "./interactions.ts";
@@ -8,6 +7,7 @@ import type { DiscordKeys } from "./keys.ts";
 import { forgetReporter } from "./file-issue.ts";
 import { forgetLink, redeemLinkCode } from "./links.ts";
 import { plain } from "./reply.ts";
+import type { Db } from "../db/index.ts";
 
 const ATTEMPTS = { n: 5, ms: 60_000 };
 const READ_LIMIT = { n: 10, ms: 60_000 };
@@ -43,7 +43,7 @@ export const HELP = [
   "A ✅ on a message means AutoCraft counted it for the issues it names.",
 ].join("\n");
 
-export function installAccountCommands(ix: Interactions, deps: { db: DatabaseSync; keys: DiscordKeys; now?: () => number }): void {
+export function installAccountCommands(ix: Interactions, deps: { db: Db; keys: DiscordKeys; now?: () => number }): void {
   const { db, keys } = deps;
   const tries = new Map<string, number[]>();
   /** Sliding window per key: false when `lim.n` uses are already inside it. Keys whose uses have all expired are dropped. */
@@ -74,26 +74,26 @@ export function installAccountCommands(ix: Interactions, deps: { db: DatabaseSyn
   ix.command("autocraft link", def, async (call) => {
     if (!call.userId) return void (await call.edit({ content: "This command needs a Discord user." }));
     if (!mayTry(keys.hash("author", call.userId))) return void (await call.edit({ content: "Too many tries. Wait a minute." }));
-    const login = redeemLinkCode(db, keys, call.option("code") ?? "", call.userId);
+    const login = await redeemLinkCode(db, keys, call.option("code") ?? "", call.userId);
     if (!login) return void (await call.edit({ content: "That code is not valid, was already used, or has expired." }));
-    audit(db, login, "discord-link", login);
+    await audit(db, login, "discord-link", login);
     await call.edit({ content: `Linked to ${plain(login)}` });
   });
   ix.command("autocraft unlink", null, async (call) => {
-    const n = call.userId ? forgetLink(db, keys, call.userId) : 0;
-    const signedIn = call.userId ? forgetReporter(db, keys.hash("author", call.userId)) : false;
-    if (n || signedIn) audit(db, "discord", "discord-unlink", null, { by: "discord", link: n > 0, signedIn });
+    const n = call.userId ? await forgetLink(db, keys, call.userId) : 0;
+    const signedIn = call.userId ? await forgetReporter(db, keys.hash("author", call.userId)) : false;
+    if (n || signedIn) await audit(db, "discord", "discord-unlink", null, { by: "discord", link: n > 0, signedIn });
     await call.edit({ content: n || signedIn ? "Unlinked." : "This Discord account is not linked." });
   });
   ix.command("autocraft stats", null, async (call: Call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
     const repo = call.option("repo")?.trim();
-    const s = publicStats(db, repo || undefined);
+    const s = await publicStats(db, repo || undefined);
     await call.edit({ content: s ? formatStats(s) : "No public repo by that name." });
   });
-  ix.autocomplete("autocraft stats", (call) => {
+  ix.autocomplete("autocraft stats", async (call) => {
     const typed = (call.focused()?.value ?? "").toLowerCase();
-    return publicRepoNames(db).filter((r) => r.toLowerCase().includes(typed)).map((r) => ({ name: r, value: r }));
+    return (await publicRepoNames(db)).filter((r) => r.toLowerCase().includes(typed)).map((r) => ({ name: r, value: r }));
   });
   ix.command("autocraft help", null, async (call) => {
     await call.edit({ content: HELP });
@@ -101,7 +101,7 @@ export function installAccountCommands(ix: Interactions, deps: { db: DatabaseSyn
   ix.command("autocraft status", null, async (call) => {
     if (!mayRead(call)) return void (await call.edit({ content: TOO_MANY }));
     const m = REF.exec(call.option("item") ?? "");
-    const s = m ? publicStatus(db, m[1]!, Number(m[2])) : null;
+    const s = m ? await publicStatus(db, m[1]!, Number(m[2])) : null;
     if (!s) return void (await call.edit({ content: "No item found. Use the form repo#123." }));
     await call.edit({ content: formatStatus(s), components: [{ type: 1, components: [{ type: 2, style: 5, label: s.ref.slice(0, 80), url: s.url }] }] });
   });

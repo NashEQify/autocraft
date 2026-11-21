@@ -1,9 +1,9 @@
 // Contributor whitelist: an automatic tier from merge history, with owner
 // overrides that always win.
-import type { DatabaseSync } from "node:sqlite";
 import { audit } from "./dash/audit.ts";
-import { connect } from "./db.ts";
 import { githubUserId } from "./github/users.ts";
+import type { Db } from "./db/index.ts";
+import { openDb } from "./db/open.ts";
 
 export type Tier = "whitelisted" | "not" | "allow" | "deny";
 
@@ -32,19 +32,19 @@ export type Contributor = {
   tier: Tier;
 };
 
-export function getRule(db: DatabaseSync): Rule {
-  const rows = db.prepare("SELECT key, value FROM settings WHERE key IN ('whitelist_min_merged','whitelist_min_merge_rate')").all() as { key: string; value: string }[];
+export async function getRule(db: Db): Promise<Rule> {
+  const rows = await db.prepare("SELECT key, value FROM settings WHERE key IN ('whitelist_min_merged','whitelist_min_merge_rate')").all() as { key: string; value: string }[];
   const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return { minMerged: Number(m.whitelist_min_merged ?? 5), minRate: Number(m.whitelist_min_merge_rate ?? 0.6) };
 }
 
-export function setRule(db: DatabaseSync, rule: Rule, by: string): void {
+export async function setRule(db: Db, rule: Rule, by: string): Promise<void> {
   if (!Number.isInteger(rule.minMerged) || rule.minMerged < 0) throw new Error("min merged must be a whole number ≥ 0");
   if (!(rule.minRate >= 0 && rule.minRate <= 1)) throw new Error("min merge rate must be between 0 and 1");
   const set = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-  set.run("whitelist_min_merged", String(rule.minMerged));
-  set.run("whitelist_min_merge_rate", String(rule.minRate));
-  audit(db, by, "rule", "whitelist", rule);
+  await set.run("whitelist_min_merged", String(rule.minMerged));
+  await set.run("whitelist_min_merge_rate", String(rule.minRate));
+  await audit(db, by, "rule", "whitelist", rule);
 }
 
 export function tierOf(merged: number, closed: number, override: string | null, rule: Rule): Tier {
@@ -73,7 +73,7 @@ type Standing = { merged: number; closed: number; override: "allow" | "deny" | n
  * the login is bound to (author_ids), and for nobody while the login is unbound. An author with no id stands for the bound account.
  * An allow override counts only for the account it was given to; a deny holds for every account under the login.
  */
-function standings(db: DatabaseSync, authors: AuthorRef[]): Map<string, Standing> {
+async function standings(db: Db, authors: AuthorRef[]): Promise<Map<string, Standing>> {
   const out = new Map<string, Standing>();
   if (!authors.length) return out;
   const logins = [...new Set(authors.map((a) => a.login))];
@@ -83,13 +83,13 @@ function standings(db: DatabaseSync, authors: AuthorRef[]): Map<string, Standing
   const only = (col: string, nocase = false): string => (all ? "1" : `${col}${nocase ? " COLLATE NOCASE" : ""} IN (${marks})`);
   const args = all ? [] : logins;
   const rows = new Map<string, { id: number | null; merged: number; closed: number }[]>();
-  for (const r of db.prepare(`SELECT author AS login, author_id AS id, SUM(state = 'MERGED') AS merged, SUM(state = 'CLOSED') AS closed
+  for (const r of await db.prepare(`SELECT author AS login, author_id AS id, SUM(state = 'MERGED') AS merged, SUM(state = 'CLOSED') AS closed
     FROM items WHERE kind = 'pr' AND author IS NOT NULL AND ${only("author")} GROUP BY author, author_id`).all(...args) as { login: string; id: number | null; merged: number; closed: number }[]) {
     (rows.get(r.login) ?? rows.set(r.login, []).get(r.login)!).push(r);
   }
-  const over = new Map((db.prepare(`SELECT login, status, github_id FROM whitelist_overrides WHERE ${only("login", true)}`).all(...args) as { login: string; status: string; github_id: number | null }[])
+  const over = new Map((await db.prepare(`SELECT login, status, github_id FROM whitelist_overrides WHERE ${only("login", true)}`).all(...args) as { login: string; status: string; github_id: number | null }[])
     .map((r) => [r.login.toLowerCase(), r]));
-  const bound = new Map((db.prepare(`SELECT login, id FROM author_ids WHERE ${only("login")}`).all(...args) as { login: string; id: number }[]).map((r) => [r.login, r.id]));
+  const bound = new Map((await db.prepare(`SELECT login, id FROM author_ids WHERE ${only("login")}`).all(...args) as { login: string; id: number }[]).map((r) => [r.login, r.id]));
   for (const a of authors) {
     const owner = bound.get(a.login);
     const account = a.id ?? owner ?? null;
@@ -103,19 +103,19 @@ function standings(db: DatabaseSync, authors: AuthorRef[]): Map<string, Standing
 }
 
 /** Tiers of the given authors, from one stats query (see standings: history and an allow count only for their own account). */
-export function tiersOf(db: DatabaseSync, authors: AuthorRef[]): Map<string, Tier> {
-  const rule = getRule(db);
-  return new Map([...standings(db, authors)].map(([k, s]) => [k, tierOf(s.merged, s.closed, s.override, rule)]));
+export async function tiersOf(db: Db, authors: AuthorRef[]): Promise<Map<string, Tier>> {
+  const rule = await getRule(db);
+  return new Map([...await standings(db, authors)].map(([k, s]) => [k, tierOf(s.merged, s.closed, s.override, rule)]));
 }
 
-export function contributors(db: DatabaseSync, opts: { repo?: string; login?: string } = {}): Contributor[] {
-  const rule = getRule(db);
+export async function contributors(db: Db, opts: { repo?: string; login?: string } = {}): Promise<Contributor[]> {
+  const rule = await getRule(db);
   const where = [opts.repo ? "AND repo = :repo" : "", opts.login ? "AND author = :login" : ""].join(" ");
   const params: Record<string, string | number> = {};
   if (opts.repo) params.repo = opts.repo;
   if (opts.login) params.login = opts.login;
   // Stats always come from every repo; the repo filter only picks who is listed.
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     WITH s AS (${STATS_SQL} GROUP BY author),
     r AS (SELECT author, GROUP_CONCAT(DISTINCT repo) AS repos FROM items WHERE kind = 'pr' AND author IS NOT NULL ${where} GROUP BY author),
     j AS (
@@ -128,7 +128,7 @@ export function contributors(db: DatabaseSync, opts: { repo?: string; login?: st
     )
     SELECT j.* FROM j`).all(params) as Omit<Contributor, "rate" | "tier" | "override_in_effect">[];
   // History, override and tier are those of the account the login is bound to, as the merge rule reads them.
-  const st = standings(db, rows.map((r) => ({ login: r.login, id: null })));
+  const st = await standings(db, rows.map((r) => ({ login: r.login, id: null })));
   return rows.map((r) => {
     const s = st.get(tierKey({ login: r.login, id: null }))!;
     return { ...r, merged: s.merged, closed: s.closed, override_in_effect: r.override !== null && s.override === r.override,
@@ -137,9 +137,9 @@ export function contributors(db: DatabaseSync, opts: { repo?: string; login?: st
 }
 
 /** Whether the author account is whitelisted (by history or an allow override), with the facts; `id` null stands for the login's bound account. */
-export function isWhitelisted(db: DatabaseSync, login: string, id: number | null): { ok: boolean; reason: string } {
-  const rule = getRule(db);
-  const s = standings(db, [{ login, id }]).get(tierKey({ login, id }))!;
+export async function isWhitelisted(db: Db, login: string, id: number | null): Promise<{ ok: boolean; reason: string }> {
+  const rule = await getRule(db);
+  const s = (await standings(db, [{ login, id }])).get(tierKey({ login, id }))!;
   if (s.override === "allow") return { ok: true, reason: "override: allow" };
   if (s.override === "deny") return { ok: false, reason: "override: deny" };
   const rate = s.merged + s.closed > 0 ? s.merged / (s.merged + s.closed) : 0;
@@ -154,18 +154,18 @@ export const OVERRIDE_LOGIN = /^[A-Za-z0-9-]{1,39}(\[bot\])?$/;
  * Sets or clears the override of a login. `githubId` is the account the login names now (looked up by the caller): an allow
  * counts only for that account, so it needs one; a deny holds for any account under the login.
  */
-export function setOverride(db: DatabaseSync, login: string, status: "allow" | "deny" | null, note: string | null, by: string, githubId: number | null = null): void {
+export async function setOverride(db: Db, login: string, status: "allow" | "deny" | null, note: string | null, by: string, githubId: number | null = null): Promise<void> {
   if (!OVERRIDE_LOGIN.test(login)) throw new Error(`not a GitHub login: ${login}`);
   if (status === "allow" && githubId === null) throw new Error(`${login} is not a GitHub user`);
   if (status === null) {
-    db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").run(login);
+    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").run(login);
   } else {
-    db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE AND login <> ?").run(login, login);
-    db.prepare("INSERT OR REPLACE INTO whitelist_overrides (login, status, note, by, at, github_id) VALUES (?, ?, ?, ?, ?, ?)")
+    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE AND login <> ?").run(login, login);
+    await db.prepare("INSERT OR REPLACE INTO whitelist_overrides (login, status, note, by, at, github_id) VALUES (?, ?, ?, ?, ?, ?)")
       .run(login, status, note || null, by, new Date().toISOString(), githubId);
   }
   // The note is private: the audit row records only that one was given.
-  audit(db, by, "override", login, { status: status ?? "clear", note: note ? true : undefined, githubId: githubId ?? undefined });
+  await audit(db, by, "override", login, { status: status ?? "clear", note: note ? true : undefined, githubId: githubId ?? undefined });
 }
 
 function flag(args: string[], name: string): string | undefined {
@@ -176,10 +176,10 @@ function flag(args: string[], name: string): string | undefined {
   return v;
 }
 
-function list(args: string[]): void {
+async function list(args: string[]): Promise<void> {
   const tier = flag(args, "--tier");
   const repo = flag(args, "--repo");
-  const rows = contributors(connect(), { repo }).filter((c) => !tier || c.tier === tier)
+  const rows = (await contributors(await openDb(), { repo })).filter((c) => !tier || c.tier === tier)
     .sort((a, b) => b.merged - a.merged || a.login.localeCompare(b.login));
   console.log(`${"login".padEnd(28)} ${"tier".padEnd(16)} ${"merged".padStart(6)} ${"closed".padStart(6)} ${"open".padStart(5)} ${"rate".padStart(5)}`);
   for (const c of rows) {
@@ -187,12 +187,12 @@ function list(args: string[]): void {
   }
 }
 
-function show(args: string[]): void {
+async function show(args: string[]): Promise<void> {
   const login = args[0];
   if (!login) throw new Error("usage: whitelist show <login>");
-  const db = connect();
-  const c = contributors(db, { login })[0];
-  const w = isWhitelisted(db, login, null);
+  const db = await openDb();
+  const c = (await contributors(db, { login }))[0];
+  const w = await isWhitelisted(db, login, null);
   if (!c) {
     console.log(`${login}: no PRs in the mirror; ${w.ok ? "allowed" : "not allowed"} (${w.reason})`);
     return;
@@ -207,20 +207,20 @@ function override(status: "allow" | "deny" | null) {
     const login = args[0];
     if (!login) throw new Error(`usage: whitelist ${status ?? "clear"} <login>${status ? " [--note TEXT]" : ""}`);
     const id = status === "allow" ? await githubUserId(login) : status === "deny" ? await githubUserId(login).catch(() => null) : null;
-    setOverride(connect(), login, status, note, "cli", id);
+    await setOverride(await openDb(), login, status, note, "cli", id);
     console.log(`${login}: ${status ?? "override cleared"}`);
   };
 }
 
-function rule(args: string[]): void {
-  const db = connect();
-  const cur = getRule(db);
+async function rule(args: string[]): Promise<void> {
+  const db = await openDb();
+  const cur = await getRule(db);
   const m = flag(args, "--min-merged");
   const r = flag(args, "--min-rate");
   if (m !== undefined || r !== undefined) {
-    setRule(db, { minMerged: m === undefined ? cur.minMerged : Number(m), minRate: r === undefined ? cur.minRate : Number(r) }, "cli");
+    await setRule(db, { minMerged: m === undefined ? cur.minMerged : Number(m), minRate: r === undefined ? cur.minRate : Number(r) }, "cli");
   }
-  const now = getRule(db);
+  const now = await getRule(db);
   console.log(`whitelisted: at least ${now.minMerged} merged PRs and a merge rate of at least ${now.minRate}`);
 }
 

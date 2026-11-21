@@ -10,7 +10,6 @@ import { handleMcp } from "../src/dash/mcp/index.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Req, Role } from "../src/dash/types.ts";
-import { connect } from "../src/db.ts";
 import { claimCall, dropQueueCache, enqueueCall, type Caller } from "../src/remote/calls.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
@@ -26,135 +25,136 @@ import { addFastTrack } from "../src/fasttrack.ts";
 import { poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-picks-"));
 
-describe("picks and Manual only", () => {
-  const db = connect(join(dir, "t.db"));
-  setInferenceMode(db, "user-local", "test");
-  db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')").run();
-  db.prepare("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = 'public'").run();
+describe("picks and Manual only", async () => {
+  const db = await connectDb(join(dir, "t.db"));
+  await setInferenceMode(db, "user-local", "test");
+  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')").run();
+  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public') ON CONFLICT (name) DO UPDATE SET visibility = 'public'").run();
   const callers: Record<string, Caller> = {};
   for (const [login, role] of [["alice", "maintainer"], ["bob", "maintainer"], ["olga", "operator"], ["eve", "viewer"]] as const) {
-    db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
-    if (role !== "viewer") callers[login] = { tokenId: createToken(db, login, "runner", { kind: "runner" }).row.id, login, role };
+    await db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
+    if (role !== "viewer") callers[login] = { tokenId: (await createToken(db, login, "runner", { kind: "runner" })).row.id, login, role };
   }
   /** The user's runner reports ready now: two slots and the fast lane. */
-  const ready = (login: string) => storeStatus(db, callers[login]!.tokenId, login, parseStatus({ slots: 3, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  for (const login of ["alice", "bob", "olga"]) ready(login);
+  const ready = async (login: string) => await storeStatus(db, callers[login]!.tokenId, login, parseStatus({ slots: 3, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  for (const login of ["alice", "bob", "olga"]) await ready(login);
   let claims = 0;
   const claim = (extra: Partial<Claim> = {}): Claim => ({ requestId: `picks-claim-${String(++claims).padStart(4, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus", small: "haiku" }, ...extra });
   const yes = async () => true;
   const leased = async (login: string, extra: Partial<Claim> = {}, canWrite = yes) => (await claimCall(db, callers[login]!, claim(extra), canWrite)).lease?.id ?? null;
   const user = (login: string, role: Role = "maintainer") => ({ login, role, canWrite: yes, canRead: yes });
   const req = (login: string, role: Role, extra: Partial<Req> = {}) => ({ user: user(login, role), params: {}, ...extra }) as unknown as Req;
-  const q = (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string } = {}) => {
+  const q = async (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string } = {}) => {
     const tier = opts.tier ?? "top", promptId = opts.promptId ?? "review.opus";
-    const id = enqueueCall(db, { promptId, promptVersion: "1", tier, effort: "medium", askedModel: tier === "top" ? "opus" : "haiku", items: opts.items ?? [{ repo: "photocraft", number: 2 }], level: 0, maxAttempts: 2,
+    const id = await enqueueCall(db, { promptId, promptVersion: "1", tier, effort: "medium", askedModel: tier === "top" ? "opus" : "haiku", items: opts.items ?? [{ repo: "photocraft", number: 2 }], level: 0, maxAttempts: 2,
       bundle: { promptId, promptVersion: "1", tier, effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: true, hints: {} } });
-    if (opts.ageMs) db.prepare("UPDATE remote_calls SET since = since - ? WHERE id = ?").run(opts.ageMs, id);
+    if (opts.ageMs) await db.prepare("UPDATE remote_calls SET since = since - ? WHERE id = ?").run(opts.ageMs, id);
     return id;
   };
-  const clear = () => db.prepare("UPDATE remote_calls SET state = 'failed' WHERE state IN ('queued', 'leased')").run();
-  const pickedBy = (id: number) => (db.prepare("SELECT picked_by FROM remote_calls WHERE id = ?").get(id) as { picked_by: string | null }).picked_by;
+  const clear = async () => await db.prepare("UPDATE remote_calls SET state = 'failed' WHERE state IN ('queued', 'leased')").run();
+  const pickedBy = async (id: number) => (await db.prepare("SELECT picked_by FROM remote_calls WHERE id = ?").get(id) as { picked_by: string | null }).picked_by;
 
   test("the picker's runners take a pick first; others pass it over; the fast lane takes only picks that fit it", async () => {
-    const older = q({ ageMs: 10 * 60_000 });
-    const newer = q();
+    const older = await q({ ageMs: 10 * 60_000 });
+    const newer = await q();
     await pickCall(db, user("bob"), newer);
     assert.equal(await leased("bob"), newer, "bob's pick before the older call");
-    assert.equal(pickedBy(newer), null, "the lease ends the pick");
-    const third = q();
+    assert.equal(await pickedBy(newer), null, "the lease ends the pick");
+    const third = await q();
     await pickCall(db, user("bob"), third);
     assert.equal(await leased("alice"), older, "alice takes the unpicked call");
     assert.equal(await leased("alice"), null, "and not bob's pick");
     assert.equal(await leased("bob", { fastLane: true }), null, "a top-tier review does not fit the fast lane");
     assert.equal(await leased("bob"), third);
-    assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'bob' AND target = 'photocraft#2'").get());
-    clear();
+    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'bob' AND target = 'photocraft#2'").get());
+    await clear();
   });
 
   test("a pick lapses with its time or its picker's runners; with no time limit it lasts", async () => {
-    setPickMinutes(db, 0, "test");
-    const a = q();
+    await setPickMinutes(db, 0, "test");
+    const a = await q();
     await pickCall(db, user("bob"), a);
-    assert.equal((db.prepare("SELECT pick_until FROM remote_calls WHERE id = ?").get(a) as { pick_until: number | null }).pick_until, null);
+    assert.equal((await db.prepare("SELECT pick_until FROM remote_calls WHERE id = ?").get(a) as { pick_until: number | null }).pick_until, null);
     assert.equal(await leased("alice"), null, "no time limit: still bob's");
-    db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login = 'bob'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login = 'bob'").run(Date.now() - STATUS_FRESH_MS - 1000);
     assert.equal(await leased("alice"), a, "none of bob's runners is fresh: the pick no longer counts");
-    ready("bob");
-    setPickMinutes(db, 15, "test");
-    const b = q();
+    await ready("bob");
+    await setPickMinutes(db, 15, "test");
+    const b = await q();
     await pickCall(db, user("bob"), b);
     assert.equal(await leased("alice"), null);
-    db.prepare("UPDATE remote_calls SET pick_until = ? WHERE id = ?").run(Date.now() - 1, b);
+    await db.prepare("UPDATE remote_calls SET pick_until = ? WHERE id = ?").run(Date.now() - 1, b);
     dropQueueCache(db);
     assert.equal(await leased("alice"), b, "the pick's time is up");
-    clear();
+    await clear();
   });
 
   test("a pick does not count while its picker is cooling off or at their Max calls at once", async () => {
-    const a = q();
+    const a = await q();
     await pickCall(db, user("bob"), a);
-    db.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('Bob', ?, 'testing cool-off')").run(Date.now() + 60_000);
+    await db.prepare("INSERT INTO remote_cooloffs (login, until, reason) VALUES ('Bob', ?, 'testing cool-off')").run(Date.now() + 60_000);
     assert.equal(await leased("alice"), a, "bob is cooling off: alice's runner takes his pick");
-    db.prepare("DELETE FROM remote_cooloffs WHERE login = 'bob'").run();
-    setUserMaxCalls(db, "bob", 1);
-    const b = q();
+    await db.prepare("DELETE FROM remote_cooloffs WHERE login = 'bob'").run();
+    await setUserMaxCalls(db, "bob", 1);
+    const b = await q();
     await pickCall(db, user("bob"), b);
     assert.equal(await leased("alice"), null, "bob may still take it");
-    const held = q({ ageMs: 60_000 });
-    db.prepare("UPDATE remote_calls SET state = 'leased', user_login = 'bob', leased_at = ?, heartbeat_at = ? WHERE id = ?").run(Date.now(), Date.now(), held);
+    const held = await q({ ageMs: 60_000 });
+    await db.prepare("UPDATE remote_calls SET state = 'leased', user_login = 'bob', leased_at = ?, heartbeat_at = ? WHERE id = ?").run(Date.now(), Date.now(), held);
     dropQueueCache(db);
     assert.equal(await leased("alice"), b, "bob runs his Max calls at once: alice's runner takes his pick");
-    setUserMaxCalls(db, "bob", null);
-    clear();
+    await setUserMaxCalls(db, "bob", null);
+    await clear();
   });
 
   test("a pick the picker may no longer take or released ends at their claim; two users picking at once: one wins", async () => {
-    const a = q();
+    const a = await q();
     await pickCall(db, user("bob"), a);
     assert.equal(await leased("bob", {}, async () => false), null, "bob lost write permission");
-    assert.equal(pickedBy(a), null, "and with it the pick");
+    assert.equal(await pickedBy(a), null, "and with it the pick");
     await pickCall(db, user("bob"), a);
-    db.prepare("UPDATE remote_calls SET released_by = 'bob', released_at = ? WHERE id = ?").run(Date.now(), a);
+    await db.prepare("UPDATE remote_calls SET released_by = 'bob', released_at = ? WHERE id = ?").run(Date.now(), a);
     dropQueueCache(db);
     assert.equal(await leased("bob"), null);
-    assert.equal(pickedBy(a), null, "a call bob's runner released loses bob's pick");
+    assert.equal(await pickedBy(a), null, "a call bob's runner released loses bob's pick");
     const results = await Promise.allSettled([pickCall(db, user("bob"), a), pickCall(db, user("alice"), a)]);
     assert.deepEqual(results.map((r) => r.status).sort(), ["fulfilled", "rejected"]);
-    const winner = pickedBy(a)!;
+    const winner = (await pickedBy(a))!;
     const loser = winner === "bob" ? "alice" : "bob";
-    assert.throws(() => unpickCall(db, user(loser), a), /only operators/);
-    unpickCall(db, user("olga", "operator"), a);
-    assert.equal(pickedBy(a), null);
-    assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'remote-unpick' AND login = 'olga' AND details LIKE ?").get(`%"picker":"${winner}"%`));
-    clear();
+    await assert.rejects(async () => await unpickCall(db, user(loser), a), /only operators/);
+    await unpickCall(db, user("olga", "operator"), a);
+    assert.equal(await pickedBy(a), null);
+    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-unpick' AND login = 'olga' AND details LIKE ?").get(`%"picker":"${winner}"%`));
+    await clear();
   });
 
   test("a Manual only user's runners take only their picks and are no room", async () => {
-    const a = q();
+    const a = await q();
     // Both runners asked for work a moment ago (active), so both are room.
-    for (const login of ["alice", "bob", "olga"]) db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE login = ?").run(Date.now(), login);
-    const room = remoteRoom(db, 0);
+    for (const login of ["alice", "bob", "olga"]) await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE login = ?").run(Date.now(), login);
+    const room = await remoteRoom(db, 0);
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { manualOnly: true } }));
     assert.equal((await userSettings.settings(db, req("alice", "maintainer"))).manualOnly, true);
-    assert.equal(remoteRoom(db, 0), room - 2, "alice's two slots are no room");
+    assert.equal(await remoteRoom(db, 0), room - 2, "alice's two slots are no room");
     assert.equal(await leased("alice"), null, "an unpicked call");
     await pickCall(db, user("alice"), a);
     assert.equal(await leased("alice"), a, "her own pick");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { manualOnly: false } }));
-    assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'manual-only' AND login = 'alice'").get());
-    clear();
+    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'manual-only' AND login = 'alice'").get());
+    await clear();
   });
 
   test("the queue view: viewers see no picker, error or repo-less call; maintainers see them and what they may pick", async () => {
-    const a = q();
-    const b = q();
-    const loose = q({ items: [] });
+    const a = await q();
+    const b = await q();
+    const loose = await q({ items: [] });
     await pickCall(db, user("bob"), a);
-    db.prepare("UPDATE remote_calls SET error = 'lease expired' WHERE id = ?").run(b);
+    await db.prepare("UPDATE remote_calls SET error = 'lease expired' WHERE id = ?").run(b);
     const viewer = await modelQueue.get(db, req("eve", "viewer"));
     assert.deepEqual(viewer.calls.map((c) => c.id), [a, b]);
     assert.deepEqual(viewer.calls[0]!.picked, {});
@@ -168,13 +168,13 @@ describe("picks and Manual only", () => {
     assert.deepEqual(alice.me, { canPick: true, manualOnly: false, picks: 0, pickMax: 2 });
     const bob = await modelQueue.unpick(db, req("bob", "maintainer", { params: { id: String(a) } }));
     assert.equal(bob.calls[0]!.picked, null);
-    clear();
+    await clear();
   });
 
   test("the MCP model call tools apply the queue page's rules: viewers list without pickers and cannot pick; a pick is audited via mcp", async () => {
-    const a = q();
+    const a = await q();
     await pickCall(db, user("bob"), a);
-    const b = q();
+    const b = await q();
     const env = (login: string, role: Role) => ({ db, user: () => user(login, role) as any, baseUrl: null, limiter: new RateLimiter(10, 60_000), canAnswer: false, expensive: () => 0, userLocal: true });
     const rpc = async (login: string, role: Role, method: string, params?: Record<string, unknown>) => (await handleMcp(env(login, role), { jsonrpc: "2.0", id: 1, method, ...(params && { params }) }))!.result as any;
     const names = async (login: string, role: Role) => (await rpc(login, role, "tools/list")).tools.map((t: { name: string }) => t.name).filter((n: string) => n.includes("model_call"));
@@ -190,11 +190,11 @@ describe("picks and Manual only", () => {
     assert.equal(taken.isError, true);
     assert.match(taken.content[0].text, /another user picked it/);
     assert.equal((await rpc("alice", "maintainer", "tools/call", { name: "pick_model_call", arguments: { id: String(b) } })).isError, undefined);
-    assert.equal(pickedBy(b), "alice");
-    assert.ok(db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'alice' AND details LIKE '%\"via\":\"mcp\"%'").get());
+    assert.equal(await pickedBy(b), "alice");
+    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'remote-pick' AND login = 'alice' AND details LIKE '%\"via\":\"mcp\"%'").get());
     await rpc("alice", "maintainer", "tools/call", { name: "unpick_model_call", arguments: { id: String(b) } });
-    assert.equal(pickedBy(b), null);
-    clear();
+    assert.equal(await pickedBy(b), null);
+    await clear();
   });
 
   test("My tasks: unticked tasks are left in the queue for others; a pick and every task again still run", async () => {
@@ -203,31 +203,31 @@ describe("picks and Manual only", () => {
     const put = (tasks: unknown) => userSettings.setSettings(db, req("alice", "maintainer", { json: { tasks } }));
     await assert.rejects(put(["review", "nope"]), /unknown task: nope/);
     assert.deepEqual((await put(all.filter((t) => t !== "review"))).tasks, all.filter((t) => t !== "review"));
-    const step = (id: number, s: string) => db.prepare("UPDATE remote_calls SET step = ? WHERE id = ?").run(s, id);
-    const review = q({ ageMs: 60_000 }), fix = q();
-    step(review, "opus-review");
-    step(fix, "fixissue");
+    const step = async (id: number, s: string) => await db.prepare("UPDATE remote_calls SET step = ? WHERE id = ?").run(s, id);
+    const review = await q({ ageMs: 60_000 }), fix = await q();
+    await step(review, "opus-review");
+    await step(fix, "fixissue");
     dropQueueCache(db);
     assert.equal(await leased("alice"), fix, "the older review is passed over");
     assert.equal(await leased("alice"), null);
     assert.equal(await leased("bob"), review, "another user who takes reviews gets it");
-    const picked = q();
-    step(picked, "opus-review");
+    const picked = await q();
+    await step(picked, "opus-review");
     dropQueueCache(db);
     await pickCall(db, user("alice"), picked);
     assert.equal(await leased("alice"), picked, "a call alice picked runs although she unticked its task");
-    const later = q();
-    step(later, "opus-review");
+    const later = await q();
+    await step(later, "opus-review");
     dropQueueCache(db);
     await put(all);
-    assert.equal(db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'skip_tasks'").get(), undefined, "every task ticked again stores nothing");
+    assert.equal(await db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'skip_tasks'").get(), undefined, "every task ticked again stores nothing");
     assert.equal(await leased("alice"), later);
-    clear();
+    await clear();
   });
 
   test("My tasks items: fast-tracked only takes calls on fast-tracked items; by me only on the user's own; a repo counts only with such an item", async () => {
     const ins = db.prepare("INSERT OR IGNORE INTO items (repo, number, kind, state, title, author, created_at) VALUES ('photocraft', ?, 'pr', 'OPEN', 'x', 'dev', '2026-01-01T00:00:00Z')");
-    for (const n of [10, 11, 12]) ins.run(n);
+    for (const n of [10, 11, 12]) await ins.run(n);
     const put = (taskItems: unknown) => userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems } }));
     assert.equal((await userSettings.settings(db, req("alice", "maintainer"))).taskItems, "all", "every item by default");
     await assert.rejects(put("some"), /taskItems must be one of/);
@@ -235,32 +235,32 @@ describe("picks and Manual only", () => {
     const at = (n: number) => [{ repo: "photocraft", number: n }];
     const takes = () => takerTest(db, Date.now());
     // Only alice's runner is fresh, so the taker rule reads her choice alone.
-    db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
-    assert.equal(takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review" }), false, "no fast-tracked item on the repo: no taker before the items are known");
+    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    assert.equal(await takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review" }), false, "no fast-tracked item on the repo: no taker before the items are known");
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");
-    assert.equal(remoteRoom(db, 0), 0, "no open fast-tracked item at all: no room, even for a question about no repo or task");
+    assert.equal(await remoteRoom(db, 0), 0, "no open fast-tracked item at all: no room, even for a question about no repo or task");
 
-    addFastTrack(db, "bob", "photocraft#11");
-    addFastTrack(db, "alice", "photocraft#12");
-    assert.ok(remoteRoom(db, 0, Date.now(), undefined, "opus-review") > 0, "room for the task: the fast-tracked items are on a repo alice takes");
-    setUserRepos(db, "alice", ["deckcraft"]);
-    assert.equal(remoteRoom(db, 0, Date.now(), undefined, "opus-review"), 0, "no room once alice takes only a repo without fast-tracked items");
-    setUserRepos(db, "alice", []);
-    q({ ageMs: 60_000, items: at(10) });
-    const bobs = q({ items: at(11) }), mixed = q({ items: [...at(10), ...at(12)] });
+    await addFastTrack(db, "bob", "photocraft#11");
+    await addFastTrack(db, "alice", "photocraft#12");
+    assert.ok(await remoteRoom(db, 0, Date.now(), undefined, "opus-review") > 0, "room for the task: the fast-tracked items are on a repo alice takes");
+    await setUserRepos(db, "alice", ["deckcraft"]);
+    assert.equal(await remoteRoom(db, 0, Date.now(), undefined, "opus-review"), 0, "no room once alice takes only a repo without fast-tracked items");
+    await setUserRepos(db, "alice", []);
+    await q({ ageMs: 60_000, items: at(10) });
+    const bobs = await q({ items: at(11) }), mixed = await q({ items: [...at(10), ...at(12)] });
     dropQueueCache(db);
-    assert.equal(takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review" }), true, "the repo now has fast-tracked items");
-    assert.equal(takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review", refs: at(10) }), false, "but not this item");
+    assert.equal(await takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review" }), true, "the repo now has fast-tracked items");
+    assert.equal(await takes()({ prompt_id: "review.opus", repos: ["photocraft"], step: "opus-review", refs: at(10) }), false, "but not this item");
     assert.equal(await leased("alice"), bobs, "the older call on an item nobody fast-tracked is passed over");
     assert.equal(await leased("alice"), mixed, "one fast-tracked item of a call is enough");
     assert.equal(await leased("alice"), null);
-    clear();
+    await clear();
 
     await put("mine");
-    const theirs = q({ ageMs: 60_000, items: at(11) }), own = q({ items: at(12) });
+    const theirs = await q({ ageMs: 60_000, items: at(11) }), own = await q({ items: at(12) });
     dropQueueCache(db);
     assert.equal(await leased("alice"), own, "only the item alice fast-tracked");
-    for (const login of ["bob", "olga"]) ready(login);
+    for (const login of ["bob", "olga"]) await ready(login);
     assert.equal(await leased("bob"), theirs, "a runner that takes every item gets the rest");
     assert.equal(await leased("alice"), null, "nothing else alice fast-tracked");
 
@@ -270,35 +270,35 @@ describe("picks and Manual only", () => {
     assert.equal(whyWaiting({ ...c, refs: at(12) }, [r], 0, () => true).code, "behind");
     assert.equal(whyWaiting({ ...c, refs: at(10) }, [{ ...r, items: { refs: new Set(), repos: new Set() } }], 0, () => true).code, "items-off", "no fast-tracked item on the repo is still about items, not repo access");
     await put("all");
-    assert.equal(db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'task_items'").get(), undefined, "every item again stores nothing");
-    clear();
+    assert.equal(await db.prepare("SELECT 1 FROM user_settings WHERE login = 'alice' AND key = 'task_items'").get(), undefined, "every item again stores nothing");
+    await clear();
   });
 
   test("My tasks items in a pool: a fast-only runner gets the fast item's unit at once and no unit on other items, even with the other runners busy", async () => {
     const ins = db.prepare("INSERT OR IGNORE INTO items (repo, number, kind, state, title, author, created_at) VALUES ('photocraft', ?, 'issue', 'OPEN', 'x', 'dev', '2026-01-01T00:00:00Z')");
     const units = [21, 22, 23, 20];
-    for (const n of units) ins.run(n);
-    addFastTrack(db, "bob", "photocraft#20");
+    for (const n of units) await ins.run(n);
+    await addFastTrack(db, "bob", "photocraft#20");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "fast" } }));
-    db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
+    await db.prepare("UPDATE remote_helpers SET reported_at = ? WHERE login <> 'alice'").run(Date.now() - STATUS_FRESH_MS - 1000);
     assert.equal(await leased("alice"), null, "an idle claim: alice's runner is active");
     const refs = (i: number) => [{ repo: "photocraft", number: units[i]! }];
     const started: number[] = [];
     await pool(units.map((_, i) => async () => { started.push(i); }), poolRoom(db, () => ["photocraft"], refs, { promptId: "review.opus" }), { pollMs: 5 });
     assert.deepEqual(started, [3], "only the fast-tracked item's unit started, though it came last");
-    assert.deepEqual(repoBatches(db, units, 3, () => "photocraft", (n) => [{ repo: "photocraft", number: n }]), [[21, 22, 23], [20]], "the fast item is batched apart");
+    assert.deepEqual(await repoBatches(db, units, 3, () => "photocraft", (n) => [{ repo: "photocraft", number: n }]), [[21, 22, 23], [20]], "the fast item is batched apart");
 
     // Bob takes every item, and the calls ahead fill his slots: they take none of alice's.
-    ready("bob");
+    await ready("bob");
     assert.equal(await leased("bob"), null);
-    for (let k = 0; k < 4; k++) q({ items: refs(0) });
+    for (let k = 0; k < 4; k++) await q({ items: refs(0) });
     dropQueueCache(db);
     const room = poolRoom(db, () => ["photocraft"], refs, { promptId: "review.opus" });
-    assert.equal(room.room(0), 0, "no room for an unfast unit: bob is full");
-    assert.ok(room.room(3) > 0, "room for the fast unit on alice's runner");
+    assert.equal(await room.room(0), 0, "no room for an unfast unit: bob is full");
+    assert.ok(await room.room(3) > 0, "room for the fast unit on alice's runner");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "all" } }));
-    for (const login of ["alice", "bob", "olga"]) ready(login);
-    clear();
+    for (const login of ["alice", "bob", "olga"]) await ready(login);
+    await clear();
   });
 
   test("why a call waits", () => {

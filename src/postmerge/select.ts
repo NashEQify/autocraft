@@ -1,11 +1,12 @@
 // Which merged PRs still need a post-merge review and which defects still need an issue, from the local tables only.
 import { quietFixPrs } from "../security/quiet.ts";
-import type { DatabaseSync } from "node:sqlite";
 import { pilotSqlFor } from "../pilot.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { Finding } from "./parse.ts";
 import { RETRY_AFTER_MS } from "../core/rules.ts";
+import { flatMapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 /** A review that failed with a `retry:` error is tried again after this long. */
 export { RETRY_AFTER_MS };
@@ -20,14 +21,14 @@ export const MAX_RETRIES = 3;
 const BATCH = `EXISTS (SELECT 1 FROM merge_batch_prs bp JOIN merge_batches mb ON mb.id = bp.batch_id WHERE mb.repo = m.repo AND bp.number = m.number AND mb.state = 'merged') AS batch`;
 
 /** PRs whose Plan holds a `postmerge` action: a pipeline merge landed since the `postmerge_since` setting and no usable review is stored (a `retry:` error counts as missing an hour after it failed; the third is stored as held). Oldest merge first. */
-export function selectPostmerge(db: DatabaseSync, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet): MergedPr[] {
-  return planned(db, "postmerge", { repo, now, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) }).flatMap((p) => mergedPr(db, repo, p.facts.number) ?? [])
+export async function selectPostmerge(db: Db, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet): Promise<MergedPr[]> {
+  return (await flatMapSeq((await planned(db, "postmerge", { repo, now, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) })), async (p) => await mergedPr(db, repo, p.facts.number) ?? []))
     .sort((a, b) => (a.merged_at < b.merged_at ? -1 : a.merged_at > b.merged_at ? 1 : 0) || a.number - b.number);
 }
 
 /** The merged PR `repo#number`, whatever its review state, or null when the pipeline did not merge it. */
-export function mergedPr(db: DatabaseSync, repo: string, number: number): MergedPr | null {
-  return (db.prepare(`SELECT m.repo, m.number,
+export async function mergedPr(db: Db, repo: string, number: number): Promise<MergedPr | null> {
+  return (await db.prepare(`SELECT m.repo, m.number,
       (SELECT x.head_oid FROM merges x WHERE x.repo = m.repo AND x.number = m.number AND x.outcome = 'merged' ORDER BY x.at DESC, x.rowid DESC LIMIT 1) AS head_oid,
       MIN(m.at) AS merged_at,
       (SELECT x.method FROM merges x WHERE x.repo = m.repo AND x.number = m.number AND x.outcome = 'merged' ORDER BY x.at DESC, x.rowid DESC LIMIT 1) AS method,
@@ -44,8 +45,8 @@ export function parseStored(json: string | null): Finding[] {
   } catch { return []; }
 }
 
-export function reviewOf(db: DatabaseSync, repo: string, number: number): StoredReview | null {
-  const r = db.prepare("SELECT repo, number, merge_sha, at, model, error, findings FROM postmerge_reviews WHERE repo = ? AND number = ?").get(repo, number) as
+export async function reviewOf(db: Db, repo: string, number: number): Promise<StoredReview | null> {
+  const r = await db.prepare("SELECT repo, number, merge_sha, at, model, error, findings FROM postmerge_reviews WHERE repo = ? AND number = ?").get(repo, number) as
     { repo: string; number: number; merge_sha: string; at: string; model: string | null; error: string | null; findings: string | null } | undefined;
   return r ? { ...r, findings: parseStored(r.findings) } : null;
 }
@@ -53,8 +54,8 @@ export function reviewOf(db: DatabaseSync, repo: string, number: number): Stored
 export type FollowupState = "filing" | "filed" | "failed" | "skipped-duplicate" | "skipped-limit" | "skipped-minor" | "skipped-stale" | "skipped-text";
 export type Followup = { repo: string; number: number; review_at: string; finding: number; title: string; issue_number: number | null; url: string | null; state: FollowupState; at: string; duplicate_of: number | null; attempts: number; note: string | null };
 
-export function followupsOf(db: DatabaseSync, repo: string, number: number): Followup[] {
-  return db.prepare("SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups WHERE repo = ? AND number = ? ORDER BY review_at, finding").all(repo, number) as Followup[];
+export async function followupsOf(db: Db, repo: string, number: number): Promise<Followup[]> {
+  return await db.prepare("SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups WHERE repo = ? AND number = ? ORDER BY review_at, finding").all(repo, number) as Followup[];
 }
 
 /** A failed filing is tried again this long after its attempt (1 h after the first, 6 h after the second); three attempts at most. */
@@ -68,8 +69,8 @@ export function retryDue(f: Pick<Followup, "state" | "attempts" | "at">, now = D
 }
 
 /** The PR is the Fix PR of a follow-up issue this stage filed. */
-export function fixesFollowup(db: DatabaseSync, repo: string, number: number): boolean {
-  return db.prepare(`SELECT 1 FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
+export async function fixesFollowup(db: Db, repo: string, number: number): Promise<boolean> {
+  return await db.prepare(`SELECT 1 FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
     WHERE fa.repo = ? AND fa.pr_url LIKE '%/pull/' || ?`).get(repo, String(number)) !== undefined;
 }
 
@@ -78,13 +79,13 @@ export function fixesFollowup(db: DatabaseSync, repo: string, number: number): b
  * exists (filed, or filing with an unknown outcome), or the PR itself fixes a follow-up issue. The operator files one
  * with `postmerge file`.
  */
-export function heldReason(db: DatabaseSync, repo: string, number: number, reviewAt: string): "earlier" | "fix" | null {
-  return heldBy(followupsOf(db, repo, number), () => fixesFollowup(db, repo, number), reviewAt);
+export async function heldReason(db: Db, repo: string, number: number, reviewAt: string): Promise<"earlier" | "fix" | null> {
+  return await heldBy(await followupsOf(db, repo, number), async () => await fixesFollowup(db, repo, number), reviewAt);
 }
 
-function heldBy(followups: Followup[], fixes: () => boolean, reviewAt: string): "earlier" | "fix" | null {
+async function heldBy(followups: Followup[], fixes: () => Promise<boolean>, reviewAt: string): Promise<"earlier" | "fix" | null> {
   if (followups.some((x) => (x.state === "filed" || x.state === "filing") && x.review_at !== reviewAt)) return "earlier";
-  return fixes() ? "fix" : null;
+  return await fixes() ? "fix" : null;
 }
 
 export type PendingDefect = { repo: string; number: number; review_at: string; finding: number; f: Finding; model: string | null; attempts: number };
@@ -93,17 +94,17 @@ export type PendingDefect = { repo: string; number: number; review_at: string; f
  * Defects of the latest review of each PR that the filing step may still try, oldest review first: no row yet, a
  * skipped-limit row, or a failed row whose backoff has passed. A review held by `heldReason`, and the review of a quiet pull request, has none.
  */
-export function pendingDefects(db: DatabaseSync, repo?: string, now = Date.now()): PendingDefect[] {
+export async function pendingDefects(db: Db, repo?: string, now = Date.now()): Promise<PendingDefect[]> {
   const only = repo !== undefined ? [repo] : [];
-  const rows = db.prepare(`SELECT r.repo, r.number, r.at, r.model, r.findings FROM postmerge_reviews r
+  const rows = await db.prepare(`SELECT r.repo, r.number, r.at, r.model, r.findings FROM postmerge_reviews r
     WHERE ${repo !== undefined ? "r.repo = ? AND " : ""}r.error IS NULL AND ${pilotSqlFor("r.repo", "r.number")} ORDER BY r.at, r.number`).all(...only) as { repo: string; number: number; at: string; model: string | null; findings: string | null }[];
   const out: PendingDefect[] = [];
-  const quiet = quietFixPrs(db, repo);
+  const quiet = await quietFixPrs(db, repo);
   // The follow-ups of each PR and the Fix PR links of follow-up issues, read once (followupsOf and fixesFollowup per PR).
   const followups = new Map<string, Followup[]>();
-  for (const f of db.prepare(`SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups
+  for (const f of await db.prepare(`SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups
     ${repo !== undefined ? "WHERE repo = ? " : ""}ORDER BY review_at, finding`).all(...only) as Followup[]) (followups.get(`${f.repo}#${f.number}`) ?? followups.set(`${f.repo}#${f.number}`, []).get(`${f.repo}#${f.number}`)!).push(f);
-  const fixUrls = db.prepare(`SELECT fa.repo, fa.pr_url FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
+  const fixUrls = await db.prepare(`SELECT fa.repo, fa.pr_url FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
     WHERE ${repo !== undefined ? "fa.repo = ? AND " : ""}fa.pr_url IS NOT NULL`).all(...only) as { repo: string; pr_url: string }[];
   // As `pr_url LIKE '%/pull/<number>'`: LIKE ignores ASCII case.
   const fixes = (r: string, n: number): boolean => fixUrls.some((u) => u.repo === r && u.pr_url.toLowerCase().endsWith(`/pull/${n}`));
@@ -111,7 +112,7 @@ export function pendingDefects(db: DatabaseSync, repo?: string, now = Date.now()
     // A security fix gets no public text until its advisory is published: its findings stay on the dashboard.
     if (quiet.has(`${r.repo}#${r.number}`)) continue;
     const prFollowups = followups.get(`${r.repo}#${r.number}`) ?? [];
-    if (heldBy(prFollowups, () => fixes(r.repo, r.number), r.at)) continue;
+    if (await heldBy(prFollowups, async () => fixes(r.repo, r.number), r.at)) continue;
     const have = prFollowups.filter((x) => x.review_at === r.at);
     parseStored(r.findings).forEach((f, i) => {
       if (f.severity !== "defect" || f.duplicate_of !== null) return;
@@ -138,11 +139,11 @@ export const sameDefect = (a: Finding, b: Finding): boolean =>
   a.file !== null && a.file === b.file && a.line !== null && b.line !== null && Math.abs(a.line - b.line) <= 20 && similarTitles(a.title, b.title);
 
 /** Defects this stage filed (or is filing) in the last 30 days, with the finding's file and line from the review they came from. */
-export function recentFiled(db: DatabaseSync, repo: string, now = Date.now()): { number: number; f: Finding }[] {
+export async function recentFiled(db: Db, repo: string, now = Date.now()): Promise<{ number: number; f: Finding }[]> {
   const since = new Date(now - 30 * 86400_000).toISOString();
-  const rows = db.prepare("SELECT number, review_at, finding FROM postmerge_followups WHERE repo = ? AND state IN ('filed', 'filing') AND at >= ?").all(repo, since) as { number: number; review_at: string; finding: number }[];
-  return rows.flatMap((x) => {
-    const r = reviewOf(db, repo, x.number);
+  const rows = await db.prepare("SELECT number, review_at, finding FROM postmerge_followups WHERE repo = ? AND state IN ('filed', 'filing') AND at >= ?").all(repo, since) as { number: number; review_at: string; finding: number }[];
+  return await flatMapSeq(rows, async (x) => {
+    const r = await reviewOf(db, repo, x.number);
     const f = r && r.at === x.review_at ? r.findings[x.finding] : undefined;
     return f ? [{ number: x.number, f }] : [];
   });

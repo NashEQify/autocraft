@@ -2,8 +2,8 @@
 // (src/live.ts) and tells every connected browser which topics changed. The stream
 // carries topic names and counters only, never data: browsers refetch through the API.
 import type { ServerResponse } from "node:http";
-import type { DatabaseSync } from "node:sqlite";
 import { readSeqs } from "../../live.ts";
+import type { Db } from "../../db/index.ts";
 
 export type LiveOptions = {
   pollMs?: number;       // how often the markers are read
@@ -13,7 +13,7 @@ export type LiveOptions = {
   stallMs?: number;        // a client whose socket stays backed up this long is dropped
 };
 
-type Client = { res: ServerResponse; alive: () => boolean; session: string; stalled?: NodeJS.Timeout };
+type Client = { res: ServerResponse; alive: () => Promise<boolean>; session: string; stalled?: NodeJS.Timeout };
 
 export class LiveHub {
   private clients = new Set<Client>();
@@ -26,9 +26,9 @@ export class LiveHub {
   private readonly maxPerSession: number;
   private readonly stallMs: number;
 
-  private readonly db: DatabaseSync;
+  private readonly db: Db;
 
-  constructor(db: DatabaseSync, o: LiveOptions = {}) {
+  constructor(db: Db, o: LiveOptions = {}) {
     this.db = db;
     this.pollMs = o.pollMs ?? 500;
     this.heartbeatMs = o.heartbeatMs ?? 25_000;
@@ -46,7 +46,7 @@ export class LiveHub {
   }
 
   /** Takes over `res` (headers already written). `alive` tells whether the session still exists. */
-  add(res: ServerResponse, alive: () => boolean, session = ""): void {
+  async add(res: ServerResponse, alive: () => Promise<boolean>, session = ""): Promise<void> {
     const c: Client = { res, alive, session };
     const mine = [...this.clients].filter((x) => x.session === session);
     for (const old of mine.slice(0, Math.max(0, mine.length + 1 - this.maxPerSession))) {
@@ -54,15 +54,15 @@ export class LiveHub {
       this.remove(old);
     }
     this.clients.add(c);
-    if (this.clients.size === 1) this.start();
-    const seqs = this.read();
+    if (this.clients.size === 1) await this.start();
+    const seqs = await this.read();
     res.write(`retry: 3000\nevent: hello\ndata: ${JSON.stringify({ seqs })}\n\n`);
     res.on("close", () => this.remove(c));
   }
 
   /** Checks the markers now, for the answer to a write the dashboard just handled. */
-  poke(): void {
-    if (this.clients.size) this.check();
+  async poke(): Promise<void> {
+    if (this.clients.size) await this.check();
   }
 
   close(): void {
@@ -71,8 +71,8 @@ export class LiveHub {
     this.stop();
   }
 
-  private read(): Record<string, number> {
-    this.last = readSeqs(this.db);
+  private async read(): Promise<Record<string, number>> {
+    this.last = await readSeqs(this.db);
     return this.last;
   }
 
@@ -82,10 +82,10 @@ export class LiveHub {
     if (!this.clients.size) this.stop();
   }
 
-  private start(): void {
-    this.last = readSeqs(this.db);
-    this.timer = setInterval(() => this.check(), this.pollMs);
-    this.beat = setInterval(() => this.heartbeat(), this.heartbeatMs);
+  private async start(): Promise<void> {
+    this.last = await readSeqs(this.db);
+    this.timer = setInterval(async () => await this.check(), this.pollMs);
+    this.beat = setInterval(async () => await this.heartbeat(), this.heartbeatMs);
     this.timer.unref();
     this.beat.unref();
   }
@@ -96,10 +96,10 @@ export class LiveHub {
     this.timer = this.beat = undefined;
   }
 
-  private check(): void {
+  private async check(): Promise<void> {
     let now: Record<string, number>;
     try {
-      now = readSeqs(this.db);
+      now = await readSeqs(this.db);
     } catch (e) {
       console.error(`live: ${(e as Error).message}`);
       return;
@@ -112,8 +112,8 @@ export class LiveHub {
     this.send(`event: change\ndata: ${JSON.stringify({ topics, seqs })}\n\n`);
   }
 
-  private heartbeat(): void {
-    for (const c of this.clients) if (!c.alive()) { c.res.end(); this.remove(c); }
+  private async heartbeat(): Promise<void> {
+    for (const c of this.clients) if (!await c.alive()) { c.res.end(); this.remove(c); }
     this.send(": hb\n\n");
   }
 

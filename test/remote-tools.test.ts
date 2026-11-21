@@ -15,7 +15,6 @@ import { loadConfig } from "../src/dash/server/config.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
-import { connect } from "../src/db.ts";
 import type { Embedder } from "../src/embed/model.ts";
 import { writeSnapshot } from "../src/itemtools/snapshot.ts";
 import { awaitCall, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
@@ -24,6 +23,7 @@ import { PROTOCOL_VERSION, ROUTES, type TaskBundle, type ToolReply } from "../sr
 import { buildReferenceIndex } from "../src/reference-search.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-tools-"));
@@ -38,8 +38,8 @@ const fake: Embedder = {
   async embed(texts) { return texts.map((t) => (t.toLowerCase().includes("layer") ? new Float32Array([1, 0]) : new Float32Array([0, 1]))); },
 };
 
-describe("per-lease tools of remote calls", () => {
-  const db = connect(dbFile);
+describe("per-lease tools of remote calls", async () => {
+  const db = await connectDb(dbFile);
   let base = "", close: () => Promise<void> = async () => {};
   const leases = new Map<string, { id: number; secret: string }>();
   const bundle = (servers: string[]): Omit<TaskBundle, "callId"> => ({ promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 600, maxTurns: 10, stdin: "x", system: null, mounts: [], mcpServers: servers, keepSession: false, hints: {} });
@@ -47,31 +47,31 @@ describe("per-lease tools of remote calls", () => {
   before(async () => {
     allocation.pollMs = 10;
     referenceOptions.embedder = fake;
-    setInferenceMode(db, "user-local", "test");
+    await setInferenceMode(db, "user-local", "test");
     const now = new Date().toISOString();
-    db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public')").run();
-    db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('photocraft', 7, 'issue', 'OPEN', 'Wave filter crashes', 'b', 'alice', ?, ?)").run(now, now);
+    await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public')").run();
+    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('photocraft', 7, 'issue', 'OPEN', 'Wave filter crashes', 'b', 'alice', ?, ?)").run(now, now);
     writeSnapshot(dbFile);
     const ref = join(dir, "reference", "photocraft");
     mkdirSync(ref, { recursive: true });
     writeFileSync(join(ref, "layers.md"), `# Layers\n\n${Array.from({ length: 10 }, (_, i) => `Layer note ${i}. ${"filler ".repeat(100)}`).join("\n\n")}`);
     await buildReferenceIndex("photocraft", { embedder: fake });
-    addLogin(db, "cli", "bob", "maintainer", null);
-    const caller: Caller = { tokenId: createToken(db, "bob", "helper", { kind: "runner" }).row.id, login: "bob", role: "maintainer" };
+    await addLogin(db, "cli", "bob", "maintainer", null);
+    const caller: Caller = { tokenId: (await createToken(db, "bob", "helper", { kind: "runner" })).row.id, login: "bob", role: "maintainer" };
     const items = [{ repo: "photocraft", number: 7 }];
     const common = { promptId: "review.opus", promptVersion: "1", tier: "top" as const, effort: "medium", askedModel: "opus", items, level: 2, maxAttempts: 1 };
     const ids = {
-      tools: enqueueCall(db, { ...common, bundle: bundle(["items", "reference"]), referenceRepo: "photocraft" }),
-      race: enqueueCall(db, { ...common, bundle: bundle(["reference"]), referenceRepo: "photocraft" }),
-      build: enqueueCall(db, { ...common, bundle: bundle(["build"]) }),
-      ended: enqueueCall(db, { ...common, bundle: bundle(["items"]) }),
+      tools: await enqueueCall(db, { ...common, bundle: bundle(["items", "reference"]), referenceRepo: "photocraft" }),
+      race: await enqueueCall(db, { ...common, bundle: bundle(["reference"]), referenceRepo: "photocraft" }),
+      build: await enqueueCall(db, { ...common, bundle: bundle(["build"]) }),
+      ended: await enqueueCall(db, { ...common, bundle: bundle(["items"]) }),
     };
     for (let i = 0; i < 4; i++) {
       const r = await claimCall(db, caller, { requestId: `test-claim-000${i}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2", tiers: { top: "opus" } }, async () => true);
       const name = Object.entries(ids).find(([, id]) => id === r.lease?.id)![0];
       leases.set(name, r.lease!);
     }
-    submitCall(db, leases.get("ended")!.secret, { ok: false, error: "x", durationMs: 1 });
+    await submitCall(db, leases.get("ended")!.secret, { ok: false, error: "x", durationMs: 1 });
     const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
     const limiter = new RateLimiter(60, 3600_000);
     const s = await startServer({ config, db, provider: new FakeProvider(permsFile), feedbackLimiter: limiter, routes: apiRoutes({ limiter }) });
@@ -80,7 +80,7 @@ describe("per-lease tools of remote calls", () => {
   });
   after(async () => {
     await close();
-    db.close();
+    await db.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -134,7 +134,7 @@ describe("per-lease tools of remote calls", () => {
       assert.ok(served <= PASSAGES_PER_LEASE);
     }
     assert.equal(served, PASSAGES_PER_LEASE);
-    const rows = db.prepare("SELECT COUNT(*) AS n, MIN(user_login) AS login, MIN(repo) AS repo FROM remote_passages WHERE call_id = ?").get(leases.get("tools")!.id) as { n: number; login: string; repo: string };
+    const rows = await db.prepare("SELECT COUNT(*) AS n, MIN(user_login) AS login, MIN(repo) AS repo FROM remote_passages WHERE call_id = ?").get(leases.get("tools")!.id) as { n: number; login: string; repo: string };
     assert.deepEqual({ ...rows }, { n: PASSAGES_PER_LEASE, login: "bob", repo: "photocraft" });
   });
 
@@ -142,7 +142,7 @@ describe("per-lease tools of remote calls", () => {
     const rs = await Promise.all(Array.from({ length: 20 }, () => tool("race", "reference", "reference_search", { query: "layer", limit: 8 })));
     const served = rs.reduce((n, r) => n + (r.body.isError ? 0 : r.body.content[0]!.text.match(/^passage \d+:/gm)!.length), 0);
     assert.ok(served <= PASSAGES_PER_LEASE);
-    const rows = db.prepare("SELECT COUNT(*) AS n FROM remote_passages WHERE call_id = ?").get(leases.get("race")!.id) as { n: number };
+    const rows = await db.prepare("SELECT COUNT(*) AS n FROM remote_passages WHERE call_id = ?").get(leases.get("race")!.id) as { n: number };
     assert.equal(Number(rows.n), served);
   });
 
@@ -152,9 +152,9 @@ describe("per-lease tools of remote calls", () => {
     const waiting = awaitCall(db, id, { check: { run: async (input, runId) => { seen.push({ input, runId }); return { text: "clippy: 0 findings on the patch's lines, no compile errors" }; } } });
     const r = await tool("build", "build", "check", { patch: "diff", command: "clippy" });
     assert.deepEqual(r.body, { content: [{ type: "text", text: "clippy: 0 findings on the patch's lines, no compile errors" }] });
-    const runId = (db.prepare("SELECT run_id FROM remote_calls WHERE id = ?").get(id) as { run_id: number }).run_id;
+    const runId = (await db.prepare("SELECT run_id FROM remote_calls WHERE id = ?").get(id) as { run_id: number }).run_id;
     assert.deepEqual(seen, [{ input: { patch: "diff", command: "clippy" }, runId }]);
-    submitCall(db, secret, { ok: false, error: "done", durationMs: 1 });
+    await submitCall(db, secret, { ok: false, error: "done", durationMs: 1 });
     assert.equal((await waiting).state, "failed");
   });
 });

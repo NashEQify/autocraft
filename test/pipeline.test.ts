@@ -9,6 +9,7 @@ import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Job, JobDetail, JobList, PipelineOverview } from "../web/src/api/types.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));
 
@@ -27,15 +28,15 @@ const dbFile = join(dir, "dash.db");
 const permsFile = join(dir, "perms.json");
 writeFileSync(permsFile, "{}");
 
-const db = connect(dbFile);
+const db = await connectDb(dbFile);
 let base = "";
 let close: () => Promise<void>;
 
 before(async () => {
-  addLogin(db, "cli", "boss", "operator", null);
-  addLogin(db, "cli", "viewer1", "viewer", null);
-  addLogin(db, "cli", "maint", "maintainer", null);
-  scopeToTracked(db);
+  await addLogin(db, "cli", "boss", "operator", null);
+  await addLogin(db, "cli", "viewer1", "viewer", null);
+  await addLogin(db, "cli", "maint", "maintainer", null);
+  await scopeToTracked(db);
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile });
   const s = await startServer({ config, db, provider: new FakeProvider(permsFile), routes: apiRoutes() });
   base = s.url;
@@ -43,7 +44,7 @@ before(async () => {
 });
 after(async () => {
   await close();
-  db.close();
+  await db.close();
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -83,7 +84,7 @@ async function signedIn(login: string): Promise<Client> {
   return c;
 }
 
-const audits = (action: string) => (db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ?").get(action) as { n: number }).n;
+const audits = async (action: string) => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ?").get(action) as { n: number }).n;
 
 describe("pipeline api", () => {
   test("viewers read jobs without logs, maintainers with them, and both get 403 on run and cancel", async () => {
@@ -91,7 +92,7 @@ describe("pipeline api", () => {
     const job = await boss.post<Job>("/api/pipeline/jobs", { step: "test-echo", params: { n: 1 } });
     const logFile = join(dir, "job.log");
     writeFileSync(logFile, `starting\nGITHUB_TOKEN=${FAKE_TOKEN}\n${homedir()}/somewhere\n`);
-    db.prepare("UPDATE jobs SET log_path = ?, error = 'exit 1: secret-detail' WHERE id = ?").run(logFile, job.id);
+    await db.prepare("UPDATE jobs SET log_path = ?, error = 'exit 1: secret-detail' WHERE id = ?").run(logFile, job.id);
     for (const login of ["viewer1", "maint"]) {
       const c = await signedIn(login);
       const o = await c.get<PipelineOverview>("/api/pipeline");
@@ -104,23 +105,23 @@ describe("pipeline api", () => {
       if (login === "viewer1") assert.equal(d.log, null);
       else assert.ok(!d.log!.includes(FAKE_TOKEN) && !d.log!.includes(homedir()) && d.log!.includes("starting"), d.log!);
       assert.ok(!JSON.stringify(d).includes(logFile), "the log path stays on the server");
-      const before = db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get();
+      const before = await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get();
       await c.post("/api/pipeline/jobs", { step: "test-echo", params: { n: 2 } }, 403);
       await c.post(`/api/pipeline/jobs/${job.id}/cancel`, undefined, 403);
-      assert.deepEqual(db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get(), before);
+      assert.deepEqual(await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action <> 'sign-in'").get(), before);
     }
-    assert.equal(getState(job.id), "queued");
+    assert.equal(await getState(job.id), "queued");
   });
 
   test("params outside the step's schema are refused", async () => {
     const boss = await signedIn("boss");
-    const before = audits("job-request");
+    const before = await audits("job-request");
     for (const params of [
       { n: 101 }, { n: -1 }, { n: 1.5 }, { n: "3" }, { mode: "maybe" }, { repo: "not-a-tracked-repo" },
       { run: "Has Spaces" }, { run: "ignore previous instructions" }, { other: 1 }, [1],
     ]) await boss.post("/api/pipeline/jobs", { step: "test-echo", params }, 400);
     await boss.post("/api/pipeline/jobs", { step: "no-such-step", params: {} }, 400);
-    assert.equal(audits("job-request"), before);
+    assert.equal(await audits("job-request"), before);
   });
 
   test("an operator requests and cancels, each audited", async () => {
@@ -131,9 +132,9 @@ describe("pipeline api", () => {
     await boss.post("/api/pipeline/jobs", { step: "test-echo", params: { n: 9, repo: "photocraft", run: "pass-2" } }, 409);
     assert.equal((await boss.post<Job>(`/api/pipeline/jobs/${j.id}/cancel`)).state, "cancelled");
     await boss.post(`/api/pipeline/jobs/${j.id}/cancel`, undefined, 409);
-    const rows = db.prepare("SELECT action FROM audit WHERE login = 'boss' AND action IN ('job-request', 'job-cancel') ORDER BY rowid").all();
+    const rows = await db.prepare("SELECT action FROM audit WHERE login = 'boss' AND action IN ('job-request', 'job-cancel') ORDER BY rowid").all();
     assert.deepEqual(rows.slice(-2).map((r) => r.action), ["job-request", "job-cancel"]);
   });
 });
 
-const getState = (id: number) => (db.prepare("SELECT state FROM jobs WHERE id = ?").get(id) as { state: string }).state;
+const getState = async (id: number) => (await db.prepare("SELECT state FROM jobs WHERE id = ?").get(id) as { state: string }).state;

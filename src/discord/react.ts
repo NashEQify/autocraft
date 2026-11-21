@@ -1,27 +1,27 @@
 // Adds a ✅ reaction to a message the bot has just recorded against items, so people see it was picked up.
 // The gateway handler stays free of network calls: it hands the message here and this fires the request without waiting.
-import type { DatabaseSync } from "node:sqlite";
 import { RestError, type RestClient } from "./rest.ts";
+import type { Db } from "../db/index.ts";
 
 type ReactRest = Pick<RestClient, "addReaction">;
 
 export const REACTION = "✅";
 
 /** The operators' switch on the Discord page; on unless switched off. */
-export const reactOn = (db: DatabaseSync): boolean =>
-  (db.prepare("SELECT value FROM settings WHERE key = 'discord_react'").get() as { value: string } | undefined)?.value !== "off";
+export const reactOn = async (db: Db): Promise<boolean> =>
+  (await db.prepare("SELECT value FROM settings WHERE key = 'discord_react'").get() as { value: string } | undefined)?.value !== "off";
 
 export class Reactor {
-  #d: { db: DatabaseSync; rest: ReactRest; log: (l: string) => void };
+  #d: { db: Db; rest: ReactRest; log: (l: string) => void };
   #logged = new Set<string>();
 
-  constructor(d: { db: DatabaseSync; rest: ReactRest; log: (l: string) => void }) {
+  constructor(d: { db: Db; rest: ReactRest; log: (l: string) => void }) {
     this.#d = d;
   }
 
   /** Fire and forget. A refusal is logged once per channel and status and never retried. */
-  recorded(channelId: string, messageId: string): void {
-    if (!reactOn(this.#d.db)) return;
+  async recorded(channelId: string, messageId: string): Promise<void> {
+    if (!await reactOn(this.#d.db)) return;
     void this.#d.rest.addReaction(channelId, messageId, REACTION).catch((e: unknown) => {
       const status = e instanceof RestError ? e.status : 0;
       const kind = status === 403 ? "missing the Add Reactions permission" : status === 404 ? "message no longer exists" : (e as Error).message;

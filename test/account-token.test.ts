@@ -9,9 +9,9 @@ import { listAccounts } from "../src/agents/accounts.ts";
 import { addAccount, beginToken, removeToken, sendTokenCode, stopToken } from "../src/agents/manage.ts";
 import { childEnv } from "../src/agents/status.ts";
 import { cliErrorText, credentialsNearExpiry, extractScreenToken, extractToken, isAuthFailure, markTokenRejected, tokenEnv, tokenFile, usesToken } from "../src/agents/token.ts";
-import { connect } from "../src/db.ts";
 import { sandboxCommand } from "../src/sandbox/command.ts";
 import { SCRATCH } from "./scratch.ts";
+import { connectDb } from "../src/db/open.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "account-token-"));
@@ -53,37 +53,37 @@ chmodSync(FAKE, 0o755);
 process.env.AUTOCRAFT_CLAUDE_BIN = FAKE;
 process.env.AUTOCRAFT_ACCOUNTS_ROOT = join(dir, "root");
 delete process.env.AUTOCRAFT_ACCOUNTS;
-const db = connect(join(dir, "t.db"));
+const db = await connectDb(join(dir, "t.db"));
 
-const waitFor = async (f: () => boolean) => {
-  for (let i = 0; i < 400 && !f(); i++) await new Promise((r) => setTimeout(r, 50));
-  assert.ok(f());
+const waitFor = async (f: () => Promise<boolean>) => {
+  for (let i = 0; i < 400 && !await f(); i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(await f());
 };
 
 describe("long-lived token", () => {
   test("is captured from setup-token, stored 0600, never returned or audited, and used only for model calls", async () => {
-    const a = addAccount(db, { label: "Team A" }, "op");
+    const a = await addAccount(db, { label: "Team A" }, "op");
     const dirA = join(dir, "root", a.id);
     assert.equal((await beginToken(db, a.id, "op")).login?.state, "waiting");
-    sendTokenCode(db, a.id, { code: "goodcode#state" }, "op");
-    await waitFor(() => listAccounts(db)[0]!.login?.state === "done");
+    await sendTokenCode(db, a.id, { code: "goodcode#state" }, "op");
+    await waitFor(async () => (await listAccounts(db))[0]!.login?.state === "done");
 
-    const view = listAccounts(db)[0]!;
+    const view = (await listAccounts(db))[0]!;
     assert.equal(view.token.state, "set");
     assert.ok(view.token.expiresAt && Date.parse(view.token.expiresAt) > Date.now() + 360 * 86_400_000);
     assert.equal(readFileSync(tokenFile(dirA), "utf8").trim(), SECRET);
     assert.equal(statSync(tokenFile(dirA)).mode & 0o777, 0o600);
     assert.ok(!existsSync(`${tokenFile(dirA)}.tmp`));
     assert.deepEqual(readdirSync(dirA).filter((n) => n.startsWith("token-check-")), []);
-    const everything = JSON.stringify([listAccounts(db), db.prepare("SELECT * FROM audit").all(), db.prepare("SELECT * FROM claude_account_tokens").all()]);
+    const everything = JSON.stringify([await listAccounts(db), await db.prepare("SELECT * FROM audit").all(), await db.prepare("SELECT * FROM claude_account_tokens").all()]);
     assert.ok(!everything.includes("sk-ant-oat01"));
-    assert.deepEqual(db.prepare("SELECT action FROM audit WHERE action LIKE 'account-token%' ORDER BY rowid").all().map((r) => (r as { action: string }).action), ["account-token-start", "account-token-code", "account-token-set"]);
+    assert.deepEqual((await db.prepare("SELECT action FROM audit WHERE action LIKE 'account-token%' ORDER BY rowid").all()).map((r) => (r as { action: string }).action), ["account-token-start", "account-token-code", "account-token-set"]);
 
     // Model calls get the token; status, usage and logout (childEnv) do not.
-    assert.deepEqual(tokenEnv(db, a.id, dirA), { CLAUDE_CODE_OAUTH_TOKEN: SECRET });
+    assert.deepEqual(await tokenEnv(db, a.id, dirA), { CLAUDE_CODE_OAUTH_TOKEN: SECRET });
     assert.equal(childEnv(dirA).CLAUDE_CODE_OAUTH_TOKEN, undefined);
     // An account with a token never waits for a login-token refresh.
-    assert.equal(credentialsNearExpiry(db, a.id, dirA, Date.now(), 3_600_000), false);
+    assert.equal(await credentialsNearExpiry(db, a.id, dirA, Date.now(), 3_600_000), false);
 
     // The sandbox gets the token as environment and no credentials mount.
     const spec = { claudeBin: "/h/claude", checkout: "/h/co", credentials: "/h/acct/.credentials.json", claudeArgs: ["-p"] };
@@ -96,43 +96,43 @@ describe("long-lived token", () => {
 
     // A rejection stops its use and shows on the page; a new token clears it.
     assert.ok(isAuthFailure('API Error: 401 {"type":"error","error":{"type":"authentication_error"}}'));
-    markTokenRejected(db, a.id);
-    assert.equal(usesToken(db, a.id, dirA), false);
-    assert.deepEqual(tokenEnv(db, a.id, dirA), {});
-    assert.equal(listAccounts(db)[0]!.token.state, "rejected");
-    assert.equal(credentialsNearExpiry(db, a.id, dirA, Date.now(), 3_600_000), true);
+    await markTokenRejected(db, a.id);
+    assert.equal(await usesToken(db, a.id, dirA), false);
+    assert.deepEqual(await tokenEnv(db, a.id, dirA), {});
+    assert.equal((await listAccounts(db))[0]!.token.state, "rejected");
+    assert.equal(await credentialsNearExpiry(db, a.id, dirA, Date.now(), 3_600_000), true);
 
-    removeToken(db, a.id, "op");
-    assert.equal(listAccounts(db)[0]!.token.state, "none");
+    await removeToken(db, a.id, "op");
+    assert.equal((await listAccounts(db))[0]!.token.state, "none");
     assert.ok(!existsSync(tokenFile(dirA)));
   });
 
   test("a token the check rejects is not saved", async () => {
-    const a = addAccount(db, { label: "Team B" }, "op");
+    const a = await addAccount(db, { label: "Team B" }, "op");
     await beginToken(db, a.id, "op");
-    sendTokenCode(db, a.id, { code: "badtoken#state" }, "op");
-    await waitFor(() => listAccounts(db).find((x) => x.id === a.id)!.login?.state === "failed");
-    const view = listAccounts(db).find((x) => x.id === a.id)!;
+    await sendTokenCode(db, a.id, { code: "badtoken#state" }, "op");
+    await waitFor(async () => (await listAccounts(db)).find((x) => x.id === a.id)!.login?.state === "failed");
+    const view = (await listAccounts(db)).find((x) => x.id === a.id)!;
     assert.equal(view.login?.message, "the token could not be checked");
     assert.ok(!existsSync(tokenFile(join(dir, "root", a.id))));
     const log = readFileSync(join(dir, "root", a.id, "setup-token-failed.log"), "utf8");
     assert.ok(!log.includes(BAD) && !log.includes("badtoken#state") && !log.includes(BAD.slice(0, 40)));
-    const actions = db.prepare("SELECT action FROM audit WHERE target = ? ORDER BY rowid").all(`account:${a.id}`).map((r) => (r as { action: string }).action);
+    const actions = (await db.prepare("SELECT action FROM audit WHERE target = ? ORDER BY rowid").all(`account:${a.id}`)).map((r) => (r as { action: string }).action);
     assert.ok(actions.includes("account-token-check-failed") && !actions.includes("account-token-set"));
-    assert.ok(!JSON.stringify(db.prepare("SELECT * FROM audit").all()).includes("sk-ant-oat01"));
+    assert.ok(!JSON.stringify(await db.prepare("SELECT * FROM audit").all()).includes("sk-ant-oat01"));
   });
 
   test("a cancel during the check saves nothing", async () => {
-    const a = addAccount(db, { label: "Team C" }, "op");
+    const a = await addAccount(db, { label: "Team C" }, "op");
     const dirC = join(dir, "root", a.id);
     await beginToken(db, a.id, "op");
-    sendTokenCode(db, a.id, { code: "slowtoken#state" }, "op");
-    await waitFor(() => existsSync(dirC) && readdirSync(dirC).some((n) => n.startsWith("token-check-")));
-    stopToken(db, a.id, "op");
+    await sendTokenCode(db, a.id, { code: "slowtoken#state" }, "op");
+    await waitFor(async () => existsSync(dirC) && readdirSync(dirC).some((n) => n.startsWith("token-check-")));
+    await stopToken(db, a.id, "op");
     await new Promise((r) => setTimeout(r, 1500));
-    assert.equal(listAccounts(db).find((x) => x.id === a.id)!.login?.state, "cancelled");
+    assert.equal((await listAccounts(db)).find((x) => x.id === a.id)!.login?.state, "cancelled");
     assert.ok(!existsSync(tokenFile(dirC)));
-    const actions = db.prepare("SELECT action FROM audit WHERE target = ?").all(`account:${a.id}`).map((r) => (r as { action: string }).action);
+    const actions = (await db.prepare("SELECT action FROM audit WHERE target = ?").all(`account:${a.id}`)).map((r) => (r as { action: string }).action);
     assert.ok(!actions.includes("account-token-set"));
   });
 
@@ -142,7 +142,7 @@ describe("long-lived token", () => {
     assert.equal(extractToken(`${t}\n`), t);
   });
 
-  test("only the CLI's own error text counts as an authentication failure", () => {
+  test("only the CLI's own error text counts as an authentication failure", async () => {
     // A timed-out stream whose tool output mentions 401 leaves the token usable.
     const timedOut = [
       { type: "assistant", message: { content: [{ type: "text", text: "HTTP 401 handling is in api.ts" }] } },
@@ -154,6 +154,6 @@ describe("long-lived token", () => {
     const empty = join(dir, "root", "empty");
     mkdirSync(empty, { recursive: true });
     writeFileSync(tokenFile(empty), "\n");
-    assert.equal(usesToken(db, "none", empty), false);
+    assert.equal(await usesToken(db, "none", empty), false);
   });
 });

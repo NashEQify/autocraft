@@ -5,7 +5,6 @@ import { refIn, refPairs } from "./ref-filter.ts";
 import { pipelineWrites } from "./rules.ts";
 import { quietFixPrs } from "../security/quiet.ts";
 export { quietFixPrs };
-import type { DatabaseSync } from "node:sqlite";
 import { commentApprovalOf } from "../act/approval.ts";
 import { actionable } from "../decisions.ts";
 import { ownLogins } from "../github/identity.ts";
@@ -51,6 +50,8 @@ import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import { settledBySql } from "../settlers.ts";
 import { activeTrips, brokeHeads } from "../push-outcomes.ts";
 import { setting } from "../settings-read.ts";
+import { everySeq, someSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 export type { PrFacts } from "./plan.ts";
 
@@ -132,7 +133,7 @@ export function refreshTimes(now: number): { soon: (ref: string, at: number | un
 }
 
 /** Facts of every open PR (and merged PRs with a take or take-fix review) of the database, repo or refs given. One pass: per-repo values are read once. */
-export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[] {
+export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFacts[]> {
   const now = opts.now ?? Date.now();
   /** The `unsent` fact of a step's ask comments that never reached GitHub; absent when the ask is due as if none had failed. */
   const unsentOf = (ats: string[]): { unsent?: { until: number } | "final" } => { const u = unsentAsk(ats, now); return u === null ? {} : { unsent: u }; };
@@ -143,10 +144,10 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
   const refs = opts.refs ? [...opts.refs] : undefined;
   if (refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(refs); }
-  const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
 
   // Values read once for all PRs.
-  const run = opts.run !== undefined ? opts.run : latestRun(db);
+  const run = opts.run !== undefined ? opts.run : await latestRun(db);
   // Rows of per-PR tables, read once for the load and keyed by `repo#number` (narrowed like the PRs: by repo or refs).
   const narrow = (a: string): { sql: string; p: Record<string, string> } => {
     const p: Record<string, string> = {};
@@ -155,86 +156,86 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     if (refs) { sql += ` AND ${refIn(a)}`; p.refs = params.refs!; }
     return { sql, p };
   };
-  const keyed = <T extends { k: string }>(sql: string, a: string): Map<string, Omit<T, "k">[]> => {
+  const keyed = async <T extends { k: string }>(sql: string, a: string): Promise<Map<string, Omit<T, "k">[]>> => {
     const n = narrow(a), out = new Map<string, Omit<T, "k">[]>();
-    for (const row of db.prepare(sql.replaceAll("/*narrow*/", n.sql)).all(n.p) as T[]) {
+    for (const row of await db.prepare(sql.replaceAll("/*narrow*/", n.sql)).all(n.p) as T[]) {
       const k = row.k;
       delete (row as Partial<T>).k;
       (out.get(k) ?? out.set(k, []).get(k)!).push(row);
     }
     return out;
   };
-  const settled = settledSet(db, run, rows.filter((r) => r.in_pilot && r.not_integration).map((r) => `${r.repo}#${r.number}`));
-  const stale = staleReviews(db, opts.repo, false, { now, refresh: refresh.soon });
-  const staleActionable = staleReviews(db, opts.repo, true, { now, refresh: refresh.soon });
-  const scope = scopeAnswers(db);
-  const unsettled = unsettledScope(db);
-  const gates = gatesOf(db, opts.repo);
-  const holds = mergeHolds(db, opts.repo);
-  const inBatch = batchStates(db, opts.repo);
-  const own = ownFixPrs(db, opts.repo, opts.appSlug);
-  const assigned = assignmentsOf(db, opts.repo);
-  const mainRed = redMainRepos(db);
-  const tripped = activeTrips(db);
-  const brokeAt = brokeHeads(db, opts.repo);
+  const settled = await settledSet(db, run, rows.filter((r) => r.in_pilot && r.not_integration).map((r) => `${r.repo}#${r.number}`));
+  const stale = await staleReviews(db, opts.repo, false, { now, refresh: refresh.soon });
+  const staleActionable = await staleReviews(db, opts.repo, true, { now, refresh: refresh.soon });
+  const scope = await scopeAnswers(db);
+  const unsettled = await unsettledScope(db);
+  const gates = await gatesOf(db, opts.repo);
+  const holds = await mergeHolds(db, opts.repo);
+  const inBatch = await batchStates(db, opts.repo);
+  const own = await ownFixPrs(db, opts.repo, opts.appSlug);
+  const assigned = await assignmentsOf(db, opts.repo);
+  const mainRed = await redMainRepos(db);
+  const tripped = await activeTrips(db);
+  const brokeAt = await brokeHeads(db, opts.repo);
   // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
-  const ourFixupHead = keyed<{ k: string }>("SELECT f.repo || '#' || f.number || '@' || f.to_head AS k FROM fixups f WHERE f.state = 'pushed' AND f.source IS NULL /*narrow*/", "f");
-  const ourSameDiffMerge = keyed<{ k: string }>("SELECT c.repo || '#' || c.number || '@' || c.to_head AS k FROM conflict_merges c WHERE c.state = 'merged' AND c.own_diff = 'same' /*narrow*/", "c");
+  const ourFixupHead = await keyed<{ k: string }>("SELECT f.repo || '#' || f.number || '@' || f.to_head AS k FROM fixups f WHERE f.state = 'pushed' AND f.source IS NULL /*narrow*/", "f");
+  const ourSameDiffMerge = await keyed<{ k: string }>("SELECT c.repo || '#' || c.number || '@' || c.to_head AS k FROM conflict_merges c WHERE c.state = 'merged' AND c.own_diff = 'same' /*narrow*/", "c");
   // A head we pushed, or the head our push moved off (the mirror may still show it, and our own comment makes its review stale).
-  const pushedHere = keyed<{ k: string }>(`SELECT p.repo || '#' || p.number || '@' || p.to_oid AS k FROM push_outcomes p WHERE 1 /*narrow*/
+  const pushedHere = await keyed<{ k: string }>(`SELECT p.repo || '#' || p.number || '@' || p.to_oid AS k FROM push_outcomes p WHERE 1 /*narrow*/
     UNION SELECT p.repo || '#' || p.number || '@' || p.from_oid FROM push_outcomes p WHERE p.from_oid IS NOT NULL /*narrow*/`, "p");
-  const pushedOffAt = keyed<{ k: string; at: string }>("SELECT p.repo || '#' || p.number || '@' || p.from_oid AS k, p.at FROM push_outcomes p WHERE p.to_oid <> p.from_oid /*narrow*/", "p");
-  const answers = new Map(actionable(db).filter((a) => a.kind === "merge").map((a) => [a.id, a.answer]));
-  const pipelineOn = pipelineWrites(setting(db, "pipeline_enabled"));
-  const posts = new Map((db.prepare("SELECT repo, number, review_id, head_oid, posted_at, opus_at FROM review_posts").all() as { repo: string; number: number; review_id: string; head_oid: string | null; posted_at: string | null; opus_at: string | null }[])
+  const pushedOffAt = await keyed<{ k: string; at: string }>("SELECT p.repo || '#' || p.number || '@' || p.from_oid AS k, p.at FROM push_outcomes p WHERE p.to_oid <> p.from_oid /*narrow*/", "p");
+  const answers = new Map((await actionable(db)).filter((a) => a.kind === "merge").map((a) => [a.id, a.answer]));
+  const pipelineOn = pipelineWrites(await setting(db, "pipeline_enabled"));
+  const posts = new Map((await db.prepare("SELECT repo, number, review_id, head_oid, posted_at, opus_at FROM review_posts").all() as { repo: string; number: number; review_id: string; head_oid: string | null; posted_at: string | null; opus_at: string | null }[])
     .map((p) => [`${p.repo}#${p.number}`, p]));
-  const grouped = new Set((db.prepare(`SELECT gi.repo || '#' || gi.number AS ref FROM dupe_group_items gi JOIN decisions g ON g.id = gi.decision_id
+  const grouped = new Set((await db.prepare(`SELECT gi.repo || '#' || gi.number AS ref FROM dupe_group_items gi JOIN decisions g ON g.id = gi.decision_id
     WHERE ${OPEN_GROUP_SQL} AND gi.role <> 'stay'`).all() as { ref: string }[]).map((r) => r.ref));
-  const activeBatched = new Set((db.prepare(`SELECT b.repo || '#' || p.number AS ref FROM main.merge_batch_prs p JOIN main.merge_batches b ON b.id = p.batch_id WHERE b.state IN ('checking', 'open')`).all() as { ref: string }[]).map((x) => x.ref));
-  const mergedByPipeline = new Map((db.prepare(`SELECT m.repo || '#' || m.number AS ref, MIN(m.at) AS merged_at,
+  const activeBatched = new Set((await db.prepare(`SELECT b.repo || '#' || p.number AS ref FROM main.merge_batch_prs p JOIN main.merge_batches b ON b.id = p.batch_id WHERE b.state IN ('checking', 'open')`).all() as { ref: string }[]).map((x) => x.ref));
+  const mergedByPipeline = new Map((await db.prepare(`SELECT m.repo || '#' || m.number AS ref, MIN(m.at) AS merged_at,
       (SELECT x.head_oid FROM merges x WHERE x.repo = m.repo AND x.number = m.number AND x.outcome = 'merged' ORDER BY x.at DESC, x.rowid DESC LIMIT 1) AS head
     FROM merges m WHERE m.outcome = 'merged' GROUP BY m.repo, m.number`).all() as { ref: string; merged_at: string; head: string | null }[]).map((x) => [x.ref, x]));
-  const pmReviews = new Map((db.prepare("SELECT repo || '#' || number AS ref, at, error FROM postmerge_reviews").all() as { ref: string; at: string; error: string | null }[]).map((x) => [x.ref, x]));
-  const since = setting(db, SINCE_KEY) ?? "9999";
-  const operator = operatorWork(db, opts.repo, now);
-  const carries = keyed<{ k: string; decision_id: string; attempts: number }>("SELECT c.repo || '#' || c.number AS k, c.decision_id, c.attempts FROM dupe_carries c WHERE c.state = 'queued' /*narrow*/ ORDER BY c.rowid", "c");
+  const pmReviews = new Map((await db.prepare("SELECT repo || '#' || number AS ref, at, error FROM postmerge_reviews").all() as { ref: string; at: string; error: string | null }[]).map((x) => [x.ref, x]));
+  const since = await setting(db, SINCE_KEY) ?? "9999";
+  const operator = await operatorWork(db, opts.repo, now);
+  const carries = await keyed<{ k: string; decision_id: string; attempts: number }>("SELECT c.repo || '#' || c.number AS k, c.decision_id, c.attempts FROM dupe_carries c WHERE c.state = 'queued' /*narrow*/ ORDER BY c.rowid", "c");
   const carryUnsent = db.prepare("SELECT created_at FROM fixups WHERE repo = ? AND number = ? AND source = 'carry' AND carry_decision = ? AND state = 'comment-unsent'");
   const carryPoints = db.prepare("SELECT detail FROM dupe_group_items WHERE decision_id = ? AND kind = 'pr' AND role = 'close' ORDER BY number");
-  const fixupsOf = keyed<{ k: string; source: string | null; state: string; reason: string | null }>("SELECT f.repo || '#' || f.number AS k, f.source, f.state, f.reason FROM fixups f WHERE 1 /*narrow*/", "f");
+  const fixupsOf = await keyed<{ k: string; source: string | null; state: string; reason: string | null }>("SELECT f.repo || '#' || f.number AS k, f.source, f.state, f.reason FROM fixups f WHERE 1 /*narrow*/", "f");
   // A review's own fix-up rows at a head, in the order of the per-PR index (created_at).
-  const fixupAt = keyed<{ k: string; state: string; created_at: string }>(`SELECT f.repo || '#' || f.number || '@' || f.from_head AS k, f.state, f.created_at FROM fixups f
+  const fixupAt = await keyed<{ k: string; state: string; created_at: string }>(`SELECT f.repo || '#' || f.number || '@' || f.from_head AS k, f.state, f.created_at FROM fixups f
     WHERE f.source IS NULL AND f.state IN ('pushed', 'cannot-push', 'too-large', 'asked', 'comment-failed', 'push-denied', 'linting', 'comment-unsent') /*narrow*/ ORDER BY f.created_at, f.rowid`, "f");
-  const lintFixup = keyed<{ k: string; source: string | null; lint_task: number | null }>("SELECT f.repo || '#' || f.number || '@' || f.from_head AS k, f.source, f.lint_task FROM fixups f WHERE f.state = 'linting' AND COALESCE(f.source, '') != 'operator' /*narrow*/ ORDER BY f.rowid", "f");
+  const lintFixup = await keyed<{ k: string; source: string | null; lint_task: number | null }>("SELECT f.repo || '#' || f.number || '@' || f.from_head AS k, f.source, f.lint_task FROM fixups f WHERE f.state = 'linting' AND COALESCE(f.source, '') != 'operator' /*narrow*/ ORDER BY f.rowid", "f");
   // An operator's fix-up works the current head, with or without a review there, so its stored patch is read at the head before the review is.
   const lintOperator = db.prepare("SELECT lint_task FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state = 'linting' AND source = 'operator' ORDER BY rowid");
-  const taskEnded = (id: number | null): boolean => { const t = id != null ? getTask(db, id) : null; return !t || TERMINAL.includes(t.state); };
-  const lintCifix = keyed<{ k: string; lint_task: number | null }>("SELECT c.repo || '#' || c.number || '@' || c.head AS k, c.lint_task FROM ci_fixes c WHERE c.state = 'linting' /*narrow*/ ORDER BY c.rowid", "c");
-  const carryRows = keyed<{ k: string } & CarrySource>(`SELECT DISTINCT c.repo || '#' || c.number AS k, g.number, g.detail, i.author, i.author_id AS id FROM dupe_carries c
+  const taskEnded = async (id: number | null): Promise<boolean> => { const t = id != null ? await getTask(db, id) : null; return !t || TERMINAL.includes(t.state); };
+  const lintCifix = await keyed<{ k: string; lint_task: number | null }>("SELECT c.repo || '#' || c.number || '@' || c.head AS k, c.lint_task FROM ci_fixes c WHERE c.state = 'linting' /*narrow*/ ORDER BY c.rowid", "c");
+  const carryRows = await keyed<{ k: string } & CarrySource>(`SELECT DISTINCT c.repo || '#' || c.number AS k, g.number, g.detail, i.author, i.author_id AS id FROM dupe_carries c
     JOIN dupe_group_items g ON g.decision_id = c.decision_id AND g.kind = 'pr' AND g.role = 'close'
     LEFT JOIN items i ON i.repo = c.repo AND i.number = g.number
     WHERE c.outcome LIKE 'pushed%' /*narrow*/`, "c");
-  const conflictRowsOf = keyed<{ k: string } & ConflictRow>("SELECT c.repo || '#' || c.number AS k, c.from_head, c.state, c.created_at FROM conflict_merges c WHERE 1 /*narrow*/ ORDER BY c.rowid", "c");
-  const lintConflict = keyed<{ k: string; lint_task: number | null }>("SELECT c.repo || '#' || c.number || '@' || c.from_head AS k, c.lint_task FROM conflict_merges c WHERE c.state = 'linting' /*narrow*/ ORDER BY c.rowid", "c");
+  const conflictRowsOf = await keyed<{ k: string } & ConflictRow>("SELECT c.repo || '#' || c.number AS k, c.from_head, c.state, c.created_at FROM conflict_merges c WHERE 1 /*narrow*/ ORDER BY c.rowid", "c");
+  const lintConflict = await keyed<{ k: string; lint_task: number | null }>("SELECT c.repo || '#' || c.number || '@' || c.from_head AS k, c.lint_task FROM conflict_merges c WHERE c.state = 'linting' /*narrow*/ ORDER BY c.rowid", "c");
   type CifixRow = { head: string; state: string; created_at: string; task_id: number | null; runs: string | null; reason: string | null };
-  const cifixOf = keyed<{ k: string } & CifixRow>("SELECT c.repo || '#' || c.number AS k, c.head, c.state, c.created_at, c.task_id, c.runs, c.reason FROM ci_fixes c WHERE 1 /*narrow*/ ORDER BY c.created_at, c.rowid", "c");
-  const authorWrites = authorWritesOf(db, now);
-  const postSource = postSourcesOf(db, rows.filter((r) => r.r_mode === CARRIED && r.r_head).map((r) => `${r.repo}#${r.number}`));
+  const cifixOf = await keyed<{ k: string } & CifixRow>("SELECT c.repo || '#' || c.number AS k, c.head, c.state, c.created_at, c.task_id, c.runs, c.reason FROM ci_fixes c WHERE 1 /*narrow*/ ORDER BY c.created_at, c.rowid", "c");
+  const authorWrites = await authorWritesOf(db, now);
+  const postSource = await postSourcesOf(db, rows.filter((r) => r.r_mode === CARRIED && r.r_head).map((r) => `${r.repo}#${r.number}`));
   const queued = rows.filter((r) => r.in_pilot && r.not_integration && (r.r_verdict === "take" || r.r_verdict === "take-fix") && r.author);
-  const tiers = tiersOf(db, queued.map((r) => ({ login: r.author!, id: r.author_id })));
+  const tiers = await tiersOf(db, queued.map((r) => ({ login: r.author!, id: r.author_id })));
 
   const repoMemo = new Map<string, { f: PrFacts["repoFacts"]; pub: boolean; longLived: LongLived; defaultBranch: string | null }>();
   // Repo rows, CI presence and long-lived branches, read once for every repo on first use.
   let tables: { repos: Map<string, { name: string; visibility: string | null; default_branch: string | null }>; noCi: Set<string>; longLived: (repo: string) => LongLived } | undefined;
-  const repoTables = () => (tables ??= ({
-    repos: new Map((db.prepare("SELECT name, visibility, default_branch FROM repos").all() as { name: string; visibility: string | null; default_branch: string | null }[]).map((x) => [x.name, x])),
-    noCi: reposWithNoCi(db), longLived: longLivedAll(db),
+  const repoTables = async () => (tables ??= ({
+    repos: new Map((await db.prepare("SELECT name, visibility, default_branch FROM repos").all() as { name: string; visibility: string | null; default_branch: string | null }[]).map((x) => [x.name, x])),
+    noCi: await reposWithNoCi(db), longLived: await longLivedAll(db),
   }));
-  const repoOf = (repo: string) => {
+  const repoOf = async (repo: string) => {
     let m = repoMemo.get(repo);
     if (!m) {
-      const t = repoTables(), row = t.repos.get(repo);
+      const t = await repoTables(), row = t.repos.get(repo);
       m = {
-        f: { mergeApproved: !!mergeApprovalOf(db, repo), pushApproved: pushApprovalOf(db, repo) !== null, commentApproved: commentApprovalOf(db, repo) !== null, ciApproved: ciApprovalOf(db, repo) !== null,
+        f: { mergeApproved: !!await mergeApprovalOf(db, repo), pushApproved: await pushApprovalOf(db, repo) !== null, commentApproved: await commentApprovalOf(db, repo) !== null, ciApproved: await ciApprovalOf(db, repo) !== null,
           noCi: t.noCi.has(repo), mainRed: mainRed.has(repo) },
         pub: row?.visibility === "public",
         longLived: t.longLived(repo),
@@ -247,43 +248,43 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
 
   // Open PRs by repo, head branch and head repo (lower case), lowest number first: the PR another one is stacked on. Only heads that are an open PR's base.
   const openByHead = new Map<string, number[]>();
-  for (const o of db.prepare(`SELECT i.repo || ' ' || i.head_ref || ' ' || lower(i.head_repo) AS k, i.number FROM items i
+  for (const o of await db.prepare(`SELECT i.repo || ' ' || i.head_ref || ' ' || lower(i.head_repo) AS k, i.number FROM items i
     WHERE i.kind = 'pr' AND i.state = 'OPEN' AND i.head_ref IS NOT NULL AND i.head_repo IS NOT NULL AND i.repo IN (SELECT value FROM json_each(?))
       AND (i.repo, i.head_ref) IN (SELECT b.repo, b.base_ref FROM items b WHERE b.kind = 'pr' AND b.state = 'OPEN' AND b.base_ref IS NOT NULL) ORDER BY i.number`)
     .all(JSON.stringify([...new Set(rows.map((r) => r.repo))])) as { k: string; number: number }[]) (openByHead.get(o.k) ?? openByHead.set(o.k, []).get(o.k)!).push(o.number);
   // The latest merge attempt at each head (first in the order) and the refusals there.
-  const merges = keyed<{ k: string; outcome: string; reason: string | null; ci: string | null; mergeable: string | null; at: string; refusals: number }>(`SELECT m.repo || '#' || m.number || '@' || m.head_oid AS k, m.outcome, m.reason, m.ci, m.mergeable, m.at,
+  const merges = await keyed<{ k: string; outcome: string; reason: string | null; ci: string | null; mergeable: string | null; at: string; refusals: number }>(`SELECT m.repo || '#' || m.number || '@' || m.head_oid AS k, m.outcome, m.reason, m.ci, m.mergeable, m.at,
     (SELECT COUNT(*) FROM merges m2 WHERE m2.repo = m.repo AND m2.number = m.number AND m2.head_oid = m.head_oid AND m2.outcome = 'refused') AS refusals FROM merges m WHERE 1 /*narrow*/ ORDER BY m.at DESC, m.rowid DESC`, "m");
   const retriedAfter = db.prepare("SELECT 1 FROM audit WHERE target = ? AND action = 'retry' AND at > ? LIMIT 1");
-  const waiting = keyed<{ k: string } & Wait>("SELECT a.repo || '#' || a.number || '@' || a.head_oid AS k, a.runs, a.approved, a.reread, a.failed, a.cross_repo, a.approved_at FROM ci_run_approvals a WHERE 1 /*narrow*/", "a");
-  const verifRows = keyed<{ k: string; state: string; kind: string; summary: string | null; note: string | null }>("SELECT v.repo || '#' || v.number || '@' || v.head_sha AS k, v.state, v.kind, v.summary, v.note FROM verifications v WHERE 1 /*narrow*/", "v");
+  const waiting = await keyed<{ k: string } & Wait>("SELECT a.repo || '#' || a.number || '@' || a.head_oid AS k, a.runs, a.approved, a.reread, a.failed, a.cross_repo, a.approved_at FROM ci_run_approvals a WHERE 1 /*narrow*/", "a");
+  const verifRows = await keyed<{ k: string; state: string; kind: string; summary: string | null; note: string | null }>("SELECT v.repo || '#' || v.number || '@' || v.head_sha AS k, v.state, v.kind, v.summary, v.note FROM verifications v WHERE 1 /*narrow*/", "v");
   const verifAt = (ref: string, head: string) => verifRows.get(`${ref}@${head}`)?.[0];
   // The answer of the merge and hold decisions at each reviewed head, by id (null: not answered yet); the loop looks up no others.
   const decisionIds = rows.filter((r) => r.r_head && r.r_verdict && r.r_at).flatMap((r) => [mergeDecisionId(r.repo, r.number, r.r_head!), holdDecisionId(r.repo, r.number, r.r_head!)]);
-  const decisionAnswers = new Map((db.prepare("SELECT id, answer FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(decisionIds)) as { id: string; answer: string | null }[]).map((d) => [d.id, d.answer]));
+  const decisionAnswers = new Map((await db.prepare("SELECT id, answer FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(decisionIds)) as { id: string; answer: string | null }[]).map((d) => [d.id, d.answer]));
   // An item has one open question at a time (src/merge/withdraw.ts): a Hold question would set another one aside, so it waits for that one.
-  const otherOpen = keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' AND d.id NOT LIKE '%:dupegroup:%' AND d.kind IN ('scope', 'merge', 'close') /*narrow*/", "d");
+  const otherOpen = await keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' AND d.id NOT LIKE '%:dupegroup:%' AND d.kind IN ('scope', 'merge', 'close') /*narrow*/", "d");
   const holdQuestionOf = (ref: string, id: string): PrFacts["decision"]["hold"] => {
     const asked = decisionAnswers.has(id), answer = decisionAnswers.get(id) ?? null;
     return { asked, open: asked && answer === null, answer, otherOpen: otherOpen.has(ref) };
   };
   const statement = db.prepare("SELECT id, repo, number, text FROM owner_statements WHERE id = ?");
   // OPEN_QUESTION_SQL for every PR.
-  const openQuestion = keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.kind = 'merge' AND d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' /*narrow*/", "d");
+  const openQuestion = await keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.kind = 'merge' AND d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' /*narrow*/", "d");
   // The settled Merge answers, by decision id: when they were given.
-  const mergeAnsweredAt = new Map((db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql("decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
+  const mergeAnsweredAt = new Map((await db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql("decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
   const answeredAfter = (id: string, at: string): boolean => { const a = mergeAnsweredAt.get(id); return a !== undefined && a > at; };
-  const pushChain = pushChainOf(db);
-  const ownHead = ownHeadOf(db);
+  const pushChain = await pushChainOf(db);
+  const ownHead = await ownHeadOf(db);
   // UNSURE_AT_SQL for every head: a take or take-fix review there with sure = 0.
-  const unsureAt = keyed<{ k: string }>(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k FROM opus_review_history o WHERE o.verdict IN ('take', 'take-fix') AND o.sure = 0 /*narrow*/
+  const unsureAt = await keyed<{ k: string }>(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k FROM opus_review_history o WHERE o.verdict IN ('take', 'take-fix') AND o.sure = 0 /*narrow*/
     UNION SELECT o.repo || '#' || o.number || '@' || o.head_oid FROM opus_reviews o WHERE o.verdict IN ('take', 'take-fix') AND o.sure = 0 /*narrow*/`, "o");
   // Pre-merge reviews at the head of each PR's latest review (r_head), the only ones the loop reads.
   const premergeKeys = JSON.stringify(rows.filter((r) => r.r_head).map((r) => `${r.repo}#${r.number}@${r.r_head}`));
   const premergeNarrow = narrow("p");
-  const premerge = premergeRows(db, { sql: `${premergeNarrow.sql} AND p.repo || '#' || p.number || '@' || p.head_oid IN (SELECT value FROM json_each(:premergeKeys))`, p: { ...premergeNarrow.p, premergeKeys } });
+  const premerge = await premergeRows(db, { sql: `${premergeNarrow.sql} AND p.repo || '#' || p.number || '@' || p.head_oid IN (SELECT value FROM json_each(:premergeKeys))`, p: { ...premergeNarrow.p, premergeKeys } });
   // Only formal reviews with an author: changesRequestedBy() reads no others.
-  const reviewRows = keyed<{ k: string } & ReviewFact>(`SELECT c.repo || '#' || c.number AS k, c.author, c.author_association AS association, c.review_state AS state, c.created_at AS at FROM comments c JOIN items i ON i.repo = c.repo AND i.number = c.number AND i.kind = 'pr' AND i.state = 'OPEN' WHERE c.kind = 'review' AND c.author IS NOT NULL AND c.review_state IN (${FORMAL_STATES.map((x) => `'${x}'`).join(", ")}) /*narrow*/ ORDER BY c.rowid`, "c");
+  const reviewRows = await keyed<{ k: string } & ReviewFact>(`SELECT c.repo || '#' || c.number AS k, c.author, c.author_association AS association, c.review_state AS state, c.created_at AS at FROM comments c JOIN items i ON i.repo = c.repo AND i.number = c.number AND i.kind = 'pr' AND i.state = 'OPEN' WHERE c.kind = 'review' AND c.author IS NOT NULL AND c.review_state IN (${FORMAL_STATES.map((x) => `'${x}'`).join(", ")}) /*narrow*/ ORDER BY c.rowid`, "c");
   const batchTip = db.prepare(`SELECT a.runs, a.approved, a.reread, a.failed, a.cross_repo FROM merge_batches b
     JOIN ci_run_approvals a ON a.repo = b.repo AND a.number = b.pr_number AND a.head_oid = b.commit_sha
     WHERE b.repo = ? AND b.pr_number = ? AND b.state = 'open'
@@ -293,7 +294,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     ORDER BY b.id LIMIT 1`);
 
   const batchOf = db.prepare("SELECT id, commit_sha FROM merge_batches WHERE repo = ? AND pr_number = ? AND state IN ('checking', 'open') ORDER BY id LIMIT 1");
-  const pipelineOn_ = pipelineRepos(db);
+  const pipelineOn_ = await pipelineRepos(db);
 
   type Wait = { runs: string; approved: string; reread: number; failed: string; cross_repo: number; approved_at: string | null };
   const runsOf = (w: Wait | undefined, ciApproved: boolean): PrFacts["runs"] => {
@@ -306,25 +307,25 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     return { waiting, reread: !!w.reread, crossRepo: !!w.cross_repo, approvable: runs.filter((x) => x.event === "pull_request" && (failed[x.id] ?? 0) < MAX_FAILURES).length, blocked };
   };
 
-  const holdOf = reviewHolds(db, now, refs);
-  const outsideHolds = holdMap(db);
+  const holdOf = await reviewHolds(db, now, refs);
+  const outsideHolds = await holdMap(db);
   const out: PrFacts[] = [];
   for (const r of rows) {
     // The queue leaves merged PRs outside the pilot and our own integration PRs out.
     if (r.state !== "OPEN" && (!r.in_pilot || !r.not_integration)) continue;
     const ref = `${r.repo}#${r.number}`;
-    const rf = repoOf(r.repo);
+    const rf = await repoOf(r.repo);
     const fresh = !!r.c_at && (!r.updated_at || r.c_at > r.updated_at);
     const integration = !r.not_integration;
     // An integration PR takes part when its repo's pipeline is on or every member is in scope (fast track); its head is the batch tip, where the run approvals are recorded.
-    const batchRow = integration ? (batchOf.get(r.repo, r.number) as { id: number; commit_sha: string } | undefined) : undefined;
-    const inScope = integration ? pipelineOn_.has(r.repo) || (!!batchRow && (members => members.length > 0 && members.every((m) => inPilot(db, r.repo, m.number)))(membersOf(db, batchRow.id))) : !!r.in_pilot;
+    const batchRow = integration ? (await batchOf.get(r.repo, r.number) as { id: number; commit_sha: string } | undefined) : undefined;
+    const inScope = integration ? pipelineOn_.has(r.repo) || (!!batchRow && await (async members => members.length > 0 && await everySeq(members, async (m) => await inPilot(db, r.repo, m.number)))(await membersOf(db, batchRow.id))) : !!r.in_pilot;
     const head = batchRow?.commit_sha ?? headOf(r);
     const pushedOff = r.state === "OPEN" && !integration && !!head && (pushedOffAt.get(`${ref}@${head}`) ?? []).some((p) => !r.updated_at || Date.parse(r.updated_at) < Date.parse(p.at));
     const lines = (r.additions ?? 0) + (r.deletions ?? 0);
     const base: PrFacts = {
       repo: r.repo, number: r.number, ...(pushedOff ? { pushedOff } : {}), assignment: assigned(ref, r.assignees), now, pipelineOn, tripped, ghState: r.state, head, draft: fresh ? r.c_state !== "OPEN" || !!r.c_draft : !!r.is_draft,
-      author: r.author, authorIsPipeline: r.author !== null && own.isOwn(r.repo, r.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
+      author: r.author, authorIsPipeline: r.author !== null && await own.isOwn(r.repo, r.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
       scopeAnswer: scope.get(ref) ?? null,
       inScope, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration, batchPr: !!r.batch_pr, heldBacklog: !!r.held_backlog, heldDuplicate: !r.held_backlog && !!r.held_dup, quiet: own.quiet.has(ref), mergeHeld: holds.has(ref),
       fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: rf.f,
@@ -334,9 +335,9 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
       decision: { asked: false, openQuestion: false, answer: null, mergeAnswerAfterReview: false, inOpenGroup: grouped.has(ref), hold: { asked: false, open: false, answer: null, otherOpen: otherOpen.has(ref) } },
       premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: activeBatched.has(ref), fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     };
-    base.inFlight = r.state === "OPEN" && !integration && !!r.author && own.isOwn(r.repo, r.author) && own.prs.has(ref);
+    base.inFlight = r.state === "OPEN" && !integration && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref);
     if (integration) {
-      base.runs = runsOf(batchTip.get(r.repo, r.number) as Wait | undefined, rf.f.ciApproved);
+      base.runs = runsOf(await batchTip.get(r.repo, r.number) as Wait | undefined, rf.f.ciApproved);
       out.push(base);
       continue;
     }
@@ -350,7 +351,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
       continue;
     }
 
-    const s = settled(r.repo, r.number);
+    const s = await settled(r.repo, r.number);
     base.label = labelWithScopeAnswer(s.label ?? null, base.scopeAnswer);
     base.needsDecisionFlag = s.flags.includes("needs decision") || (unsettled.has(ref) && !scope.has(ref));
     base.labelUnsure = s.status === "settled" && !!s.referee && !s.referee.sure && refereeClosed(s.referee);
@@ -363,25 +364,25 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     base.pushable = pushable(r.head_repo, r.repo, checksAtHead ? r.c_can : r.i_can, r.head_ref, rf.longLived, false, sameRepo(r.head_repo, r.repo) && authorWrites(r.repo, r, (t) => refresh.soon(ref, t)) !== "no");
     const ow = operator.get(ref);
     if (ow && r.state === "OPEN") {
-      base.operator = { fix: head && ow.fixHeads.has(head) && queuedOperatorFix(db, r.repo, r.number, head, now) ? { attempts: operatorTries(db, r.repo, r.number) } : null, hold: ow.hold, premerge: !!head && ow.premergeHeads.has(head), preapproved: ow.preapproved };
+      base.operator = { fix: head && ow.fixHeads.has(head) && await queuedOperatorFix(db, r.repo, r.number, head, now) ? { attempts: await operatorTries(db, r.repo, r.number) } : null, hold: ow.hold, premerge: !!head && ow.premergeHeads.has(head), preapproved: ow.preapproved };
       refresh.soon(ref, ow.settleUntil);
     }
     // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.
-    if (base.operator?.fix && !base.heldBacklog && !base.draft && base.mergeable !== "CONFLICTING" && base.pushable && base.repoFacts.pushApproved && operatorTriesLeft(db, r.repo, r.number)) base.operator.hold = true;
+    if (base.operator?.fix && !base.heldBacklog && !base.draft && base.mergeable !== "CONFLICTING" && base.pushable && base.repoFacts.pushApproved && await operatorTriesLeft(db, r.repo, r.number)) base.operator.hold = true;
     if (ow && r.state === "OPEN" && head) {
-      for (const x of lintOperator.all(r.repo, r.number, head) as { lint_task: number | null }[]) base.lint.push({ step: "fixup", source: "operator", ended: taskEnded(x.lint_task) });
+      for (const x of await lintOperator.all(r.repo, r.number, head) as { lint_task: number | null }[]) base.lint.push({ step: "fixup", source: "operator", ended: await taskEnded(x.lint_task) });
       if (base.lint.length) base.inFlight = true;
     }
     if (r.state === "OPEN" && !base.heldBacklog) {
       for (const k of carries.get(ref) ?? []) {
-        const hasPoints = (carryPoints.all(k.decision_id) as { detail: string | null }[]).some((x) => {
+        const hasPoints = (await carryPoints.all(k.decision_id) as { detail: string | null }[]).some((x) => {
           try { const c = (JSON.parse(x.detail ?? "null") as { carry?: unknown } | null)?.carry; return Array.isArray(c) && c.some((p) => typeof p === "string"); } catch { return false; }
         });
-        const u = unsentAsk((carryUnsent.all(r.repo, r.number, k.decision_id) as { created_at: string }[]).map((x) => x.created_at), now);
+        const u = unsentAsk((await carryUnsent.all(r.repo, r.number, k.decision_id) as { created_at: string }[]).map((x) => x.created_at), now);
         if (hasPoints) base.carry.push({ attempts: k.attempts, ...(u !== null && u !== "final" ? { unsent: u } : {}) });
       }
     }
-    if (r.state === "OPEN" && head && !base.draft) { const hold = holdOf(r.repo, r.number, head, (t) => refresh.soon(ref, t)); if (hold) base.reviewHold = hold; }
+    if (r.state === "OPEN" && head && !base.draft) { const hold = await holdOf(r.repo, r.number, head, (t) => refresh.soon(ref, t)); if (hold) base.reviewHold = hold; }
     if (!r.r_head || !r.r_verdict || !r.r_at) { out.push(base); continue; }
 
     const take = r.r_verdict === "take" || r.r_verdict === "take-fix";
@@ -393,7 +394,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     };
     base.pushChain = chain;
     base.decision.hold = holdQuestionOf(ref, holdDecisionId(r.repo, r.number, r.r_head));
-    if (r.state === "OPEN" && head && head !== r.r_head && (ourFixupHead.has(`${ref}@${head}`) || ourSameDiffMerge.has(`${ref}@${head}`)) && carriedReview(db, { repo: r.repo, number: r.number, head_oid: head }, stale)) base.carriable = true;
+    if (r.state === "OPEN" && head && head !== r.r_head && (ourFixupHead.has(`${ref}@${head}`) || ourSameDiffMerge.has(`${ref}@${head}`)) && await carriedReview(db, { repo: r.repo, number: r.number, head_oid: head }, stale)) base.carriable = true;
     if (r.state === "OPEN" && (chain.length > 1 || (!!head && pushedHere.has(`${ref}@${head}`)))) base.inFlight = true;
     // The facts of the review head's cached diff (src/review/diff.ts writes them with the cache); null when it is not cached.
     const diffFacts = r.d_lines === null ? null : { reasons: parseList(r.d_reasons) as string[], lines: r.d_lines, pending: r.d_pending === 1, lastRead: r.d_last_read };
@@ -404,7 +405,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     base.statementConflicts = statementConflicts(statement, [safeJson(r.r_conflicts), safeJson(premerge.get(`${ref}@${r.r_head}`)?.conflicts ?? null)]);
     const p = posts.get(ref);
     // A carried review has no text of its own: the post uses the text of the review it was carried from.
-    const src = r.r_mode === CARRIED ? postSource(r.repo, r.number, r.r_head) : null;
+    const src = r.r_mode === CARRIED ? await postSource(r.repo, r.number, r.r_head) : null;
     const hasPublic = src ? src.hasPublic : r.r_public !== null;
     const pub = src ? src.public : !hasPublic ? { ok: true } : parsePublic({ summary: r.r_public, points: [] });
     base.post = {
@@ -412,12 +413,12 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
       posted: p ? { head: p.head_oid, at: p.posted_at, opusAt: p.opus_at } : null,
     };
     // The CI fix state at one head: the rows it recorded and its limits.
-    const cifixAt = (cfHead: string): NonNullable<PrFacts["cifix"]> => {
+    const cifixAt = async (cfHead: string): Promise<NonNullable<PrFacts["cifix"]>> => {
       const all = cifixOf.get(ref) ?? [];
       const prior = all.filter((x) => x.head === cfHead);
       const totals = { pushes: all.filter((x) => CIFIX_PUSH_STATES.includes(x.state)).length, tries: all.filter((x) => CIFIX_TRY_STATES.includes(x.state)).length };
       const formatting = prior.find((x) => x.state === "formatting");
-      const task = formatting?.task_id != null ? getTask(db, formatting.task_id) : null;
+      const task = formatting?.task_id != null ? await getTask(db, formatting.task_id) : null;
       const infra = prior.find((x) => x.state === "infra");
       return {
         states: prior.map((x) => x.state), tries: prior.filter((x) => CIFIX_TRY_STATES.includes(x.state)).length,
@@ -430,10 +431,10 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
       };
     };
     // A non-take review at an earlier head while the review gate waits on red CI at the new head: the CI fix cannot start, so the contributor is asked (src/core/decide.ts unreviewedRed).
-    if (!take && r.state === "OPEN" && head && head !== r.r_head && base.reviewHold?.kind === "ci" && base.reviewHold.red && r.c_head === head && effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks) === "failure") {
+    if (!take && r.state === "OPEN" && head && head !== r.r_head && base.reviewHold?.kind === "ci" && base.reviewHold.red && r.c_head === head && await effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks) === "failure") {
       base.ci = "failure";
       base.gateRed = true;
-      base.cifix = cifixAt(head);
+      base.cifix = await cifixAt(head);
     }
     if (!take) { out.push(base); continue; }
 
@@ -442,38 +443,38 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     base.checksHere = checksHere;
     base.checksOpen = checksHere && r.c_state === "OPEN" && !r.c_draft;
     const approvedPending = parseList(wait?.approved ?? "[]").length > 0;
-    base.ci = checksHere ? (approvedPending ? "pending" : effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks)) : "unknown";
+    base.ci = checksHere ? (approvedPending ? "pending" : await effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks)) : "unknown";
     base.runs = runsOf(wait, rf.f.ciApproved);
     // Our push to this head turned its required checks red: the CI fix works on it now, without waiting for a review of the new head.
     // A head that our own push or the review's CI gate (red CI at a new head, reviewed earlier) left red is repaired against that head.
-    const redNow = r.c_head === head && effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks) === "failure";
+    const redNow = r.c_head === head && await effectiveCi(db, r.repo, r.overall ?? "none", r.c_checks) === "failure";
     base.brokeByUs = brokeAt.get(ref) === head && redNow;
     base.gateRed = !base.brokeByUs && !!base.reviewHold?.red && !!head && head !== r.r_head && redNow;
     if (r.state === "OPEN") {
       const from = carriedSources(carryRows.get(ref) ?? []);
       if (from.length) {
-        const t = tiersOf(db, from.filter((x) => x.author).map((x) => ({ login: x.author!, id: x.id })));
+        const t = await tiersOf(db, from.filter((x) => x.author).map((x) => ({ login: x.author!, id: x.id })));
         base.carriedFrom = from.map((x) => ({ number: x.number, author: x.author, tier: (x.author ? t.get(tierKey({ login: x.author, id: x.id })) : undefined) ?? "not" }));
       }
     }
     base.tier = (r.author ? tiers.get(tierKey({ login: r.author, id: r.author_id })) : undefined) ?? "not";
     // The pipeline's own Fix PRs count as whitelisted at a head the pipeline itself pushed (others may push to the branch); an operator's deny still wins.
-    const ownHere = !!r.author && own.isOwn(r.repo, r.author) && own.prs.has(ref) && !!head && ownHead(r.repo, r.number, head);
+    const ownHere = !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref) && !!head && await ownHead(r.repo, r.number, head);
     if (base.tier === "not" && ownHere) base.tier = "whitelisted";
 
     const last = merges.get(`${ref}@${r.r_head}`)?.[0];
     // An operator's Retry after a refusal asks for another try now, without waiting for CI or the mergeable state to change.
     // A fresh Merge answer after a refusal asks for another try, as a Retry does.
-    if (last && !(last.outcome === "refused" && (retriedAfter.get(mergeDecisionId(r.repo, r.number, r.r_head), last.at) || answeredAfter(mergeDecisionId(r.repo, r.number, r.r_head), last.at)))) {
+    if (last && !(last.outcome === "refused" && (await retriedAfter.get(mergeDecisionId(r.repo, r.number, r.r_head), last.at) || answeredAfter(mergeDecisionId(r.repo, r.number, r.r_head), last.at)))) {
       base.lastMerge = { outcome: last.outcome, reason: last.reason, ci: last.ci, mergeable: last.mergeable, refusals: last.refusals };
       base.runsApprovedAfterMerge = !!wait?.approved_at && wait.approved_at > last.at;
     }
     base.verification = (verifAt(ref, r.r_head) as PrFacts["verification"] | undefined) ?? null;
-    if (base.verification?.state === "failed" || base.verification?.state === "error") base.verifyOverride = verifyOverride(db, r.repo, r.number, r.r_head);
+    if (base.verification?.state === "failed" || base.verification?.state === "error") base.verifyOverride = await verifyOverride(db, r.repo, r.number, r.r_head);
     if (!base.verification || base.verification.state === "stale") {
       base.verifyUnavailable = !rf.pub ? PRIVATE_REASON : rf.f.noCi && cachedRust(r.repo, r.r_head) === false ? NOT_RUST_REASON : null;
     }
-    if (r.state === "OPEN" && base.mergeable !== "MERGEABLE" && base.mergeable !== "CONFLICTING") base.unknown = unknownOf(db, r.repo, r.number, r.r_head);
+    if (r.state === "OPEN" && base.mergeable !== "MERGEABLE" && base.mergeable !== "CONFLICTING") base.unknown = await unknownOf(db, r.repo, r.number, r.r_head);
     const id = mergeDecisionId(r.repo, r.number, r.r_head);
     const given = answers.get(id) ?? null;
     base.decision = {
@@ -505,15 +506,15 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     {
       const ended = taskEnded;
       for (const x of lintFixup.get(`${ref}@${r.r_head}`) ?? []) {
-        base.lint.push({ step: "fixup", source: x.source === "premerge" || x.source === "carry" || x.source === "operator" ? x.source : "review", ended: ended(x.lint_task) });
+        base.lint.push({ step: "fixup", source: x.source === "premerge" || x.source === "carry" || x.source === "operator" ? x.source : "review", ended: await ended(x.lint_task) });
       }
-      for (const x of lintCifix.get(`${ref}@${base.brokeByUs || base.gateRed ? head : r.r_head}`) ?? []) base.lint.push({ step: "cifix", source: "review", ended: ended(x.lint_task) });
-      for (const x of lintConflict.get(`${ref}@${r.r_head}`) ?? []) base.lint.push({ step: "conflict", source: "review", ended: ended(x.lint_task) });
+      for (const x of lintCifix.get(`${ref}@${base.brokeByUs || base.gateRed ? head : r.r_head}`) ?? []) base.lint.push({ step: "cifix", source: "review", ended: await ended(x.lint_task) });
+      for (const x of lintConflict.get(`${ref}@${r.r_head}`) ?? []) base.lint.push({ step: "conflict", source: "review", ended: await ended(x.lint_task) });
       if (base.lint.length && r.state === "OPEN") base.inFlight = true;
     }
     if (base.ci === "failure" || base.brokeByUs || base.gateRed) {
       const cfHead = base.brokeByUs || base.gateRed || (head && head !== r.r_head) ? head : r.r_head;
-      base.cifix = cifixAt(cfHead ?? r.r_head!);
+      base.cifix = await cifixAt(cfHead ?? r.r_head!);
     }
     base.batch = inBatch.get(`${ref}@${r.r_head}`) ?? null;
     if (r.base_ref && r.state === "OPEN") base.stackedOn = (openByHead.get(`${r.repo} ${r.base_ref} ${`${slugOf(r.repo)}`.toLowerCase()}`) ?? []).find((n) => n !== r.number) ?? null;
@@ -535,18 +536,18 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
 }
 
 /** Facts of one PR, or null when it is not an open PR (or a merged one with a take review). */
-export function loadPrFact(db: DatabaseSync, repo: string, number: number, opts: Omit<LoadOptions, "repo" | "refs"> = {}): PrFacts | null {
-  return loadPrFacts(db, { ...opts, repo, refs: [`${repo}#${number}`] })[0] ?? null;
+export async function loadPrFact(db: Db, repo: string, number: number, opts: Omit<LoadOptions, "repo" | "refs"> = {}): Promise<PrFacts | null> {
+  return (await loadPrFacts(db, { ...opts, repo, refs: [`${repo}#${number}`] }))[0] ?? null;
 }
 export type { PrTier };
 
 // ---- small readers shared with the merge modules ----
 
 /** Returns a function that gives the head and the earlier heads AutoCraft itself pushed it from (a `pushing` row is a push that started and may have landed) (conflict merges of the base, fix-up pushes, carry-over pushes), newest first. */
-export function pushChainOf(db: DatabaseSync): (repo: string, number: number, head: string) => string[] {
+export async function pushChainOf(db: Db): Promise<(repo: string, number: number, head: string) => string[]> {
   // Every push edge, read once: the heads each head was pushed from, distinct and in order (as the UNION gives them per head).
   const from = new Map<string, string[]>();
-  for (const r of db.prepare(`SELECT k, from_head FROM (
+  for (const r of await db.prepare(`SELECT k, from_head FROM (
       SELECT repo || '#' || number || '@' || to_head AS k, from_head FROM conflict_merges WHERE state IN ('merged', 'pushing')
       UNION SELECT repo || '#' || number || '@' || to_head, from_head FROM fixups WHERE state IN ('pushed', 'pushing')
       UNION SELECT repo || '#' || number || '@' || to_head, from_head FROM dupe_carries WHERE from_head IS NOT NULL
@@ -560,16 +561,16 @@ export function pushChainOf(db: DatabaseSync): (repo: string, number: number, he
 }
 
 /** Returns a function telling whether a PR's head is the pipeline's own work: a commit it pushed to its own branch, or one reached from such a commit only through its own later pushes. */
-export function ownHeadOf(db: DatabaseSync): (repo: string, number: number, head: string) => boolean {
-  const chain = pushChainOf(db);
+export async function ownHeadOf(db: Db): Promise<(repo: string, number: number, head: string) => Promise<boolean>> {
+  const chain = await pushChainOf(db);
   let pushed: Set<string> | undefined;
-  const ours = (repo: string, sha: string): boolean => (pushed ??= new Set((db.prepare("SELECT repo || ' ' || sha AS k FROM main.own_commits").all() as { k: string }[]).map((r) => r.k))).has(`${repo} ${sha}`);
-  return (repo, number, head) => chain(repo, number, head).some((h) => ours(repo, h));
+  const ours = async (repo: string, sha: string): Promise<boolean> => (pushed ??= new Set((await db.prepare("SELECT repo || ' ' || sha AS k FROM main.own_commits").all() as { k: string }[]).map((r) => r.k))).has(`${repo} ${sha}`);
+  return async (repo, number, head) => await someSeq(chain(repo, number, head), async (h) => await ours(repo, h));
 }
 
 /** True when any stored Opus review at the head (the current row or an overwritten one in the history) was a take or take-fix with sure = 0. */
-export function headWasUnsure(db: DatabaseSync, repo: string, number: number, head: string): boolean {
-  return !!db.prepare(UNSURE_AT_SQL).get(repo, number, head);
+export async function headWasUnsure(db: Db, repo: string, number: number, head: string): Promise<boolean> {
+  return !!await db.prepare(UNSURE_AT_SQL).get(repo, number, head);
 }
 
 type CarrySource = { number: number; detail: string | null; author: string | null; id: number | null };
@@ -582,32 +583,32 @@ function carriedSources(rows: CarrySource[]): { number: number; author: string |
 export { tierKey, tiersOf, type AuthorRef };
 
 /** PRs the pipeline opened itself from a Fix issues attempt or for a red default branch, as `repo#number`, when authored by its own account. */
-export function ownFixPrs(db: DatabaseSync, repo?: string, slug?: string | null): { login: string | null; prs: Set<string>; quiet: Set<string>; isOwn: (repo: string, author: string | null) => boolean } {
+export async function ownFixPrs(db: Db, repo?: string, slug?: string | null): Promise<{ login: string | null; prs: Set<string>; quiet: Set<string>; isOwn: (repo: string, author: string | null) => Promise<boolean> }> {
   const logins = new Map<string, Set<string>>();
-  const isOwn = (r: string, author: string | null): boolean => {
+  const isOwn = async (r: string, author: string | null): Promise<boolean> => {
     if (!author) return false;
     let set = logins.get(r);
-    if (!set) logins.set(r, (set = ownLogins(db, r, slug)));
+    if (!set) logins.set(r, (set = await ownLogins(db, r, slug)));
     return set.has(author);
   };
-  const login = setting(db, PIPELINE_LOGIN_KEY) ?? null;
+  const login = await setting(db, PIPELINE_LOGIN_KEY) ?? null;
   const prs = new Set<string>();
-  const quiet = quietFixPrs(db, repo);
+  const quiet = await quietFixPrs(db, repo);
   if (!login) return { login, prs, quiet, isOwn };
   for (const ref of quiet) prs.add(ref);
-  for (const r of db.prepare("SELECT repo, pr_url FROM main.fix_attempts WHERE pr_url IS NOT NULL" + (repo ? " AND repo = ?" : "")).all(...(repo ? [repo] : [])) as { repo: string; pr_url: string }[]) {
+  for (const r of await db.prepare("SELECT repo, pr_url FROM main.fix_attempts WHERE pr_url IS NOT NULL" + (repo ? " AND repo = ?" : "")).all(...(repo ? [repo] : [])) as { repo: string; pr_url: string }[]) {
     const m = r.pr_url.match(/\/pull\/(\d+)$/);
     if (m) prs.add(`${r.repo}#${m[1]}`);
   }
-  for (const r of db.prepare("SELECT repo, pr_number AS n FROM main.main_fixes WHERE pr_number IS NOT NULL" + (repo ? " AND repo = ?" : "")).all(...(repo ? [repo] : [])) as { repo: string; n: number }[]) prs.add(`${r.repo}#${r.n}`);
+  for (const r of await db.prepare("SELECT repo, pr_number AS n FROM main.main_fixes WHERE pr_number IS NOT NULL" + (repo ? " AND repo = ?" : "")).all(...(repo ? [repo] : [])) as { repo: string; n: number }[]) prs.add(`${r.repo}#${r.n}`);
   return { login, prs, quiet, isOwn };
 }
 
 /** Reads the pipeline account and the last successful assign or unassign of every item from the audit once; the returned function gives an item's assignment facts from its mirrored `assignees` (JSON). */
-export function assignmentsOf(db: DatabaseSync, repo?: string): (ref: string, assignees: string | null) => AssignFacts {
-  const login = setting(db, PIPELINE_LOGIN_KEY) ?? null;
+export async function assignmentsOf(db: Db, repo?: string): Promise<(ref: string, assignees: string | null) => AssignFacts> {
+  const login = await setting(db, PIPELINE_LOGIN_KEY) ?? null;
   const last = new Map<string, string | null>();
-  for (const r of db.prepare(`SELECT target, details FROM audit WHERE action = 'assign' AND rowid IN (SELECT MAX(rowid) FROM audit
+  for (const r of await db.prepare(`SELECT target, details FROM audit WHERE action = 'assign' AND rowid IN (SELECT MAX(rowid) FROM audit
     WHERE action IN ('assign', 'unassign') AND COALESCE(details, '') NOT LIKE '%"error":%' ${repo ? "AND target >= ? AND target < ?" : ""} GROUP BY target)`)
     .all(...(repo ? [`${repo}#`, `${repo}$`] : [])) as { target: string; details: string | null }[]) {
     last.set(r.target, (safeJson(r.details) as { assignee?: string } | null)?.assignee ?? null);

@@ -5,7 +5,6 @@
 // viewers get neither logs, patches nor artifact downloads; the page shows it as text and artifacts download with `attachment` (PNG inline),
 // `nosniff` and `Content-Security-Policy: sandbox`.
 import { readFileSync } from "node:fs";
-import type { DatabaseSync } from "node:sqlite";
 import type { BuildEnv, BuildFeatureState, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, TaskFilter, TaskPage, TaskState } from "../../../web/src/api/types.ts";
 import { absolute } from "../../build/artifacts.ts";
 import { BuildError, createEnv, listEnvs, rotateKey, updateEnv } from "../../build/envs.ts";
@@ -20,8 +19,9 @@ import type { Req, Res } from "../types.ts";
 import { hiddenRepos, visibleRepos } from "./visible.ts";
 import { canSeeInternals } from "./staff.ts";
 import { isHiddenRepo } from "../../hidden-sql.ts";
+import type { Db } from "../../db/index.ts";
 
-const wrap = async <T>(f: () => T | Promise<T>): Promise<T> => {
+const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
   try {
     return await f();
   } catch (e) {
@@ -31,11 +31,11 @@ const wrap = async <T>(f: () => T | Promise<T>): Promise<T> => {
 };
 
 /** Operators see every environment; others only the enabled ones. */
-export const envs = (db: DatabaseSync, req: Req): BuildEnv[] => listEnvs(db).filter((e) => e.enabled || canSeeInternals(req));
+export const envs = async (db: Db, req: Req): Promise<BuildEnv[]> => (await listEnvs(db)).filter((e) => e.enabled || canSeeInternals(req));
 
-export const postEnv = (db: DatabaseSync, req: Req) => wrap(() => createEnv(db, req.json, req.user.login));
-export const putEnv = (db: DatabaseSync, req: Req) => wrap(() => updateEnv(db, req.params.id, req.json, req.user.login));
-export const postRotate = (db: DatabaseSync, req: Req) => wrap(() => rotateKey(db, req.params.id, req.user.login));
+export const postEnv = async (db: Db, req: Req) => wrap(async () => await createEnv(db, req.json, req.user.login));
+export const putEnv = async (db: Db, req: Req) => wrap(async () => await updateEnv(db, req.params.id, req.json, req.user.login));
+export const postRotate = async (db: Db, req: Req) => wrap(async () => await rotateKey(db, req.params.id, req.user.login));
 
 function intParam(req: Req, name: string): number | undefined {
   const v = req.query.get(name);
@@ -44,52 +44,52 @@ function intParam(req: Req, name: string): number | undefined {
   return Number(v);
 }
 
-export const tasks = (db: DatabaseSync, req: Req): Promise<TaskPage> => wrap(async () => {
+export const tasks = async (db: Db, req: Req): Promise<TaskPage> => wrap(async () => {
   const q = (k: string) => req.query.get(k) || undefined;
   const repo = q("repo");
   const hidden = await hiddenRepos(db, req);
   if (repo && isHiddenRepo(hidden, repo)) throw new HttpError(404, `${repo} is not a tracked repo`);
   const f: TaskFilter = { state: q("state") as TaskState | "active" | undefined, env: q("env"), repo, cursor: q("cursor"), limit: intParam(req, "limit") };
-  return listTasks(db, f, hidden, canSeeInternals(req));
+  return await listTasks(db, f, hidden, canSeeInternals(req));
 });
 
-async function visibleTask(db: DatabaseSync, req: Req): Promise<BuildTaskDetail> {
+async function visibleTask(db: Db, req: Req): Promise<BuildTaskDetail> {
   if (!/^\d{1,15}$/.test(req.params.id ?? "")) throw new HttpError(400, "not a task id");
-  const t = getTaskDetail(db, Number(req.params.id));
+  const t = await getTaskDetail(db, Number(req.params.id));
   // The same answer for a task that does not exist and one of a repo the viewer cannot see.
   if (!t || isHiddenRepo(await hiddenRepos(db, req), t.repo) || (PRIVATE_STEPS.includes(t.step) && !canSeeInternals(req))) throw new HttpError(404, "no such task");
   return t;
 }
 
 /** Viewers get the task without its log and patch. */
-export const task = (db: DatabaseSync, req: Req) => wrap(async (): Promise<BuildTaskDetail> => {
+export const task = async (db: Db, req: Req) => wrap(async (): Promise<BuildTaskDetail> => {
   const t = await visibleTask(db, req);
   return canSeeInternals(req) ? t : { ...t, logTail: null, logBytes: 0, logTruncated: false, patch: null };
 });
 
-export const cancel = (db: DatabaseSync, req: Req): Promise<BuildTask> => wrap(async () => {
+export const cancel = async (db: Db, req: Req): Promise<BuildTask> => wrap(async () => {
   await visibleTask(db, req);
-  return cancelTask(db, req.params.id, req.user.login);
+  return await cancelTask(db, req.params.id, req.user.login);
 });
 
-export const buildSummary = async (db: DatabaseSync, req: Req): Promise<BuildSummary> => summary(db, await hiddenRepos(db, req), canSeeInternals(req));
+export const buildSummary = async (db: Db, req: Req): Promise<BuildSummary> => await summary(db, await hiddenRepos(db, req), canSeeInternals(req));
 
-async function featuresOf(db: DatabaseSync, req: Req): Promise<BuildFeatures> {
-  const tracked = new Set((db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]).map((r) => r.name));
+async function featuresOf(db: Db, req: Req): Promise<BuildFeatures> {
+  const tracked = new Set((await db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]).map((r) => r.name));
   const repos = (await visibleRepos(db, req)).filter((r) => tracked.has(r)).sort();
   const shown = new Set(repos);
-  const features: BuildFeatureState[] = featureStates(db).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], repos: s.repos.filter((r) => shown.has(r)) }));
+  const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], repos: s.repos.filter((r) => shown.has(r)) }));
   const scopes: Record<string, PrBuildScope> = {};
-  for (const r of repos) scopes[r] = scopeOf(db, r);
-  return { features, repos, prBuilds: { scopes, perDay: perDayOf(db) } };
+  for (const r of repos) scopes[r] = await scopeOf(db, r);
+  return { features, repos, prBuilds: { scopes, perDay: await perDayOf(db) } };
 }
 
-export const features = async (db: DatabaseSync, req: Req): Promise<BuildFeatures> => {
+export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the build features");
   return featuresOf(db, req);
 };
 
-export const postFeature = async (db: DatabaseSync, req: Req): Promise<BuildFeatures> => {
+export const postFeature = async (db: Db, req: Req): Promise<BuildFeatures> => {
   const b = (req.json ?? {}) as { feature?: unknown; on?: unknown; repo?: unknown; scope?: unknown; perDay?: unknown };
   if (!isFeature(b.feature)) throw new HttpError(400, `feature must be one of ${BUILD_FEATURES.join(", ")}`);
   const tracked = (r: unknown): r is string => typeof r === "string" && !!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(r);
@@ -108,31 +108,31 @@ export const postFeature = async (db: DatabaseSync, req: Req): Promise<BuildFeat
     if (!REPO_SCOPED[b.feature]) throw new HttpError(400, `${b.feature} has no per-repo switch`);
     repo = b.repo;
   }
-  if (b.scope !== undefined && scopeOf(db, b.repo as string) !== b.scope) { setScope(db, b.repo as string, b.scope as PrBuildScope); audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", scope: b.scope, repo: b.repo }); }
-  if (b.perDay !== undefined && perDayOf(db) !== b.perDay) { setPerDay(db, b.perDay as number); audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", perDay: b.perDay }); }
-  if (typeof b.on === "boolean") setFeature(db, b.feature, b.on, req.user.login, repo);
+  if (b.scope !== undefined && await scopeOf(db, b.repo as string) !== b.scope) { await setScope(db, b.repo as string, b.scope as PrBuildScope); await audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", scope: b.scope, repo: b.repo }); }
+  if (b.perDay !== undefined && await perDayOf(db) !== b.perDay) { await setPerDay(db, b.perDay as number); await audit(db, req.user.login, "build-feature", "pr-builds", { feature: "pr-builds", perDay: b.perDay }); }
+  if (typeof b.on === "boolean") await setFeature(db, b.feature, b.on, req.user.login, repo);
   return featuresOf(db, req);
 };
 
-async function screenshotSetups(db: DatabaseSync, req: Req): Promise<ScreenshotSetups> {
+async function screenshotSetups(db: Db, req: Req): Promise<ScreenshotSetups> {
   const shown = new Set(await visibleRepos(db, req));
-  return { setups: listConfigs(db).filter((c) => shown.has(c.repo)).map(({ repo, updatedBy, updatedAt, ...config }) => ({ repo, config, updatedBy, updatedAt })) };
+  return { setups: (await listConfigs(db)).filter((c) => shown.has(c.repo)).map(({ repo, updatedBy, updatedAt, ...config }) => ({ repo, config, updatedBy, updatedAt })) };
 }
 
-function trackedRepo(db: DatabaseSync, repo: string): string {
-  if (!db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new HttpError(400, "repo must be a tracked repo");
+async function trackedRepo(db: Db, repo: string): Promise<string> {
+  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new HttpError(400, "repo must be a tracked repo");
   return repo;
 }
 
-export const screenshots = async (db: DatabaseSync, req: Req): Promise<ScreenshotSetups> => {
+export const screenshots = async (db: Db, req: Req): Promise<ScreenshotSetups> => {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the screenshot setup");
   return screenshotSetups(db, req);
 };
 
-export const putScreenshots = async (db: DatabaseSync, req: Req): Promise<ScreenshotSetups> => {
-  const repo = trackedRepo(db, req.params.repo);
+export const putScreenshots = async (db: Db, req: Req): Promise<ScreenshotSetups> => {
+  const repo = await trackedRepo(db, req.params.repo);
   try {
-    putConfig(db, req.user.login, repo, req.json);
+    await putConfig(db, req.user.login, repo, req.json);
   } catch (e) {
     if (e instanceof ScreenshotConfigError) throw new HttpError(400, e.message);
     throw e;
@@ -140,17 +140,17 @@ export const putScreenshots = async (db: DatabaseSync, req: Req): Promise<Screen
   return screenshotSetups(db, req);
 };
 
-export const deleteScreenshots = async (db: DatabaseSync, req: Req): Promise<ScreenshotSetups> => {
-  if (!deleteConfig(db, req.user.login, req.params.repo)) throw new HttpError(404, "no screenshot setup for that repo");
+export const deleteScreenshots = async (db: Db, req: Req): Promise<ScreenshotSetups> => {
+  if (!await deleteConfig(db, req.user.login, req.params.repo)) throw new HttpError(404, "no screenshot setup for that repo");
   return screenshotSetups(db, req);
 };
 
-export async function artifact(db: DatabaseSync, req: Req): Promise<Res> {
+export async function artifact(db: Db, req: Req): Promise<Res> {
   try {
     if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers download artifacts");
     const t = await visibleTask(db, req);
     const a = t.artifacts.find((x) => x.name === req.params.name);
-    const row = a && (db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(t.id, a.name) as { file: string } | undefined);
+    const row = a && (await db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(t.id, a.name) as { file: string } | undefined);
     const path = row && absolute(row.file);
     if (!a || !path) throw new HttpError(404, "no such artifact");
     let data: Buffer;

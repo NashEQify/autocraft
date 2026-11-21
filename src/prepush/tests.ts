@@ -1,13 +1,13 @@
 // Tests before push: the `tests` step of the lint task runs `cargo test` for the crates a model-written patch touches.
 // A failing test goes back to the model once; after that the push proceeds and the failures are noted (a test can fail
 // on the PR without our patch, and nothing here compares against the base).
-import type { DatabaseSync } from "node:sqlite";
 import type { TaskStep } from "../../web/src/api/types.ts";
 import { LINT_MAX_ROUNDS } from "../core/rules.ts";
 import { cachedCrates, type CratesFetcher } from "../verify/crates.ts";
 import type { Crate } from "../verify/types.ts";
 import { featureOn } from "../build/features.ts";
 import type { Finding, LintJob } from "./index.ts";
+import type { Db } from "../db/index.ts";
 
 export const TESTS_STEP = "tests";
 export const TESTS_ARTIFACT = "tests.txt";
@@ -136,8 +136,8 @@ export function patchPaths(patch: string): string[] {
 }
 
 /** The crates whose tests the job's patch calls for; null when the switch is off, the crates cannot be read, or the rules say none. Fetches only when the switch is on. */
-export async function testsFeatureCrates(db: DatabaseSync, j: LintJob, fetch: CratesFetcher): Promise<string[] | null> {
-  return featureOn(db, "push-tests", j.repo) ? cratesForTests(j, fetch) : null;
+export async function testsFeatureCrates(db: Db, j: LintJob, fetch: CratesFetcher): Promise<string[] | null> {
+  return await featureOn(db, "push-tests", j.repo) ? cratesForTests(j, fetch) : null;
 }
 
 /** The same without the switch, for the operator's `lint --tests`. */

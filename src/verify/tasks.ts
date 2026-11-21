@@ -1,5 +1,4 @@
 // Build tasks for a validated plan, and the warm build of the default branch.
-import type { DatabaseSync } from "node:sqlite";
 import { createTask, warmKeyOf, type NewTask } from "../build/tasks.ts";
 import { rustPlan } from "../worker/rust.ts";
 import type { TaskStep } from "../worker/types.ts";
@@ -7,6 +6,8 @@ import { featureOn } from "../build/features.ts";
 import type { VerifyPlan } from "./plan.ts";
 import type { ParamSpec, ScreenshotConfigBody } from "./screenshot-config.ts";
 import type { ShotStep } from "./types.ts";
+import { mapSeq } from "../async-seq.ts";
+import type { Db } from "../db/index.ts";
 
 const REQUIRES = { os: "linux", toolchains: ["rust-stable"] } as const;
 export const WARM_EVERY_MS = 24 * 3600_000;
@@ -32,20 +33,20 @@ export function tasksFor(plan: Planned, c: { repo: string; number: number; head:
 }
 
 /** Queues the tasks; returns their ids, head task first. */
-export function queueTasks(db: DatabaseSync, plan: Planned, c: { repo: string; number: number; head: string; base: string }): number[] {
-  return tasksFor(plan, c).map((t) => createTask(db, t));
+export async function queueTasks(db: Db, plan: Planned, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
+  return await mapSeq(tasksFor(plan, c), async (t) => await createTask(db, t));
 }
 
 /**
  * Queues a build-only task for the default branch head when the repo has no warm build for it yet and
  * none in the last 24 hours. Returns the task id, or null when nothing was queued.
  */
-export function queueWarmBuild(db: DatabaseSync, repo: string, mainSha: string, nowMs: number = Date.now()): number | null {
-  const same = db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND head_sha = ? AND warm_role = 'build'").get(repo, mainSha);
+export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
+  const same = await db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND head_sha = ? AND warm_role = 'build'").get(repo, mainSha);
   if (same) return null;
   const since = new Date(nowMs - WARM_EVERY_MS).toISOString();
-  if (db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND warm_role = 'build' AND queued_at > ?").get(repo, since)) return null;
-  return createTask(db, {
+  if (await db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND warm_role = 'build' AND queued_at > ?").get(repo, since)) return null;
+  return await createTask(db, {
     step: "verify", repo, headSha: mainSha, baseSha: mainSha, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, priority: WARM_PRIORITY,
     plan: rustPlan({ cargoArgs: ["--workspace"], test: false }), warm: { key: warmKeyOf(repo), role: "build" },
   });
@@ -54,10 +55,10 @@ export function queueWarmBuild(db: DatabaseSync, repo: string, mainSha: string, 
 type CloneRow = { step: string; repo: string; number: number | null; head_sha: string; base_sha: string | null; requires: string; priority: number; plan: string; patch: string | null; warm_key: string | null; warm_role: "use" | "build" | null };
 
 /** Queues a new task with the same step, commits, requirements, plan, patch and warm role as task `id`. */
-export function cloneTask(db: DatabaseSync, id: number): number {
-  const r = db.prepare("SELECT * FROM build_tasks WHERE id = ?").get(id) as CloneRow | undefined;
+export async function cloneTask(db: Db, id: number): Promise<number> {
+  const r = await db.prepare("SELECT * FROM build_tasks WHERE id = ?").get(id) as CloneRow | undefined;
   if (!r) throw new Error(`no task ${id}`);
-  return createTask(db, {
+  return await createTask(db, {
     step: r.step, repo: r.repo, number: r.number, headSha: r.head_sha, baseSha: r.base_sha, requires: JSON.parse(r.requires), priority: r.priority,
     plan: JSON.parse(r.plan), ...(r.patch === null ? {} : { patch: r.patch }), ...(r.warm_key && r.warm_role ? { warm: { key: r.warm_key, role: r.warm_role } } : {}),
   });
@@ -127,7 +128,7 @@ export function screenshotTasks(script: ShotStep[], config: Pick<ScreenshotConfi
 }
 
 /** Queues the screenshot tasks; returns their ids, head task first, or [] when the repo's screenshots switch is off. */
-export function queueScreenshotTasks(db: DatabaseSync, script: ShotStep[], config: Pick<ScreenshotConfigBody, "package" | "example" | "driver" | "commands">, c: { repo: string; number: number; head: string; base: string }): number[] {
-  if (!featureOn(db, "screenshots", c.repo)) return [];
-  return screenshotTasks(script, config, c).map((t) => createTask(db, t));
+export async function queueScreenshotTasks(db: Db, script: ShotStep[], config: Pick<ScreenshotConfigBody, "package" | "example" | "driver" | "commands">, c: { repo: string; number: number; head: string; base: string }): Promise<number[]> {
+  if (!await featureOn(db, "screenshots", c.repo)) return [];
+  return await mapSeq(screenshotTasks(script, config, c), async (t) => await createTask(db, t));
 }
