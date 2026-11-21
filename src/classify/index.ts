@@ -128,7 +128,7 @@ async function refereeSection(db: Db, runId: string, pairs: Pair[]): Promise<{ t
   const sonnet = new Map((await db.all(db.k.selectFrom("classifications").select(["repo", "number", "type_label", "flags", "reason"])
     .where("classifier", "=", "sonnet").where("run_id", "=", runId))).map((r) => [ref(r), r]));
   const ps = pairs.filter((p) => sonnet.has(ref(p.r)));
-  const side = (p: Pair) => { const v = sonnet.get(ref(p.r))!.type_label; return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
+  const side = (p: Pair) => { const v = sonnet.get(ref(p.r))!.type_label ?? ""; return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
   const stats = { n: ps.length, jev: ps.filter((p) => side(p) === "jev").length, haiku: ps.filter((p) => side(p) === "haiku").length, neither: ps.filter((p) => side(p) === "neither").length };
   const by = (k: string) => ps.filter((p) => p.r.kind === k);
   const text = ps.length === 0 ? "No refereed items." : `Sonnet judged ${stats.n} disagreements, without seeing either answer.\n\n| Group | Items | Sonnet sides with Jev | with Haiku | with neither |\n|---|---|---|---|---|\n` +

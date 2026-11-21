@@ -86,7 +86,7 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
 export async function markSpotCheck(db: Db, runId: string, pairs: Pair[], count: number, seed: number): Promise<void> {
   const verdicts = new Map(
     (await db.all(db.k.selectFrom("classifications").select(["repo", "number", "type_label"]).where("classifier", "=", "sonnet").where("run_id", "=", runId)))
-      .map((r) => [ref(r), r.type_label]),
+      .map((r) => [ref(r), r.type_label ?? ""]),
   );
   const refereed = pairs.filter((p) => verdicts.has(ref(p.r)));
   const side = (p: Pair) => { const v = verdicts.get(ref(p.r)); return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
