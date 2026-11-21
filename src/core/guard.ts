@@ -6,7 +6,7 @@ import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { decidePr } from "./decide.ts";
 import { pipelineWrites, verifyAllows } from "./rules.ts";
-import { loadPrFact } from "./facts.ts";
+import { loadPass, loadPrFact } from "./facts.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { fixIssueApprovalOf } from "../fixissue/approval.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
@@ -81,7 +81,7 @@ async function check(db: DatabaseSync, ref: Ref, a: Ask, by: By, live?: Live): P
   const why = gates(f, a, by);
   if (why) return { refused: `${name}: ${why}` };
   if (a.batch && f.mergeHeld) return { refused: `${name}: merge held by an operator` };
-  const plan = decidePr(f);
+  const plan = decidePr(f, loadPass());
   const holds = plan.head === a.head && (plan.actions.some((x) => x.kind === a.kind && x.head === a.head && (a.bucket === undefined || x.params?.bucket === a.bucket) && (a.source === undefined || x.params?.source === a.source))
     // A batch member is in its batch state, not ready; it must still pass what a single merge needs apart from CI and mergeable.
     || (a.batch === true && a.kind === "merge" && BATCH_STATES.includes(plan.state) && plan.path !== null && verifyAllows(plan.path, f.verification?.state, f.verifyOverride)));

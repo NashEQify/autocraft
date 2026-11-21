@@ -3,7 +3,7 @@
 // decidePr (src/core/decide.ts); the rest is read from the facts. Reads only local tables; no GitHub calls.
 import type { DatabaseSync } from "node:sqlite";
 import { decidePr, queueEntry } from "../core/decide.ts";
-import { loadPrFacts } from "../core/facts.ts";
+import { loadPass, loadPrFacts } from "../core/facts.ts";
 import { isQueueState, QUEUE_STATES, type PrFacts, type QueueState } from "../core/plan.ts";
 import { mergeDecisionId, VERIFY_UNAVAILABLE } from "../core/rules.ts";
 import { claimsOf, findingsOf, premergeAt, type PremergeFinding } from "../premerge/store.ts";
@@ -102,11 +102,12 @@ export function buildQueue(db: DatabaseSync, opts: QueueOptions = {}): QueueEntr
   const which = opts.merged ?? "all";
   const title = db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?");
   const out: QueueEntry[] = [];
+  const pass = loadPass();
   for (const f of loadPrFacts(db, { ...(opts.repo ? { repo: opts.repo } : {}), ...(opts.refs ? { refs: opts.refs } : {}), ...(opts.run !== undefined ? { run: opts.run } : {}) })) {
     if (opts.exclude?.includes(f.repo)) continue;
     if (which === "exclude" ? f.ghState !== "OPEN" : which === "only" ? f.ghState !== "MERGED" : f.ghState === "CLOSED") continue;
     if (opts.after && (f.repo < opts.after.repo || (f.repo === opts.after.repo && f.number <= opts.after.number))) continue;
-    const plan = decidePr(f);
+    const plan = decidePr(f, pass);
     if (!isQueueState(plan.state)) continue;
     out.push(entryOf(db, f, plan, ((title.get(f.repo, f.number) as { title: string | null } | undefined)?.title ?? "")));
     if (opts.limit && out.length >= Math.floor(opts.limit)) break;

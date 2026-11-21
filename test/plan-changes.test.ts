@@ -7,8 +7,12 @@ import { test } from "node:test";
 import { connect } from "../src/db.ts";
 import { changeSeq, changesSince, pruneChanges } from "../src/core/plan-changes.ts";
 import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
+import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
+import { setReviewMinInterval } from "../src/review/gate.ts";
+import { saveOpus } from "../src/review/opus.ts";
 import { SCRATCH } from "./scratch.ts";
+import { world } from "./world-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-changes-"));
@@ -97,4 +101,24 @@ test("every table the fact loaders read is classified", () => {
   const cols = (t: string) => (db.prepare("SELECT name FROM pragma_table_info(?)").all(t) as { name: string }[]).map((c) => c.name);
   assert.deepEqual(PLAN_INPUTS.filter((p) => p.class === "item" && !p.refs && !["repo", "number"].every((c) => cols(p.table).includes(c))).map((p) => p.table), []);
   db.close();
+});
+
+test("a PR's facts change with the clock alone no earlier than its refreshAt: a review held on another item stops waiting when the blocker list expires", () => {
+  const w = world().repo().pr(1, { head: "h1" }).pr(2);
+  setReviewMinInterval(w.db, 0, "test");
+  saveOpus(w.db, "rv", { repo: "app", number: 1, head_oid: "h1" }, {
+    mode: "full", base: null, model: "m",
+    review: { ref: "app#1", verdict: "hold", sure: true, reason: "r", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: ["app#2"] },
+  });
+  w.synced(1, "h2");
+  const at = Date.parse((w.db.prepare("SELECT at FROM opus_reviews WHERE number = 1").get() as { at: string }).at);
+  const load = (now: number) => loadPrFacts(w.db, { now, refs: ["app#1"] })[0]!;
+  const f = load(at + 3600_000);
+  assert.equal(f.reviewHold?.kind, "blocked");
+  assert.ok(f.refreshAt! > f.now);
+  // Up to refreshAt a load gives the same facts at another time; at refreshAt they differ.
+  assert.deepEqual({ ...load(f.refreshAt! - 1), now: f.now }, f);
+  const after = load(f.refreshAt!);
+  assert.notEqual(after.reviewHold?.kind, "blocked");
+  assert.equal(after.review?.stale, true);
 });

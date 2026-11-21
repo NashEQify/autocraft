@@ -100,6 +100,11 @@ export type PrFacts = {
   repo: string; number: number;
   /** Time of the decision, ms. */
   now: number;
+  /**
+   * The earliest time after `now` (ms) at which loading this PR's facts again could give other facts than these with `now` replaced:
+   * a timed hold, backoff or cache lifetime the loaders read ends then. Absent: nothing the loaders read changes with the clock alone.
+   */
+  refreshAt?: number;
   /** The global pipeline switch. decide() ignores it; gates() applies it to the pipeline's own writes. */
   pipelineOn: boolean;
   /** Stages that stopped themselves (circuit breaker), by stage name (fixup, cifix, fixissue, merge): the reason. gates() refuses their writes. */
@@ -219,10 +224,10 @@ export type PrFacts = {
   sensitive: string[] | null;
   /**
    * The cached diff waits for what the merge rule reads beside it (whole files, workflow steps): `sensitive` holds the
-   * conservative reasons, and the pre-merge step reads the diff again (no model call). `lastRead`: the last such re-read (ms);
-   * `paceAt`: the earliest time the instance's re-read pace and the rate-limit pause allow the next one (ms).
+   * conservative reasons, and the pre-merge step reads the diff again (no model call). `lastRead`: the last such re-read (ms).
+   * The instance-wide re-read pace is not a fact of the PR: decidePr takes it from PassFacts.
    */
-  diffPending?: { lastRead: number | null; paceAt?: number };
+  diffPending?: { lastRead: number | null };
   statementConflicts: { id: number; where: string; text: string; reason: string }[];
   /** The PR's head branch may be pushed to (source of the maintainer flag follows `checksHere`). */
   pushable: boolean;
@@ -276,6 +281,12 @@ export type PrFacts = {
   outside?: { review: string | null; verify: string | null; ci: string | null };
 };
 
+/** Inputs of a decision that belong to the instance, not to one PR: read once per planner pass and given to every decidePr call of it. */
+export type PassFacts = {
+  /** The earliest time the instance's diff re-read pace and the rate-limit pause allow the next re-read (ms). */
+  rereadPaceAt: number;
+};
+
 // ---- facts and plans of an item's triage steps (issues and PRs) -----------------------------------------------------
 
 /** Where an open item stands in the triage steps (classify, referee, scope decision), in the order Work's next-step text checks them. */
@@ -298,6 +309,8 @@ export type ItemFacts = {
   open: boolean;
   /** Time of the decision, ms. */
   now: number;
+  /** As on PrFacts. */
+  refreshAt?: number;
   /** Open item as the mirror says (the freshest-checks rule of PrFacts is for the PR path only). */
   draft: boolean;
   /** In scope: fast-tracked, or its repo's Pipeline switch is on and, with a pilot set, it is a pilot item. */

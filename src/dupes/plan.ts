@@ -206,11 +206,17 @@ export function rememberDrop(db: DatabaseSync, s: KindSet, at: string): void {
   db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(dropKey(s), `${s.hash}|${at}`);
 }
 
-function recentlyDropped(db: DatabaseSync, s: KindSet, nowMs: number): boolean {
+/** When the set's current snapshot was last dropped (ms), or null. */
+function droppedAt(db: DatabaseSync, s: KindSet): number | null {
   const v = setting(db, dropKey(s));
-  if (!v) return false;
+  if (!v) return null;
   const [hash, at] = v.split("|");
-  return hash === s.hash && nowMs - Date.parse(at!) < DROP_PAUSE_MS;
+  return hash === s.hash ? Date.parse(at!) : null;
+}
+
+function recentlyDropped(db: DatabaseSync, s: KindSet, nowMs: number): boolean {
+  const at = droppedAt(db, s);
+  return at !== null && nowMs - at < DROP_PAUSE_MS;
 }
 
 /** A stored rule result is tried again after 15 minutes, three times at most, while no decision of the group is answered. */
@@ -221,14 +227,22 @@ function retryable(db: DatabaseSync, c: StoredComparison, nowMs: number): boolea
     WHERE gi.repo = ? AND gi.number IN (${placeholders}) AND d.answer IS NOT NULL AND d.answer <> 'superseded' LIMIT 1`).get(c.repo, ...c.members);
 }
 
-/** Sets that need a comparison: an open member is in the pilot and no current result is stored (or a rule result may be retried), and the set did not just change on GitHub. */
-export function dueSets(db: DatabaseSync, repo?: string, nowMs: number = Date.now()): KindSet[] {
+/**
+ * Sets that need a comparison: an open member is in the pilot and no current result is stored (or a rule result may be retried), and the set did not just change on GitHub.
+ * `change` is told, per set, when its answer changes with the clock alone: a rule result's retry wait or a drop's pause ends.
+ */
+export function dueSets(db: DatabaseSync, repo?: string, nowMs: number = Date.now(), change?: (s: KindSet, at: number) => void): KindSet[] {
   const out: KindSet[] = [];
   const groups = duplicateGroups(db, repo), setsOf = kindSetsLoader(db, groups), stored = storedComparisons(db, repo);
   for (const g of groups)
     for (const s of setsOf(g)) {
       if (!s.members.some((m) => m.state === "OPEN" && setsOf.inPilot(s.repo, m.number))) continue;
       const c = currentComparison(db, s, stored);
+      if (change) {
+        if (c && c.source === "rule" && c.attempts < RULE_ATTEMPTS) change(s, Date.parse(c.at) + RULE_RETRY_MS);
+        const dropped = droppedAt(db, s);
+        if (dropped !== null) change(s, dropped + DROP_PAUSE_MS);
+      }
       if ((!c || retryable(db, c, nowMs)) && !recentlyDropped(db, s, nowMs)) out.push(s);
     }
   return out;

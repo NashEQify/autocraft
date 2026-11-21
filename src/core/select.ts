@@ -1,7 +1,7 @@
 // Executors take their work from Plans: the PRs whose Plan holds an action of their kind.
 import type { DatabaseSync } from "node:sqlite";
 import { decidePr } from "./decide.ts";
-import { loadPrFacts } from "./facts.ts";
+import { loadPass, loadPrFacts } from "./facts.ts";
 import type { PlanSet } from "./plan-set.ts";
 import { WAITS_ON_PERSON, inFlightNow } from "./assignment.ts";
 import type { Action, ActionKind, Plan, PrFacts } from "./plan.ts";
@@ -37,7 +37,10 @@ export function planned(db: DatabaseSync, kind: ActionKind, opts: PlannedOptions
   if (plans) {
     const refs = load.refs ? new Set(load.refs) : null;
     source = plans.prs.filter((p) => (!load.repo || p.facts.repo === load.repo) && (!refs || refs.has(`${p.facts.repo}#${p.facts.number}`)));
-  } else source = loadPrFacts(db, load).map((facts) => ({ facts, plan: decidePr(facts) }));
+  } else {
+    const pass = loadPass(load.now);
+    source = loadPrFacts(db, load).map((facts) => ({ facts, plan: decidePr(facts, pass) }));
+  }
   for (const { facts, plan } of source) {
     onPlan?.(facts, plan);
     for (const action of plan.actions) {

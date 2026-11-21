@@ -1,6 +1,7 @@
 // What the planner and the fix-up step read of operator fix-ups and pre-approved merges. No writes here.
 import type { DatabaseSync } from "node:sqlite";
-import { settlesLoginSql } from "../settlers.ts";
+import { PERM_READ_TTL } from "../dash/server/sessions.ts";
+import { settlesAfter, settlesCheckedAtSql, settlesLoginSql } from "../settlers.ts";
 import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
 
 /** Fix-up states that count as a try; a row left in `pushing` by a crash counts too. */
@@ -21,17 +22,21 @@ export const operatorTriesLeft = (db: DatabaseSync, repo: string, number: number
 export type OperatorFix = { id: number; head: string; instructions: string; by: string; preapprovalId: number | null };
 
 /** The operator fix-up of the PR still to work at `head`: queued and without a final fixups row of its own (matched by the request's id). */
-export function queuedOperatorFix(db: DatabaseSync, repo: string, number: number, head: string): OperatorFix | null {
+export function queuedOperatorFix(db: DatabaseSync, repo: string, number: number, head: string, nowMs: number = Date.now()): OperatorFix | null {
   const r = db.prepare(`SELECT id, from_head, instructions, by, preapproval_id FROM operator_fixups o WHERE repo = ? AND number = ? AND from_head = ? AND state = 'queued'
     AND ${BY_SETTLES} AND NOT ${ENDED_SQL}
-    ORDER BY id DESC LIMIT 1`).get(repo, number, head, ...ENDED_STATES) as { id: number; from_head: string; instructions: string; by: string; preapproval_id: number | null } | undefined;
+    ORDER BY id DESC LIMIT 1`).get(settlesAfter(nowMs), repo, number, head, ...ENDED_STATES) as { id: number; from_head: string; instructions: string; by: string; preapproval_id: number | null } | undefined;
   return r ? { id: r.id, head: r.from_head, instructions: r.instructions, by: r.by, preapprovalId: r.preapproval_id } : null;
 }
 
-export type OperatorWork = { fixHeads: Set<string>; hold: boolean; /** The pushed head of a pre-approved merge waiting for its pre-merge review (state `ci`). */ premergeHeads: Set<string>; /** A pre-approved merge is live (fixup, review, ci or queued). */ preapproved: boolean };
+export type OperatorWork = {
+  fixHeads: Set<string>; hold: boolean; /** The pushed head of a pre-approved merge waiting for its pre-merge review (state `ci`). */ premergeHeads: Set<string>; /** A pre-approved merge is live (fixup, review, ci or queued). */ preapproved: boolean;
+  /** When the first of `fixHeads`' requests stops counting with the clock alone: its maintainer's cached write permission ages out (ms). */
+  settleUntil?: number;
+};
 
-/** Per PR ("repo#n"): the heads with an operator fix-up still to work, whether a pre-approved merge is before its merge answer or live at all, and the heads due a pre-merge review. Small tables, read once per pass. */
-export function operatorWork(db: DatabaseSync, repo?: string): Map<string, OperatorWork> {
+/** Per PR ("repo#n") at `nowMs`: the heads with an operator fix-up still to work, whether a pre-approved merge is before its merge answer or live at all, and the heads due a pre-merge review. Small tables, read once per pass. */
+export function operatorWork(db: DatabaseSync, repo?: string, nowMs: number = Date.now()): Map<string, OperatorWork> {
   const out = new Map<string, OperatorWork>();
   const get = (r: string, n: number): OperatorWork => {
     const k = `${r}#${n}`;
@@ -40,7 +45,12 @@ export function operatorWork(db: DatabaseSync, repo?: string): Map<string, Opera
     return w;
   };
   const q = (sql: string) => db.prepare(`${sql}${repo ? " AND repo = ?" : ""}`).all(...(repo ? [repo] : []));
-  for (const o of db.prepare(`SELECT repo, number, from_head FROM operator_fixups o WHERE state = 'queued' AND ${BY_SETTLES} AND NOT ${ENDED_SQL}${repo ? " AND repo = ?" : ""}`).all(...ENDED_STATES, ...(repo ? [repo] : [])) as { repo: string; number: number; from_head: string }[]) get(o.repo, o.number).fixHeads.add(o.from_head);
+  for (const o of db.prepare(`SELECT repo, number, from_head, ${settlesCheckedAtSql("o.by", "o.repo")} AS checked_at FROM operator_fixups o WHERE state = 'queued' AND ${BY_SETTLES} AND NOT ${ENDED_SQL}${repo ? " AND repo = ?" : ""}`)
+    .all(settlesAfter(nowMs), ...ENDED_STATES, ...(repo ? [repo] : [])) as { repo: string; number: number; from_head: string; checked_at: string | null }[]) {
+    const w = get(o.repo, o.number);
+    w.fixHeads.add(o.from_head);
+    if (o.checked_at) { const until = Date.parse(o.checked_at) + PERM_READ_TTL; if (!(w.settleUntil! <= until)) w.settleUntil = until; }
+  }
   for (const p of q("SELECT repo, number, state, head FROM preapprovals WHERE state IN ('fixup', 'review', 'ci', 'queued')") as { repo: string; number: number; state: string; head: string | null }[]) {
     const w = get(p.repo, p.number);
     w.preapproved = true;
@@ -54,8 +64,8 @@ export function operatorWork(db: DatabaseSync, repo?: string): Map<string, Opera
 export type OpenRequest = { id: number; repo: string; number: number; head: string; preapprovalId: number | null; started: boolean };
 
 /** Every operator fix-up request still queued (no final fixups row of its own); `started` when a fixups row of it exists (a stored patch or a push under way). */
-export function openOperatorFixups(db: DatabaseSync): OpenRequest[] {
+export function openOperatorFixups(db: DatabaseSync, nowMs: number = Date.now()): OpenRequest[] {
   const rows = db.prepare(`SELECT id, repo, number, from_head, preapproval_id, EXISTS (SELECT 1 FROM fixups f WHERE f.operator_fix = o.id) AS started FROM operator_fixups o WHERE state = 'queued' AND ${BY_SETTLES} AND NOT ${ENDED_SQL} AND repo IN (SELECT name FROM main.tracked_repos)`)
-    .all(...ENDED_STATES) as { id: number; repo: string; number: number; from_head: string; preapproval_id: number | null; started: number }[];
+    .all(settlesAfter(nowMs), ...ENDED_STATES) as { id: number; repo: string; number: number; from_head: string; preapproval_id: number | null; started: number }[];
   return rows.map((r) => ({ id: r.id, repo: r.repo, number: r.number, head: r.from_head, preapprovalId: r.preapproval_id, started: !!r.started }));
 }

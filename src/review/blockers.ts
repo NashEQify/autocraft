@@ -129,7 +129,7 @@ export function blocksIndex(db: DatabaseSync, hidden: HiddenRepos): Map<string, 
  * activeBlockers() and hasOpenQuestion() for many PRs, for one planner pass: the items, open decisions and latest reviews of the
  * refs are read in one batch (blockerReads) per new set of refs, starting with every ref a stored hold names.
  */
-export function blockersLoader(db: DatabaseSync): { active: (self: string, stored: string | null | undefined, at: string, nowMs?: number) => string[]; openQuestion: (refs: readonly string[]) => boolean } {
+export function blockersLoader(db: DatabaseSync): { active: (self: string, stored: string | null | undefined, at: string, nowMs: number) => string[]; openQuestion: (refs: readonly string[]) => boolean } {
   const reads: BlockerReads = { item: new Map(), pending: new Set(), latest: new Map() };
   const asked = new Set<string>();
   const key = (ref: string): string | null => { const m = REF.exec(ref); return m ? `${m[1]}#${Number(m[2])}` : null; };
@@ -148,7 +148,7 @@ export function blockersLoader(db: DatabaseSync): { active: (self: string, store
     ensure((db.prepare("SELECT DISTINCT blocked_by FROM main.opus_reviews WHERE verdict = 'hold' AND blocked_by IS NOT NULL").all() as { blocked_by: string }[]).flatMap((r) => storedBlockedBy(r.blocked_by)));
   };
   const openQuestion = (refs: readonly string[]): boolean => { start(); ensure(refs); return refs.some((r) => { const k = key(r); return k !== null && reads.pending.has(k); }); };
-  const active = (self: string, stored: string | null | undefined, at: string, nowMs: number = Date.now()): string[] => {
+  const active = (self: string, stored: string | null | undefined, at: string, nowMs: number): string[] => {
     const refs = storedBlockedBy(stored);
     if (!refs.length || nowMs - Date.parse(at) > BLOCKED_EXPIRES_MS) return [];
     start();

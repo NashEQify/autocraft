@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { isBotCommand, isBotLogin } from "./bots.ts";
-import { blockersLoader, storedBlockedBy } from "./blockers.ts";
+import { BLOCKED_EXPIRES_MS, blockersLoader, storedBlockedBy } from "./blockers.ts";
 import type { Querier } from "../mirror.ts";
 import { FORMAL_REVIEWS, recordGate, recordGateFailure, type ReviewFact } from "../merge/changes-requested.ts";
 import { ENTRY_LIMIT, TOTAL_LIMIT, type DiscussionEntry } from "./parse.ts";
@@ -343,10 +343,11 @@ export function changedSince(state: { newest: string; hash: string } | undefined
   return !!state && sec(state.newest) > sec(seen) && state.hash !== hash;
 }
 
-const day = () => new Date().toISOString().slice(0, 10);
-const rerunKey = (repo: string, number: number) => `${RERUN_KEY}${repo}#${number}:${day()}`;
-const reruns = (db: DatabaseSync, repo: string, number: number): number =>
-  Number(setting(db, rerunKey(repo, number)) ?? 0);
+const day = (nowMs: number) => new Date(nowMs).toISOString().slice(0, 10);
+export const nextUtcMidnight = (ms: number): number => { const d = new Date(ms); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1); };
+const rerunKey = (repo: string, number: number, nowMs: number = Date.now()) => `${RERUN_KEY}${repo}#${number}:${day(nowMs)}`;
+const reruns = (db: DatabaseSync, repo: string, number: number, nowMs: number): number =>
+  Number(setting(db, rerunKey(repo, number, nowMs)) ?? 0);
 
 /** Whether an operator request or the merge-time discussion check marked the PR stale after `since` (such re-reviews are not counted). */
 export function markedStaleSince(db: DatabaseSync, repo: string, number: number, since: string): boolean {
@@ -392,8 +393,11 @@ function reviewedRows(db: DatabaseSync, repo?: string): ReviewedRow[] {
  * did not read, that an operator marked stale, or whose diff was read against another base branch than the PR has now
  * (a review that recorded none counts as read against the default branch). With `respectCap`, PRs that already had
  * MAX_RERUNS_PER_DAY discussion- or base-triggered re-reviews today are left out (an operator mark is never capped).
+ * `now` is the time of the decision (default: the clock); `refresh` is told, per "repo#number", when the answer changes with the clock
+ * alone (a blocker list expiring, the daily cap ending at UTC midnight).
  */
-export function staleReviews(db: DatabaseSync, repo?: string, respectCap = false): Set<string> {
+export function staleReviews(db: DatabaseSync, repo?: string, respectCap = false, opts: { now?: number; refresh?: (ref: string, at: number) => void } = {}): Set<string> {
+  const now = opts.now ?? Date.now();
   const rows = reviewedRows(db, repo);
   const state = discussionState(db, repo);
   primeHashes(state, rows.filter((r) => maintNewer(state.get(`${r.repo}#${r.number}`), r.seen_at ?? r.at)).map((r) => `${r.repo}#${r.number}`));
@@ -402,7 +406,7 @@ export function staleReviews(db: DatabaseSync, repo?: string, respectCap = false
   const todays = new Map<string, number>();
   const capped = (r: { repo: string; number: number }) => {
     const k = `${r.repo}#${r.number}`;
-    if (!todays.has(k)) todays.set(k, reruns(db, r.repo, r.number));
+    if (!todays.has(k)) todays.set(k, reruns(db, r.repo, r.number, now));
     return todays.get(k)! >= MAX_RERUNS_PER_DAY;
   };
   let loaded: ReturnType<typeof blockersLoader> | undefined;
@@ -413,7 +417,10 @@ export function staleReviews(db: DatabaseSync, repo?: string, respectCap = false
     // On a head that has a review, only a maintainer's words (or an operator's request) make it stale: the PR author's comments feed the next review but do not start one.
     const talked = maintainerSince(state.get(ref), r.seen_at ?? r.at, r.disc_hash);
     // A hold that waited for other items is reviewed once when none is open any more.
-    const unblocked = !!r.blocked_by && storedBlockedBy(r.blocked_by).length > 0 && blockers().active(ref, r.blocked_by, r.at).length === 0;
+    const blocked = !!r.blocked_by && storedBlockedBy(r.blocked_by).length > 0 ? blockers().active(ref, r.blocked_by, r.at, now) : null;
+    const unblocked = blocked !== null && blocked.length === 0;
+    if (blocked?.length) opts.refresh?.(ref, Date.parse(r.at) + BLOCKED_EXPIRES_MS + 1);
+    if (!marked && !unblocked && (talked || r.rebased === 1) && respectCap && capped(r)) opts.refresh?.(ref, nextUtcMidnight(now));
     if (!marked && !unblocked && !((talked || r.rebased === 1) && !(respectCap && capped(r)))) continue;
     out.add(`${ref}@${r.head_oid}`);
   }

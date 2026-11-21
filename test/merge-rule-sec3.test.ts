@@ -127,7 +127,7 @@ test("the reviews are shown test files while they fit, the rule counts the rest 
   const kinds = (p: ReturnType<typeof decidePr>) => p.actions.map((a) => a.kind);
   assert.deepEqual([waiting(null).state, kinds(waiting(null))], ["needs-decision", ["premerge"]]);
   assert.deepEqual([kinds(waiting(NOW - 60_000)), kinds(waiting(NOW - 2 * 3600_000))], [[], ["premerge"]]);
-  assert.deepEqual(kinds(decidePr(prFacts({ sensitive: [EXTRAS_PENDING_REASON], diffPending: { lastRead: null, paceAt: NOW + 60_000 } }))), []);
+  assert.deepEqual(kinds(decidePr(prFacts({ sensitive: [EXTRAS_PENDING_REASON], diffPending: { lastRead: null } }), { rereadPaceAt: NOW + 60_000 })), []);
   // The instance runs at most REREADS_PER_HOUR re-reads in a rolling hour.
   const cache = mkdtempSync(join(tmpdir(), "reread-pace-")), was = process.env.AUTOCRAFT_DIFF_CACHE;
   process.env.AUTOCRAFT_DIFF_CACHE = cache;

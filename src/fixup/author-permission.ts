@@ -30,9 +30,11 @@ const ownEntry = (c: Cached | undefined, r: Row): Cached | undefined =>
   c && c.permission && c.author_id !== null && r.author_id !== null && c.author_id !== r.author_id ? { ...c, permission: null, checked_at: null } : c;
 const cached = (db: DatabaseSync, repo: string, r: Row & { author: string }): Cached | undefined =>
   ownEntry(db.prepare("SELECT permission, checked_at, failures, first_failure_at, author_id FROM main.author_permissions WHERE login = ? AND repo = ?").get(r.author, repo) as Cached | undefined, r);
-const old = (at: string | null): boolean => !at || Date.now() - Date.parse(at) > AUTHOR_PERMISSION_TTL_MS;
+const old = (at: string | null, nowMs: number = Date.now()): boolean => !at || nowMs - Date.parse(at) > AUTHOR_PERMISSION_TTL_MS;
 /** The reads have failed too often or for too long. */
-const gaveUp = (c: Cached): boolean => c.failures >= AUTHOR_READ_FAILURES || (!!c.first_failure_at && old(c.first_failure_at));
+const gaveUp = (c: Cached, nowMs: number = Date.now()): boolean => c.failures >= AUTHOR_READ_FAILURES || (!!c.first_failure_at && old(c.first_failure_at, nowMs));
+/** The first time after which `old(at)` holds. */
+const oldFrom = (at: string | null): number => (at ? Date.parse(at) + AUTHOR_PERMISSION_TTL_MS + 1 : -Infinity);
 
 /** After this many failed reads, or this long since the first, an author never read counts as unable to write. */
 export const AUTHOR_READ_FAILURES = 3;
@@ -48,22 +50,34 @@ export function authorWrites(db: DatabaseSync, repo: string, number: number): Au
   return writesFrom(cached(db, repo, { ...r, author: r.author }));
 }
 
-/** authorWrites() for many PRs, from their items rows: the pipeline login and the cache are read once. */
-export function authorWritesOf(db: DatabaseSync): (repo: string, r: Row) => AuthorWrite {
+/**
+ * authorWrites() for many PRs, from their items rows, at `nowMs`: the pipeline login and the cache are read once. `change` is told
+ * when the answer would change with the clock alone (an entry aging past the TTL after its refresh failed).
+ */
+export function authorWritesOf(db: DatabaseSync, nowMs: number = Date.now()): (repo: string, r: Row, change?: (at: number) => void) => AuthorWrite {
   const me = setting(db, PIPELINE_LOGIN_KEY);
   const entries = new Map((db.prepare("SELECT login, repo, permission, checked_at, failures, first_failure_at, author_id FROM main.author_permissions").all() as (Cached & { login: string; repo: string })[])
     .map(({ login, repo, ...c }) => [`${repo}\n${login}`, c]));
-  return (repo, r) => {
+  return (repo, r, change) => {
     if (!r.author) return "no";
     if (writesByRole(me, r)) return "yes";
-    return writesFrom(ownEntry(entries.get(`${repo}\n${r.author}`), r));
+    const c = ownEntry(entries.get(`${repo}\n${r.author}`), r);
+    const w = writesFrom(c, nowMs);
+    if (c && w !== "no") change?.(noFrom(c));
+    return w;
   };
 }
 
-function writesFrom(c: Cached | undefined): AuthorWrite {
-  if (c?.permission) return old(c.checked_at) && gaveUp(c) ? "no" : WRITE.has(c.permission) ? "yes" : "no";
+function writesFrom(c: Cached | undefined, nowMs: number = Date.now()): AuthorWrite {
+  if (c?.permission) return old(c.checked_at, nowMs) && gaveUp(c, nowMs) ? "no" : WRITE.has(c.permission) ? "yes" : "no";
   // Never read: waiting, until the reads have failed too often or for too long; then the PR gets the normal cannot-push hold.
-  return c && gaveUp(c) ? "no" : "unknown";
+  return c && gaveUp(c, nowMs) ? "no" : "unknown";
+}
+
+/** When writesFrom() turns to "no" with the clock alone: both the entry and the failed reads are old (a read entry), or the failed reads are (a missing one). */
+function noFrom(c: Cached): number {
+  const failedOld = c.failures >= AUTHOR_READ_FAILURES ? -Infinity : c.first_failure_at ? oldFrom(c.first_failure_at) : Infinity;
+  return c.permission ? Math.max(oldFrom(c.checked_at), failedOld) : failedOld;
 }
 
 export type PermissionReader = (repo: string, login: string) => Promise<string | null>;

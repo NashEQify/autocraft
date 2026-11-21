@@ -22,6 +22,10 @@ export const lockLiveSql = (t = "decisions", now: Date = new Date()): string =>
   // CASE, not AND: in a select list SQLite evaluates both sides of AND, and the card scan would run for every row.
   `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN EXISTS (SELECT 1 FROM main.conversation_cards lc WHERE (lc.state = 'queued' OR (lc.state = 'running' AND lc.acted_at > '${new Date(now.getTime() - RUNNING_STALE_MS).toISOString()}')) AND ${t}.exec_reason LIKE lc.id || ':%') ELSE 0 END)`;
 
+/** SQL: when the running card that holds the lock of `t` started (its lock is not live from RUNNING_STALE_MS later); null when no running card holds it. */
+export const lockRunningAtSql = (t = "decisions"): string =>
+  `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN (SELECT max(lc.acted_at) FROM main.conversation_cards lc WHERE lc.state = 'running' AND ${t}.exec_reason LIKE lc.id || ':%') END)`;
+
 /** The login of the person whose card is settling an open decision right now, or null. */
 export function settlingBy(db: DatabaseSync, d: Pick<DecisionRow, "id" | "answer" | "exec_state" | "exec_reason">): string | null {
   if (d.answer !== null || d.exec_state !== SETTLING) return null;

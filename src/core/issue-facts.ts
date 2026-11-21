@@ -4,7 +4,7 @@ import { refIn, refPairs } from "./ref-filter.ts";
 import { settleMemo, settledBy } from "../settlers.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
-import { assignmentsOf, ownFixPrs } from "./facts.ts";
+import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
 import { activeTrips } from "../push-outcomes.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { notOwnIntegrationSql, groupHeldSql, backlogHeldSql } from "../dupes/held.ts";
@@ -25,8 +25,9 @@ import { headOf, scopeAnswers, unsettledScope } from "../review/candidates.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
 import { pilotSql } from "../pilot.ts";
 import { holdMap } from "../outside.ts";
-import { lockLiveSql } from "../answers/hold.ts";
-import { isPreparing, prepareStateSql, utcDayStart, type PrepareColumns } from "../decide/prepared.ts";
+import { RUNNING_STALE_MS, lockLiveSql, lockRunningAtSql } from "../answers/hold.ts";
+import { DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP, isPreparing, prepareStateSql, utcDayStart, type PrepareColumns } from "../decide/prepared.ts";
+import { nextUtcMidnight } from "../review/discussion.ts";
 import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
 
@@ -89,6 +90,8 @@ type Cls = { classifier: string; at: string; type_label: string; flags: string |
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
 export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): ItemFacts[] {
   const now = opts.now ?? Date.now();
+  // Clock-driven changes of the facts below (a card's lock going stale, daily prepare counts, duplicate retries and pauses), per item.
+  const refresh = refreshTimes(now);
   const model = opts.model ?? embedderId(modelName());
   const pipelineOn = pipelineWrites(setting(db, "pipeline_enabled"));
 
@@ -106,9 +109,9 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
   // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
-  for (const d of db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions")} AS locked FROM decisions
+  for (const d of db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
     WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
-    (PrepareColumns & { locked: number; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
+    (PrepareColumns & { locked: number; lock_at: string | null; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
     const dupegroup = d.id.includes(":dupegroup:");
     if (d.kind === "scope" && d.number !== null && !(d.answer === "withdrawn" && d.answered_by === "pipeline")) latestScope.set(`${d.repo}#${d.number}`, { answer: d.answer, byOperator: settledBy(db, d, memo) });
     if (d.asked_by === SECURITY_ASKER) securityIds.add(d.id);
@@ -121,6 +124,9 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
       const it = heads.get(k);
       const h = it?.kind === "pr" ? it.head_oid : null;
       // A decision whose press is running or queued is locked and not prepared.
+      if (isPreparing(d, h) && d.locked && d.lock_at) refresh.soon(k, Date.parse(d.lock_at) + RUNNING_STALE_MS);
+      // The day's automatic prepares count towards caps that end at UTC midnight.
+      if ((d.prepares_today ?? 0) >= Math.min(DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP)) refresh.soon(k, nextUtcMidnight(now));
       if (isPreparing(d, h) && !d.locked) {
         const failures = (d.prepare_failed_head ?? null) === h ? d.recommend_failures ?? 0 : 0;
         if (failures < (recommend.get(k)?.failures ?? Infinity)) recommend.set(k, { failures, failedAt: failures ? d.recommend_failed_at : null });
@@ -142,7 +148,8 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   // Group-level work (which groups to ask about, which sets to compare) is planned per group by dupes/decide.ts and dupes/plan.ts; the items carry its result.
   const inGroup = new Set(groupsToAsk(db, opts.repo).flatMap((g) => g.group.members.map((n) => `${g.repo}#${n}`)));
   const inCompare = new Map<string, "rule" | "model">();
-  for (const s of dueSets(db, opts.repo, now)) {
+  const dueAt = (s: { repo: string; members: { number: number }[] }, at: number): void => { for (const m of s.members) refresh.soon(`${s.repo}#${m.number}`, at); };
+  for (const s of dueSets(db, opts.repo, now, dueAt)) {
     const how = ruleOutcome(s) === null ? "model" : "rule";
     for (const m of s.members) { const ref = `${s.repo}#${m.number}`; if (inCompare.get(ref) !== "model") inCompare.set(ref, how); }
   }
@@ -222,6 +229,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
 
   return rows.map((r): ItemFacts => {
     const ref = `${r.repo}#${r.number}`;
+    const refreshAt = refresh.at(ref);
     const cls = byItem.get(ref) ?? [];
     const j = cls.find((c) => c.classifier === "jev");
     // A Haiku row without a Jev row counts only when Haiku classified alone (it carries the item's input hash).
@@ -256,7 +264,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     const embedHash = r.embed_hash ?? (() => { const b = texts.get(ref)!; return hashOfText(b.title, b.body); })();
     const note = labeled.get(ref) ?? null;
     return {
-      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, pipelineOn, tripped, inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
+      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped, inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
       inScope: !!r.in_pilot, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration: !r.not_integration,
       held: r.held_backlog ? "backlog" : r.held_dup ? "duplicate" : null,
       fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: labelsApproved(r.repo), commentApproved: repoOf(r.repo).comment, fixIssueApproved: repoOf(r.repo).fix },
