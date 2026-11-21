@@ -10,14 +10,16 @@ import type { Db } from "../../db/index.ts";
 const aad = (login: string): string => `user_tokens:${login.toLowerCase()}`;
 
 export async function saveUserTokens(db: Db, box: TokenBox, login: string, githubId: number, tokens: Tokens): Promise<void> {
-  await db.prepare(`INSERT INTO user_tokens (login, github_id, token_enc, version, updated_at, status) VALUES (?, ?, ?, 1, ?, 'ok')
-              ON CONFLICT (login) DO UPDATE SET github_id = excluded.github_id, token_enc = excluded.token_enc,
-                version = user_tokens.version + 1, updated_at = excluded.updated_at, status = 'ok'`)
-    .run(login, githubId, box.seal(JSON.stringify(tokens), aad(login)), new Date().toISOString());
+  await db.run(db.k.insertInto("user_tokens")
+    .values({ login, github_id: githubId, token_enc: box.seal(JSON.stringify(tokens), aad(login)), version: 1, updated_at: new Date().toISOString(), status: "ok" })
+    .onConflict((oc) => oc.column("login").doUpdateSet((eb) => ({
+      github_id: eb.ref("excluded.github_id"), token_enc: eb.ref("excluded.token_enc"), version: eb("user_tokens.version", "+", 1),
+      updated_at: eb.ref("excluded.updated_at"), status: "ok",
+    }))));
 }
 
 export async function loadUserTokens(db: Db, box: TokenBox, login: string): Promise<Tokens | null> {
-  const row = await db.prepare("SELECT token_enc FROM user_tokens WHERE login = ? AND status = 'ok'").get(login) as { token_enc: string } | undefined;
+  const row = await db.get(db.k.selectFrom("user_tokens").select("token_enc").where("login", "=", login).where("status", "=", "ok"));
   const plain = row ? box.open(row.token_enc, aad(login)) : null;
   try {
     return plain ? (JSON.parse(plain) as Tokens) : null;
@@ -26,11 +28,9 @@ export async function loadUserTokens(db: Db, box: TokenBox, login: string): Prom
   }
 }
 
-type Row = { token_enc: string; version: number; status: string };
-
 /** The login's row with its opened tokens, whatever its status (null tokens: unreadable). */
 export async function readUserTokens(db: Db, box: TokenBox, login: string): Promise<{ tokens: Tokens | null; version: number; status: string } | null> {
-  const row = await db.prepare("SELECT token_enc, version, status FROM user_tokens WHERE login = ?").get(login) as Row | undefined;
+  const row = await db.get(db.k.selectFrom("user_tokens").select(["token_enc", "version", "status"]).where("login", "=", login));
   if (!row) return null;
   const plain = box.open(row.token_enc, aad(login));
   let tokens: Tokens | null = null;
@@ -45,14 +45,16 @@ export async function readUserTokens(db: Db, box: TokenBox, login: string): Prom
  * sign-in may have written first). Returns false when it lost.
  */
 export async function swapUserTokens(db: Db, box: TokenBox, login: string, version: number, tokens: Tokens): Promise<boolean> {
-  return Number((await db.prepare("UPDATE user_tokens SET token_enc = ?, version = version + 1, updated_at = ?, status = 'ok' WHERE login = ? AND version = ? AND status = 'ok'")
-    .run(box.seal(JSON.stringify(tokens), aad(login)), new Date().toISOString(), login, version)).changes) > 0;
+  return Number((await db.run(db.k.updateTable("user_tokens")
+    .set((eb) => ({ token_enc: box.seal(JSON.stringify(tokens), aad(login)), version: eb("version", "+", 1), updated_at: new Date().toISOString(), status: "ok" }))
+    .where("login", "=", login).where("version", "=", version).where("status", "=", "ok"))).changes) > 0;
 }
 
 /** Marks the row as needing a new sign-in, if it still has `version`. Returns false when it lost. */
 export async function failUserTokens(db: Db, login: string, version: number): Promise<boolean> {
-  return Number((await db.prepare("UPDATE user_tokens SET status = 'refresh-failed', version = version + 1, updated_at = ? WHERE login = ? AND version = ? AND status = 'ok'")
-    .run(new Date().toISOString(), login, version)).changes) > 0;
+  return Number((await db.run(db.k.updateTable("user_tokens")
+    .set((eb) => ({ status: "refresh-failed", version: eb("version", "+", 1), updated_at: new Date().toISOString() }))
+    .where("login", "=", login).where("version", "=", version).where("status", "=", "ok"))).changes) > 0;
 }
 
 /**
@@ -61,9 +63,9 @@ export async function failUserTokens(db: Db, login: string, version: number): Pr
  * Not for ending one session: that is dropSessionTokens.
  */
 export async function dropUserTokens(db: Db, login: string): Promise<boolean> {
-  const row = await db.prepare("DELETE FROM user_tokens WHERE login = ? RETURNING token_enc").get(login) as { token_enc: string } | undefined;
+  const row = await db.get(db.k.deleteFrom("user_tokens").where("login", "=", login).returning("token_enc"));
   if (!row) return false;
-  await db.prepare("INSERT INTO user_token_revocations (login, token_enc, queued_at, kind) VALUES (?, ?, ?, 'grant')").run(login, row.token_enc, new Date().toISOString());
+  await db.run(db.k.insertInto("user_token_revocations").values({ login, token_enc: row.token_enc, queued_at: new Date().toISOString(), kind: "grant" }));
   return true;
 }
 
@@ -74,7 +76,7 @@ export async function dropUserTokens(db: Db, login: string): Promise<boolean> {
  */
 export async function dropSessionTokens(db: Db, login: string, idHash: string, tokenEnc: string | null): Promise<boolean> {
   if (!tokenEnc) return false;
-  await db.prepare("INSERT INTO user_token_revocations (login, token_enc, queued_at, kind, aad) VALUES (?, ?, ?, 'token', ?)").run(login, tokenEnc, new Date().toISOString(), idHash);
+  await db.run(db.k.insertInto("user_token_revocations").values({ login, token_enc: tokenEnc, queued_at: new Date().toISOString(), kind: "token", aad: idHash }));
   return true;
 }
 
@@ -88,13 +90,13 @@ export const revocationAad = aad;
 export async function shareRefresh(db: Db, box: TokenBox, login: string, oldRefresh: string, next: Tokens): Promise<void> {
   const u = await readUserTokens(db, box, login);
   if (u?.status === "ok" && u.tokens?.refresh === oldRefresh) await swapUserTokens(db, box, login, u.version, next);
-  const sessions = await db.prepare("SELECT id_hash, token_enc FROM sessions WHERE login = ? AND token_enc IS NOT NULL").all(login) as { id_hash: string; token_enc: string }[];
+  const sessions = await db.all(db.k.selectFrom("sessions").select(["id_hash", "token_enc"]).$narrowType<{ token_enc: string }>().where("login", "=", login).where("token_enc", "is not", null));
   for (const s of sessions) {
     const plain = box.open(s.token_enc, s.id_hash);
     let t: Tokens | null = null;
     try {
       t = plain ? (JSON.parse(plain) as Tokens) : null;
     } catch { /* unreadable: leave it */ }
-    if (t?.refresh === oldRefresh) await db.prepare("UPDATE sessions SET token_enc = ? WHERE id_hash = ? AND token_enc = ?").run(box.seal(JSON.stringify(next), s.id_hash), s.id_hash, s.token_enc);
+    if (t?.refresh === oldRefresh) await db.run(db.k.updateTable("sessions").set({ token_enc: box.seal(JSON.stringify(next), s.id_hash) }).where("id_hash", "=", s.id_hash).where("token_enc", "=", s.token_enc));
   }
 }
