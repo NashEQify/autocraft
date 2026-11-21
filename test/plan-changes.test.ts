@@ -117,7 +117,7 @@ test("a PR's facts change with the clock alone no earlier than its refreshAt: a 
     review: { ref: "app#1", verdict: "hold", sure: true, reason: "r", fixes: [], risks: [], summary: null, why: null, public: null, conflicts: [], claims: [], blocked_by: ["app#2"] },
   });
   await w.synced(1, "h2");
-  const at = Date.parse((await w.db.prepare("SELECT at FROM opus_reviews WHERE number = 1").get() as { at: string }).at);
+  const at = Date.parse((await w.db.get(w.db.k.selectFrom("main.opus_reviews").select("at").where("number", "=", 1)))!.at);
   const load = async (now: number) => (await loadPrFacts(w.db, { now, refs: ["app#1"] }))[0]!;
   const f = await load(at + 3600_000);
   assert.equal(f.reviewHold?.kind, "blocked");

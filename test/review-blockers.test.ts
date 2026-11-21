@@ -7,8 +7,10 @@ import { isCounted, liveGate, markReviewsStale, staleReviews } from "../src/revi
 import { recordReviewFailure, setReviewMinInterval } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
+import { rowid } from "../src/db/kx.ts";
 import { world } from "./world-db.ts";
 
+const RED = { overall: "failure", checks: '[{"name":"gate / test","state":"failure"}]' };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function review(w: Awaited<ReturnType<typeof world>>, n: number, head: string, verdict: "take" | "hold", blocked: string[] = []): Promise<void> {
@@ -24,7 +26,7 @@ const noGaps = async (w: Awaited<ReturnType<typeof world>>) => { await setReview
 test("a hold review blocked by an open PR waits for it, then gets one review", async () => {
   const w = await noGaps(await (await (await (await world()).repo()).pr(1, { head: "h1" })).pr(2));
   await review(w, 1, "h1", "hold", ["app#2", "app#1", "app#99"]);
-  assert.deepEqual(JSON.parse((await w.db.prepare("SELECT blocked_by FROM opus_reviews WHERE number = 1").get())!.blocked_by as string), ["app#2"]);
+  assert.deepEqual(JSON.parse((await w.db.get(w.db.k.selectFrom("main.opus_reviews").select("blocked_by").where("number", "=", 1)))!.blocked_by!), ["app#2"]);
   await w.synced(1, "h2");
   assert.equal(await reviews(w, 1), 0);
   assert.match((await planOf(w, 1)).wait ?? "", /app#2/);
@@ -59,16 +61,16 @@ test("on a reviewed head only a maintainer's comment makes the review stale; com
 
 test("a head is reviewed once CI at it has finished green", async () => {
   const w = await noGaps(await (await (await world()).repo()).pr(1, { head: "h1" }));
-  await w.db.prepare("UPDATE pr_checks SET overall = 'pending' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "pending" }).where("number", "=", 1));
   assert.equal(await reviews(w, 1), 0);
   assert.match((await planOf(w, 1)).wait ?? "", /CI on the latest commit/);
-  await w.db.prepare("UPDATE pr_checks SET overall = 'failure', checks = '[{\"name\":\"gate / test\",\"state\":\"failure\"}]' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set(RED).where("number", "=", 1));
   assert.equal(await reviews(w, 1), 1); // the first review of a PR runs on finished red CI
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
-  await w.db.prepare("UPDATE pr_checks SET overall = 'failure', checks = '[{\"name\":\"gate / test\",\"state\":\"failure\"}]' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set(RED).where("number", "=", 1));
   assert.equal(await reviews(w, 1), 0);
-  await w.db.prepare("UPDATE pr_checks SET overall = 'success', checks = '[]' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "success", checks: "[]" }).where("number", "=", 1));
   assert.equal(await reviews(w, 1), 1);
 });
 
@@ -100,11 +102,11 @@ test("a PR whose review waits for CI gets its repo's checks read again", async (
   const w = await noGaps(await (await (await (await world()).repo()).pr(1, { head: "h1" })).pipeline(true));
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
-  await w.db.prepare("UPDATE pr_checks SET overall = 'pending' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set({ overall: "pending" }).where("number", "=", 1));
   const found = await detectAutopilot(w.db);
   assert.ok(found.proposals.some((p) => p.step === "checks" && p.params.repo === "app"), JSON.stringify(found.proposals));
   // A red head only changes with a push, which sync sees: no polling for it.
-  await w.db.prepare("UPDATE pr_checks SET overall = 'failure', checks = '[{\"name\":\"gate / test\",\"state\":\"failure\"}]' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set(RED).where("number", "=", 1));
   assert.ok(!(await detectAutopilot(w.db)).proposals.some((p) => p.step === "checks"));
 });
 
@@ -112,14 +114,13 @@ test("red CI at a new head leaves the CI fix to work from the earlier review; th
   const w = await noGaps(await (await (await (await world()).repo()).pr(1, { head: "h1" })).pr(2, { head: "g1" }));
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
-  const red = "UPDATE pr_checks SET overall = 'failure', checks = '[{\"name\":\"gate / test\",\"state\":\"failure\"}]' WHERE number = ";
-  await w.db.prepare(red + "1").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set(RED).where("number", "=", 1));
   assert.equal(await reviews(w, 1), 0);
   const facts = (await loadPlanSet(w.db)).prs.find((p) => p.facts.number === 1)!.facts;
   assert.notEqual(cifixBucket(facts), null);
   assert.equal(!!facts.brokeByUs, false);
   assert.equal(facts.gateRed, true);
-  await w.db.prepare(red + "2").run();
+  await w.db.run(w.db.k.updateTable("main.pr_checks").set(RED).where("number", "=", 2));
   assert.equal(await reviews(w, 2), 1);
 });
 
@@ -138,12 +139,12 @@ test("review calls and failed tries count: runs fill the day's cap, failures bac
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
   for (let i = 0; i < 3; i++) {
-    const id = Number((await w.db.prepare("INSERT INTO agent_runs (step, stage, prompt_id, prompt_version, provider, model, state, started_at) VALUES ('opus-review', 5, 'review.opus', '1', 'claude', 'opus', 'failed', ?)").run(new Date().toISOString())).lastInsertRowid);
-    await w.db.prepare("INSERT INTO agent_run_items (run_id, repo, number) VALUES (?, 'app', 1)").run(id);
+    const id = (await w.db.get(w.db.k.insertInto("main.agent_runs").values({ step: "opus-review", stage: 5, prompt_id: "review.opus", prompt_version: "1", provider: "claude", model: "opus", state: "failed", started_at: new Date().toISOString() }).returning("id")))!.id;
+    await w.db.run(w.db.k.insertInto("main.agent_run_items").values({ run_id: id, repo: "app", number: 1 }));
   }
-  await w.db.prepare("DELETE FROM opus_review_history").run();
+  await w.db.run(w.db.k.deleteFrom("main.opus_review_history"));
   assert.match((await planOf(w, 1)).wait ?? "", /review cap for today/);
-  await w.db.prepare("DELETE FROM agent_runs").run(); await w.db.prepare("DELETE FROM agent_run_items").run();
+  await w.db.run(w.db.k.deleteFrom("main.agent_runs")); await w.db.run(w.db.k.deleteFrom("main.agent_run_items"));
   assert.equal(await reviews(w, 1), 1);
   await recordReviewFailure(w.db, "app", 1, "h2");
   assert.equal(await reviews(w, 1), 0);
@@ -169,10 +170,10 @@ test("a reply-fix turn does not count as a second review call", async () => {
   const w = await noGaps(await (await (await world()).repo()).pr(1, { head: "h1" }));
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
-  await w.db.prepare("DELETE FROM opus_review_history").run();
+  await w.db.run(w.db.k.deleteFrom("main.opus_review_history"));
   const run = async (job: number) => {
-    const id = Number((await w.db.prepare("INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, state, started_at) VALUES (?, 'opus-review', 5, 'review.opus', '1', 'claude', 'opus', 'done', ?)").run(job, new Date().toISOString())).lastInsertRowid);
-    await w.db.prepare("INSERT INTO agent_run_items (run_id, repo, number) VALUES (?, 'app', 1)").run(id);
+    const id = (await w.db.get(w.db.k.insertInto("main.agent_runs").values({ job_id: job, step: "opus-review", stage: 5, prompt_id: "review.opus", prompt_version: "1", provider: "claude", model: "opus", state: "done", started_at: new Date().toISOString() }).returning("id")))!.id;
+    await w.db.run(w.db.k.insertInto("main.agent_run_items").values({ run_id: id, repo: "app", number: 1 }));
   };
   await run(1); await run(1); await run(2); // job 1: the review and its fix turn
   assert.equal(await reviews(w, 1), 1);
@@ -182,7 +183,7 @@ test("a reply-fix turn does not count as a second review call", async () => {
 
 test("a review records why it ran: new head, same head again, same head after an operator mark", async () => {
   const w = await noGaps(await (await (await world()).repo()).pr(1, { head: "h1", author: "regular" }));
-  const triggers = async () => (await w.db.prepare("SELECT trigger FROM opus_review_history WHERE repo = 'app' AND number = 1 ORDER BY rowid").all() as { trigger: string }[]).map((r) => r.trigger);
+  const triggers = async () => (await w.db.all(w.db.k.selectFrom("main.opus_review_history as h").select("trigger").where("repo", "=", "app").where("number", "=", 1).orderBy(rowid("opus_review_history", "h")))).map((r) => r.trigger);
   await review(w, 1, "h1", "hold");
   await review(w, 1, "h2", "hold");
   await review(w, 1, "h2", "hold");

@@ -510,7 +510,6 @@ src/review/diff.ts
 
 src/review/discussion.ts
 
-src/review/gate.ts
 
 src/review/index.ts
 
