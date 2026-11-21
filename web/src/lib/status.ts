@@ -8,4 +8,3 @@ export function checkStateText(state: string): string {
     default: return `Unrecognised state: ${String(state)}`;
   }
 }
-
