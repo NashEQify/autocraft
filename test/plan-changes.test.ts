@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { connect } from "../src/db.ts";
-import { changeSeq, changesSince, pruneChanges } from "../src/core/plan-changes.ts";
+import { bulkWrites, changeSeq, changesSince, pruneChanges } from "../src/core/plan-changes.ts";
 import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
@@ -155,4 +155,34 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
   } finally {
     if (prev === undefined) delete process.env.AUTOCRAFT_PLAN_SHADOW; else process.env.AUTOCRAFT_PLAN_SHADOW = prev;
   }
+});
+
+test("a held PR is logged when its blocker closes; a bulk write logs nothing and takes one full mark; malformed rows and a lost marker row fail no write", () => {
+  const db = connect(join(dir, "robust.db"));
+  const since = (seq: number) => { const c = changesSince(db, seq); return { ...c, refs: [...c.refs].sort() }; };
+  const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', ?, 'pr', 'OPEN', 't', ?)");
+  for (const n of [1, 2, 3]) item.run(n, T);
+  db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, blocked_by) VALUES ('app', 1, 'h1', ?, 'full', 'hold', '[\"app#2\", 7, \"app#2\"]')").run(T);
+  let seq = changeSeq(db);
+  db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
+  let c = since(seq);
+  assert.ok(c.full || c.refs.includes("app#1"), "the PR held for app#2 is decided again");
+  seq = c.seq;
+
+  // A decision whose items are not a list of objects is still written and logs its own item.
+  db.prepare("INSERT INTO decisions (id, kind, repo, number, items, asked_at, asked_by, question, options) VALUES ('d1', 'merge', 'app', 3, '[\"app#1\", 5]', ?, 'x', 'q', '[]')").run(T);
+  db.prepare("UPDATE decisions SET items = '{\"repo\": \"app\"}' WHERE id = 'd1'").run();
+  c = since(seq);
+  assert.ok(c.full || c.refs.includes("app#3"));
+  seq = c.seq;
+
+  bulkWrites(db, "test", () => { for (const n of [1, 3]) db.prepare("UPDATE items SET embed_hash = ? WHERE number = ?").run(`e${n}`, n); });
+  c = since(seq);
+  assert.equal(c.full, true);
+  assert.equal((db.prepare("SELECT count(*) AS n FROM item_changes WHERE seq > ?").get(seq) as { n: number }).n, 0);
+  seq = c.seq;
+
+  db.exec("DELETE FROM plan_full; DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
+  db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('other', 'op', ?, 1)").run(T);
+  assert.equal(changesSince(db, 0).full, true);
 });

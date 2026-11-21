@@ -1106,11 +1106,15 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
   // The Plan cache: the planner's output for the dashboard.
   let cache = { written: 0, deleted: 0 };
   const t1 = performance.now();
+  let cached = false;
   try {
     cache = writePlanCache(db, ctx.plans!);
-    ctx.pass?.finish();
+    cached = true;
   } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
   const cacheMs = performance.now() - t1;
+  if (cached) {
+    try { ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
+  }
   // The liveness check follows the plan cache and stores its own result at most every few minutes.
   try { refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
   const passKind = ctx.pass ? `${ctx.pass.kind}, ${ctx.pass.refs} loaded${ctx.pass.diffs.length ? `, ${ctx.pass.diffs.length} shadow differences` : ""}` : undefined;

@@ -24,11 +24,28 @@ export type Changes = {
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 
-/** Body of a full-pass trigger: the next seq (no row), and a count for the trigger, which names the input that forced it. */
-const markFull = (trigger: string): string => `UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'item_changes';
-          UPDATE plan_full SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'item_changes') WHERE id = 1;
-          INSERT INTO plan_full_causes (source, n, last_seq) VALUES ('${trigger}', 1, (SELECT seq FROM plan_full WHERE id = 1))
+/**
+ * Body of a full-pass mark: the next seq (no row), and a count for `source`, which names the input that forced it. It
+ * recreates a missing sequence or marker row, so a write to a global input never fails on them. No OR IGNORE: in a trigger the
+ * outer statement's conflict policy replaces it.
+ */
+const markFull = (source: string): string => `INSERT INTO sqlite_sequence (name, seq) SELECT 'item_changes', 0 WHERE NOT EXISTS (SELECT 1 FROM sqlite_sequence WHERE name = 'item_changes');
+          UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'item_changes';
+          INSERT INTO plan_full (id, seq) SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM plan_full WHERE id = 1);
+          UPDATE plan_full SET seq = COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'item_changes'), 0) WHERE id = 1;
+          INSERT INTO plan_full_causes (source, n, last_seq) VALUES ('${source.replace(/'/g, "''")}', 1, COALESCE((SELECT seq FROM plan_full WHERE id = 1), 0))
             ON CONFLICT (source) DO UPDATE SET n = n + 1, last_seq = excluded.last_seq;`;
+
+/** Every logging trigger is off while a bulk write holds the marker (bulkWrites). */
+const NOT_BULK = "NOT EXISTS (SELECT 1 FROM plan_bulk)";
+
+/** The blocker refs of a stored blocked_by value of review row `o` (a JSON array of "repo#number") that review_blockers does not hold yet. */
+const blockerRows = (o: string, from = ""): string => `SELECT b_repo, b_number, repo, number, head_oid FROM (
+            SELECT DISTINCT substr(j.value, 1, instr(j.value, '#') - 1) AS b_repo, CAST(substr(j.value, instr(j.value, '#') + 1) AS INTEGER) AS b_number,
+              ${o}.repo AS repo, ${o}.number AS number, ${o}.head_oid AS head_oid
+            FROM ${from}json_each(CASE WHEN json_valid(${o}.blocked_by) THEN CASE WHEN json_type(${o}.blocked_by) = 'array' THEN ${o}.blocked_by ELSE '[]' END ELSE '[]' END) j
+            WHERE j.type = 'text' AND instr(j.value, '#') > 1) nb
+          WHERE NOT EXISTS (SELECT 1 FROM review_blockers x WHERE x.b_repo = nb.b_repo AND x.b_number = nb.b_number AND x.repo = nb.repo AND x.number = nb.number AND x.head_oid = nb.head_oid)`;
 
 const on = (sql: string, alias: "new" | "old"): string => sql.replace(/\br\./g, `${alias}.`);
 
@@ -56,13 +73,40 @@ export function planChangesSql(db?: DatabaseSync): string {
     "CREATE TABLE IF NOT EXISTS main.plan_full_causes (source TEXT PRIMARY KEY, n INTEGER NOT NULL, last_seq INTEGER NOT NULL);",
     // The incremental planner's own records (src/core/plan-engine.ts); no trigger reads them.
     "CREATE TABLE IF NOT EXISTS main.plan_shadow_diffs (at TEXT NOT NULL, ref TEXT NOT NULL, side TEXT NOT NULL, fields TEXT NOT NULL, detail TEXT NOT NULL);",
-    "CREATE TABLE IF NOT EXISTS main.plan_pass_stats (kind TEXT PRIMARY KEY, passes INTEGER NOT NULL, refs INTEGER NOT NULL, last_at TEXT NOT NULL);",
+    "CREATE TABLE IF NOT EXISTS main.plan_pass_stats (kind TEXT PRIMARY KEY, passes INTEGER NOT NULL, refs INTEGER NOT NULL, last_at TEXT NOT NULL, ms INTEGER NOT NULL DEFAULT 0, max_ms INTEGER NOT NULL DEFAULT 0);",
+    // Present only inside a bulk write's transaction (bulkWrites).
+    "CREATE TABLE IF NOT EXISTS main.plan_bulk (id INTEGER PRIMARY KEY CHECK (id = 1));",
+    "DELETE FROM main.plan_bulk;",
+    // The blocker refs of every stored review, so a write to a blocking item finds the PRs held for it with an index lookup.
+    "CREATE TABLE IF NOT EXISTS main.review_blockers (b_repo TEXT NOT NULL, b_number INTEGER NOT NULL, repo TEXT NOT NULL, number INTEGER NOT NULL, head_oid TEXT NOT NULL, PRIMARY KEY (b_repo, b_number, repo, number, head_oid)) WITHOUT ROWID;",
+    "CREATE INDEX IF NOT EXISTS main.review_blockers_review ON review_blockers(repo, number, head_oid);",
+    "DELETE FROM main.review_blockers;",
+    `INSERT INTO main.review_blockers (b_repo, b_number, repo, number, head_oid) ${blockerRows("o", "main.opus_reviews o, ")};`,
+    // The pairs of an item as either item, with the verdict: covering, so SQLite looks them up instead of scanning a repo's range
+    // of the primary key (it has no statistics to tell the two apart).
+    "CREATE INDEX IF NOT EXISTS main.duplicate_pairs_a ON duplicate_pairs(repo, a, b, verdict);",
+    "CREATE INDEX IF NOT EXISTS main.duplicate_pairs_b ON duplicate_pairs(repo, b, a, verdict);",
     // The sequence row exists before the first logged item, so a full-pass mark can take a seq from it.
     "INSERT INTO main.sqlite_sequence (name, seq) SELECT 'item_changes', 0 WHERE NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = 'item_changes');",
   ];
   if (db) {
     for (const { name } of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[]) out.push(`DROP TRIGGER IF EXISTS main.${name};`);
   }
+  // review_blockers follows opus_reviews, also during a bulk write.
+  out.push("DROP TRIGGER IF EXISTS main.plan_blockers_i;");
+  out.push(`CREATE TRIGGER main.plan_blockers_i AFTER INSERT ON opus_reviews WHEN new.blocked_by IS NOT NULL BEGIN
+          INSERT INTO review_blockers (b_repo, b_number, repo, number, head_oid) ${blockerRows("new")};
+        END;`);
+  out.push("DROP TRIGGER IF EXISTS main.plan_blockers_d;");
+  out.push(`CREATE TRIGGER main.plan_blockers_d AFTER DELETE ON opus_reviews WHEN old.blocked_by IS NOT NULL BEGIN
+          DELETE FROM review_blockers WHERE repo = old.repo AND number = old.number AND head_oid = old.head_oid;
+        END;`);
+  out.push("DROP TRIGGER IF EXISTS main.plan_blockers_u;");
+  out.push(`CREATE TRIGGER main.plan_blockers_u AFTER UPDATE OF repo, number, head_oid, blocked_by ON opus_reviews
+        WHEN old.blocked_by IS NOT new.blocked_by OR old.repo IS NOT new.repo OR old.number IS NOT new.number OR old.head_oid IS NOT new.head_oid BEGIN
+          DELETE FROM review_blockers WHERE repo = old.repo AND number = old.number AND head_oid = old.head_oid;
+          INSERT INTO review_blockers (b_repo, b_number, repo, number, head_oid) ${blockerRows("new")};
+        END;`);
   const seen = new Map<string, number>();
   for (const input of PLAN_INPUTS) {
     if (input.class === "none") continue;
@@ -76,7 +120,7 @@ export function planChangesSql(db?: DatabaseSync): string {
       const upd = op === "UPDATE" ? updateCondition(input, columns) : null;
       const trigger = (name: string, cond: string, body: string): void => {
         out.push(`DROP TRIGGER IF EXISTS main.${name};`);
-        out.push(`CREATE TRIGGER main.${name} AFTER ${op} ON ${input.table} ${cond ? `WHEN ${cond}` : ""} BEGIN
+        out.push(`CREATE TRIGGER main.${name} AFTER ${op} ON ${input.table} WHEN ${and(cond, NOT_BULK)} BEGIN
           ${body}
         END;`);
       };
@@ -114,7 +158,10 @@ export function changesSince(db: DatabaseSync, seq: number): Changes {
   return { refs, full: false, seq: top };
 }
 
-/** Deletes the log rows at or below `seq`. */
+/**
+ * Deletes the log rows at or below `seq`. The log has one consumer: the runner's planner (src/core/plan-engine.ts). A second
+ * consumer would lose the rows the first one pruned; other readers take full passes.
+ */
 export function pruneChanges(db: DatabaseSync, seq: number): void {
   db.prepare("DELETE FROM main.item_changes WHERE seq <= ?").run(seq);
 }
@@ -122,4 +169,48 @@ export function pruneChanges(db: DatabaseSync, seq: number): void {
 /** Logs the PRs with a review at `head` of `repo`: for a write the triggers cannot see (a file the fact loaders read beside the database). */
 export function logReviewedAt(db: DatabaseSync, repo: string, head: string): void {
   db.prepare("INSERT INTO main.item_changes (repo, number) SELECT DISTINCT repo, number FROM main.opus_reviews WHERE repo = ? AND head_oid = ?").run(repo, head);
+}
+
+/** A write of more rows than this goes through bulkWrites: one full-pass mark costs less than logging every row. */
+export const BULK_ROWS = 500;
+
+/**
+ * Runs `fn` with the logging triggers off and takes one full-pass mark for `source`, in the caller's transaction or one of its
+ * own. The marker row exists only inside that transaction, so other connections never see the triggers off.
+ */
+export function bulkWrites<T>(db: DatabaseSync, source: string, fn: () => T): T {
+  const own = !db.isTransaction;
+  if (own) db.exec("BEGIN IMMEDIATE");
+  const nested = !!db.prepare("SELECT 1 FROM main.plan_bulk").get();
+  try {
+    if (!nested) db.exec("INSERT INTO main.plan_bulk (id) VALUES (1)");
+    const out = fn();
+    if (!nested) { db.exec("DELETE FROM main.plan_bulk"); db.exec(markFull(`bulk:${source}`)); }
+    if (own) db.exec("COMMIT");
+    return out;
+  } catch (e) {
+    if (own) { if (db.isTransaction) db.exec("ROLLBACK"); }
+    else if (!nested) { db.exec("DELETE FROM main.plan_bulk"); db.exec(markFull(`bulk:${source}`)); }
+    throw e;
+  }
+}
+
+/**
+ * Removes the change log, its triggers and the incremental planner's tables, and clears the schema stamp so the next connect
+ * migrates. For a rollback to a release without the incremental planner, whose migration would leave the triggers logging.
+ */
+export function dropPlanChanges(db: DatabaseSync): number {
+  const triggers = db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[];
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const { name } of triggers) db.exec(`DROP TRIGGER IF EXISTS main.${name}`);
+    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"]) db.exec(`DROP TABLE IF EXISTS main.${t}`);
+    db.exec("DELETE FROM main.sqlite_sequence WHERE name = 'item_changes'");
+    db.exec("DELETE FROM main.settings WHERE key = 'schema_stamp'");
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+  return triggers.length;
 }

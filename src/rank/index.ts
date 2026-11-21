@@ -6,6 +6,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { latestRun, settledLookup } from "../classify/settled.ts";
 import { connect } from "../db.ts";
+import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 import type { Level } from "../priority/score.ts";
 import { isSize, rankOf, sizeOfLines, type RankBreakdown, type RankInput, type Size } from "./score.ts";
 
@@ -34,23 +35,29 @@ export function runRank(db: DatabaseSync, nowMs: number = Date.now()): { items: 
   const put = db.prepare(`INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT (repo, number) DO UPDATE SET score = excluded.score, breakdown = excluded.breakdown, computed_at = excluded.computed_at`);
   const at = new Date(nowMs).toISOString();
-  let changed = 0;
   const keep = new Set<string>();
+  const puts: [string, number, number, string][] = [];
+  for (const r of rows) {
+    const s = settled(r.repo, r.number);
+    const { score, breakdown } = rankOf({ level: r.level, reach: r.reach, label: s.label, security: s.flags.includes("security"), ...sizeOfItem(r.kind, r.lines, r.fix_size) });
+    const k = `${r.repo}#${r.number}`, json = JSON.stringify(breakdown);
+    keep.add(k);
+    const prev = old.get(k);
+    if (prev && prev.score === score && prev.breakdown === json) continue;
+    puts.push([r.repo, r.number, score, json]);
+  }
+  const dels = [...old].filter(([k]) => !keep.has(k)).map(([, r]) => r);
   db.exec("BEGIN IMMEDIATE");
   try {
-    for (const r of rows) {
-      const s = settled(r.repo, r.number);
-      const { score, breakdown } = rankOf({ level: r.level, reach: r.reach, label: s.label, security: s.flags.includes("security"), ...sizeOfItem(r.kind, r.lines, r.fix_size) });
-      const k = `${r.repo}#${r.number}`, json = JSON.stringify(breakdown);
-      keep.add(k);
-      const prev = old.get(k);
-      if (prev && prev.score === score && prev.breakdown === json) continue;
-      changed++;
-      put.run(r.repo, r.number, score, json, at);
-    }
-    let removed = 0;
     const del = db.prepare("DELETE FROM item_rank WHERE repo = ? AND number = ?");
-    for (const [k, r] of old) if (!keep.has(k)) { del.run(r.repo, r.number); removed++; }
+    const write = (): void => {
+      for (const [repo, number, score, json] of puts) put.run(repo, number, score, json, at);
+      for (const r of dels) del.run(r.repo, r.number);
+    };
+    // Many changed rows (a first ranking, a new formula): one full-pass mark instead of a log row per item.
+    if (puts.length + dels.length >= BULK_ROWS) bulkWrites(db, "rank", write); else write();
+    const changed = puts.length;
+    const removed = dels.length;
     db.exec("COMMIT");
     return { items: rows.length, changed, removed };
   } catch (e) {

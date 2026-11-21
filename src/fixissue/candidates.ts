@@ -1,6 +1,7 @@
 // What the Fix stage reads about issues from the local tables. Which issues it works on is the Plans' (core/decide-item.ts).
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 
 export const ATTEMPT_STATES = ["retry", "testing", "passed", "pr-opened", "skipped", "failed"] as const;
 
@@ -95,7 +96,8 @@ export function fillTextRefs(db: DatabaseSync): void {
     if (!rows.length) return;
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const r of rows) upd.run(textRefs(r.title, r.body), r.repo, r.number);
+      const write = (): void => { for (const r of rows) upd.run(textRefs(r.title, r.body), r.repo, r.number); };
+      if (rows.length >= BULK_ROWS) bulkWrites(db, "text-refs", write); else write();
       db.exec("COMMIT");
     } catch (e) {
       db.exec("ROLLBACK");

@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 import { fillClassHashes, fillEmbedHashes } from "./itemhash.ts";
 import { fillTextRefs } from "./fixissue/candidates.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
-import { planChangesSql } from "./core/plan-changes.ts";
+import { bulkWrites, planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
@@ -427,8 +427,8 @@ function dropColumns(db: DatabaseSync): void {
   for (const [table, column] of DROPPED_COLUMNS) {
     const cols = (db.prepare(`PRAGMA main.table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
     if (!cols.includes(column)) continue;
-    // The live-change triggers name the column; connect() recreates them after this.
-    for (const t of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND tbl_name = ? AND name LIKE 'live\\_%' ESCAPE '\\'").all(table) as { name: string }[]) db.exec(`DROP TRIGGER main.${t.name}`);
+    // The live-change triggers name the column, and change-log triggers on any table may read it; connect() recreates them after this.
+    for (const t of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND ((tbl_name = ? AND name LIKE 'live\\_%' ESCAPE '\\') OR name LIKE 'plan\\_%' ESCAPE '\\')").all(table) as { name: string }[]) db.exec(`DROP TRIGGER main.${t.name}`);
     db.exec(`ALTER TABLE main.${table} DROP COLUMN ${column}`);
   }
 }
@@ -652,11 +652,11 @@ function buildItemStage(db: DatabaseSync): void {
   db.exec("BEGIN IMMEDIATE");
   try {
     if (!db.prepare("SELECT 1 FROM main.settings WHERE key = 'item_stage_built'").get()) {
-      db.exec(`INSERT OR REPLACE INTO main.item_stage (repo, number, stage, at, reviewed)
+      bulkWrites(db, "item-stage", () => db.exec(`INSERT OR REPLACE INTO main.item_stage (repo, number, stage, at, reviewed)
         SELECT repo, number, stage, at, reviewed FROM (
           SELECT repo, number, stage, at, MAX(stage = 'reviewed') OVER (PARTITION BY repo, number) AS reviewed,
             ROW_NUMBER() OVER (PARTITION BY repo, number ORDER BY at DESC, rowid DESC) AS rn FROM main.stages
-        ) WHERE rn = 1`);
+        ) WHERE rn = 1`));
       db.exec("INSERT INTO main.settings (key, value) VALUES ('item_stage_built', '1')");
     }
     db.exec("COMMIT");
@@ -730,8 +730,19 @@ function open(path: string): DatabaseSync {
   addColumns(db);
   dropColumns(db);
   for (const ix of ADDED_INDEXES) db.exec(ix);
-  db.exec(liveSql(db));
-  db.exec(planChangesSql(db));
+  // The triggers are dropped and created again in one transaction: no write lands between, and a second process that
+  // finished migrating first leaves them as they are.
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (stampOf(db) !== stamp) {
+      db.exec(liveSql(db));
+      db.exec(planChangesSql(db));
+    }
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
   migrateValues(db);
   backfill(db);
   buildSearchIndex(db);

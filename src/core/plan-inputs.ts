@@ -42,9 +42,10 @@ const batchPrsOf = (repo: string, number: string): string =>
   `SELECT b.repo AS repo, b.pr_number AS number FROM merge_batches b JOIN merge_batch_prs bp ON bp.batch_id = b.id
     WHERE b.repo = ${repo} AND bp.number = ${number} AND b.state IN ('checking', 'open') AND b.pr_number IS NOT NULL`;
 
-/** PRs whose latest review holds them for a blocking item that may be `repo#number` (src/review/blockers.ts); a loose match only adds refs. */
+/** PRs with a hold review that names `repo#number` as a blocking item (src/review/blockers.ts), through review_blockers (src/core/plan-changes.ts). */
 const blockedBy = (repo: string, number: string): string =>
-  `SELECT o.repo AS repo, o.number AS number FROM opus_reviews o WHERE o.verdict = 'hold' AND o.blocked_by LIKE '%' || ${repo} || '#' || ${number} || '%'`;
+  `SELECT o.repo AS repo, o.number AS number FROM review_blockers rb JOIN opus_reviews o ON o.repo = rb.repo AND o.number = rb.number AND o.head_oid = rb.head_oid
+    WHERE rb.b_repo = ${repo} AND rb.b_number = ${number} AND o.verdict = 'hold'`;
 
 /** Members of the duplicate group decision `id`. */
 const groupMembers = (id: string): string => `SELECT gm.repo AS repo, gm.number AS number FROM dupe_group_items gm WHERE gm.decision_id = ${id}`;
@@ -53,8 +54,10 @@ const groupMembers = (id: string): string => `SELECT gm.repo AS repo, gm.number 
 const carriesOf = (id: string): string => `SELECT dc.repo AS repo, dc.number AS number FROM dupe_carries dc WHERE dc.decision_id = ${id}`;
 
 /** True when item `a` is in a duplicate edge or group: its state, text and activity move other members' sets, groups and canonical pick (src/dupes/plan.ts). */
+// The unary + keeps SQLite off the verdict index: the item's own pairs are a key lookup.
 const inDupeSet = (a: string): string =>
-  `(EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.verdict = 'duplicate' AND dp.repo = ${a}.repo AND (dp.a = ${a}.number OR dp.b = ${a}.number))
+  `(EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.repo = ${a}.repo AND dp.a = ${a}.number AND +dp.verdict = 'duplicate')
+    OR EXISTS (SELECT 1 FROM duplicate_pairs dp WHERE dp.repo = ${a}.repo AND dp.b = ${a}.number AND +dp.verdict = 'duplicate')
     OR EXISTS (SELECT 1 FROM dupe_group_items dg WHERE dg.repo = ${a}.repo AND dg.number = ${a}.number))`;
 
 const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ");
@@ -133,16 +136,20 @@ export const PLAN_INPUTS: PlanInput[] = [
       OR (CASE WHEN ${changed(DUPE_COLUMNS)} THEN ${inDupeSet("new")} ELSE 0 END)`,
   },
   {
-    table: "items", class: "cross", why: "An item's state or text hash: the other item of its unchecked duplicate pairs (pairs to check), and PRs held for it as a blocking item.",
+    table: "items", class: "cross", why: "An item's state or text hash: the other item of its unchecked duplicate pairs (pairs to check).",
     updateWhen: changed(["state", "kind", "embed_hash"]),
-    refs: `SELECT dp.repo AS repo, dp.b AS number FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.a = r.number AND dp.verdict IS NULL
-      UNION SELECT dp.repo, dp.a FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.b = r.number AND dp.verdict IS NULL
-      UNION ${blockedBy("r.repo", "r.number")}`,
+    refs: `SELECT dp.repo AS repo, dp.b AS number FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.a = r.number AND +dp.verdict IS NULL
+      UNION SELECT dp.repo, dp.a FROM duplicate_pairs dp WHERE dp.repo = r.repo AND dp.b = r.number AND +dp.verdict IS NULL`,
+  },
+  {
+    table: "items", class: "cross", why: "An item's state: PRs held for it as a blocking item.",
+    updateWhen: changed(["state", "kind"]),
+    refs: blockedBy("r.repo", "r.number"),
   },
   {
     table: "decisions", class: "cross", why: "A decision is about its item, the items of its list, its group's members or a pair's two items; carry-overs of a group and PRs held for a blocking item read it too.",
     refs: `SELECT r.repo AS repo, r.number AS number
-      UNION SELECT json_extract(dj.value, '$.repo'), json_extract(dj.value, '$.number') FROM json_each(CASE WHEN json_valid(r.items) THEN r.items ELSE '[]' END) dj
+      UNION SELECT json_extract(dj.value, '$.repo'), json_extract(dj.value, '$.number') FROM json_each(CASE WHEN json_valid(r.items) THEN CASE WHEN json_type(r.items) = 'array' THEN r.items ELSE '[]' END ELSE '[]' END) dj WHERE dj.type = 'object'
       UNION ${groupMembers("r.id")}
       UNION SELECT r.repo, CAST(substr(r.id, instr(r.id, '@') + 1) AS INTEGER) WHERE r.kind = 'duplicate' AND r.id NOT LIKE '%:dupegroup:%' AND r.id GLOB '*@[0-9]*'
       UNION ${carriesOf("r.id")}

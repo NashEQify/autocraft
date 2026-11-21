@@ -17,6 +17,7 @@ import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.t
 import { ParallelError, setStepParallel, stepParallelSetting } from "./concurrency.ts";
 import { DEFAULT_MAX_JOBS, Runner, runnerLockPath } from "./runner.ts";
 import { loadSteps } from "./steps.ts";
+import { dropPlanChanges } from "../core/plan-changes.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
@@ -157,7 +158,29 @@ export const commands = {
       await f(args.slice(1));
     },
   },
+  "plan-log": {
+    summary: "the incremental planner's change log: status | drop (before a rollback to a release without it)",
+    run: (args: string[]) => planLog(args),
+  },
 };
+
+function planLog(args: string[]): void {
+  const db = connect();
+  if (args[0] === "status") {
+    console.log(JSON.stringify({
+      logged: (db.prepare("SELECT count(*) AS n FROM main.item_changes").get() as { n: number }).n,
+      passes: db.prepare("SELECT kind, passes, refs, ms, max_ms, last_at FROM main.plan_pass_stats ORDER BY kind").all(),
+      fullCauses: db.prepare("SELECT source, n FROM main.plan_full_causes ORDER BY n DESC LIMIT 10").all(),
+      shadowDiffs: (db.prepare("SELECT count(*) AS n FROM main.plan_shadow_diffs").get() as { n: number }).n,
+    }, null, 2));
+    return;
+  }
+  if (args[0] === "drop") {
+    console.log(`dropped ${dropPlanChanges(db)} triggers and the change log; the next connect migrates the schema`);
+    return;
+  }
+  die("usage: autocraft-server plan-log status | drop");
+}
 
 const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | off | drain | status
        autocraft-server pipeline limit <step> --per-day <N|none>

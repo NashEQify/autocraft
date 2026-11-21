@@ -14,6 +14,7 @@ import { readEnv, readEnvFor } from "../github/read.ts";
 import { mayBeRun, mergeSteps, workflowSteps, type WorkflowSteps } from "../core/workflow-runs.ts";
 import { lockfileNeedsWhole } from "../core/lockfiles.ts";
 import { sensitiveReasons } from "../core/sensitive.ts";
+import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 
 // gh picks its account from the working directory, so it runs in this repo.
 const REPO_DIR = fileURLToPath(new URL("../..", import.meta.url));
@@ -379,7 +380,8 @@ export function buildDiffFacts(db: DatabaseSync): number | null {
     const heads = db.prepare(`SELECT r.repo, r.number, r.head_oid FROM opus_reviews r WHERE r.verdict IS NOT NULL AND r.rowid = (
         SELECT x.rowid FROM opus_reviews x WHERE x.repo = r.repo AND x.number = r.number AND x.verdict IS NOT NULL ORDER BY x.at DESC, x.rowid DESC LIMIT 1)
       UNION SELECT repo, number, head_oid FROM diff_facts`).all() as { repo: string; number: number; head_oid: string }[];
-    for (const h of heads) writeFacts(db, h.repo, h.number, h.head_oid, diffFactsOfCache(h.repo, h.number, h.head_oid));
+    const write = (): void => { for (const h of heads) writeFacts(db, h.repo, h.number, h.head_oid, diffFactsOfCache(h.repo, h.number, h.head_oid)); };
+    if (heads.length >= BULK_ROWS) bulkWrites(db, "diff-facts", write); else write();
     n = heads.length;
     db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(DIFF_FACTS_KEY, rules);
     db.exec("COMMIT");
