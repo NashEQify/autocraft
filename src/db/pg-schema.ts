@@ -83,7 +83,9 @@ const DECISION_ITEMS_INSERT = `    INSERT INTO decision_items (repo, number, dec
       WHERE json_typeof(j) = 'object' AND json_typeof(j -> 'repo') = 'string' AND json_typeof(j -> 'number') = 'number'
         AND (j ->> 'number') ~ '^-?[0-9]+$'
       ON CONFLICT DO NOTHING;`;
-const DECISION_ITEMS_WHEN = "NEW.number IS NULL AND json_valid(NEW.items) AND json_typeof(NEW.items::json) = 'array'";
+// CASE, not AND: Postgres may evaluate AND operands in any order, and the cast must never see invalid JSON. The
+// parentheses keep plpgsql's IF from ending the condition at the CASE's THEN.
+const DECISION_ITEMS_WHEN = "NEW.number IS NULL AND (CASE WHEN json_valid(NEW.items) THEN json_typeof(NEW.items::json) = 'array' ELSE false END)";
 
 export const HAND_TRIGGERS: Record<string, HandTrigger> = {
   stages_latest: {
