@@ -1,4 +1,4 @@
-// P9: read-only item-timeline projection and reader-local OPEN transitions.
+// Read-only item-timeline projection and reader-local OPEN transitions.
 // No cache, collection, subscription or permission policy lives at module scope.
 import type { Decision, ItemPageData, TimelineEntry } from "../../api/types.ts";
 
@@ -22,6 +22,7 @@ export interface TimelineRow {
   text: string;
   actor: string;
   at: string;
+  costUsd: number | null;
 }
 
 export interface TimelineModel {
@@ -60,13 +61,13 @@ export function timelineReadState(ref: TimelineReference, snapshot: TimelineRead
   return data && data.repo === ref.repo && data.number === ref.number && Array.isArray(data.timeline) ? "ready" : "error";
 }
 
-/** Latest supplied positions, including authorized conversations, without sorting, filtering or mutating. */
+/** Latest supplied positions, oldest first, including authorized conversations without mutating. */
 export function timelineModel(entries: readonly TimelineEntry[]): TimelineModel {
   const rows: TimelineRow[] = [];
   const stop = Math.max(0, entries.length - TIMELINE_EVENT_LIMIT);
-  for (let index = entries.length - 1; index >= stop; index--) {
+  for (let index = stop; index < entries.length; index++) {
     const entry = entries[index]!;
-    rows.push({ key: JSON.stringify([index, entry.id]), text: entry.text, actor: entry.actor, at: entry.at });
+    rows.push({ key: JSON.stringify([index, entry.id]), text: entry.text, actor: entry.actor, at: entry.at, costUsd: entry.costUsd });
   }
   return { rows, empty: rows.length === 0 };
 }

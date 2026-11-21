@@ -1,4 +1,4 @@
-// One task surface: the decision first, with supporting evidence, discussion, history and GitHub context on demand.
+// The current question and one history beside GitHub on desktop, stacked on compact screens.
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ArrowLeftIcon, ArrowSquareOutIcon, ChatsCircleIcon } from "@phosphor-icons/react";
@@ -12,6 +12,7 @@ import { QueueBadge } from "../../../ui/molecules/QueueBadge";
 import { PageTitle } from "../../../shell/PageHeader";
 import { useUser } from "../../../shell/UserContext";
 import { AutoCraftSide } from "./AutoCraftSide";
+import { GithubSide } from "./GithubSide";
 import { revealWhenReady } from "../../../lib/revealElement";
 import { ItemMenu } from "./ItemMenu";
 import { StatusBar } from "./StatusBar";
@@ -82,10 +83,17 @@ export function ItemPageView({ params }: ViewProps) {
   return (
     <JumpContext.Provider value={{ to, request }}>
       <div className="h-full min-h-0 overflow-y-auto" data-task-page data-flash={flash ?? undefined}>
-        <div className="mx-auto w-full max-w-[1040px] pb-12 md:pb-16">
+        <div className="w-full pb-12 md:pb-16">
           <PageTitle title={`${repo}#${number}`} />
           <Header d={data} />
-          <AutoCraftSide key={`${user.login}:${user.role}:${repo}#${number}`} d={data} flash={flash} />
+          <div key={`${user.login}:${user.role}:${repo}#${number}`} className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,11fr)_minmax(0,9fr)]">
+            <section className="min-w-0" aria-label="In AutoCraft">
+              <AutoCraftSide d={data} flash={flash} />
+            </section>
+            <section className="mt-5 min-w-0 border-t border-line bg-bg/40 lg:mt-0 lg:border-l lg:border-t-0" aria-label="On GitHub">
+              <GithubSide d={data} flash={flash} />
+            </section>
+          </div>
         </div>
       </div>
     </JumpContext.Provider>

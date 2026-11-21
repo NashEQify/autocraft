@@ -58,10 +58,8 @@ function rowsOf(es: TimelineEntry[]): Row[] {
   return rows;
 }
 
-export function Story({ d, flash, conv, view = "all" }: { d: ItemPageData; flash: string | null; conv: Conversation | undefined; view?: "all" | "discussion" | "history" }) {
-  // The server marks replies/opinions/comments as chat; answers, reviews and work keep their typed event icons.
-  const entries = d.timeline.filter((e) => view === "all" || (view === "discussion" ? e.icon === "chat" : e.icon !== "chat"));
-  const rows = rowsOf(entries);
+export function Story({ d, flash, conv }: { d: ItemPageData; flash: string | null; conv: Conversation | undefined }) {
+  const rows = rowsOf(d.timeline);
   const today = dayKey(new Date(nowMs()).toISOString());
   let prevDay = "";
   const staff = useUser().role !== "viewer";
@@ -72,9 +70,9 @@ export function Story({ d, flash, conv, view = "all" }: { d: ItemPageData; flash
     return show ? dateOf(at) : undefined;
   };
   return (
-    <section aria-label={view === "discussion" ? "Discussion entries" : "What happened"} className="px-4 pb-2 pt-4 md:px-5">
-      {view !== "discussion" && staff && d.costUsd > 0 && <p className="num mb-1 text-right text-xs text-ink/45">{formatCost(d.costUsd)} in all</p>}
-      {rows.length === 0 && <p className="pb-3 text-sm text-ink/50">{view === "discussion" ? "No discussion yet." : "No activity recorded yet."}</p>}
+    <section aria-label="What happened" className="px-4 pb-2 pt-4 md:px-5">
+      {staff && d.costUsd > 0 && <p className="num mb-1 text-right text-xs text-ink/45">{formatCost(d.costUsd)} in all</p>}
+      {rows.length === 0 && <p className="pb-3 text-sm text-ink/50">No activity recorded yet.</p>}
       <ol>
         {rows.map((r) =>
           r.t === "line" ? (
@@ -89,11 +87,12 @@ export function Story({ d, flash, conv, view = "all" }: { d: ItemPageData; flash
 }
 
 function Run({ es, d, conv, date, flash }: { es: TimelineEntry[]; d: ItemPageData; conv: Conversation | undefined; date?: string; flash: string | null }) {
-  const cost = es.reduce((s, e) => s + (e.costUsd ?? 0), 0);
+  const cost = useUser().role === "viewer" || !es.some((e) => e.costUsd != null)
+    ? null : formatCost(es.reduce((s, e) => s + (e.costUsd ?? 0), 0));
   const first = es[0]!, last = es[es.length - 1]!;
   const span = clock(first.at) === clock(last.at) ? clock(first.at) : `${clock(first.at)}–${clock(last.at)}`;
   const hit = flash !== null && es.some((e) => flash === `hist-${e.id}`);
-  const words = [`${es.length} steps`, span, formatCost(cost)].filter(Boolean).join(" · ");
+  const words = [`${es.length} steps`, span, cost].filter(Boolean).join(" · ");
   return (
     <StoryLine time={clock(first.at)} date={date} icon={RobotIcon} text={words} open={hit}>
       <ol className="border-l border-line pl-2">
@@ -169,7 +168,7 @@ function Detail({ e, d, review, conv, operator }: { e: TimelineEntry; d: ItemPag
       {review && <ReviewDetail repo={d.repo} r={review} viewer={viewer} />}
       {e.body && <ExpandableText text={e.body} markdown={e.markdown} />}
       {e.lines.length > 0 && <ul className="space-y-0.5 text-xs leading-5 text-ink/65">{e.lines.map((l, i) => <li key={i} className="break-words">{l}</li>)}</ul>}
-      {e.calls.length > 0 && (
+      {!viewer && e.calls.length > 0 && (
         <ul className="space-y-0.5 border-l border-line pl-3 text-xs text-ink/60">
           {e.calls.map((c, i) => <li key={i} className="flex gap-2"><span className="min-w-0 flex-1">{c.label}{c.via && <RemoteVia via={c.via} className="ml-2" />}</span>{formatCost(c.costUsd) && <span className="num">{formatCost(c.costUsd)}</span>}</li>)}
         </ul>

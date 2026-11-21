@@ -1,4 +1,4 @@
-// The task surface: answer first; evidence, discussion, activity and GitHub context stay available on demand.
+// The AutoCraft side: answer first, then one open history with its composer.
 import { useEffect } from "react";
 import { localActions, useLocal } from "../../decisions/state";
 import { useQuery } from "../../../api/client";
@@ -12,7 +12,6 @@ import { Composer } from "../Composer";
 import { DisclosurePanel } from "../../../ui/molecules/DisclosurePanel";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { ItemEvidence } from "./ItemEvidence";
-import { GithubSide } from "./GithubSide";
 import { Story } from "./Story";
 
 export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | null }) {
@@ -36,8 +35,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
   // Only the newest Opus turn's cards are live: a card that leaves the question open is a suggested reply.
   const lastOpus = conv ? [...conv.turns].reverse().find((t) => t.kind === "opus") : undefined;
   const suggestions = lastOpus?.actions.filter((a) => a.settles === undefined && !a.fromChoice && ["proposed", "queued", "running", "failed"].includes(a.state) && a.canSettle) ?? [];
-  const discussionCount = d.timeline.filter((e) => e.icon === "chat").length;
-  const historyCount = d.timeline.length - discussionCount;
+  const historyCount = d.timeline.length;
   return (
     <div className="space-y-5 px-4 md:space-y-6 md:px-8" data-task-body>
       <HeldAnswers ds={(ds ?? []).filter((x) => x.dispute || x.orphaned)} />
@@ -52,18 +50,12 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
         </section>
       )}
       {open.length === 0 && <DisclosurePanel title="Evidence" summary="Review, checks and related items"><ItemEvidence d={d} /></DisclosurePanel>}
-      <DisclosurePanel title="Discussion" summary={conv?.pending ? "Opus is replying" : `${discussionCount} ${discussionCount === 1 ? "entry" : "entries"} · messages and feedback`}>
-        <Story d={d} flash={flash} conv={conv} view="discussion" />
+      <DisclosurePanel title="History" summary={conv?.pending ? "Opus is replying" : `${historyCount} ${historyCount === 1 ? "event" : "events"}`} defaultOpen>
+        <Story d={d} flash={flash} conv={conv} />
         <div className="px-4 pb-4 md:px-5">
           <ErrorLine error={conversationError?.message} />
           {conv && <Composer flush repo={d.repo} number={d.number} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} feedbackOn={open.length === 1 ? open[0] : undefined} choices={choices} opusTurns={opusTurns} />}
         </div>
-      </DisclosurePanel>
-      <DisclosurePanel title="History" summary={`${historyCount} ${historyCount === 1 ? "event" : "events"} · answers, reviews and work`}>
-        <Story d={d} flash={flash} conv={conv} view="history" />
-      </DisclosurePanel>
-      <DisclosurePanel title="On GitHub" summary="Description, conversation and changes" defaultOpen={user.role === "viewer"}>
-        <GithubSide d={d} flash={flash} />
       </DisclosurePanel>
     </div>
   );
