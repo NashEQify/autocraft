@@ -113,7 +113,6 @@ src/dash/api/build.ts
 
 src/dash/api/conversations.ts
 
-src/dash/api/decisions.ts
 
 src/dash/api/discord.ts
 
