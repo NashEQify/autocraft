@@ -7,6 +7,7 @@
 // Without --apply it is a dry run: it reads the local tables only, calls
 // nothing and writes nothing.
 import { scopeRepos } from "../pilot.ts";
+import * as kx from "../db/kx.ts";
 import { FAST_FLOOR, workScores } from "../fasttrack.ts";
 import { mergeHeld } from "./holds.ts";
 import { backlogHeld, duplicateHeld } from "../dupes/held.ts";
@@ -285,10 +286,9 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   }
 
   // Every taken PR in the queue gets one `batched` stage row per head.
-  const batched = db.prepare("SELECT 1 FROM stages WHERE repo = ? AND number = ? AND stage = 'batched' AND note LIKE ?");
-  const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)");
   for (const e of open) {
-    if (!await batched.get(e.repo, e.number, `queued at ${short(e.head)}%`)) await stage.run(e.repo, e.number, "batched", at(), ACTOR, `queued at ${short(e.head)}: ${e.state}`);
+    if (!await db.get(db.k.selectFrom("stages").select((eb) => eb.lit(1).as("one")).where("repo", "=", e.repo).where("number", "=", e.number).where("stage", "=", "batched")
+      .where((eb) => kx.like(db, "note", eb.val(`queued at ${short(e.head)}%`))))) await db.run(db.k.insertInto("main.stages").values({ repo: e.repo, number: e.number, stage: "batched", at: at(), actor: ACTOR, note: `queued at ${short(e.head)}: ${e.state}` }));
   }
 
   if (ask1.length) {
@@ -302,8 +302,7 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
   // What GitHub reported for the PR being tried, once known; a refusal records it so the autopilot retries only when it changes.
   let seen: { ci: string; mergeable: string } | null = null;
   const saveAttempt = async (e: QueueEntry, method: string | null, outcome: "merged" | "refused", reason: string | null) =>
-    await db.prepare("INSERT INTO merges (repo, number, head_oid, run_id, at, path, method, outcome, reason, ci, mergeable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(e.repo, e.number, e.head, runId, at(), e.path!, method, outcome, reason, seen?.ci ?? e.ci, seen?.mergeable ?? e.mergeable);
+    await db.run(db.k.insertInto("merges").values({ repo: e.repo, number: e.number, head_oid: e.head, run_id: runId, at: at(), path: e.path!, method, outcome, reason, ci: seen?.ci ?? e.ci, mergeable: seen?.mergeable ?? e.mergeable }));
   const refuse = async (e: QueueEntry, method: string | null, reason: string) => {
     await saveAttempt(e, method, "refused", reason);
     if (/action_required/.test(reason)) await markReread(db, e.repo, e.number, e.head);
@@ -399,9 +398,9 @@ export async function runMerge(db: Db, params: MergeParams, log: (line: string) 
     await saveAttempt(e, method, "merged", null);
     await markMerged(db, e.repo, e.number, at());
     await closeMergedQuestions(db, e.repo, e.number, at());
-    await stage.run(e.repo, e.number, "merged", at(), ACTOR, `${method} at ${short(e.head)}${e.path === "operator" ? ", operator answered merge" : ""}`);
+    await db.run(db.k.insertInto("main.stages").values({ repo: e.repo, number: e.number, stage: "merged", at: at(), actor: ACTOR, note: `${method} at ${short(e.head)}${e.path === "operator" ? ", operator answered merge" : ""}` }));
     await jobItem(db, e.repo, e.number, `merged by ${method} at ${short(e.head)}`, log);
-    if (e.path === "operator") await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at(), e.decisionId);
+    if (e.path === "operator") await db.run(db.k.updateTable("main.decisions").set({ applied_at: at() }).where("id", "=", e.decisionId!).where("applied_at", "is", null));
     summary.merged.push(refOf(e));
     params.onMerged?.(summary.merged.length);
     log(`  ${refOf(e)}: merged (${method})`);

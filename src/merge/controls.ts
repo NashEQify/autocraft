@@ -29,7 +29,7 @@ const refOf = (repo: string, number: number): string => `${repo}#${number}`;
 
 async function openPr(db: Db, repo: string, number: number): Promise<void> {
   if (!await isTracked(db, repo)) throw new ControlError(`${repo} is not a tracked repo`, 404);
-  const it = await db.prepare("SELECT kind, state FROM main.items WHERE repo = ? AND number = ?").get(repo, number) as { kind: string; state: string } | undefined;
+  const it = await db.get(db.k.selectFrom("main.items").select(["kind", "state"]).where("repo", "=", repo).where("number", "=", number));
   if (!it) throw new ControlError(`no item ${refOf(repo, number)} in the mirror`, 404);
   if (it.kind !== "pr") throw new ControlError(`${refOf(repo, number)} is not a pull request`);
   if (it.state !== "OPEN") throw new ControlError(`${refOf(repo, number)} is not open`);
@@ -38,14 +38,14 @@ async function openPr(db: Db, repo: string, number: number): Promise<void> {
 /** Holds the PR's merge. Returns false when it was already held. */
 export async function holdMerge(db: Db, by: string, repo: string, number: number, details: Record<string, unknown> = {}): Promise<boolean> {
   await openPr(db, repo, number);
-  const r = await db.prepare("INSERT OR IGNORE INTO main.merge_holds (repo, number, held_by, held_at) VALUES (?, ?, ?, ?)").run(repo, number, by, new Date().toISOString());
+  const r = await db.run(db.k.insertInto("main.merge_holds").values({ repo, number, held_by: by, held_at: new Date().toISOString() }).onConflict((oc) => oc.doNothing()));
   if (r.changes) await audit(db, by, "merge-hold", refOf(repo, number), details);
   return r.changes > 0;
 }
 
 /** Releases the PR's merge hold. Returns false when it was not held. */
 export async function releaseMerge(db: Db, by: string, repo: string, number: number): Promise<boolean> {
-  const r = await db.prepare("DELETE FROM main.merge_holds WHERE repo = ? AND number = ?").run(repo, number);
+  const r = await db.run(db.k.deleteFrom("main.merge_holds").where("repo", "=", repo).where("number", "=", number));
   if (r.changes) await audit(db, by, "merge-release", refOf(repo, number));
   return r.changes > 0;
 }
@@ -66,7 +66,7 @@ async function endBatch(db: Db, by: string, id: number, why: string, comment: st
       await audit(db, by, "batch-end-too-late", `${b.repo}:${b.branch}`, { pr: b.pr_number });
       const at = new Date().toISOString();
       await updateBatch(db, id, at, { state: "merged", summary: null });
-      for (const m of await membersOf(db, id)) await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'merged', ?, ?, ?)").run(b.repo, m.number, at, by, `merge in ${b.branch} at ${m.head_oid.slice(0, 7)}`);
+      for (const m of await membersOf(db, id)) await db.run(db.k.insertInto("main.stages").values({ repo: b.repo, number: m.number, stage: "merged", at, actor: by, note: `merge in ${b.branch} at ${m.head_oid.slice(0, 7)}` }));
       return { closed: null };
     }
     await updateBatch(db, id, new Date().toISOString(), { state: b.state, summary: b.summary });
@@ -87,7 +87,7 @@ export async function stopBatch(db: Db, by: string, id: number, run: Exec = defa
   const b = await activeBatch(db, id);
   const prs = (await membersOf(db, id)).map((m) => m.number);
   await audit(db, by, "batch-stop", `${b.repo}:${b.branch}`, { prs });
-  const held = await filterSeq(prs, async (n) => await db.prepare("SELECT 1 FROM main.items WHERE repo = ? AND number = ? AND state = 'OPEN'").get(b.repo, n) && await holdMerge(db, by, b.repo, n, { batch: b.branch }));
+  const held = await filterSeq(prs, async (n) => await db.get(db.k.selectFrom("main.items").select((eb) => eb.lit(1).as("one")).where("repo", "=", b.repo).where("number", "=", n).where("state", "=", "OPEN")) && await holdMerge(db, by, b.repo, n, { batch: b.branch }));
   const { closed } = await endBatch(db, by, id, "stopped by an operator", "the batch was stopped by an operator. Its pull requests are held until released", run);
   return { batch: b.branch, prs, held, closed };
 }
