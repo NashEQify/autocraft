@@ -25,7 +25,7 @@ import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { inList, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
@@ -161,11 +161,12 @@ function paceOwner(identity: string, target: string, owner?: string): string {
 
 /** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
 async function keyWait(db: Db, action: string, identity: string, owner: string, now: number): Promise<number> {
-  const d = `CASE WHEN ${jsonValid(db, "details")} THEN details END`;
-  const rows = await db.prepare(
-    `SELECT at, ${jsonText(db, d, "$.state")} AS state, ${jsonText(db, d, "$.error")} AS error FROM audit
-     WHERE at >= ? AND ${jsonText(db, d, "$.identity")} = ? AND ${jsonText(db, d, "$.paceOwner")} = ? ORDER BY at, rowid`,
-  ).all(new Date(now - 3_600_000).toISOString(), identity, owner) as { at: string; state: string | null; error: string | null }[];
+  const valid = (eb: kx.AnyEb) => eb.case().when(kx.jsonValid(db, "details")).then(eb.ref("details")).end();
+  const rows = await db.all(db.k.selectFrom("audit")
+    .select((eb) => ["at", kx.jsonText(db, valid(eb), "$.state").as("state"), kx.jsonText(db, valid(eb), "$.error").as("error")])
+    .where("at", ">=", new Date(now - 3_600_000).toISOString())
+    .where((eb) => eb.and([eb(kx.jsonText(db, valid(eb), "$.identity"), "=", identity), eb(kx.jsonText(db, valid(eb), "$.paceOwner"), "=", owner)]))
+    .orderBy("at").orderBy(kx.rowid("audit")));
   const times = rows.map((r) => Date.parse(r.at));
   const inMinute = times.filter((t) => t > now - 60_000);
   const share = BULK_ACTIONS.has(action) ? BULK_SHARE : 1;
@@ -196,8 +197,9 @@ export async function pipelineWriteWait(db: Db, action: string, repo: string, no
 async function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): Promise<{ id: number } | { wait: number }> {
   const identity = String(details.identity ?? "");
   const owner = paceOwner(identity, target, ownerArg);
-  const insert = async (d: Details): Promise<number> => Number((await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?) RETURNING rowid")
-    .get(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d)) as { rowid: number }).rowid);
+  const insert = async (d: Details): Promise<number> => (await w.db.get(w.db.k.insertInto("audit")
+    .values({ at: new Date(now).toISOString(), login: w.login, action, target, details: JSON.stringify(d) })
+    .returning(kx.rowid("audit").as("rowid"))))!.rowid;
   const started = { ...details, state: "started" };
   if (identity.startsWith("user:")) return { id: await insert(started) };
   return await w.db.write(async () => {
@@ -290,7 +292,7 @@ async function begin(w: Writer, action: string, target: string, details: Details
     if ("id" in r) {
       // Checked and tracked in one turn of the event loop: stopWrites either waits for this write, or it is not made.
       const id = r.id;
-      if (stoppedWhy !== null) return await park(async () => { await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id); await beforePark?.(); });
+      if (stoppedWhy !== null) return await park(async () => { await w.db.run(w.db.k.deleteFrom("audit").where(kx.rowid("audit"), "=", id)); await beforePark?.(); });
       track(id);
       return id;
     }
@@ -305,10 +307,10 @@ async function finish(w: Writer, id: number, details: Details, error?: string, o
   // The pacing key's owner, set by begin(), stays on the row.
   try {
     await w.db.write(async () => {
-      const row = await w.db.prepare("SELECT details FROM audit WHERE rowid = ?").get(id) as { details: string | null } | undefined;
+      const row = await w.db.get(w.db.k.selectFrom("audit").select("details").where(kx.rowid("audit"), "=", id));
       let owner: unknown = null;
       try { owner = (JSON.parse(row?.details ?? "null") as { paceOwner?: unknown } | null)?.paceOwner ?? null; } catch { /* no owner */ }
-      await w.db.prepare("UPDATE audit SET details = ? WHERE rowid = ?").run(JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }), id);
+      await w.db.run(w.db.k.updateTable("audit").set({ details: JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }) }).where(kx.rowid("audit"), "=", id));
     });
   } finally {
     if (owes) owed++;
@@ -339,9 +341,14 @@ async function madeBefore(w: Writer, action: string, target: string, keys: strin
   if (job === null) return null;
   const run = await resumedRun(w.db, job);
   if (!run) return null;
-  const rows = await w.db.prepare(`SELECT rowid AS id, details FROM audit WHERE target = ? AND action = ? AND at < ? AND ${jsonNum(w.db, "details", "$.jobId")} = ?
-    AND ${inList(w.db, jsonText(w.db, "details", "$.writeKey"))} AND ${jsonText(w.db, "details", "$.state")} IN ('done', 'started') ORDER BY rowid DESC`)
-    .all(target, action, run.startedAt, job, JSON.stringify(keys)) as { id: number; details: string }[];
+  const rows = await w.db.all(w.db.k.selectFrom("audit").select([kx.rowid("audit").as("id"), "details"]).$narrowType<{ details: string }>()
+    .where("target", "=", target).where("action", "=", action).where("at", "<", run.startedAt)
+    .where((eb) => eb.and([
+      eb(kx.jsonNum(w.db, "details", "$.jobId"), "=", job),
+      kx.inList(w.db, kx.jsonText(w.db, "details", "$.writeKey"), keys),
+      eb(kx.jsonText(w.db, "details", "$.state"), "in", ["done", "started"]),
+    ]))
+    .orderBy(kx.rowid("audit"), "desc"));
   const done = rows.find((r) => (JSON.parse(r.details) as Details).state === "done");
   if (done) return { done: JSON.parse(done.details) as Details };
   return rows.length ? { unknown: Number(rows[0]!.id) } : null;
@@ -552,7 +559,7 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
   const unsent = async (): Promise<void> => {
     for (const id of ids) {
       untrack(id);
-      await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+      await w.db.run(w.db.k.deleteFrom("audit").where(kx.rowid("audit"), "=", id));
     }
   };
   try {
@@ -805,7 +812,7 @@ export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
   return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
-    if (r.code === 0) try { await w.db.prepare("INSERT OR IGNORE INTO main.own_commits (repo, sha, action, at) VALUES (?, ?, ?, ?)").run(o.repo, o.sha, action, new Date().toISOString()); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
+    if (r.code === 0) try { await w.db.run(w.db.k.insertInto("main.own_commits").values({ repo: o.repo, sha: o.sha, action, at: new Date().toISOString() }).onConflict((oc) => oc.doNothing())); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;
   });
 }

@@ -7,6 +7,7 @@ import { setGithubIdentity } from "../src/github/identity.ts";
 import { plannedItems } from "../src/core/select-items.ts";
 import { authFailure, retryWaiting, type LaneDeps } from "../src/github/user-lane.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
+import * as kx from "../src/db/kx.ts";
 
 const quiet = () => {};
 let current: World | null = null;
@@ -18,7 +19,7 @@ const askedAndAnswered = async (w: World) => {
   await w.answerDecision(asked.asked[0]!, "close");
   return asked.asked[0]!;
 };
-const execOf = async (w: World, id: string) => (await w.rows("SELECT exec_state AS s, exec_reason AS r FROM decisions WHERE id = ?", id))[0] as { s: string | null; r: string | null };
+const execOf = async (w: World, id: string) => (await w.db.get(w.db.k.selectFrom("decisions").select(["exec_state as s", "exec_reason as r"]).where("id", "=", id)))!;
 
 test("legacy repos close as before; an app repo without the operator's token waits and writes nothing, then closes as the operator after a sign-in", async () => {
   // legacy: the box transports close it and no state is recorded
@@ -58,10 +59,10 @@ test("legacy repos close as before; an app repo without the operator's token wai
   assert.equal(w.gh.writes.length, 0, "still nothing through the box's transports");
   assert.ok(queries.includes("close") && !queries.includes("comment"), `the person's transports made the close only: ${queries.join(",")}`);
   assert.deepEqual(appQueries, ["comment"], "the comment before the close is the app's");
-  const row = (await w.rows("SELECT details FROM audit WHERE action = 'act-close'"))[0] as { details: string };
-  assert.equal((JSON.parse(row.details) as { identity: string }).identity, `user:${OPERATOR}`);
-  const crow = (await w.rows("SELECT details FROM audit WHERE action = 'act-comment'"))[0] as { details: string };
-  assert.equal((JSON.parse(crow.details) as { identity: string }).identity, "app");
+  const row = (await w.db.get(w.db.k.selectFrom("audit").select("details").where("action", "=", "act-close").orderBy(kx.rowid("audit")).limit(1)))!;
+  assert.equal((JSON.parse(row.details!) as { identity: string }).identity, `user:${OPERATOR}`);
+  const crow = (await w.db.get(w.db.k.selectFrom("audit").select("details").where("action", "=", "act-comment").orderBy(kx.rowid("audit")).limit(1)))!;
+  assert.equal((JSON.parse(crow.details!) as { identity: string }).identity, "app");
 });
 
 test("a waiting decision is no act work: the run counts nothing and the planner plans no act for it", async () => {

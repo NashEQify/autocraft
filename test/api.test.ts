@@ -122,7 +122,7 @@ async function signedIn(login: string): Promise<Client> {
 const actionableIds = async () => (await actionable(db)).map((d) => d.id);
 
 const auditCount = async (action: string, login: string) =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ? AND login = ?").get(action, login) as { n: number }).n;
+  (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", action).where("login", "=", login)))!.n;
 
 describe("api", () => {
   test("without a session every endpoint answers 401 JSON", async () => {
@@ -203,7 +203,7 @@ describe("api", () => {
       await c.post(dpath(P1, "/answer"), { answer: "small" }, 403);
       await c.post(dpath(P1, "/undo"), undefined, 403);
     }
-    const audits = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE login = 'viewer1'").get() as { n: number }).n;
+    const audits = async () => (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "viewer1")))!.n;
     const before = await audits();
     await viewer.post(dpath(P1, "/feedback"), { option: "plugin", text: `viewer ${MARKER}` }, 403);
     await viewer.post(dpath(P1, "/feedback"), { text: `viewer ${MARKER}` }, 403);
