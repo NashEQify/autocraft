@@ -7,6 +7,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { claudeBin, usageDir, ACCOUNT_ID } from "./box.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export type AuthStatus = { loggedIn: boolean; method: string | null; plan: string | null; expiresAt: string | null };
 
@@ -57,9 +58,9 @@ export async function readAuthStatus(configDir: string): Promise<AuthStatus | nu
 export async function refreshStatus(db: Db, id: string, configDir: string): Promise<AuthStatus | null> {
   const st = await readAuthStatus(configDir);
   if (!st) return null;
-  await db.prepare(`INSERT INTO claude_account_status (account_id, logged_in, method, plan, login_expires_at, checked_at) VALUES (?, ?, ?, ?, ?, ?)
-    ON CONFLICT (account_id) DO UPDATE SET logged_in = excluded.logged_in, method = excluded.method, plan = excluded.plan, login_expires_at = excluded.login_expires_at, checked_at = excluded.checked_at`)
-    .run(id, st.loggedIn ? 1 : 0, st.method, st.plan, st.expiresAt, new Date().toISOString());
+  await db.run(db.k.insertInto("claude_account_status")
+    .values({ account_id: id, logged_in: st.loggedIn ? 1 : 0, method: st.method, plan: st.plan, login_expires_at: st.expiresAt, checked_at: new Date().toISOString() })
+    .onConflict((oc) => oc.column("account_id").doUpdateSet(excluded(["logged_in", "method", "plan", "login_expires_at", "checked_at"]))));
   return st;
 }
 

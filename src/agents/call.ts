@@ -90,8 +90,10 @@ function sleepOrWake(ms: number): Promise<void> {
 export type Waiter = { id: number; cls: number; level: number; step: string; repo: string | null; since: number };
 
 const runningBy = async (db: Db, nowMs: number, col: "j.repo" | "r.step"): Promise<Map<string, number>> =>
-  new Map((await db.prepare(`SELECT ${col} AS k, COUNT(*) AS n FROM agent_runs r LEFT JOIN jobs j ON j.id = r.job_id WHERE r.state = 'running' AND r.provider = 'claude' AND r.started_at >= ? AND ${col} IS NOT NULL GROUP BY ${col}`)
-    .all(new Date(nowMs - RUN_SLOT_MS).toISOString()) as { k: string; n: number }[]).map((r) => [r.k, Number(r.n)]));
+  new Map((await db.all(db.k.selectFrom("agent_runs as r").leftJoin("jobs as j", "j.id", "r.job_id")
+    .select((eb) => [eb.ref(col).as("k"), eb.fn.countAll<number>().as("n")])
+    .where("r.state", "=", "running").where("r.provider", "=", "claude").where("r.started_at", ">=", new Date(nowMs - RUN_SLOT_MS).toISOString())
+    .where(col, "is not", null).groupBy(col).$narrowType<{ k: string }>())).map((r) => [r.k, Number(r.n)]));
 
 /** A waiter gains one level band for each of these minutes it has waited (at most all 4 bands), so a steady flow of P0 calls cannot starve P2 ones. Aging orders waiters; nothing waits on a timer. */
 export const LEVEL_AGING_MS = 30 * 60_000;
@@ -111,7 +113,8 @@ export async function queueOrder<T extends Waiter>(db: Db, nowMs: number, rows: 
 
 /** Fresh, eligible waiters in claim order (queueOrder). */
 async function waiterOrder(db: Db, nowMs: number): Promise<Waiter[]> {
-  return await queueOrder(db, nowMs, await db.prepare("SELECT id, class AS cls, level, step, repo, since FROM model_waits WHERE provider = 'claude' AND eligible = 1 AND seen_at >= ?").all(nowMs - allocation.staleMs) as Waiter[]);
+  return await queueOrder(db, nowMs, await db.all(db.k.selectFrom("model_waits").select(["id", "class as cls", "level", "step", "repo", "since"])
+    .where("provider", "=", "claude").where("eligible", "=", 1).where("seen_at", ">=", nowMs - allocation.staleMs)));
 }
 
 /**
@@ -159,7 +162,8 @@ const callRepos = (repos: readonly string[] | undefined): readonly string[] | un
  */
 export async function queueRoom(db: Db, cls: 0 | 1 | 2 = currentClass(), repos?: readonly string[]): Promise<number> {
   if (await inferenceMode(db) === "user-local") return await remoteRoom(db, cls, Date.now(), callRepos(repos), context?.step);
-  const ahead = (await db.prepare("SELECT COUNT(*) AS n FROM model_waits WHERE provider = 'claude' AND eligible = 1 AND seen_at >= ? AND class >= ?").get(Date.now() - allocation.staleMs, cls) as { n: number }).n;
+  const ahead = (await db.get(db.k.selectFrom("model_waits").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("provider", "=", "claude").where("eligible", "=", 1).where("seen_at", ">=", Date.now() - allocation.staleMs).where("class", ">=", cls)))!.n;
   return Math.max(0, await freeSlots(db) - Number(ahead));
 }
 
@@ -290,13 +294,13 @@ async function pollClaude(db: Db, w: Waiter, s: RunInput, minTokenMs?: number): 
     const c = await chooseAccount(db, nowMs, minTokenMs);
     // Eligibility ignores full slots: a waiter that only lacks a slot still counts when ranking, one that lacks a fresh token does not.
     const eligible = "account" in await chooseAccount(db, nowMs, minTokenMs, true) ? 1 : 0;
-    const up = await db.prepare("UPDATE model_waits SET seen_at = ?, eligible = ? WHERE id = ?").run(nowMs, eligible, w.id);
-    if (Number(up.changes) === 0) await db.prepare("INSERT INTO model_waits (id, provider, class, level, job_id, step, repo, since, seen_at, eligible) VALUES (?, 'claude', ?, ?, ?, ?, ?, ?, ?, ?)").run(w.id, w.cls, w.level, context?.jobId ?? null, w.step, w.repo, w.since, nowMs, eligible);
+    const up = await db.run(db.k.updateTable("model_waits").set({ seen_at: nowMs, eligible }).where("id", "=", w.id));
+    if (Number(up.changes) === 0) await db.run(db.k.insertInto("model_waits").values({ id: w.id, provider: "claude", class: w.cls, level: w.level, job_id: context?.jobId ?? null, step: w.step, repo: w.repo, since: w.since, seen_at: nowMs, eligible }));
     if (!("account" in c)) return { wait: c };
     const rank = (await waiterOrder(db, nowMs)).findIndex((x) => x.id === w.id);
     if (rank < 0 || rank >= await freeSlots(db, nowMs)) return { wait: { wait: "other calls are ahead in the queue" } };
     const runId = await insertRun(db, { ...s, ...stepOf(s.promptId), accountId: c.account.id });
-    await db.prepare("DELETE FROM model_waits WHERE id = ?").run(w.id);
+    await db.run(db.k.deleteFrom("model_waits").where("id", "=", w.id));
     return { started: { runId, configDir: c.account.configDir, accountId: c.account.id } };
   });
 }
@@ -308,7 +312,9 @@ export async function startClaudeRun(db: Db, s: RunInput, log: (line: string) =>
   const first = s.items[0];
   const w: Waiter = { id: 0, cls: currentClass(s.promptId), level: await levelBand(db, first?.repo, first?.number), step: stepOf(s.promptId).step, repo: context?.repo ?? null, since: began };
   // The row exists before the first poll returns, so queueRoom() is exact right after a call is made.
-  w.id = Number((await db.prepare("INSERT INTO model_waits (provider, class, level, job_id, step, repo, since, seen_at, eligible) VALUES ('claude', ?, ?, ?, ?, ?, ?, ?, 0) RETURNING id").get(w.cls, w.level, context?.jobId ?? null, w.step, w.repo, began, began) as { id: number }).id);
+  w.id = Number((await db.get(db.k.insertInto("model_waits")
+    .values({ provider: "claude", class: w.cls, level: w.level, job_id: context?.jobId ?? null, step: w.step, repo: w.repo, since: began, seen_at: began, eligible: 0 })
+    .returning("id")))!.id);
   let claimed = false;
   try {
     for (;;) {
@@ -329,7 +335,7 @@ export async function startClaudeRun(db: Db, s: RunInput, log: (line: string) =>
       await sleepOrWake(allocation.pollMs);
     }
   } finally {
-    if (!claimed) await db.prepare("DELETE FROM model_waits WHERE id = ?").run(w.id);
+    if (!claimed) await db.run(db.k.deleteFrom("model_waits").where("id", "=", w.id));
   }
 }
 
