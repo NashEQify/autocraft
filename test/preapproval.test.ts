@@ -192,11 +192,11 @@ describe("pre-approved merge", () => {
     await pushed(w, 40, "sha40b");
     await w.synced(40, "sha40b");
     await scopeToTracked(w.db);
-    await w.db.prepare("DELETE FROM main.tracked_repos WHERE name = 'app'").run();
+    await w.db.run(w.db.k.deleteFrom("main.tracked_repos").where("name", "=", "app"));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "fixup");
     assert.equal((await w.rows("SELECT state FROM operator_fixups WHERE number = 40"))[0]!.state, "queued");
-    await w.db.prepare("INSERT INTO main.tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', ?, ?, 1)").run(OPERATOR, T0);
+    await w.db.run(w.db.k.insertInto("main.tracked_repos").values({ name: "app", added_by: OPERATOR, added_at: T0, pipeline: 1 }));
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 40))?.state, "review");
   });

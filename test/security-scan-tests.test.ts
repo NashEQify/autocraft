@@ -23,8 +23,8 @@ const db = await connectDb(join(dir, "dash.db"));
 await db.prepare("INSERT INTO build_envs (id, label, kind, slots, key_hash, confidential, confidential_since, confidential_online_at, created_at) VALUES ('vault', 'vault', 'remote', 1, 'x', 1, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')").run();
 after(async () => { await db.close(); rmSync(dir, { recursive: true, force: true }); });
 
-for (const r of ["plain", "wired", "on"]) await db.prepare("INSERT INTO repos (name, visibility, default_branch, open_prs, open_issues) VALUES (?, 'public', 'main', 0, 0)").run(r);
-await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('plain', 'cli', 'x'), ('wired', 'cli', 'x'), ('on', 'cli', 'x')").run();
+for (const r of ["plain", "wired", "on"]) await db.run(db.k.insertInto("repos").values({ name: r, visibility: "public", default_branch: "main", open_prs: 0, open_issues: 0 }));
+await db.run(db.k.insertInto("main.tracked_repos").values(["plain", "wired", "on"].map((name) => ({ name, added_by: "cli", added_at: "x" }))).onConflict((oc) => oc.doNothing()));
 await scopeToTracked(db);
 
 const SHA = "a".repeat(40);
