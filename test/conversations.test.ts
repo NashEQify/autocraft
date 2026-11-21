@@ -32,10 +32,11 @@ async function fresh(): Promise<Db> {
   await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
   await useTestAccount(db);
-  const item = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, head_oid, created_at, updated_at, labels) VALUES ('app', ?, ?, 'OPEN', ?, 'Body text', 'someone', ?, '${T0}', '${T0}', '[]')`);
-  await item.run(1, "issue", "Issue 1", null);
-  await item.run(2, "pr", "PR 2", "sha2");
-  await item.run(3, "issue", "Issue 3", null);
+  const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
+    await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body text", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
+  await item(1, "issue", "Issue 1", null);
+  await item(2, "pr", "PR 2", "sha2");
+  await item(3, "issue", "Issue 3", null);
   await ask(db, [{ id: "app#1:scope", kind: "scope", repo: "app", number: 1, question: "Scope?", options: [{ key: "take", label: "Wanted" }, { key: "close", label: "Out of scope" }] }]);
   await setCommentApproval(db, "op", "app", true);
   return db;
@@ -168,7 +169,7 @@ describe("new step kinds", () => {
     assert.ok(st3.includes("transfer") && !st3.includes("fixup") && !st3.includes("request_reviewers"));
     assert.ok(st2.includes("fixup with merge") && !st2.includes("transfer") && !st3.includes("fixup with merge"));
     await ensureConversation(db, "app", 3, "op");
-    await db.prepare("UPDATE items SET state = 'CLOSED' WHERE repo = 'app' AND number = 3").run();
+    await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 3));
     await addOperatorMessage(db, "app", 3, "op", "Reopen it?", undefined, false);
     assert.ok((await turnsOf(db, "app", 3)).at(-1)!.block.includes("<steps>[") && (await applicableSteps(db, "app", 3)).includes("reopen"));
     const none = await run(db, 2, [R([{ kind: "fixup", instructions: "x", merge: true }, { kind: "request_reviewers", logins: ["someone"] }])]);
@@ -185,7 +186,7 @@ describe("Do it", () => {
       return q.includes("issueOrPullRequest") ? { repository: { issueOrPullRequest: { __typename: "Issue", id: "I_1", state: "OPEN" } } } : {};
     } };
     const params = JSON.stringify({ kind: "close", reason: "completed", pr: false });
-    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'close', ?, 'Done in an earlier PR.', 'x') RETURNING id").get(params) as { id: number }).id);
+    const id = Number((await db.get(db.k.insertInto("conversation_cards").values({ turn_id: 0, repo: "app", number: 1, kind: "close", params, text: "Done in an earlier PR.", description: "x" }).returning("id")))!.id);
     const { card } = await doCard(db, id, "op", { querier: querier as never });
     assert.equal(card.state, "done", card.error ?? "");
     assert.ok(sent.some((x) => x.q.includes("closeIssue") && x.v.reason === "COMPLETED"));
@@ -197,8 +198,8 @@ describe("Do it", () => {
   const resolution = async (db: Db, steps: unknown[], settle: unknown, text: string | null) => {
     const p = (await parseReply(db, "app", 1, `Text.\n\`\`\`actions\n${JSON.stringify([{ kind: "resolution", steps, settle, ...(text && { text }) }])}\n\`\`\``))!;
     assert.equal(p.cards.length, 1, p.notes.join("; "));
-    return Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 1, 'resolution', ?, ?, ?) RETURNING id")
-      .get(JSON.stringify(p.cards[0]!.params), p.cards[0]!.text, p.cards[0]!.description) as { id: number }).id);
+    return Number((await db.get(db.k.insertInto("conversation_cards")
+      .values({ turn_id: 0, repo: "app", number: 1, kind: "resolution", params: JSON.stringify(p.cards[0]!.params), text: p.cards[0]!.text, description: p.cards[0]!.description }).returning("id")))!.id);
   };
   const github = (failLabel: boolean) => {
     const sent: string[] = [];
@@ -270,7 +271,7 @@ describe("Do it", () => {
     const p = (await parseReply(db, "app", n, `Text.\n\`\`\`actions\n${JSON.stringify([{ kind: "resolution", steps, settle, ...(text && { text }) }])}\n\`\`\``))!;
     assert.equal(p.cards.length, 1, p.notes.join("; "));
     const turn = await insertTurn(db, "app", n, { kind: "opus", login: "opus", body: "Text.", block: "x", cards: p.cards });
-    return Number((await db.prepare("SELECT id FROM conversation_cards WHERE turn_id = ?").get(turn))!.id);
+    return Number((await db.get(db.k.selectFrom("conversation_cards").select("id").where("turn_id", "=", turn)))!.id);
   };
 
   test("skipped steps do not run, a card with nothing left is refused, a later reply replaces drafts and a PR change blocks them", async () => {
@@ -284,7 +285,7 @@ describe("Do it", () => {
     assert.match(done.result ?? "", /skipped: Post the comment below/);
     const dec = await db.prepare("SELECT answer, answer_note FROM decisions WHERE id = 'app#1:scope'").get() as { answer: string; answer_note: string };
     assert.deepEqual({ ...dec }, { answer: "take", answer_note: "Because of the pack" });
-    assert.ok((await db.prepare("SELECT body FROM conversation_turns WHERE kind = 'system' AND number = 1 ORDER BY id DESC LIMIT 1").get() as { body: string }).body.endsWith("Note: Because of the pack"));
+    assert.ok((await db.get(db.k.selectFrom("conversation_turns").select("body").where("kind", "=", "system").where("number", "=", 1).orderBy("id", "desc").limit(1)))!.body.endsWith("Note: Because of the pack"));
 
     const ask = await propose(db, 3, [{ kind: "comment" }], null, "Which version?");
     await assert.rejects(() => doCard(db, ask, "op", { skip: [0] }), /no steps left/);
@@ -292,45 +293,45 @@ describe("Do it", () => {
     // A later Opus turn replaces the proposed draft.
     await propose(db, 3, [{ kind: "comment" }], null, "Which OS?");
     await assert.rejects(() => doCard(db, ask, "op"), /replaced by a later reply/);
-    assert.equal((await db.prepare("SELECT state FROM conversation_cards WHERE id = ?").get(ask))!.state, "replaced");
+    assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state").where("id", "=", ask)))!.state, "replaced");
 
     // After a push a card that does not rest on the code still runs; one with a drafted comment is refused.
     const light = await propose(db, 2, [{ kind: "label", label: "bugfix" }], null, null);
-    await db.prepare("UPDATE items SET head_oid = 'sha3' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ head_oid: "sha3" }).where("number", "=", 2));
     assert.equal((await doCard(db, light, "op", { querier: g.querier as never })).card.state, "done");
     const pr = await propose(db, 2, [{ kind: "comment" }], null, "Thanks.");
-    await db.prepare("UPDATE items SET head_oid = 'sha4' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ head_oid: "sha4" }).where("number", "=", 2));
     await assert.rejects(() => doCard(db, pr, "op", { querier: g.querier as never }), /PR changed since/);
-    assert.equal((await conv.cardView(db, await db.prepare("SELECT * FROM conversation_cards WHERE id = ?").get(pr) as never)).stale, "pr-changed");
+    assert.equal((await conv.cardView(db, await db.get(db.k.selectFrom("conversation_cards").selectAll().where("id", "=", pr)) as never)).stale, "pr-changed");
   });
 
   test("a message with ask false is stored without a pending state and queues no Opus reply", async () => {
     const db = await fresh();
     await conv.postMessage(db, req("operator", { repo: "app", n: "3" }, { text: "Note for later", ask: false }));
-    const row = await db.prepare("SELECT status, seq FROM conversation_turns WHERE repo = 'app' AND number = 3").get() as { status: string | null; seq: number | null };
+    const row = (await db.get(db.k.selectFrom("conversation_turns").select(["status", "seq"]).where("repo", "=", "app").where("number", "=", 3)))!;
     assert.equal(row.status, null);
     assert.ok(row.seq);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM conversation_turns WHERE status = 'pending'").get())!.n, 0);
+    assert.equal((await db.get(db.k.selectFrom("conversation_turns").select((eb) => eb.fn.countAll<number>().as("n")).where("status", "=", "pending")))!.n, 0);
     // A shared maintainer post rides in the next asked turn once.
-    await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('c1', 'app#1:scope', 'maint', ?, 'I think it is fine @x')").run(T0);
+    await db.run(db.k.insertInto("decision_comments").values({ id: "c1", decision_id: "app#1:scope", login: "maint", at: T0, body: "I think it is fine @x" }));
     await conv.postInclude(db, req("operator", { repo: "app", n: "1" }, { source: "decision-comment:c1", on: true }));
     await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Look at this" }));
-    const blocks = await db.prepare("SELECT block FROM conversation_turns WHERE repo = 'app' AND number = 1 AND kind = 'operator'").all() as { block: string }[];
+    const blocks = await db.all(db.k.selectFrom("conversation_turns").select("block").where("repo", "=", "app").where("number", "=", 1).where("kind", "=", "operator").orderBy("id"));
     assert.equal(blocks.filter((b) => b.block.includes('<included from="maintainer" login="maint"') && b.block.includes("I think it is fine ")).length, 1);
     assert.ok(!blocks[0]!.block.includes("@x"));
     // A source from another item's decision is refused.
     await db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at) VALUES ('app#3:scope', 'scope', 'app', 3, 'Scope?', '[]', ?)").run(T0);
-    await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('c3', 'app#3:scope', 'maint', ?, 'Other item')").run(T0);
+    await db.run(db.k.insertInto("decision_comments").values({ id: "c3", decision_id: "app#3:scope", login: "maint", at: T0, body: "Other item" }));
     await assert.rejects(() => conv.postInclude(db, req("operator", { repo: "app", n: "1" }, { source: "decision-comment:c3", on: true })), (e) => e instanceof HttpError && e.status === 400);
     // The next asked message carries nothing again.
-    await db.prepare("UPDATE conversation_turns SET status = 'answered' WHERE repo = 'app' AND number = 1").run();
+    await db.run(db.k.updateTable("conversation_turns").set({ status: "answered" }).where("repo", "=", "app").where("number", "=", 1));
     await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "And now?" }));
-    const last = await db.prepare("SELECT block FROM conversation_turns WHERE repo = 'app' AND number = 1 AND kind = 'operator' ORDER BY id DESC LIMIT 1").get() as { block: string };
+    const last = (await db.get(db.k.selectFrom("conversation_turns").select("block").where("repo", "=", "app").where("number", "=", 1).where("kind", "=", "operator").orderBy("id", "desc").limit(1)))!;
     assert.ok(last.block.includes("And now?") && !last.block.includes("<included"));
     await assert.rejects(() => conv.postInclude(db, req("operator", { repo: "app", n: "1" }, { source: "decision-comment:c1", on: false })), (e) => e instanceof HttpError && e.status === 409);
     // A question can follow at once.
     await conv.postMessage(db, req("operator", { repo: "app", n: "3" }, { text: "What do you think?" }));
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM conversation_turns WHERE status = 'pending' AND number = 3").get())!.n, 1);
+    assert.equal((await db.get(db.k.selectFrom("conversation_turns").select((eb) => eb.fn.countAll<number>().as("n")).where("status", "=", "pending").where("number", "=", 3)))!.n, 1);
   });
 });
 
@@ -360,7 +361,7 @@ describe("access", () => {
       () => conv.dismiss(db, req("viewer", { id: cardId })),
       () => conv.editCardText(db, req("viewer", { id: cardId }, { text: "x" })),
     ]) await assert.rejects(f, (e) => e instanceof HttpError && e.status === 403);
-    assert.equal((await db.prepare("SELECT state FROM conversation_cards").get())!.state, "proposed");
+    assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state")))!.state, "proposed");
     const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
     assert.equal(writes.length, 7);
     // Chat is operator-only; the card routes check who may settle in the handler (refused for the viewer above).
@@ -378,7 +379,7 @@ describe("stale cards", () => {
   test("review bots and our own note-line posts do not make a card stale; a person's comment does", async () => {
     const db = await fresh();
     const add = async (id: string, at: string, author: string, body: string) =>
-      await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('app', 1, ?, 'comment', ?, ?, ?)").run(id, author, at, body);
+      await db.run(db.k.insertInto("comments").values({ repo: "app", number: 1, id, kind: "comment", author, created_at: at, body }));
     await add("c1", "2026-01-02T00:00:00Z", "alice", "first");
     const seen = JSON.stringify({ head: null, last_comment: "c1" });
     assert.equal(await staleOf(db, "app", 1, seen), undefined);
