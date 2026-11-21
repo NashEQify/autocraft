@@ -25,7 +25,7 @@ export function dbPath(): string {
 
 // Columns added to existing tables after their first release. CREATE TABLE IF
 // NOT EXISTS leaves an older table as it was, so these are added here.
-const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
+export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "base_ref", "TEXT"],
   ["fast_track", "weight", "INTEGER NOT NULL DEFAULT 5"],
   ["items", "reactions_count", "INTEGER"],
@@ -265,7 +265,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
 // Indexes on added columns: they can only be created once the column exists.
 // Covering indexes on the hash columns let the planner compare stored hashes without reading item rows.
 // The trigger clears the hashes of an item whose hashed fields were edited without bringing its own (sync does).
-const ADDED_INDEXES = [
+export const ADDED_INDEXES = [
   // Covers the claims' read of the queued remote calls (src/remote/calls.ts queuedCalls) and the room count, so neither walks the overflow pages of each row's bundle.
   // remote_calls_queued, the same index without the pick columns, stays while the previous release may still read it
   // (INDEXED BY) during a rollout: the deploy migrates the database before the old processes restart. The next release drops it.
@@ -305,7 +305,7 @@ const ADDED_INDEXES = [
 ];
 
 // Columns removed after their first release.
-const DROPPED_COLUMNS: [table: string, column: string][] = [["classifications", "topics"], ["classifications", "area"], ["mcp_tokens", "cooloff_until"]];
+export const DROPPED_COLUMNS: [table: string, column: string][] = [["classifications", "topics"], ["classifications", "area"], ["mcp_tokens", "cooloff_until"]];
 
 /** Appends the stored review rows that the history does not hold yet. */
 export const HISTORY_COPY_SQL = `INSERT INTO main.opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, summary, why, public_review, claims, blocked_by, trigger, job_id)
