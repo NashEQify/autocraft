@@ -24,10 +24,11 @@ const closes = (w: World, fail?: (v: Record<string, unknown>) => boolean) => {
 };
 const dupGroup = async (w: World) => {
   await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-  await w.db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES ('app:dupegroup:7', 'app', 'model')").run();
-  for (const [n, role, target] of [[7, "keep", null], [8, "close", 7]] as const)
-    await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', ?, 'issue', ?, ?, ?, ?)").run(n, role, target, role, target);
-  await w.db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES ('app:dupegroup:7', 'accept', 8, 'close', 'Duplicate of #7.')").run();
+  await w.db.run(w.db.k.insertInto("dupe_groups").values({ decision_id: "app:dupegroup:7", repo: "app", source: "model" }));
+  await w.db.run(w.db.k.insertInto("dupe_group_items").values([[7, "keep", null], [8, "close", 7]].map(([n, role, target]) => ({
+    decision_id: "app:dupegroup:7", repo: "app", number: n as number, kind: "issue", role: role as string, target: target as number | null, base_role: role as string, base_target: target as number | null,
+  }))));
+  await w.db.run(w.db.k.insertInto("dupe_group_texts").values({ decision_id: "app:dupegroup:7", option: "accept", number: 8, step: "close", text: "Duplicate of #7." }));
   await w.answerDecision("app:dupegroup:7", "accept");
   await applyDuplicateAnswers(w.db, T1);
 };
