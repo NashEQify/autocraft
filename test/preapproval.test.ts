@@ -390,6 +390,18 @@ describe("queue items: an issue", () => {
     assert.ok(after.pending?.some((p) => p.number === 37));
     assert.ok(!after.pending?.some((p) => p.number === 36));
   });
+
+  test("a closing PR the board shows in no group, such as a declined one, does not hide the issue", async () => {
+    const w = await (await (await (await fresh()).issue(38)).pr(39)).review(39, { verdict: "take" });
+    await w.db.prepare("UPDATE items SET closing_issues = '[38]' WHERE repo = 'app' AND number = 39").run();
+    await w.answer(39, "hold");
+    const req = { query: new URLSearchParams("tab=merge&repos=all"), json: { item: "app#38" }, user: { login: OPERATOR, role: "operator", canWrite: async () => true, canRead: async () => true } } as unknown as Req;
+    await addFastTrack(w.db, OPERATOR, "app#38");
+    await refreshPlanCache(w.db);
+    const page = await queuePage(w.db, req);
+    assert.ok(page.mergeRows.some((r) => r.number === 39 && r.state === "declined"));
+    assert.deepEqual(page.pending?.filter((p) => p.number === 38).map((p) => [p.step, p.prs]), [["pr", [39]]]);
+  });
 });
 
 describe("queue items: who may add", () => {

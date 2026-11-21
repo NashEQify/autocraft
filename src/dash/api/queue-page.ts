@@ -161,6 +161,8 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
 async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "decisionId" | "reviewedAt">) => Promise<QueueOrigin>,
   fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>, reader: Reader, staff: boolean): Promise<QueuePendingRow[]> {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
+  // The queue rows the Merge board shows in a group: it leaves out declined and held ones that have no merge hold.
+  const shownRows = new Set(entries.filter((e) => e.held || !UNSHOWN_STATES.has(e.state)).map((e) => `${e.repo}#${e.number}`));
   type P = { repo: string; number: number; state: "fixup" | "review" | "ci"; title: string | null; author: string | null; breakdown: string | null };
   const rows = await db.prepare(`SELECT p.repo, p.number, p.state, i.title, i.author, r.breakdown FROM preapprovals p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
     LEFT JOIN item_rank r ON r.repo = p.repo AND r.number = p.number
@@ -181,7 +183,8 @@ async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, 
     JOIN main.items i ON i.repo = f.repo AND i.number = f.number LEFT JOIN item_rank r ON r.repo = f.repo AND r.number = f.number
     LEFT JOIN item_plans pl ON pl.repo = f.repo AND pl.number = f.number
     WHERE i.state = 'OPEN' AND i.kind = 'issue' ORDER BY f.weight DESC, f.id`).all() as F[];
-  const listed = (repo: string, n: number) => queued.has(`${repo}#${n}`) || seen.has(`${repo}#${n}`);
+  const listed = (repo: string, n: number) => shownRows.has(`${repo}#${n}`) || seen.has(`${repo}#${n}`);
+  const closingOf = fast.length ? await openClosingIndex(db) : new Map<string, number[]>();
   const nextOf = (view: string | null): string | null => {
     try {
       const v = JSON.parse(view ?? "null") as { next?: unknown } | null;
@@ -192,7 +195,7 @@ async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, 
   };
   const issues = await flatMapSeq(fast, async (f): Promise<QueuePendingRow[]> => {
     if (!want(f.repo, f.number)) return [];
-    const closing = await openPrsClosing(db, f.repo, f.number);
+    const closing = closingOf.get(`${f.repo}#${f.number}`) ?? [];
     if (closing.some((n) => listed(f.repo, n))) return [];
     return [{
       repo: f.repo, number: f.number, kind: "issue", title: f.title ?? "", author: f.author ?? "", size: sizeOf(f.breakdown), step: closing.length ? "pr" : "build",
@@ -336,6 +339,26 @@ export async function openPrsClosing(db: Db, repo: string, issue: number): Promi
     .map((p) => p.number)
     .sort((a, b) => a - b);
 }
+
+/** The open PRs that close each issue, by `repo#issue`, in number order: `openPrsClosing` for every issue from one read. */
+async function openClosingIndex(db: Db): Promise<Map<string, number[]>> {
+  const rows = await db.prepare("SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND state = 'OPEN' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[];
+  const out = new Map<string, number[]>();
+  for (const p of rows) {
+    let issues: unknown[];
+    try {
+      issues = JSON.parse(p.closing_issues) as unknown[];
+    } catch {
+      continue;
+    }
+    for (const n of new Set(issues)) if (typeof n === "number") out.set(`${p.repo}#${n}`, [...(out.get(`${p.repo}#${n}`) ?? []), p.number]);
+  }
+  for (const l of out.values()) l.sort((a, b) => a - b);
+  return out;
+}
+
+/** Queue states the Merge board puts in no group unless the PR has a merge hold (web/src/modules/queue/MergeBoard.tsx: neither a step nor stopped). */
+const UNSHOWN_STATES = new Set<string>(["declined", "held-duplicate", "held-backlog", "merged"]);
 
 /** What Queue items does, as the refusal of `settleRefusal` names it. */
 export const queueWhat = (repo: string): string => `queues items on ${repo}`;
