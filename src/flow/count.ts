@@ -12,7 +12,7 @@
 // Keys starting "max." are combined with max, not summed, when repos add up.
 // Item-backed branches also return their refs ("repo#n") for the Items
 // browser's flow filter.
-import { latestRun, settledTable } from "../classify/settled.ts";
+import { latestRun, settledOn, settledTable } from "../classify/settled.ts";
 import { isScope } from "../decide/select.ts";
 import { cachedQueue, dueActions, dueRefs } from "../core/plan-read.ts";
 import type { QueueState } from "../core/plan.ts";
@@ -81,12 +81,10 @@ export class Ctx {
   /** Every open item with its settled status in the current run. */
   async open(): Promise<OpenRow[]> {
     if (!this.openRows) {
-      this.openRows = await this.db.read(async () => {
-        await settledTable(this.db, this.run);
-        return await this.db.prepare(`SELECT i.repo, i.number, i.kind, s.status, s.referee_sure, s.jev_label, s.haiku_label FROM items i
-          LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number
-          WHERE i.state = 'OPEN' ${this.andRepo("i.repo")}`).all(this.rp) as OpenRow[];
-      });
+      await settledTable(this.db, this.run);
+      this.openRows = await this.db.prepare(`SELECT i.repo, i.number, i.kind, s.status, s.referee_sure, s.jev_label, s.haiku_label FROM items i
+        LEFT JOIN item_settled s ON ${settledOn(this.run, "s")}
+        WHERE i.state = 'OPEN' ${this.andRepo("i.repo")}`).all(this.rp) as OpenRow[];
     }
     return this.openRows;
   }

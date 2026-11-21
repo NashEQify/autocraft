@@ -7,6 +7,7 @@ import type { Args, Engine, EngineContext, Op, Tx } from "./handle.ts";
 import { callSite, siteError, withoutInsertId } from "./handle.ts";
 import type { DB, DbRole, Row } from "./index.ts";
 import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, type ParsedParams } from "./params.ts";
+import { plainSchema, SCOPED_SCHEMA } from "./scoped.ts";
 
 /** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
 export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
@@ -26,6 +27,16 @@ export interface PgOptions {
   busyTimeoutMs?: number;
   /** Longest a statement may run; 0 for no limit. Default 120 s. */
   statementTimeoutMs?: number;
+  /** The app schema of a scoped handle (src/db/scoped.ts): its connections put the scoped views first on the search path. */
+  scope?: string;
+}
+
+/** `url` with the startup option that puts the scoped views before the tables of `schema`, after any options it has. */
+function scopedUrl(url: string, schema: string): string {
+  const u = new URL(url);
+  const own = u.searchParams.get("options");
+  u.searchParams.set("options", `${own ? `${own} ` : ""}-c search_path=${SCOPED_SCHEMA},${plainSchema(schema)}`);
+  return u.toString();
 }
 
 const LOCAL_HOSTS = new Set(["", "localhost", "[::1]"]);
@@ -79,7 +90,7 @@ function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
 export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, opts: PgOptions, ctx: EngineContext): Engine {
   const pool = new pg.Pool({
-    connectionString: pgConnectionString(url),
+    connectionString: pgConnectionString(opts.scope ? scopedUrl(url, opts.scope) : url),
     max: POOL_MAX[opts.role],
     allowExitOnIdle: true,
     application_name: `autocraft-${opts.role}`,
@@ -125,7 +136,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     let p = parsed.get(text);
     if (p) parsed.delete(text);
     else {
-      p = parseParams(rewriteForPostgres(text));
+      p = parseParams(rewriteForPostgres(text, opts.scope));
       if (parsed.size >= PARSE_CACHE) parsed.delete(parsed.keys().next().value!);
     }
     parsed.set(text, p);
@@ -138,7 +149,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     return f(tx.conn);
   };
 
-  return {
+  const engine: Engine = {
     dialect: "postgres",
     kysely,
     exec: async (op: Op, text: string, args: Args, tx: Tx | undefined) => {
@@ -148,8 +159,15 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
       if (op === "all") return [...r.rows];
       return withoutInsertId(Number(r.numAffectedRows ?? 0n));
     },
-    script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text))))),
+    script: async (text, tx) => void (await on(tx, (conn) => conn.executeQuery(raw(rewriteScriptForPostgres(text, opts.scope))))),
     configure: (b, mode) => (mode === "read" ? b.setIsolationLevel("repeatable read").setAccessMode("read only") : b.setIsolationLevel("read committed")),
+    // A pool of its own: the search path is a startup parameter of each connection, never a session SET.
+    scope: async () => {
+      if (opts.scope) return engine;
+      const r = await on(undefined, (conn) => conn.executeQuery<{ s: string }>(raw("SELECT current_schema() AS s")));
+      return postgresEngine(k, pg, url, { ...opts, scope: r.rows[0]!.s }, ctx);
+    },
     close: () => kysely.destroy(),
   };
+  return engine;
 }

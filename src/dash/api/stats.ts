@@ -1,5 +1,5 @@
 // Shared queries for the Progress, Repo and Run and cost pages.
-import { latestRun, settledTable } from "../../classify/settled.ts";
+import { latestRun, settledOn, settledTable } from "../../classify/settled.ts";
 import type { Db } from "../../db/index.ts";
 
 // Latest stage per item, from the item_stage table the stages trigger maintains.
@@ -28,9 +28,9 @@ export type FunnelRow = {
 
 // "classified" counts settled type labels (src/classify/settled.ts) in the latest run.
 export async function funnelByRepo(db: Db, repo?: string): Promise<FunnelRow[]> {
-  return await db.read(async () => {
-    await settledTable(db, await latestRun(db));
-    return (await db.prepare(`WITH ${latestCte(repo)}
+  const run = await latestRun(db);
+  await settledTable(db, run);
+  return (await db.prepare(`WITH ${latestCte(repo)}
       SELECT i.repo, COUNT(*) AS open,
         SUM(st.status = 'settled') AS classified, SUM(st.status = 'waiting') AS second_opinion, SUM(st.status = 'disagree') AS disagreement,
         SUM(COALESCE(l.reviewed, 0)
@@ -38,13 +38,12 @@ export async function funnelByRepo(db: Db, repo?: string): Promise<FunnelRow[]> 
         SUM(l.stage IN ('take', 'verified') OR (l.stage LIKE 'verify-%' AND l.stage <> 'verify-failed')) AS take, SUM(l.stage = 'hold') AS hold, SUM(l.stage = 'close') AS close,
         SUM(l.stage = 'needs-decision') AS needs_decision, SUM(l.stage = 'batched') AS batched
       FROM items i LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
-      LEFT JOIN temp.item_settled st ON st.repo = i.repo AND st.number = i.number
+      LEFT JOIN item_settled st ON ${settledOn(run, "st")}
       WHERE i.state = 'OPEN' ${repo ? "AND i.repo = :repo" : ""}
       GROUP BY i.repo`).all(p(repo))).map((r) => ({
         ...r, classified: r.classified ?? 0, second_opinion: r.second_opinion ?? 0, disagreement: r.disagreement ?? 0,
         take: r.take ?? 0, hold: r.hold ?? 0, close: r.close ?? 0, needs_decision: r.needs_decision ?? 0, batched: r.batched ?? 0,
       })) as FunnelRow[];
-  });
 }
 
 export type DoneRow = { repo: string; merged_pipeline: number; closed_pipeline: number; closed_others: number; total: number };

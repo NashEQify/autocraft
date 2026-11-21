@@ -5,6 +5,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import type { Args, Engine, EngineContext, Op, Tx } from "./handle.ts";
 import { callSite, siteError } from "./handle.ts";
 import type { DB, Row, RunResult } from "./index.ts";
+import { sqliteScopeSql } from "./scoped.ts";
 
 /** Prepared statements kept per connection: preparing the same text again costs more than running it. */
 const CACHE_SIZE = 1000;
@@ -157,16 +158,21 @@ export function sqliteEngine(k: typeof K, sync: DatabaseSync, ctx: EngineContext
   // connection first, and so waits for an open transaction to end.
   const held = <T>(tx: Tx | undefined, f: () => T): Promise<T> => (tx ? (async () => f())() : kysely.getExecutor().provideConnection(async () => f()));
 
-  return {
+  const engine: Engine = {
     dialect: "sqlite",
     kysely,
     sync,
     exec: (op: Op, text: string, args: Args, tx: Tx | undefined) => held(tx, () => adapter[op](text, args)),
     script: (text, tx) => held(tx, () => adapter.exec(text)),
+    scope: async () => {
+      await held(undefined, () => adapter.exec(sqliteScopeSql()));
+      return engine;
+    },
     configure: (b, mode) => (mode === "read" ? b.setAccessMode("read only") : b),
     close: async () => {
       await kysely.destroy();
       adapter.close();
     },
   };
+  return engine;
 }
