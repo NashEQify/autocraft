@@ -9,6 +9,7 @@ import { PilotError, setRepoPipeline } from "./pilot.ts";
 import { AppReadError, readEnv } from "./github/read.ts";
 import type { Db } from "./db/index.ts";
 import { openDb } from "./db/open.ts";
+export { SHADOWED_TABLES } from "./db/scoped.ts";
 
 export class RepoError extends Error {}
 
@@ -109,28 +110,9 @@ export async function listAll(db: Db): Promise<RepoRow[]> {
     ORDER BY 3 DESC, 1`).all() as RepoRow[];
 }
 
-// Temp views that shadow the mirror and work tables on this connection, so every
-// dashboard query sees tracked repos only. Writers (sync, CLI) use plain
-// connect() and never call this. Rows of untracked repos stay in the database.
-// Views carry rowid explicitly because queries order by it. Code that must see
-// everything or write through a shadowed name qualifies it with `main.`.
-const SCOPED: [string, string][] = [
-  ["repos", "name"], ["items", "repo"], ["comments", "repo"], ["stages", "repo"], ["classifications", "repo"],
-];
-/** Every table name the scoped connection shadows with a view; writes to them go through `main.`. */
-export const SHADOWED_TABLES: readonly string[] = [...SCOPED.map(([t]) => t), "decisions", "token_usage"];
+/** The dashboard's, runner's and CLI jobs' view of the database: tracked repos only (src/db/scoped.ts). */
 export async function scopeToTracked(db: Db): Promise<void> {
-  const inList = "IN (SELECT name FROM main.tracked_repos)";
-  for (const [t, col] of SCOPED) {
-    await db.script(`CREATE TEMP VIEW IF NOT EXISTS ${t} AS SELECT rowid AS rowid, * FROM main.${t} WHERE ${col} ${inList}`);
-  }
-  // A batch (repo NULL) is hidden when any of its items is in an untracked repo.
-  await db.script(`CREATE TEMP VIEW IF NOT EXISTS decisions AS SELECT rowid AS rowid, * FROM main.decisions
-    WHERE repo ${inList} OR (repo IS NULL AND NOT EXISTS (
-      SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') NOT ${inList}))`);
-  await db.script(`CREATE TEMP VIEW IF NOT EXISTS token_usage AS SELECT rowid AS rowid, * FROM main.token_usage
-    WHERE repo IS NULL OR repo ${inList}`);
+  await db.scope();
 }
 
 async function list(): Promise<void> {

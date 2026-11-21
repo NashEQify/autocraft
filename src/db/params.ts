@@ -111,15 +111,10 @@ function codeOnly(text: string): string {
 }
 
 /**
- * Rewrites SQLite-only statement text for Postgres: drops the `main.`/`temp.` schema prefixes and turns
- * `INSERT OR IGNORE INTO ...` into `INSERT INTO ... ON CONFLICT DO NOTHING` (before a trailing RETURNING).
- * `INSERT OR REPLACE` has no mechanical equivalent and throws.
- */
-/**
  * `rewriteForPostgres` for each statement of a multi-statement script (statements split on `;` in code only). A script
  * with dollar-quoted bodies (plpgsql) is Postgres DDL already and passes through as written.
  */
-export function rewriteScriptForPostgres(text: string): string {
+export function rewriteScriptForPostgres(text: string, mainSchema?: string): string {
   const code = codeOnly(text);
   if (/\$[A-Za-z_]*\$/.test(code)) return text;
   const parts: string[] = [];
@@ -127,16 +122,24 @@ export function rewriteScriptForPostgres(text: string): string {
   for (let i = 0; i <= code.length; i++) {
     if (i < code.length && code[i] !== ";") continue;
     const stmt = text.slice(from, i);
-    parts.push(stmt.trim() ? rewriteForPostgres(stmt) : stmt);
+    parts.push(stmt.trim() ? rewriteForPostgres(stmt, mainSchema) : stmt);
     from = i + 1;
   }
   return parts.join(";");
 }
 
-export function rewriteForPostgres(text: string): string {
+/**
+ * Rewrites SQLite-only statement text for Postgres: drops the `temp.` schema prefix and the `main.` one (or, given
+ * `mainSchema`, the app schema of a scoped handle, names `main.x` as `<mainSchema>.x`, past the scoped views), and turns
+ * `INSERT OR IGNORE INTO ...` into `INSERT INTO ... ON CONFLICT DO NOTHING` (before a trailing RETURNING).
+ * `INSERT OR REPLACE` has no mechanical equivalent and throws.
+ */
+export function rewriteForPostgres(text: string, mainSchema?: string): string {
   const code = codeOnly(text);
   const edits: { from: number; to: number; with: string }[] = [];
-  for (const m of code.matchAll(/(?<![A-Za-z0-9_.$])(?:main|temp)\s*\./gi)) edits.push({ from: m.index, to: m.index + m[0].length, with: "" });
+  for (const m of code.matchAll(/(?<![A-Za-z0-9_.$])(main|temp)\s*\./gi)) {
+    edits.push({ from: m.index, to: m.index + m[0].length, with: mainSchema && m[1]!.toLowerCase() === "main" ? `${mainSchema}.` : "" });
+  }
   const head = /^\s*INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\b/i.exec(code);
   const describe = () => text.replace(/\s+/g, " ").trim().slice(0, 120);
   if (head) {

@@ -36,6 +36,8 @@ export interface Engine {
   /** Runs one raw statement: on `tx`'s connection when given, otherwise on a connection of its own. */
   exec(op: Op, text: string, args: Args, tx: Tx | undefined): Promise<Row | Row[] | RunResult | undefined>;
   script(text: string, tx: Tx | undefined): Promise<void>;
+  /** An engine whose statements see tracked repos only (src/db/scoped.ts): this one with its views, or a new one. */
+  scope(): Promise<Engine>;
   /** The transaction settings for `mode` (the driver turns them into its BEGIN). */
   configure(b: TransactionBuilder<DB>, mode: Tx["mode"]): TransactionBuilder<DB>;
   close(): Promise<void>;
@@ -81,7 +83,7 @@ const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
-  readonly #engine: Engine;
+  #engine: Engine;
   readonly #als = new AsyncLocalStorage<Tx>();
   readonly #observers = new Set<(e: DbEvent) => void>();
   readonly #warned = new Set<string>();
@@ -162,8 +164,18 @@ export class Handle implements Db {
     return r;
   }
 
-  inTransaction(): boolean {
-    return this.#current() !== undefined;
+  inTransaction(mode?: Tx["mode"]): boolean {
+    const tx = this.#current();
+    return tx !== undefined && (mode === undefined || tx.mode === mode);
+  }
+
+  async scope(): Promise<void> {
+    if (this.#als.getStore()) throw new Error("db.scope inside a transaction");
+    const next = await this.#engine.scope();
+    if (next === this.#engine) return;
+    const old = this.#engine;
+    this.#engine = next;
+    await old.close();
   }
 
   script(text: string): Promise<void> {

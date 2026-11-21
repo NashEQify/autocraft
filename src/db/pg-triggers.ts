@@ -16,6 +16,7 @@ import { blockerFill, blockerSync, PG_BULK, PLAN_TABLES, planTriggers } from "..
 import { pgExpr } from "../core/pg-expr.ts";
 import { applyPgSchema, pgSchemaStamp, type PgQueryable } from "./pg-migrate.ts";
 import { translateSqlite } from "./pg-schema.ts";
+import { pgScopeSql, SCOPED_SCHEMA } from "./scoped.ts";
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 type Op = (typeof OPS)[number];
@@ -144,9 +145,25 @@ export function pgColumns(rows: { t: string; c: string }[]): Map<string, string[
   return out;
 }
 
-/** The schema stamp a migrated Postgres database stores in settings: the schema file's stamp and the trigger generators. */
+/**
+ * Pins the search path of every plpgsql function in the app schema (trigger bodies and their helpers) to that schema, so a
+ * trigger fired from a scoped handle (src/db/scoped.ts) reads the tables, as SQLite resolves a trigger's names in its
+ * own schema. SQL-language functions are left alone: a SET clause would stop them being inlined.
+ */
+const PIN_SEARCH_PATH = `DO $$
+DECLARE f record;
+BEGIN
+  FOR f IN SELECT p.oid::regprocedure AS sig FROM pg_proc p JOIN pg_language l ON l.oid = p.prolang
+    WHERE p.pronamespace = current_schema()::regnamespace AND l.lanname = 'plpgsql'
+  LOOP
+    EXECUTE format('ALTER FUNCTION %s SET search_path = %I', f.sig, current_schema());
+  END LOOP;
+END $$;`;
+
+/** The schema stamp a migrated Postgres database stores in settings: the schema file's stamp and the trigger and view generators. */
 export function pgStamp(): string {
-  return createHash("sha256").update(pgSchemaStamp()).update(pgTriggerSql()).update(JSON.stringify(BOOKKEEPING_COLUMNS)).digest("hex").slice(0, 16);
+  return createHash("sha256").update(pgSchemaStamp()).update(pgTriggerSql()).update(pgScopeSql("app")).update(PIN_SEARCH_PATH)
+    .update(JSON.stringify(BOOKKEEPING_COLUMNS)).digest("hex").slice(0, 16);
 }
 
 /** A connection that returns rows: a pg Client. */
@@ -172,6 +189,12 @@ export async function migratePg(client: PgClient): Promise<void> {
   const rows = async (sql: string) => (await client.query(sql)).rows;
   await applyPgSchema(client, async () => {
     await client.query(pgTriggerSql(pgColumns(await rows(PG_COLUMNS_SQL) as { t: string; c: string }[])));
+    await client.query(pgScopeSql((await rows("SELECT current_schema() AS s"))[0]!.s as string));
+    await client.query(PIN_SEARCH_PATH);
     await client.query("INSERT INTO settings (key, value) VALUES ('schema_stamp', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [stamp]);
-  }, { unless: async () => (await storedPgStamp(rows)) === stamp });
+  }, {
+    unless: async () => (await storedPgStamp(rows)) === stamp,
+    // The views name the tables' columns: dropped first, so the schema may change any column, and recreated after it.
+    before: async () => void (await client.query(`DROP SCHEMA IF EXISTS ${SCOPED_SCHEMA} CASCADE`)),
+  });
 }

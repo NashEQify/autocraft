@@ -104,8 +104,15 @@ export interface Db {
    * Attempts in one transaction run one at a time, like its statements.
    */
   attempt<T>(fn: () => Promise<T>): Promise<T>;
-  /** Whether a transaction is open in the current async context. */
-  inTransaction(): boolean;
+  /** Whether a transaction is open in the current async context; with `mode`, one of that kind (a read snapshot or a write). */
+  inTransaction(mode?: "read" | "write"): boolean;
+  /**
+   * Makes this handle see tracked repos only: views filtered to tracked_repos shadow the mirror and work tables
+   * (src/db/scoped.ts), and writes to those tables name them with `main.`. On SQLite they are TEMP views on the
+   * connection; on Postgres the handle moves to connections whose search path puts the views first. Call it right after
+   * opening, outside any transaction.
+   */
+  scope(): Promise<void>;
   /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
   script(text: string): Promise<void>;
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */

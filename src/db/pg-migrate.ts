@@ -37,11 +37,13 @@ export async function withMigrationLock<T>(client: PgQueryable, fn: () => Promis
 /**
  * Applies the schema under the migration lock. `then` runs in the same transaction after it (triggers generated at
  * runtime, value migrations, writing the stored stamp), so a concurrent opener sees all of it or none. `unless` runs first
- * under the lock: true skips everything (another opener migrated while this one waited).
+ * under the lock: true skips everything (another opener migrated while this one waited). `before` runs just before the
+ * schema.
  */
-export async function applyPgSchema(client: PgQueryable, then?: () => Promise<void>, opts: { unless?: () => Promise<boolean> } = {}): Promise<void> {
+export async function applyPgSchema(client: PgQueryable, then?: () => Promise<void>, opts: { unless?: () => Promise<boolean>; before?: () => Promise<void> } = {}): Promise<void> {
   await withMigrationLock(client, async () => {
     if (await opts.unless?.()) return;
+    await opts.before?.();
     // ADD COLUMN IF NOT EXISTS and friends report every skipped object as a notice.
     await client.query("SET LOCAL client_min_messages = warning");
     await client.query(pgSchemaSql());
