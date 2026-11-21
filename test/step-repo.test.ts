@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { SCRATCH } from "./scratch.ts";
 import { everySeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+import { inList } from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));
 
@@ -19,7 +20,7 @@ const { setStepParallel } = await import("../src/runner/concurrency.ts");
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "step-repo-"));
 const db = await connectDb(join(dir, "t.db"));
-for (const r of ["a", "b"]) await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES (?, 1)").run(r);
+for (const r of ["a", "b"]) await db.run(db.k.insertInto("tracked_repos").values({ name: r, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
 const make = (maxJobs?: number) => new Runner({ db, dbTarget: join(dir, "t.db"), logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, ...(maxJobs ? { maxJobs } : {}) });
 const runners: InstanceType<typeof Runner>[] = [];
 after(async () => { for (const r of runners) await r.stop(); await db.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -50,7 +51,7 @@ test("step_parallel: two repos run together with none, wait for each other with 
   await r.tick();
   assert.equal(await state(d.id), "queued", "with step_parallel 1 the second repo waits");
   await settle(r, [c.id, d.id]);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'step-parallel'").get())!.n, 2);
+  assert.equal((await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", "step-parallel")))!.n, 2);
 });
 
 test("at the process cap a queued security-class job starts before an older normal job", async () => {
@@ -67,7 +68,7 @@ test("at the process cap a queued security-class job starts before an older norm
 
 test("a proposal reserves the step it is gated on: at step_parallel 1 another repo's job of that step waits", async () => {
   const { applyProposals, detectAutopilot } = await import("../src/runner/autopilot.ts");
-  await db.script("DELETE FROM jobs");
+  await db.run(db.k.deleteFrom("jobs"));
   await setStepParallel(db, 1, "test");
   const lanes = [
     { name: "first", steps: ["test-repo"], detect: async () => [{ step: "test-repo", params: { repo: "a" }, gate: { step: "test-urgent", params: { repo: "a" } } }] },
@@ -75,6 +76,6 @@ test("a proposal reserves the step it is gated on: at step_parallel 1 another re
   ];
   const found = await detectAutopilot(db, { lanes });
   const ids = await applyProposals(db, found.proposals, { lanes });
-  assert.deepEqual((await db.prepare("SELECT step, repo FROM jobs WHERE id IN (" + ids.join(",") + ")").all() as { step: string; repo: string }[]).map((j) => `${j.step}:${j.repo}`), ["test-repo:a"]);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM jobs").get())!.n, 1);
+  assert.deepEqual((await db.all(db.k.selectFrom("jobs").select(["step", "repo"]).where(inList(db, "id", ids, "bigint")))).map((j) => `${j.step}:${j.repo}`), ["test-repo:a"]);
+  assert.equal((await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 1);
 });
