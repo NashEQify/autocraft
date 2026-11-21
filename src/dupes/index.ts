@@ -42,10 +42,10 @@ export function defaultDeps(db: Db): DupesDeps {
 
 /** Items to scan, from the Plans: those with a stored vector at their current text and no scan at it. */
 async function scanItems(db: Db, model: string, max: number): Promise<ScanItem[]> {
-  const rows = await mapSeq((await plannedItems(db, "dupes", { model })).filter((p) => p.action.params?.scan).slice(0, max), async (p) =>
+  // ScanItem.embed_hash is typed non-null; rows are returned as stored, a missing row or NULL hash included
+  return await mapSeq((await plannedItems(db, "dupes", { model })).filter((p) => p.action.params?.scan).slice(0, max), async (p) =>
     await db.get(db.k.selectFrom("items").select(["repo", "number", "kind", "state", "embed_hash", "closed_at", "merged_at", "closing_issues"])
-      .where("repo", "=", p.facts.repo).where("number", "=", p.facts.number).where("embed_hash", "is not", null).$narrowType<{ embed_hash: string }>()));
-  return rows.filter((r): r is ScanItem => !!r);
+      .where("repo", "=", p.facts.repo).where("number", "=", p.facts.number)) as ScanItem);
 }
 
 /**
