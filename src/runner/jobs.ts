@@ -1,7 +1,7 @@
 // The jobs table: requests from the dashboard, the CLI and the autopilot,
 // state written by the runner. Shared by the API, the runner and the CLI.
 import { filtered, hiddenTest, isHiddenRepo, type HiddenRepos } from "../hidden-sql.ts";
-import { closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
 import type { Job, JobDetail,  JobFilter, JobList, JobParams, JobState, JobUsage } from "../../web/src/api/types.ts";
 import { trackedNames } from "../repos.ts";
 import { accountLabelsByJob, failRunning } from "../agents/runs.ts";
@@ -11,9 +11,10 @@ import { shownLookup } from "../dash/api/shown.ts";
 import { blankIfHidden } from "../dash/api/visible.ts";
 import { withdrawJobCalls } from "../remote/calls.ts";
 import { untakenTest, type UntakenTest } from "./concurrency.ts";
+import { MAX_RESUMES } from "./resuming.ts";
 
 export const JOB_STATES: JobState[] = ["queued", "running", "done", "failed", "cancelled"];
-/** Error text of jobs ended by a runner stop or restart; the autopilot does not count them as failures. */
+/** Error text of jobs a runner stop or restart ended without resuming them (resumeJob); the autopilot does not count them as failures. */
 export const RUNNER_STOPPED = "The runner stopped while this job ran; start it again if needed.";
 /** Error of a job the runner stopped for running past its step's deadline; set when the stop is asked, so the job can finish its current item. */
 export const DEADLINE_ERROR = /^stopped: (ran past|no progress for) /;
@@ -27,11 +28,11 @@ export class JobError extends Error {
   }
 }
 
-type JobRow = {
+export type JobRow = {
   repo: string | null; id: number; step: string; params: string; requested_by: string; requested_at: string; state: JobState;
   started_at: string | null; ended_at: string | null; progress: string | null; summary: string | null; error: string | null;
   usage: string | null; log_path: string | null; pid: number | null; cancel_requested_at: string | null; cancel_requested_by: string | null;
-  items: number | null;
+  items: number | null; acted: number | null; resumes: number | null;
 };
 
 function parseJson<T>(s: string | null, fallback: T): T {
@@ -141,7 +142,15 @@ export async function requestCancel(db: Db, id: number, by: string): Promise<Job
   if (r.state === "queued") {
     const done = (await db.prepare("UPDATE jobs SET state = 'cancelled', ended_at = ?, cancel_requested_at = ?, cancel_requested_by = ? WHERE id = ? AND state = 'queued'")
       .run(t, t, by, id)).changes;
-    if (done) return await getJob(db, id);
+    if (done) {
+      // A job waiting to resume leaves its earlier run's remote calls behind.
+      if (Number(r.resumes) > 0) {
+        await withdrawJobCalls(db, "The job was cancelled.", id);
+        await failRunning(db, "The job was cancelled.", id);
+        await db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(id);
+      }
+      return await getJob(db, id);
+    }
   }
   const marked = (await db.prepare("UPDATE jobs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), cancel_requested_by = COALESCE(cancel_requested_by, ?) WHERE id = ? AND state = 'running'")
     .run(t, by, id)).changes;
@@ -224,22 +233,53 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   return { ...(await toJobs(db, [r]))[0]!, items, ...tail, log: tail.log && hidden.length ? tail.log.split("\n").filter((l) => !l || blankIfHidden(l, hidden)).join("\n") : tail.log };
 }
 
-/** Records the end of a job whose process closed: done on exit 0, cancelled when a cancel was asked, else failed with the reason. */
-export async function endJob(db: Db, id: number, code: number | null, signal: NodeJS.Signals | null, spawnError: string | null, stopping = false): Promise<{ state: "done" | "failed" | "cancelled"; error: string | null } | null> {
+/**
+ * Puts a running job that a runner stop or restart interrupted back in the queue under the same id: it runs again from the
+ * start, with a fresh deadline. Its remote calls stay for the resumed run to adopt (enqueueCall), with their agent runs;
+ * the stopped process's local model calls, model-queue waits and work leases end. False, and nothing changes, when it may
+ * not resume: a cancel was asked, it was told to stop at its deadline, it resumed MAX_RESUMES times already, or it is a
+ * command-line run (`requested_by` cli: its process belongs to the command, which records its end).
+ */
+export async function resumeJob(db: Db, id: number, why: string): Promise<boolean> {
+  const r = await db.prepare(`UPDATE jobs SET state = 'queued', resumes = resumes + 1, started_at = NULL, ended_at = NULL, pid = NULL, progress = NULL, error = NULL
+    WHERE id = ? AND state = 'running' AND cancel_requested_at IS NULL AND resumes < ? AND requested_by <> 'cli'
+      AND (error IS NULL OR (error NOT LIKE 'stopped: ran past %' AND error NOT LIKE 'stopped: no progress for %')) RETURNING resumes, log_path`)
+    .get(id, MAX_RESUMES) as { resumes: number; log_path: string | null } | undefined;
+  if (!r) return false;
+  await failRunning(db, "The runner stopped during this call.", id);
+  await db.prepare("DELETE FROM model_waits WHERE job_id = ?").run(id);
+  await releaseJob(db, id);
+  if (r.log_path) {
+    try { appendFileSync(r.log_path, `${now()} ${why}; the job is queued to resume after the restart (resume ${r.resumes} of ${MAX_RESUMES})\n`); } catch { /* the log is gone */ }
+  }
+  return true;
+}
+
+/**
+ * Records the end of a job whose process closed: done on exit 0, cancelled when a cancel was asked, else failed with the
+ * reason. With `stopping` (the runner stops) a job that the stop ended resumes (resumeJob): state `queued`.
+ */
+export async function endJob(db: Db, id: number, code: number | null, signal: NodeJS.Signals | null, spawnError: string | null, stopping = false): Promise<{ state: "done" | "failed" | "cancelled" | "queued"; error: string | null } | null> {
   const row = await jobRow(db, id);
   if (!row || row.state !== "running") return null;
+  const finished = code === 0 && !DEADLINE_ERROR.test(row.error ?? "");
+  // Stopped by the stop: the process exited on the stop signal (exec.ts exits 143) or was killed. Another exit is the job's own result.
+  const stopped = stopping && (code === 143 || signal !== null);
+  if (stopped && !finished && !row.cancel_requested_at && await resumeJob(db, id, "the runner stopped")) return { state: "queued", error: null };
   let state: "done" | "failed" | "cancelled";
   let error: string | null = row.error;
   if (row.cancel_requested_at) state = "cancelled";
-  else if (code === 0 && !DEADLINE_ERROR.test(error ?? "")) state = "done";
+  else if (finished) state = "done";
   else {
     state = "failed";
-    if (stopping) error = RUNNER_STOPPED;
+    if (stopped) error = RUNNER_STOPPED;
     error ??= spawnError ?? (signal ? `The job's process ended on ${signal}.` : `The job's process exited with code ${code}.`);
   }
   await failRunning(db, "The job ended during this call.", id);
   await db.prepare("DELETE FROM model_waits WHERE job_id = ?").run(id);
   await withdrawJobCalls(db, "The job ended during this call.", id);
+  // Replies an earlier run of the job left unread are not kept.
+  await db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(id);
   await releaseJob(db, id);
   await db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = ?, progress = CASE WHEN ? = 'done' THEN NULL ELSE progress END WHERE id = ?")
     .run(state, now(), state === "failed" ? error : null, state, id);

@@ -21,6 +21,7 @@ import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, openGroupExpr, UNSURE_AT_SQL, unsureAtQuery } from "../src/core/rules.ts";
 import { CURRENT_HEAD_SQL, currentHeadExpr } from "../src/verify/results.ts";
+import { KEPT_RUNS, keptRunsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";
 
 const T = "2026-01-01T00:00:00.000Z", LATER = "2026-01-03T00:00:00.000Z", FAR = "2099-01-01T00:00:00.000Z";
@@ -117,6 +118,14 @@ async function fixture(db: Db): Promise<void> {
     call(7, { state: "leased", user_login: "DAVE" }),
     call(8, { state: "leased", user_login: "erin" }),
   ]));
+  // Only job 1 waits to resume: its open or answered, unread calls keep their runs.
+  const job = (id: number, state: string, resumes: number) => ({ id, step: "s", params: "{}", requested_by: "pipeline", requested_at: T, state, resumes });
+  await ins(db.k.insertInto("main.jobs").values([job(1, "queued", 1), job(2, "queued", 0), job(3, "running", 1)]));
+  const jobCall = (id: number, job_id: number, run_id: number | null, state: string, consumed_at: number | null = null) => ({ ...call(id, { state }), job_id, run_id, consumed_at });
+  await ins(db.k.insertInto("main.remote_calls").values([
+    jobCall(9, 1, 1, "queued"), jobCall(10, 1, 2, "done", NOW), jobCall(11, 1, 2, "failed"), jobCall(12, 1, null, "leased"),
+    jobCall(13, 2, 3, "queued"), jobCall(14, 3, 3, "leased"),
+  ]));
 
   const command = (comment_id: number, state: string, reply: string | null) =>
     ({ comment_id, repo: "app", number: 1, pr: 1, command: "c", login: "u", github_id: 1, created_at: T, requested_at: T, state, reply });
@@ -209,6 +218,8 @@ function cases(db: Db): Case[] {
     built: (d) => d.k.selectFrom("main.mcp_tokens as t").select("t.login as k").where((eb) => manualExpr(d, eb, "t.login")).orderBy("t.login") });
   out.push({ name: "pickLapsedSql", text: [`SELECT id AS k FROM main.remote_calls WHERE picked_by IS NOT NULL AND ${pickLapsedSql(db)} ORDER BY id`, ...pickLapsedArgs(NOW)], expect: ["1", "3", "4", "5"],
     built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where("picked_by", "is not", null).where((eb) => pickLapsedExpr(d, eb, NOW)).orderBy("id") });
+  out.push({ name: "KEPT_RUNS", text: [`SELECT id AS k FROM agent_runs WHERE id NOT IN (${KEPT_RUNS}) ORDER BY id`], expect: ["2", "3"],
+    built: (d) => d.k.selectFrom("agent_runs").select("id as k").where("id", "not in", keptRunsExpr(d)).orderBy("id") });
   out.push({ name: "COMMAND_WORK_SQL", text: [`SELECT comment_id AS k FROM main.github_commands WHERE ${COMMAND_WORK_SQL} ORDER BY comment_id`], expect: ["1", "2"],
     built: (d) => d.k.selectFrom("main.github_commands").select("comment_id as k").where((eb) => commandWorkExpr(eb)).orderBy("comment_id") });
   out.push({ name: "OPEN_GROUP_SQL", text: [`SELECT g.id AS k FROM decisions g WHERE ${OPEN_GROUP_SQL} ORDER BY g.id`], expect: ["app:dupegroup:1", "app:dupegroup:3", "app:dupegroup:4"],

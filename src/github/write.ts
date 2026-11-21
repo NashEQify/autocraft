@@ -20,10 +20,12 @@ import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { call, GITHUB_API } from "./app.ts";
 import { currentJobId } from "../agents/call.ts";
+import { resumedRun } from "../runner/resuming.ts";
+import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { jsonText, jsonValid } from "../db/portable.ts";
+import { inList, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
 import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
@@ -208,34 +210,161 @@ async function tryBegin(w: Writer, action: string, target: string, details: Deta
 /** The running job's id, joined to the audit row so a write can be traced to its job. Absent outside a job. */
 const jobOf = (): { jobId?: number } => { const j = currentJobId(); return j === null ? {} : { jobId: j }; };
 
-/** Adds the row before the write, so a crash during the call leaves a "started" row: an unknown outcome. Paces the write; throws WritePacedError when the wait would pass the bound. */
-async function begin(w: Writer, action: string, target: string, details: Details, owner?: string): Promise<number> {
+/** Audit rows of writes this process has begun and not yet finished, with what resolves when they finish. */
+const inFlight = new Map<number, { done: Promise<void>; end: () => void }>();
+let stoppedWhy: string | null = null;
+/**
+ * Writes that finished whose caller has not asked for another write since: it may still be recording what the write did
+ * (a review's row, a push's outcome). A stopping process waits a little for them (stopWrites).
+ */
+let owed = 0;
+let wake: (() => void) | null = null;
+
+/** How long a stopping process waits, once its writes in flight finished, for their callers to record what they did. */
+const BOOKKEEPING_MS = 1000;
+
+/**
+ * Refuses writes from now on: a write asked for now is not made and its caller waits until the process exits (park), so no
+ * caller records it as failed, and a resumed run makes it. Waits up to `ms` for the writes in flight to finish and be
+ * recorded, so a stopped job leaves no write with an unknown outcome, then up to BOOKKEEPING_MS more for their callers'
+ * bookkeeping, cut short once each has asked for its next write or `ended` resolves (the job's step returned). Returns how
+ * many writes are still in flight.
+ */
+export async function stopWrites(why: string, ms: number, ended?: Promise<unknown>): Promise<number> {
+  stoppedWhy = why;
+  const end = Date.now() + ms;
+  const until = async (p: Promise<unknown>, by: number): Promise<void> => {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([p, new Promise<void>((r) => { timer = setTimeout(r, Math.max(0, by - Date.now())); })]);
+    clearTimeout(timer);
+  };
+  while (inFlight.size && Date.now() < end) await until(Promise.all([...inFlight.values()].map((f) => f.done)), end);
+  if (inFlight.size) return inFlight.size;
+  let over = false;
+  void ended?.then(() => { over = true; wake?.(); });
+  const quietBy = Math.min(end, Date.now() + BOOKKEEPING_MS);
+  while (owed > 0 && !over && Date.now() < quietBy) await until(new Promise<void>((r) => { wake = r; }), quietBy);
+  wake = null;
+  return inFlight.size;
+}
+
+/** For tests: writes start again after stopWrites. */
+export function resumeWritesForTests(): void {
+  stoppedWhy = null;
+  owed = 0;
+}
+
+/** Never settles: the write is not made, and its caller waits here until the stopping process exits. `cleanup` runs first. */
+async function park(cleanup?: () => Promise<void>): Promise<never> {
+  if (cleanup) await cleanup();
+  return await new Promise<never>(() => {});
+}
+
+function track(id: number): void {
+  let end = (): void => {};
+  const done = new Promise<void>((r) => { end = r; });
+  inFlight.set(id, { done, end });
+}
+
+function untrack(id: number): void {
+  inFlight.get(id)?.end();
+  inFlight.delete(id);
+}
+
+/**
+ * Adds the row before the write, so a crash during the call leaves a "started" row: an unknown outcome. Paces the write;
+ * throws WritePacedError when the wait would pass the bound. After stopWrites it parks instead, once `beforePark` has undone
+ * what the caller began (the rows of a batch it added before this one).
+ */
+async function begin(w: Writer, action: string, target: string, details: Details, owner?: string, beforePark?: () => Promise<void>): Promise<number> {
+  // The caller is past the bookkeeping of its earlier write.
+  owed = Math.max(0, owed - 1);
+  wake?.();
   const clock = w.now ?? Date.now;
   const sleep = w.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const t0 = clock();
   for (;;) {
+    if (stoppedWhy !== null) return await park(beforePark);
     const now = clock();
     const r = await tryBegin(w, action, target, details, now, owner);
-    if ("id" in r) return r.id;
+    if ("id" in r) {
+      // Checked and tracked in one turn of the event loop: stopWrites either waits for this write, or it is not made.
+      const id = r.id;
+      if (stoppedWhy !== null) return await park(async () => { await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id); await beforePark?.(); });
+      track(id);
+      return id;
+    }
     if (now - t0 + r.wait > PACE_MAX_WAIT_MS) throw new WritePacedError(`${String(details.identity)} on ${paceOwner(String(details.identity), target, owner) || "all owners"}`, r.wait);
     await sleep(r.wait);
   }
 }
 
-async function finish(w: Writer, id: number, details: Details, error?: string): Promise<void> {
+/** Marks the row done or failed. `owes`: the caller may record what the write did next (false for all but the last row of a batch). */
+async function finish(w: Writer, id: number, details: Details, error?: string, owes = true): Promise<void> {
   const d = error === undefined ? { ...details, state: "done" } : { ...details, state: "failed", error };
   // The pacing key's owner, set by begin(), stays on the row.
-  await w.db.write(async () => {
-    const row = await w.db.prepare("SELECT details FROM audit WHERE rowid = ?").get(id) as { details: string | null } | undefined;
-    let owner: unknown = null;
-    try { owner = (JSON.parse(row?.details ?? "null") as { paceOwner?: unknown } | null)?.paceOwner ?? null; } catch { /* no owner */ }
-    await w.db.prepare("UPDATE audit SET details = ? WHERE rowid = ?").run(JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }), id);
-  });
+  try {
+    await w.db.write(async () => {
+      const row = await w.db.prepare("SELECT details FROM audit WHERE rowid = ?").get(id) as { details: string | null } | undefined;
+      let owner: unknown = null;
+      try { owner = (JSON.parse(row?.details ?? "null") as { paceOwner?: unknown } | null)?.paceOwner ?? null; } catch { /* no owner */ }
+      await w.db.prepare("UPDATE audit SET details = ? WHERE rowid = ?").run(JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }), id);
+    });
+  } finally {
+    if (owes) owed++;
+    untrack(id);
+  }
 }
 
-/** Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error. */
-async function recorded<T>(w: Writer, identity: string, action: string, target: string, details0: Details, f: () => Promise<T>, view?: (r: T) => Details, failure?: (r: T) => string | null): Promise<T> {
-  const details = { ...details0, identity, ...jobOf() };
+/**
+ * A creating write is made once per job, even when the job resumed after a restart (src/runner/resuming.ts): `key` tells
+ * this write from the job's other writes of the same action on the same target (a hash of the text, a run id, a commit),
+ * and `replay` rebuilds the result from the row of the write the job's earlier run made.
+ */
+type Once<T> = { key: string; also?: string[]; replay: (d: Details) => T };
+
+/** The key of a write made once per job: a hash of what tells it apart. */
+const onceKey = (...parts: unknown[]): string => createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
+
+/** What tells two comments of one job with the same text apart: the decision, card, comment or command they answer. */
+const answered = (d: Details): unknown[] => ["decision", "card", "comment", "command"].map((k) => d[k] ?? null);
+
+/**
+ * In a resumed job: the details of the successful write its earlier run made with this action, target and one of `keys`,
+ * or null. A write the earlier run began and never finished (it was stopped before recording the outcome) is made again,
+ * and the new row names the unknown one (`repeats`).
+ */
+async function madeBefore(w: Writer, action: string, target: string, keys: string[]): Promise<{ done: Details } | { unknown: number } | null> {
+  const job = currentJobId();
+  if (job === null) return null;
+  const run = await resumedRun(w.db, job);
+  if (!run) return null;
+  const rows = await w.db.prepare(`SELECT rowid AS id, details FROM audit WHERE target = ? AND action = ? AND at < ? AND ${jsonNum(w.db, "details", "$.jobId")} = ?
+    AND ${inList(w.db, jsonText(w.db, "details", "$.writeKey"))} AND ${jsonText(w.db, "details", "$.state")} IN ('done', 'started') ORDER BY rowid DESC`)
+    .all(target, action, run.startedAt, job, JSON.stringify(keys)) as { id: number; details: string }[];
+  const done = rows.find((r) => (JSON.parse(r.details) as Details).state === "done");
+  if (done) return { done: JSON.parse(done.details) as Details };
+  return rows.length ? { unknown: Number(rows[0]!.id) } : null;
+}
+
+/**
+ * Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error.
+ * With `once`, a write the job's earlier run made is not made again: its recorded result is returned.
+ */
+async function recorded<T>(w: Writer, identity: string, action: string, target: string, details0: Details, f: () => Promise<T>, view?: (r: T) => Details, failure?: (r: T) => string | null, once?: Once<T>): Promise<T> {
+  let repeats: number | undefined;
+  if (once) {
+    const before = await madeBefore(w, action, target, [once.key, ...once.also ?? []]);
+    if (before && "done" in before) {
+      console.log(`${action} on ${target}: made by this job before the restart, not made again`);
+      return once.replay(before.done);
+    }
+    if (before) {
+      repeats = before.unknown;
+      console.log(`${action} on ${target}: this job began it before the restart with an unknown outcome (audit row ${repeats}); made again`);
+    }
+  }
+  const details = { ...details0, identity, ...jobOf(), ...(once && { writeKey: once.key }), ...(repeats !== undefined && { repeats }) };
   const id = await begin(w, action, target, details);
   let r: T;
   try {
@@ -297,7 +426,8 @@ export async function commentOn(w: Writer, g: Grant, q: Querier, action: string,
   const body = posted(note, text);
   const r = await recorded(w, await idOf(w, g), action, refOf(item.repo, item.number), { ...details, text: body },
     () => q.query(ADD_COMMENT, { id: item.id, body }) as Promise<{ addComment?: { commentEdge?: { node?: { url?: string } } } }>,
-    (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }));
+    (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }), undefined,
+    { key: onceKey(body, ...answered(details)), replay: (d) => ({ addComment: { commentEdge: { node: { url: typeof d.url === "string" ? d.url : "" } } } }) });
   return r.addComment?.commentEdge?.node?.url ?? "";
 }
 
@@ -365,7 +495,8 @@ export async function transferIssue(w: Writer, g: Grant, gTo: Grant, q: Querier,
   q = await laneQuery(w, g, q, "other", { also: [to.repo] });
   const r = await recorded(w, await idOf(w, g), "act-transfer", refOf(item.repo, item.number), { ...details, to: to.repo },
     () => q.query(TRANSFER_ISSUE, { id: item.id, repo: to.id }) as Promise<{ transferIssue?: { issue?: { url?: string } } }>,
-    (x) => ({ url: x.transferIssue?.issue?.url ?? undefined }));
+    (x) => ({ url: x.transferIssue?.issue?.url ?? undefined }), undefined,
+    { key: onceKey(to.repo), replay: (d) => ({ transferIssue: { issue: { url: typeof d.url === "string" ? d.url : "" } } }) });
   return r.transferIssue?.issue?.url ?? "";
 }
 
@@ -384,7 +515,8 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
   const r = await recorded(w, await idOf(w, g), "review-post", refOf(g.repo, g.number), { ...details, head: g.head },
     () => q.query(ADD_REVIEW, { pr: nodeId, oid: g.head, body }) as Promise<{ addPullRequestReview?: { pullRequestReview?: { id?: string } | null } | null }>,
     (x) => ({ review: x.addPullRequestReview?.pullRequestReview?.id ?? undefined }),
-    (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"));
+    (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"),
+    { key: onceKey(g.head, body), replay: (d) => ({ addPullRequestReview: { pullRequestReview: { id: typeof d.review === "string" ? d.review : undefined } } }) });
   return r.addPullRequestReview?.pullRequestReview?.id ?? null;
 }
 
@@ -416,11 +548,17 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
   items.forEach((it, k) => { vars[`i${k}`] = it.id; vars[`l${k}`] = it.labelIds; });
   const det = async (it: LabelWrite): Promise<Details> => ({ ...details, labels: it.names, identity: await idOf(w, it.g), ...jobOf() });
   const ids: number[] = [];
+  // Paced or stopped partway: the rows already added were never sent.
+  const unsent = async (): Promise<void> => {
+    for (const id of ids) {
+      untrack(id);
+      await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+    }
+  };
   try {
-    for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it)));
+    for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it), undefined, unsent));
   } catch (e) {
-    // Paced partway: the rows already added were never sent.
-    for (const id of ids) await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+    await unsent();
     throw e;
   }
   let d: Record<string, unknown> | null;
@@ -428,15 +566,15 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
     d = await retry(() => q.query(addLabelsMutation(items.length), vars));
   } catch (e) {
     const msg = oneLine(String((e as Error).message ?? e));
-    await forEachSeq(items, async (it, k) => await finish(w, ids[k]!, await det(it), msg));
+    await forEachSeq(items, async (it, k) => await finish(w, ids[k]!, await det(it), msg, k === items.length - 1));
     throw e;
   }
   const done: number[] = [];
   await forEachSeq(items, async (it, k) => {
     if (d && d[`m${k}`] !== null && d[`m${k}`] !== undefined) {
       done.push(it.number);
-      await finish(w, ids[k]!, await det(it));
-    } else await finish(w, ids[k]!, await det(it), "GitHub did not apply the labels");
+      await finish(w, ids[k]!, await det(it), undefined, k === items.length - 1);
+    } else await finish(w, ids[k]!, await det(it), "GitHub did not apply the labels", k === items.length - 1);
   });
   return done;
 }
@@ -445,10 +583,15 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
 
 const GH_URL = /https:\/\/github\.com\/\S+/;
 
-async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string): Promise<ExecResult> {
+/** The result of a gh write the job made before it resumed: success, with the URL gh printed. */
+const ghReplay = (d: Details): ExecResult => ({ code: 0, stdout: typeof d.url === "string" ? `${d.url}\n` : "", stderr: "" });
+
+/** `once`: the key of a creating write, made once per job (Once), with other keys the earlier run may have made it under. */
+async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string, once?: string | { key: string; also: string[] }): Promise<ExecResult> {
   return recorded(w, identity, action, target, details, () => exec("gh", args, input === undefined && identity !== "legacy" ? undefined : { ...(input === undefined ? {} : { input }), ...(identity === "legacy" ? { inherit: true } : {}) }),
     (r) => ({ url: r.stdout.match(GH_URL)?.[0] }),
-    (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
+    (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    once === undefined ? undefined : typeof once === "string" ? { key: once, replay: ghReplay } : { ...once, replay: ghReplay });
 }
 
 /** Asks a contributor on their PR (fix-up, conflict or CI fix where the branch is closed to us); `action` is the audit action of the caller's stage. */
@@ -462,7 +605,7 @@ export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: 
   exec = await laneExec(w, g, exec);
   const body = posted(note, text);
   return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
-    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body);
+    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body, onceKey(body, ...answered(details)));
 }
 
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
@@ -501,8 +644,9 @@ export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, 
   opensOwnPr(g, o.repo);
   exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
+  // GitHub keeps one open PR per head and base: a resumed job's PR is the one its earlier run opened, whatever the text.
   return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body },
-    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body);
+    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, o.base, o.head));
 }
 
 export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
@@ -510,7 +654,7 @@ export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: stri
   exec = await laneExec(w, g, exec, "close");
   const comment = posted(note, text);
   return viaGh(w, await idOf(w, g, "close"), exec, "batch-pr-close", refOf(o.repo, o.number), { ...details, text: comment },
-    ["pr", "close", String(o.number), "--repo", `${slugOf(o.repo)}`, "--comment", comment]);
+    ["pr", "close", String(o.number), "--repo", `${slugOf(o.repo)}`, "--comment", comment], undefined, onceKey(comment));
 }
 
 /** Creates the pipeline account's fork of `repo` when it has none. */
@@ -543,7 +687,7 @@ export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: st
   let r: ExecResult;
   try {
     r = await viaGh(w, await idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
-      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body);
+      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, scrub(o.title), body));
   } catch (e) {
     // exec rejects only when the command could not be started; the pacing rejects before anything is sent.
     throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
@@ -590,17 +734,24 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
 export async function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
   exec = await laneExec(w, g, exec);
   return viaGh(w, await idOf(w, g), exec, "ci-run-approve", refOf(g.repo, g.number), { ...details, run: runId },
-    ["api", "-X", "POST", `repos/${slugOf(g.repo)}/actions/runs/${runId}/approve`]);
+    ["api", "-X", "POST", `repos/${slugOf(g.repo)}/actions/runs/${runId}/approve`], undefined, onceKey(runId));
 }
 
-/** Refuses (as a failed result) a rerun of a run that does not belong to the commit: the run id comes from a check's link, which the PR's own CI can set. */
-async function runOutsideHead(identity: string, exec: Exec, repo: string, runId: number, head: string): Promise<ExecResult | null> {
-  const fail = (why: string): ExecResult => ({ code: 1, stdout: "", stderr: `run ${runId} not rerun: ${why}` });
+/**
+ * Reads the run a rerun is asked for. Refuses (as a failed result) a run that does not belong to the commit: the run id comes
+ * from a check's link, which the PR's own CI can set. Otherwise the rerun's once-per-job key (Once): the run and its
+ * attempt, as one job may rerun a run again once the rerun failed too. A run still going whose earlier attempt this job
+ * reran is the job's own rerun, made before it resumed.
+ */
+async function rerunOf(identity: string, exec: Exec, repo: string, runId: number, head: string): Promise<{ off: ExecResult } | { key: string; also: string[] }> {
+  const fail = (why: string): { off: ExecResult } => ({ off: { code: 1, stdout: "", stderr: `run ${runId} not rerun: ${why}` } });
   try {
     const r = await exec("gh", ["api", `repos/${slugOf(repo)}/actions/runs/${runId}`], identity === "legacy" ? { inherit: true } : undefined);
     if (r.code !== 0) return fail("the run could not be read");
-    const run = JSON.parse(r.stdout) as { head_sha?: string };
-    return run.head_sha === head ? null : fail("it belongs to another commit");
+    const run = JSON.parse(r.stdout) as { head_sha?: string; run_attempt?: number; status?: string };
+    if (run.head_sha !== head) return fail("it belongs to another commit");
+    const attempt = typeof run.run_attempt === "number" ? run.run_attempt : 1;
+    return { key: onceKey(runId, attempt), also: run.status !== "completed" && attempt > 1 ? [onceKey(runId, attempt - 1)] : [] };
   } catch {
     return fail("the run could not be read");
   }
@@ -609,20 +760,20 @@ async function runOutsideHead(identity: string, exec: Exec, repo: string, runId:
 /** Reruns the failed jobs of one Actions run of a PR's head commit. */
 export async function ghRerunFailed(w: Writer, exec: Exec, g: Guarded<"cifix">, runId: number, details: Details = {}): Promise<ExecResult> {
   exec = await laneExec(w, g, exec);
-  const off = await runOutsideHead(await idOf(w, g), exec, g.repo, runId, g.head);
-  if (off) return off;
+  const run = await rerunOf(await idOf(w, g), exec, g.repo, runId, g.head);
+  if ("off" in run) return run.off;
   return viaGh(w, await idOf(w, g), exec, "ci-rerun", refOf(g.repo, g.number), { ...details, run: runId },
-    ["run", "rerun", String(runId), "--failed", "--repo", `${slugOf(g.repo)}`]);
+    ["run", "rerun", String(runId), "--failed", "--repo", `${slugOf(g.repo)}`], undefined, run);
 }
 
 /** Reruns the failed jobs of one Actions run on a head that belongs to no item (a default-branch head, or an integration batch tip): the audit target names the repo and the commit. */
 export async function ghRerunMainFailed(w: Writer, g: GuardedRepo, exec: Exec, o: { repo: string; head: string; runId: number }, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo);
   exec = await laneExec(w, g, exec);
-  const off = await runOutsideHead(await idOf(w, g), exec, o.repo, o.runId, o.head);
-  if (off) return off;
+  const run = await rerunOf(await idOf(w, g), exec, o.repo, o.runId, o.head);
+  if ("off" in run) return run.off;
   return viaGh(w, await idOf(w, g), exec, "ci-rerun", `${o.repo}:${o.head.slice(0, 8)}`, { ...details, run: o.runId },
-    ["run", "rerun", String(o.runId), "--failed", "--repo", `${slugOf(o.repo)}`]);
+    ["run", "rerun", String(o.runId), "--failed", "--repo", `${slugOf(o.repo)}`], undefined, run);
 }
 
 // ---- git pushes ---------------------------------------------------------------
@@ -667,7 +818,9 @@ async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, acti
   const r = await recorded(w, identity, action, target, { ...details, branch: o.branch, remote: o.remote, commit: o.sha },
     () => git.git(["push", "--quiet", lease, `https://github.com/${o.remote}.git`, `${o.sha}:refs/heads/${o.branch}`]),
     undefined,
-    (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`));
+    (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`),
+    { key: onceKey(o.remote, o.branch, o.sha), replay: () => ({ code: 0, stdout: "", stderr: "" }) });
+  // Also for a push the job's earlier run made: that run may have stopped before recording it (recordPush records once).
   if (r.code === 0) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
     try { await recordPush(w.db, action, { ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
@@ -715,23 +868,24 @@ const json = (v: unknown): string => JSON.stringify(v);
 export async function ghAdvisoryCreate(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; summary: string; description: string; severity: "critical" | "high" | "medium" | "low"; range: string; patched?: string | null }): Promise<{ ghsa: string | null; result: ExecResult }> {
   covers(g, o.repo);
   const body = json({ summary: o.summary, description: o.description, severity: o.severity, vulnerabilities: [{ package: { ecosystem: "other", name: o.repo }, vulnerable_version_range: o.range, patched_versions: o.patched ?? null }] });
-  let ghsa: string | null = null;
   const result = await recorded(w, "legacy", "security-advisory", o.key, { repo: o.repo },
     () => exec("gh", ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories`, "--input", "-", "--jq", ".ghsa_id"], { input: body, inherit: true }),
-    (r) => { ghsa = r.stdout.trim() || null; return { ghsa: ghsa ?? undefined }; },
-    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
-  return { ghsa, result };
+    (r) => ({ ghsa: r.stdout.trim() || undefined }),
+    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    // One draft advisory per finding.
+    { key: onceKey(o.repo), replay: (d) => ({ code: 0, stdout: typeof d.ghsa === "string" ? d.ghsa : "", stderr: "" }) });
+  return { ghsa: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 
 /** Creates the advisory's temporary private fork; returns its owner/name. */
 export async function ghAdvisoryFork(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; ghsa: string }): Promise<{ fork: string | null; result: ExecResult }> {
   covers(g, o.repo);
-  let fork: string | null = null;
   const result = await recorded(w, "legacy", "security-advisory-fork", o.key, { repo: o.repo, ghsa: o.ghsa },
     () => exec("gh", ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/forks`, "--jq", ".full_name"], { inherit: true }),
-    (r) => { fork = r.stdout.trim() || null; return { fork: fork ?? undefined }; },
-    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
-  return { fork, result };
+    (r) => ({ fork: r.stdout.trim() || undefined }),
+    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    { key: onceKey(o.ghsa), replay: (d) => ({ code: 0, stdout: typeof d.fork === "string" ? d.fork : "", stderr: "" }) });
+  return { fork: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 
 /** Pushes the fix to the advisory's private fork with the box user's token: the GitHub App cannot reach these forks. */
@@ -743,7 +897,7 @@ export function ghAdvisoryPush(w: Writer, g: Grant, git: Pick<Git, "git">, o: { 
 export function ghAdvisoryPr(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; fork: string; base: string; head: string; title: string; body: string }): Promise<ExecResult> {
   covers(g, o.repo);
   return viaGh(w, "legacy", exec, "security-advisory-pr", o.key, { repo: o.repo, fork: o.fork },
-    ["pr", "create", "--repo", o.fork, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], scrub(o.body));
+    ["pr", "create", "--repo", o.fork, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], scrub(o.body), onceKey(o.fork, o.base, o.head));
 }
 
 /** Sets the affected version range of a draft that has none (GitHub refuses to publish without one). Does nothing, and writes nothing, when the draft has a range. */
@@ -767,7 +921,7 @@ export function ghAdvisoryPublish(w: Writer, g: Grant, exec: Exec, o: { repo: st
 /** Requests a CVE for the advisory (public repositories only). */
 export function ghAdvisoryCve(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; ghsa: string }): Promise<ExecResult> {
   covers(g, o.repo);
-  return viaGh(w, "legacy", exec, "security-cve", o.key, { repo: o.repo, ghsa: o.ghsa }, ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/cve`]);
+  return viaGh(w, "legacy", exec, "security-cve", o.key, { repo: o.repo, ghsa: o.ghsa }, ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/cve`], undefined, onceKey(o.ghsa));
 }
 
 // ---- merges ---------------------------------------------------------------------

@@ -688,7 +688,7 @@ While On, the runner plans whenever the content the stages read changed (a chang
 A stage does not wait on a timer when it has work. Two rules decide when a stage that has work is held back:
 
 - **Same input.** Each queued job stores a fingerprint of the input it saw (the stage, the repo and the counters of the topics the stage reads). A job that handled no items and made no other progress (no batch started, opened or advanced, no decision asked) is not queued again until the fingerprint changes. A step reports such progress with `acted`, next to `items`.
-- **Failures.** After a failed job the stage waits 1 minute, then 2, 4, 8 and 16, then 30 minutes, until a job succeeds. A changed fingerprint or an operator release ends the wait at once. Jobs a runner stop ended do not count.
+- **Failures.** After a failed job the stage waits 1 minute, then 2, 4, 8 and 16, then 30 minutes, until a job succeeds. A changed fingerprint or an operator release ends the wait at once. Jobs a runner stop or restart ended without resuming them do not count; a job that resumes has not ended (see Restarts and resumed jobs in [operations.md](operations.md#restarts-and-resumed-jobs)).
 
 Stages that watch an outside system (upstream CI of PRs waiting for it, open batch PRs, finished sandbox tasks) are exempt from the first rule and read it again every minute. The full classification pass is never started automatically.
 

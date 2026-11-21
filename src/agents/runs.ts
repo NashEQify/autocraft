@@ -38,6 +38,7 @@ export const unpackText = (v: unknown): string | null => (typeof v === "string" 
 import { shownLookup } from "../dash/api/shown.ts";
 import { scrub } from "../runner/scrub.ts";
 import { mapSeq } from "../async-seq.ts";
+import { keptRunsExpr } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
 
 const now = (): string => new Date().toISOString();
@@ -80,10 +81,13 @@ export async function setRunProgress(db: Db, id: number, line: string): Promise<
   await db.run(db.k.updateTable("agent_runs").set({ progress: line }).where("id", "=", id).where("state", "=", "running"));
 }
 
-/** Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. */
+/**
+ * Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. The
+ * runs of remote calls that a resuming job may adopt stay running (keptRunsExpr): a Task Runner may still answer them.
+ */
 export async function failRunning(db: Db, reason: string, jobId?: number): Promise<number> {
   const r = await db.run(db.k.updateTable("agent_runs").set({ state: "failed", ended_at: now(), error: reason, summary: reason }).where("state", "=", "running")
-    .$if(jobId !== undefined, (q) => q.where("job_id", "=", jobId!)));
+    .$if(jobId !== undefined, (q) => q.where("job_id", "=", jobId!)).where("id", "not in", keptRunsExpr(db)));
   return Number(r.changes);
 }
 
