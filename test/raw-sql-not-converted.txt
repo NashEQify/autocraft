@@ -429,24 +429,17 @@ src/review/carry.ts
 
 src/review/checks.ts
 
-src/review/diff.ts
 
 src/review/discussion.ts
 
 
-src/review/index.ts
 
-src/review/opus-candidates.ts
 
 src/review/opus.ts
 
-src/review/ours.ts
 
-src/review/post-source.ts
 
-src/review/post.ts
 
-src/review/summary.ts
 
 
 

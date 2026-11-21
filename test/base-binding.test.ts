@@ -18,11 +18,11 @@ const HEAD = "a".repeat(40);
 test("a merge is refused when the base is not the one the review read", async () => {
   const db = await connectDb(join(dir, "t.db"));
   await db.run(db.k.insertInto("repos").values({ name: "app", default_branch: "main" }));
-  await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, base_ref) VALUES ('app', 7, ?, 't', 'full', 'take', 'main')").run(HEAD);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: HEAD, at: "t", mode: "full", verdict: "take", base_ref: "main" }));
   assert.equal(await baseRefusal(db, "app", HEAD, 7, "main"), null);
   assert.match((await baseRefusal(db, "app", HEAD, 7, "release"))!, /release.*main/);
   // A review that recorded no base allows the default branch only.
-  await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict) VALUES ('app', 8, ?, 't', 'full', 'take')").run(HEAD);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 8, head_oid: HEAD, at: "t", mode: "full", verdict: "take" }));
   assert.equal(await baseRefusal(db, "app", HEAD, 8, "main"), null);
   assert.ok(await baseRefusal(db, "app", HEAD, 8, "release"));
 });

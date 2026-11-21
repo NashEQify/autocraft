@@ -1,5 +1,6 @@
 // The commits our pipeline pushed to a PR between two heads, for the review prompt and for carrying a verdict over our own fix-up.
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type OurCommit = { kind: "fix-up" | "pre-merge fix" | "operator fix-up" | "CI fix" | "base merge" | "carry"; sha: string; note: string; fixes_meant: string[]; from: string };
 
@@ -7,7 +8,8 @@ type Row = { from: string; kind: OurCommit["kind"]; note: string | null; source?
 
 /** What a carry commit holds: parts of the closed duplicates, named with their authors. */
 async function carriedNote(db: Db, repo: string, decision: string | null): Promise<string> {
-  const rows = decision ? await db.prepare("SELECT g.number, i.author FROM dupe_group_items g LEFT JOIN items i ON i.repo = ? AND i.number = g.number WHERE g.decision_id = ? AND g.kind = 'pr' AND g.role = 'close' ORDER BY g.number").all(repo, decision) as { number: number; author: string | null }[] : [];
+  const rows = decision ? await db.all(db.k.selectFrom("dupe_group_items as g").leftJoin("items as i", (j) => j.on("i.repo", "=", repo).onRef("i.number", "=", "g.number"))
+    .select(["g.number", "i.author"]).where("g.decision_id", "=", decision).where("g.kind", "=", "pr").where("g.role", "=", "close").orderBy("g.number")) : [];
   return rows.length ? `parts carried from the closed duplicate PRs ${rows.map((x) => `#${x.number}${x.author ? ` by ${x.author}` : ""}`).join(", ")}: code written by those authors, not by the pipeline` : "parts carried from closed duplicate PRs: code written by their authors, not by the pipeline";
 }
 
@@ -22,10 +24,15 @@ type Pushes = {
 /** The commit of ours that made `head`, or null when no push of ours ended there (a contributor's commit). */
 async function madeBy(db: Db, repo: string, number: number, head: string): Promise<Row | null> {
   return await madeFrom(db, repo, {
-    a: await db.prepare("SELECT from_head AS f, reason, source, carry_decision FROM fixups WHERE repo = ? AND number = ? AND to_head = ? AND state = 'pushed' ORDER BY rowid DESC").get(repo, number, head) as Pushes["a"],
-    b: async () => await db.prepare("SELECT head AS f, reason, kind FROM ci_fixes WHERE repo = ? AND number = ? AND to_head = ? AND state = 'pushed' ORDER BY rowid DESC").get(repo, number, head) as Awaited<ReturnType<Pushes["b"]>>,
-    c: async () => await db.prepare("SELECT from_head AS f, reason FROM conflict_merges WHERE repo = ? AND number = ? AND to_head = ? AND state = 'merged' ORDER BY rowid DESC").get(repo, number, head) as Awaited<ReturnType<Pushes["c"]>>,
-    d: async () => await db.prepare("SELECT from_head AS f FROM dupe_carries WHERE repo = ? AND number = ? AND to_head = ? AND outcome LIKE 'pushed%' AND from_head IS NOT NULL").get(repo, number, head) as Awaited<ReturnType<Pushes["d"]>>,
+    a: await db.get(db.k.selectFrom("fixups").select(["from_head as f", "reason", "source", "carry_decision"])
+      .where("repo", "=", repo).where("number", "=", number).where("to_head", "=", head).where("state", "=", "pushed").orderBy(kx.rowid("fixups"), "desc").limit(1)),
+    b: async () => await db.get(db.k.selectFrom("ci_fixes").select(["head as f", "reason", "kind"])
+      .where("repo", "=", repo).where("number", "=", number).where("to_head", "=", head).where("state", "=", "pushed").orderBy(kx.rowid("ci_fixes"), "desc").limit(1)),
+    c: async () => await db.get(db.k.selectFrom("conflict_merges").select(["from_head as f", "reason"])
+      .where("repo", "=", repo).where("number", "=", number).where("to_head", "=", head).where("state", "=", "merged").orderBy(kx.rowid("conflict_merges"), "desc").limit(1)),
+    d: async () => await db.get(db.k.selectFrom("dupe_carries").select(["from_head as f"]).$narrowType<{ f: string }>()
+      .where("repo", "=", repo).where("number", "=", number).where("to_head", "=", head).where((eb) => kx.like(db, "outcome", eb.val("pushed%"))).where("from_head", "is not", null)
+      .orderBy(kx.rowid("dupe_carries")).limit(1)),
   });
 }
 
@@ -45,7 +52,8 @@ async function madeFrom(db: Db, repo: string, p: Pushes): Promise<Row | null> {
 
 /** The fixes the review at `head` asked for, as "file: change". */
 async function fixesAsked(db: Db, repo: string, number: number, head: string): Promise<string[]> {
-  const r = await db.prepare("SELECT fixes FROM opus_review_history WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1").get(repo, number, head) as { fixes: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("opus_review_history").select("fixes").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).where("verdict", "is not", null)
+    .orderBy("at", "desc").orderBy(kx.rowid("opus_review_history"), "desc").limit(1));
   try {
     const v = JSON.parse(r?.fixes ?? "[]") as { file?: unknown; change?: unknown }[];
     return v.filter((x) => typeof x.file === "string" && typeof x.change === "string").slice(0, 8).map((x) => `${x.file}: ${x.change}`);
@@ -66,16 +74,23 @@ type OurPath = { commits: OurCommit[]; complete: boolean; sources: (string | nul
 export function ourCommitsLoader(db: Db): (repo: string, number: number, earlier: string, head: string) => Promise<OurPath> {
   let maps: { a: Map<string, Pushes["a"]>; b: Map<string, Awaited<ReturnType<Pushes["b"]>>>; c: Map<string, Awaited<ReturnType<Pushes["c"]>>>; d: Map<string, Awaited<ReturnType<Pushes["d"]>>> } | undefined;
   // The row each per-head read would give first: the newest for a, b and c, the first stored for d.
-  const firstBy = async <T>(sql: string): Promise<Map<string, T>> => {
-    const m = new Map<string, T>();
-    for (const r of await db.prepare(sql).all() as (T & { k: string })[]) if (!m.has(r.k)) { const { k, ...rest } = r; m.set(k, rest as T); }
+  const firstBy = <R extends { repo: string; number: number; to_head: string | null }>(rows: R[]): Map<string, Omit<R, "repo" | "number" | "to_head">> => {
+    const m = new Map<string, Omit<R, "repo" | "number" | "to_head">>();
+    for (const r of rows) {
+      const k = `${r.repo}#${r.number}@${r.to_head}`;
+      if (!m.has(k)) { const { repo, number, to_head, ...rest } = r; m.set(k, rest); }
+    }
     return m;
   };
   const load = async () => (maps ??= {
-    a: await firstBy("SELECT repo || '#' || number || '@' || to_head AS k, from_head AS f, reason, source, carry_decision FROM fixups WHERE state = 'pushed' AND to_head IS NOT NULL ORDER BY rowid DESC"),
-    b: await firstBy("SELECT repo || '#' || number || '@' || to_head AS k, head AS f, reason, kind FROM ci_fixes WHERE state = 'pushed' AND to_head IS NOT NULL ORDER BY rowid DESC"),
-    c: await firstBy("SELECT repo || '#' || number || '@' || to_head AS k, from_head AS f, reason FROM conflict_merges WHERE state = 'merged' AND to_head IS NOT NULL ORDER BY rowid DESC"),
-    d: await firstBy("SELECT repo || '#' || number || '@' || to_head AS k, from_head AS f FROM dupe_carries WHERE outcome LIKE 'pushed%' AND from_head IS NOT NULL AND to_head IS NOT NULL ORDER BY rowid"),
+    a: firstBy(await db.all(db.k.selectFrom("fixups").select(["repo", "number", "to_head", "from_head as f", "reason", "source", "carry_decision"])
+      .where("state", "=", "pushed").where("to_head", "is not", null).orderBy(kx.rowid("fixups"), "desc"))),
+    b: firstBy(await db.all(db.k.selectFrom("ci_fixes").select(["repo", "number", "to_head", "head as f", "reason", "kind"])
+      .where("state", "=", "pushed").where("to_head", "is not", null).orderBy(kx.rowid("ci_fixes"), "desc"))),
+    c: firstBy(await db.all(db.k.selectFrom("conflict_merges").select(["repo", "number", "to_head", "from_head as f", "reason"])
+      .where("state", "=", "merged").where("to_head", "is not", null).orderBy(kx.rowid("conflict_merges"), "desc"))),
+    d: firstBy(await db.all(db.k.selectFrom("dupe_carries").select(["repo", "number", "to_head", "from_head as f"]).$narrowType<{ f: string }>()
+      .where((eb) => kx.like(db, "outcome", eb.val("pushed%"))).where("from_head", "is not", null).where("to_head", "is not", null).orderBy(kx.rowid("dupe_carries")))),
   });
   return async (repo, number, earlier, head) => await walk(db, async (h) => {
     const m = await load(), k = `${repo}#${number}@${h}`;
