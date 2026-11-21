@@ -16,6 +16,7 @@ import { claudeBin } from "./box.ts";
 import { childEnv } from "./status.ts";
 import { tokenNearExpiry } from "../sandbox/index.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN";
 /** The CLI states a validity of one year. */
@@ -122,21 +123,21 @@ export function deleteToken(configDir: string): void {
   try { unlinkSync(tokenFile(configDir)); } catch { /* none there */ }
 }
 
-type Row = { set_at: string; rejected_at: string | null };
-const rowOf = async (db: Db, id: string) => await db.prepare("SELECT set_at, rejected_at FROM claude_account_tokens WHERE account_id = ?").get(id) as Row | undefined;
+const rowOf = async (db: Db, id: string) => await db.get(db.k.selectFrom("claude_account_tokens").select(["set_at", "rejected_at"]).where("account_id", "=", id));
 
 /** Records a new token (clearing any rejection). */
 export async function recordTokenSet(db: Db, id: string, now = new Date()): Promise<void> {
-  await db.prepare("INSERT INTO claude_account_tokens (account_id, set_at, rejected_at) VALUES (?, ?, NULL) ON CONFLICT (account_id) DO UPDATE SET set_at = excluded.set_at, rejected_at = NULL").run(id, now.toISOString());
+  await db.run(db.k.insertInto("claude_account_tokens").values({ account_id: id, set_at: now.toISOString(), rejected_at: null })
+    .onConflict((oc) => oc.column("account_id").doUpdateSet(excluded(["set_at", "rejected_at"]))));
 }
 
 export async function recordTokenRemoved(db: Db, id: string): Promise<void> {
-  await db.prepare("DELETE FROM claude_account_tokens WHERE account_id = ?").run(id);
+  await db.run(db.k.deleteFrom("claude_account_tokens").where("account_id", "=", id));
 }
 
 /** Marks the token rejected; calls then take the regular sign-in path. */
 export async function markTokenRejected(db: Db, id: string, now = new Date()): Promise<void> {
-  await db.prepare("UPDATE claude_account_tokens SET rejected_at = ? WHERE account_id = ?").run(now.toISOString(), id);
+  await db.run(db.k.updateTable("claude_account_tokens").set({ rejected_at: now.toISOString() }).where("account_id", "=", id));
 }
 
 /** Whether model calls on this account carry its token: the file exists and the token is not marked rejected. */

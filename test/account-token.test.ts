@@ -12,6 +12,7 @@ import { cliErrorText, credentialsNearExpiry, extractScreenToken, extractToken, 
 import { sandboxCommand } from "../src/sandbox/command.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "account-token-"));
@@ -75,9 +76,9 @@ describe("long-lived token", () => {
     assert.equal(statSync(tokenFile(dirA)).mode & 0o777, 0o600);
     assert.ok(!existsSync(`${tokenFile(dirA)}.tmp`));
     assert.deepEqual(readdirSync(dirA).filter((n) => n.startsWith("token-check-")), []);
-    const everything = JSON.stringify([await listAccounts(db), await db.prepare("SELECT * FROM audit").all(), await db.prepare("SELECT * FROM claude_account_tokens").all()]);
+    const everything = JSON.stringify([await listAccounts(db), await db.all(db.k.selectFrom("audit").select(kx.cols("audit"))), await db.all(db.k.selectFrom("claude_account_tokens").select(kx.cols("claude_account_tokens")))]);
     assert.ok(!everything.includes("sk-ant-oat01"));
-    assert.deepEqual((await db.prepare("SELECT action FROM audit WHERE action LIKE 'account-token%' ORDER BY rowid").all()).map((r) => (r as { action: string }).action), ["account-token-start", "account-token-code", "account-token-set"]);
+    assert.deepEqual((await db.all(db.k.selectFrom("audit").select("action").where((eb) => kx.like(db, "action", eb.val("account-token%"))).orderBy(kx.rowid("audit")))).map((r) => r.action), ["account-token-start", "account-token-code", "account-token-set"]);
 
     // Model calls get the token; status, usage and logout (childEnv) do not.
     assert.deepEqual(await tokenEnv(db, a.id, dirA), { CLAUDE_CODE_OAUTH_TOKEN: SECRET });
@@ -117,9 +118,9 @@ describe("long-lived token", () => {
     assert.ok(!existsSync(tokenFile(join(dir, "root", a.id))));
     const log = readFileSync(join(dir, "root", a.id, "setup-token-failed.log"), "utf8");
     assert.ok(!log.includes(BAD) && !log.includes("badtoken#state") && !log.includes(BAD.slice(0, 40)));
-    const actions = (await db.prepare("SELECT action FROM audit WHERE target = ? ORDER BY rowid").all(`account:${a.id}`)).map((r) => (r as { action: string }).action);
+    const actions = (await db.all(db.k.selectFrom("audit").select("action").where("target", "=", `account:${a.id}`).orderBy(kx.rowid("audit")))).map((r) => r.action);
     assert.ok(actions.includes("account-token-check-failed") && !actions.includes("account-token-set"));
-    assert.ok(!JSON.stringify(await db.prepare("SELECT * FROM audit").all()).includes("sk-ant-oat01"));
+    assert.ok(!JSON.stringify(await db.all(db.k.selectFrom("audit").select(kx.cols("audit")))).includes("sk-ant-oat01"));
   });
 
   test("a cancel during the check saves nothing", async () => {
@@ -132,7 +133,7 @@ describe("long-lived token", () => {
     await new Promise((r) => setTimeout(r, 1500));
     assert.equal((await listAccounts(db)).find((x) => x.id === a.id)!.login?.state, "cancelled");
     assert.ok(!existsSync(tokenFile(dirC)));
-    const actions = (await db.prepare("SELECT action FROM audit WHERE target = ?").all(`account:${a.id}`)).map((r) => (r as { action: string }).action);
+    const actions = (await db.all(db.k.selectFrom("audit").select("action").where("target", "=", `account:${a.id}`))).map((r) => r.action);
     assert.ok(!actions.includes("account-token-set"));
   });
 

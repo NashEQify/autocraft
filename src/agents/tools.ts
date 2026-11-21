@@ -3,7 +3,7 @@
 import { scrub } from "../runner/scrub.ts";
 import { forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { upsert } from "../db/portable.ts";
+import { excluded } from "../db/kx.ts";
 
 export const TOOL_ARGS_MAX = 4000;
 /** The check tool's name as the model sees it (MCP server `build`, tool `check`). */
@@ -76,7 +76,7 @@ const time = (v: unknown): string | null => (typeof v === "string" && ISO.test(v
  */
 export async function saveRemoteTools(db: Db, runId: number, callId: number, raw: unknown): Promise<void> {
   if (!Array.isArray(raw)) return;
-  const relayed = (await db.prepare("SELECT result FROM main.remote_checks WHERE call_id = ? AND run_id = ? ORDER BY id").all(callId, runId) as { result: string | null }[])
+  const relayed = (await db.all(db.k.selectFrom("main.remote_checks").select("result").where("call_id", "=", callId).where("run_id", "=", runId).orderBy("id")))
     .map((r) => { try { return textOf((JSON.parse(r.result ?? "null") as { text?: unknown } | null)?.text); } catch { return ""; } });
   const clock: ToolClock = { start: new Map(), end: new Map() };
   const uses: ToolUse[] = [];
@@ -98,11 +98,12 @@ export async function saveRemoteTools(db: Db, runId: number, callId: number, raw
 
 async function saveUses(db: Db, runId: number, uses: ToolUse[], clock?: ToolClock): Promise<void> {
   if (!uses.length) return;
-  const checks = await db.prepare("SELECT id, command FROM model_checks WHERE run_id = ? ORDER BY id").all(runId) as { id: number; command: string }[];
-  const ins = db.prepare(upsert(db, { table: "agent_run_tools", cols: ["run_id", "seq", "tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"], key: ["run_id", "seq"] }));
+  const checks = await db.all(db.k.selectFrom("model_checks").select(["id", "command"]).where("run_id", "=", runId).orderBy("id"));
   await forEachSeq(uses, async (u, i) => {
     const k = u.command === null || u.noRow ? -1 : checks.findIndex((c) => c.command === u.command);
     const link = k >= 0 ? checks.splice(k, 1)[0]!.id : null;
-    await ins.run(runId, i + 1, u.name, u.args, u.resultBytes, u.isError ? 1 : 0, clock?.start.get(u.id) ?? null, clock?.end.get(u.id) ?? null, link);
+    await db.run(db.k.insertInto("agent_run_tools")
+      .values({ run_id: runId, seq: i + 1, tool: u.name, args: u.args, result_bytes: u.resultBytes, is_error: u.isError ? 1 : 0, started_at: clock?.start.get(u.id) ?? null, ended_at: clock?.end.get(u.id) ?? null, check_id: link })
+      .onConflict((oc) => oc.columns(["run_id", "seq"]).doUpdateSet(excluded(["tool", "args", "result_bytes", "is_error", "started_at", "ended_at", "check_id"]))));
   });
 }
