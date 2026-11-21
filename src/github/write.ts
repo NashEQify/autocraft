@@ -20,6 +20,8 @@ import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
 import { call, GITHUB_API } from "./app.ts";
 import { currentJobId } from "../agents/call.ts";
+import { resumedRun } from "../runner/resuming.ts";
+import { createHash } from "node:crypto";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
@@ -227,9 +229,40 @@ async function finish(w: Writer, id: number, details: Details, error?: string): 
     .run(JSON.stringify(d), id);
 }
 
-/** Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error. */
-async function recorded<T>(w: Writer, identity: string, action: string, target: string, details0: Details, f: () => Promise<T>, view?: (r: T) => Details, failure?: (r: T) => string | null): Promise<T> {
-  const details = { ...details0, identity, ...jobOf() };
+/**
+ * A creating write is made once per job, even when the job resumed after a restart (src/runner/resuming.ts): `key` tells
+ * this write from the job's other writes of the same action on the same target (a hash of the text, a run id, a commit),
+ * and `replay` rebuilds the result from the row of the write the job's earlier run made.
+ */
+type Once<T> = { key: string; replay: (d: Details) => T };
+
+/** The key of a write made once per job: a hash of what tells it apart. */
+const onceKey = (...parts: unknown[]): string => createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
+
+/** In a resumed job: the details of the successful write its earlier run made with this action, target and key, or null. */
+async function madeBefore(w: Writer, action: string, target: string, key: string): Promise<Details | null> {
+  const job = currentJobId();
+  if (job === null) return null;
+  const run = await resumedRun(w.db, job);
+  if (!run) return null;
+  const r = await w.db.prepare(`SELECT details FROM audit WHERE target = ? AND action = ? AND at < ? AND json_extract(details, '$.jobId') = ? AND json_extract(details, '$.writeKey') = ?
+    AND json_extract(details, '$.state') = 'done' ORDER BY rowid DESC LIMIT 1`).get(target, action, run.startedAt, job, key) as { details: string } | undefined;
+  return r ? JSON.parse(r.details) as Details : null;
+}
+
+/**
+ * Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error.
+ * With `once`, a write the job's earlier run made is not made again: its recorded result is returned.
+ */
+async function recorded<T>(w: Writer, identity: string, action: string, target: string, details0: Details, f: () => Promise<T>, view?: (r: T) => Details, failure?: (r: T) => string | null, once?: Once<T>): Promise<T> {
+  if (once) {
+    const before = await madeBefore(w, action, target, once.key);
+    if (before) {
+      console.log(`${action} on ${target}: made by this job before the restart, not made again`);
+      return once.replay(before);
+    }
+  }
+  const details = { ...details0, identity, ...jobOf(), ...(once && { writeKey: once.key }) };
   const id = await begin(w, action, target, details);
   let r: T;
   try {
@@ -291,7 +324,8 @@ export async function commentOn(w: Writer, g: Grant, q: Querier, action: string,
   const body = posted(note, text);
   const r = await recorded(w, await idOf(w, g), action, refOf(item.repo, item.number), { ...details, text: body },
     () => q.query(ADD_COMMENT, { id: item.id, body }) as Promise<{ addComment?: { commentEdge?: { node?: { url?: string } } } }>,
-    (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }));
+    (x) => ({ url: x.addComment?.commentEdge?.node?.url ?? undefined }), undefined,
+    { key: onceKey(body), replay: (d) => ({ addComment: { commentEdge: { node: { url: typeof d.url === "string" ? d.url : "" } } } }) });
   return r.addComment?.commentEdge?.node?.url ?? "";
 }
 
@@ -359,7 +393,8 @@ export async function transferIssue(w: Writer, g: Grant, gTo: Grant, q: Querier,
   q = await laneQuery(w, g, q, "other", { also: [to.repo] });
   const r = await recorded(w, await idOf(w, g), "act-transfer", refOf(item.repo, item.number), { ...details, to: to.repo },
     () => q.query(TRANSFER_ISSUE, { id: item.id, repo: to.id }) as Promise<{ transferIssue?: { issue?: { url?: string } } }>,
-    (x) => ({ url: x.transferIssue?.issue?.url ?? undefined }));
+    (x) => ({ url: x.transferIssue?.issue?.url ?? undefined }), undefined,
+    { key: onceKey(to.repo), replay: (d) => ({ transferIssue: { issue: { url: typeof d.url === "string" ? d.url : "" } } }) });
   return r.transferIssue?.issue?.url ?? "";
 }
 
@@ -378,7 +413,8 @@ export async function postReview(w: Writer, q: Querier, g: Guarded<"post-review"
   const r = await recorded(w, await idOf(w, g), "review-post", refOf(g.repo, g.number), { ...details, head: g.head },
     () => q.query(ADD_REVIEW, { pr: nodeId, oid: g.head, body }) as Promise<{ addPullRequestReview?: { pullRequestReview?: { id?: string } | null } | null }>,
     (x) => ({ review: x.addPullRequestReview?.pullRequestReview?.id ?? undefined }),
-    (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"));
+    (x) => (x.addPullRequestReview?.pullRequestReview?.id ? null : "GitHub returned no review"),
+    { key: onceKey(g.head, body), replay: (d) => ({ addPullRequestReview: { pullRequestReview: { id: typeof d.review === "string" ? d.review : undefined } } }) });
   return r.addPullRequestReview?.pullRequestReview?.id ?? null;
 }
 
@@ -439,10 +475,15 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
 
 const GH_URL = /https:\/\/github\.com\/\S+/;
 
-async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string): Promise<ExecResult> {
+/** The result of a gh write the job made before it resumed: success, with the URL gh printed. */
+const ghReplay = (d: Details): ExecResult => ({ code: 0, stdout: typeof d.url === "string" ? `${d.url}\n` : "", stderr: "" });
+
+/** `once`: the key of a creating write, made once per job (Once). */
+async function viaGh(w: Writer, identity: string, exec: Exec, action: string, target: string, details: Details, args: string[], input?: string, once?: string): Promise<ExecResult> {
   return recorded(w, identity, action, target, details, () => exec("gh", args, input === undefined && identity !== "legacy" ? undefined : { ...(input === undefined ? {} : { input }), ...(identity === "legacy" ? { inherit: true } : {}) }),
     (r) => ({ url: r.stdout.match(GH_URL)?.[0] }),
-    (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
+    (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    once === undefined ? undefined : { key: once, replay: ghReplay });
 }
 
 /** Asks a contributor on their PR (fix-up, conflict or CI fix where the branch is closed to us); `action` is the audit action of the caller's stage. */
@@ -456,7 +497,7 @@ export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: 
   exec = await laneExec(w, g, exec);
   const body = posted(note, text);
   return viaGh(w, await idOf(w, g), exec, action, refOf(o.repo, o.number), { ...details, text: body },
-    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body);
+    [o.pr ? "pr" : "issue", "comment", String(o.number), "--repo", `${slugOf(o.repo)}`, "--body-file", "-"], body, onceKey(body));
 }
 
 /** Replaces the body of a comment we posted (`commentId` is the number in its `#issuecomment-` URL). */
@@ -495,8 +536,9 @@ export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, 
   opensOwnPr(g, o.repo);
   exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
+  // GitHub keeps one open PR per head and base: a resumed job's PR is the one its earlier run opened, whatever the text.
   return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body },
-    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body);
+    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, o.base, o.head));
 }
 
 export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
@@ -504,7 +546,7 @@ export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: stri
   exec = await laneExec(w, g, exec, "close");
   const comment = posted(note, text);
   return viaGh(w, await idOf(w, g, "close"), exec, "batch-pr-close", refOf(o.repo, o.number), { ...details, text: comment },
-    ["pr", "close", String(o.number), "--repo", `${slugOf(o.repo)}`, "--comment", comment]);
+    ["pr", "close", String(o.number), "--repo", `${slugOf(o.repo)}`, "--comment", comment], undefined, onceKey(comment));
 }
 
 /** Creates the pipeline account's fork of `repo` when it has none. */
@@ -537,7 +579,7 @@ export async function createIssue(w: Writer, g: Grant, exec: Exec, o: { repo: st
   let r: ExecResult;
   try {
     r = await viaGh(w, await idOf(w, g), exec, o.action ?? "postmerge-file", o.target, { ...details, title: scrub(o.title), text: body },
-      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body);
+      ["issue", "create", "--repo", `${slugOf(o.repo)}`, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, scrub(o.title), body));
   } catch (e) {
     // exec rejects only when the command could not be started; the pacing rejects before anything is sent.
     throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
@@ -584,7 +626,7 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
 export async function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
   exec = await laneExec(w, g, exec);
   return viaGh(w, await idOf(w, g), exec, "ci-run-approve", refOf(g.repo, g.number), { ...details, run: runId },
-    ["api", "-X", "POST", `repos/${slugOf(g.repo)}/actions/runs/${runId}/approve`]);
+    ["api", "-X", "POST", `repos/${slugOf(g.repo)}/actions/runs/${runId}/approve`], undefined, onceKey(runId));
 }
 
 /** Refuses (as a failed result) a rerun of a run that does not belong to the commit: the run id comes from a check's link, which the PR's own CI can set. */
@@ -606,7 +648,7 @@ export async function ghRerunFailed(w: Writer, exec: Exec, g: Guarded<"cifix">, 
   const off = await runOutsideHead(await idOf(w, g), exec, g.repo, runId, g.head);
   if (off) return off;
   return viaGh(w, await idOf(w, g), exec, "ci-rerun", refOf(g.repo, g.number), { ...details, run: runId },
-    ["run", "rerun", String(runId), "--failed", "--repo", `${slugOf(g.repo)}`]);
+    ["run", "rerun", String(runId), "--failed", "--repo", `${slugOf(g.repo)}`], undefined, onceKey(runId));
 }
 
 /** Reruns the failed jobs of one Actions run on a head that belongs to no item (a default-branch head, or an integration batch tip): the audit target names the repo and the commit. */
@@ -616,7 +658,7 @@ export async function ghRerunMainFailed(w: Writer, g: GuardedRepo, exec: Exec, o
   const off = await runOutsideHead(await idOf(w, g), exec, o.repo, o.runId, o.head);
   if (off) return off;
   return viaGh(w, await idOf(w, g), exec, "ci-rerun", `${o.repo}:${o.head.slice(0, 8)}`, { ...details, run: o.runId },
-    ["run", "rerun", String(o.runId), "--failed", "--repo", `${slugOf(o.repo)}`]);
+    ["run", "rerun", String(o.runId), "--failed", "--repo", `${slugOf(o.repo)}`], undefined, onceKey(o.runId));
 }
 
 // ---- git pushes ---------------------------------------------------------------
@@ -658,11 +700,13 @@ async function pushed(w: Writer, g: Guarded | Grant, git: Pick<Git, "git">, acti
   if (!asBox) git = await laneGit(w, g, git, o.remote.toLowerCase() === slugOf(g.repo).toLowerCase() ? undefined : { wide: true });
   // A box-account push (an advisory's private fork) is audited as legacy whatever the repo's identity.
   const identity = asBox ? "legacy" : await idOf(w, g);
+  let replayed = false;
   const r = await recorded(w, identity, action, target, { ...details, branch: o.branch, remote: o.remote, commit: o.sha },
     () => git.git(["push", "--quiet", lease, `https://github.com/${o.remote}.git`, `${o.sha}:refs/heads/${o.branch}`]),
     undefined,
-    (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`));
-  if (r.code === 0) {
+    (r) => (r.code === 0 ? null : oneLine(r.stderr) || `exit code ${r.code}`),
+    { key: onceKey(o.remote, o.branch, o.sha), replay: () => (replayed = true, { code: 0, stdout: "", stderr: "" }) });
+  if (r.code === 0 && !replayed) {
     // The push stands even when its bookkeeping cannot be written; the outcome stays unknown then.
     try { await recordPush(w.db, action, { ...pr, from: typeof details.from === "string" ? details.from : null, to: o.sha, base: typeof details.base === "string" ? details.base : null }); } catch (e) { console.error(`push outcome not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
   }
@@ -709,23 +753,24 @@ const json = (v: unknown): string => JSON.stringify(v);
 export async function ghAdvisoryCreate(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; summary: string; description: string; severity: "critical" | "high" | "medium" | "low"; range: string; patched?: string | null }): Promise<{ ghsa: string | null; result: ExecResult }> {
   covers(g, o.repo);
   const body = json({ summary: o.summary, description: o.description, severity: o.severity, vulnerabilities: [{ package: { ecosystem: "other", name: o.repo }, vulnerable_version_range: o.range, patched_versions: o.patched ?? null }] });
-  let ghsa: string | null = null;
   const result = await recorded(w, "legacy", "security-advisory", o.key, { repo: o.repo },
     () => exec("gh", ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories`, "--input", "-", "--jq", ".ghsa_id"], { input: body, inherit: true }),
-    (r) => { ghsa = r.stdout.trim() || null; return { ghsa: ghsa ?? undefined }; },
-    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
-  return { ghsa, result };
+    (r) => ({ ghsa: r.stdout.trim() || undefined }),
+    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    // One draft advisory per finding.
+    { key: onceKey(o.repo), replay: (d) => ({ code: 0, stdout: typeof d.ghsa === "string" ? d.ghsa : "", stderr: "" }) });
+  return { ghsa: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 
 /** Creates the advisory's temporary private fork; returns its owner/name. */
 export async function ghAdvisoryFork(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; ghsa: string }): Promise<{ fork: string | null; result: ExecResult }> {
   covers(g, o.repo);
-  let fork: string | null = null;
   const result = await recorded(w, "legacy", "security-advisory-fork", o.key, { repo: o.repo, ghsa: o.ghsa },
     () => exec("gh", ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/forks`, "--jq", ".full_name"], { inherit: true }),
-    (r) => { fork = r.stdout.trim() || null; return { fork: fork ?? undefined }; },
-    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
-  return { fork, result };
+    (r) => ({ fork: r.stdout.trim() || undefined }),
+    (r) => (r.code === 0 && r.stdout.trim() ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`),
+    { key: onceKey(o.ghsa), replay: (d) => ({ code: 0, stdout: typeof d.fork === "string" ? d.fork : "", stderr: "" }) });
+  return { fork: result.code === 0 ? result.stdout.trim() || null : null, result };
 }
 
 /** Pushes the fix to the advisory's private fork with the box user's token: the GitHub App cannot reach these forks. */
@@ -737,7 +782,7 @@ export function ghAdvisoryPush(w: Writer, g: Grant, git: Pick<Git, "git">, o: { 
 export function ghAdvisoryPr(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; fork: string; base: string; head: string; title: string; body: string }): Promise<ExecResult> {
   covers(g, o.repo);
   return viaGh(w, "legacy", exec, "security-advisory-pr", o.key, { repo: o.repo, fork: o.fork },
-    ["pr", "create", "--repo", o.fork, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], scrub(o.body));
+    ["pr", "create", "--repo", o.fork, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], scrub(o.body), onceKey(o.fork, o.base, o.head));
 }
 
 /** Sets the affected version range of a draft that has none (GitHub refuses to publish without one). Does nothing, and writes nothing, when the draft has a range. */
@@ -761,7 +806,7 @@ export function ghAdvisoryPublish(w: Writer, g: Grant, exec: Exec, o: { repo: st
 /** Requests a CVE for the advisory (public repositories only). */
 export function ghAdvisoryCve(w: Writer, g: Grant, exec: Exec, o: { repo: string; key: string; ghsa: string }): Promise<ExecResult> {
   covers(g, o.repo);
-  return viaGh(w, "legacy", exec, "security-cve", o.key, { repo: o.repo, ghsa: o.ghsa }, ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/cve`]);
+  return viaGh(w, "legacy", exec, "security-cve", o.key, { repo: o.repo, ghsa: o.ghsa }, ["api", "-X", "POST", `repos/${slugOf(o.repo)}/security-advisories/${o.ghsa}/cve`], undefined, onceKey(o.ghsa));
 }
 
 // ---- merges ---------------------------------------------------------------------

@@ -22,6 +22,9 @@ const { setInferenceMode } = await import("../src/remote/mode.ts");
 const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { claimCall, submitCall } = await import("../src/remote/calls.ts");
 const { PROTOCOL_VERSION } = await import("../src/remote/protocol.ts");
+const { setCallContext } = await import("../src/agents/call.ts");
+const { ghComment } = await import("../src/github/write.ts");
+type GuardedItem = import("../src/core/guard.ts").GuardedItem;
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "runner-test-"));
@@ -108,6 +111,27 @@ describe("runner", () => {
     await db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(left);
     await second.recover();
     assert.equal((await getJob(db, left)).error, RUNNER_STOPPED);
+  });
+
+  test("a resumed job does not post again a comment its earlier run posted", async () => {
+    const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES ('test-echo', '{}', 'boss', ?, 'running', ?) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    setCallContext({ jobId: id, step: "test-echo", stage: 2, cancelled: async () => false });
+    try {
+      let posts = 0;
+      const exec = async () => { posts++; return { code: 0, stdout: `https://github.com/storytold/app/issues/3#issuecomment-${posts}\n`, stderr: "" }; };
+      const g = { scope: "item", action: { kind: "act" }, repo: "app", number: 3, as: "app" } as unknown as GuardedItem;
+      const comment = (text: string) => ghComment({ db, login: "act" }, g, exec, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, text);
+      await comment("hello");
+      // The runner stopped, the job resumed and runs again from the start.
+      await db.prepare("UPDATE jobs SET resumes = 1, started_at = ? WHERE id = ?").run(new Date(Date.now() + 1000).toISOString(), id);
+      const again = await comment("hello");
+      assert.equal(posts, 1, "the comment is not posted twice");
+      assert.match(again.stdout, /issuecomment-1/, "the earlier comment's URL is the result");
+      await comment("something else");
+      assert.equal(posts, 2, "a comment the earlier run did not post is posted");
+    } finally {
+      setCallContext(null);
+    }
   });
 
 
