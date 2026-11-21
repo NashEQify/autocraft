@@ -37,7 +37,7 @@ afterEach(() => current?.close());
 const DIFF = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-let a = 1;\n+let a = 2;\n";
 const premergeDeps: PremergeDeps = { fetchDiff: async () => ({ ok: true, text: DIFF }), model: "opus", maxChars: 120_000 };
 const premergeReply = (n: number) => JSON.stringify({ ref: `app#${n}`, findings: [], searched: "callers" });
-const merged = async (w: World) => await w.rows("SELECT number, head_oid, outcome FROM merges ORDER BY number");
+const merged = async (w: World) => await w.db.all(w.db.k.selectFrom("merges").select(["number", "head_oid", "outcome"]).orderBy("number"));
 
 describe("PR journeys", () => {
   test("a whitelisted bugfix PR goes from review to merge, and the merge gets the reviewed head", async () => {
@@ -135,8 +135,8 @@ describe("PR journeys", () => {
   test("the batch PR's runs are approved at the batch tip when its members are fast-tracked in a repo whose pipeline is off", async () => {
     const w = await (await (await (await (await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2)).review(2)).verified(2)).premerge(2, "clean");
     await runBatches(w.db, { repo: "app" }, quiet, w.gh.batchDeps());
-    const tip = (await w.db.prepare("SELECT commit_sha AS c FROM merge_batches WHERE pr_number = 900").get() as { c: string }).c;
-    await w.db.prepare("INSERT INTO ci_run_approvals (repo, number, head_oid, runs, approved, reread, failed, checked_at) VALUES ('app', 900, ?, '[]', '[]', 1, '{}', ?)").run(tip, "2026-01-02T00:00:00Z");
+    const tip = (await w.db.get(w.db.k.selectFrom("merge_batches").select("commit_sha as c").where("pr_number", "=", 900)))!.c;
+    await w.db.run(w.db.k.insertInto("ci_run_approvals").values({ repo: "app", number: 900, head_oid: tip, runs: "[]", approved: "[]", reread: 1, failed: "{}", checked_at: "2026-01-02T00:00:00Z" }));
     await w.db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     await w.db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, created_at, updated_at)
       VALUES ('app', 900, 'pr', 'OPEN', 'batch', 'bot', 1, 0, 'mirror-lag', 'batch', ?, ?)`).run("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
@@ -248,7 +248,7 @@ describe("conflict resolution lint", () => {
   const setup = async () => {
     const git = gitWorld(1, undefined, true);
     const w = await (await (await (await fresh()).pr(1, { head: git.head, mergeable: "CONFLICTING" })).review(1, { verdict: "take" })).verified(1);
-    await w.db.prepare("UPDATE items SET base_ref = 'main' WHERE repo = 'app' AND number = 1").run();
+    await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }).where("repo", "=", "app").where("number", "=", 1));
     const deps = git.deps(w);
     const asked: { previous?: { findings: string[] } }[] = [];
     const answers = ["// both\nfn main() { a(); b(); }\n", "// both\nfn main() { a(); a(); }\n"];

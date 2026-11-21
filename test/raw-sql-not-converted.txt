@@ -353,11 +353,8 @@ src/merge/approval.ts
 
 src/merge/base.ts
 
-src/merge/batch-store.ts
 
-src/merge/batch.ts
 
-src/merge/changes-requested.ts
 
 src/merge/ci-approval.ts
 
