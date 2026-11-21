@@ -69,13 +69,9 @@ src/core/plan-changes.ts
 
 src/dash/api/activity.ts
 
-src/dash/api/admin.ts
 
-src/dash/api/areas.ts
 
-src/dash/api/batch-page.ts
 
-src/dash/api/build.ts
 
 src/dash/api/conversations.ts
 
@@ -142,7 +138,6 @@ src/dash/api/visible.ts
 
 src/dash/api/work.ts
 
-src/dash/audit.ts
 
 src/dash/mcp/index.ts
 
