@@ -30,8 +30,8 @@ const T0 = "2026-01-01T00:00:00Z";
 
 async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "conv-test-")), "t.db"));
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await useTestAccount(db);
   const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
     await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body text", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
@@ -142,7 +142,7 @@ describe("new step kinds", () => {
 
   test("transfer is for issues and last, an answer that writes takes open_issue but not a comment, fixup that merges needs a merge or scope decision", async () => {
     const db = await fresh();
-    await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('lib', 'op', ?, 1)").run(T0);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "lib", added_by: "op", added_at: T0, pipeline: 1 }));
     await ask(db, [{ id: "app#2:merge", kind: "merge", repo: "app", number: 2, question: "Merge?", options: [{ key: "merge", label: "Merge" }, { key: "hold", label: "Hold" }] }]);
     const p1 = await run(db, 3, [
       R([{ kind: "transfer", to: "lib" }]),
@@ -229,7 +229,7 @@ describe("Do it", () => {
 
   test("a transfer needs the comment approval of the target repository too", async () => {
     const db = await fresh();
-    await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('lib', 'op', ?, 1)").run(T0);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "lib", added_by: "op", added_at: T0, pipeline: 1 }));
     const sent: string[] = [];
     const querier = { query: async (q: string) => {
       if (q.includes("issueOrPullRequest")) return { repository: { issueOrPullRequest: { __typename: "Issue", id: "I_1", state: "OPEN" } } };

@@ -325,17 +325,13 @@ src/health.ts
 
 src/itemhash.ts
 
-src/labels/approval.ts
 
-src/labels/github.ts
 
-src/labels/plan.ts
 
 src/live.ts
 
 src/liveness.ts
 
-src/mainci/index.ts
 
 src/mainfix/approval.ts
 
