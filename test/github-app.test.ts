@@ -186,7 +186,7 @@ describe("github app registration", () => {
     assert.equal(status.app.installUrl, "https://github.com/apps/autocraft-test/installations/new");
     assert.equal(status.app.transferUrl, "https://github.com/organizations/glasswing/settings/apps/autocraft-test/advanced");
     assert.deepEqual(status.installations, [{ owner: "glasswing", selection: "selected", repos: ["glasswing/photocraft"] }]);
-    const audit = JSON.stringify(await db.prepare("SELECT * FROM audit").all());
+    const audit = JSON.stringify(db.all(db.k.selectFrom("audit").select(kx.cols("audit"))));
     for (const secret of [PEM.slice(40, 80), CLIENT_SECRET, WEBHOOK_SECRET, "ghs_installation"]) {
       assert.ok(!text.includes(secret) && !page.includes(secret) && !audit.includes(secret));
     }
@@ -199,11 +199,11 @@ describe("github app registration", () => {
     const s = await startServer({ config: loadConfig(env), db, provider: new FakeProvider(permsFile), routes: [] });
     closers.push(s.close);
     await signedIn("maint", s.url);
-    const row = await db.prepare("SELECT token_enc, version, status FROM user_tokens WHERE login = 'maint'").get() as { token_enc: string; version: number; status: string };
+    const row = (await db.get(db.k.selectFrom("user_tokens").select(["token_enc", "version", "status"]).where("login", "=", "maint")))!;
     assert.equal(row.status, "ok");
     assert.ok(row.token_enc && !row.token_enc.includes("dev_"));
     await signedIn("maint", s.url);
-    assert.equal((await db.prepare("SELECT version FROM user_tokens WHERE login = 'maint'").get() as { version: number }).version, 2);
+    assert.equal((await db.get(db.k.selectFrom("user_tokens").select("version").where("login", "=", "maint")))!.version, 2);
   });
 
   test("a secrets file that cannot be written keeps the app's slug visible and leaks no key", async () => {
@@ -231,7 +231,7 @@ describe("github app registration", () => {
       const before = converted.length;
       assert.equal((await boss.post("/auth/github-app/start", { csrf: await boss.csrf() })).status, 409);
       assert.equal(converted.length, before);
-      const text = JSON.stringify(await db.prepare("SELECT * FROM audit").all()) + page + errors.join("\n");
+      const text = JSON.stringify(db.all(db.k.selectFrom("audit").select(kx.cols("audit")))) + page + errors.join("\n");
       for (const secret of [PEM.slice(40, 80), CLIENT_SECRET, WEBHOOK_SECRET]) assert.ok(!text.includes(secret));
       assert.match(errors.join("\n"), /autocraft-test/);
     } finally {
@@ -283,7 +283,7 @@ describe("github app registration", () => {
     const s = await startServer({ config: loadConfig(env), db, provider, routes });
     closers.push(s.close);
     const c = await signedIn("viewer1", s.url);
-    const row = async () => await db.prepare("SELECT token_enc, version FROM user_tokens WHERE login = 'viewer1'").get() as { token_enc: string; version: number };
+    const row = async () => (await db.get(db.k.selectFrom("user_tokens").select(["token_enc", "version"]).where("login", "=", "viewer1")))!;
     const before = await row();
     await new Promise((r) => setTimeout(r, 350));
     await c.req("/api/test/can/photocraft");
@@ -378,7 +378,7 @@ describe("github app registration", () => {
     assert.equal((await get(new Client(s.url), path2)).r.status, 410);
 
     assert.ok(visitorTokens.size >= 1 && ![...visitorTokens].includes(""));
-    const everything = JSON.stringify([await db.prepare("SELECT * FROM audit").all(), await db.all(db.k.selectFrom("github_setup_links").select(kx.cols("github_setup_links"))), await db.prepare("SELECT * FROM github_app_states").all(), await db.prepare("SELECT * FROM oauth_states").all(), await db.all(db.k.selectFrom("sessions").select(kx.cols("sessions")))]) + readFileSync(file, "utf8") + pages.join("");
+    const everything = JSON.stringify([db.all(db.k.selectFrom("audit").select(kx.cols("audit"))), await db.all(db.k.selectFrom("github_setup_links").select(kx.cols("github_setup_links"))), await db.all(db.k.selectFrom("github_app_states").select(kx.cols("github_app_states"))), await db.all(db.k.selectFrom("oauth_states").select(kx.cols("oauth_states"))), await db.all(db.k.selectFrom("sessions").select(kx.cols("sessions")))]) + readFileSync(file, "utf8") + pages.join("");
     for (const t of visitorTokens) assert.ok(!everything.includes(t), "the owner's token is kept nowhere");
     for (const a of ["github-app-link-create", "github-app-link-use", "github-app-link-revoke"]) assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = ?").get(a), a);
   });
@@ -473,7 +473,7 @@ describe("github app registration", () => {
     closers.push(s.close);
     assert.equal((await (await signedIn("maint", s.url)).json("/api/admin/github-app/remove", {})).status, 403);
     const boss = await signedIn("boss", s.url);
-    await db.prepare("INSERT INTO github_app_states (state, login, session_hash, created_at) VALUES ('open', 'boss', 'h', ?)").run(new Date().toISOString());
+    await db.run(db.k.insertInto("github_app_states").values({ state: "open", login: "boss", session_hash: "h", created_at: new Date().toISOString() }));
     const res = await boss.json("/api/admin/github-app/remove", {});
     assert.equal(res.status, 200);
     const text = await res.text();
@@ -481,9 +481,9 @@ describe("github app registration", () => {
     assert.deepEqual(JSON.parse(readFileSync(file, "utf8")), { other_key: "kept" });
     assert.equal(statSync(file).mode & 0o777, 0o600);
     assert.equal((await (await boss.req("/api/admin/github-app")).json() as { configured: boolean }).configured, false);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM github_app_states").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("github_app_states").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'github-app-remove' AND target = 'autocraft-test'").get() as { n: number }).n, 1);
-    assert.ok(!JSON.stringify(await db.prepare("SELECT * FROM audit").all()).includes(CLIENT_SECRET));
+    assert.ok(!JSON.stringify(db.all(db.k.selectFrom("audit").select(kx.cols("audit")))).includes(CLIENT_SECRET));
     assert.equal((await boss.json("/api/admin/github-app/remove", {})).status, 409);
   });
 });
