@@ -8,6 +8,12 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      image:
+        description: Image to build
+        type: choice
+        options: [app, rust-stable]
+        default: app
 
 permissions:
   contents: read
@@ -18,7 +24,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # One image per run: the shared workflow names its digest artifacts per
+  # platform, so two image builds in one run would mix up their digests.
   publish:
+    if: github.event_name != 'workflow_dispatch' || inputs.image == 'app'
     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@0bef64f155fcea81edbd9542381777358bfbdcf4
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -41,7 +50,9 @@ jobs:
   # Toolchain image for build pods (docs/operations.md "Build pods"), pushed as
   # docker.io/storytold/autocraft:rust-stable so the cluster pulls it with the
   # same pull secret. Register its digest with `envs add --toolchain-image`.
+  # Built by a manual run with image=rust-stable.
   rust-stable:
+    if: github.event_name == 'workflow_dispatch' && inputs.image == 'rust-stable'
     uses: storytold/craft-common-actions/.github/workflows/docker-build.yml@0bef64f155fcea81edbd9542381777358bfbdcf4
     secrets:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
