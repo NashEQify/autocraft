@@ -13,7 +13,7 @@ const db = connect((workerData as { dbFile: string }).dbFile);
 
 parentPort!.on("message", async (m: WorkerTask) => {
   try {
-    const result = m.task === "plan" ? await detectAutopilot(db, m.nowMs === undefined ? {} : { nowMs: m.nowMs }) : refreshSummary(db, m.budgetMs);
+    const result = m.task === "plan" ? await detectAutopilot(db, { incremental: true, ...(m.nowMs === undefined ? {} : { nowMs: m.nowMs }) }) : refreshSummary(db, m.budgetMs);
     parentPort!.postMessage({ id: m.id, ok: true, result } satisfies WorkerReply);
   } catch (e) {
     parentPort!.postMessage({ id: m.id, ok: false, error: (e as Error).stack ?? String(e) } satisfies WorkerReply);

@@ -16,6 +16,8 @@ export type Changes = {
   refs: string[];
   /** Every item must be decided again: a global or cross-item input changed, or the log passed CHANGES_CAP. */
   full: boolean;
+  /** Why `full`: a full-pass mark, or more rows than CHANGES_CAP. */
+  cause?: "marker" | "cap";
   /** The seq this answer covers: pass it to the next changesSince and to pruneChanges. */
   seq: number;
 };
@@ -52,6 +54,9 @@ export function planChangesSql(db?: DatabaseSync): string {
     "INSERT OR IGNORE INTO main.plan_full (id, seq) VALUES (1, 0);",
     // Full-pass marks per trigger: which inputs force full passes.
     "CREATE TABLE IF NOT EXISTS main.plan_full_causes (source TEXT PRIMARY KEY, n INTEGER NOT NULL, last_seq INTEGER NOT NULL);",
+    // The incremental planner's own records (src/core/plan-engine.ts); no trigger reads them.
+    "CREATE TABLE IF NOT EXISTS main.plan_shadow_diffs (at TEXT NOT NULL, ref TEXT NOT NULL, side TEXT NOT NULL, fields TEXT NOT NULL, detail TEXT NOT NULL);",
+    "CREATE TABLE IF NOT EXISTS main.plan_pass_stats (kind TEXT PRIMARY KEY, passes INTEGER NOT NULL, refs INTEGER NOT NULL, last_at TEXT NOT NULL);",
     // The sequence row exists before the first logged item, so a full-pass mark can take a seq from it.
     "INSERT INTO main.sqlite_sequence (name, seq) SELECT 'item_changes', 0 WHERE NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = 'item_changes');",
   ];
@@ -102,9 +107,9 @@ export function changesSince(db: DatabaseSync, seq: number): Changes {
   // Read the bound first: rows and marks up to it were committed with it, later ones are the next call's.
   const top = changeSeq(db);
   const full = (db.prepare("SELECT seq FROM main.plan_full WHERE id = 1").get() as { seq: number } | undefined)?.seq ?? 0;
-  if (full > seq && full <= top) return { refs: [], full: true, seq: top };
+  if (full > seq && full <= top) return { refs: [], full: true, cause: "marker", seq: top };
   const n = (db.prepare("SELECT count(*) AS n FROM (SELECT 1 FROM main.item_changes WHERE seq > ? AND seq <= ? LIMIT ?)").get(seq, top, CHANGES_CAP + 1) as { n: number }).n;
-  if (n > CHANGES_CAP) return { refs: [], full: true, seq: top };
+  if (n > CHANGES_CAP) return { refs: [], full: true, cause: "cap", seq: top };
   const refs = (db.prepare("SELECT DISTINCT repo || '#' || number AS ref FROM main.item_changes WHERE seq > ? AND seq <= ?").all(seq, top) as { ref: string }[]).map((r) => r.ref);
   return { refs, full: false, seq: top };
 }

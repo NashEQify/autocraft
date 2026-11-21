@@ -9,6 +9,8 @@ import { changeSeq, changesSince, pruneChanges } from "../src/core/plan-changes.
 import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
+import { inReadSnapshot, planPass } from "../src/core/plan-engine.ts";
+import { latestRun } from "../src/classify/settled.ts";
 import { setReviewMinInterval } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -121,4 +123,36 @@ test("a PR's facts change with the clock alone no earlier than its refreshAt: a 
   const after = load(f.refreshAt!);
   assert.notEqual(after.reviewHold?.kind, "blocked");
   assert.equal(after.review?.stale, true);
+});
+
+test("the incremental pass reloads only logged and due items, and its PlanSet equals a full load after each write", () => {
+  const prev = process.env.AUTOCRAFT_PLAN_SHADOW;
+  process.env.AUTOCRAFT_PLAN_SHADOW = "throw";
+  try {
+    const w = world().repo().pr(1).pr(2).issue(3).review(1).review(2, { verdict: "take-fix" });
+    let now = Date.parse(T) + 3600_000;
+    const pass = () => {
+      const p = inReadSnapshot(w.db, () => planPass(w.db, { now, run: latestRun(w.db), fullEveryMs: 30 * 60_000 }));
+      p.finish();
+      return { kind: p.kind, refs: p.refs };
+    };
+    assert.equal(pass().kind, "full:start");
+    assert.deepEqual(pass(), { kind: "incremental", refs: 0 });
+    // A new item moves other items' facts (open PRs of an issue, duplicate sets): a full load.
+    w.pr(4);
+    assert.equal(pass().kind, "full:marker");
+    w.review(4, { verdict: "hold" });
+    w.db.prepare("INSERT INTO comments (id, repo, number, author, body, created_at) VALUES ('c1', 'app', 3, 'someone', 'still broken', ?)").run(T);
+    assert.deepEqual(pass(), { kind: "incremental", refs: 2 });
+    w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE repo = 'app' AND number = 2").run();
+    pass();
+    w.db.prepare("INSERT INTO settings (key, value) VALUES ('plan_shadow', 'on')").run();
+    assert.deepEqual(pass(), { kind: "incremental", refs: 0 });
+    now += 31 * 60_000;
+    assert.equal(pass().kind, "full:floor");
+    // The pass's records are not planner inputs.
+    assert.deepEqual(pass(), { kind: "incremental", refs: 0 });
+  } finally {
+    if (prev === undefined) delete process.env.AUTOCRAFT_PLAN_SHADOW; else process.env.AUTOCRAFT_PLAN_SHADOW = prev;
+  }
 });

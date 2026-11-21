@@ -67,8 +67,8 @@ const PR_CROSS_COLUMNS = ["state", "title", "body", "closing_issues", "head_ref"
 /** Item columns that change duplicate sets, group plans and the canonical pick of the item's group. */
 const DUPE_COLUMNS = ["state", "title", "body", "embed_hash", "comments_count", "created_at", "closing_issues"];
 
-/** Settings rows the runner, sync and planner write for their own use (src/live.ts), less `classify_run`, which picks the run every item's labels come from. */
-export const PLAN_IGNORED_SETTINGS = BOOKKEEPING_SETTINGS.filter((k) => k !== "classify_run");
+/** Settings rows the runner, sync and planner write for their own use (src/live.ts), less `classify_run`, which picks the run every item's labels come from; and the planner's shadow switch, which no fact reads. */
+export const PLAN_IGNORED_SETTINGS = [...BOOKKEEPING_SETTINGS.filter((k) => k !== "classify_run"), "plan_shadow"];
 const PLAN_IGNORED_SETTING_LIKE = ["%\\_points\\_last\\_run", "pipeline\\_fp:%"];
 
 export const PLAN_INPUTS: PlanInput[] = [

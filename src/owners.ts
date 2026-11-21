@@ -30,6 +30,12 @@ export function ownerOf(repo: string): string {
   return cache.get(repo) ?? DEFAULT_OWNER;
 }
 
+/** The owners ownerOf answers with, as one string: changes when the cache does. */
+export function ownersStamp(): string {
+  ownerOf("");
+  return JSON.stringify([...cache].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)));
+}
+
 /** `owner/name` of a tracked repo name. */
 export const slugOf = (repo: string): string => `${ownerOf(repo)}/${repo}`;
 

@@ -18,6 +18,13 @@ export function withSettingsSnapshot<T>(db: DatabaseSync, fn: () => T): T {
   try { return fn(); } finally { snapshots.delete(db); }
 }
 
+/** Reads the table again for the snapshot of a pass on `db` (none: nothing), so a pass sees the settings of a read transaction it opens later. */
+export function rereadSettingsSnapshot(db: DatabaseSync): void {
+  if (!snapshots.has(db)) return;
+  const rows = prep(db, "SELECT key, value FROM main.settings").all() as { key: string; value: string }[];
+  snapshots.set(db, new Map(rows.map((r) => [r.key, r.value])));
+}
+
 /** The stored value, undefined when the key has no row. */
 export function setting(db: DatabaseSync, key: string): string | undefined {
   const snap = snapshots.get(db);
