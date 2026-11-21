@@ -14,11 +14,11 @@ const as = (login: string, role: "viewer" | "maintainer" | "operator", params: R
 
 test("Backlog on an item: answers its open question, or holds it with an answered backlog decision that Reopen deletes", async () => {
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT INTO tracked_repos (name) VALUES ('alpha')").run();
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('alpha', 'public')").run();
-  await db.prepare("INSERT INTO access (login, role) VALUES ('op', 'operator'), ('maint', 'maintainer')").run();
-  for (const n of [1, 2]) await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES ('alpha', ?, 'issue', 'OPEN', ?)").run(n, `Title ${n}`);
-  await db.prepare(`INSERT INTO decisions (id, kind, repo, number, question, options, asked_at) VALUES ('alpha#2:scope', 'scope', 'alpha', 2, 'In scope?', '[{"key":"take","label":"Take"}]', ?)`).run(new Date().toISOString());
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "alpha" }));
+  await db.run(db.k.insertInto("repos").values({ name: "alpha", visibility: "public" }));
+  await db.run(db.k.insertInto("access").values([{ login: "op", role: "operator" }, { login: "maint", role: "maintainer" }]));
+  for (const n of [1, 2]) await db.run(db.k.insertInto("items").values({ repo: "alpha", number: n, kind: "issue", state: "OPEN", title: `Title ${n}` }));
+  await db.run(db.k.insertInto("decisions").values({ id: "alpha#2:scope", kind: "scope", repo: "alpha", number: 2, question: "In scope?", options: '[{"key":"take","label":"Take"}]', asked_at: new Date().toISOString() }));
   const list = async (status: string) => (await listDecisions(db, { ...as("op", "operator"), method: "GET", query: new URLSearchParams({ status, all: "1" }) })).decisions.map((d) => d.id);
 
   await assert.rejects(backlogItemRoute(db, as("maint", "maintainer", { repo: "alpha", n: "1" })), { status: 403 }, "a maintainer settles only while maintainer_writes is on");

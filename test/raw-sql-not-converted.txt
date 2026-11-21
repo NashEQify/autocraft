@@ -211,7 +211,6 @@ src/decide/index.ts
 
 src/decide/judgement.ts
 
-src/decide/prepare.ts
 
 src/decide/prepared.ts
 
