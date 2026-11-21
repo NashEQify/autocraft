@@ -23,7 +23,7 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
   await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body, commit_oid) VALUES ('photocraft', 7, 'c1', 'comment', 'dev', '2026-01-01T01:00:00Z', 'please look', NULL)").run();
   await db.prepare("INSERT INTO plan_history (repo, number, head, old_state, new_state, wait, reasons, at) VALUES ('photocraft', 7, ?, 'reviewing', 'verifying', 'CI', '[]', '2026-01-01T02:00:00Z')").run(H1);
   const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 7 }], prompt: "secret prompt" });
-  await db.prepare("UPDATE agent_runs SET started_at = '2026-01-01T03:00:00Z'").run();
+  await db.run(db.k.updateTable("agent_runs").set({ started_at: "2026-01-01T03:00:00Z" }));
   await saveTools(db, run, [{ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: "x" } }] } }]);
   await finishRun(db, run, { state: "done", output: "o", costUsd: 0.5 });
   await db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 7, ?, '2026-01-01T04:00:00Z', 'opus', 'full', 'hold', 1, 'why')").run(H1);

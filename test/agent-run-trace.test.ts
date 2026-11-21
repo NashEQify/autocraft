@@ -12,7 +12,7 @@ const result = (id: string, content: unknown, is_error = false) => ({ type: "use
 test("tool uses of a call are stored with result sizes, scrubbed arguments and the check row they ran", async () => {
   const db = await connectDb(":memory:");
   const run = await start(db);
-  const check = Number((await db.prepare("INSERT INTO model_checks (run_id, step, repo, number, head, command, started_at) VALUES (?, 'fixup', 'app', 1, 'h', 'clippy', 't') RETURNING id").get(run) as { id: number }).id);
+  const check = (await db.get(db.k.insertInto("model_checks").values({ run_id: run, step: "fixup", repo: "app", number: 1, head: "h", command: "clippy", started_at: "t" }).returning("id")))!.id;
   await saveTools(db, run, [
     use("a", "Read", { file_path: "/repo/x.rs" }), result("a", "héllo"),
     use("b", "mcp__build__check", { command: "fmt", patch: "p" }), result("b", [{ type: "text", text: "refused" }], true),
@@ -31,24 +31,24 @@ test("texts past 14 days are kept compressed and read back; old plain rows still
   const old = await start(db);
   // Plain rows exist only in SQLite files from before compression (the copy to Postgres compresses them; bytea there).
   const plain = db.dialect === "sqlite";
-  if (plain) await db.prepare("UPDATE agent_run_texts SET prompt = 'plain prompt' WHERE run_id = ?").run(old);
+  if (plain) await db.run(db.k.updateTable("agent_run_texts").set({ prompt: "plain prompt" }).where("run_id", "=", old));
   const ago = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
-  await db.prepare("UPDATE agent_runs SET started_at = ?").run(ago(20));
+  await db.run(db.k.updateTable("agent_runs").set({ started_at: ago(20) }));
   await pruneRuns(db);
   const d = await getRun(db, run);
   assert.equal(d.prompt, "the prompt");
   assert.equal(d.output, "the output");
   assert.equal(d.costUsd, 0.25);
   assert.equal((await getRun(db, old)).prompt, plain ? "plain prompt" : "the prompt");
-  await db.prepare("UPDATE agent_runs SET started_at = ?").run(ago(RUN_KEEP_MS / 86_400_000 + 1));
+  await db.run(db.k.updateTable("agent_runs").set({ started_at: ago(RUN_KEEP_MS / 86_400_000 + 1) }));
   await pruneRuns(db);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM agent_run_texts").get())!.n, 0);
+  assert.equal((await db.get(db.k.selectFrom("agent_run_texts").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
 });
 
 test("a check use that wrote no row does not take the row of a later use of the same command", async () => {
   const db = await connectDb(":memory:");
   const run = await start(db);
-  const check = Number((await db.prepare("INSERT INTO model_checks (run_id, step, repo, number, head, command, started_at) VALUES (?, 'fixup', 'app', 1, 'h', 'fmt', 't') RETURNING id").get(run) as { id: number }).id);
+  const check = (await db.get(db.k.insertInto("model_checks").values({ run_id: run, step: "fixup", repo: "app", number: 1, head: "h", command: "fmt", started_at: "t" }).returning("id")))!.id;
   await saveTools(db, run, [
     use("a", "mcp__build__check", { command: "fmt", patch: "p" }), result("a", "rustfmt: the patch changes no .rs file; nothing to format"),
     use("b", "mcp__build__check", { command: "fmt", patch: "q" }), result("b", "ok"),

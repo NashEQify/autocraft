@@ -20,7 +20,7 @@ test("the stream merges the sources of every item newest first, pages by cursor 
     await db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at) VALUES (?, ?, 'pr', 'OPEN', ?, 'dev', '2026-01-01T00:00:00Z')").run(repo, n, `Item ${n}`);
   await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 1, 'c1', 'comment', 'dev', '2026-01-01T01:00:00Z', 'hi')").run();
   const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 2 }, { repo: "photocraft", number: 1 }], prompt: "p" });
-  await db.prepare("UPDATE agent_runs SET started_at = '2026-01-01T02:00:00Z'").run();
+  await db.run(db.k.updateTable("agent_runs").set({ started_at: "2026-01-01T02:00:00Z" }));
   await db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 2, ?, '2026-01-01T03:00:00Z', 'opus', 'full', 'take', 1, 'ok')").run("a".repeat(40));
   await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T04:00:00Z', 'bot', 'review-post', 'photocraft#1', '{}')").run();
   await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T05:00:00Z', 'maint', 'set-priority', 'photocraft#2', '{}')").run();
