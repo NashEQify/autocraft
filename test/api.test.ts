@@ -19,6 +19,7 @@ import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 const MARKER = "OPINION-MARKER-k3v";
 const LIMIT = 8;
@@ -279,7 +280,8 @@ describe("api", () => {
       assert.ok(!(await actionableIds()).includes(X1), "an answer on a repo that left the app identity stops counting");
       assert.equal(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql(db, "d")}`).get(X1), undefined, "nor at the SQL sites other than actionable()");
       // Work and answers the maintainer started count only while the conditions hold; a flip to legacy stops them everywhere.
-      await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'photocraft', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(new Date().toISOString());
+      await db.run(db.k.insertInto("repo_permissions").values({ login: "maint", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() })
+        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(kx.excluded(["permission", "checked_at"]))));
       await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES ('photocraft', 7, 'h1', 'fix it', 'maint', ?)").run(new Date().toISOString());
       await identity(true);
       assert.ok(await queuedOperatorFix(db, "photocraft", 7, "h1"));

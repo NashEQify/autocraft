@@ -17,6 +17,7 @@ import { FakeProvider } from "../src/dash/server/provider.ts";
 import type { Route } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "github-app-test-"));
@@ -320,7 +321,7 @@ describe("github app registration", () => {
     // The list shows open links; the database keeps only the hash.
     const path = await mint("glasswing");
     const secret = path.split("/").pop()!;
-    assert.ok(!JSON.stringify(await db.prepare("SELECT * FROM github_setup_links").all()).includes(secret));
+    assert.ok(!JSON.stringify(await db.all(db.k.selectFrom("github_setup_links").select(kx.cols("github_setup_links")))).includes(secret));
     const status = (await (await boss.req("/api/admin/github-app")).json()) as { links: { org: string }[] };
     assert.deepEqual(status.links.map((l) => l.org), ["glasswing"]);
 
@@ -360,7 +361,7 @@ describe("github app registration", () => {
     assert.equal((await get(new Client(s.url), path)).r.status, 410);
     assert.match((await get(owner, `/auth/github-app/setup?installation_id=99&state=${installState}`)).t, />Installed</);
     assert.equal((await new Client(s.url).post(`${path}/signin`, { manager: "1" })).status, 410);
-    const used = await db.prepare("SELECT used_by, installation_id FROM github_setup_links WHERE hash IS NOT NULL AND org = 'glasswing'").get() as { used_by: string; installation_id: number };
+    const used = await db.get(db.k.selectFrom("github_setup_links").select(["used_by", "installation_id"]).where("hash", "is not", null).where("org", "=", "glasswing"));
     assert.deepEqual({ ...used }, { used_by: "alice", installation_id: 99 });
 
     // With the role available the PUT is made with the owner's token and audited without it; a revoked link is dead.
@@ -372,12 +373,12 @@ describe("github app registration", () => {
     assert.deepEqual(rolePuts, ["/orgs/glasswing/organization-roles/users/boss/8140"]);
     const row = await db.prepare("SELECT details FROM audit WHERE action = 'github-app-manager'").get() as { details: string };
     assert.deepEqual(JSON.parse(row.details), { user: "boss", role: "GitHub App Manager", roleId: 8140, identity: "user:alice", state: "done" });
-    const id = (await db.prepare("SELECT id FROM github_setup_links WHERE hash = ?").get(sha256hex(path2.split("/").pop()!)) as { id: string }).id;
+    const id = (await db.get(db.k.selectFrom("github_setup_links").select("id").where("hash", "=", sha256hex(path2.split("/").pop()!))))!.id;
     assert.equal((await boss.json("/api/admin/github-app/links/revoke", { id })).status, 200);
     assert.equal((await get(new Client(s.url), path2)).r.status, 410);
 
     assert.ok(visitorTokens.size >= 1 && ![...visitorTokens].includes(""));
-    const everything = JSON.stringify([await db.prepare("SELECT * FROM audit").all(), await db.prepare("SELECT * FROM github_setup_links").all(), await db.prepare("SELECT * FROM github_app_states").all(), await db.prepare("SELECT * FROM oauth_states").all(), await db.prepare("SELECT * FROM sessions").all()]) + readFileSync(file, "utf8") + pages.join("");
+    const everything = JSON.stringify([await db.prepare("SELECT * FROM audit").all(), await db.all(db.k.selectFrom("github_setup_links").select(kx.cols("github_setup_links"))), await db.prepare("SELECT * FROM github_app_states").all(), await db.prepare("SELECT * FROM oauth_states").all(), await db.all(db.k.selectFrom("sessions").select(kx.cols("sessions")))]) + readFileSync(file, "utf8") + pages.join("");
     for (const t of visitorTokens) assert.ok(!everything.includes(t), "the owner's token is kept nowhere");
     for (const a of ["github-app-link-create", "github-app-link-use", "github-app-link-revoke"]) assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = ?").get(a), a);
   });

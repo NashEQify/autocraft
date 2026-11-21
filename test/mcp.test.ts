@@ -424,12 +424,12 @@ describe("answering", () => {
   });
 
   test("after signing out, an answer is refused for want of a dashboard session", async () => {
-    await db.prepare("DELETE FROM sessions WHERE login = 'boss'").run();
+    await db.run(db.k.deleteFrom("sessions").where("login", "=", "boss"));
     const b = await signedIn("boss");
     const t = (await b.json<McpTokenCreated>("POST", "/api/mcp/tokens", { label: "answers", answer: true })).token;
-    await db.prepare("DELETE FROM repo_permissions WHERE login = 'boss'").run();
+    await db.run(db.k.deleteFrom("repo_permissions").where("login", "=", "boss"));
     assert.equal((await b.req("POST", "/api/signout")).status < 400, true);
-    await db.prepare("DELETE FROM repo_permissions WHERE login = 'boss'").run();
+    await db.run(db.k.deleteFrom("repo_permissions").where("login", "=", "boss"));
     const r = await call(t, "answer_decision", { id: P10, option: "small" });
     assert.equal(r.isError, true);
     assert.match(r.text, /no write access to storytold\/photocraft/);

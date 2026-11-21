@@ -151,7 +151,7 @@ describe("sign-in", () => {
     assert.equal(r.status, 403);
     assert.match(await r.text(), /Not authorised/);
     assert.equal(c.jar.has(SESSION_COOKIE), false);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE login = 'stranger'").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("sessions").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "stranger")))!.n, 0);
     assert.equal((await audits("sign-in-refused")).n, 1);
   });
 
@@ -168,8 +168,8 @@ describe("sign-in", () => {
     assert.match(page.headers.get("content-security-policy")!, /script-src 'self' 'nonce-[\w-]+'/);
     assert.equal(page.headers.get("x-frame-options"), "DENY");
     assert.equal(page.headers.get("referrer-policy"), "same-origin");
-    const rows = await db.prepare("SELECT token_enc FROM sessions").all() as { token_enc: string }[];
-    for (const row of rows) assert.doesNotMatch(row.token_enc, /dev_/);
+    const rows = await db.all(db.k.selectFrom("sessions").select("token_enc"));
+    for (const row of rows) assert.doesNotMatch(row.token_enc!, /dev_/);
   });
 
   test("a sign-in callback with a forged state is refused", async () => {
@@ -251,7 +251,7 @@ describe("tokens", () => {
     const c = await signedIn("maint");
     provider.tokenTtlMs = 8 * 3_600_000;
     await sleep(350);
-    await db.prepare("DELETE FROM repo_permissions").run();
+    await db.run(db.k.deleteFrom("repo_permissions"));
     const refreshes = provider.refreshes;
     assert.deepEqual(await (await c.get("/api/test/can/photocraft", false)).json(), { can: true });
     assert.equal(provider.refreshes, refreshes + 1);
@@ -262,7 +262,7 @@ describe("tokens", () => {
     const c = await signedIn("maint");
     provider.tokenTtlMs = 8 * 3_600_000;
     await sleep(350);
-    await db.prepare("DELETE FROM repo_permissions").run();
+    await db.run(db.k.deleteFrom("repo_permissions"));
     provider.rejectRefresh = true;
     try {
       assert.deepEqual(await (await c.get("/api/test/can/photocraft", false)).json(), { can: false });
