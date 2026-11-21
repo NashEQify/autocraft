@@ -19,7 +19,9 @@ import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/
 import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
+import type { Expression } from "kysely";
 import type { Db } from "./db/index.ts";
+import type * as kx from "./db/kx.ts";
 import { dbLockName, openDb, setDbRole } from "./db/open.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
@@ -331,6 +333,15 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): SQLInput
 /** SQL for an upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
 export const KEEP_KNOWN_MERGEABLE = (table: string): string =>
   `CASE WHEN ${table}.head_oid IS NOT DISTINCT FROM excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS DISTINCT FROM 'CONFLICTING' AND excluded.mergeable IS DISTINCT FROM 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
+
+/** `KEEP_KNOWN_MERGEABLE` as an expression, for an upsert built with the query builder. */
+export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<string | null> =>
+  eb.case().when(eb.and([
+    eb(eb.ref(`${table}.head_oid`), "is not distinct from", eb.ref("excluded.head_oid")),
+    eb(eb.ref(`${table}.mergeable`), "in", ["CONFLICTING", "MERGEABLE"]),
+    eb(eb.ref("excluded.mergeable"), "is distinct from", "CONFLICTING"),
+    eb(eb.ref("excluded.mergeable"), "is distinct from", "MERGEABLE"),
+  ])).then(eb.ref(`${table}.mergeable`)).else(eb.ref("excluded.mergeable")).end();
 
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**

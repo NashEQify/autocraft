@@ -15,6 +15,7 @@ import { snoozedExpr, SNOOZED_SQL } from "../src/decisions.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
 import { statsExpr, STATS_SQL } from "../src/whitelist.ts";
 import { settledOn, settledOnExpr, verdictExpr, VERDICT_SQL } from "../src/classify/settled.ts";
+import { KEEP_KNOWN_MERGEABLE, keepKnownMergeableExpr } from "../src/mirror.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
 import { testDatabase, type TestDatabase } from "./test-db.ts";
 
@@ -286,4 +287,28 @@ test("prepareStateSql's columns are filled for an open decision with discussion,
   assert.equal(row.prepares_today, 1);
   assert.deepEqual(JSON.parse(row.stale_choices!), { d: { x: { params: {} } }, a: ["a"] });
   assert.equal(row.review_queued, 1);
+});
+
+test("keepKnownMergeableExpr upserts the mergeable value the text fragment does", async () => {
+  const known = ["CONFLICTING", "MERGEABLE", "UNKNOWN", null], incoming = ["CONFLICTING", "MERGEABLE", "UNKNOWN", null];
+  const row = (repo: string, n: number, head_oid: string, mergeable: string | null) =>
+    ({ repo, number: n, head_oid, overall: "none", checks: "[]", fetched_at: T0, mergeable });
+  const kept: (string | null)[] = [];
+  let n = 0;
+  for (const sameHead of [true, false]) for (const old of known) for (const next of incoming) {
+    n++;
+    await db.run(db.k.insertInto("main.pr_checks").values([row("kt-text", n, "h1", old), row("kt-expr", n, "h1", old)]));
+    const head = sameHead ? "h1" : "h2";
+    await db.prepare(`INSERT INTO main.pr_checks (repo, number, head_oid, overall, checks, fetched_at, mergeable) VALUES ('kt-text', ?, ?, 'none', '[]', ?, ?)
+      ON CONFLICT (repo, number) DO UPDATE SET head_oid = excluded.head_oid, mergeable = ${KEEP_KNOWN_MERGEABLE("pr_checks")}`).run(n, head, T0, next);
+    await db.run(db.k.insertInto("main.pr_checks").values(row("kt-expr", n, head, next)).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
+      head_oid: eb.ref("excluded.head_oid"), mergeable: keepKnownMergeableExpr(eb, "pr_checks"),
+    }))));
+    const pick = async (repo: string) => (await db.get(db.k.selectFrom("main.pr_checks").select("mergeable").where("repo", "=", repo).where("number", "=", n)))!.mergeable;
+    const want = await pick("kt-text");
+    assert.equal(await pick("kt-expr"), want, `same head ${sameHead}, known ${old}, incoming ${next}`);
+    kept.push(want === old ? "kept" : "replaced");
+  }
+  assert.ok(kept.includes("kept") && kept.includes("replaced"));
+  await db.run(db.k.deleteFrom("main.pr_checks").where("repo", "in", ["kt-text", "kt-expr"]));
 });

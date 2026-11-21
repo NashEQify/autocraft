@@ -1,7 +1,9 @@
 // What can keep a PR's review from changing: another open item the review named as the reason for its hold.
 import { isHiddenRepo, type HiddenRepos } from "../hidden-sql.ts";
 import { filterSeq, someSeq } from "../async-seq.ts";
+import type { NotNull } from "kysely";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 const REF = /^([\w.-]+)#(\d+)$/;
 
@@ -27,14 +29,12 @@ export function storedBlockedBy(s: string | null | undefined): string[] {
  * merged item, or an issue with nothing left to decide, blocks nothing.
  */
 export async function openBlockers(db: Db, refs: readonly string[]): Promise<string[]> {
-  const item = db.prepare("SELECT kind, state FROM main.items WHERE repo = ? AND number = ?");
-  const pending = db.prepare("SELECT 1 FROM main.decisions WHERE repo = ? AND number = ? AND answer IS NULL LIMIT 1");
   return await filterSeq(refs, async (ref) => {
     const m = REF.exec(ref);
     if (!m) return false;
-    const i = await item.get(m[1]!, Number(m[2])) as { kind: string; state: string } | undefined;
+    const i = await db.get(db.k.selectFrom("main.items").select(["kind", "state"]).where("repo", "=", m[1]!).where("number", "=", Number(m[2])));
     if (!i || i.state !== "OPEN") return false;
-    return i.kind === "pr" || !!await pending.get(m[1]!, Number(m[2]));
+    return i.kind === "pr" || !!await db.get(db.k.selectFrom("main.decisions").select((eb) => eb.lit(1).as("one")).where("repo", "=", m[1]!).where("number", "=", Number(m[2])).where("answer", "is", null).limit(1));
   });
 }
 
@@ -48,10 +48,10 @@ export const BLOCKED_EXPIRES_MS = 14 * 24 * 3600_000;
 export async function activeBlockers(db: Db, self: string, stored: string | null | undefined, at: string, nowMs: number = Date.now()): Promise<string[]> {
   const refs = storedBlockedBy(stored);
   if (!refs.length || nowMs - Date.parse(at) > BLOCKED_EXPIRES_MS) return [];
-  const latest = db.prepare("SELECT verdict, blocked_by FROM main.opus_reviews WHERE repo = ? AND number = ? AND verdict IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1");
   return await filterSeq((await openBlockers(db, refs)), async (ref) => {
     const [repo, n] = ref.split("#");
-    const l = await latest.get(repo!, Number(n)) as { verdict: string; blocked_by: string | null } | undefined;
+    const l = await db.get(db.k.selectFrom("main.opus_reviews as o").select(["o.verdict", "o.blocked_by"]).$narrowType<{ verdict: NotNull }>()
+      .where("o.repo", "=", repo!).where("o.number", "=", Number(n)).where("o.verdict", "is not", null).orderBy("o.at", "desc").orderBy(kx.rowid("main.opus_reviews", "o"), "desc").limit(1));
     return !(l?.verdict === "hold" && storedBlockedBy(l.blocked_by).includes(self));
   });
 }
@@ -64,12 +64,14 @@ async function blockerReads(db: Db, refs: string[]): Promise<BlockerReads> {
   for (const ref of refs) { const m = REF.exec(ref); if (m) keys.set(`${m[1]}#${Number(m[2])}`, [m[1]!, Number(m[2])]); }
   const out: BlockerReads = { item: new Map(), pending: new Set(), latest: new Map() };
   if (!keys.size) return out;
-  const arg = JSON.stringify([...keys.values()]);
-  const inRefs = "(repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))";
-  for (const r of await db.prepare(`SELECT repo, number, kind, state FROM main.items WHERE ${inRefs}`).all(arg) as { repo: string; number: number; kind: string; state: string }[]) out.item.set(`${r.repo}#${r.number}`, r);
-  for (const r of await db.prepare(`SELECT DISTINCT repo, number FROM main.decisions WHERE ${inRefs} AND answer IS NULL`).all(arg) as { repo: string; number: number }[]) out.pending.add(`${r.repo}#${r.number}`);
-  for (const r of await db.prepare(`SELECT repo, number, verdict, blocked_by FROM (SELECT repo, number, verdict, blocked_by, ROW_NUMBER() OVER (PARTITION BY repo, number ORDER BY at DESC, rowid DESC) AS k
-    FROM main.opus_reviews WHERE ${inRefs} AND verdict IS NOT NULL) WHERE k = 1`).all(arg) as { repo: string; number: number; verdict: string; blocked_by: string | null }[]) out.latest.set(`${r.repo}#${r.number}`, r);
+  const pairs = [...keys.values()];
+  for (const r of await db.all(db.k.selectFrom("main.items as i").select(["i.repo", "i.number", "i.kind", "i.state"]).where(kx.refIn(db, "i", pairs)))) out.item.set(`${r.repo}#${r.number}`, r);
+  for (const r of await db.all(db.k.selectFrom("main.decisions as d").select(["d.repo", "d.number"]).distinct().where(kx.refIn(db, "d", pairs)).where("d.answer", "is", null)))
+    out.pending.add(`${r.repo}#${r.number}`);
+  const ranked = db.k.selectFrom("main.opus_reviews as o")
+    .select((eb) => ["o.repo", "o.number", "o.verdict", "o.blocked_by", eb.fn.agg<number>("row_number", []).over((w) => w.partitionBy(["o.repo", "o.number"]).orderBy("o.at", "desc").orderBy(kx.rowid("main.opus_reviews", "o"), "desc")).as("k")])
+    .where(kx.refIn(db, "o", pairs)).where("o.verdict", "is not", null);
+  for (const r of await db.all(db.k.selectFrom(ranked.as("r")).select(["r.repo", "r.number", "r.verdict", "r.blocked_by"]).$narrowType<{ verdict: NotNull }>().where("r.k", "=", 1))) out.latest.set(`${r.repo}#${r.number}`, r);
   return out;
 }
 
@@ -90,27 +92,36 @@ function activeFrom(reads: BlockerReads, self: string, stored: string | null | u
 
 /** Whether any of the refs has an open decision: the wait is then on a person. */
 export async function hasOpenQuestion(db: Db, refs: readonly string[]): Promise<boolean> {
-  const pending = db.prepare("SELECT 1 FROM main.decisions WHERE repo = ? AND number = ? AND answer IS NULL LIMIT 1");
-  return await someSeq(refs, async (ref) => { const m = REF.exec(ref); return !!m && !!await pending.get(m[1]!, Number(m[2])); });
+  return await someSeq(refs, async (ref) => {
+    const m = REF.exec(ref);
+    return !!m && !!await db.get(db.k.selectFrom("main.decisions").select((eb) => eb.lit(1).as("one")).where("repo", "=", m[1]!).where("number", "=", Number(m[2])).where("answer", "is", null).limit(1));
+  });
 }
+
+/** The rowid of the latest review with a verdict of the PR of the review `o` (an expression in a query that has `main.opus_reviews as o`). */
+const latestRowid = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("main.opus_reviews as l").select(kx.rowid("main.opus_reviews", "l").as("rid"))
+  .where("l.repo", "=", eb.ref("o.repo")).where("l.number", "=", eb.ref("o.number")).where("l.verdict", "is not", null)
+  .orderBy("l.at", "desc").orderBy(kx.rowid("main.opus_reviews", "l"), "desc").limit(1);
 
 /** Facts for an open decision naming the PRs whose review it holds (derived from their stored holds; the decision row is not written). PRs of repos in `hidden` are not named. */
 export async function blocksFacts(db: Db, repo: string | null, number: number | null, hidden: HiddenRepos): Promise<string[]> {
   if (repo === null || number === null) return [];
   const me = `${repo}#${number}`;
-  const rows = await db.prepare(`SELECT o.repo, o.number, o.at, o.blocked_by FROM main.opus_reviews o JOIN main.items i ON i.repo = o.repo AND i.number = o.number AND i.state = 'OPEN'
-    WHERE o.verdict IS NOT NULL AND o.blocked_by LIKE ?
-      AND o.rowid = (SELECT l.rowid FROM main.opus_reviews l WHERE l.repo = o.repo AND l.number = o.number AND l.verdict IS NOT NULL ORDER BY l.at DESC, l.rowid DESC LIMIT 1)
-      AND o.verdict = 'hold' ORDER BY o.repo, o.number LIMIT 5`).all(`%"${me}"%`) as { repo: string; number: number; at: string; blocked_by: string }[];
+  const rows = await db.all(db.k.selectFrom("main.opus_reviews as o").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "o.repo").onRef("i.number", "=", "o.number").on("i.state", "=", "OPEN"))
+    .select(["o.repo", "o.number", "o.at", "o.blocked_by"]).$narrowType<{ blocked_by: NotNull }>()
+    .where("o.verdict", "is not", null).where((eb) => kx.like(db, "o.blocked_by", eb.val(`%"${me}"%`)))
+    .where((eb) => eb(kx.rowid("main.opus_reviews", "o"), "=", latestRowid(eb)))
+    .where("o.verdict", "=", "hold").orderBy("o.repo").orderBy("o.number").limit(5));
   return (await filterSeq(rows, async (r) => !isHiddenRepo(hidden, r.repo) && (await activeBlockers(db, `${r.repo}#${r.number}`, r.blocked_by, r.at)).includes(me))).map((r) => `Blocks the review of ${r.repo}#${r.number}`);
 }
 
 /** `blocksFacts` for every PR at once: the facts by blocked ref ("repo#number"), from one scan of the latest holds. For a page of decisions. */
 export async function blocksIndex(db: Db, hidden: HiddenRepos): Promise<Map<string, string[]>> {
-  const rows = await db.prepare(`SELECT o.repo, o.number, o.at, o.blocked_by FROM main.opus_reviews o JOIN main.items i ON i.repo = o.repo AND i.number = o.number AND i.state = 'OPEN'
-    WHERE o.verdict = 'hold' AND o.blocked_by LIKE '%"%'
-      AND o.rowid = (SELECT l.rowid FROM main.opus_reviews l WHERE l.repo = o.repo AND l.number = o.number AND l.verdict IS NOT NULL ORDER BY l.at DESC, l.rowid DESC LIMIT 1)
-    ORDER BY o.repo, o.number`).all() as { repo: string; number: number; at: string; blocked_by: string }[];
+  const rows = await db.all(db.k.selectFrom("main.opus_reviews as o").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "o.repo").onRef("i.number", "=", "o.number").on("i.state", "=", "OPEN"))
+    .select(["o.repo", "o.number", "o.at", "o.blocked_by"]).$narrowType<{ blocked_by: NotNull }>()
+    .where("o.verdict", "=", "hold").where((eb) => kx.like(db, "o.blocked_by", eb.val('%"%')))
+    .where((eb) => eb(kx.rowid("main.opus_reviews", "o"), "=", latestRowid(eb)))
+    .orderBy("o.repo").orderBy("o.number"));
   const out = new Map<string, string[]>();
   const nowMs = Date.now();
   const shown = rows.filter((r) => !isHiddenRepo(hidden, r.repo));
@@ -146,7 +157,7 @@ export function blockersLoader(db: Db): { active: (self: string, stored: string 
   const start = async (): Promise<void> => {
     if (started) return;
     started = true;
-    await ensure((await db.prepare("SELECT DISTINCT blocked_by FROM main.opus_reviews WHERE verdict = 'hold' AND blocked_by IS NOT NULL").all() as { blocked_by: string }[]).flatMap((r) => storedBlockedBy(r.blocked_by)));
+    await ensure((await db.all(db.k.selectFrom("main.opus_reviews").select("blocked_by").distinct().where("verdict", "=", "hold").where("blocked_by", "is not", null))).flatMap((r) => storedBlockedBy(r.blocked_by)));
   };
   const openQuestion = async (refs: readonly string[]): Promise<boolean> => { await start(); await ensure(refs); return refs.some((r) => { const k = key(r); return k !== null && reads.pending.has(k); }); };
   const active = async (self: string, stored: string | null | undefined, at: string, nowMs: number): Promise<string[]> => {
