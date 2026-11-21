@@ -8,6 +8,7 @@ import { carryAskText } from "../fixup/template.ts";
 import { keptOf } from "./held.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { inList } from "../db/kx.ts";
 
 export type Row = { number: number; kind: string; role: string; target: number | null; detail: string | null };
 /** close: on a member to close; details: on the kept issue; suggestion: on the kept PR when its branch can't be pushed to and the carried parts are suggested instead. */
@@ -55,14 +56,14 @@ export function groupTexts(rows: Row[]): StoredText[] {
 
 /** Writes the text set of every option of a decision, from the roles stored with it. */
 export async function storeOptionTexts(db: Db, id: string, options: string[], closable: (n: number) => Promise<boolean>): Promise<void> {
-  const rows = await db.prepare("SELECT number, kind, role, target, detail FROM dupe_group_items WHERE decision_id = ?").all(id) as Row[];
-  await db.prepare("DELETE FROM dupe_group_texts WHERE decision_id = ?").run(id);
-  const ins = db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES (?, ?, ?, ?, ?)");
-  for (const option of options) for (const t of groupTexts(await rolesFor(rows, option, closable))) await ins.run(id, option, t.number, t.step, t.text);
+  const rows = await db.all(db.k.selectFrom("dupe_group_items").select(["number", "kind", "role", "target", "detail"]).where("decision_id", "=", id));
+  await db.run(db.k.deleteFrom("dupe_group_texts").where("decision_id", "=", id));
+  for (const option of options) for (const t of groupTexts(await rolesFor(rows, option, closable))) await db.run(db.k.insertInto("dupe_group_texts").values({ decision_id: id, option, number: t.number, step: t.step, text: t.text }));
 }
 
 export async function textsFor(db: Db, id: string, option: string): Promise<StoredText[]> {
-  return await db.prepare("SELECT number, step, text FROM dupe_group_texts WHERE decision_id = ? AND option = ? ORDER BY step = 'suggestion', number, step").all(id, option) as StoredText[];
+  return await db.all(db.k.selectFrom("dupe_group_texts").select(["number", "step", "text"]).$narrowType<{ step: TextStep }>()
+    .where("decision_id", "=", id).where("option", "=", option).orderBy((eb) => eb("step", "=", "suggestion")).orderBy("number").orderBy("step"));
 }
 
 export const textsHash = (texts: StoredText[]): string => createHash("sha256").update(JSON.stringify(texts)).digest("hex").slice(0, 16);
@@ -70,8 +71,8 @@ export const textsHash = (texts: StoredText[]): string => createHash("sha256").u
 /** `optionTextsOf` of many decisions in one read, by decision id; decisions without texts are left out. */
 export async function optionTextsMany(db: Db, ids: string[]): Promise<Map<string, { option: string; hash: string; texts: StoredText[] }[]>> {
   const by = new Map<string, Map<string, StoredText[]>>();
-  for (const r of await db.prepare(`SELECT decision_id, option, number, step, text FROM dupe_group_texts WHERE decision_id IN (SELECT value FROM json_each(?))
-    ORDER BY decision_id, option, step = 'suggestion', number, step`).all(JSON.stringify(ids)) as ({ decision_id: string; option: string } & StoredText)[]) {
+  for (const r of await db.all(db.k.selectFrom("dupe_group_texts").select(["decision_id", "option", "number", "step", "text"]).$narrowType<{ step: TextStep }>()
+    .where(inList(db, "decision_id", ids)).orderBy("decision_id").orderBy("option").orderBy((eb) => eb("step", "=", "suggestion")).orderBy("number").orderBy("step"))) {
     const opts = by.get(r.decision_id) ?? by.set(r.decision_id, new Map()).get(r.decision_id)!;
     (opts.get(r.option) ?? opts.set(r.option, []).get(r.option)!).push({ number: r.number, step: r.step, text: r.text });
   }
@@ -80,6 +81,6 @@ export async function optionTextsMany(db: Db, ids: string[]): Promise<Map<string
 
 /** What the decision page shows: per option, its hash and every text with the item it goes on. Empty for other decisions. */
 export async function optionTextsOf(db: Db, id: string): Promise<{ option: string; hash: string; texts: StoredText[] }[]> {
-  const opts = (await db.prepare("SELECT DISTINCT option FROM dupe_group_texts WHERE decision_id = ?").all(id) as { option: string }[]).map((r) => r.option);
+  const opts = (await db.all(db.k.selectFrom("dupe_group_texts").select("option").distinct().where("decision_id", "=", id))).map((r) => r.option);
   return await mapSeq(opts, async (option) => { const texts = await textsFor(db, id, option); return { option, hash: textsHash(texts), texts }; });
 }
