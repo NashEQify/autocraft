@@ -33,7 +33,6 @@ src/agents/step.ts
 
 
 
-src/areas/store.ts
 
 src/author-ids.ts
 
