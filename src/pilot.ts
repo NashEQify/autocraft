@@ -3,11 +3,13 @@
 // Empty or absent means no pilot. A Fix PR the pipeline opened for a pilot issue, a follow-up issue it filed for a pilot PR, and a Fix PR it opened for such a follow-up issue count as pilot items.
 // A fast-tracked item (src/fasttrack.ts) is in scope whatever its repo's flag and the pilot say.
 // No Node imports besides the type, so candidate queries can use the SQL fragments.
-import { quietSqlFor } from "./security/quiet.ts";
+import { quietExprFor, quietSqlFor } from "./security/quiet.ts";
 import { audit } from "./dash/audit.ts";
 import { setting } from "./settings-read.ts";
 import type { Db } from "./db/index.ts";
 import { jsonArrayLength, jsonEach, jsonValid } from "./db/portable.ts";
+import * as kx from "./db/kx.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
 export const PILOT_KEY = "pilot_items";
 
@@ -111,6 +113,39 @@ export const pilotSqlFor = (db: Db, repo: string, number: string): string => {
 
 /** The same for a row `alias` of items. */
 export const pilotSql = (db: Db, alias: string): string => pilotSqlFor(db, `${alias}.repo`, `${alias}.number`);
+
+/** `pilotSqlFor` as an expression; `repo` and `number` are column references or expressions of the item. */
+export function pilotExprFor(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  const list = t.selectFrom("main.settings as ps").select((s) => s.case().when(kx.jsonValid(db, "ps.value")).then(s.ref("ps.value")).else(s.val("[]")).end().as("v"))
+    .where("ps.key", "=", PILOT_KEY);
+  const pj = kx.jsonEach(db, list, "pj");
+  const ref = (rp: kx.Ex, np: kx.Ex) => eb(eb(kx.exprOf(eb, rp), "||", eb.val("#")), "||", kx.exprOf(eb, np));
+  const prOf = (url: string) => kx.like(db, url, eb(eb.val("%/pull/"), "||", n));
+  return eb.or([
+    eb.exists(t.selectFrom("main.fast_track as pft").select(eb.lit(1).as("one")).where("pft.repo", "=", r).where("pft.number", "=", n)),
+    eb.and([
+      eb.exists(t.selectFrom("main.tracked_repos as pt").select(eb.lit(1).as("one")).where("pt.name", "=", r).where("pt.pipeline", "=", 1)),
+      eb.not(eb.exists(t.selectFrom("main.outside_holds as oh").select(eb.lit(1).as("one")).where("oh.repo", "=", r).where("oh.number", "=", n))),
+      eb.or([
+        eb(eb.fn.coalesce(kx.jsonArrayLength(db, list), eb.lit(0)), "=", 0),
+        eb.exists(t.selectFrom(pj).select(eb.lit(1).as("one")).where("pj.value", "=", ref(r, n))),
+        quietExprFor(eb, r, n),
+        eb.exists(t.selectFrom(["main.fix_attempts as pf", pj]).select(eb.lit(1).as("one")).where("pf.repo", "=", r).where(prOf("pf.pr_url"))
+          .where("pj.value", "=", ref("pf.repo", "pf.number"))),
+        eb.exists(t.selectFrom("main.fix_attempts as pf2").innerJoin("main.postmerge_followups as pm2", (j) => j.onRef("pm2.repo", "=", "pf2.repo").onRef("pm2.issue_number", "=", "pf2.number"))
+          .crossJoin(pj).select(eb.lit(1).as("one")).where("pf2.repo", "=", r).where(prOf("pf2.pr_url")).where("pj.value", "=", ref("pm2.repo", "pm2.number"))),
+        eb.exists(t.selectFrom(["main.postmerge_followups as pm", pj]).select(eb.lit(1).as("one")).where("pm.repo", "=", r).where("pm.issue_number", "=", n)
+          .where("pj.value", "=", ref("pm.repo", "pm.number"))),
+      ]),
+    ]),
+    eb.exists(t.selectFrom("main.fix_attempts as pg").innerJoin("main.fast_track as pgt", (j) => j.onRef("pgt.repo", "=", "pg.repo").onRef("pgt.number", "=", "pg.number"))
+      .select(eb.lit(1).as("one")).where("pg.repo", "=", r).where(prOf("pg.pr_url"))),
+  ]);
+}
+
+/** `pilotSql` as an expression, for a row `alias` of items. */
+export const pilotExpr = (db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> => pilotExprFor(db, eb, `${alias}.repo`, `${alias}.number`);
 
 /** True when the item is in scope. */
 export async function inPilot(db: Db, repo: string, number: number): Promise<boolean> {

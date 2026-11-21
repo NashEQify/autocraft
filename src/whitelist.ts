@@ -3,6 +3,7 @@
 import { audit } from "./dash/audit.ts";
 import { githubUserId } from "./github/users.ts";
 import type { Db } from "./db/index.ts";
+import * as kx from "./db/kx.ts";
 import { ciEq, upsert } from "./db/portable.ts";
 import { openDb } from "./db/open.ts";
 
@@ -62,6 +63,13 @@ export const STATS_SQL = `
          SUM(CASE WHEN state = 'OPEN' THEN 1 ELSE 0 END) AS open,
          MAX(merged_at) AS last_merge
   FROM items WHERE kind = 'pr' AND author IS NOT NULL`;
+
+/** `STATS_SQL` as a query on `db.k`; add the GROUP BY (and any filter) as the text version's callers do. */
+export function statsExpr(db: Db) {
+  const n = (eb: kx.AnyEb, state: string) => eb.fn.sum<number>(eb.case().when("state", "=", state).then(eb.lit(1)).else(eb.lit(0)).end());
+  return db.k.selectFrom("items").select((eb) => ["author as login" as const, n(eb, "MERGED").as("merged"), n(eb, "CLOSED").as("closed"), n(eb, "OPEN").as("open"),
+    eb.fn.max("merged_at").as("last_merge")]).where("kind", "=", "pr").where("author", "is not", null);
+}
 
 export type AuthorRef = { login: string; id: number | null };
 export const tierKey = (a: AuthorRef): string => `${a.login}\0${a.id ?? ""}`;

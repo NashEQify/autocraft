@@ -3,12 +3,14 @@
 // decisions.exec_state; the pipeline reads a disputed answer as no answer (see settlers.ts).
 import { BACKLOG, getDecision, optionsOf, type DecisionRow } from "../decisions.ts";
 import { audit } from "../dash/audit.ts";
-import { settledBy, settledBySql } from "../settlers.ts";
+import { settledBy, settledByExpr, settledBySql } from "../settlers.ts";
 import { writeEffect } from "../act/index.ts";
 import { queuePlace } from "../conversations/queue.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { ciEq, distinctFrom } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
 export const SETTLING = "settling";
 export const DISPUTED = "disputed";
@@ -24,9 +26,24 @@ export const lockLiveSql = (t = "decisions", now: Date = new Date()): string =>
   // CASE, not AND: in a select list SQLite evaluates both sides of AND, and the card scan would run for every row.
   `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN EXISTS (SELECT 1 FROM main.conversation_cards lc WHERE (lc.state = 'queued' OR (lc.state = 'running' AND lc.acted_at > '${new Date(now.getTime() - RUNNING_STALE_MS).toISOString()}')) AND ${t}.exec_reason LIKE lc.id || ':%') ELSE FALSE END)`;
 
+/** `lockLiveSql` as an expression (`t`: the decisions table name or alias in the caller's query). */
+export function lockLiveExpr(db: Db, eb: kx.AnyEb, t = "decisions", now: Date = new Date()): AliasableExpression<SqlBool> {
+  const since = new Date(now.getTime() - RUNNING_STALE_MS).toISOString();
+  return eb.case().when(eb.ref(`${t}.exec_state`), "=", SETTLING).then(eb.exists(kx.schemaEb(eb).selectFrom("main.conversation_cards as lc").select(eb.lit(1).as("one"))
+    .where((w) => w.or([w("lc.state", "=", "queued"), w.and([w("lc.state", "=", "running"), w("lc.acted_at", ">", since)])]))
+    .where(kx.like(db, eb.ref(`${t}.exec_reason`), eb(eb.ref("lc.id"), "||", eb.val(":%"))))))
+    .else(eb.lit(false)).end();
+}
+
 /** SQL: when the running card that holds the lock of `t` started (its lock is not live from RUNNING_STALE_MS later); null when no running card holds it. */
 export const lockRunningAtSql = (t = "decisions"): string =>
   `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN (SELECT max(lc.acted_at) FROM main.conversation_cards lc WHERE lc.state = 'running' AND ${t}.exec_reason LIKE lc.id || ':%') END)`;
+
+/** `lockRunningAtSql` as an expression. */
+export function lockRunningAtExpr(db: Db, eb: kx.AnyEb, t = "decisions"): AliasableExpression<string | null> {
+  return eb.case().when(eb.ref(`${t}.exec_state`), "=", SETTLING).then(kx.schemaEb(eb).selectFrom("main.conversation_cards as lc").select((s) => s.fn.max("lc.acted_at").as("at"))
+    .where("lc.state", "=", "running").where(kx.like(db, eb.ref(`${t}.exec_reason`), eb(eb.ref("lc.id"), "||", eb.val(":%"))))).end();
+}
 
 /** The login of the person whose card is settling an open decision right now, or null. */
 export async function settlingBy(db: Db, d: Pick<DecisionRow, "id" | "answer" | "exec_state" | "exec_reason">): Promise<string | null> {
@@ -134,4 +151,24 @@ export function heldOpenSql(db: Db, login: string, operator: boolean): string {
   return `(${queuedDispute} OR decisions.answer IS NOT NULL AND decisions.applied_at IS NULL AND decisions.answer <> '${BACKLOG.key}' AND decisions.id NOT LIKE '%~replaced-%'
     AND ((decisions.exec_state = '${DISPUTED}' AND ${operator ? "TRUE" : ciEq(db, "decisions.answered_by", me)})
       OR (${operator ? "TRUE" : "FALSE"} AND ${distinctFrom(db, "decisions.exec_state", `'${DISPUTED}'`)} AND decisions.answered_by IS NOT NULL AND decisions.answered_by <> 'pipeline' AND ${writes} AND NOT ${settledBySql(db, "decisions")})))`;
+}
+
+/** `heldOpenSql` as an expression; `a` names the decisions table in the caller's query. */
+export function heldOpenExpr(db: Db, eb: kx.AnyEb, login: string, operator: boolean, a = "decisions"): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb);
+  const c = (col: string) => eb.ref(`${a}.${col}`);
+  const writes = eb.or([
+    eb.and([eb(c("answer"), "=", "close"), eb(c("kind"), "in", ["scope", "close", "duplicate", "merge", "hold"])]),
+    eb.and([eb(c("answer"), "=", "merge"), eb(c("kind"), "=", "merge")]),
+    eb.and([eb(c("kind"), "=", "duplicate"), eb.or([eb(c("answer"), "=", "accept"), kx.like(db, c("answer"), eb.val("keep:%"))])]),
+  ]);
+  // An open decision whose queued press someone disputed: the presser and operators look at it.
+  const queuedDispute = eb.and([eb(c("answer"), "is", null), eb(c("exec_state"), "=", SETTLING), eb.exists(t.selectFrom("main.conversation_cards as hc").select(eb.lit(1).as("one"))
+    .where("hc.state", "=", "queued").where("hc.dispute_by", "is not", null)
+    .where(kx.like(db, c("exec_reason"), eb(eb.ref("hc.id"), "||", eb.val(":%"))))
+    .$if(!operator, (q) => q.where((w) => kx.ciEq(db, "hc.acted_by", w.val(login)))))]);
+  const reassign = operator ? [eb.and([eb(c("exec_state"), "is distinct from", DISPUTED), eb(c("answered_by"), "is not", null), eb(c("answered_by"), "<>", "pipeline"), writes,
+    eb.not(settledByExpr(db, eb, a))])] : [];
+  return eb.or([queuedDispute, eb.and([eb(c("answer"), "is not", null), eb(c("applied_at"), "is", null), eb(c("answer"), "<>", BACKLOG.key), eb.not(kx.like(db, c("id"), eb.val("%~replaced-%"))),
+    eb.or([eb.and([eb(c("exec_state"), "=", DISPUTED), ...(operator ? [] : [kx.ciEq(db, c("answered_by"), eb.val(login))])]), ...reassign])])]);
 }

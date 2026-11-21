@@ -11,6 +11,8 @@ import { audit } from "./dash/audit.ts";
 import { isTracked } from "./repos.ts";
 import { everySeq, mapSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import * as kx from "./db/kx.ts";
+import type { AliasableExpression } from "kysely";
 import { openDb } from "./db/open.ts";
 
 export class FastTrackError extends Error {
@@ -106,6 +108,16 @@ export const FAST_FLOOR = FAST_BASE / 2;
 export const fastScoreSql = (repo: string, number: string, scoreExpr: string): string =>
   `COALESCE((SELECT MAX(${rowScore("fq")}) FROM main.fast_track fq WHERE fq.repo = ${repo} AND (fq.number = ${number}
     OR EXISTS (SELECT 1 FROM main.fix_attempts fa WHERE fa.repo = ${repo} AND fa.number = fq.number AND fa.pr_url LIKE '%/pull/' || ${number}))), ${scoreExpr})`;
+
+/** `fastScoreSql` as an expression; `repo`, `number` and `score` are column references or expressions. */
+export function fastScoreExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, score: kx.Ex): AliasableExpression<number | null> {
+  const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
+  const rowScore = eb(eb(eb.lit(FAST_BASE), "+", eb(eb.ref("fq.weight"), "*", eb.lit(WEIGHT_STEP))), "-", eb.ref("fq.id"));
+  const best = t.selectFrom("main.fast_track as fq").select((s) => s.fn.max<number>(rowScore).as("s")).where("fq.repo", "=", r).where((w) => w.or([w("fq.number", "=", n),
+    w.exists(t.selectFrom("main.fix_attempts as fa").select(eb.lit(1).as("one")).where("fa.repo", "=", r).where("fa.number", "=", eb.ref("fq.number"))
+      .where(kx.like(db, "fa.pr_url", eb(eb.val("%/pull/"), "||", n))))]));
+  return eb.fn.coalesce(best.$asScalar(), kx.exprOf(eb, score));
+}
 
 /** The fast-track score of the item (see `fastScoreSql`), or null when it is not fast-tracked. */
 export async function fastScoreOf(db: Db, repo: string, number: number): Promise<number | null> {

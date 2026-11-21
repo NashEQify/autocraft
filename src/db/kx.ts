@@ -298,3 +298,26 @@ export function commentHits<A extends string, O extends CommentHitOpts = {}>(d: 
     : sql`FROM comments_fts JOIN ${sql.table("main.comments")} c ON c.rowid = comments_fts.rowid WHERE comments_fts MATCH ${q}`;
   return sql<CommentHit<O>>`(SELECT ${sql.join(cols)} ${from})`.as(alias);
 }
+
+// ---- fragment twins ------------------------------------------------------------------------------------------------
+// Typed twins of SQL-text fragments that other files splice into their statements (`pilotSql` → `pilotExpr`). A twin
+// takes its caller's expression builder and names the caller's tables by alias strings, as the text version does.
+
+/** The expression builder a fragment twin takes from its caller: any query's, since the twin names the caller's tables by alias. */
+export type AnyEb = ExpressionBuilder<any, any>;
+
+/** `eb` typed against the schema alone, for a twin's subqueries over its own tables; outer columns come in as `eb.ref(...)`. */
+export const schemaEb = (eb: AnyEb): ExpressionBuilder<DB, never> => eb as unknown as ExpressionBuilder<DB, never>;
+
+/** `e` as an expression: a column reference string (`"i.repo"`) through `eb.ref`, an expression as it is. */
+export const exprOf = (eb: AnyEb, e: Ex): Expression<any> => (typeof e === "string" ? eb.ref(e) : e);
+
+/**
+ * A JSON object as text whose values are the JSON texts in `entries` (SQLite `json_object('k', json(v), ...)`). Keys are
+ * constants. Postgres spaces the text differently (`{"k" : ...}`); the parsed value is the same.
+ */
+export function jsonObject(d: D, entries: Record<string, Ex>): RawBuilder<string | null> {
+  const pg = pgOf(d);
+  const parts = Object.entries(entries).map(([k, v]) => (pg ? sql`${sql.raw(quote(k))}, (${x(v)})::json` : sql`${sql.raw(quote(k))}, json(${x(v)})`));
+  return pg ? sql`json_build_object(${sql.join(parts)})::text` : sql`json_object(${sql.join(parts)})`;
+}

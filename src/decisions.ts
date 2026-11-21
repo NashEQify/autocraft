@@ -10,6 +10,8 @@ import { inPilot } from "./pilot.ts";
 import { filterSeq, someSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
 import { distinctFrom } from "./db/portable.ts";
+import * as kx from "./db/kx.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import { openDb } from "./db/open.ts";
 
 export const KINDS = ["scope", "duplicate", "close", "merge", "hold", "split", "other", "backlog"] as const;
@@ -62,6 +64,24 @@ export const SNOOZED_SQL = (() => {
   OR EXISTS (SELECT 1 FROM decision_opinions so WHERE so.decision_id = decisions.id AND so.at > decisions.snoozed_at)
   OR EXISTS (SELECT 1 FROM conversation_turns st WHERE ${onItem("st")} AND st.kind = 'operator' AND st.at > decisions.snoozed_at)))`;
 })();
+
+/** `SNOOZED_SQL` as an expression; `a` names the decisions table in the caller's query. */
+export function snoozedExpr(eb: kx.AnyEb, a = "decisions"): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), c = (col: string) => eb.ref(`${a}.${col}`), at = c("snoozed_at");
+  // The item itself, or for a duplicate-group decision any of its member items.
+  const onItem = (x: string) => eb.or([eb.and([eb(eb.ref(`${x}.repo`), "=", c("repo")), eb(eb.ref(`${x}.number`), "=", c("number"))]),
+    eb.exists(t.selectFrom("dupe_group_items as gi").select(eb.lit(1).as("one")).where("gi.decision_id", "=", c("id"))
+      .where("gi.repo", "=", eb.ref(`${x}.repo`)).where("gi.number", "=", eb.ref(`${x}.number`)))]);
+  const one = eb.lit(1).as("one");
+  return eb.and([eb(c("answer"), "is", null), eb(at, "is not", null), eb.not(eb.or([
+    eb.exists(t.selectFrom("comments as sc").select(one).where(onItem("sc")).where("sc.created_at", ">", at)),
+    eb.exists(t.selectFrom("pr_commits as sp").select(one).where(onItem("sp")).where((w) => w(w.fn.coalesce("sp.first_seen_at", "sp.committed_at"), ">", at))),
+    eb.exists(t.selectFrom("item_activity as sf").select(one).where(onItem("sf")).where("sf.kind", "=", "force-push").where("sf.at", ">", at)),
+    eb.exists(t.selectFrom("decision_comments as sd").select(one).where("sd.decision_id", "=", c("id")).where("sd.at", ">", at)),
+    eb.exists(t.selectFrom("decision_opinions as so").select(one).where("so.decision_id", "=", c("id")).where("so.at", ">", at)),
+    eb.exists(t.selectFrom("conversation_turns as st").select(one).where(onItem("st")).where("st.kind", "=", "operator").where("st.at", ">", at)),
+  ]))]);
+}
 
 /** A settled decision makes the drafts still proposed on its item obsolete (the ask card, the other options' drafts) and replaces its own choices. */
 export async function replaceProposedCards(db: Db, repo: string | null, number: number | null, decisionId: string): Promise<void> {

@@ -5,6 +5,8 @@ import { OWN_NOTE_PREFIXES } from "../conversations/store.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
 import type { Db } from "../db/index.ts";
 import { distinctFrom, inList, jsonEach, jsonText, jsonValid, like, notDistinctFrom } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
 /** The columns of a decision that say what its prepare step did. */
 export type PrepareColumns = {
@@ -70,6 +72,62 @@ export const prepareStateSql = (db: Db, d: string): string => `CASE WHEN ${d}.an
   CASE WHEN ${d}.answer IS NULL THEN ${reviewedAtSql(db, d)} END AS reviewed_at, CASE WHEN ${d}.answer IS NULL THEN ${preparesTodaySql(db, d)} END AS prepares_today,
   CASE WHEN ${d}.answer IS NULL THEN ${staleChoicesSql(db, d)} END AS stale_choices, ${reviewQueuedSql(db, d)} AS review_queued`;
 
+// Typed twins of the SQL fragments above, for queries built with `db.k`; `d` names the decisions row in the caller's query.
+
+/** `reviewQueuedSql` as an expression. */
+export function reviewQueuedExpr(db: Db, eb: kx.AnyEb, d: string): AliasableExpression<SqlBool> {
+  const actions = eb.case().when(kx.jsonValid(db, "qp.actions")).then(eb.ref("qp.actions")).else(eb.val("[]")).end();
+  return eb.exists(kx.schemaEb(eb).selectFrom("item_plans as qp").innerJoin("items as qi", (j) => j.onRef("qi.repo", "=", "qp.repo").onRef("qi.number", "=", "qp.number"))
+    .crossJoin(kx.jsonEach(db, actions, "qa")).select(eb.lit(1).as("one"))
+    .where("qp.repo", "=", eb.ref(`${d}.repo`)).where("qp.number", "=", eb.ref(`${d}.number`))
+    .where(kx.jsonText(db, "qa.value", "$.kind"), "in", ["review", "carry"]).where(kx.jsonText(db, "qa.value", "$.head"), "is not distinct from", eb.ref("qi.head_oid")));
+}
+
+/** `discussionKeySql` as an expression. */
+export function discussionKeyExpr(db: Db, eb: kx.AnyEb, d: string): AliasableExpression<string | null> {
+  const t = kx.schemaEb(eb);
+  const appSlugs = t.selectFrom("main.settings").select("value").where("key", "=", "app_slugs");
+  const slugs = eb.case().when(kx.jsonValid(db, appSlugs)).then(appSlugs).else(eb.val("[]")).end();
+  const body = eb.fn<string>("ltrim", [eb.fn.coalesce("c.body", eb.val(""))]);
+  return t.selectFrom("comments as c").select("c.id").where("c.repo", "=", eb.ref(`${d}.repo`)).where("c.number", "=", eb.ref(`${d}.number`)).where("c.counted", "=", 1)
+    .where(eb.fn.coalesce("c.author", eb.val("")), "not in", t.selectFrom(kx.jsonEach(db, slugs, "s")).select("s.value"))
+    .where(eb.not(eb.or(OWN_NOTE_PREFIXES.map((p) => kx.like(db, body, eb.val(`${kx.likeEscape(p)}%`), "\\")))))
+    .orderBy("c.created_at", (o) => o.desc().nullsLast()).orderBy("c.id", "desc").limit(1).$asScalar();
+}
+
+/** `reviewedAtSql` as an expression. */
+export function reviewedAtExpr(_db: Db, eb: kx.AnyEb, d: string): AliasableExpression<string | null> {
+  return kx.schemaEb(eb).selectFrom("opus_reviews as r")
+    .innerJoin("items as ri", (j) => j.onRef("ri.repo", "=", "r.repo").onRef("ri.number", "=", "r.number").onRef("ri.head_oid", "=", "r.head_oid"))
+    .select((s) => s.fn.max("r.at").as("at")).where("r.repo", "=", eb.ref(`${d}.repo`)).where("r.number", "=", eb.ref(`${d}.number`)).where("r.verdict", "is not", null).$asScalar();
+}
+
+/** `staleChoicesSql` as an expression. */
+export function staleChoicesExpr(db: Db, eb: kx.AnyEb, d: string): AliasableExpression<string | null> {
+  return kx.schemaEb(eb).selectFrom("decision_choices as c").innerJoin("items as si", (j) => j.onRef("si.repo", "=", "c.repo").onRef("si.number", "=", "c.number"))
+    .select(kx.jsonObject(db, { d: "c.drafts", a: "c.added" }).as("choices"))
+    .where("c.decision_id", "=", eb.ref(`${d}.id`)).where("c.state", "=", "current").where("si.kind", "=", "pr")
+    .where(kx.jsonText(db, "c.seen", "$.head"), "is distinct from", eb.ref("si.head_oid")).limit(1).$asScalar();
+}
+
+/** `preparesTodaySql` as an expression; `since` is the value the text version binds (the UTC day start). */
+export function preparesTodayExpr(_db: Db, eb: kx.AnyEb, d: string, since: string): AliasableExpression<number> {
+  return kx.schemaEb(eb).selectFrom("decision_prepares as p").select((s) => s.fn.countAll<number>().as("n"))
+    .where("p.decision_id", "=", eb.ref(`${d}.id`)).where("p.manual", "=", 0).where("p.at", ">=", since).$asScalar();
+}
+
+/** `prepareStateSql` as a select list: `.select((eb) => prepareStateExpr(db, eb, "d", utcDayStart(now)))`. */
+export function prepareStateExpr(db: Db, eb: kx.AnyEb, d: string, since: string) {
+  const open = <T>(e: Expression<T>) => eb.case().when(eb.ref(`${d}.answer`), "is", null).then(e).end();
+  return [
+    open(discussionKeyExpr(db, eb, d)).as("discussion_key"),
+    open(reviewedAtExpr(db, eb, d)).as("reviewed_at"),
+    open(preparesTodayExpr(db, eb, d, since)).as("prepares_today"),
+    open(staleChoicesExpr(db, eb, d)).as("stale_choices"),
+    reviewQueuedExpr(db, eb, d).as("review_queued"),
+  ];
+}
+
 export const utcDayStart = (nowMs: number): string => `${new Date(nowMs).toISOString().slice(0, 10)}T00:00:00.000Z`;
 
 /** A Merge? or Close? decision is made for one head commit: its id ends in `@<sha>`. */
@@ -119,6 +177,13 @@ export const prepareDue = (d: PrepareColumns, head: string | null, nowMs: number
  */
 export const openSubjectSql = (d: string, i: string): string => `(${i}.state = 'OPEN' OR (${d}.id LIKE '%:dupegroup:%' AND EXISTS (SELECT 1 FROM dupe_group_items gi
   JOIN items m ON m.repo = ${d}.repo AND m.number = gi.number WHERE gi.decision_id = ${d}.id AND gi.role = 'close' AND m.state = 'OPEN')))`;
+
+/** `openSubjectSql` as an expression; `i` names the decision's items row. */
+export function openSubjectExpr(db: Db, eb: kx.AnyEb, d: string, i: string): AliasableExpression<SqlBool> {
+  return eb.or([eb(eb.ref(`${i}.state`), "=", "OPEN"), eb.and([kx.like(db, `${d}.id`, eb.val("%:dupegroup:%")),
+    eb.exists(kx.schemaEb(eb).selectFrom("dupe_group_items as gi").innerJoin("items as m", (j) => j.on("m.repo", "=", eb.ref(`${d}.repo`)).onRef("m.number", "=", "gi.number"))
+      .select(eb.lit(1).as("one")).where("gi.decision_id", "=", eb.ref(`${d}.id`)).where("gi.role", "=", "close").where("m.state", "=", "OPEN"))])]);
+}
 
 type Subject = { dkind: string; kind: string; head_oid: string | null } & Pick<PrepareColumns, "discussion_key" | "reviewed_at" | "prepares_today" | "stale_choices" | "review_queued">;
 
