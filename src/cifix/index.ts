@@ -590,7 +590,7 @@ async function runCifixWith(db: DatabaseSync, params: CifixParams, log: (line: s
     };
     const head = await git.fetchPr(ownerOf(repo), repo, c.number);
     if (head !== c.head) { noteLive(db, repo, c.number, { ...pr, headRefOid: head }, at()); fail("failed", `fetched head ${short(head)} is not the checked ${short(c.head)}`); return; }
-    const diff = await cachedDiff(repo, c.number, head, d.fetchDiff);
+    const diff = await cachedDiff(db, repo, c.number, head, d.fetchDiff);
     if (!diff.ok) { fail("failed", `no diff: ${oneLine(diff.error)}`); return; }
     if (diff.text.length > DIFF_CAP) { fail("failed", `the PR diff is over the ${DIFF_CAP} character limit`); return; }
     const made = await patchFromFailure(db, d, { git, ref, title: ((db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?").get(repo, c.number) as { title: string | null } | undefined)?.title ?? "").slice(0, 300),
@@ -698,7 +698,7 @@ async function runCifixWith(db: DatabaseSync, params: CifixParams, log: (line: s
       }
       if (t.kind === "format") {
         // Only files that are in both the PR's diff and the log's `Diff in` lines are formatted.
-        const diff = await cachedDiff(repo, c.number, c.head, d.fetchDiff);
+        const diff = await cachedDiff(db, repo, c.number, c.head, d.fetchDiff);
         if (!diff.ok) { rec.set(c, "format", "failed", `no diff: ${oneLine(diff.error)}`); summary.failed.push({ ref, reason: "no diff" }); return; }
         const prFiles = [...diff.text.matchAll(DIFF_FILE)].map((m) => m[1]!);
         const names = matchPrFiles(formatDiffPaths(failure), prFiles).filter((p) => editable(p) && !TEST_PATH.test(p));

@@ -121,7 +121,7 @@ export async function runDecide(db: DatabaseSync, params: DecideParams = {}, log
         if (head) return import("../sandbox/index.ts").then((m) => m.checkoutForPr(repo, number, head, log));
         return import("../dupes/compare.ts").then((m) => m.baseCheckout(db, repo));
       }),
-      diff: params.diff ?? ((r, n, h) => import("../conversations/run.ts").then((m) => m.githubDiff(r, n, h))),
+      diff: params.diff ?? ((r, n, h) => import("../conversations/run.ts").then((m) => m.githubDiff(db)(r, n, h))),
       usageRun, log, onSent: () => params.onSent?.(++sent),
     });
     result.prepared = r.stored;

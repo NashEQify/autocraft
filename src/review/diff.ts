@@ -1,15 +1,19 @@
 // PR diffs: fetched with `gh pr diff`, cached by head commit, and cut down to
 // the code a reviewer reads (tests and lockfiles are listed, not shown).
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import type { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { envVar } from "../env.ts";
-import { slugOf } from "../owners.ts";
+import { prep } from "../sql-cache.ts";
+import { ownerOf, slugOf } from "../owners.ts";
 import { readEnv, readEnvFor } from "../github/read.ts";
 import { mayBeRun, mergeSteps, workflowSteps, type WorkflowSteps } from "../core/workflow-runs.ts";
 import { lockfileNeedsWhole } from "../core/lockfiles.ts";
+import { sensitiveReasons } from "../core/sensitive.ts";
 
 // gh picks its account from the working directory, so it runs in this repo.
 const REPO_DIR = fileURLToPath(new URL("../..", import.meta.url));
@@ -160,7 +164,7 @@ export function wholeInDiff(f: FileDiff, side: "before" | "after"): string | nul
  * the commit it was read at. A stored entry records the base branch it was computed against; with `base` given, an entry for
  * another base is read again.
  */
-export async function cachedDiff(repo: string, number: number, head: string, fetch: DiffFetcher, base?: string | null, opts: { reread?: boolean } = {}): Promise<DiffResult> {
+export async function cachedDiff(db: DatabaseSync, repo: string, number: number, head: string, fetch: DiffFetcher, base?: string | null, opts: { reread?: boolean } = {}): Promise<DiffResult> {
   const dir = join(diffCacheDir(), repo);
   const file = join(dir, `${number}-${head}.diff`);
   const put = (path: string, text: string) => {
@@ -176,6 +180,7 @@ export async function cachedDiff(repo: string, number: number, head: string, fet
       // The extras are written before the diff, so a reader that finds the diff finds them too.
       if (r.extras) put(`${file}.files.json`, JSON.stringify(r.extras));
       put(file, r.text);
+      recordDiffFacts(db, repo, number, head);
     }
     return r;
   };
@@ -185,6 +190,8 @@ export async function cachedDiff(repo: string, number: number, head: string, fet
     if (!base || stored === base) {
       const text = readFileSync(file, "utf8");
       const extras = cachedDiffExtras(repo, number, head);
+      // A diff cached before its facts were stored (or whose facts a rule change dropped) gets them on its next read.
+      if (!prep(db, "SELECT 1 FROM diff_facts WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head)) recordDiffFacts(db, repo, number, head);
       // An entry whose extras the rule still waits for is read again only by the re-read (see `rereadDiff`).
       if (!opts.reread) return { ok: true, text, ...(stored !== undefined ? { base: stored } : {}), ...(extras ? { extras } : {}) };
     }
@@ -196,9 +203,9 @@ export async function cachedDiff(repo: string, number: number, head: string, fet
  * Reads a cached diff again for the extras the merge rule waits for, counted as one re-read; on a failed read the cached
  * entry stands.
  */
-export async function rereadDiff(repo: string, number: number, head: string, fetch: DiffFetcher, base: string | null | undefined, at: number): Promise<DiffResult> {
-  const r = await cachedDiff(repo, number, head, fetch, base, { reread: true });
-  noteReread(repo, number, head, at);
+export async function rereadDiff(db: DatabaseSync, repo: string, number: number, head: string, fetch: DiffFetcher, base: string | null | undefined, at: number): Promise<DiffResult> {
+  const r = await cachedDiff(db, repo, number, head, fetch, base, { reread: true });
+  noteReread(db, repo, number, head, at);
   return r;
 }
 
@@ -255,10 +262,11 @@ export const EXTRAS_TRIES = 3;
  * Records one re-read of a diff for its extras: a GitHub read made because the rule waits for them. Only these count
  * towards `EXTRAS_TRIES`, so reads other steps make, or skip, never use them up.
  */
-export function noteReread(repo: string, number: number, head: string, at: number): void {
+export function noteReread(db: DatabaseSync, repo: string, number: number, head: string, at: number): void {
   const f = join(diffCacheDir(), repo, `${number}-${head}.diff.reread`);
   mkdirSync(join(diffCacheDir(), repo), { recursive: true });
   writeFileSync(f, JSON.stringify({ count: diffRereads(repo, number, head).count + 1, at }));
+  recordDiffFacts(db, repo, number, head);
 }
 
 /** The re-reads recorded for a diff and the time of the last one. */
@@ -289,12 +297,99 @@ export function extrasPending(text: string, extras: DiffExtras | null, rereads: 
 }
 
 /** Forgets the cached diff of a head, so the next read fetches it (and the PR's current base) again. */
-export function dropCachedDiff(repo: string, number: number, head: string): void {
+export function dropCachedDiff(db: DatabaseSync, repo: string, number: number, head: string): void {
   const file = join(diffCacheDir(), repo, `${number}-${head}.diff`);
   rmSync(file, { force: true });
   rmSync(`${file}.base`, { force: true });
   rmSync(`${file}.files.json`, { force: true });
   rmSync(`${file}.reread`, { force: true });
+  recordDiffFacts(db, repo, number, head);
+}
+
+/**
+ * What the merge rule reads from the diff cached for a head (the `diff_facts` row). `reasons`: its sensitive-content reasons;
+ * `lines`: its changed lines, the rule's size fact for this head. `pending`: the diff waits for what the rule reads beside it
+ * (whole files, workflow steps); its reasons are then the conservative ones, holding the PR for whatever could not be read,
+ * until a re-read settles them. `lastRead`: the time of the last re-read.
+ */
+export type DiffFacts = { reasons: string[]; lines: number; pending: boolean; lastRead: number | null };
+
+/** The facts of the diff cached for this head, read from the cache files; null when no diff is cached. */
+export function diffFactsOfCache(repo: string, number: number, head: string): DiffFacts | null {
+  const file = join(diffCacheDir(), repo, `${number}-${head}.diff`);
+  let text: string;
+  try { text = readFileSync(file, "utf8"); } catch { return null; }
+  const extras = cachedDiffExtras(repo, number, head), rereads = diffRereads(repo, number, head);
+  return {
+    reasons: sensitiveReasons(text, ownerOf(repo), extras ?? {}), lines: splitDiff(text).reduce((n, f) => n + f.lines, 0),
+    pending: extrasPending(text, extras, rereads.count), lastRead: rereads.at,
+  };
+}
+
+const putFacts = (db: DatabaseSync) => prep(db, `INSERT INTO diff_facts (repo, number, head_oid, reasons, lines, pending, last_read) VALUES (?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT (repo, number, head_oid) DO UPDATE SET reasons = excluded.reasons, lines = excluded.lines, pending = excluded.pending, last_read = excluded.last_read
+  WHERE reasons IS NOT excluded.reasons OR lines IS NOT excluded.lines OR pending IS NOT excluded.pending OR last_read IS NOT excluded.last_read`);
+const dropFacts = (db: DatabaseSync) => prep(db, "DELETE FROM diff_facts WHERE repo = ? AND number = ? AND head_oid = ?");
+
+function writeFacts(db: DatabaseSync, repo: string, number: number, head: string, f: DiffFacts | null): void {
+  if (f) putFacts(db).run(repo, number, head, JSON.stringify(f.reasons), f.lines, f.pending ? 1 : 0, f.lastRead);
+  else dropFacts(db).run(repo, number, head);
+}
+
+/**
+ * Stores the facts of the diff cached for this head, or removes them when none is cached: every writer of the cache files
+ * calls it after writing, so the planner reads the facts from the database. Unchanged facts write nothing.
+ */
+export function recordDiffFacts(db: DatabaseSync, repo: string, number: number, head: string): void {
+  writeFacts(db, repo, number, head, diffFactsOfCache(repo, number, head));
+}
+
+/**
+ * The modules the stored facts are computed by (`sensitiveReasons`, `splitDiff`, `extrasPending` and what they import). A
+ * change to any of them computes the stored facts again at the next runner start, as the in-process memo did before the
+ * facts were stored. A module these come to import belongs on this list.
+ */
+const FACT_SOURCES = ["./diff.ts", "../core/sensitive.ts", "../core/trust-paths.ts", "../core/cargo-manifest.ts", "../core/toml.ts", "../core/lockfiles.ts",
+  "../core/workflow-runs.ts", "../sandbox/instruction-paths.ts"];
+export const DIFF_FACTS_KEY = "diff_facts_built";
+
+export function diffFactsRules(): string {
+  const h = createHash("sha256");
+  for (const p of FACT_SOURCES) h.update(readFileSync(new URL(p, import.meta.url)));
+  return h.digest("hex").slice(0, 16);
+}
+
+/** Written into the cache directory with the rules fingerprint once the table holds its files' facts: a new or cleared cache has none. */
+const factsMarker = () => join(diffCacheDir(), "facts-built");
+
+/**
+ * Fills `diff_facts` from the cache files when the stored facts were computed by other rules than this code's (or never), or
+ * the cache directory is not the one they were computed from: the facts of every stored row's head and of the head of every
+ * PR's latest review (the head the planner reads); a row whose diff is no longer cached is removed. The heads are listed and
+ * read under the write lock, so a review or re-read stored meanwhile is not overwritten. Returns the number of heads read,
+ * or null when the facts were current.
+ */
+export function buildDiffFacts(db: DatabaseSync): number | null {
+  const rules = diffFactsRules();
+  const marker = (() => { try { return readFileSync(factsMarker(), "utf8"); } catch { return null; } })();
+  if (marker === rules && (db.prepare("SELECT value FROM settings WHERE key = ?").get(DIFF_FACTS_KEY) as { value: string } | undefined)?.value === rules) return null;
+  let n = 0;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const heads = db.prepare(`SELECT r.repo, r.number, r.head_oid FROM opus_reviews r WHERE r.verdict IS NOT NULL AND r.rowid = (
+        SELECT x.rowid FROM opus_reviews x WHERE x.repo = r.repo AND x.number = r.number AND x.verdict IS NOT NULL ORDER BY x.at DESC, x.rowid DESC LIMIT 1)
+      UNION SELECT repo, number, head_oid FROM diff_facts`).all() as { repo: string; number: number; head_oid: string }[];
+    for (const h of heads) writeFacts(db, h.repo, h.number, h.head_oid, diffFactsOfCache(h.repo, h.number, h.head_oid));
+    n = heads.length;
+    db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(DIFF_FACTS_KEY, rules);
+    db.exec("COMMIT");
+  } catch (e) {
+    db.exec("ROLLBACK");
+    throw e;
+  }
+  mkdirSync(diffCacheDir(), { recursive: true });
+  writeFileSync(factsMarker(), rules);
+  return n;
 }
 
 /** The base branch a cached diff was computed against; null when unknown. */

@@ -40,7 +40,7 @@ export const commands = {
           if (!by) throw new ConversationError(2, USAGE);
           needOperator(db, by);
           const text = args.slice(2).filter((a, i, all) => a !== "--now" && a !== "--by" && all[i - 1] !== "--by").join(" ");
-          await addOperatorMessage(db, ref.repo, ref.number, by, text, { diff: githubDiff });
+          await addOperatorMessage(db, ref.repo, ref.number, by, text, { diff: githubDiff(db) });
           console.log(`${ref.repo}#${ref.number}: message queued; the Conversation step answers it`);
           if (args.includes("--now")) {
             // The same gates as the autopilot: the pipeline switch and the step's daily limit.

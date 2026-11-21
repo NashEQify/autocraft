@@ -149,7 +149,7 @@ export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (li
       if (ci) {
         // Only a bugfix that adds or changes a test file may get a regression test; everything else is covered by CI.
         if (c.label !== "bugfix") { byCi(); return; }
-        const pre = await cachedDiff(repo, c.number, c.head_oid, deps.fetchDiff);
+        const pre = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff);
         // Without a readable diff there is no test file to find, so CI is the verification.
         if (!pre.ok || !codeDiff(pre.text).testsOmitted.length) { byCi(); return; }
       }
@@ -161,7 +161,7 @@ export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (li
         handle();
         return;
       }
-      const d = await cachedDiff(repo, c.number, c.head_oid, deps.fetchDiff);
+      const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff);
       if (!d.ok) {
         if (d.tooLarge) { saveVerification(db, c, errorRow("GitHub refuses the diff: too large to plan")); summary.errors++; handle(); }
         else { log(`  ${ref}: no diff: ${d.error}`); summary.skipped.push(ref); }

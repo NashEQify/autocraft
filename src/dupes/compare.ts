@@ -114,7 +114,7 @@ async function prInput(x: Ctx, repo: string, numbers: number[]): Promise<Compare
     const it = bodyOf(x.db, repo, n);
     let diff = "", files: string[] = [];
     if (it.head_oid) {
-      const d = await cachedDiff(repo, n, it.head_oid, x.deps.fetchDiff);
+      const d = await cachedDiff(x.db, repo, n, it.head_oid, x.deps.fetchDiff);
       if (d.ok) {
         let cd = codeDiff(d.text);
         if (!cd.files.length && cd.testsOmitted.length) cd = codeDiff(d.text, true);
