@@ -347,13 +347,15 @@ export interface ChoicesUpdate {
 /** Writes a new current row: the current one with the update's drops, replaced drafts, added cores and pick. Returns the row and why an added core was left out. */
 export async function mergeChoices(db: Db, decisionId: string, u: ChoicesUpdate, o: { by?: string | null; now?: Date } = {}): Promise<{ row: ChoicesRow; notes: string[] }> {
   const cur = await currentChoices(db, decisionId);
-  const d = await db.get(db.k.selectFrom("main.decisions").select(["repo", "number"]).$narrowType<{ repo: string; number: number }>().where("id", "=", decisionId));
+  const d = await db.get(db.k.selectFrom("main.decisions").select(["repo", "number"]).where("id", "=", decisionId));
   if (!d) throw new Error(`no decision ${decisionId}`);
+  if (d.repo === null || d.number === null) throw new Error(`decision ${decisionId} has no item`);
+  const { repo, number } = d;
   const drafts: ChoicesRow["drafts"] = { ...(cur?.drafts ?? {}) };
   let added = [...(cur?.added ?? [])];
   // The cap counts the stored added cores that still apply to the item, as the parser does.
   const dec = await getDecision(db, decisionId);
-  const applicable = dec ? new Set(await applicableSteps(db, d.repo, d.number)) : null;
+  const applicable = dec ? new Set(await applicableSteps(db, repo, number)) : null;
   const live = async (ks: CoreKey[]): Promise<number> => (dec && applicable ? (await filterSeq(ks, async (k) => await addedCore(db, dec, k, applicable))).length : ks.length);
   const notes: string[] = [];
   for (const k of u.drop ?? []) {
@@ -368,6 +370,6 @@ export async function mergeChoices(db: Db, decisionId: string, u: ChoicesUpdate,
     }
     drafts[a.key] = { ...(a.draft.params && { params: a.draft.params }), extras: withIds(a.draft.extras) };
   }
-  const row = await writeChoices(db, { decisionId, repo: d.repo, number: d.number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
+  const row = await writeChoices(db, { decisionId, repo, number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
   return { row, notes };
 }
