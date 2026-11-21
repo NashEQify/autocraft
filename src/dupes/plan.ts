@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { canonInfoAll, pickCanonical } from "./canonical.ts";
 import { inPilot, pilotSql } from "../pilot.ts";
 import { backlogHeldSql } from "./held.ts";
+import { pairsFrom } from "../core/ref-filter.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import { mapSeq, someSeq } from "../async-seq.ts";
@@ -82,9 +83,10 @@ type MemberRow = Member & { k?: string; state_reason?: string | null; in_pilot?:
 /** kindSetsOf() for the given groups, with their members' rows read once; `inPilot` and `backlogHeld` answer for the members the same way. */
 export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => Promise<boolean>; backlogHeld: (repo: string, number: number) => boolean }> {
   const rows = new Map<string, { m: Member; reason: string | null; pilot: boolean; backlog: boolean }>();
+  const j = pairsFrom(db, "?", "j");
   for (const r of await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
       i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql(db, "i")} AS in_pilot, ${backlogHeldSql(db, "i")} AS held_backlog
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`)
+    FROM ${j.from} JOIN items i ON i.repo = ${j.repo} AND i.number = ${j.number}`)
     .all(JSON.stringify(groups.flatMap((g) => g.members.map((n) => [g.repo, n])))) as MemberRow[]) {
     const k = r.k!, reason = r.state_reason ?? null, pilot = !!r.in_pilot, backlog = !!r.held_backlog;
     delete r.k;

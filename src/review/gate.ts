@@ -94,7 +94,7 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
     WHERE p.state = 'review' AND (p.fix_id IS NOT NULL OR p.head <> p.from_head)${narrow("p")}`).all(bind()) as { k: string }[]).map((r) => r.k)));
   const failures = once(async () => new Map((await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE :prefix").all({ prefix: `${FAIL_KEY}%` }) as { key: string; value: string }[]).map((r) => [r.key, r.value])));
   // The checks list only where effectiveCiWith() reads it: a failure.
-  const checks = once(async () => new Map((await db.prepare(`SELECT c.repo || '#' || c.number AS k, c.head_oid, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS checks FROM main.pr_checks c WHERE 1${narrow("c")}`).all(bind()) as
+  const checks = once(async () => new Map((await db.prepare(`SELECT c.repo || '#' || c.number AS k, c.head_oid, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS checks FROM main.pr_checks c WHERE TRUE${narrow("c")}`).all(bind()) as
     { k: string; head_oid: string; overall: string; checks: string | null }[]).map((r) => [r.k, r])));
   const optional = once(async () => await optionalChecksOf(db));
   const staleSince = once(async () => await staleMarksSince(db));

@@ -3,6 +3,7 @@
 import { CARRIED } from "./carry.ts";
 import { parsePublic, storedClaims, type PublicReview } from "./opus-parse.ts";
 import type { Db } from "../db/index.ts";
+import { pairsFrom } from "../core/ref-filter.ts";
 
 type Row = { head_oid: string; at: string; model: string | null; mode: string | null; base_head: string | null; verdict: string; sure: number | null; public_review: string | null; claims: string | null };
 const COLS = "head_oid, at, model, mode, base_head, verdict, sure, public_review, claims";
@@ -43,8 +44,9 @@ export async function postSourcesOf(db: Db, refs: readonly string[]): Promise<(r
   const rows = new Map<string, Row>();
   const pairs = refs.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))]);
   if (pairs.length) {
-    for (const r of await db.prepare(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k, ${COLS.split(", ").map((c) => `o.${c}`).join(", ")} FROM json_each(?) j
-      JOIN opus_reviews o ON o.repo = j.value ->> 0 AND o.number = j.value ->> 1 WHERE o.verdict IS NOT NULL ORDER BY o.at DESC, o.rowid DESC`).all(JSON.stringify(pairs)) as (Row & { k: string })[]) {
+    const j = pairsFrom(db, "?", "j");
+    for (const r of await db.prepare(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k, ${COLS.split(", ").map((c) => `o.${c}`).join(", ")} FROM ${j.from}
+      JOIN opus_reviews o ON o.repo = ${j.repo} AND o.number = ${j.number} WHERE o.verdict IS NOT NULL ORDER BY o.at DESC, o.rowid DESC`).all(JSON.stringify(pairs)) as (Row & { k: string })[]) {
       const { k, ...row } = r;
       if (!rows.has(k)) rows.set(k, row);
     }

@@ -8,6 +8,7 @@ import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
 import type { PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
 import type { Db } from "../db/index.ts";
+import { pairsFrom } from "./ref-filter.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
 
@@ -35,8 +36,9 @@ const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind =
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */
 async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
+  const j = pairsFrom(db, "?", "j");
   const rows = await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.created_at, '') AS created, COALESCE(i.updated_at, '') AS updated
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as (Keys & { ref: string })[];
+    FROM ${j.from} JOIN items i ON i.repo = ${j.repo} AND i.number = ${j.number}`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as (Keys & { ref: string })[];
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
