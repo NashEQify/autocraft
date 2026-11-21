@@ -9,7 +9,7 @@ import type { Decision, DecisionComment } from "../../api/types.ts";
 export { DISCLOSURE_OPEN_LIMIT as DISCUSSION_OPEN_LIMIT, changeDisclosureOpen as changeDiscussionOpen } from "../../ui/disclosureState.ts";
 
 /** The single honest message for a failed or unusable thread read (never an answer/draft failure). */
-export const DISCUSSION_READ_ERROR = "Could not read the decision comments. The decision and your draft are unaffected.";
+export const DISCUSSION_READ_ERROR = "Could not read the decision comments.";
 
 
 export interface DiscussionOpinionRow {

@@ -1,4 +1,4 @@
-// The approved Items browser chrome (pinned reference v9): one compact toolbar, a phase context
+// The Items browser chrome: one compact toolbar, a phase context
 // row, a phone Filters disclosure and an honest count bar. Props only; views.tsx owns the URL.
 // Every label here comes from browseState's effective constraints, so an applied filter is never
 // invisible and a URL value the endpoint does not receive is always marked not applied.
@@ -67,7 +67,7 @@ export interface ChromeProps {
   children: ReactNode;
 }
 
-/** The reference's empty block: no rows, a reason, and the one action that changes it. */
+/** Empty result: no rows, a reason, and the one action that changes it. */
 export function EmptyResults({ onReset }: { onReset: () => void }) {
   return <div className="grid min-h-[230px] place-content-center justify-items-center gap-1 px-4 text-center">
     <strong className="text-sm">No matching items</strong>
@@ -76,7 +76,7 @@ export function EmptyResults({ onReset }: { onReset: () => void }) {
   </div>;
 }
 
-/* The reference's six-column toolbar needs 1010 px of columns, 50 px of gaps and 28 px of padding. */
+/* The six-column toolbar needs 1010 px of columns, 50 px of gaps and 28 px of padding. */
 const SIX_COLUMNS = 1088;
 /* Three columns need 440 px of columns, 20 px of gaps and 28 px of padding. */
 const THREE_COLUMNS = 488;
@@ -95,7 +95,7 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
   const selects = primarySelects(browse, repos);
   const extras = compatExtras(browse);
   // Only the width of this toolbar decides how its fixed columns wrap: the preview panel takes
-  // 340 px from the same row, and the reference's own 6-column band clips below 1088 px.
+  // 340 px from the same row, and the six-column band clips below 1088 px.
   const columns = phone ? "repeat(2, minmax(0, 1fr))" : width >= SIX_COLUMNS ? "170px 140px minmax(210px,1fr) 160px 170px 160px" : width >= THREE_COLUMNS ? "minmax(130px,1fr) minmax(110px,0.85fr) minmax(200px,1.25fr)" : "repeat(2, minmax(0, 1fr))";
 
   const stateField = <FilterField label="State" value={selects.state.value} options={selects.state.options} disabled={phase} disabledHint={disabledHint} onChange={(value) => onPatch({ state: value === "open" ? null : value, sort: null })} />;

@@ -3,8 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 /**
  * A debounced text draft that survives the browser's phase/list switch. The draft lives here, in
  * the page that stays mounted, not inside the toolbar that unmounts when a phase context starts or
- * ends; otherwise a click inside the 300 ms window would throw the typed text away (the reference
- * writes the query per keystroke and keeps it). A URL change or a popstate replaces the draft, and a
+ * ends; otherwise a click inside the 300 ms window would throw the typed text away. A URL change or a popstate replaces the draft, and a
  * pending timer is cancelled rather than writing text that was abandoned.
  */
 export function useDraftField({ value, commit, resolveKey, delay = 300 }: {

@@ -1,6 +1,5 @@
-// One Items row and its inline expansion, matching the approved reference: a full-width native
-// button with ref + title, a compact classification/status/age strip and a chevron; the open row
-// expands in place, in two columns where they fit. Read-only: no answer, claim or action control.
+// Native item/GitHub links and a separate Details button with row facts.
+// Expansions are read-only and use two columns where space permits.
 import { useId, type ReactNode } from "react";
 import { useQuery } from "../../api/client";
 import { useUser } from "../../shell/UserContext";
@@ -34,14 +33,14 @@ export function ItemRow({ facts, open, onToggle, children }: { facts: RowFacts; 
       <div className="relative min-h-8 max-md:min-h-11">
         <ItemRef repo={facts.repo} number={facts.number} kind={facts.kind} state={facts.state} title={facts.title} stretch className="font-medium" />
       </div>
-      <Button type="button" variant="ghost" size="sm" aria-label={`Details for ${facts.repo}#${facts.number}`}
+      <Button type="button" variant="ghost" size="sm"
         aria-expanded={open} aria-controls={open ? panel : undefined} onClick={onToggle}
         className="h-auto min-h-7 w-full flex-wrap justify-start whitespace-normal px-0 py-1 text-left font-normal max-md:min-h-11">
         {token ? <Badge tone={TONE[token.tone] ?? "neutral"}>{token.text}</Badge> : facts.status ? <Badge tone="neutral">{facts.status.phase}</Badge> : null}
         {facts.flags.includes("security") && <Badge tone="bad">Security</Badge>}
         {rowWord(facts) && <span className="min-w-0 break-words text-ink/60">{rowWord(facts)}</span>}
         <span className="ml-auto shrink-0 text-ink/60"><TimeAgo iso={facts.updatedAt} /></span>
-        <span className="inline-flex items-center gap-1">Details <CaretDownIcon aria-hidden className={cn("transition-transform duration-150", open && "rotate-180")} /></span>
+        <span className="inline-flex items-center gap-1">Details<span className="sr-only"> for {facts.repo}#{facts.number}</span> <CaretDownIcon aria-hidden className={cn("transition-transform duration-150", open && "rotate-180")} /></span>
       </Button>
     </div>
     {open && <div id={panel} className="border-t border-dashed border-line px-4 pb-4 pt-1">{children}</div>}
@@ -67,7 +66,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
   detail: ItemPageData | null;
   loading: boolean;
   error?: string;
-  /** The selected row's own item GET: the classification record the reference's first section quotes. */
+  /** The selected row's own item GET: the classification record used by the reasoning section. */
   item: Item | null;
   itemLoading: boolean;
   itemError?: string;
@@ -93,14 +92,14 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
           <p className="m-0 text-ink/55">No classifier reason recorded.</p>
           <p className="mb-0 mt-1.5 text-[11.5px] text-ink/50">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
         </> : null}
-        {!itemLoading && !itemError && !read ? <p className="m-0 text-ink/55">No classifier has run for this item, so there is nothing it read to quote.</p> : null}
+        {!itemLoading && !itemError && !read ? <p className="m-0 text-ink/55">No classifier has run for this item.</p> : null}
       </Section>
       <Section title="Classification">
         {settled ? <>
           <p className="m-0 flex flex-wrap items-center gap-2"><Badge tone={TONE[classificationToken(settled).tone] ?? "neutral"}>{classificationToken(settled).text}</Badge></p>
-          <p className="mb-0 mt-1.5 text-ink/65">{classificationDetail(settled, item?.classifications.length ?? 0)} · from the item's own record</p>
+          <p className="mb-0 mt-1.5 text-ink/65">{classificationDetail(settled, item?.classifications.length ?? 0)}</p>
           {answer && <p className="mb-0 mt-2 text-[11.5px] leading-5 text-ink/60">
-            Execution (joined from the decision, not an Items field): <Badge tone={TONE[answer.tone] ?? "neutral"}>{answer.state}</Badge> — separate from the classification above.
+            Execution: <Badge tone={TONE[answer.tone] ?? "neutral"}>{answer.state}</Badge>.
             {answer.reason ? <span className="block">{answer.reason}</span> : null}
             {answer.appliedAt ? <span className="block">Applied {when(answer.appliedAt)}</span> : null}
           </p>}

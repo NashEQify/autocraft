@@ -1,4 +1,4 @@
-// Pure facts for the compact Needs queue rows: the reference's meta line, the answer word, the age
+// Pure facts for the compact Needs queue rows: the metadata line, the answer word, the age
 // label and roving selection. No React, no data access beyond the Decision it is given.
 import type { Decision, DecisionKind } from "../../api/types.ts";
 import { nowMs, when } from "../../lib/format.ts";
@@ -24,7 +24,7 @@ export function refText(d: Pick<Decision, "repo" | "number" | "items">): string 
 export type AnswerWord = { text: string; tone: "bad" | "warn" | "ok" | "neutral" };
 
 /**
- * The reference's compact answer/execution word from real fields only: a disputed, unapplied answer is
+ * The compact answer/execution word from real fields only: a disputed, unapplied answer is
  * held (no `held` enum exists; `Decision.dispute` is the field); then the write's own state; then an
  * applied answer; then a plain answer; otherwise nothing. `queued`, `preparing` and `orphaned` are
  * never reported as applied.
@@ -67,7 +67,7 @@ export function ageTitle(askedAt: string): string {
 export interface MetaFact { key: "ref" | "kind" | "claim" | "answer"; text: string; tone?: AnswerWord["tone"]; title?: string }
 
 /**
- * The reference's meta order, omitting what the DTO does not carry. A claim carries its elapsed time
+ * The metadata order, omitting what the DTO does not carry. A claim carries its elapsed time
  * ("on it · reader · 12m") with the absolute moment in the accessible title; a claim
  * without a valid `since` shows the reader and says the time is unknown rather than inventing one.
  */

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   acceptCapture, captureSnapshot, clamp, clearSnapshotFor, commitChangesId, focusAllows, liveDecisionId, liveScopeOf,
-  peekSnapshot, readDecisionParam, resetSnapshots, resolveActive, resolveRestore, scopeOf, shouldPushDecision, snapshotFor,
+  peekSnapshot, readDecisionParam, resetSnapshots, resolveActive, resolveRestore, scopeOf, snapshotFor,
 } from "../web/src/modules/decisions/selection.ts";
 
 const rows = [{ id: "a" }, { id: "b" }, { id: "c" }];
@@ -35,11 +35,9 @@ test("the active decision is the requested id only when the current receipt hold
   assert.equal(resolveActive({ kind: "none" }, [], undefined), undefined);
 });
 
-test("a commit pushes only when the id changes", () => {
+test("a commit recognises an id change", () => {
   assert.equal(commitChangesId(undefined, "a"), true);
   assert.equal(commitChangesId("a", "a"), false);
-  assert.equal(shouldPushDecision(undefined, "a"), true);
-  assert.equal(shouldPushDecision("a", "a"), false);
 });
 
 test("the bookmark is one latest-scope record with a paired anchor identity and a fallback offset", () => {
@@ -124,22 +122,9 @@ test("opaque ids with delimiters survive the round trip unchanged", () => {
   }
 });
 
-test("a raw-URI change from one id to another pushes once, and a repeat does not", () => {
-  assert.equal(shouldPushDecision(undefined, "a"), true);   // the passive default has no URI
-  assert.equal(shouldPushDecision("a", "b"), true);         // a different explicit id pushes
-  assert.equal(shouldPushDecision("b", "b"), false);        // the same id adds no entry
-});
-
 test("the scope key is a collision-safe JSON tuple", () => {
   assert.notEqual(scopeOf({ login: "a:b", role: "c", search: "d" }), scopeOf({ login: "a", role: "b:c", search: "d" }));
   assert.deepEqual(JSON.parse(scopeOf({ login: "a", role: "b", search: "c" })), ["a", "b", "c", null]);
-});
-
-test("the inspector cursor is independent of the latent decision id", () => {
-  const base = (previewing: boolean, cursor: string | undefined, active: string | undefined) => (previewing ? cursor ?? active : active);
-  assert.equal(base(true, "c", "b"), "c");
-  assert.equal(base(false, "c", "b"), "b");
-  assert.equal(base(true, undefined, "b"), "b");
 });
 
 test("the live projected scope changes when a filter changes but the primary id stays", () => {

@@ -21,7 +21,7 @@ function ItemTimelineRead({ reference }: { reference: TimelineReference }) {
 
   // Matching cache data can coexist with a defined error; the gate above rejects it before projection.
   const model = timelineModel(item.data!.timeline);
-  if (model.empty) return <p className="text-sm text-ink/55">No item events were returned for this reader.</p>;
+  if (model.empty) return <p className="text-sm text-ink/55">No item events recorded.</p>;
   return (
     <ol className="space-y-3">
       {model.rows.map((row) => {

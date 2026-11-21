@@ -103,7 +103,6 @@ export function resolveActive(requested: RequestedDecision, rows: { id: string }
 }
 
 export const commitChangesId = (previous: string | undefined, next: string | undefined): boolean => previous !== next;
-export const shouldPushDecision = (uriId: string | undefined, targetId: string): boolean => uriId !== targetId;
 
 /* One latest-scope bookmark only (O(1), no maps/history). */
 let latest: Snapshot | undefined;

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { usePageProject } from "../../api/scope";
 import { Button } from "../../ui/atoms/Button";
 import { ItemRef } from "../../ui/molecules/ItemRef";
@@ -312,7 +312,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
         <AnswerNotice key={a.id} entry={a} className="shrink-0 border-b border-line" />
       ))}
       {failed && <div className="shrink-0 border-b border-line bg-bad/[0.06] px-3.5 py-2 text-xs text-bad" role="alert">
-        {data ? "Could not update this list: " : "This list could not be read: "}{error?.message || "No error details were recorded."}
+        This list could not be read: {error?.message || "No error details were recorded."}
         <button type="button" onClick={() => refetch()} className="ml-2 underline underline-offset-2 hover:text-ink">Retry</button>
       </div>}
       <div ref={scroller} onScroll={(e) => { if (toolsOpenRef.current) return; const top = e.currentTarget.scrollTop; if (phone) phoneListScroll = top; controlled?.onVisibleListScroll({ scope: controlled.scope, chosenId: controlled.cursorId, captureEpoch: controlled.layoutEpoch, anchor: { kind: "offset", offset: top, measuredEpoch: controlled.layoutEpoch } }); }} className="min-h-0 flex-1 overflow-y-auto">
@@ -328,9 +328,9 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
               <div className="relative min-h-8 max-md:min-h-11">
                 {d.number !== null
                   ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={d.shown?.title ?? d.title} stretch className="font-medium" />
-                  : <span className="break-words text-sm font-medium text-ink">{d.title}</span>}
+                  : <Link to={decisionPath(d)} className="break-words text-sm font-medium text-ink hover:underline">{d.title}</Link>}
               </div>
-              <Button type="button" variant="ghost" size="sm" aria-label={`Details for ${refText(d)}`} aria-current={isSelected ? "true" : undefined}
+              <Button type="button" variant="ghost" size="sm" aria-current={isSelected ? "true" : undefined}
                 disabled={showPrevious} tabIndex={!showPrevious && (controlled ? (controlled.cursorId ?? controlled.activeId) === d.id : isSelected) ? 0 : -1}
                 ref={(node) => { if (node && !showPrevious) rowRefs.current.set(d.id, node); else rowRefs.current.delete(d.id); }}
                 onClick={() => { if (!showPrevious) select(d.id); }}
@@ -342,7 +342,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
                   </span>)}
                 </span>
                 <span className="ml-auto shrink-0 text-ink/60" title={ageTitle(d.askedAt)}>{compactAge(d.askedAt)}</span>
-                <span className="inline-flex items-center gap-1">Details <CaretRightIcon aria-hidden /></span>
+                <span className="inline-flex items-center gap-1">Details<span className="sr-only"> for {refText(d)}</span> <CaretRightIcon aria-hidden /></span>
               </Button>
             </li>;
           })}

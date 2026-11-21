@@ -77,7 +77,7 @@ export interface Token { text: string; tone: ClassificationTone }
 
 /** The one classification token the compact strip shows, or why there is none (never a fake label). */
 export function classificationToken(settled: Settled): Token {
-  // The approved reference's tones: a settled label is plain (neutral), and every unsettled
+  // Label tones: a settled label is plain (neutral), and every unsettled
   // classification is amber. Security keeps its own bad tone, separately.
   if (settled.status === "settled") return { text: settled.label ?? "Settled", tone: "neutral" };
   if (settled.status === "waiting") return { text: "Waiting for a second opinion", tone: "warn" };
@@ -239,7 +239,7 @@ export interface PipelineRead {
 }
 
 /**
- * The reference's `why`, from the item's own classification record (api.item -> Item.classifications).
+ * Classifier reasoning, from the item's own classification record (api.item -> Item.classifications).
  * `classificationsOf` returns the latest record per classifier, not sorted by time, so: prefer the
  * record from the source that settled the label, else the newest available, and say which it is.
  * The caller shows an explicit empty state for a redacted or absent reason; nothing is substituted.
@@ -292,7 +292,7 @@ export interface AnswerFacts {
 }
 
 /**
- * The reference shows execution separately when the selected item's decision has an answer, and
+ * Execution is shown separately when the selected item's decision has an answer, and
  * "Answer exists · <state>" in Queue place. Our fields are `Decision.answer`, `exec.state`
  * (pending / waiting-token / waiting-permission / done / failed, with a reason) and `appliedAt`;
  * there is no "held" state in this DTO, so it is never invented.
@@ -303,7 +303,7 @@ export function answerFacts(decision: Pick<Decision, "answer" | "exec" | "applie
   // An applied answer is applied, whatever anyone disputed afterwards.
   if (decision.appliedAt) return { state: "Answer applied", tone: "ok", reason: null, appliedAt: decision.appliedAt, disputed: false };
   // A disputed, unapplied answer is held: `Decision.dispute` says the pipeline ignores it until the
-  // answerer or an operator keeps it or undoes it. That is the reference's "held", and it outranks
+  // answerer or an operator keeps it or undoes it. This held state outranks
   // any write state the answer had before the dispute (a pending write the pipeline is ignoring).
   if (decision.dispute) {
     return { state: "Answer held", tone: "warn", reason: decision.dispute.reason?.trim() || null, appliedAt: null, disputed: true };
@@ -323,7 +323,7 @@ export function conflictNote(peek: string): string {
   return `The link's old peek (${peek}) was ignored; open wins.`;
 }
 
-/** Queue place for an answered decision: the reference says "Held — disputed" for a held answer. */
+/** Queue place distinguishes a disputed held answer from normal execution. */
 export function answerQueueText(answer: AnswerFacts): string {
   return answer.disputed ? "Held — disputed" : answer.state;
 }

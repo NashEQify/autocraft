@@ -4,7 +4,7 @@ import type { Decision, ItemPageData, TimelineEntry } from "../../api/types.ts";
 
 export { DISCLOSURE_OPEN_LIMIT as TIMELINE_OPEN_LIMIT, changeDisclosureOpen as changeTimelineOpen } from "../../ui/disclosureState.ts";
 export const TIMELINE_EVENT_LIMIT = 4;
-export const TIMELINE_READ_ERROR = "Could not read the item timeline. The decision and your draft are unaffected.";
+export const TIMELINE_READ_ERROR = "Could not read the item timeline.";
 
 export interface TimelineReference {
   repo: string;

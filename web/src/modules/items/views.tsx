@@ -105,7 +105,7 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
   const queryScope = JSON.stringify([scope, filter]);
   // The receipt carries the reader it was fetched for: a payload from another scope is discarded,
   // so the previous reader's rows — and the redacted-per-role provenance in them — never render.
-  const { data: receipt, error, loading } = useQuery(
+  const { data: receipt, error, loading, refetch } = useQuery(
     `items:${queryScope}`,
     async (api) => ({ scope: queryScope, payload: await api.items(filter) }),
     { gcTime: 0 },
@@ -125,7 +125,7 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
     : undefined;
   return <Page title="Items" sub={ready && data && !loading ? `${num(data.total)} ${data.total === 1 ? "item" : "items"}` : undefined}>
     <BrowserChrome browse={browse} repos={repos ?? []} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
-      <ErrorLine error={error ? error.message || "Could not read these items." : undefined} className="px-4 py-3" />
+      {error && <div className="flex items-center gap-2 px-4 py-3" role="alert"><ErrorLine error={error.message || "Could not read these items."} /><Button variant="ghost" size="sm" onClick={refetch}>Retry</Button></div>}
       {!ready && !error && !display.retained && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
       {display.retained && <p role="status" className="sr-only">Loading items…</p>}
       {problem && <SelectionUnavailable {...problem} onClose={onCloseSelection} />}

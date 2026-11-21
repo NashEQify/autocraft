@@ -21,7 +21,7 @@ function useTab(): Tab {
 }
 
 /**
- * The three work queues (reference needsbar): underline tabs with the real queue counts. They are
+ * The three work queues: underline tabs with the real queue counts. They are
  * the page's primary switch; a decision's View is the separate native select below. Counts are the
  * person's own queue (needs().counts) and are not affected by the scope controls.
  */
@@ -47,7 +47,7 @@ export function PhoneBody(props: ViewProps) {
 
 export function Body(props: ViewProps) {
   const tab = useTab();
-  // The tabs belong to the page body (reference), so every queue shows them once.
+  // The tabs belong to the page body, so every queue shows them once.
   // The Decisions queue is a 366/296px card at 390/320, which is a 12px page inset there; the other
   // queues keep their existing 16px child inset, restored locally.
   return <div className="flex h-full min-h-0 flex-col px-3 pb-4 pt-3 md:px-6">

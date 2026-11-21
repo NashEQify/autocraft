@@ -97,4 +97,4 @@ export function evidenceStaff(role: string, _maintainerWrites?: boolean): boolea
 export { checkStateText } from "../../lib/status.ts";
 
 /** The single honest message for a rejected read and for the hook's thrown `unchanged` result. */
-export const EVIDENCE_READ_ERROR = "Could not read the item evidence. The decision and your draft are unaffected.";
+export const EVIDENCE_READ_ERROR = "Could not read the item evidence.";

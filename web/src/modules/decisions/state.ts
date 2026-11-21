@@ -73,7 +73,7 @@ export function useDecisionFilter() {
   }, [rawUpdate]);
   const clearPeek = useCallback(() => rawUpdate({ peek: null }, { replace: true }), [rawUpdate]);
   // A filter change: the open preview belongs to the old filter, so it closes with the change.
-  // Needs' View and scope controls push (the reference's go()), so Back/Forward restore them; the
+  // Needs' View and scope controls push, so Back/Forward restore them; the
   // shared hook's default stays replace for every other caller.
   const setFilter = useCallback((patch: Record<string, string | null>, opts?: { replace?: boolean }) => update({ ...patch, peek: null }, opts), [update]);
   return { filter, update, setFilter, search, peek, setPeek, decision, setDecision, clearPeek };

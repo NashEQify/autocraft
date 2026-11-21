@@ -42,8 +42,7 @@ export function NeedsControls() {
   const withCurrent = (options: [string, string][], value: string, label: string): [string, string][] =>
     value && !options.some(([v]) => v === value) ? [[value, label], ...options] : options;
   const remove = (chip: CompatValue) => update(chip.key === "age" ? removeRawAgePatch() : removeRawScopePatch(search, chip.key, chip.value), { replace: false });
-  // The scope rows are the reference's: label left, value right, full width of the card header.
-  // The reference's scope rows (styles.css:575-576): full-width flex rows, label left, a NATURAL-width
+  // Full-width scope rows keep labels left and a natural-width
   // native select at the right capped at 190px. Not a grid filler and not a fixed screenshot width.
   const row = "flex w-full items-center justify-between gap-2.5";
   const control = "h-[34px] min-w-0 max-w-[190px] px-2 py-1.5 text-[12.5px] max-md:h-11 max-md:text-[12.5px]";

@@ -23,7 +23,7 @@ export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhas
   const scope = JSON.stringify([user.login, user.role, project]);
   const filter = statusFilter(browse);
   const queryScope = JSON.stringify([scope, filter]);
-  const { pages: receipts, error, loading, hasMore, loadingMore, loadMore } = usePagedQuery(
+  const { pages: receipts, error, loading, refetch, hasMore, loadingMore, loadMore } = usePagedQuery(
     `items-status:${queryScope}`,
     async (api, cursor) => ({ scope: queryScope, page: await api.itemStatusList({ ...filter, cursor }) }),
     (receipt) => receipt.page.nextCursor,
@@ -45,7 +45,7 @@ export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhas
     : undefined;
   return <Page title="Items" sub={ready && !loading && total !== undefined ? `${num(total)} ${total === 1 ? "item" : "items"}` : undefined}>
     <BrowserChrome browse={browse} repos={repoOptions ?? []} phone={phone} phaseCounts={first?.byPhase} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
-      <ErrorLine error={error ? error.message || "Could not read these items." : undefined} className="px-4 py-3" />
+      {error && <div className="flex items-center gap-2 px-4 py-3" role="alert"><ErrorLine error={error.message || "Could not read these items."} /><Button variant="ghost" size="sm" onClick={refetch}>Retry</Button></div>}
       {!ready && !error && !display.retained && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
       {display.retained && <p role="status" className="sr-only">Loading items…</p>}
       {!loading && first && !rows.length && !error && !problem && <EmptyResults onReset={onReset} />}

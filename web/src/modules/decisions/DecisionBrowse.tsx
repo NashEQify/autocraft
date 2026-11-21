@@ -37,7 +37,8 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const { peek, setPeek, decision, setDecision, clearPeek, update, filter, search } = useDecisionFilter();
   const query = useDecisionList();
   const loc = useLocal();
-  const rows = query.data?.decisions ?? [];
+  // Failed receipts confer no selection, keyboard or review authority, just as in the queue.
+  const rows = query.error ? [] : query.data?.decisions ?? [];
   const requested = decision;
   const project = usePageProject();
   const scopeKey = scopeOf({ login: user.login, role: user.role, search, project });

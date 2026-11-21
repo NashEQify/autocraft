@@ -186,7 +186,7 @@ export function constraints(browse: BrowseState): Constraint[] {
     add("kind", "Type", status.kind === "pr" ? "Pull requests" : status.kind === "issue" ? "Issues" : undefined, !!status.kind);
     add("repo", "Repository", status.repo?.join(" + "), !!status.repo?.length);
     add("discord", "Seen on Discord", status.discord ? "yes" : undefined, true);
-    // Kept in the link, never sent: the reference reports these four in the phase notice.
+    // Kept in the link, never sent: these values remain visibly unapplied in phase mode.
     add("state", "State", browse.stateRaw ? stateLabel(browse.stateRaw) : undefined, false, browse.stateRaw);
     for (const value of browse.labelsRaw) add("label", "Type label", value, false);
     for (const value of browse.statusRaw) add("status", "Classification", statusLabel(value), false, value);

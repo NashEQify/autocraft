@@ -1,10 +1,10 @@
 /** Needs controls: the decision View and the inline scope panel. Pure helpers only; the page owns
-    the URL, the reads and the list. Mirrors the approved reference's decisionControls/needsScope. */
+    the URL, the reads and the list. */
 import type { DecisionFilter, DecisionKind } from "../../api/types.ts";
 
 export type DecisionView = NonNullable<DecisionFilter["status"]>;
 
-/** The reference's native View options, in its order. */
+/** Native View options in display order. */
 export const VIEW_OPTIONS: { value: DecisionView; label: string }[] = [
   { value: "open", label: "Waiting" },
   { value: "answered", label: "Answered" },
@@ -82,7 +82,7 @@ export function viewOf(status: string | undefined): DecisionView {
 }
 
 /**
- * The age select's options: the reference's Any/1/3/7, plus the link's own older value (the previous
+ * The age select's options: Any/1/3/7 presets, plus the link's own older value (the previous
  * rail offered 2 days) so an existing choice is shown truthfully instead of mislabelled or dropped.
  */
 export function ageOptions(minAge: number | undefined): { value: string; label: string }[] {
@@ -96,7 +96,7 @@ export interface CompatValue { key: "repo" | "kind" | "age"; value: string; labe
 
 /**
  * Values that a single native select cannot show: multiple repositories or kinds, an age outside the
- * reference's options, and values the API will not use. The panel lists them with a remove action so
+ * preset options, and values the API will not use. The panel lists them with a remove action so
  * no applied constraint is invisible and nothing unused is presented as applied.
  */
 export function compatValues(scope: Scope): CompatValue[] {
@@ -137,7 +137,7 @@ export function multiSelectValue(values: string[], none = ""): string {
 /** The label of a multi-value option ("a + b"), so the control names what it applies. */
 export const multiLabel = (values: string[]): string => values.join(" + ");
 
-/** `/needs?tab=…` with the compatible scope carried the way the reference's deskPath does. */
+/** `/needs?tab=…` with compatible scope retained. */
 export function needsTabsHref(tab: "decisions" | "feedback" | "stopped", search: string): string {
   const params = new URLSearchParams(search);
   // A queue-tab link is a cohort change: it drops the preview and the selected decision too.
