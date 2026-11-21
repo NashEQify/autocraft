@@ -19,6 +19,7 @@ import type { SessionAsk } from "../src/prepush/resume.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "sandbox-test-"));
@@ -179,7 +180,7 @@ describe("askClaude in tool mode", async () => {
       assert.deepEqual(calls[0]!.args.slice(-claudeArgs("review.opus", "opus", true).length), claudeArgs("review.opus", "opus", true));
       assert.equal(r!.turns, 4);
       assert.ok(!r!.text.includes(leak));
-      const run = await db.prepare("SELECT summary FROM agent_runs ORDER BY rowid DESC LIMIT 1").get() as { summary: string } | undefined;
+      const run = await db.get(db.k.selectFrom("agent_runs").select("summary").orderBy(rowid("agent_runs"), "desc").limit(1));
       assert.match(run?.summary ?? "", /4 turns/);
       // Without a checkout the same prompt runs tool-free through plain claude.
       await askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, db);
