@@ -265,10 +265,8 @@ src/mirror.ts
 
 
 
-src/owners.ts
 
 
-src/pilot.ts
 
 
 
