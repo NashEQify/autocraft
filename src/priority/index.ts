@@ -15,6 +15,7 @@ import { itemOf, plannedItems } from "../core/select-items.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { excluded } from "../db/kx.ts";
 
 const JEV_CHUNK = 40;
 const now = () => new Date().toISOString();
@@ -32,11 +33,10 @@ async function save(db: Db, item: Due, v: Verdict): Promise<boolean> {
   const s = settleImpact(v.jev, v.haiku?.impact ?? null);
   if (!s) return false;
   const reason = s.model === "haiku" ? v.haiku!.reason : v.jev ? `${v.jev.impact} ${v.jev.p.toFixed(2)}` : "";
-  await db.prepare(`INSERT INTO item_priority (repo, number, text_hash, impact, jev_impact, jev_p, haiku_impact, score, model, reason, at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET text_hash = excluded.text_hash, impact = excluded.impact, jev_impact = excluded.jev_impact, jev_p = excluded.jev_p,
-      haiku_impact = excluded.haiku_impact, model = excluded.model, reason = excluded.reason, at = excluded.at`).run(item.repo, item.number, item.hash, s.impact, v.jev?.impact ?? null, v.jev?.p ?? null,
-    v.haiku?.impact ?? null, 0, s.model, reason, now());
+  await db.run(db.k.insertInto("item_priority")
+    .values({ repo: item.repo, number: item.number, text_hash: item.hash, impact: s.impact, jev_impact: v.jev?.impact ?? null, jev_p: v.jev?.p ?? null,
+      haiku_impact: v.haiku?.impact ?? null, score: 0, model: s.model, reason, at: now() })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["text_hash", "impact", "jev_impact", "jev_p", "haiku_impact", "model", "reason", "at"]))));
   return true;
 }
 
@@ -46,16 +46,16 @@ async function save(db: Db, item: Due, v: Verdict): Promise<boolean> {
  */
 export async function rescore(db: Db, nowMs: number = Date.now()): Promise<number> {
   const reach = await reachOfOpenItems(db, nowMs);
-  const rows = await db.prepare(`SELECT p.repo, p.number, p.score FROM item_priority p JOIN items i ON i.repo = p.repo AND i.number = p.number WHERE i.state = 'OPEN'`)
-    .all() as { repo: string; number: number; score: number }[];
-  const upd = db.prepare("UPDATE item_priority SET score = ? WHERE repo = ? AND number = ?");
+  const rows = await db.all(db.k.selectFrom("item_priority as p")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "p.score"]).where("i.state", "=", "OPEN"));
   let changed = 0;
   await db.write(async () => {
     for (const r of rows) {
       const rc = reach.get(`${r.repo}#${r.number}`);
       if (!rc) continue;
       const score = reachScore(rc);
-      if (score !== r.score) { await upd.run(score, r.repo, r.number); changed++; }
+      if (score !== r.score) { await db.run(db.k.updateTable("item_priority").set({ score }).where("repo", "=", r.repo).where("number", "=", r.number)); changed++; }
     }
   });
   return changed;

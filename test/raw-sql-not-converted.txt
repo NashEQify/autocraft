@@ -281,22 +281,14 @@ src/preapproval/permissions.ts
 
 src/preapproval/state.ts
 
-src/premerge/index.ts
-
-src/premerge/review.ts
 
 
-src/prepush/cli.ts
 
-src/prepush/index.ts
 
-src/prepush/resume.ts
 
-src/priority/index.ts
 
-src/priority/reach.ts
 
-src/priority/read.ts
+
 
 src/public/status.ts
 

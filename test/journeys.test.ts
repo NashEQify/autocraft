@@ -264,20 +264,20 @@ describe("conflict resolution lint", () => {
     const { git, w, deps, asked } = await setup();
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket]), [["conflict", "merge"]]);
     assert.deepEqual((await run(w, deps)).pushed, []);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM conflict_merges"), [{ state: "linting", lint_round: 1 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "lint_round"])), [{ state: "linting", lint_round: 1 }]);
     await endLint(w, await lastTask(w), { diagnostics: [{ line: 2 }] });
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket]), [["lint", "conflict"]]);
 
     assert.deepEqual((await run(w, deps)).pushed, []);
     assert.equal(asked.length, 2);
     assert.match(asked[1]!.previous!.findings[0]!, /needless at line 2/);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM conflict_merges"), [{ state: "linting", lint_round: 2 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "lint_round"])), [{ state: "linting", lint_round: 2 }]);
 
     await endLint(w, await lastTask(w));
     assert.deepEqual((await run(w, deps)).pushed, ["app#1"]);
     const pushed = git.branchHead();
     assert.equal(sh(git.fork, "show", `${pushed}:src/lib.rs`), "fn a() {}\n// both\nfn main() { a(); a(); }");
-    assert.deepEqual(await w.rows("SELECT state, to_head FROM conflict_merges"), [{ state: "merged", to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "to_head"])), [{ state: "merged", to_head: pushed }]);
   });
 
   test("findings after the second lint round fail the try with the reason", async () => {
@@ -290,9 +290,9 @@ describe("conflict resolution lint", () => {
     assert.deepEqual(s.pushed, []);
     assert.equal(asked.length, 2);
     assert.deepEqual(git.pushes, []);
-    const row = (await w.rows("SELECT state, reason FROM conflict_merges"))[0] as { state: string; reason: string };
+    const row = (await w.db.get(w.db.k.selectFrom("conflict_merges").select(["state", "reason"])))!;
     assert.equal(row.state, "rejected");
-    assert.match(row.reason, /clippy findings remain after 2 rounds: needless/);
+    assert.match(row.reason!, /clippy findings remain after 2 rounds: needless/);
   });
 });
 
