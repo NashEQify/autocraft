@@ -1,0 +1,21 @@
+# Toolchain image "rust-stable" for build pods (kubernetes build environments, docs/operations.md "Build pods").
+# The pods cannot build images or install packages, so this image carries what the craft apps' CI gates commonly
+# install: the windowing, GL/Vulkan, GTK, font, audio and D-Bus development packages, plus clippy and rustfmt. A task
+# whose CI gate names a package missing here fails with that package named.
+#
+#   podman build -f deploy/container/Containerfile.rust-stable -t rust-stable deploy/container
+FROM docker.io/library/rust:1-bookworm
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      pkg-config libx11-dev libxcb1-dev libxkbcommon-dev libwayland-dev libxrandr-dev libxi-dev libxcursor-dev \
+      libgl1-mesa-dev libvulkan1 mesa-vulkan-drivers libgtk-3-dev libfontconfig1-dev libfreetype-dev \
+      libasound2-dev libdbus-1-dev poppler-utils qpdf; \
+    rm -rf /var/lib/apt/lists/*; \
+    rustup component add clippy rustfmt; \
+    rm -rf "$CARGO_HOME/registry" "$CARGO_HOME/git"; \
+    chmod -R a+rX /usr/local/rustup /usr/local/cargo
+
+# The uid build pods run as (the AutoCraft image's); steps write only to /src, /target, /cache, /out and /tmp.
+USER 10001:10001

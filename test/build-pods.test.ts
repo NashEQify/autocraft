@@ -49,7 +49,7 @@ class FakeKube implements KubeApi {
   }
   /** Ends every container of a pod with the given exit codes (0 when not named). */
   end(pod: Pod, codes: Record<string, { exitCode: number; message?: string }> = {}) {
-    const st = (c: { name: string }) => ({ name: c.name, state: { terminated: { exitCode: 0, startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:03Z", ...codes[c.name] } } });
+    const st = (c: { name: string }) => ({ name: c.name, state: { terminated: { startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:03Z", ...(codes[c.name] ?? { exitCode: 0 }) } } });
     const init = (pod.spec.initContainers ?? []) as { name: string }[], main = pod.spec.containers as { name: string }[];
     const failed = [...init, ...main].some((c) => (codes[c.name]?.exitCode ?? 0) !== 0);
     pod.status = { phase: failed ? "Failed" : "Succeeded", initContainerStatuses: init.map(st), containerStatuses: main.map(st) };

@@ -24,7 +24,7 @@ const STATE_TONE: Record<TaskState, Tone> = { queued: "neutral", claimed: "accen
 const STATE_LABEL: Record<TaskState, string> = { queued: "Queued", claimed: "Starting", running: "Running", done: "Done", failed: "Failed", cancelled: "Cancelled", lost: "Lost" };
 const ACTIVE: TaskState[] = ["queued", "claimed", "running"];
 
-const KIND_LABEL: Record<EnvKind, string> = { "local-sandbox": "Sandbox on this box", remote: "Remote" };
+const KIND_LABEL: Record<EnvKind, string> = { "local-sandbox": "Sandbox on this box", remote: "Remote", kubernetes: "Kubernetes pods" };
 
 function requiresText(r: Requires): string {
   const parts: string[] = [];
@@ -160,7 +160,7 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
         </div>
       </div>
       <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs">
-        <dt className="text-ink/55">Machine</dt>
+        <dt className="text-ink/55">{e.settings ? "Each pod" : "Machine"}</dt>
         <dd className="num min-w-0 break-words">{e.capabilities ? capsText(e.capabilities) : "not reported yet"}</dd>
         {e.capabilities && (
           <>
@@ -168,9 +168,18 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
             <dd className="code min-w-0 break-words">{e.capabilities.toolchains.join(", ") || "none"}</dd>
           </>
         )}
-        <dt className="text-ink/55">Worker</dt>
-        <dd className="num">{e.version ? `version ${e.version}` : "never connected"}</dd>
-        <dt className="text-ink/55">Last seen</dt>
+        {e.settings ? (
+          <>
+            <dt className="text-ink/55">Namespace</dt>
+            <dd className="code min-w-0 break-words">{e.settings.namespace}</dd>
+          </>
+        ) : (
+          <>
+            <dt className="text-ink/55">Worker</dt>
+            <dd className="num">{e.version ? `version ${e.version}` : "never connected"}</dd>
+          </>
+        )}
+        <dt className="text-ink/55">{e.settings ? "Last checked" : "Last seen"}</dt>
         <dd className="num">{e.lastSeenAt ? `${eventTime(e.lastSeenAt)}` : "never"}</dd>
         {e.pausedReason && (
           <>
@@ -179,7 +188,7 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
           </>
         )}
       </dl>
-      {operator && !editing && (
+      {operator && !editing && !e.settings && (
         <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-2">
           <ConfirmButton label="Rotate key" confirmLabel="Replace the key" loading={write.busy === "rotate"} onConfirm={() => void write.run("rotate", async () => setSecret((await api.envs.rotateKey(e.id)).key))} />
           <ErrorLine error={write.error} />

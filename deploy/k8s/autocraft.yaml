@@ -78,6 +78,8 @@ spec:
           args: ["runner"]
           env:
             - { name: AUTOCRAFT_BASE_URL, value: "https://autocraft.example.com" }
+            # The image of kubernetes build environments' task, source and upload pods: this container's own image.
+            - { name: AUTOCRAFT_IMAGE, value: "ghcr.io/storytold/autocraft@sha256:070416efcd1d986541c3fc395b949b85d93ba00145fbc85f54bb8909b30080d8" }
             - name: GH_TOKEN # created by the operator; see docs/operations.md
               valueFrom:
                 secretKeyRef: { name: autocraft-github, key: token, optional: true }
