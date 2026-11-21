@@ -520,7 +520,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   cancel_requested_by TEXT,
   repo TEXT,                          -- params.repo, for the autopilot's per-repo lookups
   items INTEGER,                      -- items the job handled (classified, asked, reviewed, merged ...), for the daily limits
-  acted INTEGER                       -- other progress the job made (a batch advanced or opened, a decision asked ...); with items 0, the job was idle
+  acted INTEGER,                      -- other progress the job made (a batch advanced or opened, a decision asked ...); with items 0, the job was idle
+  resumes INTEGER NOT NULL DEFAULT 0  -- times a runner stop or restart put the running job back in the queue (src/runner/resume.ts)
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 CREATE INDEX IF NOT EXISTS jobs_step ON jobs(step, id);
@@ -898,7 +899,9 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   picked_by TEXT COLLATE NOCASE,      -- a user picked the queued call for their own Task Runners ("Run on my Task Runner"); cleared on requeue and unlease
   picked_at INTEGER,
   pick_until INTEGER,                 -- the pick counts until then
-  no_taker_since INTEGER              -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
+  no_taker_since INTEGER,             -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
+  bundle_hash TEXT,                   -- sha256 of the canonical bundle JSON: a resumed job adopts its earlier run's call with the same bundle
+  consumed_at INTEGER                 -- when the caller read the done reply; a done call not yet read can still be adopted
 );
 CREATE INDEX IF NOT EXISTS remote_calls_state ON remote_calls(state, tier);
 CREATE INDEX IF NOT EXISTS remote_calls_ended ON remote_calls(state, ended_at);

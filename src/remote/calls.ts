@@ -36,6 +36,7 @@ import { endChecks, serveChecks } from "./check-relay.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
+import { ADOPTABLE_CALL, RESUMED_JOBS, RESUMING_JOBS, resumedRun } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
@@ -101,15 +102,48 @@ export type NewCall = {
   referenceRepo?: string;
 };
 
-/** Queues a call for the current job and step; a follow-up is offered only to the helper of the parent's lease holder. */
+/** JSON with object keys sorted, so equal values give equal text. */
+function canonicalJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map((x) => canonicalJson(x === undefined ? null : x)).join(",")}]`;
+  if (v && typeof v === "object") return `{${Object.keys(v).filter((k) => (v as Record<string, unknown>)[k] !== undefined).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson((v as Record<string, unknown>)[k])}`).join(",")}}`;
+  return JSON.stringify(v);
+}
+
+/** The bundle hash a resumed run matches its earlier run's calls by: everything the call asks (prompt, mounts at their commits, arguments, the parent of a follow-up). */
+export const bundleHash = (bundle: NewCall["bundle"]): string => sha256hex(canonicalJson(bundle));
+
+/** Calls this process queued or adopted: a resumed run adopts each earlier call once. */
+const adopted = new Set<number>();
+
+/**
+ * Queues a call for the current job and step; a follow-up is offered only to the helper of the parent's lease holder. In a
+ * resumed job (src/runner/resuming.ts) it first adopts a call of the job's earlier run with the same prompt, version, bundle
+ * and parent that is still open or answered and unread: the reply a Task Runner sends, or sent during the restart, lands there.
+ */
 export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()): Promise<number> {
   const s = stepOf(c.promptId), q = callQueue(c.promptId);
+  const hash = bundleHash(c.bundle);
+  if (s.jobId !== null && await resumedRun(db, s.jobId)) {
+    const taken = [...adopted];
+    const earlier = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND prompt_id = ? AND prompt_version = ? AND bundle_hash = ? AND parent_id IS ? AND ${ADOPTABLE_CALL}
+      ${taken.length ? `AND id NOT IN (${taken.map(() => "?").join(", ")})` : ""} ORDER BY id LIMIT 1`).get(s.jobId, c.promptId, c.promptVersion, hash, c.parentId ?? null, ...taken) as { id: number } | undefined;
+    if (earlier) {
+      const id = Number(earlier.id);
+      adopted.add(id);
+      // Fresh again for claims and the room: its caller is back.
+      await db.prepare("UPDATE main.remote_calls SET seen_at = ? WHERE id = ?").run(nowMs, id);
+      dropQueueCache(db);
+      console.log(`adopted remote call ${id} (${c.promptId}) of the job's run before the restart`);
+      return id;
+    }
+  }
   const sticky = c.parentId === undefined ? null : (await db.prepare("SELECT user_login FROM main.remote_calls WHERE id = ?").get(c.parentId) as { user_login: string | null } | undefined)?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
-  const id = Number((await db.prepare(`INSERT INTO main.remote_calls (job_id, step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, items, repo, class, level, since, seen_at, queued_since, max_attempts, timeout_ms, parent_id, sticky_login, reference_repo, authors)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(s.jobId, s.step, s.stage, c.promptId, c.promptVersion, c.tier, c.effort, c.askedModel, JSON.stringify(c.bundle), JSON.stringify(c.items), q.repo, q.cls, c.level, nowMs, nowMs, nowMs,
-      Math.max(1, c.maxAttempts), c.bundle.timeoutSeconds * 1000, c.parentId ?? null, sticky, c.referenceRepo ?? null, authors)).lastInsertRowid);
+  const id = Number((await db.prepare(`INSERT INTO main.remote_calls (job_id, step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, bundle_hash, state, items, repo, class, level, since, seen_at, queued_since, max_attempts, timeout_ms, parent_id, sticky_login, reference_repo, authors)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
+    .get(s.jobId, s.step, s.stage, c.promptId, c.promptVersion, c.tier, c.effort, c.askedModel, JSON.stringify(c.bundle), hash, JSON.stringify(c.items), q.repo, q.cls, c.level, nowMs, nowMs, nowMs,
+      Math.max(1, c.maxAttempts), c.bundle.timeoutSeconds * 1000, c.parentId ?? null, sticky, c.referenceRepo ?? null, authors) as { id: number }).id);
+  if (s.jobId !== null) adopted.add(id);
   dropQueueCache(db);
   return id;
 }
@@ -123,11 +157,14 @@ export async function withdrawCall(db: Db, id: number, reason: string, states: (
   return true;
 }
 
-/** Withdraws the open calls of a job that ended, or of every job (the runner restarted); calls made outside a job are left to their caller. */
+/**
+ * Withdraws the open calls of a job that ended, or of every job (the runner restarted); calls made outside a job are left to
+ * their caller, and calls of jobs waiting to resume stay for the resumed run to adopt.
+ */
 export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): Promise<number> {
   const ids = (jobId === undefined
-    ? await db.prepare("SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id IS NOT NULL").all()
-    : await db.prepare("SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id = ?").all(jobId)) as { id: number }[];
+    ? await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id IS NOT NULL AND job_id NOT IN (${RESUMING_JOBS})`).all()
+    : await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id = ? AND job_id NOT IN (${RESUMING_JOBS})`).all(jobId)) as { id: number }[];
   return (await filterSeq(ids, async (r) => await withdrawCall(db, Number(r.id), reason))).length;
 }
 
@@ -192,7 +229,9 @@ export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: numb
       if (await requeue(db, r, why, nowMs) && beaten && r.token_id !== null && r.user_login !== null) await noteDrop(db, Number(r.token_id), r.user_login, Number(r.id), nowMs);
     }
   }
-  const gone = await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND seen_at < ?${one}`).all(nowMs - CALLER_GONE_MS, ...(id === undefined ? [] : [id])) as { id: number }[];
+  // The calls of a resumed job's earlier run have no caller until the resumed run adopts them; they end with the job (endJob).
+  const gone = await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND seen_at < ?${one}
+    AND (job_id IS NULL OR job_id NOT IN (${RESUMED_JOBS}))`).all(nowMs - CALLER_GONE_MS, ...(id === undefined ? [] : [id])) as { id: number }[];
   for (const r of gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
 }
 
@@ -897,8 +936,8 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
     if (r.state === "done") {
       const stored = (r.usage ? JSON.parse(r.usage) : {}) as { byModel?: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>; costUsd?: number };
       const costUsd = typeof stored.costUsd === "number" ? stored.costUsd : null;
-      // The raw reply is not kept: the agent run stores the scrubbed copy.
-      await db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE id = ?").run(id);
+      // The raw reply is not kept: the agent run stores the scrubbed copy. A read reply can no longer be adopted.
+      await db.prepare("UPDATE main.remote_calls SET reply = NULL, consumed_at = ? WHERE id = ?").run(nowMs, id);
       return { state: "done", text: r.reply ?? "", usage: { ...storedTokens(stored), cost: costUsd }, byModel: stored.byModel ?? null, costUsd, turns: r.turns, sessionId: r.session_id, runId: r.run_id };
     }
     if (r.state === "failed" && r.error?.startsWith(NO_TAKER_PREFIX)) {

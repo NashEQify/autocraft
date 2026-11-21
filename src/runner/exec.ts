@@ -31,9 +31,13 @@ export async function execJob(id: number): Promise<number> {
   }
   const startedAt = row.started_at;
   const runs = new Set<string>();
+  // A resumed job (src/runner/resuming.ts) adds this run's calls to those of its earlier runs.
+  let before: JobUsage | null = null;
+  try { before = row.resumes && row.usage ? JSON.parse(row.usage) as JobUsage : null; } catch { /* unreadable: this run's alone */ }
   const saveUsage = async () => {
     const u = await usageOf(db, runs, startedAt);
-    if (u) await db.prepare("UPDATE jobs SET usage = ? WHERE id = ?").run(JSON.stringify(u), id);
+    const all = u && before ? { calls: before.calls + u.calls, input: before.input + u.input, output: before.output + u.output, costUsd: before.costUsd === null && u.costUsd === null ? null : (before.costUsd ?? 0) + (u.costUsd ?? 0) } : u;
+    if (all) await db.prepare("UPDATE jobs SET usage = ? WHERE id = ?").run(JSON.stringify(all), id);
   };
   const fail = async (msg: string): Promise<number> => {
     await saveUsage();

@@ -2,8 +2,8 @@
 // polls the jobs table, runs each job in its own child process (`autocraft
 // runner exec <id>`, its own process group, output to a per-job log file),
 // stops jobs whose cancel was requested, runs the autopilot (queues jobs while the
-// pipeline switch is on) and marks
-// jobs left running by an earlier runner as failed.
+// pipeline switch is on) and puts jobs that a stop or an earlier runner left
+// unfinished back in the queue to resume (src/runner/resuming.ts).
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
@@ -19,7 +19,7 @@ import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
 import { COMMAND_WORK_SQL, drainCommands, pruneCommands } from "../github/commands.ts";
 import { checkPendingUpdate } from "../build/worker-update.ts";
-import { endJob, JOB_KEEP_MS, now, pruneJobs, RUNNER_STOPPED } from "./jobs.ts";
+import { endJob, JOB_KEEP_MS, now, pruneJobs, resumeJob, RUNNER_STOPPED } from "./jobs.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
@@ -143,23 +143,31 @@ export class Runner {
     this.refreshFlow = opts.refreshFlow ?? (() => this.flowThread.flow());
   }
 
-  /** Jobs left `running` belong to a runner that is gone: stop what is left of them and mark them failed. */
+  /**
+   * Jobs left `running` belong to a runner that is gone: what is left of their processes is stopped and each job resumes
+   * (resumeJob), or ends cancelled (a cancel was asked) or failed (it may not resume). The remote calls and agent runs of
+   * resuming jobs stay; other calls of jobs, model-queue waits and work leases of the gone runner end.
+   */
   async recover(): Promise<number> {
+    const rows = await this.db.prepare("SELECT id, pid, cancel_requested_at FROM jobs WHERE state = 'running'").all() as { id: number; pid: number | null; cancel_requested_at: string | null }[];
+    for (const r of rows) {
+      if (this.running.has(r.id)) continue;
+      if (r.pid && isJobProcess(r.pid, r.id)) killGroup(r.pid, "SIGKILL");
+      const cancelled = r.cancel_requested_at !== null;
+      if (!cancelled && await resumeJob(this.db, r.id, "the runner restarted")) {
+        this.o.log(`job ${r.id}: left running by an earlier runner, queued to resume`);
+        continue;
+      }
+      await this.db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = COALESCE(error, ?) WHERE id = ? AND state = 'running'")
+        .run(cancelled ? "cancelled" : "failed", now(), cancelled ? null : RUNNER_STOPPED, r.id);
+      this.o.log(`job ${r.id}: left running by an earlier runner, marked ${cancelled ? "cancelled" : "failed"}`);
+    }
     // Model calls of a runner that is gone no longer hold an account slot.
     const orphans = await failRunning(this.db, "The runner stopped during this call.");
     if (orphans) this.o.log(`${orphans} agent runs left running by an earlier runner, marked failed`);
     await this.db.prepare("DELETE FROM model_waits").run();
     await withdrawJobCalls(this.db, "The runner stopped during this call.");
     await this.db.prepare("DELETE FROM work_leases").run();
-    const rows = await this.db.prepare("SELECT id, pid, cancel_requested_at FROM jobs WHERE state = 'running'").all() as { id: number; pid: number | null; cancel_requested_at: string | null }[];
-    for (const r of rows) {
-      if (this.running.has(r.id)) continue;
-      if (r.pid && isJobProcess(r.pid, r.id)) killGroup(r.pid, "SIGKILL");
-      const cancelled = r.cancel_requested_at !== null;
-      await this.db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = COALESCE(error, ?) WHERE id = ? AND state = 'running'")
-        .run(cancelled ? "cancelled" : "failed", now(), cancelled ? null : RUNNER_STOPPED, r.id);
-      this.o.log(`job ${r.id}: left running by an earlier runner, marked ${cancelled ? "cancelled" : "failed"}`);
-    }
     return rows.length;
   }
 
@@ -521,7 +529,7 @@ export class Runner {
 
   private async finish(id: number, code: number | null, signal: NodeJS.Signals | null, spawnError: string | null): Promise<void> {
     const r = await endJob(this.db, id, code, signal, spawnError, this.stopping);
-    if (r) this.o.log(`job ${id}: ${r.state}${r.state === "failed" && r.error ? `: ${r.error}` : ""}`);
+    if (r) this.o.log(`job ${id}: ${r.state === "queued" ? "queued to resume after the restart" : r.state}${r.state === "failed" && r.error ? `: ${r.error}` : ""}`);
   }
 
   private async recordEnds(): Promise<void> {
@@ -540,7 +548,7 @@ export class Runner {
     while (this.running.size) await Promise.all([...this.running.values()].map((r) => r.exited));
   }
 
-  /** Stops every running job (SIGTERM, then SIGKILL after the grace time) and waits for them. */
+  /** Stops every running job (SIGTERM, then SIGKILL after the grace time) and waits for them; each unfinished job is queued to resume (endJob). */
   async stop(): Promise<void> {
     this.stopping = true;
     const cancels = exclusive(() => this.cancels());

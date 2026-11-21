@@ -17,6 +17,11 @@ const { DEFAULT_MAX_JOBS, Runner } = await import("../src/runner/runner.ts");
 const { STEPS } = await import("../src/runner/steps.ts");
 const { FAKE_TOKEN } = await import("./runner-steps.ts");
 const { inputHash } = await import("../src/runner/classify.ts");
+const { RUNNER_STOPPED } = await import("../src/runner/jobs.ts");
+const { setInferenceMode } = await import("../src/remote/mode.ts");
+const { createToken } = await import("../src/dash/mcp/tokens.ts");
+const { claimCall, submitCall } = await import("../src/remote/calls.ts");
+const { PROTOCOL_VERSION } = await import("../src/remote/protocol.ts");
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "runner-test-"));
@@ -54,6 +59,55 @@ describe("runner", () => {
     assert.ok(j.log!.includes("token in the log: [hidden]"), j.log!);
     assert.ok(!j.log!.includes(FAKE_TOKEN));
     assert.equal((await getJob(db, bad.id)).error, "echo failed on purpose");
+  });
+
+  test("a job stopped by a runner stop resumes under the same id and reads the reply its Task Runner sent meanwhile", async () => {
+    await setInferenceMode(db, "user-local", "test");
+    await db.prepare("INSERT INTO access (login, role) VALUES ('bob', 'maintainer')").run();
+    const bob = { tokenId: (await createToken(db, "bob", "helper", { kind: "runner" })).row.id, login: "bob", role: "maintainer" as const };
+    const opts = { db, dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} };
+    const first = new Runner(opts);
+    const job = await enqueue(db, "test-remote", {}, "boss");
+    const callOf = async () => await db.prepare("SELECT id, state, run_id FROM remote_calls WHERE job_id = ?").all(job.id) as { id: number; state: string; run_id: number | null }[];
+    let lease = null;
+    for (let i = 0; i < 400 && !lease; i++) {
+      await first.tick();
+      if ((await callOf()).length) lease = (await claimCall(db, bob, { requestId: `resume-${i}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus" } }, async () => true)).lease;
+      if (!lease) await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.ok(lease, "the job's call was leased");
+    await first.stop();
+    const stopped = await getJob(db, job.id);
+    assert.equal(stopped.state, "queued", "the stop queued the job to resume");
+    assert.equal((await callOf())[0]!.state, "leased", "the call stays with its Task Runner");
+    // The Task Runner answers while no runner runs the job.
+    assert.deepEqual(await submitCall(db, lease.secret, { ok: true, text: "the review", model: "claude-opus-4-5", usage: { inputTokens: 10, outputTokens: 2 } }), { accepted: true });
+
+    const second = new Runner(opts);
+    try {
+      await second.recover();
+      for (let i = 0; i < 400 && !["done", "failed"].includes(await state(job.id)); i++) {
+        await second.tick();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      await second.stop();
+    }
+    const j = await jobDetail(db, job.id);
+    assert.equal(j.state, "done", j.error ?? j.log ?? "");
+    assert.equal(j.summary, "reply: the review");
+    const calls = await callOf();
+    assert.equal(calls.length, 1, "the resumed run adopted the call instead of asking again");
+    assert.equal((await db.prepare("SELECT state FROM agent_runs WHERE id = ?").get(calls[0]!.run_id) as { state: string }).state, "done");
+    assert.ok(j.log!.includes("resume 1 of 2"), j.log!);
+
+    // A job left running by a runner that is gone resumes too, until it has resumed twice.
+    const left = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, resumes) VALUES ('test-echo', '{}', 'boss', ?, 'running', ?, 1) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    await second.recover();
+    assert.equal((await getJob(db, left)).state, "queued");
+    await db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(left);
+    await second.recover();
+    assert.equal((await getJob(db, left)).error, RUNNER_STOPPED);
   });
 
 

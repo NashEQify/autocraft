@@ -87,4 +87,20 @@ export const steps: StepDef[] = [
     params: [{ name: "repo", label: "Repo", kind: "repo", required: true }, { name: "limit", label: "At most", kind: "int", min: 1, max: 50, default: 5 }],
     run: async () => "model repo done",
   },
+  {
+    name: "test-remote",
+    title: "Remote call",
+    description: "Test step: asks one user-local model call (a Task Runner answers it) and returns the reply.",
+    stage: 2,
+    requires: "operator",
+    params: [],
+    run: async (ctx) => {
+      const { allocation } = await import("../src/agents/call.ts");
+      const { askClaude } = await import("../src/classify/run.ts");
+      const { SAMPLE_OPUS_PRS } = await import("../src/prompts/samples.ts");
+      allocation.pollMs = 50;
+      const r = await askClaude("review.opus", "opus", SAMPLE_OPUS_PRS, ctx.db);
+      return `reply: ${r?.text ?? "none"}`;
+    },
+  },
 ];
