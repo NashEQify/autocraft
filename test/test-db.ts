@@ -15,6 +15,8 @@ export const needsPg: false | string = TEST_PG_URL ? false : "needs Postgres: AU
 
 export interface TestDatabase {
   readonly dialect: Db["dialect"];
+  /** The database file (SQLite only). */
+  readonly file?: string;
   /**
    * Another handle on the same database, over its own connection (SQLite) or pool (Postgres). `app` opens it the way the
    * app does, with the app's schema and triggers brought up to date.
@@ -44,7 +46,7 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
       return track(await dbFor(sync));
     };
     if (schema) await (await open()).script(schema);
-    return { dialect, open, close: closeAll };
+    return { dialect, file, open, close: closeAll };
   }
   if (!TEST_PG_URL) throw new Error("testDatabase: Postgres needs AUTOCRAFT_TEST_PG_URL");
   const admin = new URL(TEST_PG_URL);

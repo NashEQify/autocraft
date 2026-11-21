@@ -995,7 +995,7 @@ async function sync(args: string[]): Promise<void> {
       await db.prepare("UPDATE sync_runs SET ended_at = ?, mode = ?, items = ? WHERE rowid = ?").run(iso(new Date()), mode, items, row);
       console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
       // Sandboxed calls read the item snapshot instead of GitHub. The refresh is incremental and writes nothing when nothing differs; a visibility change alone removes a repository's rows.
-      refreshSnapshot();
+      await refreshSnapshot(console.log, db);
       // Files, commits and label events of the items that changed; a failed read leaves them for the next run.
       if (!opts.full && !opts.only.length) {
         try {
