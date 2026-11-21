@@ -39,7 +39,7 @@ async function current(args: string[]): Promise<void> {
     process.exit(1);
   }
   if (run === undefined) {
-    const set = (await db.prepare("SELECT value FROM settings WHERE key = 'classify_run'").get() as { value: string } | undefined)?.value;
+    const set = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "classify_run")))?.value;
     console.log(set ? `current run: ${set}` : `no current run is set; the run with the newest Jev (or Haiku-alone) verdict is used: ${await latestRun(db) ?? "none"}`);
     return;
   }
@@ -64,7 +64,7 @@ async function classify(args: string[]): Promise<void> {
   const t0 = Date.now();
   if (which === "jev") await runJev(db, runId, items);
   else await runHaiku(db, runId, items);
-  const n = (await db.prepare("SELECT count(*) AS n FROM classifications WHERE run_id = ? AND classifier = ?").get(runId, which) as { n: number }).n;
+  const n = (await db.get(db.k.selectFrom("classifications").select((eb) => eb.fn.countAll<number>().as("n")).where("run_id", "=", runId).where("classifier", "=", which)))!.n;
   console.log(`${which}: ${n}/${items.length} items classified in ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 }
 
@@ -76,12 +76,12 @@ async function sample(args: string[]): Promise<void> {
   const outDir = need(f, "out-dir");
   const prRepo = need(f, "pr-repo");
   const reference = loadReference(need(f, "reference"), prRepo);
-  const open = db.prepare("SELECT number FROM items WHERE repo = ? AND kind = ? AND state = 'OPEN' ORDER BY number");
-  const prs = (await open.all(prRepo, "pr") as { number: number }[]).map((r) => `${prRepo}#${r.number}`).filter((r) => reference.has(r));
+  const open = (repo: string, kind: "pr" | "issue") => db.all(db.k.selectFrom("items").select("number").where("repo", "=", repo).where("kind", "=", kind).where("state", "=", "OPEN").orderBy("number"));
+  const prs = (await open(prRepo, "pr")).map((r) => `${prRepo}#${r.number}`).filter((r) => reference.has(r));
   const a = shuffle(prs, rand).slice(0, Number(f.prs ?? 200)).sort();
   const b: string[] = [];
   for (const repo of (f["issue-repos"] ?? "").split(",").filter(Boolean)) {
-    const issues = (await open.all(repo, "issue") as { number: number }[]).map((r) => `${repo}#${r.number}`);
+    const issues = (await open(repo, "issue")).map((r) => `${repo}#${r.number}`);
     b.push(...shuffle(issues, rand).slice(0, Number(f["issues-each"] ?? 50)).sort());
   }
   writeFileSync(join(outDir, "items-a.txt"), a.join("\n") + "\n");
@@ -105,12 +105,13 @@ async function referee(args: string[]): Promise<void> {
   console.log(`refereed ${picked.length} of ${pairs.filter((p) => p.jev.type_label !== p.haiku.type_label).length} disagreements`);
 }
 
-type Usage = { model: string; agents: number; items: number; input: number; output: number; cache_read: number; cache_write: number; cost: number | null; first: string; last: string; busy: number };
-
 async function costSection(db: Db, runId: string, pairs: Pair[]): Promise<string> {
-  const rows = await db.prepare(`SELECT model, count(*) AS agents, sum(items) AS items, sum(input_tokens) AS input, sum(output_tokens) AS output,
-    sum(cache_read_tokens) AS cache_read, sum(cache_write_tokens) AS cache_write, sum(cost_usd) AS cost, min(started_at) AS first, max(ended_at) AS last,
-    sum((julianday(ended_at) - julianday(started_at)) * 86400) AS busy FROM token_usage WHERE run_id = ? GROUP BY model`).all(runId) as Usage[];
+  const rows = await db.all(db.k.selectFrom("token_usage").select((eb) => [
+    "model", eb.fn.countAll<number>().as("agents"), eb.fn.sum<number>("items").as("items"), eb.fn.sum<number>("input_tokens").as("input"),
+    eb.fn.sum<number>("output_tokens").as("output"), eb.fn.sum<number>("cache_read_tokens").as("cache_read"), eb.fn.sum<number>("cache_write_tokens").as("cache_write"),
+    eb.fn.sum<number | null>("cost_usd").as("cost"), eb.fn.min<string>("started_at").as("first"), eb.fn.max<string>("ended_at").as("last"),
+    eb.fn.sum<number>(eb(eb(eb.fn<number>("julianday", ["ended_at"]), "-", eb.fn<number>("julianday", ["started_at"])), "*", 86400)).as("busy"),
+  ]).where("run_id", "=", runId).groupBy("model"));
   const n = pairs.length;
   const head = ["Model", "Calls", "Items", "Input", "Output", "Cache read", "Cache write", "USD", "Wall time", "Summed call time", "Per 100 items (in / out / USD)"];
   const body = rows.map((r) => {
@@ -124,15 +125,15 @@ async function costSection(db: Db, runId: string, pairs: Pair[]): Promise<string
 }
 
 async function refereeSection(db: Db, runId: string, pairs: Pair[]): Promise<{ text: string; spot: string; stats: { n: number; jev: number; haiku: number; neither: number } }> {
-  const sonnet = new Map((await db.prepare(`SELECT repo, number, type_label, flags, reason FROM classifications WHERE classifier = 'sonnet' AND run_id = ?`).all(runId) as
-    { repo: string; number: number; type_label: string; flags: string; reason: string }[]).map((r) => [ref(r), r]));
+  const sonnet = new Map((await db.all(db.k.selectFrom("classifications").select(["repo", "number", "type_label", "flags", "reason"])
+    .where("classifier", "=", "sonnet").where("run_id", "=", runId))).map((r) => [ref(r), r]));
   const ps = pairs.filter((p) => sonnet.has(ref(p.r)));
   const side = (p: Pair) => { const v = sonnet.get(ref(p.r))!.type_label; return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
   const stats = { n: ps.length, jev: ps.filter((p) => side(p) === "jev").length, haiku: ps.filter((p) => side(p) === "haiku").length, neither: ps.filter((p) => side(p) === "neither").length };
   const by = (k: string) => ps.filter((p) => p.r.kind === k);
   const text = ps.length === 0 ? "No refereed items." : `Sonnet judged ${stats.n} disagreements, without seeing either answer.\n\n| Group | Items | Sonnet sides with Jev | with Haiku | with neither |\n|---|---|---|---|---|\n` +
     [["all", ps], ["PRs", by("pr")], ["issues", by("issue")]].map(([name, g]) => { const x = g as Pair[]; return `| ${name} | ${x.length} | ${x.filter((p) => side(p) === "jev").length} | ${x.filter((p) => side(p) === "haiku").length} | ${x.filter((p) => side(p) === "neither").length} |`; }).join("\n");
-  const spot = ps.filter((p) => sonnet.get(ref(p.r))!.flags.includes("spot-check")).map((p, i) => {
+  const spot = ps.filter((p) => sonnet.get(ref(p.r))!.flags?.includes("spot-check")).map((p, i) => {
     const s = sonnet.get(ref(p.r))!;
     const pj = p.jev.top === null ? "" : ` (${p.jev.top.toFixed(2)})`;
     return `${i + 1}. [${ref(p.r)}](${itemUrl(p.r)}) ${p.r.title}\n   - Jev: ${p.jev.type_label}${pj}; Haiku: ${p.haiku.type_label}; reference: ${p.ref ?? "none"}\n   - Referee: ${s.type_label} (sides with ${side(p)}): ${s.reason}`;

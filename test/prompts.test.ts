@@ -17,10 +17,9 @@ import { connectDb } from "../src/db/open.ts";
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "prompts-test-")), "t.db"));
 await useTestAccount(db);
-const ins = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, additions, deletions, changed_files, author_association, created_at, updated_at)
-  VALUES (?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`);
 for (const i of SAMPLE_ITEMS)
-  await ins.run(i.repo, i.number, i.kind, i.title, i.body, i.lines_changed === null ? null : i.lines_changed - 6, i.lines_changed === null ? null : 6, i.files_changed, i.author_association);
+  await db.run(db.k.insertInto("items").values({ repo: i.repo, number: i.number, kind: i.kind, state: "OPEN", title: i.title, body: i.body, additions: i.lines_changed === null ? null : i.lines_changed - 6,
+    deletions: i.lines_changed === null ? null : 6, changed_files: i.files_changed, author_association: i.author_association, created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
 
 type Call = { cmd: string; args: string[]; input: string };
 
@@ -56,7 +55,7 @@ describe("prompt registry", () => {
       { cmd: "claude", args: claudeArgs("referee.sonnet", "sonnet", false, undefined, claudeParts("referee.sonnet", SAMPLE_ITEMS, false).system), input: claudeParts("referee.sonnet", SAMPLE_ITEMS, false).stdin },
     ];
     assert.deepEqual(calls, want);
-    const n = await db.prepare("SELECT classifier, count(*) AS n FROM classifications WHERE run_id = 't' GROUP BY classifier ORDER BY classifier").all();
+    const n = await db.all(db.k.selectFrom("classifications").select((eb) => ["classifier", eb.fn.countAll<number>().as("n")]).where("run_id", "=", "t").groupBy("classifier").orderBy("classifier"));
     assert.deepEqual(n.map((r) => ({ ...r })), [{ classifier: "haiku", n: 2 }, { classifier: "jev", n: 2 }, { classifier: "sonnet", n: 2 }]);
   });
 

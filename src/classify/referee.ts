@@ -37,7 +37,8 @@ type RefereeOpts = {
 export async function refereeItems(db: Db, runId: string, items: Item[], opts: RefereeOpts): Promise<number> {
   const perCall = opts.perCall ?? REFEREE.limits.perCall;
   const chunks = await repoBatches(db, items, perCall, (i) => i.repo, (i) => [i]);
-  const have = db.prepare(`SELECT 1 FROM classifications WHERE repo = ? AND number = ? AND classifier = 'sonnet' AND run_id = ? AND at >= ?`);
+  const have = (repo: string, number: number, at: string) => db.get(db.k.selectFrom("classifications").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("number", "=", number).where("classifier", "=", "sonnet").where("run_id", "=", runId).where("at", ">=", at));
   // Evaluation runs resume: any earlier answer in the run counts. Pipeline runs ask again, since a new answer replaces the old one.
   let total = 0, sent = 0;
   await pool(chunks.map((chunk, n) => async () => {
@@ -45,7 +46,7 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
     const start = new Date().toISOString();
     let got = 0;
     // The first call asks only the items without an answer yet; a retry asks the ones still missing from the reply.
-    const first = await filterSeq(chunk, async (i) => !await have.get(i.repo, i.number, runId, opts.pipeline ? start : ""));
+    const first = await filterSeq(chunk, async (i) => !await have(i.repo, i.number, opts.pipeline ? start : ""));
     if (first.length) {
       const r = await runModelStep(db, REFEREE_SONNET, first, {
         usage: { run: runId, agent: opts.pipeline ? `${opts.model ?? "sonnet"}-${Date.now().toString(36)}-${n}` : `sonnet-${n}`, stage: "referee", ...(opts.model && { model: opts.model }) },
@@ -65,7 +66,8 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
         const answered = new Set(r.ok ? r.values.flat().map((v) => v.ref) : []);
         for (const i of first) {
           if (answered.has(`${i.repo}#${i.number}`)) continue;
-          const row = await db.prepare(`SELECT type_label, reason, probs, at FROM classifications WHERE repo = ? AND number = ? AND classifier = 'sonnet' AND run_id = ?`).get(i.repo, i.number, runId) as { type_label: string; reason: string | null; probs: string | null; at: string } | undefined;
+          const row = await db.get(db.k.selectFrom("classifications").select(["type_label", "reason", "probs", "at"])
+            .where("repo", "=", i.repo).where("number", "=", i.number).where("classifier", "=", "sonnet").where("run_id", "=", runId));
           if (!row) continue;
           let p: Record<string, unknown> = {};
           try { p = (JSON.parse(row.probs ?? "{}") as Record<string, unknown>) ?? {}; } catch { /* keep empty */ }
@@ -83,12 +85,13 @@ export async function refereeItems(db: Db, runId: string, items: Item[], opts: R
 /** Marks a varied subset (by kind and by whom Sonnet sided with) for the owner to check by hand. */
 export async function markSpotCheck(db: Db, runId: string, pairs: Pair[], count: number, seed: number): Promise<void> {
   const verdicts = new Map(
-    (await db.prepare(`SELECT repo, number, type_label FROM classifications WHERE classifier = 'sonnet' AND run_id = ?`).all(runId) as
-      { repo: string; number: number; type_label: string }[]).map((r) => [ref(r), r.type_label]),
+    (await db.all(db.k.selectFrom("classifications").select(["repo", "number", "type_label"]).where("classifier", "=", "sonnet").where("run_id", "=", runId)))
+      .map((r) => [ref(r), r.type_label]),
   );
   const refereed = pairs.filter((p) => verdicts.has(ref(p.r)));
   const side = (p: Pair) => { const v = verdicts.get(ref(p.r)); return v === p.jev.type_label ? "jev" : v === p.haiku.type_label ? "haiku" : "neither"; };
-  await db.prepare(`UPDATE main.classifications SET flags = '[]' WHERE classifier = 'sonnet' AND run_id = ?`).run(runId);
-  const upd = db.prepare(`UPDATE main.classifications SET flags = '["spot-check"]' WHERE classifier = 'sonnet' AND run_id = ? AND repo = ? AND number = ?`);
-  for (const p of spread(refereed, (p) => `${p.r.kind}|${side(p)}`, count, rng(seed + 1))) await upd.run(runId, p.r.repo, p.r.number);
+  await db.run(db.k.updateTable("main.classifications").set({ flags: "[]" }).where("classifier", "=", "sonnet").where("run_id", "=", runId));
+  for (const p of spread(refereed, (p) => `${p.r.kind}|${side(p)}`, count, rng(seed + 1))) {
+    await db.run(db.k.updateTable("main.classifications").set({ flags: '["spot-check"]' }).where("classifier", "=", "sonnet").where("run_id", "=", runId).where("repo", "=", p.r.repo).where("number", "=", p.r.number));
+  }
 }
