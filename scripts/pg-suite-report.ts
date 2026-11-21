@@ -11,6 +11,7 @@ interface Ev {
     skip?: unknown;
     todo?: unknown;
     details?: { type?: string; error?: { failureType?: string; message?: string; cause?: unknown } };
+    message?: string;
     counts?: { tests: number; passed: number; failed: number; skipped: number; todo: number; cancelled: number };
   };
 }
@@ -32,23 +33,32 @@ function message(err: NonNullable<NonNullable<Ev["data"]["details"]>["error"]>):
 
 export default async function* report(source: AsyncIterable<Ev>): AsyncGenerator<string> {
   const files = new Map<string, FileFails>();
+  // A file whose process failed outside any test reports only "test failed"; its error is in the file's stderr.
+  const stderrError = new Map<string, string>();
   let totals: Ev["data"]["counts"];
   for await (const ev of source) {
     const d = ev.data;
     if (ev.type === "test:summary" && !d.file && d.counts) totals = d.counts;
-    if (ev.type !== "test:fail" || d.details?.type === "suite") continue;
+    const file = d.file ? relative(process.cwd(), d.file) : "(unknown file)";
+    if (ev.type === "test:stderr" && !stderrError.has(file)) {
+      const line = (d.message ?? "").split("\n").find((l) => /^(\w*Error\b|error:)/.test(l.trim()));
+      if (line) stderrError.set(file, line.trim().slice(0, 300));
+    }
+    if (ev.type !== "test:fail") continue;
     const err = d.details?.error;
     // A parent whose subtests failed is not a failure of its own.
     if (err?.failureType === "subtestsFailed") continue;
-    const file = d.file ? relative(process.cwd(), d.file) : "(unknown file)";
     const f = files.get(file) ?? { fails: 0 };
     files.set(file, f);
-    f.fails++;
+    // A suite is not counted as a test, but its failing before/after hook is often the first real error.
+    if (d.details?.type !== "suite") f.fails++;
     if (err && err.failureType !== "cancelledByParent" && f.first === undefined) {
-      f.first = message(err);
+      const m = message(err);
+      f.first = m === "test failed" ? stderrError.get(file) ?? m : m;
       f.firstTest = d.name;
     }
   }
+  for (const [file, f] of files) if (f.first === undefined || f.first === "test failed") f.first = stderrError.get(file) ?? f.first;
   const sorted = [...files].sort(([a], [b]) => a.localeCompare(b));
   const t = totals ?? { tests: 0, passed: 0, failed: 0, skipped: 0, todo: 0, cancelled: 0 };
   yield `tests ${t.tests}  pass ${t.passed}  fail ${t.failed}  skipped ${t.skipped}  cancelled ${t.cancelled}\n`;

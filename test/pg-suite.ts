@@ -100,7 +100,7 @@ async function redirect(target: string): Promise<string> {
       });
       return urlOf(name);
     })()));
-    url.catch(() => created.delete(name));
+    void url.catch(() => created.delete(name));
   }
   return url;
 }
