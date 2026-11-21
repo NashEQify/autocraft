@@ -2,7 +2,7 @@
 // Every turn stores the exact text its prompt block carries, so later prompts repeat earlier ones byte for byte.
 import { isBotLogin } from "../review/bots.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { factsOf, getDecision, optionsOf, type DecisionRow } from "../decisions.ts";
+import { factsOf, getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import { CLAUDE_PROMPTS, untrustedJson } from "../prompts/index.ts";
 import { applicableSteps, cleanComment, openDecision, type NewCard } from "./cards.ts";
 import { choicesJson, storeParsedChoices, type ParsedChoices } from "../decide/choices-parse.ts";
@@ -11,6 +11,7 @@ import { ITEM_BODY_LIMIT, ITEM_COMMENT_LIMIT, ITEM_COMMENTS, ITEM_DIFF_LIMIT, ME
 import { flatMapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
+import type { NotNull } from "kysely";
 
 export class ConversationError extends Error {
   status: number;
@@ -29,20 +30,21 @@ export type ConversationRow = { repo: string; number: number; item_block: string
 export type TurnRow = { id: number; repo: string; number: number; kind: TurnKind; login: string; at: string; body: string; block: string; status: string | null; error: string | null; notes: string | null; seq: number | null; claim: string | null; claimed_at: string | null; progress: string | null };
 
 export const conversationOf = async (db: Db, repo: string, n: number): Promise<ConversationRow | undefined> =>
-  await db.get(db.k.selectFrom("conversations").select(["repo", "number", "item_block", "item_sig", "created_at", "created_by"]).where("repo", "=", repo).where("number", "=", n));
+  await db.get(db.k.selectFrom("conversations").select(kx.cols("conversations")).where("repo", "=", repo).where("number", "=", n));
 
-const TURN_COLUMNS = ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress"] as const;
+/** Every column of a turn, its kind read as a TurnKind. */
+const turns = (db: Db) => db.k.selectFrom("conversation_turns").select(kx.cols("conversation_turns")).$narrowType<{ kind: TurnKind }>();
 
 /** All turns in display order: the prompt order, then the message Opus is answering, then turns held until its reply. */
 export const turnsOf = async (db: Db, repo: string, n: number): Promise<TurnRow[]> =>
-  await db.all(db.k.selectFrom("conversation_turns").select(TURN_COLUMNS).where("repo", "=", repo).where("number", "=", n)
+  await db.all(turns(db).where("repo", "=", repo).where("number", "=", n)
     .orderBy((eb) => eb("seq", "is", null)).orderBy((eb) => eb(eb.fn.coalesce("status", eb.val("")), "=", "held"))
-    .orderBy("seq", (o) => o.asc().nullsFirst()).orderBy("id")) as TurnRow[];
+    .orderBy("seq").orderBy("id"));
 
 /** The operator message that waits for its reply: queued or claimed by a run. */
 export const pendingTurn = async (db: Db, repo: string, n: number): Promise<TurnRow | undefined> =>
-  await db.get(db.k.selectFrom("conversation_turns").select(TURN_COLUMNS).where("repo", "=", repo).where("number", "=", n)
-    .where("kind", "=", "operator").where("status", "in", ["pending", "answering"])) as TurnRow | undefined;
+  await db.get(turns(db).where("repo", "=", repo).where("number", "=", n)
+    .where("kind", "=", "operator").where("status", "in", ["pending", "answering"]));
 
 /** A claim older than this is released: a run makes `attempts` calls of at most the prompt timeout each. */
 const STALE_CLAIM_MS = (CLAUDE_PROMPTS["conversation.turn"].limits.timeoutSeconds * CLAUDE_PROMPTS["conversation.turn"].limits.attempts + 60) * 1000;
@@ -118,12 +120,12 @@ type Snapshot = { head: string | null; title: string; body: string; state: strin
 // The app's bot (the mirror stores its bare slug) is the pipeline itself: its posts are no news for the conversation.
 const countedComments = (db: Db, repo: string, n: number) => db.k.selectFrom("comments").where("repo", "=", repo).where("number", "=", n)
   .where((eb) => {
-    const t = kx.schemaEb(eb), author = eb.fn.coalesce("author", eb.val(""));
-    const slugs = eb.fn.coalesce(t.selectFrom("main.settings").select("value").where("key", "=", "app_slugs"), eb.val("[]"));
+    const author = eb.fn.coalesce("author", eb.val(""));
+    const slugs = eb.fn.coalesce(eb.selectFrom("main.settings").select("value").where("key", "=", "app_slugs"), eb.val("[]"));
     return eb.and([
       eb(eb.fn.coalesce(eb.fn<string>("trim", ["body"]), eb.val("")), "<>", ""),
       eb.not(kx.like(db, author, eb.val("%[bot]"))),
-      eb(author, "not in", t.selectFrom(kx.jsonEach(db, slugs, "s")).select("s.value")),
+      eb(author, "not in", eb.selectFrom(kx.jsonEach(db, slugs, "s")).select("s.value")),
     ]);
   });
 
@@ -167,9 +169,9 @@ export async function staleOf(db: Db, repo: string, n: number, seen: string | nu
 async function newerPersonComment(db: Db, repo: string, n: number, seenId: string | null): Promise<boolean> {
   const at = seenId === null ? null : await db.get(db.k.selectFrom("comments").select(["created_at", "id"]).where("repo", "=", repo).where("number", "=", n).where("id", "=", seenId));
   if (seenId !== null && !at) return true;
-  const rows = await db.all(countedComments(db, repo, n).select(["author", "body"])
+  const rows = await db.all(countedComments(db, repo, n).select(["author", "body"]).$narrowType<{ body: NotNull }>()
     .$if(!!at, (q) => q.where((eb) => eb.or([eb("created_at", ">", at!.created_at), eb.and([eb("created_at", "=", at!.created_at), eb("id", ">", at!.id)])]))));
-  return rows.some((r) => !(r.author && isBotLogin(r.author)) && !OWN_NOTE_PREFIXES.some((p) => (r.body ?? "").trimStart().startsWith(p)));
+  return rows.some((r) => !(r.author && isBotLogin(r.author)) && !OWN_NOTE_PREFIXES.some((p) => r.body.trimStart().startsWith(p)));
 }
 
 // Openings of the note lines in src/github/note.ts.
@@ -207,8 +209,8 @@ export async function buildItemBlock(db: Db, repo: string, n: number, deps?: Sto
 }
 
 const latestDecision = async (db: Db, repo: string, n: number): Promise<DecisionRow | undefined> =>
-  await db.get(db.k.selectFrom("decisions").selectAll().where("repo", "=", repo).where("number", "=", n)
-    .where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%")))).orderBy("asked_at", "desc").orderBy("id", "desc").limit(1)) as DecisionRow | undefined;
+  await db.get(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>().where("repo", "=", repo).where("number", "=", n)
+    .where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%")))).orderBy("asked_at", "desc").orderBy("id", "desc").limit(1));
 
 /** Creates the conversation with its item block when the item has none. Returns whether it was created. */
 export async function ensureConversation(db: Db, repo: string, n: number, by: string, deps?: StoreDeps): Promise<boolean> {
@@ -420,7 +422,7 @@ export async function claimPending(db: Db, repo: string, n: number, deps?: Store
     const r = await db.run(db.k.updateTable("conversation_turns").set({ status: "answering", claim, claimed_at: at })
       .where("repo", "=", repo).where("number", "=", n).where("kind", "=", "operator").where("status", "=", "pending"));
     if (r.changes !== 1) return null;
-    return { turn: (await db.get(db.k.selectFrom("conversation_turns").select(TURN_COLUMNS).where("claim", "=", claim)))! as TurnRow, claim };
+    return { turn: (await db.get(turns(db).where("claim", "=", claim)))!, claim };
   });
 }
 
@@ -447,7 +449,7 @@ async function settleWait(db: Db, repo: string, n: number, wait: TurnRow, status
 }
 
 const claimed = async (db: Db, repo: string, n: number, claim: string): Promise<TurnRow | undefined> =>
-  await db.get(db.k.selectFrom("conversation_turns").select(TURN_COLUMNS).where("repo", "=", repo).where("number", "=", n).where("status", "=", "answering").where("claim", "=", claim)) as TurnRow | undefined;
+  await db.get(turns(db).where("repo", "=", repo).where("number", "=", n).where("status", "=", "answering").where("claim", "=", claim));
 
 /**
  * Stores Opus's reply to the claimed message and marks the message answered, in one transaction. Returns the reply's turn id,

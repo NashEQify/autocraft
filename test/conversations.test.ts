@@ -1,5 +1,6 @@
 // Opus conversations: the prompt keeps a stable start across turns, card validation, Do it runs once through fake writers,
 // and viewers read but cannot write. Model calls go to a fake runner; GitHub to a fake querier.
+import { cols } from "../src/db/kx.ts";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -302,7 +303,7 @@ describe("Do it", () => {
     const pr = await propose(db, 2, [{ kind: "comment" }], null, "Thanks.");
     await db.run(db.k.updateTable("items").set({ head_oid: "sha4" }).where("number", "=", 2));
     await assert.rejects(() => doCard(db, pr, "op", { querier: g.querier as never }), /PR changed since/);
-    assert.equal((await conv.cardView(db, await db.get(db.k.selectFrom("conversation_cards").selectAll().where("id", "=", pr)) as never)).stale, "pr-changed");
+    assert.equal((await conv.cardView(db, (await db.get(db.k.selectFrom("conversation_cards").select(cols("conversation_cards")).where("id", "=", pr)))!)).stale, "pr-changed");
   });
 
   test("a message with ask false is stored without a pending state and queues no Opus reply", async () => {
