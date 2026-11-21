@@ -381,7 +381,7 @@ describe("issue journey", () => {
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.equal(inputs.length, 2);
     assert.ok(!inputs[0]!.includes("<previous>") && inputs[1]!.includes("<previous>") && inputs[1]!.includes("is not one of the offered choices"));
-    assert.deepEqual(await w.rows("SELECT state, json_extract(pick, '$.core') AS core FROM decision_choices"), [{ state: "current", core: "o:take" }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(["state", kx.jsonText(w.db, "pick", "$.core").as("core")])), [{ state: "current", core: "o:take" }]);
     assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "=", "take"))).length, 1);
   });
 
@@ -398,7 +398,7 @@ describe("issue journey", () => {
     assert.equal(inputs.length, 2);
     assert.ok(inputs[1]!.includes('your pick "x:review"'));
     assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "is", null))).length, 1);
-    assert.deepEqual(await w.rows("SELECT json_extract(pick, '$.core') AS core FROM decision_choices WHERE state = 'current'"), [{ core: null }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(kx.jsonText(w.db, "pick", "$.core").as("core")).where("state", "=", "current")), [{ core: null }]);
   });
 
   test("a duplicate group whose kept item is closed is prepared while a member it would close is open", async () => {
