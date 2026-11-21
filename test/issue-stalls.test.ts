@@ -129,7 +129,7 @@ test("Close and Backlog on a stopped fix are scope answers by the operator, once
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
   await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(t);
   await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES ('app', 5, 'issue', 'OPEN', 'T')").run();
-  await db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, created_at, updated_at) VALUES ('app', 5, 'm', 'h', 'skipped', ?, ?)").run(t, t);
+  await db.run(db.k.insertInto("fix_attempts").values({ repo: "app", number: 5, main_sha: "m", text_hash: "h", state: "skipped", created_at: t, updated_at: t }));
   const req = (answer: string) => ({
     method: "POST", path: "", params: { repo: "app", n: "5" }, query: new URLSearchParams(), form: new URLSearchParams(), json: { answer },
     user: { login: "op", role: "operator", canWrite: async () => true, canRead: async () => true }, csrf: "", nonce: "",

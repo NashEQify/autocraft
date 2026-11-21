@@ -337,9 +337,7 @@ src/mirror.ts
 
 src/nightly/index.ts
 
-src/operator-actions.ts
 
-src/optional-checks.ts
 
 src/outside.ts
 
