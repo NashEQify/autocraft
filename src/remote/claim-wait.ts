@@ -190,6 +190,9 @@ export class ClaimWaits {
         } catch (e) {
           // A busy database: the claim keeps waiting and is tried again, unless this was its last try.
           if (!isBusy(e) || final) this.#settle(w, null, e);
+          // Shutdown or the client leaving during the try gets the answer they skipped, not a wait for the next retry.
+          else if (this.#closed) await this.#closing(w, now).then((r) => this.#settle(w, r), (err: unknown) => this.#settle(w, null, err));
+          else if (w.ticket.gone) await w.empty(now, false).then((r) => this.#settle(w, r), (err: unknown) => this.#settle(w, null, err));
         }
       }
     } catch (e) {
