@@ -359,30 +359,37 @@ export function diffFactsRules(): string {
   return h.digest("hex").slice(0, 16);
 }
 
+/** Written into the cache directory with the rules fingerprint once the table holds its files' facts: a new or cleared cache has none. */
+const factsMarker = () => join(diffCacheDir(), "facts-built");
+
 /**
- * Fills `diff_facts` from the cache files when the stored facts were computed by other rules than this code's (or never):
- * the facts of the head of every PR's latest review, the head the planner reads, and no others, so a stale row does not
- * stay (the next read of another head's diff stores its facts). Files are read before the write lock is taken. Returns
- * the number of heads read, or null when the facts were current.
+ * Fills `diff_facts` from the cache files when the stored facts were computed by other rules than this code's (or never), or
+ * the cache directory is not the one they were computed from: the facts of every stored row's head and of the head of every
+ * PR's latest review (the head the planner reads); a row whose diff is no longer cached is removed. The heads are listed and
+ * read under the write lock, so a review or re-read stored meanwhile is not overwritten. Returns the number of heads read,
+ * or null when the facts were current.
  */
 export function buildDiffFacts(db: DatabaseSync): number | null {
   const rules = diffFactsRules();
-  if ((db.prepare("SELECT value FROM settings WHERE key = ?").get(DIFF_FACTS_KEY) as { value: string } | undefined)?.value === rules) return null;
-  const heads = db.prepare(`SELECT r.repo, r.number, r.head_oid FROM opus_reviews r WHERE r.verdict IS NOT NULL AND r.rowid = (
-    SELECT x.rowid FROM opus_reviews x WHERE x.repo = r.repo AND x.number = r.number AND x.verdict IS NOT NULL ORDER BY x.at DESC, x.rowid DESC LIMIT 1)`).all() as { repo: string; number: number; head_oid: string }[];
-  const facts = heads.map((h) => ({ ...h, f: diffFactsOfCache(h.repo, h.number, h.head_oid) }));
+  const marker = (() => { try { return readFileSync(factsMarker(), "utf8"); } catch { return null; } })();
+  if (marker === rules && (db.prepare("SELECT value FROM settings WHERE key = ?").get(DIFF_FACTS_KEY) as { value: string } | undefined)?.value === rules) return null;
+  let n = 0;
   db.exec("BEGIN IMMEDIATE");
   try {
-    for (const h of facts) writeFacts(db, h.repo, h.number, h.head_oid, h.f);
-    db.prepare("DELETE FROM diff_facts WHERE repo || '#' || number || '@' || head_oid NOT IN (SELECT value FROM json_each(?))")
-      .run(JSON.stringify(facts.map((h) => `${h.repo}#${h.number}@${h.head_oid}`)));
+    const heads = db.prepare(`SELECT r.repo, r.number, r.head_oid FROM opus_reviews r WHERE r.verdict IS NOT NULL AND r.rowid = (
+        SELECT x.rowid FROM opus_reviews x WHERE x.repo = r.repo AND x.number = r.number AND x.verdict IS NOT NULL ORDER BY x.at DESC, x.rowid DESC LIMIT 1)
+      UNION SELECT repo, number, head_oid FROM diff_facts`).all() as { repo: string; number: number; head_oid: string }[];
+    for (const h of heads) writeFacts(db, h.repo, h.number, h.head_oid, diffFactsOfCache(h.repo, h.number, h.head_oid));
+    n = heads.length;
     db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(DIFF_FACTS_KEY, rules);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;
   }
-  return heads.length;
+  mkdirSync(diffCacheDir(), { recursive: true });
+  writeFileSync(factsMarker(), rules);
+  return n;
 }
 
 /** The base branch a cached diff was computed against; null when unknown. */

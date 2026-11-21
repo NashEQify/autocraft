@@ -1,9 +1,11 @@
 // The planner reads a reviewed head's diff facts from the database; the code that writes or removes the cached diff stores them.
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { EXTRAS_PENDING_REASON } from "../src/core/sensitive.ts";
-import { EXTRAS_TRIES, buildDiffFacts, cachedDiff, diffFactsOfCache, dropCachedDiff, noteReread, type DiffFetcher } from "../src/review/diff.ts";
+import { EXTRAS_TRIES, buildDiffFacts, cachedDiff, diffCacheDir, diffFactsOfCache, dropCachedDiff, noteReread, type DiffFetcher } from "../src/review/diff.ts";
 import { tmpdir, world, type World } from "./world-db.ts";
 
 // Other test files write the same fixture heads into the shared scratch cache.
@@ -52,4 +54,10 @@ test("the planner's diff facts follow the cached diff's writes, re-reads and rem
   assert.equal(buildDiffFacts(w.db), 1);
   assert.deepEqual(facts().sensitive, [...file.reasons, EXTRAS_PENDING_REASON]);
   assert.equal(buildDiffFacts(w.db), null);
+
+  // A cache directory the facts were not built from (no marker) is read again; a head whose diff is still cached keeps its row.
+  rmSync(join(diffCacheDir(), "facts-built"));
+  w.db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict) VALUES ('app', 1, 'sha2', '2027-01-01T00:00:00Z', 'full', 'take')").run();
+  assert.equal(buildDiffFacts(w.db), 2);
+  assert.deepEqual(w.rows("SELECT head_oid FROM diff_facts"), [{ head_oid: "sha1" }]);
 });
