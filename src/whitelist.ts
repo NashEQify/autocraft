@@ -42,7 +42,7 @@ export async function getRule(db: Db): Promise<Rule> {
 export async function setRule(db: Db, rule: Rule, by: string): Promise<void> {
   if (!Number.isInteger(rule.minMerged) || rule.minMerged < 0) throw new Error("min merged must be a whole number ≥ 0");
   if (!(rule.minRate >= 0 && rule.minRate <= 1)) throw new Error("min merge rate must be between 0 and 1");
-  const set = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
+  const set = db.prepare(upsert(db, { table: "settings", cols: ["key", "value"], key: ["key"] }));
   await set.run("whitelist_min_merged", String(rule.minMerged));
   await set.run("whitelist_min_merge_rate", String(rule.minRate));
   await audit(db, by, "rule", "whitelist", rule);

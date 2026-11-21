@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const { connect } = await import("../src/db.ts");
 const { batchSizeOf } = await import("../src/merge/batch-store.ts");
@@ -14,7 +15,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "ci-first-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test("queued tests verifications become ci-enough where the repo has CI, and small batch sizes are raised", async () => {
+test("queued tests verifications become ci-enough where the repo has CI, and small batch sizes are raised", { skip: sqliteOnly("SQLite data migration in src/db.ts migrate(); Postgres starts from schema.pg.sql and a copy of a migrated SQLite database") }, async () => {
   const path = join(dir, "m.db");
   const db = await connectDb(path);
   const at = "2026-01-01T00:00:00Z";

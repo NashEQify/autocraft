@@ -5,6 +5,7 @@
 //   4. the older one;
 //   5. the lower number.
 import type { Db } from "../db/index.ts";
+import { jsonEach, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
 
 export const ACTIVITY_MARGIN = 5;
 
@@ -25,11 +26,11 @@ export function compareCanonical(x: CanonInfo, y: CanonInfo): number {
 export async function canonInfoAll(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, CanonInfo>> {
   // The issues merged PRs of these repos close, with each PR's list parsed once.
   const rows = await db.prepare(`WITH fixed AS MATERIALIZED (SELECT DISTINCT p.repo, f.value AS number FROM items p,
-      json_each(CASE WHEN json_valid(p.closing_issues) THEN p.closing_issues ELSE '[]' END) f
-      WHERE p.kind = 'pr' AND p.state = 'MERGED' AND p.repo IN (SELECT value ->> 0 FROM json_each(?1)))
+      ${jsonEach(db, `CASE WHEN ${jsonValid(db, "p.closing_issues")} THEN p.closing_issues ELSE '[]' END`, "f", "bigint")}
+      WHERE p.kind = 'pr' AND p.state = 'MERGED' AND p.repo IN (SELECT ${jsonText(db, "r.value", "$[0]")} FROM ${jsonEach(db, "?1", "r")}))
     SELECT i.repo || '#' || i.number AS k, i.number, i.state, i.created_at, COALESCE(i.comments_count, 0) AS comments,
       EXISTS (SELECT 1 FROM fixed x WHERE x.repo = i.repo AND x.number = i.number) AS fixed
-    FROM json_each(?1) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as
+    FROM ${jsonEach(db, "?1", "j")} JOIN items i ON i.repo = ${jsonText(db, "j.value", "$[0]")} AND i.number = ${jsonNum(db, "j.value", "$[1]")}`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as
     { k: string; number: number; state: string; created_at: string | null; comments: number; fixed: number }[];
   return new Map(rows.map((r) => [r.k, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
 }

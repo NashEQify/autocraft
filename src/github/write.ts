@@ -194,8 +194,8 @@ export async function pipelineWriteWait(db: Db, action: string, repo: string, no
 async function tryBegin(w: Writer, action: string, target: string, details: Details, now: number, ownerArg?: string): Promise<{ id: number } | { wait: number }> {
   const identity = String(details.identity ?? "");
   const owner = paceOwner(identity, target, ownerArg);
-  const insert = async (d: Details): Promise<number> => Number((await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?)")
-    .run(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d))).lastInsertRowid);
+  const insert = async (d: Details): Promise<number> => Number((await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?) RETURNING rowid")
+    .get(new Date(now).toISOString(), w.login, action, target, JSON.stringify(d)) as { rowid: number }).rowid);
   const started = { ...details, state: "started" };
   if (identity.startsWith("user:")) return { id: await insert(started) };
   return await w.db.write(async () => {
@@ -225,8 +225,12 @@ async function begin(w: Writer, action: string, target: string, details: Details
 async function finish(w: Writer, id: number, details: Details, error?: string): Promise<void> {
   const d = error === undefined ? { ...details, state: "done" } : { ...details, state: "failed", error };
   // The pacing key's owner, set by begin(), stays on the row.
-  await w.db.prepare("UPDATE audit SET details = CASE WHEN json_extract(details, '$.paceOwner') IS NULL THEN ?1 ELSE json_set(?1, '$.paceOwner', json_extract(details, '$.paceOwner')) END WHERE rowid = ?2")
-    .run(JSON.stringify(d), id);
+  await w.db.write(async () => {
+    const row = await w.db.prepare("SELECT details FROM audit WHERE rowid = ?").get(id) as { details: string | null } | undefined;
+    let owner: unknown = null;
+    try { owner = (JSON.parse(row?.details ?? "null") as { paceOwner?: unknown } | null)?.paceOwner ?? null; } catch { /* no owner */ }
+    await w.db.prepare("UPDATE audit SET details = ? WHERE rowid = ?").run(JSON.stringify(owner === null ? d : { ...d, paceOwner: owner }), id);
+  });
 }
 
 /** Records the row first, runs the write, then marks the row done with `view`'s extra details or failed with the error. */
