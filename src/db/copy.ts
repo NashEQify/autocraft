@@ -442,13 +442,31 @@ async function prepareTarget(target: string, replace: boolean, match: (tables: M
   }
 }
 
-async function clearTables(db: Db, tables: string[]): Promise<void> {
-  if (!tables.length) return;
+/**
+ * Empties the tables a copy fills. A SQLite target keeps the rows ROW_FILTER leaves out (its own schema stamp): they are
+ * read here and written back by the returned function after the copy, under new rowids, since the copied rows bring
+ * theirs and may take the old ones.
+ */
+async function clearTables(db: Db, tables: string[]): Promise<() => Promise<void>> {
+  const kept: { table: string; rows: Row[] }[] = [];
+  if (!tables.length) return async () => undefined;
   await db.write(async () => {
     if (db.dialect === "postgres") return db.script(`TRUNCATE ${tables.map(qi).join(", ")} RESTART IDENTITY`);
-    for (const t of tables) await db.script(`DELETE FROM main.${qi(t)}${ROW_FILTER[t] ? ` WHERE ${ROW_FILTER[t]}` : ""}`);
+    for (const t of tables) {
+      if (ROW_FILTER[t]) kept.push({ table: t, rows: await db.prepare(`SELECT * FROM main.${qi(t)} WHERE NOT (${ROW_FILTER[t]})`).all() });
+      await db.script(`DELETE FROM main.${qi(t)}`);
+    }
     await db.prepare(`DELETE FROM main.sqlite_sequence WHERE name IN (${tables.map(() => "?").join(", ")})`).run(...tables);
   });
+  return () =>
+    db.write(async () => {
+      for (const { table, rows } of kept) {
+        for (const r of rows) {
+          const cols = Object.keys(r);
+          await db.prepare(insertSql(table, cols, 1)).run(...cols.map((c) => r[c] as Param));
+        }
+      }
+    });
 }
 
 async function finishSqlite(db: Db, triggers: string[]): Promise<void> {
@@ -506,7 +524,7 @@ export async function copyDatabase(o: CopyOptions): Promise<CopyResult> {
     dst = prepared.side;
     const { both, skipped, extra } = prepared.match;
     const names = both.map(([a]) => a.name);
-    await clearTables(dst.db, names);
+    const restoreKept = await clearTables(dst.db, names);
     log(`schema ready (${fmtMs(performance.now() - t)}); ${both.length} tables`);
     if (skipped.length) log(`skipped (runtime tables on one side only): ${skipped.join(", ")}`);
     if (extra.length) log(`left out (only on one side): ${extra.join(", ")}`);
@@ -539,6 +557,7 @@ export async function copyDatabase(o: CopyOptions): Promise<CopyResult> {
           await setPgSequences(d.db, new Set(late.map(([a]) => a.name)), srcSeqs);
         }
       } else {
+        await restoreKept();
         await setSqliteSequences(d.db, copied, srcSeqs);
         await finishSqlite(d.db, prepared.sqliteTriggers);
         log(`sequences, triggers, search index (${fmtMs(performance.now() - t)})`);

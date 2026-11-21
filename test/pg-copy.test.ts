@@ -24,7 +24,13 @@ test("a SQLite database copied to Postgres and back verifies equal; a changed ro
     DELETE FROM ever_tracked_repos WHERE name = 'c/d';
     INSERT INTO agent_runs (id, step, stage, prompt_id, prompt_version, provider, model, state, started_at) VALUES (7, 's', 1, 'p', '1', 'claude', 'm', 'done', 'x'), (9, 's', 1, 'p', '1', 'claude', 'm', 'done', 'x');
     DELETE FROM agent_runs WHERE id = 9;
-    CREATE TABLE retired_feature (x INTEGER);`);
+    CREATE TABLE retired_feature (x INTEGER);
+    -- The stamp row written last, its old rowid taken by another setting (as in a database migrated many times): the
+    -- target's own stamp row must not collide with the copied rowids.
+    CREATE TEMP TABLE old_stamp AS SELECT rowid AS r, value FROM settings WHERE key = 'schema_stamp';
+    DELETE FROM settings WHERE key = 'schema_stamp';
+    INSERT INTO settings (rowid, key, value) SELECT r, 'in_old_stamp_slot', '1' FROM old_stamp;
+    INSERT INTO settings (key, value) SELECT 'schema_stamp', value FROM old_stamp;`);
   // A prompt stored as plain text (before texts were gzipped) and one already packed.
   s.prepare("INSERT INTO agent_run_texts (run_id, prompt, output) VALUES (7, ?, ?)").run("plain prompt", gzipSync("packed output"));
   s.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('a/b', 1, 'm', 'h', ?, 'x')").run(new Uint8Array([1, 2, 3, 255]));
