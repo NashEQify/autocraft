@@ -146,6 +146,23 @@ export function refIn(d: D, t: string, refs: Iterable<string> | readonly (readon
   return sql`${cols} IN (SELECT value ->> 0, value ->> 1 FROM json_each(${list}))`;
 }
 
+/**
+ * Condition: `(cols[0], cols[1], ...) IN (rows)`, for tuples of any width, the rows bound as one JSON parameter (an empty
+ * list matches nothing). `types[i]` is the type of the i-th element of each row: "bigint"/"numeric" for numbers, "citext"
+ * against a citext column, else "text".
+ */
+export function tupleIn(d: D, cols: readonly Ex[], rows: readonly (readonly Param[])[], types: readonly ElemType[]): RawBuilder<SqlBool> {
+  const list = JSON.stringify(rows);
+  const left = sql`(${sql.join(cols.map(x))})`;
+  const pg = pgOf(d);
+  const elems = cols.map((_, i) => {
+    const t = types[i] ?? "text";
+    return sql.raw(pg && t !== "text" ? `(value ->> ${i})::${t}` : `value ->> ${i}`);
+  });
+  if (pg) return sql`${left} IN (SELECT ${sql.join(elems)} FROM json_array_elements((${list})::json) AS value)`;
+  return sql`${left} IN (SELECT ${sql.join(elems)} FROM json_each(${list}))`;
+}
+
 // ---- comparison and ordering ----------------------------------------------------------------------------------------
 
 /** Case-insensitive equality (ASCII, as SQLite's NOCASE); also for a citext column against a text one on Postgres. */

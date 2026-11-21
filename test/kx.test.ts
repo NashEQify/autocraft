@@ -215,3 +215,15 @@ both("cols selects a table's whole row: every column selectAll() reads, without 
   assert.deepEqual(whole.map((r) => [r.repo, r.number, r.title]), [["app", 1, "Crash when saving files"], ["app", 2, "Slow startup"], ["other", 3, "Fix saving"]]);
   return [Object.keys(whole[0]!), whole.map((r) => [r.repo, r.number])];
 }, app);
+
+both("tupleIn matches rows of any width against a list of tuples; an empty list matches nothing", async (db) => {
+  const three = await db.all(k(db).selectFrom("r").select(["repo", "number"])
+    .where(() => kx.tupleIn(db, ["repo", "number", "v"], [["app", 1, "one"], ["lib", 1, "three"], ["app", 2, "nope"]], ["text", "bigint", "text"]))
+    .orderBy("repo").orderBy("number"));
+  assert.deepEqual(three, [{ repo: "app", number: 1 }, { repo: "lib", number: 1 }]);
+  const ci = await db.all(k(db).selectFrom("t").select("id").where(() => kx.tupleIn(db, ["login", "n"], [["alice", 3], ["BOB", null], ["carol", 9]], ["citext", "bigint"])).orderBy("id"));
+  assert.deepEqual(ci, [{ id: 1 }, { id: 3 }]);
+  const none = await db.all(k(db).selectFrom("r").select("repo").where(() => kx.tupleIn(db, ["repo", "number", "v"], [], ["text", "bigint", "text"])));
+  assert.deepEqual(none, []);
+  return [three, ci, none];
+});
