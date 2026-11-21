@@ -10,6 +10,10 @@ import { DEADLINE_ERROR, jobRow, scrub } from "./jobs.ts";
 import { loadSteps, validateParams, type StepContext } from "./steps.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { stopWrites } from "../github/write.ts";
+
+/** How long a stopping job waits for its GitHub writes in flight: inside the runner's 10 s before SIGKILL, with time left to record usage. */
+const WRITE_SETTLE_MS = 7000;
 
 const oneLine = (s: string, max = 500): string => scrub(s.replace(/\s+/g, " ").trim()).slice(0, max);
 
@@ -45,9 +49,15 @@ export async function execJob(id: number): Promise<number> {
     console.error(`failed: ${msg}`);
     return 1;
   };
+  // The runner signals this process alone: GitHub writes in flight finish and are recorded (a write asked for now is
+  // refused, and a resumed run makes it), then the rest of the job's process group (model calls, builds) is stopped.
   process.once("SIGTERM", async () => {
+    const left = await stopWrites("the job is stopping", WRITE_SETTLE_MS);
+    if (left) console.log(`${left} GitHub writes still running at the stop; their outcome is unknown`);
     await saveUsage();
     console.log("stopped");
+    process.on("SIGTERM", () => {});
+    try { process.kill(-process.pid, "SIGTERM"); } catch { /* not a group leader (a command-line run) */ }
     process.exit(143);
   });
 

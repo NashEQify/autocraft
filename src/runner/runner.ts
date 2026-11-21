@@ -418,7 +418,8 @@ export class Runner {
         if (deadline) {
           try { appendFileSync(r.logPath, `${now()} ${r.stopMsg ?? deadlineError(r.deadlineMin)}; the job did not finish in time and is stopped\n`); } catch { /* the log is gone */ }
         }
-        killGroup(pid, "SIGTERM");
+        // The job process alone: it lets its GitHub writes in flight finish, then stops its process group (src/runner/exec.ts).
+        try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
         this.o.log(`job ${id}: stopping (${this.stopping ? "runner stopping" : deadline ? `${r.stopMsg} grace over` : "cancel requested"})`);
       } else if (Date.now() - r.termAt >= this.o.killAfterMs) {
         killGroup(pid, "SIGKILL");

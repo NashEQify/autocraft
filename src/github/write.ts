@@ -208,15 +208,49 @@ async function tryBegin(w: Writer, action: string, target: string, details: Deta
 /** The running job's id, joined to the audit row so a write can be traced to its job. Absent outside a job. */
 const jobOf = (): { jobId?: number } => { const j = currentJobId(); return j === null ? {} : { jobId: j }; };
 
+/** A write asked for after this process began to stop (stopWrites): nothing was sent, and a resumed run makes it. */
+export class WritesStoppedError extends Error {}
+
+/** Audit rows of writes this process has begun and not yet finished, with what resolves when they finish. */
+const inFlight = new Map<number, { done: Promise<void>; end: () => void }>();
+let stoppedWhy: string | null = null;
+
+/**
+ * Refuses writes from now on (WritesStoppedError) and waits up to `ms` for the writes in flight to finish and be recorded,
+ * so a stopped job leaves no write with an unknown outcome. Returns how many are still in flight.
+ */
+export async function stopWrites(why: string, ms: number): Promise<number> {
+  stoppedWhy = why;
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([Promise.all([...inFlight.values()].map((f) => f.done)), new Promise<void>((r) => { timer = setTimeout(r, ms); })]);
+  clearTimeout(timer);
+  return inFlight.size;
+}
+
+function track(id: number): void {
+  let end = (): void => {};
+  const done = new Promise<void>((r) => { end = r; });
+  inFlight.set(id, { done, end });
+}
+
+function untrack(id: number): void {
+  inFlight.get(id)?.end();
+  inFlight.delete(id);
+}
+
 /** Adds the row before the write, so a crash during the call leaves a "started" row: an unknown outcome. Paces the write; throws WritePacedError when the wait would pass the bound. */
 async function begin(w: Writer, action: string, target: string, details: Details, owner?: string): Promise<number> {
+  if (stoppedWhy !== null) throw new WritesStoppedError(`not written: ${stoppedWhy}`);
   const clock = w.now ?? Date.now;
   const sleep = w.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const t0 = clock();
   for (;;) {
     const now = clock();
     const r = await tryBegin(w, action, target, details, now, owner);
-    if ("id" in r) return r.id;
+    if ("id" in r) {
+      track(r.id);
+      return r.id;
+    }
     if (now - t0 + r.wait > PACE_MAX_WAIT_MS) throw new WritePacedError(`${String(details.identity)} on ${paceOwner(String(details.identity), target, owner) || "all owners"}`, r.wait);
     await sleep(r.wait);
   }
@@ -225,8 +259,12 @@ async function begin(w: Writer, action: string, target: string, details: Details
 async function finish(w: Writer, id: number, details: Details, error?: string): Promise<void> {
   const d = error === undefined ? { ...details, state: "done" } : { ...details, state: "failed", error };
   // The pacing key's owner, set by begin(), stays on the row.
-  await w.db.prepare("UPDATE audit SET details = CASE WHEN json_extract(details, '$.paceOwner') IS NULL THEN ?1 ELSE json_set(?1, '$.paceOwner', json_extract(details, '$.paceOwner')) END WHERE rowid = ?2")
-    .run(JSON.stringify(d), id);
+  try {
+    await w.db.prepare("UPDATE audit SET details = CASE WHEN json_extract(details, '$.paceOwner') IS NULL THEN ?1 ELSE json_set(?1, '$.paceOwner', json_extract(details, '$.paceOwner')) END WHERE rowid = ?2")
+      .run(JSON.stringify(d), id);
+  } finally {
+    untrack(id);
+  }
 }
 
 /**
@@ -450,7 +488,10 @@ export async function addLabels(w: Writer, q: Querier, repo: string, items: Labe
     for (const it of items) ids.push(await begin(w, "labels-apply", refOf(repo, it.number), await det(it)));
   } catch (e) {
     // Paced partway: the rows already added were never sent.
-    for (const id of ids) await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+    for (const id of ids) {
+      untrack(id);
+      await w.db.prepare("DELETE FROM audit WHERE rowid = ?").run(id);
+    }
     throw e;
   }
   let d: Record<string, unknown> | null;

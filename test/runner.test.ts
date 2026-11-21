@@ -23,7 +23,7 @@ const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { claimCall, submitCall } = await import("../src/remote/calls.ts");
 const { PROTOCOL_VERSION } = await import("../src/remote/protocol.ts");
 const { setCallContext } = await import("../src/agents/call.ts");
-const { ghComment } = await import("../src/github/write.ts");
+const { ghComment, stopWrites, WritesStoppedError } = await import("../src/github/write.ts");
 type GuardedItem = import("../src/core/guard.ts").GuardedItem;
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -129,6 +129,18 @@ describe("runner", () => {
       assert.match(again.stdout, /issuecomment-1/, "the earlier comment's URL is the result");
       await comment("something else");
       assert.equal(posts, 2, "a comment the earlier run did not post is posted");
+
+      // A stopping job lets a write in flight finish and be recorded, and refuses writes asked for after the stop.
+      let send = (): void => {};
+      const slow = async () => { await new Promise<void>((r) => { send = r; }); return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-9\n", stderr: "" }; };
+      const inFlight = ghComment({ db, login: "act" }, g, slow, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, "in flight");
+      await new Promise((r) => setTimeout(r, 50));
+      const stopping = stopWrites("the job is stopping", 5000);
+      send();
+      assert.equal(await stopping, 0, "nothing is left in flight");
+      assert.equal((await inFlight).code, 0);
+      assert.equal((await db.prepare("SELECT json_extract(details, '$.state') AS s FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { s: string }).s, "done");
+      await assert.rejects(comment("after the stop"), WritesStoppedError);
     } finally {
       setCallContext(null);
     }
