@@ -47,8 +47,8 @@ function deps(spy: Spy, withTests: boolean): ScanDeps {
     crates: async () => { spy.crates++; return { ok: true, rust: true, crates: [{ name: "psd", dir: "crates/psd" }] }; },
   };
 }
-const newScan = async (repo: string): Promise<number> => Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES (?, 'modeling', NULL, 'boss', '2026-11-05T00:00:00Z')").run(repo)).lastInsertRowid);
-const findings = async (repo: string) => await db.prepare("SELECT number, title, severity, state, verification FROM security_findings WHERE repo = ? ORDER BY number").all(repo) as { number: number; title: string; severity: string; state: string; verification: string }[];
+const newScan = async (repo: string): Promise<number> => (await db.get(db.k.insertInto("security_scans").values({ repo, state: "modeling", cap_usd: null, started_by: "boss", started_at: "2026-11-05T00:00:00Z" }).returning("id")))!.id;
+const findings = async (repo: string) => await db.all(db.k.selectFrom("security_findings").select(["number", "title", "severity", "state", "verification"]).where("repo", "=", repo).orderBy("number"));
 const testRow = async (repo: string, n: number) => await db.prepare("SELECT * FROM security_scan_tests WHERE repo = ? AND number = ?").get(repo, n) as { state: string; task_id: number; retried: number } | undefined;
 const result = (step: string, exitCode: number | null, timedOut = false) => ({ step, exitCode, durationMs: 1, timedOut });
 
@@ -61,7 +61,7 @@ describe("scan tests", () => {
     assert.ok(!wired.ids.includes("security.scantest"));
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM build_tasks").get() as { n: number }).n, 0);
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_scan_tests").get() as { n: number }).n, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM security_calls WHERE kind = 'test'").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("security_calls").select((eb) => eb.fn.countAll<number>().as("n")).where("kind", "=", "test")))!.n, 0);
     assert.deepEqual(wired.ids, plain.ids);
     const strip = (rows: Awaited<ReturnType<typeof findings>>) => rows.map(({ number: _n, ...r }) => r);
     assert.deepEqual(strip(await findings("wired")), strip(await findings("plain")));
@@ -88,7 +88,7 @@ describe("scan tests", () => {
       assert.equal(t.number, null);
       assert.match(t.patch, /^diff --git a\/crates\/psd\/tests\/autocraft_regression_[0-9a-f]{10}\.rs /);
     }
-    const kinds = (await db.prepare("SELECT kind FROM security_calls WHERE scan_id = ? AND finding_number = ?").all(id, rows[0]!.number) as { kind: string }[]).map((c) => c.kind);
+    const kinds = (await db.all(db.k.selectFrom("security_calls").select("kind").where("scan_id", "=", id).where("finding_number", "=", rows[0]!.number).orderBy("id"))).map((c) => c.kind);
     assert.deepEqual(kinds, ["verify", "test"]);
     const [a, b, c, d] = rows.map((r) => r.number) as [number, number, number, number];
     const plan = async (n: number) => (await getTask(db, (await testRow("on", n))!.task_id))!.plan.map((s) => s.name);
@@ -115,7 +115,7 @@ describe("scan tests", () => {
     // Findings are kept as they were; only the passing test leaves a note.
     const after = await findings("on");
     assert.deepEqual(after.map((r) => [r.state, r.severity]), [["new", "high"], ["new", "high"], ["new", "high"], ["new", "high"]]);
-    assert.equal((await db.prepare("SELECT note FROM security_findings WHERE repo = 'on' AND number = ?").get(b) as { note: string }).note, NOT_SHOWN_NOTE);
+    assert.equal((await db.get(db.k.selectFrom("security_findings").select("note").where("repo", "=", "on").where("number", "=", b)))!.note, NOT_SHOWN_NOTE);
     // The automatic fix skips the finding whose test passed and starts the others.
     assert.equal(await autoFixConfirmed(db, "on"), 3);
     const started = (await db.prepare("SELECT json_extract(params, '$.number') AS n FROM jobs WHERE step = 'security-fix' ORDER BY n").all() as { n: number }[]).map((r) => r.n);
