@@ -19,6 +19,7 @@ import { rawFinding } from "../src/security/store.ts";
 import { Git } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded, like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const db = await connectDb(join(mkdtempSync(join(SCRATCH, "sec-fix-")), "dash.db"));
@@ -154,7 +155,7 @@ describe("private fix and landing", () => {
     assert.ok(pr.args.includes("Check layer length before copying"));
 
     assert.equal(await pollLanding(db, deps(f.exec)), 0, "the pull request is still open");
-    await db.prepare("INSERT INTO items (repo, number, kind, state) VALUES ('photocraft', 77, 'pr', 'MERGED')").run();
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 77, kind: "pr", state: "MERGED" }));
     assert.equal(await pollLanding(db, deps(f.exec)), 1);
     assert.equal((await stateOf(n)).state, "landed");
 
@@ -193,21 +194,21 @@ describe("private fix and landing", () => {
   });
 
   test("the quiet pull request is the pipeline's own: counted as an own fix PR and in pilot scope; a stalled one shows why", async () => {
-    await db.run(db.k.insertInto("settings").values({ key: PIPELINE_LOGIN_KEY, value: "pipeline-bot" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "pipeline-bot" })));
-    await db.script("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1");
+    await db.run(db.k.insertInto("settings").values({ key: PIPELINE_LOGIN_KEY, value: "pipeline-bot" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft", pipeline: 1 }).onConflict((oc) => oc.column("name").doUpdateSet({ pipeline: 1 })));
     const n = await finding("landing", { fix_pr: 91 });
     assert.ok((await ownFixPrs(db, "photocraft")).prs.has("photocraft#91"), "counted as an own fix PR");
     assert.ok((await ownFixPrs(db, "photocraft")).quiet.has("photocraft#91"));
     await db.run(db.k.updateTable("security_findings").set({ state: "landed" }).where("number", "=", n));
     assert.ok((await ownFixPrs(db, "photocraft")).quiet.has("photocraft#91"), "still quiet after the merge, until published");
     await db.run(db.k.updateTable("security_findings").set({ state: "landing" }).where("number", "=", n));
-    await db.prepare("INSERT INTO items (repo, number, kind, state) VALUES ('photocraft', 5, 'issue', 'OPEN')").run();
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 5, kind: "issue", state: "OPEN" }));
     await setPilot(db, "boss", ["photocraft#5"]);
     assert.equal(await inPilot(db, "photocraft", 91), true, "in scope although the pilot list names other items");
     assert.equal(await inPilot(db, "photocraft", 92), false);
     await setPilot(db, "boss", []);
     // The finding page shows why a stalled pull request waits.
-    await db.prepare("INSERT INTO items (repo, number, kind, state, ci_state) VALUES ('photocraft', 91, 'pr', 'OPEN', 'FAILURE')").run();
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 91, kind: "pr", state: "OPEN", ci_state: "FAILURE" }));
     assert.match(await stallReason(db, "photocraft", 91), /checks failed/);
     assert.equal(giveaway(await stallReason(db, "photocraft", 91)), null);
     assert.equal((await stateOf(n)).state, "landing");
@@ -218,7 +219,7 @@ describe("private fix and landing", () => {
     await createEnv(db, { id, label: id, kind: "local-sandbox", slots: 2, confidential: true }, "op");
     await hello(db, id, { version: "1.0", capabilities: { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: false, gpu: false, toolchains: ["rust-stable"] }, slots: 8 });
     const plan = [{ name: "t", cmd: ["true"], network: "none" as const, timeoutSec: 10 }];
-    await db.script("DELETE FROM tracked_repos");
+    await db.run(db.k.deleteFrom("tracked_repos"));
     const other = await createTask(db, { step: "verify", repo: "photocraft", headSha: SHA, plan });
     const fix = await createTask(db, { step: "fix-check", repo: "photocraft", headSha: SHA, plan });
     const got = (await claim(db, id, 2)).tasks.map((t) => t.id);
@@ -228,7 +229,7 @@ describe("private fix and landing", () => {
 
   test("a pull request closed without merging returns the fix to ready", async () => {
     const n = await finding("landing", { fix_pr: 78 });
-    await db.prepare("INSERT INTO items (repo, number, kind, state) VALUES ('photocraft', 78, 'pr', 'CLOSED')").run();
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 78, kind: "pr", state: "CLOSED" }));
     await pollLanding(db, deps(fake().exec));
     assert.equal((await stateOf(n)).state, "ready");
     assert.equal((await stateOf(n)).fix_pr, null);
@@ -278,7 +279,7 @@ describe("private fix and landing", () => {
   });
 
   test("security audit actions are not GitHub feed rows", async () => {
-    const actions = (await db.prepare("SELECT DISTINCT action FROM audit WHERE action LIKE 'security-%'").all() as { action: string }[]).map((a) => a.action);
+    const actions = (await db.all(db.k.selectFrom("audit").select("action").distinct().where((eb) => like(db, "action", eb.val("security-%"))))).map((a) => a.action);
     assert.ok(actions.length > 0);
     for (const a of actions) assert.equal(a in GITHUB_ACTIONS, false, a);
   });

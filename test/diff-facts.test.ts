@@ -50,14 +50,14 @@ test("the planner's diff facts follow the cached diff's writes, re-reads and rem
 
   // A diff cached before its facts were stored gets them from the startup fill, once.
   await cachedDiff(w.db, "app", 1, "sha1", fetch, "main");
-  await w.db.script("DELETE FROM diff_facts");
+  await w.db.run(w.db.k.deleteFrom("diff_facts"));
   assert.equal(await buildDiffFacts(w.db), 1);
   assert.deepEqual((await facts()).sensitive, [...file.reasons, EXTRAS_PENDING_REASON]);
   assert.equal(await buildDiffFacts(w.db), null);
 
   // A cache directory the facts were not built from (no marker) is read again; a head whose diff is still cached keeps its row.
   rmSync(join(diffCacheDir(), "facts-built"));
-  await w.db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict) VALUES ('app', 1, 'sha2', '2027-01-01T00:00:00Z', 'full', 'take')").run();
+  await w.db.run(w.db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "sha2", at: "2027-01-01T00:00:00Z", mode: "full", verdict: "take" }));
   assert.equal(await buildDiffFacts(w.db), 2);
   assert.deepEqual(await w.rows("SELECT head_oid FROM diff_facts"), [{ head_oid: "sha1" }]);
 });

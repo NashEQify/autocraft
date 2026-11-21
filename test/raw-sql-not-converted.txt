@@ -87,7 +87,6 @@ src/conversations/queue.ts
 
 src/conversations/usage.ts
 
-src/core/facts.ts
 
 src/core/issue-facts.ts
 
@@ -420,7 +419,6 @@ src/premerge/index.ts
 
 src/premerge/review.ts
 
-src/premerge/store.ts
 
 src/prepush/cli.ts
 
