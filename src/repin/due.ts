@@ -1,6 +1,8 @@
 // Which autorepins (src/repin/index.ts) have something to do now. Read from the database alone and without the modules the
 // work needs, so the runner can ask on every tick.
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** An attempt that did not finish is tried again after this long. */
 export const RETRY_MS = 60_000;
@@ -18,19 +20,33 @@ export type RepinRow = {
 
 // waiting: the dependency's pull request is no longer open (merged or closed), or this one is; locking: the lockfile task
 // has ended, or has run out of time; ended: the comment that tells the outcome is still to post.
-const DUE = `(a.state = 'waiting' AND (a.tried_at IS NULL OR a.tried_at <= ?1) AND (
-    EXISTS (SELECT 1 FROM main.items i WHERE i.repo = a.ref_repo AND i.number = a.ref_number AND i.state != 'OPEN')
-    OR NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = a.repo AND i.number = a.number AND i.kind = 'pr' AND i.state = 'OPEN')))
-  OR (a.state = 'locking' AND NOT EXISTS (SELECT 1 FROM main.build_tasks t WHERE t.id = a.task_id AND t.state IN ('queued', 'claimed', 'running') AND t.queued_at > ?2))
-  OR (a.state IN ('pushed', 'failed', 'cancelled') AND a.notice IS NULL)`;
-
-const before = (now: Date): [string, string] => [new Date(now.getTime() - RETRY_MS).toISOString(), new Date(now.getTime() - LOCK_MAX_MS).toISOString()];
+function due(eb: kx.AnyEb, now: Date): AliasableExpression<SqlBool> {
+  const s = kx.schemaEb(eb);
+  const retryBefore = new Date(now.getTime() - RETRY_MS).toISOString();
+  const lockBefore = new Date(now.getTime() - LOCK_MAX_MS).toISOString();
+  return eb.or([
+    eb.and([
+      eb("a.state", "=", "waiting"),
+      eb.or([eb("a.tried_at", "is", null), eb("a.tried_at", "<=", retryBefore)]),
+      eb.or([
+        eb.exists(s.selectFrom("main.items as i").select(eb.lit(1).as("one")).where("i.repo", "=", eb.ref("a.ref_repo")).where("i.number", "=", eb.ref("a.ref_number")).where("i.state", "!=", "OPEN")),
+        eb.not(eb.exists(s.selectFrom("main.items as i").select(eb.lit(1).as("one")).where("i.repo", "=", eb.ref("a.repo")).where("i.number", "=", eb.ref("a.number")).where("i.kind", "=", "pr").where("i.state", "=", "OPEN"))),
+      ]),
+    ]),
+    eb.and([
+      eb("a.state", "=", "locking"),
+      eb.not(eb.exists(s.selectFrom("main.build_tasks as t").select(eb.lit(1).as("one")).where("t.id", "=", eb.ref("a.task_id")).where("t.state", "in", ["queued", "claimed", "running"]).where("t.queued_at", ">", lockBefore))),
+    ]),
+    eb.and([eb("a.state", "in", ["pushed", "failed", "cancelled"]), eb("a.notice", "is", null)]),
+  ]);
+}
 
 /** The autorepins with a step to take, oldest first. */
 export async function repinsDue(db: Db, now: Date = new Date()): Promise<RepinRow[]> {
-  return await db.prepare(`SELECT a.* FROM main.autorepins a WHERE ${DUE} ORDER BY a.requested_at, a.repo, a.number`).all(...before(now)) as RepinRow[];
+  return await db.all(db.k.selectFrom("main.autorepins as a").select(kx.cols("main.autorepins", "a")).$narrowType<{ state: RepinRow["state"] }>()
+    .where((eb) => due(eb, now)).orderBy("a.requested_at").orderBy("a.repo").orderBy("a.number"));
 }
 
 export async function anyRepinDue(db: Db, now: Date = new Date()): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM main.autorepins a WHERE ${DUE} LIMIT 1`).get(...before(now));
+  return !!await db.get(db.k.selectFrom("main.autorepins as a").select((eb) => eb.lit(1).as("one")).where((eb) => due(eb, now)).limit(1));
 }
