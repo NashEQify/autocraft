@@ -6,6 +6,7 @@ import type { Role } from "./dash/types.ts";
 import { endAnswerTokens, endTokens } from "./dash/mcp/tokens.ts";
 import { dropUserTokens } from "./dash/server/user-tokens.ts";
 import type { Db } from "./db/index.ts";
+import { ciEq } from "./db/portable.ts";
 import { openDb } from "./db/open.ts";
 
 export type AccessRow = { login: string; role: Role; added_by: string | null; added_at: string | null; note: string | null };
@@ -18,7 +19,7 @@ export const isRole = (v: unknown): v is Role => (ROLES as readonly unknown[]).i
 export class AccessError extends Error {}
 
 export async function listAccess(db: Db): Promise<AccessRow[]> {
-  return await db.prepare("SELECT login, role, added_by, added_at, note FROM access ORDER BY login COLLATE NOCASE").all() as AccessRow[];
+  return await db.prepare(`SELECT login, role, added_by, added_at, note FROM access ORDER BY ${db.dialect === "postgres" ? `lower(login::text) COLLATE "C"` : "login COLLATE NOCASE"}`).all() as AccessRow[];
 }
 
 // The access entry's GitHub id is stored when the entry is added (or, for an
@@ -47,7 +48,7 @@ async function endSessions(db: Db, login: string): Promise<number> {
 
 /** Org setup links are an operator's: they end when their creator stops being one (the link flow also checks the creator's role). */
 async function endSetupLinks(db: Db, login: string): Promise<number> {
-  return Number((await db.prepare("UPDATE github_setup_links SET revoked_at = ? WHERE created_by = ? COLLATE NOCASE AND revoked_at IS NULL AND used_at IS NULL")
+  return Number((await db.prepare(`UPDATE github_setup_links SET revoked_at = ? WHERE ${ciEq(db, "created_by", "?")} AND revoked_at IS NULL AND used_at IS NULL`)
     .run(new Date().toISOString(), login)).changes);
 }
 
@@ -91,8 +92,8 @@ export async function removeLogin(db: Db, by: string, login: string, opts: Acces
     const userTokens = await dropUserTokens(db, row.login);
     // A linked Discord account acts as the login (presses, alerts); the delete trigger takes the alert opt-ins with the links.
     // Matched in any letter case: the access list is, and the removal may name the login in another case than the link stores.
-    const discordLinks = Number((await db.prepare("DELETE FROM discord_links WHERE login = ? COLLATE NOCASE").run(row.login)).changes);
-    await db.prepare("DELETE FROM discord_link_codes WHERE login = ? COLLATE NOCASE").run(row.login);
+    const discordLinks = Number((await db.prepare(`DELETE FROM discord_links WHERE ${ciEq(db, "login", "?")}`).run(row.login)).changes);
+    await db.prepare(`DELETE FROM discord_link_codes WHERE ${ciEq(db, "login", "?")}`).run(row.login);
     const setupLinks = await endSetupLinks(db, row.login);
     await audit(db, by, "access-remove", row.login, { role: row.role, sessions, ...(mcpTokens ? { mcpTokens } : {}), ...(userTokens ? { userTokens } : {}), ...(discordLinks ? { discordLinks } : {}), ...(setupLinks ? { setupLinks } : {}) });
   });

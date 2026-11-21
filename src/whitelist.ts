@@ -3,6 +3,7 @@
 import { audit } from "./dash/audit.ts";
 import { githubUserId } from "./github/users.ts";
 import type { Db } from "./db/index.ts";
+import { ciEq, upsert } from "./db/portable.ts";
 import { openDb } from "./db/open.ts";
 
 export type Tier = "whitelisted" | "not" | "allow" | "deny";
@@ -56,9 +57,9 @@ export function tierOf(merged: number, closed: number, override: string | null, 
 // SQL for per-author PR stats; the `items_pr_author` index covers it.
 export const STATS_SQL = `
   SELECT author AS login,
-         SUM(state = 'MERGED') AS merged,
-         SUM(state = 'CLOSED') AS closed,
-         SUM(state = 'OPEN') AS open,
+         SUM(CASE WHEN state = 'MERGED' THEN 1 ELSE 0 END) AS merged,
+         SUM(CASE WHEN state = 'CLOSED' THEN 1 ELSE 0 END) AS closed,
+         SUM(CASE WHEN state = 'OPEN' THEN 1 ELSE 0 END) AS open,
          MAX(merged_at) AS last_merge
   FROM items WHERE kind = 'pr' AND author IS NOT NULL`;
 
@@ -80,10 +81,11 @@ async function standings(db: Db, authors: AuthorRef[]): Promise<Map<string, Stan
   // A long list (the contributors page) reads every login rather than binding thousands of parameters.
   const all = logins.length > 500;
   const marks = logins.map(() => "?").join(",");
-  const only = (col: string, nocase = false): string => (all ? "1" : `${col}${nocase ? " COLLATE NOCASE" : ""} IN (${marks})`);
+  const only = (col: string, nocase = false): string =>
+    (all ? "TRUE" : !nocase ? `${col} IN (${marks})` : db.dialect === "postgres" ? `(${col})::citext IN (${marks})` : `${col} COLLATE NOCASE IN (${marks})`);
   const args = all ? [] : logins;
   const rows = new Map<string, { id: number | null; merged: number; closed: number }[]>();
-  for (const r of await db.prepare(`SELECT author AS login, author_id AS id, SUM(state = 'MERGED') AS merged, SUM(state = 'CLOSED') AS closed
+  for (const r of await db.prepare(`SELECT author AS login, author_id AS id, SUM(CASE WHEN state = 'MERGED' THEN 1 ELSE 0 END) AS merged, SUM(CASE WHEN state = 'CLOSED' THEN 1 ELSE 0 END) AS closed
     FROM items WHERE kind = 'pr' AND author IS NOT NULL AND ${only("author")} GROUP BY author, author_id`).all(...args) as { login: string; id: number | null; merged: number; closed: number }[]) {
     (rows.get(r.login) ?? rows.set(r.login, []).get(r.login)!).push(r);
   }
@@ -117,14 +119,14 @@ export async function contributors(db: Db, opts: { repo?: string; login?: string
   // Stats always come from every repo; the repo filter only picks who is listed.
   const rows = await db.prepare(`
     WITH s AS (${STATS_SQL} GROUP BY author),
-    r AS (SELECT author, GROUP_CONCAT(DISTINCT repo) AS repos FROM items WHERE kind = 'pr' AND author IS NOT NULL ${where} GROUP BY author),
+    r AS (SELECT author, ${db.dialect === "postgres" ? "string_agg(DISTINCT repo, ',' ORDER BY repo)" : "GROUP_CONCAT(DISTINCT repo)"} AS repos FROM items WHERE kind = 'pr' AND author IS NOT NULL ${where} GROUP BY author),
     j AS (
       SELECT r.author AS login, COALESCE(s.merged,0) AS merged, COALESCE(s.closed,0) AS closed, COALESCE(s.open,0) AS open,
              s.last_merge, r.repos, o.status AS override, o.note, o.by AS override_by, o.at AS override_at
-      FROM r LEFT JOIN s ON s.login = r.author LEFT JOIN whitelist_overrides o ON o.login = r.author COLLATE NOCASE
+      FROM r LEFT JOIN s ON s.login = r.author LEFT JOIN whitelist_overrides o ON ${ciEq(db, "o.login", "r.author")}
       UNION ALL
       SELECT o.login, 0, 0, 0, NULL, '', o.status, o.note, o.by, o.at FROM whitelist_overrides o
-      WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.kind = 'pr' AND i.author = o.login COLLATE NOCASE) ${opts.repo ? "AND 0" : ""} ${opts.login ? "AND o.login = :login" : ""}
+      WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.kind = 'pr' AND ${ciEq(db, "i.author", "o.login")}) ${opts.repo ? "AND FALSE" : ""} ${opts.login ? "AND o.login = :login" : ""}
     )
     SELECT j.* FROM j`).all(params) as Omit<Contributor, "rate" | "tier" | "override_in_effect">[];
   // History, override and tier are those of the account the login is bound to, as the merge rule reads them.
@@ -158,10 +160,10 @@ export async function setOverride(db: Db, login: string, status: "allow" | "deny
   if (!OVERRIDE_LOGIN.test(login)) throw new Error(`not a GitHub login: ${login}`);
   if (status === "allow" && githubId === null) throw new Error(`${login} is not a GitHub user`);
   if (status === null) {
-    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").run(login);
+    await db.prepare(`DELETE FROM whitelist_overrides WHERE ${ciEq(db, "login", "?")}`).run(login);
   } else {
-    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE AND login <> ?").run(login, login);
-    await db.prepare("INSERT OR REPLACE INTO whitelist_overrides (login, status, note, by, at, github_id) VALUES (?, ?, ?, ?, ?, ?)")
+    await db.prepare(`DELETE FROM whitelist_overrides WHERE ${ciEq(db, "login", "?")} AND login <> ?`).run(login, login);
+    await db.prepare(upsert(db, { table: "whitelist_overrides", cols: ["login", "status", "note", "by", "at", "github_id"], key: ["login"] }))
       .run(login, status, note || null, by, new Date().toISOString(), githubId);
   }
   // The note is private: the audit row records only that one was given.

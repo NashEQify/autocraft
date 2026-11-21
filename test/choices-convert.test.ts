@@ -23,7 +23,7 @@ test("open decisions' proposed cards convert to choices", async () => {
   await db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at, labels) VALUES ('app', 1, 'issue', 'OPEN', 'Issue 1', 'Body', 'someone', '${T0}', '${T0}', '[]')`).run();
   await ask(db, [{ id: "app#1:scope", kind: "scope", repo: "app", number: 1, question: "Scope?", options: [{ key: "take", label: "Wanted" }, { key: "close", label: "Out of scope" }] }]);
   await db.prepare("UPDATE decisions SET recommended = 'take', recommended_reason = 'fits' WHERE id = 'app#1:scope'").run();
-  const turn = Number((await db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block) VALUES ('app', 1, 'opus', 'opus', ?, '', '')").run(T0)).lastInsertRowid);
+  const turn = Number((await db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block) VALUES ('app', 1, 'opus', 'opus', ?, '', '') RETURNING id").get(T0) as { id: number }).id);
   const card = db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (?, 'app', 1, 'resolution', ?, ?, '')");
   const stamp = await decisionStamp(db, (await getDecision(db, "app#1:scope"))!);
   const take = { kind: "resolution", settle: { kind: "answer", decision: "app#1:scope", option: "take", stamp }, steps: [{ kind: "comment" }, { kind: "label", label: "accepted" }, { kind: "open_issue", repo: "app", title: "T", body: "B" }] };

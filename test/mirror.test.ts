@@ -51,9 +51,9 @@ async function scratch() {
   const dir = mkdtempSync(join(SCRATCH, "fastsync-"));
   const db = await connectDb(join(dir, "m.db"));
   await db.script("DELETE FROM tracked_repos");
-  await db.script("INSERT INTO tracked_repos VALUES ('a','t','x', 1),('b','t','x', 1)");
+  await db.script("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('a','t','x', 1),('b','t','x', 1)");
   await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('a','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z'),('b','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z')");
-  await db.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T09:30:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
+  await db.script("INSERT INTO settings (key, value) VALUES ('org_high_water','2026-11-02T09:30:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
   return { dir, db };
 }
 const opts = { only: [], all: false, full: false, perRepo: false };

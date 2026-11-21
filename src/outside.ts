@@ -22,6 +22,7 @@ import { pipelineRepos } from "./pilot.ts";
 import { isBotLogin } from "./review/bots.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import { ciEq } from "./db/portable.ts";
 
 export const OUTSIDE_SURGE = "outside-surge";
 export const KEYS = { prsPerDay: "outside_prs_per_day", issuesPerDay: "outside_issues_per_day", surgePerHour: "outside_surge_per_hour" } as const;
@@ -124,7 +125,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
         CASE WHEN p.author IS NULL THEN i.author_type ELSE p.author_type END AS author_type
       FROM items i LEFT JOIN items p ON i.kind = 'issue' AND p.repo = i.repo
         AND p.number = (SELECT f.number FROM main.postmerge_followups f WHERE f.repo = i.repo AND f.issue_number = i.number LIMIT 1)
-      WHERE i.created_at >= ? AND i.author IS NOT NULL`)
+      WHERE i.created_at >= ? AND i.author IS NOT NULL ORDER BY i.repo, i.number`)
       .all(new Date(from).toISOString()) as Row[]).filter((r) => scope.has(r.repo) && !fast.has(`${r.repo}#${r.number}`));
     await backfillAdmitted(db, new Date(from).toISOString(), now);
     const admitted = new Set((await db.prepare("SELECT repo, number FROM main.outside_admitted").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
@@ -220,12 +221,12 @@ export async function releaseOutside(db: Db, by: string, repo: string, number: n
 
 /** An operator exempts every item now held for one author. Returns how many. */
 export async function releaseAuthor(db: Db, by: string, author: string): Promise<number> {
-  const rows = await db.prepare("SELECT repo, number FROM main.outside_holds WHERE author = ? COLLATE NOCASE").all(author) as { repo: string; number: number }[];
+  const rows = await db.prepare(`SELECT repo, number FROM main.outside_holds WHERE ${ciEq(db, "author", "?")}`).all(author) as { repo: string; number: number }[];
   if (!rows.length) throw new OutsideError(`nothing is held for ${author}`, 409);
   const at = new Date().toISOString();
   const ins = db.prepare("INSERT OR IGNORE INTO main.outside_released (repo, number, by, at) VALUES (?, ?, ?, ?)");
   for (const r of rows) await ins.run(r.repo, r.number, by, at);
-  await db.prepare("DELETE FROM main.outside_holds WHERE author = ? COLLATE NOCASE").run(author);
+  await db.prepare(`DELETE FROM main.outside_holds WHERE ${ciEq(db, "author", "?")}`).run(author);
   await audit(db, by, "outside-release-author", author, { items: rows.length });
   return rows.length;
 }
@@ -235,7 +236,7 @@ export type OutsideState = OutsideLimits & { heldByLimit: number; heldBySurge: n
 export async function outsideState(db: Db, hidden: HiddenRepos = []): Promise<OutsideState> {
   const h = hiddenTest("repo", hidden);
   const hide = filtered(hidden) ? ` WHERE NOT (${h.sql})` : "";
-  const c = await db.prepare(`SELECT SUM(reason = 'limit') AS l, SUM(reason = 'surge') AS s, COUNT(DISTINCT author) AS a FROM main.outside_holds${hide}`).get(...(filtered(hidden) ? h.args : [])) as { l: number | null; s: number | null; a: number };
+  const c = await db.prepare(`SELECT SUM(CASE WHEN reason = 'limit' THEN 1 ELSE 0 END) AS l, SUM(CASE WHEN reason = 'surge' THEN 1 ELSE 0 END) AS s, COUNT(DISTINCT author) AS a FROM main.outside_holds${hide}`).get(...(filtered(hidden) ? h.args : [])) as { l: number | null; s: number | null; a: number };
   const t = await tripRow(db, OUTSIDE_SURGE);
   return { ...await outsideLimits(db), heldByLimit: c.l ?? 0, heldBySurge: c.s ?? 0, authors: c.a, tripped: t?.active ? { reason: t.reason, since: t.tripped_at } : null };
 }

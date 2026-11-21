@@ -61,8 +61,8 @@ describe("resolve card", () => {
     const parsed = (await parseReply(db, "app", 1, 'None of the options fits; the comment settled it.\n```actions\n[{"kind":"resolution","steps":[],"settle":{"kind":"handled","summary":"Asked for a use case."}},{"kind":"resolution","steps":[],"settle":{"kind":"handled","summary":""}}]\n```'))!;
     assert.equal(parsed.cards.length, 1, "a handled settle without a summary is dropped");
     const turn = await insertTurn(db, "app", 1, { kind: "opus", login: "opus", body: "x", block: "x" });
-    const card = (await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (?, 'app', 1, 'resolution', ?, NULL, ?)")
-      .run(turn, JSON.stringify(parsed.cards[0]!.params), parsed.cards[0]!.description)).lastInsertRowid as number;
+    const card = (await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (?, 'app', 1, 'resolution', ?, NULL, ?) RETURNING id")
+      .get(turn, JSON.stringify(parsed.cards[0]!.params), parsed.cards[0]!.description) as { id: number }).id;
     const querier = { query: async () => { throw new Error("GitHub was called"); }, spent: 0, remaining: null };
     const r = await doCard(db, card, "op", { querier });
     assert.equal(r.card.state, "done", r.card.error ?? "");

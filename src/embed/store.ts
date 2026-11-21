@@ -22,7 +22,7 @@ const todoOf = async (db: Db, repo: string, number: number, hash: string): Promi
 const DIFF_SQL = `SELECT i.repo, i.number, i.embed_hash AS hash FROM main.items i
     LEFT JOIN main.item_embeddings e ON e.repo = i.repo AND e.number = i.number
     WHERE i.repo IN (SELECT name FROM main.tracked_repos)
-      AND (:all OR (i.state <> 'OPEN' AND (e.model IS NOT :model OR e.hash IS NOT i.embed_hash)))`;
+      AND (:all OR (i.state <> 'OPEN' AND (e.model IS DISTINCT FROM :model OR e.hash IS DISTINCT FROM i.embed_hash)))`;
 
 /**
  * What to embed, shortest text first so batches pad little: the open items the Plans send here (every tracked item with `all`).

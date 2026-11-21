@@ -60,15 +60,18 @@ async function lookup(client: Querier, owner: string, prs: Pr[], out: Map<string
 export async function backfillAuthorIds(db: Db, client: Querier | null): Promise<number> {
   const bind = db.prepare("INSERT OR IGNORE INTO main.author_ids (login, id) VALUES (?, ?)");
   let n = 0;
-  const known = await db.prepare(`SELECT author, author_id FROM items i WHERE author IS NOT NULL AND author_id IS NOT NULL
+  // The id of the login's oldest item: every row has one here, and a login can have passed to another account.
+  const known = await db.prepare(`SELECT author, (SELECT o.author_id FROM items o WHERE o.author = i.author ORDER BY o.created_at, o.repo, o.number LIMIT 1) AS author_id
+    FROM items i WHERE author IS NOT NULL AND author_id IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM author_ids a WHERE a.login = i.author)
     AND NOT EXISTS (SELECT 1 FROM items j WHERE j.author = i.author AND j.author_id IS NULL)
-    GROUP BY author ORDER BY MIN(created_at)`).all() as { author: string; author_id: number }[];
+    GROUP BY author ORDER BY MIN(created_at), author`).all() as { author: string; author_id: number }[];
   for (const r of known) n += Number((await bind.run(r.author, r.author_id)).changes);
   const missing = new Set(await unboundLogins(db));
   if (!client || !missing.size) return n;
-  const oldest = (await db.prepare(`SELECT author AS login, repo, number, MIN(created_at) AS first FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
-    GROUP BY author ORDER BY author`).all() as Pr[]).filter((p) => missing.has(p.login));
+  const oldest = (await db.prepare(`SELECT login, repo, number, first FROM (SELECT author AS login, repo, number, created_at AS first,
+      ROW_NUMBER() OVER (PARTITION BY author ORDER BY created_at, repo, number) AS n
+    FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')) AS f WHERE n = 1 ORDER BY login`).all() as Pr[]).filter((p) => missing.has(p.login));
   const byOwner = new Map<string, Pr[]>();
   for (const p of oldest) (byOwner.get(ownerOf(p.repo)) ?? byOwner.set(ownerOf(p.repo), []).get(ownerOf(p.repo))!).push(p);
   const found = new Map<string, number>();

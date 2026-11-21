@@ -69,8 +69,8 @@ const list = (s: string | null): unknown[] => {
 
 async function authorFact(db: Db, login: string | null, id: number | null): Promise<string> {
   if (!login) return "author: unknown (deleted account)";
-  const s = await db.prepare(`${STATS_SQL} AND author = ?`).get(login) as { merged: number | null; closed: number | null };
-  const merged = s.merged ?? 0, closed = s.closed ?? 0;
+  const s = await db.prepare(`${STATS_SQL} AND author = ? GROUP BY author`).get(login) as { merged: number | null; closed: number | null } | undefined;
+  const merged = s?.merged ?? 0, closed = s?.closed ?? 0;
   const tier = (await tiersOf(db, [{ login, id }])).get(tierKey({ login, id })) ?? "not";
   return `author: ${login}, ${TIER_LABEL[tier]} (${merged} merged PR${merged === 1 ? "" : "s"}, ${closed} closed unmerged)`;
 }

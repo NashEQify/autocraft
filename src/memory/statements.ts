@@ -93,7 +93,7 @@ export async function collectStatements(db: Db): Promise<number> {
 /** What a statement is embedded from: the item's title, then what was said. */
 export const statementText = (title: string, text: string): string => `${title.trim()}\n${cleanBody(text).slice(0, BODY_CHARS)}`.trim();
 
-const WAITING = "embedding IS NULL OR model IS NOT ?";
+const WAITING = "embedding IS NULL OR model IS DISTINCT FROM ?";
 
 /** Whether there are sources to collect or statements to embed with `modelId`. */
 export async function statementsDue(db: Db, modelId: string): Promise<boolean> {

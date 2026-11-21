@@ -22,6 +22,7 @@ import { audit } from "../dash/audit.ts";
 import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
 import type { Db } from "../db/index.ts";
+import { jsonValid } from "../db/portable.ts";
 
 export const SURE = 0.9;
 
@@ -107,7 +108,7 @@ function settleLabel(jev: (Verdict & { top: number | null }) | null, haiku: Verd
 /** The run of the newest Jev or Haiku-alone verdict: two indexed lookups, the newer wins. */
 export async function newestVerdictRun(db: Db): Promise<string | null> {
   const jev = await db.prepare("SELECT run_id, at FROM classifications WHERE classifier = 'jev' ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
-  const alone = await db.prepare("SELECT run_id, at FROM main.classifications INDEXED BY classifications_alone WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
+  const alone = await db.prepare(`SELECT run_id, at FROM main.classifications${db.dialect === "sqlite" ? " INDEXED BY classifications_alone" : ""} WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1`).get() as { run_id: string; at: string } | undefined;
   return (alone && (!jev || alone.at > jev.at) ? alone : jev)?.run_id ?? null;
 }
 
@@ -166,7 +167,7 @@ export async function settledSet(db: Db, run: string | null, refs?: Iterable<str
   if (!run) return async () => settle(null, null);
   const narrow = refs ? ` AND ${refIn("classifications", "?")}` : "";
   // Only what settledFrom() reads: the referee's reason, and Jev's probabilities without the per-type ones.
-  const rows = await db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND json_valid(probs) THEN json_remove(probs, '$.type') ELSE probs END AS probs,
+  const rows = await db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND ${jsonValid(db, "probs")} THEN ${db.dialect === "postgres" ? "(probs::jsonb - 'type')::text" : "json_remove(probs, '$.type')"} ELSE probs END AS probs,
       CASE WHEN classifier = 'sonnet' THEN reason END AS reason, at, input_hash FROM classifications
     WHERE run_id = ? AND classifier IN ('jev', 'haiku', 'sonnet')${narrow}`).all(...(refs ? [run, refPairs(refs)] : [run])) as (ClsRow & { repo: string; number: number; classifier: string })[];
   const byItem = new Map<string, Partial<Record<string, ClsRow>>>();

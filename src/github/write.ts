@@ -23,6 +23,7 @@ import { currentJobId } from "../agents/call.ts";
 import { giveaway } from "../security/rules.ts";
 import { filterSeq, forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonText, jsonValid } from "../db/portable.ts";
 import { openDb } from "../db/open.ts";
 
 export { GITHUB_ACTIONS } from "./actions.ts";
@@ -158,9 +159,10 @@ function paceOwner(identity: string, target: string, owner?: string): string {
 
 /** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
 async function keyWait(db: Db, action: string, identity: string, owner: string, now: number): Promise<number> {
+  const d = `CASE WHEN ${jsonValid(db, "details")} THEN details END`;
   const rows = await db.prepare(
-    `SELECT at, json_extract(details, '$.state') AS state, json_extract(details, '$.error') AS error FROM audit
-     WHERE at >= ? AND json_extract(details, '$.identity') = ? AND json_extract(details, '$.paceOwner') = ? ORDER BY at`,
+    `SELECT at, ${jsonText(db, d, "$.state")} AS state, ${jsonText(db, d, "$.error")} AS error FROM audit
+     WHERE at >= ? AND ${jsonText(db, d, "$.identity")} = ? AND ${jsonText(db, d, "$.paceOwner")} = ? ORDER BY at, rowid`,
   ).all(new Date(now - 3_600_000).toISOString(), identity, owner) as { at: string; state: string | null; error: string | null }[];
   const times = rows.map((r) => Date.parse(r.at));
   const inMinute = times.filter((t) => t > now - 60_000);

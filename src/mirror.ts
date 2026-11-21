@@ -330,7 +330,7 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): SQLInput
 
 /** SQL for an upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
 export const KEEP_KNOWN_MERGEABLE = (table: string): string =>
-  `CASE WHEN ${table}.head_oid IS excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS NOT 'CONFLICTING' AND excluded.mergeable IS NOT 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
+  `CASE WHEN ${table}.head_oid IS NOT DISTINCT FROM excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS DISTINCT FROM 'CONFLICTING' AND excluded.mergeable IS DISTINCT FROM 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
 
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**
@@ -988,7 +988,7 @@ async function sync(args: string[]): Promise<void> {
     if (restart) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
     const querier = opts.full ? lowPriority(client, { busy: () => lockHeld(lockPath()), minRemaining: keep }) : client;
     // Each run leaves a row for the Pipeline page; rows older than two days go.
-    const row = (await db.prepare("INSERT INTO sync_runs (started_at) VALUES (?)").run(iso(new Date()))).lastInsertRowid;
+    const row = (await db.prepare("INSERT INTO sync_runs (started_at) VALUES (?) RETURNING rowid").get(iso(new Date())) as { rowid: number }).rowid;
     await db.prepare("DELETE FROM sync_runs WHERE started_at < ?").run(iso(new Date(Date.now() - 2 * 86400_000)));
     try {
       const { mode, items } = await runSync(db, querier, opts);

@@ -25,7 +25,7 @@ test("a follow-up issue on a Merge card is opened once after the merge and dropp
     const id = mergeDecisionId("app", n, `sha${n}`);
     await ask(w.db, [{ id, kind: "merge", repo: "app", number: n, question: "Merge this PR?", facts: [`${HEAD_FACT}sha${n}`], options: Object.values(MERGE_OPTIONS).map((x) => ({ ...x })), asked_by: "merge", asked_at: T0 }]);
     const params = { kind: "resolution", steps: [{ kind: "open_issue", repo: "app", title: `Follow-up of ${n}`, body: "The parser still drops the last line." }], settle: { kind: "answer", decision: id, option: "merge", stamp: await decisionStamp(w.db, (await getDecision(w.db, id))!) } };
-    const card = Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, description) VALUES (0, 'app', ?, 'resolution', ?, 'merge and open an issue')").run(n, JSON.stringify(params))).lastInsertRowid);
+    const card = Number((await w.db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, description) VALUES (0, 'app', ?, 'resolution', ?, 'merge and open an issue') RETURNING id").get(n, JSON.stringify(params)) as { id: number }).id);
     const r = await doCard(w.db, card, "op", { ...w.gh.actDeps(), exec } as never);
     assert.equal(r.card.state, "done", r.card.error ?? "");
     assert.equal((await getDecision(w.db, id))!.answer, "merge");
@@ -37,7 +37,7 @@ test("a follow-up issue on a Merge card is opened once after the merge and dropp
   assert.deepEqual((await held()).map((h) => h.state), ["held", "held"]);
 
   // PR 3: a fix-up-and-merge press; the PR is merged on GitHub at 10:00 and the pre-approval cancels itself after that.
-  const pre = Number((await w.db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, updated_at, fix_id, reason) VALUES ('app', 3, 'op', ?, 'rename', 'cancelled', 'sha3', '2026-01-02T10:05:00Z', 1, 'the PR was merged before the fix-up finished')").run(T0)).lastInsertRowid);
+  const pre = Number((await w.db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, updated_at, fix_id, reason) VALUES ('app', 3, 'op', ?, 'rename', 'cancelled', 'sha3', '2026-01-02T10:05:00Z', 1, 'the PR was merged before the fix-up finished') RETURNING id").get(T0) as { id: number }).id);
   await w.db.prepare("INSERT INTO held_followups (card_id, preapproval_id, repo, number, issue_repo, title, body, by, at, updated_at) VALUES (0, ?, 'app', 3, 'app', 'Follow-up of 3', 'Body.', 'op', ?, ?)").run(pre, T0, T0);
   await w.db.prepare("UPDATE items SET state = 'MERGED', merged_at = '2026-01-02T10:00:00Z' WHERE repo = 'app' AND number = 3").run();
   await w.db.prepare("UPDATE items SET state = 'MERGED' WHERE repo = 'app' AND number = 1").run();

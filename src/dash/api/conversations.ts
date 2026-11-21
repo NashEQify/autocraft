@@ -365,8 +365,8 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
     if (prior?.state === "failed" && /^outcome unknown/.test(prior.error ?? "")) throw new HttpError(409, "the last run of these choices stopped after some of its steps; Re-prepare, or tell Opus what to do next");
     failedBefore = prior?.state === "failed" ? prior : undefined;
     await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE choice_id = ? AND state = 'proposed'").run(row.id);
-    id = Number((await db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?)")
-      .run(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id)).lastInsertRowid);
+    id = Number((await db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?) RETURNING id")
+      .get(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id) as { id: number }).id);
     return undefined;
   });
   if (pressed) return await cardView(db, pressed, req.user);
