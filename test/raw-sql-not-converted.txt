@@ -281,7 +281,6 @@ src/github/webhooks.ts
 
 src/github/write.ts
 
-src/health-checks.ts
 
 src/health.ts
 
