@@ -28,9 +28,9 @@ const BASE_QUERY = `query($owner: String!, $name: String!, $n: Int!) { repositor
 
 export async function runFixupTry(db: Db, repo: string, number: number, d: FixupDeps = defaultDeps(), log: (line: string) => void = console.log): Promise<number> {
   const ref = `${repo}#${number}`;
-  const item = await db.prepare("SELECT head_oid, title FROM items WHERE repo = ? AND number = ? AND kind = 'pr'").get(repo, number) as { head_oid: string | null; title: string | null } | undefined;
+  const item = await db.get(db.k.selectFrom("items").select(["head_oid", "title"]).where("repo", "=", repo).where("number", "=", number).where("kind", "=", "pr"));
   if (!item?.head_oid) throw new Error(`${ref} is not a PR in the database`);
-  const review = await db.prepare("SELECT fixes, reason, verdict FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ? ORDER BY at DESC LIMIT 1").get(repo, number, item.head_oid) as { fixes: string | null; reason: string | null; verdict: string } | undefined;
+  const review = await db.get(db.k.selectFrom("final_reviews").select(["fixes", "reason", "verdict"]).where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", item.head_oid).orderBy("at", "desc").limit(1));
   if (!review) throw new Error(`${ref} has no review at its head ${item.head_oid.slice(0, 7)}`);
   if (review.verdict !== "take-fix") throw new Error(`the latest review of ${ref} at its head is ${review.verdict}, not take-fix`);
   const fixes = parseFixes(review.fixes);
@@ -63,8 +63,8 @@ export async function runFixupTry(db: Db, repo: string, number: number, d: Fixup
   }
   log(`${ref} at ${head.slice(0, 7)}: ${fixes.length} fixes in ${files.join(", ")}; ${checkout ? "sandbox checkout ready" : "NO checkout: the model runs without tools"}`);
 
-  const before0 = (await db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM agent_runs").get() as { n: number }).n;
-  const before = (await db.prepare("SELECT COALESCE(MAX(id), 0) AS n FROM model_checks").get() as { n: number }).n;
+  const before0 = (await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.max<number | null>("id"), eb.lit(0)).as("n"))))!.n;
+  const before = (await db.get(db.k.selectFrom("model_checks").select((eb) => eb.fn.coalesce(eb.fn.max<number | null>("id"), eb.lit(0)).as("n"))))!.n;
   const base = (await d.querier.query(BASE_QUERY, { owner: ownerOf(repo), name: repo, n: number }) as { repository?: { pullRequest?: { baseRefOid?: string } | null } }).repository?.pullRequest?.baseRefOid ?? null;
   const tool = new CheckTool({ db, step: "fixup", repo, number, head, base, applies: applyCheck(git, d.root, head, (p) => refusal(validatePatch(p, files, (x) => fixupEditable(x, scripts)))) });
   const t0 = Date.now();
@@ -73,11 +73,11 @@ export async function runFixupTry(db: Db, repo: string, number: number, d: Fixup
 
   const offered = checkout !== undefined && CLAUDE_PROMPTS["fixup.patch"].sandbox?.check === true;
   log(`\ntools given to the model: ${offered ? `${[...CLAUDE_PROMPTS["fixup.patch"].sandbox!.tools, "Agent", "mcp__build__check"].join(", ")} (check offered; commands that returned a result: ${[...tool.ran].join(", ") || "none"})` : "none (no checkout, so no sandbox and no check tool)"}`);
-  const runs = await db.prepare("SELECT id, summary FROM agent_runs WHERE prompt_id IN ('fixup.patch') AND id > ? ORDER BY id").all(before0) as { id: number; summary: string | null }[];
+  const runs = await db.all(db.k.selectFrom("agent_runs").select(["id", "summary"]).where("prompt_id", "in", ["fixup.patch"]).where("id", ">", before0).orderBy("id"));
   for (const r of runs) log(`model call: agent run ${r.id}: ${r.summary ?? "no summary"}`);
   log("tool calls:");
-  const calls = await db.prepare("SELECT command, crate, test_name, task_id, outcome, started_at, ended_at FROM model_checks WHERE id > ? AND step = 'fixup' AND repo = ? AND number = ? AND head = ? ORDER BY id").all(before, repo, number, head) as
-    { command: string; crate: string | null; test_name: string | null; task_id: number | null; outcome: string | null; started_at: string; ended_at: string | null }[];
+  const calls = await db.all(db.k.selectFrom("model_checks").select(["command", "crate", "test_name", "task_id", "outcome", "started_at", "ended_at"])
+    .where("id", ">", before).where("step", "=", "fixup").where("repo", "=", repo).where("number", "=", number).where("head", "=", head).orderBy("id"));
   if (!calls.length) log("  none");
   for (const c of calls) log(`  ${c.command}${c.crate ? ` -p ${c.crate}` : ""}${c.test_name ? ` ${c.test_name}` : ""}: ${c.outcome ?? "unfinished"} (task ${c.task_id ?? "none"}, ${c.ended_at ? Math.round((Date.parse(c.ended_at) - Date.parse(c.started_at)) / 1000) : "?"} s)`);
 

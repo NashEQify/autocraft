@@ -26,7 +26,7 @@ test("PRs found conflicting live go to the conflict merge and do not use up the 
     heads.set(n, head);
     await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head, head_ref: "fix", head_repo: "contrib/app", base_ref: "main",
       maintainer_can_modify: 1, mergeable: "UNKNOWN", created_at: T0, updated_at: T0 }));
-    await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take-fix', 'nearly right', ?, 1, 'full')`).run(n, head, FIXES);
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: n, head_oid: head, run_id: "rv", at: T0, model: "m", verdict: "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
   }
   const querier: Querier = validating({
     spent: 0, remaining: 5000,
