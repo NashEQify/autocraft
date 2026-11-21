@@ -900,22 +900,22 @@ export async function setEnabled(db: Db, enabled: boolean, by: string, mode: "of
 const STOP_WINDOW = 5000;
 
 /** Jobs the runner stopped for running past their step's limit that nobody has acknowledged and no later job of the step has beaten. */
-export async function deadlineStops(db: Db): Promise<{ step: string; jobId: number; error: string; endedAt: string; count: number }[]> {
+export async function deadlineStops(db: Db): Promise<{ step: string; jobId: number; error: string; endedAt: string | null; count: number }[]> {
   const floor = Number((await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m"))))!.m ?? 0) - STOP_WINDOW;
   const rows = await db.all(db.k.selectFrom("jobs").select(["step", "id", "error", "ended_at as endedAt"]).where("id", ">", floor).where("state", "=", "failed")
     .where((eb) => eb.or([kx.like(db, "error", eb.val("stopped: ran past %")), kx.like(db, "error", eb.val("stopped: no progress for %"))])).orderBy("id", "desc").$narrowType<{ error: string }>());
   const lastDone = (step: string) => db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.max<number | null>("id").as("m")).where("step", "=", step).where("state", "=", "done"));
   // The acknowledgement is an audit row, which the header's query refetches on and the planner does not.
   const acked = (target: string) => db.get(db.k.selectFrom("audit").select((eb) => eb.fn.max<string | null>("at").as("at")).where("action", "=", "deadline-ack").where("target", "=", target));
-  const out: { step: string; jobId: number; error: string; endedAt: string; count: number }[] = [];
+  const out: { step: string; jobId: number; error: string; endedAt: string | null; count: number }[] = [];
   const steps = [...new Set(rows.map((r) => r.step))];
   for (const step of steps) {
     const mine = rows.filter((r) => r.step === step), latest = mine[0]!;
     const done = Number((await lastDone(step))!.m ?? 0);
     if (done > latest.id) continue;
     const ack = (await acked(`step:${step}`))!.at;
-    if (ack && ack >= (latest.endedAt ?? "")) continue;
-    out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt ?? "", count: mine.filter((r) => r.id > done).length });
+    if (ack && latest.endedAt !== null && ack >= latest.endedAt) continue;
+    out.push({ step, jobId: latest.id, error: latest.error, endedAt: latest.endedAt, count: mine.filter((r) => r.id > done).length });
   }
   return out;
 }
