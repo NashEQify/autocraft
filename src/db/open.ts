@@ -124,11 +124,20 @@ export async function connectDb(target: string = dbTarget(), opts: ConnectOption
   return db;
 }
 
-let proc: Promise<Db> | undefined;
+let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
 
-/** The process's handle on the configured database. */
-export function openDb(): Promise<Db> {
-  return (proc ??= connectDb());
+/**
+ * The process's handle on the configured database. It is shared by everything in the process, so its `close()` does
+ * nothing: a module that closes the handle it was given must not end it for the job or server still using it. Only
+ * `closeDb()` closes it.
+ */
+export async function openDb(): Promise<Db> {
+  proc ??= connectDb().then((db) => {
+    const close = db.close.bind(db);
+    db.close = async () => {};
+    return { db, close };
+  });
+  return (await proc).db;
 }
 
 /** Closes the process's handle (CLI exit). */

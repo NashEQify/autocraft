@@ -192,7 +192,8 @@ export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: nu
  * Each step copies the pristine tree into its own /src (the container runtime's "writes are dropped after the step") and runs
  * under `timeout`: exit 124 is a timeout, 137 a kill after the 10 s grace.
  */
-export const STEP_WRAPPER = 'cp -a /pristine/. /src/ || { echo "could not copy the source tree" >&2; exit 125; }; t=$1; shift; exec timeout -k 10 "$t" "$@"';
+// The children are copied, not `/pristine/.`: /src is a mount point the pod's user doesn't own, so cp could not set its times.
+export const STEP_WRAPPER = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }; t=$1; shift; exec timeout -k 10 "$t" "$@"';
 /** Fails before any step when the toolchain image lacks a package the repo's CI gate installs: pod mode cannot add packages. */
 export const PACKAGES_CHECK = "missing=''; for p in \"$@\"; do dpkg-query -W -f='${Status}' \"$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"$missing $p\"; done; " +
   "if [ -n \"$missing\" ]; then echo \"the toolchain image lacks packages the CI gate installs:$missing (build pods cannot install packages)\" | tee /dev/termination-log >&2; exit 3; fi";
