@@ -6,8 +6,12 @@
 #   scripts/pg-test.sh run [--latency MS] [test files...]
 #       starts one, runs the test files (default: the Postgres tests) with AUTOCRAFT_TEST_PG_URL set, removes it.
 #       --latency routes the connections through scripts/latency-proxy.ts with MS each way (10 if no number follows).
+#   scripts/pg-test.sh suite [--concurrency N] [test files...]
+#       starts one, runs the test files (default: the whole suite) on it with test/pg-suite-preload.ts loaded, so every
+#       connectDb on a SQLite path opens a Postgres database (test/pg-suite.ts); prints the totals and the failures per
+#       file (scripts/pg-suite-report.ts), writes the spec output to a log, removes the container.
 #
-# `pnpm test:pg` is `run`.
+# `pnpm test:pg` is `run`; `pnpm test:pg:suite` is `suite`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -74,9 +78,34 @@ run() {
   AUTOCRAFT_TEST_PG_URL="$url" node --test --no-warnings "${files[@]}"
 }
 
+suite() {
+  local conc="" files=()
+  while (($#)); do
+    case "$1" in
+      --concurrency) conc="${2:?--concurrency needs a number}"; shift ;;
+      *) files+=("$1") ;;
+    esac
+    shift
+  done
+  local out url log
+  out=$(start)
+  id=${out%% *}
+  url=${out#* }
+  trap 'stop "$id"' EXIT
+  log=$(mktemp "${TMPDIR:-/tmp}/pg-suite-XXXXXX.log")
+  echo "pg-test: container ${id:0:12}, spec output in $log" >&2
+  # NODE_OPTIONS, not a node flag: processes the tests spawn (the CLI, workers' children) redirect too.
+  AUTOCRAFT_TEST_PG_URL="$url" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--import=$PWD/test/pg-suite-preload.ts" \
+    node --test --no-warnings ${conc:+--test-concurrency="$conc"} \
+      --test-reporter=spec --test-reporter-destination="$log" \
+      --test-reporter="$PWD/scripts/pg-suite-report.ts" --test-reporter-destination=stdout \
+      "${files[@]}"
+}
+
 case "${1:-}" in
   start) start ;;
+  suite) shift; suite "$@" ;;
   stop) stop "${2:?container id}" ;;
   run) shift; run "$@" ;;
-  *) sed -n '2,10p' "$0" >&2; exit 2 ;;
+  *) sed -n "2,14p" "$0" >&2; exit 2 ;;
 esac

@@ -5,13 +5,21 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
+import { connect } from "../src/db.ts";
 import { connectDb, dbFor } from "../src/db/open.ts";
+import { pgSuite } from "./pg-suite.ts";
 
 /** The Postgres server tests run against, if any. */
 export const TEST_PG_URL = process.env.AUTOCRAFT_TEST_PG_URL || undefined;
 
 /** `skip` option for tests that need Postgres: false when a server is configured, otherwise the reason shown. */
 export const needsPg: false | string = TEST_PG_URL ? false : "needs Postgres: AUTOCRAFT_TEST_PG_URL is not set (pnpm test:pg runs these against a container)";
+
+/**
+ * `skip` option for tests that need SQLite itself (a raw DatabaseSync, db.sync, sqlite_master, VACUUM, copying the
+ * file): false normally, the reason when the suite runs on Postgres (`pnpm test:pg:suite`, test/pg-suite.ts).
+ */
+export const sqliteOnly = (reason: string): false | string => (pgSuite ? `SQLite only: ${reason}` : false);
 
 export interface TestDatabase {
   readonly dialect: Db["dialect"];
@@ -40,7 +48,8 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
   if (dialect === "sqlite") {
     const file = join(SCRATCH, `test-db-${process.pid}-${n++}.db`);
     const open = async (opts: { busyTimeoutMs?: number; app?: boolean } = {}) => {
-      if (opts.app) return track(await connectDb(file, { busyTimeoutMs: opts.busyTimeoutMs }));
+      // connect(), not connectDb(): an explicit SQLite database stays SQLite under the Postgres suite.
+      if (opts.app) return track(await dbFor(connect(file, { busyTimeoutMs: opts.busyTimeoutMs })));
       const sync = new DatabaseSync(file, { timeout: opts.busyTimeoutMs ?? 5000 });
       sync.exec("PRAGMA journal_mode=WAL");
       return track(await dbFor(sync));

@@ -9,8 +9,9 @@ import { planned } from "../src/core/select.ts";
 import { carriedReview } from "../src/review/carry.ts";
 import { prFacts } from "./world.ts";
 import { connectDb, dbFor } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
-test("selection order: our broken push, then work in flight, then score", async () => {
+test("selection order: our broken push, then work in flight, then score", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const mk = (n: number, over: Parameters<typeof prFacts>[0]) => { const facts = prFacts({ number: n, review: { head: "old" }, head: "h", ...over }); return { facts, plan: decidePr(facts) }; };
   const plans: PlanSet = {
     run: null, now: 0, pass: { rereadPaceAt: 0 }, items: [],

@@ -22,7 +22,8 @@
     "pg-schema": "node scripts/gen-pg-schema.ts",
     "pg-schema:check": "node scripts/gen-pg-schema.ts --check",
     "test": "node --test",
-    "test:pg": "scripts/pg-test.sh run"
+    "test:pg": "scripts/pg-test.sh run",
+    "test:pg:suite": "scripts/pg-test.sh suite"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

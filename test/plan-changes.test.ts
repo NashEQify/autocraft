@@ -17,6 +17,7 @@ import { world } from "./world-db.ts";
 import { everySeq, filterSeq } from "../src/async-seq.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-changes-"));
@@ -81,7 +82,7 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   await db.close();
 });
 
-test("every table the fact loaders read is classified", async () => {
+test("every table the fact loaders read is classified", { skip: sqliteOnly("reads sqlite_master") }, async () => {
   const db = await connectDb(join(dir, "reads.db"));
   const tables = (await db.prepare("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all() as { name: string; type: string; sql: string }[]);
   const views = new Map(tables.filter((t) => t.type === "view").map((t) => [t.name, t.sql]));

@@ -23,12 +23,13 @@ import { setMaintainerWrites } from "../src/settlers.ts";
 import { PROTOCOL_VERSION, ROUTES, type LoginStartReply, type PendingRunnerLogin } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "runner-credentials-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test("older tokens a helper used become runners, the others connectors, and can_run follows the kind", async () => {
+test("older tokens a helper used become runners, the others connectors, and can_run follows the kind", { skip: sqliteOnly("splitRunnerTokens on db.sync") }, async () => {
   const db = await connectDb(join(dir, "split.db"));
   const now = new Date().toISOString();
   const token = async (label: string, canRun: number) =>

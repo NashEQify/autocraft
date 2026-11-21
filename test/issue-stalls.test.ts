@@ -6,6 +6,7 @@ import { decideItem } from "../src/core/decide-item.ts";
 import { issuesWithOpenPr, textRefs } from "../src/fixissue/candidates.ts";
 import { itemFacts } from "./world.ts";
 import { connectDb, dbFor } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 const attempt = (state: string) => ({ state, textChanged: false, headDone: false, baseDone: true });
@@ -48,7 +49,7 @@ test("an open PR waits the issue whatever its fix attempt state, and a mention s
   assert.equal(mention.wait, "open PR #9 mentions it");
 });
 
-test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", async () => {
+test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const db = await dbFor(new DatabaseSync(":memory:"));
   await db.script("CREATE TABLE items (repo TEXT, number INTEGER, kind TEXT, state TEXT, author TEXT, title TEXT, body TEXT, closing_issues TEXT, text_refs TEXT)");
   const add = db.prepare("INSERT INTO items (repo, number, kind, state, author, title, body, closing_issues) VALUES ('app', ?, 'pr', 'OPEN', ?, ?, ?, ?)");
