@@ -215,9 +215,9 @@ export function topOf(probs: string | null): number | null {
 // Items without a Jev or Haiku verdict have no row ("unclassified"). Classifiers only
 // insert (INSERT OR REPLACE gives a new rowid), so verdicts with a rowid above
 // the last one seen are applied item by item; a new run or fewer rows than
-// expected rebuilds the table.
+// expected rebuilds the table. The last run and rowid seen are kept in temp.item_settled_seen beside the table, so a
+// read that rolls back (and a CREATE TEMP TABLE with it) takes both back together.
 type Seen = { run: string | null; maxRowid: number; count: number };
-const seen = new WeakMap<Db, Seen>();
 
 type VerdictRow = { repo: string; number: number; jl: string | null; jf: string | null; probs: string | null; hl: string | null; hf: string | null; sl: string | null; ss: number | null; sr: string | null; sf: number | null; sx: number | null };
 // Items with a Jev or a Haiku verdict: Haiku alone settles an item when Jev was unavailable.
@@ -239,11 +239,12 @@ export function settledTable(db: Db, run: string | null): Promise<void> {
 
 async function refreshSettled(db: Db, run: string | null): Promise<void> {
   const now = await db.prepare("SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS count FROM main.classifications").get() as { maxRowid: number; count: number };
-  const prev = seen.get(db);
-  if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
   await db.script(`CREATE TEMP TABLE IF NOT EXISTS item_settled (repo TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, label TEXT,
     source TEXT, top REAL, jev_label TEXT, haiku_label TEXT, flags TEXT NOT NULL, security INTEGER NOT NULL, needs_decision INTEGER NOT NULL,
-    referee_label TEXT, referee_sure INTEGER, referee_reason TEXT, referee_final INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo, number))`);
+    referee_label TEXT, referee_sure INTEGER, referee_reason TEXT, referee_final INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo, number));
+    CREATE TEMP TABLE IF NOT EXISTS item_settled_seen (id INTEGER PRIMARY KEY CHECK (id = 1), run TEXT, max_rowid INTEGER NOT NULL, count INTEGER NOT NULL)`);
+  const prev = await db.prepare("SELECT run, max_rowid AS maxRowid, count FROM temp.item_settled_seen WHERE id = 1").get() as Seen | undefined;
+  if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
   const rows: unknown[][] = [];
   const put = (r: VerdictRow) => {
     const ref = r.sl !== null && r.ss !== null ? { label: r.sl, sure: !!r.ss, reason: r.sr ?? "", ...(r.sf ? { final: true } : {}), ...(r.sx ? { failures: r.sx } : {}) } : null;
@@ -276,7 +277,7 @@ async function refreshSettled(db: Db, run: string | null): Promise<void> {
     if (run) for (const r of await db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
   }
   await insertAll();
-  seen.set(db, { run, ...now });
+  await db.prepare("INSERT OR REPLACE INTO temp.item_settled_seen (id, run, max_rowid, count) VALUES (1, ?, ?, ?)").run(run, now.maxRowid, now.count);
 }
 
 export type SettledRow = {
