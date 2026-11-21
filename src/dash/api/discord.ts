@@ -47,7 +47,7 @@ const operator = (req: Req): void => {
 const body = (req: Req): Record<string, unknown> => (req.json && typeof req.json === "object" ? (req.json as Record<string, unknown>) : {});
 
 async function setupOf(db: Db): Promise<DiscordSetup> {
-  const st = await db.get(db.k.selectFrom("discord_status").select(["state", "detail", "at"]).where("id", "=", 1)) as { state: DiscordSetup["state"]; detail: string | null; at: string } | undefined;
+  const st = await db.get(db.k.selectFrom("discord_status").select(["state", "detail", "at"]).where("id", "=", 1).$narrowType<{ state: DiscordSetup["state"] }>());
   const channels = await db.all(db.k.selectFrom("discord_channels as c")
     .leftJoin("discord_categories as k", (j) => j.onRef("k.category_id", "=", "c.category_id").onRef("k.guild_id", "=", "c.guild_id"))
     .select(["c.channel_id as channelId", "c.guild_id as guildId", "c.guild_name as guildName", "c.name", "c.watched", "c.default_repo as defaultRepo", "k.name as category"])
