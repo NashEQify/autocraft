@@ -136,7 +136,7 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     const ctx: ParseCtx = { attempt, last: attempt === attempts - 1, ...("text" in r ? { problems: r.problems, fixTurn: r.fixTurn } : { code: r.code }) };
     if ("answers" in r && !r.json) { error = "unreadable answer"; continue; }
     const reply = ("text" in r ? r.text : r.answers) as never;
-    let parsed = (step as { parse: (a: never, i: I, c: ParseCtx, x: C) => Parsed<I, V> | null }).parse(reply, todo, ctx, opts.ctx as C);
+    let parsed = await (step as { parse: (a: never, i: I, c: ParseCtx, x: C) => Parsed<I, V> | null | Promise<Parsed<I, V> | null> }).parse(reply, todo, ctx, opts.ctx as C);
     if (parsed && "text" in r && r.problems?.length && (step as ClaudeStep<I, V>).lint?.onFail === "retry") parsed = null;
     if (!parsed) {
       error = "no valid answer";

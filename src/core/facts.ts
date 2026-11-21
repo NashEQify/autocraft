@@ -106,13 +106,13 @@ const SELECT = `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i
     OR EXISTS (SELECT 1 FROM merges mm WHERE mm.repo = i.repo AND mm.number = i.number AND mm.outcome = 'merged'))`;
 
 /** The statements named by the given stored `conflicts` values (JSON [{id, reason}]), one entry per id with the first reason; unknown ids and unreadable values count for nothing. */
-function statementConflicts(find: { get(id: number): unknown }, stored: unknown[]): PrFacts["statementConflicts"] {
+async function statementConflicts(find: { get(id: number): Promise<unknown> }, stored: unknown[]): Promise<PrFacts["statementConflicts"]> {
   const out: PrFacts["statementConflicts"] = [];
   for (const v of stored) {
     if (!Array.isArray(v)) continue;
     for (const h of v as { id?: unknown; reason?: unknown }[]) {
       if (typeof h?.id !== "number" || out.some((d) => d.id === h.id)) continue;
-      const d = find.get(h.id) as { id: number; repo: string; number: number | null; text: string } | undefined;
+      const d = await find.get(h.id) as { id: number; repo: string; number: number | null; text: string } | undefined;
       if (d) out.push({ id: d.id, where: d.number === null ? d.repo : `${d.repo}#${d.number}`, text: d.text, reason: typeof h.reason === "string" ? h.reason : "" });
     }
   }
@@ -402,7 +402,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     base.sensitive = diffFacts ? (diffFacts.pending ? [...diffFacts.reasons, EXTRAS_PENDING_REASON] : diffFacts.reasons) : null;
     if (diffFacts?.pending) base.diffPending = { lastRead: diffFacts.lastRead };
     if (diffFacts) { base.lines = diffFacts.lines; base.size = sizeOf(diffFacts.lines); }
-    base.statementConflicts = statementConflicts(statement, [safeJson(r.r_conflicts), safeJson(premerge.get(`${ref}@${r.r_head}`)?.conflicts ?? null)]);
+    base.statementConflicts = await statementConflicts(statement, [safeJson(r.r_conflicts), safeJson(premerge.get(`${ref}@${r.r_head}`)?.conflicts ?? null)]);
     const p = posts.get(ref);
     // A carried review has no text of its own: the post uses the text of the review it was carried from.
     const src = r.r_mode === CARRIED ? await postSource(r.repo, r.number, r.r_head) : null;

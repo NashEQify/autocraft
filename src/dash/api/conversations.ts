@@ -299,6 +299,25 @@ function choiceBody(req: Req): { core: CoreKey; params: { reason?: string; instr
  * show as edited; a maintainer may not edit fix-up instructions.
  */
 export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<ConversationCard> {
+  const key = req.params.id!;
+  const before = pressing.get(key) ?? Promise.resolve();
+  let release!: () => void;
+  const mine = new Promise<void>((r) => { release = r; });
+  pressing.set(key, mine);
+  try {
+    await before;
+    return await pressChoices(db, req, release, deps);
+  } finally {
+    release();
+    if (pressing.get(key) === mine) pressing.delete(key);
+  }
+}
+
+// A press inserts its card and claims it only in doCard, after other awaits; a second press of the same choices let in between
+// would replace the first one's card. So in this process a press waits until the one before it has claimed its card or ended.
+const pressing = new Map<string, Promise<void>>();
+
+async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDeps): Promise<ConversationCard> {
   const row = await choicesById(db, req.params.id!);
   if (!row) throw new HttpError(404, `no choices ${req.params.id}`);
   await needVisible(db, req, row.repo);
@@ -335,7 +354,7 @@ export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<Conver
   const probe = { repo: row.repo } as CardRow;
   await requireSettle(db, req.user, cardRepos(probe, v.card.params), "runs choices");
 
-  // The press is claimed here, with no await between the check and the insert: a second press that got this far sees the first one's card.
+  // The press is claimed here, in one transaction with the check: a press from another process that got this far sees this one's card.
   let id = 0;
   let failedBefore: CardRow | undefined;
   const pressed = await db.write(async () => {
@@ -374,7 +393,7 @@ export async function doChoice(db: Db, req: Req, deps?: ActDeps): Promise<Conver
   const alreadyDone = doneAt.length < allSteps.length || (v.card.params.kind === "resolution" && v.card.params.settle) ? doneAt : [];
   let ran;
   try {
-    ran = await guardAsync(() => doCard(db, id, req.user.login, { ...deps, skip: alreadyDone, note: body.note, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }));
+    ran = await guardAsync(() => doCard(db, id, req.user.login, { ...deps, claimed, skip: alreadyDone, note: body.note, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }));
   } catch (e) {
     // Refused before the claim (lane, approval): the card never ran and must not stay proposed.
     await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);

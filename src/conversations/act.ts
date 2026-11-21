@@ -38,7 +38,7 @@ export type CardRow = {
 };
 
 /** `canWrite` is the signed-in operator's write access to a repo; the shell has none to check. */
-export type ActDeps = StoreDeps & { querier?: Querier; /** Runs `gh` for the open_issue step. */ exec?: Exec; canWrite?: (repo: string) => Promise<boolean>; /** Indexes into a resolution's steps the operator removed. */ skip?: number[]; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** The note with the choice. */ note?: string; /** The presser's role, named in the conversation block (default operator). */ role?: string; /** The presser is not an operator: the note is stored and shown but never put in the model's block. */ noteStaysOut?: boolean; /** Set by the Act step's drain: run the queued card as its presser pressed it. */ drain?: boolean };
+export type ActDeps = StoreDeps & { querier?: Querier; /** Runs `gh` for the open_issue step. */ exec?: Exec; canWrite?: (repo: string) => Promise<boolean>; /** Indexes into a resolution's steps the operator removed. */ skip?: number[]; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** The note with the choice. */ note?: string; /** The presser's role, named in the conversation block (default operator). */ role?: string; /** The presser is not an operator: the note is stored and shown but never put in the model's block. */ noteStaysOut?: boolean; /** Set by the Act step's drain: run the queued card as its presser pressed it. */ drain?: boolean; /** Called once the press has claimed the card (running or queued). */ claimed?: () => void };
 
 export const cardOf = async (db: Db, id: number): Promise<CardRow | undefined> =>
   await db.prepare("SELECT * FROM conversation_cards WHERE id = ?").get(id) as CardRow | undefined;
@@ -601,6 +601,7 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   }
   if (claimed === "busy") return { card: c, ran: false };
   if (claimed === "lost") return { card: await need(db, id), ran: false };
+  deps.claimed?.();
   if (claimed.queued) {
     await audit(db, by, "conversation-card-queue", ref(c.repo, c.number), { card: id, kind: c.kind });
     await insertTurn(db, c.repo, c.number, {
