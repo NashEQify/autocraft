@@ -534,14 +534,14 @@ describe("CI fix journey", () => {
 
     const s0 = await runCifix(w.db, { repo: "app", dryRun: false }, quiet, git.cifixDeps(w));
     assert.deepEqual(s0.pushed, []);
-    assert.deepEqual(await w.rows("SELECT state FROM ci_fixes"), [{ state: "linting" }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("ci_fixes").select("state")), [{ state: "linting" }]);
     await endLint(w, ((await w.rows("SELECT id FROM build_tasks"))[0] as { id: number }).id);
     const s = await runCifix(w.db, { repo: "app", dryRun: false }, quiet, git.cifixDeps(w));
     assert.deepEqual(s.pushed, ["app#1"]);
     const pushed = git.branchHead();
     assert.notEqual(pushed, git.head);
     assert.deepEqual(git.pushes, [{ lease: git.head, to: pushed }]);
-    assert.deepEqual(await w.rows("SELECT kind, state, head, to_head FROM ci_fixes"), [{ kind: "code", state: "pushed", head: git.head, to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("ci_fixes").select(["kind", "state", "head", "to_head"])), [{ kind: "code", state: "pushed", head: git.head, to_head: pushed }]);
     assert.equal(w.gh.writesOf("merge").length, 0);
   });
 });

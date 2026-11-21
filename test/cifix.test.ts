@@ -22,6 +22,7 @@ import { validating } from "./gql.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { rowid } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "cifix-test-"));
@@ -210,7 +211,6 @@ function world(opts: { log?: string; reply?: string | null; check?: string | nul
 }
 
 const spreadDiff = (path: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n` + Array.from({ length: 24 }, (_, i) => 1 + i * 250).map((n) => `@@ -${n} +${n} @@\n-x\n+fn f${n}() {}\n`).join("");
-const rows = async (db: Db, sql: string) => (await db.prepare(sql).all() as Record<string, unknown>[]).map((r) => ({ ...r }));
 
 describe("code failure", () => {
   test("a file over the size limit fails without a checkout and is listed by path alone with one", async () => {
@@ -341,7 +341,7 @@ test("a stored patch whose comment did not reach GitHub is posted again after th
     const db = await fresh(w.head, { canModify: false, comment: true });
     const out: string[] = [];
     const run = () => runCifix(db, { repo: "app", dryRun: false }, (l) => out.push(l), w.deps);
-    const states = async () => (await rows(db, "SELECT state FROM ci_fixes ORDER BY rowid")).map((r) => r.state);
+    const states = async () => (await db.all(db.k.selectFrom("ci_fixes").select("state").orderBy(rowid("ci_fixes")))).map((r) => r.state);
     const comments = () => w.log.filter((l) => l.startsWith("comment:")).length;
     await run();
     assert.deepEqual(await states(), ["linting"], out.join("\n"));
