@@ -238,13 +238,9 @@ src/itemhash.ts
 
 
 
-src/memory/retrieve.ts
 
-src/memory/statements.ts
 
-src/merge/approval.ts
 
-src/merge/base.ts
 
 
 

@@ -12,7 +12,7 @@ import { T0, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
-const answerOf = async (w: World, n: number, head: string) => await w.rows("SELECT answer FROM decisions WHERE id = ?", mergeDecisionId("app", n, head));
+const answerOf = async (w: World, n: number, head: string) => await w.db.all(w.db.k.selectFrom("decisions").select("answer").where("id", "=", mergeDecisionId("app", n, head)));
 
 test("a retarget makes the review stale like a push, and the re-review against the new base voids the old base's answer and pre-merge review", async () => {
   const w = (current = await (await (await (await (await (await world()).repo()).pr(1)).review(1)).answer(1, "merge")).premerge(1, "clean"));

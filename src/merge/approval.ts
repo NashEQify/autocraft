@@ -20,10 +20,10 @@ export async function mergeApprovalOf(db: Db, repo: string): Promise<MergeApprov
 
 // Returns false when nothing changed.
 export async function setMergeApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {
-  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", repo))) throw new Error(`${repo} is not tracked`);
   if ((await mergeApprovalOf(db, repo) !== null) === approved) return false;
-  if (approved) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
-  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  if (approved) await db.run(db.k.insertInto("main.settings").values({ key: key(repo), value: JSON.stringify({ by, at: new Date().toISOString() }) }));
+  else await db.run(db.k.deleteFrom("main.settings").where("key", "=", key(repo)));
   await audit(db, by, approved ? "merge-approve" : "merge-revoke", repo);
   return true;
 }
