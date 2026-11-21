@@ -15,7 +15,8 @@ import { isPublicRepo } from "../public/status.ts";
 import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-ask.ts";
 import { failReporter, forgetReporterRow, newReporterState, readReporter, reporterToken } from "./reporter.ts";
 import type { Db } from "../db/index.ts";
-import { jsonText } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
+import type { SelectQueryBuilder } from "kysely";
 
 /** Filing from Discord under the person's account is built but off: the sign-in needs a Discord identity step first, so a forwarded sign-in link cannot link someone else's GitHub account. While off, the draft offers only the prefilled GitHub link and the sign-in routes answer 404. */
 export const FILING_IN_DISCORD = false;
@@ -94,7 +95,7 @@ async function junkCheck(db: Db, a: JunkAsk, judge: NonNullable<FileHooks["judge
     return "unknown";
   } finally {
     try {
-      await db.prepare("DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-issue' AND state <> 'running')").run();
+      await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", "discord-issue").where("state", "<>", "running")));
     } catch (e) { log(`discord: removing junk texts failed: ${(e as Error).message}`); }
   }
 }
@@ -108,7 +109,7 @@ function secretsOf(env = process.env): { box: TokenBox; provider: Provider } | n
   }
 }
 
-const count = async (db: Db, sql: string, ...args: (string | number)[]): Promise<number> => Number((await db.prepare(sql).get(...args) as { c: number }).c);
+const count = async (db: Db, q: SelectQueryBuilder<any, any, { c: number }>): Promise<number> => Number((await db.get(q))!.c);
 
 export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHooks = {}): Promise<FileResult> {
   const { db, log } = deps;
@@ -128,12 +129,12 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
   if (!tok.ok) return { status: "refused", reason: "GitHub did not answer. Try again in a minute." };
 
   const since = new Date(now - DAY_MS).toISOString();
-  await db.prepare("DELETE FROM discord_filed WHERE at < ?").run(since);
-  if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE login = ? AND at >= ?", tok.login, since) >= PER_LOGIN) return { status: "refused", reason: `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.` };
-  if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE repo = ? AND at >= ?", req.repo, since) >= PER_REPO) return { status: "refused", reason: "This repo has reached its limit of issues filed from Discord today." };
-  if (await count(db, `SELECT COUNT(*) AS c FROM audit WHERE action = ? AND at >= ? AND ${jsonText(db, "details", "$.state")} <> 'failed'`, AUDIT_ACTION, since) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
+  await db.run(db.k.deleteFrom("discord_filed").where("at", "<", since));
+  if (await count(db, db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("c")).where("login", "=", tok.login).where("at", ">=", since)) >= PER_LOGIN) return { status: "refused", reason: `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.` };
+  if (await count(db, db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("c")).where("repo", "=", req.repo).where("at", ">=", since)) >= PER_REPO) return { status: "refused", reason: "This repo has reached its limit of issues filed from Discord today." };
+  if (await count(db, db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("c")).where("action", "=", AUDIT_ACTION).where("at", ">=", since).where(kx.jsonText(db, "details", "$.state"), "<>", "failed")) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
   // The slot is reserved before any await, so parallel sessions of one person cannot pass the limit together; every failure below frees it.
-  const slot = Number((await db.prepare("INSERT INTO discord_filed (repo, number, login, reporter, at) VALUES (?, 0, ?, ?, ?) RETURNING rowid").get(req.repo, tok.login, req.reporter, new Date(now).toISOString()) as { rowid: number }).rowid);
+  const slot = Number((await db.get(db.k.insertInto("discord_filed").values({ repo: req.repo, number: 0, login: tok.login, reporter: req.reporter, at: new Date(now).toISOString() }).returning(kx.rowid("discord_filed").as("rowid"))))!.rowid);
   let filed = false;
   try {
     const junk = await junkCheck(db, { title, body }, hooks.judge ?? modelJudge, log);
@@ -157,12 +158,12 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
       return { status: "refused", reason: "GitHub did not accept the issue." };
     }
     filed = true;
-    await db.prepare("UPDATE discord_filed SET number = ? WHERE rowid = ?").run(made.number, slot);
+    await db.run(db.k.updateTable("discord_filed").set({ number: made.number }).where(kx.rowid("discord_filed"), "=", slot));
     // A label is a courtesy: GitHub refuses it when the repo has no such label or the account may not set labels.
     await labelReporterIssue(w, asUser, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
     return { status: "filed", number: made.number, url: made.url, login: tok.login };
   } finally {
-    if (!filed) await db.prepare("DELETE FROM discord_filed WHERE rowid = ?").run(slot);
+    if (!filed) await db.run(db.k.deleteFrom("discord_filed").where(kx.rowid("discord_filed"), "=", slot));
   }
 }
 

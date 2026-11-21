@@ -180,14 +180,10 @@ src/decide/choices-parse.ts
 
 src/decide/choices.ts
 
-src/decide/decision.ts
-
-src/decide/index.ts
-
-src/decide/judgement.ts
 
 
-src/decide/prepared.ts
+
+
 
 src/decisions-used.ts
 
@@ -195,11 +191,8 @@ src/decisions.ts
 
 src/discord/alerts.ts
 
-src/discord/file-issue.ts
 
-src/discord/index.ts
 
-src/discord/issue-new.ts
 
 src/discord/links.ts
 
