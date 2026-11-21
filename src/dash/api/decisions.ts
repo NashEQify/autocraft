@@ -4,6 +4,7 @@
 // it in a conversation (`<included>` blocks, src/conversations/store.ts).
 import { preparedEarlier, preparing, prepareStates, type PrepareState } from "../../decide/prepared.ts";
 import { priorityOf } from "../../priority/read.ts";
+import type { Level } from "../../priority/score.ts";
 import type {
   Claim, Classification, Decision, ExecState, ItemShown, DecisionComment, DecisionKind, DecisionList, DuplicateMember, ItemState, OpenDecisionCounts, Opinion, QueueSlot, RelatedItem, Relation,
 } from "../../../web/src/api/types.ts";
@@ -138,10 +139,7 @@ function latestClassifications(all: ClassRow[]): Classification[] {
   }));
 }
 
-/**
- * The two relations that have no index, read once for a page: classifier duplicates by their original, and PRs by the issues they close ("repo#number" -> numbers).
- * The PR read uses the covering partial index `items_closing`.
- */
+// The two relations that have no index, read once for a page: classifier duplicates by their original, and PRs by the issues they close ("repo#number" -> numbers).
 export type RelatedIndex = { duplicatedBy: Map<string, number[]>; linkedBy: Map<string, number[]> };
 export async function relatedIndex(db: Db): Promise<RelatedIndex> {
   const duplicatedBy = new Map<string, number[]>();
@@ -363,8 +361,8 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
       pushTo(page.classes, `${repo}#${number}`, row);
     }
     for (const a of await db.all(db.k.selectFrom("item_areas").select(["repo", "number", "area"]).where(kx.refIn(db, "item_areas", refs)))) page.areas.set(keyOf(a), a.area);
-    for (const p of await db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).where(kx.refIn(db, "item_priority", refs))))
-      page.priority.set(keyOf(p), { level: p.impact as NonNullable<Awaited<ReturnType<typeof priorityOf>>>["level"], model: p.model, reason: p.reason });
+    for (const p of await db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).$narrowType<{ impact: Level }>().where(kx.refIn(db, "item_priority", refs))))
+      page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
   }
   const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h] as [string, number, string]] : []; });
   if (heads.length) for (const o of await db.all(db.k.selectFrom("opus_reviews").select(["repo", "number", "head_oid", "risks"])
