@@ -84,16 +84,16 @@ type Row = {
 const parseList = (s: string | null): unknown[] => { try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; } };
 const safeJson = (s: string | null): unknown => { try { return JSON.parse(s!); } catch { return null; } };
 
-const SELECT = `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i.assignees, i.state, i.review_decision, i.head_oid, i.updated_at, i.is_draft, i.additions, i.deletions, i.mergeable AS i_mergeable,
+const select = (db: Db): string => `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i.assignees, i.state, i.review_decision, i.head_oid, i.updated_at, i.is_draft, i.additions, i.deletions, i.mergeable AS i_mergeable,
     i.head_repo, i.head_ref, i.base_ref, i.maintainer_can_modify AS i_can,
     c.head_oid AS c_head, c.fetched_at AS c_at, c.state AS c_state, c.is_draft AS c_draft, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS c_checks, c.mergeable AS c_mergeable, c.maintainer_can_modify AS c_can,
     l.head_oid AS r_head, l.at AS r_at, l.verdict AS r_verdict, l.sure AS r_sure, l.mode AS r_mode, l.reason AS r_reason, l.fixes AS r_fixes, CASE WHEN l.public_review IS NULL THEN NULL WHEN json_valid(l.public_review) AND json_type(l.public_review, '$.summary') = 'text'
       AND json_type(l.public_review, '$.points') = 'array' THEN json_extract(l.public_review, '$.summary') ELSE '' END AS r_public, l.conflicts AS r_conflicts,
     df.reasons AS d_reasons, df.lines AS d_lines, df.pending AS d_pending, df.last_read AS d_last_read,
     ${fastScoreSql("i.repo", "i.number", "p.score")} AS score,
-    ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration,
+    ${pilotSql(db, "i")} AS in_pilot, ${notOwnIntegrationSql(db, "i")} AS not_integration,
     EXISTS (SELECT 1 FROM main.merge_batches mb WHERE mb.repo = i.repo AND mb.pr_number = i.number) AS batch_pr,
-    ${backlogHeldSql("i")} AS held_backlog,
+    ${backlogHeldSql(db, "i")} AS held_backlog,
     (EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = i.repo AND dh.number = i.number AND (dh.answer IS NULL OR dh.answer = 'close'))
       OR ${groupHeldSql("i")}) AS held_dup
   FROM items i
@@ -144,7 +144,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
   const refs = opts.refs ? [...opts.refs] : undefined;
   if (refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(refs); }
-  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  const rows = await db.prepare(`${select(db)}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
 
   // Values read once for all PRs.
   const run = opts.run !== undefined ? opts.run : await latestRun(db);
@@ -272,7 +272,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   // OPEN_QUESTION_SQL for every PR.
   const openQuestion = await keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.kind = 'merge' AND d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' /*narrow*/", "d");
   // The settled Merge answers, by decision id: when they were given.
-  const mergeAnsweredAt = new Map((await db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql("decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
+  const mergeAnsweredAt = new Map((await db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql(db, "decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
   const answeredAfter = (id: string, at: string): boolean => { const a = mergeAnsweredAt.get(id); return a !== undefined && a > at; };
   const pushChain = await pushChainOf(db);
   const ownHead = await ownHeadOf(db);

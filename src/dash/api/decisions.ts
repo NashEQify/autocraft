@@ -478,11 +478,11 @@ export function withoutHidden(hidden: HiddenRepos, params: Record<string, string
  * SQL for the decisions a person has to look at (decisions unaliased): open ones they can settle, plus the disputes and unsettled answers they resolve
  * (src/answers/hold.ts). `everything` leaves out the can-settle test, for a view of all open questions; viewers always get it.
  */
-export function needingSql(req: Req, everything = false): string {
+export function needingSql(db: Db, req: Req, everything = false): string {
   // A viewer settles nothing, so a can-settle default would leave them an empty list: they read every question they may see.
   everything ||= req.user.role === "viewer";
-  const open = `answer IS NULL AND NOT ${SNOOZED_SQL}${everything ? "" : ` AND ${canSettleSql(req.user.login, req.user.role)}`}`;
-  return `((${open}) OR ${heldOpenSql(req.user.login, isOperator(req))})`;
+  const open = `answer IS NULL AND NOT ${SNOOZED_SQL}${everything ? "" : ` AND ${canSettleSql(db, req.user.login, req.user.role)}`}`;
+  return `((${open}) OR ${heldOpenSql(db, req.user.login, isOperator(req))})`;
 }
 
 /**
@@ -492,7 +492,7 @@ export function needingSql(req: Req, everything = false): string {
 export async function openCounts(db: Db, req: Req): Promise<OpenDecisionCounts> {
   const params: Record<string, string> = {};
   const hide = withoutHidden(await hiddenRepos(db, req), params);
-  const rows = await db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
+  const rows = await db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
   const byRepo: Record<string, number> = {};
   for (const r of rows) for (const repo of reposOf(r as DecisionRow)) byRepo[repo] = (byRepo[repo] ?? 0) + 1;
   return { total: rows.length, byRepo };
@@ -513,7 +513,7 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   else if (status === "snoozed") where.push(SNOOZED_SQL);
   else if (status === "open" || status === "opinions") {
     // The person's own list unless asked for everything (`all=1`) or scoped to one item: only the questions they can settle, plus the disputes they resolve.
-    where.push(needingSql(req, q.get("all") === "1" || q.get("number") !== null));
+    where.push(needingSql(db, req, q.get("all") === "1" || q.get("number") !== null));
   }
   if (status === "opinions") where.push("(EXISTS (SELECT 1 FROM decision_opinions o WHERE o.decision_id = decisions.id AND o.retracted_at IS NULL) OR EXISTS (SELECT 1 FROM decision_comments c WHERE c.decision_id = decisions.id))");
   const kinds = list(req, "kind").filter((k) => (KINDS as readonly string[]).includes(k));

@@ -50,7 +50,7 @@ export async function neighbourPairs(db: Db, index: VectorIndex, item: ScanItem,
   // A quiet pull request is never paired: a duplicate close or group question would name it on GitHub.
   const quiet = db.prepare(`SELECT 1 AS q WHERE ${quietSqlFor("?", "?")}`);
   if (await quiet.get(item.repo, item.number)) return [];
-  const get = db.prepare(`SELECT ${COLS} FROM items i WHERE i.repo = ? AND i.number = ? AND ${notOwnIntegrationSql("i")} AND NOT ${quietSqlFor("i.repo", "i.number")}`);
+  const get = db.prepare(`SELECT ${COLS} FROM items i WHERE i.repo = ? AND i.number = ? AND ${notOwnIntegrationSql(db, "i")} AND NOT ${quietSqlFor("i.repo", "i.number")}`);
   const out: Pair[] = [];
   for (const h of await index.nearest(db, v, LOOKUP, `${item.repo}#${item.number}`, item.repo)) {
     if (h.score < threshold || out.length >= cap) break;

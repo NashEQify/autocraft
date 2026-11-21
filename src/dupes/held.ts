@@ -5,6 +5,7 @@
 import { pilotSql } from "../pilot.ts";
 import { appSlug } from "../github/identity.ts";
 import type { Db } from "../db/index.ts";
+import { jsonEach, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
 
 /** The fact line that names the original; the act step reads it. */
 export const DUP_FACT = "duplicate of ";
@@ -29,36 +30,38 @@ export const groupHeldSql = (alias: string): string =>
     AND gi.role = 'close' AND dg.kind = 'duplicate' AND (dg.answer IS NULL OR dg.answer = 'accept' OR dg.answer LIKE 'keep:%'))`;
 
 /** SQL condition, true when the item `alias` is named by a decision answered Backlog: the decision's own item, an item of a batch, or a member of a duplicate group. */
-export const backlogHeldSql = (alias: string): string =>
+export const backlogHeldSql = (db: Db, alias: string): string =>
   `EXISTS (SELECT 1 FROM decisions db WHERE db.answer = 'backlog' AND (
     (db.repo = ${alias}.repo AND db.number = ${alias}.number)
-    OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(db.items) THEN db.items ELSE '[]' END) bj
-      WHERE json_extract(bj.value, '$.repo') = ${alias}.repo AND json_extract(bj.value, '$.number') = ${alias}.number)
+    OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "db.items")} THEN db.items ELSE '[]' END`, "bj")}
+      WHERE ${jsonText(db, "bj.value", "$.repo")} = ${alias}.repo AND ${jsonNum(db, "bj.value", "$.number")} = ${alias}.number)
     OR EXISTS (SELECT 1 FROM dupe_group_items bg WHERE bg.decision_id = db.id AND bg.repo = ${alias}.repo AND bg.number = ${alias}.number)))`;
+
+const APP_SLUGS = "(SELECT value FROM main.settings WHERE key = 'app_slugs')";
 
 /** Live app slug as a JSON list; the persisted `app_slugs` setting covers slugs that are unreadable now or were replaced. */
 const liveSlugJson = (): string => JSON.stringify([appSlug()].filter(Boolean)).replaceAll("'", "''");
 
 /** SQL condition, true when the item `alias` (a row of items) is not an integration batch PR the pipeline opened itself (see src/merge/batch.ts). Such PRs only carry reviewed PRs and never enter the pipeline as contributor PRs. */
-export const notOwnIntegrationSql = (alias: string): string =>
+export const notOwnIntegrationSql = (db: Db, alias: string): string =>
   `NOT EXISTS (SELECT 1 FROM main.merge_batches mb WHERE mb.repo = ${alias}.repo AND mb.pr_number = ${alias}.number
     AND (${alias}.author = (SELECT value FROM main.settings WHERE key = 'pipeline_login')
-      OR EXISTS (SELECT 1 FROM (SELECT value AS slug FROM json_each('${liveSlugJson()}')
-          UNION SELECT value FROM json_each(CASE WHEN json_valid((SELECT value FROM main.settings WHERE key = 'app_slugs')) THEN (SELECT value FROM main.settings WHERE key = 'app_slugs') ELSE '[]' END))
+      OR EXISTS (SELECT 1 FROM (SELECT value AS slug FROM ${jsonEach(db, `'${liveSlugJson()}'`, "ls")}
+          UNION SELECT value FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, APP_SLUGS)} THEN ${APP_SLUGS} ELSE '[]' END`, "ps")}) AS slugs
         WHERE ${alias}.author IN (slug, slug || '[bot]')))) `;
 
 /** SQL condition, true when the item `alias` (a row of items) is not held by a duplicate decision, is not one of our integration PRs and is in the pilot (when one is set). For WHERE clauses of candidate queries. */
-export const notHeldSql = (alias: string): string =>
-  `${notOwnIntegrationSql(alias)} AND ${pilotSql(alias)} AND NOT EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = ${alias}.repo AND dh.number = ${alias}.number AND (dh.answer IS NULL OR dh.answer = 'close')) AND NOT ${groupHeldSql(alias)} AND NOT ${backlogHeldSql(alias)}`;
+export const notHeldSql = (db: Db, alias: string): string =>
+  `${notOwnIntegrationSql(db, alias)} AND ${pilotSql(db, alias)} AND NOT EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = ${alias}.repo AND dh.number = ${alias}.number AND (dh.answer IS NULL OR dh.answer = 'close')) AND NOT ${groupHeldSql(alias)} AND NOT ${backlogHeldSql(db, alias)}`;
 
 /** True when a Backlog answer holds the item. */
 export async function backlogHeld(db: Db, repo: string, number: number): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${backlogHeldSql("i")}`).get(repo, number);
+  return !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${backlogHeldSql(db, "i")}`).get(repo, number);
 }
 
 export async function duplicateHeld(db: Db, repo: string, number: number): Promise<boolean> {
   return !!await db.prepare(`SELECT 1 FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND number = ? AND (answer IS NULL OR answer = 'close')`).get(repo, number)
-    || !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND (${groupHeldSql("i")} OR ${backlogHeldSql("i")})`).get(repo, number);
+    || !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND (${groupHeldSql("i")} OR ${backlogHeldSql(db, "i")})`).get(repo, number);
 }
 
 /** Open duplicates pointing at the canonical item: items held by a decision that names it as the original. */

@@ -83,7 +83,7 @@ type MemberRow = Member & { k?: string; state_reason?: string | null; in_pilot?:
 export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => Promise<boolean>; backlogHeld: (repo: string, number: number) => boolean }> {
   const rows = new Map<string, { m: Member; reason: string | null; pilot: boolean; backlog: boolean }>();
   for (const r of await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
-      i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql("i")} AS in_pilot, ${backlogHeldSql("i")} AS held_backlog
+      i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql(db, "i")} AS in_pilot, ${backlogHeldSql(db, "i")} AS held_backlog
     FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`)
     .all(JSON.stringify(groups.flatMap((g) => g.members.map((n) => [g.repo, n])))) as MemberRow[]) {
     const k = r.k!, reason = r.state_reason ?? null, pilot = !!r.in_pilot, backlog = !!r.held_backlog;

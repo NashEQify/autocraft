@@ -4,6 +4,7 @@ import { notOwnIntegrationSql } from "../dupes/held.ts";
 import { OWN_NOTE_PREFIXES } from "../conversations/store.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
 import type { Db } from "../db/index.ts";
+import { distinctFrom, inList, jsonEach, jsonText, jsonValid, like, notDistinctFrom } from "../db/portable.ts";
 
 /** The columns of a decision that say what its prepare step did. */
 export type PrepareColumns = {
@@ -32,22 +33,24 @@ export const PREPARE_DAILY_CAP = 3;
 export const DISCUSSION_PREPARES_PER_DAY = 2;
 
 /** The item's Plan holds a review or carry action for the PR's current head, so a review starts soon. A review that is stale but held (daily cap, CI, a blocking item, paused) has no such action. Alias `d`: a decision row. */
-export const reviewQueuedSql = (d: string): string => `EXISTS (SELECT 1 FROM item_plans qp JOIN items qi ON qi.repo = qp.repo AND qi.number = qp.number, json_each(CASE WHEN json_valid(qp.actions) THEN qp.actions ELSE '[]' END) qa
-  WHERE qp.repo = ${d}.repo AND qp.number = ${d}.number AND json_extract(qa.value, '$.kind') IN ('review', 'carry') AND json_extract(qa.value, '$.head') IS qi.head_oid)`;
+export const reviewQueuedSql = (db: Db, d: string): string => `EXISTS (SELECT 1 FROM item_plans qp JOIN items qi ON qi.repo = qp.repo AND qi.number = qp.number, ${jsonEach(db, `CASE WHEN ${jsonValid(db, "qp.actions")} THEN qp.actions ELSE '[]' END`, "qa")}
+  WHERE qp.repo = ${d}.repo AND qp.number = ${d}.number AND ${jsonText(db, "qa.value", "$.kind")} IN ('review', 'carry') AND ${notDistinctFrom(db, jsonText(db, "qa.value", "$.head"), "qi.head_oid")})`;
 
 /** The newest comment the item's discussion counts (src/review/discussion.ts isCounted, stored as `comments.counted`), without our own posts (app accounts, note lines). Alias `d`: a decision row. */
-export const discussionKeySql = (d: string): string => `(SELECT c.id FROM comments c WHERE c.repo = ${d}.repo AND c.number = ${d}.number AND c.counted = 1
-  AND COALESCE(c.author, '') NOT IN (SELECT value FROM json_each(CASE WHEN json_valid((SELECT value FROM main.settings WHERE key = 'app_slugs')) THEN (SELECT value FROM main.settings WHERE key = 'app_slugs') ELSE '[]' END))
-  AND NOT (${OWN_NOTE_PREFIXES.map((x) => `ltrim(COALESCE(c.body, '')) LIKE '${x.replace(/_/g, "\\_")}%' ESCAPE '\\'`).join(" OR ")})
+export const discussionKeySql = (db: Db, d: string): string => `(SELECT c.id FROM comments c WHERE c.repo = ${d}.repo AND c.number = ${d}.number AND c.counted = 1
+  AND ${inList(db, "COALESCE(c.author, '')", `CASE WHEN ${jsonValid(db, APP_SLUGS)} THEN ${APP_SLUGS} ELSE '[]' END`, "text", true)}
+  AND NOT (${OWN_NOTE_PREFIXES.map((x) => like(db, "ltrim(COALESCE(c.body, ''))", `'${x.replace(/_/g, "\\_")}%'`, "\\")).join(" OR ")})
   ORDER BY c.created_at DESC, c.id DESC LIMIT 1)`;
 
+const APP_SLUGS = "(SELECT value FROM main.settings WHERE key = 'app_slugs')";
+
 /** When the newest finished Opus review at the item's current head was stored. */
-export const reviewedAtSql = (d: string): string => `(SELECT max(r.at) FROM opus_reviews r JOIN items ri ON ri.repo = r.repo AND ri.number = r.number AND ri.head_oid = r.head_oid
+export const reviewedAtSql = (_db: Db, d: string): string => `(SELECT max(r.at) FROM opus_reviews r JOIN items ri ON ri.repo = r.repo AND ri.number = r.number AND ri.head_oid = r.head_oid
   WHERE r.repo = ${d}.repo AND r.number = ${d}.number AND r.verdict IS NOT NULL)`;
 
 /** The current choices of decision alias `d` when they were written for another PR head than the item's current one. */
-export const staleChoicesSql = (d: string): string => `(SELECT json_object('d', json(c.drafts), 'a', json(c.added)) FROM decision_choices c JOIN items si ON si.repo = c.repo AND si.number = c.number
-  WHERE c.decision_id = ${d}.id AND c.state = 'current' AND si.kind = 'pr' AND json_extract(c.seen, '$.head') IS NOT si.head_oid LIMIT 1)`;
+export const staleChoicesSql = (db: Db, d: string): string => `(SELECT ${db.dialect === "postgres" ? "json_build_object('d', c.drafts::json, 'a', c.added::json)::text" : "json_object('d', json(c.drafts), 'a', json(c.added))"} FROM decision_choices c JOIN items si ON si.repo = c.repo AND si.number = c.number
+  WHERE c.decision_id = ${d}.id AND c.state = 'current' AND si.kind = 'pr' AND ${distinctFrom(db, jsonText(db, "c.seen", "$.head"), "si.head_oid")} LIMIT 1)`;
 
 /** Whether choices (the `stale_choices` JSON) hold a core whose effect rests on the code: a push, a drafted comment or issue, or a model-written reason. */
 export function choicesDependOnCode(json: string | null | undefined): boolean {
@@ -60,12 +63,12 @@ export function choicesDependOnCode(json: string | null | undefined): boolean {
 }
 
 /** Automatic prepares of decision alias `d` since the UTC day start bound to `?`. */
-export const preparesTodaySql = (d: string): string => `(SELECT count(*) FROM decision_prepares p WHERE p.decision_id = ${d}.id AND p.manual = 0 AND p.at >= ?)`;
+export const preparesTodaySql = (_db: Db, d: string): string => `(SELECT count(*) FROM decision_prepares p WHERE p.decision_id = ${d}.id AND p.manual = 0 AND p.at >= ?)`;
 
 /** The select list for the columns above, for open decisions only; binds one `?` (the UTC day start). */
-export const prepareStateSql = (d: string): string => `CASE WHEN ${d}.answer IS NULL THEN ${discussionKeySql(d)} END AS discussion_key,
-  CASE WHEN ${d}.answer IS NULL THEN ${reviewedAtSql(d)} END AS reviewed_at, CASE WHEN ${d}.answer IS NULL THEN ${preparesTodaySql(d)} END AS prepares_today,
-  CASE WHEN ${d}.answer IS NULL THEN ${staleChoicesSql(d)} END AS stale_choices, ${reviewQueuedSql(d)} AS review_queued`;
+export const prepareStateSql = (db: Db, d: string): string => `CASE WHEN ${d}.answer IS NULL THEN ${discussionKeySql(db, d)} END AS discussion_key,
+  CASE WHEN ${d}.answer IS NULL THEN ${reviewedAtSql(db, d)} END AS reviewed_at, CASE WHEN ${d}.answer IS NULL THEN ${preparesTodaySql(db, d)} END AS prepares_today,
+  CASE WHEN ${d}.answer IS NULL THEN ${staleChoicesSql(db, d)} END AS stale_choices, ${reviewQueuedSql(db, d)} AS review_queued`;
 
 export const utcDayStart = (nowMs: number): string => `${new Date(nowMs).toISOString().slice(0, 10)}T00:00:00.000Z`;
 
@@ -121,8 +124,8 @@ type Subject = { dkind: string; kind: string; head_oid: string | null } & Pick<P
 
 type Open = Partial<PrepareColumns> & { id: string; answer: string | null; repo: string | null; number: number | null };
 
-const subjectSql = (): string => `SELECT d.id AS did, i.kind, i.head_oid, d.kind AS dkind, ${prepareStateSql("d")} FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
-    WHERE ${openSubjectSql("d", "i")} AND ${pilotSql("i")} AND ${notOwnIntegrationSql("i")}`;
+const subjectSql = (db: Db): string => `SELECT d.id AS did, i.kind, i.head_oid, d.kind AS dkind, ${prepareStateSql(db, "d")} FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
+    WHERE ${openSubjectSql("d", "i")} AND ${pilotSql(db, "i")} AND ${notOwnIntegrationSql(db, "i")}`;
 
 function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; head: string | null; open: true } | null {
   if (!it) return null;
@@ -133,7 +136,7 @@ function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; 
 
 async function columnsOf(db: Db, d: Open): Promise<{ cols: PrepareColumns; head: string | null; open: true } | null> {
   if (d.answer !== null || d.number === null) return null;
-  return columnsFrom(d, await db.prepare(`${subjectSql()} AND d.id = ?`).get(utcDayStart(Date.now()), d.id) as Subject | undefined);
+  return columnsFrom(d, await db.prepare(`${subjectSql(db)} AND d.id = ?`).get(utcDayStart(Date.now()), d.id) as Subject | undefined);
 }
 
 export type PrepareState = { preparing: boolean; preparedEarlier: boolean };
@@ -143,7 +146,7 @@ export async function prepareStates(db: Db, ds: Open[]): Promise<Map<string, Pre
   const open = ds.filter((d) => d.answer === null && d.number !== null);
   const out = new Map<string, PrepareState>();
   if (!open.length) return out;
-  const rows = await db.prepare(`${subjectSql()} AND d.id IN (SELECT value FROM json_each(?))`).all(utcDayStart(Date.now()), JSON.stringify(open.map((d) => d.id))) as (Subject & { did: string })[];
+  const rows = await db.prepare(`${subjectSql(db)} AND ${inList(db, "d.id")}`).all(utcDayStart(Date.now()), JSON.stringify(open.map((d) => d.id))) as (Subject & { did: string })[];
   const by = new Map(rows.map((r) => [r.did, r]));
   for (const d of open) {
     const x = columnsFrom(d, by.get(d.id));

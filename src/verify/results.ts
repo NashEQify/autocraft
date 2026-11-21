@@ -100,7 +100,7 @@ export async function collectDue(db: Db): Promise<boolean> {
     LEFT JOIN pr_checks c ON c.repo = v.repo AND c.number = v.number
     LEFT JOIN build_tasks h ON h.id = v.head_task_id
     LEFT JOIN build_tasks b ON b.id = v.base_task_id
-    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor("v.repo", "v.number")} AND NOT ${backlogHeldSql("v")} AND (
+    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor(db, "v.repo", "v.number")} AND NOT ${backlogHeldSql(db, "v")} AND (
       i.state IS NOT 'OPEN' OR (${CURRENT_HEAD_SQL}) IS NOT v.head_sha
       OR (h.state IN (${TERMINAL_SQL}) AND (b.id IS NULL OR b.state IN (${TERMINAL_SQL})))
       OR (v.state = 'planned' AND (h.state IN ('claimed', 'running') OR b.state IN ('claimed', 'running'))))
@@ -217,7 +217,7 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
   const rows = await db.prepare(`SELECT v.*, i.state AS item_state, ${CURRENT_HEAD_SQL} AS item_head FROM verifications v
     LEFT JOIN items i ON i.repo = v.repo AND i.number = v.number
     LEFT JOIN pr_checks c ON c.repo = v.repo AND c.number = v.number
-    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor("v.repo", "v.number")} AND NOT ${backlogHeldSql("v")} ORDER BY v.created_at, v.number`).all() as (Row & { item_state: string | null; item_head: string | null })[];
+    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor(db, "v.repo", "v.number")} AND NOT ${backlogHeldSql(db, "v")} ORDER BY v.created_at, v.number`).all() as (Row & { item_state: string | null; item_head: string | null })[];
   s.looked = rows.length;
   if (params.dryRun) { log(`verify-collect: ${rows.length} pending; dry run`); return s; }
 

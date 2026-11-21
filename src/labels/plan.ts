@@ -18,7 +18,7 @@ export type PlanRow = {
 export type PlanCounts = { toAdd: number; already: number; unsettled: number; conflicts: number };
 
 export async function planLabels(db: Db, repo: string, runId?: string): Promise<PlanRow[]> {
-  const items = await db.prepare(`SELECT number, kind, url, labels FROM main.items i WHERE repo = ? AND state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND ${pilotSql("i")} AND NOT ${backlogHeldSql("i")} ORDER BY number`).all(repo) as
+  const items = await db.prepare(`SELECT number, kind, url, labels FROM main.items i WHERE repo = ? AND state = 'OPEN' AND ${notOwnIntegrationSql(db, "i")} AND ${pilotSql(db, "i")} AND NOT ${backlogHeldSql(db, "i")} ORDER BY number`).all(repo) as
     { number: number; kind: string; url: string | null; labels: string | null }[];
   const byItem = new Map<number, ClsRow[]>();
   const cls = await db.prepare(`SELECT number, classifier, run_id, at, type_label, flags, probs, input_hash FROM main.classifications WHERE repo = ?
