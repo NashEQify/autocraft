@@ -272,7 +272,6 @@ src/fixissue/approval.ts
 
 src/fixissue/candidates.ts
 
-src/fixissue/index.ts
 
 
 

@@ -10,6 +10,7 @@ import { useTestAccount } from "./accounts-fixture.ts";
 import { spawnSync } from "node:child_process";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixissue-pool-"));
@@ -52,15 +53,16 @@ async function collect(perDay?: number) {
   const db = await connectDb(join(root, "t.db"));
   await useTestAccount(db);
   await db.prepare("UPDATE claude_accounts SET max_concurrent = 4").run();
-  await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public", default_branch: "main" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setFixIssueApproval(db, "op", "app", true);
-  if (perDay !== undefined) await db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('fixissue', ?)").run(perDay);
+  if (perDay !== undefined) await db.run(db.k.insertInto("stage_limits").values({ step: "fixissue", per_day: perDay, updated_by: null, updated_at: null })
+    .onConflict((oc) => oc.column("step").doUpdateSet(excluded(["per_day", "updated_by", "updated_at"]))));
   for (const n of [5, 6]) {
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', ?, 'b', 'someone', ?, ?)").run(n, `Panic ${n}`, T0, T0);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title: `Panic ${n}`, body: "b", author: "someone", created_at: T0, updated_at: T0 }));
     await db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('app', ?, 'jev', 'r1', ?, 'bugfix', '[]', '{\"top\":0.97}')").run(n, T0);
-    await db.prepare(`INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, round, patch, files, crate, crate_dir, size, created_at, updated_at)
-      VALUES ('app', ?, ?, 'h', 'passed', 1, ?, ?, 'app', 'crates/app', 'S', ?, ?)`).run(n, sha, patchFor(n), JSON.stringify([LIB]), T0, T0);
+    await db.run(db.k.insertInto("fix_attempts").values({ repo: "app", number: n, main_sha: sha, text_hash: "h", state: "passed", round: 1, patch: patchFor(n),
+      files: JSON.stringify([LIB]), crate: "app", crate_dir: "crates/app", size: "S", created_at: T0, updated_at: T0 }));
   }
 
   const created: string[] = [];

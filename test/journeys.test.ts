@@ -26,6 +26,7 @@ import { runMerge } from "../src/merge/index.ts";
 import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
 import { CHECK, T1, tmpdir, world, type World } from "./world-db.ts";
+import { excluded } from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("diffs"), "cache");
 
@@ -137,12 +138,12 @@ describe("PR journeys", () => {
     await runBatches(w.db, { repo: "app" }, quiet, w.gh.batchDeps());
     const tip = (await w.db.get(w.db.k.selectFrom("merge_batches").select("commit_sha as c").where("pr_number", "=", 900)))!.c;
     await w.db.run(w.db.k.insertInto("ci_run_approvals").values({ repo: "app", number: 900, head_oid: tip, runs: "[]", approved: "[]", reread: 1, failed: "{}", checked_at: "2026-01-02T00:00:00Z" }));
-    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
-    await w.db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, created_at, updated_at)
-      VALUES ('app', 900, 'pr', 'OPEN', 'batch', 'bot', 1, 0, 'mirror-lag', 'batch', ?, ?)`).run("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 900, kind: "pr", state: "OPEN", title: "batch", author: "bot", additions: 1, deletions: 0,
+      head_oid: "mirror-lag", head_ref: "batch", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
     const plan = async () => await w.prPlan(900);
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     assert.equal((await plan()).state, "out-of-scope");
     for (const n of [1, 2]) await w.db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', ?, 'op', ?)").run(n, "2026-01-02T00:00:00Z");
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
@@ -405,14 +406,14 @@ describe("issue journey", () => {
     const w = await (await (await fresh()).issue(7)).issue(8);
     await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
     await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', 8, 'issue', 'close', 7, 'close', 7)").run();
-    await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 7").run();
+    await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 7));
     assert.deepEqual(await prepareIds(w.db), ["app:dupegroup:7"]);
     assert.equal(await preparing(w.db, (await getDecision(w.db, "app:dupegroup:7"))!), true);
     await w.models(() => `Both issues report the same crash when opening an empty file, and #7 already has the fix, so #8 can be closed as its duplicate.${choices({ pick: { core: "o:accept", reason: "same report." } })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.deepEqual(await prepareIds(w.db), []);
     await w.db.prepare("UPDATE decisions SET prepared_at = NULL").run();
-    await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 8").run();
+    await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 8));
     assert.deepEqual(await prepareIds(w.db), []);
   });
 
@@ -447,10 +448,10 @@ describe("issue journey", () => {
     await w.db.prepare("UPDATE decisions SET recommend_failures = NULL, recommend_failed_at = NULL").run();
     assert.equal((await prepareIds(w.db)).length, 1);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), true);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 0").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }));
     assert.equal((await prepareIds(w.db)).length, 0);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), false);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 1").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 1 }));
     await w.db.prepare("UPDATE decisions SET recommend_failures = 1").run();
     await w.db.prepare("UPDATE decisions SET recommend_failed_at = ?").run(new Date(Date.now() - 2 * 3_600_000).toISOString());
     await w.models(() => `It reports a panic on an empty slice. The reference app has no such case, so a fix is wanted.${choices({ pick: { core: "o:take", reason: "The reference app has this case." }, cores: [{ core: "o:take", extras: [] }] })}`);
