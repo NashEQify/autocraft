@@ -9,6 +9,7 @@ import { GithubError, reconcileNext, runSync } from "../src/mirror.ts";
 import { loadOwners } from "../src/owners.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 async function scratchDb() {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "synchealth-")), "m.db"));
@@ -17,7 +18,7 @@ async function scratchDb() {
   return db;
 }
 
-test("a repo that no longer resolves is skipped and recorded; failures and recoveries keep per-repo reads right", async () => {
+test("a repo that no longer resolves is skipped and recorded; failures and recoveries keep per-repo reads right", { skip: sqliteOnly("loadOwners on db.sync") }, async () => {
   await recoveryScenarios();
   const db = await scratchDb();
   await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('a','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-01T00:00:00Z'),('b','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T00:00:00Z')");

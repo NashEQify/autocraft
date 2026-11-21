@@ -49,6 +49,17 @@ export function dbTarget(env: NodeJS.ProcessEnv = process.env): string {
 
 let role: DbRole = "cli";
 
+let testRedirect: ((sqliteTarget: string) => Promise<string>) | undefined;
+
+/**
+ * Test hook: `connectDb` on a SQLite target opens the Postgres URL `map(target)` gives instead. test/pg-suite.ts installs
+ * it to run the SQLite tests on Postgres; refused unless AUTOCRAFT_TEST_PG_URL is set.
+ */
+export function setTestDbRedirect(map: (sqliteTarget: string) => Promise<string>): void {
+  if (!process.env.AUTOCRAFT_TEST_PG_URL) throw new Error("setTestDbRedirect is for tests on Postgres: AUTOCRAFT_TEST_PG_URL is not set");
+  testRedirect = map;
+}
+
 /** Sets the role of this process's handles (pool size on Postgres). Called by long-running commands before they open one. */
 export function setDbRole(r: DbRole): void {
   role = r;
@@ -68,6 +79,7 @@ export interface ConnectOptions {
  * `migratePg()`).
  */
 export async function connectDb(target: string = dbTarget(), opts: ConnectOptions = {}): Promise<Db> {
+  if (testRedirect && !isPgUrl(target)) target = await testRedirect(target);
   if (!isPgUrl(target)) return dbFor(connect(target, opts));
   const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
   const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));

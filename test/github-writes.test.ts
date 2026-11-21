@@ -3,8 +3,9 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { pushedByAutoCraft, writesOf } from "../src/dash/api/github-writes.ts";
 import { dbFor } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
-test("writes match their comment by url, review id, then by time when the url is missing", async () => {
+test("writes match their comment by url, review id, then by time when the url is missing", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const db = await dbFor(new DatabaseSync(":memory:"));
   await db.script("CREATE TABLE audit (at TEXT, login TEXT, action TEXT, target TEXT, details TEXT); CREATE TABLE comments (id TEXT, repo TEXT, number INT, kind TEXT, url TEXT, created_at TEXT, author TEXT); CREATE TABLE settings (key TEXT, value TEXT); INSERT INTO settings VALUES ('pipeline_login', 'bot')");
   const a = db.prepare("INSERT INTO audit VALUES (?,?,?,?,?)");

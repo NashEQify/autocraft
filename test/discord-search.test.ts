@@ -21,6 +21,7 @@ import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-search-"));
@@ -184,7 +185,7 @@ describe("ping replies", () => {
     assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_replies WHERE ping_hash IN (?, ?)").get(keys.hash("message", "p7"), keys.hash("message", "p8")) as { n: number }).n, 0);
   });
 
-  test("no question text is stored in any table", async () => {
+  test("no question text is stored in any table", { skip: sqliteOnly("reads sqlite_master") }, async () => {
     const dump = (await mapSeq((await db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]), async (t) => JSON.stringify((await db.prepare(`SELECT * FROM "${t.name}"`).all() as object[]).map((r) => Object.values(r).map((v) => (v instanceof Uint8Array ? Buffer.from(v).toString("latin1") : v))))))
       .join("\n");
     for (const needle of ["zebra-unique", "is this known", "crash in layers"]) assert.ok(!dump.includes(needle), needle);

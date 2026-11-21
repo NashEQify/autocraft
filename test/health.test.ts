@@ -5,8 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { dbReady, serveHealth } from "../src/health.ts";
 import { dbFor } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
-test("healthz answers while the process is up; readyz follows the database", async () => {
+test("healthz answers while the process is up; readyz follows the database", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
   const db = await dbFor(new DatabaseSync(":memory:"));
   const server = createServer(async (req, res) => {
     if (!await serveHealth(req, res, async () => await dbReady(db))) res.writeHead(404).end();
