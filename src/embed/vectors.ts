@@ -8,7 +8,7 @@
 // Loading never blocks a request: it runs in chunks between event-loop turns.
 // The first load is awaited by the request that needs it (`ready`); after that
 // the index serves what it has while rows added past the last rowid seen are
-// read in. A rewritten row is deleted and inserted again (embedItems) and so gets a new rowid: it is read
+// read in. A rewritten row is replaced (embedItems, kx.replaceRow) and so gets a rowid above every other: it is read
 // again and overwrites its slot. Deleted rows and changed tracked repos need a
 // rebuild, done on the side and swapped in when complete; a rebuild also runs
 // every REBUILD_MS to drop vectors of deleted rows.

@@ -9,6 +9,7 @@ import type { PlanSet } from "../core/plan-set.ts";
 import { embedStatements, statementsDue } from "../memory/statements.ts";
 import { forEachSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type Todo = { repo: string; number: number; text: string; hash: string };
 
@@ -22,7 +23,6 @@ const todoOf = async (db: Db, repo: string, number: number, hash: string): Promi
 const diffQuery = (db: Db, all: boolean, model: string) => db.k.selectFrom("main.items as i")
   .leftJoin("main.item_embeddings as e", (j) => j.onRef("e.repo", "=", "i.repo").onRef("e.number", "=", "i.number"))
   .select(["i.repo", "i.number", "i.embed_hash as hash"])
-  .$narrowType<{ hash: string }>()
   .where((eb) => eb("i.repo", "in", eb.selectFrom("main.tracked_repos").select("name")))
   .$if(!all, (q) => q.where((eb) => eb.and([
     eb("i.state", "<>", "OPEN"),
@@ -38,7 +38,9 @@ export async function pending(db: Db, modelId: string, all = false, plans?: Plan
   // The first query runs on covering indexes; only the rows that differ are read in full.
   const diff = await db.all(diffQuery(db, all, modelId));
   const planned = all ? [] : (await plannedItems(db, "embed", { model: modelId, run: null, ...(plans ? { plans } : {}) })).map((p) => ({ repo: p.facts.repo, number: p.facts.number, hash: p.facts.embedHash }));
-  return (await mapSeq([...planned, ...diff], async (r) => await todoOf(db, r.repo, r.number, r.hash))).sort((a, b) => a.text.length - b.text.length);
+  // A row without a hash waits for fillEmbedHashes (embedItems runs it first).
+  const hashed = [...planned, ...diff].filter((r): r is { repo: string; number: number; hash: string } => r.hash !== null);
+  return (await mapSeq(hashed, async (r) => await todoOf(db, r.repo, r.number, r.hash))).sort((a, b) => a.text.length - b.text.length);
 }
 
 /** Whether the embed step has work: open items the Plans send here, or closed ones with a missing or stale vector. */
@@ -73,10 +75,9 @@ export async function embedItems(db: Db, embedder: Embedder,
     const vecs = await embedder.embed(batch.map((t) => t.text), "item");
     const at = new Date().toISOString();
     await db.write(async () => {
-      // Delete and insert, not an upsert: a rewritten row gets a new rowid, which is how the vector index (vectors.ts) sees it changed.
+      // A replace, not an upsert: the rewritten row gets a rowid above every other, which is how the vector index (vectors.ts) sees it changed.
       await forEachSeq(batch, async (t, k) => {
-        await db.run(db.k.deleteFrom("main.item_embeddings").where("repo", "=", t.repo).where("number", "=", t.number));
-        await db.run(db.k.insertInto("main.item_embeddings").values({ repo: t.repo, number: t.number, model: embedder.id, hash: t.hash, vec: toBlob(vecs[k]!), at }));
+        await kx.replaceRow(db, "main.item_embeddings", ["repo", "number"], { repo: t.repo, number: t.number, model: embedder.id, hash: t.hash, vec: toBlob(vecs[k]!), at });
       });
     });
     done += batch.length;
