@@ -46,7 +46,7 @@ export function ItemsView(_: ViewProps) {
   const selection = useMemo(() => parseSelection(liveSearch), [liveSearch]);
   const user = useUser();
   const project = usePageProject();
-  const continuity = useRowContinuity(JSON.stringify([user, project, browse.repo]));
+  const continuity = useRowContinuity(JSON.stringify([user, project, browse.repos]));
   // Scoped to the link's own selection: the ignored peek is only named while that open row is the
   // one on screen, so a later row, close, filter, reset, paging or typing never inherits the note.
   const [conflict, setConflict] = useState<{ peek: string; openKey: string } | null>(null);

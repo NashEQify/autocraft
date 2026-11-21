@@ -8,7 +8,7 @@ import { Facts, KindTag } from "../decisions/parts";
 import { Refs } from "../decisions/Refs";
 import { AnswerNotice } from "../decisions/AnswerNotice";
 import { ChoiceGroup } from "./ChoiceGroup";
-import { canAct, canComment } from "../../registry/permissions";
+import { canComment } from "../../registry/permissions";
 import { useFolded, useLocal } from "../decisions/state";
 import { canActOn } from "../decisions/access";
 import { DecisionChips, DecisionDetails, DecisionSummary } from "../decisions/DecisionBlocks";
