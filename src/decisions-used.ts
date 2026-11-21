@@ -23,7 +23,7 @@ export async function applyUsedAnswers(db: Db, at: string = new Date().toISOStri
   const reviewed = async (repo: string, number: number, since: string) => await db.get(db.k.selectFrom("final_reviews").select((eb) => eb.lit(1).as("one"))
     .where("repo", "=", repo).where("number", "=", number).where("at", ">=", since).limit(1));
   const attempted = async (repo: string, number: number) => await db.get(db.k.selectFrom("fix_attempts").select((eb) => eb.lit(1).as("one"))
-    .where("repo", "=", repo).where("number", "=", number).limit(1));
+    .where("repo", "=", repo).where("number", "=", number));
   let n = 0;
   for (const a of await actionable(db)) {
     if (a.kind !== "scope" && a.kind !== "close" && a.kind !== "hold") continue;
