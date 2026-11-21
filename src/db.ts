@@ -6,9 +6,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fillHashesSync } from "./itemhash.ts";
-import { fillTextRefs } from "./fixissue/candidates.ts";
+import { textRefs } from "./fixissue/candidates.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
-import { bulkWritesSync, planChangesSql } from "./core/plan-changes.ts";
+import { BULK_ROWS, bulkWritesSync, planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
@@ -657,6 +657,25 @@ function buildHashes(db: DatabaseSync): void {
   if (db.prepare("SELECT 1 FROM main.settings WHERE key = 'hashes_built'").get()) return;
   fillHashesSync(db);
   db.exec("INSERT OR IGNORE INTO main.settings (key, value) VALUES ('hashes_built', '1')");
+}
+
+/** Writes text_refs of the open PRs without one, in batches so other processes can write between them. */
+function fillTextRefs(db: DatabaseSync): void {
+  const sel = db.prepare("SELECT repo, number, title, body FROM main.items WHERE kind = 'pr' AND state = 'OPEN' AND text_refs IS NULL LIMIT 2000");
+  const upd = db.prepare("UPDATE main.items SET text_refs = ? WHERE repo = ? AND number = ? AND text_refs IS NULL");
+  for (;;) {
+    const rows = sel.all() as { repo: string; number: number; title: string | null; body: string | null }[];
+    if (!rows.length) return;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      const write = (): void => { for (const r of rows) upd.run(textRefs(r.title, r.body), r.repo, r.number); };
+      if (rows.length >= BULK_ROWS) bulkWritesSync(db, "text-refs", write); else write();
+      db.exec("COMMIT");
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
+  }
 }
 
 // Fills text_refs once for the open PRs mirrored before the column existed (the planner reads the text of a row without it).

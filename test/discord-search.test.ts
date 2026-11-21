@@ -76,13 +76,14 @@ const msg = (id: string, over: Record<string, unknown> = {}) => ({
   message_reference: { message_id: "q1" }, referenced_message: { content: QUESTION }, ...over,
 });
 
+const emb = async (repo: string, number: number, vec: Uint8Array, at: string) =>
+  await db.run(db.k.insertInto("item_embeddings").values({ repo, number, model: "fake", hash: "h", vec, at }));
+
 before(async () => {
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft'), ('secret')").run();
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "photocraft" }, { name: "secret" }]).onConflict((oc) => oc.doNothing()));
   await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public'), ('secret', 'storytold', 'private') ON CONFLICT(name) DO UPDATE SET visibility = excluded.visibility").run();
   await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched, default_repo) VALUES ('c1', 'g1', 'G', 'dev', 1, 'photocraft'), ('c2', 'g1', 'G', 'off', 0, NULL)").run();
   const recent = new Date(Date.now() - 5 * 86_400_000).toISOString();
-  const item = db.prepare("INSERT INTO items (repo, number, kind, state, state_reason, closed_at, title, body, url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  const emb = db.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES (?, ?, 'fake', 'h', ?, ?)");
   const rows: [string, number, string, string, string | null, string | null, string][] = [
     ["photocraft", 1, "issue", "OPEN", null, null, "Export to WebP ignores the quality setting"],
     ["photocraft", 2, "issue", "OPEN", null, null, "Dark mode for the layers panel"],
@@ -92,12 +93,12 @@ before(async () => {
     ["secret", 1, "issue", "OPEN", null, null, "WebP export quality in a private repo"],
   ];
   for (const [repo, n, kind, state, reason, closed, title] of rows) {
-    await item.run(repo, n, kind, state, reason, closed, title, "", `https://github.com/storytold/${repo}/${kind === "pr" ? "pull" : "issues"}/${n}`);
-    await emb.run(repo, n, toBlob((await embedder.embed([title], "item"))[0]!), recent);
+    await db.run(db.k.insertInto("items").values({ repo, number: n, kind, state, state_reason: reason, closed_at: closed, title, body: "", url: `https://github.com/storytold/${repo}/${kind === "pr" ? "pull" : "issues"}/${n}` }));
+    await emb(repo, n, toBlob((await embedder.embed([title], "item"))[0]!), recent);
   }
   // A security-labelled issue of a public repo is never a candidate, however close it is.
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, url, labels) VALUES ('photocraft', 6, 'issue', 'OPEN', 'WebP export quality hole', '', 'https://github.com/storytold/photocraft/issues/6', '[\"Security\"]')").run();
-  await emb.run("photocraft", 6, toBlob((await embedder.embed(["WebP export quality hole"], "item"))[0]!), recent);
+  await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 6, kind: "issue", state: "OPEN", title: "WebP export quality hole", body: "", url: "https://github.com/storytold/photocraft/issues/6", labels: '["Security"]' }));
+  await emb("photocraft", 6, toBlob((await embedder.embed(["WebP export quality hole"], "item"))[0]!), recent);
   await pings.dispatch("READY", { user: { id: "bot1" } });
 });
 
@@ -145,16 +146,17 @@ describe("ping replies", () => {
   });
 
   test("picks are shown open first, then by comments plus reactions, whatever order the model gave", async () => {
-    const set = db.prepare("UPDATE items SET comments_count = ?, reactions_count = ? WHERE repo = 'photocraft' AND number = ?");
-    await set.run(40, 10, 3); // closed, most active
-    await set.run(1, null, 1); // open, little activity (no reactions stored)
-    await set.run(2, 5, 2); // open, more activity
+    const set = async (comments: number, reactions: number | null, number: number) =>
+      await db.run(db.k.updateTable("items").set({ comments_count: comments, reactions_count: reactions }).where("repo", "=", "photocraft").where("number", "=", number));
+    await set(40, 10, 3); // closed, most active
+    await set(1, null, 1); // open, little activity (no reactions stored)
+    await set(2, 5, 2); // open, more activity
     reply = () => JSON.stringify({ picks: [{ ref: "photocraft#3", reason: "c" }, { ref: "photocraft#1", reason: "a" }, { ref: "photocraft#2", reason: "b" }] });
     try {
       const found = await search.find("webp export quality dark mode layers");
       assert.deepEqual(found.matches.map((m) => m.number), [2, 1, 3]);
     } finally {
-      await db.prepare("UPDATE items SET comments_count = NULL, reactions_count = NULL WHERE repo = 'photocraft'").run();
+      await db.run(db.k.updateTable("items").set({ comments_count: null, reactions_count: null }).where("repo", "=", "photocraft"));
     }
   });
 
@@ -304,11 +306,11 @@ describe("rest", () => {
 
 describe("repo named in the question", () => {
   before(async () => {
-    await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('vectorcraft')").run();
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "vectorcraft" }).onConflict((oc) => oc.doNothing()));
     await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('vectorcraft', 'storytold', 'public') ON CONFLICT(name) DO UPDATE SET visibility = excluded.visibility").run();
     const title = "Crash in layers";
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, url) VALUES ('vectorcraft', 1, 'issue', 'OPEN', ?, '', 'https://github.com/storytold/vectorcraft/issues/1')").run(title);
-    await db.prepare("INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('vectorcraft', 1, 'fake', 'h', ?, ?)").run(toBlob((await embedder.embed([title], "item"))[0]!), new Date().toISOString());
+    await db.run(db.k.insertInto("items").values({ repo: "vectorcraft", number: 1, kind: "issue", state: "OPEN", title, body: "", url: "https://github.com/storytold/vectorcraft/issues/1" }));
+    await emb("vectorcraft", 1, toBlob((await embedder.embed([title], "item"))[0]!), new Date().toISOString());
   });
   const repos = async (q: string, repo?: string) => [...new Set((await new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask }).candidates(q, repo)).map((c) => c.repo))].sort();
 

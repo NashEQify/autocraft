@@ -8,12 +8,13 @@
 // Loading never blocks a request: it runs in chunks between event-loop turns.
 // The first load is awaited by the request that needs it (`ready`); after that
 // the index serves what it has while rows added past the last rowid seen are
-// read in. A rewritten row gets a new rowid (INSERT OR REPLACE), so it is read
+// read in. A rewritten row is deleted and inserted again (embedItems) and so gets a new rowid: it is read
 // again and overwrites its slot. Deleted rows and changed tracked repos need a
 // rebuild, done on the side and swapped in when complete; a rebuild also runs
 // every REBUILD_MS to drop vectors of deleted rows.
 import type { Embedder } from "./model.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type Hit = { repo: string; number: number; score: number };
 
@@ -96,8 +97,11 @@ export class VectorIndex {
     const now = Date.now();
     if (this.store && now - this.checked < CHECK_MS) return;
     this.checked = now;
-    const s = await db.prepare(`SELECT (SELECT COUNT(*) FROM main.item_embeddings) AS n, (SELECT MAX(rowid) FROM main.item_embeddings) AS m,
-      (SELECT group_concat(name) FROM main.tracked_repos) AS t`).get() as { n: number; m: number | null; t: string | null };
+    const s = (await db.get(db.k.selectNoFrom((eb) => [
+      eb.selectFrom("main.item_embeddings").select(eb.fn.countAll<number>().as("n")).as("n"),
+      eb.selectFrom("main.item_embeddings").select(eb.fn.max<number | null>(kx.rowid("main.item_embeddings")).as("m")).as("m"),
+      eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("t")).as("t"),
+    ]).$narrowType<{ n: number }>()))!;
     const tracked = s.t ?? "";
     const cur = this.store;
     const rebuild = !cur || cur.tracked !== tracked || s.n < this.tableRows || now - cur.builtAt > REBUILD_MS;
@@ -120,11 +124,17 @@ export class VectorIndex {
   private async load(db: Db, into: Store | null, tracked: string, tableRows: number): Promise<void> {
     // A full rebuild fills a new store, swapped in at the end; an incremental load writes into the live one.
     const s = into ?? newStore(this.embedder.dim, Math.max(1024, Math.ceil(tableRows * 1.2)), tracked);
-    const next = db.prepare(`SELECT rowid AS rid, repo, number, vec FROM main.item_embeddings
-      WHERE rowid > ? AND model = ? AND repo IN (SELECT name FROM main.tracked_repos) ORDER BY rowid LIMIT ?`);
+    const next = (after: number) => db.k.selectFrom("main.item_embeddings")
+      .select([kx.rowid("main.item_embeddings").as("rid"), "repo", "number", "vec"])
+      .where((eb) => eb.and([
+        eb(kx.rowid("main.item_embeddings"), ">", after),
+        eb("model", "=", this.embedder.id),
+        eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name")),
+      ]))
+      .orderBy(kx.rowid("main.item_embeddings")).limit(CHUNK);
     try {
       for (;;) {
-        const rows = await next.all(s.lastRowid, this.embedder.id, CHUNK) as { rid: number; repo: string; number: number; vec: Uint8Array }[];
+        const rows = await db.all(next(s.lastRowid));
         for (const r of rows) put(s, r.repo, r.number, r.vec);
         if (rows.length) s.lastRowid = rows[rows.length - 1]!.rid;
         if (rows.length < CHUNK) break;

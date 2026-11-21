@@ -1,12 +1,10 @@
 // Issues that need a person are asked or listed, and an issue waiting on a PR names it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { DatabaseSync } from "node:sqlite";
 import { decideItem } from "../src/core/decide-item.ts";
 import { issuesWithOpenPr, textRefs } from "../src/fixissue/candidates.ts";
 import { itemFacts } from "./world.ts";
-import { connectDb, dbFor } from "../src/db/open.ts";
-import { sqliteOnly } from "./test-db.ts";
+import { connectDb } from "../src/db/open.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 const attempt = (state: string) => ({ state, textChanged: false, headDone: false, baseDone: true });
@@ -49,20 +47,20 @@ test("an open PR waits the issue whatever its fix attempt state, and a mention s
   assert.equal(mention.wait, "open PR #9 mentions it");
 });
 
-test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", { skip: sqliteOnly("raw DatabaseSync handle (convert to connectDb)") }, async () => {
-  const db = await dbFor(new DatabaseSync(":memory:"));
-  await db.script("CREATE TABLE items (repo TEXT, number INTEGER, kind TEXT, state TEXT, author TEXT, title TEXT, body TEXT, closing_issues TEXT, text_refs TEXT)");
-  const add = db.prepare("INSERT INTO items (repo, number, kind, state, author, title, body, closing_issues) VALUES ('app', ?, 'pr', 'OPEN', ?, ?, ?, ?)");
-  await add.run(10, "dev", "Rework (#1)", "See also #2. Fixes #3", null);
-  await add.run(11, "dev", "Other", "Addresses item 3/5 of #6. Resolves: #4", "[5]");
-  await add.run(12, "dependabot[bot]", "Bump x", 'Notes: <a href="https://github.com/o/r/issues/710">#710</a> and #711 and [#712](https://x/y)', null);
-  await add.run(13, "dev", "Link", "https://github.com/o/r/issues/20 and [#21](https://x/21)", null);
+test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", async () => {
+  const db = await connectDb(":memory:");
+  const add = async (number: number, author: string, title: string, body: string, closing_issues: string | null) =>
+    await db.run(db.k.insertInto("items").values({ repo: "app", number, kind: "pr", state: "OPEN", author, title, body, closing_issues }));
+  await add(10, "dev", "Rework (#1)", "See also #2. Fixes #3", null);
+  await add(11, "dev", "Other", "Addresses item 3/5 of #6. Resolves: #4", "[5]");
+  await add(12, "dependabot[bot]", "Bump x", 'Notes: <a href="https://github.com/o/r/issues/710">#710</a> and #711 and [#712](https://x/y)', null);
+  await add(13, "dev", "Link", "https://github.com/o/r/issues/20 and [#21](https://x/21)", null);
   const m = await issuesWithOpenPr(db, "app");
   assert.deepEqual([...m].sort((a, b) => a[0] - b[0]).map(([n, p]) => [n, p.number, p.closes]),
     [[1, 10, false], [2, 10, false], [3, 10, true], [4, 11, true], [5, 11, true], [6, 11, false]]);
   // The references sync stores give the same answer as the text.
-  for (const r of await db.prepare("SELECT number, title, body FROM items").all() as { number: number; title: string; body: string }[])
-    await db.prepare("UPDATE items SET text_refs = ? WHERE number = ?").run(textRefs(r.title, r.body), r.number);
+  for (const r of await db.all(db.k.selectFrom("items").select(["number", "title", "body"])))
+    await db.run(db.k.updateTable("items").set({ text_refs: textRefs(r.title, r.body) }).where("number", "=", r.number));
   assert.deepEqual(await issuesWithOpenPr(db, "app"), m);
 });
 
@@ -71,12 +69,12 @@ test("stopped fixes are one group row per repo, listed 25 per page with priority
   const { needs, fixes, FIXES_PAGE } = await import("../src/dash/api/needs.ts");
   const { fixStoppedWait } = await import("../src/core/decide-item.ts");
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot')").run();
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('app')").run();
+  await db.run(db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app" }).onConflict((oc) => oc.doNothing()));
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public') ON CONFLICT (name) DO UPDATE SET visibility = 'public'").run();
   const t = new Date().toISOString();
   for (let n = 1; n <= 30; n++) {
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES ('app', ?, 'issue', 'OPEN', ?)").run(n, `Issue ${n}`);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title: `Issue ${n}` }));
     await db.prepare("INSERT INTO item_plans (repo, number, kind, head, state, item_state, actions, wait, reasons, note, view, planned_at) VALUES ('app', ?, 'issue', NULL, 'x', 'classified', '[]', ?, '[]', NULL, '{}', ?)").run(n, fixStoppedWait("skipped"), t);
   }
   await db.prepare("INSERT INTO item_priority (repo, number, text_hash, impact, score, model, at) VALUES ('app', 7, 'h', 'P1', 90, 'm', ?)").run(t);
@@ -103,9 +101,9 @@ test("a lapsed maintainer scope answer is set aside and asked once; an open dupl
   const db = await connectDb(":memory:");
   const t = new Date().toISOString();
   await db.prepare("INSERT INTO repos (name, visibility, default_branch) VALUES ('app', 'public', 'main')").run();
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(t);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: t, pipeline: 1 }));
   await db.prepare("INSERT INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-  for (const n of [5, 6]) await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', 'T', '', 'a', ?, ?)").run(n, t, t);
+  for (const n of [5, 6]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "issue", state: "OPEN", title: "T", body: "", author: "a", created_at: t, updated_at: t }));
   const q = (id: string, number: number) => ({ id, kind: "scope", repo: "app", number, question: "Scope?", facts: [], options: [{ key: "take", label: "Take" }, { key: "close", label: "Close" }], asked_at: t, asked_by: "decide" });
   await ask(db, [q("app#5:scope", 5)]);
   await db.prepare("UPDATE decisions SET answer = 'take', answered_by = 'maint', answered_at = ?, applied_at = ? WHERE id = 'app#5:scope'").run(t, t);
@@ -127,8 +125,8 @@ test("Close and Backlog on a stopped fix are scope answers by the operator, once
   const db = await connectDb(":memory:");
   const t = new Date().toISOString();
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(t);
-  await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES ('app', 5, 'issue', 'OPEN', 'T')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: t, pipeline: 1 }));
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 5, kind: "issue", state: "OPEN", title: "T" }));
   await db.prepare("INSERT INTO fix_attempts (repo, number, main_sha, text_hash, state, created_at, updated_at) VALUES ('app', 5, 'm', 'h', 'skipped', ?, ?)").run(t, t);
   const req = (answer: string) => ({
     method: "POST", path: "", params: { repo: "app", n: "5" }, query: new URLSearchParams(), form: new URLSearchParams(), json: { answer },

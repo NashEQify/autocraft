@@ -236,15 +236,11 @@ src/dupes/index.ts
 
 
 
-src/embed/store.ts
 
-src/embed/vectors.ts
 
 src/fasttrack.ts
 
-src/fixissue/approval.ts
 
-src/fixissue/candidates.ts
 
 
 
