@@ -1,6 +1,6 @@
 // CI and merge state of PR heads: one GraphQL query per chunk of PRs, stored in pr_checks.
 import { ownerOf } from "../owners.ts";
-import type { Querier } from "../mirror.ts";
+import { keepKnownMergeableExpr, type Querier } from "../mirror.ts";
 import { pilotExpr } from "../pilot.ts";
 import { resolvePushes } from "../push-outcomes.ts";
 import { overallAt, recordRuns, type Suite } from "../merge/ci-approval.ts";
@@ -112,13 +112,7 @@ export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISO
       mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify ? 1 : 0, fetched_at: at,
     }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
       ...kx.excluded(["head_oid", "state", "is_draft", "overall", "checks", "maintainer_can_modify", "fetched_at"])(eb),
-      // GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head.
-      mergeable: eb.case().when(eb.and([
-        eb("pr_checks.head_oid", "is not distinct from", eb.ref("excluded.head_oid")),
-        eb("pr_checks.mergeable", "in", ["CONFLICTING", "MERGEABLE"]),
-        eb("excluded.mergeable", "is distinct from", "CONFLICTING"),
-        eb("excluded.mergeable", "is distinct from", "MERGEABLE"),
-      ])).then(eb.ref("pr_checks.mergeable")).else(eb.ref("excluded.mergeable")).end(),
+      mergeable: keepKnownMergeableExpr(eb, "pr_checks"),
     }))));
   for (const r of rows) await recordRuns(db, r, at);
   await resolvePushes(db, rows, at);

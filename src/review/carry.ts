@@ -20,7 +20,7 @@ export async function carriedReview(db: Db, c: { repo: string; number: number; h
   const e = await db.get(db.k.selectFrom("opus_reviews").select(["head_oid", "verdict", "sure", "risks", "summary", "why", "conflicts", "fixes", "at", "seen_at", "disc_hash", "model", "base_ref"])
     .$narrowType<{ verdict: NotNull }>().where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "<>", c.head_oid).where("verdict", "is not", null).where("model", "is not", null)
     .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1));
-  if (await db.get(db.k.selectFrom("opus_reviews").select((eb) => eb.lit(1).as("one")).where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid).where("verdict", "is not", null).limit(1))) return null;
+  if (await db.get(db.k.selectFrom("opus_reviews").select((eb) => eb.lit(1).as("one")).where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid).where("verdict", "is not", null))) return null;
   if (!e || stale.has(`${c.repo}#${c.number}@${e.head_oid}`) || (e.verdict !== "take" && e.verdict !== "take-fix") || e.sure !== 1) return null;
   const baseRef = e.base_ref ?? await defaultBranchOf(db, c.repo);
   const liveBase = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", c.repo).where("number", "=", c.number)))?.base_ref ?? null;
