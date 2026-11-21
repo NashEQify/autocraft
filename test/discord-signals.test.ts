@@ -41,10 +41,10 @@ const signalled = () => db.k.selectFrom("discord_mentions").select((eb) => eb.fn
 
 describe("attention signals", () => {
   before(async () => {
-    await db.run(db.k.insertInto("main.tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
-    await db.run(db.k.insertInto("main.repos").values({ name: "photocraft", owner: "storytold" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold" }).onConflict((oc) => oc.doNothing()));
     await db.run(db.k.insertInto("discord_channels").values({ channel_id: "c1", guild_id: "g1", guild_name: "Guild", name: "dev", watched: 1 }));
-    for (const n of [1, 2, 3, 4]) await db.run(db.k.insertInto("main.items").values({ repo: "photocraft", number: n, kind: "issue", state: "OPEN", title: `Item ${n}`, updated_at: "2026-01-01" }));
+    for (const n of [1, 2, 3, 4]) await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: n, kind: "issue", state: "OPEN", title: `Item ${n}`, updated_at: "2026-01-01" }));
   });
 
   test("Jev decides from 0.8 up and below 0.3; Haiku decides in between and when Jev is off", async () => {

@@ -23,8 +23,7 @@ export const isWatched = async (db: Db, channelId: string): Promise<boolean> =>
     .where((eb) => eb.or([
       eb("c.watched", "=", 1),
       eb.exists(eb.selectFrom("discord_channels as p").select(eb.lit(1).as("one")).whereRef("p.channel_id", "=", "c.parent_id").where("p.watched", "=", 1)),
-    ]))
-    .limit(1));
+    ])));
 
 /** Sets a message's rows to exactly the items its text names. Returns the number of rows newly recorded (0 for a repeat), or -1 when the event carries no text. */
 export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage, guildId: string | undefined): Promise<number> {

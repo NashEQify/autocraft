@@ -13,7 +13,7 @@ import { setup } from "../src/dash/api/discord.ts";
 import { countOf, forgetAuthor, handleDispatch, linksOf } from "../src/discord/store.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
-import { excluded } from "../src/db/kx.ts";
+import { cols, excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-test-"));
@@ -39,7 +39,7 @@ describe("reference parser", () => {
 
 describe("event handler", () => {
   before(async () => {
-    await db.run(db.k.insertInto("main.tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
     await db.run(db.k.insertInto("discord_channels").values([
       { channel_id: "c1", guild_id: "g1", guild_name: "Guild", name: "dev", watched: 1 },
       { channel_id: "c2", guild_id: "g1", guild_name: "Guild", name: "off", watched: 0 },
@@ -53,7 +53,7 @@ describe("event handler", () => {
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m3", "photocraft#1", "c2"));
     assert.equal(await countOf(db, "photocraft", 1), 2);
     assert.equal(await countOf(db, "photocraft", 2), 1);
-    const raw = JSON.stringify(await db.all(db.k.selectFrom("discord_mentions").select(["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"])));
+    const raw = JSON.stringify(await db.all(db.k.selectFrom("discord_mentions").select(cols("discord_mentions"))));
     for (const plain of ["m1", "u1", "c1", "g1", "photocraft#1 again"]) assert.ok(!raw.includes(`"${plain}"`) && !raw.includes(`/${plain}`), `${plain} is stored in the clear`);
     const links = await linksOf(db, keys, "photocraft", 2);
     assert.deepEqual(links.map((l) => l.url), ["https://discord.com/channels/g1/c1/m1"]);
