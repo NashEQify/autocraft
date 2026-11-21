@@ -22,6 +22,8 @@ import type { Action, ActionKind } from "../core/plan.ts";
 import { writePlanCache } from "../core/plan-cache.ts";
 import { refreshLiveness } from "../liveness.ts";
 import { embedderId, modelName } from "../embed/model.ts";
+import { jevUsable } from "../agents/jev.ts";
+import { PACE_MAX_WAIT_MS, pipelineWriteWait } from "../github/write.ts";
 import { embedDue } from "../embed/store.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { selectFixups } from "../fixup/select.ts";
@@ -167,6 +169,28 @@ export const planCtx = (db: DatabaseSync): PlanCtx => {
 
 /** The pass's Plans (loaded on first use when the ctx came without). */
 const plansOf = (db: DatabaseSync, ctx: PlanCtx): PlanSet => (ctx.plans ??= loadPlanSet(db, { run: ctx.run }));
+/**
+ * The planned items of `kind` that a job of `step`, which serves every repo, gets to work now. In the user-local mode a job
+ * leaves out the Claude calls no Task Runner takes (the pools' poolRoom, the pair check's taker test), so an item that only
+ * such a call would serve is not work: a job for it would handle nothing and be queued again on every change of its input.
+ * `free`: the item needs no Claude call now (no model, or Jev while Jev may be called).
+ */
+function servable(db: DatabaseSync, ctx: PlanCtx, kind: ActionKind, step: string, free: (p: PlannedItem) => boolean = () => false): PlannedItem[] {
+  const untaken = (ctx.untaken ??= untakenTest(db)), byRepo = new Map<string, string | null>();
+  let why: string | null = null;
+  const out = plannedItems(db, kind, { plans: plansOf(db, ctx) }).filter((p) => {
+    if (free(p)) return true;
+    const repo = p.facts.repo;
+    if (!byRepo.has(repo)) byRepo.set(repo, untaken({ step, repo }));
+    const w = byRepo.get(repo)!;
+    why ??= w;
+    return w === null;
+  });
+  // With nothing left, the step's status names the wait rather than "nothing to do".
+  if (!out.length && why !== null && ctx.notes) ctx.notes[step] ??= why;
+  return out;
+}
+
 /** The pass's fast-track scores, keyed by `repo#number`. */
 const fastOf = (db: DatabaseSync, ctx: PlanCtx): Map<string, number> => (ctx.fast ??= fastScores(db));
 
@@ -181,7 +205,7 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
 }
 
 /** Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries the item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue"].includes(t));
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue"].includes(t));
 
 /** User-local mode: the Task Runners that could take calls (takerSignature). Work a pool left for want of a taker waits on it. */
 const takersOf = (db: DatabaseSync): string => (inferenceMode(db) === "user-local" ? takerSignature(db) : "");
@@ -296,12 +320,19 @@ function cifixRepos(db: DatabaseSync, ctx: PlanCtx, buckets: string[]): string[]
 const LANE_CODE: Omit<Lane, "steps">[] = [
   {
     name: "classify",
-    detect: (db, ctx) => (ctx.run && plannedItems(db, "classify", { plans: plansOf(db, ctx) }).length ? [{ step: "classify-new", params: {} }] : []),
+    // Jev classifies the items Jev is due for without a Task Runner; Haiku's calls need one.
+    detect: (db, ctx) => {
+      const jev = !!ctx.run && jevUsable(db);
+      return ctx.run && servable(db, ctx, "classify", "classify-new", (p) => jev && p.action.params?.source === "jev").length ? [{ step: "classify-new", params: {} }] : [];
+    },
   },
   {
     // Items without a priority at their current text hash; the scores of the others are refreshed by the same job.
     name: "priority",
-    detect: (db, ctx) => (plannedItems(db, "prioritize", { plans: plansOf(db, ctx) }).length ? [{ step: "prioritize", params: {} }] : []),
+    detect: (db, ctx) => {
+      const jev = jevUsable(db);
+      return servable(db, ctx, "prioritize", "prioritize", () => jev).length ? [{ step: "prioritize", params: {} }] : [];
+    },
   },
   {
     // Work score from the stored priority, size, type and security flag; no model. It is cheap and has no work test of its own:
@@ -321,13 +352,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "dupes",
     detect: (db, ctx) => {
       const plans = plansOf(db, ctx);
-      return plannedItems(db, "dupes", { plans }).length || plannedItems(db, "dupe-answer", { plans }).length ? [{ step: "dupes", params: {} }] : [];
+      // Scans (local vectors), group questions and answers need no model; a pair check needs a Task Runner, also for its Jev half.
+      return servable(db, ctx, "dupes", "dupes", (p) => !!p.action.params?.scan || !!p.action.params?.group).length || plannedItems(db, "dupe-answer", { plans }).length ? [{ step: "dupes", params: {} }] : [];
     },
   },
   {
     // Each duplicate group is compared once its pairs are checked; the comparison asks the group decision.
     name: "dupes-compare",
-    detect: (db, ctx) => (plannedItems(db, "dupes-compare", { plans: plansOf(db, ctx) }).length ? [{ step: "dupes-compare", params: {} }] : []),
+    // A set settled by rule (a closed member, a lone member) needs no model; the others need a Task Runner.
+    detect: (db, ctx) => (servable(db, ctx, "dupes-compare", "dupes-compare", (p) => p.facts.inCompareSet === "rule").length ? [{ step: "dupes-compare", params: {} }] : []),
   },
   {
     name: "decide",
@@ -335,7 +368,8 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: (db, ctx) => {
       // A recommendation that failed is tried again once its backoff ends.
       for (const r of db.prepare("SELECT recommend_failed_at AS at FROM decisions WHERE answer IS NULL AND recommend_failed_at > ?").all(new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
-      return plannedItems(db, "decide", { plans: plansOf(db, ctx) }).length ? [{ step: "decide", params: {} }] : [];
+      // A new scope decision is asked without a model; the prepare calls Opus.
+      return servable(db, ctx, "decide", "decide", (p) => p.action.params?.source === "new").length ? [{ step: "decide", params: {} }] : [];
     },
   },
   {
@@ -394,7 +428,16 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: (db, ctx) => {
       if (!ctx.run) return [];
       const repos = new Set(allowed(plannedItems(db, "label", { plans: plansOf(db, ctx) })).map((p) => p.facts.repo));
-      return ctx.tracked.filter((repo) => repos.has(repo)).map((repo) => ({ step: "labels-apply", params: { repo } }));
+      // A repo whose GitHub write budget is used up would label nothing (the writes are refused as paced): it waits for the window to move.
+      const now = Date.now();
+      return ctx.tracked.filter((repo) => {
+        if (!repos.has(repo)) return false;
+        const wait = pipelineWriteWait(db, "labels-apply", repo, now);
+        if (wait <= PACE_MAX_WAIT_MS) return true;
+        ctx.wake?.push(now + wait);
+        if (ctx.notes) ctx.notes["labels-apply"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
+        return false;
+      }).map((repo) => ({ step: "labels-apply", params: { repo } }));
     },
   },
   {
@@ -554,7 +597,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: (db, ctx) => {
       // An item whose Opus call failed is asked again once its backoff ends.
       if (ctx.run) for (const r of db.prepare("SELECT json_extract(probs, '$.opusFailedAt') AS at FROM classifications WHERE classifier = 'sonnet' AND run_id = ? AND json_extract(probs, '$.opusFailedAt') > ?").all(ctx.run, new Date(Date.now() - RECOMMEND_RETRY_MS).toISOString()) as { at: string }[]) ctx.wake?.push(Date.parse(r.at) + RECOMMEND_RETRY_MS);
-      return ctx.run && plannedItems(db, "referee", { plans: plansOf(db, ctx) }).length ? [{ step: "referee", params: {} }] : [];
+      return ctx.run && servable(db, ctx, "referee", "referee").length ? [{ step: "referee", params: {} }] : [];
     },
   },
   {
@@ -780,20 +823,26 @@ export function failureBackoff(db: DatabaseSync, step: string, ms: number = Date
 
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
-/** Why the stage cannot start jobs now, or null. The one place a stage's pause is decided. A step's models are taken at their defaults. */
-export function pauseReason(db: DatabaseSync, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): string | null {
+/** Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused. A step's models are taken at their defaults. */
+export function pauseOf(db: DatabaseSync, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): { why: string; wakeAt: number | null } | null {
   const l = limitRow(db, step), used = usageToday(db, step, ms);
   const tripped = tripReasonOfStep(db, step);
-  if (tripped) return tripped;
-  if (l.per_day === 0) return "paused: the daily limit is 0";
-  if (l.per_day !== null && used >= l.per_day) return `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`;
+  if (tripped) return { why: tripped, wakeAt: null };
+  if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
+  if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
   const b = o.backoff === false ? null : failureBackoff(db, step, ms);
-  if (b !== null) return `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`;
+  if (b !== null) return { why: `failed ${b.failures} time${b.failures === 1 ? "" : "s"} in a row; retry at ${hhmm(b.until)}`, wakeAt: b.until };
   // Steps that call Claude (decide, opus-review, the Haiku part of classify-new) wait for an account with headroom.
   // In the user-local mode no account is used: calls wait for helpers instead.
-  if (usesClaude(modelsOf(knownStep(step), {})) && inferenceMode(db) === "server") return claudePauseReason(db, ms);
+  if (usesClaude(modelsOf(knownStep(step), {})) && inferenceMode(db) === "server") {
+    const why = claudePauseReason(db, ms);
+    return why === null ? null : { why, wakeAt: ms + 60_000 };
+  }
   return null;
 }
+
+/** Why the stage cannot start jobs now, or null. The one place a stage's pause is decided. */
+export const pauseReason = (db: DatabaseSync, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): string | null => pauseOf(db, step, ms, o)?.why ?? null;
 
 // ---- state ---------------------------------------------------------------------
 
@@ -960,9 +1009,10 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
 
   const pausedWhy = (stepName: string): string | null => {
     if (!paused.has(stepName)) {
-      const why = pauseReason(db, stepName, ms, { backoff: false });
+      const p = pauseOf(db, stepName, ms, { backoff: false });
+      const why = p?.why ?? null;
       paused.set(stepName, why);
-      if (why) ctx.wake?.push(/daily limit/.test(why) ? nextUtcMidnight(ms) : ms + 60_000);
+      if (p?.wakeAt != null) ctx.wake?.push(p.wakeAt);
     }
     return paused.get(stepName)!;
   };

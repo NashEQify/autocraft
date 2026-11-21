@@ -19,14 +19,22 @@ const HAIKU = CLAUDE_PROMPTS["dupes.haiku"];
 
 export type PairKey = { repo: string; a: number; b: number; a_hash: string; b_hash: string; similarity: number };
 
-/** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. */
-export function uncheckedPairs(db: DatabaseSync, limit: number): PairKey[] {
-  return db.prepare(`SELECT p.repo, p.a, p.b, p.a_hash, p.b_hash, p.similarity FROM duplicate_pairs p
+// Unchecked pairs whose items still have the hashed text and of which at least one is open.
+const UNCHECKED = `SELECT p.repo, p.a, p.b, p.a_hash, p.b_hash, p.similarity FROM duplicate_pairs p
     JOIN items ia ON ia.repo = p.repo AND ia.number = p.a AND ia.embed_hash = p.a_hash
     JOIN items ib ON ib.repo = p.repo AND ib.number = p.b AND ib.embed_hash = p.b_hash
     WHERE p.verdict IS NULL AND (ia.state = 'OPEN' OR ib.state = 'OPEN') AND p.repo IN (SELECT name FROM tracked_repos)
-      AND (${pilotSqlFor("p.repo", "p.a")} OR ${pilotSqlFor("p.repo", "p.b")})
-    ORDER BY p.similarity DESC, p.repo, p.a, p.b LIMIT ?`).all(limit) as PairKey[];
+      AND (${pilotSqlFor("p.repo", "p.a")} OR ${pilotSqlFor("p.repo", "p.b")})`;
+
+/** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. */
+export function uncheckedPairs(db: DatabaseSync, limit: number): PairKey[] {
+  return db.prepare(`${UNCHECKED} ORDER BY p.similarity DESC, p.repo, p.a, p.b LIMIT ?`).all(limit) as PairKey[];
+}
+
+/** The number of unchecked pairs (uncheckedPairs) each item is in, keyed by `repo#number`. */
+export function uncheckedPairCounts(db: DatabaseSync): Map<string, number> {
+  const rows = db.prepare(`WITH u AS (${UNCHECKED}) SELECT repo || '#' || number AS k, COUNT(*) AS n FROM (SELECT repo, a AS number FROM u UNION ALL SELECT repo, b FROM u) GROUP BY repo, number`).all() as { k: string; n: number }[];
+  return new Map(rows.map((r) => [r.k, r.n]));
 }
 
 export function pairInput(db: DatabaseSync, k: PairKey): DupePair {

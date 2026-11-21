@@ -155,6 +155,34 @@ function paceOwner(identity: string, target: string, owner?: string): string {
   return owner ?? (ownerOf(name) || name);
 }
 
+/** How long a write of `action` by `identity` on `owner`'s key waits for the budget now (0: it may start). Reads only. */
+function keyWait(db: DatabaseSync, action: string, identity: string, owner: string, now: number): number {
+  const rows = db.prepare(
+    `SELECT at, json_extract(details, '$.state') AS state, json_extract(details, '$.error') AS error FROM audit
+     WHERE at >= ? AND json_extract(details, '$.identity') = ? AND json_extract(details, '$.paceOwner') = ? ORDER BY at`,
+  ).all(new Date(now - 3_600_000).toISOString(), identity, owner) as { at: string; state: string | null; error: string | null }[];
+  const times = rows.map((r) => Date.parse(r.at));
+  const inMinute = times.filter((t) => t > now - 60_000);
+  const share = BULK_ACTIONS.has(action) ? BULK_SHARE : 1;
+  const perMinute = Math.floor(PACE_PER_MINUTE * share);
+  const perHour = Math.floor(PACE_PER_HOUR * share);
+  let wait = 0;
+  if (inMinute.length >= perMinute) wait = inMinute[inMinute.length - perMinute]! + 60_000 - now;
+  if (times.length >= perHour) wait = Math.max(wait, times[times.length - perHour]! + 3_600_000 - now);
+  const lastSecondary = rows.filter((r) => r.state === "failed" && SECONDARY_LIMIT.test(r.error ?? "")).map((r) => Date.parse(r.at)).at(-1);
+  if (lastSecondary !== undefined) wait = Math.max(wait, lastSecondary + SECONDARY_PAUSE_MS - now);
+  return wait > 0 ? Math.max(wait, 1) : 0;
+}
+
+/**
+ * How long the pipeline's write of `action` on `repo` (made as the app, or the box account while writes use it) waits for
+ * the budget now; 0 when it may start. The planner reads it so it does not queue a job whose writes would be refused as paced.
+ */
+export function pipelineWriteWait(db: DatabaseSync, action: string, repo: string, now: number = Date.now()): number {
+  const identity = githubIdentity(db) === "box" ? "legacy" : "app";
+  return keyWait(db, action, identity, paceOwner(identity, repo), now);
+}
+
 /**
  * Tries to insert the row inside one BEGIN IMMEDIATE: counts the key's rows of the last hour (json_extract over the
  * window's rows via the audit_at index: fine at this volume) and inserts when under budget. Returns the row id, or
@@ -169,21 +197,8 @@ function tryBegin(w: Writer, action: string, target: string, details: Details, n
   if (identity.startsWith("user:")) return { id: insert(started) };
   w.db.exec("BEGIN IMMEDIATE");
   try {
-    const rows = w.db.prepare(
-      `SELECT at, json_extract(details, '$.state') AS state, json_extract(details, '$.error') AS error FROM audit
-       WHERE at >= ? AND json_extract(details, '$.identity') = ? AND json_extract(details, '$.paceOwner') = ? ORDER BY at`,
-    ).all(new Date(now - 3_600_000).toISOString(), identity, owner) as { at: string; state: string | null; error: string | null }[];
-    const times = rows.map((r) => Date.parse(r.at));
-    const inMinute = times.filter((t) => t > now - 60_000);
-    const share = BULK_ACTIONS.has(action) ? BULK_SHARE : 1;
-    const perMinute = Math.floor(PACE_PER_MINUTE * share);
-    const perHour = Math.floor(PACE_PER_HOUR * share);
-    let wait = 0;
-    if (inMinute.length >= perMinute) wait = inMinute[inMinute.length - perMinute]! + 60_000 - now;
-    if (times.length >= perHour) wait = Math.max(wait, times[times.length - perHour]! + 3_600_000 - now);
-    const lastSecondary = rows.filter((r) => r.state === "failed" && SECONDARY_LIMIT.test(r.error ?? "")).map((r) => Date.parse(r.at)).at(-1);
-    if (lastSecondary !== undefined) wait = Math.max(wait, lastSecondary + SECONDARY_PAUSE_MS - now);
-    if (wait > 0) { w.db.exec("COMMIT"); return { wait: Math.max(wait, 1) }; }
+    const wait = keyWait(w.db, action, identity, owner, now);
+    if (wait > 0) { w.db.exec("COMMIT"); return { wait }; }
     const id = insert({ ...started, paceOwner: owner });
     w.db.exec("COMMIT");
     return { id };

@@ -62,22 +62,26 @@ export function setJevEnabled(db: DatabaseSync, on: boolean, by: string): void {
   if (on !== was) audit(db, by, "account-change", "jev", { jevEnabled: on, was });
 }
 
+/** Whether a pass may call Jev now, without writing: for readers such as the planner. */
+export function jevUsable(db: DatabaseSync, nowMs: number = Date.now()): boolean {
+  if (!jevEnabled(db)) return false;
+  const o = jevOutage(db);
+  if (!o) return true;
+  if (o.kind === "missing") return jevInstalled();
+  if (o.kind === "account") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
+  return true;
+}
+
 /** Whether a pass may call Jev now. Also keeps the stored state in step with the switch and the installed command. */
 export function jevAvailable(db: DatabaseSync, nowMs: number = Date.now()): boolean {
   if (!jevEnabled(db)) {
     if (jevOutage(db)?.kind !== "off") put(db, JEV_UNAVAILABLE_KEY, JSON.stringify({ kind: "off", reason: "switched off", since: new Date(nowMs).toISOString(), at: new Date(nowMs).toISOString() } satisfies JevOutage));
     return false;
   }
-  const o = jevOutage(db);
-  if (!o) return true;
-  if (o.kind === "missing") {
-    if (!jevInstalled()) return false;
-    clear(db);
-    return true;
-  }
-  if (o.kind === "account") return nowMs - Date.parse(o.at) >= JEV_RETRY_MS;
-  clear(db);
-  return true;
+  const usable = jevUsable(db, nowMs), o = jevOutage(db);
+  // A switch turned back on or a command installed since the outage was recorded ends it; an account outage ends with a call that works.
+  if (usable && o && o.kind !== "account") clear(db);
+  return usable;
 }
 
 /** Records a failure; `since` stays at the first failure of an outage. */

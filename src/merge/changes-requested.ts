@@ -16,14 +16,15 @@ export const FORMAL_REVIEWS = "latestOpinionatedReviews(first: 100, writersOnly:
 
 /** Associations that cannot be a maintainer. Anything else, and an unknown association, may be one. */
 const STRANGER = ["NONE", "FIRST_TIMER", "FIRST_TIME_CONTRIBUTOR", "MANNEQUIN"];
-const FORMAL = ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"];
+/** Review states that count as a reviewer's opinion; COMMENTED does not. */
+export const FORMAL_STATES = ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"];
 
 /** Logins whose latest formal review in the mirror is CHANGES_REQUESTED, unless their association rules them out. */
 export function changesRequestedBy(reviews: ReviewFact[]): string[] {
   const latest = new Map<string, ReviewFact>();
   const ordered = reviews.map((r, i) => ({ r, i })).sort((a, b) => (a.r.at ?? "").localeCompare(b.r.at ?? "") || a.i - b.i);
   for (const { r } of ordered) {
-    if (!r.author || !FORMAL.includes(r.state ?? "")) continue;
+    if (!r.author || !FORMAL_STATES.includes(r.state ?? "")) continue;
     latest.set(r.author, r);
   }
   return [...latest.values()].filter((r) => r.state === "CHANGES_REQUESTED" && !STRANGER.includes(r.association ?? "")).map((r) => r.author!).sort();

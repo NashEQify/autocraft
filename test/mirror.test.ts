@@ -180,3 +180,26 @@ test("saveChecks keeps a known mergeable at the same head and replaces it at a n
   save("h2", "UNKNOWN");
   assert.equal(stored(), "UNKNOWN");
 });
+
+test("the open-PR references follow an edit of the PR's text, from sync and from any other writer", async () => {
+  const { writeItemNode } = await import("../src/mirror.ts");
+  const { issuesWithOpenPr } = await import("../src/fixissue/candidates.ts");
+  const db = connect(join(mkdtempSync(join(SCRATCH, "refs-")), "m.db"));
+  const pr = (body: string) => ({
+    __typename: "PullRequest", repository: { name: "a", owner: { login: "storytold" } }, number: 7, title: "Change", body, url: "https://github.com/storytold/a/pull/7",
+    author: { __typename: "User", login: "x", databaseId: 1 }, authorAssociation: "NONE", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-11-02T10:00:00Z", closedAt: null, state: "OPEN",
+    labels: { nodes: [] }, assignees: { nodes: [] }, commentCount: { totalCount: 0 }, comments: { nodes: [] }, reviews: { nodes: [] },
+    isDraft: false, mergedAt: null, mergedBy: null, additions: 1, deletions: 0, changedFiles: 1, headRefName: "b", headRefOid: "h1", headRepository: { nameWithOwner: "storytold/a" },
+    baseRefName: "main", closingIssuesReferences: { nodes: [] }, maintainerCanModify: true, mergeable: "MERGEABLE", reviewDecision: null, commits: { nodes: [] },
+  });
+  writeItemNode(db, "a", pr("Fixes #5"));
+  assert.deepEqual(issuesWithOpenPr(db, "a").get(5), { number: 7, closes: true });
+  writeItemNode(db, "a", pr("Unrelated to #5 after all"));
+  assert.deepEqual(issuesWithOpenPr(db, "a").get(5), { number: 7, closes: false });
+  writeItemNode(db, "a", pr("No references"));
+  assert.equal(issuesWithOpenPr(db, "a").has(5), false);
+  // Stored by sync, so the next edit must clear it.
+  assert.notEqual((db.prepare("SELECT text_refs FROM items WHERE repo = 'a' AND number = 7").get() as { text_refs: string | null }).text_refs, null);
+  db.prepare("UPDATE items SET body = 'Closes #6' WHERE repo = 'a' AND number = 7").run();
+  assert.deepEqual(issuesWithOpenPr(db, "a").get(6), { number: 7, closes: true });
+});

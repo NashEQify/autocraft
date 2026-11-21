@@ -52,6 +52,10 @@ export type Member = { number: number; kind: Kind; state: string; title: string 
 /** The members of one kind of a group: what one comparison covers. */
 export type KindSet = { repo: string; kind: Kind; key: string; members: Member[]; hash: string };
 
+/** How a set is settled without a model call: a closed or merged member wins, a lone member is kept; null when a model compares it. */
+export const ruleOutcome = (s: Pick<KindSet, "members">): "closed" | "single" | null =>
+  s.members.some((m) => m.state !== "OPEN") ? "closed" : s.members.length < 2 ? "single" : null;
+
 export const setKey = (kind: Kind, numbers: number[]): string => `${kind}:${[...numbers].sort((a, b) => a - b).join(",")}`;
 
 /** Changes whenever a member's state does, an issue's text, or the issues a PR closes; a PR's head and other text are left out (its diff size is checked on its own). */

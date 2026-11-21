@@ -29,7 +29,7 @@ import {
   GROUP_DIFF_CHARS, GROUP_MAX, prsRef, 
   type CompareIssue, type CompareIssues, type ComparePr, type ComparePrs,
 } from "./group.ts";
-import { dueSets, rememberDrop, saveComparison, storedComparison, type ComparisonResult, type KindSet, type StoredComparison } from "./plan.ts";
+import { dueSets, rememberDrop, ruleOutcome, saveComparison, storedComparison, type ComparisonResult, type KindSet, type StoredComparison } from "./plan.ts";
 
 const PR_PROMPT = CLAUDE_PROMPTS["dupes.compare-prs.opus"];
 const ISSUE_PROMPT = CLAUDE_PROMPTS["dupes.compare-issues.sonnet"];
@@ -239,10 +239,11 @@ export async function runDupeCompare(db: DatabaseSync, params: CompareParams = {
   let calls: KindSet[] = [];
   for (const set of sets) {
     const at = NOW_ISO(d);
-    if (set.members.some((m) => m.state !== "OPEN")) {
+    const rule = ruleOutcome(set);
+    if (rule === "closed") {
       saveComparison(db, viaRule(db, set, at, null, "closed"), set);
       s.closedWins++;
-    } else if (set.members.length < 2) {
+    } else if (rule === "single") {
       saveComparison(db, viaRule(db, set, at, null, "single"), set);
       s.single++;
     } else calls.push(set);

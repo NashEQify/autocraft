@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { decideItem } from "../src/core/decide-item.ts";
-import { issuesWithOpenPr } from "../src/fixissue/candidates.ts";
+import { issuesWithOpenPr, textRefs } from "../src/fixissue/candidates.ts";
 import { itemFacts } from "./world.ts";
 
 const needsDecision = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
@@ -49,8 +49,8 @@ test("an open PR waits the issue whatever its fix attempt state, and a mention s
 
 test("only closing references, and a person's bare mention, hold an issue; links and bot mentions do not", () => {
   const db = new DatabaseSync(":memory:");
-  db.exec("CREATE TABLE items (repo TEXT, number INTEGER, kind TEXT, state TEXT, author TEXT, title TEXT, body TEXT, closing_issues TEXT)");
-  const add = db.prepare("INSERT INTO items VALUES ('app', ?, 'pr', 'OPEN', ?, ?, ?, ?)");
+  db.exec("CREATE TABLE items (repo TEXT, number INTEGER, kind TEXT, state TEXT, author TEXT, title TEXT, body TEXT, closing_issues TEXT, text_refs TEXT)");
+  const add = db.prepare("INSERT INTO items (repo, number, kind, state, author, title, body, closing_issues) VALUES ('app', ?, 'pr', 'OPEN', ?, ?, ?, ?)");
   add.run(10, "dev", "Rework (#1)", "See also #2. Fixes #3", null);
   add.run(11, "dev", "Other", "Addresses item 3/5 of #6. Resolves: #4", "[5]");
   add.run(12, "dependabot[bot]", "Bump x", 'Notes: <a href="https://github.com/o/r/issues/710">#710</a> and #711 and [#712](https://x/y)', null);
@@ -58,6 +58,10 @@ test("only closing references, and a person's bare mention, hold an issue; links
   const m = issuesWithOpenPr(db, "app");
   assert.deepEqual([...m].sort((a, b) => a[0] - b[0]).map(([n, p]) => [n, p.number, p.closes]),
     [[1, 10, false], [2, 10, false], [3, 10, true], [4, 11, true], [5, 11, true], [6, 11, false]]);
+  // The references sync stores give the same answer as the text.
+  for (const r of db.prepare("SELECT number, title, body FROM items").all() as { number: number; title: string; body: string }[])
+    db.prepare("UPDATE items SET text_refs = ? WHERE number = ?").run(textRefs(r.title, r.body), r.number);
+  assert.deepEqual(issuesWithOpenPr(db, "app"), m);
 });
 
 test("stopped fixes are one group row per repo, listed 25 per page with priority first", async () => {

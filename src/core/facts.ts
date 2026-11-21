@@ -20,7 +20,7 @@ import { FAST_FLOOR, fastScoreSql } from "../fasttrack.ts";
 import { latestRun, refereeClosed, settledSet } from "../classify/settled.ts";
 import { redMainRepos, MAIN_FIX_BRANCH_PREFIX } from "../mainci/index.ts";
 import { batchStates, membersOf } from "../merge/batch-store.ts";
-import { changesRequestedWhy, gatesOf, GATE_FAILURES, failureNote, type ReviewFact } from "../merge/changes-requested.ts";
+import { changesRequestedWhy, FORMAL_STATES, gatesOf, GATE_FAILURES, failureNote, type ReviewFact } from "../merge/changes-requested.ts";
 import { ciApprovalOf } from "../merge/ci-approval.ts";
 import { mergeApprovalOf } from "../merge/approval.ts";
 import { mergeHolds } from "../merge/holds.ts";
@@ -71,8 +71,12 @@ export type LoadOptions = {
 type Row = {
   repo: string; number: number; author: string | null; author_id: number | null; author_type: string | null; state: "OPEN" | "MERGED" | "CLOSED"; review_decision: string | null; head_oid: string | null; updated_at: string | null; is_draft: number | null;
   additions: number | null; deletions: number | null; i_mergeable: string | null; head_repo: string | null; head_ref: string | null; base_ref: string | null; i_can: number | null;
-  c_head: string | null; c_at: string | null; c_state: string | null; c_draft: number | null; overall: string | null; c_checks: string | null; c_mergeable: string | null; c_can: number | null;
-  r_head: string | null; r_at: string | null; r_verdict: string | null; r_sure: number | null; r_mode: string | null; r_reason: string | null; r_fixes: string | null; r_public: string | null; r_conflicts: string | null;
+  c_head: string | null; c_at: string | null; c_state: string | null; c_draft: number | null; overall: string | null; c_mergeable: string | null; c_can: number | null;
+  r_head: string | null; r_at: string | null; r_verdict: string | null; r_sure: number | null; r_mode: string | null; r_reason: string | null; r_fixes: string | null; r_conflicts: string | null;
+  /** The stored public review's summary when it has a summary and a points list ('' when not): all parsePublic() needs to tell whether it can be posted. */
+  r_public: string | null;
+  /** Read only when `overall` is failure, the one case effectiveCi() looks at them. */
+  c_checks: string | null;
   assignees: string | null; score: number | null; in_pilot: number; not_integration: number; batch_pr: number; held_backlog: number; held_dup: number;
 };
 
@@ -81,8 +85,9 @@ const safeJson = (s: string | null): unknown => { try { return JSON.parse(s!); }
 
 const SELECT = `SELECT i.repo, i.number, i.author, i.author_id, i.author_type, i.assignees, i.state, i.review_decision, i.head_oid, i.updated_at, i.is_draft, i.additions, i.deletions, i.mergeable AS i_mergeable,
     i.head_repo, i.head_ref, i.base_ref, i.maintainer_can_modify AS i_can,
-    c.head_oid AS c_head, c.fetched_at AS c_at, c.state AS c_state, c.is_draft AS c_draft, c.overall, c.checks AS c_checks, c.mergeable AS c_mergeable, c.maintainer_can_modify AS c_can,
-    l.head_oid AS r_head, l.at AS r_at, l.verdict AS r_verdict, l.sure AS r_sure, l.mode AS r_mode, l.reason AS r_reason, l.fixes AS r_fixes, l.public_review AS r_public, l.conflicts AS r_conflicts,
+    c.head_oid AS c_head, c.fetched_at AS c_at, c.state AS c_state, c.is_draft AS c_draft, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS c_checks, c.mergeable AS c_mergeable, c.maintainer_can_modify AS c_can,
+    l.head_oid AS r_head, l.at AS r_at, l.verdict AS r_verdict, l.sure AS r_sure, l.mode AS r_mode, l.reason AS r_reason, l.fixes AS r_fixes, CASE WHEN l.public_review IS NULL THEN NULL WHEN json_valid(l.public_review) AND json_type(l.public_review, '$.summary') = 'text'
+      AND json_type(l.public_review, '$.points') = 'array' THEN json_extract(l.public_review, '$.summary') ELSE '' END AS r_public, l.conflicts AS r_conflicts,
     ${fastScoreSql("i.repo", "i.number", "p.score")} AS score,
     ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration,
     EXISTS (SELECT 1 FROM main.merge_batches mb WHERE mb.repo = i.repo AND mb.pr_number = i.number) AS batch_pr,
@@ -250,10 +255,11 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     return m;
   };
 
-  // Open PRs by repo, head branch and head repo (lower case), lowest number first: the PR another one is stacked on.
+  // Open PRs by repo, head branch and head repo (lower case), lowest number first: the PR another one is stacked on. Only heads that are an open PR's base.
   const openByHead = new Map<string, number[]>();
   for (const o of db.prepare(`SELECT i.repo || ' ' || i.head_ref || ' ' || lower(i.head_repo) AS k, i.number FROM items i
-    WHERE i.kind = 'pr' AND i.state = 'OPEN' AND i.head_ref IS NOT NULL AND i.head_repo IS NOT NULL AND i.repo IN (SELECT value FROM json_each(?)) ORDER BY i.number`)
+    WHERE i.kind = 'pr' AND i.state = 'OPEN' AND i.head_ref IS NOT NULL AND i.head_repo IS NOT NULL AND i.repo IN (SELECT value FROM json_each(?))
+      AND (i.repo, i.head_ref) IN (SELECT b.repo, b.base_ref FROM items b WHERE b.kind = 'pr' AND b.state = 'OPEN' AND b.base_ref IS NOT NULL) ORDER BY i.number`)
     .all(JSON.stringify([...new Set(rows.map((r) => r.repo))])) as { k: string; number: number }[]) (openByHead.get(o.k) ?? openByHead.set(o.k, []).get(o.k)!).push(o.number);
   // The latest merge attempt at each head (first in the order) and the refusals there.
   const merges = keyed<{ k: string; outcome: string; reason: string | null; ci: string | null; mergeable: string | null; at: string; refusals: number }>(`SELECT m.repo || '#' || m.number || '@' || m.head_oid AS k, m.outcome, m.reason, m.ci, m.mergeable, m.at,
@@ -262,8 +268,9 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
   const waiting = keyed<{ k: string } & Wait>("SELECT a.repo || '#' || a.number || '@' || a.head_oid AS k, a.runs, a.approved, a.reread, a.failed, a.cross_repo, a.approved_at FROM ci_run_approvals a WHERE 1 /*narrow*/", "a");
   const verifRows = keyed<{ k: string; state: string; kind: string; summary: string | null; note: string | null }>("SELECT v.repo || '#' || v.number || '@' || v.head_sha AS k, v.state, v.kind, v.summary, v.note FROM verifications v WHERE 1 /*narrow*/", "v");
   const verifAt = (ref: string, head: string) => verifRows.get(`${ref}@${head}`)?.[0];
-  // The answer of every decision, by id (null: not answered yet).
-  const decisionAnswers = new Map((db.prepare("SELECT id, answer FROM decisions").all() as { id: string; answer: string | null }[]).map((d) => [d.id, d.answer]));
+  // The answer of the merge and hold decisions at each reviewed head, by id (null: not answered yet); the loop looks up no others.
+  const decisionIds = rows.filter((r) => r.r_head && r.r_verdict && r.r_at).flatMap((r) => [mergeDecisionId(r.repo, r.number, r.r_head!), holdDecisionId(r.repo, r.number, r.r_head!)]);
+  const decisionAnswers = new Map((db.prepare("SELECT id, answer FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(decisionIds)) as { id: string; answer: string | null }[]).map((d) => [d.id, d.answer]));
   // An item has one open question at a time (src/merge/withdraw.ts): a Hold question would set another one aside, so it waits for that one.
   const otherOpen = keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' AND d.id NOT LIKE '%:dupegroup:%' AND d.kind IN ('scope', 'merge', 'close') /*narrow*/", "d");
   const holdQuestionOf = (ref: string, id: string): PrFacts["decision"]["hold"] => {
@@ -281,8 +288,12 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
   // UNSURE_AT_SQL for every head: a take or take-fix review there with sure = 0.
   const unsureAt = keyed<{ k: string }>(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k FROM opus_review_history o WHERE o.verdict IN ('take', 'take-fix') AND o.sure = 0 /*narrow*/
     UNION SELECT o.repo || '#' || o.number || '@' || o.head_oid FROM opus_reviews o WHERE o.verdict IN ('take', 'take-fix') AND o.sure = 0 /*narrow*/`, "o");
-  const premerge = premergeRows(db, narrow("p"));
-  const reviewRows = keyed<{ k: string } & ReviewFact>("SELECT c.repo || '#' || c.number AS k, c.author, c.author_association AS association, c.review_state AS state, c.created_at AS at FROM comments c JOIN items i ON i.repo = c.repo AND i.number = c.number AND i.kind = 'pr' AND i.state = 'OPEN' WHERE c.kind = 'review' /*narrow*/ ORDER BY c.rowid", "c");
+  // Pre-merge reviews at the head of each PR's latest review (r_head), the only ones the loop reads.
+  const premergeKeys = JSON.stringify(rows.filter((r) => r.r_head).map((r) => `${r.repo}#${r.number}@${r.r_head}`));
+  const premergeNarrow = narrow("p");
+  const premerge = premergeRows(db, { sql: `${premergeNarrow.sql} AND p.repo || '#' || p.number || '@' || p.head_oid IN (SELECT value FROM json_each(:premergeKeys))`, p: { ...premergeNarrow.p, premergeKeys } });
+  // Only formal reviews with an author: changesRequestedBy() reads no others.
+  const reviewRows = keyed<{ k: string } & ReviewFact>(`SELECT c.repo || '#' || c.number AS k, c.author, c.author_association AS association, c.review_state AS state, c.created_at AS at FROM comments c JOIN items i ON i.repo = c.repo AND i.number = c.number AND i.kind = 'pr' AND i.state = 'OPEN' WHERE c.kind = 'review' AND c.author IS NOT NULL AND c.review_state IN (${FORMAL_STATES.map((x) => `'${x}'`).join(", ")}) /*narrow*/ ORDER BY c.rowid`, "c");
   const batchTip = db.prepare(`SELECT a.runs, a.approved, a.reread, a.failed, a.cross_repo FROM merge_batches b
     JOIN ci_run_approvals a ON a.repo = b.repo AND a.number = b.pr_number AND a.head_oid = b.commit_sha
     WHERE b.repo = ? AND b.pr_number = ? AND b.state = 'open'
@@ -401,7 +412,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     // A carried review has no text of its own: the post uses the text of the review it was carried from.
     const src = r.r_mode === CARRIED ? postSource(r.repo, r.number, r.r_head) : null;
     const hasPublic = src ? src.hasPublic : r.r_public !== null;
-    const pub = src ? src.public : !hasPublic ? { ok: true } : parsePublic(safeJson(r.r_public!));
+    const pub = src ? src.public : !hasPublic ? { ok: true } : parsePublic({ summary: r.r_public, points: [] });
     base.post = {
       postable: (hasPublic || !!p?.review_id) && !!pub,
       posted: p ? { head: p.head_oid, at: p.posted_at, opusAt: p.opus_at } : null,

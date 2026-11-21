@@ -3,7 +3,7 @@
 // Also decides when a PR's review is stale because someone else wrote on it after them.
 // All text here is written by outsiders and is passed on as untrusted data.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { isBotCommand, isBotLogin } from "./bots.ts";
 import { blockersLoader, storedBlockedBy } from "./blockers.ts";
@@ -270,7 +270,7 @@ const MAINTAINER_ASSOCIATIONS = ["OWNER", "MEMBER", "COLLABORATOR"];
 // bump `reviews`, and the pipeline login is part of the key, so an unchanged signature means unchanged input.
 const stateMemo = new WeakMap<DatabaseSync, Map<string, { sig: string; state: DiscussionState }>>();
 
-/** Newest counted comment or review by someone else, and the hash of those, per "repo#n" from the mirror. Callers must not modify the result. */
+/** Newest counted comment or review by someone else, and the hash of those, per PR "repo#n" from the mirror (issues are left out). Callers must not modify the result. */
 export function discussionState(db: DatabaseSync, repo?: string): DiscussionState {
   const seqs = db.prepare("SELECT topic, seq FROM change_seq WHERE topic IN ('items', 'reviews') ORDER BY topic").all() as { topic: string; seq: number }[];
   const sig = JSON.stringify([seqs, [...allOwnLogins(db)]]);
@@ -285,22 +285,49 @@ export function discussionState(db: DatabaseSync, repo?: string): DiscussionStat
 }
 
 function computeDiscussionState(db: DatabaseSync, repo?: string): DiscussionState {
-  const rows = db.prepare(`SELECT c.repo, c.number, c.id, c.body, c.created_at, c.author_association AS assoc,
-      EXISTS (SELECT 1 FROM main.access a WHERE a.login = c.author AND a.role IN ('operator', 'maintainer')) AS dash FROM comments c
-    WHERE (:repo IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}`).all({ repo: repo ?? null, own: ownJson(repo ? ownLogins(db, repo) : allOwnLogins(db)) }) as { repo: string; number: number; id: string; body: string | null; created_at: string; assoc: string | null; dash: number }[];
-  const by = new Map<string, typeof rows>();
-  for (const r of rows) {
+  const own = ownJson(repo ? ownLogins(db, repo) : allOwnLogins(db));
+  const rows = db.prepare(`SELECT c.repo, c.number, COALESCE(MAX(c.created_at), '') AS newest,
+      COALESCE(MAX(CASE WHEN c.author_association IN (${MAINTAINER_ASSOCIATIONS.map((a) => `'${a}'`).join(", ")})
+        OR EXISTS (SELECT 1 FROM main.access a WHERE a.login = c.author AND a.role IN ('operator', 'maintainer')) THEN c.created_at END), '') AS maint
+    FROM comments c WHERE (:repo IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}
+      AND NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = c.repo AND i.number = c.number AND i.kind = 'issue') GROUP BY c.repo, c.number`).all({ repo: repo ?? null, own }) as { repo: string; number: number; newest: string; maint: string }[];
+  // The hash needs the comment text; callers ask for it only after a newer entry than a review's snapshot, so it is read on first use (primeHashes reads many in one query).
+  const known = new Map<string, string>();
+  const texts = (keys: { repo: string; number: number }[]): Map<string, { id: string; body: string | null }[]> => {
+    const by = new Map<string, { id: string; body: string | null }[]>(keys.map((k) => [`${k.repo}#${k.number}`, []]));
+    for (const c of db.prepare(`SELECT c.repo, c.number, c.id, c.body FROM json_each(:keys) j JOIN comments c ON c.repo = j.value ->> 0 AND c.number = j.value ->> 1
+      WHERE c.counted = 1 AND ${NOT_OURS}`).all({ keys: JSON.stringify(keys.map((k) => [k.repo, k.number])), own }) as { repo: string; number: number; id: string; body: string | null }[])
+      by.get(`${c.repo}#${c.number}`)?.push(c);
+    return by;
+  };
+  const prime = (keys: { repo: string; number: number }[]) => {
+    for (const [k, v] of texts(keys)) known.set(k, discussionHash(v));
+  };
+  const rowOf = new Map(rows.map((r) => [`${r.repo}#${r.number}`, r]));
+  const state: DiscussionState = new Map(rows.map((r) => {
     const k = `${r.repo}#${r.number}`;
-    const list = by.get(k);
-    if (list) list.push(r);
-    else by.set(k, [r]);
-  }
-  return new Map([...by].map(([k, v]) => [k, { newest: v.reduce((m, r) => (r.created_at > m ? r.created_at : m), ""), hash: discussionHash(v), maint: v.filter((r) => r.dash || MAINTAINER_ASSOCIATIONS.includes(r.assoc ?? "")).reduce((m, r) => (r.created_at > m ? r.created_at : m), "") }]));
+    return [k, { newest: r.newest, maint: r.maint, get hash() { if (!known.has(k)) prime([r]); return known.get(k)!; } }];
+  }));
+  primers.set(state, (refs) => {
+    const keys = [...new Set(refs)].filter((k) => !known.has(k)).flatMap((k) => rowOf.get(k) ?? []);
+    if (keys.length) prime(keys);
+  });
+  return state;
 }
+
+const primers = new WeakMap<DiscussionState, (refs: Iterable<string>) => void>();
+
+/** Reads the hashes of the entries of `refs` in one query; an entry not primed reads its own on first use. */
+export function primeHashes(state: DiscussionState, refs: Iterable<string>): void {
+  primers.get(state)?.(refs);
+}
+
+/** Whether the newest maintainer entry is newer than `seen`: maintainerSince() then needs the hash. */
+const maintNewer = (state: { maint: string } | undefined, seen: string): boolean => !!state && !!state.maint && sec(state.maint) > sec(seen);
 
 /** A maintainer's counted entry newer than a review's snapshot that the review did not read; PR author comments do not count. */
 export function maintainerSince(state: { newest: string; hash: string; maint: string } | undefined, seen: string, hash: string | null): boolean {
-  return !!state && !!state.maint && sec(state.maint) > sec(seen) && state.hash !== hash;
+  return maintNewer(state, seen) && state!.hash !== hash;
 }
 
 /**
@@ -339,6 +366,27 @@ export function countRerun(db: DatabaseSync, repo: string, number: number): void
   db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1").run(rerunKey(repo, number), "1");
 }
 
+type ReviewedRow = { repo: string; number: number; head_oid: string; at: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null; rebased: number | null };
+
+// A pass calls staleReviews() several times; the rows change only with the `items`, `reviews` and `repos` topics.
+const reviewedMemo = new WeakMap<DatabaseSync, Map<string, { sig: string; rows: ReviewedRow[] }>>();
+
+function reviewedRows(db: DatabaseSync, repo?: string): ReviewedRow[] {
+  const seqs = db.prepare("SELECT topic, seq FROM change_seq WHERE topic IN ('items', 'reviews', 'repos') ORDER BY topic").all() as { topic: string; seq: number }[];
+  const sig = JSON.stringify(seqs);
+  const memo = reviewedMemo.get(db) ?? new Map<string, { sig: string; rows: ReviewedRow[] }>();
+  reviewedMemo.set(db, memo);
+  const hit = memo.get(repo ?? "");
+  if (hit && hit.sig === sig && seqs.length === 3) return hit.rows;
+  const rows = db.prepare(`SELECT r.repo, r.number, r.head_oid, r.at, r.seen_at, r.disc_hash, r.blocked_by,
+      i.base_ref IS NOT NULL AND COALESCE(r.base_ref, p.default_branch) IS NOT NULL AND i.base_ref <> COALESCE(r.base_ref, p.default_branch) AS rebased
+    FROM opus_reviews r LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number LEFT JOIN repos p ON p.name = r.repo
+    WHERE r.verdict IS NOT NULL AND (:repo IS NULL OR r.repo = :repo)`)
+    .all({ repo: repo ?? null }) as ReviewedRow[];
+  memo.set(repo ?? "", { sig, rows });
+  return rows;
+}
+
 /**
  * PRs, as "repo#n@head", whose Opus review read the discussion before a counted comment or review that it
  * did not read, that an operator marked stale, or whose diff was read against another base branch than the PR has now
@@ -346,12 +394,9 @@ export function countRerun(db: DatabaseSync, repo: string, number: number): void
  * MAX_RERUNS_PER_DAY discussion- or base-triggered re-reviews today are left out (an operator mark is never capped).
  */
 export function staleReviews(db: DatabaseSync, repo?: string, respectCap = false): Set<string> {
-  const rows = db.prepare(`SELECT r.repo, r.number, r.head_oid, r.at, r.seen_at, r.disc_hash, r.blocked_by,
-      i.base_ref IS NOT NULL AND COALESCE(r.base_ref, p.default_branch) IS NOT NULL AND i.base_ref <> COALESCE(r.base_ref, p.default_branch) AS rebased
-    FROM opus_reviews r LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number LEFT JOIN repos p ON p.name = r.repo
-    WHERE r.verdict IS NOT NULL AND (:repo IS NULL OR r.repo = :repo)`)
-    .all({ repo: repo ?? null }) as { repo: string; number: number; head_oid: string; at: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null; rebased: number | null }[];
+  const rows = reviewedRows(db, repo);
   const state = discussionState(db, repo);
+  primeHashes(state, rows.filter((r) => maintNewer(state.get(`${r.repo}#${r.number}`), r.seen_at ?? r.at)).map((r) => `${r.repo}#${r.number}`));
   const marks = new Map((db.prepare("SELECT key, value FROM main.settings WHERE key LIKE ?").all(`${STALE_KEY}%`) as { key: string; value: string }[]).map((m) => [m.key.slice(STALE_KEY.length), m.value]));
   const out = new Set<string>();
   const todays = new Map<string, number>();

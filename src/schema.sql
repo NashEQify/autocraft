@@ -1753,6 +1753,13 @@ CREATE TABLE IF NOT EXISTS item_plans (
   PRIMARY KEY (repo, number)
 ) WITHOUT ROWID;
 
+-- A counter every write to item_plans moves: the planner keeps the stored rows in memory between passes and reads them again only when it moved.
+CREATE TABLE IF NOT EXISTS item_plans_rev (id INTEGER PRIMARY KEY CHECK (id = 1), rev INTEGER NOT NULL);
+INSERT OR IGNORE INTO item_plans_rev (id, rev) VALUES (1, 0);
+CREATE TRIGGER IF NOT EXISTS item_plans_rev_i AFTER INSERT ON item_plans BEGIN UPDATE item_plans_rev SET rev = rev + 1; END;
+CREATE TRIGGER IF NOT EXISTS item_plans_rev_u AFTER UPDATE ON item_plans BEGIN UPDATE item_plans_rev SET rev = rev + 1; END;
+CREATE TRIGGER IF NOT EXISTS item_plans_rev_d AFTER DELETE ON item_plans BEGIN UPDATE item_plans_rev SET rev = rev + 1; END;
+
 -- What each autopilot lane's next jobs take, as the last planner pass listed it (LaneItem[] as JSON, capped); the Next page reads it.
 CREATE TABLE IF NOT EXISTS lane_next (
   lane TEXT PRIMARY KEY,

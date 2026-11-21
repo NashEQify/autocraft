@@ -129,7 +129,7 @@ type Stored = { repo: string; head_sha: string; branch: string; state: MainCiSta
 /** One entry per repo with stored heads, red first, then by name. `hidden` repos are left out. */
 export function mainCiRepos(db: DatabaseSync, hidden: HiddenRepos = []): MainCiRepoRow[] {
   const by = new Map<string, Stored[]>();
-  for (const r of db.prepare("SELECT * FROM main_ci").all() as Stored[]) {
+  for (const r of db.prepare("SELECT repo, head_sha, branch, state, failing, committed_at, headline, first_seen_at, state_changed_at, updated_at FROM main_ci").all() as Stored[]) {
     if (isHiddenRepo(hidden, r.repo)) continue;
     (by.get(r.repo) ?? by.set(r.repo, []).get(r.repo)!).push(r);
   }

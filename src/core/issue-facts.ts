@@ -12,8 +12,8 @@ import { FAST_FLOOR, fastScoreSql } from "../fasttrack.ts";
 import { latestRun, needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { answersToApply, groupsToAsk } from "../dupes/decide.ts";
-import { uncheckedPairs } from "../dupes/check.ts";
-import { dueSets } from "../dupes/plan.ts";
+import { uncheckedPairCounts } from "../dupes/check.ts";
+import { dueSets, ruleOutcome } from "../dupes/plan.ts";
 import { embedderId, modelName } from "../embed/model.ts";
 import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts";
 import { actionable } from "../decisions.ts";
@@ -45,19 +45,24 @@ export type ItemLoadOptions = {
 };
 
 type Row = {
-  repo: string; number: number; kind: "pr" | "issue"; state: string; title: string | null; author: string | null; assignees: string | null; is_draft: number | null; updated_at: string | null; labels: string | null;
-  embed_hash: string | null; class_hash: string | null; class_scheme: string | null; score: number | null;
+  repo: string; number: number; kind: "pr" | "issue"; state: string; author: string | null; assignees: string | null; is_draft: number | null; updated_at: string | null; labels: string | null;
+  embed_hash: string | null; /** Null unless computed under the current scheme. */ class_hash: string | null; score: number | null;
   in_pilot: number; not_integration: number; held_backlog: number; held_dup: number;
   pr_hash: string | null; e_hash: string | null; scan_hash: string | null; stage: string | null; impact: string | null;
   a_state: string | null; a_pr: string | null; a_hash: string | null; a_head: string | null; a_base: string | null; h_state: string | null; b_state: string | null;
 };
 
-const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.title, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash, i.class_hash, i.class_scheme,
+// The stored hashes that follow the item's text hash are read as '' when they equal it (asText() restores them), so the common case sends no copy.
+const sameAsText = (col: string): string => `CASE WHEN ${col} = i.embed_hash THEN '' ELSE ${col} END`;
+const asText = (h: string | null, text: string | null): string | null => (h === "" ? text : h);
+
+const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
+    CASE WHEN i.class_scheme = '${SCHEME_ID}' THEN i.class_hash END AS class_hash,
     ${fastScoreSql("i.repo", "i.number", "r.score")} AS score,
     ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration, ${backlogHeldSql("i")} AS held_backlog,
     (EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = i.repo AND dh.number = i.number AND (dh.answer IS NULL OR dh.answer = 'close'))
       OR ${groupHeldSql("i")}) AS held_dup,
-    p.text_hash AS pr_hash, p.impact, e.hash AS e_hash, s.hash AS scan_hash, st.stage,
+    ${sameAsText("p.text_hash")} AS pr_hash, p.impact, ${sameAsText("e.hash")} AS e_hash, ${sameAsText("s.hash")} AS scan_hash, st.stage,
     fa.state AS a_state, fa.pr_url AS a_pr, fa.text_hash AS a_hash, fa.head_task_id AS a_head, fa.base_task_id AS a_base, ht.state AS h_state, bt.state AS b_state
   FROM items i JOIN tracked_repos t ON t.name = i.repo
   LEFT JOIN item_rank r ON r.repo = i.repo AND r.number = i.number
@@ -90,13 +95,6 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   // Values read once for all items.
   const tripped = activeTrips(db);
   const run = opts.run !== undefined ? opts.run : latestRun(db);
-  const byItem = new Map<string, Cls[]>();
-  if (run) {
-    for (const c of db.prepare("SELECT repo, number, classifier, at, type_label, flags, probs, input_hash FROM classifications WHERE run_id = ?").all(run) as (Cls & { repo: string; number: number })[]) {
-      const k = `${c.repo}#${c.number}`;
-      (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
-    }
-  }
   const memo = settleMemo();
   const outsideHolds = holdMap(db);
   const answers = scopeAnswers(db);
@@ -107,7 +105,9 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   const heads = new Map((db.prepare(`SELECT DISTINCT i.repo || '#' || i.number AS k, i.kind, i.head_oid FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
     WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
-  for (const d of db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions")} AS locked FROM decisions ORDER BY asked_at, id`).all(utcDayStart(now)) as
+  // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
+  for (const d of db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions")} AS locked FROM decisions
+    WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
     (PrepareColumns & { locked: number; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
     const dupegroup = d.id.includes(":dupegroup:");
     if (d.kind === "scope" && d.number !== null && !(d.answer === "withdrawn" && d.answered_by === "pipeline")) latestScope.set(`${d.repo}#${d.number}`, { answer: d.answer, byOperator: settledBy(db, d, memo) });
@@ -136,14 +136,16 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
     .map((s) => [`${s.repo}#${s.number}`, s.note]));
   const own = ownFixPrs(db, opts.repo);
   const assigned = assignmentsOf(db, opts.repo);
-  const pairs = new Map<string, number>();
-  for (const p of uncheckedPairs(db, -1))
-    for (const n of [p.a, p.b]) pairs.set(`${p.repo}#${n}`, (pairs.get(`${p.repo}#${n}`) ?? 0) + 1);
+  const pairs = uncheckedPairCounts(db);
   const dupeAnswers = new Map<string, string[]>();
   for (const a of answersToApply(db)) for (const r of a.refs) (dupeAnswers.get(r) ?? dupeAnswers.set(r, []).get(r)!).push(a.id);
   // Group-level work (which groups to ask about, which sets to compare) is planned per group by dupes/decide.ts and dupes/plan.ts; the items carry its result.
   const inGroup = new Set(groupsToAsk(db, opts.repo).flatMap((g) => g.group.members.map((n) => `${g.repo}#${n}`)));
-  const inCompare = new Set(dueSets(db, opts.repo, now).flatMap((s) => s.members.map((m) => `${s.repo}#${m.number}`)));
+  const inCompare = new Map<string, "rule" | "model">();
+  for (const s of dueSets(db, opts.repo, now)) {
+    const how = ruleOutcome(s) === null ? "model" : "rule";
+    for (const m of s.members) { const ref = `${s.repo}#${m.number}`; if (inCompare.get(ref) !== "model") inCompare.set(ref, how); }
+  }
   const approved = new Map<string, boolean>();
   const labelsApproved = (repo: string) => approved.get(repo) ?? (approved.set(repo, labelsApprovalOf(db, repo) !== null), approved.get(repo)!);
   // Act: answers an operator gave that close an item (decisions.ts actionable, as act/index.ts targetsOf reads them).
@@ -174,6 +176,16 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
   if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
   const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
+  const byItem = new Map<string, Cls[]>();
+  if (run) {
+    for (const c of db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
+        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN json_remove(c.probs, '$.type') ELSE c.probs END AS probs, c.input_hash
+      FROM classifications c WHERE c.run_id = :run AND ${refIn("c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
+      const k = `${c.repo}#${c.number}`;
+      (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
+    }
+  }
   const closeReview = new Map<string, NonNullable<ItemFacts["closeReview"]>>();
   for (const r of db.prepare(`SELECT r.repo, r.number, r.head_oid, i.head_oid AS i_head, i.updated_at, c.head_oid AS c_head, c.fetched_at AS c_at,
       EXISTS (SELECT 1 FROM decisions d WHERE d.id = r.repo || '#' || r.number || ':close@' || r.head_oid) AS asked
@@ -198,7 +210,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   // Item text, read only for the rows that need it (a skipped Fix attempt, a missing text hash, a classifier hash to recompute), in one query.
   type Text = { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null };
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
-  const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || ((r.class_scheme === SCHEME_ID ? r.class_hash : null) === null && classed(`${r.repo}#${r.number}`)));
+  const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
   const texts = new Map(needText.length ? (db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
     FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
   const mirrored = db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ? AND kind = 'pr'");
@@ -226,7 +238,7 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
       referee,
     );
     // The classifier's input hash: stored on the row, recomputed when it was made under another scheme.
-    let classHash = r.class_scheme === SCHEME_ID ? r.class_hash : null;
+    let classHash = r.class_hash;
     if (classHash === null && (j || h)) {
       classHash = classifyHash(texts.get(ref)!);
     }
@@ -253,8 +265,8 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
         status: settled.status, label: settled.label, flags: settled.flags, jevLabel: settled.jevLabel, haikuLabel: settled.haikuLabel,
         referee: settled.referee ? { sure: settled.referee.sure, final: refereeClosed(settled.referee), failedAt: settled.referee.failedAt ?? null } : null, jev, haiku,
       },
-      embedHash, embeddedHash: r.e_hash, priorityHash: r.pr_hash, scannedHash: r.scan_hash,
-      pairsToCheck: pairs.get(ref) ?? 0, inGroupToAsk: inGroup.has(ref), inCompareSet: inCompare.has(ref), dupeAnswers: dupeAnswers.get(ref) ?? [],
+      embedHash, embeddedHash: asText(r.e_hash, r.embed_hash), priorityHash: asText(r.pr_hash, r.embed_hash), scannedHash: asText(r.scan_hash, r.embed_hash),
+      pairsToCheck: pairs.get(ref) ?? 0, inGroupToAsk: inGroup.has(ref), inCompareSet: inCompare.get(ref) ?? false, dupeAnswers: dupeAnswers.get(ref) ?? [],
       scope: { open: openScope.has(ref), answer: answers.get(ref) ?? null, covered: covered.has(ref), recommend: recommend.get(ref) ?? null },
       labels: { quietFix: own.quiet.has(ref), existing: json<unknown[]>(r.labels, []).map(String), pluginAnswer: operatorAnswers.get(ref) === "plugin", labeledNote: note },
       answeredClose: answeredClose.get(ref) ?? [],

@@ -40,11 +40,14 @@ function sortKeysOf(db: DatabaseSync, items: { repo: string; number: number }[])
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
-/** The sort keys of every item of a PlanSet, read once per set. */
+/** The sort keys of a PlanSet's items, read on first use and kept with the set. */
 const planKeys = new WeakMap<PlanSet, Map<string, Keys>>();
-function planSortKeys(db: DatabaseSync, plans: PlanSet): Map<string, Keys> {
+function planSortKeys(db: DatabaseSync, plans: PlanSet, items: { repo: string; number: number }[]): Map<string, Keys> {
   let m = planKeys.get(plans);
-  if (!m) planKeys.set(plans, (m = sortKeysOf(db, plans.items.map((p) => p.facts))));
+  if (!m) planKeys.set(plans, (m = new Map()));
+  const missing = new Map<string, { repo: string; number: number }>();
+  for (const x of items) if (!m.has(`${x.repo}#${x.number}`)) missing.set(`${x.repo}#${x.number}`, x);
+  if (missing.size) for (const [k, v] of sortKeysOf(db, [...missing.values()])) m.set(k, v);
   return m;
 }
 
@@ -60,7 +63,7 @@ export function plannedItems(db: DatabaseSync, kind: ActionKind, opts: PlannedOp
     for (const action of plan.actions) if (action.kind === kind && (opts.bucket === undefined || bucketOf(action) === opts.bucket)) out.push({ facts, plan, action });
   }
   if (out.length < 2) return out;
-  const stored = opts.plans ? planSortKeys(db, opts.plans) : sortKeysOf(db, out.map((p) => p.facts));
+  const stored = opts.plans ? planSortKeys(db, opts.plans, out.map((p) => p.facts)) : sortKeysOf(db, out.map((p) => p.facts));
   const keys = new Map<PlannedItem, Keys>(out.map((p) => [p, stored.get(`${p.facts.repo}#${p.facts.number}`)!]));
   const created: Cmp = (a, b) => str(keys.get(a)!.created, keys.get(b)!.created);
   const updatedDesc: Cmp = (a, b) => str(keys.get(b)!.updated, keys.get(a)!.updated);

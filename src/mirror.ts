@@ -11,6 +11,7 @@ import { connect, dbPath } from "./db.ts";
 import { trackedNames } from "./repos.ts";
 import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
+import { textRefs } from "./fixissue/candidates.ts";
 import { syncActivity } from "./activity.ts";
 import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";
@@ -343,6 +344,8 @@ function writePage(db: DatabaseSync, repo: string, kind: Kind, detail: Detail, n
   // A login with merged or closed PRs mirrored without an id is left to the backfill, which binds the author of that history, not the login's current holder.
   const bindId = db.prepare(`INSERT OR IGNORE INTO main.author_ids (login, id) SELECT ?1, ?2
     WHERE NOT EXISTS (SELECT 1 FROM main.items WHERE author = ?1 AND kind = 'pr' AND state IN ('MERGED','CLOSED') AND author_id IS NULL)`);
+  // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
+  const setRefs = db.prepare("UPDATE main.items SET text_refs = ? WHERE repo = ? AND number = ?");
   const del = db.prepare("DELETE FROM main.comments WHERE repo=? AND number=?");
   const insComment = db.prepare(`INSERT INTO main.comments (repo, number, id, kind, author, created_at, body, review_state, commit_oid, counted, author_association, mentions_pipeline, url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (id) DO UPDATE SET
     repo=excluded.repo, number=excluded.number, kind=excluded.kind, author=excluded.author, created_at=excluded.created_at,
@@ -364,6 +367,7 @@ function writePage(db: DatabaseSync, repo: string, kind: Kind, detail: Detail, n
       const old = stored.get(repo, n.number) as Record<string, SQLInputValue> | undefined;
       if (!force && old && COLUMNS.every((c) => old[c] === row[c])) continue;
       insert.run(row);
+      if (kind === "pr") setRefs.run(textRefs(row.title as string | null, row.body as string | null), repo, n.number);
       if (typeof row.author === "string" && typeof row.author_id === "number") bindId.run(row.author, row.author_id);
       if (detail === "full") {
         const rows = commentRows(repo, kind, n, own);

@@ -61,8 +61,8 @@ const rows: Row[] = [
   { name: "an out-of-scope item whose partner is in scope is still in the pair check", facts: { inScope: false, pairsToCheck: 1 }, expect: { state: "classified", actions: ["dupes"] } },
   { name: "member of a group to ask about", facts: { inGroupToAsk: true }, expect: { state: "classified", actions: ["dupes"] } },
   { name: "an operator's duplicate answer waits to be applied", facts: { dupeAnswers: ["app#1:duplicate@2"] }, expect: { state: "classified", actions: ["dupe-answer"] } },
-  { name: "member of a set to compare", facts: { inCompareSet: true }, expect: { state: "classified", actions: ["dupes-compare"] } },
-  { name: "pair check and compare together", facts: { pairsToCheck: 1, inCompareSet: true }, expect: { state: "classified", actions: ["dupes", "dupes-compare"] } },
+  { name: "member of a set to compare", facts: { inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes-compare"] } },
+  { name: "pair check and compare together", facts: { pairsToCheck: 1, inCompareSet: "model" }, expect: { state: "classified", actions: ["dupes", "dupes-compare"] } },
 
   // ---- scope decision
   { name: "needs-decision flag, nobody asked", facts: needsDecision, expect: { state: "scope-due", actions: ["decide"], next: "Decide" } },

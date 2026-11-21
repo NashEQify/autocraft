@@ -347,8 +347,8 @@ export type ItemFacts = {
   pairsToCheck: number;
   /** Member of a duplicate group whose decision is due to be asked. */
   inGroupToAsk: boolean;
-  /** Member of a duplicate kind-set that needs a comparison. */
-  inCompareSet: boolean;
+  /** Member of a duplicate kind-set that needs a comparison: "model" when one of its sets needs a model call, "rule" when each is settled by rule (ruleOutcome), false when none. */
+  inCompareSet: false | "rule" | "model";
   /** Ids of the operator's duplicate answers (pair or group decisions) that concern the item and are not applied yet. */
   dupeAnswers: string[];
 

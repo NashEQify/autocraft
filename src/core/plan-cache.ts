@@ -122,26 +122,49 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
 
 const sig = (r: PlanRow): string => JSON.stringify([r.kind, r.head, r.state, r.item_state, r.actions, r.wait, r.reasons, r.note, r.view]);
 
+type Stored = { sig: string; status: ItemStatus | undefined; state: string; wait: string | null; head: string | null };
+
+// The stored rows as of item_plans_rev `rev`, kept between passes: the table is read again only after a write this connection did not make.
+const storedMemo = new WeakMap<DatabaseSync, { rev: number; rows: Map<string, Stored> }>();
+
+const planRev = (db: DatabaseSync): number | null => (db.prepare("SELECT rev FROM main.item_plans_rev WHERE id = 1").get() as { rev: number } | undefined)?.rev ?? null;
+
+const storedOf = (r: PlanRow): Stored => ({ sig: sig(r), status: (JSON.parse(r.view) as Partial<PlanView>).status, state: r.state, wait: r.wait, head: r.head });
+
+const readStored = (db: DatabaseSync): Map<string, Stored> => {
+  const rows = new Map<string, Stored>();
+  for (const r of db.prepare("SELECT repo, number, kind, head, state, item_state, actions, wait, reasons, note, view FROM main.item_plans").all() as PlanRow[]) rows.set(`${r.repo}#${r.number}`, storedOf(r));
+  return rows;
+};
+
+function storedRows(db: DatabaseSync): { rev: number | null; rows: Map<string, Stored> } {
+  // The counter is read before the rows: a write between the two leaves the memo older than its rev, so the next pass reads again.
+  const rev = planRev(db);
+  const hit = storedMemo.get(db);
+  if (hit && rev !== null && hit.rev === rev) return { rev, rows: hit.rows };
+  const rows = readStored(db);
+  if (rev !== null) storedMemo.set(db, { rev, rows });
+  else storedMemo.delete(db);
+  return { rev, rows };
+}
+
 /** Writes the rows that differ from the stored ones and deletes the stored rows with no Plan. Returns the numbers written and deleted. */
 export function writePlanCache(db: DatabaseSync, plans: PlanSet, plannedAt: string = new Date().toISOString()): { written: number; deleted: number } {
-  const rows = planRows(plans, plannedAt);
-  const stored = new Map<string, string>();
-  const storedStatus = new Map<string, ItemStatus | undefined>();
-  const storedState = new Map<string, { state: string; wait: string | null; head: string | null }>();
-  for (const r of db.prepare("SELECT repo, number, kind, head, state, item_state, actions, wait, reasons, note, view FROM main.item_plans").all() as PlanRow[]) {
-    stored.set(`${r.repo}#${r.number}`, sig(r));
-    storedStatus.set(`${r.repo}#${r.number}`, (JSON.parse(r.view) as Partial<PlanView>).status);
-    storedState.set(`${r.repo}#${r.number}`, { state: r.state, wait: r.wait, head: r.head });
-  }
-  // `since` moves only when phase or wait does; recomputing it every pass would change every row's signature.
-  for (const r of rows) {
-    const old = storedStatus.get(`${r.repo}#${r.number}`);
-    const v = JSON.parse(r.view) as PlanView;
-    if (old && old.phase === v.status.phase && old.waiting === v.status.waiting && old.since !== v.status.since) r.view = JSON.stringify({ ...v, status: { ...v.status, since: old.since } });
-  }
-  const changed = rows.filter((r) => stored.get(`${r.repo}#${r.number}`) !== sig(r));
-  const keep = new Set(rows.map((r) => `${r.repo}#${r.number}`));
-  const gone = [...stored.keys()].filter((k) => !keep.has(k));
+  const planned = planRows(plans, plannedAt);
+  const diff = (stored: Map<string, Stored>) => {
+    // `since` moves only when phase or wait does; recomputing it every pass would change every row's signature.
+    const rows = planned.map((r) => {
+      const old = stored.get(`${r.repo}#${r.number}`)?.status;
+      const v = JSON.parse(r.view) as PlanView;
+      return old && old.phase === v.status.phase && old.waiting === v.status.waiting && old.since !== v.status.since ? { ...r, view: JSON.stringify({ ...v, status: { ...v.status, since: old.since } }) } : r;
+    });
+    const changed = rows.filter((r) => stored.get(`${r.repo}#${r.number}`)?.sig !== sig(r));
+    const keep = new Set(rows.map((r) => `${r.repo}#${r.number}`));
+    return { changed, gone: [...stored.keys()].filter((k) => !keep.has(k)) };
+  };
+  const first = storedRows(db);
+  let stored = first.rows;
+  let { changed, gone } = diff(stored);
   if (!changed.length && !gone.length) return { written: 0, deleted: 0 };
   const put = db.prepare(`INSERT INTO main.item_plans (repo, number, kind, head, state, item_state, actions, wait, reasons, note, view, planned_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -149,24 +172,37 @@ export function writePlanCache(db: DatabaseSync, plans: PlanSet, plannedAt: stri
       actions = excluded.actions, wait = excluded.wait, reasons = excluded.reasons, note = excluded.note, view = excluded.view, planned_at = excluded.planned_at`);
   const del = db.prepare("DELETE FROM main.item_plans WHERE repo = ? AND number = ?");
   const hist = db.prepare("INSERT INTO main.plan_history (repo, number, head, old_state, new_state, old_wait, wait, reasons, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  // The memo is dropped until the write commits and is brought up to date after it.
+  storedMemo.delete(db);
+  let rev: number | null;
   db.exec("BEGIN IMMEDIATE");
   try {
+    // A write by another connection since the rows were read is in the table but not in `stored`: read the rows again under the lock and diff against those.
+    if (planRev(db) !== first.rev) {
+      stored = readStored(db);
+      ({ changed, gone } = diff(stored));
+    }
     for (const r of changed) {
-      const old = storedState.get(`${r.repo}#${r.number}`);
+      const old = stored.get(`${r.repo}#${r.number}`);
       if (!old || old.state !== r.state || old.wait !== r.wait) hist.run(r.repo, r.number, r.head, old?.state ?? null, r.state, old?.wait ?? null, r.wait, r.reasons, plannedAt);
     }
     for (const r of changed) put.run(r.repo, r.number, r.kind, r.head, r.state, r.item_state, r.actions, r.wait, r.reasons, r.note, r.view, plannedAt);
     for (const k of gone) {
-      const i = k.lastIndexOf("#"), repo = k.slice(0, i), number = Number(k.slice(i + 1)), old = storedState.get(k)!;
+      const i = k.lastIndexOf("#"), repo = k.slice(0, i), number = Number(k.slice(i + 1)), old = stored.get(k)!;
       // A row for the exit, so the item's return does not read as a first plan.
       hist.run(repo, number, old.head, old.state, "gone", old.wait, null, "[]", plannedAt);
       del.run(repo, number);
     }
+    // Read under the write lock: no other write can land between the rows this transaction diffed against (or wrote) and the counter.
+    rev = planRev(db);
     db.exec("COMMIT");
   } catch (e) {
     db.exec("ROLLBACK");
     throw e;
   }
+  for (const r of changed) stored.set(`${r.repo}#${r.number}`, storedOf(r));
+  for (const k of gone) stored.delete(k);
+  if (rev !== null) storedMemo.set(db, { rev, rows: stored });
   return { written: changed.length, deleted: gone.length };
 }
 

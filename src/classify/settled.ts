@@ -165,7 +165,9 @@ export function settledLookup(db: DatabaseSync, run: string | null): (repo: stri
 export function settledSet(db: DatabaseSync, run: string | null, refs?: Iterable<string>): (repo: string, number: number) => Settled {
   if (!run) return () => settle(null, null);
   const narrow = refs ? ` AND ${refIn("classifications", "?")}` : "";
-  const rows = db.prepare(`SELECT repo, number, classifier, type_label, flags, probs, reason, at, input_hash FROM classifications
+  // Only what settledFrom() reads: the referee's reason, and Jev's probabilities without the per-type ones.
+  const rows = db.prepare(`SELECT repo, number, classifier, type_label, flags, CASE WHEN classifier = 'jev' AND json_valid(probs) THEN json_remove(probs, '$.type') ELSE probs END AS probs,
+      CASE WHEN classifier = 'sonnet' THEN reason END AS reason, at, input_hash FROM classifications
     WHERE run_id = ? AND classifier IN ('jev', 'haiku', 'sonnet')${narrow}`).all(...(refs ? [run, refPairs(refs)] : [run])) as (ClsRow & { repo: string; number: number; classifier: string })[];
   const byItem = new Map<string, Partial<Record<string, ClsRow>>>();
   for (const r of rows) { const k = `${r.repo}#${r.number}`; (byItem.get(k) ?? byItem.set(k, {}).get(k)!)[r.classifier] = r; }

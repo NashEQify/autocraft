@@ -70,7 +70,7 @@ export const LONG_DAYS_DEFAULT = 7;
 export const REFRESH_MS = 3 * 60_000;
 const DAY_MS = 86_400_000;
 
-type Row = { repo: string; number: number; kind: "pr" | "issue"; state: string; item_state: string | null; actions: string; wait: string | null; view: string; planned_at: string };
+type Row = { repo: string; number: number; kind: "pr" | "issue"; state: string; item_state: string | null; actions: number; wait: string | null; phase: string; since: string; wait_kind: WaitKind | null };
 
 function keySet(db: DatabaseSync, sql: string): Set<string> {
   return new Set((db.prepare(sql).all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
@@ -97,22 +97,21 @@ export function computeLiveness(db: DatabaseSync, nowMs: number = Date.now()): L
   const days = Number(setting(db, LONG_DAYS_KEY));
   const longMs = (Number.isFinite(days) && days > 0 ? days : LONG_DAYS_DEFAULT) * DAY_MS;
   const flags = flagSets(db);
-  const rows = db.prepare(`SELECT p.repo, p.number, p.kind, p.state, p.item_state, p.actions, p.wait, p.view, p.planned_at
-    FROM main.item_plans p JOIN main.items i ON i.repo = p.repo AND i.number = p.number WHERE i.state = 'OPEN'`).all() as Row[];
+  // The view's status and wait kind and the action count, read in SQL: the rows' JSON stays in the database. Ended and switched-off items are not checked.
+  const rows = db.prepare(`SELECT p.repo, p.number, p.kind, p.state, p.item_state, json_array_length(p.actions) AS actions, p.wait,
+      COALESCE(json_extract(p.view, '$.status.phase'), 'Triage') AS phase, COALESCE(json_extract(p.view, '$.status.since'), p.planned_at) AS since, json_extract(p.view, '$.waitKind') AS wait_kind
+    FROM main.item_plans p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
+    WHERE i.state = 'OPEN' AND COALESCE(json_extract(p.view, '$.status.phase'), 'Triage') NOT IN ('Pipeline off', 'Merged', 'Closed')`).all() as Row[];
   const items: LivenessItem[] = [];
   const causes: Record<string, number> = {};
-  let open = 0;
+  const open = rows.length;
   for (const r of rows) {
-    const v = JSON.parse(r.view) as { status?: { phase?: string; since?: string }; waitKind?: WaitKind };
-    const phase = v.status?.phase ?? "Triage";
-    if (phase === "Pipeline off" || phase === "Merged" || phase === "Closed") continue;
-    open++;
+    const { phase, since } = r;
     const key = `${r.repo}#${r.number}`;
-    const since = v.status?.since ?? r.planned_at;
     // A review held by other items waits on the questions about those items.
     const asked = flags.question.has(key) || blockersOfWait(r.wait).some((b) => flags.question.has(b));
     const verdict = classify(
-      { kind: r.kind, state: r.state, itemState: r.item_state, phase, wait: r.wait, waitKind: v.waitKind ?? null, actions: (JSON.parse(r.actions) as unknown[]).length, since },
+      { kind: r.kind, state: r.state, itemState: r.item_state, phase, wait: r.wait, waitKind: r.wait_kind, actions: r.actions, since },
       { question: asked, answered: flags.answered.has(key), dispute: flags.dispute.has(key), stopped: flags.stopped.has(key) },
     );
     const base = { repo: r.repo, number: r.number, kind: r.kind, state: r.state, wait: r.wait, phase, since };

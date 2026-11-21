@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fillClassHashes, fillEmbedHashes } from "./itemhash.ts";
+import { fillTextRefs } from "./fixissue/candidates.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
 import { planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
@@ -28,6 +29,8 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "base_ref", "TEXT"],
   ["fast_track", "weight", "INTEGER NOT NULL DEFAULT 5"],
   ["items", "reactions_count", "INTEGER"],
+  // src/fixissue/candidates.ts textRefs(): the issue numbers a PR's text names, so the planner does not read every open PR's body.
+  ["items", "text_refs", "TEXT"],
   ["discord_channels", "default_repo", "TEXT"],
   ["discord_channels", "position", "INTEGER"],
   ["discord_channels", "category_id", "TEXT"],
@@ -289,6 +292,12 @@ const ADDED_INDEXES = [
         OR old.changed_files IS NOT new.changed_files OR old.author_association IS NOT new.author_association OR old.kind IS NOT new.kind)
     BEGIN
       UPDATE items SET embed_hash = NULL, class_hash = NULL, class_scheme = NULL WHERE rowid = new.rowid;
+    END`,
+  // Clears text_refs of a PR whose text was edited without bringing its own (sync writes it after the row).
+  `CREATE TRIGGER IF NOT EXISTS main.items_text_refs_stale AFTER UPDATE OF title, body ON items
+    WHEN new.text_refs IS NOT NULL AND new.text_refs IS old.text_refs AND (old.title IS NOT new.title OR old.body IS NOT new.body)
+    BEGIN
+      UPDATE items SET text_refs = NULL WHERE rowid = new.rowid;
     END`,
 ];
 
@@ -630,6 +639,13 @@ function buildHashes(db: DatabaseSync): void {
   db.exec("INSERT OR IGNORE INTO main.settings (key, value) VALUES ('hashes_built', '1')");
 }
 
+// Fills text_refs once for the open PRs mirrored before the column existed (the planner reads the text of a row without it).
+function buildTextRefs(db: DatabaseSync): void {
+  if (db.prepare("SELECT 1 FROM main.settings WHERE key = 'text_refs_built'").get()) return;
+  fillTextRefs(db);
+  db.exec("INSERT OR IGNORE INTO main.settings (key, value) VALUES ('text_refs_built', '1')");
+}
+
 // Fills item_stage once, for a database that had stages before the table existed.
 function buildItemStage(db: DatabaseSync): void {
   if (db.prepare("SELECT 1 FROM main.settings WHERE key = 'item_stage_built'").get()) return;
@@ -720,6 +736,7 @@ function open(path: string): DatabaseSync {
   backfill(db);
   buildSearchIndex(db);
   buildHashes(db);
+  buildTextRefs(db);
   buildItemStage(db);
   buildDecisionItems(db);
   // Progress counts from here: the first sync, or now for a new database.

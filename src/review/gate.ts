@@ -92,7 +92,8 @@ export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?:
   const preapproved = once(() => new Set((db.prepare(`SELECT p.repo || '#' || p.number || '@' || p.head AS k FROM main.preapprovals p
     WHERE p.state = 'review' AND (p.fix_id IS NOT NULL OR p.head <> p.from_head)${narrow("p")}`).all(bind()) as { k: string }[]).map((r) => r.k)));
   const failures = once(() => new Map((db.prepare("SELECT key, value FROM main.settings WHERE key LIKE :prefix").all({ prefix: `${FAIL_KEY}%` }) as { key: string; value: string }[]).map((r) => [r.key, r.value])));
-  const checks = once(() => new Map((db.prepare(`SELECT c.repo || '#' || c.number AS k, c.head_oid, c.overall, c.checks FROM main.pr_checks c WHERE 1${narrow("c")}`).all(bind()) as
+  // The checks list only where effectiveCiWith() reads it: a failure.
+  const checks = once(() => new Map((db.prepare(`SELECT c.repo || '#' || c.number AS k, c.head_oid, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS checks FROM main.pr_checks c WHERE 1${narrow("c")}`).all(bind()) as
     { k: string; head_oid: string; overall: string; checks: string | null }[]).map((r) => [r.k, r])));
   const optional = once(() => optionalChecksOf(db));
   const staleSince = once(() => staleMarksSince(db));
