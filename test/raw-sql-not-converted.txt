@@ -335,7 +335,6 @@ src/merge/verify-override.ts
 
 src/mirror.ts
 
-src/nightly/index.ts
 
 src/operator-actions.ts
 
