@@ -8,6 +8,7 @@
 // The mirror stores only the association, so there a reviewer blocks unless the association says a stranger.
 import type { Querier } from "../mirror.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export type ReviewFact = { id?: string | null; author: string | null; association: string | null; state: string | null; at: string | null };
 
@@ -67,22 +68,22 @@ export type Gate = { blocked: boolean; by: string[]; readAt: string; failures: n
 
 /** What the live reads stored for the PRs, as `repo#number`. */
 export async function gatesOf(db: Db, repo?: string): Promise<Map<string, Gate>> {
-  const rows = await db.prepare(`SELECT repo, number, blocked, by_login, read_at, failures FROM review_gates ${repo ? "WHERE repo = ?" : ""}`).all(...(repo ? [repo] : [])) as
-    { repo: string; number: number; blocked: number | null; by_login: string | null; read_at: string | null; failures: number }[];
+  const rows = await db.all(db.k.selectFrom("review_gates").select(["repo", "number", "blocked", "by_login", "read_at", "failures"])
+    .$if(!!repo, (q) => q.where("repo", "=", repo!)));
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, { blocked: r.blocked === 1, by: r.by_login ? r.by_login.split(",") : [], readAt: r.read_at ?? "", failures: r.failures }]));
 }
 
 /** Stores a successful live read. The table is ours, so a sync cannot wipe it; the queue trusts it over the mirror until the PR changes. */
 export async function recordGate(db: Db, repo: string, number: number, formal: ReviewFact[], decision: string | null | undefined, at = new Date().toISOString()): Promise<string | null> {
   const reason = refuseLive(formal, decision);
-  await db.prepare(`INSERT INTO review_gates (repo, number, blocked, by_login, read_at, failures) VALUES (?, ?, ?, ?, ?, 0)
-    ON CONFLICT (repo, number) DO UPDATE SET blocked = excluded.blocked, by_login = excluded.by_login, read_at = excluded.read_at, failures = 0`)
-    .run(repo, number, reason ? 1 : 0, blockedByWriters(formal).join(","), at);
+  await db.run(db.k.insertInto("review_gates").values({ repo, number, blocked: reason ? 1 : 0, by_login: blockedByWriters(formal).join(","), read_at: at, failures: 0 })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["blocked", "by_login", "read_at", "failures"]))));
   return reason;
 }
 
 export async function recordGateFailure(db: Db, repo: string, number: number): Promise<void> {
-  await db.prepare("INSERT INTO review_gates (repo, number, failures) VALUES (?, ?, 1) ON CONFLICT (repo, number) DO UPDATE SET failures = failures + 1").run(repo, number);
+  await db.run(db.k.insertInto("review_gates").values({ repo, number, failures: 1 })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({ failures: eb("review_gates.failures", "+", 1) }))));
 }
 
 const SMALL_QUERY = `query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewDecision ${FORMAL_REVIEWS} } } }`;
