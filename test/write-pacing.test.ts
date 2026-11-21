@@ -13,7 +13,7 @@ mkdirSync(SCRATCH, { recursive: true });
 
 async function setup(as: string, repoIdentity = "app", failing = false) {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "write-pacing-")), "t.db"));
-  if (repoIdentity === "app") await db.prepare("INSERT INTO main.settings (key, value) VALUES ('github_identity', 'app')").run();
+  if (repoIdentity === "app") await db.run(db.k.insertInto("main.settings").values({ key: "github_identity", value: "app" }));
   let t = Date.parse("2026-01-01T00:00:00Z");
   const sleeps: number[] = [];
   const w: Writer = { db, login: "t", mint: async () => "tok", appClient: () => q, now: () => t, sleep: async (ms) => { sleeps.push(ms); t += ms; } };
