@@ -1,0 +1,189 @@
+// The Db handle over one backend engine: transaction routing through AsyncLocalStorage, the statement API and the
+// observers. Backend specifics (dialect, drivers, BEGIN forms, statement execution) live in the engine.
+import { AsyncLocalStorage } from "node:async_hooks";
+import type { Compilable, DatabaseConnection, Kysely, Transaction, TransactionBuilder } from "kysely";
+import type { DatabaseSync } from "node:sqlite";
+import type { DB, Db, DbEvent, Dialect, NamedParams, Param, Row, RunResult, Statement, WriteOptions } from "./index.ts";
+
+export type Op = "get" | "all" | "run";
+export type Args = readonly (Param | NamedParams)[];
+
+/** The transaction open in an async context. `state` is "opening" until BEGIN succeeded and "closed" once `fn` settled. */
+export interface Tx {
+  mode: "read" | "write";
+  state: "opening" | "open" | "closed";
+  lockTimeoutMs?: number;
+  /** The connection the transaction runs on, recorded by the engine's driver at BEGIN. */
+  conn?: DatabaseConnection;
+  trx?: Transaction<DB>;
+}
+
+/** What a handle gives its engine. */
+export interface EngineContext {
+  /** The transaction of the current async context, in any state. */
+  tx(): Tx | undefined;
+  /** Whether any observer listens: events cost a stack capture and a JSON size, so engines skip them otherwise. */
+  observed(): boolean;
+  emit(e: DbEvent): void;
+}
+
+export interface Engine {
+  readonly dialect: Dialect;
+  readonly kysely: Kysely<DB>;
+  readonly sync?: DatabaseSync;
+  /** Runs one raw statement: on `tx`'s connection when given, otherwise on a connection of its own. */
+  exec(op: Op, text: string, args: Args, tx: Tx | undefined): Promise<Row | Row[] | RunResult | undefined>;
+  script(text: string, tx: Tx | undefined): Promise<void>;
+  /** The transaction settings for `mode` (the driver turns them into its BEGIN). */
+  configure(b: TransactionBuilder<DB>, mode: Tx["mode"]): TransactionBuilder<DB>;
+  close(): Promise<void>;
+}
+
+/** Write transactions holding the lock longer than this log their site. */
+const SLOW_HOLD_MS = 1000;
+
+/** An Error whose stack reaches past the layers of Kysely and this module. The stack text is formatted only when read. */
+export function siteError(): Error {
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 40;
+  const e = new Error();
+  Error.stackTraceLimit = limit;
+  return e;
+}
+
+/** The first stack frame outside src/db/, Kysely and node internals: the code that made the call. */
+export function callSite(e: Error): string {
+  for (const line of (e.stack ?? "").split("\n").slice(1)) {
+    const f = line.trim();
+    if (/\/src\/db\/|node_modules|\(node:|at node:/.test(f)) continue;
+    return f.replace(/^at (async )?/, "");
+  }
+  return "";
+}
+
+/** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
+const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
+
+export class Handle implements Db {
+  readonly dialect: Dialect;
+  readonly sync?: DatabaseSync;
+  readonly #engine: Engine;
+  readonly #als = new AsyncLocalStorage<Tx>();
+  readonly #observers = new Set<(e: DbEvent) => void>();
+  readonly #warned = new Set<string>();
+
+  constructor(make: (ctx: EngineContext) => Engine) {
+    this.#engine = make({
+      tx: () => this.#als.getStore(),
+      observed: () => this.#observers.size > 0,
+      emit: (e) => this.#emit(e),
+    });
+    this.dialect = this.#engine.dialect;
+    this.sync = this.#engine.sync;
+  }
+
+  #emit(e: DbEvent): void {
+    for (const o of this.#observers) o(e);
+  }
+
+  /** The open transaction of this async context; a closed one is a call that outlived it. */
+  #current(): Tx | undefined {
+    const tx = this.#als.getStore();
+    if (!tx || tx.state !== "closed") return tx?.state === "open" ? tx : undefined;
+    const msg = "database call after its transaction ended: a promise started inside db.write/db.read was left running";
+    if (strayThrows()) throw new Error(msg);
+    const site = callSite(siteError());
+    if (!this.#warned.has(site)) {
+      this.#warned.add(site);
+      console.warn(`db: ${msg} (${site}); it ran outside the transaction`);
+    }
+    return undefined;
+  }
+
+  get k(): Kysely<DB> {
+    return this.#current()?.trx ?? this.#engine.kysely;
+  }
+
+  async get<O>(q: Compilable<O>): Promise<O | undefined> {
+    return (await this.all(q))[0];
+  }
+
+  async all<O>(q: Compilable<O>): Promise<O[]> {
+    return [...(await this.k.executeQuery(q.compile())).rows];
+  }
+
+  async run(q: Compilable<unknown>): Promise<RunResult> {
+    const r = await this.k.executeQuery(q.compile());
+    return { changes: Number(r.numAffectedRows ?? 0n), lastInsertRowid: Number(r.insertId ?? 0n) };
+  }
+
+  prepare(text: string): Statement {
+    const exec = async (op: Op, args: Args) => this.#engine.exec(op, text, args, this.#current());
+    async function* iterate(args: Args): AsyncGenerator<Row> {
+      yield* (await exec("all", args)) as Row[];
+    }
+    return {
+      get: (...args: Args) => exec("get", args),
+      all: (...args: Args) => exec("all", args),
+      run: (...args: Args) => exec("run", args),
+      iterate: (...args: Args) => iterate(args),
+    } as Statement;
+  }
+
+  inTransaction(): boolean {
+    return this.#current() !== undefined;
+  }
+
+  script(text: string): Promise<void> {
+    return this.#engine.script(text, this.#current());
+  }
+
+  read<T>(fn: () => Promise<T>): Promise<T> {
+    return this.#transaction("read", fn, undefined);
+  }
+
+  write<T>(fn: () => Promise<T>, opts: WriteOptions = {}): Promise<T> {
+    return this.#transaction("write", fn, opts.lockTimeoutMs);
+  }
+
+  async #transaction<T>(mode: Tx["mode"], fn: () => Promise<T>, lockTimeoutMs: number | undefined): Promise<T> {
+    const cur = this.#current();
+    if (cur) {
+      if (mode === "write" && cur.mode === "read") throw new Error("db.write inside db.read: a read snapshot cannot write");
+      return fn();
+    }
+    const site = mode === "write" ? siteError() : undefined;
+    const tx: Tx = { mode, state: "opening", lockTimeoutMs };
+    let lockedAt: number | undefined;
+    try {
+      return await this.#als.run(tx, () =>
+        this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
+          tx.trx = trx;
+          tx.state = "open";
+          lockedAt = performance.now();
+          try {
+            return await fn();
+          } finally {
+            tx.state = "closed";
+          }
+        }),
+      );
+    } finally {
+      tx.state = "closed";
+      if (site && lockedAt !== undefined) {
+        const holdMs = performance.now() - lockedAt;
+        if (holdMs > SLOW_HOLD_MS) console.warn(`db: write lock held ${Math.round(holdMs)} ms by ${callSite(site)}`);
+        if (this.#observers.size) this.#emit({ kind: "write-lock", holdMs, site: callSite(site) });
+      }
+    }
+  }
+
+  observe(fn: (e: DbEvent) => void): () => void {
+    this.#observers.add(fn);
+    return () => void this.#observers.delete(fn);
+  }
+
+  close(): Promise<void> {
+    return this.#engine.close();
+  }
+}
