@@ -517,7 +517,7 @@ export async function drainRepins(db: Db, deps: RepinDeps): Promise<number> {
         }
       }
       ended++;
-      r = await db.get(db.k.selectFrom("main.autorepins").select(kx.cols("autorepins")).where(isRow(r))) as RepinRow;
+      r = (await db.get(db.k.selectFrom("main.autorepins").select(kx.cols("autorepins")).where(isRow(r)).$narrowType<{ state: RepinRow["state"] }>()))!;
       deps.log?.(`autorepin ${refOf(r)}: ${r.state}${r.result ? `: ${r.result}` : ""}`);
     }
     if (r.notice === null && (await notify(db, r, deps)) === "paced") break;
