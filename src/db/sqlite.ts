@@ -9,14 +9,25 @@ import type { DB, Row, RunResult } from "./index.ts";
 /** Prepared statements kept per connection: preparing the same text again costs more than running it. */
 const CACHE_SIZE = 1000;
 
-const plain = (rows: unknown[]): Row[] => rows.map((r) => ({ ...(r as Row) }));
+type Entry = { stmt: StatementSync; reader?: boolean };
+
+// Statements return rows as arrays, made into plain objects here: node:sqlite's own row objects have a null prototype, and
+// copying them costs more than reading the rows. The names are read on every call because SQLite prepares a statement
+// again after a schema change. A repeated column name keeps its last value, as in node:sqlite's objects.
+const names = (stmt: StatementSync): string[] => stmt.columns().map((c) => c.name);
+
+function rowOf(cols: string[], v: unknown[]): Row {
+  const r: Row = {};
+  for (let i = 0; i < cols.length; i++) r[cols[i]!] = v[i] as Row[string];
+  return r;
+}
 
 /**
  * The statement layer over one DatabaseSync: an LRU of prepared statements, plain-object rows, numeric run results and
  * the query events. Both Kysely (through `prepare`, the shape SqliteDialect expects) and `db.prepare` run through it.
  */
 export class SqliteAdapter {
-  readonly #cache = new Map<string, { stmt: StatementSync; reader?: boolean }>();
+  readonly #cache = new Map<string, Entry>();
   readonly sync: DatabaseSync;
   readonly #ctx: EngineContext;
 
@@ -25,12 +36,14 @@ export class SqliteAdapter {
     this.#ctx = ctx;
   }
 
-  #entry(text: string): { stmt: StatementSync; reader?: boolean } {
+  #entry(text: string): Entry {
     let e = this.#cache.get(text);
     if (e) {
       this.#cache.delete(text);
     } else {
-      e = { stmt: this.sync.prepare(text) };
+      const stmt = this.sync.prepare(text);
+      stmt.setReturnArrays(true);
+      e = { stmt };
       if (this.#cache.size >= CACHE_SIZE) this.#cache.delete(this.#cache.keys().next().value!);
     }
     this.#cache.set(text, e);
@@ -52,8 +65,8 @@ export class SqliteAdapter {
     return this.#timed(
       text,
       () => {
-        const r = stmt.get(...(args as [])) as Row | undefined;
-        return r && { ...r };
+        const v = stmt.get(...(args as [])) as unknown as unknown[] | undefined;
+        return v && rowOf(names(stmt), v);
       },
       (r) => (r ? [1, Buffer.byteLength(JSON.stringify(r))] : [0, 0]),
     );
@@ -61,7 +74,13 @@ export class SqliteAdapter {
 
   all(text: string, args: Args): Row[] {
     const stmt = this.#entry(text).stmt;
-    return this.#timed(text, () => plain(stmt.all(...(args as []))), (r) => [r.length, Buffer.byteLength(JSON.stringify(r))]);
+    return this.#timed(
+      text,
+      () => {
+        const rows = stmt.all(...(args as [])) as unknown as unknown[][];
+        const cols = names(stmt);
+        return rows.map((v) => rowOf(cols, v));
+      }, (r) => [r.length, Buffer.byteLength(JSON.stringify(r))]);
   }
 
   run(text: string, args: Args): RunResult {

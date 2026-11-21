@@ -107,6 +107,16 @@ test("the counter totals round trips, rows, result bytes and write-lock time by 
   assert.ok([...counts.sites.keys()].some((s) => s.includes("db-layer.test.ts")), [...counts.sites.keys()].join("\n"));
 });
 
+test("rows are plain objects named by the statement's columns, also after the table gains a column", async () => {
+  const { dbs: [db] } = await handles(1);
+  await db!.prepare("INSERT INTO t (v) VALUES (?)").run("a");
+  const row = await db!.prepare("SELECT * FROM t").get();
+  assert.equal(Object.getPrototypeOf(row), Object.prototype);
+  assert.deepEqual(row, { id: 1, v: "a" });
+  await db!.script("ALTER TABLE t ADD COLUMN w TEXT DEFAULT 'x'");
+  assert.deepEqual(await db!.prepare("SELECT * FROM t").all(), [{ id: 1, v: "a", w: "x" }]);
+});
+
 test("placeholders outside literals and comments bind by node:sqlite's rules", () => {
   const p = parseParams("SELECT ?, :x, '?:y', \"a?\" -- ?\n, ?3, @x, ? /* :z */, $w, a::text");
   const { text, values } = bindParams(p, [{ x: "X", w: "W" }, 1, 2, 3], (i) => `$${i + 1}`);
