@@ -2,9 +2,9 @@
 // membership and place. They read the stored rows only; nothing here loads facts or decides.
 import type { PlanView, QueueView } from "./plan-cache.ts";
 import { QUEUE_STATES, type Action, type ActionKind, type QueueState } from "./plan.ts";
-import { filtered, hiddenJsonTest, type HiddenRepos } from "../hidden-sql.ts";
+import { filtered, hiddenTestExpr, type HiddenRepos } from "../hidden-sql.ts";
 import type { Db } from "../db/index.ts";
-import { inList, jsonEach, jsonText } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 /** A PR in a queue state, as the merge queue lists it: the Plan's state, reasons and note, and the cached queue fields. */
 export type CachedEntry = QueueView & {
@@ -26,23 +26,20 @@ export type CachedQueueOptions = {
   refs?: Iterable<string>;
 };
 
-const STATE_LIST = QUEUE_STATES.map((s) => `'${s}'`).join(",");
-
-type QueueRow = { repo: string; number: number; title: string | null; state: string; reasons: string; note: string | null; view: string };
-
 /** The queue entries of the cached Plans, in (repo, number) order; the same list buildQueue builds from facts. */
 export async function cachedQueue(db: Db, opts: CachedQueueOptions = {}): Promise<CachedEntry[]> {
   const which = opts.merged ?? "all";
-  const params: Record<string, string | number> = {};
-  const where = [`p.kind = 'pr'`, `p.state IN (${STATE_LIST})`, `${jsonText(db, "p.view", "$.queue")} IS NOT NULL`];
-  if (opts.repo) { where.push("p.repo = :repo"); params.repo = opts.repo; }
-  if (opts.hidden && filtered(opts.hidden)) { const h = hiddenJsonTest(db, "p.repo", opts.hidden, ":hidden"); where.push(`NOT (${h.sql})`); params.hidden = h.arg; }
-  if (opts.refs) { where.push(inList(db, "p.repo || '#' || p.number", ":refs")); params.refs = JSON.stringify([...opts.refs]); }
-  const gh = jsonText(db, "p.view", "$.gh");
-  where.push(which === "exclude" ? `${gh} = 'OPEN'` : which === "only" ? `${gh} = 'MERGED'` : `${gh} <> 'CLOSED'`);
-  if (opts.after) { where.push("(p.repo > :ar OR (p.repo = :ar AND p.number > :an))"); params.ar = opts.after.repo; params.an = opts.after.number; }
-  const rows = await db.prepare(`SELECT p.repo, p.number, i.title, p.state, p.reasons, p.note, p.view FROM main.item_plans p LEFT JOIN main.items i ON i.repo = p.repo AND i.number = p.number
-    WHERE ${where.join(" AND ")} ORDER BY p.repo, p.number${opts.limit ? ` LIMIT ${Math.floor(opts.limit)}` : ""}`).all(params) as QueueRow[];
+  const gh = kx.jsonText(db, "p.view", "$.gh");
+  const rows = await db.all(db.k.selectFrom("main.item_plans as p").leftJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "i.title", "p.state", "p.reasons", "p.note", "p.view"])
+    .where("p.kind", "=", "pr").where("p.state", "in", [...QUEUE_STATES]).where(kx.jsonText(db, "p.view", "$.queue"), "is not", null)
+    .$if(!!opts.repo, (q) => q.where("p.repo", "=", opts.repo!))
+    .$if(!!(opts.hidden && filtered(opts.hidden)), (q) => q.where((eb) => eb.not(hiddenTestExpr(db, "p.repo", opts.hidden!))))
+    .$if(!!opts.refs, (q) => q.where(kx.refIn(db, "p", opts.refs!)))
+    .where((eb) => (which === "exclude" ? eb(gh, "=", "OPEN") : which === "only" ? eb(gh, "=", "MERGED") : eb(gh, "<>", "CLOSED")))
+    .$if(!!opts.after, (q) => q.where((eb) => eb.or([eb("p.repo", ">", opts.after!.repo), eb.and([eb("p.repo", "=", opts.after!.repo), eb("p.number", ">", opts.after!.number)])])))
+    .orderBy("p.repo").orderBy("p.number")
+    .$if(!!opts.limit, (q) => q.limit(Math.floor(opts.limit!))));
   return rows.map((r) => {
     const v = JSON.parse(r.view) as PlanView;
     return { ...v.queue!, repo: r.repo, number: r.number, title: r.title ?? "", state: r.state as QueueState, outsideRule: JSON.parse(r.reasons) as string[], note: r.note, gh: v.gh! };
@@ -57,17 +54,20 @@ export function countStates(entries: { state: QueueState }[]): Record<QueueState
 
 /** How many merged PRs (GitHub says merged) have a Plan in a queue state, in the repo or all repos, without the hidden ones. */
 export async function countMergedPlans(db: Db, repo?: string, hidden: HiddenRepos = []): Promise<number> {
-  const h = hiddenJsonTest(db, "p.repo", hidden, ":hidden");
-  return (await db.prepare(`SELECT COUNT(*) AS n FROM main.item_plans p WHERE p.kind = 'pr' AND p.state IN (${STATE_LIST}) AND ${jsonText(db, "p.view", "$.gh")} = 'MERGED'
-    ${repo ? "AND p.repo = :repo" : ""} AND NOT (${h.sql})`).get({ ...(repo ? { repo } : {}), hidden: h.arg }) as { n: number }).n;
+  return (await db.get(db.k.selectFrom("main.item_plans as p").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("p.kind", "=", "pr").where("p.state", "in", [...QUEUE_STATES]).where(kx.jsonText(db, "p.view", "$.gh"), "=", "MERGED")
+    .$if(!!repo, (q) => q.where("p.repo", "=", repo!))
+    .where((eb) => eb.not(hiddenTestExpr(db, "p.repo", hidden)))))!.n;
 }
 
 export type DueOptions = { repo?: string; /** The action's `bucket` param, else its `source` param. */ bucket?: string };
 
 /** The items whose cached Plan holds an action of `kind` (a PR's triage and review-to-merge actions are cached together), in (repo, number) order. */
 export async function dueActions(db: Db, kind: ActionKind, opts: DueOptions = {}): Promise<{ repo: string; number: number; action: Action }[]> {
-  const rows = await db.prepare(`SELECT p.repo, p.number, a.value AS action FROM main.item_plans p, ${jsonEach(db, "p.actions", "a")}
-    WHERE ${jsonText(db, "a.value", "$.kind")} = :kind ${opts.repo ? "AND p.repo = :repo" : ""} ORDER BY p.repo, p.number`).all({ kind, ...(opts.repo ? { repo: opts.repo } : {}) }) as { repo: string; number: number; action: string }[];
+  const rows = await db.all(db.k.selectFrom(["main.item_plans as p", kx.jsonEach(db, "p.actions", "a")]).select(["p.repo", "p.number", "a.value as action"])
+    .where(kx.jsonText(db, "a.value", "$.kind"), "=", kind)
+    .$if(!!opts.repo, (q) => q.where("p.repo", "=", opts.repo!))
+    .orderBy("p.repo").orderBy("p.number"));
   const out = rows.map((r) => ({ repo: r.repo, number: r.number, action: JSON.parse(r.action) as Action }));
   if (opts.bucket === undefined) return out;
   return out.filter(({ action: a }) => (typeof a.params?.bucket === "string" ? a.params.bucket : typeof a.params?.source === "string" ? a.params.source : null) === opts.bucket);
@@ -78,6 +78,7 @@ export const dueRefs = async (db: Db, kind: ActionKind, opts: DueOptions = {}): 
 
 /** The cached view of every open item with a Plan: `repo#number` to its PlanView. */
 export async function openViews(db: Db): Promise<Map<string, PlanView>> {
-  const rows = await db.prepare(`SELECT p.repo, p.number, p.view FROM main.item_plans p JOIN main.items i ON i.repo = p.repo AND i.number = p.number WHERE i.state = 'OPEN'`).all() as { repo: string; number: number; view: string }[];
+  const rows = await db.all(db.k.selectFrom("main.item_plans as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "p.view"]).where("i.state", "=", "OPEN"));
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, JSON.parse(r.view) as PlanView]));
 }

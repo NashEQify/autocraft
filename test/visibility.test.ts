@@ -238,21 +238,21 @@ describe("repo visibility", () => {
     const now = new Date().toISOString();
     const logFile = join(dir, "job.log");
     writeFileSync(logFile, "job log line\n");
-    const job = await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, log_path, repo) VALUES ('classify', '{}', 'cli', ?, 'done', ?, 'open-app')").run(now, logFile);
-    const task = await db.prepare("INSERT INTO build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at, patch, log_bytes) VALUES ('verify', 'open-app', 1, 'h', '{}', '[]', 'done', ?, 'diff --git a/x b/x', 9)").run(now);
-    await db.prepare("INSERT INTO build_task_logs (task_id, seq, step, chunk) VALUES (?, 0, 'test', 'task log line')").run(task.lastInsertRowid);
+    const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", log_path: logFile, repo: "open-app" }).returning("id")))!.id;
+    const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo: "open-app", number: 1, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: now, patch: "diff --git a/x b/x", log_bytes: 9 }).returning("id")))!.id;
+    await db.run(db.k.insertInto("build_task_logs").values({ task_id: task, seq: 0, step: "test", chunk: "task log line" }));
     await db.prepare("INSERT INTO patch_checks (kind, repo, number, subject, patch_hash, verdict, reasons, problems, model, created_at) VALUES ('fixup', 'open-app', 1, 's', 'p', 'reject', 'the patch drops the guard', '[\"drops the guard\"]', 'opus', ?)").run(now);
     for (const login of ["reader", "maint"]) {
       const c = await signedIn(login);
       const staff = login === "maint";
-      const t = await c.get<BuildTaskDetail>(`/api/tasks/${task.lastInsertRowid}`);
+      const t = await c.get<BuildTaskDetail>(`/api/tasks/${task}`);
       assert.equal(t.logTail, staff ? "task log line" : null, login);
       assert.equal(t.patch, staff ? "diff --git a/x b/x" : null, login);
-      assert.equal((await c.get<JobDetail>(`/api/pipeline/jobs/${job.lastInsertRowid}`)).log, staff ? "job log line\n" : null, login);
+      assert.equal((await c.get<JobDetail>(`/api/pipeline/jobs/${job}`)).log, staff ? "job log line\n" : null, login);
       const [check] = (await c.get<Item>("/api/items/open-app/1")).patchChecks ?? [];
       assert.equal(check?.reasons, staff ? "the patch drops the guard" : "", login);
       assert.deepEqual(check?.problems, staff ? ["drops the guard"] : [], login);
-      assert.equal(await c.status(`/api/tasks/${task.lastInsertRowid}/artifacts/none`), staff ? 404 : 403, login);
+      assert.equal(await c.status(`/api/tasks/${task}/artifacts/none`), staff ? 404 : 403, login);
     }
     await db.prepare("DELETE FROM patch_checks").run();
   });
@@ -291,11 +291,11 @@ describe("repo visibility", () => {
   test("rows of an untracked repo and of a private repo the user cannot read are operator-only", async () => {
     const now = new Date().toISOString();
     const rows = async (repo: string) => {
-      const job = await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, repo) VALUES ('classify', '{}', 'cli', ?, 'done', ?)").run(now, repo);
-      const task = await db.prepare("INSERT INTO build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at, patch, log_bytes) VALUES ('verify', ?, 7, 'h', '{}', '[]', 'done', ?, 'diff', 0)").run(repo, now);
+      const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", repo }).returning("id")))!.id;
+      const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo, number: 7, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: now, patch: "diff", log_bytes: 0 }).returning("id")))!.id;
       const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo, number: 7 }], prompt: `prompt for ${repo}` });
       await finishRun(db, run, { state: "done", output: `output for ${repo}` });
-      return { job: Number(job.lastInsertRowid), task: Number(task.lastInsertRowid), run };
+      return { job, task, run };
     };
     await db.prepare("INSERT OR IGNORE INTO ever_tracked_repos (name) VALUES ('gone-app')").run();
     const gone = await rows("gone-app"), vault = await rows("vault");
@@ -410,9 +410,9 @@ describe("repo visibility", () => {
   });
 
   test("a build task for a repo that was never tracked is hidden from viewers", async () => {
-    const task = await db.prepare("INSERT INTO main.build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at) VALUES ('smoke', 'ghost-repo', NULL, 'h', '{}', '[]', 'done', ?)").run(new Date().toISOString());
-    assert.equal(await (await signedIn("reader")).status(`/api/tasks/${task.lastInsertRowid}`), 404);
-    assert.equal(await (await signedIn("boss")).status(`/api/tasks/${task.lastInsertRowid}`), 200);
+    const task = (await db.get(db.k.insertInto("main.build_tasks").values({ step: "smoke", repo: "ghost-repo", number: null, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: new Date().toISOString() }).returning("id")))!.id;
+    assert.equal(await (await signedIn("reader")).status(`/api/tasks/${task}`), 404);
+    assert.equal(await (await signedIn("boss")).status(`/api/tasks/${task}`), 200);
   });
 
 });

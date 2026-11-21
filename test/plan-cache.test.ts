@@ -8,6 +8,7 @@ import { detectAutopilot, planDue, setEnabled } from "../src/runner/autopilot.ts
 import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-cache-"));
@@ -15,22 +16,24 @@ const T0 = "2026-01-01T00:00:00Z";
 
 describe("Plan cache", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-  const add = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, is_draft, created_at, updated_at) VALUES ('app', ?, 'issue', 'OPEN', 't', 'b', 0, '${T0}', '${T0}')`);
-  await add.run(1); await add.run(2);
-  await db.script("UPDATE items SET embed_hash = NULL");
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
+  await db.run(db.k.insertInto("items").values([1, 2].map((number) => ({ repo: "app", number, kind: "issue", state: "OPEN", title: "t", body: "b", is_draft: 0, created_at: T0, updated_at: T0 }))));
+  await db.run(db.k.updateTable("items").set({ embed_hash: null }));
   await setEnabled(db, true, "op");
-  const cache = async () => await db.prepare("SELECT number, kind, state, actions FROM item_plans ORDER BY number").all() as { number: number; kind: string; state: string; actions: string }[];
-  const seq = async () => (await db.prepare("SELECT seq FROM change_seq WHERE topic = 'plans'").get() as { seq: number }).seq;
+  const cache = async () => await db.all(db.k.selectFrom("item_plans").select(["number", "kind", "state", "actions"]).orderBy("number"));
+  const seq = async () => (await db.get(db.k.selectFrom("change_seq").select("seq").where("topic", "=", "plans")))!.seq;
+  const unhashed = async () => (await db.get(db.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n")).where("embed_hash", "is", null)))!;
 
   test("a pass writes one row per item, writes nothing else, and writes only changed rows the next time", async () => {
-    const changes = async () => (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
-    const before = await db.prepare("SELECT COUNT(*) AS n FROM items WHERE embed_hash IS NULL").get() as { n: number };
+    // Rows written by this connection so far; Postgres has no such counter, but each call of txid_current() takes one transaction id, and a read takes none.
+    let calls = 0;
+    const changes = async () => db.dialect === "postgres" ? Number((await db.prepare("SELECT txid_current() AS n").get() as { n: number }).n) - ++calls : (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const before = await unhashed();
     const first = await detectAutopilot(db);
     assert.equal(first.timing!.written, 2);
     assert.deepEqual((await cache()).map((r) => [r.number, r.kind]), [[1, "issue"], [2, "issue"]]);
     assert.ok(JSON.parse((await cache())[0]!.actions).some((a: { kind: string }) => a.kind === "embed"), "the embed action is cached");
-    assert.deepEqual(await db.prepare("SELECT COUNT(*) AS n FROM items WHERE embed_hash IS NULL").get(), before, "planning fills no hashes");
+    assert.deepEqual(await unhashed(), before, "planning fills no hashes");
     const s = await seq();
     const n = await changes();
     const second = await detectAutopilot(db);
@@ -40,7 +43,7 @@ describe("Plan cache", async () => {
   });
 
   test("a changed item rewrites its row only, and an item that closed leaves the cache", async () => {
-    await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2));
     const r = await detectAutopilot(db);
     assert.deepEqual([r.timing!.written, r.timing!.deleted], [0, 1]);
     assert.deepEqual((await cache()).map((x) => x.number), [1]);
@@ -48,7 +51,7 @@ describe("Plan cache", async () => {
 
   test("with the pipeline off the planner is still due and caches the Plans (the runner queues no proposal then)", async () => {
     await setEnabled(db, false, "op");
-    await db.prepare("UPDATE items SET state = 'OPEN' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ state: "OPEN" }).where("number", "=", 2));
     assert.equal(await planDue(db), true);
     const r = await detectAutopilot(db);
     assert.ok(r.proposals.every((p) => p.lane), "proposals are only data; applyProposals is not called while off");
@@ -59,7 +62,7 @@ describe("Plan cache", async () => {
   test("with the pipeline off a wake time that has passed makes one pass due, not every tick", async () => {
     await setEnabled(db, false, "op");
     await planDue(db);
-    await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_wake_at', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(new Date(Date.now() - 60_000).toISOString());
+    await db.run(db.k.insertInto("settings").values({ key: "pipeline_wake_at", value: new Date(Date.now() - 60_000).toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     assert.equal(await planDue(db), true);
     assert.equal(await planDue(db), false);
   });
@@ -68,20 +71,20 @@ describe("Plan cache", async () => {
     const before = (await planHistory(db, "app", 1)).length;
     await refreshPlanCache(db);
     assert.equal((await planHistory(db, "app", 1)).length, before, "an unchanged pass adds no row");
-    await db.prepare("UPDATE item_plans SET state = 'earlier' WHERE number = 1").run();
+    await db.run(db.k.updateTable("item_plans").set({ state: "earlier" }).where("number", "=", 1));
     await refreshPlanCache(db);
-    await db.prepare("UPDATE item_plans SET state = 'before-that', wait = 'x' WHERE number = 1").run();
+    await db.run(db.k.updateTable("item_plans").set({ state: "before-that", wait: "x" }).where("number", "=", 1));
     await refreshPlanCache(db);
     const h = await planHistory(db, "app", 1);
     assert.deepEqual(h.slice(before).map((r) => [r.oldState, r.wait === null]), [["earlier", true], ["before-that", true]]);
-    await db.prepare("UPDATE item_plans SET wait = 'y' WHERE number = 1").run();
+    await db.run(db.k.updateTable("item_plans").set({ wait: "y" }).where("number", "=", 1));
     await refreshPlanCache(db);
     const w = (await planHistory(db, "app", 1)).at(-1)!;
     assert.deepEqual([w.oldWait, w.wait === null], ["y", true], "a wait-only change is recorded with the old wait");
-    await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2));
     await refreshPlanCache(db);
     const gone = (await planHistory(db, "app", 2)).at(-1)!;
-    await db.prepare("UPDATE items SET state = 'OPEN' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ state: "OPEN" }).where("number", "=", 2));
     await refreshPlanCache(db);
     assert.deepEqual([gone.newState, gone.oldState === null], ["gone", false], "an item leaving the plan set gets a row");
     assert.equal(h[h.length - 1]!.newState, (await cache())[0]!.state);
@@ -94,16 +97,18 @@ describe("Plan cache", async () => {
 describe("the cached next step of a PR outside the pipeline's scope", () => {
   test("names the step its stored rows wait on, not Review", async () => {
     const db = await connectDb(join(dir, "scope.db"));
-    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('off', 0)").run();
-    const pr = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, is_draft, head_oid, created_at, updated_at) VALUES ('off', ?, 'pr', 'OPEN', 't', 'b', 0, ?, '${T0}', '${T0}')`);
-    const jev = db.prepare(`INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, flags, probs) VALUES ('off', ?, 'jev', 'r1', '${T0}', 'bugfix', '[]', '{"top":0.95}')`);
-    const review = db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, sure, mode) VALUES ('off', ?, ?, 'rv', '${T0}', 'sonnet', ?, 'why', 1, 'full')`);
-    for (const [n, verdict] of [[1, "hold"], [2, "take-fix"], [3, "take"]] as const) { await pr.run(n, `h${n}`); await jev.run(n); await review.run(n, `h${n}`, verdict); }
-    await pr.run(4, "h4"); await jev.run(4);
-    await db.prepare(`INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('off', 3, 'h3', 'tests', 'r', 'passed', '${T0}')`).run();
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "off", pipeline: 0 }));
+    for (const [n, verdict] of [[1, "hold"], [2, "take-fix"], [3, "take"]] as const) {
+      await db.run(db.k.insertInto("items").values({ repo: "off", number: n, kind: "pr", state: "OPEN", title: "t", body: "b", is_draft: 0, head_oid: `h${n}`, created_at: T0, updated_at: T0 }));
+      await db.run(db.k.insertInto("classifications").values({ repo: "off", number: n, classifier: "jev", run_id: "r1", at: T0, type_label: "bugfix", flags: "[]", probs: '{"top":0.95}' }));
+      await db.run(db.k.insertInto("opus_reviews").values({ repo: "off", number: n, head_oid: `h${n}`, run_id: "rv", at: T0, model: "sonnet", verdict, reason: "why", sure: 1, mode: "full" }));
+    }
+    await db.run(db.k.insertInto("items").values({ repo: "off", number: 4, kind: "pr", state: "OPEN", title: "t", body: "b", is_draft: 0, head_oid: "h4", created_at: T0, updated_at: T0 }));
+    await db.run(db.k.insertInto("classifications").values({ repo: "off", number: 4, classifier: "jev", run_id: "r1", at: T0, type_label: "bugfix", flags: "[]", probs: '{"top":0.95}' }));
+    await db.run(db.k.insertInto("verifications").values({ repo: "off", number: 3, head_sha: "h3", kind: "tests", reason: "r", state: "passed", created_at: T0 }));
     await refreshPlanCache(db);
-    const next = async (n: number) => JSON.parse((await db.prepare("SELECT view FROM item_plans WHERE repo = 'off' AND number = ?").get(n) as { view: string }).view).next;
+    const next = async (n: number) => JSON.parse((await db.get(db.k.selectFrom("item_plans").select("view").where("repo", "=", "off").where("number", "=", n)))!.view).next;
     assert.deepEqual(await mapSeq([1, 2, 3, 4], next), ["Needs a person", "Fix-up", "Merge queue", "Review"]);
-    assert.equal((await db.prepare("SELECT state FROM item_plans WHERE number = 3").get() as { state: string }).state, "out-of-scope");
+    assert.equal((await db.get(db.k.selectFrom("item_plans").select("state").where("number", "=", 3)))!.state, "out-of-scope");
   });
 });

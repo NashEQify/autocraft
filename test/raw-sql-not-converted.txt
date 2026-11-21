@@ -67,17 +67,12 @@ src/conversations/held.ts
 
 
 
-src/core/issue-facts.ts
 
-src/core/plan-cache.ts
 
 src/core/plan-changes.ts
 
-src/core/plan-engine.ts
 
-src/core/plan-read.ts
 
-src/core/select-items.ts
 
 src/dash/api/activity.ts
 

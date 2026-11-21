@@ -8,7 +8,7 @@ import { loadItemFacts, type ItemLoadOptions } from "./issue-facts.ts";
 import type { PlanSet } from "./plan-set.ts";
 import type { Action, ActionKind, ItemFacts, ItemPlan } from "./plan.ts";
 import type { Db } from "../db/index.ts";
-import { pairsFrom } from "./ref-filter.ts";
+import * as kx from "../db/kx.ts";
 
 export type PlannedItem = { facts: ItemFacts; plan: ItemPlan; action: Action };
 
@@ -36,9 +36,9 @@ const prFirst: Cmp = (a, b) => (b.facts.kind === "pr" ? 1 : 0) - (a.facts.kind =
 
 /** The sort keys of the items, keyed by `repo#number`: one query. */
 async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
-  const j = pairsFrom(db, "?", "j");
-  const rows = await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.created_at, '') AS created, COALESCE(i.updated_at, '') AS updated
-    FROM ${j.from} JOIN items i ON i.repo = ${j.repo} AND i.number = ${j.number}`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as (Keys & { ref: string })[];
+  const rows = await db.all(db.k.selectFrom("items as i")
+    .innerJoin(kx.refPairs(db, items.map((x) => [x.repo, x.number] as const), "j"), (j) => j.onRef("j.repo", "=", "i.repo").onRef("j.number", "=", "i.number"))
+    .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", kx.exprOf(eb, "i.number")).as("ref"), eb.fn.coalesce("i.created_at", eb.val("")).as("created"), eb.fn.coalesce("i.updated_at", eb.val("")).as("updated")]));
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
@@ -89,8 +89,8 @@ export async function plannedItems(db: Db, kind: ActionKind, opts: PlannedOption
 
 /** The item as the model steps read it. */
 export async function itemOf(db: Db, repo: string, number: number): Promise<Item> {
-  const r = await db.prepare(`SELECT repo, number, kind, COALESCE(title, '') AS title, COALESCE(body, '') AS body, additions + deletions AS lines_changed,
-    changed_files AS files_changed, author_association FROM items WHERE repo = ? AND number = ?`).get(repo, number) as Item | undefined;
+  const r = await db.get(db.k.selectFrom("items").select((eb) => ["repo", "number", "kind", eb.fn.coalesce("title", eb.val("")).as("title"), eb.fn.coalesce("body", eb.val("")).as("body"),
+    eb(eb.ref("additions"), "+", eb.ref("deletions")).as("lines_changed"), "changed_files as files_changed", "author_association"]).$narrowType<{ kind: Item["kind"] }>().where("repo", "=", repo).where("number", "=", number));
   if (!r) throw new Error(`${repo}#${number} is not in the database`);
   return r;
 }

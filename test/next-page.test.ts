@@ -8,6 +8,7 @@ import { nextPage } from "../src/dash/api/next.ts";
 import { detectAutopilot, INPUT_TOPICS, LANE_KINDS, LANES, NO_ITEM_LANES, setEnabled, setLimit } from "../src/runner/autopilot.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "next-page-"));
@@ -15,11 +16,10 @@ const T0 = "2026-01-01T00:00:00Z";
 
 describe("Next page", async () => {
   const db = await connectDb(join(dir, "t.db"));
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('secret', 1)").run();
-  const add = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, is_draft, created_at, updated_at) VALUES (?, ?, 'issue', 'OPEN', ?, 'b', 0, '${T0}', '${T0}')`);
-  for (const n of [3, 1, 2]) await add.run("app", n, `issue ${n}`);
-  await add.run("secret", 9, "hidden");
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "app", pipeline: 1 }, { name: "secret", pipeline: 1 }]));
+  const add = (repo: string, number: number, title: string) => db.run(db.k.insertInto("items").values({ repo, number, kind: "issue", state: "OPEN", title, body: "b", is_draft: 0, created_at: T0, updated_at: T0 }));
+  for (const n of [3, 1, 2]) await add("app", n, `issue ${n}`);
+  await add("secret", 9, "hidden");
   await setEnabled(db, true, "op");
 
   test("a lane lists its items in the planner's order, without hidden repos", async () => {
@@ -41,10 +41,10 @@ describe("Next page", async () => {
   });
 
   test("storing the lists is not planner input", async () => {
-    const seqs = async () => await db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[];
+    const seqs = async () => await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]));
     const before = await seqs();
-    await db.prepare("INSERT OR REPLACE INTO lane_next (lane, total, items, at) VALUES ('x', 0, '[]', 'now')").run();
-    await db.prepare("DELETE FROM lane_next WHERE lane = 'x'").run();
+    await db.run(db.k.insertInto("lane_next").values({ lane: "x", total: 0, items: "[]", at: "now" }).onConflict((oc) => oc.column("lane").doUpdateSet(excluded(["total", "items", "at"]))));
+    await db.run(db.k.deleteFrom("lane_next").where("lane", "=", "x"));
     const moved = (await seqs()).filter((s) => s.seq !== (before.find((b) => b.topic === s.topic)?.seq ?? 0)).map((s) => s.topic);
     assert.deepEqual(moved.filter((t) => INPUT_TOPICS.includes(t as never)), [], "lane_next must sit under an excluded topic");
     assert.ok(moved.includes("plans"));

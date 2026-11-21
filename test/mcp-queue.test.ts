@@ -10,6 +10,7 @@ import { addFastTrack, fastTrackList } from "../src/fasttrack.ts";
 import { insertBatch, updateBatch } from "../src/merge/batch-store.ts";
 import { preapprovalOf } from "../src/preapproval/index.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
+import { excluded } from "../src/db/kx.ts";
 
 let current: World | null = null;
 // The pre-approval tools need an answering token, which exists only while answering is available.
@@ -82,7 +83,7 @@ describe("merge queue tools", () => {
     await call(op, "queue_pr", { item: "app#1" });
     await call(op, "cancel_queued", { item: "app#1" });
     await call(op, "set_weight", { item: "app#1", remove: true });
-    const rows = await w.db.prepare("SELECT action, details FROM audit WHERE action IN ('preapproval', 'fasttrack-add', 'fasttrack-remove')").all() as { action: string; details: string | null }[];
+    const rows = await w.db.all(w.db.k.selectFrom("audit").select(["action", "details"]).where("action", "in", ["preapproval", "fasttrack-add", "fasttrack-remove"]));
     assert.ok(rows.length >= 4);
     for (const x of rows) assert.equal(JSON.parse(x.details ?? "{}").via, "mcp", `${x.action} ${x.details}`);
   });
@@ -113,9 +114,9 @@ describe("merge queue tools", () => {
     };
     // Maintainer writes off, then on without the app identity: nothing changes.
     await refusedAll();
-    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "maintainer_writes", value: "1" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     await refusedAll();
-    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     const r = await call(maint, "queue_pr", { item: "app#1", weight: 6 });
     assert.equal(r.isError, false, r.text);
     assert.match(r.text, /The weight was ignored: only operators set fast-track weights/);
