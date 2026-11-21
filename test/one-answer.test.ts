@@ -63,7 +63,10 @@ describe("one answer per question", () => {
     const settle = { kind: "answer", decision: d.id, option: "take", stamp: await decisionStamp(db, d) };
     let release!: () => void;
     const gate = new Promise<boolean>((r) => { release = () => r(true); });
-    const running = doCard(db, await card(db, { kind: "resolution", steps: [], settle }), "op", { querier, canWrite: () => gate });
+    let claimed!: () => void;
+    const claim = new Promise<void>((r) => { claimed = r; });
+    const running = doCard(db, await card(db, { kind: "resolution", steps: [], settle }), "op", { querier, canWrite: () => gate, claimed });
+    await claim;
     await assert.rejects(async () => await applyAnswer(db, (await getDecision(db, d.id))!, "op2", { answer: "close" }, "dashboard"), /op is applying their answer/);
     const second = doCard(db, await card(db, { kind: "resolution", steps: [], settle }), "op2", { querier });
     await assert.rejects(second, /op is applying their answer/);

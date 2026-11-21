@@ -55,13 +55,13 @@ test("every audited write in write.ts takes its identity from a grant", () => {
   const src = readFileSync(new URL("../src/github/write.ts", import.meta.url), "utf8");
   const calls = src.split("\n").filter((l) => /\b(recorded|viaGh)\(w, /.test(l) && !/function /.test(l));
   assert.ok(calls.length >= 25, `found ${calls.length} audited calls`);
-  for (const l of calls) assert.match(l, /\b(recorded|viaGh)\(w, (idOf\(w, g(, "close")?\)|identity|"legacy"|`user:\$\{w\.login\}`), /, l.trim().slice(0, 80));
+  for (const l of calls) assert.match(l, /\b(recorded|viaGh)\(w, (await idOf\(w, g(, "close")?\)|identity|"legacy"|`user:\$\{w\.login\}`), /, l.trim().slice(0, 80));
   // The rows started with begin() directly (labels, merge, command-line merge) carry the identity in their details.
   const begins = src.split("\n").filter((l) => /\bbegin\(w, /.test(l) && !/function /.test(l));
   assert.equal(begins.length, 4);
   for (const l of begins) assert.match(l, /begin\(w, (action, target, details|"labels-apply", .*det\(it\)|"merge", target, base|"merge", .*details(, splitSlug\(repoSlug\)\.owner)?)\)/);
-  assert.match(src, /identity: idOf\(w, it\.g\)/);
-  assert.match(src, /base = \{ \.\.\.details, method, identity: idOf\(w, g, "merge"\)(, \.\.\.jobOf\(\))? \}/);
+  assert.match(src, /identity: await idOf\(w, it\.g\)/);
+  assert.match(src, /base = \{ \.\.\.details, method, identity: await idOf\(w, g, "merge"\)(, \.\.\.jobOf\(\))? \}/);
   assert.match(src, /identity: "legacy"/);
 });
 

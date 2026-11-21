@@ -149,7 +149,7 @@ describe("long-polling claims", async () => {
     let release!: () => void, started!: () => void;
     const gate = new Promise<void>((r) => { release = r; }), inTry = new Promise<void>((r) => { started = r; });
     let leased: boolean | null = null;
-    const empty = () => ({ lease: null, retryAfter: CLAIM_RETRY_S }) as never;
+    const empty = async () => ({ lease: null, retryAfter: CLAIM_RETRY_S }) as never;
     const reply = waits.hold(new Ticket(new AbortController().signal), Date.now() + 60_000, {
       attempt: async (_now, { live }) => { started(); await gate; leased = live(); return null; },
       idle: async () => {}, empty, blocked: () => false,
