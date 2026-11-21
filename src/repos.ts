@@ -14,10 +14,10 @@ export { SHADOWED_TABLES } from "./db/scoped.ts";
 export class RepoError extends Error {}
 
 export const trackedNames = async (db: Db): Promise<string[]> =>
-  (await db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+  (await db.all(db.k.selectFrom("main.tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
 
 export const isTracked = async (db: Db, name: string): Promise<boolean> =>
-  await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(name) !== undefined;
+  await db.get(db.k.selectFrom("main.tracked_repos").select((eb) => eb.lit(1).as("one")).where("name", "=", name)) !== undefined;
 
 const NAME = /^[A-Za-z0-9._-]{1,100}$/;
 
@@ -26,18 +26,18 @@ export async function trackRepo(db: Db, by: string, input: string): Promise<bool
   const { owner, name } = splitSlug(input);
   if (!NAME.test(name)) throw new RepoError("Not a repo name.");
   if (!OWNER.test(owner)) throw new RepoError("Not an owner name.");
-  const known = await db.prepare("SELECT owner FROM main.repos WHERE name = ?").get(name) as { owner: string } | undefined;
+  const known = await db.get(db.k.selectFrom("main.repos").select("owner").where("name", "=", name));
   // A bare name means the repo as already known, whoever owns it.
   if (known && input.includes("/") && known.owner.toLowerCase() !== owner.toLowerCase()) {
     throw new RepoError(`${name} is already known under ${known.owner}; repo names are unique across owners.`);
   }
-  if (!known) await db.prepare("INSERT INTO main.repos (name, owner) VALUES (?, ?)").run(name, owner);
+  if (!known) await db.run(db.k.insertInto("main.repos").values({ name, owner }));
   await reloadOwners(db);
-  const r = await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES (?, ?, ?)")
-    .run(name, by, new Date().toISOString());
+  const r = await db.run(db.k.insertInto("main.tracked_repos").values({ name, added_by: by, added_at: new Date().toISOString() })
+    .onConflict((oc) => oc.doNothing()));
   if (r.changes) {
     // Items updated while the repo was untracked were never read; the next sync reads the repo in full.
-    await db.prepare("UPDATE main.repos SET high_water = NULL, synced_at = NULL, reconciled_at = NULL WHERE name = ?").run(name);
+    await db.run(db.k.updateTable("main.repos").set({ high_water: null, synced_at: null, reconciled_at: null }).where("name", "=", name));
     await audit(db, by, "repo-track", name);
   }
   return r.changes > 0;
@@ -58,14 +58,14 @@ export const ghRepoExists: RepoExists = async (owner, name) => {
  */
 export async function trackRepoChecked(db: Db, by: string, input: string, exists: RepoExists = ghRepoExists, mint?: (owner: string, repo: string) => Promise<string>): Promise<boolean> {
   const { owner, name } = splitSlug(input);
-  const known = NAME.test(name) && await db.prepare("SELECT 1 FROM main.repos WHERE name = ?").get(name) !== undefined;
+  const known = NAME.test(name) && await db.get(db.k.selectFrom("main.repos").select((eb) => eb.lit(1).as("one")).where("name", "=", name)) !== undefined;
   if (input.includes("/") && owner.toLowerCase() !== DEFAULT_OWNER && OWNER.test(owner) && NAME.test(name) && !known) {
     if (await exists(DEFAULT_OWNER, name)) throw new RepoError(`${DEFAULT_OWNER}/${name} exists; repo names are unique across owners.`);
     if (!(await exists(owner, name))) throw new RepoError(`${owner}/${name} was not found or is not readable.`);
   }
   // Under the GitHub App identity a repo the installation does not cover could not be written to.
   if (await githubIdentity(db) === "app" && NAME.test(name) && OWNER.test(owner)) {
-    const known2 = await db.prepare("SELECT owner FROM main.repos WHERE name = ?").get(name) as { owner: string } | undefined;
+    const known2 = await db.get(db.k.selectFrom("main.repos").select("owner").where("name", "=", name));
     const c = await appCoverage(input.includes("/") ? owner : known2?.owner ?? owner, name, mint);
     if (c.kind === "uncovered") throw new RepoError(`The GitHub App does not cover ${name}: ${c.why}`);
     if (c.kind === "unconfirmed") throw new RepoError(`GitHub could not confirm the GitHub App's installation for ${name}. Try again.`);
@@ -75,7 +75,7 @@ export async function trackRepoChecked(db: Db, by: string, input: string, exists
 
 export async function untrackRepo(db: Db, by: string, input: string): Promise<boolean> {
   const { name } = splitSlug(input);
-  const r = await db.prepare("DELETE FROM main.tracked_repos WHERE name = ?").run(name);
+  const r = await db.run(db.k.deleteFrom("main.tracked_repos").where("name", "=", name));
   if (r.changes) await audit(db, by, "repo-untrack", name);
   return r.changes > 0;
 }
@@ -85,9 +85,9 @@ export async function purgeRepo(db: Db, input: string): Promise<{ items: number;
   const { name } = splitSlug(input);
   if (await isTracked(db, name)) throw new RepoError(`${name} is tracked; untrack it first.`);
   return await db.write(async () => {
-    const comments = Number((await db.prepare("DELETE FROM main.comments WHERE repo = ?").run(name)).changes);
-    const items = Number((await db.prepare("DELETE FROM main.items WHERE repo = ?").run(name)).changes);
-    await db.prepare("UPDATE main.repos SET high_water = NULL, synced_at = NULL, reconciled_at = NULL WHERE name = ?").run(name);
+    const comments = Number((await db.run(db.k.deleteFrom("main.comments").where("repo", "=", name))).changes);
+    const items = Number((await db.run(db.k.deleteFrom("main.items").where("repo", "=", name))).changes);
+    await db.run(db.k.updateTable("main.repos").set({ high_water: null, synced_at: null, reconciled_at: null }).where("name", "=", name));
     return { items, comments };
   });
 }
@@ -98,16 +98,19 @@ export type RepoRow = {
 
 // Every known repo, tracked first.
 export async function listAll(db: Db): Promise<RepoRow[]> {
-  return await db.prepare(`
-    SELECT r.name, r.owner, EXISTS (SELECT 1 FROM main.tracked_repos t WHERE t.name = r.name) AS tracked,
-           COALESCE((SELECT t.pipeline FROM main.tracked_repos t WHERE t.name = r.name), 0) AS pipeline,
-           r.open_prs, r.open_issues, r.synced_at,
-           (SELECT COUNT(*) FROM main.items i WHERE i.repo = r.name) AS rows
-    FROM main.repos r
-    UNION ALL
-    SELECT t.name, 'storytold', 1, t.pipeline, NULL, NULL, NULL, (SELECT COUNT(*) FROM main.items i WHERE i.repo = t.name)
-    FROM main.tracked_repos t WHERE t.name NOT IN (SELECT name FROM main.repos)
-    ORDER BY 3 DESC, 1`).all() as RepoRow[];
+  const first = db.k.selectFrom("main.repos as r").select((eb) => [
+    "r.name", "r.owner",
+    eb.case().when(eb.exists(eb.selectFrom("main.tracked_repos as t").select(eb.lit(1).as("one")).whereRef("t.name", "=", "r.name"))).then(1).else(0).end().as("tracked"),
+    eb.fn.coalesce(eb.selectFrom("main.tracked_repos as t").select("t.pipeline").whereRef("t.name", "=", "r.name"), eb.lit(0)).as("pipeline"),
+    "r.open_prs", "r.open_issues", "r.synced_at",
+    eb.selectFrom("main.items as i").select(eb.fn.countAll<number>().as("n")).whereRef("i.repo", "=", "r.name").as("rows"),
+  ]).$narrowType<{ rows: number }>();
+  const second = db.k.selectFrom("main.tracked_repos as t").select((eb) => [
+    "t.name", eb.val("storytold").as("owner"), eb.lit(1).as("tracked"), "t.pipeline",
+    eb.lit(null).as("open_prs"), eb.lit(null).as("open_issues"), eb.lit(null).as("synced_at"),
+    eb.selectFrom("main.items as i").select(eb.fn.countAll<number>().as("n")).whereRef("i.repo", "=", "t.name").as("rows"),
+  ]).$narrowType<{ rows: number }>().where((eb) => eb("t.name", "not in", eb.selectFrom("main.repos as r2").select("r2.name")));
+  return await db.all(first.unionAll(second).orderBy("tracked", "desc").orderBy("name"));
 }
 
 /** The dashboard's, runner's and CLI jobs' view of the database: tracked repos only (src/db/scoped.ts). */

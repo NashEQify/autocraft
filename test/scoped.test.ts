@@ -6,7 +6,7 @@ import { SHADOWED_TABLES } from "../src/repos.ts";
 test("a scoped handle sees tracked repos only and writes through main. to every repo", async () => {
   const db = await connectDb(":memory:");
   try {
-    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
     const item = db.prepare("INSERT INTO main.items (repo, number, kind, state, title, updated_at) VALUES (?, ?, 'issue', 'OPEN', 't', '2026-01-01')");
     await item.run("app", 1);
     await item.run("other", 2);
@@ -23,7 +23,7 @@ test("a scoped handle sees tracked repos only and writes through main. to every 
     await item.run("other", 3);
     assert.deepEqual(await repos("SELECT repo FROM main.items WHERE number = 3"), ["other"]);
     assert.deepEqual(await repos("SELECT repo FROM items WHERE number = 3"), []);
-    await db.prepare("INSERT INTO main.tracked_repos (name, pipeline) VALUES ('other', 0)").run();
+    await db.run(db.k.insertInto("main.tracked_repos").values({ name: "other", pipeline: 0 }));
     assert.deepEqual(await repos("SELECT repo FROM items"), ["app", "other", "other"]);
 
     if (db.dialect === "postgres") {
