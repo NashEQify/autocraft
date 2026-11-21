@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fillClassHashes, fillEmbedHashes } from "./itemhash.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
+import { planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
@@ -668,7 +669,7 @@ function buildDecisionItems(db: DatabaseSync): void {
 
 /** Identifies the schema this code expects; the database stores the stamp it was last migrated with. */
 function schemaStamp(sql: string): string {
-  return createHash("sha256").update(sql).update(JSON.stringify([ADDED_COLUMNS, DROPPED_COLUMNS, ADDED_INDEXES, MIGRATION_VERSION, liveSql(), BOOKKEEPING_COLUMNS])).digest("hex").slice(0, 16);
+  return createHash("sha256").update(sql).update(JSON.stringify([ADDED_COLUMNS, DROPPED_COLUMNS, ADDED_INDEXES, MIGRATION_VERSION, liveSql(), planChangesSql(), BOOKKEEPING_COLUMNS])).digest("hex").slice(0, 16);
 }
 
 function stampOf(db: DatabaseSync): string | null {
@@ -714,6 +715,7 @@ function open(path: string): DatabaseSync {
   dropColumns(db);
   for (const ix of ADDED_INDEXES) db.exec(ix);
   db.exec(liveSql(db));
+  db.exec(planChangesSql(db));
   migrateValues(db);
   backfill(db);
   buildSearchIndex(db);
