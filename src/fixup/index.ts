@@ -266,7 +266,7 @@ class Recorder {
       .where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", c.head).where("state", "in", ["pushing", "linting"])
       .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", c.source ?? "review"))
       .where((eb) => (operatorId === null ? eb("operator_fix", "is", null) : eb("operator_fix", "=", operatorId)))
-      .orderBy(rowid("fixups"), "desc"));
+      .orderBy(rowid("fixups"), "desc").limit(1));
     if (open) {
       await this.db.run(this.db.k.updateTable("fixups").set({ state, reason, files: JSON.stringify(files), to_head: toHead }).where(rowid("fixups"), "=", open.id));
     } else {
