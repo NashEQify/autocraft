@@ -2,6 +2,7 @@
 // read); the planning model only picks command names and argument values, so every command line a task runs comes
 // from this config and from validated arguments, never from model text.
 import { audit } from "../dash/audit.ts";
+import { cols, excluded } from "../db/kx.ts";
 import type { ParamSpec } from "./types.ts";
 import type { Db } from "../db/index.ts";
 
@@ -229,12 +230,12 @@ const safeJson = (s: string): unknown => {
 
 /** The repo's config, or null when none is stored (or the stored row no longer validates). */
 export async function getConfig(db: Db, repo: string): Promise<ScreenshotConfig | null> {
-  const r = await db.prepare("SELECT * FROM screenshot_config WHERE repo = ?").get(repo) as Row | undefined;
+  const r = await db.get(db.k.selectFrom("screenshot_config").select(cols("screenshot_config")).where("repo", "=", repo));
   return r ? fromRow(r) : null;
 }
 
 export async function listConfigs(db: Db): Promise<ScreenshotConfig[]> {
-  return (await db.prepare("SELECT * FROM screenshot_config ORDER BY repo").all() as Row[]).map(fromRow).filter((c): c is ScreenshotConfig => c !== null);
+  return (await db.all(db.k.selectFrom("screenshot_config").select(cols("screenshot_config")).orderBy("repo"))).map(fromRow).filter((c): c is ScreenshotConfig => c !== null);
 }
 
 /** Validates and stores the repo's config; throws ScreenshotConfigError with the reason. Audited. */
@@ -243,17 +244,16 @@ export async function putConfig(db: Db, by: string, repo: string, raw: unknown):
   if ("error" in p) throw new ScreenshotConfigError(p.error);
   const v = p.value;
   const at = new Date().toISOString();
-  await db.prepare(`INSERT INTO screenshot_config (repo, package, example, driver, commands, ui_paths, size, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(repo) DO UPDATE SET package = excluded.package, example = excluded.example, driver = excluded.driver, commands = excluded.commands,
-      ui_paths = excluded.ui_paths, size = excluded.size, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
-    .run(repo, v.package, v.example, v.driver, JSON.stringify(v.commands), JSON.stringify(v.ui_paths), v.size ?? null, by, at);
+  await db.run(db.k.insertInto("screenshot_config")
+    .values({ repo, package: v.package, example: v.example, driver: v.driver, commands: JSON.stringify(v.commands), ui_paths: JSON.stringify(v.ui_paths), size: v.size ?? null, updated_by: by, updated_at: at })
+    .onConflict((oc) => oc.column("repo").doUpdateSet(excluded(["package", "example", "driver", "commands", "ui_paths", "size", "updated_by", "updated_at"]))));
   await audit(db, by, "screenshot-config", repo, { package: v.package, example: v.example, driver: v.driver, commands: Object.keys(v.commands) });
   return { ...v, repo, updatedBy: by, updatedAt: at };
 }
 
 /** Removes the repo's config; false when there was none. Audited. */
 export async function deleteConfig(db: Db, by: string, repo: string): Promise<boolean> {
-  const gone = (await db.prepare("DELETE FROM screenshot_config WHERE repo = ?").run(repo)).changes > 0;
+  const gone = (await db.run(db.k.deleteFrom("screenshot_config").where("repo", "=", repo))).changes > 0;
   if (gone) await audit(db, by, "screenshot-config", repo, { removed: true });
   return gone;
 }
