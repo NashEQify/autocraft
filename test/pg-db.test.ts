@@ -78,6 +78,27 @@ test("a nested write joins the outer one on its connection and rolls back with i
   }
 });
 
+test("a statement error inside db.attempt leaves the write usable: its own changes are undone, the rest commit", { skip: needsPg }, async () => {
+  const t = await testDatabase(`${SCHEMA}; CREATE UNIQUE INDEX t_v ON t (v)`);
+  try {
+    const a = await t.open();
+    await a.write(async () => {
+      await a.prepare("INSERT INTO t (v) VALUES ('kept')").run();
+      const dup = await a.attempt(async () => {
+        await a.prepare("INSERT INTO t (v) VALUES ('undone')").run();
+        await a.prepare("INSERT INTO t (v) VALUES ('kept')").run();
+      }).catch((e: unknown) => e);
+      assert.equal((dup as { code?: string }).code, "23505");
+      assert.equal(await a.attempt(() => count(a)), 1);
+      await a.prepare("INSERT INTO t (v) VALUES ('after')").run();
+    });
+    const rows = await a.prepare("SELECT v FROM t ORDER BY id").all();
+    assert.deepEqual(rows.map((r) => r.v), ["kept", "after"]);
+  } finally {
+    await t.close();
+  }
+});
+
 test("? and :name placeholders become $n by node:sqlite's binding rules, outside literals and casts", { skip: needsPg }, async () => {
   const t = await testDatabase();
   try {

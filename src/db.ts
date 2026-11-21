@@ -20,8 +20,18 @@ import { SIM_THRESHOLD } from "./dupes/scan.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
 
-export function dbPath(): string {
-  return envVar("DB") ?? DEFAULT_DB;
+/** The SQLite file: `AUTOCRAFT_DB`, else mirror.db in `AUTOCRAFT_DATA_DIR`, else the default under the home. */
+export function dbPath(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = envVar("DATA_DIR", env);
+  return envVar("DB", env) ?? (dir ? join(dir, "mirror.db") : DEFAULT_DB);
+}
+
+/**
+ * The instance's data directory (reference documents, artifacts, the item snapshot): `AUTOCRAFT_DATA_DIR`, else the
+ * SQLite file's directory. A Postgres instance keeps its files here too.
+ */
+export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
+  return envVar("DATA_DIR", env) || dirname(dbPath(env));
 }
 
 // Columns added to existing tables after their first release. CREATE TABLE IF

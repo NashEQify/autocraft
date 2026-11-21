@@ -7,8 +7,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
-import { dbPath } from "../db.ts";
+import { join } from "node:path";
+import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
 import { advancePreapprovals } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
 import { recordUsageSamples } from "../agents/accounts.ts";
@@ -39,7 +39,7 @@ export const logsDir = (): string => envVar("RUNNER_LOGS") ?? join(homedir(), ".
 
 export function runnerLockPath(): string {
   const dir = envVar("LOCK_DIR") ?? join(homedir(), ".cache/autocraft-logs");
-  return join(dir, `runner-${basename(dbPath())}.lock`);
+  return join(dir, `runner-${dbLockName()}.lock`);
 }
 
 export const HEARTBEAT_KEY = "runner_heartbeat";
@@ -56,8 +56,8 @@ export const DEFAULT_MAX_JOBS = 32;
 
 export type RunnerOptions = {
   db: Db;
-  /** Database file the children open; default AUTOCRAFT_DB or the default path. */
-  dbFile?: string;
+  /** Database the children and worker threads open (a SQLite path or a postgres:// URL); default `dbTarget()`. */
+  dbTarget?: string;
   logs?: string;
   /** Most job processes running at once. */
   maxJobs?: number;
@@ -65,7 +65,7 @@ export type RunnerOptions = {
   killAfterMs?: number;
   lockFile?: string;
   log?: (line: string) => void;
-  /** The planner's detection pass (default: a worker thread on its own connection to `dbFile`). Tests pass a fake. */
+  /** The planner's detection pass (default: a worker thread on its own connection to `dbTarget`). Tests pass a fake. */
   detect?: (nowMs: number) => Promise<Detected>;
   /** The flowchart summary refresh (default: a worker thread). */
   refreshFlow?: () => Promise<unknown>;
@@ -128,12 +128,12 @@ export class Runner {
   constructor(opts: RunnerOptions) {
     this.db = opts.db;
     this.o = {
-      dbFile: opts.dbFile ?? dbPath(), logs: opts.logs ?? logsDir(), maxJobs: opts.maxJobs ?? DEFAULT_MAX_JOBS, killAfterMs: opts.killAfterMs ?? 10_000,
+      dbTarget: opts.dbTarget ?? dbTarget(), logs: opts.logs ?? logsDir(), maxJobs: opts.maxJobs ?? DEFAULT_MAX_JOBS, killAfterMs: opts.killAfterMs ?? 10_000,
       lockFile: opts.lockFile ?? null, log: opts.log ?? ((l) => console.log(l)),
     };
     mkdirSync(this.o.logs, { recursive: true });
-    this.planThread = new OffThread(this.o.dbFile);
-    this.flowThread = new OffThread(this.o.dbFile);
+    this.planThread = new OffThread(this.o.dbTarget);
+    this.flowThread = new OffThread(this.o.dbTarget);
     this.detect = opts.detect ?? ((t) => this.planThread.plan(t));
     this.maxMin = opts.maxMin ?? stepDeadlineMin;
     this.graceMs = opts.graceMs ?? 600_000;
@@ -490,7 +490,7 @@ export class Runner {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...process.env, AUTOCRAFT_DB: this.o.dbFile },
+        env: dbEnv(this.o.dbTarget),
       });
     } finally {
       closeSync(fd);

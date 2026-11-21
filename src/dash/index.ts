@@ -16,11 +16,11 @@ async function serve(): Promise<void> {
     console.error(`dash serve: ${e.message}`);
     process.exit(2);
   }
-  const db = await connectDb(config.dbPath, { role: "dashboard" });
+  const db = await connectDb(config.dbTarget, { role: "dashboard" });
   await scopeToTracked(db);
   await sweepRunningCards(db);
   // The helper routes' own connection: they wait at most REMOTE_BUSY_MS for a write lock and then answer 503.
-  const remoteDb = await connectDb(config.dbPath, { busyTimeoutMs: REMOTE_BUSY_MS, role: "dashboard-remote" });
+  const remoteDb = await connectDb(config.dbTarget, { busyTimeoutMs: REMOTE_BUSY_MS, role: "dashboard-remote" });
   const { url, close } = await startServer({ config, db, remoteDb });
   console.log(`dashboard listening on ${url}${config.devAuth ? " (development sign-in)" : ""}`);
   const stop = () => void close().then(async () => {

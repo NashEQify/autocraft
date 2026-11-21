@@ -5,7 +5,7 @@
 // Commands not listed in CLI_STEPS, and runs with options a step has no parameter for, keep their own direct path.
 import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, mkdirSync, openSync } from "node:fs";
-import { dbPath } from "../db.ts";
+import { dbEnv, dbTarget } from "../db/open.ts";
 import { cliGate, jobLimit } from "./autopilot.ts";
 import { checkRequest, endJob, JobError, now } from "./jobs.ts";
 import { logsDir } from "./runner.ts";
@@ -75,7 +75,7 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
   await db.prepare("UPDATE jobs SET log_path = ? WHERE id = ?").run(logPath, job);
   const log = createWriteStream(logPath, { flags: "a" });
   const child = spawn(process.execPath, [new URL("../cli.ts", import.meta.url).pathname, "runner", "exec", String(job)], {
-    stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, AUTOCRAFT_DB: dbPath() },
+    stdio: ["ignore", "pipe", "pipe"], env: dbEnv(dbTarget()),
   });
   await db.prepare("UPDATE jobs SET pid = ? WHERE id = ?").run(child.pid ?? null, job);
   child.stdout.on("data", (b: Buffer) => { log.write(b); process.stdout.write(b); });

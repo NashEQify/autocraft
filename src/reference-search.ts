@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } fr
 import { DatabaseSync } from "node:sqlite";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
-import { dbPath } from "./db.ts";
+import { dataDir } from "./db.ts";
 import { DEFAULT_MODEL, localEmbedder, type Embedder } from "./embed/model.ts";
 import { toBlob } from "./embed/store.ts";
 import type { ScoreReply, ScoreRequest } from "./reference-score-worker.ts";
@@ -23,7 +23,6 @@ const REPO = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 const TEXT = /\.(txt|md)$/;
 const SCHEMA_VERSION = "1";
 
-const dataDir = (): string => dirname(dbPath());
 const referenceFolder = (repo: string): string => join(dataDir(), "reference", repo);
 export const indexPath = (repo: string): string => join(dataDir(), "reference-index", `${repo}.db`);
 

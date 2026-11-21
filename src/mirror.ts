@@ -6,8 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { SQLInputValue } from "node:sqlite";
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
-import { dbPath } from "./db.ts";
+import { dirname, join } from "node:path";
 import { trackedNames } from "./repos.ts";
 import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
@@ -21,7 +20,7 @@ import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
-import { openDb, setDbRole } from "./db/open.ts";
+import { dbLockName, openDb, setDbRole } from "./db/open.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
 const FULL_PAGE = 30;
@@ -675,12 +674,12 @@ function lockDir(): string {
 
 // The incremental sync's lock.
 export function lockPath(): string {
-  return join(lockDir(), `sync-${basename(dbPath())}.lock`);
+  return join(lockDir(), `sync-${dbLockName()}.lock`);
 }
 
 // A full re-sync has its own lock, so it never blocks the incremental sync.
 export function fullLockPath(): string {
-  return join(lockDir(), `sync-full-${basename(dbPath())}.lock`);
+  return join(lockDir(), `sync-full-${dbLockName()}.lock`);
 }
 
 // Wraps a client for a full re-sync, which runs beside the incremental sync and gives way to it:
