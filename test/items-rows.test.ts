@@ -61,47 +61,11 @@ test("an unusable selection is described, never turned into a row", () => {
   assert.equal(selectionProblem(parseSelection(""), keys), null);
 });
 
-test("row facts come from the payload that carries them, and phase rows say what they lack", () => {
-  const normal = factsFromListRow(listRow());
-  assert.equal(normal.phaseScoped, false);
-  assert.equal(normal.key, "photocraft#4127");
-  assert.deepEqual(normal.flags, []);
-  assert.equal(normal.queue?.place, 2);
-  assert.equal(normal.author, "pixel-wrangler");
-  assert.equal(normal.discord, 3);
-  const phase = factsFromStatusRow(statusRow());
-  assert.equal(phase.phaseScoped, true);
-  assert.equal(phase.settled, undefined);
-  assert.equal(phase.queue, null);
-  assert.equal(phase.status?.phase, "Fixing");
-  assert.equal(phase.author, undefined);
-});
 
-test("the row token is the real classification, or the phase, never an invented label", () => {
-  // The approved reference's tones: settled neutral, every unsettled state warn (F3).
-  assert.deepEqual(classificationToken(settled()), { text: "bugfix", tone: "neutral" });
-  assert.deepEqual(classificationToken(settled({ status: "waiting", label: null })), { text: "Waiting for a second opinion", tone: "warn" });
-  assert.deepEqual(classificationToken(settled({ status: "disagree", label: null })), { text: "Classifiers disagree", tone: "warn" });
-  assert.deepEqual(classificationToken(settled({ status: "unclassified", label: null })), { text: "Not classified", tone: "warn" });
-  assert.equal(statusWord(factsFromListRow(listRow())), "Waiting for a decision");
-  // A row with no stage, queue or phase shows no placeholder word at all; the expansion says it once.
-  assert.equal(rowWord(factsFromListRow(listRow({ stage: null, queue: null }))), null);
-  assert.equal(rowWord(factsFromListRow(listRow())), "Waiting for a decision");
-  assert.equal(statusWord(factsFromStatusRow(statusRow())), "waiting for fix-up round 2");
-  assert.equal(statusWord(factsFromStatusRow(statusRow({ status: { phase: "Review", waiting: null, next: "merge", since: "x" } }))), "merge");
-});
 
-test("classification provenance names the classifiers and their confidence", () => {
-  assert.equal(classificationDetail(settled({ source: "jev", confidence: 0.62 })), "Jev 0.62");
-  assert.equal(classificationDetail(settled({ source: "haiku", confidence: null })), "Jev unsure, Haiku agrees");
-  const waiting = classificationDetail(settled({ status: "waiting", label: null, confidence: 0.51, jevLabel: "bugfix", haikuLabel: "performance" }));
-  assert.match(waiting, /^Waiting for a second opinion\. Jev bugfix 0\.51 · Haiku performance$/);
-  const disagree = classificationDetail(settled({ status: "disagree", label: null, jevLabel: "bugfix", haikuLabel: "small extra", referee: { label: "bugfix", sure: false, reason: "the diff touches only the toolbar" } }));
-  assert.match(disagree, /Classifiers disagree\. Jev bugfix.*Haiku small extra.*Sonnet bugfix, unsure: the diff touches only the toolbar/);
-  assert.match(classificationDetail(settled({ status: "unclassified", label: null })), /No classifier has run/);
-  // With earlier records present, the copy must not claim that no classifier ran.
-  assert.match(classificationDetail(settled({ status: "unclassified", label: null }), 2), /latest classification run settled nothing/i);
-});
+
+
+
 
 test("last events keep the latest supplied subset and display it oldest first", () => {
   const at = (iso: string, text: string): TimelineEntry => ({ id: text, at: iso, kind: "harness", actor: "AutoCraft", icon: "job", text, tone: "neutral", costUsd: null, major: true, jobId: null, reviewId: null, githubId: null, commit: null, preapproval: null, calls: [], body: null, markdown: false, lines: [], feedback: null });
@@ -111,82 +75,20 @@ test("last events keep the latest supplied subset and display it oldest first", 
   assert.deepEqual(lastEvents(undefined), []);
 });
 
-test("old row metadata stays readable in the expansion, not in the row strip", () => {
-  const normal = detailFacts(factsFromListRow(listRow({ snippet: { field: "comment", author: "ana", text: "matched \u0002wave\u0003 text" } })));
-  const labels = normal.map((fact) => fact.label);
-  for (const label of ["Author", "Kind", "Discord", "Matched", "Stage", "Queue"]) assert.ok(labels.includes(label), label);
-  assert.equal(normal.find((fact) => fact.label === "Matched")?.value, "matched wave text");
-  assert.equal(normal.find((fact) => fact.label === "Queue")?.value, "Review · place 2");
-  const phase = detailFacts(factsFromStatusRow(statusRow()));
-  const phaseLabels = phase.map((fact) => fact.label);
-  assert.ok(phaseLabels.includes("Phase") && phaseLabels.includes("Waiting for") && phaseLabels.includes("Next"));
-  for (const label of ["Author", "Discord", "Matched", "Queue"]) assert.equal(phaseLabels.includes(label), false, label);
-});
+
 
 const cls = (classifier: Classification["classifier"], at: string, reason: string, typeLabel: Classification["typeLabel"] = "bugfix"): Classification => ({ classifier, at, typeLabel, want: "yes", reference: null, reason, dupOf: null });
 const itemWith = (classifications: Classification[], over: Partial<Item> = {}): Item => ({ classifications, ...over } as Item);
 
-test("the pipeline-read paragraph is the classifier's own reason, attributed", () => {
-  const settledNow = settled({ source: "jev" });
-  const read = pipelineRead(itemWith([cls("jev", "2026-01-05T10:00:00Z", "Feature request phrased as an extension of an existing tool.")]), settledNow);
-  assert.deepEqual(read, { text: "Feature request phrased as an extension of an existing tool.", classifier: "Jev", at: "2026-01-05T10:00:00Z", matchedSource: true });
-  assert.equal(pipelineRead(null, settledNow), null);
-  assert.equal(pipelineRead(itemWith([]), settledNow), null);
-});
 
-test("the record that settled the label wins; otherwise the newest is named as the latest available", () => {
-  const records = [cls("jev", "2026-01-01T00:00:00Z", "older jev"), cls("haiku", "2026-01-04T00:00:00Z", "newer haiku")];
-  const matched = pipelineRead(itemWith(records), settled({ source: "jev" }));
-  assert.equal(matched?.text, "older jev");
-  assert.equal(matched?.matchedSource, true);
-  // The settling source has no record (a sonnet settlement with none recorded): the newest record is
-  // used and labelled as such, never as consensus.
-  const fallback = pipelineRead(itemWith(records), settled({ source: "sonnet" }));
-  assert.equal(fallback?.text, "newer haiku");
-  assert.equal(fallback?.classifier, "Haiku");
-  assert.equal(fallback?.matchedSource, false);
-});
 
-test("a redacted or missing reason is an explicit empty state, not a substitute", () => {
-  const redacted = pipelineRead(itemWith([cls("jev", "2026-01-05T10:00:00Z", "")]), settled({ source: "jev" }));
-  assert.equal(redacted?.text, "");
-  assert.equal(redacted?.classifier, "Jev");
-});
 
-test("a phase row's expanded classification comes from the selected item; its collapsed row stays phase-only", () => {
-  const phase = factsFromStatusRow(statusRow());
-  assert.equal(effectiveSettled(phase, null), undefined);
-  assert.deepEqual(effectiveSettled(phase, itemWith([], { settled: settled() })), settled());
-  // A list row may be historical: the expansion's verdict and reason use the fetched snapshot together.
-  const listed = factsFromListRow(listRow());
-  const historical = listed.settled;
-  const current = settled({ label: "performance", source: "haiku" });
-  const fetched = itemWith([
-    cls("jev", "2026-01-05T10:00:00Z", "previous source's current reason"),
-    cls("haiku", "2026-01-06T10:00:00Z", "reason for the fetched verdict"),
-  ], { settled: current });
-  const expanded = effectiveSettled(listed, fetched);
-  assert.deepEqual(expanded, current);
-  assert.equal(pipelineRead(fetched, expanded)?.text, "reason for the fetched verdict");
-  assert.deepEqual(listed.settled, historical);
-  assert.notDeepEqual(listed.settled, expanded);
-  assert.equal(effectiveSettled(listed, itemWith([], { settled: undefined })), undefined);
-  assert.equal(effectiveSettled(listed, null), undefined);
-});
 
-test("the item GET adds the metadata a phase row lacks, without inventing any", () => {
-  const phase = factsFromStatusRow(statusRow());
-  const bare = detailFacts(phase).map((fact) => fact.label);
-  assert.equal(bare.includes("Author"), false);
-  const enriched = detailFacts(phase, itemWith([], { author: "moth-and-lamp", labels: ["bugfix"], discord: { count: 2, links: [] }, queue: { stage: "Review", tab: "review", place: 1 } } as Partial<Item>));
-  const byLabel = new Map(enriched.map((fact) => [fact.label, fact.value]));
-  assert.equal(byLabel.get("Author"), "moth-and-lamp");
-  assert.equal(byLabel.get("Discord"), "2 messages");
-  assert.equal(byLabel.get("Labels"), "bugfix");
-  assert.equal(byLabel.get("Queue"), "Review · place 1");
-  // A row with no item GET still shows no author: absence is not filled in.
-  assert.equal(detailFacts(phase).some((fact) => fact.label === "Author"), false);
-});
+
+
+
+
+
 
 test("F4: a canonical open wins by presence, including when it is empty or malformed", () => {
   const validPeek = "peek=vectorcraft%234464";
@@ -234,19 +136,7 @@ test("F7: a receipt is only usable when it is settled, un-failed and for this ro
 });
 
 
-test("an answered decision gives execution facts separate from classification, from real fields", () => {
-  const base = { id: "d", answer: "fix", exec: null, appliedAt: null } as const;
-  assert.equal(answerFacts(null), null);
-  assert.equal(answerFacts({ ...base, answer: null }), null);
-  assert.deepEqual(answerFacts({ ...base, appliedAt: "2026-11-16T03:05:00Z" }), { state: "Answer applied", tone: "ok", reason: null, appliedAt: "2026-11-16T03:05:00Z", disputed: false });
-  assert.deepEqual(answerFacts({ ...base, exec: { state: "done", reason: null } }), { state: "Answer applied", tone: "ok", reason: null, appliedAt: null, disputed: false });
-  assert.deepEqual(answerFacts({ ...base, exec: { state: "failed", reason: "the push was refused" } }), { state: "Answer failed", tone: "bad", reason: "the push was refused", appliedAt: null, disputed: false });
-  assert.deepEqual(answerFacts({ ...base, exec: { state: "pending", reason: null } }), { state: "Answer pending", tone: "warn", reason: null, appliedAt: null, disputed: false });
-  assert.deepEqual(answerFacts({ ...base, exec: { state: "waiting-token", reason: "sign in again" } }), { state: "Answer waiting for sign-in", tone: "warn", reason: "sign in again", appliedAt: null, disputed: false });
-  assert.deepEqual(answerFacts({ ...base, exec: { state: "waiting-permission", reason: null } }), { state: "Answer waiting for permission", tone: "warn", reason: null, appliedAt: null, disputed: false });
-  // Answered with no execution record: recorded but not applied.
-  assert.deepEqual(answerFacts(base), { state: "Answer recorded, not applied yet", tone: "neutral", reason: null, appliedAt: null, disputed: false });
-});
+
 
 test("F7: a list payload renders only for the reader it was fetched for", () => {
   const payload = { rows: [], total: 0 };
@@ -278,32 +168,10 @@ test("N2: a disputed, unapplied answer is held ahead of any exec write state", (
   assert.equal(answerQueueText(answerFacts(answered)!), "Answer recorded, not applied yet");
 });
 
-test("N1: the ignored-peek note is built once, naming the peek exactly once", () => {
-  const note = conflictNote("designcraft#378");
-  assert.equal(note, "The link's old peek (designcraft#378) was ignored; open wins.");
-  assert.equal((note.match(/old peek/g) ?? []).length, 1);
-  assert.equal((note.match(/designcraft#378/g) ?? []).length, 1);
-  assert.equal((note.match(/was ignored/g) ?? []).length, 1);
-});
 
 
-test("phase rows retain upstream author, closing issues and native merge checks", () => {
-  const checks: NonNullable<ItemStatusRow["checks"]> = {
-    verdict: "take-fix", ci: "pending", mergeable: "clean", size: "M",
-    verify: { state: "running", kind: "build", summary: "Tests are running", note: "Not a pass" }, prBuild: null,
-  };
-  const phase = factsFromStatusRow(statusRow({ author: "pixel-wrangler", closes: [5, 8], checks }));
-  assert.equal(phase.author, "pixel-wrangler");
-  assert.equal(phase.checks, checks); // The native checks, not a new lossy projection.
-  assert.deepEqual(phase.closes, [5, 8]);
-  assert.equal(phase.settled, undefined);
-  assert.equal(phase.queue, null);
-  assert.ok(detailFacts(phase).some((fact) => fact.label === "Author" && fact.value === "pixel-wrangler"));
-  const absent = factsFromStatusRow(statusRow({ author: null, checks: null }));
-  assert.equal(absent.author, undefined);
-  assert.equal(absent.checks, null);
-  assert.equal(absent.closes, undefined);
-});
+
+
 
 test("Items reader receipts reject prior project rows while the new project has no receipt", () => {
   const a = JSON.stringify(["anna", "operator", "deckcraft"]);

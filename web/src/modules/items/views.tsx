@@ -6,6 +6,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "../../api/client";
 import type { ViewProps } from "../../registry/types";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
+import { Button } from "../../ui/atoms/Button";
 import { Pager } from "../../ui/molecules/Pager";
 import { Page } from "../../ui/organisms/Page";
 import { num } from "../../lib/format";

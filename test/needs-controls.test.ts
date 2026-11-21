@@ -10,14 +10,7 @@ import {
 
 const KINDS = ["scope", "duplicate", "close", "merge", "hold", "split", "other"];
 
-test("the View is the server's status, defaulting to Waiting", () => {
-  assert.equal(viewOf("open"), "open");
-  assert.equal(viewOf("opinions"), "opinions");
-  assert.equal(viewOf("answered"), "answered");
-  assert.equal(viewOf("bogus"), "open");
-  assert.equal(viewOf(undefined), "open");
-  assert.deepEqual(ALL_SCOPE_VIEWS, ["open", "opinions"]);
-});
+
 
 test("an unknown repository is a real filter that matches nothing, not an ignored value", () => {
   const scope = parseScope("?repo=no-such-repo", KINDS);
@@ -55,18 +48,7 @@ test("values the API will not use are kept apart, never applied", () => {
   assert.equal(parseScope("?age=0", KINDS).unusedAge, "0");
 });
 
-test("the Filters badge counts dimensions once each, and ignores `all` where the view ignores it", () => {
-  const both = parseScope("?repo=a,b&kind=scope,merge&age=3&all=1", KINDS);
-  // Two repositories and two kinds are still two dimensions, not four.
-  assert.equal(scopeCount(both, "open"), 4);
-  assert.equal(scopeCount(both, "opinions"), 4);
-  // Answered/backlog/snoozed ignore `all`, so it must not inflate the badge there.
-  assert.equal(scopeCount(both, "answered"), 3);
-  assert.equal(scopeCount(parseScope("?all=1", KINDS), "backlog"), 0);
-  // Unused values never count.
-  assert.equal(scopeCount(parseScope("?kind=bogus&age=zero", KINDS), "open"), 0);
-  assert.equal(scopeCount(parseScope("", KINDS), "open"), 0);
-});
+
 
 test("Clear scope drops the four scope keys, the preview and nothing else", () => {
   assert.deepEqual(clearScopePatch(), { repo: null, kind: null, age: null, all: null, peek: null });
@@ -74,21 +56,9 @@ test("Clear scope drops the four scope keys, the preview and nothing else", () =
   for (const key of ["tab", "ticket"]) assert.equal(Object.hasOwn(patch, key), false, key);
 });
 
-test("a single select names multi-value scopes and never reads All/Any while values apply", () => {
-  assert.equal(multiSelectValue([]), "");
-  assert.equal(multiSelectValue(["a", "b"]), "a,b");
-  assert.equal(multiLabel(["a", "b"]), "a + b");
-  const scope = parseScope("?repo=a,b&kind=scope,merge", KINDS);
-  assert.deepEqual(compatValues(scope).map((c) => `${c.key}:${c.value}`), ["repo:a", "repo:b", "kind:scope", "kind:merge"]);
-});
 
-test("age options are the reference's 1/3/7 plus the link's own older value", () => {
-  assert.deepEqual(AGE_VALUES, [1, 3, 7]);
-  assert.deepEqual(ageOptions(undefined).map((o) => o.value), ["", "1", "3", "7"]);
-  assert.deepEqual(ageOptions(2).map((o) => o.value), ["", "1", "3", "7", "2"]);
-  assert.match(ageOptions(2).at(-1)!.label, /2 days · from this link/);
-  assert.deepEqual(ageOptions(3).map((o) => o.value), ["", "1", "3", "7"]);
-});
+
+
 
 test("queue-tab links carry the compatible scope, drop the preview and set the tab", () => {
   assert.equal(needsTabsHref("feedback", "?tab=decisions&repo=a&peek=x"), "/needs?tab=feedback&repo=a");

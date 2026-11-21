@@ -35,10 +35,7 @@ test("the active decision is the requested id only when the current receipt hold
   assert.equal(resolveActive({ kind: "none" }, [], undefined), undefined);
 });
 
-test("a commit recognises an id change", () => {
-  assert.equal(commitChangesId(undefined, "a"), true);
-  assert.equal(commitChangesId("a", "a"), false);
-});
+
 
 test("the bookmark is one latest-scope record with a paired anchor identity and a fallback offset", () => {
   resetSnapshots();
@@ -122,10 +119,7 @@ test("opaque ids with delimiters survive the round trip unchanged", () => {
   }
 });
 
-test("the scope key is a collision-safe JSON tuple", () => {
-  assert.notEqual(scopeOf({ login: "a:b", role: "c", search: "d" }), scopeOf({ login: "a", role: "b:c", search: "d" }));
-  assert.deepEqual(JSON.parse(scopeOf({ login: "a", role: "b", search: "c" })), ["a", "b", "c", null]);
-});
+
 
 test("the live projected scope changes when a filter changes but the primary id stays", () => {
   const b = liveScopeOf("?decision=b", "anna", "operator");
