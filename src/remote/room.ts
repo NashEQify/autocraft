@@ -12,7 +12,7 @@ import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { leasedBy, queueSnapshot, runnerTakes } from "./calls.ts";
 import { claimClass } from "./claim-class.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
-import { manualSql } from "./manual-only.ts";
+import { manualExpr } from "./manual-only.ts";
 import { userMaxCalls } from "./max-calls.ts";
 import { claimRepos } from "./my-repos.ts";
 import { TASK_CHOICES, taskOfStep, userSkips } from "./my-tasks.ts";
@@ -21,7 +21,7 @@ import { scaled } from "./time-scale.ts";
 import { HEARTBEAT_S } from "./protocol.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { inList } from "../db/portable.ts";
+import { inList } from "../db/kx.ts";
 
 /** How long an empty claim counts as an idle helper: two claim intervals and some slack. */
 export const IDLE_FRESH_MS = scaled(45_000);
@@ -56,7 +56,7 @@ export async function remoteRoom(db: Db, cls: number, nowMs: number = Date.now()
  */
 export async function roomCanWrite(db: Db, logins: readonly string[], nowMs: number): Promise<(login: string, repo: string) => boolean> {
   const denied = new Set<string>();
-  for (const p of await db.prepare(`SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE ${inList(db, "login", "?", "citext")}`).all(JSON.stringify([...new Set(logins)])) as { login: string; repo: string; permission: string; checked_at: string }[])
+  for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", [...new Set(logins)], "citext"))))
     if (!WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) denied.add(`${p.login.toLowerCase()}\n${p.repo}`);
   return (login, repo) => !denied.has(`${login.toLowerCase()}\n${repo}`);
 }
@@ -71,11 +71,12 @@ type Taker = { h: Helper; active: boolean; r: { login: string; role: string; rep
 export type RoomState = { ready: Helper[]; active: Helper[]; takers?: { list: Taker[]; canWrite: (login: string, repo: string) => boolean }; left: Map<string, number> };
 
 export async function roomState(db: Db, nowMs: number = Date.now()): Promise<RoomState> {
-  const rows = await filterSeq((await db.prepare(`SELECT t.login, a.role, t.idle_claim_at, t.idle_repos, COALESCE(h.slots, 1) AS slots,
-      (SELECT COUNT(*) FROM main.remote_calls c WHERE c.state = 'leased' AND c.token_id = t.id) AS leased,
-      (SELECT MAX(c.heartbeat_at) FROM main.remote_calls c WHERE c.state = 'leased' AND c.token_id = t.id) AS beat
-    FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id LEFT JOIN main.access a ON a.login = t.login
-    WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ? AND NOT ${manualSql("t.login")}`).all(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as Helper[]), async (h) => (await userSkips(db, h.login)).size < TASK_CHOICES.length && ((await itemFilter(db, h.login))?.refs.size ?? 1) > 0);
+  const rows = await filterSeq(await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").leftJoin("main.access as a", "a.login", "t.login")
+    .select((eb) => ["t.login", "a.role", "t.idle_claim_at", "t.idle_repos", eb.fn.coalesce("h.slots", eb.lit(1)).as("slots"),
+      eb.selectFrom("main.remote_calls as c").select((e) => e.fn.countAll<number>().as("n")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("leased"),
+      eb.selectFrom("main.remote_calls as c").select((e) => e.fn.max<number | null>("c.heartbeat_at").as("m")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("beat")]).$narrowType<{ leased: number }>()
+    .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.readiness", "=", "ready").where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS)
+    .where((eb) => eb.not(manualExpr(db, eb, "t.login")))), async (h) => (await userSkips(db, h.login)).size < TASK_CHOICES.length && ((await itemFilter(db, h.login))?.refs.size ?? 1) > 0);
   return { ready: rows, active: rows.filter((h) => isActive(h, nowMs)), left: new Map() };
 }
 

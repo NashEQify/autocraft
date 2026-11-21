@@ -226,7 +226,7 @@ describe("user-local remote calls", async () => {
     assert.deepEqual((await userSettings.settings(db, req("carol", "maintainer"))).reserve, { fiveHour: 20, weekly: 20 }, "another user's is their own");
     await assert.rejects(userSettings.setSettings(db, req("bob", "maintainer", { reserve: { fiveHour: 95, weekly: 10 } })), /0 to 90/);
     await assert.rejects(userSettings.setSettings(db, req("eve", "viewer", { reserve: { fiveHour: 30, weekly: 30 } })), /viewers/);
-    assert.ok(await db.prepare("SELECT 1 FROM audit WHERE action = 'usage-reserve' AND login = 'bob'").get());
+    assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "usage-reserve").where("login", "=", "bob")));
     assert.deepEqual(await claimCall(db, callers.bob!, claim(), canWrite), { lease: null, retryAfter: CLAIM_RETRY_S, reserve: { fiveHour: 35, weekly: 10 } });
     assert.equal(await remoteRoom(db, 0), 0, "an idle helper that never reported ready");
     const status = { slots: 1, busy: 0, harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 35, weekly: 10 }, usage: { fiveHour: { usedPercent: 70, resetsAt: null }, weekly: null, at: new Date().toISOString() } };
@@ -248,7 +248,8 @@ describe("user-local remote calls", async () => {
 
   test("a user's repo picks limit their claims and next_task; the helper's own list narrows them, never widens them", async () => {
     await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }));
-    await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1), ('fontcraft', 1), ('gridcraft', 0) ON CONFLICT (name) DO UPDATE SET pipeline = excluded.pipeline").run();
+    await db.run(db.k.insertInto("tracked_repos").values([{ name: "photocraft", pipeline: 1 }, { name: "fontcraft", pipeline: 1 }, { name: "gridcraft", pipeline: 0 }])
+      .onConflict((oc) => oc.column("name").doUpdateSet(excluded(["pipeline"]))));
     const pick = (repos: string[]) => userSettings.setSettings(db, req("bob", "maintainer", { repos }));
     const got = await pick(["fontcraft", "gridcraft"]);
     assert.deepEqual([got.repos, got.repoChoices], [["fontcraft", "gridcraft"], ["fontcraft", "photocraft"]], "picks are kept; choices are the pipeline-on repos");

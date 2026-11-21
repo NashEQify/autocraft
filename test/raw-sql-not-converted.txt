@@ -319,19 +319,12 @@ src/rank/position.ts
 
 
 
-src/remote/my-repos.ts
 
-src/remote/my-tasks.ts
 
-src/remote/permission.ts
 
-src/remote/picks.ts
 
-src/remote/queue-view.ts
 
-src/remote/reserve.ts
 
-src/remote/room.ts
 
 src/remote/takers.ts
 
