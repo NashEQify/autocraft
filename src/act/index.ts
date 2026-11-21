@@ -118,7 +118,7 @@ type ReviewRow = { verdict?: string; repo: string; number: number; head_oid: str
 const reviewQuery = (db: Db, repo: string, number: number, head: string | null) => db.k.selectFrom("final_reviews as r").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
   .select((eb) => ["r.repo", "r.number", "r.head_oid", "r.reason", "r.sure", eb(eb.fn.coalesce("i.additions", eb.lit(0)), "+", eb.fn.coalesce("i.deletions", eb.lit(0))).as("lines"), "i.title", "i.author"])
   .$narrowType<{ repo: string; number: number; head_oid: string }>()
-  .where("r.repo", "=", repo).where("r.number", "=", number).where("r.head_oid", "=", head ?? "");
+  .where("r.repo", "=", repo).where("r.number", "=", number).where("r.head_oid", "=", head);
 
 /** The final close reviews behind the Close? questions the Plans ask for in this repo. */
 async function closeRows(db: Db, repo: string): Promise<ReviewRow[]> {
