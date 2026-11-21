@@ -247,37 +247,43 @@ async function statusCounts(db: Db, b: Built & { run: string | null }, sql: stri
 }
 
 export async function listItems(db: Db, req: Req): Promise<ItemList> {
-  const b = await build(db, req, await hiddenRepos(db, req));
-  const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
-  const offset = Math.max(0, Number(req.query.get("offset")) || 0);
-  const from = (scored: boolean) => (b.text
-    ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
-    : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
-  const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
+  const hidden = await hiddenRepos(db, req);
+  // build() fills the connection's temp tables (item_settled, flow_pick) that the counts and the page read, so all of
+  // it runs in one snapshot.
+  const { b, total, byStatus, rows } = await db.read(async () => {
+    const b = await build(db, req, hidden);
+    const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
+    const offset = Math.max(0, Number(req.query.get("offset")) || 0);
+    const from = (scored: boolean) => (b.text
+      ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
+      : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
+    const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
 
-  // Counts per status under every filter but the status one; the total follows from them.
-  const byStatus = await statusCounts(db, b, from(false).replace("%COLS", "s.status, COUNT(*) AS n") + whereSql(b.where) + " GROUP BY 1", req.query.get("flow"));
-  const total = (b.statuses.length ? b.statuses : STATUSES).reduce((a, s) => a + byStatus[s], 0);
+    // Counts per status under every filter but the status one; the total follows from them.
+    const byStatus = await statusCounts(db, b, from(false).replace("%COLS", "s.status, COUNT(*) AS n") + whereSql(b.where) + " GROUP BY 1", req.query.get("flow"));
+    const total = (b.statuses.length ? b.statuses : STATUSES).reduce((a, s) => a + byStatus[s], 0);
 
-  // The page as rowids first, so only its rows are read in full.
-  const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
-  // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
-  const order = b.sort === "relevance" ? `h.score ${b.desc ? "ASC" : "DESC"}` : `${ORDER[b.sort]} ${b.desc ? "DESC" : "ASC"}`;
-  // Newest first within a state: main.items with its index named, because through the
-  // scoping view the planner walks the repo index and sorts every open item.
-  const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
-  const pageFrom = byUpdated
-    ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
-    : from(b.sort === "relevance");
-  const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
-  const ids = (await db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
-    ` ORDER BY ${order}, i.repo, i.number DESC LIMIT :limit OFFSET :offset`).all({ ...b.params, limit, offset }) as { rid: number }[]).map((r) => r.rid);
-  const byId = new Map((ids.length ? await db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
-      i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
-      s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
-    FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
-    .map((r) => [r.rid, r]));
-  const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
+    // The page as rowids first, so only its rows are read in full.
+    const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
+    // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
+    const order = b.sort === "relevance" ? `h.score ${b.desc ? "ASC" : "DESC"}` : `${ORDER[b.sort]} ${b.desc ? "DESC" : "ASC"}`;
+    // Newest first within a state: main.items with its index named, because through the
+    // scoping view the planner walks the repo index and sorts every open item.
+    const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
+    const pageFrom = byUpdated
+      ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
+      : from(b.sort === "relevance");
+    const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
+    const ids = (await db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
+      ` ORDER BY ${order}, i.repo, i.number DESC LIMIT :limit OFFSET :offset`).all({ ...b.params, limit, offset }) as { rid: number }[]).map((r) => r.rid);
+    const byId = new Map((ids.length ? await db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
+        i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
+        s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
+      FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
+      .map((r) => [r.rid, r]));
+    const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
+    return { b, total, byStatus, rows };
+  });
 
   const stages = await stagesOf(db, rows);
   const snips = b.text ? await snippets(db, b.params.q as string, rows) : new Map<number, Snippet>();

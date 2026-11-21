@@ -70,6 +70,12 @@ type Waiter = {
   resolve: (r: ClaimReply) => void;
   reject: (e: unknown) => void;
   done: boolean;
+  /**
+   * A try is in progress. The client leaving or shutdown does not answer such a claim: the try may be past its `live`
+   * check and leasing a call, and an empty answer then would leave that lease with no one told of it. The pass answers
+   * it when the try ends.
+   */
+  trying: boolean;
 };
 
 /** How long each held reply waited, for the `X-Held-Ms` header. */
@@ -101,10 +107,10 @@ export class ClaimWaits {
   hold(ticket: Ticket, deadline: number, w: Pick<Waiter, "attempt" | "idle" | "empty" | "blocked">): Promise<ClaimReply> {
     return new Promise<ClaimReply>((resolve, reject) => {
       const now = Date.now();
-      const waiter: Waiter = { ...w, ticket, deadline, nextTry: now + this.#retryMs, seq: null, from: now, resolve, reject, done: false };
+      const waiter: Waiter = { ...w, ticket, deadline, nextTry: now + this.#retryMs, seq: null, from: now, resolve, reject, done: false, trying: false };
       const prev = ticket.onGone;
       ticket.onGone = () => {
-        if (!waiter.done) {
+        if (!waiter.done && !waiter.trying) {
           void waiter.empty(Date.now(), false).then((r) => this.#settle(waiter, r), (e: unknown) => this.#settle(waiter, null, e));
         }
         prev?.();
@@ -120,9 +126,13 @@ export class ClaimWaits {
     this.#closed = true;
     const now = Date.now();
     for (const w of [...this.#waiters]) {
-      if (w.done) continue;
-      void w.empty(now, false).then((r) => this.#settle(w, { ...r, retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) }), (e: unknown) => this.#settle(w, null, e));
+      if (w.done || w.trying) continue;
+      void this.#closing(w, now).then((r) => this.#settle(w, r), (e: unknown) => this.#settle(w, null, e));
     }
+  }
+
+  async #closing(w: Waiter, now: number): Promise<ClaimReply> {
+    return { ...await w.empty(now, false), retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) };
   }
 
   #settle(w: Waiter, r: ClaimReply | null, err?: unknown): void {
@@ -160,11 +170,19 @@ export class ClaimWaits {
         w.seq = seq;
         if (full) w.nextTry = now + this.#retryMs;
         try {
-          // A claim answered meanwhile (its client left, or shutdown answered it) must not lease the call it found.
-          const r = await w.attempt(now, { quick: !full, live: () => !w.ticket.gone && !w.done && !this.#closed });
+          // A claim whose client left, or that shutdown or a pass answered meanwhile, must not lease the call it found.
+          let r: ClaimReply | null;
+          w.trying = true;
+          try {
+            r = await w.attempt(now, { quick: !full, live: () => !w.ticket.gone && !w.done && !this.#closed });
+          } finally {
+            w.trying = false;
+          }
           if (w.done) continue;
           if (r) this.#settle(w, r);
-          else if (w.blocked()) this.#settle(w, await w.empty(now, false));
+          // Shutdown or the client leaving during the try, which leased nothing, gets the answer they skipped.
+          else if (this.#closed) this.#settle(w, await this.#closing(w, now));
+          else if (w.ticket.gone || w.blocked()) this.#settle(w, await w.empty(now, false));
           else if (final) {
             await w.idle(now);
             this.#settle(w, await w.empty(now, true));

@@ -31,6 +31,8 @@ import { stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
 import { jobRemoteQueue, REMOTE_WAIT_CAP_MS, withdrawJobCalls } from "../remote/calls.ts";
+import { exclusive } from "../async-seq.ts";
+import { refreshReadIdentity } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
 
 export const logsDir = (): string => envVar("RUNNER_LOGS") ?? join(homedir(), ".cache/autocraft-logs/jobs");
@@ -172,6 +174,11 @@ export class Runner {
     }
     await this.cancels();
     if (this.stopping) return;
+    try {
+      await refreshReadIdentity(this.db);
+    } catch (e) {
+      this.o.log(`GitHub identity not refreshed: ${(e as Error).message}`);
+    }
     try {
       const lost = await reapLost(this.db);
       if (lost) this.o.log(`${lost} build tasks lost their worker`);
@@ -519,8 +526,9 @@ export class Runner {
   /** Stops every running job (SIGTERM, then SIGKILL after the grace time) and waits for them. */
   async stop(): Promise<void> {
     this.stopping = true;
-    const timer = setInterval(() => void this.cancels().catch((e) => this.o.log(`cancels: ${(e as Error).message}`)), 500);
-    await this.cancels();
+    const cancels = exclusive(() => this.cancels());
+    const timer = setInterval(() => void cancels.skip().catch((e) => this.o.log(`cancels: ${(e as Error).message}`)), 500);
+    await cancels.run();
     await this.idle();
     clearInterval(timer);
     await Promise.all([this.planThread.close(), this.flowThread.close()]);

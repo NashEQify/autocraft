@@ -13,6 +13,7 @@ import { AppError, call, GITHUB_API } from "./app.ts";
 import { AppNotInstalledError, installationToken, readAppSecrets, RepoNotInInstallationError } from "./install-token.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { noteReadIdentity } from "./read.ts";
 
 export type Identity = "app" | `user:${string}`;
 export type GithubIdentity = "box" | "app";
@@ -43,6 +44,7 @@ export async function setGithubIdentity(db: Db, by: string, value: unknown): Pro
   const at = new Date().toISOString();
   for (const t of stored) await queue.run(t.login, t.token_enc, at);
   });
+  noteReadIdentity(value === "app");
   return true;
 }
 

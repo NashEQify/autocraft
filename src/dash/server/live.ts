@@ -3,6 +3,8 @@
 // carries topic names and counters only, never data: browsers refetch through the API.
 import type { ServerResponse } from "node:http";
 import { readSeqs } from "../../live.ts";
+import { exclusive } from "../../async-seq.ts";
+import { refreshReadIdentity } from "../../github/read.ts";
 import type { Db } from "../../db/index.ts";
 
 export type LiveOptions = {
@@ -20,6 +22,9 @@ export class LiveHub {
   private last: Record<string, number> = {};
   private timer?: NodeJS.Timeout;
   private beat?: NodeJS.Timeout;
+  // Passes never overlap: two checks at once could set `last` back to the older markers and announce a change twice.
+  private checks = exclusive(() => this.check().catch((e: unknown) => console.error(`live: ${(e as Error).message}`)));
+  private beats = exclusive(() => this.heartbeat().catch((e: unknown) => console.error(`live heartbeat: ${(e as Error).message}`)));
   private readonly pollMs: number;
   private readonly heartbeatMs: number;
   private readonly maxClients: number;
@@ -62,7 +67,7 @@ export class LiveHub {
 
   /** Checks the markers now, for the answer to a write the dashboard just handled. */
   async poke(): Promise<void> {
-    if (this.clients.size) await this.check();
+    if (this.clients.size) await this.checks.run();
   }
 
   close(): void {
@@ -84,8 +89,9 @@ export class LiveHub {
 
   private async start(): Promise<void> {
     this.last = await readSeqs(this.db);
-    this.timer = setInterval(() => void this.check().catch((e: unknown) => console.error(`live: ${(e as Error).message}`)), this.pollMs);
-    this.beat = setInterval(() => void this.heartbeat().catch((e: unknown) => console.error(`live heartbeat: ${(e as Error).message}`)), this.heartbeatMs);
+    await this.identity(this.last);
+    this.timer = setInterval(() => void this.checks.skip(), this.pollMs);
+    this.beat = setInterval(() => void this.beats.skip(), this.heartbeatMs);
     this.timer.unref();
     this.beat.unref();
   }
@@ -110,6 +116,16 @@ export class LiveHub {
     const seqs: Record<string, number> = {};
     for (const t of topics) seqs[t] = now[t]!;
     this.send(`event: change\ndata: ${JSON.stringify({ topics, seqs })}\n\n`);
+    if (topics.includes("settings")) await this.identity(now);
+  }
+
+  /** The GitHub read identity this process holds follows the `settings` counter. */
+  private async identity(seqs: Record<string, number>): Promise<void> {
+    try {
+      await refreshReadIdentity(this.db, seqs.settings);
+    } catch (e) {
+      console.error(`live: GitHub identity not refreshed: ${(e as Error).message}`);
+    }
   }
 
   private async heartbeat(): Promise<void> {

@@ -11,16 +11,22 @@ const REFRESH_MS = 30_000;
 let cache = new Map<string, string>();
 let source: DatabaseSync | null = null;
 let loadedAt = 0;
+// Counts loads. An async reload stores its rows only when no load started after it, so a reload whose read finished
+// late never puts back an older owner list.
+let loads = 0;
 
 /** Reads the owners from the `repos` table; the most recently loaded database also refreshes the cache later. */
 export function loadOwners(db: DatabaseSync): void {
   source = db;
+  loads++;
   setOwners(db.prepare(OWNERS_SQL).all() as OwnerRow[]);
 }
 
 /** loadOwners() through the async handle, after a write to `repos`. The cache refreshes later from the connection loaded last. */
 export async function reloadOwners(db: { prepare(sql: string): { all(...params: never[]): Promise<unknown[]> } }): Promise<void> {
-  setOwners(await db.prepare(OWNERS_SQL).all() as OwnerRow[]);
+  const mine = ++loads;
+  const rows = await db.prepare(OWNERS_SQL).all() as OwnerRow[];
+  if (mine === loads) setOwners(rows);
 }
 
 const OWNERS_SQL = "SELECT name, owner FROM main.repos";

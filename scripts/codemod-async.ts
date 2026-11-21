@@ -58,7 +58,9 @@ export type Report = {
   rmw: Record<string, Rmw[]>;
 };
 
-const DEFAULT_LOCAL = ["src/itemtools/", "src/reference-search.ts", "src/reference-score-worker.ts"];
+// src/remote/tools.ts keeps the item-tools snapshot on a synchronous DatabaseSync, and src/github/read.ts opens its
+// read-only DatabaseSync before wrapping it with dbFor; the rest of both files is async already.
+const DEFAULT_LOCAL = ["src/itemtools/", "src/reference-search.ts", "src/reference-score-worker.ts", "src/remote/tools.ts", "src/github/read.ts"];
 const DEFAULT_NO_EDIT = ["src/db/", "src/async-seq.ts", "test/db-layer.test.ts"];
 const under = (rel: string, ps: string[]) => ps.some((p) => rel === p || (p.endsWith("/") && rel.startsWith(p)));
 const RENAME: Record<string, string> = { DatabaseSync: "Db", StatementSync: "Statement" };

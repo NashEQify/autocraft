@@ -453,15 +453,19 @@ const queueSig = (n: number, m: number | null): string => `${n}:${m}`;
 function takeFromQueueCache(db: Db, id: number): void {
   const c = queueCaches.get(db);
   if (!c) return;
-  const drop = (l: Cand[]): boolean => { const i = l.findIndex((r) => r.id === id); if (i >= 0) l.splice(i, 1); return i >= 0; };
-  if (!drop(c.followUps) && !drop(c.ordered)) return dropQueueCache(db);
+  // New arrays, not splices: another claim may be walking the old ones across its awaits (claimOrder), and a splice
+  // would shift an element past its loop index.
+  const followUps = c.followUps.filter((r) => r.id !== id), ordered = c.ordered.filter((r) => r.id !== id);
+  if (followUps.length === c.followUps.length && ordered.length === c.ordered.length) return dropQueueCache(db);
+  c.followUps = followUps;
+  c.ordered = ordered;
   let m: number | null = null;
   for (const r of c.followUps) if (m === null || r.id > m) m = r.id;
   for (const r of c.ordered) if (m === null || r.id > m) m = r.id;
   c.sig = queueSig(c.followUps.length + c.ordered.length, m);
 }
 
-/** Every queued call, read once per QUEUE_CACHE_MS: follow-ups by age, the rest in queue order. Callers filter it and must not change it; only takeFromQueueCache does. */
+/** Every queued call, read once per QUEUE_CACHE_MS: follow-ups by age, the rest in queue order. Callers filter it and must not change it; only takeFromQueueCache replaces its arrays. */
 async function queuedCalls(db: Db, nowMs: number): Promise<QueueCache> {
   const q = await db.prepare("SELECT COUNT(*) AS n, MAX(id) AS m FROM main.remote_calls WHERE state = 'queued'").get() as { n: number; m: number | null };
   const sig = queueSig(Number(q.n), q.m === null ? null : Number(q.m));
