@@ -72,6 +72,24 @@ test("a phase link that also names classification scopes says they are not appli
   for (const key of ["state", "label", "status", "flag"]) assert.equal(chips.find((c) => c.key === key)?.applied, false, key);
 });
 
+test("an explicit all-state remains visible but unapplied under a phase", () => {
+  const browse = of("phase=Review&state=all&repo=photocraft&status=settled&flag=security");
+  const chip = compatExtras(browse).find((entry) => entry.key === "state");
+  assert.ok(chip, "explicit all-state must remain visible under a phase");
+  assert.equal(chip.value, "Any state");
+  assert.equal(chip.rawValue, "all");
+  assert.equal(chip.applied, false);
+  assert.equal(ignoredPhaseScopes(of("phase=Review&state=all")), true);
+  const patch = removeValuePatch(browse, chip.key, chip.rawValue);
+  assert.deepEqual(patch, { state: null });
+  const next = new URLSearchParams(browse.search);
+  for (const [key, value] of Object.entries(patch)) value === null ? next.delete(key) : next.set(key, value);
+  assert.equal(next.has("state"), false);
+  assert.equal(next.get("status"), "settled");
+  assert.equal(next.get("flag"), "security");
+  assert.deepEqual(statusFilter(of(next.toString())), statusFilter(browse));
+});
+
 test("values outside their contract stay in the URL and are reported as not applied", () => {
   const browse = of("state=pending&kind=epic&phase=Nope&label=chore&status=mystery&flag=urgent&sort=random&mode=advanced&ticket=ABC-9");
   assert.equal(browse.state, "open");

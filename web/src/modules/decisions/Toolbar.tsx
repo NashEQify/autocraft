@@ -51,12 +51,12 @@ export function NeedsControls() {
     <div className="flex flex-wrap items-center justify-between gap-2">
       <label className="inline-flex min-w-0 items-center gap-2 text-xs text-ink/85">
         <span>View</span>
-        <Select aria-label="Decision view" value={view} onChange={(event) => patch({ tab: event.target.value === "open" ? null : event.target.value })} className="h-[34px] w-[114px] text-xs max-md:h-[34px]">
+        <Select aria-label="Decision view" value={view} onChange={(event) => patch({ tab: event.target.value === "open" ? null : event.target.value })} className="h-[34px] w-[114px] text-xs max-md:h-11">
           {VIEW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
       </label>
       <button type="button" aria-expanded={open} aria-controls="needs-filters-panel" onClick={() => setOpen((was) => !was)}
-        className="inline-flex h-9 shrink-0 items-center justify-center rounded border border-line-strong bg-raised px-3 text-[13px] text-ink/80 hover:bg-ink/[0.06] max-md:h-10">
+        className="inline-flex h-9 shrink-0 items-center justify-center rounded border border-line-strong bg-raised px-3 text-[13px] text-ink/80 hover:bg-ink/[0.06] max-md:h-11">
         Filters{active ? ` (${active})` : ""}
       </button>
     </div>

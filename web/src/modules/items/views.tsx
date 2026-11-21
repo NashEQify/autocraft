@@ -118,7 +118,7 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
   const bar = !isActive(browse) ? undefined : updating
     ? "Updating results… previous rows stay visible."
     : data
-      ? <>Filtered view · {num(data.total)} {data.total === 1 ? "item" : "items"}{browse.status.length ? ` of ${num(Object.values(data.byStatus).reduce((sum, count) => sum + count, 0))}` : ""} · {num(data.byStatus.settled)} settled, {num(data.byStatus.waiting)} waiting for a second opinion, {num(data.byStatus.disagree)} disagreements{data.run ? ` (run ${data.run})` : ""}</>
+      ? <>Filtered view · {num(data.total)} {data.total === 1 ? "item" : "items"}{browse.status.length ? ` of ${num(Object.values(data.byStatus).reduce((sum, count) => sum + count, 0))}` : ""} · {num(data.byStatus.settled)} settled, {num(data.byStatus.waiting)} waiting for a second opinion, {num(data.byStatus.disagree)} disagreements, {num(data.byStatus.unclassified)} not classified{data.run ? ` (run ${data.run})` : ""}</>
       : "Loading items…";
   return <Page title="Items" sub={ready && data && !loading ? `${num(data.total)} ${data.total === 1 ? "item" : "items"}` : undefined}>
     <BrowserChrome browse={browse} repos={repos ?? []} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={rows.length > 0}>

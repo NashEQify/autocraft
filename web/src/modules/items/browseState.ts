@@ -187,7 +187,7 @@ export function constraints(browse: BrowseState): Constraint[] {
     add("repo", "Repository", status.repo?.join(" + "), !!status.repo?.length);
     add("discord", "Seen on Discord", status.discord ? "yes" : undefined, true);
     // Kept in the link, never sent: the reference reports these four in the phase notice.
-    add("state", "State", browse.stateRaw && browse.stateRaw !== "all" ? stateLabel(browse.stateRaw) : undefined, false);
+    add("state", "State", browse.stateRaw ? stateLabel(browse.stateRaw) : undefined, false, browse.stateRaw);
     for (const value of browse.labelsRaw) add("label", "Type label", value, false);
     for (const value of browse.statusRaw) add("status", "Classification", statusLabel(value), false, value);
     for (const value of browse.flagsRaw) add("flag", "Flag", flagLabel(value), false, value);

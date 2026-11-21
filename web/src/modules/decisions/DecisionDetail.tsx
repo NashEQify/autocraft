@@ -84,7 +84,7 @@ function Body({ d, onOpenItem, answer, evidence, discussion, timeline }: { d: De
     <p className={cn("mt-1 break-words font-semibold text-ink/85", "text-[16px] leading-[21.6px] min-[861px]:text-[17px] min-[861px]:leading-[22.95px]")}>{d.question}</p>
     {word && <p className="mt-2 text-xs text-ink/60">Answer · {word.text}{d.answer && d.options.find((o) => o.key === d.answer) ? ` · ${d.options.find((o) => o.key === d.answer)!.label}` : ""}</p>}
     {facts.length > 0 && <ul className="mt-3 space-y-1 text-sm leading-6 text-ink/80">{facts.map((f, i) => <li key={i} className="break-words">{f}</li>)}</ul>}
-    {rec && <p className="mt-3 break-words text-sm text-ink/80"><strong className="font-semibold">{rec.label}</strong> — {rec.reason}</p>}
+    {rec && <p className="mt-3 break-words text-sm text-ink/80"><strong className="font-semibold">{rec.label}</strong>{rec.reason && <> — {rec.reason}</>}</p>}
     {answer}
     {d.number === null && <p className="mt-2 text-xs text-ink/55">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</p>}
     <button type="button" onClick={() => onOpenItem(d.id)} className="mt-4 inline-flex min-h-11 items-center rounded px-1 text-sm text-accent-ink hover:underline">
