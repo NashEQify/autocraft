@@ -206,12 +206,12 @@ both("jsonObject builds an object whose values are JSON texts; Postgres spaces t
   return o;
 });
 
-both("cols selects a table's whole row: every column selectAll() reads, without rowid", async (db) => {
+both("cols selects a table's whole row: every column selectAll() reads, without rowid or Postgres' full-text column", async (db) => {
   const whole = await db.all(db.k.selectFrom("main.items as i").select(kx.cols("main.items", "i")).orderBy("i.number"));
   const all: Record<string, unknown>[] = await db.all(db.k.selectFrom("main.items").selectAll().orderBy("number"));
-  for (const r of all) delete r.rowid;
+  for (const r of all) { delete r.rowid; delete r.fts; }
   assert.deepEqual(whole, all);
-  assert.ok(!("rowid" in whole[0]!));
+  assert.ok(!("rowid" in whole[0]!) && !("fts" in whole[0]!));
   assert.deepEqual(whole.map((r) => [r.repo, r.number, r.title]), [["app", 1, "Crash when saving files"], ["app", 2, "Slow startup"], ["other", 3, "Fix saving"]]);
   return [Object.keys(whole[0]!), whole.map((r) => [r.repo, r.number])];
 }, app);

@@ -235,9 +235,9 @@ type Bare<T extends keyof DB & string> = T extends `main.${infer B extends keyof
 type Col<T extends keyof DB & string> = (typeof COLUMNS)[Bare<T>][number];
 
 /**
- * The whole row of `table` as a select list: every column in table order (from src/db/types.ts, so never rowid, which
- * `selectAll()` returns on Postgres and on SQLite's scoped views), each prefixed with `alias` when given:
- * `.selectFrom("decisions as d").select(kx.cols("decisions", "d"))`.
+ * The whole row of `table` as a select list: every column in table order from src/db/types.ts, each prefixed with `alias`
+ * when given. `selectAll()` also returns rowid on Postgres and on SQLite's scoped views, and the full-text column `fts` of
+ * items and comments on Postgres; this list holds neither. `.selectFrom("decisions as d").select(kx.cols("decisions", "d"))`.
  */
 export function cols<T extends keyof DB & string, A extends string | undefined = undefined>(table: T, alias?: A): readonly (A extends string ? `${A}.${Col<T>}` : Col<T>)[] {
   const names: readonly string[] = COLUMNS[table.replace(/^main\./, "") as keyof typeof COLUMNS];
