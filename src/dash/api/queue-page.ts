@@ -19,7 +19,7 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { toBatch, toRow } from "./queue.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
-import { readerOf, veiledFor } from "./reader.ts";
+import { readerOf, statusFor, veiledFor, type Reader } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
@@ -123,7 +123,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   // Tabs come from the stored next step; the text is veiled afterwards, so a quiet pull request stays in its tab.
   const tabOf = new Map(work.map((w) => [w, tabOfNext(w.next)]));
   const veilNext = (w: QueueWorkRow): QueueWorkRow => (veiledFor(reader, w.repo, w.number) ? { ...w, next: "" } : w);
-  const pending = await pendingRows(db, entries, inScope, originOf, fastOf, held);
+  const pending = await pendingRows(db, entries, inScope, originOf, fastOf, held, reader, internals);
   const count = (t: QueueTab): number => (t === "all" ? work.length : t === "merge" ? entries.length + pending.length : work.filter((w) => tabOf.get(w) === t).length);
   const counts = { all: count("all"), review: count("review"), fix: count("fix"), verify: count("verify"), merge: count("merge") };
 
@@ -155,26 +155,52 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
 /**
  * Open PRs queued with Queue items or pre-approved that are no merge queue row yet: no take review at their head, so they wait for
  * the fix-up or the review first. `entries` are the queue rows the view shows and `want` is the view's scope, so a PR is in exactly one
- * group. Oldest first.
+ * group. Oldest first. Then the open fast-tracked issues none of whose closing PRs is listed: Fix builds their PR, which then comes
+ * through review into the queue; an issue leaves the group once a PR that closes it is listed. In fast-track order.
  */
 async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "decisionId" | "reviewedAt">) => Promise<QueueOrigin>,
-  fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>): Promise<QueuePendingRow[]> {
+  fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>, reader: Reader, staff: boolean): Promise<QueuePendingRow[]> {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
   type P = { repo: string; number: number; state: "fixup" | "review" | "ci"; title: string | null; author: string | null; breakdown: string | null };
   const rows = await db.prepare(`SELECT p.repo, p.number, p.state, i.title, i.author, r.breakdown FROM preapprovals p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
     LEFT JOIN item_rank r ON r.repo = p.repo AND r.number = p.number
     WHERE p.state IN ('fixup', 'review', 'ci') AND i.state = 'OPEN' AND i.kind = 'pr' ORDER BY p.id`).all() as P[];
   const seen = new Set<string>();
-  return await flatMapSeq(rows, async (p) => {
+  const sizeOf = (breakdown: string | null) => (breakdown ? ((JSON.parse(breakdown) as RankBreakdown).size ?? null) : null);
+  const prs = await flatMapSeq(rows, async (p): Promise<QueuePendingRow[]> => {
     const k = `${p.repo}#${p.number}`;
     if (seen.has(k) || queued.has(k) || !want(p.repo, p.number)) return [];
     seen.add(k);
-    const size = p.breakdown ? ((JSON.parse(p.breakdown) as RankBreakdown).size ?? null) : null;
     return [{
-      repo: p.repo, number: p.number, title: p.title ?? "", author: p.author ?? "", size, step: p.state,
+      repo: p.repo, number: p.number, kind: "pr", title: p.title ?? "", author: p.author ?? "", size: sizeOf(p.breakdown), step: p.state,
       fast: fastOf(p.repo, p.number), held: held.has(k), added: await originOf({ repo: p.repo, number: p.number, decisionId: null, reviewedAt: "" }),
     }];
   });
+  type F = { repo: string; number: number; title: string | null; author: string | null; breakdown: string | null; added_by: string; added_at: string; view: string | null };
+  const fast = await db.prepare(`SELECT f.repo, f.number, i.title, i.author, r.breakdown, f.added_by, f.added_at, pl.view FROM main.fast_track f
+    JOIN main.items i ON i.repo = f.repo AND i.number = f.number LEFT JOIN item_rank r ON r.repo = f.repo AND r.number = f.number
+    LEFT JOIN item_plans pl ON pl.repo = f.repo AND pl.number = f.number
+    WHERE i.state = 'OPEN' AND i.kind = 'issue' ORDER BY f.weight DESC, f.id`).all() as F[];
+  const listed = (repo: string, n: number) => queued.has(`${repo}#${n}`) || seen.has(`${repo}#${n}`);
+  const nextOf = (view: string | null): string | null => {
+    try {
+      const v = JSON.parse(view ?? "null") as { next?: unknown } | null;
+      return typeof v?.next === "string" ? v.next : null;
+    } catch {
+      return null;
+    }
+  };
+  const issues = await flatMapSeq(fast, async (f): Promise<QueuePendingRow[]> => {
+    if (!want(f.repo, f.number)) return [];
+    const closing = await openPrsClosing(db, f.repo, f.number);
+    if (closing.some((n) => listed(f.repo, n))) return [];
+    return [{
+      repo: f.repo, number: f.number, kind: "issue", title: f.title ?? "", author: f.author ?? "", size: sizeOf(f.breakdown), step: closing.length ? "pr" : "build",
+      fast: fastOf(f.repo, f.number), held: false, added: { how: "fast", by: staff ? f.added_by || null : null, at: f.added_at },
+      prs: closing, next: statusFor(reader, f.repo, f.number, { waiting: null, next: nextOf(f.view) }).next,
+    }];
+  });
+  return [...prs, ...issues];
 }
 
 /**
