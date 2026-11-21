@@ -50,8 +50,8 @@ test("refuses a merge without a live read, and when GitHub's head moved", async 
 test("refuses when an operator's Hold answer arrived", async () => {
   const db = await fresh([{ n: 1 }]);
   const id = mergeDecisionId("app", 1, "sha1");
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, question, options, facts, asked_at, answer, answered_by, answered_at) VALUES (?, 'merge', 'app', 1, '[]', 'q', '[]', ?, ?, 'hold', 'op', ?)")
-    .run(id, JSON.stringify(["head commit sha1"]), T, T);
+  await db.run(db.k.insertInto("decisions").values({ id, kind: "merge", repo: "app", number: 1, items: "[]", question: "q", options: "[]", facts: JSON.stringify(["head commit sha1"]),
+    asked_at: T, answer: "hold", answered_by: "op", answered_at: T }));
   assert.match(why(await guard(db, ref, MERGE, OP, live())), /plan no longer has merge/);
 });
 
@@ -113,8 +113,8 @@ test("the merge command gets the reviewed head, and the built-in command refuses
 /** Item 1 with an operator's close answer to a scope decision. */
 async function closeAnswered(): Promise<Db> {
   const db = await fresh([{ n: 1 }]);
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, question, options, facts, asked_at, answer, answered_by, answered_at) VALUES ('d1', 'scope', 'app', 1, ?, 'q', '[]', '[]', ?, 'close', 'op', ?)")
-    .run(JSON.stringify([{ repo: "app", number: 1 }]), T, T);
+  await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "scope", repo: "app", number: 1, items: JSON.stringify([{ repo: "app", number: 1 }]), question: "q", options: "[]", facts: "[]",
+    asked_at: T, answer: "close", answered_by: "op", answered_at: T }));
   return db;
 }
 const CLOSE = { kind: "act", bucket: "scope", decisionId: "d1" } as const;
@@ -124,7 +124,7 @@ test("an item write needs the comment approval and an answer that still closes t
   assert.match(why(await guardItem(db, ref, CLOSE, OP)), /Comments in app are not approved/);
   await setCommentApproval(db, "op", "app", true);
   assert.ok(ok(await guardItem(db, ref, CLOSE, OP)));
-  await db.prepare("UPDATE decisions SET answer = 'hold' WHERE id = 'd1'").run();
+  await db.run(db.k.updateTable("decisions").set({ answer: "hold" }).where("id", "=", "d1"));
   assert.match(why(await guardItem(db, ref, CLOSE, OP)), /plan no longer has act:scope/);
 });
 

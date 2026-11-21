@@ -12,15 +12,15 @@ import { connectDb } from "../src/db/open.ts";
 const SECRET = "hook-secret";
 async function scratch() {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "hook-")), "m.db"));
-  await db.script("DELETE FROM tracked_repos");
-  await db.script("INSERT INTO tracked_repos VALUES ('a','t','x', 1)");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "a", added_by: "t", added_at: "x", pipeline: 1 }));
   return db;
 }
 const deliver = async (db: Awaited<ReturnType<typeof scratch>>, event: string, payload: unknown, sign = true) => {
   const raw = Buffer.from(JSON.stringify(payload));
   return await handleDelivery(db, SECRET, { event, ...(sign ? { signature: signatureOf(SECRET, raw) } : {}) }, raw, safeEqual);
 };
-const queued = async (db: Awaited<ReturnType<typeof scratch>>) => (await db.prepare("SELECT repo, number FROM sync_requests ORDER BY number").all()).map((r) => ({ ...r }));
+const queued = async (db: Awaited<ReturnType<typeof scratch>>) => (await db.all(db.k.selectFrom("sync_requests").select(["repo", "number"]).orderBy("number"))).map((r) => ({ ...r }));
 
 test("a signed delivery queues one row per item, a bad or missing signature and an untracked repo queue nothing", async () => {
   const db = await scratch();
@@ -39,7 +39,7 @@ test("a signed delivery queues one row per item, a bad or missing signature and 
   const suite = (action: string, prs: unknown[], sha = "s1") => ({ action, repository: { full_name: "storytold/a", name: "a", id: 1 }, check_suite: { head_sha: sha, pull_requests: prs } });
   assert.equal((await deliver(db, "check_suite", suite("requested", [{ number: 13, base: { repo: { id: 1 } } }]))).status, 202);
   assert.equal((await deliver(db, "check_suite", suite("completed", [{ number: 12, base: { repo: { id: 1 } } }, { number: 99, base: { repo: { id: 2 } } }]))).status, 202);
-  await db.script("INSERT INTO items (repo, number, kind, state, head_oid) VALUES ('a', 14, 'pr', 'OPEN', 'fork-sha')");
+  await db.run(db.k.insertInto("items").values({ repo: "a", number: 14, kind: "pr", state: "OPEN", head_oid: "fork-sha" }));
   assert.equal((await deliver(db, "check_suite", suite("completed", [], "fork-sha"))).status, 202);
   assert.deepEqual(await queued(db), [{ repo: "a", number: 7 }, { repo: "a", number: 8 }, { repo: "a", number: 12 }, { repo: "a", number: 14 }]);
 });

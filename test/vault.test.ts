@@ -54,7 +54,7 @@ test("a refresh GitHub rejects marks the row and answers needs-sign-in, never an
   const v = new Vault(db, box, provider);
   v.waitMs = 0;
   assert.deepEqual(await v.userToken("example-user"), { ok: false, needsSignIn: true, why: "refresh-failed" });
-  assert.equal((await db.prepare("SELECT status FROM user_tokens").get() as { status: string }).status, "refresh-failed");
+  assert.equal((await db.get(db.k.selectFrom("user_tokens").select("status")))!.status, "refresh-failed");
   provider.rejectRefresh = false;
   assert.equal((await v.userToken("example-user")).ok, false);
   assert.equal(provider.refreshes, 0);
@@ -69,11 +69,11 @@ test("removing a login deletes its token row and the sweep revokes the grant at 
   await addLogin(db, "op", "example-user", "viewer", null);
   const t = await signIn("example-user", 8 * 3_600_000);
   await removeLogin(db, "op", "example-user");
-  assert.equal(await db.prepare("SELECT 1 FROM user_tokens").get(), undefined);
+  assert.equal(await db.get(db.k.selectFrom("user_tokens").select("login")), undefined);
   const v = new Vault(db, box, provider);
   assert.equal(await v.sweepRevocations(), 1);
   assert.deepEqual(provider.revokedGrants, [t.access]);
-  assert.equal(await db.prepare("SELECT 1 FROM user_token_revocations").get(), undefined);
+  assert.equal(await db.get(db.k.selectFrom("user_token_revocations").select("id")), undefined);
 });
 
 test("revoking one session revokes only its token and keeps the login's newer sign-in", async () => {
@@ -91,6 +91,6 @@ test("revoking one session revokes only its token and keeps the login's newer si
   assert.equal(provider.revoked.length, 1);
   assert.notEqual(provider.revoked[0], a.access);
   assert.equal((await v.userToken("example-user")).ok, true);
-  assert.equal(openTokens(box, (await db.prepare("SELECT token_enc FROM user_tokens").get() as { token_enc: string }).token_enc, "user_tokens:example-user")?.access, b.access);
-  assert.equal(await db.prepare("SELECT 1 FROM user_token_revocations").get(), undefined);
+  assert.equal(openTokens(box, (await db.get(db.k.selectFrom("user_tokens").select("token_enc")))!.token_enc, "user_tokens:example-user")?.access, b.access);
+  assert.equal(await db.get(db.k.selectFrom("user_token_revocations").select("id")), undefined);
 });

@@ -21,7 +21,7 @@ async function setup(as: string, repoIdentity = "app", failing = false) {
   const g = { scope: "item", repo: "app1", number: 1, as } as unknown as Grant;
   const post = () => commentOn(w, g, q, "act-comment", { repo: "app1", number: 1, id: "x" }, { kind: "none" } as never, "hi");
   const closeIt = () => closeItem(w, g as never, q, { repo: "app1", number: 1, id: "x", pr: false });
-  const rows = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action IN ('act-comment', 'act-close')").get() as { n: number }).n;
+  const rows = async () => (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "in", ["act-comment", "act-close"])))!.n;
   return { w, post, closeIt, rows, sleeps, advance: (ms: number) => { t += ms; } };
 }
 

@@ -273,13 +273,9 @@ src/github/read.ts
 
 src/github/slugs.ts
 
-src/github/user-lane.ts
 
-src/github/vault.ts
 
-src/github/webhooks.ts
 
-src/github/write.ts
 
 src/health-checks.ts
 

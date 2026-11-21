@@ -101,11 +101,13 @@ export class Vault {
     if (this.#sweeping) return 0;
     this.#sweeping = true;
     try {
-      const rows = await this.#db.prepare(`SELECT id, login, token_enc, kind, aad, attempts FROM user_token_revocations ${fresh ? "WHERE attempts = 0 " : ""}ORDER BY id`)
-        .all() as { id: number; login: string; token_enc: string; kind: string; aad: string | null; attempts: number }[];
+      const rows = await this.#db.all(this.#db.k.selectFrom("user_token_revocations")
+        .select(["id", "login", "token_enc", "kind", "aad", "attempts"])
+        .$if(fresh, (q) => q.where("attempts", "=", 0)).orderBy("id"));
       for (const r of rows) {
         // Claim the attempt first: a concurrent sweep (another process) that read the same row changes nothing here and skips it.
-        if ((await this.#db.prepare("UPDATE user_token_revocations SET attempts = attempts + 1 WHERE id = ? AND attempts = ?").run(r.id, r.attempts)).changes !== 1) continue;
+        if ((await this.#db.run(this.#db.k.updateTable("user_token_revocations").set((eb) => ({ attempts: eb("attempts", "+", 1) }))
+          .where("id", "=", r.id).where("attempts", "=", r.attempts))).changes !== 1) continue;
         let done = false;
         try {
           done = await this.#revokeRow(r);
@@ -113,10 +115,10 @@ export class Vault {
           console.error(`revocation for ${r.login}: ${(e as Error).message}`);
         }
         if (done) {
-          await this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
+          await this.#db.run(this.#db.k.deleteFrom("user_token_revocations").where("id", "=", r.id));
         } else if (r.attempts + 1 >= MAX_REVOKE_ATTEMPTS) {
           console.error(`revocation for ${r.login}: given up after ${r.attempts + 1} failed attempts`);
-          await this.#db.prepare("DELETE FROM user_token_revocations WHERE id = ?").run(r.id);
+          await this.#db.run(this.#db.k.deleteFrom("user_token_revocations").where("id", "=", r.id));
         }
       }
       return rows.length;
@@ -156,7 +158,7 @@ export class Vault {
       if (!access) return false;
       await revoke(access);
     }
-    if (sameSignIn) await this.#db.prepare("DELETE FROM user_tokens WHERE login = ?").run(r.login);
+    if (sameSignIn) await this.#db.run(this.#db.k.deleteFrom("user_tokens").where("login", "=", r.login));
     return true;
   }
 }
