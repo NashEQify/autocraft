@@ -22,6 +22,7 @@ import { giveaway, landBody, nameGiveaway } from "./rules.ts";
 import type { ExecResult } from "../fixup/git.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 const ACTOR = "security";
 const oneLine = (s: string, max = 300): string => s.replace(/\s+/g, " ").trim().slice(0, max);
@@ -237,11 +238,13 @@ async function draftAdvisory(db: Db, row: FindingRow, w: Writer, g: Parameters<t
   const key = findingKey(row.repo, row.number);
   // One draft per finding: the empty id claims the creation, so the merge poll and a Publish press never both create one. A claim older than ten minutes is a crashed attempt.
   const stale = new Date(Date.now() - 600_000).toISOString();
-  const claimed = (await db.prepare("UPDATE security_findings SET ghsa_id = '', updated_at = ? WHERE repo = ? AND number = ? AND (ghsa_id IS NULL OR (ghsa_id = '' AND updated_at < ?))").run(new Date().toISOString(), row.repo, row.number, stale)).changes;
+  const claimed = (await db.run(db.k.updateTable("security_findings").set({ ghsa_id: "", updated_at: new Date().toISOString() })
+    .where("repo", "=", row.repo).where("number", "=", row.number)
+    .where((eb) => eb.or([eb("ghsa_id", "is", null), eb.and([eb("ghsa_id", "=", ""), eb("updated_at", "<", stale)])])))).changes;
   if (!claimed) return { ghsa: null, result: { code: 1, stdout: "", stderr: "the advisory is being created" } };
   const text = `${advisoryText(row)}${row.fix_pr ? `\n### Fix\n\nFixed in ${slugOf(row.repo)}#${row.fix_pr}.\n` : ""}`;
   const a = await ghAdvisoryCreate(w, g, d.exec, { repo: row.repo, key, summary: row.title, description: text, severity: row.severity, range: await advisoryRange(db, row, d) });
-  await db.prepare("UPDATE security_findings SET ghsa_id = ? WHERE repo = ? AND number = ? AND ghsa_id = ''").run(a.ghsa, row.repo, row.number);
+  await db.run(db.k.updateTable("security_findings").set({ ghsa_id: a.ghsa }).where("repo", "=", row.repo).where("number", "=", row.number).where("ghsa_id", "=", ""));
   return a;
 }
 
@@ -254,7 +257,7 @@ export async function runPublish(db: Db, repo: string, n: number, by: By, cve: b
   if (!row || (row.state !== "landed" && row.state !== "advisory")) return `finding ${n}: nothing to publish`;
   const key = findingKey(repo, n);
   const w: Writer = { db, login: ACTOR };
-  const note = async (why: string): Promise<string> => { await db.prepare("UPDATE security_findings SET note = ?, updated_at = ? WHERE repo = ? AND number = ?").run(oneLine(why, 400), new Date().toISOString(), repo, n); return `finding ${n}: ${oneLine(why, 120)}`; };
+  const note = async (why: string): Promise<string> => { await db.run(db.k.updateTable("security_findings").set({ note: oneLine(why, 400), updated_at: new Date().toISOString() }).where("repo", "=", repo).where("number", "=", n)); return `finding ${n}: ${oneLine(why, 120)}`; };
   const g = await guardRepo(db, repo, "security", by);
   if ("refused" in g) return await note(g.refused);
   let ghsa = row.ghsa_id;
@@ -297,7 +300,9 @@ export async function fixOnMain(git: Git, fixCommit: string, head: string): Prom
 }
 
 async function setNote(db: Db, repo: string, n: number, note: string): Promise<void> {
-  await db.prepare("UPDATE security_findings SET note = ?, updated_at = ? WHERE repo = ? AND number = ? AND state = 'landing' AND COALESCE(note, '') <> ?").run(note, new Date().toISOString(), repo, n, note);
+  await db.run(db.k.updateTable("security_findings").set({ note, updated_at: new Date().toISOString() })
+    .where("repo", "=", repo).where("number", "=", n).where("state", "=", "landing")
+    .where((eb) => eb(eb.fn.coalesce("note", eb.val("")), "<>", note)));
 }
 
 /**
@@ -305,8 +310,8 @@ async function setNote(db: Db, repo: string, n: number, note: string): Promise<v
  * so it is safe wherever the note is shown.
  */
 export async function stallReason(db: Db, repo: string, number: number): Promise<string> {
-  const it = await db.prepare("SELECT is_draft, ci_state, mergeable FROM main.items WHERE repo = ? AND number = ?").get(repo, number) as { is_draft: number | null; ci_state: string | null; mergeable: string | null } | undefined;
-  const last = await db.prepare("SELECT outcome, reason FROM main.merges WHERE repo = ? AND number = ? ORDER BY at DESC LIMIT 1").get(repo, number) as { outcome: string; reason: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("main.items").select(["is_draft", "ci_state", "mergeable"]).where("repo", "=", repo).where("number", "=", number));
+  const last = await db.get(db.k.selectFrom("main.merges").select(["outcome", "reason"]).where("repo", "=", repo).where("number", "=", number).orderBy("at", "desc").limit(1));
   if (!it) return "The pull request is open; waiting for the pipeline to read it.";
   if (it.is_draft) return "The pull request is a draft.";
   if (it.mergeable === "CONFLICTING") return "The pull request has merge conflicts.";
@@ -323,9 +328,10 @@ export async function stallReason(db: Db, repo: string, number: number): Promise
  */
 export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "log">): Promise<number> {
   let moved = 0;
-  const quiet = await db.prepare("SELECT repo, number, fix_pr FROM security_findings WHERE state = 'landing' AND fix_pr IS NOT NULL AND fork IS NULL").all() as { repo: string; number: number; fix_pr: number }[];
+  const quiet = await db.all(db.k.selectFrom("security_findings").select(["repo", "number", "fix_pr"])
+    .where("state", "=", "landing").where("fix_pr", "is not", null).where("fork", "is", null).$narrowType<{ fix_pr: number }>());
   for (const f of quiet) {
-    const pr = await db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(f.repo, f.fix_pr) as { state: string } | undefined;
+    const pr = await db.get(db.k.selectFrom("main.items").select("state").where("repo", "=", f.repo).where("number", "=", f.fix_pr));
     if (pr?.state === "MERGED" && await advance(db, f.repo, f.number, ["landing"], "landed", { note: null })) {
       await audit(db, ACTOR, "security-landed", findingKey(f.repo, f.number), { pr: f.fix_pr });
       moved++;
@@ -340,7 +346,8 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
     } else if (pr?.state === "CLOSED" && (await rememberQuietPr(db, f.repo, f.number, f.fix_pr), await advance(db, f.repo, f.number, ["landing"], "ready", { fix_pr: null, note: "The pull request was closed without merging." }))) moved++;
     else if (pr?.state === "OPEN") await setNote(db, f.repo, f.number, await stallReason(db, f.repo, f.fix_pr));
   }
-  const waiting = await db.prepare("SELECT repo, number, fix_commit, fork, fix_pr FROM security_findings WHERE state = 'awaiting-admin' AND fix_commit IS NOT NULL").all() as { repo: string; number: number; fix_commit: string; fork: string | null; fix_pr: number | null }[];
+  const waiting = await db.all(db.k.selectFrom("security_findings").select(["repo", "number", "fix_commit", "fork", "fix_pr"])
+    .where("state", "=", "awaiting-admin").where("fix_commit", "is not", null).$narrowType<{ fix_commit: string }>());
   // The admin may merge the pull request in the advisory's fork; the fork exists until the advisory is published.
   for (const f of waiting) {
     if (!f.fork || f.fix_pr === null) continue;
@@ -369,10 +376,12 @@ export async function pollLanding(db: Db, d: Pick<LandDeps, "exec" | "root" | "l
 
 /** Runs `pollLanding` when the last poll is older than a couple of minutes; the sync run calls it. */
 export async function pollLandingIfDue(db: Db, d: Pick<LandDeps, "exec" | "root" | "log">, now = Date.now()): Promise<number> {
-  const open = await db.prepare("SELECT 1 FROM security_findings WHERE (state = 'landing' AND fix_pr IS NOT NULL) OR state = 'awaiting-admin' LIMIT 1").get();
+  const open = await db.get(db.k.selectFrom("security_findings").select((eb) => eb.lit(1).as("one"))
+    .where((eb) => eb.or([eb.and([eb("state", "=", "landing"), eb("fix_pr", "is not", null)]), eb("state", "=", "awaiting-admin")])).limit(1));
   if (!open) return 0;
   const at = await setting(db, "security_poll_at");
   if (at && now - Date.parse(at) < 115_000) return 0;
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('security_poll_at', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(new Date(now).toISOString());
+  await db.run(db.k.insertInto("settings").values({ key: "security_poll_at", value: new Date(now).toISOString() })
+    .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   return pollLanding(db, d);
 }
