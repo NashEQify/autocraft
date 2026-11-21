@@ -8,7 +8,7 @@ import type { Conversation, ItemPageData, OpusReviewEntry, TimelineEntry } from 
 import { Button } from "../../../ui/atoms/Button";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { ConfirmButton } from "../../../ui/molecules/ConfirmButton";
-import { RemoteVia } from "../../../ui/molecules/RemoteVia";
+import { HistoryCallDetail } from "./HistoryCallDetail";
 import { ExpandableText } from "../../../ui/molecules/ExpandableText";
 import { ReviewDetail } from "./ReviewDetail";
 import { StoryLine } from "../../../ui/molecules/StoryLine";
@@ -170,7 +170,7 @@ function Detail({ e, d, review, conv, operator }: { e: TimelineEntry; d: ItemPag
       {e.lines.length > 0 && <ul className="space-y-0.5 text-xs leading-5 text-ink/65">{e.lines.map((l, i) => <li key={i} className="break-words">{l}</li>)}</ul>}
       {!viewer && e.calls.length > 0 && (
         <ul className="space-y-0.5 border-l border-line pl-3 text-xs text-ink/60">
-          {e.calls.map((c, i) => <li key={i} className="flex gap-2"><span className="min-w-0 flex-1">{c.label}{c.via && <RemoteVia via={c.via} className="ml-2" />}</span>{formatCost(c.costUsd) && <span className="num">{formatCost(c.costUsd)}</span>}</li>)}
+          {e.calls.map((c, i) => <li key={JSON.stringify([c.runId, i])}><HistoryCallDetail call={c} repo={d.repo} number={d.number} /></li>)}
         </ul>
       )}
       {e.feedback && <FeedbackActions e={e} d={d} conv={conv} operator={operator} />}

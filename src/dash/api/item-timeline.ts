@@ -10,6 +10,11 @@ import { arr, clip, stepTitle, type Ctx, type Ev } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 
 const short = (s: string | null | undefined): string => (s ?? "").slice(0, 7);
+const validRunId = (id: unknown): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0;
+const modelCall = (e: Ev): HistoryCall => ({
+  label: `${e.call?.step ?? e.summary} (${e.call?.model ?? e.actor.name})`, kind: "model", costUsd: e.call?.costUsd ?? null,
+  ...(e.call?.via && { via: e.call.via }), ...(validRunId(e.ref.runId) && { runId: e.ref.runId }),
+});
 const q = async <T>(db: Db, sql: string, ...args: (string | number)[]): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 const VERDICT: Record<string, string> = { take: "take", "take-fix": "take with fixes", hold: "hold", close: "close" };
 const VERDICT_TONE: Record<string, TimelineTone> = { take: "ok", "take-fix": "warn", hold: "warn", close: "bad" };
@@ -38,15 +43,15 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
   const { db, repo, n, staff } = c;
   const out: TimelineEntry[] = [];
   const callsOf = (jobId: unknown): HistoryCall[] =>
-    !staff ? [] : ev.filter((x) => x.kind === "model-call" && x.ref.jobId === jobId).map((x) => ({ label: `${x.call?.step ?? x.summary} (${x.call?.model ?? x.actor.name})`, kind: "model" as const, costUsd: x.call?.costUsd ?? null, ...(x.call?.via && { via: x.call.via }) }));
+    !staff ? [] : ev.filter((x) => x.kind === "model-call" && x.ref.jobId === jobId).map(modelCall);
   const callCost = (calls: HistoryCall[]): number | null => (calls.some((x) => x.costUsd !== null) ? calls.reduce((s, x) => s + (x.costUsd ?? 0), 0) : null);
   const fixSteps = ev.filter((e) => e.kind === "step" && /^(fixup|cifix|conflict):/.test(e.id));
   const stepOfJob = new Map((await q<{ id: number; step: string }>(db, "SELECT id, step FROM jobs WHERE json_extract(params, '$.number') = ?1 AND repo = ?2 UNION SELECT j.id, j.step FROM job_items ji JOIN jobs j ON j.id = ji.job_id WHERE ji.number = ?1 AND ji.repo = ?2", n, repo)).map((j) => [j.id, j.step]));
   const jobsWithCalls = new Set(ev.filter((e) => e.kind === "job").map((e) => e.ref.jobId));
   const mergeSteps = ev.filter((e) => e.kind === "step" && e.id.startsWith("merge:"));
   const near = (a: string, b: string, ms: number) => Math.abs(Date.parse(a) - Date.parse(b)) <= ms;
-  // The model calls of every Opus review, read once.
-  const calls = staff ? await runRows(db, ev.flatMap((e) => (e.kind === "review" && e.id.replace(/^review:/, "").startsWith("opus") ? ((e.ref.runIds as number[] | undefined) ?? []) : []))) : new Map<number, RunRow>();
+  // The model calls named by the reader-filtered review refs, read once.
+  const calls = staff ? await runRows(db, ev.flatMap((e) => (e.kind === "review" ? ((e.ref.runIds as number[] | undefined) ?? (validRunId(e.ref.runId) ? [e.ref.runId] : [])) : []))).filter(validRunId)) : new Map<number, RunRow>();
 
   for (const e of ev) {
     const after = e.summary.includes(": ") ? e.summary.slice(e.summary.indexOf(": ") + 2) : e.summary;
@@ -60,6 +65,7 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
       const title = e.call?.step ?? "Model call";
       const t = base(e.id, e.at, "harness", "AutoCraft", "job", PLAIN_BY_TITLE.get(title) ?? `${title}: ${e.summary.replace(/^[^:]*:\s*/, "")}`);
       t.costUsd = e.call?.costUsd ?? null;
+      if (staff && validRunId(e.ref.runId)) t.calls = [modelCall(e)];
       out.push(t);
     } else if (e.kind === "job") {
       // A fix-up's job repeats its step line; its model calls move to that line.
@@ -82,16 +88,18 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
       out.push(t);
     } else if (e.kind === "review") {
       const id = e.id.replace(/^review:/, "");
+      const reviewCalls = staff ? runCalls(calls, e.ref.runIds ?? (validRunId(e.ref.runId) ? [e.ref.runId] : [])) : [];
       if (id.startsWith("opus")) {
         const verdict = String(e.detail?.verdict ?? "hold");
         const sure = e.detail?.sure === true;
         const t = base(e.id, e.at, "opus", "Opus", "review", `review: ${VERDICT[verdict] ?? verdict}${sure ? "" : ", unsure"}`);
         t.tone = VERDICT_TONE[verdict] ?? "neutral"; t.costUsd = e.costUsd ?? null; t.major = true; t.reviewId = id;
-        t.calls = staff ? runCalls(calls, (e.ref.runIds as number[] | undefined) ?? []) : [];
+        t.calls = reviewCalls;
         out.push(t);
       } else {
         const t = base(e.id, e.at, "harness", "AutoCraft", id.startsWith("verify") ? "check" : "review", id.startsWith("verify") ? e.summary.replace(/^Verification \((.*)\): \1$/, "Verification: $1") : e.summary);
         t.tone = toneOf(e.summary); t.major = true; t.costUsd = e.costUsd ?? null;
+        t.calls = reviewCalls;
         if (staff && e.detail) t.lines = detailLines(e.detail);
         out.push(t);
       }
@@ -238,8 +246,8 @@ async function runRows(db: Db, ids: number[]): Promise<Map<number, RunRow>> {
 
 /** The calls of the runs `ids` that exist, in id order. */
 function runCalls(rows: Map<number, RunRow>, ids: number[]): HistoryCall[] {
-  return [...new Set(ids.map(Number))].filter((id) => rows.has(id)).sort((a, b) => a - b).map((id) => rows.get(id)!)
-    .map((r) => ({ label: `${stepTitle(r.step)} (${r.model})`, kind: "model" as const, costUsd: r.cost_usd, ...(r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }) }));
+  return [...new Set(ids.filter(validRunId))].filter((id) => rows.has(id)).sort((a, b) => a - b).map((id) => rows.get(id)!)
+    .map((r) => ({ label: `${stepTitle(r.step)} (${r.model})`, kind: "model" as const, runId: r.id, costUsd: r.cost_usd, ...(r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }) }));
 }
 
 function detailLines(d: Record<string, unknown>): string[] {
