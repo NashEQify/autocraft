@@ -264,7 +264,7 @@ export async function prepare(db: Db, ids: string[], p: PrepareParams): Promise<
     const dir = referenceDir(repo);
     const semantic = p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`);
     // What the call reads of the discussion, kept with the prepare; the call counts against the decision's daily cap unless an operator asked for it.
-    const readKey = (await db.get(db.k.selectFrom("decisions as d").select((eb) => discussionKeyExpr(db, eb, "d").as("k")).where("d.id", "=", d.id)))?.k ?? "";
+    const readKey = (await db.get(db.k.selectFrom("decisions as d").select((eb) => discussionKeyExpr(db, eb, "d").as("k")).where("d.id", "=", d.id)))!.k ?? "";
     const tried = (await db.get(db.k.insertInto("main.decision_prepares").values({ decision_id: d.id, at: now(), manual: d.prepare_requested_at ? 1 : 0 }).returning(kx.rowid("main.decision_prepares").as("rowid"))))!.rowid;
     let r;
     try {
