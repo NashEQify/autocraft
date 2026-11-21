@@ -12,7 +12,8 @@
 // Keys starting "max." are combined with max, not summed, when repos add up.
 // Item-backed branches also return their refs ("repo#n") for the Items
 // browser's flow filter.
-import { latestRun, settledOn, settledTable } from "../classify/settled.ts";
+import type { Compilable, Expression, SqlBool } from "kysely";
+import { latestRun, settledOnExpr, settledTable, verdictExpr } from "../classify/settled.ts";
 import { isScope } from "../decide/select.ts";
 import { cachedQueue, dueActions, dueRefs } from "../core/plan-read.ts";
 import type { QueueState } from "../core/plan.ts";
@@ -26,7 +27,7 @@ import { scopeAnswers } from "../review/candidates.ts";
 import { BACKLOG_KIND } from "../decisions.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { indexedBy, jsonText } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export type Counts = Record<string, number>;
 export type Refs = Set<string>;
@@ -44,7 +45,6 @@ type OpenRow = { repo: string; number: number; kind: string; status: string | nu
 /** What the node counters share for one repo (or all repos) on one connection. */
 export class Ctx {
   readonly since: string;
-  readonly rp: Record<string, string>;
   private openRows?: OpenRow[];
   private openSet?: Refs;
   private answers?: Map<string, string>;
@@ -57,35 +57,35 @@ export class Ctx {
     this.db = db;
     this.repo = repo;
     this.since = new Date(now - DAY).toISOString();
-    this.rp = repo ? { repo } : {};
   }
-  andRepo(col = "repo"): string {
-    return this.repo ? `AND ${col} = :repo` : "";
+  andRepo(eb: kx.AnyEb, col = "repo"): Expression<SqlBool> {
+    return this.repo ? eb(eb.ref(col), "=", this.repo) : eb.and([]);
   }
   /** Restricts a query on `col` to the repo, or to the tracked repos. */
-  tracked(col = "repo"): string {
-    return this.repo ? `AND ${col} = :repo` : `AND ${col} IN (SELECT name FROM main.tracked_repos)`;
+  tracked(eb: kx.AnyEb, col = "repo"): Expression<SqlBool> {
+    return this.repo ? eb(eb.ref(col), "=", this.repo) : eb(eb.ref(col), "in", eb.selectFrom("main.tracked_repos").select("name"));
   }
   async repos(): Promise<string[]> {
     return this.repo ? [this.repo] : await trackedNames(this.db);
   }
   /** Rows of `repo, number` as refs. */
-  async refs(sql: string, params: Record<string, string> = {}): Promise<Refs> {
-    return new Set((await this.db.prepare(sql).all({ ...this.rp, ...params }) as { repo: string; number: number }[]).map(ref));
+  async refs(q: Compilable<{ repo: string; number: number }>): Promise<Refs> {
+    return new Set((await this.db.all(q)).map(ref));
   }
   inRepo(k: string): boolean {
     return !this.repo || k.startsWith(`${this.repo}#`);
   }
-  async n(sql: string, params: Record<string, string> = {}): Promise<number> {
-    return (await this.db.prepare(sql).get({ ...this.rp, ...params }) as { n: number }).n;
+  async n(q: Compilable<{ n: number }>): Promise<number> {
+    return (await this.db.get(q))!.n;
   }
   /** Every open item with its settled status in the current run. */
   async open(): Promise<OpenRow[]> {
     if (!this.openRows) {
       await settledTable(this.db, this.run);
-      this.openRows = await this.db.prepare(`SELECT i.repo, i.number, i.kind, s.status, s.referee_sure, s.jev_label, s.haiku_label FROM items i
-        LEFT JOIN item_settled s ON ${settledOn(this.run, "s")}
-        WHERE i.state = 'OPEN' ${this.andRepo("i.repo")}`).all(this.rp) as OpenRow[];
+      this.openRows = await this.db.all(this.db.k.selectFrom("items as i")
+        .leftJoin("item_settled as s", (j) => j.on((eb) => settledOnExpr(eb, this.run, "s")))
+        .select(["i.repo", "i.number", "i.kind", "s.status", "s.referee_sure", "s.jev_label", "s.haiku_label"])
+        .where("i.state", "=", "OPEN").where((eb) => this.andRepo(eb, "i.repo")));
     }
     return this.openRows;
   }
@@ -95,13 +95,10 @@ export class Ctx {
   async scopeAnswers(): Promise<Map<string, string>> {
     return (this.answers ??= await scopeAnswers(this.db));
   }
-  /** Items created or closed since `since`. Over every repo the named date index reads only the last day; for one repo its own rows are fewer. */
+  /** Items created or closed since `since`. */
   async recentItems(col: "created_at" | "closed_at"): Promise<number> {
-    const extra = col === "closed_at" ? "AND state <> 'OPEN'" : "";
-    if (this.repo) return await this.n(`SELECT COUNT(*) AS n FROM main.items WHERE repo = :repo AND ${col} >= :since ${extra}`, { since: this.since });
-    const idx = col === "created_at" ? "items_created" : "items_closed";
-    return await this.n(`SELECT COUNT(*) AS n FROM main.items${indexedBy(this.db, idx)} WHERE ${col} >= :since ${extra}
-      AND repo IN (SELECT name FROM main.tracked_repos)`, { since: this.since });
+    return await this.n(this.db.k.selectFrom("main.items").select((eb) => eb.fn.countAll<number>().as("n"))
+      .where(col, ">=", this.since).$if(col === "closed_at", (q) => q.where("state", "<>", "OPEN")).where((eb) => this.tracked(eb)));
   }
 }
 
@@ -129,8 +126,9 @@ async function classify(c: Ctx): Promise<NodeCount> {
     members.get(`classify.${k}`)!.add(ref(r));
   }
   const run = c.run;
-  const recent = run ? await c.n(`SELECT COUNT(*) AS n FROM main.classifications${indexedBy(c.db, "classifications_run")} WHERE run_id = :run AND (classifier = 'jev' OR (classifier = 'haiku' AND input_hash IS NOT NULL)) AND at >= :since
-      AND repo IN (SELECT name FROM main.tracked_repos) ${c.andRepo()}`, { run, since: c.since }) : 0;
+  const recent = run ? await c.n(c.db.k.selectFrom("main.classifications").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("run_id", "=", run).where((eb) => verdictExpr(eb)).where("at", ">=", c.since)
+    .where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).where((eb) => c.andRepo(eb))) : 0;
   return {
     counts: {
       ...Object.fromEntries(Object.entries(by).map(([k, v]) => [`classify.${k}`, v])),
@@ -141,8 +139,7 @@ async function classify(c: Ctx): Promise<NodeCount> {
 }
 
 async function decide(c: Ctx): Promise<NodeCount> {
-  const rows = await c.db.prepare(`SELECT repo, number, items, answer, asked_at, answered_at FROM decisions WHERE kind = 'scope'`).all() as
-    { repo: string | null; number: number | null; items: string | null; answer: string | null; asked_at: string; answered_at: string | null }[];
+  const rows = await c.db.all(c.db.k.selectFrom("decisions").select(["repo", "number", "items", "answer", "asked_at", "answered_at"]).where("kind", "=", "scope"));
   const openRefs = await c.openRefs();
   const waiting: Refs = new Set();
   let openDecisions = 0, asked = 0, answered = 0;
@@ -161,8 +158,9 @@ async function decide(c: Ctx): Promise<NodeCount> {
   const byAnswer = new Map<string, Refs>(SCOPE_ANSWERS.map((a) => [a, new Set()]));
   for (const [r, a] of await c.scopeAnswers()) if (openRefs.has(r) && !waiting.has(r) && c.inRepo(r)) byAnswer.get(a)?.add(r);
   // An item a person put on the Backlog without a question counts there, whatever its scope answer was.
-  for (const b of await c.db.prepare(`SELECT repo, number FROM decisions WHERE kind = '${BACKLOG_KIND}' AND answer = 'backlog'`).all() as { repo: string; number: number }[]) {
-    const r = ref(b);
+  for (const b of await c.db.all(c.db.k.selectFrom("decisions").select(["repo", "number"]).where("kind", "=", BACKLOG_KIND).where("answer", "=", "backlog"))) {
+    if (b.repo === null || b.number === null) continue;
+    const r = ref({ repo: b.repo, number: b.number });
     if (!openRefs.has(r) || waiting.has(r) || !c.inRepo(r)) continue;
     for (const set of byAnswer.values()) set.delete(r);
     byAnswer.get("backlog")!.add(r);
@@ -182,10 +180,13 @@ async function decide(c: Ctx): Promise<NodeCount> {
 
 async function review(c: Ctx): Promise<NodeCount> {
   const candidates = await dueRefs(c.db, "review", c.repo ? { repo: c.repo } : {});
-  const last = await c.db.prepare(`WITH last AS (SELECT repo, number, verdict, ROW_NUMBER() OVER (PARTITION BY repo, number ORDER BY at DESC, head_oid DESC) AS k
-      FROM final_reviews WHERE true ${c.andRepo()})
-    SELECT l.repo, l.number, l.verdict FROM last l JOIN items i ON i.repo = l.repo AND i.number = l.number
-    WHERE l.k = 1 AND i.state = 'OPEN'`).all(c.rp) as { repo: string; number: number; verdict: string }[];
+  const last = await c.db.all(c.db.k
+    .with("last", (qb) => qb.selectFrom("final_reviews").select((eb) => ["repo", "number", "verdict",
+      eb.fn.agg<number>("row_number", []).over((o) => o.partitionBy(["repo", "number"]).orderBy("at", "desc").orderBy("head_oid", "desc")).as("k")])
+      .where((eb) => c.andRepo(eb)))
+    .selectFrom("last as l").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "l.repo").onRef("i.number", "=", "l.number"))
+    .select(["i.repo", "i.number", "l.verdict"]).$narrowType<{ verdict: string }>()
+    .where("l.k", "=", 1).where("i.state", "=", "OPEN"));
   // A PR waiting for a review at its new head counts there, not under its old verdict.
   const by = new Map<string, Refs>(VERDICTS.map((v) => [v, new Set()]));
   for (const r of last) if (!candidates.has(ref(r))) by.get(r.verdict)?.add(ref(r));
@@ -196,7 +197,8 @@ async function review(c: Ctx): Promise<NodeCount> {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
       "review.total": all.length,
-      "review.recent.reviewed": await c.n(`SELECT COUNT(*) AS n FROM final_reviews WHERE at >= :since ${c.andRepo()}`, { since: c.since }),
+      "review.recent.reviewed": await c.n(c.db.k.selectFrom("final_reviews").select((eb) => eb.fn.countAll<number>().as("n"))
+        .where("at", ">=", c.since).where((eb) => c.andRepo(eb))),
       "edge.labels.review": all.length, "edge.review.verify": by.get("take")!.size, "edge.review.fixup": takeFix,
     },
     members,
@@ -212,12 +214,14 @@ async function verify(c: Ctx): Promise<NodeCount> {
   for (const p of await dueActions(c.db, "verify", { ...(c.repo ? { repo: c.repo } : {}), bucket: "plan" }))
     if (tracked.has(p.repo)) by.get("verify.waiting")!.add(ref(p));
   // Verifications at the open PR's current head (same head rule as the queue); primary-key joins, no scan of closed PRs' rows.
-  const rows = await c.db.prepare(`SELECT v.repo, v.number, v.state FROM main.verifications v
-    JOIN main.items i ON i.repo = v.repo AND i.number = v.number AND i.state = 'OPEN'
-    LEFT JOIN main.pr_checks c ON c.repo = v.repo AND c.number = v.number
-    WHERE v.state <> 'stale' AND v.repo IN (SELECT name FROM main.tracked_repos) ${c.andRepo("v.repo")}
-      AND v.head_sha = COALESCE(CASE WHEN c.fetched_at IS NOT NULL AND (i.updated_at IS NULL OR c.fetched_at > i.updated_at) THEN c.head_oid END, i.head_oid, c.head_oid)`)
-    .all(c.rp) as { repo: string; number: number; state: string }[];
+  const rows = await c.db.all(c.db.k.selectFrom("main.verifications as v")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "v.repo").onRef("i.number", "=", "v.number").on("i.state", "=", "OPEN"))
+    .leftJoin("main.pr_checks as c", (j) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number"))
+    .select(["v.repo", "v.number", "v.state"])
+    .where("v.state", "<>", "stale").where("v.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).where((eb) => c.andRepo(eb, "v.repo"))
+    .where((eb) => eb("v.head_sha", "=", eb.fn.coalesce(
+      eb.case().when(eb.and([eb("c.fetched_at", "is not", null), eb.or([eb("i.updated_at", "is", null), eb("c.fetched_at", ">", eb.ref("i.updated_at"))])])).then(eb.ref("c.head_oid")).end(),
+      "i.head_oid", "c.head_oid"))));
   for (const r of rows) by.get(`verify.${r.state}`)?.add(ref(r));
   const total = [...by.values()].reduce((a, s) => a + s.size, 0);
   const passing = by.get("verify.passed")!.size + by.get("verify.ci-enough")!.size;
@@ -225,8 +229,8 @@ async function verify(c: Ctx): Promise<NodeCount> {
     counts: {
       ...Object.fromEntries([...by].map(([k, v]) => [k, v.size])),
       "verify.total": total,
-      "verify.recent.finished": await c.n(`SELECT COUNT(*) AS n FROM main.verifications${indexedBy(c.db, "verifications_finished")} WHERE finished_at >= :since
-        AND state IN ('passed', 'ci-enough', 'failed', 'error') AND repo IN (SELECT name FROM main.tracked_repos) ${c.andRepo()}`, { since: c.since }),
+      "verify.recent.finished": await c.n(c.db.k.selectFrom("main.verifications").select((eb) => eb.fn.countAll<number>().as("n")).where("finished_at", ">=", c.since)
+        .where("state", "in", ["passed", "ci-enough", "failed", "error"]).where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).where((eb) => c.andRepo(eb))),
       "edge.verify.merge": passing,
     },
     members: by,
@@ -238,7 +242,6 @@ async function merge(c: Ctx): Promise<NodeCount> {
   const queue = (await cachedQueue(c.db, c.repo ? { repo: c.repo } : {})).filter((e) => tracked.has(e.repo));
   const approvedRepos = new Set(await filterSeq([...new Set(queue.map((e) => e.repo))], async (r) => await mergeApprovalOf(c.db, r)));
   const ready = queue.filter((e) => e.eligible);
-  const since = { since: c.since };
   const of = (...states: QueueState[]): Refs => new Set(queue.filter((e) => states.includes(e.state)).map(ref));
   const members = new Map<string, Refs>([
     ["merge.eligible", new Set(ready.filter((e) => approvedRepos.has(e.repo)).map(ref))],
@@ -251,14 +254,15 @@ async function merge(c: Ctx): Promise<NodeCount> {
     ["merge.ci-approval", new Set(queue.filter((e) => e.state === "ci-approval" && !e.runsBlocked).map(ref))],
     ["merge.ci-approval-person", new Set(queue.filter((e) => e.state === "ci-approval" && e.runsBlocked).map(ref))],
     ...(["ci-failed", "conflict", "needs-fix-up", "waiting-premerge", "waiting-verify", "verify-failed", "verify-error", "declined"] as const).map((s) => [`merge.${s}`, of(s)] as [string, Refs]),
-    ["merge.merged", await c.refs(`SELECT DISTINCT repo, number FROM merges WHERE outcome = 'merged' AND at >= :since ${c.andRepo()}`, since)],
+    ["merge.merged", await c.refs(c.db.k.selectFrom("merges").select(["repo", "number"]).distinct().where("outcome", "=", "merged").where("at", ">=", c.since).where((eb) => c.andRepo(eb)))],
   ]);
   return {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
       "merge.total": queue.length - of("merged").size,
-      "merge.recent.merged": await c.n(`SELECT COUNT(DISTINCT repo || '#' || number) AS n FROM merges WHERE outcome = 'merged' AND at >= :since ${c.andRepo()}`, since),
-      "merge.recent.tries": await c.n(`SELECT COUNT(*) AS n FROM merges WHERE at >= :since ${c.andRepo()}`, since),
+      "merge.recent.merged": await c.n(c.db.k.selectFrom((eb) => eb.selectFrom("merges").select(["repo", "number"]).distinct().where("outcome", "=", "merged").where("at", ">=", c.since)
+        .where((e) => c.andRepo(e)).as("m")).select((eb) => eb.fn.countAll<number>().as("n"))),
+      "merge.recent.tries": await c.n(c.db.k.selectFrom("merges").select((eb) => eb.fn.countAll<number>().as("n")).where("at", ">=", c.since).where((eb) => c.andRepo(eb))),
       "x.mergedAll": of("merged").size,
     },
     members,
@@ -269,7 +273,7 @@ async function labels(c: Ctx): Promise<NodeCount> {
   const repos = c.repo ? [c.repo] : await trackedNames(c.db);
   const approved = new Set(await filterSeq(repos, async (r) => await approvalOf(c.db, r)));
   const openRefs = await c.openRefs();
-  const labelled = new Set((await c.db.prepare(`SELECT DISTINCT repo, number FROM stages WHERE stage = 'labeled' ${c.andRepo()}`).all(c.rp) as { repo: string; number: number }[])
+  const labelled = new Set((await c.db.all(c.db.k.selectFrom("stages").select(["repo", "number"]).distinct().where("stage", "=", "labeled").where((eb) => c.andRepo(eb))))
     .map(ref).filter((r) => openRefs.has(r)));
   const pending: Refs = new Set(), unapproved: Refs = new Set();
   for (const r of await c.open()) {
@@ -281,7 +285,7 @@ async function labels(c: Ctx): Promise<NodeCount> {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
       "labels.total": labelled.size + pending.size + unapproved.size,
-      "labels.recent.labelled": await c.n(`SELECT COUNT(*) AS n FROM stages WHERE stage = 'labeled' AND at >= :since ${c.andRepo()}`, { since: c.since }),
+      "labels.recent.labelled": await c.n(c.db.k.selectFrom("stages").select((eb) => eb.fn.countAll<number>().as("n")).where("stage", "=", "labeled").where("at", ">=", c.since).where((eb) => c.andRepo(eb))),
       "x.repos": repos.length, "x.approved": approved.size,
     },
     members,
@@ -296,23 +300,29 @@ async function dupes(c: Ctx): Promise<NodeCount> {
   // Unjudged pairs whose items still have the hashed text; duplicate_pairs_open reads only the rows without a verdict.
   // CROSS JOIN fixes the order: with a single repo the planner otherwise scans both items tables for the repo and probes the pairs
   // last, which took minutes on a large repo.
-  const pairs = await c.db.prepare(`SELECT p.repo, p.a, p.b, ia.state AS sa, ib.state AS sb FROM main.duplicate_pairs p
-    CROSS JOIN main.items ia ON ia.repo = p.repo AND ia.number = p.a AND ia.embed_hash = p.a_hash
-    CROSS JOIN main.items ib ON ib.repo = p.repo AND ib.number = p.b AND ib.embed_hash = p.b_hash
-    WHERE p.verdict IS NULL AND (ia.state = 'OPEN' OR ib.state = 'OPEN') ${c.tracked("p.repo")}`).all(c.rp) as { repo: string; a: number; b: number; sa: string; sb: string }[];
+  const pairs = await c.db.all(c.db.k.selectFrom("main.duplicate_pairs as p").crossJoin("main.items as ia").crossJoin("main.items as ib")
+    .select(["p.repo", "p.a", "p.b", "ia.state as sa", "ib.state as sb"])
+    .whereRef("ia.repo", "=", "p.repo").whereRef("ia.number", "=", "p.a").whereRef("ia.embed_hash", "=", "p.a_hash")
+    .whereRef("ib.repo", "=", "p.repo").whereRef("ib.number", "=", "p.b").whereRef("ib.embed_hash", "=", "p.b_hash")
+    .where("p.verdict", "is", null).where((eb) => eb.or([eb("ia.state", "=", "OPEN"), eb("ib.state", "=", "OPEN")])).where((eb) => c.tracked(eb, "p.repo")));
   for (const p of pairs) {
     if (p.sa === "OPEN") members.get("dupes.checking")!.add(`${p.repo}#${p.a}`);
     if (p.sb === "OPEN") members.get("dupes.checking")!.add(`${p.repo}#${p.b}`);
   }
   // Open decisions and answered close (the held-out items, see src/dupes/held.ts); decisions_open covers both.
-  const rows = await c.db.prepare(`SELECT d.repo, d.number, d.answer, i.state FROM main.decisions d
-    JOIN main.items i ON i.repo = d.repo AND i.number = d.number
-    WHERE d.kind = 'duplicate' AND d.id NOT LIKE '%:dupegroup:%' AND (d.answer IS NULL OR d.answer = 'close') ${c.tracked("d.repo")}`).all(c.rp) as { repo: string; number: number; answer: string | null; state: string }[];
+  const rows = await c.db.all(c.db.k.selectFrom("main.decisions as d")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+    .select(["i.repo", "i.number", "d.answer", "i.state"])
+    .where("d.kind", "=", "duplicate").where((eb) => eb.not(kx.like(c.db, "d.id", eb.val("%:dupegroup:%"))))
+    .where((eb) => eb.or([eb("d.answer", "is", null), eb("d.answer", "=", "close")])).where((eb) => c.tracked(eb, "d.repo")));
   for (const r of rows) members.get(r.answer === null ? (r.state === "OPEN" ? "dupes.waiting" : "") : r.state === "OPEN" ? "dupes.held" : "dupes.closed")?.add(ref(r));
   // Group decisions hold the members they close.
-  const groupRows = await c.db.prepare(`SELECT gi.repo, gi.number, d.answer, i.state FROM main.dupe_group_items gi
-    JOIN main.decisions d ON d.id = gi.decision_id JOIN main.items i ON i.repo = gi.repo AND i.number = gi.number
-    WHERE gi.role = 'close' AND d.kind = 'duplicate' AND (d.answer IS NULL OR d.answer = 'accept' OR d.answer LIKE 'keep:%') ${c.tracked("gi.repo")}`).all(c.rp) as { repo: string; number: number; answer: string | null; state: string }[];
+  const groupRows = await c.db.all(c.db.k.selectFrom("main.dupe_group_items as gi")
+    .innerJoin("main.decisions as d", "d.id", "gi.decision_id")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "gi.repo").onRef("i.number", "=", "gi.number"))
+    .select(["gi.repo", "gi.number", "d.answer", "i.state"])
+    .where("gi.role", "=", "close").where("d.kind", "=", "duplicate")
+    .where((eb) => eb.or([eb("d.answer", "is", null), eb("d.answer", "=", "accept"), kx.like(c.db, "d.answer", eb.val("keep:%"))])).where((eb) => c.tracked(eb, "gi.repo")));
   for (const r of groupRows) members.get(r.answer === null ? (r.state === "OPEN" ? "dupes.waiting" : "") : r.state === "OPEN" ? "dupes.held" : "dupes.closed")?.add(ref(r));
   const open = (await c.open()).length;
   return {
@@ -328,11 +338,14 @@ async function dupes(c: Ctx): Promise<NodeCount> {
 /** Priority scores (src/priority) and the work rank (src/rank) of the open, embedded items. */
 async function priority(c: Ctx): Promise<NodeCount> {
   const members = new Map<string, Refs>(["scored", "todo", "unsure"].map((k) => [`priority.${k}`, new Set()]));
-  const rows = await c.db.prepare(`SELECT i.repo, i.number, CASE WHEN p.repo IS NULL OR p.text_hash <> i.embed_hash THEN 'todo' WHEN p.model = 'jev-unsure' THEN 'unsure' ELSE 'scored' END AS s
-    FROM main.items i LEFT JOIN main.item_priority p ON p.repo = i.repo AND p.number = i.number
-    WHERE i.state = 'OPEN' AND i.embed_hash IS NOT NULL ${c.tracked("i.repo")}`).all(c.rp) as { repo: string; number: number; s: string }[];
+  const rows = await c.db.all(c.db.k.selectFrom("main.items as i")
+    .leftJoin("main.item_priority as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select((eb) => ["i.repo", "i.number", eb.case().when(eb.or([eb("p.repo", "is", null), eb("p.text_hash", "<>", eb.ref("i.embed_hash"))])).then("todo")
+      .when("p.model", "=", "jev-unsure").then("unsure").else("scored").end().as("s")])
+    .where("i.state", "=", "OPEN").where("i.embed_hash", "is not", null).where((eb) => c.tracked(eb, "i.repo")));
   for (const r of rows) members.get(`priority.${r.s}`)!.add(ref(r));
-  const rank = await c.db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(score), 0) AS top FROM main.item_rank WHERE true ${c.tracked()}`).get(c.rp) as { n: number; top: number };
+  const rank = (await c.db.get(c.db.k.selectFrom("main.item_rank")
+    .select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.coalesce(eb.fn.max<number | null>("score"), eb.lit(0)).as("top")]).where((eb) => c.tracked(eb))))!;
   return {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
@@ -351,8 +364,9 @@ async function fix(c: Ctx): Promise<NodeCount> {
     const bucket = members.get(await fixIssueApprovalOf(c.db, repo) ? "fix.candidates" : "fix.unapproved")!;
     for (const r of await dueRefs(c.db, "fixissue", { repo, bucket: "new" })) bucket.add(r);
   }
-  const rows = await c.db.prepare(`SELECT a.repo, a.number, a.state FROM main.fix_attempts a
-    JOIN main.items i ON i.repo = a.repo AND i.number = a.number AND i.state = 'OPEN' WHERE true ${c.tracked("a.repo")}`).all(c.rp) as { repo: string; number: number; state: string }[];
+  const rows = await c.db.all(c.db.k.selectFrom("main.fix_attempts as a")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number").on("i.state", "=", "OPEN"))
+    .select(["a.repo", "a.number", "a.state"]).where((eb) => c.tracked(eb, "a.repo")));
   for (const r of rows) members.get(`fix.${r.state}`)?.add(ref(r));
   // A skipped issue whose text changed is a candidate again.
   for (const r of members.get("fix.candidates")!) members.get("fix.skipped")!.delete(r);
@@ -369,9 +383,9 @@ async function fixup(c: Ctx): Promise<NodeCount> {
   const hold = members.get("fixup.hold")!;
   const tracked = new Set(await c.repos());
   // The buckets are part of each PR's cached view.
-  const fixupOf = jsonText(c.db, "view", "$.fixup"), cifixOf = jsonText(c.db, "view", "$.cifix");
-  const cached = await c.db.prepare(`SELECT repo, number, ${fixupOf} AS fixup, ${cifixOf} AS cifix FROM main.item_plans
-    WHERE kind = 'pr' AND (${fixupOf} IS NOT NULL OR ${cifixOf} IS NOT NULL) ${c.andRepo()}`).all(c.rp) as { repo: string; number: number; fixup: string | null; cifix: string | null }[];
+  const fixupOf = kx.jsonText(c.db, "view", "$.fixup"), cifixOf = kx.jsonText(c.db, "view", "$.cifix");
+  const cached = await c.db.all(c.db.k.selectFrom("main.item_plans").select(["repo", "number", fixupOf.as("fixup"), cifixOf.as("cifix")])
+    .where("kind", "=", "pr").where((eb) => eb.or([eb(fixupOf, "is not", null), eb(cifixOf, "is not", null)])).where((eb) => c.andRepo(eb)));
   const facts = cached.filter((f) => tracked.has(f.repo));
   for (const f of facts) {
     if (!f.fixup) continue;
@@ -380,17 +394,19 @@ async function fixup(c: Ctx): Promise<NodeCount> {
   }
   const waiting = hold.size + sizeOf(members, "fixup.fix") + sizeOf(members, "fixup.unapproved") + sizeOf(members, "fixup.asked");
   const pushed = members.get("fixup.pushed")!;
-  for (const r of await c.refs(`SELECT DISTINCT f.repo, f.number FROM main.fixups f JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN'
-      WHERE f.state = 'pushed' ${c.tracked("f.repo")}`)) if (![...members.values()].some((s) => s !== pushed && s.has(r))) pushed.add(r);
+  for (const r of await c.refs(c.db.k.selectFrom("main.fixups as f")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").on("i.state", "=", "OPEN"))
+    .select(["f.repo", "f.number"]).distinct().where("f.state", "=", "pushed").where((eb) => c.tracked(eb, "f.repo")))) if (![...members.values()].some((s) => s !== pushed && s.has(r))) pushed.add(r);
   // CI fix: PRs whose gate check fails, by what the step does next; a pushed CI fix counts like a pushed fix-up.
   for (const f of facts) if (f.cifix) members.get(`fixup.${f.cifix}`)!.add(ref(f));
-  for (const r of await c.refs(`SELECT DISTINCT f.repo, f.number FROM main.ci_fixes f JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN'
-      WHERE f.state = 'pushed' ${c.tracked("f.repo")}`)) members.get("fixup.cifix-pushed")!.add(r);
+  for (const r of await c.refs(c.db.k.selectFrom("main.ci_fixes as f")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").on("i.state", "=", "OPEN"))
+    .select(["f.repo", "f.number"]).distinct().where("f.state", "=", "pushed").where((eb) => c.tracked(eb, "f.repo")))) members.get("fixup.cifix-pushed")!.add(r);
   return {
     counts: {
       ...Object.fromEntries([...members].map(([k, v]) => [k, v.size])),
       "fixup.total": waiting + pushed.size, "edge.fixup.review": pushed.size,
-      "fixup.recent.pushed": await c.n(`SELECT COUNT(*) AS n FROM main.fixups WHERE state = 'pushed' AND created_at >= :since ${c.tracked()}`, { since: c.since }),
+      "fixup.recent.pushed": await c.n(c.db.k.selectFrom("main.fixups").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "pushed").where("created_at", ">=", c.since).where((eb) => c.tracked(eb))),
     },
     members,
   };
@@ -400,12 +416,13 @@ async function fixup(c: Ctx): Promise<NodeCount> {
 async function act(c: Ctx): Promise<NodeCount> {
   const members = new Map<string, Refs>(["todo", "failed", "unapproved", "done"].map((k) => [`act.${k}`, new Set()]));
   for (const repo of await c.repos()) {
-    const failed = new Set((await c.db.prepare("SELECT decision_id, number FROM main.actions WHERE repo = ? AND state = 'failed'").all(repo) as { decision_id: string; number: number }[]).map((r) => `${r.decision_id}\0${r.number}`));
+    const failed = new Set((await c.db.all(c.db.k.selectFrom("main.actions").select(["decision_id", "number"]).where("repo", "=", repo).where("state", "=", "failed")))
+      .map((r) => `${r.decision_id}\0${r.number}`));
     const approved = await commentApprovalOf(c.db, repo) !== null;
     for (const p of (await dueActions(c.db, "act", { repo })).filter((x) => !x.action.params?.ask))
       members.get(!approved ? "act.unapproved" : failed.has(`${p.action.params!.decisionId}\0${p.number}`) ? "act.failed" : "act.todo")!.add(`${repo}#${p.number}`);
   }
-  const done = await c.n(`SELECT COUNT(*) AS n FROM main.actions WHERE state = 'done' AND created_at >= :since ${c.tracked()}`, { since: c.since });
+  const done = await c.n(c.db.k.selectFrom("main.actions").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "done").where("created_at", ">=", c.since).where((eb) => c.tracked(eb)));
   const waiting = sizeOf(members, "act.todo") + sizeOf(members, "act.failed") + sizeOf(members, "act.unapproved");
   return {
     counts: {
@@ -428,8 +445,8 @@ async function postmerge(c: Ctx): Promise<NodeCount> {
       members.get(approved ? "postmerge.to-file" : "postmerge.unapproved")!.add(`${repo}#${d.number}`);
     }
   }
-  const recent = await c.refs(`SELECT repo, number FROM main.postmerge_reviews WHERE error IS NULL AND at >= :since ${c.andRepo()}`, { since: c.since });
-  const filed = await c.refs(`SELECT DISTINCT repo, number FROM main.postmerge_followups WHERE state = 'filed' AND at >= :since ${c.andRepo()}`, { since: c.since });
+  const recent = await c.refs(c.db.k.selectFrom("main.postmerge_reviews").select(["repo", "number"]).where("error", "is", null).where("at", ">=", c.since).where((eb) => c.andRepo(eb)));
+  const filed = await c.refs(c.db.k.selectFrom("main.postmerge_followups").select(["repo", "number"]).distinct().where("state", "=", "filed").where("at", ">=", c.since).where((eb) => c.andRepo(eb)));
   for (const r of filed) members.get("postmerge.filed")!.add(r);
   for (const r of recent) if (!filed.has(r) && !toFile.has(r)) members.get("postmerge.nothing")!.add(r);
   return {
