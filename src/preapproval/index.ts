@@ -34,8 +34,10 @@ import { reviewHold } from "../review/gate.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { openOperatorFixups, operatorTriesLeft, queuedOperatorFix } from "./state.ts";
 import { refreshSettlers, type RefreshDeps } from "./permissions.ts";
-import { lockLiveSql } from "../answers/hold.ts";
+import { lockLiveExpr } from "../answers/hold.ts";
 import type { Db } from "../db/index.ts";
+import type { NotNull } from "kysely";
+import * as kx from "../db/kx.ts";
 
 export type PipelineStep = Extract<Step, { kind: "review" | "fixup" }>;
 
@@ -52,7 +54,9 @@ type Row = { id: number; repo: string; number: number; by: string; at: string; i
 type PrRow = { state: string; head_oid: string | null; kind: string; head_repo: string | null; head_ref: string | null };
 
 const prRow = async (db: Db, repo: string, n: number): Promise<PrRow | undefined> =>
-  await db.prepare("SELECT state, head_oid, kind, head_repo, head_ref FROM items WHERE repo = ? AND number = ?").get(repo, n) as PrRow | undefined;
+  await db.get(db.k.selectFrom("items").select(["state", "head_oid", "kind", "head_repo", "head_ref"]).where("repo", "=", repo).where("number", "=", n));
+
+const preapprovalRows = (db: Db) => db.k.selectFrom("preapprovals").select(kx.cols("preapprovals")).$narrowType<{ state: Row["state"] }>();
 
 /** The PR's plan state as it would be with a live pre-approved merge, which lifts the label gate: what a new pre-approval can count on. */
 function preapprovedState(f: PrFacts | null): string | null {
@@ -63,13 +67,13 @@ const toView = (r: Row): Preapproval => ({ id: r.id, by: r.by, at: r.at, instruc
 
 /** The newest pre-approved merge of the PR, or null. */
 export async function preapprovalOf(db: Db, repo: string, n: number): Promise<Preapproval | null> {
-  const r = await db.prepare("SELECT * FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 1").get(repo, n) as Row | undefined;
+  const r = await db.get(preapprovalRows(db).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1));
   return r ? toView(r) : null;
 }
 
 /** Every pre-approved merge of the PR, oldest first. */
 export async function preapprovalsOf(db: Db, repo: string, n: number): Promise<Preapproval[]> {
-  return (await db.prepare("SELECT * FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id").all(repo, n) as Row[]).map(toView);
+  return (await db.all(preapprovalRows(db).where("repo", "=", repo).where("number", "=", n).orderBy("id"))).map(toView);
 }
 
 /** The system line of the item's thread (when it has a conversation). Not inside a transaction: the thread writes its own. */
@@ -79,11 +83,12 @@ async function say(db: Db, repo: string, n: number, text: string): Promise<void>
 
 /** Moves the row to `to` when it is still in its state; audits the transition (the trace shows it). Callable inside a transaction. */
 async function moveRaw(db: Db, p: Row, to: Row["state"], o: { head?: string | null; reason?: string | null; by?: string; via?: string }): Promise<boolean> {
-  const r = await db.prepare("UPDATE preapprovals SET state = ?, head = COALESCE(?, head), reason = ?, updated_at = ? WHERE id = ? AND state = ?")
-    .run(to, o.head ?? null, o.reason ?? null, iso(), p.id, p.state);
+  // A head the call does not give leaves the row's head as it is.
+  const r = await db.run(db.k.updateTable("preapprovals").set({ state: to, reason: o.reason ?? null, updated_at: iso(), ...(o.head != null ? { head: o.head } : {}) })
+    .where("id", "=", p.id).where("state", "=", p.state));
   if (r.changes !== 1) return false;
   // A fix-up request that has no try yet must not start after the pre-approval ended; a push that is already running is recorded by the fix-up step as usual.
-  if (["asked", "cancelled", "failed", "merged"].includes(to) && p.fix_id !== null) await db.prepare("UPDATE operator_fixups SET state = 'ended' WHERE id = ?").run(p.fix_id);
+  if (["asked", "cancelled", "failed", "merged"].includes(to) && p.fix_id !== null) await db.run(db.k.updateTable("operator_fixups").set({ state: "ended" }).where("id", "=", p.fix_id));
   const head = o.head ?? p.head;
   await audit(db, o.by ?? ACTOR, "preapproval", `${p.repo}#${p.number}`, { id: p.id, from: p.state, state: to, ...(head ? { head } : {}), ...(o.reason ? { reason: o.reason } : {}), ...(o.via ? { via: o.via } : {}) });
   return true;
@@ -106,8 +111,9 @@ const isOperator = async (db: Db, login: string | null, repo: string, held?: Rea
 export async function revertAnswer(db: Db, p: Row, by: string): Promise<boolean> {
   if (!p.head) return false;
   const id = mergeDecisionId(p.repo, p.number, p.head);
-  if (!await db.prepare("SELECT 1 FROM audit WHERE action = 'answer' AND target = ? AND details LIKE '%\"source\":\"preapproval\"%'").get(id)) return false;
-  const r = await db.prepare("UPDATE main.decisions SET answer = NULL, answer_note = NULL, exceptions = NULL, answered_by = NULL, answered_at = NULL, applied_at = NULL, adopted_opinion = NULL, exec_state = NULL, exec_reason = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND answer = 'merge' AND applied_at IS NULL AND answered_by = ?").run(id, p.by);
+  if (!await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "answer").where("target", "=", id).where((w) => kx.like(db, "details", w.val('%"source":"preapproval"%'))))) return false;
+  const r = await db.run(db.k.updateTable("main.decisions").set({ answer: null, answer_note: null, exceptions: null, answered_by: null, answered_at: null, applied_at: null, adopted_opinion: null, exec_state: null, exec_reason: null, dispute_by: null, dispute_reason: null, dispute_at: null })
+    .where("id", "=", id).where("answer", "=", "merge").where("applied_at", "is", null).where("answered_by", "=", p.by));
   if (r.changes !== 1) return false;
   await audit(db, by, "undo", id, { answer: "merge", source: "preapproval" });
   return true;
@@ -117,13 +123,13 @@ export async function revertAnswer(db: Db, p: Row, by: string): Promise<boolean>
 async function cancelRow(db: Db, id: number, by: string, reason: string, line: string, guard = false, via?: string): Promise<boolean> {
   // Nothing is written before an early return, so committing leaves the database as a rollback would.
   const p = await db.write(async () => {
-    const p = await db.prepare("SELECT * FROM preapprovals WHERE id = ?").get(id) as Row | undefined;
+    const p = await db.get(preapprovalRows(db).where("id", "=", id));
     if (!p || !(ACTIVE as readonly string[]).includes(p.state)) return null;
     // Past the guard of the merge queue, a cancel cannot stop the merge: a batch holds the PR, or it is merged.
     if (guard && p.state === "queued") {
       if (await inActiveBatch(db, p.repo, p.number)) throw new Error("the PR is still in an integration batch");
       if (await mergeRunning(db, p.repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
-      if (p.head && await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND head_oid = ? AND outcome = 'merged'").get(p.repo, p.number, p.head)) throw new Error("the PR is already merged");
+      if (p.head && await db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", p.head).where("outcome", "=", "merged"))) throw new Error("the PR is already merged");
     }
     if (!await moveRaw(db, p, "cancelled", { by, reason, via })) return null;
     await revertAnswer(db, p, by);
@@ -158,7 +164,7 @@ export async function runPipelineStep(db: Db, o: { repo: string; number: number;
   if (instructions.length > INSTRUCTIONS_MAX) throw new Error(`the instructions are over ${INSTRUCTIONS_MAX} characters`);
   const head = it.head_oid;
   if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
-  const checks = await db.prepare("SELECT head_oid, mergeable, maintainer_can_modify FROM pr_checks WHERE repo = ? AND number = ?").get(repo, number) as { head_oid: string; mergeable: string | null; maintainer_can_modify: number | null } | undefined;
+  const checks = await db.get(db.k.selectFrom("pr_checks").select(["head_oid", "mergeable", "maintainer_can_modify"]).where("repo", "=", repo).where("number", "=", number));
   if (checks?.mergeable === "CONFLICTING") throw new Error(`${ref} conflicts with its base branch: the conflict merge comes first`);
   if (!await pushApprovalOf(db, repo)) throw new Error(`pushing is not approved for ${repo}`);
   const writes = await ensureAuthorWrites(db, repo, number, it.head_repo);
@@ -168,7 +174,7 @@ export async function runPipelineStep(db: Db, o: { repo: string; number: number;
   if (await queuedOperatorFix(db, repo, number, head)) throw new Error(`a fix-up of ${ref} is already queued`);
   const merge = step.merge === true;
   const activeCheck = async () => {
-    if (await db.prepare(`SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND state IN (${ACTIVE.map(() => "?").join(",")})`).get(repo, number, ...ACTIVE)) throw new Error(`${ref} already has a pre-approved merge in progress`);
+    if (await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("state", "in", ACTIVE))) throw new Error(`${ref} already has a pre-approved merge in progress`);
   };
   if (merge) {
     if (!await mergeApprovalOf(db, repo)) throw new Error(`merging is not approved for ${repo}`);
@@ -179,10 +185,10 @@ export async function runPipelineStep(db: Db, o: { repo: string; number: number;
   await db.write(async () => {
     // Checked again under the write lock: another writer may have started one since the first check.
     if (merge) await activeCheck();
-    const fix = Number((await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES (?, ?, ?, ?, ?, ?)").run(repo, number, head, instructions, by, at)).lastInsertRowid);
+    const fix = (await db.get(db.k.insertInto("operator_fixups").values({ repo, number, from_head: head, instructions, by, at }).returning("id")))!.id;
     if (merge) {
-      id = Number((await db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, updated_at, fix_id) VALUES (?, ?, ?, ?, ?, 'fixup', ?, ?, ?)").run(repo, number, by, at, instructions, head, at, fix)).lastInsertRowid);
-      await db.prepare("UPDATE operator_fixups SET preapproval_id = ? WHERE id = ?").run(id, fix);
+      id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions, state: "fixup", from_head: head, updated_at: at, fix_id: fix }).returning("id")))!.id;
+      await db.run(db.k.updateTable("operator_fixups").set({ preapproval_id: id }).where("id", "=", fix));
     }
     await audit(db, by, merge ? "preapproval" : "operator-fixup", ref, merge ? { id, state: "fixup", head } : { head, queued: true });
   });
@@ -228,13 +234,13 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
   if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
   if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
   if (!await mergeApprovalOf(db, repo)) throw new Error(`merging is not approved for ${repo}`);
-  const active = async () => await db.prepare(`SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND state IN (${ACTIVE.map(() => "?").join(",")})`).get(repo, number, ...ACTIVE);
+  const active = async () => await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("state", "in", ACTIVE));
   if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
   const at = iso();
   await db.write(async () => {
     // Checked again under the write lock: another writer may have started one since the first check.
     if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
-    const id = Number((await db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, head, updated_at, fix_id) VALUES (?, ?, ?, ?, '', 'review', ?, ?, ?, NULL)").run(repo, number, by, at, head, head, at)).lastInsertRowid);
+    const id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions: "", state: "review", from_head: head, head, updated_at: at, fix_id: null }).returning("id")))!.id;
     await audit(db, by, "preapproval", ref, { id, state: "review", head, queued: "merge-queue", ...(via ? { via } : {}) });
   });
   await say(db, repo, number, `${by} added the PR to the merge queue at ${short(head)}: it merges once the review there says take, the pre-merge review is clean and CI is green.`);
@@ -281,12 +287,12 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
   const stopped = await db.write(async (): Promise<Hand | null> => {
     if (!await isOperator(db, p.by, p.repo, held)) return { stop: `${p.by} no longer settles decisions on ${p.repo}` };
     // A hand-over waits for a running verification and never answers Merge over a failed one: the operator is asked.
-    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('planned', 'running')").get(p.repo, p.number, head)) return { wait: true };
-    if (await db.prepare("SELECT 1 FROM verifications WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('failed', 'error')").get(p.repo, p.number, head)) return { stop: `verification failed at ${headName(p)}` };
+    if (await db.get(db.k.selectFrom("verifications").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_sha", "=", head).where("state", "in", ["planned", "running"]))) return { wait: true };
+    if (await db.get(db.k.selectFrom("verifications").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_sha", "=", head).where("state", "in", ["failed", "error"]))) return { stop: `verification failed at ${headName(p)}` };
     const d0 = await getDecision(db, id);
     if (d0 && d0.answer !== null && d0.answer !== "merge") return { stop: `the Merge? question at this head was answered ${d0.answer}` };
     // A conversation card is settling the question right now: the hand-over waits for it instead of answering over it.
-    if (d0 && d0.answer === null && await db.prepare(`SELECT 1 FROM main.decisions WHERE id = ? AND ${lockLiveSql("decisions")}`).get(id)) return { wait: true };
+    if (d0 && d0.answer === null && await db.get(db.k.selectFrom("main.decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", id).where((eb) => lockLiveExpr(db, eb, "decisions")))) return { wait: true };
     if (!await moveRaw(db, p, "queued", { head })) return { gone: true };
     if (!await getDecision(db, id)) {
       await ask(db, [{
@@ -302,9 +308,9 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
       }], true);
     }
     if ((await getDecision(db, id))!.answer === null) {
-      await db.prepare(`UPDATE main.decisions SET answer = 'merge', answer_note = NULL, exceptions = NULL, answered_by = ?, answered_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL
-        WHERE id = ? AND answer IS NULL AND NOT ${lockLiveSql("decisions")}`).run(p.by, at, id);
-      await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(id);
+      await db.run(db.k.updateTable("main.decisions").set({ answer: "merge", answer_note: null, exceptions: null, answered_by: p.by, answered_at: at, adopted_opinion: null, snoozed_by: null, snoozed_at: null })
+        .where("id", "=", id).where("answer", "is", null).where((eb) => eb.not(lockLiveExpr(db, eb, "decisions"))));
+      await db.run(db.k.deleteFrom("main.decision_claims").where("decision_id", "=", id));
       await replaceProposedCards(db, p.repo, p.number, id);
       await audit(db, p.by, "answer", id, { answer: "merge", source: "preapproval" });
     }
@@ -319,7 +325,8 @@ type ReviewRead = { kind: "none" | "stale" | "take" | "takefix" | "bad"; why: st
 
 /** The Opus review at `head`: a sure take that is not stale is the only one a pre-approved merge goes on with. */
 async function reviewAt(db: Db, p: Row, head: string): Promise<ReviewRead> {
-  const r = await db.prepare("SELECT verdict, sure, reason FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(p.repo, p.number, head) as { verdict: string; sure: number | null; reason: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("opus_reviews").select(["verdict", "sure", "reason"]).$narrowType<{ verdict: NotNull }>()
+    .where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head).where("verdict", "is not", null));
   if (!r) return { kind: "none", why: "" };
   if ((await staleReviews(db, p.repo)).has(`${p.repo}#${p.number}@${head}`)) return { kind: "stale", why: "" };
   if (r.verdict === "take" && r.sure === 1) return { kind: "take", why: "" };
@@ -333,11 +340,12 @@ async function reviewAt(db: Db, p: Row, head: string): Promise<ReviewRead> {
  * The review's fix-up counts only for a row that began with the operator's own fix-up: a plain Merge answer carried across a base merge never covered model-written code.
  */
 async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
-  if (p.fix_id !== null && await db.prepare("SELECT 1 FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND to_head = ? AND COALESCE(source, 'review') = 'review' AND state IN ('pushing', 'pushed')").get(p.repo, p.number, p.head, cur)) return "fix-up for the review's fixes";
+  if (p.fix_id !== null && await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur)
+    .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", "review")).where("state", "in", ["pushing", "pushed"]))) return "fix-up for the review's fixes";
   // Only a base merge that left the PR's own diff unchanged continues an answer; a CI fix or a resolved conflict is model-written code nobody saw.
-  if (await db.prepare("SELECT 1 FROM conflict_merges WHERE repo = ? AND number = ? AND from_head = ? AND to_head = ? AND state = 'merged' AND own_diff = 'same'").get(p.repo, p.number, p.head, cur)) return "base merge";
+  if (await db.get(db.k.selectFrom("conflict_merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur).where("state", "=", "merged").where("own_diff", "=", "same"))) return "base merge";
   // An autorepin (src/repin) is no model's code either: the revs of a dependency moved to a merge commit on its default branch, as someone who may queue the PR asked.
-  if (await db.prepare("SELECT 1 FROM main.autorepins WHERE repo = ? AND number = ? AND head = ? AND to_head = ? AND state IN ('waiting', 'locking', 'pushed')").get(p.repo, p.number, p.head, cur)) return "autorepin";
+  if (await db.get(db.k.selectFrom("main.autorepins").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head", "=", p.head).where("to_head", "=", cur).where("state", "in", ["waiting", "locking", "pushed"]))) return "autorepin";
   return null;
 }
 
@@ -372,7 +380,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
   };
   if (!it) return cancel("the PR is gone");
   const cur = it.head_oid;
-  const mergedByQueue = !!p.head && !!await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND head_oid = ? AND outcome = 'merged'").get(p.repo, p.number, p.head);
+  const mergedByQueue = !!p.head && !!await db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", p.head).where("outcome", "=", "merged"));
   if (p.state === "queued" && (it.state === "MERGED" || mergedByQueue)) return void await move(db, p, "merged", { line: "The pre-approved merge went through: the PR is merged." });
   if (it.state === "MERGED") return cancel(p.fix_id !== null ? "the PR was merged before the fix-up finished" : "the PR was merged before the pre-approved merge reached the merge queue");
   if (it.state !== "OPEN") return cancel("the PR was closed");
@@ -381,7 +389,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
   if (p.state !== "queued" && !await isOperator(db, p.by, p.repo, held)) return cancel(`${p.by} no longer settles decisions on ${p.repo}`);
 
   if (p.state === "fixup") {
-    const fx = await db.prepare("SELECT state, to_head, reason FROM fixups WHERE operator_fix = ? AND source = 'operator' ORDER BY rowid DESC LIMIT 1").get(p.fix_id) as { state: string; to_head: string | null; reason: string | null } | undefined;
+    const fx = await db.get(db.k.selectFrom("fixups").select(["state", "to_head", "reason"]).where("operator_fix", "=", p.fix_id).where("source", "=", "operator").orderBy(kx.rowid("fixups"), "desc").limit(1));
     if (fx?.state === "pushed" && fx.to_head) return void await move(db, p, "review", { head: fx.to_head, line: `The fix-up pushed ${short(fx.to_head)}; Opus reviews it next.` });
     if (fx && FAILED_FIXUP.includes(fx.state)) {
       const why = `the fix-up ${fx.state}${fx.reason ? `: ${oneLine(fx.reason, 120)}` : ""}`;
@@ -404,9 +412,9 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
   const head = p.head!;
   if (cur !== null && cur !== head) {
     // The mirror row shows the old head until a sync that started after the push has finished (synced_at is the sync's start; the row's state entry follows the push); a review at the pushed head also shows the mirror saw it.
-    const synced = (await db.prepare("SELECT synced_at FROM repos WHERE name = ?").get(p.repo) as { synced_at: string | null } | undefined)?.synced_at ?? null;
+    const synced = (await db.get(db.k.selectFrom("repos").select("synced_at").where("name", "=", p.repo)))?.synced_at ?? null;
     const lag = p.state === "review" && cur === p.from_head && (synced === null || synced <= p.updated_at)
-      && !await db.prepare("SELECT 1 FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(p.repo, p.number, head);
+      && !await db.get(db.k.selectFrom("opus_reviews").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head));
     if (!lag && p.state !== "queued") {
       // The pipeline's own CI fix or conflict merge on the pushed head carries the pre-approval on: the new head needs the whole chain again.
       const own = await ownPush(db, p, cur);
@@ -450,7 +458,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (r.kind === "takefix" && p.fix_id === null) return await stop("asked", `the review of ${headName(p)} asks for fixes`, head, [reviewFact(p, `take-fix${r.why ? `: ${r.why}` : ""}`)]);
     if (r.kind === "takefix") return void await move(db, p, "review", { line: "The review of the pushed head now asks for fixes; the pipeline's fix-up comes first." });
     if (r.kind === "bad") return await stop("asked", r.why, head, [reviewFact(p, r.why)]);
-    const c = await db.prepare("SELECT overall, mergeable FROM pr_checks WHERE repo = ? AND number = ? AND head_oid = ?").get(p.repo, p.number, head) as { overall: string; mergeable: string | null } | undefined;
+    const c = await db.get(db.k.selectFrom("pr_checks").select(["overall", "mergeable"]).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head));
     if (!c || c.overall === "pending") return;
     if (c.overall === "failure") {
       // The CI fix step works the red head as it would for any PR; its push is a head the operator did not see, so the row ends and the Merge? question is asked there. The operator decides when the step has given up.
@@ -489,9 +497,9 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
 /** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
 async function endStaleRequests(db: Db, held: ReadonlySet<string>): Promise<void> {
   // A request whose maker stopped settling (a maintainer after the setting went off, the repo left the app identity, a demotion) is dropped before the planner can push it.
-  for (const o of await db.prepare("SELECT id, repo, number, from_head, by, preapproval_id FROM operator_fixups WHERE state = 'queued'").all() as { id: number; repo: string; number: number; from_head: string; by: string; preapproval_id: number | null }[]) {
+  for (const o of await db.all(db.k.selectFrom("operator_fixups").select(["id", "repo", "number", "from_head", "by", "preapproval_id"]).where("state", "=", "queued").orderBy("id"))) {
     if (o.preapproval_id !== null || await isOperator(db, o.by, o.repo, held)) continue;
-    if ((await db.prepare("UPDATE operator_fixups SET state = 'ended' WHERE id = ? AND state = 'queued'").run(o.id)).changes !== 1) continue;
+    if ((await db.run(db.k.updateTable("operator_fixups").set({ state: "ended" }).where("id", "=", o.id).where("state", "=", "queued"))).changes !== 1) continue;
     await audit(db, ACTOR, "operator-fixup", `${o.repo}#${o.number}`, { id: o.id, ended: true, reason: "the requester no longer settles here" });
     await say(db, o.repo, o.number, `The queued fix-up of ${short(o.from_head)} was dropped: ${o.by} no longer settles decisions on ${o.repo}.`);
   }
@@ -500,7 +508,7 @@ async function endStaleRequests(db: Db, held: ReadonlySet<string>): Promise<void
     const f = await loadPrFact(db, o.repo, o.number);
     const why = !f ? "the PR is no longer open" : f.head !== o.head ? `the head moved to ${short(f.head)}` : o.started ? null : await whyNotPlanned(db, f);
     if (!why) continue;
-    if ((await db.prepare("UPDATE operator_fixups SET state = 'ended' WHERE id = ? AND state = 'queued'").run(o.id)).changes !== 1) continue;
+    if ((await db.run(db.k.updateTable("operator_fixups").set({ state: "ended" }).where("id", "=", o.id).where("state", "=", "queued"))).changes !== 1) continue;
     await audit(db, ACTOR, "operator-fixup", `${o.repo}#${o.number}`, { id: o.id, ended: true, reason: why });
     await say(db, o.repo, o.number, `The queued fix-up of ${short(o.head)} was dropped: ${why}.`);
   }
@@ -509,9 +517,9 @@ async function endStaleRequests(db: Db, held: ReadonlySet<string>): Promise<void
 /** A cancel that came too late for a merge already past its guard: the merge row that appears at the head turns the row into merged. */
 async function settleCancelled(db: Db): Promise<void> {
   const since = new Date(Date.now() - 86_400_000).toISOString();
-  const rows = await db.prepare("SELECT * FROM preapprovals WHERE state = 'cancelled' AND head IS NOT NULL AND updated_at > ?").all(since) as Row[];
+  const rows = await db.all(preapprovalRows(db).$narrowType<{ head: NotNull }>().where("state", "=", "cancelled").where("head", "is not", null).where("updated_at", ">", since).orderBy("id"));
   for (const p of rows) {
-    if (await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND head_oid = ? AND outcome = 'merged' AND at >= ?").get(p.repo, p.number, p.head, p.at)) await move(db, p, "merged", { line: "The merge went through before the cancel took effect: the PR is merged." });
+    if (await db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", p.head).where("outcome", "=", "merged").where("at", ">=", p.at))) await move(db, p, "merged", { line: "The merge went through before the cancel took effect: the PR is merged." });
   }
 }
 
@@ -521,21 +529,24 @@ async function settleCancelled(db: Db): Promise<void> {
  * review and CI runs again before the hand-over answers the Merge? question at H2. One row per (PR, H2); the row's existence is the memory.
  */
 async function carryAnswers(db: Db, held: ReadonlySet<string>): Promise<void> {
-  const pushes = await db.prepare(`SELECT m.repo, m.number, m.from_head, m.to_head, 'base merge' AS what FROM conflict_merges m WHERE m.state = 'merged' AND m.own_diff = 'same' AND m.to_head IS NOT NULL AND m.repo IN (SELECT name FROM main.tracked_repos)`).all() as { repo: string; number: number; from_head: string; to_head: string; what: string }[];
+  const pushes = await db.all(db.k.selectFrom("conflict_merges as m").select(["m.repo", "m.number", "m.from_head", "m.to_head", (eb) => eb.val("base merge").as("what")]).$narrowType<{ to_head: NotNull }>()
+    .where("m.state", "=", "merged").where("m.own_diff", "=", "same").where("m.to_head", "is not", null)
+    .where((eb) => eb("m.repo", "in", eb.selectFrom("main.tracked_repos").select("name"))));
   for (const x of pushes) {
     const it = await prRow(db, x.repo, x.number);
     if (!it || it.kind !== "pr" || it.state !== "OPEN" || it.head_oid !== x.to_head) continue;
     const d = await getDecision(db, mergeDecisionId(x.repo, x.number, x.from_head));
     if (!d || d.answer !== "merge" || !d.answered_by || !await isOperator(db, d.answered_by, x.repo, held)) continue;
-    if (await db.prepare(`SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND (head = ? OR state IN (${ACTIVE.map(() => "?").join(",")}))`).get(x.repo, x.number, x.to_head, ...ACTIVE)) continue;
+    if (await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", x.repo).where("number", "=", x.number).where((eb) => eb.or([eb("head", "=", x.to_head), eb("state", "in", ACTIVE)])))) continue;
     // An answer the hand-over of a row wrote is that row's own; its ownPush handling carries it while the row is active.
-    if (await db.prepare("SELECT 1 FROM audit WHERE action = 'answer' AND target = ? AND details LIKE '%\"source\":\"preapproval\"%'").get(d.id) && await db.prepare(`SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND head = ? AND state IN (${ACTIVE.map(() => "?").join(",")})`).get(x.repo, x.number, x.from_head, ...ACTIVE)) continue;
+    if (await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "answer").where("target", "=", d.id).where((w) => kx.like(db, "details", w.val('%"source":"preapproval"%'))))
+      && await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", x.repo).where("number", "=", x.number).where("head", "=", x.from_head).where("state", "in", ACTIVE))) continue;
     if (!await mergeApprovalOf(db, x.repo)) continue;
     const at = iso();
     const carried = await db.write(async () => {
       // Re-check under the write lock: another tick may have created it.
-      if (await db.prepare("SELECT 1 FROM preapprovals WHERE repo = ? AND number = ? AND head = ?").get(x.repo, x.number, x.to_head)) return false;
-      const id = Number((await db.prepare("INSERT INTO preapprovals (repo, number, by, at, instructions, state, from_head, head, updated_at, fix_id) VALUES (?, ?, ?, ?, '', 'review', ?, ?, ?, NULL)").run(x.repo, x.number, d.answered_by, at, x.from_head, x.to_head, at)).lastInsertRowid);
+      if (await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", x.repo).where("number", "=", x.number).where("head", "=", x.to_head))) return false;
+      const id = (await db.get(db.k.insertInto("preapprovals").values({ repo: x.repo, number: x.number, by: d.answered_by!, at, instructions: "", state: "review", from_head: x.from_head, head: x.to_head, updated_at: at, fix_id: null }).returning("id")))!.id;
       await audit(db, ACTOR, "preapproval", `${x.repo}#${x.number}`, { id, state: "review", head: x.to_head, carried: x.from_head });
       return true;
     });
@@ -565,27 +576,27 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
   } catch (e) {
     log(`preapproval requests: ${(e as Error).message}`);
   }
-  const rows = await db.prepare(`SELECT * FROM preapprovals WHERE state IN (${ACTIVE.map(() => "?").join(",")}) AND repo IN (SELECT name FROM main.tracked_repos) ORDER BY id`).all(...ACTIVE) as Row[];
+  const rows = await db.all(preapprovalRows(db).where("state", "in", ACTIVE).where((eb) => eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name"))).orderBy("id"));
   for (const p of rows) {
     try {
       await advance(db, p, held);
-      if ((await db.prepare("SELECT state FROM preapprovals WHERE id = ?").get(p.id) as { state: string }).state !== p.state) n++;
+      if ((await db.get(db.k.selectFrom("preapprovals").select("state").where("id", "=", p.id)))!.state !== p.state) n++;
     } catch (e) {
       const msg = oneLine(String((e as Error).message ?? e), 300);
       log(`preapproval ${p.repo}#${p.number}: ${msg}`);
       // Runs every tick: the item's trace gets the error once, not once per tick.
       try {
-        const last = await db.prepare("SELECT details FROM audit WHERE action = 'preapproval-error' AND target = ? ORDER BY rowid DESC LIMIT 1").get(`${p.repo}#${p.number}`) as { details: string } | undefined;
-        if (!last || (JSON.parse(last.details) as { error?: string }).error !== msg) await audit(db, ACTOR, "preapproval-error", `${p.repo}#${p.number}`, { id: p.id, state: p.state, error: msg });
+        const last = await db.get(db.k.selectFrom("audit").select("details").where("action", "=", "preapproval-error").where("target", "=", `${p.repo}#${p.number}`).orderBy(kx.rowid("audit"), "desc").limit(1));
+        if (!last || (JSON.parse(last.details ?? "{}") as { error?: string }).error !== msg) await audit(db, ACTOR, "preapproval-error", `${p.repo}#${p.number}`, { id: p.id, state: p.state, error: msg });
       } catch { /* the log line above stands */ }
     }
   }
   return n;
 }
 
-export const mergeRunning = async (db: Db, repo: string): Promise<boolean> => !!await db.prepare("SELECT 1 FROM jobs WHERE repo = ? AND step = 'merge' AND state = 'running'").get(repo);
+export const mergeRunning = async (db: Db, repo: string): Promise<boolean> => !!await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("step", "=", "merge").where("state", "=", "running"));
 export const inActiveBatch = async (db: Db, repo: string, n: number): Promise<boolean> =>
-  !!await db.prepare("SELECT 1 FROM main.merge_batch_prs x JOIN main.merge_batches b ON b.id = x.batch_id WHERE b.repo = ? AND x.number = ? AND b.state IN ('checking', 'open')").get(repo, n);
+  !!await db.get(db.k.selectFrom("main.merge_batch_prs as x").innerJoin("main.merge_batches as b", "b.id", "x.batch_id").select((eb) => eb.lit(1).as("one")).where("b.repo", "=", repo).where("x.number", "=", n).where("b.state", "in", ["checking", "open"]));
 
 /**
  * An operator cancels the PR's pre-approved merge before the merge queue has merged it. A queued PR in an integration batch is first
@@ -593,9 +604,9 @@ export const inActiveBatch = async (db: Db, repo: string, n: number): Promise<bo
  * Throws when there is none or the queue is past stopping it.
  */
 export async function cancelPreapproval(db: Db, by: string, repo: string, n: number, run?: Exec, via?: string): Promise<Preapproval> {
-  const p = await db.prepare(`SELECT id FROM preapprovals WHERE repo = ? AND number = ? AND state IN (${ACTIVE.map(() => "?").join(",")}) ORDER BY id DESC LIMIT 1`).get(repo, n, ...ACTIVE) as { id: number } | undefined;
+  const p = await db.get(db.k.selectFrom("preapprovals").select("id").where("repo", "=", repo).where("number", "=", n).where("state", "in", ACTIVE).orderBy("id", "desc").limit(1));
   if (!p) throw new Error(`${repo}#${n} has no pre-approved merge in progress`);
-  const state = (await db.prepare("SELECT state FROM preapprovals WHERE id = ?").get(p.id) as { state: string }).state;
+  const state = (await db.get(db.k.selectFrom("preapprovals").select("state").where("id", "=", p.id)))!.state;
   // The state change and the take-back of the hand-over answer are one transaction, so the merge queue never sees a cancelled row with a live answer.
   const finish = async () => {
     if (!await cancelRow(db, p.id, by, `cancelled by ${by}`, `${by} cancelled the pre-approved merge.`, true, via)) throw new Error("the pre-approved merge changed a moment ago");
@@ -604,10 +615,10 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
     if (await mergeRunning(db, repo)) throw new Error("a merge of the repo is running: it may be merging this PR");
     // The removal holds the PR's merge; a hold that was there before stays, the one the removal set is released again after the row
     // is cancelled (so the queue never sees an unheld PR with a live Merge answer), also when the removal or the cancel fails.
-    const heldBefore = !!await db.prepare("SELECT 1 FROM main.merge_holds WHERE repo = ? AND number = ?").get(repo, n);
+    const heldBefore = !!await db.get(db.k.selectFrom("main.merge_holds").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n));
     try {
       const r = await removeFromBatch(db, by, repo, n, run);
-      const b = await db.prepare("SELECT state FROM main.merge_batches WHERE repo = ? AND branch = ? ORDER BY id DESC LIMIT 1").get(repo, r.batch) as { state: string } | undefined;
+      const b = await db.get(db.k.selectFrom("main.merge_batches").select("state").where("repo", "=", repo).where("branch", "=", r.batch).orderBy("id", "desc").limit(1));
       if (b?.state === "merged") throw new Error("the PR is already merged: its batch merged");
       await finish();
     } finally {
@@ -624,7 +635,7 @@ export async function cancelPreapproval(db: Db, by: string, repo: string, n: num
  * Throws when the latest pre-approval did not fail.
  */
 export async function retryPreapproval(db: Db, by: string, repo: string, n: number): Promise<Preapproval> {
-  const p = await db.prepare("SELECT * FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 1").get(repo, n) as Row | undefined;
+  const p = await db.get(preapprovalRows(db).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1));
   if (!p || p.state !== "failed") throw new Error(`${repo}#${n} has no failed pre-approved merge`);
   if (!await isOperator(db, by, repo)) throw new Error(`${by} does not settle decisions on ${repo}`);
   await runPipelineStep(db, { repo, number: n, step: { kind: "fixup", instructions: p.instructions, merge: true }, by });

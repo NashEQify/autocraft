@@ -365,7 +365,6 @@ src/prbuild/select.ts
 
 src/prbuild/view.ts
 
-src/preapproval/index.ts
 
 src/preapproval/permissions.ts
 

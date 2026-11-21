@@ -10,9 +10,10 @@ const kindsOf = async (w: World, n: number) => (await w.prPlan(n)).actions.map((
 
 test("a Merge answer carries across a base merge that left the diff unchanged, not across a CI fix or a changed-diff merge", async () => {
   const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(1)).review(1, { verdict: "take" })).answer(1, "merge")).pr(2)).review(2, { verdict: "take" })).answer(2, "merge")).pr(3)).review(3, { verdict: "take" })).answer(3, "merge"));
-  const merge = "INSERT INTO conflict_merges (repo, number, from_head, to_head, state, attempt, created_at, own_diff) VALUES ('app', ?, ?, ?, 'merged', 1, ?, ?)";
-  await w.db.prepare(merge).run(1, "sha1", "sha1m", T0, "same");
-  await w.db.prepare(merge).run(2, "sha2", "sha2m", T0, "changed");
+  const merge = (number: number, from_head: string, to_head: string, own_diff: string) =>
+    w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number, from_head, to_head, state: "merged", attempt: 1, created_at: T0, own_diff }));
+  await merge(1, "sha1", "sha1m", "same");
+  await merge(2, "sha2", "sha2m", "changed");
   await w.db.prepare("INSERT INTO ci_fixes (repo, number, head, to_head, kind, state, attempt, created_at) VALUES ('app', 3, 'sha3', 'sha3c', 'code', 'pushed', 1, ?)").run(T0);
   await (await (await w.synced(1, "sha1m")).synced(2, "sha2m")).synced(3, "sha3c");
   await advancePreapprovals(w.db);
