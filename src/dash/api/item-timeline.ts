@@ -51,7 +51,8 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
   const mergeSteps = ev.filter((e) => e.kind === "step" && e.id.startsWith("merge:"));
   const near = (a: string, b: string, ms: number) => Math.abs(Date.parse(a) - Date.parse(b)) <= ms;
   // The model calls named by the reader-filtered review refs, read once.
-  const calls = staff ? await runRows(db, ev.flatMap((e) => (e.kind === "review" ? ((e.ref.runIds as number[] | undefined) ?? (validRunId(e.ref.runId) ? [e.ref.runId] : [])) : []))).filter(validRunId)) : new Map<number, RunRow>();
+  const reviewRunIds = ev.flatMap((e) => e.kind === "review" ? (e.ref.runIds ?? (validRunId(e.ref.runId) ? [e.ref.runId] : [])) : []).filter(validRunId);
+  const calls = staff ? await runRows(db, reviewRunIds) : new Map<number, RunRow>();
 
   for (const e of ev) {
     const after = e.summary.includes(": ") ? e.summary.slice(e.summary.indexOf(": ") + 2) : e.summary;
