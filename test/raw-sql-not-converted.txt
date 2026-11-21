@@ -260,16 +260,13 @@ src/github/webhooks.ts
 src/github/write.ts
 
 
-src/health.ts
 
 src/itemhash.ts
 
 
 
 
-src/live.ts
 
-src/liveness.ts
 
 
 
