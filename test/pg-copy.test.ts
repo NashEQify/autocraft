@@ -72,7 +72,8 @@ test("a SQLite database copied to Postgres and back verifies equal; a changed ro
     await db.prepare("UPDATE items SET body = 'changed' WHERE number = 1").run();
     const after = await verifyDatabases(file, pg.target, { skipExtra: true, log: quiet });
     assert.equal(after.ok, false);
-    assert.deepEqual(after.tables.filter((t) => !t.ok).map((t) => t.table), ["items"]);
+    // The writes above also moved the live counters and the change log, which the runtime triggers keep on Postgres.
+    assert.deepEqual(after.tables.filter((t) => !t.ok && !RUNTIME_TABLES.has(t.table)).map((t) => t.table), ["items"]);
   } finally {
     await pg.close();
   }
