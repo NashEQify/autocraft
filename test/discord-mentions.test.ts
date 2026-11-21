@@ -13,6 +13,7 @@ import { setup } from "../src/dash/api/discord.ts";
 import { countOf, forgetAuthor, handleDispatch, linksOf } from "../src/discord/store.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-test-"));
@@ -38,8 +39,11 @@ describe("reference parser", () => {
 
 describe("event handler", () => {
   before(async () => {
-    await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES (?)").run("photocraft");
-    await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched) VALUES ('c1', 'g1', 'Guild', 'dev', 1), ('c2', 'g1', 'Guild', 'off', 0)").run();
+    await db.run(db.k.insertInto("main.tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("discord_channels").values([
+      { channel_id: "c1", guild_id: "g1", guild_name: "Guild", name: "dev", watched: 1 },
+      { channel_id: "c2", guild_id: "g1", guild_name: "Guild", name: "off", watched: 0 },
+    ]));
   });
   const msg = (id: string, content: string, channel = "c1") => ({ id, channel_id: channel, guild_id: "g1", content, timestamp: "2026-11-01T10:00:00.000Z", author: { id: "u1" } });
 
@@ -49,7 +53,7 @@ describe("event handler", () => {
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m3", "photocraft#1", "c2"));
     assert.equal(await countOf(db, "photocraft", 1), 2);
     assert.equal(await countOf(db, "photocraft", 2), 1);
-    const raw = JSON.stringify(await db.prepare("SELECT * FROM discord_mentions").all());
+    const raw = JSON.stringify(await db.all(db.k.selectFrom("discord_mentions").select(["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"])));
     for (const plain of ["m1", "u1", "c1", "g1", "photocraft#1 again"]) assert.ok(!raw.includes(`"${plain}"`) && !raw.includes(`/${plain}`), `${plain} is stored in the clear`);
     const links = await linksOf(db, keys, "photocraft", 2);
     assert.deepEqual(links.map((l) => l.url), ["https://discord.com/channels/g1/c1/m1"]);
@@ -63,11 +67,11 @@ describe("event handler", () => {
     await handleDispatch(db, keys, "MESSAGE_DELETE", { id: "m2", channel_id: "c1" });
     assert.equal(await countOf(db, "photocraft", 1), 0);
     await handleDispatch(db, keys, "MESSAGE_DELETE_BULK", { ids: ["m1"], channel_id: "c1" });
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions").get())!.n, 0);
+    assert.equal((await db.get(db.k.selectFrom("discord_mentions").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   });
 
   test("a deletion request by user id removes that author's rows, also after an edit without an author", async () => {
-    const columns = (await db.prepare("PRAGMA table_info(discord_mentions)").all() as { name: string }[]).map((c) => c.name);
+    const columns = (await db.k.introspection.getTables()).filter((t) => t.name === "discord_mentions").flatMap((t) => t.columns.map((c) => c.name));
     assert.ok(!columns.some((c) => /author|user/.test(c)), "no per-person plain column");
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m4", "photocraft#5"));
     await handleDispatch(db, keys, "MESSAGE_CREATE", { ...msg("m5", "photocraft#5"), author: { id: "u2" } });
@@ -79,12 +83,12 @@ describe("event handler", () => {
   test("a delete applies in an unwatched channel, and a deleted channel takes its rows", async () => {
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m6", "photocraft#6"));
     await handleDispatch(db, keys, "MESSAGE_CREATE", msg("m7", "photocraft#6"));
-    await db.prepare("UPDATE discord_channels SET watched = 0 WHERE channel_id = 'c1'").run();
+    await db.run(db.k.updateTable("discord_channels").set({ watched: 0 }).where("channel_id", "=", "c1"));
     await handleDispatch(db, keys, "MESSAGE_DELETE", { id: "m6", channel_id: "c1" });
     assert.equal(await countOf(db, "photocraft", 6), 1);
     await handleDispatch(db, keys, "CHANNEL_DELETE", { id: "c1" });
     assert.equal(await countOf(db, "photocraft", 6), 0);
-    await db.prepare("UPDATE discord_channels SET watched = 1 WHERE channel_id = 'c1'").run();
+    await db.run(db.k.updateTable("discord_channels").set({ watched: 1 }).where("channel_id", "=", "c1"));
   });
 
   test("a thread message counts under its watched parent", async () => {
@@ -114,7 +118,7 @@ describe("privacy page", () => {
     const perms = join(dir, "perms.json");
     writeFileSync(perms, "{}");
     chmodSync(perms, 0o600);
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('discord_contact', 'ask-us@example.org')").run();
+    await db.run(db.k.insertInto("settings").values({ key: "discord_contact", value: "ask-us@example.org" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: join(dir, "d.db"), AUTOCRAFT_DEV_PERMS: perms, AUTOCRAFT_WEB_DIST: dir });
     const s = await startServer({ config, db, provider: new FakeProvider(perms), routes: await defaultRoutes() });
     base = s.url;
