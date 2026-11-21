@@ -304,8 +304,15 @@ describe("patch model build tool", () => {
     const outcomes: string[] = [];
     let asked = 0;
     // The fake worker: a queued task of a patch with `return;` has a clippy finding on line 1, any other is clean.
+    let busy = false;
     const worker = setInterval(async () => {
-      for (const t of await w.rows("SELECT id, patch FROM build_tasks WHERE state = 'queued'") as { id: number; patch: string }[]) await endLint(w, t.id, { diagnostics: t.patch.includes("return;") ? [{ line: 1 }] : [] });
+      if (busy) return;
+      busy = true;
+      try {
+        for (const t of await w.rows("SELECT id, patch FROM build_tasks WHERE state = 'queued'") as { id: number; patch: string }[]) await endLint(w, t.id, { diagnostics: t.patch.includes("return;") ? [{ line: 1 }] : [] });
+      } finally {
+        busy = false;
+      }
     }, 5);
     deps.ask = async (_db, _input, _checkout, tool) => {
       asked++;
