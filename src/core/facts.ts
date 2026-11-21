@@ -1,6 +1,7 @@
 // Facts: everything the review-to-merge rules read about open PRs, loaded in one pass for a whole database or a slice of it.
 // Each concept has one definition here. Where a step selector and the merge queue used different
 // definitions, the queue's wins; the differences are listed in the report of this change, not here.
+import { refIn, refPairs } from "./ref-filter.ts";
 import { pipelineWrites } from "./rules.ts";
 import { quietFixPrs } from "../security/quiet.ts";
 export { quietFixPrs };
@@ -145,7 +146,8 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
   const params: Record<string, string> = {};
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += " AND i.repo || '#' || i.number IN (SELECT value FROM json_each(:refs))"; params.refs = JSON.stringify([...opts.refs]); }
+  const refs = opts.refs ? [...opts.refs] : undefined;
+  if (refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(refs); }
   const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
 
   // Values read once for all PRs.
@@ -155,7 +157,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     const p: Record<string, string> = {};
     let sql = "";
     if (opts.repo) { sql += ` AND ${a}.repo = :repo`; p.repo = opts.repo; }
-    if (opts.refs) { sql += ` AND ${a}.repo || '#' || ${a}.number IN (SELECT value FROM json_each(:refs))`; p.refs = params.refs!; }
+    if (refs) { sql += ` AND ${refIn(a)}`; p.refs = params.refs!; }
     return { sql, p };
   };
   const keyed = <T extends { k: string }>(sql: string, a: string): Map<string, Omit<T, "k">[]> => {
@@ -303,7 +305,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     return { waiting, reread: !!w.reread, crossRepo: !!w.cross_repo, approvable: runs.filter((x) => x.event === "pull_request" && (failed[x.id] ?? 0) < MAX_FAILURES).length, blocked };
   };
 
-  const holdOf = reviewHolds(db, now, params.refs ? (JSON.parse(params.refs) as string[]) : undefined);
+  const holdOf = reviewHolds(db, now, refs);
   const outsideHolds = holdMap(db);
   const out: PrFacts[] = [];
   for (const r of rows) {

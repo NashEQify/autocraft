@@ -1,5 +1,6 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
+import { refIn, refPairs } from "../core/ref-filter.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { effectiveCi, effectiveCiWith, optionalChecksOf } from "../optional-checks.ts";
@@ -68,8 +69,8 @@ export const nextUtcMidnight = (ms: number): number => { const d = new Date(ms);
  */
 export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?: Iterable<string>): (repo: string, number: number, head: string) => ReviewHold | null {
   // Each table is read once, on first use, for every PR (or only `refs`, "repo#number"), keyed by `repo#number`.
-  const only = refs ? JSON.stringify([...refs]) : null;
-  const narrow = (a: string): string => (only ? ` AND ${a}.repo || '#' || ${a}.number IN (SELECT value FROM json_each(:refs))` : "");
+  const only = refs ? refPairs(refs) : null;
+  const narrow = (a: string): string => (only ? ` AND ${refIn(a)}` : "");
   const bind = (p: Record<string, string> = {}): Record<string, string> => (only ? { ...p, refs: only } : p);
   const once = <T>(load: () => T): (() => T) => { let v: T | undefined; return () => (v ??= load()); };
   type Last = { k: string; head_oid: string; at: string; verdict: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null };

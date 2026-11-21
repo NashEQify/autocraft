@@ -1,5 +1,6 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, scope decision, labels.
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
+import { refIn, refPairs } from "./ref-filter.ts";
 import { settleMemo, settledBy } from "../settlers.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
@@ -66,7 +67,7 @@ const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.title, i.author, i.a
   LEFT JOIN item_stage st ON st.repo = i.repo AND st.number = i.number
   LEFT JOIN fix_attempts fa ON fa.repo = i.repo AND fa.number = i.number
   LEFT JOIN build_tasks ht ON ht.id = fa.head_task_id LEFT JOIN build_tasks bt ON bt.id = fa.base_task_id
-  WHERE (i.state = 'OPEN' OR i.repo || '#' || i.number IN (SELECT value FROM json_each(:closing)))`;
+  WHERE (i.state = 'OPEN' OR ${refIn("i", ":closing")})`;
 
 /** `asked_by` of the decisions a security scan asks (act/index.ts SECURITY_ASKER). */
 const SECURITY_ASKER = "security-scan";
@@ -168,10 +169,10 @@ export function loadItemFacts(db: DatabaseSync, opts: ItemLoadOptions = {}): Ite
   }
   // A closed item stays in the facts while an answered close of it is not applied: the Act step records it as already closed.
   const closing = [...answeredClose].filter(([, t]) => t.some((x) => x.action === null || x.action === "failed")).map(([ref]) => ref);
-  const params: Record<string, string> = { model, closing: JSON.stringify(closing) };
+  const params: Record<string, string> = { model, closing: refPairs(closing) };
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += " AND i.repo || '#' || i.number IN (SELECT value FROM json_each(:refs))"; params.refs = JSON.stringify([...opts.refs]); }
+  if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
   const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
   const closeReview = new Map<string, NonNullable<ItemFacts["closeReview"]>>();
   for (const r of db.prepare(`SELECT r.repo, r.number, r.head_oid, i.head_oid AS i_head, i.updated_at, c.head_oid AS c_head, c.fetched_at AS c_at,
