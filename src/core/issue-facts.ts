@@ -81,7 +81,7 @@ const flagsOf = (s: string | null): string[] => { const f = json<unknown>(s, [])
 const refsOf = (d: { repo: string | null; number: number | null; items: string | null }): string[] =>
   d.number !== null ? [`${d.repo}#${d.number}`] : json<{ repo: string; number: number }[]>(d.items, []).map((r) => `${r.repo}#${r.number}`);
 
-type Cls = { classifier: string; at: string; type_label: string; flags: string | null; probs: string | null; input_hash: string | null };
+type Cls = { classifier: string; at: string; type_label: string | null; flags: string | null; probs: string | null; input_hash: string | null };
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
 export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise<ItemFacts[]> {
@@ -188,7 +188,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
         eb.case().when(eb.and([eb("c.classifier", "=", "jev"), kx.jsonValid(db, "c.probs")])).then(kx.jsonRemoveKey(db, "c.probs", "type")).else(eb.ref("c.probs")).end().as("probs"), "c.input_hash"])
       .where("c.run_id", "=", run).where(kx.refIn(db, "c", rows.map((r) => [r.repo, r.number] as const))))) {
       const k = `${c.repo}#${c.number}`;
-      (byItem.get(k) ?? byItem.set(k, []).get(k)!).push({ ...c, type_label: c.type_label ?? "" });
+      (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
     }
   }
   const closeReview = new Map<string, NonNullable<ItemFacts["closeReview"]>>();
@@ -239,11 +239,11 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     let referee: Referee | null = null;
     if (s && j && h && s.at >= j.at && s.at >= h.at) {
       const p = json<{ sure?: unknown; final?: unknown; opusFailures?: unknown; opusFailedAt?: unknown } | null>(s.probs, null);
-      if (typeof p?.sure === "boolean") referee = { label: s.type_label, sure: p.sure, reason: "", ...(p.final === true && { final: true }), ...(typeof p.opusFailures === "number" && { failures: p.opusFailures }), ...(typeof p.opusFailedAt === "string" && { failedAt: p.opusFailedAt }) };
+      if (typeof p?.sure === "boolean" && s.type_label !== null) referee = { label: s.type_label, sure: p.sure, reason: "", ...(p.final === true && { final: true }), ...(typeof p.opusFailures === "number" && { failures: p.opusFailures }), ...(typeof p.opusFailedAt === "string" && { failedAt: p.opusFailedAt }) };
     }
     const settled = settle(
-      j ? { label: j.type_label, flags: flagsOf(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
-      h ? { label: h.type_label, flags: flagsOf(h.flags) } : null,
+      j && j.type_label !== null ? { label: j.type_label, flags: flagsOf(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
+      h && h.type_label !== null ? { label: h.type_label, flags: flagsOf(h.flags) } : null,
       referee,
     );
     // The classifier's input hash: stored on the row, recomputed when it was made under another scheme.

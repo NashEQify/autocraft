@@ -25,9 +25,7 @@ describe("Plan cache", async () => {
   const unhashed = async () => (await db.get(db.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n")).where("embed_hash", "is", null)))!;
 
   test("a pass writes one row per item, writes nothing else, and writes only changed rows the next time", async () => {
-    // Rows written by this connection so far; Postgres has no such counter, but each call of txid_current() takes one transaction id, and a read takes none.
-    let calls = 0;
-    const changes = async () => db.dialect === "postgres" ? Number((await db.prepare("SELECT txid_current() AS n").get() as { n: number }).n) - ++calls : (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const changes = async () => (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
     const before = await unhashed();
     const first = await detectAutopilot(db);
     assert.equal(first.timing!.written, 2);
