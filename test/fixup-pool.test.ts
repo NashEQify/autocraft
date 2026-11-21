@@ -23,13 +23,13 @@ const head = (n: number) => String(n).repeat(40);
 async function setup(prs: number): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await useTestAccount(db);
-  await db.prepare("UPDATE claude_accounts SET max_concurrent = 8").run();
+  await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 8 }));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   for (let n = 1; n <= prs; n++) {
     await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head(n), head_ref: "fix", head_repo: "contrib/app", base_ref: "main",
       maintainer_can_modify: 1, mergeable: "MERGEABLE", created_at: T0, updated_at: T0 }));
-    await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take-fix', 'nearly right', ?, 1, 'full')`).run(n, head(n), FIXES);
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: n, head_oid: head(n), run_id: "rv", at: T0, model: "m", verdict: "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
   }
   return db;
 }
