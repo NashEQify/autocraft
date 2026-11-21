@@ -18,7 +18,7 @@ import type { Dialect, Param } from "./index.ts";
 import { nowParam, pgPath, quote, rowidOf } from "./portable.ts";
 import { fts5Query, tsQueryText, type Search } from "./search.ts";
 import { sql } from "./sql.ts";
-import type { DB } from "./types.ts";
+import { COLUMNS, type DB } from "./types.ts";
 
 type D = Dialect | { readonly dialect: Dialect };
 
@@ -211,6 +211,20 @@ export function groupConcat(d: D, e: Ex, sep: string, orderBy: Ex, dir: "asc" | 
  */
 export function rowid(table: keyof DB & string, alias?: string): RawBuilder<number> {
   return sql.ref(`${alias ?? table.replace(/^main\./, "")}.${rowidOf(table.replace(/^main\./, ""))}`) as unknown as RawBuilder<number>;
+}
+
+/** A table or view of src/db/types.ts without its `main.` prefix. */
+type Bare<T extends keyof DB & string> = T extends `main.${infer B extends keyof typeof COLUMNS}` ? B : T & keyof typeof COLUMNS;
+type Col<T extends keyof DB & string> = (typeof COLUMNS)[Bare<T>][number];
+
+/**
+ * The whole row of `table` as a select list: every column in table order (from src/db/types.ts, so never rowid, which
+ * `selectAll()` returns on Postgres and on SQLite's scoped views), each prefixed with `alias` when given:
+ * `.selectFrom("decisions as d").select(kx.cols("decisions", "d"))`.
+ */
+export function cols<T extends keyof DB & string, A extends string | undefined = undefined>(table: T, alias?: A): readonly (A extends string ? `${A}.${Col<T>}` : Col<T>)[] {
+  const names: readonly string[] = COLUMNS[table.replace(/^main\./, "") as keyof typeof COLUMNS];
+  return (alias ? names.map((c) => `${alias}.${c}`) : names) as readonly (A extends string ? `${A}.${Col<T>}` : Col<T>)[];
 }
 
 // ---- upserts ------------------------------------------------------------------------------------------------------

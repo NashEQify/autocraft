@@ -6,6 +6,8 @@
 // node:sqlite's shapes): INTEGER and REAL → number, TEXT → string (JSON stays text), BLOB → Uint8Array. A column with no
 // NOT NULL is `| null`; an INTEGER PRIMARY KEY of a rowid table or a column with a default is `Generated<>`, so inserts may
 // leave it out. Virtual tables (full-text search) are left out: queries reach them only through src/db/kx.ts.
+//
+// `COLUMNS` lists each table's and view's columns in table order, without rowid or dropped columns, for `kx.cols`.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -50,15 +52,18 @@ export function renderDbTypes(): string {
         "",
       ];
       const names: Rel[] = [];
+      const columns: string[] = [];
       for (const r of rels) {
         if (virtual.includes(r.name) || shadow(r.name)) continue;
         const cols = db.prepare(`PRAGMA table_info(${JSON.stringify(r.name)})`).all() as Col[];
         const pks = cols.filter((c) => c.pk > 0);
         const rowidTable = r.type === "table" && !/WITHOUT\s+ROWID\s*;?\s*$/i.test(r.sql);
         out.push(`export interface ${pascal(r.name)} {`);
+        const kept: string[] = [];
         for (const c of cols) {
           const where = `${r.name}.${c.name}`;
           if (dropped.has(where)) continue;
+          kept.push(JSON.stringify(c.name));
           const override = TYPE_OVERRIDES[where];
           let t = override ? OVERRIDE_TS[override] ?? tsType(override, where) : tsType(c.type, where);
           // Postgres makes every primary key column NOT NULL; SQLite allows NULL only in a non-INTEGER key of a rowid table.
@@ -69,11 +74,14 @@ export function renderDbTypes(): string {
         }
         out.push("}", "");
         names.push(r);
+        columns.push(`  ${key(r.name)}: [${kept.join(", ")}],`);
       }
       out.push("export interface DB {");
       for (const r of names) out.push(`  ${key(r.name)}: ${pascal(r.name)};`);
       for (const r of names) out.push(`  ${key(`main.${r.name}`)}: ${pascal(r.name)};`);
       out.push("}", "");
+      out.push("/** Each table's and view's columns in table order (no rowid), for selecting a whole row: `kx.cols`. */");
+      out.push("export const COLUMNS = {", ...columns, "} as const;", "");
       return out.join("\n");
     } finally {
       db.close();
