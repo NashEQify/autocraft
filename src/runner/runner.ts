@@ -152,7 +152,11 @@ export class Runner {
     const rows = await this.db.prepare("SELECT id, pid, cancel_requested_at FROM jobs WHERE state = 'running'").all() as { id: number; pid: number | null; cancel_requested_at: string | null }[];
     for (const r of rows) {
       if (this.running.has(r.id)) continue;
-      if (r.pid && isJobProcess(r.pid, r.id)) killGroup(r.pid, "SIGKILL");
+      if (r.pid && isJobProcess(r.pid, r.id)) {
+        killGroup(r.pid, "SIGKILL");
+        // A command-line run's process leads no group of its own.
+        try { process.kill(r.pid, "SIGKILL"); } catch { /* gone with its group */ }
+      }
       const cancelled = r.cancel_requested_at !== null;
       if (!cancelled && await resumeJob(this.db, r.id, "the runner restarted")) {
         this.o.log(`job ${r.id}: left running by an earlier runner, queued to resume`);
@@ -160,6 +164,8 @@ export class Runner {
       }
       await this.db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = COALESCE(error, ?) WHERE id = ? AND state = 'running'")
         .run(cancelled ? "cancelled" : "failed", now(), cancelled ? null : RUNNER_STOPPED, r.id);
+      // Replies an earlier run of the job left unread are not kept (as in endJob).
+      await this.db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(r.id);
       this.o.log(`job ${r.id}: left running by an earlier runner, marked ${cancelled ? "cancelled" : "failed"}`);
     }
     // Model calls of a runner that is gone no longer hold an account slot.

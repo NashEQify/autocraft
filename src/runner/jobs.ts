@@ -28,11 +28,11 @@ export class JobError extends Error {
   }
 }
 
-type JobRow = {
+export type JobRow = {
   repo: string | null; id: number; step: string; params: string; requested_by: string; requested_at: string; state: JobState;
   started_at: string | null; ended_at: string | null; progress: string | null; summary: string | null; error: string | null;
   usage: string | null; log_path: string | null; pid: number | null; cancel_requested_at: string | null; cancel_requested_by: string | null;
-  items: number | null; resumes: number | null;
+  items: number | null; acted: number | null; resumes: number | null;
 };
 
 function parseJson<T>(s: string | null, fallback: T): T {
@@ -237,11 +237,12 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
  * Puts a running job that a runner stop or restart interrupted back in the queue under the same id: it runs again from the
  * start, with a fresh deadline. Its remote calls stay for the resumed run to adopt (enqueueCall), with their agent runs;
  * the stopped process's local model calls, model-queue waits and work leases end. False, and nothing changes, when it may
- * not resume: a cancel was asked, it was told to stop at its deadline, or it resumed MAX_RESUMES times already.
+ * not resume: a cancel was asked, it was told to stop at its deadline, it resumed MAX_RESUMES times already, or it is a
+ * command-line run (`requested_by` cli: its process belongs to the command, which records its end).
  */
 export async function resumeJob(db: Db, id: number, why: string): Promise<boolean> {
   const r = await db.prepare(`UPDATE jobs SET state = 'queued', resumes = resumes + 1, started_at = NULL, ended_at = NULL, pid = NULL, progress = NULL, error = NULL
-    WHERE id = ? AND state = 'running' AND cancel_requested_at IS NULL AND resumes < ?
+    WHERE id = ? AND state = 'running' AND cancel_requested_at IS NULL AND resumes < ? AND requested_by <> 'cli'
       AND (error IS NULL OR (error NOT LIKE 'stopped: ran past %' AND error NOT LIKE 'stopped: no progress for %')) RETURNING resumes, log_path`)
     .get(id, MAX_RESUMES) as { resumes: number; log_path: string | null } | undefined;
   if (!r) return false;
@@ -256,20 +257,22 @@ export async function resumeJob(db: Db, id: number, why: string): Promise<boolea
 
 /**
  * Records the end of a job whose process closed: done on exit 0, cancelled when a cancel was asked, else failed with the
- * reason. With `stopping` (the runner stops) a job that did not finish resumes (resumeJob): state `queued`.
+ * reason. With `stopping` (the runner stops) a job that the stop ended resumes (resumeJob): state `queued`.
  */
 export async function endJob(db: Db, id: number, code: number | null, signal: NodeJS.Signals | null, spawnError: string | null, stopping = false): Promise<{ state: "done" | "failed" | "cancelled" | "queued"; error: string | null } | null> {
   const row = await jobRow(db, id);
   if (!row || row.state !== "running") return null;
   const finished = code === 0 && !DEADLINE_ERROR.test(row.error ?? "");
-  if (stopping && !finished && !row.cancel_requested_at && await resumeJob(db, id, "the runner stopped")) return { state: "queued", error: null };
+  // Stopped by the stop: the process exited on the stop signal (exec.ts exits 143) or was killed. Another exit is the job's own result.
+  const stopped = stopping && (code === 143 || signal !== null);
+  if (stopped && !finished && !row.cancel_requested_at && await resumeJob(db, id, "the runner stopped")) return { state: "queued", error: null };
   let state: "done" | "failed" | "cancelled";
   let error: string | null = row.error;
   if (row.cancel_requested_at) state = "cancelled";
   else if (finished) state = "done";
   else {
     state = "failed";
-    if (stopping) error = RUNNER_STOPPED;
+    if (stopped) error = RUNNER_STOPPED;
     error ??= spawnError ?? (signal ? `The job's process ended on ${signal}.` : `The job's process exited with code ${code}.`);
   }
   await failRunning(db, "The job ended during this call.", id);

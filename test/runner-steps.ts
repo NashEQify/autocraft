@@ -103,4 +103,32 @@ export const steps: StepDef[] = [
       return `reply: ${r?.text ?? "none"}`;
     },
   },
+  {
+    name: "test-writes",
+    title: "Writes",
+    description: "Test step: posts one slow comment per item, two items at a time, and, like the pipeline's steps, records an item whose write fails and goes on.",
+    stage: 2,
+    requires: "operator",
+    params: [{ name: "n", label: "Items", kind: "int", min: 1, max: 100, default: 5 }],
+    run: async (ctx) => {
+      const { ghComment } = await import("../src/github/write.ts");
+      // A job with model usage records it when it stops, as the pipeline's steps do.
+      ctx.usageRun(`writes-${ctx.job.id}`);
+      const g = { scope: "item", action: { kind: "act" }, repo: "app", number: 3, as: "app" } as never;
+      const exec = async () => { await sleep(300); return { code: 0, stdout: "https://github.com/storytold/app/issues/3#issuecomment-1\n", stderr: "" }; };
+      let failed = 0;
+      // Two items at a time, the second starting a little later: a stop during the first's write comes before the second's.
+      const post = async (k: number, after: number): Promise<void> => {
+        await sleep(after);
+        try {
+          await ghComment({ db: ctx.db, login: "act" }, g, exec, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, `item ${k}`);
+        } catch (e) {
+          failed++;
+          ctx.log(`item ${k} failed: ${(e as Error).message}`);
+        }
+      };
+      for (let k = 1; k <= Number(ctx.params.n); k += 2) await Promise.all([post(k, 0), post(k + 1, 150)]);
+      return `${failed} failed`;
+    },
+  },
 ];

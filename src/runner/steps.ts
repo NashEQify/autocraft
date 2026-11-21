@@ -13,6 +13,7 @@ import { envVar } from "../env.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { stepDeadlineMin } from "./deadlines.ts";
 import { mapSeq } from "../async-seq.ts";
+import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
 
 type Base = { name: string; label: string; help?: string; required?: boolean };
@@ -28,7 +29,8 @@ export const RUN_ID = /^[a-z0-9][a-z0-9-]{0,47}$/;
 
 export type StepContext = {
   db: Db;
-  job: { id: number; requestedBy: string; startedAt: string };
+  /** `resumes`: times the job resumed after a runner stop or restart (src/runner/resuming.ts); 0 on its first run. */
+  job: { id: number; requestedBy: string; startedAt: string; resumes: number };
   params: Params;
   /** One line shown on the dashboard while the job runs. */
   progress(text: string): Promise<void>;
@@ -543,7 +545,7 @@ export const STEPS: StepDef[] = [
       const { usageRunId } = await import("../security/real.ts");
       ctx.usageRun(usageRunId(Number(ctx.params.scan)));
       const { autoFixConfirmed } = await import("../security/actions.ts");
-      const deps = realDeps(ctx.db, Number(ctx.params.scan), { cancelled: ctx.cancelled, log: ctx.log, progress: ctx.progress });
+      const deps = realDeps(ctx.db, Number(ctx.params.scan), { cancelled: ctx.cancelled, log: ctx.log, progress: ctx.progress, resumes: ctx.job.resumes });
       return runScan(ctx.db, Number(ctx.params.scan), { ...deps, confirmed: (n) => autoFixConfirmed(ctx.db, String(ctx.params.repo), n) });
     },
   },
@@ -812,7 +814,7 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const { proposeAreas } = await import("../areas/propose.ts");
       const { baseCheckout } = await import("../dupes/compare.ts");
-      const repo = String(ctx.params.repo), usageRun = `areas-${ctx.job.id}`;
+      const repo = String(ctx.params.repo), usageRun = jobRunId("areas", ctx.job);
       ctx.usageRun(usageRun);
       ctx.handled(1);
       const id = await proposeAreas(ctx.db, repo, { by: ctx.job.requestedBy, checkout: (r) => baseCheckout(ctx.db, r), usageRun, log: ctx.log });
@@ -829,7 +831,7 @@ export const STEPS: StepDef[] = [
     params: [{ name: "repo", label: "Repo", kind: "repo", required: true }],
     run: async (ctx) => {
       const { suggestAreas } = await import("../areas/propose.ts");
-      const repo = String(ctx.params.repo), usageRun = `areas-${ctx.job.id}`;
+      const repo = String(ctx.params.repo), usageRun = jobRunId("areas", ctx.job);
       ctx.usageRun(usageRun);
       ctx.handled(1);
       const id = await suggestAreas(ctx.db, repo, { by: ctx.job.requestedBy, usageRun, log: ctx.log });
@@ -850,7 +852,7 @@ export const STEPS: StepDef[] = [
     ],
     run: async (ctx) => {
       const { assignAreas } = await import("../areas/assign.ts");
-      const usageRun = `areas-${ctx.job.id}`;
+      const usageRun = jobRunId("areas", ctx.job);
       ctx.usageRun(usageRun);
       const r = await assignAreas(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), rescan: true, usageRun, onSent: ctx.handled, cancelled: ctx.cancelled, progress: ctx.progress, log: ctx.log });
       return `${ctx.params.repo}: ${r.due} items asked; Jev settled ${r.jev}, Haiku ${r.haiku}; ${r.none} fit none of the areas, ${r.left} unanswered`;

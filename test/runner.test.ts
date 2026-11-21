@@ -23,7 +23,7 @@ const { createToken } = await import("../src/dash/mcp/tokens.ts");
 const { claimCall, submitCall } = await import("../src/remote/calls.ts");
 const { PROTOCOL_VERSION } = await import("../src/remote/protocol.ts");
 const { setCallContext } = await import("../src/agents/call.ts");
-const { ghComment, stopWrites, WritesStoppedError } = await import("../src/github/write.ts");
+const { ghComment, resumeWritesForTests, stopWrites } = await import("../src/github/write.ts");
 type GuardedItem = import("../src/core/guard.ts").GuardedItem;
 
 mkdirSync(SCRATCH, { recursive: true });
@@ -111,6 +111,28 @@ describe("runner", () => {
     await db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(left);
     await second.recover();
     assert.equal((await getJob(db, left)).error, RUNNER_STOPPED);
+    // A command-line run is not resumed: its process belongs to the command, which may still be running it.
+    const cli = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES ('test-echo', '{}', 'cli', ?, 'running', ?) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    await second.recover();
+    assert.equal((await getJob(db, cli)).state, "failed");
+  });
+
+  test("a runner stop while a step writes lets the write finish, and the write it refuses is no failed item: the job resumes", async () => {
+    const stopper = new Runner({ db, dbFile, logs: join(dir, "logs"), killAfterMs: 5000, log: () => {} });
+    const job = await enqueue(db, "test-writes", { n: 5 }, "boss");
+    const states = async () => (await db.prepare("SELECT json_extract(details, '$.state') AS s FROM audit WHERE json_extract(details, '$.jobId') = ?").all(job.id) as { s: string }[]).map((r) => r.s);
+    for (let i = 0; i < 400 && !(await states()).includes("started"); i++) {
+      await stopper.tick();
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    assert.ok((await states()).includes("started"), "a comment is being written");
+    await stopper.stop();
+    const j = await jobDetail(db, job.id);
+    assert.equal(j.state, "queued", j.log ?? "");
+    assert.ok(!j.log!.includes("failed:"), j.log!);
+    const written = await states();
+    assert.ok(written.length >= 1 && written.every((s) => s === "done"), `the write in flight finished and was recorded: ${written.join(", ")}`);
+    await requestCancel(db, job.id, "boss");
   });
 
   test("a resumed job does not post again a comment its earlier run posted", async () => {
@@ -140,8 +162,14 @@ describe("runner", () => {
       assert.equal(await stopping, 0, "nothing is left in flight");
       assert.equal((await inFlight).code, 0);
       assert.equal((await db.prepare("SELECT json_extract(details, '$.state') AS s FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { s: string }).s, "done");
-      await assert.rejects(comment("after the stop"), WritesStoppedError);
+      // A write asked for after the stop is not made, and its caller waits for the process to exit.
+      const rows = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'act-comment'").get() as { n: number }).n;
+      const n = await rows();
+      const late = await Promise.race([comment("after the stop").then(() => "settled", () => "settled"), new Promise((r) => setTimeout(() => r("waits"), 200))]);
+      assert.equal(late, "waits");
+      assert.equal(await rows(), n, "no row for the write that was not made");
     } finally {
+      resumeWritesForTests();
       setCallContext(null);
     }
   });

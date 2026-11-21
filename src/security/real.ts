@@ -11,9 +11,11 @@ import type { Db } from "../db/index.ts";
 /** The token_usage run id of a scan: the job registers it with `usageRun`, so the spend shows in the job's usage and on the Cost page. */
 export const usageRunId = (scanId: number): string => `security-${scanId}`;
 
-export function realDeps(db: Db, scanId: number, io: { cancelled: () => Promise<boolean>; log: (line: string) => void; progress: (line: string) => Promise<void> }): ScanDeps {
+/** `io.resumes`: the job's resume count (src/runner/resuming.ts); a resumed run's agent names differ from its earlier run's, whose usage rows stay. */
+export function realDeps(db: Db, scanId: number, io: { cancelled: () => Promise<boolean>; log: (line: string) => void; progress: (line: string) => Promise<void>; resumes?: number }): ScanDeps {
   let dir = "";
   let seq = 0;
+  const run = io.resumes ? `r${io.resumes}.` : "";
   // The checkout is read-only in bubblewrap; the CLI keeps its API access, the model gets Read, Grep and Glob and no web tool.
   // The cost is read from the agent runs the call made (a failed call and a fix turn cost money too), so the spend cap sees all of it.
   const send = async (id: "security.model" | "security.area" | "security.verify" | "security.scantest", input: { repo: string; number: number }) => {
@@ -29,7 +31,7 @@ export function realDeps(db: Db, scanId: number, io: { cancelled: () => Promise<
     const spent = (await db.prepare(`SELECT SUM(r.cost_usd) AS c FROM agent_runs r JOIN agent_run_items i ON i.run_id = r.id WHERE i.repo = ? AND i.number = ? AND r.id > ?`)
       .get(input.repo, input.number, before) as { c: number | null }).c;
     const cost = spent ?? usage?.cost ?? null;
-    await saveUsage(db, usageRunId(scanId), `${id}#${++seq}`, "security", "opus", 1, usage ? { ...usage, cost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost }, start, new Date().toISOString());
+    await saveUsage(db, usageRunId(scanId), `${id}#${run}${++seq}`, "security", "opus", 1, usage ? { ...usage, cost } : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost }, start, new Date().toISOString());
     const runId = (await db.prepare(`SELECT MIN(r.id) AS id FROM agent_runs r JOIN agent_run_items i ON i.run_id = r.id WHERE i.repo = ? AND i.number = ? AND r.id > ?`)
       .get(input.repo, input.number, before) as { id: number | null }).id;
     return { text, cost, runId };
