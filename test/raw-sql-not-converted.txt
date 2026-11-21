@@ -466,7 +466,6 @@ src/review/post.ts
 
 src/review/summary.ts
 
-src/runner/autopilot.ts
 
 
 
