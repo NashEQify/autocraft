@@ -6,11 +6,10 @@
 // switch takes effect in every process without a restart.
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { dbPath } from "../db.ts";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
 import type { Db } from "../db/index.ts";
-import { dbFor } from "../db/open.ts";
+import { dbFor, dbTarget, isPgUrl, openDb } from "../db/open.ts";
 
 export type ReadEnv = Record<string, string>;
 export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
@@ -18,11 +17,14 @@ export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; def
 // The promise is kept, so two first calls at once share one open.
 let shared: { path: string; db: Promise<Db> } | null = null;
 /**
- * A read-only handle on the instance database, opened on first use. Null only when there is no database file (nothing
- * configured the identity); a file that cannot be opened is an error, never a silent read as the box account.
+ * A handle on the instance database for reads, opened on first use; callers read through it inside `db.read`. On
+ * SQLite a read-only connection of its own; on Postgres the process's handle. Null only when there is no SQLite file
+ * (nothing configured the identity); a database that cannot be opened is an error, never a silent read as the box
+ * account.
  */
 async function sharedDb(): Promise<Db | null> {
-  const path = dbPath();
+  const path = dbTarget();
+  if (isPgUrl(path)) return await openDb();
   if (shared?.path === path) return await shared.db;
   if (!existsSync(path)) return null;
   const mine = { path, db: openShared(path) };
@@ -105,7 +107,8 @@ export async function readsUseApp(db?: Db): Promise<boolean> {
 export async function trackedOwner(db?: Db): Promise<string> {
   const d = db ?? await sharedDb();
   try {
-    const rows = await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
+    const q = async () => await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
+    const rows = db || !d ? await q() : await d.read(q);
     const owners = (rows ?? []).map((r) => r.owner).filter((o) => OWNER.test(o));
     if (owners.some((o) => o.toLowerCase() === DEFAULT_OWNER)) return DEFAULT_OWNER;
     if (owners[0]) return owners[0];

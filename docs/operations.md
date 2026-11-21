@@ -84,6 +84,7 @@ The frontend is the React app in `web/`. Build it before serving: `pnpm -C web i
 | `AUTOCRAFT_BASE_URL` | Public origin of the dashboard, such as `https://dashboard.example.org` (no path). The OAuth App's callback URL must be exactly `<AUTOCRAFT_BASE_URL>/auth/callback`. Required unless dev auth is on. |
 | `AUTOCRAFT_LISTEN` | `host:port` to listen on. Default `127.0.0.1:8993`; with dev auth, `127.0.0.1:8994`. |
 | `AUTOCRAFT_DB` | SQLite database path (the mirror database). |
+| `AUTOCRAFT_DB_URL` | A `postgres://` URL: the database is Postgres instead of SQLite. Set it or `AUTOCRAFT_DB`, not both. The runner hands it to its worker threads and job processes. |
 | `AUTOCRAFT_REVIEW_BOTS` | Comma-separated logins of review bots whose comments never make a review stale, besides accounts of type Bot or ending in `[bot]`. Default `coderabbitai,dependabot,renovate`. Read by `sync` (when it stores a comment), the database backfill and the runner, so set it for all three alike. |
 | `AUTOCRAFT_WEB_DIST` | Directory of the built frontend. Default `web/dist` in the repo. |
 | `AUTOCRAFT_SECRETS_FILE` | JSON file with `github_client_id`, `github_client_secret` and `session_key` (at least 32 characters, random). Must be mode 0600; the server refuses to start if it is missing, incomplete, or readable by group or others. Registering the GitHub App from the dashboard (GitHub App page, operators only) adds `github_app_id`, `github_app_slug`, `github_app_private_key`, `github_app_client_id`, `github_app_client_secret`, `github_app_webhook_secret` and `github_app_owner` (`{"login", "type"}`, the user or organization that owns the app). The GitHub App page's Remove button deletes every `github_app_*` key through the same atomic write (refused while the GitHub identity is the GitHub App) and links to the app's GitHub settings page, where the operator deletes the app. The dashboard rewrites this file itself for that: it writes a temporary file beside it and renames it over the file (a symlink stays a symlink), so the directory must be writable by the server user. Registration checks this first and refuses to start when it cannot write. The server reads the app's keys again whenever the file changes, so registering or removing the app needs no restart. Whether GitHub reads, writes and dashboard sign-in use the box account or the GitHub App is one instance-wide setting (GitHub App page, or `autocraft-server identity [box|app]`); switching ends every dashboard session and takes effect in the runner and the dashboard at their next GitHub call, without a restart. Under `box`, every `gh` and `git` call uses the server user's own `gh` login. Under `app`, every read (GraphQL, REST, git fetch over HTTPS, the image proxy, repository checks when tracking) runs with an installation token of the owner it concerns (the first tracked repo's owner when a read names none) and never sees the box account's credentials; the `gh` login of the server user is not needed. A read for which no installation token can be minted fails with an error naming the owner. The GitHub rate figures shown on the Pipeline page and used by the sync's reserve are those of the token in use. Permission checks of a signed-in person use that person's own token in both modes. |
@@ -762,7 +763,7 @@ A production install runs the dashboard, the runner, the sync timer and a daily 
 | `post-receive` | Bootstrap hook for `<root>/repo.git` (a bare repo). Install it once; each deploy replaces it with the copy in the deployed commit. It runs `deploy/hook.sh` from the pushed commit and passes that commit (`AUTOCRAFT_DEPLOY_SHA`), so the release is the commit that was pushed even if the branch moves during the deploy. |
 | `hook.sh` | Snapshots the database, pauses the sync timer, builds `<root>/releases/<commit>` (dependencies, `web/dist`), updates the sandbox worker code (when `AUTOCRAFT_WORKER_SSH` is set; SSH accepts only a known host key, from `<key>.known_hosts` when it exists, else the user's `known_hosts`) switches the `<root>/app` symlink and restarts the units named by `AUTOCRAFT_UNITS`. A failed deploy prints the command that redeploys the same commit. |
 | `push.sh` | `deploy/push.sh REMOTE [REF]`: pushes a branch to the bare repo. |
-| `backup.sh` | `backup.sh [PREFIX [KEEP]]`: consistent snapshot with `sqlite3 .backup`, compressed, newest KEEP kept. |
+| `backup.sh` | `backup.sh [PREFIX [KEEP]]`: consistent SQLite snapshot (`VACUUM INTO`), compressed, newest KEEP kept. With `AUTOCRAFT_DB_URL` it makes no backup and exits 3: the Postgres provider keeps the backups. |
 
 Layout: `<root>/{repo.git,releases,app,data,cache,config}` (`app` is a symlink to the current release). `<root>/config` holds the settings file, `secrets.json` (mode 0600), `accounts.json` and the per-account Claude config directories. The user needs `node` 24, `git`, `pnpm`, `sqlite3`, `curl`, `bwrap`, `gh` (logged in, with its git credential helper), `claude` (logged in per account) and `jev` on its PATH (`<root>/.local/bin` comes first). The restart needs a sudoers entry allowing the user `systemctl restart` of its own units, and `start`/`stop` of the sync timer, without a password. The units load `autocraft.env` themselves as the app user. The dashboard unit sees that file, `releases/`, `repo.git` and `.local` read-only (`ReadOnlyPaths=`): the process that faces the network cannot change what the other units source or run. The worker runs as a separate user (see Running a worker); `AUTOCRAFT_WORKER_SSH` and an SSH key at `<root>/.ssh/id_craftsandbox` let the hook install its code through the worker's forced-command key.
 
@@ -812,7 +813,8 @@ Every path is set by an environment variable. When a variable is unset, the code
 
 | Variable | Code default | Image | Systemd example |
 |---|---|---|---|
-| `AUTOCRAFT_DB` | `~/.local/share/autocraft/mirror.db` | `/data/mirror.db` | `<root>/data/mirror.db` |
+| `AUTOCRAFT_DATA_DIR` (reference documents, artifacts, item snapshot) | the SQLite file's directory | `/data` | unset |
+| `AUTOCRAFT_DB` | `mirror.db` in `AUTOCRAFT_DATA_DIR` when that is set, else `~/.local/share/autocraft/mirror.db` | unset (`/data/mirror.db`) | `<root>/data/mirror.db` |
 | `AUTOCRAFT_SECRETS_FILE` | none (required) | `/config/secrets.json` | `<root>/config/secrets.json` |
 | `AUTOCRAFT_ACCOUNTS` | none | `/config/accounts.json` | `<root>/config/accounts.json` |
 | `AUTOCRAFT_ACCOUNTS_ROOT` (Claude config directories) | none | `/config/claude` | `<root>/config/claude` |
@@ -824,8 +826,8 @@ Every path is set by an environment variable. When a variable is unset, the code
 | `AUTOCRAFT_CHECKOUT_DIR` | `~/.cache/autocraft/checkouts-v2` | `/data/cache/autocraft/checkouts` | `<root>/cache/autocraft/checkouts` |
 | `AUTOCRAFT_FIXUP_DIR` (bare git cache) | `~/.cache/autocraft/fixups` | `/data/cache/autocraft/fixups` | `<root>/cache/autocraft/fixups` |
 | `AUTOCRAFT_BACKUP_DIR` | `<database dir>/backups` | `/data/backups` | `<database dir>/backups` |
-| `AUTOCRAFT_ARTIFACT_DIR` | `<database dir>/artifacts` | unset | unset |
-| `AUTOCRAFT_SNAPSHOT_DIR` | `<database dir>/item-snapshot` | unset | unset |
+| `AUTOCRAFT_ARTIFACT_DIR` | `<data dir>/artifacts` | unset | unset |
+| `AUTOCRAFT_SNAPSHOT_DIR` | `<data dir>/item-snapshot` | unset | unset |
 | `AUTOCRAFT_CLAUDE_CWD` | `~/.cache/autocraft/claude-cwd` | unset | unset |
 | `AUTOCRAFT_MODEL_CACHE` | `$XDG_CACHE_HOME/autocraft/models` | unset | unset |
 | `AUTOCRAFT_WEB_DIST` | `web/dist` of the code | unset | unset |

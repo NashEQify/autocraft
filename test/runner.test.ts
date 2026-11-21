@@ -3,6 +3,7 @@
 // left running, runs one job per step and repo at a time.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { createServer, type AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -23,7 +24,7 @@ const dir = mkdtempSync(join(SCRATCH, "runner-test-"));
 const dbFile = join(dir, "runner.db");
 const db = await connectDb(dbFile);
 await db.script("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES ('app', 1); UPDATE tracked_repos SET pipeline = 1");
-const runner = new Runner({ db, dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} });
+const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} });
 
 after(async () => {
   await runner.stop();
@@ -56,9 +57,34 @@ describe("runner", () => {
     assert.equal((await getJob(db, bad.id)).error, "echo failed on purpose");
   });
 
-
-
-
-
-
+  test("with AUTOCRAFT_DB_URL set, a job process opens that Postgres database, not a SQLite file", async () => {
+    // A stand-in server that records the startup packet a Postgres client sends first (it names the database), then hangs up.
+    const seen: Buffer[] = [];
+    const server = createServer((s) => s.on("data", (b: Buffer) => { seen.push(b); s.destroy(); }));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const port = (server.address() as AddressInfo).port;
+    const saved = { url: process.env.AUTOCRAFT_DB_URL, db: process.env.AUTOCRAFT_DB };
+    const pgDir = mkdtempSync(join(dir, "pg-"));
+    const pgDb = await connectDb(join(pgDir, "jobs.db"));
+    process.env.AUTOCRAFT_DB_URL = `postgres://autocraft@127.0.0.1:${port}/childjob`;
+    delete process.env.AUTOCRAFT_DB;
+    const pgRunner = new Runner({ db: pgDb, logs: join(pgDir, "logs"), killAfterMs: 2000, log: () => {}, detect: async () => ({ proposals: [], logs: [] }), refreshFlow: async () => undefined });
+    try {
+      const job = await enqueue(pgDb, "test-echo", { n: 1 }, "boss");
+      const end = Date.now() + 20_000;
+      while (!Buffer.concat(seen).includes("database\0childjob\0")) {
+        if (Date.now() > end) throw new Error(`the job process did not connect; job ${job.id} is ${(await getJob(pgDb, job.id)).state}`);
+        await pgRunner.tick();
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    } finally {
+      await pgRunner.stop();
+      await pgDb.close();
+      await new Promise((r) => server.close(r));
+      for (const [k, v] of [["AUTOCRAFT_DB_URL", saved.url], ["AUTOCRAFT_DB", saved.db]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
 });

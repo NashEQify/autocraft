@@ -1,5 +1,7 @@
 // Opens database handles. The only module that loads the kysely and pg packages, with dynamic imports: the build worker
 // runs src/ without node_modules and never opens the app database (test/no-package-imports.test.ts).
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { connect, dbPath } from "../db.ts";
 import { envVar } from "../env.ts";
@@ -44,7 +46,27 @@ export function dbTarget(env: NodeJS.ProcessEnv = process.env): string {
   const path = envVar("DB", env);
   if (url !== undefined && path !== undefined && url !== path) throw new Error("AUTOCRAFT_DB_URL and AUTOCRAFT_DB are both set and differ: set only one");
   if (url !== undefined && !isPgUrl(url)) throw new Error("AUTOCRAFT_DB_URL must be a postgres:// or postgresql:// URL");
-  return url ?? dbPath();
+  return url ?? dbPath(env);
+}
+
+const DB_VARS = ["AUTOCRAFT_DB", "CRAFT_AUTO_DB", "AUTOCRAFT_DB_URL", "CRAFT_AUTO_DB_URL"];
+
+/** `env` for a child process that opens `target`: the one variable that names it, and no other database variable. */
+export function dbEnv(target: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const k of DB_VARS) delete out[k];
+  out[isPgUrl(target) ? "AUTOCRAFT_DB_URL" : "AUTOCRAFT_DB"] = target;
+  return out;
+}
+
+/**
+ * A file-name-safe name for `target`, for lock files that exclude a second run on the same database: a SQLite file's
+ * base name, or for Postgres a hash of the host, port and database name (no credentials).
+ */
+export function dbLockName(target: string = dbTarget()): string {
+  if (!isPgUrl(target)) return basename(target);
+  const u = new URL(target);
+  return `pg-${createHash("sha256").update(`${u.hostname}:${u.port || "5432"}${u.pathname}`).digest("hex").slice(0, 12)}`;
 }
 
 let role: DbRole = "cli";

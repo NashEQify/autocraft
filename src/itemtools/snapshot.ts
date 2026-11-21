@@ -7,13 +7,21 @@
 import { existsSync, mkdirSync, renameSync, rmSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { dbPath } from "../db.ts";
+import { dataDir } from "../db.ts";
+import { dbTarget, isPgUrl } from "../db/open.ts";
 import { envVar } from "../env.ts";
 
 export function snapshotDir(): string {
-  return envVar("SNAPSHOT_DIR") ?? join(dirname(dbPath()), "item-snapshot");
+  return envVar("SNAPSHOT_DIR") ?? join(dataDir(), "item-snapshot");
 }
 export const snapshotFile = (): string => join(snapshotDir(), "items.db");
+
+/** The SQLite database the snapshot is copied from: the configured one. */
+function snapshotSource(): string {
+  const target = dbTarget();
+  if (isPgUrl(target)) throw new Error("the item snapshot is copied from a SQLite database; building it from Postgres (AUTOCRAFT_DB_URL) is not implemented");
+  return target;
+}
 
 const ITEM_COLUMNS = ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_association", "created_at", "updated_at",
   "closed_at", "merged_at", "state_reason", "is_draft", "labels", "comments_count", "additions", "deletions", "changed_files",
@@ -91,7 +99,7 @@ const differs = (a: string, b: string, names: string[]) => names.filter((c) => c
  * missing or has another schema version. Only repositories with visibility
  * `public` are copied. The source is only read.
  */
-export function writeSnapshot(src: string = dbPath(), dest: string = snapshotFile()): SnapshotStats {
+export function writeSnapshot(src: string = snapshotSource(), dest: string = snapshotFile()): SnapshotStats {
   mkdirSync(dirname(dest), { recursive: true });
   recoverJournal(dest);
   let rebuilt = false;

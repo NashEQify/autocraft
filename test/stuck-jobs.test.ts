@@ -25,7 +25,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "stuck-jobs-"));
 const dbFile = join(dir, "runner.db");
 const db = await connectDb(dbFile);
-const runner = new Runner({ db, dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
+const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
 after(async () => {
   await runner.stop();
   await db.close();

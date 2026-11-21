@@ -3,9 +3,9 @@
 // them, only a few kinds are accepted, and nothing here ever executes or
 // renders them.
 import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, rmSync } from "node:fs";
-import { dirname, join, resolve, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { createHash } from "node:crypto";
-import { dbPath } from "../db.ts";
+import { dataDir } from "../db.ts";
 import { envVar } from "../env.ts";
 import type { Db } from "../db/index.ts";
 
@@ -16,7 +16,7 @@ export const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 
 /** AUTOCRAFT_ARTIFACT_DIR, else `artifacts` beside the database. */
 export function artifactDir(): string {
-  return resolve(envVar("ARTIFACT_DIR") ?? join(dirname(dbPath()), "artifacts"));
+  return resolve(envVar("ARTIFACT_DIR") ?? join(dataDir(), "artifacts"));
 }
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);

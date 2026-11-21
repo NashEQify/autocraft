@@ -77,9 +77,12 @@ services:
           f=$$(ls -1t /data/backups/daily-*.db.* 2>/dev/null | head -n 1)
           if [ -n "$$f" ]; then stat -c %Y "$$f"; else echo 0; fi
         }
+        # A Postgres database (AUTOCRAFT_DB_URL) is backed up by its provider; the snapshot covers SQLite only.
+        snapshots=1
+        if [ -n "$${AUTOCRAFT_DB_URL:-}" ]; then snapshots=0; echo "backup: AUTOCRAFT_DB_URL is set; no snapshots here, the database provider keeps the backups" >&2; fi
         while true; do
           /app/deploy/entrypoint.sh sync || echo "sync exited $$?" >&2
-          if [ $$(( $$(date +%s) - $$(last_backup) )) -ge 86400 ]; then
+          if [ "$$snapshots" = 1 ] && [ $$(( $$(date +%s) - $$(last_backup) )) -ge 86400 ]; then
             /app/deploy/entrypoint.sh backup daily 7 || echo "backup exited $$?" >&2
           fi
           sleep 60 & wait $$!

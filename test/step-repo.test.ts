@@ -20,7 +20,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "step-repo-"));
 const db = await connectDb(join(dir, "t.db"));
 for (const r of ["a", "b"]) await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES (?, 1)").run(r);
-const make = (maxJobs?: number) => new Runner({ db, dbFile: join(dir, "t.db"), logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, ...(maxJobs ? { maxJobs } : {}) });
+const make = (maxJobs?: number) => new Runner({ db, dbTarget: join(dir, "t.db"), logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, ...(maxJobs ? { maxJobs } : {}) });
 const runners: InstanceType<typeof Runner>[] = [];
 after(async () => { for (const r of runners) await r.stop(); await db.close(); rmSync(dir, { recursive: true, force: true }); });
 

@@ -97,6 +97,13 @@ export interface Db {
    * inside a read snapshot it throws. Never retries itself.
    */
   write<T>(fn: () => Promise<T>, opts?: WriteOptions): Promise<T>;
+  /**
+   * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
+   * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
+   * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
+   * Attempts in one transaction run one at a time, like its statements.
+   */
+  attempt<T>(fn: () => Promise<T>): Promise<T>;
   /** Whether a transaction is open in the current async context. */
   inTransaction(): boolean;
   /** Runs several statements with no parameters (schema scripts, PRAGMAs). */

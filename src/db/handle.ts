@@ -16,6 +16,8 @@ export interface Tx {
   /** The connection the transaction runs on, recorded by the engine's driver at BEGIN. */
   conn?: DatabaseConnection;
   trx?: Transaction<DB>;
+  /** Savepoints taken by `attempt`, for unique names. */
+  savepoints?: number;
 }
 
 /** What a handle gives its engine. */
@@ -141,6 +143,23 @@ export class Handle implements Db {
       run: (...args: Args) => exec("run", args),
       iterate: (...args: Args) => iterate(args),
     } as Statement;
+  }
+
+  async attempt<T>(fn: () => Promise<T>): Promise<T> {
+    const tx = this.#current();
+    if (this.dialect !== "postgres" || !tx) return await fn();
+    tx.savepoints = (tx.savepoints ?? 0) + 1;
+    const name = `attempt_${tx.savepoints}`;
+    await this.#engine.script(`SAVEPOINT ${name}`, tx);
+    let r: T;
+    try {
+      r = await fn();
+    } catch (e) {
+      await this.#engine.script(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`, tx);
+      throw e;
+    }
+    await this.#engine.script(`RELEASE SAVEPOINT ${name}`, tx);
+    return r;
   }
 
   inTransaction(): boolean {
