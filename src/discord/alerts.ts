@@ -6,12 +6,12 @@ import { createHash } from "node:crypto";
 import { applyDrafts, choicesById, coresFor, currentChoices, type Core } from "../decide/choices.ts";
 import type { ActionTag } from "../decide/choices-types.ts";
 import { decisionStamp } from "../conversations/cards.ts";
-import { lockLiveSql } from "../answers/hold.ts";
+import { lockLiveExpr } from "../answers/hold.ts";
 import { queuePlace } from "../conversations/queue.ts";
 import { choicesView, doChoice } from "../dash/api/conversations.ts";
 import { HttpError } from "../dash/server/util.ts";
 import type { Req, Role, User } from "../dash/types.ts";
-import { BACKLOG, HANDLED, WITHDRAWN_OPTION, getDecision, itemsOf, optionsOf, reposOf, SNOOZED_SQL, type DecisionRow } from "../decisions.ts";
+import { BACKLOG, HANDLED, WITHDRAWN_OPTION, getDecision, itemsOf, optionsOf, reposOf, snoozedExpr, type DecisionRow, type Kind } from "../decisions.ts";
 import { readSeqs } from "../live.ts";
 import { trackedNames } from "../repos.ts";
 import { allAppIdentity, maintainerWritesOn } from "../settlers.ts";
@@ -23,6 +23,7 @@ import { RestError, type DiscordRest, type EditBody } from "./rest.ts";
 import { ghPermission, type PermissionReader } from "../fixup/author-permission.ts";
 import { everySeq, exclusive, filterSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** What the alerts need from Discord beyond messages: the direct-message channel of a user. */
 export type DmRest = DiscordRest & { createDm(userId: string): Promise<{ id: string }> };
@@ -55,7 +56,7 @@ const soft = (s: string, n: number): string => {
 };
 
 const roleOf = async (db: Db, login: string): Promise<Role | null> => {
-  const r = (await db.prepare("SELECT role FROM main.access WHERE login = ?").get(login) as { role: string } | undefined)?.role;
+  const r = (await db.get(db.k.selectFrom("main.access").select("role").where("login", "=", login)))?.role;
   return r === "operator" || r === "maintainer" || r === "viewer" ? r : null;
 };
 
@@ -73,8 +74,9 @@ export async function mayReceive(db: Db, login: string, role: Role, repos: strin
   if (role === "operator") return true;
   if (role !== "maintainer" || !await maintainerWritesOn(db) || !await allAppIdentity(db, repos)) return false;
   const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
-  return await everySeq(repos, async (r) => !!await db.prepare("SELECT 1 FROM main.repo_permissions WHERE login = ? AND repo = ? AND permission IN ('write', 'maintain', 'admin') AND (checked_at > ? OR ?)")
-    .get(login, r, since, Number(kept.has(permKey(login, r)))));
+  return await everySeq(repos, async (r) => !!await db.get(db.k.selectFrom("main.repo_permissions").select((eb) => eb.lit(1).as("one"))
+    .where("login", "=", login).where("repo", "=", r).where("permission", "in", ["write", "maintain", "admin"])
+    .$if(!kept.has(permKey(login, r)), (q) => q.where("checked_at", ">", since))));
 }
 
 export async function mayAlert(db: Db, login: string): Promise<boolean> {
@@ -88,21 +90,21 @@ export async function mayAlert(db: Db, login: string): Promise<boolean> {
 export async function setAlerts(db: Db, keys: DiscordKeys, userId: string, channelId: string | null): Promise<void> {
   const h = keys.hash("author", userId);
   if (channelId === null) {
-    await db.prepare("DELETE FROM discord_alerts WHERE user_hash = ?").run(h);
-    await db.prepare("DELETE FROM discord_alert_msgs WHERE user_hash = ?").run(h);
+    await db.run(db.k.deleteFrom("discord_alerts").where("user_hash", "=", h));
+    await db.run(db.k.deleteFrom("discord_alert_msgs").where("user_hash", "=", h));
     return;
   }
-  await db.prepare(`INSERT INTO discord_alerts (user_hash, sealed, created_at) VALUES (?, ?, ?)
-    ON CONFLICT(user_hash) DO UPDATE SET sealed = excluded.sealed`).run(h, ref(keys, channelId, "-", aad(h)), new Date().toISOString());
+  await db.run(db.k.insertInto("discord_alerts").values({ user_hash: h, sealed: ref(keys, channelId, "-", aad(h)), created_at: new Date().toISOString() })
+    .onConflict((oc) => oc.column("user_hash").doUpdateSet(kx.excluded(["sealed"]))));
 }
 
 export const alertsOn = async (db: Db, keys: DiscordKeys, userId: string): Promise<boolean> =>
-  !!await db.prepare("SELECT 1 FROM discord_alerts WHERE user_hash = ?").get(keys.hash("author", userId));
+  !!await db.get(db.k.selectFrom("discord_alerts").select((eb) => eb.lit(1).as("one")).where("user_hash", "=", keys.hash("author", userId)));
 
 type Built = { content: string; components: unknown[]; choicesId: string | null };
 
 const itemTitle = async (db: Db, repo: string, n: number): Promise<string> =>
-  (await db.prepare("SELECT title FROM main.items WHERE repo = ? AND number = ?").get(repo, n) as { title: string | null } | undefined)?.title ?? "";
+  (await db.get(db.k.selectFrom("main.items").select("title").where("repo", "=", repo).where("number", "=", n)))?.title ?? "";
 
 /** A button names its core by a short hash of the core key, so a changed list of choices never runs another core. */
 export const coreId = (key: string): string => createHash("sha256").update(key).digest("base64url").slice(0, 8);
@@ -213,7 +215,8 @@ export class DecisionAlerts {
   async #alerters(): Promise<Alerter[]> {
     const { db, keys } = this.#d;
     const out: Alerter[] = [];
-    for (const r of await db.prepare("SELECT a.user_hash, a.sealed, l.login FROM discord_alerts a JOIN discord_links l ON l.user_hash = a.user_hash").all() as { user_hash: string; sealed: string; login: string }[]) {
+    for (const r of await db.all(db.k.selectFrom("discord_alerts as a").innerJoin("discord_links as l", "l.user_hash", "a.user_hash")
+      .select(["a.user_hash", "a.sealed", "l.login"]).orderBy("a.user_hash"))) {
       const role = await roleOf(db, r.login);
       const channelId = keys.open(r.sealed, aad(r.user_hash))?.channelId;
       if (role && channelId) out.push({ userHash: r.user_hash, login: r.login, role, channelId });
@@ -227,29 +230,36 @@ export class DecisionAlerts {
     const people = await this.#alerters();
     await this.#refreshPermissions(people, now);
     // Messages first: an answer or new choices change what is shown.
-    for (const m of await db.prepare("SELECT decision_id, user_hash, sealed, choices_id, sent_at FROM discord_alert_msgs").all() as MsgRow[]) {
+    for (const m of await db.all(db.k.selectFrom("discord_alert_msgs").select(["decision_id", "user_hash", "sealed", "choices_id", "sent_at"])
+      .orderBy("decision_id").orderBy("user_hash"))) {
       const owner = people.find((x) => x.userHash === m.user_hash);
       if (owner) await this.#refresh(m, owner);
     }
     for (const p of people) {
-      const open = await db.prepare(`SELECT * FROM decisions WHERE answer IS NULL AND NOT ${SNOOZED_SQL} AND NOT ${lockLiveSql("decisions")} AND asked_at >= (SELECT created_at FROM discord_alerts WHERE user_hash = ?) ORDER BY asked_at`).all(p.userHash) as DecisionRow[];
-      const have = new Set((await db.prepare("SELECT decision_id FROM discord_alert_msgs WHERE user_hash = ?").all(p.userHash) as { decision_id: string }[]).map((r) => r.decision_id));
+      const open: DecisionRow[] = await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>()
+        .where("answer", "is", null).where((eb) => eb.not(snoozedExpr(eb))).where((eb) => eb.not(lockLiveExpr(db, eb, "decisions")))
+        .where((eb) => eb("asked_at", ">=", eb.selectFrom("discord_alerts").select("created_at").where("user_hash", "=", p.userHash)))
+        .orderBy("asked_at").orderBy(kx.rowid("decisions")));
+      const have = new Set((await db.all(db.k.selectFrom("discord_alert_msgs").select("decision_id").where("user_hash", "=", p.userHash))).map((r) => r.decision_id));
       const fresh = await filterSeq(open, async (d) => !have.has(d.id) && itemsOf(d).length > 0 && await mayReceive(db, p.login, p.role, reposOf(d), now, this.#kept));
       if (!fresh.length) continue;
-      let room = (this.#d.perHour ?? PER_HOUR) - Number((await db.prepare("SELECT COUNT(*) AS n FROM discord_alert_msgs WHERE user_hash = ? AND (sealed IS NOT NULL OR decision_id LIKE 'summary:%') AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString()) as { n: number }).n);
+      let room = (this.#d.perHour ?? PER_HOUR) - (await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.fn.countAll<number>().as("n"))
+        .where("user_hash", "=", p.userHash).where((eb) => eb.or([eb("sealed", "is not", null), kx.like(db, "decision_id", eb.val("summary:%"))]))
+        .where("sent_at", ">", new Date(now - HOUR_MS).toISOString())))!.n;
       const overflow: DecisionRow[] = [];
       for (const d of fresh) {
         if (room <= 0) { overflow.push(d); continue; }
         try {
           const b = await buildMessage(db, d, this.#d.baseUrl);
           const sent = await rest.createMessage(p.channelId, { content: b.content, components: b.components, allowed_mentions: { parse: [] } });
-          await db.prepare("INSERT OR REPLACE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, ?, ?, ?)")
-            .run(d.id, p.userHash, ref(keys, p.channelId, sent.id, aad(p.userHash, d.id)), b.choicesId, new Date(now).toISOString());
+          await db.run(db.k.insertInto("discord_alert_msgs")
+            .values({ decision_id: d.id, user_hash: p.userHash, sealed: ref(keys, p.channelId, sent.id, aad(p.userHash, d.id)), choices_id: b.choicesId, sent_at: new Date(now).toISOString() })
+            .onConflict((oc) => oc.columns(["decision_id", "user_hash"]).doUpdateSet(kx.excluded(["sealed", "choices_id", "sent_at"]))));
           room--;
         } catch (e) {
           log(`discord: alert not sent: ${(e as Error).message}`);
           // Direct messages that are closed will stay closed; anything else is tried again on the next change.
-          if (e instanceof RestError && e.status === 403) await db.prepare("INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, NULL, NULL, ?)").run(d.id, p.userHash, new Date(now).toISOString());
+          if (e instanceof RestError && e.status === 403) await db.run(db.k.insertInto("discord_alert_msgs").values({ decision_id: d.id, user_hash: p.userHash, sealed: null, choices_id: null, sent_at: new Date(now).toISOString() }).onConflict((oc) => oc.doNothing()));
           else break;
         }
       }
@@ -260,7 +270,8 @@ export class DecisionAlerts {
   async #summary(p: Alerter, ds: DecisionRow[], now: number): Promise<void> {
     const { db, rest, log } = this.#d;
     // One summary per person per hour; the questions it would have named wait for the next pass after that.
-    if (await db.prepare("SELECT 1 FROM discord_alert_msgs WHERE user_hash = ? AND decision_id LIKE 'summary:%' AND sent_at > ?").get(p.userHash, new Date(now - HOUR_MS).toISOString())) return;
+    if (await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.lit(1).as("one")).where("user_hash", "=", p.userHash)
+      .where((eb) => kx.like(db, "decision_id", eb.val("summary:%"))).where("sent_at", ">", new Date(now - HOUR_MS).toISOString()).limit(1))) return;
     const base = this.#d.baseUrl?.replace(/\/+$/, "");
     const lines = ds.slice(0, 10).map((d) => {
       const f = itemsOf(d)[0]!;
@@ -268,9 +279,10 @@ export class DecisionAlerts {
     });
     try {
       await rest.createMessage(p.channelId, { content: `${ds.length} new ${ds.length === 1 ? "question" : "questions"}\n${lines.join("\n")}${ds.length > 10 ? `\nand ${ds.length - 10} more` : ""}`.slice(0, 1990), allowed_mentions: { parse: [] } });
-      const ins = db.prepare("INSERT OR IGNORE INTO discord_alert_msgs (decision_id, user_hash, sealed, choices_id, sent_at) VALUES (?, ?, NULL, NULL, ?)");
-      for (const d of ds) await ins.run(d.id, p.userHash, new Date(now).toISOString());
-      await ins.run(`summary:${now}`, p.userHash, new Date(now).toISOString());
+      const ins = (id: string) => db.run(db.k.insertInto("discord_alert_msgs").values({ decision_id: id, user_hash: p.userHash, sealed: null, choices_id: null, sent_at: new Date(now).toISOString() })
+        .onConflict((oc) => oc.doNothing()));
+      for (const d of ds) await ins(d.id);
+      await ins(`summary:${now}`);
     } catch (e) {
       log(`discord: alert summary not sent: ${(e as Error).message}`);
     }
@@ -286,24 +298,22 @@ export class DecisionAlerts {
     const maintainers = people.filter((p) => p.role === "maintainer");
     if (!maintainers.length || !await maintainerWritesOn(db)) return;
     const repos = new Set<string>();
-    for (const d of await db.prepare("SELECT * FROM decisions WHERE answer IS NULL").all() as DecisionRow[]) for (const r of reposOf(d)) repos.add(r);
+    for (const d of await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>().where("answer", "is", null).orderBy(kx.rowid("decisions")))) for (const r of reposOf(d)) repos.add(r);
     if (!repos.size) return;
     const since = new Date(now - RECEIVE_PERMISSION_TTL_MS).toISOString();
-    const stale = db.prepare("SELECT 1 FROM main.repo_permissions WHERE login = ? AND repo = ? AND checked_at <= ?");
-    const store = db.prepare(`INSERT INTO main.repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)
-      ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at`);
     const read = this.#d.readPermission ?? ghPermission;
     for (const login of new Set(maintainers.map((p) => p.login))) {
       for (const repo of repos) {
         const k = permKey(login, repo);
-        if (!await stale.get(login, repo, since)) { this.#kept.delete(k); continue; }
+        if (!await db.get(db.k.selectFrom("main.repo_permissions").select((eb) => eb.lit(1).as("one")).where("login", "=", login).where("repo", "=", repo).where("checked_at", "<=", since))) { this.#kept.delete(k); continue; }
         const last = this.#permRead.get(k);
         if (last && now - last.at < RECEIVE_PERMISSION_TTL_MS) continue;
         const p = await read(repo, login).catch(() => null);
         this.#permRead.set(k, { at: now, failed: p === null });
         if (p === null) { this.#kept.add(k); log(`discord: permission of ${login} on ${repo} could not be read`); continue; }
         this.#kept.delete(k);
-        await store.run(login, repo, p, new Date(now).toISOString());
+        await db.run(db.k.insertInto("main.repo_permissions").values({ login, repo, permission: p, checked_at: new Date(now).toISOString() })
+          .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(kx.excluded(["permission", "checked_at"]))));
       }
     }
   }
@@ -313,7 +323,7 @@ export class DecisionAlerts {
     const { db, keys, rest, log } = this.#d;
     const forget = async (): Promise<void> => {
       this.#seen.delete(`${m.decision_id}|${m.user_hash}`);
-      await db.prepare("DELETE FROM discord_alert_msgs WHERE decision_id = ? AND user_hash = ?").run(m.decision_id, m.user_hash);
+      await db.run(db.k.deleteFrom("discord_alert_msgs").where("decision_id", "=", m.decision_id).where("user_hash", "=", m.user_hash));
     };
     if (m.decision_id.startsWith("summary:")) return Date.parse(m.sent_at) < (this.#d.now ?? Date.now)() - 2 * HOUR_MS ? await forget() : undefined;
     const d = await getDecision(db, m.decision_id);
@@ -348,7 +358,7 @@ export class DecisionAlerts {
     try {
       await rest.editMessage(at.channelId, at.messageId, body);
       if (gone) await forget();
-      else if (open) await db.prepare("UPDATE discord_alert_msgs SET choices_id = ? WHERE decision_id = ? AND user_hash = ?").run(choicesId, m.decision_id, m.user_hash);
+      else if (open) await db.run(db.k.updateTable("discord_alert_msgs").set({ choices_id: choicesId }).where("decision_id", "=", m.decision_id).where("user_hash", "=", m.user_hash));
       else await forget();
     } catch (e) {
       // A deleted message cannot be edited and need not be.

@@ -119,7 +119,7 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
   assert.equal(last.channelId, "dm-1");
   assert.deepEqual(last.body.components, []);
   assert.match(last.body.content ?? "", /Answered by op: Hold/);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_alert_msgs").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
 
   // Over the hourly limit the new questions come as one summary message.
   const limited = mk(1);
@@ -137,6 +137,6 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
 
   // Off: the account's rows are gone.
   assert.match(await alertsCmd("1", "off"), /off/);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_alerts WHERE user_hash = ?").get(keys.hash("author", "1")) as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_alerts").select((eb) => eb.fn.countAll<number>().as("n")).where("user_hash", "=", keys.hash("author", "1"))))!.n, 0);
   assert.deepEqual(logs, []);
 });
