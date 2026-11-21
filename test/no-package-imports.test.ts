@@ -22,3 +22,18 @@ test("server code imports only node: modules and relative files at the top level
   walk(root);
   assert.deepEqual(bad, []);
 });
+
+// kysely and pg load in one place, so everything else stays importable without node_modules.
+test("only src/db/open.ts loads kysely or pg", () => {
+  const root = new URL("../src", import.meta.url).pathname;
+  const found: string[] = [];
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (p.endsWith(".ts") && /import\(\s*["'](kysely|pg)["']\s*\)/.test(readFileSync(p, "utf8"))) found.push(p.slice(root.length + 1));
+    }
+  };
+  walk(root);
+  assert.deepEqual(found, ["db/open.ts"]);
+});

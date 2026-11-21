@@ -1,0 +1,104 @@
+/**
+ * The database handle that SQLite and Postgres both sit behind. Types only: values come from `./open.ts`, which is the one
+ * module that loads the `kysely` and `pg` packages (with a dynamic import, so the build worker runs without them).
+ *
+ * How callers get a handle:
+ * - `await openDb()`: the process's handle on the configured database (`AUTOCRAFT_DB`), memoized; `closeDb()` at exit.
+ * - `await connectDb(path, { busyTimeoutMs })`: a handle of its own (tests, the dashboard's second handle, worker threads).
+ * - `await dbFor(sync)`: the handle over a `DatabaseSync` that `connect()` (src/db.ts) returned, memoized per connection.
+ *   Code that still holds a `DatabaseSync` reaches the async API this way while the rest of the call graph is converted.
+ *
+ * Target shape of the sync → async conversion (statement API mirrors node:sqlite's, but every call returns a promise):
+ * - `db: DatabaseSync`                         → `db: Db`
+ * - `db.prepare(X).get(a)` / `.all` / `.run`   → `await db.prepare(X).get(a)` / ...  (`?` and `:name` parameters as today)
+ * - `db.prepare(X).iterate(a)` in `for`        → `for await (... of db.prepare(X).iterate(a))`
+ * - `db.exec(X)`                               → `await db.script(X)`
+ * - `db.isTransaction`                         → `db.inTransaction()`
+ * - `BEGIN IMMEDIATE; ...; COMMIT`             → `await db.write(async () => { ... })`
+ * - `BEGIN; ...; COMMIT` (read snapshot)       → `await db.read(async () => { ... })`
+ * - `connect(path, opts)`                      → `await connectDb(path, opts)`; the default database → `await openDb()`
+ * `db.sync` is the underlying `DatabaseSync` on SQLite, for residue that cannot await yet; it bypasses transaction
+ * routing (it runs on the same connection, so inside whatever transaction is open on it) and goes away after the move.
+ *
+ * Transactions are routed through AsyncLocalStorage: every call made inside `db.write(fn)` / `db.read(fn)`, at any depth
+ * of awaits, runs in that transaction. Read `db.k` at each use; a `Kysely` captured outside a transaction stays outside it.
+ */
+import type { Compilable, Kysely } from "kysely";
+import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
+
+export type Dialect = "sqlite" | "postgres";
+
+/**
+ * The table types Kysely queries are checked against. Loose until generated types from the migrated schema replace it.
+ */
+export type DB = Record<string, Record<string, unknown>>;
+
+export type Value = SQLOutputValue;
+export type Row = Record<string, Value>;
+export type Param = SQLInputValue;
+export type NamedParams = Record<string, Param>;
+
+/** What a write statement did. Numbers on both backends. */
+export interface RunResult {
+  changes: number;
+  lastInsertRowid: number;
+}
+
+/** A statement from `db.prepare(text)`: node:sqlite's API, async. Rows are plain objects. */
+export interface Statement {
+  get<T = Row>(...params: Param[]): Promise<T | undefined>;
+  get<T = Row>(named: NamedParams, ...params: Param[]): Promise<T | undefined>;
+  all<T = Row>(...params: Param[]): Promise<T[]>;
+  all<T = Row>(named: NamedParams, ...params: Param[]): Promise<T[]>;
+  run(...params: Param[]): Promise<RunResult>;
+  run(named: NamedParams, ...params: Param[]): Promise<RunResult>;
+  /** Rows one at a time. The result is read whole first, so the loop body may use the database freely. */
+  iterate<T = Row>(...params: Param[]): AsyncIterableIterator<T>;
+  iterate<T = Row>(named: NamedParams, ...params: Param[]): AsyncIterableIterator<T>;
+}
+
+export interface WriteOptions {
+  /** How long to wait for the write lock before failing with a lock timeout. Defaults to the handle's busy timeout. */
+  lockTimeoutMs?: number;
+}
+
+/** One event for `db.observe`. */
+export type DbEvent =
+  /** One round trip: a statement, a script, BEGIN or COMMIT. `bytes` is the size of the result rows as JSON. */
+  | { kind: "query"; sql: string; rows: number; bytes: number; ms: number; site: string }
+  /** A write transaction ended; `holdMs` is how long it held the write lock. */
+  | { kind: "write-lock"; holdMs: number; site: string };
+
+export interface Db {
+  readonly dialect: Dialect;
+  /** Kysely, routed to the transaction open in the current async context. */
+  readonly k: Kysely<DB>;
+  /** Runs a Kysely query: its first row. */
+  get<O>(q: Compilable<O>): Promise<O | undefined>;
+  /** Runs a Kysely query: all rows. */
+  all<O>(q: Compilable<O>): Promise<O[]>;
+  /** Runs a Kysely write. */
+  run(q: Compilable<unknown>): Promise<RunResult>;
+  /** Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters. */
+  prepare(text: string): Statement;
+  /**
+   * Runs `fn` in one read snapshot (SQLite BEGIN; Postgres REPEATABLE READ READ ONLY). Inside an open transaction it
+   * joins that one.
+   */
+  read<T>(fn: () => Promise<T>): Promise<T>;
+  /**
+   * Runs `fn` in one write transaction (SQLite BEGIN IMMEDIATE; Postgres READ COMMITTED with the global writer lock),
+   * committed when `fn` resolves and rolled back when it throws. Inside an open write transaction it joins that one;
+   * inside a read snapshot it throws. Never retries itself.
+   */
+  write<T>(fn: () => Promise<T>, opts?: WriteOptions): Promise<T>;
+  /** Whether a transaction is open in the current async context. */
+  inTransaction(): boolean;
+  /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
+  script(text: string): Promise<void>;
+  /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */
+  observe(fn: (e: DbEvent) => void): () => void;
+  close(): Promise<void>;
+  /** The underlying SQLite connection, for code that cannot await yet. Absent on Postgres. */
+  readonly sync?: DatabaseSync;
+}
