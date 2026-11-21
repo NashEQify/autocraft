@@ -97,11 +97,3 @@ test("U24 read.blank-error", () => {
 test("U25 read.waiting", () => {
   assert.equal(timelineReadState(ref, { data: undefined, loading: true, error: undefined }), "waiting");
 });
-
-
-
-
-
-
-
-

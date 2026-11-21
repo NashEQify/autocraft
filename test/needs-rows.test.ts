@@ -31,6 +31,3 @@ test("roving selection defaults to the first row and clamps every movement", () 
   assert.equal(stepIndex(list, 1, "End"), 2);
   assert.equal(stepIndex([], 0, "ArrowDown"), -1);
 });
-
-
-
