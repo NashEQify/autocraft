@@ -32,7 +32,7 @@ test("a merge of the base that leaves the PR's own diff alone carries the verdic
 
   const db = await connectDb(join(tmpdir("conflict-cost"), "t.db"));
   const at = "2026-11-04T10:00:00.000Z";
-  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, at, model, mode, verdict, sure, reason, fixes, seen_at) VALUES ('app', 1, 'E', ?, 'opus', 'full', 'take-fix', 1, 'r', '[{"file":"a","change":"c"}]', ?)`).run(at, at);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "E", at, model: "opus", mode: "full", verdict: "take-fix", sure: 1, reason: "r", fixes: '[{"file":"a","change":"c"}]', seen_at: at }));
   await db.run(db.k.insertInto("conflict_merges").values({ repo: "app", number: 1, from_head: "E", to_head: "H", state: "merged", attempt: 1, created_at: at, own_diff: "same" }));
   await db.run(db.k.insertInto("conflict_merges").values({ repo: "app", number: 1, from_head: "E", to_head: "H2", state: "merged", attempt: 1, created_at: at, own_diff: "changed" }));
   const k = await carriedReview(db, { repo: "app", number: 1, head_oid: "H" });
@@ -57,7 +57,7 @@ test("a third merge of the base into one PR in a UTC day waits for the next day"
 test("the review after our resolution reads the changed and dropped PR hunks, and a head with no recorded delta is reviewed in full", async () => {
   const db = await connectDb(join(tmpdir("conflict-delta"), "t.db"));
   const at = "2026-11-04T10:00:00.000Z";
-  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, at, model, mode, verdict, sure, reason, seen_at) VALUES ('app', 1, 'E', ?, 'opus', 'full', 'take', 1, 'r', ?)`).run(at, at);
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: "E", at, model: "opus", mode: "full", verdict: "take", sure: 1, reason: "r", seen_at: at }));
   const before = `${diff("x", "let kept = 1;")}diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-old\n+dropped line\n`;
   const after = diff("x", "let kept = 1;");
   const delta = changedHunks(before, after);

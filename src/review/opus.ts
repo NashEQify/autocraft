@@ -16,7 +16,6 @@ import { withdrawHoldQuestion, withdrawMergeQuestion } from "../merge/withdraw.t
 import { headWasUnsure, mergeDecisionId, holdDecisionId } from "../merge/queue.ts";
 import { defaultBranchOf, recordLiveBase, reviewedBaseOf } from "../merge/base.ts";
 import { relatedOpen, latestReview } from "../postmerge/related.ts";
-import { HISTORY_COPY_SQL } from "../db.ts";
 import type { DiscussionEntry } from "./parse.ts";
 import { reviewAfterBaseMerge } from "./own-diff.ts";
 import { MAX_DIFF_CHARS, cachedDiff, cachedDiffBase, codeDiff, ghDelta, ghDiff, type DeltaFetcher, type DiffFetcher } from "./diff.ts";
@@ -32,6 +31,8 @@ import { jobItem } from "../runner/job-items.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import * as kx from "../db/kx.ts";
+import type { NotNull } from "kysely";
 
 const PROMPT = CLAUDE_PROMPTS["review.opus"];
 export { MAX_DIFF_CHARS };
@@ -79,66 +80,72 @@ type Saved = { snap?: Snapshot; mode: "full" | "delta" | "carried"; base: string
  */
 export async function saveOpus(db: Db, runId: string | null, c: { repo: string; number: number; head_oid: string }, s: Saved): Promise<void> {
   const at = now(), r = s.review;
-  const again = await db.prepare("SELECT at FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(c.repo, c.number, c.head_oid) as { at: string } | undefined;
+  const again = await db.get(db.k.selectFrom("opus_reviews").select("at").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
   const baseRef = s.baseRef !== undefined ? s.baseRef : await reviewedBase(db, c);
   const before = again ? await reviewedBaseOf(db, c.repo, c.number, c.head_oid) ?? await defaultBranchOf(db, c.repo) : null;
   const rebased = !!before && !!baseRef && before !== baseRef;
-  const reviewed = await db.prepare("SELECT at FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(c.repo, c.number, c.head_oid) as { at: string } | undefined;
+  const reviewed = await db.get(db.k.selectFrom("opus_reviews").select("at").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid).where("verdict", "is not", null));
   if (reviewed && !await markedStaleSince(db, c.repo, c.number, reviewed.at)) await countRerun(db, c.repo, c.number);
   // A head that was ever unsure keeps its Merge? question (and a person's answer to it) through a re-review that stays take or take-fix.
   // An answered question is withdrawn as for any re-review: the head then needs a new answer.
-  const unanswered = !!await db.prepare("SELECT 1 FROM decisions WHERE id = ? AND answer IS NULL").get(mergeDecisionId(c.repo, c.number, c.head_oid));
+  const unanswered = !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", mergeDecisionId(c.repo, c.number, c.head_oid)).where("answer", "is", null));
   const keepsQuestion = !!again && !rebased && unanswered && (r.verdict === "take" || r.verdict === "take-fix") && await headWasUnsure(db, c.repo, c.number, c.head_oid);
   // An answered, unapplied merge answer stands through a re-review at the same head and base unless the verdict got worse.
   const keepsAnswer = !!again && !rebased && (r.verdict === "take" || r.verdict === "take-fix") && r.sure
-    && !!await db.prepare("SELECT 1 FROM decisions WHERE id = ? AND answer = 'merge' AND applied_at IS NULL").get(mergeDecisionId(c.repo, c.number, c.head_oid));
+    && !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", mergeDecisionId(c.repo, c.number, c.head_oid)).where("answer", "=", "merge").where("applied_at", "is", null));
   if (again && !keepsQuestion && !keepsAnswer) {
     const worse = r.verdict === "take" || r.verdict === "take-fix" ? "the new review is unsure" : `the new review is a ${r.verdict}`;
     await withdrawMergeQuestion(db, c.repo, c.number, c.head_oid, at, rebased ? `the base branch changed from ${before} to ${baseRef}` : `superseded by a new review: ${worse}`);
   }
   if (rebased) {
-    await db.prepare("DELETE FROM premerge_reviews WHERE repo = ? AND number = ? AND head_oid = ?").run(c.repo, c.number, c.head_oid);
-    await db.prepare("UPDATE verifications SET state = 'stale' WHERE repo = ? AND number = ? AND head_sha = ?").run(c.repo, c.number, c.head_oid);
+    await db.run(db.k.deleteFrom("premerge_reviews").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
+    await db.run(db.k.updateTable("verifications").set({ state: "stale" }).where("repo", "=", c.repo).where("number", "=", c.number).where("head_sha", "=", c.head_oid));
   }
   // The Hold question belongs to one review: a review made again at the head asks it anew if the verdict is still hold.
   // An unanswered or Wait-answered question stays while the verdict is still hold: its review time moves, so the prepare is written again.
   const holdId = holdDecisionId(c.repo, c.number, c.head_oid);
-  const keepsHold = r.verdict === "hold" && !!await db.prepare("SELECT 1 FROM decisions WHERE id = ? AND (answer IS NULL OR answer = 'wait')").get(holdId);
+  const keepsHold = r.verdict === "hold" && !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", holdId).where((eb) => eb.or([eb("answer", "is", null), eb("answer", "=", "wait")])));
   if (again && !keepsHold) await withdrawHoldQuestion(db, c.repo, c.number, c.head_oid, at, "superseded by a new review");
   // The row about to be replaced may predate the history: copy it first.
-  await db.prepare(`${HISTORY_COPY_SQL} AND o.repo = ? AND o.number = ? AND o.head_oid = ?`).run(c.repo, c.number, c.head_oid);
+  await db.run(db.k.insertInto("main.opus_review_history")
+    .columns(["repo", "number", "head_oid", "at", "model", "mode", "verdict", "sure", "reason", "risks", "fixes", "summary", "why", "public_review", "claims", "blocked_by"])
+    .expression((eb) => eb.selectFrom("main.opus_reviews as o")
+      .select(["o.repo", "o.number", "o.head_oid", "o.at", "o.model", "o.mode", "o.verdict", "o.sure", "o.reason", "o.risks", "o.fixes", "o.summary", "o.why", "o.public_review", "o.claims", "o.blocked_by"])
+      .where((eb) => eb.not(eb.exists(eb.selectFrom("main.opus_review_history as h").select(eb.lit(1).as("one"))
+        .whereRef("h.repo", "=", "o.repo").whereRef("h.number", "=", "o.number").whereRef("h.head_oid", "=", "o.head_oid").whereRef("h.at", "=", "o.at"))))
+      .where("o.repo", "=", c.repo).where("o.number", "=", c.number).where("o.head_oid", "=", c.head_oid)));
   const risks = JSON.stringify(r.risks), fixes = r.fixes.length ? JSON.stringify(r.fixes) : null, pub = r.public ? JSON.stringify(r.public) : null, claims = r.claims.length ? JSON.stringify(r.claims) : null;
   // Only open tracked items other than the PR can block it: a reference that is already closed would end the wait at once.
   // A scope question is no blocker once a person has settled scope for this PR.
   const scopeSettled = await settledScope(db, c.repo, c.number) !== null;
   const blockers = r.verdict === "hold" ? await filterSeq((await openBlockers(db, r.blocked_by.filter((x) => x !== `${c.repo}#${c.number}`))), async (b) => !(scopeSettled && await isScopeQuestion(db, b))) : [];
   const blockedBy = blockers.length ? JSON.stringify(blockers) : null;
-  await db.prepare(`INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, summary, why, public_review, claims, blocked_by, trigger, job_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(c.repo, c.number, c.head_oid, at, s.model, s.mode, r.verdict, r.sure ? 1 : 0, r.reason, risks, fixes, r.summary, r.why, pub, claims, blockedBy,
-    again ? (await markedStaleSince(db, c.repo, c.number, again.at) ? "operator" : rebased ? "base" : "discussion") : "new-head", currentJobId());
-  await db.prepare(`INSERT OR REPLACE INTO opus_reviews (repo, number, head_oid, run_id, at, model, mode, base_head, verdict, sure, reason, fixes, risks, public_review, seen_at, disc_hash, summary, why, conflicts, claims, blocked_by, base_ref)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(c.repo, c.number, c.head_oid, runId, at, s.model, s.mode, s.base, r.verdict,
-    r.sure ? 1 : 0, r.reason, fixes, risks, pub, s.snap?.seen ?? at, s.snap?.hash ?? null, r.summary, r.why, r.conflicts.length ? JSON.stringify(r.conflicts) : null, claims, blockedBy, baseRef);
-  await db.prepare("DELETE FROM main.settings WHERE key = ?").run(`review_fail:${c.repo}#${c.number}@${c.head_oid}`);
-  await db.prepare("DELETE FROM opus_carried_fixes WHERE repo = ? AND number = ? AND head_oid = ?").run(c.repo, c.number, c.head_oid);
+  await db.run(db.k.insertInto("opus_review_history").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, at, model: s.model, mode: s.mode, verdict: r.verdict,
+    sure: r.sure ? 1 : 0, reason: r.reason, risks, fixes, summary: r.summary, why: r.why, public_review: pub, claims, blocked_by: blockedBy,
+    trigger: again ? (await markedStaleSince(db, c.repo, c.number, again.at) ? "operator" : rebased ? "base" : "discussion") : "new-head", job_id: currentJobId() }));
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, run_id: runId, at, model: s.model, mode: s.mode, base_head: s.base,
+      verdict: r.verdict, sure: r.sure ? 1 : 0, reason: r.reason, fixes, risks, public_review: pub, seen_at: s.snap?.seen ?? at, disc_hash: s.snap?.hash ?? null, summary: r.summary,
+      why: r.why, conflicts: r.conflicts.length ? JSON.stringify(r.conflicts) : null, claims, blocked_by: blockedBy, base_ref: baseRef })
+    .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet(kx.excluded(["run_id", "at", "model", "mode", "base_head", "verdict", "sure", "reason", "fixes", "risks", "public_review",
+      "seen_at", "disc_hash", "summary", "why", "conflicts", "claims", "blocked_by", "base_ref"]))));
+  await db.run(db.k.deleteFrom("main.settings").where("key", "=", `review_fail:${c.repo}#${c.number}@${c.head_oid}`));
+  await db.run(db.k.deleteFrom("opus_carried_fixes").where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "=", c.head_oid));
   for (const u of s.unapplied ?? []) {
-    await db.prepare("INSERT INTO opus_carried_fixes (repo, number, head_oid, from_head, file, change, outcome, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(c.repo, c.number, c.head_oid, u.head, u.file, u.change, u.outcome, at);
+    await db.run(db.k.insertInto("opus_carried_fixes").values({ repo: c.repo, number: c.number, head_oid: c.head_oid, from_head: u.head, file: u.file, change: u.change, outcome: u.outcome, at }));
   }
-  const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)");
-  await stage.run(c.repo, c.number, "reviewed", at, "opus-review", `${r.verdict}${r.sure ? "" : " (unsure)"} at ${c.head_oid.slice(0, 7)}: ${r.reason}`);
-  await stage.run(c.repo, c.number, r.verdict === "take-fix" ? "take" : r.verdict, at, "opus-review", r.reason);
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "reviewed", at, actor: "opus-review", note: `${r.verdict}${r.sure ? "" : " (unsure)"} at ${c.head_oid.slice(0, 7)}: ${r.reason}` }));
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: r.verdict === "take-fix" ? "take" : r.verdict, at, actor: "opus-review", note: r.reason }));
 }
 
 /** The Opus review of the PR's latest earlier head that a model wrote (not a too-large hold), for the delta. */
 export async function earlierOpus(db: Db, c: { repo: string; number: number; head_oid: string }, skip = 0): Promise<EarlierOpus | null> {
-  const o = await db.prepare(`SELECT head_oid, verdict, sure, reason, fixes FROM opus_reviews
-    WHERE repo = ? AND number = ? AND head_oid <> ? AND verdict IS NOT NULL AND model IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1 OFFSET ?`).get(c.repo, c.number, c.head_oid, skip) as
-    { head_oid: string; verdict: string; sure: number; reason: string; fixes: string | null } | undefined;
+  const o = await db.get(db.k.selectFrom("opus_reviews").select(["head_oid", "verdict", "sure", "reason", "fixes"]).$narrowType<{ verdict: NotNull }>()
+    .where("repo", "=", c.repo).where("number", "=", c.number).where("head_oid", "<>", c.head_oid).where("verdict", "is not", null).where("model", "is not", null)
+    .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1).offset(skip));
   if (!o) return null;
   let fixes: EarlierOpus["fixes"] = [];
   try { fixes = JSON.parse(o.fixes ?? "[]") as EarlierOpus["fixes"]; } catch { /* none */ }
-  return { head: o.head_oid, verdict: o.verdict, sure: o.sure === 1, reason: o.reason, fixes };
+  return { head: o.head_oid, verdict: o.verdict, sure: o.sure === 1, reason: o.reason ?? "", fixes };
 }
 
 /**
@@ -150,14 +157,14 @@ export async function unappliedFixes(db: Db, c: { repo: string; number: number; 
   let e = await earlierOpus(db, c);
   if (e?.verdict === "hold") e = await earlierOpus(db, c, 1);
   if (!e || e.verdict !== "take-fix") return [];
-  if (await db.prepare("SELECT 1 FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state IN ('pushed', 'asked')").get(c.repo, c.number, e.head)) return [];
+  if (await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", e.head).where("state", "in", ["pushed", "asked"]))) return [];
   return e.fixes.filter((f) => typeof f?.file === "string" && !!f.file.trim() && typeof f.change === "string").map((f) => ({ head: e.head, file: f.file, change: f.change }));
 }
 
 /** The base branch the review's diff was computed against; the mirrored base when the cached diff does not say. */
 async function reviewedBase(db: Db, c: { repo: string; number: number; head_oid: string }): Promise<string | null> {
   return cachedDiffBase(c.repo, c.number, c.head_oid)
-    ?? (await db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { base_ref: string | null } | undefined)?.base_ref ?? null;
+    ?? (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", c.repo).where("number", "=", c.number)))?.base_ref ?? null;
 }
 
 /** `base`: the earlier head a delta was read from; `baseRef`: the base branch the whole PR diff was read against. */
@@ -173,7 +180,7 @@ export type PreparedOpus =
  * review that must not be anchored on the first one (the pre-merge review); the snapshot then marks the time of the read.
  */
 export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, deps: OpusDeps, log: (line: string) => void, opts: { independent?: boolean } = {}): Promise<PreparedOpus> {
-  const liveBase = (await db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, c.number) as { base_ref: string | null } | undefined)?.base_ref;
+  const liveBase = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", c.number)))?.base_ref;
   const d = await cachedDiff(db, repo, c.number, c.head_oid, deps.fetchDiff, liveBase);
   if (!d.ok) return d.tooLarge ? { kind: "large", mode: "full", base: null, baseRef: liveBase ?? null } : { kind: "no-diff", error: d.error };
   const baseRef = d.base ?? liveBase ?? null;
@@ -199,7 +206,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   const priorBase = prior ? await reviewedBaseOf(db, repo, c.number, prior.head) ?? await defaultBranchOf(db, repo) : null;
   const earlier = prior && (priorBase === null || baseRef === null || priorBase === baseRef) ? prior : null;
   // A merge commit of ours carries the base branch's changes since the earlier head, so a delta of the heads would show unrelated changes: the delta is taken between the PR's own diffs.
-  const merged = await db.prepare("SELECT from_head, own_diff, own_delta FROM conflict_merges WHERE repo = ? AND number = ? AND to_head = ? AND state = 'merged' ORDER BY rowid DESC").get(repo, c.number, c.head_oid) as { from_head: string; own_diff: string | null; own_delta: string | null } | undefined;
+  const merged = await db.get(db.k.selectFrom("conflict_merges").select(["from_head", "own_diff", "own_delta"]).where("repo", "=", repo).where("number", "=", c.number).where("to_head", "=", c.head_oid).where("state", "=", "merged")
+    .orderBy(kx.rowid("conflict_merges"), "desc").limit(1));
   if (earlier && !merged) {
     const delta = await deps.fetchDelta(repo, earlier.head, c.head_oid);
     // A delta whose test files do not all fit is not used: the full diff shows them.
@@ -215,7 +223,8 @@ export async function prepareOpusInput(db: Db, repo: string, c: OpusCandidate, d
   let discussion: DiscussionEntry[], snap: Snapshot, maintDropped: boolean;
   try {
     // What the PR's previous review read is not lost to the budget silently: only maintainers' words since then must fit.
-    const since = (await db.prepare("SELECT COALESCE(seen_at, at) AS seen FROM opus_reviews WHERE repo = ? AND number = ? AND verdict IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1").get(repo, c.number) as { seen: string } | undefined)?.seen ?? "";
+    const since = (await db.get(db.k.selectFrom("opus_reviews").select((eb) => eb.fn.coalesce("seen_at", "at").as("seen")).where("repo", "=", repo).where("number", "=", c.number).where("verdict", "is not", null)
+      .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1)))?.seen ?? "";
     ({ entries: discussion, snap, maintDropped } = await discussionOf(db, repo, c.number, deps.querier ? await withRetry(() => liveDiscussion(deps.querier!, db, repo, c.number)) : undefined, since));
   } catch (e) {
     return { kind: "no-threads", error: String((e as Error).message ?? e) };

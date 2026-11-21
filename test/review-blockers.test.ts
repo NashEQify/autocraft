@@ -30,7 +30,7 @@ test("a hold review blocked by an open PR waits for it, then gets one review", a
   await w.synced(1, "h2");
   assert.equal(await reviews(w, 1), 0);
   assert.match((await planOf(w, 1)).wait ?? "", /app#2/);
-  await w.db.prepare("UPDATE items SET state = 'MERGED' WHERE number = 2").run();
+  await w.db.run(w.db.k.updateTable("items").set({ state: "MERGED" }).where("number", "=", 2));
   assert.equal(await reviews(w, 1), 1);
   await review(w, 1, "h2", "take");
   assert.equal(await reviews(w, 1), 0);
@@ -130,7 +130,7 @@ test("a head made only by our own push skips the interval", async () => {
   await review(w, 1, "h1", "take");
   await w.synced(1, "h2");
   assert.equal(await reviews(w, 1), 0);
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at) VALUES ('app', 1, 'h1', 'h2', 'pushed', 1, ?)").run(new Date().toISOString());
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "h1", to_head: "h2", state: "pushed", attempt: 1, created_at: new Date().toISOString() }));
   assert.equal(await reviews(w, 1), 1);
 });
 
