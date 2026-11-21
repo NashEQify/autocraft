@@ -36,7 +36,7 @@ import { endChecks, serveChecks } from "./check-relay.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
-import { ADOPTABLE_CALL, RESUMED_JOBS, RESUMING_JOBS, resumedRun } from "../runner/resuming.ts";
+import { ADOPTABLE_CALL, EARLIER_RUN_CALL, RESUMING_JOBS, resumedRun } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
@@ -114,28 +114,53 @@ export const bundleHash = (bundle: NewCall["bundle"]): string => sha256hex(canon
 
 /** Calls this process queued or adopted: a resumed run adopts each earlier call once. */
 const adopted = new Set<number>();
+/** One adoption at a time, so two equal calls of one job made side by side do not adopt the same earlier call. */
+let adopting: Promise<unknown> = Promise.resolve();
 
 /**
- * Queues a call for the current job and step; a follow-up is offered only to the helper of the parent's lease holder. In a
- * resumed job (src/runner/resuming.ts) it first adopts a call of the job's earlier run with the same prompt, version, bundle
- * and parent that is still open or answered and unread: the reply a Task Runner sends, or sent during the restart, lands there.
+ * In a resumed job: adopts a call of the job's earlier runs with the same prompt, version, bundle and parent that is still
+ * open or answered and unread, and returns its id. When there is none, the earlier runs' open calls with the same prompt,
+ * items and parent asked something else (the input changed meanwhile): the resumed run will not adopt them, so they are
+ * withdrawn and free their Task Runner.
  */
-export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()): Promise<number> {
-  const s = stepOf(c.promptId), q = callQueue(c.promptId);
-  const hash = bundleHash(c.bundle);
-  if (s.jobId !== null && await resumedRun(db, s.jobId)) {
+function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, nowMs: number): Promise<number | null> {
+  const turn = adopting.then(async (): Promise<number | null> => {
     const taken = [...adopted];
-    const earlier = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND prompt_id = ? AND prompt_version = ? AND bundle_hash = ? AND parent_id IS ? AND ${ADOPTABLE_CALL}
-      ${taken.length ? `AND id NOT IN (${taken.map(() => "?").join(", ")})` : ""} ORDER BY id LIMIT 1`).get(s.jobId, c.promptId, c.promptVersion, hash, c.parentId ?? null, ...taken) as { id: number } | undefined;
+    const notTaken = taken.length ? `AND id NOT IN (${taken.map(() => "?").join(", ")})` : "";
+    const earlier = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND prompt_version = ? AND bundle_hash = ? AND parent_id IS ? AND ${ADOPTABLE_CALL}
+      ${notTaken} ORDER BY id LIMIT 1`).get(jobId, startedMs, c.promptId, c.promptVersion, hash, c.parentId ?? null, ...taken) as { id: number } | undefined;
     if (earlier) {
       const id = Number(earlier.id);
       adopted.add(id);
-      // Fresh again for claims and the room: its caller is back.
-      await db.prepare("UPDATE main.remote_calls SET seen_at = ? WHERE id = ?").run(nowMs, id);
+      // Fresh again for claims and the room: its caller is back. A queued call's wait starts again: the time it waited
+      // before the stop (its earlier caller's last poll) counts toward its wait limits, the restart's does not.
+      await db.prepare(`UPDATE main.remote_calls SET queued_ms = queued_ms + CASE WHEN state = 'queued' AND queued_since IS NOT NULL THEN MAX(0, MIN(seen_at, ?) - queued_since) ELSE 0 END,
+        queued_since = CASE WHEN state = 'queued' THEN ? ELSE queued_since END, seen_at = ? WHERE id = ?`).run(nowMs, nowMs, nowMs, id);
       dropQueueCache(db);
       console.log(`adopted remote call ${id} (${c.promptId}) of the job's run before the restart`);
       return id;
     }
+    const stale = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND items = ? AND parent_id IS ? AND state IN ('queued', 'leased') ${notTaken}`)
+      .all(jobId, startedMs, c.promptId, JSON.stringify(c.items), c.parentId ?? null, ...taken) as { id: number }[];
+    for (const r of stale) await withdrawCall(db, Number(r.id), "the resumed job asked again with other input", undefined, nowMs);
+    return null;
+  });
+  adopting = turn.catch(() => undefined);
+  return turn;
+}
+
+/**
+ * Queues a call for the current job and step; a follow-up is offered only to the helper of the parent's lease holder. In a
+ * resumed job (src/runner/resuming.ts) it first adopts an equal call of the job's earlier run (adoptEarlier): the reply a
+ * Task Runner sends, or sent during the restart, lands there.
+ */
+export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()): Promise<number> {
+  const s = stepOf(c.promptId), q = callQueue(c.promptId);
+  const hash = bundleHash(c.bundle);
+  const run = s.jobId === null ? null : await resumedRun(db, s.jobId);
+  if (s.jobId !== null && run) {
+    const id = await adoptEarlier(db, s.jobId, Date.parse(run.startedAt), c, hash, nowMs);
+    if (id !== null) return id;
   }
   const sticky = c.parentId === undefined ? null : (await db.prepare("SELECT user_login FROM main.remote_calls WHERE id = ?").get(c.parentId) as { user_login: string | null } | undefined)?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
@@ -229,9 +254,8 @@ export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: numb
       if (await requeue(db, r, why, nowMs) && beaten && r.token_id !== null && r.user_login !== null) await noteDrop(db, Number(r.token_id), r.user_login, Number(r.id), nowMs);
     }
   }
-  // The calls of a resumed job's earlier run have no caller until the resumed run adopts them; they end with the job (endJob).
-  const gone = await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND seen_at < ?${one}
-    AND (job_id IS NULL OR job_id NOT IN (${RESUMED_JOBS}))`).all(nowMs - CALLER_GONE_MS, ...(id === undefined ? [] : [id])) as { id: number }[];
+  // The calls of a resumed job's earlier runs have no caller until the resumed run adopts them; they end with the job (endJob).
+  const gone = await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND seen_at < ?${one} AND NOT ${EARLIER_RUN_CALL}`).all(nowMs - CALLER_GONE_MS, ...(id === undefined ? [] : [id])) as { id: number }[];
   for (const r of gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
 }
 

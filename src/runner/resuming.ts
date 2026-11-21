@@ -8,8 +8,12 @@ import type { Db } from "../db/index.ts";
 export const MAX_RESUMES = 2;
 /** Jobs waiting in the queue to resume. */
 export const RESUMING_JOBS = "SELECT id FROM main.jobs WHERE state = 'queued' AND resumes > 0";
-/** Resumed jobs that have not ended: their earlier run's remote calls wait for adoption, with no caller polling them. */
-export const RESUMED_JOBS = "SELECT id FROM main.jobs WHERE resumes > 0 AND state IN ('queued', 'running')";
+/**
+ * A remote_calls row of an earlier run of a resumed job that has not ended: it waits for adoption, with no caller polling
+ * it. The resumed run's own calls (made since it started) have their caller.
+ */
+export const EARLIER_RUN_CALL = `EXISTS (SELECT 1 FROM main.jobs j WHERE j.id = remote_calls.job_id AND j.resumes > 0
+  AND (j.state = 'queued' OR (j.state = 'running' AND remote_calls.since < (julianday(j.started_at) - 2440587.5) * 86400000)))`;
 /** Remote calls a resumed run may adopt: open, or answered and not yet read. */
 export const ADOPTABLE_CALL = "state IN ('queued', 'leased', 'done') AND consumed_at IS NULL";
 /** Agent runs of the adoptable calls of resuming jobs: they stay running until the resumed run reads the reply or the job ends. */
@@ -20,3 +24,9 @@ export async function resumedRun(db: Db, jobId: number): Promise<{ resumes: numb
   const r = await db.prepare("SELECT resumes, started_at FROM main.jobs WHERE id = ?").get(jobId) as { resumes: number | null; started_at: string | null } | undefined;
   return r && Number(r.resumes) > 0 && r.started_at ? { resumes: Number(r.resumes), startedAt: r.started_at } : null;
 }
+
+/**
+ * A token_usage run id that is one job's own: each resumed run gets its own, so the rows of an earlier run (keyed by run
+ * id and agent, which restart with the run) are kept beside the later run's.
+ */
+export const jobRunId = (prefix: string, job: { id: number; resumes: number }): string => (job.resumes ? `${prefix}-${job.id}-r${job.resumes}` : `${prefix}-${job.id}`);
