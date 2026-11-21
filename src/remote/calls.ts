@@ -977,8 +977,12 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
   }
 }
 
-/** For the runner: whether a remote call of the job waits in the queue now, and when its latest lease began. The runner sums the time in which any call waited (the union, as calls of one job wait side by side). */
-export async function jobRemoteQueue(db: Db, jobId: number): Promise<{ queued: boolean; lastLeaseAt: number | null }> {
-  const r = await db.prepare("SELECT COALESCE(MAX(state = 'queued'), 0) AS queued, MAX(leased_at) AS last FROM main.remote_calls WHERE job_id = ?").get(jobId) as { queued: number; last: number | null };
+/**
+ * For the runner: whether a remote call of the job waits in the queue now for a caller that polls it, and when its latest
+ * lease began. The runner sums the time in which any call waited (the union, as calls of one job wait side by side). A call
+ * of a resumed job's earlier run that the resumed run has not adopted has no caller and does not count.
+ */
+export async function jobRemoteQueue(db: Db, jobId: number, nowMs: number = Date.now()): Promise<{ queued: boolean; lastLeaseAt: number | null }> {
+  const r = await db.prepare("SELECT COALESCE(MAX(state = 'queued' AND seen_at >= ?), 0) AS queued, MAX(leased_at) AS last FROM main.remote_calls WHERE job_id = ?").get(nowMs - CALLER_STALE_MS, jobId) as { queued: number; last: number | null };
   return { queued: Number(r.queued) === 1, lastLeaseAt: r.last === null ? null : Number(r.last) };
 }
