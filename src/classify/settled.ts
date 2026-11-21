@@ -22,6 +22,7 @@ import { audit } from "../dash/audit.ts";
 import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
 import type { Db } from "../db/index.ts";
+import { indexedBy } from "../db/portable.ts";
 
 export const SURE = 0.9;
 
@@ -107,7 +108,7 @@ function settleLabel(jev: (Verdict & { top: number | null }) | null, haiku: Verd
 /** The run of the newest Jev or Haiku-alone verdict: two indexed lookups, the newer wins. */
 export async function newestVerdictRun(db: Db): Promise<string | null> {
   const jev = await db.prepare("SELECT run_id, at FROM classifications WHERE classifier = 'jev' ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
-  const alone = await db.prepare("SELECT run_id, at FROM main.classifications INDEXED BY classifications_alone WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
+  const alone = await db.prepare(`SELECT run_id, at FROM main.classifications${indexedBy(db, "classifications_alone")} WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1`).get() as { run_id: string; at: string } | undefined;
   return (alone && (!jev || alone.at > jev.at) ? alone : jev)?.run_id ?? null;
 }
 

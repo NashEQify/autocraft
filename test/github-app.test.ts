@@ -193,7 +193,7 @@ describe("github app registration", () => {
   });
 
   test("app sign-in keeps the user's token sealed in user_tokens", async () => {
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const env = { AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile, AUTOCRAFT_SECRETS_FILE: secretsFile };
     const s = await startServer({ config: loadConfig(env), db, provider: new FakeProvider(permsFile), routes: [] });
     closers.push(s.close);
@@ -275,7 +275,7 @@ describe("github app registration", () => {
   });
 
   test("a refreshed app sign-in token reaches user_tokens", async () => {
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const env = { AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile, AUTOCRAFT_SECRETS_FILE: secretsFile };
     const provider = new FakeProvider(permsFile, 300);
     const routes: Route[] = [{ method: "GET", pattern: "/api/test/can/:repo", handler: async (_db, r) => ({ json: { can: await r.user.canWrite(r.params.repo!) } }) }];
@@ -460,7 +460,7 @@ describe("github app registration", () => {
     writeFileSync(file, JSON.stringify({ other_key: "kept", github_app_id: "4242", github_app_slug: "autocraft-test", github_app_private_key: PEM, github_app_client_id: "Iv1.test", github_app_client_secret: CLIENT_SECRET, github_app_webhook_secret: "", github_app_owner: { login: "glasswing", type: "Organization" } }), { mode: 0o600 });
     const env = { AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: dbFile, AUTOCRAFT_DEV_PERMS: permsFile, AUTOCRAFT_SECRETS_FILE: file };
     const githubApi = `http://127.0.0.1:${(github.address() as AddressInfo).port}`;
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const appMode = await startServer({ config: loadConfig(env), db, provider: new FakeProvider(permsFile), routes: [], githubApi });
     closers.push(appMode.close);
     const locked = await signedIn("boss", appMode.url);

@@ -330,7 +330,7 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): SQLInput
 
 /** SQL for an upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
 export const KEEP_KNOWN_MERGEABLE = (table: string): string =>
-  `CASE WHEN ${table}.head_oid IS excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS NOT 'CONFLICTING' AND excluded.mergeable IS NOT 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
+  `CASE WHEN ${table}.head_oid IS NOT DISTINCT FROM excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS DISTINCT FROM 'CONFLICTING' AND excluded.mergeable IS DISTINCT FROM 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
 
 /** `force` rewrites an item and its comments even when the row is unchanged (a comment edit leaves the item row as it was). */
 /**

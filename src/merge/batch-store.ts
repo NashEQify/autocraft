@@ -102,9 +102,9 @@ export async function nextBranch(db: Db, repo: string, now: Date): Promise<strin
 }
 
 export async function insertBatch(db: Db, b: { repo: string; branch: string; baseSha: string; commitSha: string; parentId: number | null; taskId?: number | null; members: BatchMember[]; at: string }): Promise<number> {
-  const r = await db.prepare("INSERT INTO main.merge_batches (repo, branch, state, base_sha, commit_sha, parent_id, task_id, created_at, updated_at) VALUES (?, ?, 'checking', ?, ?, ?, ?, ?, ?)")
-    .run(b.repo, b.branch, b.baseSha, b.commitSha, b.parentId, b.taskId ?? null, b.at, b.at);
-  const id = Number(r.lastInsertRowid);
+  const r = await db.prepare("INSERT INTO main.merge_batches (repo, branch, state, base_sha, commit_sha, parent_id, task_id, created_at, updated_at) VALUES (?, ?, 'checking', ?, ?, ?, ?, ?, ?) RETURNING id")
+    .get(b.repo, b.branch, b.baseSha, b.commitSha, b.parentId, b.taskId ?? null, b.at, b.at) as { id: number };
+  const id = Number(r.id);
   const ins = db.prepare("INSERT INTO main.merge_batch_prs (batch_id, number, head_oid, position) VALUES (?, ?, ?, ?)");
   await forEachSeq(b.members, async (m, i) => await ins.run(id, m.number, m.head_oid, i));
   return id;

@@ -15,6 +15,7 @@ import { isPublicRepo } from "../public/status.ts";
 import { jevJunk, junkBand, junkState, parseJunk, type JunkAsk } from "./junk-ask.ts";
 import { failReporter, forgetReporterRow, newReporterState, readReporter, reporterToken } from "./reporter.ts";
 import type { Db } from "../db/index.ts";
+import { jsonText } from "../db/portable.ts";
 
 /** Filing from Discord under the person's account is built but off: the sign-in needs a Discord identity step first, so a forwarded sign-in link cannot link someone else's GitHub account. While off, the draft offers only the prefilled GitHub link and the sign-in routes answer 404. */
 export const FILING_IN_DISCORD = false;
@@ -130,9 +131,9 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
   await db.prepare("DELETE FROM discord_filed WHERE at < ?").run(since);
   if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE login = ? AND at >= ?", tok.login, since) >= PER_LOGIN) return { status: "refused", reason: `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.` };
   if (await count(db, "SELECT COUNT(*) AS c FROM discord_filed WHERE repo = ? AND at >= ?", req.repo, since) >= PER_REPO) return { status: "refused", reason: "This repo has reached its limit of issues filed from Discord today." };
-  if (await count(db, "SELECT COUNT(*) AS c FROM audit WHERE action = ? AND at >= ? AND json_extract(details, '$.state') <> 'failed'", AUDIT_ACTION, since) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
+  if (await count(db, `SELECT COUNT(*) AS c FROM audit WHERE action = ? AND at >= ? AND ${jsonText(db, "details", "$.state")} <> 'failed'`, AUDIT_ACTION, since) >= DAILY_WRITES) return { status: "refused", reason: "Filing from Discord has reached its daily limit." };
   // The slot is reserved before any await, so parallel sessions of one person cannot pass the limit together; every failure below frees it.
-  const slot = Number((await db.prepare("INSERT INTO discord_filed (repo, number, login, reporter, at) VALUES (?, 0, ?, ?, ?)").run(req.repo, tok.login, req.reporter, new Date(now).toISOString())).lastInsertRowid);
+  const slot = Number((await db.prepare("INSERT INTO discord_filed (repo, number, login, reporter, at) VALUES (?, 0, ?, ?, ?) RETURNING rowid").get(req.repo, tok.login, req.reporter, new Date(now).toISOString()) as { rowid: number }).rowid);
   let filed = false;
   try {
     const junk = await junkCheck(db, { title, body }, hooks.judge ?? modelJudge, log);

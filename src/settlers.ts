@@ -7,7 +7,12 @@ import { PERM_READ_TTL } from "./dash/server/sessions.ts";
 import { HttpError } from "./dash/server/util.ts";
 import { slugOf } from "./owners.ts";
 import { everySeq } from "./async-seq.ts";
+import type { Dialect } from "./db/index.ts";
+import { jsonEach, jsonText, jsonValid, nowParam, quote } from "./db/portable.ts";
 import type { Db } from "./db/index.ts";
+
+type D = Dialect | { readonly dialect: Dialect };
+const pgOf = (d: D): boolean => (typeof d === "string" ? d : d.dialect) === "postgres";
 
 export const MAINTAINER_WRITES_KEY = "maintainer_writes";
 
@@ -133,12 +138,16 @@ export const settlesCheckedAtSql = (login: string, repo: string): string => `(CA
  * maintainer while `maintainer_writes` is on and every repo the decision covers (its own and its batch items') has the app's
  * identity, so its merge or close is made as that person. Checked wherever the pipeline reads answers.
  */
-export const settledBySql = (a: string): string => `(${a}.exec_state IS NOT 'disputed' AND (${a}.answered_by IN (SELECT login FROM main.access WHERE role = 'operator')
+export const settledBySql = (d: D, a: string): string => `(${a}.exec_state IS DISTINCT FROM 'disputed' AND (${a}.answered_by IN (SELECT login FROM main.access WHERE role = 'operator')
   OR (${a}.answered_by IN ${SETTLER_LOGINS_SQL}
-    AND (${a}.repo IS NOT NULL OR json_array_length(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) > 0)
+    AND (${a}.repo IS NOT NULL OR ${arrayLength(d, itemsOf(d, a))} > 0)
     AND NOT EXISTS (SELECT 1 WHERE ${a}.repo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app'))
-    AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')))))`;
+    AND NOT EXISTS (SELECT 1 FROM ${jsonEach(d, itemsOf(d, a), "j")}
+      WHERE ${jsonText(d, "j.value", "$.repo")} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')))))`;
+
+/** A decision's `items` when it is valid JSON, else an empty array. */
+const itemsOf = (d: D, a: string): string => `CASE WHEN ${jsonValid(d, `${a}.items`)} THEN ${a}.items ELSE '[]' END`;
+const arrayLength = (d: D, expr: string): string => pgOf(d) ? `json_array_length((${expr})::json)` : `json_array_length(${expr})`;
 
 /** The same check for one loaded decision row. */
 export async function settledBy(db: Db, d: { answered_by: string | null; repo: string | null; items: string | null; exec_state?: string | null }, m: SettleMemo = settleMemo()): Promise<boolean> {
@@ -156,16 +165,20 @@ export async function settledBy(db: Db, d: { answered_by: string | null; repo: s
  * settles everything. A maintainer needs `maintainer_writes` on, and for the decision's repo and every batch item's repo the app's identity and a fresh
  * cached write permission. Anyone else settles nothing.
  */
-export function canSettleSql(login: string, role: string, a = "decisions"): string {
-  if (role === "operator") return "1";
-  if (role !== "maintainer") return "0";
-  const me = `'${login.replace(/'/g, "''")}'`;
+export function canSettleSql(d: D, login: string, role: string, a = "decisions"): string {
+  const pg = pgOf(d);
+  if (role === "operator") return pg ? "TRUE" : "1";
+  if (role !== "maintainer") return pg ? "FALSE" : "0";
+  const me = quote(login);
+  // Postgres gets the cut-off as a literal; SQLite computes it in the statement.
+  const fresh = pg ? quote(nowParam({ offsetMs: -PERM_READ_TTL })) : `strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${PERM_READ_TTL / 1000} seconds')`;
   const ok = (repo: string): string => `(EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')
     AND EXISTS (SELECT 1 FROM main.repo_permissions rp WHERE rp.login = ${me} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}
-      AND rp.checked_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${PERM_READ_TTL / 1000} seconds')))`;
+      AND rp.checked_at > ${fresh}))`;
+  const repoOf = jsonText(d, "j.value", "$.repo");
   return `(EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')
-    AND (${a}.repo IS NOT NULL OR json_array_length(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) > 0)
+    AND (${a}.repo IS NOT NULL OR ${arrayLength(d, itemsOf(d, a))} > 0)
     AND (${a}.repo IS NULL OR ${ok(`${a}.repo`)})
-    AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') IS NOT NULL AND NOT ${ok("json_extract(j.value, '$.repo')")}))`;
+    AND NOT EXISTS (SELECT 1 FROM ${jsonEach(d, itemsOf(d, a), "j")}
+      WHERE ${repoOf} IS NOT NULL AND NOT ${ok(repoOf)}))`;
 }

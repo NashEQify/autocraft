@@ -272,7 +272,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   // OPEN_QUESTION_SQL for every PR.
   const openQuestion = await keyed<{ k: string }>("SELECT DISTINCT d.repo || '#' || d.number AS k FROM decisions d WHERE d.kind = 'merge' AND d.answer IS NULL AND d.id NOT LIKE '%~replaced-%' /*narrow*/", "d");
   // The settled Merge answers, by decision id: when they were given.
-  const mergeAnsweredAt = new Map((await db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql("decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
+  const mergeAnsweredAt = new Map((await db.prepare(`SELECT id, answered_at FROM decisions WHERE kind = 'merge' AND answer = 'merge' AND answered_at IS NOT NULL AND ${settledBySql(db, "decisions")}`).all() as { id: string; answered_at: string }[]).map((d) => [d.id, d.answered_at]));
   const answeredAfter = (id: string, at: string): boolean => { const a = mergeAnsweredAt.get(id); return a !== undefined && a > at; };
   const pushChain = await pushChainOf(db);
   const ownHead = await ownHeadOf(db);

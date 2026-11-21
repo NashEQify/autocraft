@@ -54,8 +54,8 @@ export const packPrompt = (prompt: string): Uint8Array => packText(scrub(prompt.
 export async function insertRun(db: Db, s: RunStart): Promise<number> {
   const refs = s.items.slice(0, MAX_ITEM_REFS);
   const id = Number((await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, account_id, items, item_count, state, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-    .run(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now())).lastInsertRowid);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?) RETURNING id`)
+    .get(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now()) as { id: number }).id);
   const ins = db.prepare("INSERT OR IGNORE INTO agent_run_items (run_id, repo, number) VALUES (?, ?, ?)");
   for (const r of s.items) await ins.run(id, r.repo, r.number);
   await db.prepare("INSERT INTO agent_run_texts (run_id, prompt) VALUES (?, ?)").run(id, typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt);

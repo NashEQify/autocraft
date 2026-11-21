@@ -342,7 +342,7 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
   const perHourPipeline = new Array<number>(24).fill(0);
   const since = now - 24 * 3600_000;
   for (const r of await db.prepare(`WITH ${latestCte()} SELECT i.closed_at, l.stage IN ('merged', 'closed', 'fixed-by-us') AS ours
-      FROM ${CLOSED_ITEMS} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
+      FROM ${CLOSED_ITEMS(db)} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
       WHERE i.closed_at >= :since AND i.state <> 'OPEN' AND i.${TRACKED}${hideSql ? ` AND ${hideSql}` : ""}`).all({ ...hp, since: new Date(since).toISOString() }) as { closed_at: string; ours: number | null }[]) {
     const h = Math.floor((Date.parse(r.closed_at) - since) / 3600_000);
     if (h >= 0 && h < 24) {
@@ -370,7 +370,7 @@ async function progressItems(db: Db, hidden: HiddenRepos): Promise<Heavy> {
 async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
   const heavy = await progressItems(db, hidden);
   const dp: Record<string, string> = {};
-  const hideDec = withoutHidden(hidden, dp);
+  const hideDec = withoutHidden(db, hidden, dp);
   const openDec = new Map<string, number>();
   let decisionsOpen = 0;
   for (const r of await db.prepare(`SELECT repo, number, items FROM decisions WHERE answer IS NULL${hideDec ? ` AND ${hideDec}` : ""}`).all(dp) as { repo: string | null; number: number | null; items: string | null }[]) {

@@ -47,6 +47,7 @@ import { itemState, shownMap, withShown } from "./shown.ts";
 import { slugOf } from "../../owners.ts";
 import { mapSeq, someSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { indexedBy, inList, inTuples, jsonEach, jsonNum, jsonText, jsonValid } from "../../db/portable.ts";
 
 const json = <T>(s: string | null | undefined, d: T): T => {
   if (!s) return d;
@@ -145,7 +146,7 @@ export async function relatedIndex(db: Db): Promise<RelatedIndex> {
     duplicatedBy.set(k, [...(duplicatedBy.get(k) ?? []), r.number]);
   }
   const linkedBy = new Map<string, number[]>();
-  for (const p of await db.prepare("SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[])
+  for (const p of await db.prepare(`SELECT repo, number, closing_issues FROM main.items${indexedBy(db, "items_closing")} WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'`).all() as { repo: string; number: number; closing_issues: string }[])
     for (const x of json<unknown[]>(p.closing_issues, [])) if (typeof x === "number") linkedBy.set(`${p.repo}#${x}`, [...(linkedBy.get(`${p.repo}#${x}`) ?? []), p.number]);
   return { duplicatedBy, linkedBy };
 }
@@ -319,7 +320,7 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   const ids = JSON.stringify(ds.map((d) => d.id));
   const singles = ds.filter((d) => !isBatch(d)).map((d) => ({ repo: d.repo!, number: d.number! }));
   const refs = JSON.stringify(singles.map((r) => [r.repo, r.number]));
-  const inRefs = (repo: string, number: string) => `(${repo}, ${number}) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:refs))`;
+  const inRefs = (repo: string, number: string) => inTuples(db, [repo, number], ":refs", ["text", "bigint"]);
   const rows = async <T>(sql: string, args: Record<string, string>): Promise<T[]> => await db.prepare(sql).all(args) as T[];
   const itemSql = "SELECT repo, number, title, body, kind, state, closing_issues FROM items WHERE ";
   const items = new Map<string, PageItem>();
@@ -340,16 +341,16 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
   if (batchRefs.length) page.shown = await shownMap(db, batchRefs);
   for (const o of await rows<OpinionRow & { decision_id: string }>(`SELECT decision_id, id, login, option, note, at, permission, via FROM decision_opinions
-    WHERE decision_id IN (SELECT value FROM json_each(:ids)) AND retracted_at IS NULL ORDER BY decision_id, at DESC`, { ids })) {
+    WHERE ${inList(db, "decision_id", ":ids")} AND retracted_at IS NULL ORDER BY decision_id, at DESC`, { ids })) {
     const { decision_id, ...op } = o;
     pushTo(page.opinions, decision_id, op);
   }
   const adopted = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
-  if (adopted.length) for (const o of await rows<OpinionRow>("SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE id IN (SELECT value FROM json_each(:ids))", { ids: JSON.stringify(adopted) })) page.adopted.set(o.id, o);
-  for (const c of await rows<Claim & { decision_id: string }>(`SELECT decision_id, login, since FROM decision_claims WHERE decision_id IN (SELECT value FROM json_each(:ids)) AND at > :fresh AND login <> :me ORDER BY decision_id, at DESC`,
+  if (adopted.length) for (const o of await rows<OpinionRow>(`SELECT id, login, option, note, at, permission, via FROM decision_opinions WHERE ${inList(db, "id", ":ids")}`, { ids: JSON.stringify(adopted) })) page.adopted.set(o.id, o);
+  for (const c of await rows<Claim & { decision_id: string }>(`SELECT decision_id, login, since FROM decision_claims WHERE ${inList(db, "decision_id", ":ids")} AND at > :fresh AND login <> :me ORDER BY decision_id, at DESC`,
     { ids, fresh: new Date(Date.now() - CLAIM_TTL).toISOString(), me: viewer.login }))
     if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
-  for (const c of await rows<{ decision_id: string; n: number }>("SELECT decision_id, COUNT(*) AS n FROM decision_comments WHERE decision_id IN (SELECT value FROM json_each(:ids)) GROUP BY decision_id", { ids })) page.comments.set(c.decision_id, c.n);
+  for (const c of await rows<{ decision_id: string; n: number }>(`SELECT decision_id, COUNT(*) AS n FROM decision_comments WHERE ${inList(db, "decision_id", ":ids")} GROUP BY decision_id`, { ids })) page.comments.set(c.decision_id, c.n);
   if (singles.length) {
     // In the primary key's order within an item, as the one-item read walks it.
     for (const c of await rows<ClassRow & { repo: string; number: number }>(`SELECT repo, number, classifier, at, type_label, want, reference, reason, dup_of FROM classifications
@@ -363,11 +364,11 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   }
   const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h]] : []; });
   if (heads.length) for (const o of await rows<{ repo: string; number: number; head_oid: string; risks: string | null }>(`SELECT repo, number, head_oid, risks FROM opus_reviews
-    WHERE (repo, number, head_oid) IN (SELECT value ->> 0, value ->> 1, value ->> 2 FROM json_each(:heads)) AND verdict IS NOT NULL`, { heads: JSON.stringify(heads) }))
+    WHERE ${inTuples(db, ["repo", "number", "head_oid"], ":heads", ["text", "bigint", "text"])} AND verdict IS NOT NULL`, { heads: JSON.stringify(heads) }))
     page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
   const groups = ds.filter(isGroup).map((d) => d.id);
   if (groups.length) {
-    for (const g of await rows<GroupRow & { decision_id: string }>(`${GROUP_SQL} WHERE gi.decision_id IN (SELECT value FROM json_each(:ids))`, { ids: JSON.stringify(groups) })) {
+    for (const g of await rows<GroupRow & { decision_id: string }>(`${GROUP_SQL} WHERE ${inList(db, "gi.decision_id", ":ids")}`, { ids: JSON.stringify(groups) })) {
       const { decision_id, ...row } = g;
       pushTo(page.groups, decision_id, row);
     }
@@ -375,7 +376,7 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   }
   if (!viewer.staff) {
     page.quiet = await quietFixPrs(db);
-    for (const m of await rows<{ decision_id: string; repo: string; number: number }>("SELECT decision_id, repo, number FROM dupe_group_items WHERE decision_id IN (SELECT value FROM json_each(:ids))", { ids }))
+    for (const m of await rows<{ decision_id: string; repo: string; number: number }>(`SELECT decision_id, repo, number FROM dupe_group_items WHERE ${inList(db, "decision_id", ":ids")}`, { ids }))
       pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
   }
   return page;
@@ -454,35 +455,35 @@ export async function toDecision(db: Db, d: DecisionRow, viewer: Viewer): Promis
 const list = (req: Req, key: string): string[] => req.query.getAll(key).flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean);
 
 // Decisions touching any of the given repos: the decision's own repo, or an item of a batch.
-export function inRepos(prefix: string, repos: string[], params: Record<string, string>): string {
+export function inRepos(db: Db, prefix: string, repos: string[], params: Record<string, string>): string {
   const names = repos.map((r, k) => {
     params[`${prefix}${k}`] = r;
     return `:${prefix}${k}`;
   }).join(",") || "NULL";
-  return `(COALESCE(repo IN (${names}), 0) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j
-    WHERE json_extract(j.value, '$.repo') IN (${names})))`;
+  return `(COALESCE(repo IN (${names}), FALSE) OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "j")}
+    WHERE ${jsonText(db, "j.value", "$.repo")} IN (${names})))`;
 }
 
 /** SQL that leaves out decisions touching a hidden repo (the decision's own, or an item of a batch); null when nothing is hidden. */
-export function withoutHidden(hidden: HiddenRepos, params: Record<string, string>): string | null {
+export function withoutHidden(db: Db, hidden: HiddenRepos, params: Record<string, string>): string | null {
   if (!filtered(hidden)) return null;
   const bind = (h: { sql: string; args: string[] }): string => { let k = 0; return h.sql.replace(/\?/g, () => { params[`hd${k}`] = h.args[k]!; return `:hd${k++}`; }); };
-  if (!hidden.visible) return `NOT ${inRepos("hd", hidden, params)}`;
+  if (!hidden.visible) return `NOT ${inRepos(db, "hd", hidden, params)}`;
   // Allow-list: a decision is shown only when every repo it names (its own, and each item of a batch) is one the viewer may see.
   const own = bind(hiddenTest("repo", hidden));
-  const member = bind(hiddenTest("json_extract(j.value, '$.repo')", hidden));
-  return `NOT ((repo IS NOT NULL AND ${own}) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j WHERE json_extract(j.value, '$.repo') IS NOT NULL AND ${member}))`;
+  const member = bind(hiddenTest(`${jsonText(db, "j.value", "$.repo")}`, hidden));
+  return `NOT ((repo IS NOT NULL AND ${own}) OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "j")} WHERE ${jsonText(db, "j.value", "$.repo")} IS NOT NULL AND ${member}))`;
 }
 
 /**
  * SQL for the decisions a person has to look at (decisions unaliased): open ones they can settle, plus the disputes and unsettled answers they resolve
  * (src/answers/hold.ts). `everything` leaves out the can-settle test, for a view of all open questions; viewers always get it.
  */
-export function needingSql(req: Req, everything = false): string {
+export function needingSql(db: Db, req: Req, everything = false): string {
   // A viewer settles nothing, so a can-settle default would leave them an empty list: they read every question they may see.
   everything ||= req.user.role === "viewer";
-  const open = `answer IS NULL AND NOT ${SNOOZED_SQL}${everything ? "" : ` AND ${canSettleSql(req.user.login, req.user.role)}`}`;
-  return `((${open}) OR ${heldOpenSql(req.user.login, isOperator(req))})`;
+  const open = `answer IS NULL AND NOT ${SNOOZED_SQL}${everything ? "" : ` AND ${canSettleSql(db, req.user.login, req.user.role)}`}`;
+  return `((${open}) OR ${heldOpenSql(db, req.user.login, isOperator(req))})`;
 }
 
 /**
@@ -491,8 +492,8 @@ export function needingSql(req: Req, everything = false): string {
  */
 export async function openCounts(db: Db, req: Req): Promise<OpenDecisionCounts> {
   const params: Record<string, string> = {};
-  const hide = withoutHidden(await hiddenRepos(db, req), params);
-  const rows = await db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
+  const hide = withoutHidden(db, await hiddenRepos(db, req), params);
+  const rows = await db.prepare(`SELECT repo, number, items FROM decisions WHERE ${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`).all(params) as Pick<DecisionRow, "repo" | "number" | "items">[];
   const byRepo: Record<string, number> = {};
   for (const r of rows) for (const repo of reposOf(r as DecisionRow)) byRepo[repo] = (byRepo[repo] ?? 0) + 1;
   return { total: rows.length, byRepo };
@@ -513,7 +514,7 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   else if (status === "snoozed") where.push(SNOOZED_SQL);
   else if (status === "open" || status === "opinions") {
     // The person's own list unless asked for everything (`all=1`) or scoped to one item: only the questions they can settle, plus the disputes they resolve.
-    where.push(needingSql(req, q.get("all") === "1" || q.get("number") !== null));
+    where.push(needingSql(db, req, q.get("all") === "1" || q.get("number") !== null));
   }
   if (status === "opinions") where.push("(EXISTS (SELECT 1 FROM decision_opinions o WHERE o.decision_id = decisions.id AND o.retracted_at IS NULL) OR EXISTS (SELECT 1 FROM decision_comments c WHERE c.decision_id = decisions.id))");
   const kinds = list(req, "kind").filter((k) => (KINDS as readonly string[]).includes(k));
@@ -523,10 +524,10 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
     where.push("asked_at <= :before");
     params.before = new Date(Date.now() - minAge * 86400_000).toISOString();
   }
-  const hide = withoutHidden(await hiddenRepos(db, req), params);
+  const hide = withoutHidden(db, await hiddenRepos(db, req), params);
   if (hide) where.push(hide);
   const repos = [...new Set(list(req, "repo"))];
-  if (repos.length) where.push(inRepos("rp", repos, params));
+  if (repos.length) where.push(inRepos(db, "rp", repos, params));
   // One item: the decision's own, or a batch or duplicate group that lists it as a member.
   const itemNo = q.get("number");
   if (itemNo !== null && repos.length === 1) {
@@ -534,8 +535,8 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
     if (!Number.isInteger(n)) throw new HttpError(400, "number must be an item number");
     params.itemRepo = repos[0]!;
     params.itemNo = String(n);
-    where.push(`((repo = :itemRepo AND number = :itemNo) OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) ij
-      WHERE json_extract(ij.value, '$.repo') = :itemRepo AND json_extract(ij.value, '$.number') = CAST(:itemNo AS INTEGER))
+    where.push(`((repo = :itemRepo AND number = :itemNo) OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "ij")}
+      WHERE ${jsonText(db, "ij.value", "$.repo")} = :itemRepo AND ${jsonNum(db, "ij.value", "$.number")} = CAST(:itemNo AS INTEGER))
       OR EXISTS (SELECT 1 FROM dupe_group_items gm WHERE gm.decision_id = decisions.id AND gm.repo = :itemRepo AND gm.number = :itemNo))`);
   }
 
@@ -588,7 +589,7 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   }
   const more = ids.length > limit;
   const shownIds = ids.slice(0, limit);
-  const rowOf = new Map((shownIds.length ? await db.prepare("SELECT * FROM decisions WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(shownIds.map((r) => r.id))) as DecisionRow[] : []).map((d) => [d.id, d]));
+  const rowOf = new Map((shownIds.length ? await db.prepare(`SELECT * FROM decisions WHERE ${inList(db, "id", "?")}`).all(JSON.stringify(shownIds.map((r) => r.id))) as DecisionRow[] : []).map((d) => [d.id, d]));
   const shown = shownIds.map((r) => rowOf.get(r.id)!);
   const viewer = shown.length ? await viewerWith(db, req) : viewerOf(req);
   viewer.prep = await prepareStates(db, shown);
@@ -612,8 +613,8 @@ export async function forItem(db: Db, req: Req): Promise<Decision | null> {
   const repo = shortRepo(req.params.repo!);
   const visible = new Set(await visibleRepos(db, req));
   const rows = await db.prepare(`SELECT * FROM decisions WHERE (repo = :repo AND number = :n) OR (number IS NULL AND EXISTS (
-      SELECT 1 FROM json_each(CASE WHEN json_valid(items) THEN items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') = :repo AND json_extract(j.value, '$.number') = :n))`).all({ repo, n }) as unknown as DecisionRow[];
+      SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "j")}
+      WHERE ${jsonText(db, "j.value", "$.repo")} = :repo AND ${jsonNum(db, "j.value", "$.number")} = :n))`).all({ repo, n }) as unknown as DecisionRow[];
   const viewer = await viewerWith(db, req);
   // A batch that also covers the item counts only when no single-item decision exists; it is the item's decision only by membership.
   const single = rows.filter((d) => d.number === n);

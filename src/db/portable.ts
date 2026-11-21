@@ -10,6 +10,7 @@
  * | --------------------------------------------- | ---------------------------------------- |
  * | `x IN (SELECT value FROM json_each(?))`       | `inList(db, "x", "?", "bigint")`          |
  * | `x IN (?, ?, ?)` from JS values (Kysely)      | `inValues(db, sql.ref("x"), values)`      |
+ * | `(a, b) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))` | `inTuples(db, ["a", "b"], "?", ["text", "bigint"])` |
  * | `json_extract(c, '$.a.b')` (a string)         | `jsonText(db, "c", "$.a.b")`              |
  * | `json_extract(c, '$.n')` (a number)           | `jsonNum(db, "c", "$.n")`                 |
  * | `json_extract(c, '$.ok')` (true/false → 1/0)  | `jsonBool(db, "c", "$.ok")`               |
@@ -19,6 +20,7 @@
  * | `INSERT OR IGNORE INTO t ...`                 | `insertIgnore(db, "t (a, b) VALUES (?, ?)")` |
  * | `INSERT OR REPLACE INTO t ...`                | `upsert(db, { table, cols, key })`        |
  * | `a = b COLLATE NOCASE`, citext vs text        | `ciEq(db, "a", "b")`                      |
+ * | `ORDER BY a COLLATE NOCASE`                 | `` `ORDER BY ${nocase(db, "a")}` ``       |
  * | `a LIKE p` (case-insensitive)                 | `like(db, "a", "p")`                      |
  * | `ORDER BY x` on a nullable column             | `nullsFirst(db, "x")` / `nullsLast(db, "x", "DESC")` |
  * | `a IS NOT b` / `a IS b`                       | `distinctFrom(db, "a", "b")` / `notDistinctFrom` |
@@ -27,6 +29,7 @@
  * | `char(10)`                                    | `chr(db, 10)`                             |
  * | `strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`       | `?` bound to `nowParam()`                 |
  * | `rowid`                                       | `rowidOf("table")`                        |
+ * | `t INDEXED BY idx`                            | `` `t${indexedBy(db, "idx")}` ``          |
  *
  * JSON stays TEXT on Postgres: the JSON helpers cast with `::json` in the query. Paths are SQLite's (`$.a.b`, `$[0]`,
  * `$.a[2].b`, `$."odd key"`).
@@ -56,6 +59,15 @@ export function inList(d: D, expr: string, param = "?", type: ElemType = "text",
   if (!pgOf(d)) return `${expr} ${op} (SELECT value FROM json_each(${param}))`;
   const v = type === "text" ? "value" : `value::${type}`;
   return `${expr} ${op} (SELECT ${v} FROM json_array_elements_text((${param})::json) AS value)`;
+}
+
+/**
+ * `(a, b, ...) IN (the rows of a JSON array of arrays)`, bound as one parameter like `inList`: `[["app", 7], ...]` matches
+ * `a = 'app' AND b = 7`. `types` are the columns' types on Postgres, one per column.
+ */
+export function inTuples(d: D, cols: readonly string[], param: string, types: readonly ElemType[]): string {
+  if (!pgOf(d)) return `(${cols.join(", ")}) IN (SELECT ${cols.map((_, k) => `value ->> ${k}`).join(", ")} FROM json_each(${param}))`;
+  return `(${cols.join(", ")}) IN (SELECT ${types.map((t, k) => `(value ->> ${k})::${t}`).join(", ")} FROM json_array_elements((${param})::json) AS value)`;
 }
 
 /** Kysely: `expr IN (values)`: one parameter per value on SQLite, one array parameter on Postgres (`= ANY`). */
@@ -250,4 +262,14 @@ export function rowidOf(table: string): string {
   const col = rowids.get(table);
   if (!col) throw new Error(`rowidOf: table ${table} has no rowid`);
   return col;
+}
+
+/** ` INDEXED BY index` after a table name on SQLite; nothing on Postgres, whose planner takes no index hints. */
+export function indexedBy(d: D, index: string): string {
+  return pgOf(d) ? "" : ` INDEXED BY ${index}`;
+}
+
+/** `expr` compared and sorted case-insensitively (ASCII, as SQLite's NOCASE), for ORDER BY and GROUP BY terms. */
+export function nocase(d: D, expr: string): string {
+  return pgOf(d) ? `(${expr})::citext` : `${expr} COLLATE NOCASE`;
 }

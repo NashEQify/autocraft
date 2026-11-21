@@ -113,9 +113,9 @@ describe("merge queue tools", () => {
     };
     // Maintainer writes off, then on without the app identity: nothing changes.
     await refusedAll();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run();
+    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     await refusedAll();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const r = await call(maint, "queue_pr", { item: "app#1", weight: 6 });
     assert.equal(r.isError, false, r.text);
     assert.match(r.text, /The weight was ignored: only operators set fast-track weights/);

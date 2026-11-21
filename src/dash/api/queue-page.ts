@@ -23,6 +23,7 @@ import { readerOf, veiledFor } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { indexedBy } from "../../db/portable.ts";
 
 export const TABS: QueueTab[] = ["all", "review", "fix", "verify", "merge"];
 const NEXT_LIMIT = 10;
@@ -201,7 +202,7 @@ export async function queueOrigins(db: Db, staff: boolean): Promise<(e: Pick<Cac
 
 /** The issues each PR closes when it merges (GitHub's closing references, from the mirror), by `repo#number`; PRs without any are left out. */
 async function closingIssues(db: Db): Promise<Map<string, number[]>> {
-  const rows = await db.prepare("SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[];
+  const rows = await db.prepare(`SELECT repo, number, closing_issues FROM main.items${indexedBy(db, "items_closing")} WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'`).all() as { repo: string; number: number; closing_issues: string }[];
   const out = new Map<string, number[]>();
   for (const r of rows) {
     try {
@@ -298,7 +299,7 @@ async function markFast(db: Db, by: string, repo: string, number: number, w: num
 
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror). */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
-  const rows = await db.prepare("SELECT number, closing_issues FROM main.items INDEXED BY items_closing WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all(repo) as { number: number; closing_issues: string }[];
+  const rows = await db.prepare(`SELECT number, closing_issues FROM main.items${indexedBy(db, "items_closing")} WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND closing_issues IS NOT NULL AND closing_issues <> '[]'`).all(repo) as { number: number; closing_issues: string }[];
   return rows
     .filter((p) => {
       try {
