@@ -69,18 +69,18 @@ test("removing or demoting an operator in any letter case ends their Discord lin
   await addLogin(db, "cli", "Owner", "operator", null);
   await addLogin(db, "cli", "Bob", "operator", null);
   await addLogin(db, "cli", "Ann", "operator", null);
-  await db.prepare("INSERT INTO discord_links (user_hash, login, linked_at) VALUES ('u1', 'Bob', ?)").run(T0);
-  await db.prepare("INSERT INTO discord_link_codes (code_hash, login, expires_at) VALUES ('c1', 'Bob', '2099-01-01T00:00:00Z')").run();
+  await db.run(db.k.insertInto("discord_links").values({ user_hash: "u1", login: "Bob", linked_at: T0 }));
+  await db.run(db.k.insertInto("discord_link_codes").values({ code_hash: "c1", login: "Bob", expires_at: "2099-01-01T00:00:00Z" }));
   await createLink(db, "Bob", "real-org");
   await createLink(db, "Ann", "real-org");
   await createLink(db, "Owner", "real-org");
   assert.equal((await openLinks(db)).length, 3);
   await removeLogin(db, "cli", "bob");
   await setRole(db, "cli", "ann", "viewer");
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_links").get() as { n: number }).n, 0);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_link_codes").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_links").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_link_codes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   assert.deepEqual((await openLinks(db)).map((l) => l.createdBy), ["Owner"]);
   // A link whose creator lost the role by any other path stops working too.
-  await db.prepare("UPDATE access SET role = 'maintainer' WHERE login = 'Owner'").run();
+  await db.run(db.k.updateTable("access").set({ role: "maintainer" }).where("login", "=", "Owner"));
   assert.deepEqual(await openLinks(db), []);
 });

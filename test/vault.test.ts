@@ -42,8 +42,8 @@ test("two vaults refreshing one expired token end with one refresh and the same 
   assert.equal(ra.access, rb.access);
   assert.notEqual(ra.access, old.access);
   // The session held the same refresh token, so it took the new pair instead of being left with a dead one.
-  const s = await db.prepare("SELECT id_hash, token_enc FROM sessions").get() as { id_hash: string; token_enc: string };
-  assert.equal(openTokens(box, s.token_enc, s.id_hash)?.access, ra.access);
+  const s = (await db.get(db.k.selectFrom("sessions").select(["id_hash", "token_enc"])))!;
+  assert.equal(openTokens(box, s.token_enc!, s.id_hash)?.access, ra.access);
   assert.ok(sid);
 });
 
@@ -82,9 +82,9 @@ test("revoking one session revokes only its token and keeps the login's newer si
   // The older session's token set expired; the sweep refreshes it once before revoking.
   const a = await signIn("example-user", -1000);
   await createSession(db, box, "example-user", a, undefined);
-  const s = await db.prepare("SELECT id_hash, token_enc FROM sessions").get() as { id_hash: string; token_enc: string };
+  const s = (await db.get(db.k.selectFrom("sessions").select(["id_hash", "token_enc"])))!;
   const b = await signIn("example-user", 8 * 3_600_000);
-  assert.ok(await dropSessionTokens(db, "example-user", s.id_hash, s.token_enc));
+  assert.ok(await dropSessionTokens(db, "example-user", s.id_hash, s.token_enc!));
   const v = new Vault(db, box, provider);
   assert.equal(await v.sweepRevocations(), 1);
   assert.deepEqual(provider.revokedGrants, []);
