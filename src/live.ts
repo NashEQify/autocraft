@@ -121,6 +121,18 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "merge_batch_prs" }, { table: "tracked_repos" },
     { table: "settings", when: "new_key IN ('pilot_items', 'classify_run', 'pipeline_login')" },
   ],
+  // What runRank reads (src/rank/index.ts): the rank lane's work test. Only the columns and settings that move a score.
+  "rank-inputs": [
+    { table: "items", ops: ["INSERT", "DELETE"] },
+    { table: "items", ops: ["UPDATE"], when: "old.state IS NOT new.state OR old.kind IS NOT new.kind OR old.additions IS NOT new.additions OR old.deletions IS NOT new.deletions" },
+    { table: "item_priority", ops: ["INSERT", "DELETE"] },
+    { table: "item_priority", ops: ["UPDATE"], when: "old.impact IS NOT new.impact OR old.score IS NOT new.score" },
+    { table: "fix_attempts", ops: ["INSERT", "DELETE"] },
+    { table: "fix_attempts", ops: ["UPDATE"], when: "old.size IS NOT new.size" },
+    { table: "classifications" },
+    { table: "tracked_repos" },
+    { table: "settings", when: "new_key = 'classify_run'" },
+  ],
   // What the item trace reads that no page topic watches. A model call's progress line is not a change here.
   trace: [
     { table: "model_checks" }, { table: "conflict_merges" }, { table: "job_items" }, { table: "opus_review_history" }, { table: "plan_history" }, { table: "patch_checks" },
@@ -180,7 +192,7 @@ export function liveSql(db?: DatabaseSync): string {
     for (const { table, ops = ALL_OPS, when } of sources) {
       for (const op of ops) {
         // `steps`, `trace`, `limits`, `decision-snooze`, `build-features` and `remote-queue` read tables other topics already watch; their triggers need names of their own.
-        const name = `live_${topic === "steps" || topic === "trace" || topic === "limits" || topic === "decision-snooze" || topic === "build-features" || topic === "remote-queue" ? `${topic.replace(/\W/g, "_")}_` : ""}${table}_${op[0]!.toLowerCase()}`;
+        const name = `live_${topic === "steps" || topic === "trace" || topic === "limits" || topic === "decision-snooze" || topic === "build-features" || topic === "remote-queue" || topic === "rank-inputs" ? `${topic.replace(/\W/g, "_")}_` : ""}${table}_${op[0]!.toLowerCase()}`;
         const key = op === "DELETE" ? "old.key" : "new.key";
         let cond = when ? when.replaceAll("new_key", key) : "";
         if (op === "UPDATE" && !when) {

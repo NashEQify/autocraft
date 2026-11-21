@@ -205,7 +205,7 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
 }
 
 /** Topics whose changes call for a plan: content the stages read. Job logs, usage, agent runs, sandbox environments and tasks, audit entries the item-trace bookkeeping and the limits topic (its tables are already read through the jobs topic) do not. */
-export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue"].includes(t));
+export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs"].includes(t));
 
 /** User-local mode: the Task Runners that could take calls (takerSignature). Work a pool left for want of a taker waits on it. */
 const takersOf = (db: DatabaseSync): string => (inferenceMode(db) === "user-local" ? takerSignature(db) : "");
@@ -335,11 +335,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    // Work score from the stored priority, size, type and security flag; no model. It is cheap and has no work test of its own:
-    // the fingerprint (items, fix triage, priorities; not its own output) decides whether its input moved.
+    // Work score from the stored priority, size, type and security flag; no model. The rank-inputs topic is its work test:
+    // it moves only when something runRank reads changed (the lane's own output is not in it).
     name: "rank",
-    topics: INPUT_TOPICS.filter((t) => t !== "ranks"),
-    extra: (db) => String((db.prepare("SELECT COUNT(*) || ':' || COALESCE(MAX(at), '') AS s FROM main.item_priority").get() as { s: string }).s),
+    topics: ["rank-inputs"],
     minGapMs: 60_000,
     detect: () => [{ step: "rank", params: {} }],
   },

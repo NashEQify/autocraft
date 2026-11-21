@@ -1,7 +1,8 @@
 // autocraft-server rank [show <repo> <n>]: the work rank of open items (src/rank/score.ts).
 //
 // Reads the stored priority, the settled classification and the size; calls no model. The rank step
-// rewrites the item_rank row of every open item in a tracked repo and removes the rows of the others.
+// writes the item_rank row of an open item in a tracked repo only when it is new or its score or breakdown changed
+// (computed_at is the time the score last changed) and removes the rows of the others.
 import type { DatabaseSync } from "node:sqlite";
 import { latestRun, settledLookup } from "../classify/settled.ts";
 import { connect } from "../db.ts";
@@ -18,7 +19,7 @@ export function sizeOfItem(kind: string, lines: number | null, fixSize: string |
   return lines === null ? { size: null, sizeSource: "default" } : { size: sizeOfLines(lines), sizeSource: "lines" };
 }
 
-/** Recomputes the rank of every open item in a tracked repo. Returns the number of rows written or changed. */
+/** Recomputes the rank of every open item in a tracked repo. Returns the number of rows written. */
 export function runRank(db: DatabaseSync, nowMs: number = Date.now()): { items: number; changed: number; removed: number } {
   const settled = settledLookup(db, latestRun(db));
   const rows = db.prepare(`SELECT i.repo, i.number, i.kind,
@@ -43,7 +44,8 @@ export function runRank(db: DatabaseSync, nowMs: number = Date.now()): { items: 
       const k = `${r.repo}#${r.number}`, json = JSON.stringify(breakdown);
       keep.add(k);
       const prev = old.get(k);
-      if (!prev || prev.score !== score || prev.breakdown !== json) changed++;
+      if (prev && prev.score === score && prev.breakdown === json) continue;
+      changed++;
       put.run(r.repo, r.number, score, json, at);
     }
     let removed = 0;
@@ -74,7 +76,7 @@ export const commands = {
         if (!repo || !Number.isInteger(n)) throw new Error("usage: rank show <repo> <n>");
         const r = rankOfItem(db, repo, n);
         if (!r) { console.log(`${repo}#${n}: no rank (not open, or the rank step has not run)`); return; }
-        console.log(`${repo}#${n}: ${r.score} (computed ${r.computedAt})`);
+        console.log(`${repo}#${n}: ${r.score} (changed ${r.computedAt})`);
         const b = r.breakdown;
         console.log(`  level     ${b.level}${b.security ? " (raised by the security flag)" : ""}${b.rated ? "" : " (not rated yet)"}`);
         console.log(`  type      ${b.type ?? "not settled"}`);
