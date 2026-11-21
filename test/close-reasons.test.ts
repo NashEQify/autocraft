@@ -24,10 +24,10 @@ const closes = (w: World, fail?: (v: Record<string, unknown>) => boolean) => {
 };
 const dupGroup = async (w: World) => {
   await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-  await w.db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES ('app:dupegroup:7', 'app', 'model')").run();
+  await w.db.run(w.db.k.insertInto("dupe_groups").values({ decision_id: "app:dupegroup:7", repo: "app", source: "model" }));
   for (const [n, role, target] of [[7, "keep", null], [8, "close", 7]] as const)
     await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:7", repo: "app", number: n, kind: "issue", role, target, base_role: role, base_target: target }));
-  await w.db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES ('app:dupegroup:7', 'accept', 8, 'close', 'Duplicate of #7.')").run();
+  await w.db.run(w.db.k.insertInto("dupe_group_texts").values({ decision_id: "app:dupegroup:7", option: "accept", number: 8, step: "close", text: "Duplicate of #7." }));
   await w.answerDecision("app:dupegroup:7", "accept");
   await applyDuplicateAnswers(w.db, T1);
 };
