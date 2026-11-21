@@ -91,5 +91,8 @@ test("every table the fact loaders read is classified", () => {
   const listed = new Set(PLAN_INPUTS.map((p) => p.table));
   assert.ok(read.size > 20);
   assert.deepEqual([...read].filter((t) => !listed.has(t)).sort(), []);
+  // An item input without its own refs is logged by its repo and number columns.
+  const cols = (t: string) => (db.prepare("SELECT name FROM pragma_table_info(?)").all(t) as { name: string }[]).map((c) => c.name);
+  assert.deepEqual(PLAN_INPUTS.filter((p) => p.class === "item" && !p.refs && !["repo", "number"].every((c) => cols(p.table).includes(c))).map((p) => p.table), []);
   db.close();
 });

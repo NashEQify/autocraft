@@ -78,7 +78,7 @@ export function planChangesSql(db?: DatabaseSync): string {
         trigger(`${base}_full_${op[0]!.toLowerCase()}`, cond, MARK_FULL);
       }
       // Affected items.
-      if (input.class === "global") continue;
+      if (input.class === "global" || (input.class === "cross" && !input.refs)) continue;
       const refs = input.refs ?? "SELECT r.repo AS repo, r.number AS number";
       const select = rows.map((a) => `SELECT repo, number FROM (${on(refs, a)})${input.when ? ` WHERE ${on(input.when, a)}` : ""}`).join(" UNION ");
       trigger(`${base}_${op[0]!.toLowerCase()}`, and(upd, when), `INSERT INTO item_changes (repo, number) SELECT repo, number FROM (${select}) WHERE repo IS NOT NULL AND number IS NOT NULL;`);

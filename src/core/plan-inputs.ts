@@ -20,7 +20,7 @@ export type PlanInput = {
   table: string;
   class: PlanInputClass;
   why: string;
-  /** SELECT of the `repo` and `number` columns of the items row `r` decides (default: the row's own repo and number). item and cross. */
+  /** SELECT of the `repo` and `number` columns of the items row `r` decides; an item input defaults to the row's own repo and number, a cross input without it only forces full passes. */
   refs?: string;
   /** Condition on `r`: only rows that meet it are logged. */
   when?: string;
@@ -125,6 +125,7 @@ export const PLAN_INPUTS: PlanInput[] = [
   // ---- cross-item ----
   {
     table: "items", class: "cross", why: "One item's mirror row; a new or deleted item, a PR's state, text or branches, an author, or a change to a member of a duplicate set changes other items' facts.",
+    refs: "SELECT r.repo AS repo, r.number AS number",
     full: "r.kind = 'pr'",
     fullUpdate: `${changed(["kind", "author", "author_id"])}
       OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)}))
@@ -201,6 +202,7 @@ export const PLAN_INPUTS: PlanInput[] = [
   },
   {
     table: "pr_checks", class: "cross", why: "Checks of one PR; a new row or one whose overall state moves to or from none can flip its repo's no-CI fact (reposWithNoCi).",
+    refs: "SELECT r.repo AS repo, r.number AS number",
     full: "1", fullUpdate: "(COALESCE(old.overall, 'none') = 'none') IS NOT (COALESCE(new.overall, 'none') = 'none')",
   },
   { table: "fast_track", class: "cross", why: "Fast track moves an item's scope and score, its fix PR's, and through scope its duplicate sets and integration PRs.", full: "1" },
