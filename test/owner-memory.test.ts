@@ -33,7 +33,7 @@ async function comment(w: Awaited<ReturnType<typeof world>>, id: string, repo: s
 
 test("statements come from operators' own words only, and a related one reaches the review of a similar PR of its repo", async () => {
   const w = await (await (await world()).repo()).pr(1);
-  await w.db.prepare("INSERT INTO access (login, role) VALUES ('boss', 'operator'), ('guest', 'maintainer')").run();
+  await w.db.run(w.db.k.insertInto("access").values([{ login: "boss", role: "operator" }, { login: "guest", role: "maintainer" }]));
   await comment(w, "c1", "craft-libs", 5, "boss", "Vendored hyphenation code and dictionaries belong in the shared library, not in the app.");
   await comment(w, "c2", "craft-libs", 6, "boss", withNote({ by: "operator", model: null }, "Hyphenation dictionary posted by the pipeline for the operator."));
   await comment(w, "c3", "craft-libs", 7, "guest", "Hyphenation dictionary vendoring is fine with me, as far as I can tell.");
@@ -46,7 +46,7 @@ test("statements come from operators' own words only, and a related one reaches 
   await comment(w, "PRR_x", "craft-libs", 12, "boss", "Hyphenation review text posted by the pipeline without a note line.");
   await w.db.run(w.db.k.insertInto("audit").values({ at: "t", login: "review", action: "review-post", target: "craft-libs#12", details: JSON.stringify({ review: "PRR_x", state: "done" }) }));
   await w.db.run(w.db.k.insertInto("decisions").values({ id: "d1", kind: "close", repo: "app", number: 9, question: "q", options: "[]", asked_at: "2026-03-02T00:00:00Z", answer: "close", answer_note: "No new dependency for canvas export.", answered_by: "boss", answered_at: "2026-03-02T00:00:00Z" }));
-  await w.db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('app', 10, 'operator', 'boss', '2026-03-03T00:00:00Z', 'Keep language data out of the app crates.', 'b', 'answered', 1)").run();
+  await w.db.run(w.db.k.insertInto("conversation_turns").values({ repo: "app", number: 10, kind: "operator", login: "boss", at: "2026-03-03T00:00:00Z", body: "Keep language data out of the app crates.", block: "b", status: "answered", seq: 1 }));
 
   assert.equal(await collectStatements(w.db), 3);
   assert.equal(await collectStatements(w.db), 0);
