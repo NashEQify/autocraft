@@ -5,7 +5,8 @@ import { connect, dbPath } from "../db.ts";
 import { envVar } from "../env.ts";
 import { Handle } from "./handle.ts";
 import type { Db, DbRole } from "./index.ts";
-import { postgresEngine } from "./postgres.ts";
+import { migratePg, pgStamp, storedPgStamp } from "./pg-triggers.ts";
+import { pgConnectionString, postgresEngine } from "./postgres.ts";
 import { bindSql } from "./sql.ts";
 import { sqliteEngine } from "./sqlite.ts";
 
@@ -58,16 +59,35 @@ export interface ConnectOptions {
   busyTimeoutMs?: number;
   /** The handle's use, for its pool size on Postgres. Defaults to the process's role (`setDbRole`). */
   role?: DbRole;
+  /** Postgres: bring the schema and triggers up to date first (default). False opens the database as it is. */
+  migrate?: boolean;
 }
 
 /**
- * A handle of its own on `target`: a SQLite file, schema brought up to date (see `connect()`), or a Postgres URL. A
- * Postgres database must already have its schema.
+ * A handle of its own on `target`: a SQLite file or a Postgres URL, schema brought up to date (see `connect()` and
+ * `migratePg()`).
  */
 export async function connectDb(target: string = dbTarget(), opts: ConnectOptions = {}): Promise<Db> {
   if (!isPgUrl(target)) return dbFor(connect(target, opts));
   const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
-  return new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));
+  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));
+  if (opts.migrate === false) return db;
+  try {
+    // A current database costs two reads on the pool; only a stale one opens a connection of its own for the migration.
+    if (await storedPgStamp((sql) => db.prepare(sql).all()) !== pgStamp()) {
+      const client = new pg.Client({ connectionString: pgConnectionString(target), application_name: "autocraft-migrate" });
+      await client.connect();
+      try {
+        await migratePg(client);
+      } finally {
+        await client.end();
+      }
+    }
+  } catch (e) {
+    await db.close();
+    throw e;
+  }
+  return db;
 }
 
 let proc: Promise<Db> | undefined;

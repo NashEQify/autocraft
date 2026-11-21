@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
-import { bulkWrites, changeSeq, changesSince, pruneChanges } from "../src/core/plan-changes.ts";
+import { bulkWrites, changeCursor, changesSince, pruneChanges, type ChangeCursor } from "../src/core/plan-changes.ts";
 import { PLAN_INPUTS } from "../src/core/plan-inputs.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { loadPlanSet } from "../src/core/plan-set.ts";
@@ -24,45 +24,45 @@ const T = "2026-01-01T00:00:00Z";
 
 test("writes log the items they re-decide; stamp-only updates log nothing; cross-item and global writes reach every affected item or force a full pass", async () => {
   const db = await connectDb(join(dir, "log.db"));
-  const since = async (seq: number) => { const c = await changesSince(db, seq); return { ...c, refs: [...c.refs].sort() }; };
-  let seq = await changeSeq(db);
+  const since = async (cursor: ChangeCursor) => { const c = await changesSince(db, cursor); return { ...c, refs: [...c.refs].sort() }; };
+  let seq = await changeCursor(db);
 
   // Item-keyed: the row's own item.
   await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('app', 7, 1, '{}', ?)").run(T);
   let c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#7"], false]);
-  seq = c.seq;
+  seq = c.cursor;
 
   // A bookkeeping column alone: nothing.
   await db.prepare("UPDATE item_rank SET computed_at = '2026-01-02T00:00:00Z' WHERE repo = 'app' AND number = 7").run();
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [[], false]);
-  assert.equal(c.seq, seq);
+  assert.deepEqual(c.cursor, seq);
 
   // A key move logs the old and the new item.
   await db.prepare("UPDATE item_rank SET number = 8 WHERE repo = 'app' AND number = 7").run();
   c = await since(seq);
   assert.deepEqual(c.refs, ["app#7", "app#8"]);
-  seq = c.seq;
+  seq = c.cursor;
 
   // Cross-item: a batch row reaches its integration PR and every member.
   const batch = Number((await db.prepare(`INSERT INTO merge_batches (repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at)
     VALUES ('app', 'integration-1', 'open', 'b', 'c', 50, ?, ?)`).run(T, T)).lastInsertRowid);
   await db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (?, 3, 'h3', 0), (?, 4, 'h4', 1)").run(batch, batch);
-  seq = (await since(seq)).seq;
+  seq = (await since(seq)).cursor;
   await db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = ?").run(batch);
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#3", "app#4", "app#50"], false]);
-  seq = c.seq;
+  seq = c.cursor;
 
   // Cross-item without a readable set: a full pass, and later logged items after it still count.
   await db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', 9, 'op', ?)").run(T);
   c = await since(seq);
   assert.equal(c.full, true);
-  assert.ok(c.seq > seq);
-  // The mark is counted under the trigger that made it.
-  assert.deepEqual({ ...await db.prepare("SELECT n, last_seq FROM plan_full_causes WHERE source = 'plan_fast_track_full_i'").get() }, { n: 1, last_seq: c.seq });
-  seq = c.seq;
+  assert.ok(c.cursor.gen > seq.gen);
+  // The mark is counted under the trigger that made it, with the generation it made.
+  assert.deepEqual({ ...await db.prepare("SELECT n, last_seq FROM plan_full_causes WHERE source = 'plan_fast_track_full_i'").get() }, { n: 1, last_seq: c.cursor.gen });
+  seq = c.cursor;
 
   // Global: a planner input setting forces a full pass; the planner's own bookkeeping setting does not.
   await db.prepare("INSERT INTO settings (key, value) VALUES ('runner_heartbeat', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(T);
@@ -70,10 +70,11 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_enabled', '1') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
   c = await since(seq);
   assert.equal(c.full, true);
-  seq = c.seq;
+  seq = c.cursor;
 
-  // A prune never lets a seq come back: the next write is still after the consumed seq.
+  // A prune deletes what was read; the next write is read after it.
   await pruneChanges(db, seq);
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM item_changes").get() as { n: number }).n, 0);
   await db.prepare("INSERT INTO merge_holds (repo, number, held_by, held_at) VALUES ('app', 11, 'op', ?)").run(T);
   c = await since(seq);
   assert.deepEqual([c.refs, c.full], [["app#11"], false]);
@@ -161,30 +162,30 @@ test("the incremental pass reloads only logged and due items, and its PlanSet eq
 
 test("a held PR is logged when its blocker closes; a bulk write logs nothing and takes one full mark; malformed rows and a lost marker row fail no write", async () => {
   const db = await connectDb(join(dir, "robust.db"));
-  const since = async (seq: number) => { const c = await changesSince(db, seq); return { ...c, refs: [...c.refs].sort() }; };
+  const since = async (cursor: ChangeCursor) => { const c = await changesSince(db, cursor); return { ...c, refs: [...c.refs].sort() }; };
   const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, created_at) VALUES ('app', ?, 'pr', 'OPEN', 't', ?)");
   for (const n of [1, 2, 3]) await item.run(n, T);
   await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, at, mode, verdict, blocked_by) VALUES ('app', 1, 'h1', ?, 'full', 'hold', '[\"app#2\", 7, \"app#2\"]')").run(T);
-  let seq = await changeSeq(db);
+  let seq = await changeCursor(db);
   await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
   let c = await since(seq);
   assert.ok(c.full || c.refs.includes("app#1"), "the PR held for app#2 is decided again");
-  seq = c.seq;
+  seq = c.cursor;
 
   // A decision whose items are not a list of objects is still written and logs its own item.
   await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, asked_at, asked_by, question, options) VALUES ('d1', 'merge', 'app', 3, '[\"app#1\", 5]', ?, 'x', 'q', '[]')").run(T);
   await db.prepare("UPDATE decisions SET items = '{\"repo\": \"app\"}' WHERE id = 'd1'").run();
   c = await since(seq);
   assert.ok(c.full || c.refs.includes("app#3"));
-  seq = c.seq;
+  seq = c.cursor;
 
   await bulkWrites(db, "test", async () => { for (const n of [1, 3]) await db.prepare("UPDATE items SET embed_hash = ? WHERE number = ?").run(`e${n}`, n); });
   c = await since(seq);
   assert.equal(c.full, true);
-  assert.equal((await db.prepare("SELECT count(*) AS n FROM item_changes WHERE seq > ?").get(seq) as { n: number }).n, 0);
-  seq = c.seq;
+  assert.deepEqual((await db.prepare("SELECT seq FROM item_changes").all() as { seq: number }[]).filter((r) => !seq.seen.has(r.seq)), []);
+  seq = c.cursor;
 
   await db.script("DELETE FROM plan_full; DELETE FROM sqlite_sequence WHERE name = 'item_changes'");
   await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('other', 'op', ?, 1)").run(T);
-  assert.equal((await changesSince(db, 0)).full, true);
+  assert.equal((await changesSince(db, seq)).full, true);
 });

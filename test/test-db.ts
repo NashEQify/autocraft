@@ -15,8 +15,11 @@ export const needsPg: false | string = TEST_PG_URL ? false : "needs Postgres: AU
 
 export interface TestDatabase {
   readonly dialect: Db["dialect"];
-  /** Another handle on the same database, over its own connection (SQLite) or pool (Postgres). */
-  open(opts?: { busyTimeoutMs?: number }): Promise<Db>;
+  /**
+   * Another handle on the same database, over its own connection (SQLite) or pool (Postgres). `app` opens it the way the
+   * app does, with the app's schema and triggers brought up to date.
+   */
+  open(opts?: { busyTimeoutMs?: number; app?: boolean }): Promise<Db>;
   /** Closes every handle opened here and drops the database. */
   close(): Promise<void>;
 }
@@ -34,7 +37,8 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
   const closeAll = async () => void (await Promise.all(closers.splice(0).map((c) => c())));
   if (dialect === "sqlite") {
     const file = join(SCRATCH, `test-db-${process.pid}-${n++}.db`);
-    const open = async (opts: { busyTimeoutMs?: number } = {}) => {
+    const open = async (opts: { busyTimeoutMs?: number; app?: boolean } = {}) => {
+      if (opts.app) return track(await connectDb(file, { busyTimeoutMs: opts.busyTimeoutMs }));
       const sync = new DatabaseSync(file, { timeout: opts.busyTimeoutMs ?? 5000 });
       sync.exec("PRAGMA journal_mode=WAL");
       return track(await dbFor(sync));
@@ -45,11 +49,12 @@ export async function testDatabase(schema = "", dialect: Db["dialect"] = TEST_PG
   if (!TEST_PG_URL) throw new Error("testDatabase: Postgres needs AUTOCRAFT_TEST_PG_URL");
   const admin = new URL(TEST_PG_URL);
   const name = `test_${process.pid}_${n++}_${randomBytes(3).toString("hex")}`;
-  const server = await connectDb(admin.toString(), { role: "cli" });
+  const server = await connectDb(admin.toString(), { role: "cli", migrate: false });
   await server.script(`CREATE DATABASE ${name}`);
   const url = new URL(admin);
   url.pathname = `/${name}`;
-  const open = async (opts: { busyTimeoutMs?: number } = {}) => track(await connectDb(url.toString(), { role: "dashboard", ...opts }));
+  const open = async ({ app, ...opts }: { busyTimeoutMs?: number; app?: boolean } = {}) =>
+    track(await connectDb(url.toString(), { role: "dashboard", migrate: !!app, ...opts }));
   if (schema) await (await open()).script(schema);
   return {
     dialect,
