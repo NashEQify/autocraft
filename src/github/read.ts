@@ -2,7 +2,9 @@
 // Under the `box` identity nothing is added: the child inherits this process's environment and the box account's
 // login. Under `app` the child's whole environment is the inherited basics plus an installation token (never the
 // box account's credentials), and a failure to mint one is an error, not a fallback to the box account.
-// The setting is read at every call, so a switch takes effect in the runner and the dashboard without a restart.
+// The setting is held in memory: the runner's tick and the dashboard's live hub refresh it when the `settings` change
+// counter moves (refreshReadIdentity), so a switch takes effect there without a restart; a one-shot CLI command reads it
+// once, on first use.
 import { existsSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { dbPath } from "../db.ts";
@@ -14,24 +16,34 @@ import { dbFor } from "../db/open.ts";
 export type ReadEnv = Record<string, string>;
 export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
 
-let shared: { path: string; db: Db } | null = null;
+// The promise is kept, so two first calls at once share one open.
+let shared: { path: string; db: Promise<Db> } | null = null;
 /**
  * A read-only handle on the instance database, opened on first use. Null only when there is no database file (nothing
  * configured the identity); a file that cannot be opened is an error, never a silent read as the box account.
  */
 async function sharedDb(): Promise<Db | null> {
   const path = dbPath();
-  if (shared?.path === path) return shared.db;
+  if (shared?.path === path) return await shared.db;
   if (!existsSync(path)) return null;
+  const mine = { path, db: openShared(path) };
+  shared = mine;
+  try {
+    return await mine.db;
+  } catch (e) {
+    if (shared === mine) shared = null;
+    throw e;
+  }
+}
+
+async function openShared(path: string): Promise<Db> {
   let last: unknown;
   for (let i = 0; i < 3; i++) {
     let sync: DatabaseSync;
     try {
       sync = new DatabaseSync(path, { readOnly: true, timeout: 5_000 });
     } catch (e) { last = e; continue; }
-    const db = await dbFor(sync);
-    shared = { path, db };
-    return db;
+    return await dbFor(sync);
   }
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
@@ -46,10 +58,43 @@ async function settingOf(db: Db): Promise<string | undefined> {
   throw new Error(`cannot read the GitHub identity setting: ${String((last as Error)?.message ?? last).slice(0, 120)}`);
 }
 
-/** Whether reads go through the GitHub App right now. Throws when the setting exists to be read but cannot be. */
+/** The identity setting as this process holds it, with the `settings` change counter it was read at (null: unknown). */
+let held: { app: boolean; seq: number | null } | null = null;
+let firstRead: Promise<boolean> | null = null;
+
+/**
+ * Brings the held identity up to date when the `settings` change counter moved (`seq`: the counter as the caller already
+ * read it). Long-running loops call it every pass. The counter is read before the value, so a write between the two
+ * only makes the next pass read again.
+ */
+export async function refreshReadIdentity(db: Db, seq?: number): Promise<void> {
+  const at = seq ?? (await db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'settings'").get() as { seq: number } | undefined)?.seq ?? null;
+  if (at !== null && held?.seq === at) return;
+  const app = await settingOf(db) === "app";
+  // Another pass may have stored a later reading while this one awaited.
+  if (at !== null && held && held.seq !== null && held.seq > at) return;
+  held = { app, seq: at };
+}
+
+/** Records a switch this process just wrote, so its own next read uses it before any refresh. */
+export function noteReadIdentity(app: boolean): void {
+  held = { app, seq: null };
+}
+
+/**
+ * Whether reads go through the GitHub App right now: the held value, read once on first use when no loop refreshed it.
+ * With `db`, that database's setting. Throws when the setting exists to be read but cannot be.
+ */
 export async function readsUseApp(db?: Db): Promise<boolean> {
-  const d = db ?? await sharedDb();
-  return d !== null && await settingOf(d) === "app";
+  if (db) return await settingOf(db) === "app";
+  if (held) return held.app;
+  firstRead ??= (async () => {
+    const d = await sharedDb();
+    return d !== null && await settingOf(d) === "app";
+  })().catch((e: unknown) => { firstRead = null; throw e; });
+  const app = await firstRead;
+  held ??= { app, seq: null };
+  return held.app;
 }
 
 /** The owner of the tracked repos: the default owner when it has any, else the first tracked one. */

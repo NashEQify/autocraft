@@ -51,6 +51,8 @@ import { startLiveness } from "../../remote/liveness.ts";
 import { archiveOf, callTaskTool, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
 import { handleDelivery, WEBHOOK_BODY_LIMIT, WEBHOOK_PATH } from "../../github/webhooks.ts";
 import { esc, HttpError, parseCookies, plainPage, previewTags, RateLimiter, safeReturnTo } from "./util.ts";
+import { exclusive } from "../../async-seq.ts";
+import { refreshReadIdentity } from "../../github/read.ts";
 import type { Db } from "../../db/index.ts";
 
 export const SESSION_COOKIE = "__Host-craft_session";
@@ -288,14 +290,17 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
 
   // Ended remote calls, finished check relays and the status of deleted tokens, once a minute; a busy database skips a round.
   // The same pass withdraws queued calls no Task Runner has been able to take for a while and marks repos without one (takers.ts).
-  const maintenance = setInterval(async () => {
+  const maintain = exclusive(async () => {
     try {
       await remote.pruneRemote(rdb);
       await sweepTakers(rdb);
+      // The live hub refreshes it only while a page is open.
+      await refreshReadIdentity(rdb);
     } catch (e) {
       if (!isBusy(e)) console.log(`remote maintenance failed: ${(e as Error).message}`);
     }
-  }, scaled(60_000));
+  });
+  const maintenance = setInterval(() => void maintain.skip(), scaled(60_000));
   maintenance.unref();
 
   function secure(headers: Record<string, string | string[]>, csp: string): Record<string, string | string[]> {

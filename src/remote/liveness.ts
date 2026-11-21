@@ -3,6 +3,7 @@
 // `remote_liveness` row every ALIVE_EVERY_MS; job processes, which expire leases (calls.ts expireLeases), read it.
 import { isBusy } from "../db.ts";
 import { scaled } from "./time-scale.ts";
+import { exclusive } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
 export const ALIVE_EVERY_MS = scaled(5_000);
@@ -45,8 +46,9 @@ export async function startLiveness(db: Db): Promise<() => void> {
   const tick = async (): Promise<void> => {
     try { await stampAlive(db); } catch (e) { if (!isBusy(e)) console.log(`liveness stamp not written: ${(e as Error).message}`); }
   };
-  await tick();
-  const t = setInterval(() => void tick(), ALIVE_EVERY_MS);
+  const stamp = exclusive(tick);
+  await stamp.run();
+  const t = setInterval(() => void stamp.skip(), ALIVE_EVERY_MS);
   t.unref();
   return () => clearInterval(t);
 }

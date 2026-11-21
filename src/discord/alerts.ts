@@ -21,7 +21,7 @@ import { loginOf } from "./links.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import { RestError, type DiscordRest, type EditBody } from "./rest.ts";
 import { ghPermission, type PermissionReader } from "../fixup/author-permission.ts";
-import { everySeq, filterSeq, someSeq } from "../async-seq.ts";
+import { everySeq, exclusive, filterSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
 /** What the alerts need from Discord beyond messages: the direct-message channel of a user. */
@@ -174,7 +174,7 @@ export class DecisionAlerts {
   /** Polls the change markers of the decision topics; a change runs one pass. Runs a first pass at once. */
   start(signal: AbortSignal): void {
     void this.sync();
-    const t = setInterval(async () => {
+    const poll = exclusive(async () => {
       try {
         const seqs = await readSeqs(this.#d.db);
         const sig = TOPICS.map((k) => seqs[k] ?? 0).join(",");
@@ -190,7 +190,8 @@ export class DecisionAlerts {
       } catch (e) {
         this.#d.log(`discord: alert poll failed: ${(e as Error).message}`);
       }
-    }, POLL_MS);
+    });
+    const t = setInterval(() => void poll.skip(), POLL_MS);
     t.unref();
     signal.addEventListener("abort", () => clearInterval(t), { once: true });
   }

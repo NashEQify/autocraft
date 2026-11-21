@@ -81,10 +81,12 @@ export class Ctx {
   /** Every open item with its settled status in the current run. */
   async open(): Promise<OpenRow[]> {
     if (!this.openRows) {
-      await settledTable(this.db, this.run);
-      this.openRows = await this.db.prepare(`SELECT i.repo, i.number, i.kind, s.status, s.referee_sure, s.jev_label, s.haiku_label FROM items i
-        LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number
-        WHERE i.state = 'OPEN' ${this.andRepo("i.repo")}`).all(this.rp) as OpenRow[];
+      this.openRows = await this.db.read(async () => {
+        await settledTable(this.db, this.run);
+        return await this.db.prepare(`SELECT i.repo, i.number, i.kind, s.status, s.referee_sure, s.jev_label, s.haiku_label FROM items i
+          LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number
+          WHERE i.state = 'OPEN' ${this.andRepo("i.repo")}`).all(this.rp) as OpenRow[];
+      });
     }
     return this.openRows;
   }

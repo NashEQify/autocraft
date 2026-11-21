@@ -230,7 +230,14 @@ const VERDICTS = `SELECT k.repo, k.number, j.type_label AS jl, j.flags AS jf, j.
     AND s.at >= j.at AND s.at >= h.at AND json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.sure') IS NOT NULL
   WHERE 1 = 1`;
 
-export async function settledTable(db: Db, run: string | null): Promise<void> {
+// The table belongs to the connection, and so to every async context on it: a caller runs this and its own queries on
+// temp.item_settled inside one db.read (or db.write), so no other context rebuilds the table for another run between
+// them. The refresh is itself one read snapshot, so it joins either; it writes only the temp table.
+export function settledTable(db: Db, run: string | null): Promise<void> {
+  return db.read(() => refreshSettled(db, run));
+}
+
+async function refreshSettled(db: Db, run: string | null): Promise<void> {
   const now = await db.prepare("SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS count FROM main.classifications").get() as { maxRowid: number; count: number };
   const prev = seen.get(db);
   if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
@@ -250,27 +257,25 @@ export async function settledTable(db: Db, run: string | null): Promise<void> {
     const cols = Array.from({ length: 15 }, (_, i) => `value ->> ${i}`).join(", ");
     await db.prepare(`INSERT OR REPLACE INTO temp.item_settled SELECT ${cols} FROM json_each(?)`).run(JSON.stringify(rows));
   };
-  await db.write(async () => {
-    const fresh = prev && prev.run === run
-      ? (await db.prepare("SELECT DISTINCT repo, number FROM main.classifications WHERE rowid > ? AND run_id = ?").all(prev.maxRowid, run) as { repo: string; number: number }[])
-      : null;
-    const added = prev ? (await db.prepare("SELECT COUNT(*) AS n FROM main.classifications WHERE rowid > ?").get(prev.maxRowid) as { n: number }).n : 0;
-    // INSERT OR REPLACE removes one row for each it adds, so the count only falls when something was deleted.
-    if (fresh && run && now.count >= prev!.count && now.count <= prev!.count + added) {
-      if (fresh.length) {
-        const keys = JSON.stringify(fresh.map((k) => [k.repo, k.number]));
-        const found = await db.prepare(`${VERDICTS} AND (k.repo, k.number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:keys))`).all({ run, keys }) as VerdictRow[];
-        const have = new Set(found.map((r) => `${r.repo}#${r.number}`));
-        const gone = fresh.filter((k) => !have.has(`${k.repo}#${k.number}`)).map((k) => [k.repo, k.number]);
-        if (gone.length) await db.prepare("DELETE FROM temp.item_settled WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").run(JSON.stringify(gone));
-        for (const r of found) put(r);
-      }
-    } else {
-      await db.script("DELETE FROM temp.item_settled");
-      if (run) for (const r of await db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
+  const fresh = prev && prev.run === run
+    ? (await db.prepare("SELECT DISTINCT repo, number FROM main.classifications WHERE rowid > ? AND run_id = ?").all(prev.maxRowid, run) as { repo: string; number: number }[])
+    : null;
+  const added = prev ? (await db.prepare("SELECT COUNT(*) AS n FROM main.classifications WHERE rowid > ?").get(prev.maxRowid) as { n: number }).n : 0;
+  // INSERT OR REPLACE removes one row for each it adds, so the count only falls when something was deleted.
+  if (fresh && run && now.count >= prev!.count && now.count <= prev!.count + added) {
+    if (fresh.length) {
+      const keys = JSON.stringify(fresh.map((k) => [k.repo, k.number]));
+      const found = await db.prepare(`${VERDICTS} AND (k.repo, k.number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:keys))`).all({ run, keys }) as VerdictRow[];
+      const have = new Set(found.map((r) => `${r.repo}#${r.number}`));
+      const gone = fresh.filter((k) => !have.has(`${k.repo}#${k.number}`)).map((k) => [k.repo, k.number]);
+      if (gone.length) await db.prepare("DELETE FROM temp.item_settled WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").run(JSON.stringify(gone));
+      for (const r of found) put(r);
     }
-    await insertAll();
-  });
+  } else {
+    await db.script("DELETE FROM temp.item_settled");
+    if (run) for (const r of await db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
+  }
+  await insertAll();
   seen.set(db, { run, ...now });
 }
 
