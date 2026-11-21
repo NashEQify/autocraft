@@ -6,23 +6,28 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { computeChecks, serveChecks } from "../src/health-checks.ts";
 import { GithubError, reconcileNext, runSync } from "../src/mirror.ts";
-import { loadOwners } from "../src/owners.ts";
+import { reloadOwners } from "../src/owners.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
-import { sqliteOnly } from "./test-db.ts";
+import { excluded } from "../src/db/kx.ts";
 
 async function scratchDb() {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "synchealth-")), "m.db"));
-  await db.script("DELETE FROM tracked_repos");
-  await db.script("INSERT INTO tracked_repos (name, added_by, added_at) VALUES ('a','t','x'),('b','t','x')");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "a", added_by: "t", added_at: "x" }, { name: "b", added_by: "t", added_at: "x" }]));
   return db;
 }
 
-test("a repo that no longer resolves is skipped and recorded; failures and recoveries keep per-repo reads right", { skip: sqliteOnly("loadOwners on db.sync") }, async () => {
+test("a repo that no longer resolves is skipped and recorded; failures and recoveries keep per-repo reads right", async () => {
   await recoveryScenarios();
   const db = await scratchDb();
-  await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('a','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-01T00:00:00Z'),('b','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T00:00:00Z')");
-  await db.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T09:30:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
+  await db.run(db.k.insertInto("repos").values([
+    { name: "a", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-01T00:00:00Z" },
+    { name: "b", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-02T00:00:00Z" },
+  ]));
+  await db.run(db.k.insertInto("settings").values([
+    { key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
+  ]));
   const client = {
     spent: 0, remaining: 4000 as number | null,
     repoMovedTo: (owner: string, name: string) => `elsewhere/${name}-${owner.length}`,
@@ -37,7 +42,7 @@ test("a repo that no longer resolves is skipped and recorded; failures and recov
   const err = await db.prepare("SELECT repo, kind, moved_to FROM sync_repo_errors").all();
   assert.deepEqual(err.map((e) => ({ ...e })), [{ repo: "a", kind: "not-found", moved_to: "elsewhere/a-9" }]);
   // The failing repo gives up its place at the front of the daily reconcile, so repo b is next.
-  assert.equal((await db.prepare("SELECT reconciled_at AS t FROM repos WHERE name = 'a'").get() as { t: string }).t, "2026-11-02T10:05:00Z");
+  assert.equal((await db.get(db.k.selectFrom("repos").select("reconciled_at as t").where("name", "=", "a")))!.t, "2026-11-02T10:05:00Z");
   const check = (await computeChecks(db, Date.parse("2026-11-02T10:06:00Z"))).find((c) => c.id === "sync-repo:a");
   assert.equal(check?.state, "warn");
   assert.match(check!.text, /storytold\/a no longer resolves on GitHub \(moved to elsewhere\/a-9\)/);
@@ -54,8 +59,8 @@ const conn = (nodes: unknown[]) => ({ nodes, pageInfo: { hasNextPage: false, end
 async function recoveryScenarios(): Promise<void> {
   // A new repo whose first read fails with a plain error is retried per repo, not marked synced by a search.
   const db = await scratchDb();
-  await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('a','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z')");
-  await db.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T09:30:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
+  await db.run(db.k.insertInto("repos").values({ name: "a", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-02T09:00:00Z" }));
+  await db.run(db.k.insertInto("settings").values([{ key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" }]));
   const client = {
     spent: 0, remaining: 4000 as number | null,
     async query(query: string, v: Record<string, unknown>) {
@@ -70,18 +75,20 @@ async function recoveryScenarios(): Promise<void> {
   };
   const o = { only: [], all: false, full: false, perRepo: false };
   assert.equal((await runSync(db, client, o, new Date("2026-11-02T10:05:00Z"))).mode, "per-repo");
-  await db.prepare("INSERT INTO settings VALUES ('repos_refreshed_at','2999-01-01T00:00:00Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value").run();
+  await db.run(db.k.insertInto("settings").values({ key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   assert.equal((await runSync(db, client, o, new Date("2026-11-02T10:06:00Z"))).mode, "per-repo");
-  assert.equal((await db.prepare("SELECT synced_at AS t FROM repos WHERE name = 'b'").get() as { t: string | null }).t, null);
+  assert.equal((await db.get(db.k.selectFrom("repos").select("synced_at as t").where("name", "=", "b")))!.t, null);
 
   // A repo of another owner that failed for hours reads from its own high water when it recovers.
   const db2 = await scratchDb();
-  await db2.script("DELETE FROM tracked_repos");
-  await db2.script("INSERT INTO tracked_repos (name, added_by, added_at) VALUES ('c','t','x')");
-  await db2.script("INSERT INTO repos (name, owner, synced_at, high_water, reconciled_at) VALUES ('c','other','2026-11-02T08:00:00Z','2026-11-02T08:00:00Z','2026-11-02T09:00:00Z')");
-  await db2.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T10:00:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
-  await db2.script("INSERT INTO sync_repo_errors VALUES ('c','transient','x','','2026-11-02T08:30:00Z','2026-11-02T10:00:00Z')");
-  loadOwners(db2.sync!);
+  await db2.run(db2.k.deleteFrom("tracked_repos"));
+  await db2.run(db2.k.insertInto("tracked_repos").values({ name: "c", added_by: "t", added_at: "x" }));
+  await db2.run(db2.k.insertInto("repos").values({ name: "c", owner: "other", synced_at: "2026-11-02T08:00:00Z", high_water: "2026-11-02T08:00:00Z", reconciled_at: "2026-11-02T09:00:00Z" }));
+  await db2.run(db2.k.insertInto("settings").values([
+    { key: "org_high_water", value: "2026-11-02T10:00:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
+  ]));
+  await db2.run(db2.k.insertInto("sync_repo_errors").values({ repo: "c", kind: "transient", message: "x", moved_to: "", since: "2026-11-02T08:30:00Z", at: "2026-11-02T10:00:00Z" }));
+  await reloadOwners(db2);
   const c2 = {
     spent: 0, remaining: 4000 as number | null,
     async query(query: string, v: Record<string, unknown>) {
@@ -91,15 +98,15 @@ async function recoveryScenarios(): Promise<void> {
     },
   };
   await runSync(db2, c2, o, new Date("2026-11-02T10:05:00Z"));
-  assert.equal((await db2.prepare("SELECT COUNT(*) AS n FROM items WHERE repo = 'c'").get() as { n: number }).n, 1);
-  assert.equal((await db2.prepare("SELECT COUNT(*) AS n FROM sync_repo_errors").get() as { n: number }).n, 0);
+  assert.equal((await db2.get(db2.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", "c")))!.n, 1);
+  assert.equal((await db2.get(db2.k.selectFrom("sync_repo_errors").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
 }
 
 test("GET /healthz/checks answers 503 with a stale worker and shows no repo names", async () => {
   const db = await scratchDb();
   const now = Date.parse("2026-11-05T12:00:00Z");
   const at = (msAgo: number) => new Date(now - msAgo).toISOString();
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('runner_heartbeat', ?)").run(at(5_000));
+  await db.run(db.k.insertInto("settings").values({ key: "runner_heartbeat", value: at(5_000) }));
   await db.prepare("INSERT INTO sync_runs (started_at, ended_at, mode, items) VALUES (?, ?, 'search', 0)").run(at(70_000), at(60_000));
   await db.prepare("INSERT INTO build_envs (id, label, kind, enabled, slots, key_hash, last_seen_at, created_at) VALUES ('sandbox','Sandbox','local-sandbox',1,2,'h',?,?)").run(at(6 * 60_000), at(86_400_000));
   await db.prepare("INSERT INTO sync_repo_errors (repo, kind, message, since, at) VALUES ('a','not-found','x',?,?)").run(at(1000), at(1000));

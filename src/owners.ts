@@ -1,36 +1,34 @@
 // Owner (GitHub org or user) of each repo. Repo names are unique across owners, so items keep
 // the bare name as key; the owner is a property of the `repos` row. Repos without a row are storytold's.
 
-// A structural type: the web build imports this module through the templates and has no node types.
-type DatabaseSync = { prepare(sql: string): { all(...params: never[]): unknown[] } };
+import type { Db } from "./db/index.ts";
+
+export type OwnerRow = { name: string; owner: string | null };
 
 export const DEFAULT_OWNER = "storytold";
 export const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 
 const REFRESH_MS = 30_000;
 let cache = new Map<string, string>();
-let source: DatabaseSync | null = null;
+let source: (() => OwnerRow[]) | null = null;
 let loadedAt = 0;
 // Counts loads. An async reload stores its rows only when no load started after it, so a reload whose read finished
 // late never puts back an older owner list.
 let loads = 0;
 
-/** Reads the owners from the `repos` table; the most recently loaded database also refreshes the cache later. */
-export function loadOwners(db: DatabaseSync): void {
-  source = db;
+/** Reads the owners with `read` (the rows of the `repos` table); the most recently loaded reader also refreshes the cache later. */
+export function loadOwners(read: () => OwnerRow[]): void {
+  source = read;
   loads++;
-  setOwners(db.prepare(OWNERS_SQL).all() as OwnerRow[]);
+  setOwners(read());
 }
 
 /** loadOwners() through the async handle, after a write to `repos`. The cache refreshes later from the connection loaded last. */
-export async function reloadOwners(db: { prepare(sql: string): { all(...params: never[]): Promise<unknown[]> } }): Promise<void> {
+export async function reloadOwners(db: Db): Promise<void> {
   const mine = ++loads;
-  const rows = await db.prepare(OWNERS_SQL).all() as OwnerRow[];
+  const rows = await db.all(db.k.selectFrom("main.repos").select(["name", "owner"]));
   if (mine === loads) setOwners(rows);
 }
-
-const OWNERS_SQL = "SELECT name, owner FROM main.repos";
-type OwnerRow = { name: string; owner: string | null };
 
 function setOwners(rows: OwnerRow[]): void {
   const next = new Map<string, string>();
@@ -62,10 +60,9 @@ export function splitSlug(s: string): { owner: string; name: string } {
 }
 
 /** Every owner with a tracked repo, plus the default one. */
-export function trackedOwners(db: DatabaseSync): string[] {
-  const rows = db.prepare(
-    "SELECT DISTINCT COALESCE(r.owner, ?) AS owner FROM main.tracked_repos t LEFT JOIN main.repos r ON r.name = t.name",
-  ).all(DEFAULT_OWNER as never) as { owner: string }[];
+export async function trackedOwners(db: Db): Promise<string[]> {
+  const rows = await db.all(db.k.selectFrom("main.tracked_repos as t").leftJoin("main.repos as r", "r.name", "t.name")
+    .select((eb) => eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER)).as("owner")).distinct());
   return [...new Set([DEFAULT_OWNER, ...rows.map((r) => r.owner)])].sort();
 }
 

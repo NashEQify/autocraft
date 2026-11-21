@@ -1,5 +1,5 @@
 import { isBotCommand, isBotLogin } from "./review/bots.ts";
-import { loadOwners } from "./owners.ts";
+import { loadOwners, type OwnerRow } from "./owners.ts";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -716,6 +716,8 @@ function stampOf(db: DatabaseSync): string | null {
   }
 }
 
+const ownerRows = (db: DatabaseSync): OwnerRow[] => db.prepare("SELECT name, owner FROM main.repos").all() as OwnerRow[];
+
 /**
  * Opens the database and brings its schema up to date. `busyTimeoutMs` replaces the 30-second busy timeout once the
  * schema is current: a connection that serves requests waits that long for a write lock, then throws SQLITE_BUSY.
@@ -743,7 +745,7 @@ function open(path: string): DatabaseSync {
   // A current database takes no write lock here: opening a connection must not wait for a sync.
   if (stampOf(db) === stamp) {
     migrateValues(db);
-    loadOwners(db);
+    loadOwners(() => ownerRows(db));
     return db;
   }
   db.exec(schema);
@@ -774,6 +776,6 @@ function open(path: string): DatabaseSync {
   db.exec(`INSERT OR IGNORE INTO main.settings (key, value) SELECT 'tracking_started_at',
     COALESCE((SELECT MIN(synced_at) FROM main.repos), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`);
   db.prepare("INSERT INTO main.settings (key, value) VALUES ('schema_stamp', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(stamp);
-  loadOwners(db);
+  loadOwners(() => ownerRows(db));
   return db;
 }

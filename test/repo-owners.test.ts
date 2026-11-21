@@ -11,16 +11,15 @@ import { RepoError, trackRepo, trackRepoChecked } from "../src/repos.ts";
 import { G } from "./guarded.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
-import { sqliteOnly } from "./test-db.ts";
 
-test("a tracked repo of another owner is written to under its own owner; storytold repos are unchanged", { skip: sqliteOnly("trackedOwners on db.sync") }, async () => {
+test("a tracked repo of another owner is written to under its own owner; storytold repos are unchanged", async () => {
   resetOwners();
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "owners-")), "o.db"));
   assert.ok(await trackRepo(db, "t", "example-org/autocraft-sandbox"));
   await trackRepo(db, "t", "designcraft");
   assert.equal(ownerOf("autocraft-sandbox"), "example-org");
   assert.equal(ownerOf("designcraft"), "storytold");
-  assert.deepEqual(trackedOwners(db.sync!), ["example-org", "storytold"]);
+  assert.deepEqual(await trackedOwners(db), ["example-org", "storytold"]);
   await assert.rejects(async () => await trackRepo(db, "t", "other/designcraft"), RepoError);
   await assert.rejects(async () => await trackRepo(db, "t", "bad owner/x"), RepoError);
 

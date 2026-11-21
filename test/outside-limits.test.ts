@@ -11,11 +11,11 @@ const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
 
 async function setup() {
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
   let n = 0;
   const add = async (author: string, kind: "pr" | "issue", minAgo: number, assoc = "NONE") =>
-    await db.prepare("INSERT INTO items (repo, number, kind, state, author, author_association, created_at) VALUES ('app', ?, ?, 'OPEN', ?, ?, ?)").run(++n, kind, author, assoc, ago(minAgo)) && n;
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: ++n, kind, state: "OPEN", author, author_association: assoc, created_at: ago(minAgo) })) && n;
   return { db, add };
 }
 
@@ -41,10 +41,10 @@ test("an outside author's 6th PR in 24 hours waits; members and the pipeline's o
   await setOutsideLimits(db, "op", { prsPerDay: 5 });
 
   // Items of a repo whose pipeline is off are neither counted nor held.
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('idle', 0)").run();
-  for (let k = 1; k <= 8; k++) await db.prepare("INSERT INTO items (repo, number, kind, state, author, author_association, created_at) VALUES ('idle', ?, 'pr', 'OPEN', 'offauthor', 'NONE', ?)").run(k, ago(50));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "idle", pipeline: 0 }));
+  for (let k = 1; k <= 8; k++) await db.run(db.k.insertInto("items").values({ repo: "idle", number: k, kind: "pr", state: "OPEN", author: "offauthor", author_association: "NONE", created_at: ago(50) }));
   await refreshOutsideHolds(db, NOW);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM outside_holds WHERE repo = 'idle'").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("outside_holds").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", "idle")))!.n, 0);
 
   // The oldest items age out of the window: the held one starts by itself.
   const held = await add("outsider", "pr", 1);
