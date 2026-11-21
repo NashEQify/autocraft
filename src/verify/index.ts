@@ -84,7 +84,7 @@ type Saved = { kind: string; reason: string; plan: unknown; model: string | null
 /** Stores the verification of a PR head and its stages row. */
 export async function saveVerification(db: Db, c: { repo: string; number: number; head_oid: string }, v: Saved): Promise<void> {
   const at = now();
-  // Every column is written, `note` included: the REPLACE this upsert stands for cleared the note of the row it replaced.
+  // Every column is written: a new verification of a head clears the note of the earlier one.
   const row = {
     repo: c.repo, number: c.number, head_sha: c.head_oid, base_sha: v.baseSha, kind: v.kind, reason: v.reason, plan: v.plan === null ? null : JSON.stringify(v.plan),
     model: v.model, head_task_id: v.headTask, base_task_id: v.baseTask, state: v.state, summary: v.summary, note: null, created_at: at,

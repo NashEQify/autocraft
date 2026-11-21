@@ -179,18 +179,12 @@ async function stageRow(db: Db, v: Row, stage: string, at: string, note: string)
 /** The last bytes of the log chunks one step wrote. */
 async function stepLog(db: Db, id: number, step: string): Promise<string> {
   const parts: string[] = [];
-  let size = 0, before: number | null = null;
-  const PAGE = 40;
-  read: for (;;) {
-    const rows: { seq: number; chunk: string }[] = await db.all(db.k.selectFrom("build_task_logs").select(["seq", "chunk"]).where("task_id", "=", id).where("step", "=", step)
-      .$if(before !== null, (q) => q.where("seq", "<", before!)).orderBy("seq", "desc").limit(PAGE));
-    for (const c of rows) {
-      parts.push(c.chunk);
-      size += Buffer.byteLength(c.chunk);
-      if (size >= SUMMARY_LOG_BYTES) break read;
-    }
-    if (rows.length < PAGE) break;
-    before = rows[rows.length - 1]!.seq;
+  let size = 0;
+  const rows = await db.all(db.k.selectFrom("build_task_logs").select("chunk").where("task_id", "=", id).where("step", "=", step).orderBy("seq", "desc"));
+  for (const c of rows) {
+    parts.push(c.chunk);
+    size += Buffer.byteLength(c.chunk);
+    if (size >= SUMMARY_LOG_BYTES) break;
   }
   const all = Buffer.from(parts.reverse().join(""));
   return all.subarray(-SUMMARY_LOG_BYTES).toString("utf8");
@@ -293,7 +287,7 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
       if (verdict.state === "error" && await retriesOf(db, v) < MAX_RETRIES) {
         try {
           const ids = await mapSeq([v.head_task_id, v.base_task_id], async (id) => (id === null ? null : await cloneTask(db, id)));
-          await db.run(db.k.updateTable("verifications").set({ head_task_id: ids[0]!, base_task_id: ids[1]!, state: "planned" })
+          await db.run(db.k.updateTable("verifications").set({ head_task_id: ids[0] ?? null, base_task_id: ids[1] ?? null, state: "planned" })
             .where("repo", "=", v.repo).where("number", "=", v.number).where("head_sha", "=", v.head_sha));
           s.retried++; s.changed++;
           await jobItem(db, v.repo, v.number, `${verdict.reason}; queued the tasks again`, log);
