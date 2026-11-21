@@ -1,6 +1,6 @@
 // The jobs table: requests from the dashboard, the CLI and the autopilot,
 // state written by the runner. Shared by the API, the runner and the CLI.
-import { filtered, hiddenTest, isHiddenRepo, type HiddenRepos } from "../hidden-sql.ts";
+import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../hidden-sql.ts";
 import { appendFileSync, closeSync, fstatSync, openSync, readSync, unlinkSync } from "node:fs";
 import type { Job, JobDetail,  JobFilter, JobList, JobParams, JobState, JobUsage } from "../../web/src/api/types.ts";
 import { trackedNames } from "../repos.ts";
@@ -62,7 +62,7 @@ export async function toJobs(db: Db, rows: JobRow[]): Promise<Job[]> {
 }
 
 export async function jobRow(db: Db, id: number): Promise<JobRow | undefined> {
-  return await db.prepare("SELECT * FROM jobs WHERE id = ?").get(id) as JobRow | undefined;
+  return await db.get(db.k.selectFrom("jobs").select(cols("jobs")).$narrowType<{ state: JobState }>().where("id", "=", id));
 }
 
 export async function getJob(db: Db, id: number): Promise<Job> {
@@ -72,25 +72,13 @@ export async function getJob(db: Db, id: number): Promise<Job> {
 }
 
 export async function listJobs(db: Db, f: JobFilter = {}, hidden: HiddenRepos = []): Promise<JobList> {
-  const where: string[] = [];
-  const args: (string | number)[] = [];
-  if (f.step) {
-    where.push("step = ?");
-    args.push(f.step);
-  }
-  if (f.state) {
-    where.push("state = ?");
-    args.push(f.state);
-  }
-  if (filtered(hidden)) {
-    const h = hiddenTest("repo", hidden);
-    where.push(`(repo IS NULL OR NOT (${h.sql}))`);
-    args.push(...h.args);
-  }
-  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs ${w}`).get(...args) as { n: number }).n;
+  const filter = <QB extends SelectQueryBuilder<DB, "jobs", any>>(q: QB): QB => q
+    .$if(!!f.step, (q) => q.where("step", "=", f.step!))
+    .$if(!!f.state, (q) => q.where("state", "=", f.state!))
+    .$if(filtered(hidden), (q) => q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))]))) as QB;
+  const total = (await db.get(filter(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")))))!.n;
   const limit = Math.min(Math.max(f.limit ?? 50, 1), 200), offset = Math.max(f.offset ?? 0, 0);
-  const rows = await db.prepare(`SELECT * FROM jobs ${w} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...args, limit, offset) as JobRow[];
+  const rows = await db.all(filter(db.k.selectFrom("jobs").select(cols("jobs")).$narrowType<{ state: JobState }>()).orderBy("id", "desc").limit(limit).offset(offset));
   return { jobs: await toJobs(db, rows), total };
 }
 
@@ -125,12 +113,11 @@ export async function enqueue(db: Db, stepName: unknown, rawParams: unknown, by:
   const params = settle ? await settle(step, checked.params) : checked.params;
   if (!params) throw new JobError(409, `the daily limit of ${step.name} leaves too little for a job`);
   const json = JSON.stringify(params);
-  if (await db.prepare("SELECT 1 FROM jobs WHERE step = ? AND params = ? AND state = 'queued'").get(step.name, json)) {
+  if (await db.get(db.k.selectFrom("jobs").select("id").where("step", "=", step.name).where("params", "=", json).where("state", "=", "queued").limit(1))) {
     throw new JobError(409, `${step.name} with these settings is already queued`);
   }
   const repo = typeof params.repo === "string" ? params.repo : null;
-  const id = Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state) VALUES (?, ?, ?, ?, ?, 'queued') RETURNING id")
-    .get(step.name, json, repo, by, now()) as { id: number }).id);
+  const id = (await db.get(db.k.insertInto("jobs").values({ step: step.name, params: json, repo, requested_by: by, requested_at: now(), state: "queued" }).returning("id")))!.id;
   return await getJob(db, id);
 }
 
@@ -140,20 +127,21 @@ export async function requestCancel(db: Db, id: number, by: string): Promise<Job
   if (!r) throw new JobError(404, `no job ${id}`);
   const t = now();
   if (r.state === "queued") {
-    const done = (await db.prepare("UPDATE jobs SET state = 'cancelled', ended_at = ?, cancel_requested_at = ?, cancel_requested_by = ? WHERE id = ? AND state = 'queued'")
-      .run(t, t, by, id)).changes;
+    const done = (await db.run(db.k.updateTable("jobs").set({ state: "cancelled", ended_at: t, cancel_requested_at: t, cancel_requested_by: by })
+      .where("id", "=", id).where("state", "=", "queued"))).changes;
     if (done) {
       // A job waiting to resume leaves its earlier run's remote calls behind.
       if (Number(r.resumes) > 0) {
         await withdrawJobCalls(db, "The job was cancelled.", id);
         await failRunning(db, "The job was cancelled.", id);
-        await db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(id);
+        await db.run(db.k.updateTable("main.remote_calls").set({ reply: null }).where("job_id", "=", id).where("state", "=", "done").where("reply", "is not", null));
       }
       return await getJob(db, id);
     }
   }
-  const marked = (await db.prepare("UPDATE jobs SET cancel_requested_at = COALESCE(cancel_requested_at, ?), cancel_requested_by = COALESCE(cancel_requested_by, ?) WHERE id = ? AND state = 'running'")
-    .run(t, by, id)).changes;
+  const marked = (await db.run(db.k.updateTable("jobs")
+    .set((eb) => ({ cancel_requested_at: eb.fn.coalesce("cancel_requested_at", eb.val(t)), cancel_requested_by: eb.fn.coalesce("cancel_requested_by", eb.val(by)) }))
+    .where("id", "=", id).where("state", "=", "running"))).changes;
   if (!marked) throw new JobError(409, `job ${id} has already ended`);
   return await getJob(db, id);
 }
@@ -164,12 +152,10 @@ export const JOB_KEEP_MS = 3650 * 24 * 3600_000;
 /** Deletes finished jobs that ended more than JOB_KEEP_MS ago, with their log files. Returns the number of jobs. */
 export async function pruneJobs(db: Db, nowMs: number = Date.now()): Promise<number> {
   const before = new Date(nowMs - JOB_KEEP_MS).toISOString();
-  const old = db.prepare("SELECT id, log_path FROM jobs WHERE ended_at IS NOT NULL AND ended_at < ? AND state IN ('done', 'failed', 'cancelled') ORDER BY ended_at LIMIT 1000");
-  const del = db.prepare("DELETE FROM jobs WHERE id = ?");
-  const delItems = db.prepare("DELETE FROM job_items WHERE job_id = ?");
   let n = 0;
   for (;;) {
-    const rows = await old.all(before) as { id: number; log_path: string | null }[];
+    const rows = await db.all(db.k.selectFrom("jobs").select(["id", "log_path"]).where("ended_at", "is not", null).where("ended_at", "<", before)
+      .where("state", "in", ["done", "failed", "cancelled"]).orderBy("ended_at").limit(1000));
     if (!rows.length) return n;
     for (const r of rows) {
       if (r.log_path) {
@@ -179,8 +165,8 @@ export async function pruneJobs(db: Db, nowMs: number = Date.now()): Promise<num
           // already gone
         }
       }
-      await delItems.run(r.id);
-      await del.run(r.id);
+      await db.run(db.k.deleteFrom("job_items").where("job_id", "=", r.id));
+      await db.run(db.k.deleteFrom("jobs").where("id", "=", r.id));
       n++;
     }
   }
@@ -192,6 +178,9 @@ export { scrub } from "./scrub.ts";
 import { scrub } from "./scrub.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import type { DB } from "../db/types.ts";
+import type { SelectQueryBuilder } from "kysely";
+import { cols, like } from "../db/kx.ts";
 
 export const LOG_TAIL_BYTES = 48 * 1024;
 
@@ -226,7 +215,7 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   const hidden = view.hidden ?? [];
   if (!r || (r.repo && isHiddenRepo(hidden, r.repo))) throw new JobError(404, `no job ${id}`);
   const shown = shownLookup(db);
-  const items = await mapSeq((await db.prepare("SELECT repo, number, outcome, ref FROM job_items WHERE job_id = ? ORDER BY id").all(id) as { repo: string; number: number; outcome: string | null; ref: string | null }[])
+  const items = await mapSeq((await db.all(db.k.selectFrom("job_items").select(["repo", "number", "outcome", "ref"]).where("job_id", "=", id).orderBy("id")))
     .filter((i) => !isHiddenRepo(hidden, i.repo)), async (i) => ({ repo: i.repo, number: i.number, ...await shown(i.repo, i.number), outcome: i.outcome, decision: i.ref }));
   if (view.logs === false) return { ...(await toJobs(db, [r]))[0]!, items, log: null, logTruncated: false };
   const tail = logTail(r.log_path);
@@ -241,13 +230,16 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
  * command-line run (`requested_by` cli: its process belongs to the command, which records its end).
  */
 export async function resumeJob(db: Db, id: number, why: string): Promise<boolean> {
-  const r = await db.prepare(`UPDATE jobs SET state = 'queued', resumes = resumes + 1, started_at = NULL, ended_at = NULL, pid = NULL, progress = NULL, error = NULL
-    WHERE id = ? AND state = 'running' AND cancel_requested_at IS NULL AND resumes < ? AND requested_by <> 'cli'
-      AND (error IS NULL OR (error NOT LIKE 'stopped: ran past %' AND error NOT LIKE 'stopped: no progress for %')) RETURNING resumes, log_path`)
-    .get(id, MAX_RESUMES) as { resumes: number; log_path: string | null } | undefined;
+  const r = await db.get(db.k.updateTable("jobs")
+    .set((eb) => ({ state: "queued", resumes: eb("resumes", "+", 1), started_at: null, ended_at: null, pid: null, progress: null, error: null }))
+    .where("id", "=", id).where("state", "=", "running").where("cancel_requested_at", "is", null).where("resumes", "<", MAX_RESUMES).where("requested_by", "<>", "cli")
+    .where((eb) => eb.or([eb("error", "is", null), eb.and([
+      eb.not(like(db, "error", eb.val("stopped: ran past %"))), eb.not(like(db, "error", eb.val("stopped: no progress for %"))),
+    ])]))
+    .returning(["resumes", "log_path"]));
   if (!r) return false;
   await failRunning(db, "The runner stopped during this call.", id);
-  await db.prepare("DELETE FROM model_waits WHERE job_id = ?").run(id);
+  await db.run(db.k.deleteFrom("model_waits").where("job_id", "=", id));
   await releaseJob(db, id);
   if (r.log_path) {
     try { appendFileSync(r.log_path, `${now()} ${why}; the job is queued to resume after the restart (resume ${r.resumes} of ${MAX_RESUMES})\n`); } catch { /* the log is gone */ }
@@ -276,12 +268,11 @@ export async function endJob(db: Db, id: number, code: number | null, signal: No
     error ??= spawnError ?? (signal ? `The job's process ended on ${signal}.` : `The job's process exited with code ${code}.`);
   }
   await failRunning(db, "The job ended during this call.", id);
-  await db.prepare("DELETE FROM model_waits WHERE job_id = ?").run(id);
+  await db.run(db.k.deleteFrom("model_waits").where("job_id", "=", id));
   await withdrawJobCalls(db, "The job ended during this call.", id);
   // Replies an earlier run of the job left unread are not kept.
-  await db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(id);
+  await db.run(db.k.updateTable("main.remote_calls").set({ reply: null }).where("job_id", "=", id).where("state", "=", "done").where("reply", "is not", null));
   await releaseJob(db, id);
-  await db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = ?, progress = CASE WHEN ? = 'done' THEN NULL ELSE progress END WHERE id = ?")
-    .run(state, now(), state === "failed" ? error : null, state, id);
+  await db.run(db.k.updateTable("jobs").set({ state, ended_at: now(), pid: null, error: state === "failed" ? error : null, ...(state === "done" ? { progress: null } : {}) }).where("id", "=", id));
   return { state, error: state === "failed" ? error : null };
 }
