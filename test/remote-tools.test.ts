@@ -152,7 +152,7 @@ describe("per-lease tools of remote calls", async () => {
     const waiting = awaitCall(db, id, { check: { run: async (input, runId) => { seen.push({ input, runId }); return { text: "clippy: 0 findings on the patch's lines, no compile errors" }; } } });
     const r = await tool("build", "build", "check", { patch: "diff", command: "clippy" });
     assert.deepEqual(r.body, { content: [{ type: "text", text: "clippy: 0 findings on the patch's lines, no compile errors" }] });
-    const runId = (await db.prepare("SELECT run_id FROM remote_calls WHERE id = ?").get(id) as { run_id: number }).run_id;
+    const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", id)))!.run_id!;
     assert.deepEqual(seen, [{ input: { patch: "diff", command: "clippy" }, runId }]);
     await submitCall(db, secret, { ok: false, error: "done", durationMs: 1 });
     assert.equal((await waiting).state, "failed");

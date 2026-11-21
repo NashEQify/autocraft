@@ -21,7 +21,7 @@ import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, openGroupExpr, UNSURE_AT_SQL, unsureAtQuery } from "../src/core/rules.ts";
 import { CURRENT_HEAD_SQL, currentHeadExpr } from "../src/verify/results.ts";
-import { KEPT_RUNS, keptRunsExpr } from "../src/runner/resuming.ts";
+import { ADOPTABLE_CALL, EARLIER_RUN_CALL, KEPT_RUNS, RESUMING_JOBS, adoptableCallExpr, earlierRunCallExpr, keptRunsExpr, resumingJobsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";
 
 const T = "2026-01-01T00:00:00.000Z", LATER = "2026-01-03T00:00:00.000Z", FAR = "2099-01-01T00:00:00.000Z";
@@ -120,11 +120,14 @@ async function fixture(db: Db): Promise<void> {
   ]));
   // Only job 1 waits to resume: its open or answered, unread calls keep their runs.
   const job = (id: number, state: string, resumes: number) => ({ id, step: "s", params: "{}", requested_by: "pipeline", requested_at: T, state, resumes });
-  await ins(db.k.insertInto("main.jobs").values([job(1, "queued", 1), job(2, "queued", 0), job(3, "running", 1)]));
+  await ins(db.k.insertInto("main.jobs").values([job(1, "queued", 1), job(2, "queued", 0), job(3, "running", 1), job(4, "running", 1)]));
+  // Jobs 3 and 4 restarted after and before their calls were made.
+  await ins(db.k.updateTable("main.jobs").set({ started_at: LATER }).where("id", "=", 3));
+  await ins(db.k.updateTable("main.jobs").set({ started_at: T }).where("id", "=", 4));
   const jobCall = (id: number, job_id: number, run_id: number | null, state: string, consumed_at: number | null = null) => ({ ...call(id, { state }), job_id, run_id, consumed_at });
   await ins(db.k.insertInto("main.remote_calls").values([
     jobCall(9, 1, 1, "queued"), jobCall(10, 1, 2, "done", NOW), jobCall(11, 1, 2, "failed"), jobCall(12, 1, null, "leased"),
-    jobCall(13, 2, 3, "queued"), jobCall(14, 3, 3, "leased"),
+    jobCall(13, 2, 3, "queued"), jobCall(14, 3, 3, "leased"), jobCall(15, 4, null, "queued"),
   ]));
 
   const command = (comment_id: number, state: string, reply: string | null) =>
@@ -220,6 +223,12 @@ function cases(db: Db): Case[] {
     built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where("picked_by", "is not", null).where((eb) => pickLapsedExpr(d, eb, NOW)).orderBy("id") });
   out.push({ name: "KEPT_RUNS", text: [`SELECT id AS k FROM agent_runs WHERE id NOT IN (${KEPT_RUNS}) ORDER BY id`], expect: ["2", "3"],
     built: (d) => d.k.selectFrom("agent_runs").select("id as k").where("id", "not in", keptRunsExpr(d)).orderBy("id") });
+  out.push({ name: "RESUMING_JOBS", text: [`SELECT id AS k FROM main.jobs WHERE id IN (${RESUMING_JOBS}) ORDER BY id`], expect: ["1"],
+    built: (d) => d.k.selectFrom("main.jobs").select("id as k").where("id", "in", resumingJobsExpr(d)).orderBy("id") });
+  out.push({ name: "EARLIER_RUN_CALL", text: [`SELECT id AS k FROM main.remote_calls WHERE job_id IS NOT NULL AND ${EARLIER_RUN_CALL} ORDER BY id`], expect: ["9", "10", "11", "12", "14"],
+    built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where("job_id", "is not", null).where((eb) => earlierRunCallExpr(d, eb)).orderBy("id") });
+  out.push({ name: "ADOPTABLE_CALL", text: [`SELECT id AS k FROM main.remote_calls WHERE ${ADOPTABLE_CALL} ORDER BY id`], expect: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "12", "13", "14", "15"],
+    built: (d) => d.k.selectFrom("main.remote_calls").select("id as k").where((eb) => adoptableCallExpr(eb)).orderBy("id") });
   out.push({ name: "COMMAND_WORK_SQL", text: [`SELECT comment_id AS k FROM main.github_commands WHERE ${COMMAND_WORK_SQL} ORDER BY comment_id`], expect: ["1", "2"],
     built: (d) => d.k.selectFrom("main.github_commands").select("comment_id as k").where((eb) => commandWorkExpr(eb)).orderBy("comment_id") });
   out.push({ name: "OPEN_GROUP_SQL", text: [`SELECT g.id AS k FROM decisions g WHERE ${OPEN_GROUP_SQL} ORDER BY g.id`], expect: ["app:dupegroup:1", "app:dupegroup:3", "app:dupegroup:4"],

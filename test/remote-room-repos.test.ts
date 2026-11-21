@@ -14,6 +14,7 @@ import { setUserTasks, TASK_CHOICES } from "../src/remote/my-tasks.ts";
 import { remoteRoom } from "../src/remote/room.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 
@@ -22,14 +23,14 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
   await setInferenceMode(db, "user-local", "test");
   const at = new Date().toISOString();
   const runner = async (login: string, role: string) => {
-    await db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
+    await db.run(db.k.insertInto("access").values({ login, role }));
     const id = (await createToken(db, login, "helper", { kind: "runner" })).row.id;
     await storeStatus(db, id, login, parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
     await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
     return id;
   };
   const perm = async (login: string, repo: string, permission: string) =>
-    await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(login, repo, permission, at);
+    await db.run(db.k.insertInto("repo_permissions").values({ login, repo, permission, checked_at: at }).onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
   const room = async (repos?: string[]) => await remoteRoom(db, 0, Date.now(), repos);
 
   // The operator takes deckcraft and designcraft only; no permission of theirs on designcraft is cached yet.
@@ -54,9 +55,9 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
   assert.equal(await room(["deckcraft"]), 1, "dave's slot is no deckcraft room");
   assert.equal(await room(["photocraft"]), 0, "dave's slot goes to the queued photocraft call first");
   assert.equal(await room([]), 1, "a maintainer's runner takes no call without a repo");
-  await db.prepare("UPDATE remote_calls SET state = 'failed' WHERE id = ?").run(photo);
+  await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("id", "=", photo));
   assert.equal(await room(["photocraft"]), 1);
-  await db.prepare("UPDATE repo_permissions SET checked_at = ? WHERE login = 'dave' AND repo = 'deckcraft'").run(new Date(Date.now() - 3600_000).toISOString());
+  await db.run(db.k.updateTable("repo_permissions").set({ checked_at: new Date(Date.now() - 3600_000).toISOString() }).where("login", "=", "dave").where("repo", "=", "deckcraft"));
   assert.equal(await room(["deckcraft"]), 2, "a read permission confirmed an hour ago no longer leaves dave out");
   await perm("dave", "deckcraft", "read");
   assert.equal(await room(["photocraft", "deckcraft"]), 0, "nobody takes a call on both");
@@ -80,7 +81,7 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
 test("room and takers count only the runners whose users take the call's task (My tasks)", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-room-tasks-")), "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
   await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));

@@ -29,7 +29,7 @@ import { userReserve } from "./reserve.ts";
 import { scaled, scaledS } from "./time-scale.ts";
 import { CALLER_STALE_MS, IDLE_FRESH_MS, SEEN_EVERY_MS } from "./room.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
-import { manualOnly, manualSql } from "./manual-only.ts";
+import { manualExpr, manualOnly } from "./manual-only.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { endChecks, serveChecks } from "./check-relay.ts";
@@ -37,10 +37,10 @@ import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
-import { ADOPTABLE_CALL, EARLIER_RUN_CALL, RESUMING_JOBS, resumedRun } from "../runner/resuming.ts";
+import { adoptableCallExpr, earlierRunCallExpr, resumedRun, resumingJobsExpr } from "../runner/resuming.ts";
 import type { Db, Dialect } from "../db/index.ts";
-import { ciEq as ciEqExpr, ref, type Eb, type Ex } from "../db/kx.ts";
-import { ciEq, greatest, indexedBy, inList, least, notDistinctFrom } from "../db/portable.ts";
+import { ciEq as ciEqExpr, greatest, inList, least, ref, type Eb, type Ex } from "../db/kx.ts";
+import { ciEq, indexedBy } from "../db/portable.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
 export const LEASE_IDLE_MS = scaled(2 * 60_000);
@@ -93,8 +93,9 @@ type Row = {
   attempt: number; max_attempts: number; timeout_ms: number; parent_id: number | null; sticky_login: string | null; progress: string | null;
   reply: string | null; usage: string | null; turns: number | null; session_id: string | null; error: string | null; root: string | null;
 };
-const COLS = "id, job_id, step, stage, run_id, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, items, repo, class AS cls, level, since, seen_at, queued_since, queued_ms, user_login, harness, model, leased_at, heartbeat_at, started_at, token_id, lease_secret_hash, attempt, max_attempts, timeout_ms, parent_id, sticky_login, progress, reply, usage, turns, session_id, error, root";
-const rowOf = async (db: Db, id: number): Promise<Row | undefined> => await db.prepare(`SELECT ${COLS} FROM main.remote_calls WHERE id = ?`).get(id) as Row | undefined;
+const COLS = ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class as cls", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "model", "leased_at", "heartbeat_at", "started_at", "token_id", "lease_secret_hash", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "progress", "reply", "usage", "turns", "session_id", "error", "root"] as const;
+const rowOf = async (db: Db, id: number): Promise<Row | undefined> =>
+  await db.get(db.k.selectFrom("main.remote_calls").select(COLS).where("id", "=", id).$narrowType<{ tier: Tier; state: Row["state"] }>());
 
 export type NewCall = {
   promptId: string; promptVersion: string; tier: Tier; effort: string; askedModel: string;
@@ -129,22 +130,26 @@ let adopting: Promise<unknown> = Promise.resolve();
 function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash: string, nowMs: number): Promise<number | null> {
   const turn = adopting.then(async (): Promise<number | null> => {
     const taken = [...adopted];
-    const notTaken = taken.length ? `AND id NOT IN (${taken.map(() => "?").join(", ")})` : "";
-    const earlier = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND prompt_version = ? AND bundle_hash = ? AND ${notDistinctFrom(db, "parent_id", "?")} AND ${ADOPTABLE_CALL}
-      ${notTaken} ORDER BY id LIMIT 1`).get(jobId, startedMs, c.promptId, c.promptVersion, hash, c.parentId ?? null, ...taken) as { id: number } | undefined;
+    const parent = (eb: Eb) => (c.parentId === undefined ? eb("parent_id", "is", null) : eb("parent_id", "=", c.parentId));
+    const earlier = await db.get(db.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
+      .where("prompt_version", "=", c.promptVersion).where("bundle_hash", "=", hash).where(parent).where((e) => adoptableCallExpr(e))
+      .$if(taken.length > 0, (q) => q.where("id", "not in", taken)).orderBy("id").limit(1));
     if (earlier) {
       const id = Number(earlier.id);
       adopted.add(id);
       // Fresh again for claims and the room: its caller is back. A queued call's wait starts again: the time it waited
       // before the stop (its earlier caller's last poll) counts toward its wait limits, the restart's does not.
-      await db.prepare(`UPDATE main.remote_calls SET queued_ms = queued_ms + CASE WHEN state = 'queued' AND queued_since IS NOT NULL THEN ${greatest(db, "0", `${least(db, "seen_at", "?")} - queued_since`)} ELSE 0 END,
-        queued_since = CASE WHEN state = 'queued' THEN ? ELSE queued_since END, seen_at = ? WHERE id = ?`).run(nowMs, nowMs, nowMs, id);
+      await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+        queued_ms: eb("queued_ms", "+", eb.case().when(eb.and([eb("state", "=", "queued"), eb("queued_since", "is not", null)]))
+          .then(greatest(db, eb.lit(0), eb(least(db, "seen_at", eb.val(nowMs)), "-", eb.ref("queued_since")))).else(eb.lit(0)).end()),
+        queued_since: eb.case().when("state", "=", "queued").then(nowMs).else(eb.ref("queued_since")).end(), seen_at: nowMs,
+      })).where("id", "=", id));
       dropQueueCache(db);
       console.log(`adopted remote call ${id} (${c.promptId}) of the job's run before the restart`);
       return id;
     }
-    const stale = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND items = ? AND ${notDistinctFrom(db, "parent_id", "?")} AND state = 'queued' ${notTaken}`)
-      .all(jobId, startedMs, c.promptId, JSON.stringify(c.items), c.parentId ?? null, ...taken) as { id: number }[];
+    const stale = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("job_id", "=", jobId).where("since", "<", startedMs).where("prompt_id", "=", c.promptId)
+      .where("items", "=", JSON.stringify(c.items)).where(parent).where("state", "=", "queued").$if(taken.length > 0, (q) => q.where("id", "not in", taken)));
     for (const r of stale) await withdrawCall(db, Number(r.id), "the resumed job asked again with other input", ["queued"], nowMs);
     return null;
   });
@@ -165,12 +170,13 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
     const id = await adoptEarlier(db, s.jobId, Date.parse(run.startedAt), c, hash, nowMs);
     if (id !== null) return id;
   }
-  const sticky = c.parentId === undefined ? null : (await db.prepare("SELECT user_login FROM main.remote_calls WHERE id = ?").get(c.parentId) as { user_login: string | null } | undefined)?.user_login ?? null;
+  const sticky = c.parentId === undefined ? null : (await db.get(db.k.selectFrom("main.remote_calls").select("user_login").where("id", "=", c.parentId)))?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
-  const id = Number((await db.prepare(`INSERT INTO main.remote_calls (job_id, step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, bundle_hash, state, items, repo, class, level, since, seen_at, queued_since, max_attempts, timeout_ms, parent_id, sticky_login, reference_repo, authors)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`)
-    .get(s.jobId, s.step, s.stage, c.promptId, c.promptVersion, c.tier, c.effort, c.askedModel, JSON.stringify(c.bundle), hash, JSON.stringify(c.items), q.repo, q.cls, c.level, nowMs, nowMs, nowMs,
-      Math.max(1, c.maxAttempts), c.bundle.timeoutSeconds * 1000, c.parentId ?? null, sticky, c.referenceRepo ?? null, authors) as { id: number }).id);
+  const id = Number((await db.get(db.k.insertInto("main.remote_calls").values({
+    job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
+    bundle: JSON.stringify(c.bundle), bundle_hash: hash, state: "queued", items: JSON.stringify(c.items), repo: q.repo, class: q.cls, level: c.level, since: nowMs, seen_at: nowMs, queued_since: nowMs,
+    max_attempts: Math.max(1, c.maxAttempts), timeout_ms: c.bundle.timeoutSeconds * 1000, parent_id: c.parentId ?? null, sticky_login: sticky, reference_repo: c.referenceRepo ?? null, authors,
+  }).returning("id")))!.id);
   if (s.jobId !== null) adopted.add(id);
   dropQueueCache(db);
   return id;
@@ -178,8 +184,10 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
 
 /** Ends a call that is in one of `states` as failed; true when it did. A leased call's agent run fails with it. */
 export async function withdrawCall(db: Db, id: number, reason: string, states: ("queued" | "leased")[] = ["queued", "leased"], nowMs: number = Date.now()): Promise<boolean> {
-  const r = await db.prepare(`UPDATE main.remote_calls SET state = 'failed', error = ?, ended_at = ?, queued_ms = queued_ms + CASE WHEN queued_since IS NULL THEN 0 ELSE ${greatest(db, "0", "? - queued_since")} END, queued_since = NULL
-    WHERE id = ? AND state IN (${states.map(() => "?").join(", ")}) RETURNING run_id`).get(reason, nowMs, nowMs, id, ...states) as { run_id: number | null } | undefined;
+  const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
+    state: "failed", error: reason, ended_at: nowMs,
+    queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since")))).end()), queued_since: null,
+  })).where("id", "=", id).where(inList(db, "state", states)).returning("run_id"));
   if (!r) return false;
   if (r.run_id !== null) await finishRun(db, r.run_id, { state: "failed", error: reason, summary: "withdrawn" });
   return true;
@@ -190,16 +198,15 @@ export async function withdrawCall(db: Db, id: number, reason: string, states: (
  * their caller, and calls of jobs waiting to resume stay for the resumed run to adopt.
  */
 export async function withdrawJobCalls(db: Db, reason: string, jobId?: number): Promise<number> {
-  const ids = (jobId === undefined
-    ? await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id IS NOT NULL AND job_id NOT IN (${RESUMING_JOBS})`).all()
-    : await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND job_id = ? AND job_id NOT IN (${RESUMING_JOBS})`).all(jobId)) as { id: number }[];
+  const ids = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"])
+    .where((eb) => (jobId === undefined ? eb("job_id", "is not", null) : eb("job_id", "=", jobId))).where("job_id", "not in", resumingJobsExpr(db)));
   return (await filterSeq(ids, async (r) => await withdrawCall(db, Number(r.id), reason))).length;
 }
 
 /** Keeps the secret hash of a lease that just ended or went back to the queue, so its routes answer 410 (leaseState); kept as long as ended calls (pruneRemote). */
 async function bury(db: Db, id: number, hash: string | null, nowMs: number): Promise<void> {
   if (hash === null) return;
-  await db.prepare("INSERT OR IGNORE INTO main.remote_lease_tombstones (secret_hash, call_id, at) VALUES (?, ?, ?)").run(hash, id, nowMs);
+  await db.run(db.k.insertInto("main.remote_lease_tombstones").values({ secret_hash: hash, call_id: id, at: nowMs }).onConflict((oc) => oc.doNothing()));
 }
 
 /**
@@ -210,9 +217,11 @@ async function requeue(db: Db, r: Pick<Row, "id" | "run_id" | "attempt" | "max_a
   const fail = r.attempt >= r.max_attempts;
   const skip = opts.skipLogin ?? null;
   // Compare and set: only the lease that was read ends, so two processes that saw it expire end it once.
-  const up = await db.prepare(`UPDATE main.remote_calls SET state = ?, attempt = attempt + ?, lease_secret_hash = NULL, token_id = NULL, claim_id = NULL, started_at = NULL, queued_since = ?, ended_at = ?, error = ?, progress = NULL, picked_by = NULL, picked_at = NULL, pick_until = NULL,
-      released_by = COALESCE(?, released_by), released_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN released_at ELSE ? END
-    WHERE id = ? AND state = 'leased' AND attempt = ? AND ${notDistinctFrom(db, "leased_at", "?")}`).run(fail ? "failed" : "queued", fail ? 0 : 1, fail ? null : nowMs, fail ? nowMs : null, reason, skip, skip, nowMs, r.id, r.attempt, r.leased_at);
+  const up = await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+    state: fail ? "failed" : "queued", attempt: eb("attempt", "+", fail ? 0 : 1), lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: fail ? null : nowMs, ended_at: fail ? nowMs : null, error: reason,
+    progress: null, picked_by: null, picked_at: null, pick_until: null, ...(skip !== null && { released_by: skip, released_at: nowMs }),
+  })).where("id", "=", r.id).where("state", "=", "leased").where("attempt", "=", r.attempt)
+    .where((eb) => (r.leased_at === null ? eb("leased_at", "is", null) : eb("leased_at", "=", r.leased_at))));
   if (Number(up.changes) !== 1) return false;
   dropQueueCache(db);
   await bury(db, r.id, r.lease_secret_hash, nowMs);
@@ -222,8 +231,10 @@ async function requeue(db: Db, r: Pick<Row, "id" | "run_id" | "attempt" | "max_a
 
 /** Puts a leased call back in the queue without using an attempt (released by its helper, or its token lost the right to run it). */
 async function unlease(db: Db, r: { id: number; runId: number | null; hash: string | null }, why: string, nowMs: number, releasedBy: string | null = null): Promise<void> {
-  const up = await db.prepare(`UPDATE main.remote_calls SET state = 'queued', lease_secret_hash = NULL, token_id = NULL, claim_id = NULL, started_at = NULL, queued_since = ?, error = ?, progress = NULL, picked_by = NULL, picked_at = NULL, pick_until = NULL, released_by = COALESCE(?, released_by), released_at = CASE WHEN CAST(? AS TEXT) IS NULL THEN released_at ELSE ? END
-    WHERE id = ? AND state = 'leased' AND ${notDistinctFrom(db, "lease_secret_hash", "?")}`).run(nowMs, why, releasedBy, releasedBy, nowMs, r.id, r.hash);
+  const up = await db.run(db.k.updateTable("main.remote_calls").set({
+    state: "queued", lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: nowMs, error: why, progress: null, picked_by: null, picked_at: null, pick_until: null,
+    ...(releasedBy !== null && { released_by: releasedBy, released_at: nowMs }),
+  }).where("id", "=", r.id).where("state", "=", "leased").where((eb) => (r.hash === null ? eb("lease_secret_hash", "is", null) : eb("lease_secret_hash", "=", r.hash))));
   if (Number(up.changes) !== 1) return;
   dropQueueCache(db);
   await bury(db, r.id, r.hash, nowMs);
@@ -239,15 +250,16 @@ async function unlease(db: Db, r: { id: number; runId: number | null; hash: stri
  * caller's poll (`id`: that call only); old rows go with pruneRemote.
  */
 export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: number): Promise<void> {
-  const one = id === undefined ? "" : " AND id = ?";
   const live = await dashboardAlive(db, nowMs);
   if (live.alive) {
     const idle = live.since <= nowMs - LEASE_IDLE_MS ? 1 : 0;
-    // Every lease: the leased rows are found in remote_calls_leased and only the lost ones are read. One call: by its id.
-    const ended = "state = 'leased' AND ((? = 1 AND heartbeat_at < ?) OR (started_at IS NULL AND leased_at + ? < ?) OR (started_at IS NOT NULL AND started_at + timeout_ms + ? < ?))";
-    const lost = await db.prepare(`SELECT id, run_id, attempt, max_attempts, heartbeat_at, leased_at, started_at, timeout_ms, token_id, user_login, lease_secret_hash FROM main.remote_calls
-      WHERE ${id === undefined ? `id IN (SELECT id FROM main.remote_calls${indexedBy(db, "remote_calls_leased")} WHERE ${ended})` : `${ended} AND id = ?`}`)
-      .all(idle, nowMs - LEASE_IDLE_MS, scaled(PREPARE_MAX_S * 1000), nowMs, LEASE_MARGIN_MS, nowMs, ...(id === undefined ? [] : [id])) as Row[];
+    // One call: by its id.
+    const lost = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "attempt", "max_attempts", "heartbeat_at", "leased_at", "started_at", "timeout_ms", "token_id", "user_login", "lease_secret_hash"])
+      .where((eb) => eb.and([eb("state", "=", "leased"), eb.or([
+        ...(idle === 1 ? [eb("heartbeat_at", "<", nowMs - LEASE_IDLE_MS)] : []),
+        eb.and([eb("started_at", "is", null), eb(eb("leased_at", "+", scaled(PREPARE_MAX_S * 1000)), "<", nowMs)]),
+        eb.and([eb("started_at", "is not", null), eb(eb(eb("started_at", "+", eb.ref("timeout_ms")), "+", LEASE_MARGIN_MS), "<", nowMs)]),
+      ])])).$if(id !== undefined, (q) => q.where("id", "=", id!)));
     for (const r of lost) {
       const why = idle && Number(r.heartbeat_at) < nowMs - LEASE_IDLE_MS ? `lease expired: no heartbeat for ${Math.round(LEASE_IDLE_MS / 1000)} s`
         : r.started_at === null ? `lease expired: still preparing ${Math.round(scaled(PREPARE_MAX_S * 1000) / 1000)} s after the claim` : "lease expired: past the call's time limit";
@@ -258,7 +270,8 @@ export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: numb
     }
   }
   // The calls of a resumed job's earlier runs have no caller until the resumed run adopts them; they end with the job (endJob).
-  const gone = await db.prepare(`SELECT id FROM main.remote_calls WHERE state IN ('queued', 'leased') AND seen_at < ?${one} AND NOT ${EARLIER_RUN_CALL}`).all(nowMs - CALLER_GONE_MS, ...(id === undefined ? [] : [id])) as { id: number }[];
+  const gone = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"]).where("seen_at", "<", nowMs - CALLER_GONE_MS)
+    .$if(id !== undefined, (q) => q.where("id", "=", id!)).where((eb) => eb.not(earlierRunCallExpr(db, eb))));
   for (const r of gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
 }
 
@@ -269,33 +282,34 @@ export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: numb
 export async function pruneRemote(db: Db, nowMs: number = Date.now()): Promise<void> {
   const old = nowMs - KEEP_MS;
   // Each condition is a range of the (state, ended_at) indexes; a row without ended_at goes by when it began.
-  await db.prepare("DELETE FROM main.remote_calls WHERE state IN ('done', 'failed') AND ended_at < ?").run(old);
-  await db.prepare("DELETE FROM main.remote_calls WHERE state IN ('done', 'failed') AND ended_at IS NULL AND since < ?").run(old);
-  await db.prepare("DELETE FROM main.remote_checks WHERE state = 'done' AND ended_at < ?").run(old);
-  await db.prepare("DELETE FROM main.remote_checks WHERE state = 'done' AND ended_at IS NULL AND requested_at < ?").run(old);
-  await db.prepare("DELETE FROM main.remote_lease_tombstones WHERE at < ?").run(old);
+  await db.run(db.k.deleteFrom("main.remote_calls").where("state", "in", ["done", "failed"]).where("ended_at", "<", old));
+  await db.run(db.k.deleteFrom("main.remote_calls").where("state", "in", ["done", "failed"]).where("ended_at", "is", null).where("since", "<", old));
+  await db.run(db.k.deleteFrom("main.remote_checks").where("state", "=", "done").where("ended_at", "<", old));
+  await db.run(db.k.deleteFrom("main.remote_checks").where("state", "=", "done").where("ended_at", "is", null).where("requested_at", "<", old));
+  await db.run(db.k.deleteFrom("main.remote_lease_tombstones").where("at", "<", old));
   await pruneCooloffs(db, nowMs);
-  await db.prepare("DELETE FROM main.remote_helpers WHERE NOT EXISTS (SELECT 1 FROM main.mcp_tokens t WHERE t.id = remote_helpers.token_id)").run();
+  await db.run(db.k.deleteFrom("main.remote_helpers").where((eb) => eb.not(eb.exists(db.k.selectFrom("main.mcp_tokens as t").select(eb.lit(1).as("one")).where("t.id", "=", ref<number>("remote_helpers.token_id"))))));
 }
 
 /** The call a lease secret belongs to while its lease is live (expired leases are ended first), or null. For the per-lease routes: bundle, heartbeat, submit, the task MCP servers and the tarball. */
 export async function liveLease(db: Db, secret: string | undefined, nowMs: number = Date.now()): Promise<{ id: number; jobId: number | null; runId: number | null; login: string; promptId: string; items: ItemRef[]; repo: string | null; root: string | null } | null> {
   if (!secret || secret.length > 200 || !secret.startsWith(LEASE_PREFIX)) return null;
   const hash = sha256hex(secret);
-  const found = await db.prepare("SELECT id FROM main.remote_calls WHERE lease_secret_hash = ? AND state = 'leased'").get(hash) as { id: number } | undefined;
+  const found = await db.get(db.k.selectFrom("main.remote_calls").select("id").where("lease_secret_hash", "=", hash).where("state", "=", "leased"));
   if (!found) return null;
   await expireLeases(db, nowMs, Number(found.id));
   // The lease lives only while the Task Runner credential that claimed it lives and its login is still a maintainer or operator.
-  const r = await db.prepare(`SELECT c.id, c.job_id, c.run_id, c.user_login, c.prompt_id, c.items, c.repo, c.root, a.login AS ok FROM main.remote_calls c
-      LEFT JOIN main.mcp_tokens t ON t.id = c.token_id AND t.kind = 'runner' AND t.expires_at > ?
-      LEFT JOIN main.access a ON a.login = t.login AND a.role IN ('maintainer', 'operator')
-    WHERE c.id = ? AND c.lease_secret_hash = ? AND c.state = 'leased'`).get(new Date(nowMs).toISOString(), found.id, hash) as
-    { id: number; job_id: number | null; run_id: number | null; user_login: string; prompt_id: string; items: string; repo: string | null; root: string | null; ok: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("main.remote_calls as c")
+    .leftJoin("main.mcp_tokens as t", (j) => j.onRef("t.id", "=", "c.token_id").on("t.kind", "=", "runner").on("t.expires_at", ">", new Date(nowMs).toISOString()))
+    .leftJoin("main.access as a", (j) => j.onRef("a.login", "=", "t.login").on("a.role", "in", ["maintainer", "operator"]))
+    .select(["c.id", "c.job_id", "c.run_id", "c.user_login", "c.prompt_id", "c.items", "c.repo", "c.root", "a.login as ok"])
+    .where("c.id", "=", found.id).where("c.lease_secret_hash", "=", hash).where("c.state", "=", "leased"));
   if (r && r.ok === null) {
     await unlease(db, { id: Number(r.id), runId: r.run_id, hash }, "returned to the queue: the Task Runner that claimed it was removed or may no longer run tasks", nowMs);
     return null;
   }
-  return r ? { id: Number(r.id), jobId: r.job_id, runId: r.run_id, login: r.user_login, promptId: r.prompt_id, items: JSON.parse(r.items) as ItemRef[], repo: r.repo, root: r.root } : null;
+  // A claim always records its login; a leased row without one has no one to act for.
+  return r && r.user_login !== null ? { id: Number(r.id), jobId: r.job_id, runId: r.run_id, login: r.user_login, promptId: r.prompt_id, items: JSON.parse(r.items) as ItemRef[], repo: r.repo, root: r.root } : null;
 }
 
 /**
@@ -305,9 +319,9 @@ export async function liveLease(db: Db, secret: string | undefined, nowMs: numbe
 export async function leaseState(db: Db, secret: string | undefined): Promise<{ id: number; live: boolean } | null> {
   if (!secret || secret.length > 200 || !secret.startsWith(LEASE_PREFIX)) return null;
   const hash = sha256hex(secret);
-  const r = await db.prepare("SELECT id, state FROM main.remote_calls WHERE lease_secret_hash = ?").get(hash) as { id: number; state: Row["state"] } | undefined;
+  const r = await db.get(db.k.selectFrom("main.remote_calls").select(["id", "state"]).where("lease_secret_hash", "=", hash));
   if (r) return { id: Number(r.id), live: r.state === "leased" };
-  const t = await db.prepare("SELECT call_id FROM main.remote_lease_tombstones WHERE secret_hash = ?").get(hash) as { call_id: number } | undefined;
+  const t = await db.get(db.k.selectFrom("main.remote_lease_tombstones").select("call_id").where("secret_hash", "=", hash));
   return t ? { id: Number(t.call_id), live: false } : null;
 }
 
@@ -320,13 +334,11 @@ const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLo
 /** The lowercase logins that authored any of the items, or authored or co-authored (a Co-authored-by trailer, as GitHub lists the commit's authors) a commit of one. */
 export async function authorsOf(db: Db, refs: readonly ItemRef[]): Promise<string[]> {
   if (!refs.length) return [];
-  const item = db.prepare("SELECT author FROM main.items WHERE repo = ? AND number = ? AND author IS NOT NULL");
-  const commits = db.prepare("SELECT author, co_authors FROM main.pr_commits WHERE repo = ? AND number = ?");
   const out = new Set<string>();
   for (const r of refs) {
-    const a = await item.get(r.repo, r.number) as { author: string } | undefined;
+    const a = await db.get(db.k.selectFrom("main.items").select("author").where("repo", "=", r.repo).where("number", "=", r.number).where("author", "is not", null).$narrowType<{ author: string }>());
     if (a) out.add(a.author.toLowerCase());
-    for (const c of await commits.all(r.repo, r.number) as { author: string | null; co_authors: string | null }[]) {
+    for (const c of await db.all(db.k.selectFrom("main.pr_commits").select(["author", "co_authors"]).where("repo", "=", r.repo).where("number", "=", r.number))) {
       if (c.author) out.add(c.author.toLowerCase());
       let co: unknown = [];
       try { co = c.co_authors ? JSON.parse(c.co_authors) : []; } catch { /* not JSON: no co-authors */ }
@@ -377,10 +389,10 @@ function idleOthers(db: Db, login: string, nowMs: number): (c: Cand) => Promise<
   const takers = new Map<string, string[]>();
   return async (c) => {
     if (!idle) {
-      idle = await mapSeq((await db.prepare(`SELECT t.login, a.role, t.idle_tiers, t.idle_repos FROM main.mcp_tokens t JOIN main.access a ON a.login = t.login
-          WHERE t.kind = 'runner' AND t.expires_at > ? AND t.idle_claim_at >= ? AND NOT ${ciEq(db, "t.login", "?")} AND NOT ${manualSql("t.login")}`).all(new Date(nowMs).toISOString(), nowMs - IDLE_FRESH_MS, login) as
-        { login: string; role: string; idle_tiers: string | null; idle_repos: string | null }[]), async (o) => ({ login: o.login, role: o.role, tiers: new Set(o.idle_tiers ? JSON.parse(o.idle_tiers) as string[] : []), only: o.idle_repos ? new Set(JSON.parse(o.idle_repos) as string[]) : null, skip: await userSkips(db, o.login), items: await itemFilter(db, o.login) }));
-      for (const p of await db.prepare(`SELECT login, repo, permission, checked_at FROM main.repo_permissions WHERE ${inList(db, "login", "?", "citext")}`).all(JSON.stringify(idle.map((o) => o.login))) as { login: string; repo: string; permission: string; checked_at: string }[])
+      idle = await mapSeq(await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.access as a", "a.login", "t.login").select(["t.login", "a.role", "t.idle_tiers", "t.idle_repos"])
+          .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("t.idle_claim_at", ">=", nowMs - IDLE_FRESH_MS)
+          .where((eb) => eb.and([eb.not(ciEqExpr(db, "t.login", eb.val(login))), eb.not(manualExpr(db, eb, "t.login"))]))), async (o) => ({ login: o.login, role: o.role, tiers: new Set(o.idle_tiers ? JSON.parse(o.idle_tiers) as string[] : []), only: o.idle_repos ? new Set(JSON.parse(o.idle_repos) as string[]) : null, skip: await userSkips(db, o.login), items: await itemFilter(db, o.login) }));
+      for (const p of await db.all(db.k.selectFrom("main.repo_permissions").select(["login", "repo", "permission", "checked_at"]).where(inList(db, "login", idle.map((o) => o.login), "citext"))))
         if (WRITE_PERMISSIONS.has(p.permission) && nowMs - Date.parse(p.checked_at) < PERM_READ_TTL) writable.add(`${p.login.toLowerCase()}\n${p.repo}`);
     }
     const key = `${c.tier}\n${c.prompt_id.startsWith("discord.")}\n${taskOfStep(c.step)}\n${c.repos.join("\n")}`;
@@ -460,11 +472,12 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
 
 /** The calls the login's helpers hold leases on now, all helpers together. */
 export const leasedBy = async (db: Db, login: string): Promise<number> =>
-  Number((await db.prepare(`SELECT COUNT(*) AS n FROM main.remote_calls${indexedBy(db, "remote_calls_leased")} WHERE state = 'leased' AND ${ciEq(db, "user_login", "?")}`).get(login) as { n: number }).n);
+  Number((await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => eb.and([eb("state", "=", "leased"), ciEqExpr(db, "user_login", eb.val(login))]))))!.n);
 
 /** The role of a live Task Runner credential's user, or null when the credential is gone or expired. */
 async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role | null> {
-  const r = await db.prepare("SELECT a.role FROM main.mcp_tokens t JOIN main.access a ON a.login = t.login WHERE t.id = ? AND t.kind = 'runner' AND t.expires_at > ?").get(tokenId, new Date(nowMs).toISOString()) as { role: Role } | undefined;
+  const r = await db.get(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.access as a", "a.login", "t.login").select("a.role").where("t.id", "=", tokenId).where("t.kind", "=", "runner")
+    .where("t.expires_at", ">", new Date(nowMs).toISOString()).$narrowType<{ role: Role }>());
   return r?.role ?? null;
 }
 
@@ -478,24 +491,28 @@ async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role 
 async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
   // The run's stored prompt is built before the write lock is taken: scrubbing and compressing a large prompt takes milliseconds.
-  const queued = await db.prepare("SELECT bundle FROM main.remote_calls WHERE id = ? AND state = 'queued'").get(id) as { bundle: string } | undefined;
+  const queued = await db.get(db.k.selectFrom("main.remote_calls").select("bundle").where("id", "=", id).where("state", "=", "queued"));
   const promptOf = (bundle: string): Uint8Array => packPrompt(joinParts(forHarness(JSON.parse(bundle) as Omit<TaskBundle, "callId">, claim.harness, claim.root ?? "")));
   const packed = queued ? promptOf(queued.bundle) : null;
   return await db.write(async () => {
     if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
     if (!live()) return "gone";
-    const r = await db.prepare(`UPDATE main.remote_calls SET state = 'leased', token_id = ?, user_login = ?, harness = ?, harness_version = ?, model = ?, root = ?, lease_secret_hash = ?, leased_at = ?, heartbeat_at = ?, started_at = NULL, claim_id = ?,
-        queued_ms = queued_ms + CASE WHEN queued_since IS NULL THEN 0 ELSE ${greatest(db, "0", "? - queued_since")} END, queued_since = NULL, progress = NULL, error = NULL,
-        picked_by = NULL, picked_at = NULL, pick_until = NULL, no_taker_since = NULL
-      WHERE id = ? AND state = 'queued' AND (picked_by IS NULL OR picked_by = ? OR ${pickLapsedSql(db)}) AND (? = 0 OR parent_id IS NOT NULL OR picked_by = ?)
-        AND EXISTS (SELECT 1 FROM main.mcp_tokens lt WHERE lt.id = ? AND lt.kind = 'runner' AND lt.expires_at > ?) RETURNING ${COLS}`)
-      .get(caller.tokenId, caller.login, claim.harness, claim.harnessVersion, model, claim.root ?? null, sha256hex(secret), nowMs, nowMs, claim.requestId, nowMs, id,
-        caller.login, ...pickLapsedArgs(nowMs), await manualOnly(db, caller.login) ? 1 : 0, caller.login, caller.tokenId, new Date(nowMs).toISOString()) as Row | undefined;
+    const manual = await manualOnly(db, caller.login);
+    const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
+      state: "leased", token_id: caller.tokenId, user_login: caller.login, harness: claim.harness, harness_version: claim.harnessVersion, model, root: claim.root ?? null, lease_secret_hash: sha256hex(secret),
+      leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId,
+      queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since")))).end()), queued_since: null, progress: null, error: null,
+      picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
+    })).where("id", "=", id).where("state", "=", "queued")
+      .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", caller.login), pickLapsedExpr(db, eb, nowMs)]))
+      .$if(manual, (q) => q.where((eb) => eb.or([eb("parent_id", "is not", null), eb("picked_by", "=", caller.login)])))
+      .where((eb) => eb.exists(db.k.selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(nowMs).toISOString())))
+      .returning(COLS).$narrowType<{ tier: Tier; state: Row["state"] }>());
     if (!r) return null;
     const refs = JSON.parse(r.items) as ItemRef[];
     const runId = await insertRun(db, { jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version, provider: "claude", model: r.asked_model, accountId: null, items: refs, prompt: packed ?? promptOf(r.bundle) });
-    await db.prepare("UPDATE main.agent_runs SET user_login = ?, harness = ?, reported_model = ? WHERE id = ?").run(caller.login, claim.harness, model, runId);
-    await db.prepare("UPDATE main.remote_calls SET run_id = ? WHERE id = ?").run(runId, id);
+    await db.run(db.k.updateTable("main.agent_runs").set({ user_login: caller.login, harness: claim.harness, reported_model: model }).where("id", "=", runId));
+    await db.run(db.k.updateTable("main.remote_calls").set({ run_id: runId }).where("id", "=", id));
     return { id, secret, title: titleOf(r.prompt_id, refs), requiredHelper: REQUIRED_HELPER };
   });
 }
@@ -535,19 +552,18 @@ function takeFromQueueCache(db: Db, id: number): void {
 
 /** Every queued call, read once per QUEUE_CACHE_MS: follow-ups by age, the rest in queue order. Callers filter it and must not change it; only takeFromQueueCache replaces its arrays. */
 async function queuedCalls(db: Db, nowMs: number): Promise<QueueCache> {
-  const q = await db.prepare("SELECT COUNT(*) AS n, MAX(id) AS m FROM main.remote_calls WHERE state = 'queued'").get() as { n: number; m: number | null };
+  const q = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("m")]).where("state", "=", "queued")))!;
   const sig = queueSig(Number(q.n), q.m === null ? null : Number(q.m));
   const hit = queueCaches.get(db);
   if (hit && hit.sig === sig && nowMs >= hit.at && nowMs - hit.at < QUEUE_CACHE_MS) return hit;
   const known = parsedCalls.get(db) ?? new Map<number, Parsed>(), seen = new Map<number, Parsed>();
-  const extra = db.prepare("SELECT items, authors FROM main.remote_calls WHERE id = ?");
-  const rows = await mapSeq((await db.prepare(`SELECT id, class AS cls, level, step, repo, since, seen_at, prompt_id, tier, parent_id, sticky_login, released_by, released_at, picked_by, picked_at, pick_until
-      FROM main.remote_calls${indexedBy(db, "remote_calls_waiting")} WHERE state = 'queued'`).all() as
-    (Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_login" | "seen_at"> & { released_by: string | null; released_at: number | null; picked_by: string | null; picked_at: number | null; pick_until: number | null })[]), async (r): Promise<Cand> => {
+  const rows = await mapSeq(await db.all(db.k.selectFrom("main.remote_calls")
+    .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until"])
+    .where("state", "=", "queued").$narrowType<{ tier: Tier }>()), async (r): Promise<Cand> => {
       const id = Number(r.id);
       let p = known.get(id);
       if (!p) {
-        const x = await extra.get(id) as { items: string; authors: string | null };
+        const x = (await db.get(db.k.selectFrom("main.remote_calls").select(["items", "authors"]).where("id", "=", id)))!;
         const refs = JSON.parse(x.items) as ItemRef[];
         // Calls queued before authors were stored on the row are read now.
         const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
@@ -650,7 +666,7 @@ export const pickLapsedExpr = (db: Db, eb: Eb, nowMs: number): AliasableExpressi
 
 /** The logins (lowercase) whose picks count now (pickerSql). */
 export async function pickerLogins(db: Db, nowMs: number): Promise<Set<string>> {
-  const rows = await db.prepare(`SELECT DISTINCT lower(h.login) AS login FROM main.remote_helpers h WHERE ${pickerSql(db, "h.login")}`).all(...pickerArgs(nowMs)) as { login: string }[];
+  const rows = await db.all(db.k.selectFrom("main.remote_helpers as h").select((eb) => eb.fn<string>("lower", ["h.login"]).as("login")).distinct().where((eb) => pickerExpr(db, eb, "h.login", nowMs)));
   return new Set(rows.map((r) => r.login));
 }
 
@@ -661,8 +677,8 @@ export const pickCounts = async (r: { pickedBy: string | null; pickUntil: number
 /** Ends a queued call's pick (only `login`'s, when given); true when one ended. */
 export async function clearPick(db: Db, id: number, login?: string): Promise<boolean> {
   const r = login === undefined
-    ? await db.prepare("UPDATE main.remote_calls SET picked_by = NULL, picked_at = NULL, pick_until = NULL WHERE id = ? AND picked_by IS NOT NULL").run(id)
-    : await db.prepare("UPDATE main.remote_calls SET picked_by = NULL, picked_at = NULL, pick_until = NULL WHERE id = ? AND picked_by = ?").run(id, login);
+    ? await db.run(db.k.updateTable("main.remote_calls").set({ picked_by: null, picked_at: null, pick_until: null }).where("id", "=", id).where("picked_by", "is not", null))
+    : await db.run(db.k.updateTable("main.remote_calls").set({ picked_by: null, picked_at: null, pick_until: null }).where("id", "=", id).where("picked_by", "=", login));
   if (Number(r.changes) !== 1) return false;
   dropQueueCache(db);
   return true;
@@ -695,7 +711,7 @@ export async function claimableCalls(db: Db, caller: Caller, opts: { tiers?: rea
 
 /** The state of a call this login holds or held (by its lease id); null for an unknown call and for another login's. */
 export async function callStatus(db: Db, id: number, login: string): Promise<{ id: number; state: Row["state"]; error: string | null; title: string } | null> {
-  const r = await db.prepare("SELECT id, state, error, prompt_id, items, user_login FROM main.remote_calls WHERE id = ?").get(id) as { id: number; state: Row["state"]; error: string | null; prompt_id: string; items: string; user_login: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("main.remote_calls").select(["id", "state", "error", "prompt_id", "items", "user_login"]).where("id", "=", id).$narrowType<{ state: Row["state"] }>());
   if (!r || !sameLogin(r.user_login, login)) return null;
   return { id: Number(r.id), state: r.state, error: r.error, title: titleOf(r.prompt_id, JSON.parse(r.items) as ItemRef[]) };
 }
@@ -764,7 +780,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
   // A repeat the dashboard no longer remembers (it restarted in between): the lease the first claim took cannot be given
   // out again, as only its secret's hash is stored, so it goes back to the queue unused and this claim is answered afresh.
-  const orphan = await db.prepare("SELECT id, run_id, lease_secret_hash FROM main.remote_calls WHERE token_id = ? AND claim_id = ? AND state = 'leased'").get(caller.tokenId, claim.requestId) as { id: number; run_id: number | null; lease_secret_hash: string | null } | undefined;
+  const orphan = await db.get(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "lease_secret_hash"]).where("token_id", "=", caller.tokenId).where("claim_id", "=", claim.requestId).where("state", "=", "leased"));
   if (orphan) await unlease(db, { id: Number(orphan.id), runId: orphan.run_id, hash: orphan.lease_secret_hash }, "returned to the queue: the claim that leased it was repeated after a server restart", nowMs);
   await expireLeases(db, nowMs);
   const fast = claim.fastLane === true;
@@ -799,7 +815,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       if (!lease) continue;
       takeFromQueueCache(db, Number(r.id));
       // The fast lane says nothing about the helper's other slots: only their claims mark it idle or busy.
-      if (!fast) await db.prepare("UPDATE main.mcp_tokens SET idle_claim_at = NULL WHERE id = ?").run(caller.tokenId);
+      if (!fast) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: null }).where("id", "=", caller.tokenId));
       return { lease, reserve: await userReserve(db, caller.login) };
     }
     if (limited) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers run ${max} calls, your limit of calls at once (Connect page, My settings)`, reserve: await userReserve(db, caller.login) };
@@ -809,7 +825,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     attempt,
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
     // (idleOthers). The fast lane says nothing about the helper's other slots.
-    idle: async (now) => { if (!fast) await db.prepare("UPDATE main.mcp_tokens SET idle_claim_at = ?, idle_tiers = ?, idle_repos = ? WHERE id = ?").run(now, JSON.stringify([...tiers]), repos ? JSON.stringify([...repos]) : null, caller.tokenId); },
+    idle: async (now) => { if (!fast) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: now, idle_tiers: JSON.stringify([...tiers]), idle_repos: repos ? JSON.stringify([...repos]) : null }).where("id", "=", caller.tokenId)); },
     empty: async (_now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: await userReserve(db, caller.login) }),
   };
 }
@@ -839,7 +855,9 @@ const rootless = (v: unknown, root: string | null): unknown => (root && v !== un
 export async function bundleOf(db: Db, secret: string | undefined): Promise<TaskBundle | null> {
   const l = await liveLease(db, secret);
   if (!l) return null;
-  const r = await db.prepare("SELECT bundle, harness FROM main.remote_calls WHERE id = ?").get(l.id) as { bundle: string; harness: HarnessId };
+  const r = await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "harness"]).where("id", "=", l.id).$narrowType<{ harness: HarnessId | null }>());
+  // A claim always records its harness.
+  if (!r || r.harness === null) return null;
   return { ...forHarness(JSON.parse(r.bundle) as Omit<TaskBundle, "callId">, r.harness, l.root ?? ""), callId: l.id };
 }
 
@@ -852,8 +870,10 @@ export async function heartbeat(db: Db, secret: string | undefined, raw: unknown
   if (!l) return false;
   const h = raw as Partial<Heartbeat> | undefined;
   const line = progressLine(typeof h?.progress === "string" ? unrooted(h.progress, l.root) : h?.progress);
-  await db.prepare("UPDATE main.remote_calls SET heartbeat_at = ?, progress = COALESCE(?, progress), started_at = CASE WHEN ? = 1 AND started_at IS NULL THEN ? ELSE started_at END WHERE id = ?")
-    .run(nowMs, line, h?.phase === "running" ? 1 : 0, nowMs, l.id);
+  await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+    heartbeat_at: nowMs, ...(line !== null && { progress: line }),
+    ...(h?.phase === "running" && { started_at: eb.case().when("started_at", "is", null).then(nowMs).else(eb.ref("started_at")).end() }),
+  })).where("id", "=", l.id));
   if (line && l.runId !== null) await setRunProgress(db, l.runId, line);
   return true;
 }
@@ -880,7 +900,7 @@ const storedTokens = (v: unknown): { input: number; output: number; cacheRead: n
 export async function submitCall(db: Db, secret: string | undefined, raw: unknown, nowMs: number = Date.now()): Promise<SubmitReply | null> {
   const l = await liveLease(db, secret, nowMs);
   const gone = async (): Promise<SubmitReply | null> => {
-    const done = secret?.startsWith(LEASE_PREFIX) && await db.prepare("SELECT 1 FROM main.remote_calls WHERE lease_secret_hash = ? AND state = 'done'").get(sha256hex(secret));
+    const done = secret?.startsWith(LEASE_PREFIX) && await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.lit(1).as("one")).where("lease_secret_hash", "=", sha256hex(secret)).where("state", "=", "done"));
     return done ? { accepted: true } : null;
   };
   if (!l) return await gone();
@@ -905,13 +925,14 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
     const sessionId = typeof s.sessionId === "string" && s.sessionId.length <= 200 ? s.sessionId : null;
     const costUsd = typeof s.costUsd === "number" && Number.isFinite(s.costUsd) && s.costUsd >= 0 ? s.costUsd : null;
     // The lease can end between the check above and this write (another process expired it): then the reply is not taken.
-    const up = await db.prepare("UPDATE main.remote_calls SET state = 'done', reply = ?, usage = ?, turns = ?, session_id = ?, duration_ms = ?, ended_at = ?, progress = NULL WHERE id = ? AND state = 'leased' AND lease_secret_hash = ?")
-      .run(unrooted(s.text, r.root), JSON.stringify({ ...(usage ?? usageOf({})), ...(Object.keys(byModel).length > 0 && { byModel }), ...(costUsd !== null && { costUsd }) }), turns, sessionId, duration, nowMs, l.id, sha256hex(secret!));
+    const up = await db.run(db.k.updateTable("main.remote_calls").set({
+      state: "done", reply: unrooted(s.text, r.root), usage: JSON.stringify({ ...(usage ?? usageOf({})), ...(Object.keys(byModel).length > 0 && { byModel }), ...(costUsd !== null && { costUsd }) }), turns, session_id: sessionId, duration_ms: duration, ended_at: nowMs, progress: null,
+    }).where("id", "=", l.id).where("state", "=", "leased").where("lease_secret_hash", "=", sha256hex(secret!)));
     if (Number(up.changes) !== 1) return await gone();
     await noteSuccess(db, l.login);
     // The claim named the model the helper meant to run (often an alias); the reply names the one that ran.
     if (r.run_id !== null) {
-      await db.prepare("UPDATE main.agent_runs SET reported_model = ? WHERE id = ?").run(s.model.slice(0, 100), r.run_id);
+      await db.run(db.k.updateTable("main.agent_runs").set({ reported_model: s.model.slice(0, 100) }).where("id", "=", r.run_id));
       try { await db.attempt(async () => await saveRemoteTools(db, r.run_id!, r.id, rootless((s as { tools?: unknown }).tools, r.root))); } catch (e) { console.log(`tool uses of remote call ${r.id} not stored: ${(e as Error).message}`); }
     }
     return { accepted: true };
@@ -921,7 +942,7 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   if (await requeue(db, r, await scrubError(`helper: ${unrooted(s.error, l.root)}`), nowMs, { skipLogin: l.login, summary: "helper failed" })) {
     await noteFailure(db, l.login, nowMs);
     // The last attempt's tokens stay with the failed call.
-    await db.prepare("UPDATE main.remote_calls SET usage = ?, duration_ms = ? WHERE id = ? AND state = 'failed'").run(usage ? JSON.stringify(usage) : null, duration, l.id);
+    await db.run(db.k.updateTable("main.remote_calls").set({ usage: usage ? JSON.stringify(usage) : null, duration_ms: duration }).where("id", "=", l.id).where("state", "=", "failed"));
   }
   return { accepted: true };
 }
@@ -948,8 +969,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Whether the helper that ran the parent call (its agent token, which holds the session) holds a lease that heartbeats: it is alive and busy. */
 const runsLiveLease = async (db: Db, parentId: number, nowMs: number): Promise<boolean> =>
-  await db.prepare(`SELECT 1 FROM main.remote_calls${indexedBy(db, "remote_calls_leased")} WHERE state = 'leased' AND heartbeat_at >= ?
-    AND token_id = (SELECT token_id FROM main.remote_calls WHERE id = ?) LIMIT 1`).get(nowMs - STICKY_LIVE_MS, parentId) !== undefined;
+  await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "leased").where("heartbeat_at", ">=", nowMs - STICKY_LIVE_MS)
+    .where("token_id", "=", (eb) => eb.selectFrom("main.remote_calls").select("token_id").where("id", "=", parentId)).limit(1)) !== undefined;
 
 /**
  * Waits for the call's result, polling its row like the model queue polls (allocation.pollMs). Each poll ends a lost lease
@@ -974,7 +995,7 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
     const nowMs = Date.now();
     // The caller's liveness stamp; claims and the room count a call while it is fresher than CALLER_STALE_MS.
     if (nowMs - lastSeen >= SEEN_EVERY_MS) {
-      await db.prepare("UPDATE main.remote_calls SET seen_at = ? WHERE id = ?").run(nowMs, id);
+      await db.run(db.k.updateTable("main.remote_calls").set({ seen_at: nowMs }).where("id", "=", id));
       lastSeen = nowMs;
     }
     await expireLeases(db, nowMs, id);
@@ -984,7 +1005,7 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
       const stored = (r.usage ? JSON.parse(r.usage) : {}) as { byModel?: Record<string, { input: number; output: number; cacheRead: number; cacheWrite: number }>; costUsd?: number };
       const costUsd = typeof stored.costUsd === "number" ? stored.costUsd : null;
       // The raw reply is not kept: the agent run stores the scrubbed copy. A read reply can no longer be adopted.
-      await db.prepare("UPDATE main.remote_calls SET reply = NULL, consumed_at = ? WHERE id = ?").run(nowMs, id);
+      await db.run(db.k.updateTable("main.remote_calls").set({ reply: null, consumed_at: nowMs }).where("id", "=", id));
       return { state: "done", text: r.reply ?? "", usage: { ...storedTokens(stored), cost: costUsd }, byModel: stored.byModel ?? null, costUsd, turns: r.turns, sessionId: r.session_id, runId: r.run_id };
     }
     if (r.state === "failed" && r.error?.startsWith(NO_TAKER_PREFIX)) {
@@ -1030,6 +1051,9 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
  * of a resumed job's earlier run that the resumed run has not adopted has no caller and does not count.
  */
 export async function jobRemoteQueue(db: Db, jobId: number, nowMs: number = Date.now()): Promise<{ queued: boolean; lastLeaseAt: number | null }> {
-  const r = await db.prepare("SELECT COALESCE(MAX(CASE WHEN state = 'queued' AND seen_at >= ? THEN 1 ELSE 0 END), 0) AS queued, MAX(leased_at) AS last FROM main.remote_calls WHERE job_id = ?").get(nowMs - CALLER_STALE_MS, jobId) as { queued: number; last: number | null };
+  const r = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => [
+    eb.fn.coalesce(eb.fn.max<number | null>(eb.case().when(eb.and([eb("state", "=", "queued"), eb("seen_at", ">=", nowMs - CALLER_STALE_MS)])).then(eb.lit(1)).else(eb.lit(0)).end()), eb.lit(0)).as("queued"),
+    eb.fn.max<number | null>("leased_at").as("last"),
+  ]).where("job_id", "=", jobId)))!;
   return { queued: Number(r.queued) === 1, lastLeaseAt: r.last === null ? null : Number(r.last) };
 }
