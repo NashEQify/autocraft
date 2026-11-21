@@ -17,6 +17,7 @@ import { convertAndStore, DEFAULT_APP_NAME, publicBase } from "./github-app.ts";
 import type { GithubUser, Provider, Tokens } from "./provider.ts";
 import { esc, plainPage } from "./util.ts";
 import type { Db } from "../../db/index.ts";
+import { ciEq } from "../../db/portable.ts";
 
 export const SETUP_COOKIE = "__Host-craft_setup";
 const LINK_TTL_MS = 7 * 86_400_000;
@@ -49,16 +50,16 @@ export async function revokeLink(db: Db, operator: string, id: string): Promise<
 
 /** Links that can still be used, newest first. */
 export async function openLinks(db: Db): Promise<GithubSetupLink[]> {
-  const rows = await db.prepare(`SELECT id, org, created_by, created_at, expires_at FROM github_setup_links WHERE revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR} ORDER BY created_at DESC`)
+  const rows = await db.prepare(`SELECT id, org, created_by, created_at, expires_at FROM github_setup_links WHERE revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${byOperator(db)} ORDER BY created_at DESC`)
     .all(new Date().toISOString()) as LinkRow[];
   return rows.map((l) => ({ id: l.id, org: l.org, createdBy: l.created_by, createdAt: l.created_at, expiresAt: l.expires_at }));
 }
 
 /** A link works only while its creator is an operator on the access list. */
-const BY_OPERATOR = "EXISTS (SELECT 1 FROM access a WHERE a.login = github_setup_links.created_by COLLATE NOCASE AND a.role = 'operator')";
+const byOperator = (db: Db): string => `EXISTS (SELECT 1 FROM access a WHERE ${ciEq(db, "a.login", "github_setup_links.created_by")} AND a.role = 'operator')`;
 
 const openLink = async (db: Db, where: "id" | "hash", value: string): Promise<LinkRow | null> =>
-  (await db.prepare(`SELECT * FROM github_setup_links WHERE ${where} = ? AND revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${BY_OPERATOR}`).get(value, new Date().toISOString()) as LinkRow | undefined) ?? null;
+  (await db.prepare(`SELECT * FROM github_setup_links WHERE ${where} = ? AND revoked_at IS NULL AND used_at IS NULL AND expires_at > ? AND ${byOperator(db)}`).get(value, new Date().toISOString()) as LinkRow | undefined) ?? null;
 
 // ---- The visitor's flow -----------------------------------------------------
 

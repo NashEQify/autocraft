@@ -16,6 +16,7 @@ import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { Client, GithubError, Transient, type Querier } from "../mirror.ts";
 import { slugOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
+import { ciEq } from "../db/portable.ts";
 
 export type ExecState = "pending" | "waiting-token" | "waiting-permission" | "done" | "failed";
 export const WAITING: readonly ExecState[] = ["waiting-token", "waiting-permission"];
@@ -25,7 +26,7 @@ export const noWriteReason = (repo: string): string => `You have no write access
 
 /** Sets the state shown on the decision. Writes nothing when it is already that, so the planner is not woken for nothing. */
 export async function setExecState(db: Db, id: string, state: ExecState, reason: string | null = null): Promise<void> {
-  await db.prepare("UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND exec_state IS NOT 'disputed' AND (exec_state IS NOT ? OR exec_reason IS NOT ?)").run(state, reason, id, state, reason);
+  await db.prepare("UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND exec_state IS DISTINCT FROM 'disputed' AND (exec_state IS DISTINCT FROM ? OR exec_reason IS DISTINCT FROM ?)").run(state, reason, id, state, reason);
 }
 
 /** Decisions the pipeline applied are done. */
@@ -48,7 +49,7 @@ export async function initExecState(db: Db, id: string): Promise<void> {
 /** Puts the waiting (and, for one decision, failed) decisions back to pending so the stages take them up again. Returns how many changed. */
 export async function retryWaiting(db: Db, login?: string): Promise<number> {
   const r = await db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
-    WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL AND answer IS NOT NULL AND (? IS NULL OR answered_by = ? COLLATE NOCASE)`).run(login ?? null, login ?? null);
+    WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL AND answer IS NOT NULL AND (CAST(? AS TEXT) IS NULL OR ${ciEq(db, "answered_by", "?")})`).run(login ?? null, login ?? null);
   return Number(r.changes);
 }
 
