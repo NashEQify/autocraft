@@ -29,11 +29,10 @@ export async function reachOfOpenItems(db: Db, nowMs: number = Date.now()): Prom
   for (const r of await db.prepare("SELECT repo, number, COUNT(DISTINCT author) AS n FROM comments WHERE kind = 'comment' GROUP BY repo, number").all() as { repo: string; number: number; n: number }[])
     commenters.set(key(r.repo, r.number), r.n);
   const security = new Set<string>();
-  await db.read(async () => {
-    await settledTable(db, await latestRun(db));
-    for (const r of await db.prepare("SELECT repo, number FROM temp.item_settled WHERE security = 1").all() as { repo: string; number: number }[])
-      security.add(key(r.repo, r.number));
-  });
+  const run = await latestRun(db);
+  await settledTable(db, run);
+  for (const r of await db.prepare("SELECT repo, number FROM item_settled WHERE run = ? AND security = 1").all(run ?? "") as { repo: string; number: number }[])
+    security.add(key(r.repo, r.number));
   // A PR that closes issues counts for the PR and for each issue.
   const linked = new Map<string, number>();
   const bump = (k: string) => linked.set(k, (linked.get(k) ?? 0) + 1);

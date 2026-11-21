@@ -85,7 +85,26 @@ const DECISION_ITEMS_INSERT = `    INSERT INTO decision_items (repo, number, dec
       ON CONFLICT DO NOTHING;`;
 const DECISION_ITEMS_WHEN = "NEW.number IS NULL AND json_valid(NEW.items) AND json_typeof(NEW.items::json) = 'array'";
 
+// One function for the three SQLite triggers: an UPDATE that keeps the key marks it once (ON CONFLICT cannot touch a row
+// twice in one statement); a marked item is worked out again whatever the count.
+const SETTLED_MARK = (who: string) => `INSERT INTO item_settled_dirty (run_id, repo, number) VALUES (${who}.run_id, ${who}.repo, ${who}.number)
+      ON CONFLICT (run_id, repo, number) DO UPDATE SET n = item_settled_dirty.n + 1;`;
+const SETTLED_FN = fn("classifications_settled", `  IF TG_OP <> 'DELETE' THEN
+    ${SETTLED_MARK("NEW")}
+  END IF;
+  IF TG_OP = 'DELETE' THEN
+    ${SETTLED_MARK("OLD")}
+  ELSIF TG_OP = 'UPDATE' THEN
+    IF (OLD.run_id, OLD.repo, OLD.number) IS DISTINCT FROM (NEW.run_id, NEW.repo, NEW.number) THEN
+      ${SETTLED_MARK("OLD")}
+    END IF;
+  END IF;`);
+const settled = (name: string, op: string) => `CREATE OR REPLACE TRIGGER ${name} AFTER ${op} ON classifications FOR EACH ROW EXECUTE FUNCTION trg_classifications_settled();`;
+
 export const HAND_TRIGGERS: Record<string, HandTrigger> = {
+  classifications_settled_i: { source: "c1d5f1f2e66486a2", pg: `${SETTLED_FN}\n${settled("classifications_settled_i", "INSERT")}` },
+  classifications_settled_u: { source: "1f5e5a7298e8163f", pg: settled("classifications_settled_u", "UPDATE") },
+  classifications_settled_d: { source: "ec2a4d0f1d61aa9a", pg: settled("classifications_settled_d", "DELETE") },
   stages_latest: {
     source: "8a5df492d0eae433",
     pg: `${fn("stages_latest", `  INSERT INTO item_stage (repo, number, stage, at, reviewed)

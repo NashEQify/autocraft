@@ -6,7 +6,7 @@ import type {
   ItemChecks, ItemPeek, ItemList, ItemListRow, ItemSort, SearchHit, SettledStatus, Snippet, Stage,
 } from "../../../web/src/api/types.ts";
 import { quietFixPrs, quietSqlFor } from "../../security/quiet.ts";
-import { fromRow, unflagged, latestRun, settledTable, type SettledRow } from "../../classify/settled.ts";
+import { fromRow, unflagged, latestRun, settledOn, settledTable, type SettledRow } from "../../classify/settled.ts";
 import { LABELS } from "../../classify/rules.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -177,7 +177,7 @@ async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort
   let sort: ItemSort = sortQ ?? (fts ? "relevance" : state === BY_US ? "merged" : "updated");
   if (sort === "relevance" && !fts) sort = "updated";
   const desc = q.get("desc") !== "0";
-  // Last, after every parameter check: nothing is filled for a request that fails.
+  // Last, after every parameter check (a no-op inside listItems' read, which refreshes the run first).
   await settledTable(db, run);
   return { where, statusWhere, statuses: [...st] as SettledStatus[], params, text: !!fts, sort, desc, run };
 }
@@ -249,15 +249,20 @@ async function statusCounts(db: Db, b: Built & { run: string | null }, sql: stri
 
 export async function listItems(db: Db, req: Req): Promise<ItemList> {
   const hidden = await hiddenRepos(db, req);
-  // build() fills the connection's temp tables (item_settled, flow_pick) that the counts and the page read, so all of
-  // it runs in one snapshot.
+  // The counts and the page join item_settled inside the read below, where it is not refreshed: the run's rows, and for
+  // a flow filter the current run's (the flowchart counts in it), are brought up to date first.
+  const latest = await latestRun(db);
+  const run = req.query.get("run") || latest;
+  await settledTable(db, run);
+  if (req.query.get("flow") && run !== latest) await settledTable(db, latest);
+  // build() fills the connection's temp table flow_pick that the counts and the page read, so all of it runs in one snapshot.
   const { b, total, byStatus, rows } = await db.read(async () => {
     const b = await build(db, req, hidden);
     const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
     const offset = Math.max(0, Number(req.query.get("offset")) || 0);
     const from = (scored: boolean) => (b.text
       ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
-      : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
+      : "SELECT %COLS FROM items i") + ` LEFT JOIN item_settled s ON ${settledOn(b.run, "s")}`;
     const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
 
     // Counts per status under every filter but the status one; the total follows from them.
@@ -280,7 +285,7 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
     const byId = new Map((ids.length ? await db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
         i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
         s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
-      FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
+      FROM items i LEFT JOIN item_settled s ON ${settledOn(b.run, "s")} WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
       .map((r) => [r.rid, r]));
     const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
     return { b, total, byStatus, rows };

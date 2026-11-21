@@ -21,7 +21,8 @@ import { refIn, refPairs } from "../core/ref-filter.ts";
 import { audit } from "../dash/audit.ts";
 import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
-import type { Db } from "../db/index.ts";
+import type { Db, Dialect } from "../db/index.ts";
+import { jsonBool, jsonNum, jsonValid, quote } from "../db/portable.ts";
 
 export const SURE = 0.9;
 
@@ -107,7 +108,9 @@ function settleLabel(jev: (Verdict & { top: number | null }) | null, haiku: Verd
 /** The run of the newest Jev or Haiku-alone verdict: two indexed lookups, the newer wins. */
 export async function newestVerdictRun(db: Db): Promise<string | null> {
   const jev = await db.prepare("SELECT run_id, at FROM classifications WHERE classifier = 'jev' ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
-  const alone = await db.prepare("SELECT run_id, at FROM main.classifications INDEXED BY classifications_alone WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1").get() as { run_id: string; at: string } | undefined;
+  // SQLite's planner needs the partial index named; Postgres picks it.
+  const hint = db.dialect === "sqlite" ? " INDEXED BY classifications_alone" : "";
+  const alone = await db.prepare(`SELECT run_id, at FROM main.classifications${hint} WHERE classifier = 'haiku' AND input_hash IS NOT NULL ORDER BY at DESC LIMIT 1`).get() as { run_id: string; at: string } | undefined;
   return (alone && (!jev || alone.at > jev.at) ? alone : jev)?.run_id ?? null;
 }
 
@@ -209,75 +212,91 @@ export function topOf(probs: string | null): number | null {
   } catch { return null; }
 }
 
-// Settled verdicts of one run as a temp table on this connection, for queries
-// that count or filter many items:
-//   temp.item_settled(repo, number, status, label, source, top, jev_label, haiku_label, flags JSON, security, needs_decision)
-// Items without a Jev or Haiku verdict have no row ("unclassified"). Classifiers only
-// insert (INSERT OR REPLACE gives a new rowid), so verdicts with a rowid above
-// the last one seen are applied item by item; a new run or fewer rows than
-// expected rebuilds the table. The last run and rowid seen are kept in temp.item_settled_seen beside the table, so a
-// read that rolls back (and a CREATE TEMP TABLE with it) takes both back together.
-type Seen = { run: string | null; maxRowid: number; count: number };
+// Settled verdicts of a run as rows of item_settled (src/schema.sql), for queries that count or filter many items:
+//   item_settled(run, repo, number, status, label, source, top, jev_label, haiku_label, flags JSON, security, needs_decision, referee_*)
+// Items without a Jev or Haiku verdict have no row ("unclassified"). A run is built in full on first use; after that the
+// triggers on classifications mark changed items in item_settled_dirty and a refresh works out only those again.
 
 type VerdictRow = { repo: string; number: number; jl: string | null; jf: string | null; probs: string | null; hl: string | null; hf: string | null; sl: string | null; ss: number | null; sr: string | null; sf: number | null; sx: number | null };
-// Items with a Jev or a Haiku verdict: Haiku alone settles an item when Jev was unavailable.
-const VERDICTS = `SELECT k.repo, k.number, j.type_label AS jl, j.flags AS jf, j.probs, h.type_label AS hl, h.flags AS hf,
-    s.type_label AS sl, json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.sure') AS ss, s.reason AS sr, json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.final') AS sf, json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.opusFailures') AS sx
+
+/** Items with a Jev or a Haiku verdict in run `:run` (Haiku alone settles an item when Jev was unavailable). */
+function verdictsSql(d: Dialect): string {
+  const sp = `CASE WHEN ${jsonValid(d, "s.probs")} THEN s.probs END`;
+  return `SELECT k.repo, k.number, j.type_label AS jl, j.flags AS jf, j.probs, h.type_label AS hl, h.flags AS hf,
+    s.type_label AS sl, ${jsonBool(d, sp, "$.sure")} AS ss, s.reason AS sr, ${jsonBool(d, sp, "$.final")} AS sf, ${jsonNum(d, sp, "$.opusFailures")} AS sx
   FROM (SELECT repo, number FROM main.classifications WHERE run_id = :run AND classifier = 'jev' UNION SELECT repo, number FROM main.classifications WHERE run_id = :run AND classifier = 'haiku' AND input_hash IS NOT NULL) k
   LEFT JOIN main.classifications j ON j.repo = k.repo AND j.number = k.number AND j.classifier = 'jev' AND j.run_id = :run
   LEFT JOIN main.classifications h ON h.repo = k.repo AND h.number = k.number AND h.classifier = 'haiku' AND h.run_id = :run
   LEFT JOIN main.classifications s ON s.repo = k.repo AND s.number = k.number AND s.classifier = 'sonnet' AND s.run_id = :run
-    AND s.at >= j.at AND s.at >= h.at AND json_extract(CASE WHEN json_valid(s.probs) THEN s.probs END, '$.sure') IS NOT NULL
+    AND s.at >= j.at AND s.at >= h.at AND ${jsonBool(d, sp, "$.sure")} IS NOT NULL
   WHERE 1 = 1`;
-
-// The table belongs to the connection, and so to every async context on it: a caller runs this and its own queries on
-// temp.item_settled inside one db.read (or db.write), so no other context rebuilds the table for another run between
-// them. The refresh is itself one read snapshot, so it joins either; it writes only the temp table.
-export function settledTable(db: Db, run: string | null): Promise<void> {
-  return db.read(() => refreshSettled(db, run));
 }
 
-async function refreshSettled(db: Db, run: string | null): Promise<void> {
-  const now = await db.prepare("SELECT COALESCE(MAX(rowid), 0) AS maxRowid, COUNT(*) AS count FROM main.classifications").get() as { maxRowid: number; count: number };
-  await db.script(`CREATE TEMP TABLE IF NOT EXISTS item_settled (repo TEXT NOT NULL, number INTEGER NOT NULL, status TEXT NOT NULL, label TEXT,
-    source TEXT, top REAL, jev_label TEXT, haiku_label TEXT, flags TEXT NOT NULL, security INTEGER NOT NULL, needs_decision INTEGER NOT NULL,
-    referee_label TEXT, referee_sure INTEGER, referee_reason TEXT, referee_final INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (repo, number));
-    CREATE TEMP TABLE IF NOT EXISTS item_settled_seen (id INTEGER PRIMARY KEY CHECK (id = 1), run TEXT, max_rowid INTEGER NOT NULL, count INTEGER NOT NULL)`);
-  const prev = await db.prepare("SELECT run, max_rowid AS maxRowid, count FROM temp.item_settled_seen WHERE id = 1").get() as Seen | undefined;
-  if (prev && prev.run === run && prev.maxRowid === now.maxRowid && prev.count === now.count) return;
+/** `(repo, number)` pairs from a JSON array of `[repo, number]` bound to `param`, as a subquery body. */
+const pairsFrom = (d: Dialect, param: string, extra = ""): string => d === "postgres"
+  ? `SELECT value ->> 0, (value ->> 1)::bigint${extra ? `, (value ->> 2)::bigint` : ""} FROM json_array_elements((${param})::json) AS value`
+  : `SELECT value ->> 0, value ->> 1${extra ? ", value ->> 2" : ""} FROM json_each(${param})`;
+
+const SETTLED_COLS = ["run", "repo", "number", "status", "label", "source", "top", "jev_label", "haiku_label", "flags", "security", "needs_decision", "referee_label", "referee_sure", "referee_reason", "referee_final"];
+const PG_TYPES: Record<string, string> = { number: "bigint", top: "double precision", security: "bigint", needs_decision: "bigint", referee_sure: "bigint", referee_final: "bigint" };
+
+/**
+ * Brings item_settled up to date for `run`: a read when it is current, otherwise one write (db.write) that builds or
+ * refreshes it. Call it before the db.read whose queries join the table, never inside one: inside a read snapshot it
+ * changes nothing, so the snapshot sees the table as the last refresh left it. Join with `settledOn`.
+ */
+export async function settledTable(db: Db, run: string | null): Promise<void> {
+  if (run === null || db.inTransaction("read")) return;
+  const r = await db.prepare(`SELECT EXISTS (SELECT 1 FROM main.item_settled_runs WHERE run = ?) AS built,
+    EXISTS (SELECT 1 FROM main.item_settled_dirty WHERE run_id = ?) AS dirty`).get(run, run) as { built: number; dirty: number };
+  if (r.built && !r.dirty) return;
+  await db.write(() => refreshSettled(db, run));
+}
+
+/** The join condition of an item_settled row `alias` with the item `item` in `run` (null: no rows). */
+export function settledOn(run: string | null, alias: string, item = "i"): string {
+  return `${alias}.run = ${quote(run ?? "")} AND ${alias}.repo = ${item}.repo AND ${alias}.number = ${item}.number`;
+}
+
+async function refreshSettled(db: Db, run: string): Promise<void> {
+  const d = db.dialect;
+  const built = !!await db.prepare("SELECT 1 FROM main.item_settled_runs WHERE run = ?").get(run);
   const rows: unknown[][] = [];
   const put = (r: VerdictRow) => {
     const ref = r.sl !== null && r.ss !== null ? { label: r.sl, sure: !!r.ss, reason: r.sr ?? "", ...(r.sf ? { final: true } : {}), ...(r.sx ? { failures: r.sx } : {}) } : null;
     const s = settle(r.jl === null ? null : { label: r.jl, flags: parseFlags(r.jf), top: topOf(r.probs), nd: needsDecisionOf(r.probs), sec: securityOf(r.probs) }, r.hl === null ? null : { label: r.hl, flags: parseFlags(r.hf) }, ref);
-    rows.push([r.repo, r.number, s.status, s.label, s.source, s.confidence, s.jevLabel, s.haikuLabel, JSON.stringify(s.flags),
+    rows.push([run, r.repo, r.number, s.status, s.label, s.source, s.confidence, s.jevLabel, s.haikuLabel, JSON.stringify(s.flags),
       s.flags.includes("security") ? 1 : 0, s.flags.includes("needs decision") ? 1 : 0, s.referee?.label ?? null, s.referee ? Number(s.referee.sure) : null, s.referee?.reason ?? null, refereeClosed(s.referee) ? 1 : 0]);
   };
-  // All rows in one statement: the table is rebuilt in full on a connection's first use.
-  const insertAll = async () => {
-    if (!rows.length) return;
-    const cols = Array.from({ length: 15 }, (_, i) => `value ->> ${i}`).join(", ");
-    await db.prepare(`INSERT OR REPLACE INTO temp.item_settled SELECT ${cols} FROM json_each(?)`).run(JSON.stringify(rows));
-  };
-  const fresh = prev && prev.run === run
-    ? (await db.prepare("SELECT DISTINCT repo, number FROM main.classifications WHERE rowid > ? AND run_id = ?").all(prev.maxRowid, run) as { repo: string; number: number }[])
-    : null;
-  const added = prev ? (await db.prepare("SELECT COUNT(*) AS n FROM main.classifications WHERE rowid > ?").get(prev.maxRowid) as { n: number }).n : 0;
-  // INSERT OR REPLACE removes one row for each it adds, so the count only falls when something was deleted.
-  if (fresh && run && now.count >= prev!.count && now.count <= prev!.count + added) {
-    if (fresh.length) {
-      const keys = JSON.stringify(fresh.map((k) => [k.repo, k.number]));
-      const found = await db.prepare(`${VERDICTS} AND (k.repo, k.number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(:keys))`).all({ run, keys }) as VerdictRow[];
-      const have = new Set(found.map((r) => `${r.repo}#${r.number}`));
-      const gone = fresh.filter((k) => !have.has(`${k.repo}#${k.number}`)).map((k) => [k.repo, k.number]);
-      if (gone.length) await db.prepare("DELETE FROM temp.item_settled WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").run(JSON.stringify(gone));
-      for (const r of found) put(r);
-    }
+  if (!built) {
+    // Marks made before this read are covered by it; marks committed after it stay for the next refresh.
+    await db.prepare("DELETE FROM main.item_settled_dirty WHERE run_id = ?").run(run);
+    await db.prepare("DELETE FROM main.item_settled WHERE run = ?").run(run);
+    for (const r of await db.prepare(verdictsSql(d)).all({ run }) as VerdictRow[]) put(r);
+    // Built runs whose classifications are all gone.
+    const gone = `SELECT r.run FROM main.item_settled_runs r WHERE r.run <> ? AND NOT EXISTS (SELECT 1 FROM main.classifications c WHERE c.run_id = r.run)`;
+    await db.prepare(`DELETE FROM main.item_settled WHERE run IN (${gone})`).run(run);
+    await db.prepare(`DELETE FROM main.item_settled_runs WHERE run IN (${gone})`).run(run);
   } else {
-    await db.script("DELETE FROM temp.item_settled");
-    if (run) for (const r of await db.prepare(VERDICTS).all({ run }) as VerdictRow[]) put(r);
+    const dirty = await db.prepare("SELECT repo, number, n FROM main.item_settled_dirty WHERE run_id = ?").all(run) as { repo: string; number: number; n: number }[];
+    if (!dirty.length) return;
+    const keys = JSON.stringify(dirty.map((k) => [k.repo, k.number]));
+    await db.prepare(`DELETE FROM main.item_settled WHERE run = ? AND (repo, number) IN (${pairsFrom(d, "?")})`).run(run, keys);
+    for (const r of await db.prepare(`${verdictsSql(d)} AND (k.repo, k.number) IN (${pairsFrom(d, ":keys")})`).all({ run, keys }) as VerdictRow[]) put(r);
+    // Only the marks read above: an item marked again since then (n moved) stays marked.
+    await db.prepare(`DELETE FROM main.item_settled_dirty WHERE run_id = ? AND (repo, number, n) IN (${pairsFrom(d, "?", "n")})`)
+      .run(run, JSON.stringify(dirty.map((k) => [k.repo, k.number, k.n])));
   }
-  await insertAll();
-  await db.prepare("INSERT OR REPLACE INTO temp.item_settled_seen (id, run, max_rowid, count) VALUES (1, ?, ?, ?)").run(run, now.maxRowid, now.count);
+  // Marks of runs that are not built: a run is built in full on first use. This run's are kept, built or not: a mark
+  // committed during a first build covers a change that build may not have read.
+  await db.prepare("DELETE FROM main.item_settled_dirty WHERE run_id <> ? AND run_id NOT IN (SELECT run FROM main.item_settled_runs)").run(run);
+  if (rows.length) {
+    const cols = SETTLED_COLS.map((c, i) => (d === "postgres" ? `(value ->> ${i})${PG_TYPES[c] ? `::${PG_TYPES[c]}` : ""}` : `value ->> ${i}`)).join(", ");
+    const from = d === "postgres" ? "json_array_elements((?)::json) AS value" : "json_each(?)";
+    await db.prepare(`INSERT INTO main.item_settled (${SETTLED_COLS.join(", ")}) SELECT ${cols} FROM ${from}`).run(JSON.stringify(rows));
+  }
+  await db.prepare("INSERT INTO main.item_settled_runs (run, refreshed_at) VALUES (?, ?) ON CONFLICT (run) DO UPDATE SET refreshed_at = excluded.refreshed_at")
+    .run(run, new Date().toISOString());
 }
 
 export type SettledRow = {
@@ -286,7 +305,7 @@ export type SettledRow = {
   referee_label: string | null; referee_sure: number | null; referee_reason: string | null; referee_final?: number | null;
 };
 
-// A temp.item_settled row (or none) as the wire shape.
+// An item_settled row (or none) as the wire shape.
 export function fromRow(r: Partial<SettledRow> | undefined): Settled {
   if (!r?.status) return settle(null, null);
   return {
