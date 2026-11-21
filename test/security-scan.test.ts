@@ -141,18 +141,18 @@ describe("security deep scan", () => {
     const rows = await db.all(db.k.selectFrom("security_findings").select(["title", "state", "verification"]).where("scan_id", "=", id).orderBy("number"));
     assert.deepEqual(rows.map((r) => [r.title, r.state]), [["Layer length trusted", "fixing"], ["Name read unchecked", "disproved"]]);
     assert.equal(JSON.parse(rows[0]!.verification!).proposedTest, "parse a layer with len = u32::MAX");
-    const fixes = async () => await db.prepare("SELECT requested_by, json_extract(params, '$.number') AS n FROM jobs WHERE step = 'security-fix'").all() as { requested_by: string; n: number }[];
+    const fixes = async () => await db.all(db.k.selectFrom("jobs").select(["requested_by", kx.jsonNum(db, "params", "$.number").as("n")]).where("step", "=", "security-fix"));
     const confirmed = (await db.get(db.k.selectFrom("security_findings").select("number").where("scan_id", "=", id).where("title", "=", "Layer length trusted")))!.number;
     assert.deepEqual((await fixes()).map((j) => [j.requested_by, j.n]), [["pipeline", confirmed]]);
     // Back to new as after a failed fix: the finding is left for the operator, not started again.
     await db.run(db.k.updateTable("security_findings").set({ state: "new" }).where("scan_id", "=", id));
     assert.equal(await autoFixConfirmed(db), 0);
     // A fix the pipeline switch cancelled does not count: once the finding is back to new, the fix is queued again.
-    await db.prepare("UPDATE jobs SET state = 'cancelled' WHERE step = 'security-fix'").run();
+    await db.run(db.k.updateTable("jobs").set({ state: "cancelled" }).where("step", "=", "security-fix"));
     await db.run(db.k.updateTable("security_findings").set({ state: "fixing", updated_at: "2026-01-01T00:00:00Z" }).where("scan_id", "=", id).where("title", "=", "Layer length trusted"));
     assert.equal(await autoFixConfirmed(db), 1);
     await db.run(db.k.updateTable("security_findings").set({ state: "new" }).where("scan_id", "=", id));
-    await db.prepare("DELETE FROM jobs WHERE step = 'security-fix'").run();
+    await db.run(db.k.deleteFrom("jobs").where("step", "=", "security-fix"));
     await db.prepare("DELETE FROM audit WHERE action = 'security-finding-fix'").run();
     // A second scan does not raise the same findings again, nor ask to verify them.
     const again = await newScan(null);
@@ -321,7 +321,8 @@ describe("security deep scan", () => {
   test("a maintainer who cannot see the repo sees none of its scan jobs", async () => {
     const boss = await signedIn("boss"), maint = await signedIn("maint");
     const started = await boss.post<ScanView>("/api/repos/secret/security/scans", { capUsd: 1 });
-    await db.prepare("UPDATE jobs SET state = 'running', progress = 'area 1', started_at = ? WHERE id = (SELECT job_id FROM security_scans WHERE id = ?)").run(new Date().toISOString(), started.id);
+    await db.run(db.k.updateTable("jobs").set({ state: "running", progress: "area 1", started_at: new Date().toISOString() })
+      .where("id", "=", (eb) => eb.selectFrom("security_scans").select("job_id").where("id", "=", started.id)));
     const steps = (c: Client) => c.get<{ jobs: { step: string; params: { repo?: string } }[] }>("/api/pipeline/jobs").then((r) => r.jobs.filter((j) => j.step === "security-scan" && j.params.repo === "secret").length);
     assert.equal(await steps(boss), 1);
     assert.equal(await steps(maint), 0);
