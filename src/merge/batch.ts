@@ -61,8 +61,6 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
 const ACTOR = "batch";
-/** The GitHub CLI the batch stage runs for its reads. */
-const GH = "gh";
 /** How long the one rerun of a red batch PR gets to report new results before the batch is split anyway. */
 export const RERUN_WAIT_MS = 45 * 60_000;
 /** Batches in flight per repo at most; a split or a trace starts no more. */
@@ -349,7 +347,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   /** The failed checks of the batch tip with their log tails, or null when they cannot be read. Read-only. */
   async function readBatchFailure(b: BatchRow): Promise<CiFailure | null> {
     const gh = async (args: string[]): Promise<string> => {
-      const r = await d.exec(GH, args);
+      const r = await d.exec("gh", args);
       if (r.code !== 0) throw new Error(oneLine(r.stderr || r.stdout || `gh exited ${r.code}`));
       return r.stdout;
     };
@@ -435,7 +433,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   async function anyRunInProgress(runs: number[]): Promise<boolean> {
     for (const id of runs) {
       try {
-        const r = await d.exec(GH, ["api", `repos/${slugOf(repo)}/actions/runs/${id}`]);
+        const r = await d.exec("gh", ["api", `repos/${slugOf(repo)}/actions/runs/${id}`]);
         if (r.code !== 0) continue;
         const st = (JSON.parse(r.stdout) as { status?: string }).status;
         if (st && st !== "completed") return true;
@@ -478,7 +476,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     // A crash after `gh pr create` leaves a PR for this branch: adopt it instead of failing on "already exists".
     const owner = fork.split("/")[0]!;
     const sel = await ownPrSelect(db, repo, [owner], branch);
-    const found = await d.exec(GH, ["pr", "list", "--repo", `${slugOf(repo)}`, "--state", "open", "--head", b.branch, "--json", sel.json, "--jq", sel.jq]);
+    const found = await d.exec("gh", ["pr", "list", "--repo", `${slugOf(repo)}`, "--state", "open", "--head", b.branch, "--json", sel.json, "--jq", sel.jq]);
     const existing = found.code === 0 ? found.stdout.trim().split("\n")[0] ?? "" : "";
     const pr = PR_URL.test(existing) ? { code: 0, stdout: existing, stderr: "" }
       : await ghOpenPr(w, g, d.exec, "batch-pr", { repo, target: `${repo}:${b.branch}`, base: branch, head: `${owner}:${b.branch}`, title: `Integration batch ${b.branch}`, body }, { by: "fixed" }, { run: runId });
