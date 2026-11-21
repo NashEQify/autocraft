@@ -1,9 +1,9 @@
 // The scope decision for one candidate: question, options, recommendation and
 // facts. The summary is added by the caller.
-import { STATS_SQL, TIER_LABEL, tierKey, tiersOf } from "../whitelist.ts";
+import { TIER_LABEL, statsExpr, tierKey, tiersOf } from "../whitelist.ts";
 import type { Candidate } from "./select.ts";
 import type { Db } from "../db/index.ts";
-import { jsonEach } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 /**
  * Answer keys of a scope decision. The step that applies answers reads these
@@ -57,19 +57,13 @@ export function shapeOf(c: Candidate): Shape {
 
 export const decisionId = (c: { repo: string; number: number }): string => `${c.repo}#${c.number}:scope`;
 
-type ItemRow = {
-  kind: "pr" | "issue"; author: string | null; created_at: string | null; labels: string | null;
-  additions: number | null; deletions: number | null; changed_files: number | null; comments_count: number | null;
-  closing_issues: string | null; author_id: number | null;
-};
-
 const list = (s: string | null): unknown[] => {
   try { const v = JSON.parse(s ?? "[]") as unknown; return Array.isArray(v) ? v : []; } catch { return []; }
 };
 
 async function authorFact(db: Db, login: string | null, id: number | null): Promise<string> {
   if (!login) return "author: unknown (deleted account)";
-  const s = await db.prepare(`${STATS_SQL} AND author = ? GROUP BY author`).get(login) as { merged: number | null; closed: number | null } | undefined;
+  const s = await db.get(statsExpr(db).where("author", "=", login).groupBy("author"));
   const merged = s?.merged ?? 0, closed = s?.closed ?? 0;
   const tier = (await tiersOf(db, [{ login, id }])).get(tierKey({ login, id })) ?? "not";
   return `author: ${login}, ${TIER_LABEL[tier]} (${merged} merged PR${merged === 1 ? "" : "s"}, ${closed} closed unmerged)`;
@@ -77,8 +71,8 @@ async function authorFact(db: Db, login: string | null, id: number | null): Prom
 
 /** Up to five facts: what and how big, author and tier, classifiers, GitHub labels, linked items. */
 export async function factsOf(db: Db, c: Candidate, now = Date.now()): Promise<string[]> {
-  const i = await db.prepare(`SELECT kind, author, created_at, labels, additions, deletions, changed_files, comments_count, closing_issues, author_id
-    FROM items WHERE repo = ? AND number = ?`).get(c.repo, c.number) as ItemRow;
+  const i = (await db.get(db.k.selectFrom("items").select(["kind", "author", "created_at", "labels", "additions", "deletions", "changed_files", "comments_count", "closing_issues", "author_id"])
+    .$narrowType<{ kind: "pr" | "issue" }>().where("repo", "=", c.repo).where("number", "=", c.number)))!;
   const days = i.created_at ? Math.max(0, Math.floor((now - Date.parse(i.created_at)) / 86_400_000)) : null;
   const age = days === null ? "" : days === 0 ? ", opened today" : `, opened ${days} day${days === 1 ? "" : "s"} ago`;
   const comments = i.comments_count ?? 0;
@@ -93,11 +87,13 @@ export async function factsOf(db: Db, c: Candidate, now = Date.now()): Promise<s
   const fixes = list(i.closing_issues).filter((n): n is number => typeof n === "number");
   if (fixes.length) linked.push(`fixes ${fixes.map((n) => `#${n}`).join(", ")}`);
   if (i.kind === "issue") {
-    const prs = await db.prepare(`SELECT number FROM items WHERE repo = ? AND kind = 'pr' AND state = 'OPEN'
-      AND EXISTS (SELECT 1 FROM ${jsonEach(db, "closing_issues", "ci")} WHERE ci.value = ?) ORDER BY number`).all(c.repo, c.number) as { number: number }[];
+    const prs = await db.all(db.k.selectFrom("items").select("number").where("repo", "=", c.repo).where("kind", "=", "pr").where("state", "=", "OPEN")
+      .where((eb) => eb.exists(eb.selectFrom(kx.jsonEach(db, "items.closing_issues", "ci", "bigint")).select(eb.lit(1).as("one")).where("ci.value", "=", c.number)))
+      .orderBy("number"));
     if (prs.length) linked.push(`open PRs that fix it: ${prs.map((p) => `#${p.number}`).join(", ")}`);
   }
-  const dups = await db.prepare(`SELECT DISTINCT dup_of FROM classifications WHERE repo = ? AND number = ? AND dup_of IS NOT NULL`).all(c.repo, c.number) as { dup_of: number }[];
+  const dups = await db.all(db.k.selectFrom("classifications").select("dup_of").distinct().where("repo", "=", c.repo).where("number", "=", c.number).where("dup_of", "is not", null)
+    .$narrowType<{ dup_of: number }>().orderBy("dup_of"));
   if (dups.length) linked.push(`possible duplicate of ${dups.map((d) => `#${d.dup_of}`).join(", ")}`);
   if (linked.length) facts.push(linked.join("; "));
   return facts.slice(0, 5);

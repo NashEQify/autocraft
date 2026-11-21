@@ -1,6 +1,6 @@
 // When an open decision counts as prepared. Only items in scope (pipeline on for the repo, not our own integration PR) are prepared.
-import { pilotSql } from "../pilot.ts";
-import { notOwnIntegrationSql } from "../dupes/held.ts";
+import { pilotExpr } from "../pilot.ts";
+import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { OWN_NOTE_PREFIXES } from "../conversations/store.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS } from "../core/item-rules.ts";
 import type { Db } from "../db/index.ts";
@@ -185,12 +185,13 @@ export function openSubjectExpr(db: Db, eb: kx.AnyEb, d: string, i: string): Ali
       .select(eb.lit(1).as("one")).where("gi.decision_id", "=", eb.ref(`${d}.id`)).where("gi.role", "=", "close").where("m.state", "=", "OPEN"))])]);
 }
 
-type Subject = { dkind: string; kind: string; head_oid: string | null } & Pick<PrepareColumns, "discussion_key" | "reviewed_at" | "prepares_today" | "stale_choices" | "review_queued">;
+type Subject = { dkind: string; kind: string; head_oid: string | null; prepares_today: number | null; review_queued: SqlBool } & Pick<PrepareColumns, "discussion_key" | "reviewed_at" | "stale_choices">;
 
 type Open = Partial<PrepareColumns> & { id: string; answer: string | null; repo: string | null; number: number | null };
 
-const subjectSql = (db: Db): string => `SELECT d.id AS did, i.kind, i.head_oid, d.kind AS dkind, ${prepareStateSql(db, "d")} FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
-    WHERE ${openSubjectSql("d", "i")} AND ${pilotSql(db, "i")} AND ${notOwnIntegrationSql(db, "i")}`;
+const subjects = (db: Db) => db.k.selectFrom("decisions as d").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+  .select((eb) => ["d.id as did", "i.kind", "i.head_oid", "d.kind as dkind", ...prepareStateExpr(db, eb, "d", utcDayStart(Date.now()))])
+  .where((eb) => eb.and([openSubjectExpr(db, eb, "d", "i"), pilotExpr(db, eb, "i"), notOwnIntegrationExpr(db, eb, "i")]));
 
 function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; head: string | null; open: true } | null {
   if (!it) return null;
@@ -201,7 +202,7 @@ function columnsFrom(d: Open, it: Subject | undefined): { cols: PrepareColumns; 
 
 async function columnsOf(db: Db, d: Open): Promise<{ cols: PrepareColumns; head: string | null; open: true } | null> {
   if (d.answer !== null || d.number === null) return null;
-  return columnsFrom(d, await db.prepare(`${subjectSql(db)} AND d.id = ?`).get(utcDayStart(Date.now()), d.id) as Subject | undefined);
+  return columnsFrom(d, await db.get(subjects(db).where("d.id", "=", d.id)));
 }
 
 export type PrepareState = { preparing: boolean; preparedEarlier: boolean };
@@ -211,7 +212,7 @@ export async function prepareStates(db: Db, ds: Open[]): Promise<Map<string, Pre
   const open = ds.filter((d) => d.answer === null && d.number !== null);
   const out = new Map<string, PrepareState>();
   if (!open.length) return out;
-  const rows = await db.prepare(`${subjectSql(db)} AND ${inList(db, "d.id")}`).all(utcDayStart(Date.now()), JSON.stringify(open.map((d) => d.id))) as (Subject & { did: string })[];
+  const rows = await db.all(subjects(db).where(kx.inList(db, "d.id", open.map((d) => d.id))));
   const by = new Map(rows.map((r) => [r.did, r]));
   for (const d of open) {
     const x = columnsFrom(d, by.get(d.id));

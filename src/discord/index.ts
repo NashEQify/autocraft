@@ -54,11 +54,12 @@ export async function handleMeta(db: Db, type: string, d: unknown): Promise<void
   } else if (type === "THREAD_LIST_SYNC" && x.guild_id) {
     for (const t of x.threads ?? []) await thread(x.guild_id, t);
   } else if ((type === "CHANNEL_DELETE" || type === "THREAD_DELETE") && x.id) {
-    await db.prepare("DELETE FROM discord_channels WHERE channel_id = ? OR parent_id = ?").run(x.id, x.id);
-    await db.prepare("DELETE FROM discord_categories WHERE category_id = ?").run(x.id);
+    const gone = x.id;
+    await db.run(db.k.deleteFrom("discord_channels").where((eb) => eb.or([eb("channel_id", "=", gone), eb("parent_id", "=", gone)])));
+    await db.run(db.k.deleteFrom("discord_categories").where("category_id", "=", gone));
   } else if (type === "GUILD_DELETE" && x.id && !x.unavailable) {
-    await db.prepare("DELETE FROM discord_channels WHERE guild_id = ?").run(x.id);
-    await db.prepare("DELETE FROM discord_categories WHERE guild_id = ?").run(x.id);
+    await db.run(db.k.deleteFrom("discord_channels").where("guild_id", "=", x.id));
+    await db.run(db.k.deleteFrom("discord_categories").where("guild_id", "=", x.id));
   }
 }
 
@@ -179,10 +180,11 @@ async function discord(args: string[]): Promise<void> {
       console.log(`deleted ${n} mention ${n === 1 ? "row" : "rows"} and ${links} ${links === 1 ? "link" : "links"}${signedIn ? " and the GitHub sign-in" : ""}`);
     }
   } else if (sub === "channels") {
-    for (const c of await db.prepare("SELECT channel_id, guild_name, name, watched FROM discord_channels ORDER BY guild_name, name").all() as { channel_id: string; guild_name: string | null; name: string | null; watched: number }[])
+    for (const c of await db.all(db.k.selectFrom("discord_channels").select(["channel_id", "guild_name", "name", "watched"])
+      .orderBy("guild_name", (o) => o.asc().nullsFirst()).orderBy("name", (o) => o.asc().nullsFirst())))
       console.log(`${c.watched ? "watched " : "-       "} ${c.channel_id} ${c.guild_name ?? "?"} / #${c.name ?? "?"}`);
   } else if ((sub === "watch" || sub === "unwatch") && a) {
-    const r = await db.prepare("UPDATE discord_channels SET watched = ? WHERE channel_id = ?").run(sub === "watch" ? 1 : 0, a);
+    const r = await db.run(db.k.updateTable("discord_channels").set({ watched: sub === "watch" ? 1 : 0 }).where("channel_id", "=", a));
     if (!r.changes) die("no such channel; the bot has not reported it");
     await audit(db, "cli", sub === "watch" ? "discord-watch" : "discord-unwatch", a);
     console.log(`${sub === "watch" ? "watching" : "no longer watching"} ${a}`);
