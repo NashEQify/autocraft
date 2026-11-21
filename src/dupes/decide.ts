@@ -16,7 +16,7 @@ import { oneSentence } from "../review/summary.ts";
 import { storeOptionTexts } from "./texts.ts";
 import { inPilot, pilotSqlFor } from "../pilot.ts";
 import { withdrawGroupedQuestions } from "../merge/withdraw.ts";
-import { mapSeq } from "../async-seq.ts";
+import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
 export { duplicateEdges, duplicateGroups, type Group } from "./plan.ts";
@@ -77,7 +77,7 @@ export async function groupPlans(db: Db, repo?: string): Promise<GroupPlan[]> {
   const out: GroupPlan[] = [];
   const groups = await duplicateGroups(db, repo), setsOf = await kindSetsLoader(db, groups), stored = await storedComparisons(db, repo), answeredKeeps = await answeredKeepsLoader(db, repo);
   for (const g of groups) {
-    const sets = setsOf(g).filter((s) => s.members.some((m) => m.state === "OPEN" && setsOf.inPilot(s.repo, m.number)));
+    const sets = await filterSeq(setsOf(g), async (s) => await someSeq(s.members, async (m) => m.state === "OPEN" && await setsOf.inPilot(s.repo, m.number)));
     if (!sets.length) continue;
     // A member held by a Backlog answer is not asked about again.
     if (g.members.some((n) => setsOf.backlogHeld(g.repo, n))) continue;
@@ -96,7 +96,7 @@ export async function groupPlans(db: Db, repo?: string): Promise<GroupPlan[]> {
         if (settled.has(m.number)) continue;
         const other = cmp.result?.others.find((o) => o.number === m.number);
         const dup = set.kind === "issue" || other?.duplicate !== false;
-        const role: Role = m.state === "OPEN" && dup && setsOf.inPilot(set.repo, m.number) ? "close" : "stay";
+        const role: Role = m.state === "OPEN" && dup && await setsOf.inPilot(set.repo, m.number) ? "close" : "stay";
         items.push({ number: m.number, kind: set.kind, role, target: role === "close" ? kept : null, detail: other ? { ...other } : null });
       }
     }

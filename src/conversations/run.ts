@@ -26,7 +26,7 @@ export type ConversationParams = {
   diff?: DiffSource;
   usageRun: string;
   onHandled?: (n: number) => void;
-  cancelled?: () => boolean;
+  cancelled?: () => Promise<boolean>;
   log: (line: string) => void;
   /** The Jev and Haiku calls of the semantic reference check; absent: the real ones. */
   semantic?: SemanticDeps;
@@ -42,7 +42,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
   const checkouts = new Map<string, Promise<string | null>>();
   let answered = 0, handled = 0;
   await pool(todo.map((c, k) => async () => {
-    if (p.cancelled?.()) return;
+    if (await p.cancelled?.()) return;
     const { repo, number: n } = c;
     const start = now();
     // The item may have changed since the message was written; the update goes in front of the message.

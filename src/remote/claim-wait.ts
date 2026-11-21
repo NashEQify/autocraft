@@ -62,9 +62,9 @@ type Waiter = {
   from: number;
   attempt: ClaimTry;
   /** Records the claim as an idle helper's (idle_claim_at). */
-  idle: (nowMs: number) => void;
+  idle: (nowMs: number) => Promise<void>;
   /** The empty reply; `held` when it ends a wait that ran to its deadline. */
-  empty: (nowMs: number, held: boolean) => EmptyReply;
+  empty: (nowMs: number, held: boolean) => Promise<EmptyReply>;
   /** A reason outside the try to answer at once (a write permission GitHub could not confirm). */
   blocked: () => boolean;
   resolve: (r: ClaimReply) => void;
@@ -105,7 +105,7 @@ export class ClaimWaits {
       const prev = ticket.onGone;
       ticket.onGone = () => {
         if (!waiter.done) {
-          try { this.#settle(waiter, waiter.empty(Date.now(), false)); } catch (e) { this.#settle(waiter, null, e); }
+          void waiter.empty(Date.now(), false).then((r) => this.#settle(waiter, r), (e: unknown) => this.#settle(waiter, null, e));
         }
         prev?.();
       };
@@ -121,9 +121,7 @@ export class ClaimWaits {
     const now = Date.now();
     for (const w of [...this.#waiters]) {
       if (w.done) continue;
-      let r: EmptyReply;
-      try { r = w.empty(now, false); } catch (e) { this.#settle(w, null, e); continue; }
-      this.#settle(w, { ...r, retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) });
+      void w.empty(now, false).then((r) => this.#settle(w, { ...r, retryAfter: scaledS(1 + Math.floor(Math.random() * 5)) }), (e: unknown) => this.#settle(w, null, e));
     }
   }
 
@@ -166,10 +164,10 @@ export class ClaimWaits {
           const r = await w.attempt(now, { quick: !full, live: () => !w.ticket.gone && !w.done && !this.#closed });
           if (w.done) continue;
           if (r) this.#settle(w, r);
-          else if (w.blocked()) this.#settle(w, w.empty(now, false));
+          else if (w.blocked()) this.#settle(w, await w.empty(now, false));
           else if (final) {
-            w.idle(now);
-            this.#settle(w, w.empty(now, true));
+            await w.idle(now);
+            this.#settle(w, await w.empty(now, true));
           }
         } catch (e) {
           // A busy database: the claim keeps waiting and is tried again, unless this was its last try.

@@ -29,7 +29,7 @@ export type ScanDeps = {
   /** The pinned commit of the default branch and a read-only directory of its files, or null when none can be made. */
   /** With `pin`, the checkout of exactly that commit (a continued scan), else the current head of the default branch. */
   checkout: (repo: string, pin?: string) => Promise<{ dir: string; sha: string } | null>;
-  cancelled: () => boolean;
+  cancelled: () => Promise<boolean>;
   log: (line: string) => void;
   progress?: (line: string) => void;
   /** The model call that writes a finding's scan test (feature scan-tests); with `crates`, absent means no scan tests. */
@@ -158,7 +158,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
   if (!scan) throw new Error(`no scan ${scanId}`);
   if (!ACTIVE_STATES.includes(scan.state)) return `scan ${scanId} already ${scan.state}`;
   const { repo, cap_usd: cap } = scan;
-  const stopped = async (): Promise<boolean> => deps.cancelled() || (await scanRow(db, scanId))?.state === "stopped";
+  const stopped = async (): Promise<boolean> => await deps.cancelled() || (await scanRow(db, scanId))?.state === "stopped";
   const setState = async (state: "modeling" | "scanning" | "verifying"): Promise<void> => void await db.prepare(`UPDATE security_scans SET state = ? WHERE id = ? AND state IN (${ACTIVE_STATES.map((s) => `'${s}'`).join(", ")})`).run(state, scanId);
   const progress = (line: string): void => { deps.progress?.(line); deps.log(line); };
   const cost = async (): Promise<number> => (await scanRow(db, scanId))!.cost_usd;
@@ -189,15 +189,15 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
   }
 
   /** Ends the scan as failed and throws, so the job fails too. */
-  const fail = async (msg: string): never => {
+  const fail = async (msg: string): Promise<never> => {
     await finishScan(db, scanId, "failed", msg.slice(0, 500));
     throw new Error(`${repo}: scan ${scanId} failed: ${msg}`);
   };
 
   try {
     const co = await deps.checkout(repo, scan.commit_sha ?? undefined);
-    if (!co) return fail("The repository could not be checked out for a read-only scan.");
-    if (scan.commit_sha && co.sha !== scan.commit_sha) return fail(`The checkout is at ${co.sha.slice(0, 7)}, not the scan's pinned commit ${scan.commit_sha.slice(0, 7)}.`);
+    if (!co) return await fail("The repository could not be checked out for a read-only scan.");
+    if (scan.commit_sha && co.sha !== scan.commit_sha) return await fail(`The checkout is at ${co.sha.slice(0, 7)}, not the scan's pinned commit ${scan.commit_sha.slice(0, 7)}.`);
     await db.prepare("UPDATE security_scans SET commit_sha = ? WHERE id = ?").run(co.sha, scanId);
     const base = { repo: securityRepo(repo), number: scanId, project: repo, commit: co.sha } as const;
 
@@ -223,7 +223,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
       await setState("modeling");
       progress(`${repo}: threat model`);
       const modeled = await call<ThreatModel>("model", MODEL_GUESS_USD, {}, () => deps.ask("security.model", { ...base }), parseThreatModel);
-      if (!modeled) return fail("The threat model could not be read.");
+      if (!modeled) return await fail("The threat model could not be read.");
       summaryText = modeled.value.summary;
       entryPoints = modeled.value.entryPoints;
       for (const a of modeled.value.areas) {
@@ -232,7 +232,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
         areas.push(a);
         sizes.push(bytes);
       }
-      if (!areas.length) return fail("The threat model named no area that exists in the checkout.");
+      if (!areas.length) return await fail("The threat model named no area that exists in the checkout.");
       const insArea = db.prepare("INSERT INTO security_areas (scan_id, idx, name, paths, entry_points, risk, why) VALUES (?, ?, ?, ?, ?, ?, ?)");
       await forEachSeq(areas, async (a, i) => await insArea.run(scanId, i, a.name, JSON.stringify(a.paths), JSON.stringify(a.entryPoints), a.risk, a.why));
       const total = sizes.map(areaGuessUsd).reduce((x, y) => x + y, 0);

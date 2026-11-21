@@ -10,7 +10,7 @@ import { inPilot, pilotSql } from "../pilot.ts";
 import { backlogHeldSql } from "./held.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
-import { mapSeq } from "../async-seq.ts";
+import { mapSeq, someSeq } from "../async-seq.ts";
 
 type Edge = { repo: string; a: number; b: number; similarity: number; jev_p: number | null; haiku: string | null };
 
@@ -80,7 +80,7 @@ export async function kindSetsOf(db: Db, g: Group): Promise<KindSet[]> {
 
 type MemberRow = Member & { k?: string; state_reason?: string | null; in_pilot?: number; held_backlog?: number };
 /** kindSetsOf() for the given groups, with their members' rows read once; `inPilot` and `backlogHeld` answer for the members the same way. */
-export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => boolean; backlogHeld: (repo: string, number: number) => boolean }> {
+export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => Promise<boolean>; backlogHeld: (repo: string, number: number) => boolean }> {
   const rows = new Map<string, { m: Member; reason: string | null; pilot: boolean; backlog: boolean }>();
   for (const r of await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
       i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql("i")} AS in_pilot, ${backlogHeldSql("i")} AS held_backlog
@@ -237,7 +237,7 @@ export async function dueSets(db: Db, repo?: string, nowMs: number = Date.now(),
   const groups = await duplicateGroups(db, repo), setsOf = await kindSetsLoader(db, groups), stored = await storedComparisons(db, repo);
   for (const g of groups)
     for (const s of setsOf(g)) {
-      if (!s.members.some((m) => m.state === "OPEN" && setsOf.inPilot(s.repo, m.number))) continue;
+      if (!await someSeq(s.members, async (m) => m.state === "OPEN" && await setsOf.inPilot(s.repo, m.number))) continue;
       const c = await currentComparison(db, s, stored);
       if (change) {
         if (c && c.source === "rule" && c.attempts < RULE_ATTEMPTS) change(s, Date.parse(c.at) + RULE_RETRY_MS);

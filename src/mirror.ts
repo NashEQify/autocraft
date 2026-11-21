@@ -17,7 +17,7 @@ import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";
 import { envVar } from "./env.ts";
 import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/read.ts";
-import { DEFAULT_OWNER, loadOwners, ownerOf, slugOf } from "./owners.ts";
+import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
@@ -754,7 +754,7 @@ async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
       await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
     }
   }
-  loadOwners(db);
+  await reloadOwners(db);
   // A repo the listing shows exists again: its not-found record is stale.
   for (const r of repos) await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind = 'not-found'").run(r.name);
   await setSetting(db, "repos_refreshed_at", iso(new Date()));

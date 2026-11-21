@@ -54,7 +54,7 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
   try {
     const { step, params } = await checkRequest(db, req.step, req.params);
     // The gate and the insert are one write transaction, so two CLI runs cannot both pass the gate.
-    await db.write(async () => {
+    job = await db.write(async () => {
       const why = await cliGate(db, step, steps, params);
       if (why) throw new JobError(409, why);
       const lim = await jobLimit(db, step, Date.now(), typeof params.limit === "number" ? params.limit : undefined);
@@ -63,7 +63,7 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
       mkdirSync(logsDir(), { recursive: true });
       const t = now();
       const repo = typeof full.repo === "string" ? full.repo : null;
-      job = Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?)")
+      return Number((await db.prepare("INSERT INTO jobs (step, params, repo, requested_by, requested_at, state, started_at) VALUES (?, ?, ?, 'cli', ?, 'running', ?)")
         .run(step.name, JSON.stringify(full), repo, t, t)).lastInsertRowid);
     });
   } catch (e) {

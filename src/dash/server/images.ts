@@ -94,7 +94,7 @@ export function registerImageRepos(fn: ((href: string) => Promise<string[]>) | n
 /** The repo an allowed image URL belongs to (the first, when it occurs in several), else null. */
 export async function imageRepo(raw: string): Promise<string | null> {
   const u = allowedImage(raw);
-  return (u && (await currentIndex?.(u.href))[0]) || null;
+  return (u && (await currentIndex?.(u.href))?.[0]) || null;
 }
 
 /**

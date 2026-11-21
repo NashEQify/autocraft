@@ -174,8 +174,7 @@ export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string =
   const hist = db.prepare("INSERT INTO main.plan_history (repo, number, head, old_state, new_state, old_wait, wait, reasons, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
   // The memo is dropped until the write commits and is brought up to date after it.
   storedMemo.delete(db);
-  let rev: number | null;
-  await db.write(async () => {
+  const rev = await db.write(async () => {
     // A write by another connection since the rows were read is in the table but not in `stored`: read the rows again under the lock and diff against those.
     if (await planRev(db) !== first.rev) {
       stored = await readStored(db);
@@ -193,7 +192,7 @@ export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string =
       await del.run(repo, number);
     }
     // Read under the write lock: no other write can land between the rows this transaction diffed against (or wrote) and the counter.
-    rev = await planRev(db);
+    return await planRev(db);
   });
   for (const r of changed) stored.set(`${r.repo}#${r.number}`, storedOf(r));
   for (const k of gone) stored.delete(k);

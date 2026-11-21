@@ -15,10 +15,20 @@ let loadedAt = 0;
 /** Reads the owners from the `repos` table; the most recently loaded database also refreshes the cache later. */
 export function loadOwners(db: DatabaseSync): void {
   source = db;
+  setOwners(db.prepare(OWNERS_SQL).all() as OwnerRow[]);
+}
+
+/** loadOwners() through the async handle, after a write to `repos`. The cache refreshes later from the connection loaded last. */
+export async function reloadOwners(db: { prepare(sql: string): { all(...params: never[]): Promise<unknown[]> } }): Promise<void> {
+  setOwners(await db.prepare(OWNERS_SQL).all() as OwnerRow[]);
+}
+
+const OWNERS_SQL = "SELECT name, owner FROM main.repos";
+type OwnerRow = { name: string; owner: string | null };
+
+function setOwners(rows: OwnerRow[]): void {
   const next = new Map<string, string>();
-  for (const r of db.prepare("SELECT name, owner FROM main.repos").all() as { name: string; owner: string | null }[]) {
-    if (r.owner) next.set(r.name, r.owner);
-  }
+  for (const r of rows) if (r.owner) next.set(r.name, r.owner);
   cache = next;
   loadedAt = Date.now();
 }

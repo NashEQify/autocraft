@@ -64,7 +64,7 @@ type OurPath = { commits: OurCommit[]; complete: boolean; sources: (string | nul
 
 /** ourCommitsSince() for many PRs: the pushes of every PR are read once, on first use. */
 export function ourCommitsLoader(db: Db): (repo: string, number: number, earlier: string, head: string) => Promise<OurPath> {
-  let maps: { a: Map<string, Pushes["a"]>; b: Map<string, Pushes["b"]>; c: Map<string, Pushes["c"]>; d: Map<string, Pushes["d"]> } | undefined;
+  let maps: { a: Map<string, Pushes["a"]>; b: Map<string, Awaited<ReturnType<Pushes["b"]>>>; c: Map<string, Awaited<ReturnType<Pushes["c"]>>>; d: Map<string, Awaited<ReturnType<Pushes["d"]>>> } | undefined;
   // The row each per-head read would give first: the newest for a, b and c, the first stored for d.
   const firstBy = async <T>(sql: string): Promise<Map<string, T>> => {
     const m = new Map<string, T>();

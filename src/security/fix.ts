@@ -56,7 +56,7 @@ export type FixDeps = {
    */
   ask: (id: "security.fix" | "security.fixcheck", input: SecurityFixInput | SecurityFixCheckInput, o: { checkout?: string; tool?: CheckTool; agent: string; run: string; session?: SessionAsk }) => Promise<{ text: string | null; cost: number | null; resumed?: boolean; kept?: KeptSession }>;
   who: (repo: string) => Promise<{ login: string; email: string }>;
-  cancelled: () => boolean;
+  cancelled: () => Promise<boolean>;
   log: (line: string) => void;
 };
 
@@ -238,7 +238,7 @@ export async function runFix(db: Db, repo: string, n: number, d: FixDeps): Promi
     }
     let lastWhy = previous?.failure ?? "no round ran";
     for (let round = startRound; round <= FIX_ROUNDS; round++) {
-      if (d.cancelled()) return await giveUp(db, repo, n, "the fix was cancelled", log);
+      if (await d.cancelled()) return await giveUp(db, repo, n, "the fix was cancelled", log);
       const failRound = (why: string, patch?: string): void => {
         lastWhy = why;
         previous = { patch: (patch ?? previous?.patch ?? "").slice(0, 60_000), failure: why };

@@ -28,7 +28,7 @@ export type GroupIo = {
   /** Called before a decision's writes: a string says why the decision waits (its operator has no token or no access), and it is left for a later run. */
   begin?(decision: string): Promise<string | null>;
   /** A write of the decision failed with `why` (the error `err`); true when that is a wait for the operator's access or a transient failure, not a failure to count. */
-  failed?(decision: string, why: string, err: unknown): boolean;
+  failed?(decision: string, why: string, err: unknown): Promise<boolean>;
 };
 export type GroupRun = {
   repo: string; io: GroupIo; at: () => string; log: (line: string) => void;
@@ -196,7 +196,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
       }
     } catch (e) {
       const why = (e as Error).message.replace(/\s+/g, " ").slice(0, 300);
-      if (run.io.failed?.(dec.id, why, e)) { run.log(`  ${dec.id}: waiting: ${why}`); continue; }
+      if (await run.io.failed?.(dec.id, why, e)) { run.log(`  ${dec.id}: waiting: ${why}`); continue; }
       res.failed.push({ ref: cur ? ref(cur.item.number) : dec.id, reason: why });
       run.log(`  ${dec.id}: failed: ${why}`);
       if (!cur) return res;

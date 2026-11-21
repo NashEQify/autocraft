@@ -2,7 +2,7 @@
 // the dashboard work on. `repos` holds every org repo; `tracked_repos` selects.
 import { audit } from "./dash/audit.ts";
 import { execFile } from "node:child_process";
-import { DEFAULT_OWNER, loadOwners, OWNER, splitSlug } from "./owners.ts";
+import { DEFAULT_OWNER, OWNER, reloadOwners, splitSlug } from "./owners.ts";
 import { appCoverage, githubIdentity, setGithubIdentityChecked } from "./github/identity.ts";
 import { readAppSecrets } from "./github/install-token.ts";
 import { PilotError, setRepoPipeline } from "./pilot.ts";
@@ -31,7 +31,7 @@ export async function trackRepo(db: Db, by: string, input: string): Promise<bool
     throw new RepoError(`${name} is already known under ${known.owner}; repo names are unique across owners.`);
   }
   if (!known) await db.prepare("INSERT INTO main.repos (name, owner) VALUES (?, ?)").run(name, owner);
-  loadOwners(db);
+  await reloadOwners(db);
   const r = await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES (?, ?, ?)")
     .run(name, by, new Date().toISOString());
   if (r.changes) {

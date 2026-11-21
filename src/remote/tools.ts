@@ -17,6 +17,7 @@ import { REFERENCE_SERVER } from "./bundle.ts";
 import { liveLease } from "./calls.ts";
 import { relayCheck } from "./check-relay.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
+import type { DatabaseSync } from "node:sqlite";
 import type { Db } from "../db/index.ts";
 
 export type { ToolResult };
@@ -124,31 +125,31 @@ async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): 
 }
 
 const SNAPSHOT_IDLE_MS = 60_000;
-let snapshotHandle: { file: string; stamp: string; db: Db; timer: NodeJS.Timeout } | undefined;
+let snapshotHandle: { file: string; stamp: string; db: DatabaseSync; timer: NodeJS.Timeout } | undefined;
 
-async function closeSnapshot(): Promise<void> {
+function closeSnapshot(): void {
   if (!snapshotHandle) return;
   clearTimeout(snapshotHandle.timer);
-  try { await snapshotHandle.db.close(); } catch { /* already closed */ }
+  try { snapshotHandle.db.close(); } catch { /* already closed */ }
   snapshotHandle = undefined;
 }
 
 /** The read-only handle of the snapshot database, kept open between tool calls; reopened when the file is replaced, closed after an idle minute. */
-async function snapshotDb(file: string): Promise<Db> {
+function snapshotDb(file: string): DatabaseSync {
   const st = statSync(file), stamp = `${st.mtimeMs}:${st.size}:${st.ino}`;
-  if (snapshotHandle && (snapshotHandle.file !== file || snapshotHandle.stamp !== stamp)) await closeSnapshot();
+  if (snapshotHandle && (snapshotHandle.file !== file || snapshotHandle.stamp !== stamp)) closeSnapshot();
   if (!snapshotHandle) snapshotHandle = { file, stamp, db: openDb(file), timer: setTimeout(closeSnapshot, SNAPSHOT_IDLE_MS).unref() };
   else snapshotHandle.timer.refresh();
   return snapshotHandle.db;
 }
 
-async function items(name: string, raw: unknown): Promise<ToolResult> {
+function items(name: string, raw: unknown): ToolResult {
   const file = snapshotFile();
-  let db: Db;
+  let db: DatabaseSync;
   try {
-    db = await snapshotDb(file);
+    db = snapshotDb(file);
   } catch {
-    await closeSnapshot();
+    closeSnapshot();
     return { text: "the item tools are not available right now", isError: true };
   }
   return itemTool(db, { db: file, diffs: diffCacheDir() }, name, raw);
