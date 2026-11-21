@@ -56,6 +56,21 @@ test("the snapshot built from Postgres has the rows of the one built from SQLite
     const dir = mkdtempSync(join(SCRATCH, "itemtools-pg-"));
     // A page size below the row count exercises the keyset paging.
     const fromPg = await writeSnapshotFromDb(pdb, join(dir, "pg", "items.db"), 2);
+    // Nothing written since: the file is left alone. An item update rebuilds it.
+    const file = join(dir, "pg", "items.db");
+    const marker = () => (new DatabaseSync(file, { readOnly: true }).prepare("SELECT value FROM meta WHERE key = 'refreshed_at'").get() as { value: string }).value;
+    const before = marker();
+    await new Promise((r) => setTimeout(r, 5));
+    const again = await writeSnapshotFromDb(pdb, file, 2);
+    assert.equal(again.rebuilt, false);
+    assert.equal(marker(), before);
+    assert.equal(again.items, 3);
+    await pdb.prepare("UPDATE items SET title = 'Fix kerning now' WHERE repo = 'photocraft' AND number = 7").run();
+    const after = await writeSnapshotFromDb(pdb, file, 2);
+    assert.equal(after.rebuilt, true);
+    assert.notEqual(marker(), before);
+    await pdb.prepare("UPDATE items SET title = 'Fix kerning' WHERE repo = 'photocraft' AND number = 7").run();
+    await writeSnapshotFromDb(pdb, file, 2);
     await sdb.close();
     writeSnapshot(lite.file!, join(dir, "sqlite", "items.db"));
     const a = dump(join(dir, "pg", "items.db"));

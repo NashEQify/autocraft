@@ -197,12 +197,14 @@ const cell = (name: string, v: unknown): unknown => (INTEGER_COLUMNS.has(name) &
 
 /**
  * Builds the snapshot at `dest` from a Db handle (the Postgres app database). The same rows as the SQLite path, read in
- * one snapshot and keyset-paged, are written into a new file in one transaction, renamed over `dest`. A refresh always
- * rewrites the file, so `changed` counts the rows written.
+ * one snapshot and keyset-paged, are written into a new file in one transaction, renamed over `dest`. A refresh whose stamp
+ * (change markers and embedding count and time) equals the one stored in the file's meta writes nothing; otherwise
+ * it rewrites the file, and `changed` counts the rows written.
  */
 export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(), pageSize: number = PAGE): Promise<SnapshotStats> {
   mkdirSync(dirname(dest), { recursive: true });
   recoverJournal(dest);
+  let stamp = "";
   const target = `${dest}.${process.pid}.tmp`;
   rmSync(target, { force: true });
   const out = new DatabaseSync(target, { timeout: 30_000 });
@@ -212,7 +214,17 @@ export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(),
     out.prepare("INSERT INTO meta VALUES ('schema', ?)").run(SCHEMA_VERSION);
     out.exec("BEGIN");
     const counts = { items: 0, comments: 0, embeddings: 0 };
+    let unchanged = false;
     await db.read(async () => {
+      // A cheap stamp of what is copied: the change markers of the topics covering repos, items, comments and decisions,
+      // and the embeddings' count and newest write time (no topic covers them).
+      const seqs = await db.prepare("SELECT topic, seq FROM change_seq WHERE topic IN ('repos', 'items', 'decisions') ORDER BY topic").all<{ topic: string; seq: unknown }>();
+      const emb = await db.prepare("SELECT COUNT(*) AS n, MAX(at) AS at FROM item_embeddings").get<{ n: unknown; at: string | null }>();
+      stamp = JSON.stringify([seqs.map((r) => [r.topic, Number(r.seq)]), Number(emb?.n ?? 0), emb?.at ?? null]);
+      if (hasVersion(dest) && storedStamp(dest) === stamp) {
+        unchanged = true;
+        return;
+      }
       const pub = "repo IN (SELECT name FROM repos WHERE visibility = 'public')";
       const copy = async (table: string, columns: string[], key: string[], where: string, into: string, count: keyof typeof counts | null) => {
         const ins = out.prepare(`INSERT INTO ${into} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`);
@@ -240,7 +252,20 @@ export async function writeSnapshotFromDb(db: Db, dest: string = snapshotFile(),
         ins.run(o.repo, o.number, o.kind, o.answer, o.label, o.at);
       }
     });
+    if (unchanged) {
+      out.exec("ROLLBACK");
+      out.close();
+      rmSync(target, { force: true });
+      const same = new DatabaseSync(dest, { readOnly: true });
+      try {
+        const n = (t: string) => Number((same.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);
+        return { items: n("items"), comments: n("comments"), bytes: statSync(dest).size, rebuilt: false, changed: { items: 0, comments: 0, embeddings: 0 } };
+      } finally {
+        same.close();
+      }
+    }
     out.prepare("INSERT OR REPLACE INTO meta VALUES ('refreshed_at', ?)").run(new Date().toISOString());
+    out.prepare("INSERT OR REPLACE INTO meta VALUES ('pg_stamp', ?)").run(stamp);
     const n = (t: string) => Number((out.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n);
     const result = { items: n("items"), comments: n("comments") };
     out.exec("COMMIT");
@@ -292,6 +317,19 @@ function recoverJournal(dest: string): void {
 
 function dropJournal(dest: string): void {
   try { unlinkSync(`${dest}-journal`); } catch { /* none */ }
+}
+
+function storedStamp(file: string): string | undefined {
+  try {
+    const db = new DatabaseSync(file, { readOnly: true });
+    try {
+      return (db.prepare("SELECT value FROM meta WHERE key = 'pg_stamp'").get() as { value: string } | undefined)?.value;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
 }
 
 function hasVersion(file: string): boolean {
