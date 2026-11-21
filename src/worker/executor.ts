@@ -57,6 +57,7 @@ export function removeStaleWorkDirs(cfg: WorkerConfig, note: (s: string) => void
 }
 
 const CONTENT_TYPES: Record<string, string> = { ".png": "image/png", ".json": "application/json", ".xml": "application/xml", ".txt": "text/plain", ".log": "text/plain" };
+export const contentTypeOf = (name: string): string => CONTENT_TYPES[name.slice(name.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream";
 
 type Collected = { name: string; path: string; bytes: number };
 
@@ -191,7 +192,7 @@ export async function executeTask(cfg: WorkerConfig, task: ClaimedTask, sink: Ta
       if (outcome.timedOut) await emit(step.name, `\nstep timed out after ${step.timeoutSec} s and was killed\n`);
       const files = collectArtifacts(out, step.artifacts ?? [], taken, budget, (s) => void emit(step.name, `${s}\n`));
       for (const f of files) {
-        await sink.artifact(f.name, readFileSync(f.path), CONTENT_TYPES[f.name.slice(f.name.lastIndexOf(".")).toLowerCase()] ?? "application/octet-stream");
+        await sink.artifact(f.name, readFileSync(f.path), contentTypeOf(f.name));
       }
       if (step.network === "fetch") {
         // Before any offline step (build scripts, tests) can touch the cache.

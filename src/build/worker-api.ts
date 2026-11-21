@@ -11,7 +11,7 @@ import { TokenBucket } from "../dash/server/limits.ts";
 import { RateLimiter } from "../dash/server/util.ts";
 import { ArtifactError, MAX_ARTIFACT_BYTES, NAME_RE, storeArtifact, tempPath } from "./artifacts.ts";
 import { authenticate, BuildError, hello, touch } from "./envs.ts";
-import { appendLog, claim, finishTask, heartbeat, MAX_CHUNK_BYTES, ownedTask, startTask } from "./tasks.ts";
+import { appendLog, claim, finishTask, heartbeat, MAX_CHUNK_BYTES, ownedTask, podTask, startTask } from "./tasks.ts";
 import { dbReady, serveHealth } from "../health.ts";
 import { envVar } from "../env.ts";
 
@@ -118,6 +118,13 @@ export function handler(o: WorkerServerOptions) {
     if (wait) throw new Refusal(429, "too many requests", { "retry-after": String(wait) });
     const path = url.pathname;
     const method = req.method ?? "GET";
+
+    // A build pod's key reads its one task and uploads that task's artifacts; results come from pod status, read by the runner.
+    if (env.taskId !== undefined) {
+      if (method === "GET" && path === "/worker/pod/task") return reply(res, 200, podTask(db, env.id, env.taskId));
+      const a = /^\/worker\/tasks\/(\d{1,15})\/artifacts\/[^/]+$/.exec(path);
+      if (!a || method !== "PUT" || Number(a[1]) !== env.taskId) throw new Refusal(403, "a build pod key may only read its task and upload its artifacts");
+    } else if (path === "/worker/pod/task") throw new Refusal(403, "only a build pod key reads a pod task");
 
     if (method === "POST" && path === "/worker/hello") {
       return reply(res, 200, hello(db, env.id, await readJson(req, 16 * 1024)));

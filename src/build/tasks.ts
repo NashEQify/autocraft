@@ -230,23 +230,53 @@ export function claim(db: DatabaseSync, envId: string, free: number, nowMs: numb
 /** Tasks without a heartbeat for LOST_AFTER_MS: requeued once, then failed; a cancelled one is just cancelled. Returns how many were handled. */
 export function reapLost(db: DatabaseSync, nowMs: number = Date.now()): number {
   const cutoff = new Date(nowMs - LOST_AFTER_MS).toISOString();
-  const stale = db.prepare("SELECT id, attempts, cancel_requested_at FROM build_tasks WHERE state IN ('claimed', 'running') AND heartbeat_at < ?").all(cutoff) as
-    { id: number; attempts: number; cancel_requested_at: string | null }[];
-  if (!stale.length) return 0;
-  const at = new Date(nowMs).toISOString();
-  for (const t of stale) {
-    removeArtifacts(db, [t.id]);
-    if (!t.cancel_requested_at && t.attempts < MAX_ATTEMPTS) {
-      db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(t.id);
-      db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, claimed_at = NULL, started_at = NULL, heartbeat_at = NULL, results = '[]',
-        log_bytes = 0, summary = NULL WHERE id = ? AND state IN ('claimed', 'running')`).run(t.id);
-    } else {
-      const state = t.cancel_requested_at ? "cancelled" : "failed";
-      db.prepare("UPDATE build_tasks SET state = ?, ended_at = ?, summary = ? WHERE id = ? AND state IN ('claimed', 'running')")
-        .run(state, at, t.cancel_requested_at ? "Cancelled; the worker stopped answering." : "The worker stopped answering twice (no heartbeat for 2 minutes).", t.id);
-    }
-  }
+  // The pod launcher owns the tasks it runs in pods (launcher.ts) and loses them by their pods' state.
+  const stale = db.prepare("SELECT id FROM build_tasks WHERE state IN ('claimed', 'running') AND heartbeat_at < ? AND id NOT IN (SELECT task_id FROM build_pod_runs)").all(cutoff) as { id: number }[];
+  for (const t of stale) loseTask(db, t.id, "The worker stopped answering twice (no heartbeat for 2 minutes).", "Cancelled; the worker stopped answering.", nowMs);
   return stale.length;
+}
+
+/**
+ * A claimed or running task whose worker or pod is gone: requeued when it has a claim left and nobody cancelled it,
+ * else failed with `reason` (or cancelled with `cancelled`). Its artifacts go; a requeued task also loses its log.
+ */
+export function loseTask(db: DatabaseSync, id: number, reason: string, cancelled = "Cancelled; the worker stopped answering.", nowMs: number = Date.now()): void {
+  const t = db.prepare("SELECT attempts, cancel_requested_at FROM build_tasks WHERE id = ? AND state IN ('claimed', 'running')").get(id) as
+    { attempts: number; cancel_requested_at: string | null } | undefined;
+  if (!t) return;
+  removeArtifacts(db, [id]);
+  if (!t.cancel_requested_at && t.attempts < MAX_ATTEMPTS) {
+    db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
+    db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, claimed_at = NULL, started_at = NULL, heartbeat_at = NULL, results = '[]',
+      log_bytes = 0, summary = NULL WHERE id = ? AND state IN ('claimed', 'running')`).run(id);
+  } else {
+    db.prepare("UPDATE build_tasks SET state = ?, ended_at = ?, summary = ? WHERE id = ? AND state IN ('claimed', 'running')")
+      .run(t.cancel_requested_at ? "cancelled" : "failed", new Date(nowMs).toISOString(), t.cancel_requested_at ? cancelled : reason, id);
+  }
+}
+
+/** Undoes a claim whose task never started (its first pod could not be created): queued again, the claim not counted. */
+export function releaseClaim(db: DatabaseSync, envId: string, id: number): void {
+  db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
+  db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, attempts = MAX(0, attempts - 1), claimed_at = NULL, started_at = NULL, heartbeat_at = NULL,
+    results = '[]', log_bytes = 0, summary = NULL WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')`).run(id, envId);
+}
+
+/** Keeps a task alive while its pods run (they send no heartbeats of their own). */
+export function touchTask(db: DatabaseSync, envId: string, id: number): void {
+  db.prepare("UPDATE build_tasks SET heartbeat_at = ? WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')").run(nowIso(), id, envId);
+}
+
+/** What a build pod's API containers need of their task: the source to fetch, the patch, and each step's name and artifact patterns. */
+export type PodTask = { id: number; repo: string; headSha: string; baseSha: string | null; sourceUrl: string; patch?: string; steps: { name: string; artifacts: string[] }[] };
+
+export function podTask(db: DatabaseSync, envId: string, id: number): PodTask {
+  const t = mine(db, envId, id);
+  return {
+    id: t.id, repo: t.repo, headSha: t.head_sha, baseSha: t.base_sha, sourceUrl: `https://codeload.github.com/${slugOf(t.repo)}/tar.gz/${t.head_sha}`,
+    ...(t.patch ? { patch: t.patch } : {}),
+    steps: json<TaskStep[]>(t.plan, []).map((s) => ({ name: s.name, artifacts: s.artifacts ?? [] })),
+  };
 }
 
 /** The task row when it is running on this environment, else a 409. */

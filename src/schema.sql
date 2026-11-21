@@ -979,7 +979,7 @@ CREATE INDEX IF NOT EXISTS jobs_started ON jobs(started_at);
 CREATE TABLE IF NOT EXISTS build_envs (
   id TEXT PRIMARY KEY,                -- lowercase letters, digits and hyphens
   label TEXT NOT NULL,                -- the only name shown to people
-  kind TEXT NOT NULL,                 -- local-sandbox | remote
+  kind TEXT NOT NULL,                 -- local-sandbox | remote | kubernetes
   enabled INTEGER NOT NULL DEFAULT 1,
   slots INTEGER NOT NULL,             -- the operator's cap; the worker may report fewer
   confidential INTEGER NOT NULL DEFAULT 0, -- set by an operator, never by the worker: takes the security lane's private tasks and no PR code
@@ -993,7 +993,10 @@ CREATE TABLE IF NOT EXISTS build_envs (
   last_seen_at TEXT,
   created_at TEXT NOT NULL,
   updated_by TEXT,
-  updated_at TEXT
+  updated_at TEXT,
+  settings TEXT,                      -- JSON KubeSettings of a kubernetes environment
+  health TEXT,                        -- JSON { state, text, since } the pod launcher last found; null when all is well
+  health_at TEXT                      -- when the pod launcher last wrote health
 );
 
 -- Tasks: one unit of untrusted execution created by a pipeline step.
@@ -1028,6 +1031,27 @@ CREATE INDEX IF NOT EXISTS build_tasks_queue ON build_tasks(priority DESC, id) W
 CREATE INDEX IF NOT EXISTS build_tasks_env ON build_tasks(env_id, state);
 CREATE INDEX IF NOT EXISTS build_tasks_active ON build_tasks(heartbeat_at) WHERE state IN ('claimed', 'running');
 CREATE INDEX IF NOT EXISTS build_tasks_repo ON build_tasks(repo, id);
+
+-- A build task running in Kubernetes pods (src/build/launcher.ts): one row while its pods and volume exist.
+-- The pod key authenticates only the task's API pods and dies with the row.
+CREATE TABLE IF NOT EXISTS build_pod_runs (
+  task_id INTEGER PRIMARY KEY,
+  env_id TEXT NOT NULL,
+  key_hash TEXT NOT NULL,
+  pvc TEXT NOT NULL,                  -- the task's volume
+  stage INTEGER NOT NULL DEFAULT 0,   -- 0 task, 1 source, 2.. step groups, then upload (pods.ts)
+  pod TEXT,                           -- the stage's pod
+  pod_created_at TEXT,
+  prepared TEXT,                      -- JSON Prepared from the source pod
+  results TEXT NOT NULL DEFAULT '[]', -- JSON TaskResult[] read from pod status
+  failed TEXT,                        -- summary of the first failure; later step groups are skipped
+  ran INTEGER NOT NULL DEFAULT 0,     -- plan steps that ran
+  logged TEXT NOT NULL DEFAULT '[]',  -- JSON list of "<pod>/<container>" whose output is in the task log
+  create_tries INTEGER NOT NULL DEFAULT 0, -- failed creates of the stage's pod in a row
+  failing_since TEXT,                 -- the first of them
+  retry_at TEXT,                      -- when the next create is tried
+  started_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);
 CREATE INDEX IF NOT EXISTS build_tasks_ended ON build_tasks(ended_at);
 

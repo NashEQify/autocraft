@@ -2,6 +2,7 @@
 // Authorization header; errors carry the path and status, never the key.
 import type { SandboxInfo } from "./environment.ts";
 import type { Capabilities, ClaimResponse, StepResult } from "./types.ts";
+import type { PodTask } from "../build/tasks.ts";
 
 export class ApiError extends Error {
   status: number;
@@ -60,6 +61,10 @@ export class WorkerApi {
     return (text ? JSON.parse(text) : {}) as T;
   }
 
+  /** A build pod's task (pod keys only). */
+  podTask() {
+    return this.#patient<PodTask>("GET", "/worker/pod/task");
+  }
   hello(version: string, capabilities: Capabilities, slots: number) {
     return this.#call<{ envId: string; label: string }>("POST", "/worker/hello", { version, capabilities, slots });
   }

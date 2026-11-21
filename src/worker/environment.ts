@@ -7,7 +7,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { WorkerConfig } from "./config.ts";
-import { isCommitId, resolveGate, resolveI18nRev } from "./gate.ts";
+import { isCommitId, resolveGate, resolveI18nRev, type GateEnv } from "./gate.ts";
 import { downloadAndExtract } from "./tarball.ts";
 import { slugOf } from "../owners.ts";
 
@@ -84,11 +84,16 @@ export async function ensureImage(cfg: WorkerConfig, toolchain: string, baseImag
 }
 
 /** Directory with the files of `<owner>/<repo>` at `ref`, fetched once per commit and kept in the worker's work dir. */
-export async function ensureCheckout(cfg: WorkerConfig, repo: "craft-fonts" | "craft-i18n", ref: string, fetchImpl?: typeof fetch): Promise<string> {
+export function ensureCheckout(cfg: WorkerConfig, repo: "craft-fonts" | "craft-i18n", ref: string, fetchImpl?: typeof fetch): Promise<string> {
+  return fetchCheckout(cfg.workDir, repo, ref, fetchImpl);
+}
+
+/** `<workDir>/ext/<repo>/<ref>` with the files of the repo at `ref`, fetched once per commit. */
+export async function fetchCheckout(workDir: string, repo: "craft-fonts" | "craft-i18n", ref: string, fetchImpl?: typeof fetch): Promise<string> {
   if (!isCommitId(ref)) throw new Error(`${repo} ref is not a full commit id`);
-  const dir = join(cfg.workDir, "ext", repo, ref);
+  const dir = join(workDir, "ext", repo, ref);
   if (existsSync(join(dir, ".complete"))) return dir;
-  const tmp = join(cfg.workDir, "ext", repo, `.tmp-${randomBytes(4).toString("hex")}`);
+  const tmp = join(workDir, "ext", repo, `.tmp-${randomBytes(4).toString("hex")}`);
   rmSync(tmp, { recursive: true, force: true });
   mkdirSync(tmp, { recursive: true });
   try {
@@ -133,26 +138,35 @@ export async function prepareEnvironment(cfg: WorkerConfig, task: { repo: string
     const image = await ensureImage(cfg, toolchain, baseImage, DISPLAY_PACKAGES, (s) => o.log(`${s}\n`));
     return { image, env: { WGPU_BACKEND: "vulkan" }, mounts: [], info: { ...stock.info, image, packages: [...DISPLAY_PACKAGES] } };
   }
-  const env: Record<string, string> = { ...gate.env };
   const packages = display ? [...new Set([...gate.packages, ...DISPLAY_PACKAGES])] : gate.packages;
-  if (display) env.WGPU_BACKEND = "vulkan";
-  const mounts: ExtraMount[] = [];
   let image = toolImage;
   if (packages.length) image = await ensureImage(cfg, toolchain, baseImage, packages, (s) => o.log(`${s}\n`));
+  const { env, mounts, craftI18nRev: rev } = await gateInputs(cfg.workDir, task.repo, base, gate, o);
+  if (display) env.WGPU_BACKEND = "vulkan";
+  o.log(`environment: image ${image}, gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${rev?.slice(0, 12) ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}\n`);
+  return { image, env, mounts, info: { image, baseImage, packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: rev } };
+}
+
+/**
+ * The steps' env and read-only checkouts that a repo's CI gate (at the base commit) asks for: the gate's env, craft-fonts and
+ * craft-i18n under `<workDir>/ext`. Shared by the container runtime and build pods.
+ */
+export async function gateInputs(workDir: string, repo: string, base: string, gate: GateEnv, o: PrepareOptions): Promise<{ env: Record<string, string>; mounts: ExtraMount[]; craftI18nRev: string | null }> {
+  const env: Record<string, string> = { ...gate.env };
+  const mounts: ExtraMount[] = [];
   if (gate.craftFontsRef) {
-    const dir = await ensureCheckout(cfg, "craft-fonts", gate.craftFontsRef, o.fetchImpl);
+    const dir = await fetchCheckout(workDir, "craft-fonts", gate.craftFontsRef, o.fetchImpl);
     mounts.push({ source: dir, target: "/craft-fonts" });
     env.CRAFT_FONTS_DIR = "/craft-fonts";
     if (gate.requireFonts) env.CRAFT_FONTS_REQUIRED = "1";
   }
   // The commit comes from the base commit, so a PR cannot make the host download a commit of its choosing.
-  const rev = await resolveI18nRev(task.repo, base, o.fetchImpl);
+  const rev = await resolveI18nRev(repo, base, o.fetchImpl);
   if (rev) {
-    mounts.push({ source: await ensureCheckout(cfg, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
+    mounts.push({ source: await fetchCheckout(workDir, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
     env.CRAFT_I18N_DIR = "/craft-i18n";
     env.CRAFT_I18N_REQUIRED = "1";
   }
   if (gate.dropped.length) o.log(`gate env left out: ${gate.dropped.join(", ")}\n`);
-  o.log(`environment: image ${image}, gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${rev?.slice(0, 12) ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}\n`);
-  return { image, env, mounts, info: { image, baseImage, packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: rev } };
+  return { env, mounts, craftI18nRev: rev };
 }

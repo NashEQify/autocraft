@@ -4,15 +4,20 @@
 // characters removed, so it cannot drive the terminal.
 import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
-import type { EnvKind } from "../../web/src/api/types.ts";
+import type { EnvKind, KubeSettings } from "../../web/src/api/types.ts";
 import { connect } from "../db.ts";
+import { envVar } from "../env.ts";
 import { trackedNames } from "../repos.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
-       autocraft-server envs set <id> [--label TEXT] [--enabled yes|no] [--slots N] [--confidential yes|no]
+       autocraft-server envs add <id> --label TEXT --kind kubernetes --slots N [POD SETTINGS]
+       autocraft-server envs set <id> [--label TEXT] [--enabled yes|no] [--slots N] [--confidential yes|no] [POD SETTINGS]
+         POD SETTINGS (kubernetes): --namespace NS  --image REF|runner  --toolchain-image NAME=REF|NAME=none  --worker-url URL
+           --cpu-request Q --cpu-limit Q --memory-request Q --memory-limit Q --ephemeral-request Q --ephemeral-limit Q
+           --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
@@ -72,6 +77,35 @@ function keyFile(opt: Map<string, string>): { write: (key: string) => void; remo
   };
 }
 
+const POD_OPTIONS: Record<string, keyof KubeSettings> = {
+  namespace: "namespace", image: "image", "worker-url": "workerUrl", "cpu-request": "cpuRequest", "cpu-limit": "cpuLimit", "memory-request": "memoryRequest",
+  "memory-limit": "memoryLimit", "ephemeral-request": "ephemeralRequest", "ephemeral-limit": "ephemeralLimit", storage: "storage", "storage-class": "storageClass",
+  "deadline-sec": "deadlineSec", "max-step-sec": "maxStepSec", "runtime-class": "runtimeClassName", arch: "arch",
+};
+
+/** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
+function podSettings(opt: Map<string, string>, current: KubeSettings | null): Partial<KubeSettings> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [name, key] of Object.entries(POD_OPTIONS)) {
+    if (!opt.has(name)) continue;
+    const v = opt.get(name)!;
+    out[key] = key === "deadlineSec" || key === "maxStepSec" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
+  }
+  if (opt.has("toolchain-image")) {
+    const m = /^([^=]+)=(.+)$/.exec(opt.get("toolchain-image")!) ?? die("--toolchain-image takes NAME=REF or NAME=none");
+    const images: Record<string, string | null> = { ...(current?.toolchainImages ?? {}) };
+    if (m[2] === "none") delete images[m[1]!];
+    else images[m[1]!] = m[2]!;
+    out.toolchainImages = images;
+  }
+  return Object.keys(out).length ? (out as Partial<KubeSettings>) : undefined;
+}
+
+const settingsLine = (s: KubeSettings): string =>
+  `namespace ${s.namespace}, image ${s.image ?? "the runner's own"}, toolchains ${Object.entries(s.toolchainImages).map(([t, i]) => `${t}=${i}`).join(" ") || "none"}, ` +
+  `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
+  `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}`;
+
 /** A yes|no option as a boolean; undefined when it is not given. */
 function yesNo(opt: Map<string, string>, name: string): boolean | undefined {
   if (!opt.has(name)) return undefined;
@@ -96,16 +130,25 @@ function envs(args: string[]): void {
     for (const e of listEnvs(db)) {
       const c = e.capabilities;
       console.log(`${e.id.padEnd(16)} ${safe(e.label).padEnd(24)} ${e.kind.padEnd(14)} ${e.enabled ? (e.online ? "online " : "offline") : "disabled"} ${e.running}/${e.slots} slots${e.confidential ? "  confidential" : ""}  ${c ? `${c.os}/${c.arch} ${c.cpus} cpu ${c.memGb} GB ${c.toolchains.join(",")}` : "no report yet"}${e.pausedReason ? `  paused: ${safe(e.pausedReason)}` : ""}`);
+      if (e.settings) console.log(`${"".padEnd(16)} ${settingsLine(e.settings)}`);
     }
   } else if (sub === "add") {
     const { pos, opt } = options(rest, ["print"]);
     if (!pos[0] || !opt.get("label") || !opt.get("kind") || !opt.get("slots")) die(USAGE);
     if (!KINDS.includes(opt.get("kind") as EnvKind)) die(`--kind must be ${KINDS.join(" or ")}`);
     const confidential = yesNo(opt, "confidential");
+    if (opt.get("kind") === "kubernetes") {
+      const settings = podSettings(opt, null);
+      const { env } = run(() => createEnv(db, { id: pos[0], label: opt.get("label"), kind: "kubernetes", slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }), ...(settings && { settings }) }, "cli"));
+      console.log(`environment ${env.id} created (no worker key: the runner starts its pods)\n${settingsLine(env.settings!)}`);
+      if (!env.settings!.image && !envVar("IMAGE")) console.log("note: this shell has no AUTOCRAFT_IMAGE; the runner must have it, or set --image");
+      return;
+    }
+    if (podSettings(opt, null)) die("pod settings are only for --kind kubernetes");
     const f = keyFile(opt);
     try {
       const { env, key } = (() => createEnv(db, { id: pos[0], label: opt.get("label"), kind: opt.get("kind"), slots: Number(opt.get("slots")), ...(confidential !== undefined && { confidential }) }, "cli"))();
-      f.write(key);
+      f.write(key!);
       console.log(`environment ${env.id} created`);
     } catch (e) {
       f.remove();
@@ -122,9 +165,12 @@ function envs(args: string[]): void {
       const v = yesNo(opt, name);
       if (v !== undefined) input[name] = v;
     }
+    const settings = podSettings(opt, listEnvs(db).find((x) => x.id === pos[0])?.settings ?? null);
+    if (settings) input.settings = settings;
     if (!Object.keys(input).length) die(USAGE);
     const e = run(() => updateEnv(db, pos[0], input, "cli"));
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
+    if (e.settings) console.log(settingsLine(e.settings));
   } else if (sub === "rotate-key") {
     const { pos, opt } = options(rest, ["print"]);
     if (!pos[0]) die(USAGE);

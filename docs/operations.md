@@ -552,8 +552,9 @@ Every call carries `Authorization: Bearer <worker key>`, which identifies the en
 | `PUT /worker/tasks/:id/artifacts/:name` | raw bytes, at most 50 MB; the name is 1 to 100 of letters, digits, `.`, `_`, `-` | `{ bytes, contentType }` |
 | `POST /worker/tasks/:id/finish` | `{ results: [{ step, exitCode, durationMs, timedOut, peakMemBytes?, oomKilled? }], summary }` | `{ state }`; retries return the same answer |
 | `POST /worker/tasks/:id/heartbeat` | none (every 15 s while running) | `{ cancel }` |
+| `GET /worker/pod/task` | none; build pod keys only | `{ id, repo, headSha, baseSha, sourceUrl, patch?, steps: [{ name, artifacts }] }` |
 
-`claim` with `free: 0` is allowed and refreshes the heartbeat and the paused reason. The task is `done` when every step exited 0 without a timeout, otherwise `failed` (empty results too). Errors are `{ "error": text }` with status 400 (bad body), 401 (key), 409 (the task is not running on this environment), 413 (size cap), 415 (artifact type), 429 (rate limit; `Retry-After`).
+A build pod key (`cwp_<task>_…`, see [Build pods](#build-pods)) may call only `GET /worker/pod/task` and the artifact upload of its own task; anything else is 403. `claim` with `free: 0` is allowed and refreshes the heartbeat and the paused reason. The task is `done` when every step exited 0 without a timeout, otherwise `failed` (empty results too). Errors are `{ "error": text }` with status 400 (bad body), 401 (key), 409 (the task is not running on this environment), 413 (size cap), 415 (artifact type), 429 (rate limit; `Retry-After`).
 
 Operators manage environments on the Build environments page (`/envs`) or from a shell (recorded as `cli`). A worker key is written to a file with mode 0600 and printed only with `--print`:
 
@@ -905,6 +906,73 @@ The manifest holds no secret values. Before the first start:
 
 1. Set `replicas: 0` and apply the manifest, so the claims exist and no pod holds them. Place `secrets.json` on the config volume as uid 10001 with mode 0600 with a short-lived helper pod that mounts the `config-autocraft-0` claim (`kubectl cp`, then `chown 10001:10001` and `chmod 600`). Delete the helper, then scale the StatefulSet to 1. A ReadWriteOnce claim attaches to one node, so the helper and the pod cannot run together. The migration runbook ([migration.md](migration.md)) uses the same sequence.
 2. Create the Secret `autocraft-github` with key `token` (a GitHub token for `gh`: `repo`, `read:org`, `workflow`) with `kubectl create secret generic autocraft-github --from-literal=token=...` typed by the operator.
+
+### Build pods
+
+A `kubernetes` build environment has no worker. The runner starts one pod run per build task in the cluster it runs in, through the Kubernetes API with its own service-account token (`/var/run/secrets/kubernetes.io/serviceaccount`). Untrusted code runs only in those pods, never next to AutoCraft.
+
+```
+autocraft-server envs add pods --label "Cluster pods" --kind kubernetes --slots 4 [POD SETTINGS]
+autocraft-server envs set pods --toolchain-image rust-stable=<registry>/rust-stable@sha256:<digest>
+autocraft-server envs set pods --enabled no
+```
+
+A task runs as a sequence of pods that share one volume (a PersistentVolumeClaim per task). Each pod is labelled `app.kubernetes.io/name=autocraft-build`, `craft.build/env=<env id>`, `craft.build/task=<task id>`, `craft.build/stage` and `craft.build/network`:
+
+| Stage | Image | `craft.build/network` | What it does |
+|---|---|---|---|
+| task | AutoCraft | `api` | Fetches the task (source URL, patch, steps) with a one-time key and writes it to the volume. |
+| source | AutoCraft | `fetch` | Downloads the source tarball, applies the patch and reads the CI gate at the base commit (env, craft-fonts and craft-i18n checkouts). Reports what it found in its termination message. |
+| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. |
+| upload | AutoCraft | `api` | Uploads the artifacts of the steps that ran, when a step names any. |
+
+- The runner reads each step's exit code, OOM kill and times from pod status, and its output from the pod log. Nothing in a pod reports a result.
+- The one-time key reaches only the `api` pods. It can read its task and upload its artifacts; it stops working when the task pod ends, and the upload pod gets a new one. No key is valid while repository code runs.
+- Every pod: `restartPolicy: Never`, a `kubernetes.io/arch` node selector from `--arch`, no service-account token, no service links, non-root (uid 10001, `fsGroup` 10001), `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, read-only root, CPU, memory and ephemeral-storage requests and limits, `activeDeadlineSeconds`, and the optional runtime class.
+- `fetch` steps get neither the CI gate's env nor the checkouts, as in the container runtime. Tasks that need a display are not taken. A task whose CI gate names a package the toolchain image lacks fails with the package named: pods cannot install packages. Warm build caches are not used.
+- A pod that disappears, cannot pull its image for 3 minutes, is not scheduled within 15 minutes, stays in deletion or on a node that stopped reporting for 5 minutes, or runs 5 minutes past a deadline Kubernetes should have enforced, loses its task: requeued once, then failed, as for a worker that stops answering. The runner owns these tasks, so the worker heartbeat timeout does not apply to them.
+- A failed create of a later stage's pod (rate limit, quota, an API error) is retried after 15 s, doubling to at most 5 minutes; after 6 tries or 15 minutes the task is lost. A task whose first pod cannot be created goes back to the queue without using an attempt, and the environment takes no task for a minute.
+- After a restart the runner deletes pods and volumes whose task is no longer the environment's. The namespace cannot change while tasks run.
+
+Disk use. The `local-path` provisioner does not enforce a volume's size: a step can write to `/target`, `/cache` and `/out` until the node's disk is full, and a node under disk pressure evicts other pods. What bounds it:
+
+| Bound | Effect |
+|---|---|
+| The `disk` check before every step pod | Fails the task when the volume holds more than `--storage` (or more than two million files). It runs between step pods, not during a step. |
+| `--max-step-sec` and each step's own limit | Caps how long one step can write. |
+| `--ephemeral-limit` | Caps each container's `/src` copy, `/tmp` and logs (emptyDirs with a size limit); the kubelet evicts only that pod. |
+| `--deadline-sec` | Caps the whole task; the volume is deleted when the task ends. |
+
+So a single step can still exceed `--storage` while it runs, by as much as it can write in its time limit. A storage class that enforces size (a block volume, or a quota-capable local provisioner) removes that gap.
+
+Settings (`envs add` and `envs set` options; `envs list` shows them):
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--namespace` | `craft-builds` | Namespace of the pods and volumes. |
+| `--image` | `runner` | AutoCraft image of the task, source and upload pods. `runner` uses the runner's `AUTOCRAFT_IMAGE`. |
+| `--toolchain-image NAME=REF` | none | Image the steps of tasks naming toolchain `NAME` run in; `NAME=none` removes it. With none set, the environment takes no task that names a toolchain (every pipeline build names `rust-stable`). `deploy/container/Containerfile.rust-stable` builds the `rust-stable` image. |
+| `--worker-url` | `http://autocraft-worker-api.craft.svc:8981` | The worker API as the `api` pods reach it. |
+| `--cpu-request`, `--cpu-limit` | `2`, `4` | Per container. |
+| `--memory-request`, `--memory-limit` | `4Gi`, `8Gi` | Per container. |
+| `--ephemeral-request`, `--ephemeral-limit` | `4Gi`, `16Gi` | Per container: `/src` copies, `/tmp` and logs. |
+| `--storage`, `--storage-class` | `40Gi`, `local-path` | The task's volume: source, `/target`, the cargo cache, `/out`, checkouts. A ReadWriteOnce local volume keeps a task's later pods on the node of its first. |
+| `--deadline-sec` | `10800` | Longest a task may take from its first pod to its last. |
+| `--max-step-sec` | `7200` | Longest one step may run, below its own limit. |
+| `--runtime-class` | none | A sandbox runtime class (gVisor, Kata) when the cluster has one. |
+| `--arch` | `x86_64` | Architecture the pods run on, for claim matching. |
+
+What the cluster must provide:
+
+| Item | Detail |
+|---|---|
+| `AUTOCRAFT_IMAGE` on the runner container | The image the runner itself runs, by digest (the downward API does not expose it). Or set `--image`. |
+| Runner service account | Its token mounted into the runner container only, at the standard path. |
+| Role in the build namespace | `pods`: create, get, list, watch, delete; `pods/log`: get; `persistentvolumeclaims`: create, get, list, delete. |
+| NetworkPolicies in the build namespace | No ingress. `craft.build/network=none`: no egress. `fetch`: DNS and public 80/443, no private ranges. `api`: DNS and the runner's 8981. |
+| Ingress to the runner | 8981 from the build namespace, if the runner's namespace denies by default. |
+
+The health check `worker:<env id>` fails when the runner is not in a cluster, the API does not answer, the service account lacks a permission (checked with SelfSubjectAccessReview every minute), no AutoCraft image is known, or a pod could not be created. It warns when a pod has waited more than 3 minutes to start and when no toolchain image is set.
 
 ## Similar items and semantic search
 
