@@ -2,7 +2,7 @@
 // rows by time through an index (never every event of every item), the sources are merged and cut to the page, and the
 // cursor is time + id. The row to event mapping is the item trace's (trace.ts).
 import { createHash } from "node:crypto";
-import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
+import { privateStepExpr } from "../../build/tasks.ts";
 import type { ActivityEvent, ActivityItem, ActivityPage, TraceKind } from "../../../web/src/api/types.ts";
 import { getDecision, reposOf } from "../../decisions.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
@@ -10,15 +10,18 @@ import { quietFixPrs } from "../../security/quiet.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import {
-  KINDS, actionEvent, activityEvent, writeActions, writeEvent, checkEvent, ciFixEvent, closedEvent, commentEvent, conflictEvent, decisionEvents, feedbackEvent, fixupEvent, hiddenSql, hiddenArgs,
-  iso, jobEvent, mergeEvent, mergedEvent, openedEvent, opusEvent, patchCheckEvent, planEvent, planEventFor, postmergeEvent, premergeEvent, pushEvent, RUN_COLUMNS, rows, runEvent, stageEvent,
-  taskEvent, turnEvent, verifyEvent, plainSummary, veilEvent, VEILED_KINDS, type DecisionRow, type Ev, type ItemRow, type OpusRow,
+  KINDS, actionEvent, activityEvent, writeActions, writeEvent, checkEvent, ciFixEvent, closedEvent, commentEvent, conflictEvent, decisionEvents, feedbackEvent, fixupEvent, hiddenExpr,
+  iso, jobEvent, mergeEvent, mergedEvent, openedEvent, opusEvent, patchCheckEvent, planEventFor, postmergeEvent, premergeEvent, pushEvent, runColumnsExpr, runEvent, stageEvent,
+  taskEvent, turnEvent, verifyEvent, plainSummary, veilEvent, VEILED_KINDS, type Ev, type ItemRow,
 } from "./trace.ts";
 import { canSeeInternals } from "./staff.ts";
 import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { allOwnLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
+import type { DB } from "../../db/types.ts";
+import type { Expression, ExpressionBuilder, SelectQueryBuilder, SqlBool } from "kysely";
 
 export const ACTIVITY_PAGE_DEFAULT = 50, ACTIVITY_PAGE_MAX = 200;
 /** Plan changes and stages come from every planner pass of every item and would bury the rest, so they show only when asked for. */
@@ -29,17 +32,26 @@ const LAST = "~";
 export type Ctx = { db: Db; own: Set<string>; staff: boolean; operator: boolean; hidden: HiddenRepos; visible: string[]; only: boolean; repo: string | null; limit: number; before: { at: string; id: string } | null };
 type At = { repo: string; number: number };
 type Pulled = { events: (Ev & At)[]; /** Oldest time read when the source had more rows than it returned; null when it returned everything. */ floor: string | null };
-export type Source = { kinds: TraceKind[]; table: string; time: string; pull: (c: Ctx) => Promise<Pulled> };
+export type Source = { kinds: TraceKind[]; table: keyof DB & string; time: string; pull: (c: Ctx) => Promise<Pulled> };
+
+/** A condition on the rows of a source: `only` narrows a source to AutoCraft's rows with one. */
+type Cond = (eb: kx.Eb) => Expression<SqlBool>;
+/** Always true: every row of the source is AutoCraft's. */
+const EVERY: Cond = (eb) => eb.and([]);
 
 /** Newest `limit` rows of one table at or before the cursor's second (the stored times mix second and millisecond precision), each mapped to events. */
-async function newest<R>(c: Ctx, o: { cols: string; from: string; time: string; where?: string; repoCol?: string | null; args?: (string | number)[]; /** With Only AutoCraft: null skips the source (its events are people's), a clause narrows it to AutoCraft's rows, nothing means every row is AutoCraft's. */ only?: (c: Ctx) => { where: string; args: (string | number)[] } | null; of?: (r: R) => At | null; map: (r: R) => (Ev | null)[]; keep?: (r: R) => Promise<boolean>; one?: (r: R) => string }): Promise<Pulled> {
-  // Only visible (tracked, readable) repos are read. The unary plus keeps the planner on the time index instead of a repo index plus a sort. No `repoCol`: the repo is not a column (audit targets), so `of` filters it.
+async function newest<R extends object>(c: Ctx, o: { q: SelectQueryBuilder<any, any, R>; time: string; repoCol?: string | null; /** Breaks a tie of `time`, newest first. */ tie?: () => kx.Ex; /** With Only AutoCraft: null skips the source (its events are people's), a condition narrows it to AutoCraft's rows, EVERY means every row is AutoCraft's. */ only?: (c: Ctx) => Cond | null; of?: (r: R) => At | null; map: (r: R) => (Ev | null)[]; keep?: (r: R) => Promise<boolean>; one?: (r: R) => string }): Promise<Pulled> {
+  // Only visible (tracked, readable) repos are read. The function around the column keeps the planner on the time index instead of a repo index plus a sort. No `repoCol`: the repo is not a column (audit targets), so `of` filters it.
   const repoCol = o.repoCol === undefined ? "repo" : o.repoCol;
   const own = c.only ? o.only?.(c) : undefined;
   if (own === null) return { events: [], floor: null };
-  const where = [`${o.time} IS NOT NULL`, ...(o.where ? [o.where] : []), ...(own ? [own.where] : []), ...(c.before ? [`${o.time} <= ?`] : []), ...(repoCol && c.repo ? [`${repoCol} = ?`] : []), ...(repoCol ? [`+${repoCol} IN (${c.visible.map(() => "?").join(",") || "NULL"})`] : [])];
-  const args = [...(o.args ?? []), ...(own?.args ?? []), ...(c.before ? [`${c.before.at.slice(0, 19)}Z`] : []), ...(repoCol && c.repo ? [c.repo] : []), ...(repoCol ? c.visible : [])];
-  const raw = await rows<R & Record<string, string>>(c.db, `SELECT ${o.cols} FROM ${o.from} WHERE ${where.join(" AND ")} ORDER BY ${o.time} DESC LIMIT ${c.limit}`, ...args);
+  const before = c.before ? `${c.before.at.slice(0, 19)}Z` : null;
+  const raw = await c.db.all(o.q.select((eb) => eb.ref(o.time).as(T)).where(o.time, "is not", null)
+    .$if(!!own, (q) => q.where(own!))
+    .$if(before !== null, (q) => q.where(o.time, "<=", before))
+    .$if(!!(repoCol && c.repo), (q) => q.where(repoCol!, "=", c.repo!))
+    .$if(!!repoCol, (q) => q.where((eb) => kx.inList(c.db, eb.fn.coalesce(repoCol!, repoCol!), c.visible)))
+    .orderBy(o.time, "desc").$if(o.tie !== undefined, (q) => q.orderBy(o.tie!(), "desc")).limit(c.limit));
   const seen = new Set<string>();
   const events: (Ev & At)[] = [];
   for (const r of raw) {
@@ -48,90 +60,116 @@ async function newest<R>(c: Ctx, o: { cols: string; from: string; time: string; 
     const at = o.of ? o.of(r) : (r as unknown as At);
     if (at) for (const e of o.map(r)) if (e) events.push({ ...e, repo: at.repo, number: at.number });
   }
-  // The time column is always aliased `t` in `cols`.
-  const floor = raw.length >= c.limit ? iso(raw[raw.length - 1]!["t"]) : null;
+  const floor = raw.length >= c.limit ? iso(raw[raw.length - 1]![T]) : null;
   return { events, floor };
 }
 
 const T = "t";
-const itemCols = "repo, number, kind, author, created_at, closed_at, merged_at, merged_by, head_oid";
-const item = (time: string, where: string, map: (r: ItemRow & At) => Ev): Source => ({
+const item = (time: "created_at" | "merged_at" | "closed_at", where: (eb: ExpressionBuilder<DB, "items">) => Expression<SqlBool>, map: (r: ItemRow & At) => Ev): Source => ({
   kinds: ["github"], table: "items", time,
-  pull: async (c) => await newest<ItemRow & At>(c, { cols: `${itemCols}, ${time} AS ${T}`, from: "items", time, where, only: () => null, map: (r) => [map(r)] }),
+  pull: async (c) => await newest(c, {
+    q: c.db.k.selectFrom("items").select(["repo", "number", "kind", "author", "created_at", "closed_at", "merged_at", "merged_by", "head_oid"]).where(where),
+    time, only: () => null, map: (r) => [map(r)],
+  }),
 });
 /** A source whose rows carry `repo` and `number` and map to one event each. */
-const plain = <R extends At>(kind: TraceKind, table: string, time: string, cols: string, map: (r: R, c: Ctx) => Ev, o: { from?: string; repoCol?: string; where?: string; one?: (r: R) => string; only?: (c: Ctx) => { where: string; args: (string | number)[] } | null } = {}): Source => ({
+const plain = <R extends object>(kind: TraceKind, table: Source["table"], time: string, q: (db: Db) => SelectQueryBuilder<any, any, R>, map: (r: R, c: Ctx) => Ev, o: { repoCol?: string; tie?: () => kx.Ex; one?: (r: R) => string; only?: (c: Ctx) => Cond | null } = {}): Source => ({
   kinds: [kind], table, time,
-  pull: async (c) => await newest<R>(c, { cols: `${cols}, ${time} AS ${T}`, from: o.from ?? table, time, repoCol: o.repoCol, where: o.where, one: o.one, only: o.only, map: (r) => [map(r, c)] }),
+  pull: async (c) => await newest<R>(c, { q: q(c.db), time, repoCol: o.repoCol, tie: o.tie, one: o.one, only: o.only, map: (r) => [map(r, c)] }),
 });
+/** Rows of the authors' column that are among the logins AutoCraft posts as, none when it has no login. */
+const byOwn = (col: string): (c: Ctx) => Cond | null => (c) => (c.own.size ? (eb) => kx.inList(c.db, col, [...c.own]) : null);
 
 /** Decisions that name an item and do not touch a repo hidden from the viewer. */
 const decisionVisible = async (c: Ctx, id: string): Promise<boolean> => {
   const d = await getDecision(c.db, id);
   return !d || !reposOf(d).some((r) => isHiddenRepo(c.hidden, r));
 };
-const DECISION_COLS = "d.id, d.repo, d.number, d.kind, d.question, d.asked_at, d.asked_by, d.answer, d.answered_at, d.answered_by, d.answer_note";
-type Dec = DecisionRow & At;
+const DECISION_COLS = ["d.id", "d.repo", "d.number", "d.kind", "d.question", "d.asked_at", "d.asked_by", "d.answer", "d.answered_at", "d.answered_by", "d.answer_note"] as const;
+/** A decision row's item: a decision of the stream always has both. */
+const decisionAt = (r: { repo: string | null; number: number }): At | null => (r.repo === null ? null : { repo: r.repo, number: r.number });
 
 export const SOURCES: Source[] = [
-  item("created_at", "kind IS NOT NULL", openedEvent),
-  item("merged_at", "merged_at IS NOT NULL", mergedEvent),
-  item("closed_at", "closed_at IS NOT NULL AND merged_at IS NULL", closedEvent),
-  plain<Parameters<typeof commentEvent>[0] & At>("github", "comments", "created_at", "repo, number, id, kind, author, created_at, review_state, commit_oid, LENGTH(COALESCE(body, '')) AS len", (r, c) => commentEvent(r, c.own), { only: (c) => (c.own.size ? { where: `author IN (${[...c.own].map(() => "?").join(",")})`, args: [...c.own] } : null) }),
-  plain<Parameters<typeof activityEvent>[0] & At>("github", "item_activity", "at", "repo, number, id, kind, at, actor, label, after_oid, before_oid", (r, c) => activityEvent(r, c.own), { only: (c) => (c.own.size ? { where: `actor IN (${[...c.own].map(() => "?").join(",")})`, args: [...c.own] } : null) }),
-  plain<Parameters<typeof stageEvent>[0] & At>("plan", "stages", "at", "repo, number, rowid, stage, at, actor, note", stageEvent),
-  plain<Parameters<typeof planEvent>[0] & At>("plan", "plan_history", "at", "repo, number, id, head, old_state, new_state, wait, reasons, at", (r, c) => planEventFor(c, r)),
+  item("created_at", (eb) => eb("kind", "is not", null), openedEvent),
+  item("merged_at", (eb) => eb("merged_at", "is not", null), mergedEvent),
+  item("closed_at", (eb) => eb.and([eb("closed_at", "is not", null), eb("merged_at", "is", null)]), closedEvent),
+  plain("github", "comments", "created_at", (db) => db.k.selectFrom("comments").select((eb) => ["repo", "number", "id", "kind", "author", "created_at", "review_state", "commit_oid", eb.fn<number>("length", [eb.fn.coalesce("body", eb.val(""))]).as("len")])
+    .$narrowType<{ created_at: string }>(), (r, c) => commentEvent(r, c.own), { only: byOwn("author") }),
+  plain("github", "item_activity", "at", (db) => db.k.selectFrom("item_activity").select(["repo", "number", "id", "kind", "at", "actor", "label", "after_oid", "before_oid"]), (r, c) => activityEvent(r, c.own), { only: byOwn("actor") }),
+  plain("plan", "stages", "at", (db) => db.k.selectFrom("stages").select(["repo", "number", kx.rowid("stages").as("rowid"), "stage", "at", "actor", "note"]), stageEvent),
+  plain("plan", "plan_history", "at", (db) => db.k.selectFrom("plan_history").select(["repo", "number", "id", "head", "old_state", "new_state", "wait", "reasons", "at"]), (r, c) => planEventFor(c, r)),
   // A job over many items is one row of the stream, at its newest item.
-  plain<Parameters<typeof jobEvent>[0] & At>("job", "job_items", "ji.at", "ji.repo AS repo, ji.number AS number, ji.id, ji.job_id, ji.outcome, ji.at, j.step, j.state, j.error", jobEvent, { repoCol: "ji.repo", from: "job_items ji LEFT JOIN jobs j ON j.id = ji.job_id", one: (r) => String(r.job_id) }),
+  plain("job", "job_items", "ji.at", (db) => db.k.selectFrom("job_items as ji").leftJoin("jobs as j", "j.id", "ji.job_id")
+    .select(["ji.repo as repo", "ji.number as number", "ji.id", "ji.job_id", "ji.outcome", "ji.at", "j.step", "j.state", "j.error"]), jobEvent, { repoCol: "ji.repo", tie: () => kx.rowid("job_items", "ji"), one: (r) => String(r.job_id) }),
   // A run over many items is one row too: its first item. Runs that touched a hidden repo are left out whole.
   {
     kinds: ["model-call"], table: "agent_runs", time: "started_at",
-    pull: async (c) => await newest<Parameters<typeof runEvent>[0] & At>(c, {
-      cols: `${RUN_COLUMNS}, i.repo AS repo, i.number AS number, r.started_at AS ${T}`,
-      from: "agent_runs r JOIN agent_run_items i ON i.run_id = r.id AND (i.repo, i.number) = (SELECT x.repo, x.number FROM agent_run_items x WHERE x.run_id = r.id ORDER BY x.repo, x.number LIMIT 1) LEFT JOIN claude_accounts a ON a.id = r.account_id",
-      time: "r.started_at", repoCol: "i.repo", where: hiddenSql(c.hidden).replace(/^ AND /, "") || undefined, args: hiddenArgs(c.hidden), map: (r) => [runEvent(r, c.staff)],
-    }),
+    pull: async (c) => {
+      const firstItem = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("agent_run_items as x").where("x.run_id", "=", eb.ref("r.id")).orderBy("x.repo").orderBy("x.number").limit(1);
+      return await newest(c, {
+        q: c.db.k.selectFrom("agent_runs as r")
+          .innerJoin("agent_run_items as i", (j) => j.onRef("i.run_id", "=", "r.id").on((eb) => eb.and([eb("i.repo", "=", firstItem(eb).select("x.repo")), eb("i.number", "=", firstItem(eb).select("x.number"))])))
+          .leftJoin("claude_accounts as a", "a.id", "r.account_id")
+          .select((eb) => [...runColumnsExpr(c.db, eb), "i.repo as repo", "i.number as number"])
+          .where((eb) => hiddenExpr(c.db, eb, c.hidden) ?? eb.and([])),
+        time: "r.started_at", repoCol: "i.repo", map: (r) => [runEvent(r, c.staff)],
+      });
+    },
   },
-  plain<Parameters<typeof checkEvent>[0] & At>("check", "model_checks", "started_at", "repo, number, id, run_id, step, head, command, crate, test_name, task_id, outcome, started_at", checkEvent),
-  plain<Parameters<typeof taskEvent>[0] & At>("check", "build_tasks", "queued_at", "repo, number, id, job_id, step, head_sha, state, summary, queued_at", taskEvent, { where: `step NOT IN (${PRIVATE_STEPS_SQL})` }),
-  plain<Parameters<typeof pushEvent>[0] & At>("check", "push_outcomes", "at", "repo, number, id, at, stage, action, to_oid, before_res, after_res, outcome", pushEvent),
-  plain<Parameters<typeof patchCheckEvent>[0] & At>("check", "patch_checks", "created_at", "repo, number, id, kind, subject, round, verdict, model, reasons, created_at", patchCheckEvent),
-  plain<OpusRow & At & { rowid: number }>("review", "opus_review_history", "at", "repo, number, rowid, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, claims", (r) => opusEvent(r, `opus:${r.rowid}`)),
-  plain<Parameters<typeof premergeEvent>[0] & At>("review", "premerge_reviews", "at", "repo, number, head_oid, at, model, findings, error, searched", premergeEvent),
-  plain<Parameters<typeof postmergeEvent>[0] & At>("review", "postmerge_reviews", "at", "repo, number, merge_sha, at, model, findings, error", (r, c) => postmergeEvent(r, c.staff)),
-  plain<Parameters<typeof verifyEvent>[0] & At>("review", "verifications", "created_at", "repo, number, head_sha, kind, state, reason, summary, note, created_at, head_task_id", verifyEvent),
+  plain("check", "model_checks", "started_at", (db) => db.k.selectFrom("model_checks").select(["repo", "number", "id", "run_id", "step", "head", "command", "crate", "test_name", "task_id", "outcome", "started_at"]), checkEvent),
+  plain("check", "build_tasks", "queued_at", (db) => db.k.selectFrom("build_tasks").select(["repo", "number", "id", "job_id", "step", "head_sha", "state", "summary", "queued_at"]).where((eb) => eb.not(privateStepExpr(eb))), taskEvent),
+  plain("check", "push_outcomes", "at", (db) => db.k.selectFrom("push_outcomes").select(["repo", "number", "id", "at", "stage", "action", "to_oid", "before_res", "after_res", "outcome"]), pushEvent),
+  plain("check", "patch_checks", "created_at", (db) => db.k.selectFrom("patch_checks").select(["repo", "number", "id", "kind", "subject", "round", "verdict", "model", "reasons", "created_at"]), patchCheckEvent),
+  plain("review", "opus_review_history", "at", (db) => db.k.selectFrom("opus_review_history").select(["repo", "number", kx.rowid("opus_review_history").as("rowid"), "head_oid", "at", "model", "mode", "verdict", "sure", "reason", "risks", "fixes", "claims"]), (r) => opusEvent(r, `opus:${r.rowid}`)),
+  plain("review", "premerge_reviews", "at", (db) => db.k.selectFrom("premerge_reviews").select(["repo", "number", "head_oid", "at", "model", "findings", "error", "searched"]), premergeEvent),
+  plain("review", "postmerge_reviews", "at", (db) => db.k.selectFrom("postmerge_reviews").select(["repo", "number", "merge_sha", "at", "model", "findings", "error"]), (r, c) => postmergeEvent(r, c.staff)),
+  plain("review", "verifications", "created_at", (db) => db.k.selectFrom("verifications").select(["repo", "number", "head_sha", "kind", "state", "reason", "summary", "note", "created_at", "head_task_id"]), verifyEvent),
   {
     kinds: ["decision"], table: "decisions", time: "asked_at",
-    pull: async (c) => await newest<Dec>(c, { cols: `${DECISION_COLS}, d.asked_at AS ${T}`, from: "decisions d", time: "d.asked_at", repoCol: "d.repo", where: "d.number IS NOT NULL", keep: async (r) => await decisionVisible(c, r.id), map: (r) => [decisionEvents(r)[0]!] }),
+    pull: async (c) => await newest(c, {
+      q: c.db.k.selectFrom("decisions as d").select(DECISION_COLS).where("d.number", "is not", null).$narrowType<{ number: number }>(),
+      time: "d.asked_at", repoCol: "d.repo", of: decisionAt, keep: async (r) => await decisionVisible(c, r.id), map: (r) => [decisionEvents(r)[0]!],
+    }),
   },
   {
     kinds: ["decision"], table: "decisions", time: "answered_at",
-    pull: async (c) => await newest<Dec>(c, { cols: `${DECISION_COLS}, d.answered_at AS ${T}`, from: "decisions d", time: "d.answered_at", repoCol: "d.repo", where: "d.number IS NOT NULL", only: () => null, keep: async (r) => await decisionVisible(c, r.id), map: (r) => [decisionEvents(r)[1] ?? null] }),
+    pull: async (c) => await newest(c, {
+      q: c.db.k.selectFrom("decisions as d").select(DECISION_COLS).where("d.number", "is not", null).$narrowType<{ number: number }>(),
+      time: "d.answered_at", repoCol: "d.repo", of: decisionAt, only: () => null, keep: async (r) => await decisionVisible(c, r.id), map: (r) => [decisionEvents(r)[1] ?? null],
+    }),
   },
   {
     kinds: ["decision"], table: "decision_comments", time: "at",
-    pull: async (c) => await newest<{ decision_id: string; cid: string; login: string; at: string; len: number } & At>(c, {
-      cols: `d.repo AS repo, d.number AS number, x.decision_id, x.id AS cid, x.login, x.at, LENGTH(x.body) AS len, x.at AS ${T}`, from: "decision_comments x JOIN decisions d ON d.id = x.decision_id", time: "x.at", repoCol: "d.repo", where: "d.number IS NOT NULL",
+    pull: async (c) => await newest(c, {
+      q: c.db.k.selectFrom("decision_comments as x").innerJoin("decisions as d", "d.id", "x.decision_id")
+        .select((eb) => ["d.repo as repo", "d.number as number", "x.decision_id", "x.id as cid", "x.login", "x.at", eb.fn<number>("length", ["x.body"]).as("len")])
+        .where("d.number", "is not", null).$narrowType<{ number: number }>(),
+      time: "x.at", repoCol: "d.repo", of: decisionAt,
       only: () => null, keep: async (r) => await decisionVisible(c, r.decision_id), map: (r) => [feedbackEvent(r.decision_id, { id: r.cid, login: r.login, at: r.at, len: r.len })],
     }),
   },
-  plain<Parameters<typeof fixupEvent>[0] & At>("step", "fixups", "created_at", "repo, number, rowid, from_head AS head, to_head, state, reason, files, attempt, created_at", fixupEvent),
-  plain<Parameters<typeof ciFixEvent>[0] & At>("step", "ci_fixes", "created_at", "repo, number, rowid, head, to_head, kind, state, reason, files, attempt, task_id, created_at", ciFixEvent),
-  plain<Parameters<typeof conflictEvent>[0] & At>("step", "conflict_merges", "created_at", "repo, number, rowid, from_head AS head, to_head, state, reason, files, attempt, created_at", conflictEvent),
-  plain<Parameters<typeof mergeEvent>[0] & At>("step", "merges", "at", "repo, number, rowid, head_oid, at, path, method, outcome, reason", mergeEvent),
-  plain<Parameters<typeof actionEvent>[0] & At>("step", "actions", "created_at", "repo, number, id, decision_id, kind, state, reason, created_at", actionEvent),
-  plain<Parameters<typeof turnEvent>[0] & At>("conversation", "conversation_turns", "at", "repo, number, id, kind, login, at, LENGTH(body) AS len, status", turnEvent, { only: () => ({ where: "kind IN ('opus', 'system')", args: [] }) }),
+  plain("step", "fixups", "created_at", (db) => db.k.selectFrom("fixups").select(["repo", "number", kx.rowid("fixups").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]), fixupEvent),
+  plain("step", "ci_fixes", "created_at", (db) => db.k.selectFrom("ci_fixes").select(["repo", "number", kx.rowid("ci_fixes").as("rowid"), "head", "to_head", "kind", "state", "reason", "files", "attempt", "task_id", "created_at"]), ciFixEvent),
+  plain("step", "conflict_merges", "created_at", (db) => db.k.selectFrom("conflict_merges").select(["repo", "number", kx.rowid("conflict_merges").as("rowid"), "from_head as head", "to_head", "state", "reason", "files", "attempt", "created_at"]), conflictEvent),
+  plain("step", "merges", "at", (db) => db.k.selectFrom("merges").select(["repo", "number", kx.rowid("merges").as("rowid"), "head_oid", "at", "path", "method", "outcome", "reason"]), mergeEvent),
+  plain("step", "actions", "created_at", (db) => db.k.selectFrom("actions").select(["repo", "number", "id", "decision_id", "kind", "state", "reason", "created_at"]), actionEvent),
+  plain("conversation", "conversation_turns", "at", (db) => db.k.selectFrom("conversation_turns").select((eb) => ["repo", "number", "id", "kind", "login", "at", eb.fn<number>("length", ["body"]).as("len"), "status"]), turnEvent,
+    { only: () => (eb) => eb("kind", "in", ["opus", "system"]) }),
   // Audit rows name their item in `target` (`repo#number`); other targets are not items.
   {
     kinds: ["write"], table: "audit", time: "at",
     async pull(c) {
       const allowed = writeActions(c.staff, c.operator);
-      return await newest<Parameters<typeof writeEvent>[0] & { target: string }>(c, {
-        cols: `rowid, at, login, action, details, target, at AS ${T}`, from: "audit", time: "at", repoCol: null,
-        where: `instr(target, '#') > 0${allowed ? ` AND action IN (${allowed.map(() => "?").join(",")})` : ""}${c.repo ? " AND substr(target, 1, ?) = ?" : ""}`,
-        args: [...(allowed ?? []), ...(c.repo ? [c.repo.length + 1, `${c.repo}#`] : [])],
+      return await newest(c, {
+        q: c.db.k.selectFrom("audit").select([kx.rowid("audit").as("rowid"), "at", "login", "action", "details", "target"])
+          .where((eb) => eb(eb.fn<number>("instr", ["target", eb.val("#")]), ">", eb.lit(0))).$narrowType<{ target: string }>()
+          .$if(!!allowed, (q) => q.where(kx.inList(c.db, "action", allowed!)))
+          .$if(!!c.repo, (q) => q.where((eb) => eb(eb.fn<string>("substr", ["target", eb.lit(1), eb.lit(c.repo!.length + 1)]), "=", `${c.repo}#`))),
+        time: "at", repoCol: null,
         // A write is AutoCraft's when the viewer is not staff (the actor is hidden) or the pipeline recorded a state with it (writeEvent).
-        only: () => (c.staff ? { where: `CASE WHEN json_valid(details) THEN typeof(json_extract(details, '$.state')) ELSE NULL END = 'text' AND action IN (${Object.keys(GITHUB_ACTIONS).map(() => "?").join(",")})`, args: Object.keys(GITHUB_ACTIONS) } : { where: "1", args: [] }),
+        only: () => (c.staff
+          ? (eb) => eb.and([eb(eb.case().when(kx.jsonValid(c.db, "details")).then(kx.jsonType(c.db, "details", "$.state")).end(), "=", "text"), kx.inList(c.db, "action", Object.keys(GITHUB_ACTIONS))])
+          : EVERY),
         of: (r) => {
           const i = r.target.lastIndexOf("#"), n = Number(r.target.slice(i + 1)), repo = r.target.slice(0, i);
           return Number.isInteger(n) && repo && c.visible.includes(repo) ? { repo, number: n } : null;
@@ -191,20 +229,19 @@ const tail = (events: Ev[], limit: number): { at: string; id: string } | null =>
 /** The newest time and the running counts per wanted source: equal stamps mean a poll has nothing new for the top of the stream. */
 async function stampOf(db: Db, sources: Source[], key: unknown[]): Promise<string> {
   const parts: unknown[] = [key];
-  for (const s of sources) parts.push((await db.prepare(`SELECT MAX(${s.time.replace(/^\w+\./, "")}) AS m FROM ${s.table}`).get() as { m: unknown }).m);
-  parts.push(Object.values(await db.prepare("SELECT COUNT(*) FROM agent_runs WHERE state = 'running'").get() as object));
-  parts.push(Object.values(await db.prepare("SELECT COUNT(*), MAX(id) FROM jobs WHERE state IN ('queued', 'running')").get() as object));
-  parts.push(Object.values(await db.prepare("SELECT COUNT(*) FROM build_tasks WHERE state IN ('queued', 'claimed', 'running')").get() as object));
+  for (const s of sources) parts.push((await db.get(db.k.selectFrom(s.table).select((eb) => eb.fn.max<string | null>(kx.ref(s.time.replace(/^\w+\./, ""))).as("m"))))!.m);
+  parts.push(Object.values((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running")))!));
+  parts.push(Object.values((await db.get(db.k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("state", "in", ["queued", "running"])))!));
+  parts.push(Object.values((await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["queued", "claimed", "running"])))!));
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
 }
 
 const itemsOf = async (db: Db, events: (Ev & At)[]): Promise<Map<string, ActivityItem>> => {
   const out = new Map<string, ActivityItem>();
-  const q = db.prepare("SELECT kind, state, title FROM items WHERE repo = ? AND number = ?");
   for (const e of events) {
     const k = `${e.repo}#${e.number}`;
     if (out.has(k)) continue;
-    const r = await q.get(e.repo, e.number) as { kind: string | null; state: string | null; title: string | null } | undefined;
+    const r = await db.get(db.k.selectFrom("items").select(["kind", "state", "title"]).where("repo", "=", e.repo).where("number", "=", e.number));
     out.set(k, { repo: e.repo, number: e.number, kind: r?.kind === "pr" || r?.kind === "issue" ? r.kind : null, state: r?.state ? (r.state.toLowerCase() as ActivityItem["state"]) : null, title: r?.title ?? null });
   }
   return out;
