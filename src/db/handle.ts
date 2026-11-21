@@ -61,6 +61,18 @@ export function callSite(e: Error): string {
   return "";
 }
 
+/**
+ * A write result without an insert id: Postgres has no lastInsertRowid. Reading it throws, so code that relies on it fails
+ * where it reads it instead of using 0 as a key; such statements add RETURNING.
+ */
+export function withoutInsertId(changes: number): RunResult {
+  return Object.defineProperty({ changes }, "lastInsertRowid", {
+    get(): never {
+      throw new Error("lastInsertRowid is not available on Postgres: add RETURNING to the statement and read the row");
+    },
+  }) as RunResult;
+}
+
 /** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
 const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 
@@ -114,7 +126,8 @@ export class Handle implements Db {
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
     const r = await this.k.executeQuery(q.compile());
-    return { changes: Number(r.numAffectedRows ?? 0n), lastInsertRowid: Number(r.insertId ?? 0n) };
+    const changes = Number(r.numAffectedRows ?? 0n);
+    return this.dialect === "postgres" ? withoutInsertId(changes) : { changes, lastInsertRowid: Number(r.insertId ?? 0n) };
   }
 
   prepare(text: string): Statement {

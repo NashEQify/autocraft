@@ -9,7 +9,7 @@ import { connectDb } from "../db/open.ts";
 export type WorkerTask = { id: number; task: "plan"; nowMs?: number } | { id: number; task: "flow"; budgetMs?: number };
 export type WorkerReply = { id: number; ok: true; result: unknown } | { id: number; ok: false; error: string };
 
-const db = await connectDb((workerData as { dbFile: string }).dbFile);
+const db = await connectDb((workerData as { dbFile: string }).dbFile, { role: "planner" });
 
 parentPort!.on("message", async (m: WorkerTask) => {
   try {

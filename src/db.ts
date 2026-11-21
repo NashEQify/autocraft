@@ -12,6 +12,7 @@ import { bulkWritesSync, planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
+import { isLockTimeout } from "./db/errors.ts";
 import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
 import { SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
@@ -709,8 +710,8 @@ export function connect(path: string = dbPath(), opts: { busyTimeoutMs?: number 
   return db;
 }
 
-/** Whether `e` is SQLite's "database is locked" (SQLITE_BUSY, any extended code): another connection held the write lock past the busy timeout. */
-export const isBusy = (e: unknown): boolean => typeof (e as { errcode?: unknown } | null)?.errcode === "number" && ((e as { errcode: number }).errcode & 0xff) === 5;
+/** Whether `e` is a lock wait that ran out (SQLITE_BUSY or Postgres 55P03): another connection held the write lock past the timeout. */
+export const isBusy = isLockTimeout;
 
 function open(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });

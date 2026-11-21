@@ -21,7 +21,7 @@ import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
-import { openDb } from "./db/open.ts";
+import { openDb, setDbRole } from "./db/open.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
 const FULL_PAGE = 30;
@@ -982,6 +982,8 @@ async function sync(args: string[]): Promise<void> {
   const release = acquireLock(opts.full ? fullLockPath() : lockPath());
   if (!release) return;
   try {
+    // The periodic container runs this command in a loop.
+    setDbRole("periodic");
     const db = await openDb();
     const client = new Client(reserve);
     if (restart) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();

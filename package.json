@@ -19,7 +19,8 @@
     "docs:check": "node scripts/gen-docs.ts --check",
     "docs:image": "node scripts/flowchart-shot.mjs",
     "gql-schema": "scripts/gql-schema.sh",
-    "test": "node --test"
+    "test": "node --test",
+    "test:pg": "scripts/pg-test.sh run"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

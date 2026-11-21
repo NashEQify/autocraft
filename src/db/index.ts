@@ -3,8 +3,10 @@
  * module that loads the `kysely` and `pg` packages (with a dynamic import, so the build worker runs without them).
  *
  * How callers get a handle:
- * - `await openDb()`: the process's handle on the configured database (`AUTOCRAFT_DB`), memoized; `closeDb()` at exit.
- * - `await connectDb(path, { busyTimeoutMs })`: a handle of its own (tests, the dashboard's second handle, worker threads).
+ * - `await openDb()`: the process's handle on the configured database, memoized; `closeDb()` at exit. The database is
+ *   `AUTOCRAFT_DB_URL` (a postgres:// URL) or else `AUTOCRAFT_DB` (a SQLite file); see `dbTarget()`.
+ * - `await connectDb(target, { busyTimeoutMs, role })`: a handle of its own (tests, the dashboard's second handle, worker
+ *   threads). `target` is a SQLite path or a postgres:// URL.
  * - `await dbFor(sync)`: the handle over a `DatabaseSync` that `connect()` (src/db.ts) returned, memoized per connection.
  *   Code that still holds a `DatabaseSync` reaches the async API this way while the rest of the call graph is converted.
  *
@@ -27,6 +29,9 @@ import type { Compilable, Kysely } from "kysely";
 import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 
 export type Dialect = "sqlite" | "postgres";
+
+/** What a process (or worker thread) uses its handle for; on Postgres it sets the connection pool size. */
+export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "planner" | "periodic" | "cli";
 
 /**
  * The table types Kysely queries are checked against. Loose until generated types from the migrated schema replace it.

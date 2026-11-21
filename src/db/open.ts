@@ -4,7 +4,8 @@ import type { DatabaseSync } from "node:sqlite";
 import { connect, dbPath } from "../db.ts";
 import { envVar } from "../env.ts";
 import { Handle } from "./handle.ts";
-import type { Db } from "./index.ts";
+import type { Db, DbRole } from "./index.ts";
+import { postgresEngine } from "./postgres.ts";
 import { bindSql } from "./sql.ts";
 import { sqliteEngine } from "./sqlite.ts";
 
@@ -31,16 +32,48 @@ export function dbFor(sync: DatabaseSync): Promise<Db> {
   return h;
 }
 
-/** A handle of its own on the SQLite database at `path`, schema brought up to date (see `connect()`). */
-export async function connectDb(path: string = dbPath(), opts: { busyTimeoutMs?: number } = {}): Promise<Db> {
-  return dbFor(connect(path, opts));
+export const isPgUrl = (target: string): boolean => /^postgres(ql)?:\/\//.test(target);
+
+/**
+ * The configured database: `AUTOCRAFT_DB_URL` (Postgres) or else `AUTOCRAFT_DB` (a SQLite file, default under the home).
+ * Both set to different values is refused: one of them would be ignored without a word.
+ */
+export function dbTarget(env: NodeJS.ProcessEnv = process.env): string {
+  const url = envVar("DB_URL", env);
+  const path = envVar("DB", env);
+  if (url !== undefined && path !== undefined && url !== path) throw new Error("AUTOCRAFT_DB_URL and AUTOCRAFT_DB are both set and differ: set only one");
+  if (url !== undefined && !isPgUrl(url)) throw new Error("AUTOCRAFT_DB_URL must be a postgres:// or postgresql:// URL");
+  return url ?? dbPath();
+}
+
+let role: DbRole = "cli";
+
+/** Sets the role of this process's handles (pool size on Postgres). Called by long-running commands before they open one. */
+export function setDbRole(r: DbRole): void {
+  role = r;
+}
+
+export interface ConnectOptions {
+  /** How long a write waits for the write lock before failing with a lock timeout. */
+  busyTimeoutMs?: number;
+  /** The handle's use, for its pool size on Postgres. Defaults to the process's role (`setDbRole`). */
+  role?: DbRole;
+}
+
+/**
+ * A handle of its own on `target`: a SQLite file, schema brought up to date (see `connect()`), or a Postgres URL. A
+ * Postgres database must already have its schema.
+ */
+export async function connectDb(target: string = dbTarget(), opts: ConnectOptions = {}): Promise<Db> {
+  if (!isPgUrl(target)) return dbFor(connect(target, opts));
+  const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
+  return new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));
 }
 
 let proc: Promise<Db> | undefined;
 
 /** The process's handle on the configured database. */
 export function openDb(): Promise<Db> {
-  if (envVar("DB_URL") !== undefined) return Promise.reject(new Error("AUTOCRAFT_DB_URL is set, but the Postgres backend is not available yet"));
   return (proc ??= connectDb());
 }
 
