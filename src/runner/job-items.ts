@@ -17,7 +17,7 @@ export async function jobItem(db: Db, repo: string, number: number, outcome: str
   if (job === null) return;
   // Bookkeeping: a failed insert must not fail the stage.
   try {
-    await db.prepare("INSERT INTO job_items (job_id, repo, number, outcome, at, ref) VALUES (?, ?, ?, ?, ?, ?)").run(job, repo, number, line, new Date().toISOString(), decision);
+    await db.run(db.k.insertInto("job_items").values({ job_id: job, repo, number, outcome: line, at: new Date().toISOString(), ref: decision }));
   } catch (e) {
     log(`job item not recorded: ${(e as Error).message}`);
   }
@@ -27,6 +27,6 @@ export type ItemJob = { jobId: number; outcome: string | null; at: string };
 
 /** The jobs that handled an item, oldest first. */
 export async function itemJobs(db: Db, repo: string, number: number): Promise<ItemJob[]> {
-  return (await db.prepare("SELECT job_id, outcome, at FROM job_items WHERE repo = ? AND number = ? ORDER BY id").all(repo, number) as { job_id: number; outcome: string | null; at: string }[])
+  return (await db.all(db.k.selectFrom("job_items").select(["job_id", "outcome", "at"]).where("repo", "=", repo).where("number", "=", number).orderBy("id")))
     .map((r) => ({ jobId: r.job_id, outcome: r.outcome, at: r.at }));
 }

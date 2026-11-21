@@ -25,7 +25,7 @@ export const keptRunsExpr = (db: Db) => db.k.selectFrom("main.remote_calls").sel
 
 /** For a job that resumed: when its current run started (work recorded before that belongs to an earlier run). Null for a job that never resumed. */
 export async function resumedRun(db: Db, jobId: number): Promise<{ resumes: number; startedAt: string } | null> {
-  const r = await db.prepare("SELECT resumes, started_at FROM main.jobs WHERE id = ?").get(jobId) as { resumes: number | null; started_at: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("main.jobs").select(["resumes", "started_at"]).where("id", "=", jobId));
   return r && Number(r.resumes) > 0 && r.started_at ? { resumes: Number(r.resumes), startedAt: r.started_at } : null;
 }
 
