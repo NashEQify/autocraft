@@ -205,9 +205,7 @@ src/fixissue/candidates.ts
 
 
 
-src/fixup/select.ts
 
-src/fixup/try.ts
 
 
 
