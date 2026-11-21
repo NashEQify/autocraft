@@ -31,7 +31,7 @@ test("history and an allow count only for their own account, and the pipeline's 
   for (let i = 1; i <= 6; i++) await db.run(db.k.insertInto("items").values({ repo: "r", number: i, kind: "pr", state: "MERGED", title: "t", author: "old-dev", created_at: "2026-01-01T00:00:00Z", merged_at: "2026-01-02T00:00:00Z" }));
   // A new holder of the login writes an issue before the history is bound: no binding, and no tier for anyone while unbound.
   await writeItemNode(db, "r", issue(50, "old-dev", 999));
-  assert.deepEqual(await db.prepare("SELECT id FROM author_ids WHERE login = 'old-dev'").all(), []);
+  assert.deepEqual(await db.all(db.k.selectFrom("author_ids").select("id").where("login", "=", "old-dev")), []);
   assert.equal(await tier("old-dev", 999), "not");
   const client = { spent: 0, remaining: null, async query() { return { p0: { pullRequest: { author: { __typename: "User", databaseId: 42 } } } }; } };
   await backfillAuthorIds(db, client);

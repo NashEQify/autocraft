@@ -8,8 +8,10 @@ const BATCH = 40;
 
 /** Logins whose merged or closed PRs count toward a tier and that have no bound account id. */
 export async function unboundLogins(db: Db): Promise<string[]> {
-  return (await db.prepare(`SELECT DISTINCT author FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')
-    AND NOT EXISTS (SELECT 1 FROM author_ids a WHERE a.login = items.author) ORDER BY author`).all() as { author: string }[]).map((r) => r.author);
+  return (await db.all(db.k.selectFrom("items").select("author").distinct().$narrowType<{ author: string }>()
+    .where("kind", "=", "pr").where("author", "is not", null).where("state", "in", ["MERGED", "CLOSED"])
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("author_ids as a").select(eb.lit(1).as("one")).whereRef("a.login", "=", "items.author"))))
+    .orderBy("author"))).map((r) => r.author);
 }
 
 /**
@@ -58,20 +60,25 @@ async function lookup(client: Querier, owner: string, prs: Pr[], out: Map<string
  * Ids stored on item rows are used only when every row of the login has one. One batched pass per owner; nothing when all are bound.
  */
 export async function backfillAuthorIds(db: Db, client: Querier | null): Promise<number> {
-  const bind = db.prepare("INSERT OR IGNORE INTO main.author_ids (login, id) VALUES (?, ?)");
+  const bind = async (login: string, id: number) => await db.run(db.k.insertInto("main.author_ids").values({ login, id }).onConflict((oc) => oc.doNothing()));
   let n = 0;
   // The id of the login's oldest item: every row has one here, and a login can have passed to another account.
-  const known = await db.prepare(`SELECT author, (SELECT o.author_id FROM items o WHERE o.author = i.author ORDER BY o.created_at, o.repo, o.number LIMIT 1) AS author_id
-    FROM items i WHERE author IS NOT NULL AND author_id IS NOT NULL
-    AND NOT EXISTS (SELECT 1 FROM author_ids a WHERE a.login = i.author)
-    AND NOT EXISTS (SELECT 1 FROM items j WHERE j.author = i.author AND j.author_id IS NULL)
-    GROUP BY author ORDER BY MIN(created_at), author`).all() as { author: string; author_id: number }[];
-  for (const r of known) n += Number((await bind.run(r.author, r.author_id)).changes);
+  const known = await db.all(db.k.selectFrom("items as i")
+    .select((eb) => ["i.author", eb.selectFrom("items as o").select("o.author_id").whereRef("o.author", "=", "i.author")
+      .orderBy("o.created_at", (o) => o.asc().nullsFirst()).orderBy("o.repo").orderBy("o.number").limit(1).as("author_id")])
+    .$narrowType<{ author: string; author_id: number }>()
+    .where("i.author", "is not", null).where("i.author_id", "is not", null)
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("author_ids as a").select(eb.lit(1).as("one")).whereRef("a.login", "=", "i.author"))))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("items as j").select(eb.lit(1).as("one")).whereRef("j.author", "=", "i.author").where("j.author_id", "is", null))))
+    .groupBy("i.author").orderBy((eb) => eb.fn.min("i.created_at"), (o) => o.asc().nullsFirst()).orderBy("i.author"));
+  for (const r of known) n += (await bind(r.author, r.author_id)).changes;
   const missing = new Set(await unboundLogins(db));
   if (!client || !missing.size) return n;
-  const oldest = (await db.prepare(`SELECT login, repo, number, first FROM (SELECT author AS login, repo, number, created_at AS first,
-      ROW_NUMBER() OVER (PARTITION BY author ORDER BY created_at, repo, number) AS n
-    FROM items WHERE kind = 'pr' AND author IS NOT NULL AND state IN ('MERGED','CLOSED')) AS f WHERE n = 1 ORDER BY login`).all() as Pr[]).filter((p) => missing.has(p.login));
+  const oldest = (await db.all(db.k.selectFrom((eb) => eb.selectFrom("items")
+      .select((e) => ["author as login", "repo", "number", "created_at as first",
+        e.fn.agg<number>("row_number", []).over((o) => o.partitionBy("author").orderBy("created_at", (d) => d.asc().nullsFirst()).orderBy("repo").orderBy("number")).as("n")])
+      .where("kind", "=", "pr").where("author", "is not", null).where("state", "in", ["MERGED", "CLOSED"]).as("f"))
+    .select(["f.login", "f.repo", "f.number", "f.first"]).$narrowType<{ login: string }>().where("f.n", "=", 1).orderBy("f.login"))).filter((p) => missing.has(p.login));
   const byOwner = new Map<string, Pr[]>();
   for (const p of oldest) (byOwner.get(ownerOf(p.repo)) ?? byOwner.set(ownerOf(p.repo), []).get(ownerOf(p.repo))!).push(p);
   const found = new Map<string, number>();
@@ -86,6 +93,6 @@ export async function backfillAuthorIds(db: Db, client: Querier | null): Promise
     }
   }
   if (skipped.length) console.log(`author ids: skipped ${skipped.join(", ")} (no readable token)`);
-  for (const [login, id] of found) n += Number((await bind.run(login, id)).changes);
+  for (const [login, id] of found) n += (await bind(login, id)).changes;
   return n;
 }

@@ -52,8 +52,9 @@ export function parseItemRef(input: unknown): FastRef {
 
 /** Open fast-tracked items, first to run first: heaviest first, then in the order added. */
 export async function fastTrackList(db: Db): Promise<FastItem[]> {
-  const rows = await db.prepare(`SELECT f.repo, f.number, f.weight, f.added_by, f.added_at FROM main.fast_track f
-    JOIN main.items i ON i.repo = f.repo AND i.number = f.number AND i.state = 'OPEN' ORDER BY f.weight DESC, f.id`).all() as { repo: string; number: number; weight: number; added_by: string; added_at: string }[];
+  const rows = await db.all(db.k.selectFrom("main.fast_track as f")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number").on("i.state", "=", "OPEN"))
+    .select(["f.repo", "f.number", "f.weight", "f.added_by", "f.added_at"]).orderBy("f.weight", "desc").orderBy("f.id"));
   return rows.map((r, k) => ({ repo: r.repo, number: r.number, position: k + 1, of: rows.length, weight: r.weight, addedBy: r.added_by, addedAt: r.added_at }));
 }
 
@@ -66,11 +67,12 @@ export async function fastPositions(db: Db): Promise<Map<string, { position: num
 export async function addFastTrack(db: Db, by: string, input: unknown, weight: unknown = WEIGHT_DEFAULT, via?: string): Promise<{ ref: FastRef; added: boolean }> {
   const ref = parseItemRef(input);
   if (!await isTracked(db, ref.repo)) throw new FastTrackError(`${ref.repo} is not a tracked repo`, 404);
-  const item = await db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(ref.repo, ref.number) as { state: string } | undefined;
+  const item = await db.get(db.k.selectFrom("main.items").select("state").where("repo", "=", ref.repo).where("number", "=", ref.number));
   if (!item) throw new FastTrackError(`no item ${refText(ref)} in the mirror`, 404);
   if (item.state !== "OPEN") throw new FastTrackError(`${refText(ref)} is not open`, 409);
   const w = parseWeight(weight);
-  const r = await db.prepare("INSERT OR IGNORE INTO main.fast_track (repo, number, added_by, added_at, weight) VALUES (?, ?, ?, ?, ?)").run(ref.repo, ref.number, by, new Date().toISOString(), w);
+  const r = await db.run(db.k.insertInto("main.fast_track").values({ repo: ref.repo, number: ref.number, added_by: by, added_at: new Date().toISOString(), weight: w })
+    .onConflict((oc) => oc.doNothing()));
   if (r.changes) await audit(db, by, "fasttrack-add", refText(ref), { weight: w, ...(via ? { via } : {}) });
   return { ref, added: r.changes > 0 };
 }
@@ -79,8 +81,8 @@ export async function addFastTrack(db: Db, by: string, input: unknown, weight: u
 export async function setFastTrackWeight(db: Db, by: string, input: unknown, weight: unknown, via?: string): Promise<{ ref: FastRef; weight: number }> {
   const ref = parseItemRef(input);
   const w = parseWeight(weight);
-  if (!await db.prepare("SELECT 1 FROM main.fast_track WHERE repo = ? AND number = ?").get(ref.repo, ref.number)) throw new FastTrackError(`${refText(ref)} is not fast-tracked`, 404);
-  const r = await db.prepare("UPDATE main.fast_track SET weight = ? WHERE repo = ? AND number = ? AND weight <> ?").run(w, ref.repo, ref.number, w);
+  if (!await db.get(db.k.selectFrom("main.fast_track").select((eb) => eb.lit(1).as("one")).where("repo", "=", ref.repo).where("number", "=", ref.number))) throw new FastTrackError(`${refText(ref)} is not fast-tracked`, 404);
+  const r = await db.run(db.k.updateTable("main.fast_track").set({ weight: w }).where("repo", "=", ref.repo).where("number", "=", ref.number).where("weight", "<>", w));
   if (r.changes) await audit(db, by, "fasttrack-weight", refText(ref), { weight: w, ...(via ? { via } : {}) });
   return { ref, weight: w };
 }
@@ -88,7 +90,7 @@ export async function setFastTrackWeight(db: Db, by: string, input: unknown, wei
 /** Takes an item off the list; it returns to normal ranking. Returns false when it was not on it. */
 export async function removeFastTrack(db: Db, by: string, input: unknown, via?: string): Promise<{ ref: FastRef; removed: boolean }> {
   const ref = parseItemRef(input);
-  const r = await db.prepare("DELETE FROM main.fast_track WHERE repo = ? AND number = ?").run(ref.repo, ref.number);
+  const r = await db.run(db.k.deleteFrom("main.fast_track").where("repo", "=", ref.repo).where("number", "=", ref.number));
   if (r.changes) await audit(db, by, "fasttrack-remove", refText(ref), via ? { via } : undefined);
   return { ref, removed: r.changes > 0 };
 }
@@ -98,6 +100,7 @@ const FAST_BASE = 1e15;
 const WEIGHT_STEP = 1e12;
 /** A fast-tracked row's score: its weight first, then the earlier addition. `f` is the table alias. */
 const rowScore = (f: string) => `(${FAST_BASE} + ${f}.weight * ${WEIGHT_STEP} - ${f}.id)`;
+const rowScoreExpr = (eb: kx.AnyEb, f: string) => eb(eb(eb.lit(FAST_BASE), "+", eb(eb.ref(`${f}.weight`), "*", eb.lit(WEIGHT_STEP))), "-", eb.ref(`${f}.id`));
 /** Scores at or above this belong to fast-tracked items. */
 export const FAST_FLOOR = FAST_BASE / 2;
 
@@ -112,8 +115,7 @@ export const fastScoreSql = (repo: string, number: string, scoreExpr: string): s
 /** `fastScoreSql` as an expression; `repo`, `number` and `score` are column references or expressions. */
 export function fastScoreExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, score: kx.Ex): AliasableExpression<number | null> {
   const t = kx.schemaEb(eb), r = kx.exprOf(eb, repo), n = kx.exprOf(eb, number);
-  const rowScore = eb(eb(eb.lit(FAST_BASE), "+", eb(eb.ref("fq.weight"), "*", eb.lit(WEIGHT_STEP))), "-", eb.ref("fq.id"));
-  const best = t.selectFrom("main.fast_track as fq").select((s) => s.fn.max<number>(rowScore).as("s")).where("fq.repo", "=", r).where((w) => w.or([w("fq.number", "=", n),
+  const best = t.selectFrom("main.fast_track as fq").select((s) => s.fn.max<number>(rowScoreExpr(eb, "fq")).as("s")).where("fq.repo", "=", r).where((w) => w.or([w("fq.number", "=", n),
     w.exists(t.selectFrom("main.fix_attempts as fa").select(eb.lit(1).as("one")).where("fa.repo", "=", r).where("fa.number", "=", eb.ref("fq.number"))
       .where(kx.like(db, "fa.pr_url", eb(eb.val("%/pull/"), "||", n))))]));
   return eb.fn.coalesce(best.$asScalar(), kx.exprOf(eb, score));
@@ -121,8 +123,7 @@ export function fastScoreExpr(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex, 
 
 /** The fast-track score of the item (see `fastScoreSql`), or null when it is not fast-tracked. */
 export async function fastScoreOf(db: Db, repo: string, number: number): Promise<number | null> {
-  const r = await db.prepare(`SELECT ${fastScoreSql("?1", "CAST(?2 AS INTEGER)", "NULL")} AS s`).get(repo, number) as { s: number | null };
-  return r.s;
+  return (await db.get(db.k.selectNoFrom((eb) => fastScoreExpr(db, eb, eb.val(repo), eb.lit(number), eb.lit(null)).as("s"))))!.s;
 }
 
 /** A Fix PR's number from its URL, as `fastScoreSql` links it: the URL ends in `/pull/<number>` (any case, no leading zero). */
@@ -133,9 +134,12 @@ const linkedPr = (url: string): number | null => {
 
 /** The fast-track score of every fast-tracked item (see `fastScoreSql`), keyed by `repo#number`: one query. An item without an entry is not fast-tracked. */
 export async function fastScores(db: Db): Promise<Map<string, number>> {
-  const rows = await db.prepare(`SELECT ft.repo, ft.number, NULL AS pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft
-    UNION ALL SELECT ft.repo, NULL, fa.pr_url, ${rowScore("ft")} FROM main.fast_track ft JOIN main.fix_attempts fa ON fa.repo = ft.repo AND fa.number = ft.number
-    WHERE fa.pr_url IS NOT NULL`).all() as { repo: string; number: number | null; pr_url: string | null; s: number }[];
+  const rows = await db.all(db.k.selectFrom("main.fast_track as ft")
+    .select((eb) => ["ft.repo", "ft.number", eb.cast<string | null>(eb.lit(null), "text").as("pr_url"), rowScoreExpr(eb, "ft").as("s")])
+    .unionAll(db.k.selectFrom("main.fast_track as ft")
+      .innerJoin("main.fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "ft.repo").onRef("fa.number", "=", "ft.number"))
+      .select((eb) => ["ft.repo", eb.cast<number>(eb.lit(null), "bigint").as("number"), "fa.pr_url", rowScoreExpr(eb, "ft").as("s")])
+      .where("fa.pr_url", "is not", null)));
   const out = new Map<string, number>();
   for (const r of rows) {
     const n = r.number ?? linkedPr(r.pr_url!);
@@ -151,9 +155,9 @@ export const isFastTracked = async (db: Db, repo: string, number: number): Promi
 /** True when the sandbox task belongs to a fast-tracked item: its PR or issue, or a batch of fast-tracked PRs only. */
 export async function fastTask(db: Db, t: { id: number; repo: string; number: number | null }): Promise<boolean> {
   if (t.number !== null) return await isFastTracked(db, t.repo, t.number);
-  const b = await db.prepare("SELECT id FROM main.merge_batches WHERE task_id = ?").get(t.id) as { id: number } | undefined;
+  const b = await db.get(db.k.selectFrom("main.merge_batches").select("id").where("task_id", "=", t.id).limit(1));
   if (!b) return false;
-  const ms = await db.prepare("SELECT number FROM main.merge_batch_prs WHERE batch_id = ?").all(b.id) as { number: number }[];
+  const ms = await db.all(db.k.selectFrom("main.merge_batch_prs").select("number").where("batch_id", "=", b.id));
   return ms.length > 0 && await everySeq(ms, async (m) => await isFastTracked(db, t.repo, m.number));
 }
 
@@ -170,11 +174,13 @@ export async function fastFirst(db: Db, repos: string[], top: (repo: string) => 
 
 /** Work score of every ranked open item of the repo, with fast-tracked items raised above all others. */
 export async function workScores(db: Db, repo: string): Promise<Map<number, number>> {
-  const out = new Map((await db.prepare("SELECT number, score FROM main.item_rank WHERE repo = ?").all(repo) as { number: number; score: number }[]).map((r) => [r.number, r.score]));
-  for (const f of await db.prepare(`SELECT number, ${rowScore("ft")} AS s FROM main.fast_track ft WHERE repo = ?`).all(repo) as { number: number; s: number }[]) out.set(f.number, f.s);
+  const out = new Map((await db.all(db.k.selectFrom("main.item_rank").select(["number", "score"]).where("repo", "=", repo))).map((r) => [r.number, r.score]));
+  for (const f of await db.all(db.k.selectFrom("main.fast_track as ft").select((eb) => ["ft.number", rowScoreExpr(eb, "ft").as("s")]).where("ft.repo", "=", repo))) out.set(f.number, f.s);
   // A fast-tracked issue's Fix PR takes the issue's place.
-  for (const f of await db.prepare(`SELECT fa.pr_url, ${rowScore("ft")} AS s FROM main.fast_track ft JOIN main.fix_attempts fa ON fa.repo = ft.repo AND fa.number = ft.number
-    WHERE ft.repo = ? AND fa.pr_url IS NOT NULL`).all(repo) as { pr_url: string; s: number }[]) {
+  for (const f of await db.all(db.k.selectFrom("main.fast_track as ft")
+    .innerJoin("main.fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "ft.repo").onRef("fa.number", "=", "ft.number"))
+    .select((eb) => ["fa.pr_url", rowScoreExpr(eb, "ft").as("s")]).$narrowType<{ pr_url: string }>()
+    .where("ft.repo", "=", repo).where("fa.pr_url", "is not", null))) {
     const n = Number(/\/pull\/(\d+)$/.exec(f.pr_url)?.[1]);
     const own = out.get(n) ?? 0;
     // The higher score (heavier, then earlier addition) counts, like fastScoreSql.

@@ -226,8 +226,8 @@ describe("picks and Manual only", async () => {
   });
 
   test("My tasks items: fast-tracked only takes calls on fast-tracked items; by me only on the user's own; a repo counts only with such an item", async () => {
-    const ins = db.prepare("INSERT OR IGNORE INTO items (repo, number, kind, state, title, author, created_at) VALUES ('photocraft', ?, 'pr', 'OPEN', 'x', 'dev', '2026-01-01T00:00:00Z')");
-    for (const n of [10, 11, 12]) await ins.run(n);
+    const ins = async (number: number) => await db.run(db.k.insertInto("items").values({ repo: "photocraft", number, kind: "pr", state: "OPEN", title: "x", author: "dev", created_at: "2026-01-01T00:00:00Z" }).onConflict((oc) => oc.doNothing()));
+    for (const n of [10, 11, 12]) await ins(n);
     const put = (taskItems: unknown) => userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems } }));
     assert.equal((await userSettings.settings(db, req("alice", "maintainer"))).taskItems, "all", "every item by default");
     await assert.rejects(put("some"), /taskItems must be one of/);
@@ -275,9 +275,9 @@ describe("picks and Manual only", async () => {
   });
 
   test("My tasks items in a pool: a fast-only runner gets the fast item's unit at once and no unit on other items, even with the other runners busy", async () => {
-    const ins = db.prepare("INSERT OR IGNORE INTO items (repo, number, kind, state, title, author, created_at) VALUES ('photocraft', ?, 'issue', 'OPEN', 'x', 'dev', '2026-01-01T00:00:00Z')");
+    const ins = async (number: number) => await db.run(db.k.insertInto("items").values({ repo: "photocraft", number, kind: "issue", state: "OPEN", title: "x", author: "dev", created_at: "2026-01-01T00:00:00Z" }).onConflict((oc) => oc.doNothing()));
     const units = [21, 22, 23, 20];
-    for (const n of units) await ins.run(n);
+    for (const n of units) await ins(n);
     await addFastTrack(db, "bob", "photocraft#20");
     await userSettings.setSettings(db, req("alice", "maintainer", { json: { taskItems: "fast" } }));
     await db.run(db.k.updateTable("remote_helpers").set({ reported_at: Date.now() - STATUS_FRESH_MS - 1000 }).where("login", "<>", "alice"));

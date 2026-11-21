@@ -234,8 +234,8 @@ describe("pre-approved merge", () => {
     await w.premerge(18, "clean");
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 18))?.state, "queued");
-    await w.db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, created_at, updated_at) VALUES (5, 'app', 'integration-app-1', 'open', 'b', 't', ?, ?)").run(T0, T0);
-    await w.db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (5, 18, 'sha18b', 1)").run();
+    await w.db.run(w.db.k.insertInto("merge_batches").values({ id: 5, repo: "app", branch: "integration-app-1", state: "open", base_sha: "b", commit_sha: "t", created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 5, number: 18, head_oid: "sha18b", position: 1 }));
     assert.equal((await cancelPreapproval(w.db, OPERATOR, "app", 18)).state, "cancelled");
     assert.equal((await w.rows("SELECT state FROM merge_batches WHERE id = 5"))[0]!.state, "superseded");
     assert.deepEqual(await answerOf(w, 18, "sha18b"), [{ answer: null }]);
@@ -260,8 +260,8 @@ describe("pre-approved merge", () => {
     await inCi(w, 19);
     await w.premerge(19, "clean");
     await settle(w);
-    await w.db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at) VALUES (6, 'app', 'integration-app-2', 'open', 'b', 't', 77, ?, ?)").run(T0, T0);
-    await w.db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (6, 19, 'sha19b', 1)").run();
+    await w.db.run(w.db.k.insertInto("merge_batches").values({ id: 6, repo: "app", branch: "integration-app-2", state: "open", base_sha: "b", commit_sha: "t", pr_number: 77, created_at: T0, updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("merge_batch_prs").values({ batch_id: 6, number: 19, head_oid: "sha19b", position: 1 }));
     const failing = async () => ({ code: 1, stdout: "", stderr: "boom" });
     await assert.rejects(cancelPreapproval(w.db, OPERATOR, "app", 19, failing));
     assert.equal((await w.rows("SELECT 1 FROM merge_holds WHERE number = 19")).length, 0);
@@ -358,8 +358,8 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
 describe("queue items: an issue", () => {
   test("is fast-tracked without lowering its weight; its one closing PR is queued, several are only listed", async () => {
     const w = await (await (await (await (await (await fresh()).issue(31)).pr(32)).issue(33)).pr(34)).pr(35);
-    await w.db.prepare("UPDATE items SET closing_issues = '[31]' WHERE repo = 'app' AND number = 32").run();
-    await w.db.prepare("UPDATE items SET closing_issues = '[33]' WHERE repo = 'app' AND number IN (34, 35)").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[31]" }).where("repo", "=", "app").where("number", "=", 32));
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[33]" }).where("repo", "=", "app").where("number", "in", [34, 35]));
     await addFastTrack(w.db, OPERATOR, "app#31", 9);
     const req = (item: string) => ({ query: new URLSearchParams(), json: { item, weight: 7 }, user: { login: OPERATOR, role: "operator", canWrite: async () => true } }) as unknown as Req;
     assert.match((await queueAdd(w.db, req("app#31"))).label, /Fast-tracked the issue; queued #32/);

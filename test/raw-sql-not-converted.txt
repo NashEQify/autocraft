@@ -35,7 +35,6 @@ src/agents/step.ts
 
 src/areas/store.ts
 
-src/author-ids.ts
 
 
 
@@ -189,7 +188,6 @@ src/decide/judgement.ts
 
 src/decide/prepared.ts
 
-src/decisions-used.ts
 
 src/decisions.ts
 
@@ -240,7 +238,6 @@ src/embed/store.ts
 
 src/embed/vectors.ts
 
-src/fasttrack.ts
 
 src/fixissue/approval.ts
 
