@@ -7,7 +7,7 @@ import {
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
-import type { Action, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind } from "./plan.ts";
+import type { Action, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind } from "./plan.ts";
 
 /** The start of a statement for a reason line: one line, at most 80 characters. */
 const excerpt = (t: string): string => { const s = t.replace(/\s+/g, " ").trim(); return s.length > 80 ? `${s.slice(0, 79).trimEnd()}…` : s; };
@@ -131,7 +131,7 @@ const refusedAsBefore = (f: PrFacts, e: Entry): boolean => {
   return m.ci === null || m.mergeable === null || (m.ci === f.ci && m.mergeable === f.mergeable);
 };
 
-const rereadDue = (f: PrFacts): boolean => (f.diffPending?.paceAt ?? 0) <= f.now && (f.diffPending?.lastRead == null || f.now - f.diffPending.lastRead >= RETRY_AFTER_MS);
+const rereadDue = (f: PrFacts, pass: PassFacts): boolean => pass.rereadPaceAt <= f.now && (f.diffPending?.lastRead == null || f.now - f.diffPending.lastRead >= RETRY_AFTER_MS);
 
 const premergeRetryDue = (f: PrFacts): boolean => {
   const row = f.premerge;
@@ -348,7 +348,10 @@ function fixupWait(f: PrFacts, fx: { bucket: FixupBucket; done: boolean } | null
   }
 }
 
-export function decidePr(f: PrFacts): Plan {
+/** PassFacts of a decision that has none to give: no re-read pace holds the next diff re-read. */
+export const NO_PASS: PassFacts = { rereadPaceAt: 0 };
+
+export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const plan = (state: PlanState, p: Partial<Plan> = {}): Plan => ({ repo: f.repo, number: f.number, head: f.head, state, path: null, reasons: [], note: null, actions: [], wait: null, waitKind: null, eligible: false, conflictNote: null, ...p });
   const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
   const r = f.review;
@@ -504,7 +507,7 @@ export function decidePr(f: PrFacts): Plan {
   if (f.operator?.premerge && e && r && inQueue && f.repoFacts.mergeApproved && !f.draft && !f.mergeHeld && ciAllows("operator", f.ci, e.noCi) && f.mergeable === "MERGEABLE" && premergeRetryDue(f)) actions.push(act("premerge", r.head));
 
   // A diff that waits for what the merge rule reads beside it is read again by the pre-merge step, with no model call; after a read that left it waiting, an hour later.
-  if (f.diffPending && r && f.ghState === "OPEN" && rereadDue(f) && !actions.some((a) => a.kind === "premerge")) actions.push(act("premerge", r.head));
+  if (f.diffPending && r && f.ghState === "OPEN" && rereadDue(f, pass) && !actions.some((a) => a.kind === "premerge")) actions.push(act("premerge", r.head));
 
   actions.push(...unassignOf(f, state, actions));
 

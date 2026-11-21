@@ -30,7 +30,7 @@ export const BOOKKEEPING_COLUMNS: Record<string, string[]> = {
 };
 
 /** Settings the runner, the sync and the planner write for their own use; the dashboard shows none of them. */
-const BOOKKEEPING_SETTINGS = [
+export const BOOKKEEPING_SETTINGS = [
   "runner_heartbeat", "schema_stamp", "fts_built", "hashes_built", "text_refs_built", "diff_facts_built", "mentions_built", "item_stage_built", "tracking_started_at",
   "pipeline_planned_at", "pipeline_seqs_seen", "pipeline_wake_at", "pipeline_status", "pipeline_sync_seen", "pipeline_sync_at", "pipeline_review_cursor", "pipeline_verify_cursor",
   "full_sync_cursor", "org_high_water", "main_ci_polled_at", "releases_polled_at", "releases_offset", "search_catchup_at", "repos_refreshed_at", "sync_rate_remaining", "sync_rate_reset_at",
@@ -163,7 +163,7 @@ export const TOPICS = Object.keys(TOPIC_TABLES);
 const ALL_OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 
 /** The columns an UPDATE of `table` must change to count: all of them but the bookkeeping ones. */
-function watchedColumns(table: string, columns: Map<string, string[]> | undefined): string[] | null {
+export function watchedColumns(table: string, columns: Map<string, string[]> | undefined): string[] | null {
   const all = columns?.get(table);
   if (!all) return null;
   const skip = new Set(BOOKKEEPING_COLUMNS[table] ?? []);
@@ -171,7 +171,7 @@ function watchedColumns(table: string, columns: Map<string, string[]> | undefine
 }
 
 /** Column names of every table, for the UPDATE conditions. */
-function columnsOf(db: DatabaseSync): Map<string, string[]> {
+export function columnsOf(db: DatabaseSync): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const { name } of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table'").all() as { name: string }[]) {
     out.set(name, (db.prepare(`SELECT name FROM pragma_table_info('${name}', 'main')`).all() as { name: string }[]).map((c) => c.name));

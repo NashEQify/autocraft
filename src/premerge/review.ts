@@ -8,6 +8,7 @@ import { runModelStep } from "../agents/step.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
 import { planned } from "../core/select.ts";
+import { loadPass } from "../core/facts.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { PrFacts } from "../core/plan.ts";
 import { PREMERGE_MAX_TRIES, RETRY_AFTER_MS } from "../core/rules.ts";
@@ -54,13 +55,14 @@ export type PremergeItem = { repo: string; number: number; head: string; facts: 
  */
 export function premergeCandidates(db: DatabaseSync, opts: { repo?: string; at?: number; wake?: number[]; run?: string | null; plans?: PlanSet } = {}): PremergeItem[] {
   const { wake, at, ...rest } = opts;
+  const pace = wake ? (opts.plans?.pass ?? loadPass(at)).rereadPaceAt : 0;
   return planned(db, "premerge", {
     ...rest, ...(at !== undefined ? { now: at } : {}),
     onPlan: wake ? (f, plan) => {
       const pm = f.premerge;
       if ((plan.state === "waiting-premerge" || f.operator?.premerge) && f.repoFacts.mergeApproved && pm && !pm.hasFindings && pm.tries < PREMERGE_MAX_TRIES) wake.push(Date.parse(pm.at) + RETRY_AFTER_MS);
       if (f.diffPending) {
-        const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, f.diffPending.paceAt ?? 0);
+        const t = Math.max(f.diffPending.lastRead != null ? f.diffPending.lastRead + RETRY_AFTER_MS : 0, pace);
         if (t > f.now) wake.push(t);
       }
     } : undefined,

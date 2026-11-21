@@ -64,10 +64,13 @@ import { pilotItems, scopeRepos } from "../pilot.ts";
 import { refreshOutsideHolds } from "../outside.ts";
 import { JUDGEMENT_MODELS, judgementModel } from "../decide/judgement.ts";
 import { FAST_FLOOR, fastFirst, fastScores } from "../fasttrack.ts";
-import { deleteSetting, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
+import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
+import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
 
 /** Fallback only: the planner normally runs on a content change, a finished job or a release. */
 export const PLAN_EVERY_MS = 5 * 60_000;
+/** An incremental planner (the runner's) loads every item's facts again at least this often: the bound on a change the log missed. */
+export const PLAN_FULL_EVERY_MS = 30 * 60_000;
 /** Failed jobs of a step are retried after 1, 2, 4, 8, 16 minutes, then every 30. */
 export const FAIL_BACKOFF_MS = 60_000;
 export const FAIL_BACKOFF_MAX_MS = 30 * 60_000;
@@ -150,10 +153,12 @@ export type PlanCtx = {
   untaken?: UntakenTest;
   /** The fast-track scores of the pass (fastScores), read on first use. */
   fast?: Map<string, number>;
+  /** The incremental pass that built `plans`, when the planner keeps facts between passes. */
+  pass?: PlanPass;
 };
 
 /** Only the repos in scope (pipeline on, narrowed by the pilot) are planned for; a job for another repo is never proposed. */
-export const planCtx = (db: DatabaseSync): PlanCtx => {
+export const planCtx = (db: DatabaseSync, incremental = false): PlanCtx => {
   // The outside-author holds first: the facts below read them through the pilot condition (src/outside.ts).
   const wake: number[] = [];
   try {
@@ -161,6 +166,16 @@ export const planCtx = (db: DatabaseSync): PlanCtx => {
     if (outside.wakeAt !== null) wake.push(outside.wakeAt);
   } catch (e) {
     console.error(`autopilot: outside-author holds: ${(e as Error).message}`);
+  }
+  if (incremental) {
+    // One read transaction for the settings, the change log and every load, so a write in between is either all seen or left for the next pass.
+    return inReadSnapshot(db, () => {
+      rereadSettingsSnapshot(db);
+      const scope = scopeRepos(db);
+      const run = latestRun(db);
+      const pass = planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
+      return { run, tracked: trackedNames(db).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {} };
+    });
   }
   const scope = scopeRepos(db);
   const run = latestRun(db);
@@ -956,7 +971,11 @@ export async function pipelineState(db: DatabaseSync): Promise<Omit<PipelineStat
 
 // ---- planner -------------------------------------------------------------------
 
-export type PlanOptions = { lanes?: Lane[]; nowMs?: number; log?: (line: string) => void };
+export type PlanOptions = {
+  lanes?: Lane[]; nowMs?: number; log?: (line: string) => void;
+  /** Keep facts between passes on this connection and reload only what changed (the runner's worker); AUTOCRAFT_PLAN_SHADOW=throw turns it on for every pass. */
+  incremental?: boolean;
+};
 
 /** A job the detection pass wants queued; `params` include the `limit` the gate set. */
 export type Proposal = { lane: string; step: string; params: Params; fp?: string; gate?: { step: string; params: Params } };
@@ -964,7 +983,7 @@ export type Proposal = { lane: string; step: string; params: Params; fp?: string
 export type Detected = {
   proposals: Proposal[]; logs: string[]; wakeAt?: number | null; status?: Record<string, string>;
   /** Milliseconds the pass spent: loading and deciding the Plans, the lanes, writing the Plan cache; and the cache rows written and deleted. */
-  timing?: { loadMs: number; lanesMs: number; cacheMs: number; written: number; deleted: number };
+  timing?: { loadMs: number; lanesMs: number; cacheMs: number; written: number; deleted: number; pass?: string };
 };
 
 /** The fewest proposals one lane hands to apply: one per repo, in order, so that when the first is refused at enqueue (or the step is full at step_parallel) the next repo's goes in. */
@@ -993,7 +1012,7 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
   const log = (l: string) => { logs.push(l); opts.log?.(l); };
   const proposals: Proposal[] = [];
   const t0 = performance.now();
-  const ctx = planCtx(db);
+  const ctx = planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
   // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
   const untaken = (ctx.untaken = untakenTest(db, steps, ms));
   const loadMs = performance.now() - t0;
@@ -1087,16 +1106,25 @@ function detectPass(db: DatabaseSync, opts: PlanOptions, steps: Map<string, Step
   // The Plan cache: the planner's output for the dashboard.
   let cache = { written: 0, deleted: 0 };
   const t1 = performance.now();
-  try { cache = writePlanCache(db, ctx.plans!); } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
+  let cached = false;
+  try {
+    cache = writePlanCache(db, ctx.plans!);
+    cached = true;
+  } catch (e) { log(`autopilot: plan cache: ${(e as Error).message}`); }
   const cacheMs = performance.now() - t1;
+  if (cached) {
+    try { ctx.pass?.finish(loadMs + lanesMs + cacheMs); } catch (e) { log(`autopilot: plan records: ${(e as Error).message}`); }
+  }
   // The liveness check follows the plan cache and stores its own result at most every few minutes.
   try { refreshLiveness(db); } catch (e) { log(`autopilot: liveness: ${(e as Error).message}`); }
-  if (loadMs + lanesMs + cacheMs > 2000) log(`autopilot: pass took ${Math.round(loadMs + lanesMs + cacheMs)} ms: plans ${Math.round(loadMs)}, lanes ${Math.round(lanesMs)}, cache ${Math.round(cacheMs)} (${cache.written} rows written, ${cache.deleted} deleted)`);
+  const passKind = ctx.pass ? `${ctx.pass.kind}, ${ctx.pass.refs} loaded${ctx.pass.diffs.length ? `, ${ctx.pass.diffs.length} shadow differences` : ""}` : undefined;
+  if (ctx.pass?.diffs.length) log(`autopilot: plan shadow: ${ctx.pass.diffs.length} differences (plan_shadow_diffs)`);
+  if (loadMs + lanesMs + cacheMs > 2000) log(`autopilot: pass took ${Math.round(loadMs + lanesMs + cacheMs)} ms${passKind ? ` (${passKind})` : ""}: plans ${Math.round(loadMs)}, lanes ${Math.round(lanesMs)}, cache ${Math.round(cacheMs)} (${cache.written} rows written, ${cache.deleted} deleted)`);
   // A stage with a candidate the checks above held back says why; the others had no candidate or start now.
   Object.assign(status, ctx.notes ?? {});
   for (const p of proposals) delete status[p.step];
   const wakes = (ctx.wake ?? []).filter((t) => t > ms);
-  return { proposals, logs, wakeAt: wakes.length ? Math.min(...wakes) : null, status, timing: { loadMs, lanesMs, cacheMs, ...cache } };
+  return { proposals, logs, wakeAt: wakes.length ? Math.min(...wakes) : null, status, timing: { loadMs, lanesMs, cacheMs, ...cache, ...(passKind ? { pass: passKind } : {}) } };
 }
 
 /** The lease keys among a job's skip keys: null for a job from before the keys were recorded. */

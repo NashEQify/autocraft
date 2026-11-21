@@ -153,7 +153,7 @@ export async function runVerify(db: DatabaseSync, params: VerifyParams, log: (li
         // Without a readable diff there is no test file to find, so CI is the verification.
         if (!pre.ok || !codeDiff(pre.text).testsOmitted.length) { byCi(); return; }
       }
-      const cr = await cachedCrates(repo, c.head_oid, deps.fetchCrates);
+      const cr = await cachedCrates(repo, c.head_oid, deps.fetchCrates, db);
       if (!cr.ok) { log(`  ${ref}: no crate list: ${cr.error}`); summary.skipped.push(ref); return; }
       if (!cr.rust) {
         saveVerification(db, c, unavailableRow(NOT_RUST_REASON));

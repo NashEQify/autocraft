@@ -1,10 +1,11 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
+import { refIn, refPairs } from "../core/ref-filter.ts";
 import type { DatabaseSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { effectiveCi, effectiveCiWith, optionalChecksOf } from "../optional-checks.ts";
-import { BLOCKS_REVIEW, blockersLoader, storedBlockedBy } from "./blockers.ts";
-import { MAX_RERUNS_PER_DAY, discussionState, maintainerSince, staleMarksSince, type DiscussionState } from "./discussion.ts";
+import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, blockersLoader, storedBlockedBy } from "./blockers.ts";
+import { MAX_RERUNS_PER_DAY, discussionState, maintainerSince, nextUtcMidnight, staleMarksSince, type DiscussionState } from "./discussion.ts";
 import { ourCommitsLoader } from "./ours.ts";
 import { setting } from "../settings-read.ts";
 
@@ -57,7 +58,7 @@ export function headCi(db: DatabaseSync, repo: string, number: number, head: str
   return o === "pending" ? "pending" : o === "failure" ? "failure" : "ok";
 }
 
-export const nextUtcMidnight = (ms: number): number => { const d = new Date(ms); return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1); };
+export { nextUtcMidnight };
 
 /**
  * The hold check of every PR of one planning pass: statements are prepared once. A hold is what keeps the next review of a PR at `head`
@@ -65,11 +66,12 @@ export const nextUtcMidnight = (ms: number): number => { const d = new Date(ms);
  * An unknown CI state does not hold (the review step reads the checks live before asking the model and applies this again).
  * Not held by CI: the first review of a PR when CI is red (running CI still waits), and the one review after the blockers settled.
  * Not held by the cap or the interval: a head that only our own pushes made since the last review.
+ * `refresh` is told when a hold without an `until` of its own ends with the clock (a blocker list expiring).
  */
-export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?: Iterable<string>): (repo: string, number: number, head: string) => ReviewHold | null {
+export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?: Iterable<string>): (repo: string, number: number, head: string, refresh?: (at: number) => void) => ReviewHold | null {
   // Each table is read once, on first use, for every PR (or only `refs`, "repo#number"), keyed by `repo#number`.
-  const only = refs ? JSON.stringify([...refs]) : null;
-  const narrow = (a: string): string => (only ? ` AND ${a}.repo || '#' || ${a}.number IN (SELECT value FROM json_each(:refs))` : "");
+  const only = refs ? refPairs(refs) : null;
+  const narrow = (a: string): string => (only ? ` AND ${refIn(a)}` : "");
   const bind = (p: Record<string, string> = {}): Record<string, string> => (only ? { ...p, refs: only } : p);
   const once = <T>(load: () => T): (() => T) => { let v: T | undefined; return () => (v ??= load()); };
   type Last = { k: string; head_oid: string; at: string; verdict: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null };
@@ -108,7 +110,7 @@ export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?:
   const interval = reviewMinInterval(db) * 60_000;
   const today = new Date(nowMs).toISOString().slice(0, 10);
   const states = new Map<string, DiscussionState>();
-  return (repo, number, head) => {
+  return (repo, number, head, refresh) => {
     const ref = `${repo}#${number}`;
     const last = lastReviews().get(ref);
     // The failure backoff holds even after a request: a review that keeps failing is not retried on every pass.
@@ -134,7 +136,10 @@ export function reviewHolds(db: DatabaseSync, nowMs: number = Date.now(), refs?:
     let settled = false;
     if (last?.verdict === "hold" && storedBlockedBy(last.blocked_by).length) {
       const open = blockers().active(`${repo}#${number}`, last.blocked_by, last.at, nowMs);
-      if (open.length) return { kind: "blocked", wait: `${open.join(", ")}${BLOCKS_REVIEW}`, ...(blockers().openQuestion(open) ? { person: true } : {}) };
+      if (open.length) {
+        refresh?.(Date.parse(last.at) + BLOCKED_EXPIRES_MS + 1);
+        return { kind: "blocked", wait: `${open.join(", ")}${BLOCKS_REVIEW}`, ...(blockers().openQuestion(open) ? { person: true } : {}) };
+      }
       settled = true;
     }
     const ci = ciAt(repo, number, head);

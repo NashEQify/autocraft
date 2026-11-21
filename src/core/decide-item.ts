@@ -5,7 +5,7 @@ import { levelWith, type Level } from "../priority/score.ts";
 import { isWork, unassignActions } from "./assignment.ts";
 import { decidePr } from "./decide.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
-import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PrFacts } from "./plan.ts";
+import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts } from "./plan.ts";
 
 const act = (kind: Action["kind"], head: string | null, params?: Record<string, unknown>): Action => ({ kind, head, ...(params ? { params } : {}) });
 
@@ -172,9 +172,9 @@ export function nextStep(item: ItemPlan, f: ItemFacts, pr: PrFacts | null): stri
 }
 
 /** Every plan of an item together. A PR's triage actions (classify, label, ...) and its review-to-merge actions can both be due: triage actions come first. */
-export function decideAll(item: ItemFacts, pr: PrFacts | null = null): ItemView {
+export function decideAll(item: ItemFacts, pr: PrFacts | null = null, pass?: PassFacts): ItemView {
   const plan = decideItem(item);
-  const prPlan = pr ? decidePr(pr) : null;
+  const prPlan = pr ? decidePr(pr, pass) : null;
   return {
     repo: item.repo, number: item.number, kind: item.kind, head: pr?.head ?? null, item: plan, pr: prPlan,
     actions: [...plan.actions, ...(prPlan?.actions ?? [])], next: nextStep(plan, item, pr),

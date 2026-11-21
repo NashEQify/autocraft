@@ -149,7 +149,7 @@ export async function runPrBuilds(db: DatabaseSync, repo: string, log: (line: st
   if (!featureOn(db, "pr-builds", repo)) return out;
   for (const c of selectPrBuilds(db, repo)) {
     if (c.rust === null) {
-      const r = await cachedCrates(repo, c.head, deps.fetchCrates);
+      const r = await cachedCrates(repo, c.head, deps.fetchCrates, db);
       if (!r.ok) {
         // Recorded as an error so the head is not selected (and fetched) again; a new push is a new head.
         db.prepare("INSERT OR IGNORE INTO main.pr_builds (repo, number, head_sha, scope, state, summary, created_at, finished_at) VALUES (?, ?, ?, ?, 'error', ?, ?, ?)")

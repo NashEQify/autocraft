@@ -1,6 +1,7 @@
 // Facts: everything the review-to-merge rules read about open PRs, loaded in one pass for a whole database or a slice of it.
 // Each concept has one definition here. Where a step selector and the merge queue used different
 // definitions, the queue's wins; the differences are listed in the report of this change, not here.
+import { refIn, refPairs } from "./ref-filter.ts";
 import { pipelineWrites } from "./rules.ts";
 import { quietFixPrs } from "../security/quiet.ts";
 export { quietFixPrs };
@@ -46,7 +47,7 @@ import { nextUtcMidnight, reviewHolds } from "../review/gate.ts";
 import { scopeAnswers, unsettledScope } from "../review/candidates.ts";
 import { NOT_RUST_REASON, PRIVATE_REASON, cachedRust } from "../verify/candidates.ts";
 import { CIFIX_PUSH_STATES, CIFIX_TRY_STATES, MAX_FAILURES, labelWithScopeAnswer, sizeOf, unsentAsk } from "./rules.ts";
-import type { AssignFacts, PrFacts, PrTier } from "./plan.ts";
+import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import { settledBySql } from "../settlers.ts";
 import { activeTrips, brokeHeads } from "../push-outcomes.ts";
 import { setting } from "../settings-read.ts";
@@ -117,17 +118,31 @@ function statementConflicts(find: { get(id: number): unknown }, stored: unknown[
   return out.sort((a, b) => a.id - b.id);
 }
 
+/** The instance-wide inputs of decidePr at `now`: read once per pass, not per PR. */
+export const loadPass = (now: number = Date.now()): PassFacts => ({ rereadPaceAt: rereadPaceAt(now) });
+
+/** Keeps the earliest time after `now` per ref: what `refreshAt` is made from. */
+export function refreshTimes(now: number): { soon: (ref: string, at: number | undefined) => void; at: (ref: string, ...more: (number | undefined)[]) => number | undefined } {
+  const times = new Map<string, number>();
+  const later = (t: number | undefined): t is number => t !== undefined && Number.isFinite(t) && t > now;
+  return {
+    soon: (ref, t) => { if (later(t) && !(times.get(ref)! <= t)) times.set(ref, t); },
+    at: (ref, ...more) => [times.get(ref), ...more].filter(later).reduce<number | undefined>((m, t) => (m === undefined || t < m ? t : m), undefined),
+  };
+}
+
 /** Facts of every open PR (and merged PRs with a take or take-fix review) of the database, repo or refs given. One pass: per-repo values are read once. */
 export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[] {
   const now = opts.now ?? Date.now();
   /** The `unsent` fact of a step's ask comments that never reached GitHub; absent when the ask is due as if none had failed. */
   const unsentOf = (ats: string[]): { unsent?: { until: number } | "final" } => { const u = unsentAsk(ats, now); return u === null ? {} : { unsent: u }; };
-  // When the next diff re-read may run (the instance's hourly pace, a rate-limit pause); read once per load.
-  let paceAt: number | undefined;
+  // Clock-driven changes the facts below do not show as a time of their own (expiries, daily counts, cache lifetimes), per PR.
+  const refresh = refreshTimes(now);
   const params: Record<string, string> = {};
   let where = "";
   if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += " AND i.repo || '#' || i.number IN (SELECT value FROM json_each(:refs))"; params.refs = JSON.stringify([...opts.refs]); }
+  const refs = opts.refs ? [...opts.refs] : undefined;
+  if (refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(refs); }
   const rows = db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
 
   // Values read once for all PRs.
@@ -137,7 +152,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     const p: Record<string, string> = {};
     let sql = "";
     if (opts.repo) { sql += ` AND ${a}.repo = :repo`; p.repo = opts.repo; }
-    if (opts.refs) { sql += ` AND ${a}.repo || '#' || ${a}.number IN (SELECT value FROM json_each(:refs))`; p.refs = params.refs!; }
+    if (refs) { sql += ` AND ${refIn(a)}`; p.refs = params.refs!; }
     return { sql, p };
   };
   const keyed = <T extends { k: string }>(sql: string, a: string): Map<string, Omit<T, "k">[]> => {
@@ -150,8 +165,8 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     return out;
   };
   const settled = settledSet(db, run, rows.filter((r) => r.in_pilot && r.not_integration).map((r) => `${r.repo}#${r.number}`));
-  const stale = staleReviews(db, opts.repo);
-  const staleActionable = staleReviews(db, opts.repo, true);
+  const stale = staleReviews(db, opts.repo, false, { now, refresh: refresh.soon });
+  const staleActionable = staleReviews(db, opts.repo, true, { now, refresh: refresh.soon });
   const scope = scopeAnswers(db);
   const unsettled = unsettledScope(db);
   const gates = gatesOf(db, opts.repo);
@@ -181,7 +196,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     FROM merges m WHERE m.outcome = 'merged' GROUP BY m.repo, m.number`).all() as { ref: string; merged_at: string; head: string | null }[]).map((x) => [x.ref, x]));
   const pmReviews = new Map((db.prepare("SELECT repo || '#' || number AS ref, at, error FROM postmerge_reviews").all() as { ref: string; at: string; error: string | null }[]).map((x) => [x.ref, x]));
   const since = setting(db, SINCE_KEY) ?? "9999";
-  const operator = operatorWork(db, opts.repo);
+  const operator = operatorWork(db, opts.repo, now);
   const carries = keyed<{ k: string; decision_id: string; attempts: number }>("SELECT c.repo || '#' || c.number AS k, c.decision_id, c.attempts FROM dupe_carries c WHERE c.state = 'queued' /*narrow*/ ORDER BY c.rowid", "c");
   const carryUnsent = db.prepare("SELECT created_at FROM fixups WHERE repo = ? AND number = ? AND source = 'carry' AND carry_decision = ? AND state = 'comment-unsent'");
   const carryPoints = db.prepare("SELECT detail FROM dupe_group_items WHERE decision_id = ? AND kind = 'pr' AND role = 'close' ORDER BY number");
@@ -202,7 +217,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
   const lintConflict = keyed<{ k: string; lint_task: number | null }>("SELECT c.repo || '#' || c.number || '@' || c.from_head AS k, c.lint_task FROM conflict_merges c WHERE c.state = 'linting' /*narrow*/ ORDER BY c.rowid", "c");
   type CifixRow = { head: string; state: string; created_at: string; task_id: number | null; runs: string | null; reason: string | null };
   const cifixOf = keyed<{ k: string } & CifixRow>("SELECT c.repo || '#' || c.number AS k, c.head, c.state, c.created_at, c.task_id, c.runs, c.reason FROM ci_fixes c WHERE 1 /*narrow*/ ORDER BY c.created_at, c.rowid", "c");
-  const authorWrites = authorWritesOf(db);
+  const authorWrites = authorWritesOf(db, now);
   const postSource = postSourcesOf(db, rows.filter((r) => r.r_mode === CARRIED && r.r_head).map((r) => `${r.repo}#${r.number}`));
   const queued = rows.filter((r) => r.in_pilot && r.not_integration && (r.r_verdict === "take" || r.r_verdict === "take-fix") && r.author);
   const tiers = tiersOf(db, queued.map((r) => ({ login: r.author!, id: r.author_id })));
@@ -291,7 +306,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     return { waiting, reread: !!w.reread, crossRepo: !!w.cross_repo, approvable: runs.filter((x) => x.event === "pull_request" && (failed[x.id] ?? 0) < MAX_FAILURES).length, blocked };
   };
 
-  const holdOf = reviewHolds(db, now, params.refs ? (JSON.parse(params.refs) as string[]) : undefined);
+  const holdOf = reviewHolds(db, now, refs);
   const outsideHolds = holdMap(db);
   const out: PrFacts[] = [];
   for (const r of rows) {
@@ -345,9 +360,12 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     const checksAtHead = r.c_head === (r.r_head ?? head);
     base.mergeable = (checksAtHead ? r.c_mergeable : r.i_mergeable) ?? "UNKNOWN";
     // An author whose permission has not been read yet counts as able to write: the job that pushes reads it first.
-    base.pushable = pushable(r.head_repo, r.repo, checksAtHead ? r.c_can : r.i_can, r.head_ref, rf.longLived, false, sameRepo(r.head_repo, r.repo) && authorWrites(r.repo, r) !== "no");
+    base.pushable = pushable(r.head_repo, r.repo, checksAtHead ? r.c_can : r.i_can, r.head_ref, rf.longLived, false, sameRepo(r.head_repo, r.repo) && authorWrites(r.repo, r, (t) => refresh.soon(ref, t)) !== "no");
     const ow = operator.get(ref);
-    if (ow && r.state === "OPEN") base.operator = { fix: head && ow.fixHeads.has(head) && queuedOperatorFix(db, r.repo, r.number, head) ? { attempts: operatorTries(db, r.repo, r.number) } : null, hold: ow.hold, premerge: !!head && ow.premergeHeads.has(head), preapproved: ow.preapproved };
+    if (ow && r.state === "OPEN") {
+      base.operator = { fix: head && ow.fixHeads.has(head) && queuedOperatorFix(db, r.repo, r.number, head, now) ? { attempts: operatorTries(db, r.repo, r.number) } : null, hold: ow.hold, premerge: !!head && ow.premergeHeads.has(head), preapproved: ow.preapproved };
+      refresh.soon(ref, ow.settleUntil);
+    }
     // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.
     if (base.operator?.fix && !base.heldBacklog && !base.draft && base.mergeable !== "CONFLICTING" && base.pushable && base.repoFacts.pushApproved && operatorTriesLeft(db, r.repo, r.number)) base.operator.hold = true;
     if (ow && r.state === "OPEN" && head) {
@@ -363,7 +381,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
         if (hasPoints) base.carry.push({ attempts: k.attempts, ...(u !== null && u !== "final" ? { unsent: u } : {}) });
       }
     }
-    if (r.state === "OPEN" && head && !base.draft) { const hold = holdOf(r.repo, r.number, head); if (hold) base.reviewHold = hold; }
+    if (r.state === "OPEN" && head && !base.draft) { const hold = holdOf(r.repo, r.number, head, (t) => refresh.soon(ref, t)); if (hold) base.reviewHold = hold; }
     if (!r.r_head || !r.r_verdict || !r.r_at) { out.push(base); continue; }
 
     const take = r.r_verdict === "take" || r.r_verdict === "take-fix";
@@ -381,7 +399,7 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     const diffFacts = r.d_lines === null ? null : { reasons: parseList(r.d_reasons) as string[], lines: r.d_lines, pending: r.d_pending === 1, lastRead: r.d_last_read };
     // While the extras are pending the reasons are the conservative ones, and the wait itself keeps the PR off the rule.
     base.sensitive = diffFacts ? (diffFacts.pending ? [...diffFacts.reasons, EXTRAS_PENDING_REASON] : diffFacts.reasons) : null;
-    if (diffFacts?.pending) base.diffPending = { lastRead: diffFacts.lastRead, paceAt: paceAt ??= rereadPaceAt(now) };
+    if (diffFacts?.pending) base.diffPending = { lastRead: diffFacts.lastRead };
     if (diffFacts) { base.lines = diffFacts.lines; base.size = sizeOf(diffFacts.lines); }
     base.statementConflicts = statementConflicts(statement, [safeJson(r.r_conflicts), safeJson(premerge.get(`${ref}@${r.r_head}`)?.conflicts ?? null)]);
     const p = posts.get(ref);
@@ -506,6 +524,12 @@ export function loadPrFacts(db: DatabaseSync, opts: LoadOptions = {}): PrFacts[]
     if (gate && gate.failures >= GATE_FAILURES) base.gateFailureNote = failureNote(gate.failures);
     if (why) base.changesRequested = { why, live };
     out.push(base);
+  }
+  // The timed waits the facts hold end at their own times; the refresh also covers the clock uses they do not show.
+  const until = (u: { until: number } | "final" | undefined): number | undefined => (typeof u === "object" ? u.until : undefined);
+  for (const f of out) {
+    const at = refresh.at(`${f.repo}#${f.number}`, f.reviewHold?.until, f.conflict?.until, until(f.fixup?.unsent), until(f.cifix?.unsent), ...f.carry.map((c) => c.unsent?.until));
+    if (at !== undefined) f.refreshAt = at;
   }
   return out;
 }

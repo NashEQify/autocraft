@@ -5,6 +5,7 @@
 //     class_scheme names the scheme it was computed under, so a changed scheme rehashes lazily.
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { BULK_ROWS, bulkWrites } from "./core/plan-changes.ts";
 import { itemInput, type Item } from "./classify/parse.ts";
 import { LABELS, RULES } from "./classify/rules.ts";
 import { itemText, textHash } from "./embed/text.ts";
@@ -41,17 +42,17 @@ const BATCH = 2000;
 
 /** Fills embed_hash where it is missing. Returns the number of rows written. */
 export function fillEmbedHashes(db: DatabaseSync): number {
-  return fill(db, `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
+  return fill(db, "embed-hashes", `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
     "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", (r) => [embedHash(r.title, r.body)]);
 }
 
 /** Fills class_hash where it is missing or was computed under another scheme. Only open items: the classifier reads no others. */
 export function fillClassHashes(db: DatabaseSync): number {
-  return fill(db, `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
+  return fill(db, "class-hashes", `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
     `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, (r) => [classifyHash(r)]);
 }
 
-function fill(db: DatabaseSync, select: string, update: string, values: (r: Fields) => string[]): number {
+function fill(db: DatabaseSync, source: string, select: string, update: string, values: (r: Fields) => string[]): number {
   const sel = db.prepare(select), upd = db.prepare(update);
   let total = 0;
   for (;;) {
@@ -59,7 +60,9 @@ function fill(db: DatabaseSync, select: string, update: string, values: (r: Fiel
     if (!rows.length) return total;
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const r of rows) upd.run(...values(r), r.repo, r.number);
+      const write = (): void => { for (const r of rows) upd.run(...values(r), r.repo, r.number); };
+      // A batch of a backfill takes one full-pass mark instead of a log row per item (src/core/plan-changes.ts).
+      if (rows.length >= BULK_ROWS) bulkWrites(db, source, write); else write();
       db.exec("COMMIT");
     } catch (e) {
       db.exec("ROLLBACK");
