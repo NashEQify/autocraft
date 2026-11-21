@@ -9,6 +9,8 @@ import { slugOf } from "./owners.ts";
 import { everySeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
 import { distinctFrom, jsonArrayLength, jsonEach, jsonText, jsonValid, nowParam, quote } from "./db/portable.ts";
+import * as kx from "./db/kx.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
 export const MAINTAINER_WRITES_KEY = "maintainer_writes";
 
@@ -176,4 +178,71 @@ export function canSettleSql(db: Db, login: string, role: string, a = "decisions
     AND (${a}.repo IS NULL OR ${ok(`${a}.repo`)})
     AND NOT EXISTS (SELECT 1 FROM ${itemsEach(db, a)}
       WHERE ${jsonText(db, "j.value", "$.repo")} IS NOT NULL AND NOT ${ok(jsonText(db, "j.value", "$.repo"))}))`;
+}
+
+// Typed twins of the SQL fragments above, for queries built with `db.k`.
+
+const WRITE_PERMISSIONS = ["write", "maintain", "admin"];
+
+/** The logins of operators. */
+const operatorLogins = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("main.access").select("login").where("role", "=", "operator");
+
+/** `SETTLER_LOGINS_SQL`: operators, and maintainers while `maintainer_writes` is on. */
+const settlerLoginsQuery = (eb: kx.AnyEb) => {
+  const t = kx.schemaEb(eb);
+  return t.selectFrom("main.access").select("login").where((w) => w.or([w("role", "=", "operator"), w.and([w("role", "=", "maintainer"),
+    w.exists(t.selectFrom("main.settings").select(w.lit(1).as("one")).where("key", "=", MAINTAINER_WRITES_KEY).where("value", "=", "1"))])]));
+};
+
+/** The instance runs as the GitHub App. */
+const appIdentity = (eb: kx.AnyEb) =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.settings as s").select(eb.lit(1).as("one")).where("s.key", "=", "github_identity").where("s.value", "=", "app"));
+
+/** The `items` of decisions row `a` when it is a JSON array, else `[]`. */
+const itemsJson = (db: Db, eb: kx.AnyEb, a: string) => eb.case().when(kx.jsonValid(db, `${a}.items`)).then(eb.ref(`${a}.items`)).else(eb.val("[]")).end();
+
+/** `settlesLoginSql` as an expression; `nowMs` takes the place of the bound `:settles_after` (settlesAfter). */
+export function settlesLoginExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex, nowMs: number): AliasableExpression<SqlBool> {
+  const l = kx.exprOf(eb, login);
+  return eb.or([eb(l, "in", operatorLogins(eb)), eb.and([eb(l, "in", settlerLoginsQuery(eb)), appIdentity(eb),
+    eb.exists(kx.schemaEb(eb).selectFrom("main.repo_permissions as rp").select(eb.lit(1).as("one")).where("rp.login", "=", l).where("rp.repo", "=", kx.exprOf(eb, repo))
+      .where("rp.permission", "in", WRITE_PERMISSIONS).where("rp.checked_at", ">", settlesAfter(nowMs).settles_after))])]);
+}
+
+/** `settlesCheckedAtSql` as an expression. */
+export function settlesCheckedAtExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex): AliasableExpression<string | null> {
+  const l = kx.exprOf(eb, login);
+  return eb.case().when(l, "in", operatorLogins(eb)).then(eb.lit(null))
+    .else(kx.schemaEb(eb).selectFrom("main.repo_permissions as rp").select((s) => s.fn.max("rp.checked_at").as("at")).where("rp.login", "=", l)
+      .where("rp.repo", "=", kx.exprOf(eb, repo)).where("rp.permission", "in", WRITE_PERMISSIONS)).end();
+}
+
+/** `settledBySql` as an expression (`a`: the decisions table name or alias in the caller's query). */
+export function settledByExpr(db: Db, eb: kx.AnyEb, a: string): AliasableExpression<SqlBool> {
+  const c = (col: string) => eb.ref(`${a}.${col}`);
+  return eb.and([eb(c("exec_state"), "is distinct from", "disputed"), eb.or([eb(c("answered_by"), "in", operatorLogins(eb)), eb.and([
+    eb(c("answered_by"), "in", settlerLoginsQuery(eb)),
+    eb.or([eb(c("repo"), "is not", null), eb(kx.jsonArrayLength(db, itemsJson(db, eb, a)), ">", 0)]),
+    eb.not(eb.and([eb(c("repo"), "is not", null), eb.not(appIdentity(eb))])),
+    eb.not(eb.exists(kx.schemaEb(eb).selectFrom(kx.jsonEach(db, itemsJson(db, eb, a), "j")).select(eb.lit(1).as("one"))
+      .where(kx.jsonText(db, "j.value", "$.repo"), "is not", null).where(eb.not(appIdentity(eb))))),
+  ])])]);
+}
+
+/** `canSettleSql` as an expression. */
+export function canSettleExpr(db: Db, eb: kx.AnyEb, login: string, role: string, a = "decisions"): AliasableExpression<SqlBool> {
+  if (role === "operator") return eb.lit(true);
+  if (role !== "maintainer") return eb.lit(false);
+  const t = kx.schemaEb(eb);
+  const c = (col: string) => eb.ref(`${a}.${col}`);
+  const fresh = nowParam({ offsetMs: -PERM_READ_TTL });
+  const ok = (repo: Expression<any>) => eb.and([appIdentity(eb), eb.exists(t.selectFrom("main.repo_permissions as rp").select(eb.lit(1).as("one"))
+    .where("rp.login", "=", login).where("rp.repo", "=", repo).where("rp.permission", "in", WRITE_PERMISSIONS).where("rp.checked_at", ">", fresh))]);
+  const itemRepo = () => kx.jsonText(db, "j.value", "$.repo");
+  return eb.and([
+    eb.exists(t.selectFrom("main.settings").select(eb.lit(1).as("one")).where("key", "=", MAINTAINER_WRITES_KEY).where("value", "=", "1")),
+    eb.or([eb(c("repo"), "is not", null), eb(kx.jsonArrayLength(db, itemsJson(db, eb, a)), ">", 0)]),
+    eb.or([eb(c("repo"), "is", null), ok(c("repo"))]),
+    eb.not(eb.exists(t.selectFrom(kx.jsonEach(db, itemsJson(db, eb, a), "j")).select(eb.lit(1).as("one")).where(itemRepo(), "is not", null).where(eb.not(ok(itemRepo()))))),
+  ]);
 }

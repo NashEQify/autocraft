@@ -23,6 +23,8 @@ import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
 import type { Db, Dialect } from "../db/index.ts";
 import { indexedBy, jsonBool, jsonNum, jsonRemoveKey, jsonValid, quote } from "../db/portable.ts";
+import type * as kx from "../db/kx.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 
 export const SURE = 0.9;
 
@@ -31,6 +33,12 @@ export const SURE = 0.9;
  * Only that path sets input_hash on a Haiku row; a second opinion or an evaluation row has none.
  */
 export const VERDICT_SQL = "(classifier = 'jev' OR (classifier = 'haiku' AND input_hash IS NOT NULL))";
+
+/** `VERDICT_SQL` as an expression; `a` names the classifications table when the caller's query aliases it. */
+export function verdictExpr(eb: kx.AnyEb, a?: string): AliasableExpression<SqlBool> {
+  const c = (col: string) => eb.ref(a ? `${a}.${col}` : col);
+  return eb.or([eb(c("classifier"), "=", "jev"), eb.and([eb(c("classifier"), "=", "haiku"), eb(c("input_hash"), "is not", null)])]);
+}
 
 export type SettledStatus = "settled" | "waiting" | "disagree" | "unclassified";
 

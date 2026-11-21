@@ -198,3 +198,10 @@ both("rowid names the key or rowid; main. reaches past the scoped views on both 
   assert.deepEqual([scoped, all, closed], [[{ number: 1 }, { number: 2 }], [{ number: 1 }, { number: 2 }, { number: 3 }], [{ number: 3 }]]);
   return [scoped, all, closed];
 }, app);
+
+both("jsonObject builds an object whose values are JSON texts; Postgres spaces the text differently", async (db) => {
+  const row = await db.get(k(db).selectFrom("t").where("id", "=", 2).select(kx.jsonObject(db, { d: "j", a: kx.json(["x", 1]) }).as("o")));
+  const o = JSON.parse(row!.o!);
+  assert.deepEqual(o, { d: [1, 2, 3], a: ["x", 1] });
+  return o;
+});
