@@ -342,15 +342,15 @@ describe("api", () => {
   test("a group decision's answer must carry the hash of the shown comments, and an answer Act wrote for can't be undone", async () => {
     const boss = await signedIn("boss");
     const id = "photocraft:dupegroup:4";
-    await db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES (?, 'photocraft', 'model')").run(id);
-    await db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES (?, 'accept', 5, 'close', 'Closing as a duplicate of #4.')").run(id);
+    await db.run(db.k.insertInto("dupe_groups").values({ decision_id: id, repo: "photocraft", source: "model" }));
+    await db.run(db.k.insertInto("dupe_group_texts").values({ decision_id: id, option: "accept", number: 5, step: "close", text: "Closing as a duplicate of #4." }));
     const shown = await boss.get<Decision>(dpath(id));
     const ot = shown.optionTexts.find((o) => o.option === "accept")!;
     assert.equal(ot.texts[0]!.text, "Closing as a duplicate of #4.");
     await boss.post(dpath(id, "/answer"), { answer: "accept" }, 409);
     await boss.post(dpath(id, "/answer"), { answer: "accept", textsHash: "stale" }, 409);
     // The comments changed after the page was loaded.
-    await db.prepare("UPDATE dupe_group_texts SET text = 'Closing as a duplicate of #4.\nParts to carry over to #4: x.' WHERE decision_id = ?").run(id);
+    await db.run(db.k.updateTable("dupe_group_texts").set({ text: "Closing as a duplicate of #4.\nParts to carry over to #4: x." }).where("decision_id", "=", id));
     await boss.post(dpath(id, "/answer"), { answer: "accept", textsHash: ot.hash }, 409);
     const fresh = (await boss.get<Decision>(dpath(id))).optionTexts[0]!;
     // Adopting an opinion approves the same texts, so it needs the same hash.
@@ -360,7 +360,7 @@ describe("api", () => {
     assert.equal((await boss.post<Decision>(dpath(id, "/adopt"), { opinionId: "op1", textsHash: fresh.hash })).answer, "accept");
     await boss.post<Decision>(dpath(id, "/undo"));
     assert.equal((await boss.post<Decision>(dpath(id, "/answer"), { answer: "accept", textsHash: fresh.hash })).answer, "accept");
-    await db.prepare("INSERT INTO dupe_group_posts (decision_id, number, step, url, at) VALUES (?, 5, 'comment', 'https://x/c', 'now')").run(id);
+    await db.run(db.k.insertInto("dupe_group_posts").values({ decision_id: id, number: 5, step: "comment", url: "https://x/c", at: "now" }));
     await boss.post(dpath(id, "/undo"), undefined, 409);
     await db.run(db.k.updateTable("main.decisions").set({ applied_at: "now" }).where("id", "=", id));
     await db.run(db.k.deleteFrom("decision_opinions").where("id", "=", "op1"));
