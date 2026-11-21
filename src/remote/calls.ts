@@ -140,9 +140,9 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
       console.log(`adopted remote call ${id} (${c.promptId}) of the job's run before the restart`);
       return id;
     }
-    const stale = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND items = ? AND parent_id IS ? AND state IN ('queued', 'leased') ${notTaken}`)
+    const stale = await db.prepare(`SELECT id FROM main.remote_calls WHERE job_id = ? AND since < ? AND prompt_id = ? AND items = ? AND parent_id IS ? AND state = 'queued' ${notTaken}`)
       .all(jobId, startedMs, c.promptId, JSON.stringify(c.items), c.parentId ?? null, ...taken) as { id: number }[];
-    for (const r of stale) await withdrawCall(db, Number(r.id), "the resumed job asked again with other input", undefined, nowMs);
+    for (const r of stale) await withdrawCall(db, Number(r.id), "the resumed job asked again with other input", ["queued"], nowMs);
     return null;
   });
   adopting = turn.catch(() => undefined);

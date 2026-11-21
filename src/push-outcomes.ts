@@ -60,8 +60,8 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
     if (row && row.head_oid === o.from) before = requiredResult(parse(row.checks), await optionalChecks(db, o.repo));
   }
   await db.prepare(`INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) SELECT ?, ?, ?, ?, ?, ?, ?, ?
-    WHERE NOT EXISTS (SELECT 1 FROM push_outcomes WHERE repo = ? AND to_oid = ? AND action = ?)`)
-    .run(at, stage, action, o.repo, o.number, o.from, o.to, before, o.repo, o.to, action);
+    WHERE NOT EXISTS (SELECT 1 FROM push_outcomes WHERE repo = ? AND number IS ? AND to_oid = ? AND action = ?)`)
+    .run(at, stage, action, o.repo, o.number, o.from, o.to, before, o.repo, o.number, o.to, action);
 }
 
 /**
