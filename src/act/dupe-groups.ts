@@ -3,7 +3,7 @@
 // Each write is recorded in dupe_group_posts right after it happens, so a retry or a crash
 // midway never repeats a comment or a close. A member that closed, merged or moved on its own
 // is skipped, and so is a whole decision whose answer or roles changed (undo, refresh) while the run went on.
-import { settledBySql } from "../settlers.ts";
+import { settledByExpr } from "../settlers.ts";
 import { audit } from "../dash/audit.ts";
 import { embedHash } from "../itemhash.ts";
 import { backlogHeld } from "../dupes/held.ts";
@@ -12,6 +12,7 @@ import { textsFor } from "../dupes/texts.ts";
 import { compareAgain } from "../dupes/compare.ts";
 import { comparedHead } from "../dupes/plan.ts";
 import { everySeq, filterSeq, findSeq, someSeq } from "../async-seq.ts";
+import * as kx from "../db/kx.ts";
 import type { Db } from "../db/index.ts";
 
 const ACTOR = "act";
@@ -44,25 +45,32 @@ type Decision = { id: string; answer: string };
 
 /** Answered group decisions of the repo whose roles are written (applyDuplicateAnswers ran) and that are not applied yet. */
 export async function groupDecisionsToAct(db: Db, repo: string): Promise<Decision[]> {
-  return await db.prepare(`SELECT d.id, d.answer FROM decisions d JOIN dupe_groups g ON g.decision_id = d.id
-    WHERE d.kind = 'duplicate' AND d.repo = ? AND d.answer IS NOT NULL AND d.answer NOT IN ('distinct', 'backlog') AND d.applied_at IS NULL
-      AND g.applied_answer = d.answer AND ${settledBySql(db, "d")} ORDER BY d.answered_at`).all(repo) as Decision[];
+  return await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_groups as g", "g.decision_id", "d.id")
+    .select(["d.id", "d.answer"]).$narrowType<{ answer: string }>()
+    .where("d.kind", "=", "duplicate").where("d.repo", "=", repo).where("d.answer", "is not", null).where("d.answer", "not in", ["distinct", "backlog"]).where("d.applied_at", "is", null)
+    .whereRef("g.applied_answer", "=", "d.answer").where((eb) => settledByExpr(db, eb, "d"))
+    .orderBy("d.answered_at", (o) => o.asc().nullsFirst()));
 }
 
 /** Members the act step still has to close, over all repos: close-role members of the decisions above (as actOnGroups selects its closers) with no close record yet. The planner lists an act action for each. */
 export async function groupClosersPending(db: Db): Promise<{ decisionId: string; repo: string; number: number }[]> {
-  const rows = await db.prepare(`SELECT d.id, d.repo, gi.number FROM decisions d JOIN dupe_groups g ON g.decision_id = d.id JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE d.kind = 'duplicate' AND d.repo IS NOT NULL AND d.id LIKE '%:dupegroup:%' AND d.answer IS NOT NULL AND d.answer NOT IN ('distinct', 'backlog') AND d.applied_at IS NULL
-      AND g.applied_answer = d.answer AND ${settledBySql(db, "d")} AND gi.role = 'close'
-      AND NOT EXISTS (SELECT 1 FROM dupe_group_posts p WHERE p.decision_id = d.id AND p.number = gi.number AND p.step = 'close')
-    ORDER BY d.answered_at, gi.number`).all() as { id: string; repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_groups as g", "g.decision_id", "d.id").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id")
+    .select(["d.id", "d.repo", "gi.number"]).$narrowType<{ repo: string }>()
+    .where("d.kind", "=", "duplicate").where("d.repo", "is not", null).where((eb) => kx.like(db, "d.id", eb.val("%:dupegroup:%")))
+    .where("d.answer", "is not", null).where("d.answer", "not in", ["distinct", "backlog"]).where("d.applied_at", "is", null)
+    .whereRef("g.applied_answer", "=", "d.answer").where((eb) => settledByExpr(db, eb, "d")).where("gi.role", "=", "close")
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("dupe_group_posts as p").select(eb.lit(1).as("one"))
+      .whereRef("p.decision_id", "=", "d.id").whereRef("p.number", "=", "gi.number").where("p.step", "=", "close"))))
+    .orderBy("d.answered_at", (o) => o.asc().nullsFirst()).orderBy("gi.number"));
   return (await filterSeq(rows, async (r) => await inPilot(db, r.repo, r.number) && !await backlogHeld(db, r.repo, r.number))).map((r) => ({ decisionId: r.id, repo: r.repo, number: r.number }));
 }
 
 /** The decision's answer and the item's stored role are still what the run started from: an undo or a refresh in between changes them. */
 async function unchanged(db: Db, dec: Decision, item: Item): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM decisions d JOIN dupe_groups g ON g.decision_id = d.id JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE d.id = ? AND d.answer = ? AND d.applied_at IS NULL AND g.applied_answer = ? AND gi.number = ? AND gi.role = ?`).get(dec.id, dec.answer, dec.answer, item.number, item.role);
+  return !!await db.get(db.k.selectFrom("decisions as d").innerJoin("dupe_groups as g", "g.decision_id", "d.id").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id")
+    .select((eb) => eb.lit(1).as("one"))
+    .where("d.id", "=", dec.id).where("d.answer", "=", dec.answer).where("d.applied_at", "is", null).where("g.applied_answer", "=", dec.answer)
+    .where("gi.number", "=", item.number).where("gi.role", "=", item.role));
 }
 
 const carryOf = (detail: string | null): string[] => {
@@ -74,24 +82,25 @@ const carryOf = (detail: string | null): string[] => {
 
 export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
   const res: GroupResult = { done: [], skipped: [], failed: [] };
-  const posted = db.prepare("SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND number = ? AND step = ?");
+  const posted = async (id: string, n: number, step: string): Promise<boolean> =>
+    !!await db.get(db.k.selectFrom("dupe_group_posts").select((eb) => eb.lit(1).as("one")).where("decision_id", "=", id).where("number", "=", n).where("step", "=", step));
   const record = async (id: string, n: number, step: string, url: string | null) =>
-    await db.prepare("INSERT OR IGNORE INTO dupe_group_posts (decision_id, number, step, url, at) VALUES (?, ?, ?, ?, ?)").run(id, n, step, url, run.at());
+    await db.run(db.k.insertInto("dupe_group_posts").values({ decision_id: id, number: n, step, url, at: run.at() }).onConflict((oc) => oc.doNothing()));
   const ref = (n: number) => `${run.repo}#${n}`;
 
   decisions: for (const dec of await groupDecisionsToAct(db, run.repo)) {
-    const items = await db.prepare("SELECT number, kind, role, detail, head FROM dupe_group_items WHERE decision_id = ? ORDER BY number").all(dec.id) as Item[];
+    const items: Item[] = await db.all(db.k.selectFrom("dupe_group_items").select(["number", "kind", "role", "detail", "head"]).where("decision_id", "=", dec.id).orderBy("number"));
     const texts = new Map((await textsFor(db, dec.id, dec.answer)).map((t) => [`${t.number}:${t.step}`, t.text]));
     const closers = await filterSeq(items, async (i) => i.role === "close" && await inPilot(db, run.repo, i.number) && !await backlogHeld(db, run.repo, i.number));
     const details = await findSeq(items, async (i) => i.role === "keep" && i.kind === "issue" && texts.has(`${i.number}:details`) && await inPilot(db, run.repo, i.number));
     if (run.dryRun) {
-      if (details && !await posted.get(dec.id, details.number, "details")) run.log(`  would post the details comment on ${ref(details.number)} (${dec.id})`);
-      for (const c of closers) if (!await posted.get(dec.id, c.number, "close")) run.log(`  would comment and close ${ref(c.number)} (${dec.id})`);
+      if (details && !await posted(dec.id, details.number, "details")) run.log(`  would post the details comment on ${ref(details.number)} (${dec.id})`);
+      for (const c of closers) if (!await posted(dec.id, c.number, "close")) run.log(`  would comment and close ${ref(c.number)} (${dec.id})`);
       continue;
     }
     // A PR is closed or kept only at a head a stored comparison read: with none that recorded heads, the set is compared first
     // (compareAgain marks a stored row; a set with no row is due anyway). A PR with no head is released below instead.
-    const unbound = await filterSeq(items, async (i) => i.kind === "pr" && i.role !== "stay" && !!i.head && !await posted.get(dec.id, i.number, "close") && await comparedHead(db, run.repo, i.number) === undefined);
+    const unbound = await filterSeq(items, async (i) => i.kind === "pr" && i.role !== "stay" && !!i.head && !await posted(dec.id, i.number, "close") && await comparedHead(db, run.repo, i.number) === undefined);
     if (unbound.length) {
       for (const i of unbound) await compareAgain(db, ACTOR, run.repo, i.number);
       run.log(`  ${dec.id}: waits for a comparison that records the heads of ${unbound.map((i) => ref(i.number)).join(", ")}`);
@@ -103,7 +112,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
       await record(dec.id, n, step, null);
       if (release) {
         // Not closed by this decision: it stays open, is no longer held or settled by it, and the next comparison may ask about it again.
-        await db.prepare("UPDATE dupe_group_items SET role = 'stay', target = NULL, base_role = 'stay', base_target = NULL WHERE decision_id = ? AND number = ?").run(dec.id, n);
+        await db.run(db.k.updateTable("dupe_group_items").set({ role: "stay", target: null, base_role: "stay", base_target: null }).where("decision_id", "=", dec.id).where("number", "=", n));
         await record(dec.id, n, "released", null);
         await audit(db, ACTOR, "duplicate-member-released", ref(n), { decision: dec.id, reason });
       }
@@ -118,7 +127,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
     };
     let cur: { item: Item; step: string } | null = null;
     try {
-      if (await someSeq(closers, async (c) => !await posted.get(dec.id, c.number, "close")) || (details && !await posted.get(dec.id, details.number, "details"))) {
+      if (await someSeq(closers, async (c) => !await posted(dec.id, c.number, "close")) || (details && !await posted(dec.id, details.number, "details"))) {
         // The kept items must still stand: a closed (unmerged) kept item makes the duplicates' comments wrong.
         for (const k of items.filter((i) => i.role === "keep")) {
           const live = await run.io.live(k.number);
@@ -131,17 +140,17 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
           if (gone || unknown || moved) {
             // Nothing stays held by a decision that can no longer close anything: the members are released and the next comparison asks again.
             const reason = moved ? `the head of the kept PR ${ref(k.number)} moved since the comparison` : unknown ? `no comparison read a head of the kept PR ${ref(k.number)}` : `the kept item ${ref(k.number)} is gone or closed`;
-            for (const c of closers) if (!await posted.get(dec.id, c.number, "close")) await skip(c.number, "close", reason, true);
+            for (const c of closers) if (!await posted(dec.id, c.number, "close")) await skip(c.number, "close", reason, true);
             // The next comparison reads the kept PR's new head.
             if (moved) await compareAgain(db, ACTOR, run.repo, k.number);
-            await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(run.at(), dec.id);
+            await db.run(db.k.updateTable("main.decisions").set({ applied_at: run.at() }).where("id", "=", dec.id).where("applied_at", "is", null));
             await audit(db, ACTOR, "duplicate-group-ended", dec.id, { reason });
             run.log(`  ${dec.id}: ${reason}; group ended`);
             continue decisions;
           }
         }
       }
-      if (details && !await posted.get(dec.id, details.number, "details")) {
+      if (details && !await posted(dec.id, details.number, "details")) {
         if (run.left() <= 0) return res;
         cur = { item: details, step: "details" };
         if (await changed(details)) continue decisions;
@@ -157,7 +166,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
         }
       }
       for (const c of closers) {
-        if (await posted.get(dec.id, c.number, "close")) continue;
+        if (await posted(dec.id, c.number, "close")) continue;
         if (run.left() <= 0) return res;
         cur = { item: c, step: "close" };
         if (await changed(c)) continue decisions;
@@ -171,14 +180,14 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
           if (live.head !== c.head || bound !== c.head) { await skip(c.number, "close", "the head moved since the comparison", true); await compareAgain(db, ACTOR, run.repo, c.number); continue; }
         }
         if (c.kind === "issue" && c.head) {
-          const row = await db.prepare("SELECT embed_hash, title, body FROM items WHERE repo = ? AND number = ?").get(run.repo, c.number) as { embed_hash: string | null; title: string | null; body: string | null } | undefined;
+          const row = await db.get(db.k.selectFrom("items").select(["embed_hash", "title", "body"]).where("repo", "=", run.repo).where("number", "=", c.number));
           // A missing stored hash is computed from the text; an item without a row counts as changed.
           const now = row ? (row.embed_hash ?? embedHash(row.title, row.body)) : null;
           if (now !== c.head) { await skip(c.number, "close", "the text changed since the comparison", true); continue; }
         }
         const text = texts.get(`${c.number}:close`);
         if (!text) { await skip(c.number, "close", "the decision stores no comment for this answer"); continue; }
-        let url = (await db.prepare("SELECT url FROM dupe_group_posts WHERE decision_id = ? AND number = ? AND step = 'comment'").get(dec.id, c.number) as { url: string | null } | undefined)?.url ?? null;
+        let url = (await db.get(db.k.selectFrom("dupe_group_posts").select("url").where("decision_id", "=", dec.id).where("number", "=", c.number).where("step", "=", "comment")))?.url ?? null;
         if (url === null) {
           if (await changed(c)) continue decisions;
           url = await run.io.comment(live, text, { number: c.number, decision: dec.id });
@@ -189,7 +198,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
         const keptLive = keep ? await run.io.live(keep.number) : null;
         await run.io.close(live, { number: c.number, decision: dec.id }, keep && keptLive ? { ...keptLive, number: keep.number } : undefined);
         await record(dec.id, c.number, "close", url);
-        await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(run.repo, c.number, run.at(), ACTOR, `closed after duplicate group decision ${dec.id}`);
+        await db.run(db.k.insertInto("main.stages").values({ repo: run.repo, number: c.number, stage: "closed", at: run.at(), actor: ACTOR, note: `closed after duplicate group decision ${dec.id}` }));
         res.done.push(ref(c.number));
         run.handled();
         run.log(`  ${ref(c.number)}: commented and closed`);
@@ -201,16 +210,17 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
       run.log(`  ${dec.id}: failed: ${why}`);
       if (!cur) return res;
       // One permanent error (a locked issue, a 403) must not block every later group: after MAX_FAILS the member is skipped.
-      await db.prepare("INSERT INTO dupe_group_fails (decision_id, number, fails) VALUES (?, ?, 1) ON CONFLICT (decision_id, number) DO UPDATE SET fails = fails + 1").run(dec.id, cur.item.number);
-      const n = (await db.prepare("SELECT fails FROM dupe_group_fails WHERE decision_id = ? AND number = ?").get(dec.id, cur.item.number) as { fails: number }).fails;
+      await db.run(db.k.insertInto("dupe_group_fails").values({ decision_id: dec.id, number: cur.item.number, fails: 1 })
+        .onConflict((oc) => oc.columns(["decision_id", "number"]).doUpdateSet((eb) => ({ fails: eb("dupe_group_fails.fails", "+", 1) }))));
+      const n = (await db.get(db.k.selectFrom("dupe_group_fails").select("fails").where("decision_id", "=", dec.id).where("number", "=", cur.item.number)))!.fails;
       if (n < MAX_FAILS) return res;
       // A member whose comment is already public is settled, not released: re-asking would repeat the comment.
-      const commented = !!await db.prepare("SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND number = ? AND step = 'comment' AND url IS NOT NULL").get(dec.id, cur.item.number);
+      const commented = !!await db.get(db.k.selectFrom("dupe_group_posts").select((eb) => eb.lit(1).as("one")).where("decision_id", "=", dec.id).where("number", "=", cur.item.number).where("step", "=", "comment").where("url", "is not", null));
       await skip(cur.item.number, cur.step, `${n} writes failed: ${why}`, cur.step === "close" && !commented);
     }
     // Applied once every member to close has a close record and the details comment is settled.
-    if (await everySeq(closers, async (c) => await posted.get(dec.id, c.number, "close")) && (!details || await posted.get(dec.id, details.number, "details"))) {
-      await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(run.at(), dec.id);
+    if (await everySeq(closers, async (c) => await posted(dec.id, c.number, "close")) && (!details || await posted(dec.id, details.number, "details"))) {
+      await db.run(db.k.updateTable("main.decisions").set({ applied_at: run.at() }).where("id", "=", dec.id).where("applied_at", "is", null));
       await audit(db, ACTOR, "act-group-applied", dec.id, { answer: dec.answer });
       await queueCarry(db, run.repo, dec.id, items, run.at());
     }
@@ -221,7 +231,7 @@ export async function actOnGroups(db: Db, run: GroupRun): Promise<GroupResult> {
 /** The kept PR gets a carry job when the PRs closed in its group name parts worth carrying over. */
 async function queueCarry(db: Db, repo: string, id: string, items: Item[], at: string): Promise<void> {
   const keep = items.find((i) => i.role === "keep" && i.kind === "pr");
-  if (!keep || !await someSeq(items, async (i) => i.kind === "pr" && i.role === "close" && carryOf(i.detail).length && await db.prepare("SELECT 1 FROM dupe_group_posts WHERE decision_id = ? AND number = ? AND step = 'close' AND url IS NOT NULL").get(id, i.number))) return;
-  await db.prepare("INSERT OR IGNORE INTO dupe_carries (decision_id, repo, number, state, updated_at) VALUES (?, ?, ?, 'queued', ?)").run(id, repo, keep.number, at);
+  if (!keep || !await someSeq(items, async (i) => i.kind === "pr" && i.role === "close" && carryOf(i.detail).length && await db.get(db.k.selectFrom("dupe_group_posts").select((eb) => eb.lit(1).as("one")).where("decision_id", "=", id).where("number", "=", i.number).where("step", "=", "close").where("url", "is not", null)))) return;
+  await db.run(db.k.insertInto("dupe_carries").values({ decision_id: id, repo, number: keep.number, state: "queued", updated_at: at }).onConflict((oc) => oc.doNothing()));
   await audit(db, ACTOR, "carry-queued", `${repo}#${keep.number}`, { decision: id });
 }

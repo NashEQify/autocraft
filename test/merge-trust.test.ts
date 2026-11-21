@@ -23,12 +23,12 @@ test("a Merge answer carries across a base merge that left the diff unchanged, n
 
 test("code carried from a closed duplicate by an author who is not whitelisted needs a Merge answer at the head", async () => {
   const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(5)).review(5, { verdict: "take" })).verified(5)).premerge(5, "clean")).pr(6)).pr(7, { author: "regular" })).review(7, { verdict: "take" })).verified(7)).premerge(7, "clean"));
-  await w.db.prepare("UPDATE items SET state = 'CLOSED', author = ? WHERE number = 6").run("stranger");
-  await w.db.prepare("INSERT INTO items (repo, number, kind, state, title, author, author_id, created_at, updated_at) VALUES ('app', 8, 'pr', 'CLOSED', 'PR 8', 'regular', ?, ?, ?)").run(REGULAR_ID, T0, T0);
+  await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED", author: "stranger" }).where("number", "=", 6));
+  await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 8, kind: "pr", state: "CLOSED", title: "PR 8", author: "regular", author_id: REGULAR_ID, created_at: T0, updated_at: T0 }));
   const carry = async (kept: number, closed: number) => {
     const id = `app:dupegroup:${kept}`;
-    await w.db.prepare("INSERT INTO dupe_carries (decision_id, repo, number, state, outcome, updated_at) VALUES (?, 'app', ?, 'done', 'pushed', ?)").run(id, kept, T0);
-    await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, detail, base_role) VALUES (?, 'app', ?, 'pr', 'close', ?, 'close')").run(id, closed, JSON.stringify({ carry: ["the null check"] }));
+    await w.db.run(w.db.k.insertInto("dupe_carries").values({ decision_id: id, repo: "app", number: kept, state: "done", outcome: "pushed", updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: id, repo: "app", number: closed, kind: "pr", role: "close", detail: JSON.stringify({ carry: ["the null check"] }), base_role: "close" }));
   };
   await carry(5, 6);
   await carry(7, 8);
