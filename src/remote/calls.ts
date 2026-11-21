@@ -36,7 +36,9 @@ import { endChecks, serveChecks } from "./check-relay.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db, Dialect } from "../db/index.ts";
+import { ciEq as ciEqExpr, ref, type Eb, type Ex } from "../db/kx.ts";
 import { ciEq, greatest, indexedBy, inList, notDistinctFrom } from "../db/portable.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
@@ -562,6 +564,26 @@ const pickerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs)
 /** SQL on a remote_calls row that has a pick: the pick no longer counts, as its time is up or its picker cannot take it now (pickerSql). Bind pickLapsedArgs. */
 export const pickLapsedSql = (d: { readonly dialect: Dialect }): string => `(pick_until < ? OR NOT ${pickerSql(d, "remote_calls.picked_by")})`;
 export const pickLapsedArgs = (nowMs: number): [number, string, number, number] => [nowMs, ...pickerArgs(nowMs)];
+
+/** `pickerSql` as an expression on the login in `login`, at `nowMs`. */
+function pickerExpr(db: Db, eb: Eb, login: Ex, nowMs: number): AliasableExpression<SqlBool> {
+  const [expires, fresh, now] = pickerArgs(nowMs);
+  const max = eb.cast<number>(eb.case().when("ps.key", "=", MAX_CALLS_KEY).then(eb.ref("ps.value")).end(), "bigint");
+  const leased = db.k.selectFrom("main.remote_calls as pl").select((e) => e.fn.countAll<number>().as("n"))
+    .where("pl.state", "=", "leased").where(ciEqExpr(db, "pl.user_login", login));
+  return eb.and([
+    eb.exists(db.k.selectFrom("main.remote_helpers as ph").innerJoin("main.mcp_tokens as pt", "pt.id", "ph.token_id").select(eb.lit(1).as("one"))
+      .where("ph.login", "=", ref<string>(login)).where("pt.kind", "=", "runner").where("pt.expires_at", ">", expires).where("ph.reported_at", ">=", fresh)),
+    eb.not(eb.exists(db.k.selectFrom("main.remote_cooloffs as pc").select(eb.lit(1).as("one")).where("pc.login", "=", ref<string>(login)).where("pc.until", ">", now))),
+    eb.not(eb.exists(db.k.selectFrom("main.user_settings as ps").select(eb.lit(1).as("one"))
+      .where("ps.login", "=", ref<string>(login)).where("ps.key", "=", MAX_CALLS_KEY)
+      .where(eb.between(max, 1, MAX_CALLS_MAX)).where(eb(leased, ">=", max)))),
+  ]);
+}
+
+/** `pickLapsedSql` (with its pickLapsedArgs bound) as an expression on a remote_calls row, at `nowMs`. */
+export const pickLapsedExpr = (db: Db, eb: Eb, nowMs: number): AliasableExpression<SqlBool> =>
+  eb.or([eb("pick_until", "<", nowMs), eb.not(pickerExpr(db, eb, "remote_calls.picked_by", nowMs))]);
 
 /** The logins (lowercase) whose picks count now (pickerSql). */
 export async function pickerLogins(db: Db, nowMs: number): Promise<Set<string>> {

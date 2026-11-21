@@ -1,4 +1,9 @@
-// Constants and pure helpers of the merge rule, shared by the old modules (which re-export them) and by decide.ts. No imports.
+// Constants and pure helpers of the merge rule, shared by the old modules (which re-export them) and by decide.ts. No imports
+// but the database's query helpers, which import nothing of the app.
+
+import type { AliasableExpression, SqlBool } from "kysely";
+import type { Db } from "../db/index.ts";
+import { like, type Eb } from "../db/kx.ts";
 
 /** Type labels whose PRs may merge without asking. */
 export const RULE_LABELS = ["bugfix", "infra"];
@@ -112,7 +117,7 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   return until > nowMs ? { until } : null;
 }
 
-// ---- merge decisions and their SQL (no imports) ----
+// ---- merge decisions and their SQL ----
 
 /** The PR has an unanswered Merge? question at any head. */
 export const OPEN_QUESTION_SQL = "SELECT 1 FROM decisions WHERE repo = ? AND number = ? AND kind = 'merge' AND answer IS NULL AND id NOT LIKE '%~replaced-%' LIMIT 1";
@@ -123,6 +128,26 @@ export const UNSURE_AT_SQL = `SELECT 1 FROM opus_review_history WHERE repo = ?1 
 /** SQL condition on `g` (a decisions row): a duplicate group decision that is unanswered or answered "keep #N instead" with the new roles not applied yet. */
 export const OPEN_GROUP_SQL = `(g.kind = 'duplicate' AND g.id LIKE '%:dupegroup:%' AND (g.answer IS NULL
   OR (g.answer LIKE 'keep:%' AND COALESCE((SELECT dg.applied_answer FROM dupe_groups dg WHERE dg.decision_id = g.id), '') <> g.answer)))`;
+
+/** `UNSURE_AT_SQL` as a query: a take or take-fix review with sure = 0 at the head, in the history or the current reviews. */
+export const unsureAtQuery = (db: Db, repo: string, number: number, head: string) => db.k.selectFrom("opus_review_history").select((eb) => eb.lit(1).as("one"))
+  .where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).where("verdict", "in", ["take", "take-fix"]).where("sure", "=", 0)
+  .unionAll(db.k.selectFrom("opus_reviews").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).where("verdict", "in", ["take", "take-fix"]).where("sure", "=", 0))
+  .limit(1);
+
+/** `OPEN_GROUP_SQL` as an expression on `g` (a decisions row). */
+export const openGroupExpr = (db: Db, eb: Eb): AliasableExpression<SqlBool> => eb.and([
+  eb("g.kind", "=", "duplicate"),
+  like(db, "g.id", eb.val("%:dupegroup:%")),
+  eb.or([
+    eb("g.answer", "is", null),
+    eb.and([
+      like(db, "g.answer", eb.val("keep:%")),
+      eb(eb.fn.coalesce(db.k.selectFrom("dupe_groups as dg").select("dg.applied_answer").where("dg.decision_id", "=", eb.ref("g.id")), eb.val("")), "<>", eb.ref("g.answer")),
+    ]),
+  ]),
+]);
 
 /** Option keys of a "Merge this PR?" decision. Only an operator's answer counts. */
 export const MERGE_OPTIONS = {

@@ -1,12 +1,18 @@
 // Shared queries for the Progress, Repo and Run and cost pages.
 import { latestRun, settledOn, settledTable } from "../../classify/settled.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import { ref, type Eb, type Ex } from "../../db/kx.ts";
 import { indexedBy } from "../../db/portable.ts";
 
 // Latest stage per item, from the item_stage table the stages trigger maintains.
 export const LATEST_SQL = `latest AS (SELECT repo, number, stage, reviewed FROM main.item_stage %W)`;
 
 export const latestCte = (repo?: string): string => LATEST_SQL.replace("%W", repo ? "WHERE repo = :repo" : "");
+
+/** `latestCte` as a WITH clause to build the query on: `latestCteExpr(db, repo).selectFrom("latest")...`. */
+export const latestCteExpr = (db: Db, repo?: string) =>
+  db.k.with("latest", (qc) => qc.selectFrom("main.item_stage").select(["repo", "number", "stage", "reviewed"]).$if(!!repo, (q) => q.where("repo", "=", repo!)));
 
 // When tracking began: set by connect() (src/db.ts) on first use.
 export async function trackingStart(db: Db): Promise<string> {
@@ -19,6 +25,9 @@ export async function trackingStart(db: Db): Promise<string> {
 export const CLOSED_ITEMS = (db: Db): string => `main.items AS i${indexedBy(db, "items_closed")}`;
 export const CREATED_ITEMS = (db: Db): string => `main.items AS i${indexedBy(db, "items_created")}`;
 export const TRACKED = "repo IN (SELECT name FROM main.tracked_repos)";
+
+/** `TRACKED` as an expression on the repo in `col` (`i.${TRACKED}` is `trackedExpr(db, eb, "i.repo")`). */
+export const trackedExpr = (db: Db, eb: Eb, col: Ex = "repo"): AliasableExpression<SqlBool> => eb(ref(col), "in", db.k.selectFrom("main.tracked_repos").select("name"));
 
 const p = (repo?: string, extra: Record<string, string | number> = {}): Record<string, string | number> => (repo ? { repo, ...extra } : extra);
 

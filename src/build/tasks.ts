@@ -16,7 +16,9 @@ import { fastTask } from "../fasttrack.ts";
 import { featureOn } from "./features.ts";
 import { slugOf } from "../owners.ts";
 import { mapSeq } from "../async-seq.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import { ref, type Eb, type Ex } from "../db/kx.ts";
 import { greatest } from "../db/portable.ts";
 
 export const LOST_AFTER_MS = 2 * 60_000;
@@ -516,6 +518,9 @@ export async function privateClockStart(db: Db, queuedAt: string): Promise<numbe
 
 /** SQL for the steps hidden from viewers, for `step NOT IN (...)`. */
 export const PRIVATE_STEPS_SQL = PRIVATE_STEPS.map((x) => `'${x}'`).join(", ");
+
+/** `step IN (PRIVATE_STEPS_SQL)` as an expression on the step in `col`; `eb.not(...)` for NOT IN. */
+export const privateStepExpr = (eb: Eb, col: Ex = "step"): AliasableExpression<SqlBool> => eb(ref(col), "in", PRIVATE_STEPS);
 
 /** Newest first, keyset-paged by id. `hidden` repos are left out, and the security fix's tasks unless `staff`. */
 export async function listTasks(db: Db, f: TaskFilter, hidden: string[] = [], staff = true): Promise<TaskPage> {

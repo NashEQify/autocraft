@@ -298,3 +298,14 @@ export function commentHits<A extends string, O extends CommentHitOpts = {}>(d: 
     : sql`FROM comments_fts JOIN ${sql.table("main.comments")} c ON c.rowid = comments_fts.rowid WHERE comments_fts MATCH ${q}`;
   return sql<CommentHit<O>>`(SELECT ${sql.join(cols)} ${from})`.as(alias);
 }
+
+// ---- typed twins of shared SQL fragments --------------------------------------------------------------------------
+
+/**
+ * The expression builder a fragment twin takes from its caller's callback (`.where((eb) => quietExprFor(db, eb, "i.repo",
+ * "i.number"))`). Its tables are the caller's, so the twin's column references are not checked against them.
+ */
+export type Eb = ExpressionBuilder<any, any>;
+
+/** `e` as an expression: a string is a column reference, a value goes in as `eb.val(v)`. For twins whose arguments are `Ex`. */
+export const ref = <T = unknown>(e: Ex): Expression<T> => x(e) as Expression<T>;
