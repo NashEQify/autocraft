@@ -50,20 +50,29 @@ function subscribeUrl(listener: () => void) {
   };
 }
 
+/** Read at action time, before React Router's render may catch up with navigation. */
+export function useLiveLocation() {
+  const hashRouter = useHref("/").startsWith("#");
+  return useCallback(() => ({
+    pathname: hashRouter ? window.location.hash.slice(1).split(/[?#]/, 1)[0] || "/" : window.location.pathname,
+    search: liveSearch(hashRouter),
+  }), [hashRouter]);
+}
+
 /** URL-only view state. Patches read the live location, not a render that may precede another patch.
  * Replacing stays the default for existing callers; discrete navigation may explicitly push. */
 export function useUrlState() {
   const [sp, setSp] = useSearchParams();
-  const hashRouter = useHref("/").startsWith("#");
-  const search = useSyncExternalStore(subscribeUrl, () => liveSearch(hashRouter), () => sp.toString());
+  const readLocation = useLiveLocation();
+  const search = useSyncExternalStore(subscribeUrl, () => readLocation().search, () => sp.toString());
   const state = useMemo(() => Object.fromEntries(new URLSearchParams(search)), [search]);
   const update = useCallback((patch: Record<string, string | null | undefined>, options?: { replace?: boolean }) => {
-    const next = new URLSearchParams(liveSearch(hashRouter));
+    const next = new URLSearchParams(readLocation().search);
     for (const [key, value] of Object.entries(patch)) value ? next.set(key, value) : next.delete(key);
     setSp(next, { replace: options?.replace ?? true });
     // History changes synchronously; React Router may publish its context in a transition.
     // All view owners see the same snapshot immediately, without a module-global history or timer.
     window.dispatchEvent(new Event(URL_PATCH_EVENT));
-  }, [hashRouter, setSp]);
+  }, [readLocation, setSp]);
   return { state, update, search };
 }

@@ -4,6 +4,7 @@
 // clock, which is independent of bookmark captures.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
+import { useLiveLocation } from "../../lib/hooks";
 import type { ViewProps } from "../../registry/types";
 import { useMedia } from "../../shell/useMedia";
 import { useUser } from "../../shell/UserContext";
@@ -33,6 +34,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const user = useUser();
   const api = useApi();
   const navigate = useNavigate();
+  const readLocation = useLiveLocation();
   const undo = useUndo();
   const { peek, setPeek, decision, setDecision, clearPeek, update, filter, search } = useDecisionFilter();
   const query = useDecisionList();
@@ -55,13 +57,14 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const cursorRef = useRef<string | undefined>(undefined);
   readerRef.current = { login: user.login, role: user.role };
   // Mutation-time facts: the LIVE canonical scope (projected with the CURRENT reader) and primary id, plus receipt.
-  const liveFacts = () => {
+  const liveFacts = useCallback(() => {
     const reader = readerRef.current;
+    const { pathname, search } = readLocation();
     return {
-      scope: liveScopeOf(window.location.search, reader.login, reader.role, projectOf(window.location.pathname, window.location.search, getScope())),
-      id: liveDecisionId(window.location.search),
+      scope: liveScopeOf(search, reader.login, reader.role, projectOf(pathname, search, getScope())),
+      id: liveDecisionId(search),
     };
-  };
+  }, [readLocation]);
   const receipt = useRef({ rows, loading: query.loading });
   receipt.current = { rows, loading: query.loading };
 
@@ -99,8 +102,8 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   /** Resolve only the current scope's row before explicitly opening the native item form. */
   const readCurrentFacts = useCallback(() => {
     const currentUser = fullUserRef.current;
-    const liveSearch = window.location.search;
-    const liveScope = liveScopeOf(liveSearch, currentUser.login, currentUser.role, projectOf(window.location.pathname, liveSearch, getScope()));
+    const { pathname, search: liveSearch } = readLocation();
+    const liveScope = liveScopeOf(liveSearch, currentUser.login, currentUser.role, projectOf(pathname, liveSearch, getScope()));
     const parsed = readDecisionParam(liveSearch);
     const state = receiptRef.current;
     const coherent = liveScope === scopeKeyRef.current;
@@ -111,7 +114,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
       row: currentRows.find((row) => row.id === selectedId),
       loading: state.loading, error: state.error, coherent,
     };
-  }, []);
+  }, [readLocation]);
   const focusTitle = useCallback(() => {
     const owner = page.current;
     const title = owner?.querySelector<HTMLElement>("#detail-title") ?? owner?.querySelector<HTMLElement>("[data-detail-title]") ?? null;
@@ -133,14 +136,15 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
 
   const armIntent = useCallback((target: FocusTarget) => {
     focusVersion.current += 1;
+    const live = liveFacts();
     intent.current = {
       target,
       focusIntentVersion: focusVersion.current,
-      intentScope: liveFacts().scope,
-      intentUriId: liveDecisionId(window.location.search),
+      intentScope: live.scope,
+      intentUriId: live.id,
       targetOwnerId: "needs-decisions",
     };
-  }, []);
+  }, [liveFacts]);
 
   // A reader/filter change clears a bookmark and intents from another scope (local state only; the raw URI stays).
   useEffect(() => { clearSnapshotFor(scopeKey); cancelIntent(); }, [scopeKey, cancelIntent]);
@@ -155,13 +159,13 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
       // A compact commit unmounts the queue: that is the only case that arms a restoration.
       pendingRestore.current = narrow ? chosen : null;
     }
-    const uriId = liveDecisionId(window.location.search);
+    const uriId = liveFacts().id;
     if (commitChangesId(uriId, id)) setDecision(id, { clearPeek: true, replace: reason === "arrow" });
     else if (peek) clearPeek();
     setCursor(id);
     if (reason === "activate" || narrow) { armIntent({ kind: "title", whenHidden: false }); setTitleTick((n) => n + 1); }
     else armIntent({ kind: "row", id, reveal: true });
-  }, [narrow, peek, clearPeek, setDecision, armIntent]);
+  }, [narrow, peek, clearPeek, setDecision, armIntent, liveFacts]);
 
   /** Close: a known row returns to it; an unavailable selection falls back to the native Decision view. */
   const closeSelection = useCallback(() => {
@@ -267,7 +271,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     }
     if (queueHidden) return;
     if (queueHandle.current?.focusRow(target.id, target.reveal)) intent.current = null;
-  }, [queueHidden]);
+  }, [queueHidden, liveFacts]);
   useEffect(() => {
     const raf = requestAnimationFrame(runIntent);
     return () => cancelAnimationFrame(raf);
@@ -301,7 +305,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     // An OWNED-ROOT listener (the exact cached element), not a document-global focus interception.
     root.addEventListener("focusin", onFocusIn as EventListener);
     return () => root.removeEventListener("focusin", onFocusIn as EventListener);
-  }, [focusTitle, readyTick, user.login, user.role]);
+  }, [focusTitle, readyTick, user.login, user.role, liveFacts]);
   // Any real input disarms a pending focus intent (read-only observation; no global redirection).
   useEffect(() => {
     const disarm = () => { focusVersion.current += 1; intent.current = null; };
