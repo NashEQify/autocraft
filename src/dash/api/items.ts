@@ -104,7 +104,6 @@ async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort
   const mode = q.get("mode") ?? "text";
   if (mode !== "text") throw new HttpError(400, "mode must be text");
   const run = q.get("run") || await latestRun(db);
-  await settledTable(db, run);
   const params: Record<string, SQLInputValue> = {};
   const where: string[] = [];
   const fts = ftsQuery(q.get("q") ?? "");
@@ -178,6 +177,8 @@ async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort
   let sort: ItemSort = sortQ ?? (fts ? "relevance" : state === BY_US ? "merged" : "updated");
   if (sort === "relevance" && !fts) sort = "updated";
   const desc = q.get("desc") !== "0";
+  // Last, after every parameter check: nothing is filled for a request that fails.
+  await settledTable(db, run);
   return { where, statusWhere, statuses: [...st] as SettledStatus[], params, text: !!fts, sort, desc, run };
 }
 
