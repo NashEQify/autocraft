@@ -454,17 +454,11 @@ src/remote/cli.ts
 
 src/remote/cooloff.ts
 
-src/remote/device-login.ts
 
-src/remote/helpers.ts
 
-src/remote/liveness.ts
 
-src/remote/manual-only.ts
 
-src/remote/max-calls.ts
 
-src/remote/mode.ts
 
 src/remote/my-repos.ts
 

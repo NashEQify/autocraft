@@ -5,6 +5,7 @@ import { audit } from "../dash/audit.ts";
 import { EFFORTS, type Effort, type HarnessId, type Tier } from "./protocol.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const INFERENCE_MODES = ["server", "user-local"] as const;
 export type InferenceMode = (typeof INFERENCE_MODES)[number];
@@ -18,8 +19,8 @@ export const inferenceMode = async (db: Db): Promise<InferenceMode> =>
 /** Sets the mode and audits the change as `by`; false when it already was `mode`. */
 export async function setInferenceMode(db: Db, mode: InferenceMode, by: string): Promise<boolean> {
   if (await inferenceMode(db) === mode) return false;
-  if (mode === "server") await db.prepare("DELETE FROM main.settings WHERE key = ?").run(INFERENCE_KEY);
-  else await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(INFERENCE_KEY, mode);
+  if (mode === "server") await db.run(db.k.deleteFrom("main.settings").where("key", "=", INFERENCE_KEY));
+  else await db.run(db.k.insertInto("main.settings").values({ key: INFERENCE_KEY, value: mode }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, by, "inference", INFERENCE_KEY, { value: mode });
   return true;
 }
@@ -116,7 +117,7 @@ export async function setAcceptedModels(db: Db, raw: unknown, by: string, minEff
     for (const t of clear) { if (!isTier(t)) throw new Error(`unknown tier ${t}`); delete floors[t]; }
   }
   const stored = { ...next, ...(Object.keys(floors).length && { minEffort: floors }) };
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(REMOTE_MODELS_KEY, JSON.stringify(stored));
+  await db.run(db.k.insertInto("main.settings").values({ key: REMOTE_MODELS_KEY, value: JSON.stringify(stored) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, by, "remote-models", REMOTE_MODELS_KEY, stored);
   return next;
 }

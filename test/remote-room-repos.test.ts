@@ -25,7 +25,7 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
     await db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
     const id = (await createToken(db, login, "helper", { kind: "runner" })).row.id;
     await storeStatus(db, id, login, parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-    await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+    await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
     return id;
   };
   const perm = async (login: string, repo: string, permission: string) =>
@@ -62,7 +62,7 @@ test("room is counted per repo: runners with disjoint repos, a call nobody may t
   assert.equal(await room(["photocraft", "deckcraft"]), 0, "nobody takes a call on both");
 
   // A job's repo param is added to the repos a pool names.
-  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = NULL WHERE id = ?").run(dave);
+  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: null }).where("id", "=", dave));
   await setUserRepos(db, "olga", ["designcraft"]);
   assert.equal(await queueRoom(db, 0, ["designcraft"]), 1);
   const job = (repo: string) => setCallContext({ jobId: 1, step: "opus-review", stage: 5, repo, cancelled: async () => false });
@@ -83,7 +83,7 @@ test("room and takers count only the runners whose users take the call's task (M
   await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
   await setUserTasks(db, "olga", TASK_CHOICES.map((t) => t.id).filter((t) => t !== "review"));
   const room = async (repos: string[] | undefined, step: string) => await remoteRoom(db, 0, Date.now(), repos, step);
   assert.ok(await room(["deckcraft"], "fixissue") > 0);
