@@ -151,9 +151,9 @@ describe("Act failures", () => {
     assert.deepEqual(closed, ["P6"], "the failing target does not stop the next one");
     assert.equal(first.failed.length, 1);
     for (let i = 0; i < 2; i++) await run(w, d);
-    const row = async () => (await w.rows("SELECT state, attempts, reason FROM actions WHERE number = 5"))[0] as { state: string; attempts: number; reason: string };
+    const row = async () => (await w.db.all(w.db.k.selectFrom("actions").select(["state", "attempts", "reason"]).where("number", "=", 5)))[0];
     assert.equal((await row()).state, "stopped");
-    assert.match((await row()).reason, /stopped after 3 failed tries/);
+    assert.match((await row()).reason!, /stopped after 3 failed tries/);
     const n = closed.length;
     await run(w, d);
     assert.equal(closed.length, n, "a stopped target is not tried again");
@@ -194,7 +194,7 @@ describe("blocked repos, GitHub errors and permission reads", () => {
     const first = await run(w, deps(w, { closed, serverError: [5] }));
     assert.equal(first.failed.length, 1);
     assert.deepEqual(closed, [], "the run stopped at the first target");
-    const attempts = ((await w.rows("SELECT attempts FROM actions WHERE number = 5"))[0] as { attempts: number } | undefined)?.attempts ?? 0;
+    const attempts = (await w.db.all(w.db.k.selectFrom("actions").select("attempts").where("number", "=", 5)))[0]?.attempts ?? 0;
     assert.equal(attempts, 0);
     await run(w, deps(w, { closed }));
     assert.deepEqual(closed.sort(), ["P5", "P6"]);
