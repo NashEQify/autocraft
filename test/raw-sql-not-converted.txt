@@ -100,21 +100,13 @@ src/dash/api/model-queue.ts
 
 src/dash/api/needs.ts
 
-src/dash/api/next.ts
 
-src/dash/api/nightly.ts
 
-src/dash/api/now.ts
 
-src/dash/api/operator.ts
 
-src/dash/api/outside.ts
 
-src/dash/api/pipeline.ts
 
-src/dash/api/postmerge.ts
 
-src/dash/api/queue-page.ts
 
 src/dash/api/queue.ts
 
