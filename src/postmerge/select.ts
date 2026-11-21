@@ -1,12 +1,14 @@
 // Which merged PRs still need a post-merge review and which defects still need an issue, from the local tables only.
 import { quietFixPrs } from "../security/quiet.ts";
-import { pilotSqlFor } from "../pilot.ts";
+import { pilotExprFor } from "../pilot.ts";
 import { planned } from "../core/select.ts";
 import type { PlanSet } from "../core/plan-set.ts";
 import type { Finding } from "./parse.ts";
 import { RETRY_AFTER_MS } from "../core/rules.ts";
 import { flatMapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
+import type { NotNull } from "kysely";
 
 /** A review that failed with a `retry:` error is tried again after this long. */
 export { RETRY_AFTER_MS };
@@ -18,8 +20,6 @@ export type MergedPr = { repo: string; number: number; head_oid: string; merged_
 /** Re-reviews of a PR whose review ended in a `retry:` error stop after this many tries. */
 export const MAX_RETRIES = 3;
 
-const BATCH = `EXISTS (SELECT 1 FROM merge_batch_prs bp JOIN merge_batches mb ON mb.id = bp.batch_id WHERE mb.repo = m.repo AND bp.number = m.number AND mb.state = 'merged') AS batch`;
-
 /** PRs whose Plan holds a `postmerge` action: a pipeline merge landed since the `postmerge_since` setting and no usable review is stored (a `retry:` error counts as missing an hour after it failed; the third is stored as held). Oldest merge first. */
 export async function selectPostmerge(db: Db, repo: string, now = Date.now(), run?: string | null, plans?: PlanSet): Promise<MergedPr[]> {
   return (await flatMapSeq((await planned(db, "postmerge", { repo, now, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) })), async (p) => await mergedPr(db, repo, p.facts.number) ?? []))
@@ -28,12 +28,17 @@ export async function selectPostmerge(db: Db, repo: string, now = Date.now(), ru
 
 /** The merged PR `repo#number`, whatever its review state, or null when the pipeline did not merge it. */
 export async function mergedPr(db: Db, repo: string, number: number): Promise<MergedPr | null> {
-  return (await db.prepare(`SELECT m.repo, m.number,
-      (SELECT x.head_oid FROM merges x WHERE x.repo = m.repo AND x.number = m.number AND x.outcome = 'merged' ORDER BY x.at DESC, x.rowid DESC LIMIT 1) AS head_oid,
-      MIN(m.at) AS merged_at,
-      (SELECT x.method FROM merges x WHERE x.repo = m.repo AND x.number = m.number AND x.outcome = 'merged' ORDER BY x.at DESC, x.rowid DESC LIMIT 1) AS method,
-      ${BATCH}
-    FROM merges m WHERE m.repo = ? AND m.number = ? AND m.outcome = 'merged' GROUP BY m.repo, m.number`).get(repo, number) as MergedPr | undefined) ?? null;
+  return await db.get(db.k.selectFrom("merges as m").select((eb) => [
+      "m.repo", "m.number",
+      eb.selectFrom("merges as x").select("x.head_oid").whereRef("x.repo", "=", "m.repo").whereRef("x.number", "=", "m.number").where("x.outcome", "=", "merged")
+        .orderBy("x.at", "desc").orderBy(kx.rowid("merges", "x"), "desc").limit(1).as("head_oid"),
+      eb.fn.min<string>("m.at").as("merged_at"),
+      eb.selectFrom("merges as x").select("x.method").whereRef("x.repo", "=", "m.repo").whereRef("x.number", "=", "m.number").where("x.outcome", "=", "merged")
+        .orderBy("x.at", "desc").orderBy(kx.rowid("merges", "x"), "desc").limit(1).as("method"),
+      eb.case().when(eb.exists(eb.selectFrom("merge_batch_prs as bp").innerJoin("merge_batches as mb", "mb.id", "bp.batch_id").select(eb.lit(1).as("one"))
+        .whereRef("mb.repo", "=", "m.repo").whereRef("bp.number", "=", "m.number").where("mb.state", "=", "merged"))).then(1).else(0).end().as("batch"),
+    ]).where("m.repo", "=", repo).where("m.number", "=", number).where("m.outcome", "=", "merged").groupBy(["m.repo", "m.number"])
+    .$narrowType<{ head_oid: string }>()) ?? null;
 }
 
 export type StoredReview = { repo: string; number: number; merge_sha: string; at: string; model: string | null; error: string | null; findings: Finding[] };
@@ -46,8 +51,7 @@ export function parseStored(json: string | null): Finding[] {
 }
 
 export async function reviewOf(db: Db, repo: string, number: number): Promise<StoredReview | null> {
-  const r = await db.prepare("SELECT repo, number, merge_sha, at, model, error, findings FROM postmerge_reviews WHERE repo = ? AND number = ?").get(repo, number) as
-    { repo: string; number: number; merge_sha: string; at: string; model: string | null; error: string | null; findings: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("postmerge_reviews").select(["repo", "number", "merge_sha", "at", "model", "error", "findings"]).where("repo", "=", repo).where("number", "=", number));
   return r ? { ...r, findings: parseStored(r.findings) } : null;
 }
 
@@ -55,7 +59,8 @@ export type FollowupState = "filing" | "filed" | "failed" | "skipped-duplicate" 
 export type Followup = { repo: string; number: number; review_at: string; finding: number; title: string; issue_number: number | null; url: string | null; state: FollowupState; at: string; duplicate_of: number | null; attempts: number; note: string | null };
 
 export async function followupsOf(db: Db, repo: string, number: number): Promise<Followup[]> {
-  return await db.prepare("SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups WHERE repo = ? AND number = ? ORDER BY review_at, finding").all(repo, number) as Followup[];
+  return await db.all(db.k.selectFrom("postmerge_followups").select(kx.cols("postmerge_followups")).where("repo", "=", repo).where("number", "=", number)
+    .orderBy("review_at").orderBy("finding").$narrowType<{ state: FollowupState }>());
 }
 
 /** A failed filing is tried again this long after its attempt (1 h after the first, 6 h after the second); three attempts at most. */
@@ -70,8 +75,8 @@ export function retryDue(f: Pick<Followup, "state" | "attempts" | "at">, now = D
 
 /** The PR is the Fix PR of a follow-up issue this stage filed. */
 export async function fixesFollowup(db: Db, repo: string, number: number): Promise<boolean> {
-  return await db.prepare(`SELECT 1 FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
-    WHERE fa.repo = ? AND fa.pr_url LIKE '%/pull/' || ?`).get(repo, String(number)) !== undefined;
+  return await db.get(db.k.selectFrom("fix_attempts as fa").innerJoin("postmerge_followups as pf", (j) => j.onRef("pf.repo", "=", "fa.repo").onRef("pf.issue_number", "=", "fa.number"))
+    .select((eb) => eb.lit(1).as("one")).where("fa.repo", "=", repo).where((eb) => kx.like(db, "fa.pr_url", eb.val(`%/pull/${number}`))).limit(1)) !== undefined;
 }
 
 /**
@@ -95,17 +100,17 @@ export type PendingDefect = { repo: string; number: number; review_at: string; f
  * skipped-limit row, or a failed row whose backoff has passed. A review held by `heldReason`, and the review of a quiet pull request, has none.
  */
 export async function pendingDefects(db: Db, repo?: string, now = Date.now()): Promise<PendingDefect[]> {
-  const only = repo !== undefined ? [repo] : [];
-  const rows = await db.prepare(`SELECT r.repo, r.number, r.at, r.model, r.findings FROM postmerge_reviews r
-    WHERE ${repo !== undefined ? "r.repo = ? AND " : ""}r.error IS NULL AND ${pilotSqlFor(db, "r.repo", "r.number")} ORDER BY r.at, r.number`).all(...only) as { repo: string; number: number; at: string; model: string | null; findings: string | null }[];
+  const rows = await db.all(db.k.selectFrom("postmerge_reviews as r").select(["r.repo", "r.number", "r.at", "r.model", "r.findings"])
+    .$if(repo !== undefined, (q) => q.where("r.repo", "=", repo!)).where("r.error", "is", null).where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))
+    .orderBy("r.at").orderBy("r.number"));
   const out: PendingDefect[] = [];
   const quiet = await quietFixPrs(db, repo);
   // The follow-ups of each PR and the Fix PR links of follow-up issues, read once (followupsOf and fixesFollowup per PR).
   const followups = new Map<string, Followup[]>();
-  for (const f of await db.prepare(`SELECT repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of, attempts, note FROM postmerge_followups
-    ${repo !== undefined ? "WHERE repo = ? " : ""}ORDER BY review_at, finding`).all(...only) as Followup[]) (followups.get(`${f.repo}#${f.number}`) ?? followups.set(`${f.repo}#${f.number}`, []).get(`${f.repo}#${f.number}`)!).push(f);
-  const fixUrls = await db.prepare(`SELECT fa.repo, fa.pr_url FROM fix_attempts fa JOIN postmerge_followups pf ON pf.repo = fa.repo AND pf.issue_number = fa.number
-    WHERE ${repo !== undefined ? "fa.repo = ? AND " : ""}fa.pr_url IS NOT NULL`).all(...only) as { repo: string; pr_url: string }[];
+  for (const f of await db.all(db.k.selectFrom("postmerge_followups").select(kx.cols("postmerge_followups")).$if(repo !== undefined, (q) => q.where("repo", "=", repo!))
+    .orderBy("review_at").orderBy("finding").$narrowType<{ state: FollowupState }>())) (followups.get(`${f.repo}#${f.number}`) ?? followups.set(`${f.repo}#${f.number}`, []).get(`${f.repo}#${f.number}`)!).push(f);
+  const fixUrls = await db.all(db.k.selectFrom("fix_attempts as fa").innerJoin("postmerge_followups as pf", (j) => j.onRef("pf.repo", "=", "fa.repo").onRef("pf.issue_number", "=", "fa.number"))
+    .select(["fa.repo", "fa.pr_url"]).$if(repo !== undefined, (q) => q.where("fa.repo", "=", repo!)).where("fa.pr_url", "is not", null).$narrowType<{ pr_url: NotNull }>());
   // As `pr_url LIKE '%/pull/<number>'`: LIKE ignores ASCII case.
   const fixes = (r: string, n: number): boolean => fixUrls.some((u) => u.repo === r && u.pr_url.toLowerCase().endsWith(`/pull/${n}`));
   for (const r of rows) {
@@ -141,7 +146,7 @@ export const sameDefect = (a: Finding, b: Finding): boolean =>
 /** Defects this stage filed (or is filing) in the last 30 days, with the finding's file and line from the review they came from. */
 export async function recentFiled(db: Db, repo: string, now = Date.now()): Promise<{ number: number; f: Finding }[]> {
   const since = new Date(now - 30 * 86400_000).toISOString();
-  const rows = await db.prepare("SELECT number, review_at, finding FROM postmerge_followups WHERE repo = ? AND state IN ('filed', 'filing') AND at >= ?").all(repo, since) as { number: number; review_at: string; finding: number }[];
+  const rows = await db.all(db.k.selectFrom("postmerge_followups").select(["number", "review_at", "finding"]).where("repo", "=", repo).where("state", "in", ["filed", "filing"]).where("at", ">=", since));
   return await flatMapSeq(rows, async (x) => {
     const r = await reviewOf(db, repo, x.number);
     const f = r && r.at === x.review_at ? r.findings[x.finding] : undefined;
