@@ -9,7 +9,7 @@ import { knownStep, modelsOf, usesClaude, type Params, type StepDef } from "./st
 import { setting } from "../settings-read.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { jsonNum } from "../db/portable.ts";
+import { excluded, jsonNum } from "../db/kx.ts";
 
 export const STEP_PARALLEL_KEY = "step_parallel";
 export const STEP_PARALLEL_DEFAULT = 1;
@@ -36,7 +36,8 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
     throw new ParallelError(`repos at once per step must be a whole number from 1 to ${STEP_PARALLEL_MAX}, or none`);
   }
   const was = await stepParallelSetting(db);
-  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(STEP_PARALLEL_KEY, v);
+  await db.run(db.k.insertInto("settings").values({ key: STEP_PARALLEL_KEY, value: v as string })
+    .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   if (v !== was) await audit(db, by, "step-parallel", "pipeline", { stepParallel: v, was });
   return v as string;
 }
@@ -45,8 +46,8 @@ export async function setStepParallel(db: Db, input: unknown, by: string): Promi
 export type Active = { id: number; step: string; state: string; repo: string | null; number: number | null; params?: string };
 
 export async function activeJobs(db: Db, states: ("queued" | "running")[] = ["queued", "running"]): Promise<Active[]> {
-  return await db.prepare(`SELECT id, step, state, repo, ${jsonNum(db, "params", "$.number")} AS number, params FROM jobs WHERE state IN (${states.map(() => "?").join(",")})`)
-    .all(...states) as Active[];
+  return await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "repo", jsonNum(db, "params", "$.number").as("number"), "params"])
+    .where("state", "in", states));
 }
 
 /** A job or proposal as untakenTest reads it: `params` as an object or the stored JSON. */

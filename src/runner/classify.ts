@@ -20,6 +20,7 @@ import { latestRun } from "../classify/settled.ts";
 import { assignAreas, type AssignResult } from "../areas/assign.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export { inputHash } from "../itemhash.ts";
 
@@ -36,8 +37,11 @@ const JEV_CHUNK = 40, HAIKU_PER_CALL = 25;
  * names are renamed first so their cost stays on record.
  */
 async function keepUsage(db: Db, run: string, agents: string[]): Promise<void> {
-  const q = db.prepare("UPDATE main.token_usage SET agent = agent || '@' || COALESCE(started_at, '') WHERE run_id = ? AND agent = ?");
-  for (const a of agents) await q.run(run, a);
+  for (const a of agents) {
+    await db.run(db.k.updateTable("main.token_usage")
+      .set((eb) => ({ agent: eb(eb("agent", "||", eb.val("@")), "||", eb.fn.coalesce("started_at", eb.val(""))) }))
+      .where("run_id", "=", run).where("agent", "=", a));
+  }
 }
 
 /** Items sent to a model so far in this job, saved as the job's handled count. */
@@ -48,7 +52,8 @@ const sentCounter = (ctx: StepContext) => {
 
 async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<string, string>, sent: (n: number) => void): Promise<Set<string>> {
   const { db } = ctx;
-  const setHash = db.prepare("UPDATE main.classifications SET input_hash = ? WHERE repo = ? AND number = ? AND classifier = 'jev' AND run_id = ? AND at >= ?");
+  const setHash = (hash: string, repo: string, number: number, at: string) => db.run(db.k.updateTable("main.classifications").set({ input_hash: hash })
+    .where("repo", "=", repo).where("number", "=", number).where("classifier", "=", "jev").where("run_id", "=", run).where("at", ">=", at));
   const done = new Set<string>();
   for (let i = 0; i < todo.length && !await ctx.cancelled() && await jevAvailable(db); i += JEV_CHUNK) {
     const chunk = todo.slice(i, i + JEV_CHUNK);
@@ -56,7 +61,7 @@ async function jevPass(ctx: StepContext, run: string, todo: Item[], hashes: Map<
     const t0 = new Date().toISOString();
     sent(chunk.length);
     await runJev(db, run, chunk);
-    for (const x of chunk) if ((await setHash.run(hashes.get(refOf(x))!, x.repo, x.number, run, t0)).changes) done.add(refOf(x));
+    for (const x of chunk) if ((await setHash(hashes.get(refOf(x))!, x.repo, x.number, t0)).changes) done.add(refOf(x));
     await ctx.progress(`Jev: ${Math.min(i + JEV_CHUNK, todo.length)} of ${todo.length} items`);
   }
   return done;
@@ -69,7 +74,6 @@ async function haikuItems(db: Db, run: string, limit: number): Promise<Item[]> {
 
 async function haikuPass(ctx: StepContext, run: string, todo: Item[], sent: (n: number) => void): Promise<number> {
   const { db } = ctx;
-  const count = db.prepare("SELECT COUNT(*) AS n FROM classifications WHERE classifier = 'haiku' AND run_id = ? AND at >= ?");
   const t0 = new Date().toISOString();
   // A chunk holds one batch for every call the accounts can take at once (at least 4), so the calls fill the free slots.
   for (let i = 0, size = 0; i < todo.length && !await ctx.cancelled(); i += size) {
@@ -80,7 +84,8 @@ async function haikuPass(ctx: StepContext, run: string, todo: Item[], sent: (n: 
     sent(await runHaiku(db, run, chunk, HAIKU_PER_CALL, undefined, { cold: i === 0 }));
     await ctx.progress(`Haiku: ${Math.min(i + size, todo.length)} of ${todo.length} items`);
   }
-  return (await count.get(run, t0) as { n: number }).n;
+  return (await db.get(db.k.selectFrom("classifications").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("classifier", "=", "haiku").where("run_id", "=", run).where("at", ">=", t0)))!.n;
 }
 
 /**
@@ -91,13 +96,16 @@ async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashe
   const { db } = ctx;
   const t0 = new Date().toISOString();
   await haikuPass(ctx, run, items, sent);
-  const setHash = db.prepare("UPDATE main.classifications SET input_hash = ? WHERE repo = ? AND number = ? AND classifier = 'haiku' AND run_id = ? AND at >= ?");
+  const setHash = (hash: string, repo: string, number: number) => db.run(db.k.updateTable("main.classifications").set({ input_hash: hash })
+    .where("repo", "=", repo).where("number", "=", number).where("classifier", "=", "haiku").where("run_id", "=", run).where("at", ">=", t0));
   // A Jev row of the item's earlier text goes; one without a hash (older rows) is kept, it is current until the item changes.
-  const dropStale = db.prepare("DELETE FROM main.classifications WHERE repo = ? AND number = ? AND classifier = 'jev' AND run_id = ? AND input_hash IS NOT NULL AND input_hash <> ?");
+  const dropStale = (repo: string, number: number, hash: string) => db.run(db.k.deleteFrom("main.classifications")
+    .where("repo", "=", repo).where("number", "=", number).where("classifier", "=", "jev").where("run_id", "=", run)
+    .where("input_hash", "is not", null).where("input_hash", "<>", hash));
   let n = 0;
   for (const x of items) {
-    if (!(await setHash.run(hashes.get(refOf(x))!, x.repo, x.number, run, t0)).changes) continue;
-    await dropStale.run(x.repo, x.number, run, hashes.get(refOf(x))!);
+    if (!(await setHash(hashes.get(refOf(x))!, x.repo, x.number)).changes) continue;
+    await dropStale(x.repo, x.number, hashes.get(refOf(x))!);
     n++;
   }
   return n;
@@ -109,14 +117,14 @@ async function haikuOnlyPass(ctx: StepContext, run: string, items: Item[], hashe
  */
 async function jevItems(db: Db, run: string, mode: "new" | "all"): Promise<{ open: number; due: Item[]; hashes: Map<string, string> }> {
   await fillClassHashes(db);
-  const open = (await db.prepare("SELECT COUNT(*) AS n FROM items i JOIN tracked_repos t ON t.name = i.repo WHERE i.state = 'OPEN'").get() as { n: number }).n;
-  const hash = db.prepare("SELECT class_hash AS h FROM items WHERE repo = ? AND number = ?");
+  const open = (await db.get(db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
+    .select((eb) => eb.fn.countAll<number>().as("n")).where("i.state", "=", "OPEN")))!.n;
   const due: Item[] = [], hashes = new Map<string, string>();
   for (const p of await plannedItems(db, "classify", { run, bucket: "jev" })) {
     if (mode === "all" && p.facts.classification.jev) continue;
     const x = await itemOf(db, p.facts.repo, p.facts.number);
     due.push(x);
-    hashes.set(refOf(x), (await hash.get(x.repo, x.number) as { h: string }).h);
+    hashes.set(refOf(x), (await db.get(db.k.selectFrom("items").select("class_hash as h").where("repo", "=", x.repo).where("number", "=", x.number)))!.h!);
   }
   return { open, due, hashes };
 }
@@ -160,6 +168,7 @@ export async function classifyAll(ctx: StepContext): Promise<string> {
   const run = String(ctx.params.run);
   const r = await pass(ctx, run, "all");
   const complete = r.left === 0 && !await ctx.cancelled();
-  if (complete) await ctx.db.prepare("INSERT INTO settings (key, value) VALUES ('classify_run', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(run);
+  if (complete) await ctx.db.run(ctx.db.k.insertInto("settings").values({ key: "classify_run", value: run })
+    .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   return `Run ${run}: ${aloneNote(r)}Jev classified ${r.jev} of ${r.due} items without a verdict${r.left ? ` (${r.left} left; start it again to continue)` : ""}; Haiku gave a second opinion on ${r.haiku} of ${r.haikuDue}.${areaNote(r)}${complete ? " The run is now the current one." : ""}`;
 }

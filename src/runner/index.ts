@@ -173,10 +173,10 @@ async function planLog(args: string[]): Promise<void> {
   const db = await openDb();
   if (args[0] === "status") {
     console.log(JSON.stringify({
-      logged: (await db.prepare("SELECT count(*) AS n FROM main.item_changes").get() as { n: number }).n,
-      passes: await db.prepare("SELECT kind, passes, refs, ms, max_ms, last_at FROM main.plan_pass_stats ORDER BY kind").all(),
-      fullCauses: await db.prepare("SELECT source, n FROM main.plan_full_causes ORDER BY n DESC LIMIT 10").all(),
-      shadowDiffs: (await db.prepare("SELECT count(*) AS n FROM main.plan_shadow_diffs").get() as { n: number }).n,
+      logged: (await db.get(db.k.selectFrom("main.item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
+      passes: await db.all(db.k.selectFrom("main.plan_pass_stats").select(["kind", "passes", "refs", "ms", "max_ms", "last_at"]).orderBy("kind")),
+      fullCauses: await db.all(db.k.selectFrom("main.plan_full_causes").select(["source", "n"]).orderBy("n", "desc").limit(10)),
+      shadowDiffs: (await db.get(db.k.selectFrom("main.plan_shadow_diffs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
     }, null, 2));
     return;
   }
