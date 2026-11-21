@@ -36,6 +36,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const undo = useUndo();
   const { peek, setPeek, decision, setDecision, clearPeek, update, filter, search } = useDecisionFilter();
   const query = useDecisionList();
+  const queueError = query.error ? query.error.message || "Could not read this queue." : undefined;
   const loc = useLocal();
   // Failed receipts confer no selection, keyboard or review authority, just as in the queue.
   const rows = query.error ? [] : query.data?.decisions ?? [];
@@ -49,8 +50,8 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const readerRef = useRef({ login: user.login, role: user.role });
   // The handoff reads current identity and guarded rows, never a stale queue callback's snapshot.
   const fullUserRef = useRef(user); fullUserRef.current = user;
-  const receiptRef = useRef({ rows, loading: query.loading, error: query.error?.message });
-  receiptRef.current = { rows, loading: query.loading, error: query.error?.message };
+  const receiptRef = useRef({ rows, loading: query.loading, error: queueError });
+  receiptRef.current = { rows, loading: query.loading, error: queueError };
   const cursorRef = useRef<string | undefined>(undefined);
   readerRef.current = { login: user.login, role: user.role };
   // Mutation-time facts: the LIVE canonical scope (projected with the CURRENT reader) and primary id, plus receipt.
@@ -360,7 +361,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
   const checkedHere = rows.filter((r) => loc.checked.has(r.id));
   const answerFacts = selected ? {
     user, scopeKey, requestedIdentity: JSON.stringify(requested),
-    row: selected, loading: query.loading, error: query.error?.message,
+    row: selected, loading: query.loading, error: queueError,
     readCurrentFacts,
   } : undefined;
   const detail = <DecisionDetail
@@ -369,7 +370,7 @@ export function DecisionBrowse({ phone, ...props }: ViewProps & { phone?: boolea
     reason={requested.kind === "unavailable" ? requested.reason : selected ? undefined : "not-loaded"}
     raw={requested.kind === "unavailable" ? requested.raw : undefined}
     loading={query.loading}
-    error={query.error?.message}
+    error={queueError}
     hasRows={rows.length > 0}
     compact={narrow}
     onClose={closeSelection}
