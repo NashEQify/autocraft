@@ -28,10 +28,10 @@ test("push outcome: green to red is broke, red to green is fixed, optional check
 
 test("a new branch takes the CI result of its base commit, not the latest main CI", async () => {
   const db = await connectDb(join(tmpdir("push-base"), "t.db"));
-  const ci = async (sha: string, state: string, at: string) => await db.prepare("INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, committed_at, first_seen_at, state_changed_at, updated_at) VALUES ('o/r', ?, 'main', ?, '[]', '[]', ?, ?, ?, ?)").run(sha, state, at, at, at, at);
+  const ci = async (sha: string, state: string, at: string) => await db.run(db.k.insertInto("main_ci").values({ repo: "o/r", head_sha: sha, branch: "main", state, failing: "[]", checks: "[]", committed_at: at, first_seen_at: at, state_changed_at: at, updated_at: at }));
   await ci("base", "red", "2026-11-01T00:00:00Z");
   await ci("latest", "green", "2026-11-02T00:00:00Z");
-  const before = async () => (await db.prepare("SELECT before_res FROM push_outcomes ORDER BY id DESC LIMIT 1").get() as { before_res: string }).before_res;
+  const before = async () => (await db.get(db.k.selectFrom("push_outcomes").select("before_res").orderBy("id", "desc").limit(1)))!.before_res;
   await recordPush(db, "fixissue-push", { repo: "o/r", number: null, from: null, to: "c1", base: "base" });
   assert.equal(await before(), "red");
   await recordPush(db, "fixissue-push", { repo: "o/r", number: null, from: null, to: "c2", base: "gone" });
@@ -40,15 +40,15 @@ test("a new branch takes the CI result of its base commit, not the latest main C
   assert.equal(await before(), "green");
   const rows = [{ repo: "o/r", number: 5, head_oid: "c1", checks: [{ name: "gate", state: "failure" }] }];
   await resolvePushes(db, rows);
-  assert.equal((await db.prepare("SELECT outcome FROM push_outcomes WHERE to_oid = 'c1'").get() as { outcome: string }).outcome, "still-red");
+  assert.equal((await db.get(db.k.selectFrom("push_outcomes").select("outcome").where("to_oid", "=", "c1")))!.outcome, "still-red");
 });
 
 test("the unsettled-push gate counts only recent pushes whose PR is open at the pushed head", async () => {
   const db = await connectDb(join(tmpdir("push-gate"), "t.db"));
   const now = new Date("2026-11-07T12:00:00Z");
-  const item = async (n: number, state: string, head: string) => await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, head_oid, created_at, updated_at) VALUES ('app', ?, 'pr', ?, 't', 'a', ?, '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z')`).run(n, state, head);
-  const push = async (n: number | null, to: string, at: string) => await db.prepare("INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) VALUES (?, 'fixup', 'fixup-push', 'app', ?, 'old', ?, 'green')").run(at, n, to);
-  const checks = async (n: number, head: string) => await db.prepare("INSERT INTO pr_checks (repo, number, head_oid, overall, checks, fetched_at) VALUES ('app', ?, ?, 'pending', ?, '2026-11-07T11:50:00Z')").run(n, head, JSON.stringify([{ name: "gate", state: "pending" }]));
+  const item = async (n: number, state: string, head: string) => await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state, title: "t", author: "a", head_oid: head, created_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" }));
+  const push = async (n: number | null, to: string, at: string) => await db.run(db.k.insertInto("push_outcomes").values({ at, stage: "fixup", action: "fixup-push", repo: "app", number: n, from_oid: "old", to_oid: to, before_res: "green" }));
+  const checks = async (n: number, head: string) => await db.run(db.k.insertInto("pr_checks").values({ repo: "app", number: n, head_oid: head, overall: "pending", checks: JSON.stringify([{ name: "gate", state: "pending" }]), fetched_at: "2026-11-07T11:50:00Z" }));
   // Orphans: PR merged, head moved on, no number.
   await item(1, "MERGED", "h1"); await push(1, "h1", "2026-11-07T11:30:00Z");
   await item(2, "OPEN", "other"); await push(2, "h2", "2026-11-07T11:30:00Z");

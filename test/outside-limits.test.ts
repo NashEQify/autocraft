@@ -61,7 +61,7 @@ test("the surge breaker trips on many new outside items, holds only those, and s
   const insider = await add("regular", "pr", 10, "COLLABORATOR");
   const surge = [await add("a", "pr", 30), await add("b", "issue", 20), await add("c", "pr", 10), await add("d", "pr", 5)];
   await refreshOutsideHolds(db, NOW);
-  assert.equal((await db.prepare("SELECT active FROM stage_trips WHERE stage = 'outside-surge'").get() as { active: number }).active, 1);
+  assert.equal((await db.get(db.k.selectFrom("stage_trips").select("active").where("stage", "=", "outside-surge")))!.active, 1);
   assert.deepEqual(await mapSeq(surge, async (n) => await inPilot(db, "app", n)), [false, false, false, false]);
   assert.ok(await inPilot(db, "app", older) && await inPilot(db, "app", insider));
 
@@ -70,5 +70,5 @@ test("the surge breaker trips on many new outside items, holds only those, and s
   await resumeStage(db, "outside-surge", "op");
   await refreshOutsideHolds(db, NOW + 3 * 3_600_000);
   assert.ok(await everySeq(surge, async (n) => await inPilot(db, "app", n)));
-  assert.equal((await db.prepare("SELECT active FROM stage_trips WHERE stage = 'outside-surge'").get() as { active: number }).active, 0, "the old items do not trip it again");
+  assert.equal((await db.get(db.k.selectFrom("stage_trips").select("active").where("stage", "=", "outside-surge")))!.active, 0, "the old items do not trip it again");
 });
