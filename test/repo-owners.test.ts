@@ -45,10 +45,12 @@ const item = (repo: string, owner: string, number: number) => ({
 async function syncDb() {
   resetOwners();
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "owners-")), "o.db"));
-  await db.script("DELETE FROM tracked_repos");
-  await db.script("INSERT INTO tracked_repos VALUES ('designcraft','t','x',1)");
-  await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('designcraft','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z')");
-  await db.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T09:30:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "designcraft", added_by: "t", added_at: "x", pipeline: 1 }));
+  await db.run(db.k.insertInto("repos").values({ name: "designcraft", synced_at: "2026-11-02T09:00:00Z", high_water: "2026-11-02T09:00:00Z", reconciled_at: "2026-11-02T09:00:00Z" }));
+  await db.run(db.k.insertInto("settings").values([
+    { key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
+  ]));
   return db;
 }
 const opts = { only: [], all: false, full: false, perRepo: false };
@@ -58,7 +60,7 @@ test("a search node of another owner's same-named repo is skipped", async () => 
   const nodes = [item("designcraft", "example-org", 1), item("designcraft", "storytold", 2)];
   const client = { spent: 0, remaining: 4000 as number | null, async query() { return { search: { issueCount: 2, pageInfo: { hasNextPage: false, endCursor: null }, nodes } }; } };
   await runSync(db, client, opts, new Date("2026-11-02T10:05:00Z"));
-  assert.deepEqual((await db.prepare("SELECT number FROM items WHERE repo = 'designcraft'").all()).map((r) => r.number), [2]);
+  assert.deepEqual((await db.all(db.k.selectFrom("items").select("number").where("repo", "=", "designcraft"))).map((r) => r.number), [2]);
 });
 
 test("a failing fetch of another owner's repo leaves the storytold sync working", async () => {
@@ -68,7 +70,7 @@ test("a failing fetch of another owner's repo leaves the storytold sync working"
   await assert.rejects(trackRepoChecked(db, "t", "example-org/designcraft", async () => true), /unique across owners|already known/);
   await assert.rejects(trackRepoChecked(db, "t", "example-org/nope", exists), /not found/);
   assert.equal(ownerOf("sandbox"), "example-org");
-  await db.script("UPDATE repos SET synced_at = '2026-11-02T09:00:00Z' WHERE name = 'sandbox'");
+  await db.run(db.k.updateTable("repos").set({ synced_at: "2026-11-02T09:00:00Z" }).where("name", "=", "sandbox"));
   const client = {
     spent: 0, remaining: 4000 as number | null,
     async query(q: string, v: Record<string, unknown>) {
@@ -79,5 +81,5 @@ test("a failing fetch of another owner's repo leaves the storytold sync working"
   };
   const r = await runSync(db, client, opts, new Date("2026-11-02T10:05:00Z"));
   assert.equal(r.mode, "search");
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM items WHERE repo = 'designcraft'").get())!.n, 1);
+  assert.equal((await db.get(db.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", "designcraft")))!.n, 1);
 });
