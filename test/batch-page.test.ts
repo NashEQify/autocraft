@@ -8,12 +8,15 @@ const T = (m: number) => `2026-01-02T00:${String(m).padStart(2, "0")}:00Z`;
 
 test("a removed PR shows as removed with its reason in the batch history, and the actor only to staff", async () => {
   const db = (await (await (await (await world()).repo(["comment"])).pr(1)).pr(2)).db;
-  await db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, pr_number, summary, created_at, updated_at) VALUES (7, 'app', 'integration-app-1', 'superseded', 'basesha1', 'tip', 900, 'app#2 was removed by an operator', ?, ?)").run(T(0), T(9));
-  const ins = db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (7, ?, ?, ?)");
-  await ins.run(1, "sha1", 0); await ins.run(2, "sha2", 1);
-  const audit = db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, ?, ?, ?, ?)");
-  await audit.run(T(2), "bot", "batch-pr", "app:integration-app-1", "{}");
-  await audit.run(T(8), "op", "batch-remove", "app#2", JSON.stringify({ batch: "integration-app-1" }));
+  await db.run(db.k.insertInto("merge_batches").values({ id: 7, repo: "app", branch: "integration-app-1", state: "superseded", base_sha: "basesha1", commit_sha: "tip", pr_number: 900, summary: "app#2 was removed by an operator", created_at: T(0), updated_at: T(9) }));
+  await db.run(db.k.insertInto("merge_batch_prs").values([
+    { batch_id: 7, number: 1, head_oid: "sha1", position: 0 },
+    { batch_id: 7, number: 2, head_oid: "sha2", position: 1 },
+  ]));
+  await db.run(db.k.insertInto("audit").values([
+    { at: T(2), login: "bot", action: "batch-pr", target: "app:integration-app-1", details: "{}" },
+    { at: T(8), login: "op", action: "batch-remove", target: "app#2", details: JSON.stringify({ batch: "integration-app-1" }) },
+  ]));
   const staff = await batchDetail(db, 7, true);
   assert.deepEqual(staff.members.map((m) => [m.number, m.state]), [[1, "in"], [2, "removed"]]);
   assert.equal(staff.members[1]!.reason, "removed by an operator");
