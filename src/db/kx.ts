@@ -321,3 +321,12 @@ export function jsonObject(d: D, entries: Record<string, Ex>): RawBuilder<string
   const parts = Object.entries(entries).map(([k, v]) => (pg ? sql`${sql.raw(quote(k))}, (${x(v)})::json` : sql`${sql.raw(quote(k))}, json(${x(v)})`));
   return pg ? sql`json_build_object(${sql.join(parts)})::text` : sql`json_object(${sql.join(parts)})`;
 }
+
+/**
+ * The expression builder a fragment twin takes from its caller's callback (`.where((eb) => quietExprFor(db, eb, "i.repo",
+ * "i.number"))`). Its tables are the caller's, so the twin's column references are not checked against them.
+ */
+export type Eb = AnyEb;
+
+/** `e` as an expression: a string is a column reference, a value goes in as `eb.val(v)`. For twins whose arguments are `Ex`. */
+export const ref = <T = unknown>(e: Ex): Expression<T> => x(e) as Expression<T>;

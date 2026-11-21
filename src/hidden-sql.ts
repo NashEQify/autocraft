@@ -1,4 +1,6 @@
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Dialect } from "./db/index.ts";
+import { inList as inListExpr, type Ex } from "./db/kx.ts";
 import { inList } from "./db/portable.ts";
 
 // Repo filters for viewers who may not see every repo. A list from the dashboard's `hiddenRepos` carries the repos the viewer
@@ -12,6 +14,11 @@ export const filtered = (h: HiddenRepos): boolean => !!h.visible || h.length > 0
 export function hiddenTest(col: string, h: HiddenRepos): { sql: string; args: string[] } {
   if (h.visible) return h.visible.length ? { sql: `${col} NOT IN (${h.visible.map(() => "?").join(",")})`, args: h.visible } : { sql: "1", args: [] };
   return { sql: `${col} IN (${h.map(() => "?").join(",")})`, args: [...h] };
+}
+
+/** `hiddenTest` (and `hiddenJsonTest`) as an expression on the repo in `col`. */
+export function hiddenTestExpr(d: Dialect | { readonly dialect: Dialect }, col: Ex, h: HiddenRepos): AliasableExpression<SqlBool> {
+  return h.visible ? inListExpr(d, col, h.visible, "text", true) : inListExpr(d, col, [...h]);
 }
 
 export const isHiddenRepo = (h: HiddenRepos, repo: string): boolean => (h.visible ? !h.visible.includes(repo) : h.includes(repo));

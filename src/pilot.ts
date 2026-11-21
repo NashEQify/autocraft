@@ -130,7 +130,7 @@ export function pilotExprFor(db: Db, eb: kx.AnyEb, repo: kx.Ex, number: kx.Ex): 
       eb.or([
         eb(eb.fn.coalesce(kx.jsonArrayLength(db, list), eb.lit(0)), "=", 0),
         eb.exists(t.selectFrom(pj).select(eb.lit(1).as("one")).where("pj.value", "=", ref(r, n))),
-        quietExprFor(eb, r, n),
+        quietExprFor(db, eb, r, n),
         eb.exists(t.selectFrom(["main.fix_attempts as pf", pj]).select(eb.lit(1).as("one")).where("pf.repo", "=", r).where(prOf("pf.pr_url"))
           .where("pj.value", "=", ref("pf.repo", "pf.number"))),
         eb.exists(t.selectFrom("main.fix_attempts as pf2").innerJoin("main.postmerge_followups as pm2", (j) => j.onRef("pm2.repo", "=", "pf2.repo").onRef("pm2.issue_number", "=", "pf2.number"))

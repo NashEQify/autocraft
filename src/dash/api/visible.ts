@@ -11,7 +11,9 @@ import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { securityRepo } from "../../security/rules.ts";
 import { canSeeInternals } from "./staff.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import { inList, type Ex } from "../../db/kx.ts";
 
 const memo = new WeakMap<Req, Promise<string[]>>();
 
@@ -98,6 +100,12 @@ export function excludeHidden(col: string, hidden: string[] & { visible?: string
   if (hidden.visible) return hidden.visible.length ? `${col} IN (${hidden.visible.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})` : "0";
   if (!hidden.length) return null;
   return `${col} NOT IN (${hidden.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})`;
+}
+
+/** `excludeHidden` as an expression on the repo in `col`; null when nothing is hidden. */
+export function excludeHiddenExpr(db: Db, col: Ex, hidden: string[] & { visible?: string[] }): AliasableExpression<SqlBool> | null {
+  if (hidden.visible) return inList(db, col, hidden.visible);
+  return hidden.length ? inList(db, col, hidden, "text", true) : null;
 }
 
 const namePatterns = new WeakMap<string[], RegExp | null>();

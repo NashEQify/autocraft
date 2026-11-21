@@ -3,13 +3,19 @@
 // (calls.ts claimOrder). The planner's room (room.ts), the authors' give-way rule (calls.ts idleOthers) and the
 // `remote-starved` health check leave such runners out. No row means off.
 import { audit } from "../dash/audit.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import { ref, type Eb, type Ex } from "../db/kx.ts";
 
 export const MANUAL_ONLY_KEY = "manual_only";
 
 /** SQL that is true when the login in column `col` has Manual only on. */
 export const manualSql = (col: string): string =>
   `EXISTS (SELECT 1 FROM main.user_settings mo WHERE mo.login = ${col} AND mo.key = '${MANUAL_ONLY_KEY}' AND mo.value = '1')`;
+
+/** `manualSql` as an expression on the login in `col`. */
+export const manualExpr = (db: Db, eb: Eb, col: Ex): AliasableExpression<SqlBool> =>
+  eb.exists(db.k.selectFrom("main.user_settings as mo").select(eb.lit(1).as("one")).where("mo.login", "=", ref<string>(col)).where("mo.key", "=", MANUAL_ONLY_KEY).where("mo.value", "=", "1"));
 
 export async function manualOnly(db: Db, login: string): Promise<boolean> {
   return await db.prepare("SELECT 1 FROM main.user_settings WHERE login = ? AND key = ? AND value = '1'").get(login, MANUAL_ONLY_KEY) !== undefined;

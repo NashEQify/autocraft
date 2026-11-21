@@ -14,10 +14,12 @@ import { detailOf } from "./github-detail.ts";
 import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import { reasonsFor, waitFor, type Reader } from "./reader.ts";
-import { filtered, hiddenTest, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { filtered, hiddenTest, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { ownLogins } from "../../github/identity.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
+import type { AliasedExpression, AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import type { Eb } from "../../db/kx.ts";
 
 export type Ev = TraceEvent & { detail?: Record<string, unknown> };
 /** `staff`: operators and maintainers; `hidden`: repos the viewer may not see, whose runs are left out like getRun does. */
@@ -134,11 +136,24 @@ export const hiddenSql = (hidden: HiddenRepos): string => (filtered(hidden) ? ` 
 /** The `?` arguments of `hiddenSql`. */
 export const hiddenArgs = (hidden: HiddenRepos): string[] => (filtered(hidden) ? hiddenTest("x.repo", hidden).args : []);
 
+/** `hiddenSql` as an expression on the run `r` (without the leading AND); null when nothing is hidden. */
+export const hiddenExpr = (db: Db, eb: Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> | null => (filtered(hidden)
+  ? eb.not(eb.exists(db.k.selectFrom("agent_run_items as x").select(eb.lit(1).as("one")).where("x.run_id", "=", eb.ref("r.id")).where(hiddenTestExpr(db, "x.repo", hidden))))
+  : null);
+
 /** Prompts whose calls are named by what they do, not by the step that makes them. */
 const PROMPT_TITLES: Record<string, string> = { "lint.reference.jev": "Reference lint", "lint.reference.haiku": "Reference lint" };
 
 export const RUN_COLUMNS = `r.id, r.step, r.prompt_id, r.model, r.provider, r.state, r.started_at, r.ended_at, r.input_tokens, r.output_tokens, r.cost_usd, r.summary, r.job_id, r.user_login, r.harness, r.reported_model,
        COALESCE(a.label, r.account_id) AS label, (SELECT COUNT(*) FROM agent_run_tools t WHERE t.run_id = r.id) AS tools`;
+/** `RUN_COLUMNS` as selections on `r` (agent_runs) and `a` (claude_accounts, left joined): `.select((eb) => runColumnsExpr(db, eb))`. */
+export const runColumnsExpr = (db: Db, eb: Eb) => [
+  "r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd",
+  "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",
+  eb.fn.coalesce(eb.ref("a.label"), eb.ref("r.account_id")).as("label") as AliasedExpression<string | null, "label">,
+  db.k.selectFrom("agent_run_tools as t").select((e) => e.fn.countAll<number>().as("n")).where("t.run_id", "=", eb.ref("r.id")).as("tools"),
+] as const;
+
 export const runEvent = (r: { id: number; step: string; prompt_id: string; model: string; provider: string; state: string; started_at: string; ended_at: string | null; input_tokens: number | null; output_tokens: number | null;
   cost_usd: number | null; summary: string | null; label: string | null; tools: number; job_id: number | null; user_login?: string | null; harness?: string | null; reported_model?: string | null }, staff = false): Ev => ({
   id: `run:${r.id}`, kind: "model-call", at: r.started_at, head: null, actor: model(r.model, "model"),

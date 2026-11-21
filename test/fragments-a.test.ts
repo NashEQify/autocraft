@@ -186,7 +186,7 @@ const cases = (): Case[] => [
   onItems("pilotSql", pilotSql(db, "i"), (eb) => pilotExpr(db, eb, "i")),
   onItems("pilotSql without a pilot list", pilotSql(db, "i"), (eb) => pilotExpr(db, eb, "i"), noPilot),
   onItems("pilotSqlFor", pilotSqlFor(db, "i.repo", "i.number"), (eb) => pilotExprFor(db, eb, "i.repo", "i.number")),
-  onItems("quietSqlFor", quietSqlFor("i.repo", "i.number"), (eb) => quietExprFor(eb, "i.repo", "i.number")),
+  onItems("quietSqlFor", quietSqlFor("i.repo", "i.number"), (eb) => quietExprFor(db, eb, "i.repo", "i.number")),
   onItems("groupHeldSql", groupHeldSql("i"), (eb) => groupHeldExpr(db, eb, "i")),
   onItems("backlogHeldSql", backlogHeldSql(db, "i"), (eb) => backlogHeldExpr(db, eb, "i")),
   onItems("notOwnIntegrationSql", notOwnIntegrationSql(db, "i"), (eb) => notOwnIntegrationExpr(db, eb, "i")),

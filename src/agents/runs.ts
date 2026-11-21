@@ -1,6 +1,8 @@
 // Agent runs: one row per model call made through the prompt registry. Written
 // by the callers in src/classify/run.ts, read by the API.
-import { filtered, hiddenTest, type HiddenRepos } from "../hidden-sql.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
+import { filtered, hiddenTest, hiddenTestExpr, type HiddenRepos } from "../hidden-sql.ts";
+import type { Eb } from "../db/kx.ts";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { AgentRun, AgentRunDetail, AgentRunFilter, AgentRunPage, AgentRunState, AgentRunTool, ItemRef, ItemShown, RateBucket, Rates } from "../../web/src/api/types.ts";
 
@@ -170,6 +172,12 @@ export const touchesHidden = (hidden: HiddenRepos): { sql: string; args: string[
   const h = hiddenTest("x.repo", hidden);
   return { sql: `EXISTS (SELECT 1 FROM agent_run_items y WHERE y.run_id = r.id) AND NOT EXISTS (SELECT 1 FROM agent_run_items x WHERE x.run_id = r.id AND ${h.sql})`, args: h.args };
 };
+
+/** `touchesHidden` as an expression on the run `r`. */
+export const touchesHiddenExpr = (db: Db, eb: Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> => eb.and([
+  eb.exists(db.k.selectFrom("agent_run_items as y").select(eb.lit(1).as("one")).where("y.run_id", "=", eb.ref("r.id"))),
+  eb.not(eb.exists(db.k.selectFrom("agent_run_items as x").select(eb.lit(1).as("one")).where("x.run_id", "=", eb.ref("r.id")).where(hiddenTestExpr(db, "x.repo", hidden)))),
+]);
 
 /** A run that touches a hidden repo is not found; prompt and output text go only to `texts` viewers (operators). */
 export async function getRun(db: Db, id: unknown, view: { hidden?: HiddenRepos; texts?: boolean } = { texts: true }): Promise<AgentRunDetail> {

@@ -3,9 +3,11 @@
 // reasons, prompts, model output, account data or anything about a security fix, and it knows only public tracked repos.
 import { scoreLookup } from "../rank/position.ts";
 import { fastPositions } from "../fasttrack.ts";
-import { quietSqlFor } from "../security/quiet.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
+import { quietExprFor, quietSqlFor } from "../security/quiet.ts";
 import { sortSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { jsonEach, jsonValid, like, ref, type Eb, type Ex } from "../db/kx.ts";
 
 export const STEPS = ["New", "Triaged", "In review", "Waiting for CI", "Fix-up in progress", "Needs a maintainer decision", "In the merge queue", "Merged", "Closed"] as const;
 export type PublicStep = (typeof STEPS)[number];
@@ -56,6 +58,19 @@ export const hiddenSql = (repo: string, number: string, labels: string): string 
   OR EXISTS (SELECT 1 FROM main.security_findings sf WHERE sf.repo = ${repo} AND (sf.fix_pr = ${number}))
   OR EXISTS (SELECT 1 FROM main.classifications c, json_each(CASE WHEN json_valid(c.flags) THEN c.flags ELSE '[]' END) f WHERE c.repo = ${repo} AND c.number = ${number} AND f.value = 'security')
   OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${labels}) THEN ${labels} ELSE '[]' END) l WHERE lower(l.value) LIKE '%security%'))`;
+
+/** `hiddenSql` as an expression on the item's `repo`, `number` and `labels` (column references or values). */
+export function hiddenExpr(db: Db, eb: Eb, repo: Ex, number: Ex, labels: Ex): AliasableExpression<SqlBool> {
+  const array = (e: Ex) => eb.case().when(jsonValid(db, e)).then(ref<string>(e)).else("[]").end();
+  return eb.or([
+    quietExprFor(db, eb, repo, number),
+    eb.exists(db.k.selectFrom("main.security_findings as sf").select(eb.lit(1).as("one")).where("sf.repo", "=", ref<string>(repo)).where("sf.fix_pr", "=", ref<number>(number))),
+    eb.exists(db.k.selectFrom("main.classifications as c").crossJoin(jsonEach(db, array("c.flags"), "f")).select(eb.lit(1).as("one"))
+      .where("c.repo", "=", ref<string>(repo)).where("c.number", "=", ref<number>(number)).where("f.value", "=", "security")),
+    eb.exists(db.k.selectFrom(jsonEach(db, array(labels), "l")).select(eb.lit(1).as("one"))
+      .where((e) => like(db, e.fn("lower", ["l.value"]), e.val("%security%")))),
+  ]);
+}
 
 type Row = { title: string | null; url: string | null; kind: string; state: string; hidden: number; stage: string | null; reviewed: number | null; plan: string | null; view: string | null; decision: number };
 

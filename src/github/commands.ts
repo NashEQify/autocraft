@@ -37,7 +37,9 @@ import { appSlug } from "./identity.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError } from "./write.ts";
 import { filterSeq, someSeq } from "../async-seq.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import type { Eb } from "../db/kx.ts";
 
 /** Comments read for a command: GitHub caps a body at 65536 characters. */
 const BODY_MAX = 65_536;
@@ -466,6 +468,8 @@ async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "fa
 
 /** SQL condition: rows a drain has work for, queued commands and settled ones whose answer is still to post (index github_commands_state). */
 export const COMMAND_WORK_SQL = "(state = 'queued' OR (state <> 'queued' AND reply IS NULL))";
+/** `COMMAND_WORK_SQL` as an expression on github_commands. */
+export const commandWorkExpr = (eb: Eb): AliasableExpression<SqlBool> => eb.or([eb("state", "=", "queued"), eb.and([eb("state", "<>", "queued"), eb("reply", "is", null)])]);
 
 /**
  * Carries out the queued commands, oldest first, and posts their answers. Run after the webhook's re-reads, so the item is in the

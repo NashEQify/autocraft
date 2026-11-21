@@ -17,7 +17,9 @@ import { backlogHeldSql } from "../dupes/held.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { collectScreenshots, screenshotsDue, type ScreenshotDeps } from "./screenshots.ts";
 import { mapSeq } from "../async-seq.ts";
+import type { AliasableExpression } from "kysely";
 import type { Db } from "../db/index.ts";
+import type { Eb } from "../db/kx.ts";
 
 const PROMPT = CLAUDE_PROMPTS["verify.summary"];
 const ACTOR = "verify";
@@ -29,6 +31,10 @@ export const NOT_FAILING_REASON = "regression test passes on base";
 /** The PR's current head, as src/review/candidates.ts headOf picks it: the checks table's when fetched after the mirror last saw the PR change. */
 export const CURRENT_HEAD_SQL = `CASE WHEN c.head_oid IS NOT NULL AND c.fetched_at IS NOT NULL AND (i.updated_at IS NULL OR c.fetched_at > i.updated_at)
   THEN c.head_oid ELSE COALESCE(i.head_oid, c.head_oid) END`;
+/** `CURRENT_HEAD_SQL` as an expression on `i` (items) and `c` (pr_checks, left joined). */
+export const currentHeadExpr = (eb: Eb): AliasableExpression<string | null> => eb.case()
+  .when(eb.and([eb("c.head_oid", "is not", null), eb("c.fetched_at", "is not", null), eb.or([eb("i.updated_at", "is", null), eb("c.fetched_at", ">", eb.ref("i.updated_at"))])]))
+  .then(eb.ref("c.head_oid")).else(eb.fn.coalesce("i.head_oid", "c.head_oid")).end();
 const ERROR_LIMIT = 200;
 
 export const VERIFICATION_STATES = ["planned", "running", "passed", "failed", "error", "ci-enough", "stale", "unavailable"] as const;
