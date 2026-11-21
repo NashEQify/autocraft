@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { finishRun, getRun, insertRun, pruneRuns, RUN_KEEP_MS, runTools } from "../src/agents/runs.ts";
+import { finishRun, getRun, insertRun, pruneRuns, rates, RUN_KEEP_MS, runTools } from "../src/agents/runs.ts";
 import { saveTools } from "../src/agents/tools.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -63,4 +63,22 @@ test("viewers without text access get tools without arguments", async () => {
   const t = (await getRun(db, run, { texts: false })).tools;
   assert.deepEqual([t[0]!.tool, t[0]!.args, t[0]!.resultBytes], ["Read", null, 1]);
   assert.match((await getRun(db, run)).tools[0]!.args!, /secret/);
+});
+
+test("rates count runs in the UTC hour or day their ISO start time falls in", async () => {
+  const db = await connectDb(":memory:");
+  const times = ["2026-11-21T14:05:30.123Z", "2026-11-21T00:00:00.000Z", "2026-11-20T23:59:59.999Z", "2026-11-18T07:00:00Z"];
+  for (const t of times) await db.run(db.k.updateTable("agent_runs").set({ started_at: t }).where("id", "=", await start(db)));
+  const now = Date.parse("2026-11-21T15:30:00Z");
+  const counts = async (window: "24h" | "7d") => Object.fromEntries((await rates(db, window, now)).stages.find((s) => s.step === "fixup")!.buckets.filter((b) => b.runs).map((b) => [b.t, b.runs]));
+  const hours = { "2026-11-20T23:00:00.000Z": 1, "2026-11-21T00:00:00.000Z": 1, "2026-11-21T14:00:00.000Z": 1 };
+  const days = { "2026-11-18T00:00:00.000Z": 1, "2026-11-20T00:00:00.000Z": 1, "2026-11-21T00:00:00.000Z": 2 };
+  assert.deepEqual(await counts("24h"), hours);
+  assert.deepEqual(await counts("7d"), days);
+  if (db.dialect === "sqlite") {
+    // The buckets SQLite's strftime gives for the same times.
+    const strftime = async (fmt: string, t: string) => (await db.prepare("SELECT strftime(?, ?) AS t").get(fmt, t) as { t: string }).t;
+    for (const t of times.slice(0, 3)) assert.ok(await strftime("%Y-%m-%dT%H:00:00.000Z", t) in hours, t);
+    for (const t of times) assert.ok(await strftime("%Y-%m-%dT00:00:00.000Z", t) in days, t);
+  }
 });

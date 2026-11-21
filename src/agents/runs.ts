@@ -91,16 +91,12 @@ export async function failRunning(db: Db, reason: string, jobId?: number): Promi
 
 type RunRow = {
   id: number; job_id: number | null; step: string; stage: number; prompt_id: string; prompt_version: string; provider: string; model: string;
-  account_id: string | null; account_label: string | null; items: string; item_count: number; state: string; started_at: string; ended_at: string | null;
+  account_id: string | null; account_label: string | null; items: string; item_count: number; state: AgentRunState; started_at: string; ended_at: string | null;
   input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; summary: string | null; error: string | null; progress: string | null; cost_usd: number | null;
   user_login: string | null; harness: string | null; reported_model: string | null;
 };
 
-const RUN_COLS = [
-  "r.id", "r.job_id", "r.step", "r.stage", "r.prompt_id", "r.prompt_version", "r.provider", "r.model", "r.account_id", "r.items", "r.item_count", "r.state", "r.started_at",
-  "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cache_read_tokens", "r.cache_write_tokens", "r.summary", "r.error", "r.progress", "r.cost_usd", "r.user_login",
-  "r.harness", "r.reported_model", "a.label as account_label",
-] as const;
+const RUN_COLS = [...kx.cols("agent_runs", "r"), "a.label as account_label"] as const;
 
 function refs(s: string): ItemRef[] {
   try {
@@ -116,7 +112,7 @@ async function toRun(r: RunRow, shown: (repo: string, number: number) => Promise
   return {
     id: r.id, jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version,
     provider: r.provider === "jev" ? "jev" : "claude", model: r.model, accountId: r.account_id, accountLabel: r.account_id ? (r.account_label ?? r.account_id) : null,
-    items: await mapSeq(refs(r.items), async (x) => ({ ...x, ...await shown(x.repo, x.number) })), itemCount: r.item_count, state: r.state as AgentRunState, startedAt: r.started_at, endedAt: r.ended_at,
+    items: await mapSeq(refs(r.items), async (x) => ({ ...x, ...await shown(x.repo, x.number) })), itemCount: r.item_count, state: r.state, startedAt: r.started_at, endedAt: r.ended_at,
     inputTokens: r.input_tokens, outputTokens: r.output_tokens, cacheReadTokens: r.cache_read_tokens, cacheWriteTokens: r.cache_write_tokens, costUsd: r.cost_usd, summary: r.summary,
     ...(staff && r.user_login && { via: { login: r.user_login, harness: r.harness ?? "", model: r.reported_model ?? "" } }),
     ...(r.state === "running" && r.progress && { progress: r.progress }),
@@ -161,8 +157,8 @@ export async function listRuns(db: Db, f: AgentRunFilter, hidden: HiddenRepos = 
     ? await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS)
       .where("i.repo", "=", f.repo)
       .where((eb) => eb("i.number", "=", eb.selectFrom("agent_run_items as j").select((e) => e.fn.min("j.number").as("n")).whereRef("j.run_id", "=", "i.run_id").whereRef("j.repo", "=", "i.repo")))
-      .where(conds).orderBy("i.run_id", "desc").limit(limit + 1))
-    : await db.all(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where(conds).orderBy("r.id", "desc").limit(limit + 1));
+      .where(conds).orderBy("i.run_id", "desc").limit(limit + 1).$narrowType<{ state: AgentRunState }>())
+    : await db.all(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where(conds).orderBy("r.id", "desc").limit(limit + 1).$narrowType<{ state: AgentRunState }>());
   const shown = shownLookup(db);
   const page = rows.slice(0, limit);
   return { runs: await mapSeq(page, async (x) => await toRun(x, shown, staff)), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
@@ -186,7 +182,7 @@ export const touchesHiddenExpr = (db: Db, eb: Eb, hidden: HiddenRepos): Aliasabl
 /** A run that touches a hidden repo is not found; prompt and output text go only to `texts` viewers (operators). */
 export async function getRun(db: Db, id: unknown, view: { hidden?: HiddenRepos; texts?: boolean } = { texts: true }): Promise<AgentRunDetail> {
   if (typeof id !== "number" || !Number.isInteger(id) || id < 1) throw new RunQueryError(400, "not a run id");
-  const r = await db.get(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where("r.id", "=", id));
+  const r = await db.get(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where("r.id", "=", id).$narrowType<{ state: AgentRunState }>());
   if (!r) throw new RunQueryError(404, `no agent run ${id}`);
   const hidden = view.hidden;
   if (hidden && filtered(hidden) && !await db.get(db.k.selectFrom("agent_runs as r").select((eb) => eb.lit(1).as("one")).where("r.id", "=", id).where((eb) => touchesHiddenExpr(db, eb, hidden)))) {
