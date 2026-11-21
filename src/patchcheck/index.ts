@@ -30,13 +30,16 @@ export type PatchCheckRow = {
 
 /** `subject` is the commit the patch applies to: the PR head (fixup) or the default branch head (fix). */
 export async function recordCheck(db: Db, r: { kind: CheckKind; repo: string; number: number; subject: string; patch: string; round: number; model: string; check: PatchCheck; at: string }): Promise<void> {
-  await db.prepare("INSERT INTO patch_checks (kind, repo, number, subject, patch_hash, round, verdict, reasons, problems, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(r.kind, r.repo, r.number, r.subject, patchHash(r.patch), r.round, r.check.verdict, r.check.reasons, JSON.stringify(r.check.problems), r.model, r.at);
+  await db.run(db.k.insertInto("patch_checks").values({
+    kind: r.kind, repo: r.repo, number: r.number, subject: r.subject, patch_hash: patchHash(r.patch), round: r.round, verdict: r.check.verdict,
+    reasons: r.check.reasons, problems: JSON.stringify(r.check.problems), model: r.model, created_at: r.at,
+  }));
 }
 
 export async function checksOf(db: Db, repo: string, number: number): Promise<PatchCheckRow[]> {
-  const rows = await db.prepare("SELECT id, kind, subject, patch_hash, round, verdict, reasons, problems, model, created_at FROM patch_checks WHERE repo = ? AND number = ? ORDER BY id").all(repo, number) as
-    { id: number; kind: CheckKind; subject: string; patch_hash: string; round: number; verdict: "approve" | "reject"; reasons: string; problems: string; model: string; created_at: string }[];
+  const rows = await db.all(db.k.selectFrom("patch_checks").select(["id", "kind", "subject", "patch_hash", "round", "verdict", "reasons", "problems", "model", "created_at"])
+    .where("repo", "=", repo).where("number", "=", number).orderBy("id")
+    .$narrowType<{ kind: CheckKind; verdict: "approve" | "reject" }>());
   return rows.map((x) => ({ id: x.id, kind: x.kind, repo, number, subject: x.subject, patchHash: x.patch_hash, round: x.round, verdict: x.verdict, reasons: x.reasons, problems: JSON.parse(x.problems) as string[], model: x.model, createdAt: x.created_at }));
 }
 

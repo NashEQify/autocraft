@@ -20,6 +20,7 @@ import { followupsOf, MAX_RETRIES, mergedPr, selectPostmerge, type MergedPr } fr
 import { jobItem } from "../runner/job-items.ts";
 import { flatMapSeq, forEachSeq, mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { excluded, like } from "../db/kx.ts";
 
 const PROMPT = CLAUDE_PROMPTS["postmerge.opus"];
 const now = () => new Date().toISOString();
@@ -53,13 +54,13 @@ export function defaultPostmergeDeps(db: Db): PostmergeDeps {
 /** Commits the pipeline added to the PR: conflict merges, fix-ups and parts carried over from duplicates, oldest first. */
 async function pipelineCommits(db: Db, repo: string, number: number): Promise<PostmergeCommit[]> {
   const rows = [
-    ...(await db.prepare("SELECT to_head AS sha, created_at AS at, reason AS note FROM conflict_merges WHERE repo = ? AND number = ? AND state = 'merged'").all(repo, number) as { sha: string | null; at: string; note: string | null }[])
+    ...(await db.all(db.k.selectFrom("conflict_merges").select(["to_head as sha", "created_at as at", "reason as note"]).where("repo", "=", repo).where("number", "=", number).where("state", "=", "merged")))
       .map((r) => ({ ...r, kind: "conflict-merge" as const, note: r.note ?? "merged the base branch into the PR" })),
-    ...(await db.prepare("SELECT to_head AS sha, created_at AS at, reason AS note FROM fixups WHERE repo = ? AND number = ? AND state = 'pushed'").all(repo, number) as { sha: string | null; at: string; note: string | null }[])
+    ...(await db.all(db.k.selectFrom("fixups").select(["to_head as sha", "created_at as at", "reason as note"]).where("repo", "=", repo).where("number", "=", number).where("state", "=", "pushed")))
       .map((r) => ({ ...r, kind: "fix-up" as const, note: r.note ?? "pushed the fixes of the review" })),
-    ...(await db.prepare("SELECT to_head AS sha, created_at AS at, reason AS note FROM ci_fixes WHERE repo = ? AND number = ? AND state = 'pushed'").all(repo, number) as { sha: string | null; at: string; note: string | null }[])
+    ...(await db.all(db.k.selectFrom("ci_fixes").select(["to_head as sha", "created_at as at", "reason as note"]).where("repo", "=", repo).where("number", "=", number).where("state", "=", "pushed")))
       .map((r) => ({ ...r, kind: "ci-fix" as const, note: r.note ?? "pushed a fix for the failing CI check" })),
-    ...(await db.prepare("SELECT to_head AS sha, updated_at AS at, outcome AS note FROM dupe_carries WHERE repo = ? AND number = ? AND outcome LIKE 'pushed%'").all(repo, number) as { sha: string | null; at: string; note: string | null }[])
+    ...(await db.all(db.k.selectFrom("dupe_carries").select(["to_head as sha", "updated_at as at", "outcome as note"]).where("repo", "=", repo).where("number", "=", number).where((eb) => like(db, "outcome", eb.val("pushed%")))))
       .map((r) => ({ ...r, kind: "duplicate-carry" as const, note: "carried parts of closed duplicates onto the PR" })),
   ];
   return rows.sort((a, b) => a.at.localeCompare(b.at)).map(({ kind, sha, note }) => ({ kind, sha, note }));
@@ -67,9 +68,8 @@ async function pipelineCommits(db: Db, repo: string, number: number): Promise<Po
 
 /** Follow-up issues earlier reviews of the PR filed, with their current state; one still in `filing` has an unknown outcome. */
 export async function filedBefore(db: Db, repo: string, number: number): Promise<FiledBefore[]> {
-  const stateOf = db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?");
   return await mapSeq((await followupsOf(db, repo, number)).filter((f) => f.state === "filed" || f.state === "filing"), async (f) => {
-    const it = f.issue_number === null ? undefined : await stateOf.get(repo, f.issue_number) as { state: string } | undefined;
+    const it = f.issue_number === null ? undefined : await db.get(db.k.selectFrom("items").select("state").where("repo", "=", repo).where("number", "=", f.issue_number));
     return { number: f.issue_number, state: f.state === "filing" ? "unknown" as const : it?.state === "OPEN" || !it ? "open" as const : "closed" as const, title: f.title };
   });
 }
@@ -83,7 +83,7 @@ async function prepare(db: Db, c: MergedPr, deps: PostmergeDeps): Promise<Prepar
   if (!cd.files.length && cd.testsOmitted.length) cd = codeDiff(d.text, true);
   if (!cd.files.length) return { kind: "error", error: "held: the merge changed no code files" };
   if (cd.text.length > deps.maxChars) return { kind: "error", error: "held: too large to review automatically" };
-  const it = await db.prepare("SELECT title, body, author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { title: string | null; body: string | null; author: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("items").select(["title", "body", "author"]).where("repo", "=", c.repo).where("number", "=", c.number));
   const input: PostmergePr = {
     ref: refOf(c), title: it?.title ?? "", body: it?.body ?? "", author: it?.author ?? null, merge_sha: d.sha ?? c.head_oid, method: c.method,
     files: cd.files, tests_omitted: cd.testsOmitted, lockfiles_omitted: cd.lockfilesOmitted,
@@ -101,19 +101,22 @@ async function prepare(db: Db, c: MergedPr, deps: PostmergeDeps): Promise<Prepar
 export async function saveReview(db: Db, c: { repo: string; number: number }, r: { sha: string; runId: string | null; model: string | null; findings: Finding[] | null; error: string | null; at?: string }): Promise<void> {
   const at = r.at ?? now();
   // A failed second try never replaces a stored review.
-  if (r.error && await db.prepare("SELECT 1 FROM postmerge_reviews WHERE repo = ? AND number = ? AND error IS NULL").get(c.repo, c.number)) return;
+  if (r.error && await db.get(db.k.selectFrom("postmerge_reviews").select((eb) => eb.lit(1).as("one")).where("repo", "=", c.repo).where("number", "=", c.number).where("error", "is", null))) return;
   let error = r.error, tries = 0;
   if (error?.startsWith("retry:")) {
-    tries = ((await db.prepare("SELECT tries FROM postmerge_reviews WHERE repo = ? AND number = ?").get(c.repo, c.number) as { tries: number } | undefined)?.tries ?? 0) + 1;
+    tries = ((await db.get(db.k.selectFrom("postmerge_reviews").select("tries").where("repo", "=", c.repo).where("number", "=", c.number)))?.tries ?? 0) + 1;
     if (tries >= MAX_RETRIES) error = `held: gave up after ${tries} tries (${error.slice("retry:".length).trim()})`;
   }
-  await db.prepare("INSERT OR REPLACE INTO postmerge_reviews (repo, number, merge_sha, at, model, run_id, findings, error, tries) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(c.repo, c.number, r.sha, at, r.model, r.runId, r.findings ? JSON.stringify(r.findings) : null, error, tries);
-  const skip = db.prepare("INSERT OR IGNORE INTO postmerge_followups (repo, number, review_at, finding, title, issue_number, url, state, at, duplicate_of) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)");
+  await db.run(db.k.insertInto("postmerge_reviews")
+    .values({ repo: c.repo, number: c.number, merge_sha: r.sha, at, model: r.model, run_id: r.runId, findings: r.findings ? JSON.stringify(r.findings) : null, error, tries })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["merge_sha", "at", "model", "run_id", "findings", "error", "tries"]))));
+  const skip = (state: string, f: Finding, i: number, duplicateOf: number | null) => db.run(db.k.insertInto("postmerge_followups")
+    .values({ repo: c.repo, number: c.number, review_at: at, finding: i, title: f.title, issue_number: null, url: null, state, at, duplicate_of: duplicateOf })
+    .onConflict((oc) => oc.doNothing()));
   await mergeDefect(db, c.repo, c.number, (r.findings ?? []).filter((f) => f.severity === "defect").length);
   await forEachSeq((r.findings ?? []), async (f, i) => {
-    if (f.severity === "minor") await skip.run(c.repo, c.number, at, i, f.title, "skipped-minor", at, null);
-    else if (f.duplicate_of !== null) await skip.run(c.repo, c.number, at, i, f.title, "skipped-duplicate", at, f.duplicate_of);
+    if (f.severity === "minor") await skip("skipped-minor", f, i, null);
+    else if (f.duplicate_of !== null) await skip("skipped-duplicate", f, i, f.duplicate_of);
   });
 }
 
@@ -167,10 +170,11 @@ export async function queueBackfill(db: Db, by: string, since: string, o: { yes?
   const iso = new Date(since).toISOString();
   const days = ((o.now ?? Date.now()) - Date.parse(iso)) / 86400_000;
   if (days > BACKFILL_FREE_DAYS && !o.yes) throw new Error(`--since is ${Math.floor(days)} days back; every merged PR since then gets a model review and its defects are filed publicly. Add --yes to confirm`);
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('postmerge_since', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(iso);
+  await db.run(db.k.insertInto("settings").values({ key: "postmerge_since", value: iso }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, by, "postmerge-backfill", null, { since: iso, confirmed: o.yes === true });
-  return (await db.prepare(`SELECT COUNT(*) AS n FROM (SELECT DISTINCT m.repo, m.number FROM merges m WHERE m.outcome = 'merged' AND m.at >= ?
-    AND NOT EXISTS (SELECT 1 FROM postmerge_reviews r WHERE r.repo = m.repo AND r.number = m.number))`).get(iso) as { n: number }).n;
+  return (await db.get(db.k.selectFrom((eb) => eb.selectFrom("merges as m").select(["m.repo", "m.number"]).distinct().where("m.outcome", "=", "merged").where("m.at", ">=", iso)
+    .where((e) => e.not(e.exists(e.selectFrom("postmerge_reviews as r").select(e.lit(1).as("one")).whereRef("r.repo", "=", "m.repo").whereRef("r.number", "=", "m.number")))).as("d"))
+    .select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
 }
 
 export { RELATED_CLOSED_DAYS, relatedOpen } from "./related.ts";

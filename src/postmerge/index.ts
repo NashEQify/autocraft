@@ -15,9 +15,9 @@ export async function reviewOne(db: Db, ref: string, again: boolean, log: (line:
   if (!m) throw new Error(`not a repo#number: ${ref}`);
   const repo = m[1]!, number = Number(m[2]);
   if (!await mergedPr(db, repo, number)) throw new Error(`${ref} was not merged by the pipeline`);
-  if (!again && await db.prepare("SELECT 1 FROM postmerge_reviews WHERE repo = ? AND number = ? AND error IS NULL").get(repo, number)) throw new Error(`${ref} has a post-merge review; add --again to review it again`);
+  if (!again && await db.get(db.k.selectFrom("postmerge_reviews").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("error", "is", null).limit(1))) throw new Error(`${ref} has a post-merge review; add --again to review it again`);
   // The runner's job reviews any candidate of its repo; two reviews of one PR at once would replace each other's rows.
-  if (await db.prepare("SELECT 1 FROM jobs WHERE step = 'postmerge' AND state = 'running' AND repo = ?").get(repo)) throw new Error(`a postmerge job is running for ${repo}; try again when it has finished`);
+  if (await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", "postmerge").where("state", "=", "running").where("repo", "=", repo).limit(1))) throw new Error(`a postmerge job is running for ${repo}; try again when it has finished`);
   await audit(db, ACTOR, "postmerge-review", ref, { again });
   const { runPostmerge } = await import("./review.ts");
   await runPostmerge(db, { repo, only: [number] }, log);
