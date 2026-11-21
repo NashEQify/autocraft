@@ -9,6 +9,7 @@ import { after, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { rowid } from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_EXTRA_STEPS = fileURLToPath(new URL("./runner-steps.ts", import.meta.url));
 
@@ -31,7 +32,8 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "runner-test-"));
 const dbFile = join(dir, "runner.db");
 const db = await connectDb(dbFile);
-await db.script("INSERT OR IGNORE INTO tracked_repos (name, pipeline) VALUES ('app', 1); UPDATE tracked_repos SET pipeline = 1");
+await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+await db.run(db.k.updateTable("tracked_repos").set({ pipeline: 1 }));
 const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} });
 
 after(async () => {
@@ -98,12 +100,12 @@ describe("runner", () => {
 
   test("a job stopped by a runner stop resumes under the same id and reads the reply its Task Runner sent meanwhile", async () => {
     await setInferenceMode(db, "user-local", "test");
-    await db.prepare("INSERT INTO access (login, role) VALUES ('bob', 'maintainer')").run();
+    await db.run(db.k.insertInto("access").values({ login: "bob", role: "maintainer" }));
     const bob = { tokenId: (await createToken(db, "bob", "helper", { kind: "runner" })).row.id, login: "bob", role: "maintainer" as const };
     const opts = { db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {} };
     const first = new Runner(opts);
     const job = await enqueue(db, "test-remote", {}, "boss");
-    const callOf = async () => await db.prepare("SELECT id, state, run_id FROM remote_calls WHERE job_id = ?").all(job.id) as { id: number; state: string; run_id: number | null }[];
+    const callOf = async () => await db.all(db.k.selectFrom("remote_calls").select(["id", "state", "run_id"]).where("job_id", "=", job.id));
     let lease = null;
     for (let i = 0; i < 400 && !lease; i++) {
       await first.tick();
@@ -133,18 +135,18 @@ describe("runner", () => {
     assert.equal(j.summary, "reply: the review");
     const calls = await callOf();
     assert.equal(calls.length, 1, "the resumed run adopted the call instead of asking again");
-    assert.equal((await db.prepare("SELECT state FROM agent_runs WHERE id = ?").get(calls[0]!.run_id) as { state: string }).state, "done");
+    assert.equal((await db.get(db.k.selectFrom("agent_runs").select("state").where("id", "=", calls[0]!.run_id!)))!.state, "done");
     assert.ok(j.log!.includes("resume 1 of 2"), j.log!);
 
     // A job left running by a runner that is gone resumes too, until it has resumed twice.
-    const left = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, resumes) VALUES ('test-echo', '{}', 'boss', ?, 'running', ?, 1) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    const left = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "boss", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString(), resumes: 1 }).returning("id")))!.id);
     await second.recover();
     assert.equal((await getJob(db, left)).state, "queued");
-    await db.prepare("UPDATE jobs SET state = 'running' WHERE id = ?").run(left);
+    await db.run(db.k.updateTable("jobs").set({ state: "running" }).where("id", "=", left));
     await second.recover();
     assert.equal((await getJob(db, left)).error, RUNNER_STOPPED);
     // A command-line run is not resumed: its process belongs to the command, which may still be running it.
-    const cli = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES ('test-echo', '{}', 'cli', ?, 'running', ?) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    const cli = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "cli", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString() }).returning("id")))!.id);
     await second.recover();
     assert.equal((await getJob(db, cli)).state, "failed");
   });
@@ -152,7 +154,7 @@ describe("runner", () => {
   test("a runner stop while a step writes lets the write finish, and the write it refuses is no failed item: the job resumes", async () => {
     const stopper = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 5000, log: () => {} });
     const job = await enqueue(db, "test-writes", { n: 5 }, "boss");
-    const states = async () => (await db.prepare("SELECT details FROM audit ORDER BY rowid").all() as { details: string | null }[]).map((r) => JSON.parse(r.details || "{}") as { jobId?: number; state?: string }).filter((d) => d.jobId === job.id).map((d) => d.state!);
+    const states = async () => (await db.all(db.k.selectFrom("audit").select("details").orderBy(rowid("audit")))).map((r) => JSON.parse(r.details || "{}") as { jobId?: number; state?: string }).filter((d) => d.jobId === job.id).map((d) => d.state!);
     for (let i = 0; i < 400 && !(await states()).includes("started"); i++) {
       await stopper.tick();
       await new Promise((r) => setTimeout(r, 20));
@@ -168,7 +170,7 @@ describe("runner", () => {
   });
 
   test("a resumed job does not post again a comment its earlier run posted", async () => {
-    const id = Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at) VALUES ('test-echo', '{}', 'boss', ?, 'running', ?) RETURNING id").get(new Date().toISOString(), new Date().toISOString()) as { id: number }).id);
+    const id = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "boss", requested_at: new Date().toISOString(), state: "running", started_at: new Date().toISOString() }).returning("id")))!.id);
     setCallContext({ jobId: id, step: "test-echo", stage: 2, cancelled: async () => false });
     try {
       let posts = 0;
@@ -177,7 +179,7 @@ describe("runner", () => {
       const comment = (text: string) => ghComment({ db, login: "act" }, g, exec, "act-comment", { repo: "app", number: 3, pr: false }, { by: "fixed" } as never, text);
       await comment("hello");
       // The runner stopped, the job resumed and runs again from the start.
-      await db.prepare("UPDATE jobs SET resumes = 1, started_at = ? WHERE id = ?").run(new Date(Date.now() + 1000).toISOString(), id);
+      await db.run(db.k.updateTable("jobs").set({ resumes: 1, started_at: new Date(Date.now() + 1000).toISOString() }).where("id", "=", id));
       const again = await comment("hello");
       assert.equal(posts, 1, "the comment is not posted twice");
       assert.match(again.stdout, /issuecomment-1/, "the earlier comment's URL is the result");
@@ -193,9 +195,9 @@ describe("runner", () => {
       send();
       assert.equal(await stopping, 0, "nothing is left in flight");
       assert.equal((await inFlight).code, 0);
-      assert.equal((JSON.parse((await db.prepare("SELECT details FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { details: string }).details) as { state: string }).state, "done");
+      assert.equal((JSON.parse((await db.get(db.k.selectFrom("audit").select("details").where("action", "=", "act-comment").orderBy(rowid("audit"), "desc").limit(1)))!.details!) as { state: string }).state, "done");
       // A write asked for after the stop is not made, and its caller waits for the process to exit.
-      const rows = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'act-comment'").get() as { n: number }).n;
+      const rows = async () => (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", "act-comment")))!.n;
       const n = await rows();
       const late = await Promise.race([comment("after the stop").then(() => "settled", () => "settled"), new Promise((r) => setTimeout(() => r("waits"), 200))]);
       assert.equal(late, "waits");

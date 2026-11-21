@@ -41,7 +41,7 @@ test("a job past its step's deadline is stopped and failed, and warns until ackn
   assert.deepEqual((await deadlineStops(db)).map((d) => d.step), ["test-sleep"]);
   assert.match((await jobDetail(db, slow.id)).log ?? "", /may finish its current item/);
   // The stopped paid work is not started again for an hour, whatever the input does.
-  await db.prepare("UPDATE jobs SET requested_by = 'pipeline' WHERE id = ?").run(slow.id);
+  await db.run(db.k.updateTable("jobs").set({ requested_by: "pipeline" }).where("id", "=", slow.id));
   const b = await failureBackoff(db, "test-sleep", Date.now(), { fp: "changed" });
   assert.ok(b && b.until - Date.parse(j.endedAt!) >= DEADLINE_BACKOFF_MS);
   // Every step with model calls gets at least the time the code lets its job work.
