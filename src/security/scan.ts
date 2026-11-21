@@ -244,7 +244,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
     }
     const guesses = sizes.map(areaGuessUsd);
 
-    const known: Known[] = (await db.all(db.k.selectFrom("security_findings").select(["number", "state", "fingerprint", "title", "refs", "category"]).where("repo", "=", repo))).map(knownOf);
+    const known: Known[] = (await db.all(db.k.selectFrom("security_findings").select(["number", "state", "fingerprint", "title", "refs", "category"]).where("repo", "=", repo).orderBy("number"))).map(knownOf);
 
     const unverifiedOf = async (area: string): Promise<{ number: number; c: Candidate }[]> =>
       (await db.all(db.k.selectFrom("security_findings").select(kx.cols("security_findings")).$narrowType<{ severity: Candidate["severity"] }>()

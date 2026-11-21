@@ -12,7 +12,6 @@ import { runScan, type Ask, type ScanDeps } from "../src/security/scan.ts";
 import { advanceScanTests, NOT_SHOWN_NOTE } from "../src/security/scantest.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
-import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "scan-tests-"));
