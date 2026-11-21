@@ -2,6 +2,7 @@
 // connection state are written by the runner's gateway client (src/discord/); this file only reads them.
 import type { DiscordAccount, DiscordLinkCode, DiscordInfo, DiscordSetup } from "../../../web/src/api/types.ts";
 import { envVar } from "../../env.ts";
+import { excluded } from "../../db/kx.ts";
 import { audit } from "../audit.ts";
 import { isPublicRepo, publicRepoNames } from "../../public/status.ts";
 import { HttpError } from "../server/util.ts";
@@ -32,7 +33,7 @@ export function discordKeys(): DiscordKeys | null {
 }
 
 export const contactOf = async (db: Db): Promise<string> =>
-  (await db.prepare("SELECT value FROM settings WHERE key = 'discord_contact'").get() as { value: string } | undefined)?.value ?? "";
+  (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "discord_contact")))?.value ?? "";
 
 /** Count for everyone who sees the item; message links only with the key. */
 export async function discordOf(db: Db, repo: string, n: number): Promise<DiscordInfo> {
@@ -46,12 +47,15 @@ const operator = (req: Req): void => {
 const body = (req: Req): Record<string, unknown> => (req.json && typeof req.json === "object" ? (req.json as Record<string, unknown>) : {});
 
 async function setupOf(db: Db): Promise<DiscordSetup> {
-  const st = await db.prepare("SELECT state, detail, at FROM discord_status WHERE id = 1").get() as { state: DiscordSetup["state"]; detail: string | null; at: string } | undefined;
-  const channels = await db.prepare(`SELECT c.channel_id AS channelId, c.guild_id AS guildId, c.guild_name AS guildName, c.name, c.watched, c.default_repo AS defaultRepo, k.name AS category
-    FROM discord_channels c LEFT JOIN discord_categories k ON k.category_id = c.category_id AND k.guild_id = c.guild_id
-    WHERE c.parent_id IS NULL
-    ORDER BY c.guild_name, c.guild_id, k.category_id IS NOT NULL, k.position IS NULL, k.position, k.category_id, c.position IS NULL, c.position, c.channel_id`).all() as
-    { channelId: string; guildId: string; guildName: string | null; name: string | null; watched: number; defaultRepo: string | null; category: string | null }[];
+  const st = await db.get(db.k.selectFrom("discord_status").select(["state", "detail", "at"]).where("id", "=", 1)) as { state: DiscordSetup["state"]; detail: string | null; at: string } | undefined;
+  const channels = await db.all(db.k.selectFrom("discord_channels as c")
+    .leftJoin("discord_categories as k", (j) => j.onRef("k.category_id", "=", "c.category_id").onRef("k.guild_id", "=", "c.guild_id"))
+    .select(["c.channel_id as channelId", "c.guild_id as guildId", "c.guild_name as guildName", "c.name", "c.watched", "c.default_repo as defaultRepo", "k.name as category"])
+    .where("c.parent_id", "is", null)
+    .orderBy("c.guild_name", (o) => o.asc().nullsFirst()).orderBy("c.guild_id")
+    .orderBy((eb) => eb("k.category_id", "is not", null)).orderBy((eb) => eb("k.position", "is", null))
+    .orderBy("k.position", (o) => o.asc().nullsFirst()).orderBy("k.category_id", (o) => o.asc().nullsFirst())
+    .orderBy((eb) => eb("c.position", "is", null)).orderBy("c.position", (o) => o.asc().nullsFirst()).orderBy("c.channel_id"));
   return {
     state: st?.state ?? "off", detail: st?.detail ?? null, at: st?.at ?? null,
     channels: channels.map((c) => ({ ...c, watched: !!c.watched })),
@@ -69,7 +73,7 @@ export async function putChannel(db: Db, req: Req): Promise<DiscordSetup> {
   operator(req);
   const id = body(req).channelId, watched = body(req).watched;
   if (typeof id !== "string" || typeof watched !== "boolean") throw new HttpError(400, "channelId and watched are required");
-  const r = await db.prepare("UPDATE discord_channels SET watched = ? WHERE channel_id = ?").run(watched ? 1 : 0, id);
+  const r = await db.run(db.k.updateTable("discord_channels").set({ watched: watched ? 1 : 0 }).where("channel_id", "=", id));
   if (!r.changes) throw new HttpError(404, "the bot has not reported that channel");
   await audit(db, req.user.login, watched ? "discord-watch" : "discord-unwatch", id);
   return await setupOf(db);
@@ -80,7 +84,7 @@ export async function putChannelRepo(db: Db, req: Req): Promise<DiscordSetup> {
   const id = body(req).channelId, repo = body(req).repo;
   if (typeof id !== "string" || (repo !== null && typeof repo !== "string")) throw new HttpError(400, "channelId and repo (a tracked repo or null) are required");
   if (repo !== null && !await isPublicRepo(db, repo)) throw new HttpError(400, "repo is not a public tracked repo");
-  const r = await db.prepare("UPDATE discord_channels SET default_repo = ? WHERE channel_id = ?").run(repo, id);
+  const r = await db.run(db.k.updateTable("discord_channels").set({ default_repo: repo }).where("channel_id", "=", id));
   if (!r.changes) throw new HttpError(404, "the bot has not reported that channel");
   await audit(db, req.user.login, "discord-default-repo", id, { repo });
   return await setupOf(db);
@@ -90,7 +94,7 @@ export async function putContact(db: Db, req: Req): Promise<DiscordSetup> {
   operator(req);
   const c = body(req).contact;
   if (typeof c !== "string" || c.length > 300) throw new HttpError(400, "contact must be text of at most 300 characters");
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('discord_contact', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(c.trim());
+  await db.run(db.k.insertInto("settings").values({ key: "discord_contact", value: c.trim() }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, req.user.login, "discord-contact", null);
   return await setupOf(db);
 }
@@ -99,7 +103,7 @@ export async function putReact(db: Db, req: Req): Promise<DiscordSetup> {
   operator(req);
   const on = body(req).on;
   if (typeof on !== "boolean") throw new HttpError(400, "on must be true or false");
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('discord_react', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(on ? "on" : "off");
+  await db.run(db.k.insertInto("settings").values({ key: "discord_react", value: on ? "on" : "off" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, req.user.login, on ? "discord-react-on" : "discord-react-off", null);
   return await setupOf(db);
 }

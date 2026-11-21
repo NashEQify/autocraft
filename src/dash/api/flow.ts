@@ -14,8 +14,8 @@ export async function flow(db: Db, req: Req): Promise<Flow> {
   const repo = req.query.get("repo") || null;
   if (repo) await needVisible(db, req, repo);
   const { counts, countedAt, uncounted } = await readSummary(db, repo, undefined, await visibleRepos(db, req));
-  const lastSync = (await db.prepare("SELECT MAX(ended_at) AS t FROM sync_runs WHERE error IS NULL").get() as { t: string | null }).t
-    ?? (await db.prepare("SELECT value AS t FROM settings WHERE key = 'org_high_water'").get() as { t: string } | undefined)?.t ?? null;
+  const lastSync = (await db.get(db.k.selectFrom("sync_runs").select((eb) => eb.fn.max<string | null>("ended_at").as("t")).where("error", "is", null)))!.t
+    ?? (await db.get(db.k.selectFrom("settings").select("value as t").where("key", "=", "org_high_water")))?.t ?? null;
   return buildFlow(counts, { repo, now: new Date().toISOString(), lastSync, run: await latestRun(db), countedAt, uncounted: uncounted.length });
 }
 
