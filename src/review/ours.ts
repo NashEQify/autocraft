@@ -74,22 +74,22 @@ type OurPath = { commits: OurCommit[]; complete: boolean; sources: (string | nul
 export function ourCommitsLoader(db: Db): (repo: string, number: number, earlier: string, head: string) => Promise<OurPath> {
   let maps: { a: Map<string, Pushes["a"]>; b: Map<string, Awaited<ReturnType<Pushes["b"]>>>; c: Map<string, Awaited<ReturnType<Pushes["c"]>>>; d: Map<string, Awaited<ReturnType<Pushes["d"]>>> } | undefined;
   // The row each per-head read would give first: the newest for a, b and c, the first stored for d.
-  const firstBy = async <T>(rows: (T & { repo: string; number: number; to_head: string | null })[]): Promise<Map<string, T>> => {
-    const m = new Map<string, T>();
+  const firstBy = <R extends { repo: string; number: number; to_head: string | null }>(rows: R[]): Map<string, Omit<R, "repo" | "number" | "to_head">> => {
+    const m = new Map<string, Omit<R, "repo" | "number" | "to_head">>();
     for (const r of rows) {
       const k = `${r.repo}#${r.number}@${r.to_head}`;
-      if (!m.has(k)) { const { repo, number, to_head, ...rest } = r; m.set(k, rest as unknown as T); }
+      if (!m.has(k)) { const { repo, number, to_head, ...rest } = r; m.set(k, rest); }
     }
     return m;
   };
   const load = async () => (maps ??= {
-    a: await firstBy<NonNullable<Pushes["a"]>>(await db.all(db.k.selectFrom("fixups").select(["repo", "number", "to_head", "from_head as f", "reason", "source", "carry_decision"])
+    a: firstBy(await db.all(db.k.selectFrom("fixups").select(["repo", "number", "to_head", "from_head as f", "reason", "source", "carry_decision"])
       .where("state", "=", "pushed").where("to_head", "is not", null).orderBy(kx.rowid("fixups"), "desc"))),
-    b: await firstBy<NonNullable<Awaited<ReturnType<Pushes["b"]>>>>(await db.all(db.k.selectFrom("ci_fixes").select(["repo", "number", "to_head", "head as f", "reason", "kind"])
+    b: firstBy(await db.all(db.k.selectFrom("ci_fixes").select(["repo", "number", "to_head", "head as f", "reason", "kind"])
       .where("state", "=", "pushed").where("to_head", "is not", null).orderBy(kx.rowid("ci_fixes"), "desc"))),
-    c: await firstBy<NonNullable<Awaited<ReturnType<Pushes["c"]>>>>(await db.all(db.k.selectFrom("conflict_merges").select(["repo", "number", "to_head", "from_head as f", "reason"])
+    c: firstBy(await db.all(db.k.selectFrom("conflict_merges").select(["repo", "number", "to_head", "from_head as f", "reason"])
       .where("state", "=", "merged").where("to_head", "is not", null).orderBy(kx.rowid("conflict_merges"), "desc"))),
-    d: await firstBy<NonNullable<Awaited<ReturnType<Pushes["d"]>>>>(await db.all(db.k.selectFrom("dupe_carries").select(["repo", "number", "to_head", "from_head as f"]).$narrowType<{ f: string }>()
+    d: firstBy(await db.all(db.k.selectFrom("dupe_carries").select(["repo", "number", "to_head", "from_head as f"]).$narrowType<{ f: string }>()
       .where((eb) => kx.like(db, "outcome", eb.val("pushed%"))).where("from_head", "is not", null).where("to_head", "is not", null).orderBy(kx.rowid("dupe_carries")))),
   });
   return async (repo, number, earlier, head) => await walk(db, async (h) => {
