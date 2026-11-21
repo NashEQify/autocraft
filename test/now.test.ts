@@ -27,7 +27,7 @@ test("Now lists running work with its items, reports a failing sync, and hides a
   const pj = await job("photocraft", 1);
   await job("secretcraft", 2);
   const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
-  await db.prepare("UPDATE agent_runs SET job_id = ? WHERE id = ?").run(pj, run);
+  await db.run(db.k.updateTable("agent_runs").set({ job_id: pj }).where("id", "=", run));
   await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "secretcraft", number: 2 }], prompt: "x" });
   const sync = db.prepare("INSERT INTO sync_runs (started_at, ended_at, mode, items, error) VALUES (?, ?, 'full', 0, ?)");
   await sync.run(at(40), at(39), null);
@@ -56,7 +56,7 @@ test("Now lists running work with its items, reports a failing sync, and hides a
   // A failed job and a failed model call: staff read the error text, viewers only that it failed.
   await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, ended_at, error, repo) VALUES ('opus-review', '{}', 'pipeline', ?, 'failed', ?, ?, 'exit 1: token ghp_xyz leaked', 'photocraft')").run(at(4), at(4), at(2));
   const bad = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 1 }], prompt: "x" });
-  await db.prepare("UPDATE agent_runs SET state = 'failed', ended_at = ?, error = 'stack: boom in /srv/app' WHERE id = ?").run(at(1), bad);
+  await db.run(db.k.updateTable("agent_runs").set({ state: "failed", ended_at: at(1), error: "stack: boom in /srv/app" }).where("id", "=", bad));
   const texts = (n: Awaited<ReturnType<typeof now>>) => JSON.stringify(n.entries.filter((e) => e.state === "failed").map((e) => [e.title, e.summary]));
   const staff = texts(await now(db, req("operator")));
   assert.ok(staff.includes("ghp_xyz") && staff.includes("boom"), staff);

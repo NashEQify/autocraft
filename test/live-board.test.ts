@@ -18,8 +18,7 @@ test("the live board shows a running job with its call and build steps, an estim
   const running = Number((await job.get("review", ago(5), "running", ago(5), null, "Reviewing app#7", null) as { id: number }).id);
   await job.run("review", ago(3), "done", ago(4), ago(3), null, "nothing to do");
   await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, 'app', 7, ?)").run(running, ago(5));
-  await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, items, item_count, state, started_at, ended_at)
-    VALUES (?, 'review', 1, 'p', '1', 'claude', 'opus', '[]', 1, 'done', ?, ?)`).run(running, ago(5), ago(4));
+  await db.run(db.k.insertInto("agent_runs").values({ job_id: running, step: "review", stage: 1, prompt_id: "p", prompt_version: "1", provider: "claude", model: "opus", items: "[]", item_count: 1, state: "done", started_at: ago(5), ended_at: ago(4) }));
   const task = db.prepare(`INSERT INTO build_tasks (job_id, step, repo, number, head_sha, requires, plan, state, queued_at, started_at, ended_at, results)
     VALUES (?, 'verify', 'app', 7, 'abc', '{}', '[]', ?, ?, ?, ?, ?)`);
   await task.run(running, "done", ago(4), ago(4), ago(2), JSON.stringify([{ step: "install", exitCode: 0, durationMs: 30_000, timedOut: false }, { step: "test", exitCode: 1, durationMs: 60_000, timedOut: false }]));
@@ -47,7 +46,7 @@ test("viewers see no account label and no progress line that names a repo hidden
   await db.prepare("INSERT INTO job_items (job_id, repo, number, at) VALUES (?, 'app', 7, ?)").run(job, ago(5));
   const run = async (jobId: number | null, progress: string) => {
     const id = await insertRun(db, { jobId, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: "acc", items: [{ repo: "app", number: 7 }], prompt: "p" });
-    await db.prepare("UPDATE agent_runs SET state = 'running', started_at = ?, progress = ? WHERE id = ?").run(ago(4), progress, id);
+    await db.run(db.k.updateTable("agent_runs").set({ state: "running", started_at: ago(4), progress }).where("id", "=", id));
   };
   await run(job, "Reading app/src/main.rs");
   await run(null, "Comparing with secret#3");
