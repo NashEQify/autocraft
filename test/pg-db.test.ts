@@ -148,3 +148,21 @@ test("the counter sees round trips, rows and write-lock time on Postgres", { ski
     await t.close();
   }
 });
+
+test("SQLite-only statement text is rewritten: schema prefixes, INSERT OR IGNORE, and INSERT OR REPLACE is refused", { skip: needsPg }, async () => {
+  const t = await testDatabase("CREATE TABLE u (id BIGINT PRIMARY KEY, v TEXT)");
+  try {
+    const db = await t.open();
+    await db.prepare("INSERT OR IGNORE INTO main.u (id, v) VALUES (1, 'main.x')").run();
+    await db.prepare("insert or ignore into u (id, v) values (1, 'dup')").run();
+    const r = await db.prepare("INSERT OR IGNORE INTO u (id, v) VALUES (?, 'b') RETURNING id").all(2);
+    assert.deepEqual(r, [{ id: 2 }]);
+    assert.deepEqual(await db.prepare("INSERT OR IGNORE INTO u (id, v) VALUES (2, 'dup') RETURNING id").all(), []);
+    const rows = await db.prepare("SELECT a.v FROM main.u a JOIN main.u b ON b.id = a.id WHERE a.id = 1 AND a.v = 'main.x'").all();
+    assert.deepEqual(rows, [{ v: "main.x" }], "the literal keeps its prefix");
+    await assert.rejects(db.prepare("INSERT OR IGNORE INTO u (id) VALUES (3) ON CONFLICT DO NOTHING").run(), /ON CONFLICT/);
+    await assert.rejects(db.prepare("INSERT OR REPLACE INTO u (id, v) VALUES (1, 'z')").run(), /INSERT OR REPLACE/);
+  } finally {
+    await t.close();
+  }
+});

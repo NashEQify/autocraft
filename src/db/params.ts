@@ -82,3 +82,58 @@ export function bindParams(p: ParsedParams, args: readonly (Param | NamedParams)
   p.slots.forEach((s, k) => (text += render(s.index - 1) + p.parts[k + 1]!));
   return { text, values };
 }
+
+/** The text with string literals, quoted identifiers and comments blanked out (same length), for matching keywords in code only. */
+function codeOnly(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let k = from; k < to; k++) if (out[k] !== "\n") out[k] = " ";
+  };
+  let i = 0;
+  const skipTo = (close: string, from: number): number => {
+    const j = text.indexOf(close, from);
+    return j < 0 ? text.length : j + close.length;
+  };
+  while (i < text.length) {
+    const c = text[i]!;
+    let end = -1;
+    if (c === "'" || c === '"' || c === "`") end = skipTo(c, i + 1);
+    else if (c === "[") end = skipTo("]", i + 1);
+    else if (c === "-" && text[i + 1] === "-") end = skipTo("\n", i + 2);
+    else if (c === "/" && text[i + 1] === "*") end = skipTo("*/", i + 2);
+    if (end < 0) i++;
+    else {
+      blank(i + 1, end - 1 > i ? end - 1 : end);
+      i = end;
+    }
+  }
+  return out.join("");
+}
+
+/**
+ * Rewrites SQLite-only statement text for Postgres: drops the `main.`/`temp.` schema prefixes and turns
+ * `INSERT OR IGNORE INTO ...` into `INSERT INTO ... ON CONFLICT DO NOTHING` (before a trailing RETURNING).
+ * `INSERT OR REPLACE` has no mechanical equivalent and throws.
+ */
+export function rewriteForPostgres(text: string): string {
+  const code = codeOnly(text);
+  const edits: { from: number; to: number; with: string }[] = [];
+  for (const m of code.matchAll(/(?<![A-Za-z0-9_.$])(?:main|temp)\s*\./gi)) edits.push({ from: m.index, to: m.index + m[0].length, with: "" });
+  const head = /^\s*INSERT\s+OR\s+(IGNORE|REPLACE)\s+INTO\b/i.exec(code);
+  const describe = () => text.replace(/\s+/g, " ").trim().slice(0, 120);
+  if (head) {
+    if (head[1]!.toUpperCase() === "REPLACE") throw new Error(`INSERT OR REPLACE is not supported on Postgres; rewrite it by hand: ${describe()}`);
+    if (/\bON\s+CONFLICT\b/i.test(code)) throw new Error(`INSERT OR IGNORE with ON CONFLICT: ${describe()}`);
+    const orAt = head[0].search(/\bOR\b/i);
+    const intoAt = head[0].search(/\bINTO\b/i);
+    edits.push({ from: orAt, to: intoAt, with: "" });
+    const ret = [...code.matchAll(/\bRETURNING\b/gi)].at(-1);
+    const at = (ret?.index ?? text.replace(/[\s;]+$/, "").length);
+    edits.push({ from: at, to: at, with: ret ? "ON CONFLICT DO NOTHING " : " ON CONFLICT DO NOTHING" });
+  }
+  if (!edits.length) return text;
+  edits.sort((a, b) => b.from - a.from || b.to - a.to);
+  let out = text;
+  for (const e of edits) out = out.slice(0, e.from) + e.with + out.slice(e.to);
+  return out;
+}
