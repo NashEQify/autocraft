@@ -15,8 +15,9 @@ import { settlesNow } from "../settlers.ts";
 import { actRoom } from "./queue.ts";
 import { conversationOf, insertTurn, systemBlock } from "./store.ts";
 import { filterSeq } from "../async-seq.ts";
+import type { NotNull } from "kysely";
 import type { Db } from "../db/index.ts";
-import { jsonText, jsonValid } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export type HeldState = "held" | "filing" | "filed" | "dropped" | "failed";
 export type HeldRow = {
@@ -34,17 +35,20 @@ const ref = (repo: string, n: number) => `${repo}#${n}`;
 const oneLine = (e: unknown): string => String((e as Error).message ?? e).replace(/\s+/g, " ").trim().slice(0, 300);
 
 export async function holdFollowup(db: Db, h: Pick<HeldRow, "card_id" | "choice_id" | "decision_id" | "answer_seq" | "preapproval_id" | "repo" | "number" | "issue_repo" | "title" | "body" | "by" | "at">): Promise<number> {
-  return Number((await db.prepare(`INSERT INTO main.held_followups (card_id, choice_id, decision_id, answer_seq, preapproval_id, repo, number, issue_repo, title, body, by, at, state, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'held', ?) RETURNING id`).get(h.card_id, h.choice_id, h.decision_id, h.answer_seq, h.preapproval_id, h.repo, h.number, h.issue_repo, h.title, h.body, h.by, h.at, h.at) as { id: number }).id);
+  return (await db.get(db.k.insertInto("main.held_followups")
+    .values({ card_id: h.card_id, choice_id: h.choice_id, decision_id: h.decision_id, answer_seq: h.answer_seq, preapproval_id: h.preapproval_id, repo: h.repo, number: h.number, issue_repo: h.issue_repo, title: h.title, body: h.body, by: h.by, at: h.at, state: "held", updated_at: h.at })
+    .returning("id")))!.id;
 }
 
 /** The item's held follow-ups, oldest first. */
 export const heldOf = async (db: Db, repo: string, n: number): Promise<HeldRow[]> =>
-  await db.prepare("SELECT * FROM main.held_followups WHERE repo = ? AND number = ? ORDER BY id").all(repo, n) as HeldRow[];
+  await db.all(db.k.selectFrom("main.held_followups").select(kx.cols("main.held_followups")).$narrowType<{ state: HeldState }>()
+    .where("repo", "=", repo).where("number", "=", n).orderBy("id"));
 
 /** Answer, undo and reopen audit rows of the decision: the card stores the count once it answered, and any later one ends its merge path. */
 export const answerSeqOf = async (db: Db, decision: string): Promise<number> =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM main.audit WHERE target = ? AND action IN ('answer', 'undo', 'reopen')").get(decision) as { n: number }).n;
+  (await db.get(db.k.selectFrom("main.audit").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("target", "=", decision).where("action", "in", ["answer", "undo", "reopen"])))!.n;
 
 type Ended = { why: string; at: string };
 
@@ -54,7 +58,7 @@ type Ended = { why: string; at: string };
  */
 async function pathEnded(db: Db, h: HeldRow, nowIso: string): Promise<Ended | null> {
   if (h.preapproval_id !== null) {
-    const p = await db.prepare("SELECT state, updated_at FROM main.preapprovals WHERE id = ?").get(h.preapproval_id) as { state: string; updated_at: string } | undefined;
+    const p = await db.get(db.k.selectFrom("main.preapprovals").select(["state", "updated_at"]).where("id", "=", h.preapproval_id));
     if (!p) return { why: "the pre-approved merge is gone", at: nowIso };
     if (p.state === "asked") return { why: "the pre-approved merge was handed back as a question", at: p.updated_at };
     if (p.state === "cancelled" || p.state === "failed") return { why: `the pre-approved merge was ${p.state}`, at: p.updated_at };
@@ -63,11 +67,14 @@ async function pathEnded(db: Db, h: HeldRow, nowIso: string): Promise<Ended | nu
   if (h.decision_id === null) return null;
   const d = await getDecision(db, h.decision_id);
   if (!d) {
-    const aside = await db.prepare("SELECT answer_note, applied_at FROM main.decisions WHERE id LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 1").get(`${h.decision_id.replace(/[\\%_]/g, "\\$&")}~replaced-%`) as { answer_note: string | null; applied_at: string | null } | undefined;
+    const pattern = `${h.decision_id.replace(/[\\%_]/g, "\\$&")}~replaced-%`;
+    const aside = await db.get(db.k.selectFrom("main.decisions").select(["answer_note", "applied_at"])
+      .where((eb) => kx.like(db, "id", eb.val(pattern), "\\")).orderBy("id", "desc").limit(1));
     return aside ? { why: `the Merge answer was set aside${aside.answer_note ? `: ${aside.answer_note}` : ""}`, at: aside.applied_at ?? nowIso } : { why: "the Merge question is gone", at: nowIso };
   }
   const later = h.answer_seq === null ? undefined
-    : await db.prepare("SELECT action, at FROM main.audit WHERE target = ? AND action IN ('answer', 'undo', 'reopen') ORDER BY rowid LIMIT 1 OFFSET ?").get(h.decision_id, h.answer_seq) as { action: string; at: string } | undefined;
+    : await db.get(db.k.selectFrom("main.audit").select(["action", "at"]).where("target", "=", h.decision_id).where("action", "in", ["answer", "undo", "reopen"])
+      .orderBy(kx.rowid("main.audit")).limit(1).offset(h.answer_seq));
   if (later) return { why: later.action === "answer" ? "the Merge question was answered again" : later.action === "undo" ? "the Merge answer was taken back" : "the Merge question was reopened", at: later.at };
   if (d.answer === "merge") return null;
   const why = d.answer === null ? "the Merge answer was taken back" : `the question was answered "${optionsOf(d).find((o) => o.key === d.answer)?.label ?? d.answer}"`;
@@ -79,7 +86,7 @@ async function pathEnded(db: Db, h: HeldRow, nowIso: string): Promise<Ended | nu
  * the merge: a pre-approval the merge itself cancelled ("merged before the fix-up finished") does not count.
  */
 export async function heldVerdict(db: Db, h: HeldRow, nowIso: string = new Date().toISOString()): Promise<{ file: true } | { drop: string } | null> {
-  const it = await db.prepare("SELECT state, merged_at FROM main.items WHERE repo = ? AND number = ?").get(h.repo, h.number) as { state: string; merged_at: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("main.items").select(["state", "merged_at"]).where("repo", "=", h.repo).where("number", "=", h.number));
   if (!it) return null;
   if (it.state === "CLOSED") return { drop: "the PR was closed without merging" };
   const ended = await pathEnded(db, h, nowIso);
@@ -97,7 +104,10 @@ export const HELD_STUCK_MS = Math.max(10 * 60_000, 4 * PACE_MAX_WAIT_MS);
  */
 export async function filingOutcome(db: Db, h: HeldRow, ms: number = Date.now()): Promise<{ state: "filed"; number: number; url: string } | { state: "held" } | null> {
   if (h.state !== "filing" || Date.parse(h.updated_at) > ms - HELD_STUCK_MS) return null;
-  const a = await db.prepare(`SELECT details FROM main.audit WHERE action = 'act-open-issue' AND ${jsonText(db, `CASE WHEN ${jsonValid(db, "details")} THEN details END`, "$.held")} = ? AND at >= ? ORDER BY rowid DESC LIMIT 1`).get(h.id, h.updated_at) as { details: string } | undefined;
+  const a = await db.get(db.k.selectFrom("main.audit").select("details").$narrowType<{ details: NotNull }>()
+    .where("action", "=", "act-open-issue")
+    .where((eb) => eb(kx.jsonNum(db, eb.case().when(kx.jsonValid(db, "details")).then(eb.ref("details")).end(), "$.held"), "=", h.id))
+    .where("at", ">=", h.updated_at).orderBy(kx.rowid("main.audit"), "desc").limit(1));
   if (!a) return { state: "held" };
   const d = JSON.parse(a.details) as { state?: string; url?: string };
   const m = d.state === "done" ? /\/issues\/(\d+)/.exec(d.url ?? "") : null;
@@ -106,7 +116,8 @@ export async function filingOutcome(db: Db, h: HeldRow, ms: number = Date.now())
 
 /** The held rows of the PRs of `repo` that the Act step has to file or drop now. */
 export async function dueHeld(db: Db, repo?: string): Promise<HeldRow[]> {
-  const rows = await db.prepare(`SELECT * FROM main.held_followups WHERE state IN ('held', 'filing') ${repo ? "AND repo = ?" : ""} ORDER BY id`).all(...(repo ? [repo] : [])) as HeldRow[];
+  const rows = await db.all(db.k.selectFrom("main.held_followups").select(kx.cols("main.held_followups")).$narrowType<{ state: HeldState }>()
+    .where("state", "in", ["held", "filing"]).$if(!!repo, (q) => q.where("repo", "=", repo!)).orderBy("id"));
   return await filterSeq(rows, async (h) => (h.state === "filing" ? await filingOutcome(db, h) !== null : await heldVerdict(db, h) !== null));
 }
 
@@ -126,7 +137,7 @@ export async function heldDue(db: Db, ms: number = Date.now()): Promise<{ repos:
 
 /** When rows in `filing` become old enough for filingOutcome to settle them: the planner wakes then. */
 export async function filingWakes(db: Db, ms: number = Date.now()): Promise<number[]> {
-  return (await db.prepare("SELECT updated_at FROM main.held_followups WHERE state = 'filing'").all() as { updated_at: string }[])
+  return (await db.all(db.k.selectFrom("main.held_followups").select("updated_at").where("state", "=", "filing")))
     .map((r) => Date.parse(r.updated_at) + HELD_STUCK_MS).filter((t) => t > ms);
 }
 
@@ -136,7 +147,7 @@ async function say(db: Db, h: HeldRow, text: string): Promise<void> {
 }
 
 async function drop(db: Db, h: HeldRow, reason: string, at: string): Promise<boolean> {
-  const r = await db.prepare("UPDATE main.held_followups SET state = 'dropped', reason = ?, updated_at = ? WHERE id = ? AND state = 'held'").run(reason, at, h.id);
+  const r = await db.run(db.k.updateTable("main.held_followups").set({ state: "dropped", reason, updated_at: at }).where("id", "=", h.id).where("state", "=", "held"));
   if (r.changes !== 1) return false;
   await say(db, h, `The issue "${h.title}" held for after the merge is dropped: ${reason}.`);
   return true;
@@ -161,8 +172,8 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
     if (h.state === "filing") {
       // Left behind by a stopped process: its audit row says whether the create finished, or never went out.
       const f = await filingOutcome(db, h, now().getTime());
-      if (f?.state === "filed") { await db.prepare("UPDATE main.held_followups SET state = 'filed', issue_number = ?, url = ?, reason = NULL, updated_at = ? WHERE id = ? AND state = 'filing'").run(f.number, f.url, at, h.id); s.filed++; }
-      else if (f?.state === "held") await db.prepare("UPDATE main.held_followups SET state = 'held', attempts = MAX(attempts - 1, 0), updated_at = ? WHERE id = ? AND state = 'filing'").run(at, h.id);
+      if (f?.state === "filed") { await db.run(db.k.updateTable("main.held_followups").set({ state: "filed", issue_number: f.number, url: f.url, reason: null, updated_at: at }).where("id", "=", h.id).where("state", "=", "filing")); s.filed++; }
+      else if (f?.state === "held") await db.run(db.k.updateTable("main.held_followups").set((eb) => ({ state: "held", attempts: eb.case().when("attempts", ">", eb.lit(0)).then(eb("attempts", "-", eb.lit(1))).else(eb.lit(0)).end(), updated_at: at })).where("id", "=", h.id).where("state", "=", "filing"));
       continue;
     }
     const v = await heldVerdict(db, h, at);
@@ -172,12 +183,12 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
     if (!await settlesNow(db, h.by, [h.issue_repo])) { if (await drop(db, h, `${h.by} no longer has write access to ${h.issue_repo}`, at)) s.dropped++; continue; }
     const g = await guardRepo(db, h.issue_repo, "comment", { operator: h.by }, undefined, h.by);
     if ("refused" in g) {
-      await db.prepare("UPDATE main.held_followups SET reason = ? WHERE id = ? AND state = 'held'").run(g.refused, h.id);
+      await db.run(db.k.updateTable("main.held_followups").set({ reason: g.refused }).where("id", "=", h.id).where("state", "=", "held"));
       continue;
     }
     if ((o.writes !== undefined && s.writes >= o.writes) || !await actRoom(db, 1, now().getTime())) break;
     const attempts = h.attempts + 1;
-    if ((await db.prepare("UPDATE main.held_followups SET state = 'filing', attempts = ?, updated_at = ? WHERE id = ? AND state = 'held'").run(attempts, at, h.id)).changes !== 1) continue;
+    if ((await db.run(db.k.updateTable("main.held_followups").set({ state: "filing", attempts, updated_at: at }).where("id", "=", h.id).where("state", "=", "held"))).changes !== 1) continue;
     s.writes++;
     const w: Writer = { db, login: h.by };
     let made: { number: number; url: string };
@@ -189,17 +200,17 @@ export async function fileHeldFollowups(db: Db, repo: string, deps: HeldDeps = {
       if (!(e instanceof IssueError) || !e.clear) { s.unknown++; break; }
       // The write pacing sent nothing: no try is counted; the job fails with the pacing message, which the failure backoff ignores, so the next pass runs it again.
       if (e.paced) {
-        await db.prepare("UPDATE main.held_followups SET state = 'held', attempts = ? WHERE id = ? AND state = 'filing'").run(h.attempts, h.id);
+        await db.run(db.k.updateTable("main.held_followups").set({ state: "held", attempts: h.attempts }).where("id", "=", h.id).where("state", "=", "filing"));
         s.paced = reason;
         break;
       }
       const end = attempts >= HELD_MAX_ATTEMPTS;
-      await db.prepare("UPDATE main.held_followups SET state = ?, reason = ?, updated_at = ? WHERE id = ? AND state = 'filing'").run(end ? "failed" : "held", reason, now().toISOString(), h.id);
+      await db.run(db.k.updateTable("main.held_followups").set({ state: end ? "failed" : "held", reason, updated_at: now().toISOString() }).where("id", "=", h.id).where("state", "=", "filing"));
       if (end) await say(db, h, `The issue "${h.title}" held for after the merge could not be opened: ${reason}.`);
       s.failed.push({ ref: ref(h.repo, h.number), reason });
       continue;
     }
-    await db.prepare("UPDATE main.held_followups SET state = 'filed', issue_number = ?, url = ?, reason = NULL, updated_at = ? WHERE id = ?").run(made.number, made.url, now().toISOString(), h.id);
+    await db.run(db.k.updateTable("main.held_followups").set({ state: "filed", issue_number: made.number, url: made.url, reason: null, updated_at: now().toISOString() }).where("id", "=", h.id));
     await say(db, h, `The PR merged: opened ${ref(h.issue_repo, made.number)}, the issue "${h.title}" held for after the merge.`);
     s.filed++;
   }
