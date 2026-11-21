@@ -208,17 +208,11 @@ src/fixissue/candidates.ts
 
 
 
-src/github/claim.ts
 
-src/github/commands.ts
 
-src/github/identity.ts
 
-src/github/pipeline-account.ts
 
-src/github/read.ts
 
-src/github/slugs.ts
 
 
 

@@ -8,8 +8,8 @@ import { sqliteOnly } from "./test-db.ts";
 
 const dbWith = async (identity?: string): Promise<Db> => {
   const db = await dbFor(new DatabaseSync(":memory:"));
-  await db.script("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)");
-  if (identity) await db.prepare("INSERT INTO settings VALUES ('github_identity', ?)").run(identity);
+  await db.run(db.k.schema.createTable("settings").addColumn("key", "text", (c) => c.primaryKey()).addColumn("value", "text"));
+  if (identity) await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: identity }));
   return db;
 };
 
