@@ -50,7 +50,7 @@ const stillThere = (w: World) => async (_repo: string, id: number): Promise<Comm
   return { kind: "ok", authorId: r.github_id, body: `@${SLUG} merge queue${r.weight === null ? "" : ` ${r.weight}`}` };
 };
 const unchanged = (w: World) => async (_q: unknown, _repo: string, n: number): Promise<PrNow | null> =>
-  ({ head: (await w.db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n) as { head_oid: string }).head_oid, opened: "2020-01-01T00:00:00Z", changed: false });
+  ({ head: (await w.db.get(w.db.k.selectFrom("items").select("head_oid").$narrowType<{ head_oid: string }>().where("repo", "=", "app").where("number", "=", n)))!.head_oid, opened: "2020-01-01T00:00:00Z", changed: false });
 const WRITE: AppPermission = { kind: "ok", permission: "write" };
 const FAILED: AppPermission = { kind: "error", why: "GitHub permission check failed: HTTP 502" };
 const PERMS: Record<"ok" | "no" | "transient", AppPermission> = { ok: WRITE, no: { kind: "ok", permission: "read" }, transient: FAILED };
@@ -110,7 +110,7 @@ describe("webhook", () => {
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5005 }), null);
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5006, login: "bad login" }));
     assert.deepEqual(await rows(w), [{ comment_id: 5000, number: 1, pr: 1, weight: 7, login: OPERATOR, state: "queued", result: null, reply: null }]);
-    const cols = (await w.db.prepare("SELECT name FROM pragma_table_info('github_commands')").all() as { name: string }[]).map((c) => c.name);
+    const cols = (await w.db.k.introspection.getTables()).find((t) => t.name === "github_commands")!.columns.map((c) => c.name);
     assert.ok(!cols.includes("body"), "the comment's text has no column");
     assert.deepEqual((await w.db.prepare("SELECT number FROM sync_requests").all()).map((r) => ({ ...r })), [{ number: 1 }], "the item is still re-read");
   });
@@ -184,7 +184,7 @@ describe("drainCommands", () => {
 
   test("on an issue, the PR that closes it must be read after the comment too before it is queued", async () => {
     const w = await (await (await fresh()).issue(3)).pr(4);
-    await w.db.prepare("UPDATE items SET closing_issues = '[3]' WHERE repo = 'app' AND number = 4").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[3]" }).where("repo", "=", "app").where("number", "=", 4));
     await readAt(w, 4, new Date(Date.now() - 60_000));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 3, pr: false }));
     await w.db.script("DELETE FROM sync_requests");
@@ -397,7 +397,7 @@ describe("comment-time checks", () => {
     const w = await (await (await (await fresh()).pr(1)).pr(2)).pr(3);
     for (const n of [1, 2, 3]) await deliver(w, payload({ body: `@${SLUG} merge queue`, number: n, comment: 6000 + n }));
     const gh = ghFake();
-    const head = async (n: number) => (await w.db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n) as { head_oid: string }).head_oid;
+    const head = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("head_oid").$narrowType<{ head_oid: string }>().where("repo", "=", "app").where("number", "=", n)))!.head_oid;
     const pr = async (_q: unknown, _repo: string, n: number): Promise<PrNow> =>
       n === 1 ? { head: await head(1), opened: "2020-01-01T00:00:00Z", changed: true } : { head: n === 2 ? "f".repeat(40) : await head(3), opened: "2020-01-01T00:00:00Z", changed: false };
     await drained(w, { exec: gh.exec, pr });
@@ -410,7 +410,7 @@ describe("comment-time checks", () => {
 
   test("on an issue, a closing PR opened or pushed to after the comment is named, not queued", async () => {
     const w = await (await (await fresh()).issue(3)).pr(4);
-    await w.db.prepare("UPDATE items SET closing_issues = '[3]' WHERE repo = 'app' AND number = 4").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[3]" }).where("repo", "=", "app").where("number", "=", 4));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 3, pr: false }));
     const gh = ghFake();
     await readAt(w, 4, new Date(Date.now() + 1000));

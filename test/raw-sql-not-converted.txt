@@ -35,7 +35,6 @@ src/agents/step.ts
 
 src/areas/store.ts
 
-src/author-ids.ts
 
 
 
@@ -180,7 +179,6 @@ src/dash/server/sessions.ts
 
 
 
-src/decisions-used.ts
 
 
 src/discord/alerts.ts
@@ -227,7 +225,6 @@ src/embed/store.ts
 
 src/embed/vectors.ts
 
-src/fasttrack.ts
 
 src/fixissue/approval.ts
 
