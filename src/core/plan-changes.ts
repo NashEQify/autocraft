@@ -22,9 +22,11 @@ export type Changes = {
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 
-/** Bodies of the triggers: the next seq for a full pass (no row), or one row per affected item. */
-const MARK_FULL = `UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'item_changes';
-          UPDATE plan_full SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'item_changes') WHERE id = 1;`;
+/** Body of a full-pass trigger: the next seq (no row), and a count for the trigger, which names the input that forced it. */
+const markFull = (trigger: string): string => `UPDATE sqlite_sequence SET seq = seq + 1 WHERE name = 'item_changes';
+          UPDATE plan_full SET seq = (SELECT seq FROM sqlite_sequence WHERE name = 'item_changes') WHERE id = 1;
+          INSERT INTO plan_full_causes (source, n, last_seq) VALUES ('${trigger}', 1, (SELECT seq FROM plan_full WHERE id = 1))
+            ON CONFLICT (source) DO UPDATE SET n = n + 1, last_seq = excluded.last_seq;`;
 
 const on = (sql: string, alias: "new" | "old"): string => sql.replace(/\br\./g, `${alias}.`);
 
@@ -48,6 +50,8 @@ export function planChangesSql(db?: DatabaseSync): string {
     "CREATE TABLE IF NOT EXISTS main.item_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT NOT NULL, number INTEGER NOT NULL);",
     "CREATE TABLE IF NOT EXISTS main.plan_full (id INTEGER PRIMARY KEY CHECK (id = 1), seq INTEGER NOT NULL);",
     "INSERT OR IGNORE INTO main.plan_full (id, seq) VALUES (1, 0);",
+    // Full-pass marks per trigger: which inputs force full passes.
+    "CREATE TABLE IF NOT EXISTS main.plan_full_causes (source TEXT PRIMARY KEY, n INTEGER NOT NULL, last_seq INTEGER NOT NULL);",
     // The sequence row exists before the first logged item, so a full-pass mark can take a seq from it.
     "INSERT INTO main.sqlite_sequence (name, seq) SELECT 'item_changes', 0 WHERE NOT EXISTS (SELECT 1 FROM main.sqlite_sequence WHERE name = 'item_changes');",
   ];
@@ -75,7 +79,8 @@ export function planChangesSql(db?: DatabaseSync): string {
       if (fullRow || (op === "UPDATE" && input.fullUpdate)) {
         const cond = op === "UPDATE" && input.fullUpdate ? and(input.fullUpdate, when)
           : and(upd, rows.map((a) => `(${on(fullRow!, a)})`).join(" OR "), when);
-        trigger(`${base}_full_${op[0]!.toLowerCase()}`, cond, MARK_FULL);
+        const name = `${base}_full_${op[0]!.toLowerCase()}`;
+        trigger(name, cond, markFull(name));
       }
       // Affected items.
       if (input.class === "global" || (input.class === "cross" && !input.refs)) continue;

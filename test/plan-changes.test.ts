@@ -52,6 +52,8 @@ test("writes log the items they re-decide; stamp-only updates log nothing; cross
   c = since(seq);
   assert.equal(c.full, true);
   assert.ok(c.seq > seq);
+  // The mark is counted under the trigger that made it.
+  assert.deepEqual({ ...db.prepare("SELECT n, last_seq FROM plan_full_causes WHERE source = 'plan_fast_track_full_i'").get() }, { n: 1, last_seq: c.seq });
   seq = c.seq;
 
   // Global: a planner input setting forces a full pass; the planner's own bookkeeping setting does not.
