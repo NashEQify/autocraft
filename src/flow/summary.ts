@@ -69,8 +69,7 @@ export async function markChanged(db: Db): Promise<number> {
     eb.fn.coalesce(eb.selectFrom(table).select(eb.fn.max<string | null>(col).as("m")), eb.val(""));
   const last = (eb: kx.Eb, table: "main.classifications" | "main.stages" | "main.opus_reviews" | "main.merges") =>
     eb.fn.coalesce(eb.selectFrom(table).select(eb.fn.max<number | null>(kx.rowid(table)).as("m")), eb.val(0));
-  const cur: Marks = {
-    ...(await db.get(db.k.selectNoFrom((eb) => [
+  const row = (await db.get(db.k.selectNoFrom((eb) => [
       top(eb, "main.items", "updated_at").as("items"),
       last(eb, "main.classifications").as("cls"),
       last(eb, "main.stages").as("stages"),
@@ -78,10 +77,10 @@ export async function markChanged(db: Db): Promise<number> {
       last(eb, "main.merges").as("merges"),
       top(eb, "main.pr_checks", "fetched_at").as("checks"),
       top(eb, "main.item_plans", "planned_at").as("plans"),
-    ])))!,
-    global: await globalSig(db),
-    vers: await verificationSigs(db),
-  };
+    ])))!;
+  const global = await globalSig(db);
+  const vers = await verificationSigs(db);
+  const cur: Marks = { ...row, global, vers };
   const dirty = new Set<string>();
   let all = !prev || prev.global !== cur.global;
   if (!all && prev) {
@@ -96,7 +95,7 @@ export async function markChanged(db: Db): Promise<number> {
     await add(db.k.selectFrom("main.pr_checks").select("repo").distinct().where("fetched_at", ">", prev.checks));
     // Counts of what is due or queued read the Plan cache; a row leaving it moves items.updated_at or a table above.
     await add(db.k.selectFrom("main.item_plans").select("repo").distinct().where("planned_at", ">", prev.plans ?? ""));
-    for (const r of new Set([...Object.keys(cur.vers!), ...Object.keys(prev.vers ?? {})])) if (!prev.vers || prev.vers[r] !== cur.vers![r]) dirty.add(r);
+    for (const r of new Set([...Object.keys(vers), ...Object.keys(prev.vers ?? {})])) if (!prev.vers || prev.vers[r] !== vers[r]) dirty.add(r);
     const sigs = await decisionSigs(db);
     for (const r of await db.all(db.k.selectFrom("main.flow_summary").select(["repo", "decisions_sig"]))) {
       if ((sigs.get(r.repo) ?? null) !== r.decisions_sig) dirty.add(r.repo);
