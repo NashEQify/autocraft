@@ -5,12 +5,12 @@ import { connectDb } from "../src/db/open.ts";
 
 test("a session answers only on test repos, as an operator, and the audit row says so", async () => {
   const db = await connectDb(":memory:");
-  for (const r of ["sandbox", "real"]) await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(r);
-  await db.prepare("INSERT INTO access (login, role) VALUES ('op', 'operator'), ('viewer', 'viewer')").run();
-  const ask = db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at) VALUES (?, 'scope', ?, 1, 'Q?', ?, ?)");
+  for (const r of ["sandbox", "real"]) await db.run(db.k.insertInto("tracked_repos").values({ name: r }));
+  await db.run(db.k.insertInto("access").values([{ login: "op", role: "operator" }, { login: "viewer", role: "viewer" }]));
   const opts = JSON.stringify([{ key: "yes", label: "Yes" }, { key: "no", label: "No" }]);
-  await ask.run("d-real", "real", opts, new Date().toISOString());
-  await ask.run("d-box", "sandbox", opts, new Date().toISOString());
+  const ask = (id: string, repo: string) => db.run(db.k.insertInto("decisions").values({ id, kind: "scope", repo, number: 1, question: "Q?", options: opts, asked_at: new Date().toISOString() }));
+  await ask("d-real", "real");
+  await ask("d-box", "sandbox");
 
   await assert.rejects(answerAsSession(db, "d-real", "yes", "op"), /not marked as a test repo/);
   await setTestRepo(db, "cli", "sandbox", true);
@@ -28,13 +28,14 @@ test("a session answers only on test repos, as an operator, and the audit row sa
 
 test("a session runs a card only when every repo it writes to is a test repo", async () => {
   const db = await connectDb(":memory:");
-  for (const r of ["sandbox", "real"]) await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(r);
-  await db.prepare("INSERT INTO access (login, role) VALUES ('op', 'operator'), ('viewer', 'viewer')").run();
+  for (const r of ["sandbox", "real"]) await db.run(db.k.insertInto("tracked_repos").values({ name: r }));
+  await db.run(db.k.insertInto("access").values([{ login: "op", role: "operator" }, { login: "viewer", role: "viewer" }]));
   await setTestRepo(db, "cli", "sandbox", true);
-  const card = db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, description) VALUES (1, ?, 1, 'resolution', ?, 'd') RETURNING id");
-  const onReal = Number((await card.get("real", JSON.stringify({ kind: "resolution", steps: [] })) as { id: number }).id);
-  const toReal = Number((await card.get("sandbox", JSON.stringify({ kind: "resolution", steps: [{ kind: "transfer", to: "real" }] })) as { id: number }).id);
-  const local = Number((await card.get("sandbox", JSON.stringify({ kind: "resolution", steps: [] })) as { id: number }).id);
+  const card = async (repo: string, params: unknown) =>
+    (await db.get(db.k.insertInto("conversation_cards").values({ turn_id: 1, repo, number: 1, kind: "resolution", params: JSON.stringify(params), description: "d" }).returning("id")))!.id;
+  const onReal = await card("real", { kind: "resolution", steps: [] });
+  const toReal = await card("sandbox", { kind: "resolution", steps: [{ kind: "transfer", to: "real" }] });
+  const local = await card("sandbox", { kind: "resolution", steps: [] });
   await assert.rejects(cardAsSession(db, onReal, "op"), /real is not marked as a test repo/);
   await assert.rejects(cardAsSession(db, toReal, "op"), /real is not marked as a test repo/);
   await assert.rejects(cardAsSession(db, local, "viewer"), /not an operator/);

@@ -188,7 +188,7 @@ describe("api", () => {
 
   test("the decisions list narrows to one item: its own decisions and the duplicate groups that list it", async () => {
     const boss = await signedIn("boss");
-    await db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, detail, base_role, base_target, head) VALUES ('photocraft:dupegroup:4', 'photocraft', 5, 'issue', 'close', 4, NULL, 'close', 4, NULL)").run();
+    await db.run(db.k.insertInto("dupe_group_items").values({ decision_id: "photocraft:dupegroup:4", repo: "photocraft", number: 5, kind: "issue", role: "close", target: 4, detail: null, base_role: "close", base_target: 4, head: null }));
     const ids = async (n: number) => (await boss.get<DecisionList>(`/api/decisions?repo=photocraft&number=${n}`)).decisions.map((d) => d.id).sort();
     assert.deepEqual(await ids(1), [P1]);
     assert.deepEqual(await ids(5), ["photocraft:dupegroup:4"]);
@@ -212,7 +212,7 @@ describe("api", () => {
     assert.equal(await audits(), before);
     assert.equal((await maint.get<Decision>(dpath(P1))).opinions.some((o) => o.login === "viewer1"), false);
     assert.equal((await maint.get<DecisionComment[]>(dpath(P1, "/thread"))).length, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM decision_claims WHERE login = 'viewer1'").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("decision_claims").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "viewer1")))!.n, 0);
 
     const d1 = await pal.post<Decision>(dpath(P1, "/feedback"), { option: "plugin", text: `pal ${MARKER}` });
     const pOp = d1.opinions.find((o) => o.login === "pal")!;
@@ -326,12 +326,12 @@ describe("api", () => {
     assert.ok(!(await ids("open")).includes(P2));
     assert.deepEqual(await ids("snoozed"), [P2]);
     // Feedback after the snooze wakes it.
-    await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('wake1', ?, 'maint', ?, 'More news')").run(P2, new Date(Date.now() + 60_000).toISOString());
+    await db.run(db.k.insertInto("decision_comments").values({ id: "wake1", decision_id: P2, login: "maint", at: new Date(Date.now() + 60_000).toISOString(), body: "More news" }));
     assert.equal((await boss.get<Decision>(dpath(P2))).snoozed, null);
     assert.ok((await ids("open")).includes(P2));
     assert.deepEqual(await ids("snoozed"), []);
     // A force-push wakes it too (the earlier comment is removed so it does not wake the new snooze).
-    await db.prepare("DELETE FROM decision_comments WHERE id = 'wake1'").run();
+    await db.run(db.k.deleteFrom("decision_comments").where("id", "=", "wake1"));
     await boss.post(dpath(P2, "/snooze"), { on: true });
     assert.deepEqual(await ids("snoozed"), [P2]);
     const d2 = (await db.get(db.k.selectFrom("decisions").select(["repo", "number"]).where("id", "=", P2)))!;
@@ -354,7 +354,7 @@ describe("api", () => {
     await boss.post(dpath(id, "/answer"), { answer: "accept", textsHash: ot.hash }, 409);
     const fresh = (await boss.get<Decision>(dpath(id))).optionTexts[0]!;
     // Adopting an opinion approves the same texts, so it needs the same hash.
-    await db.prepare("INSERT INTO decision_opinions (id, decision_id, login, option, note, at, permission) VALUES ('op1', ?, 'maint', 'accept', NULL, 'now', 'write')").run(id);
+    await db.run(db.k.insertInto("decision_opinions").values({ id: "op1", decision_id: id, login: "maint", option: "accept", note: null, at: "now", permission: "write" }));
     await boss.post(dpath(id, "/adopt"), { opinionId: "op1" }, 409);
     await boss.post(dpath(id, "/adopt"), { opinionId: "op1", textsHash: ot.hash }, 409);
     assert.equal((await boss.post<Decision>(dpath(id, "/adopt"), { opinionId: "op1", textsHash: fresh.hash })).answer, "accept");
@@ -363,7 +363,7 @@ describe("api", () => {
     await db.prepare("INSERT INTO dupe_group_posts (decision_id, number, step, url, at) VALUES (?, 5, 'comment', 'https://x/c', 'now')").run(id);
     await boss.post(dpath(id, "/undo"), undefined, 409);
     await db.run(db.k.updateTable("main.decisions").set({ applied_at: "now" }).where("id", "=", id));
-    await db.prepare("DELETE FROM decision_opinions WHERE id = 'op1'").run();
+    await db.run(db.k.deleteFrom("decision_opinions").where("id", "=", "op1"));
   });
 
   test("adopt records the operator's answer and credits the opinion; opinions close once answered", async () => {
