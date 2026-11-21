@@ -52,9 +52,10 @@ before(async () => {
     return { id, kind: "scope", repo, number: Number(rest!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "Adds a filter." };
   }));
   // Two take-fix PRs the planner holds for a fix-up; #9 has a push of ours under way, so it is not waiting for a person.
-  const plan = db.prepare("INSERT INTO item_plans (repo, number, kind, head, state, actions, reasons, note, view, planned_at) VALUES (?, ?, 'pr', ?, 'needs-fixup', '[]', '[]', ?, ?, ?)");
-  await plan.run("photocraft", 8, "h8", "cannot push", JSON.stringify({ fixup: "hold" }), now);
-  await plan.run("photocraft", 9, "h9", null, JSON.stringify({ fixup: "hold" }), now);
+  const plan = (number: number, head: string, note: string | null) =>
+    db.run(db.k.insertInto("item_plans").values({ repo: "photocraft", number, kind: "pr", head, state: "needs-fixup", actions: "[]", reasons: "[]", note, view: JSON.stringify({ fixup: "hold" }), planned_at: now }));
+  await plan(8, "h8", "cannot push");
+  await plan(9, "h9", null);
   const review = (number: number, head_oid: string, reason: string, fixes: string) =>
     db.run(db.k.insertInto("opus_reviews").values({ repo: "photocraft", number, head_oid, at: now, mode: "full", verdict: "take-fix", sure: 1, reason, fixes }));
   await review(8, "h8", "Good change; two small fixes.", JSON.stringify([{ file: "src/brush.rs", change: "Drop the unused import" }]));
@@ -174,7 +175,7 @@ describe("agent tokens", () => {
     assert.equal(made.path, "/mcp");
     const listed = await c.json<McpTokens>("GET", "/api/mcp/tokens");
     assert.equal(JSON.stringify(listed).includes(made.token), false);
-    const stored = await db.prepare("SELECT token_hash FROM mcp_tokens WHERE id = ?").get(made.id) as { token_hash: string };
+    const stored = (await db.get(db.k.selectFrom("mcp_tokens").select("token_hash").where("id", "=", made.id)))!;
     assert.notEqual(stored.token_hash, made.token);
     assert.equal((await rpc(made.token, "ping")).status, 200);
     // Another user cannot revoke it.
@@ -447,7 +448,7 @@ describe("answering", () => {
 describe("token revocation", () => {
   before(() => { answering.enabled = true; });
   after(() => { answering.enabled = false; });
-  const live = async (login: string): Promise<number> => (await db.prepare("SELECT COUNT(*) AS n FROM mcp_tokens WHERE login = ?").get(login) as { n: number }).n;
+  const live = async (login: string): Promise<number> => Number((await db.get(db.k.selectFrom("mcp_tokens").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", login)))!.n);
 
   test("demoting an operator ends its answering tokens for good; plain tokens stay", async () => {
     const b = await signedIn("op2");

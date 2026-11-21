@@ -90,7 +90,8 @@ describe("user-local remote calls", async () => {
     assert.equal((await db.prepare("SELECT reply FROM remote_calls WHERE id = ?").get(lease.id) as { reply: string | null }).reply, null, "the raw reply is not kept");
     assert.equal(r?.usage.input, 90);
     assert.deepEqual(r?.usage.extra?.map((e) => [e.model, e.usage.input]), [["haiku", 10]]);
-    const run = await db.prepare("SELECT state, user_login, harness, reported_model, account_id, cost_usd FROM agent_runs WHERE id = (SELECT run_id FROM remote_calls WHERE id = ?)").get(lease.id) as Record<string, unknown>;
+    const run = await db.get(db.k.selectFrom("agent_runs").select(["state", "user_login", "harness", "reported_model", "account_id", "cost_usd"])
+      .where("id", "=", (eb) => eb.selectFrom("remote_calls").select("run_id").where("id", "=", lease.id)));
     assert.deepEqual({ ...run }, { state: "done", user_login: "bob", harness: "claude", reported_model: "claude-opus-4-5", account_id: null, cost_usd: 0.25 });
     const tool = await db.prepare("SELECT seq, tool, args, result_bytes, started_at FROM agent_run_tools WHERE run_id = (SELECT run_id FROM remote_calls WHERE id = ?)").get(lease.id) as Record<string, unknown>;
     assert.deepEqual({ ...tool }, { seq: 1, tool: "mcp__items__item", args: '{"ref":"photocraft#1"}', result_bytes: 300, started_at: "2026-11-19T10:00:00.000Z" });
@@ -121,9 +122,9 @@ describe("user-local remote calls", async () => {
     // A reply from another model family than the claim declared is refused.
     assert.equal((await submitCall(db, second!.secret, { ok: true, text: "x", model: "claude-sonnet-4-5", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1 }))?.accepted, false);
     assert.equal(await ask, null, "both attempts are used up");
-    const runs = await db.prepare("SELECT state, error FROM agent_runs WHERE prompt_id = 'review.opus' ORDER BY id DESC LIMIT 2").all() as { state: string; error: string }[];
+    const runs = await db.all(db.k.selectFrom("agent_runs").select(["state", "error"]).where("prompt_id", "=", "review.opus").orderBy("id", "desc").limit(2));
     assert.deepEqual(runs.map((x) => x.state), ["failed", "failed"]);
-    assert.match(runs[1]!.error, /lease expired/);
+    assert.match(runs[1]!.error!, /lease expired/);
   });
 
   test("three lost leases of distinct calls of one login within two hours cool its helpers off for six hours; its next claim says why and until when; an operator clears it", async () => {

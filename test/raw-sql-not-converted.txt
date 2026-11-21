@@ -156,9 +156,7 @@ src/dash/api/work.ts
 
 src/dash/audit.ts
 
-src/dash/mcp/index.ts
 
-src/dash/mcp/tokens.ts
 
 src/dash/server/github-app.ts
 
