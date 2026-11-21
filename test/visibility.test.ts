@@ -171,7 +171,7 @@ describe("repo visibility", () => {
 
 
   test("operators and maintainers see prompts and answer notes; viewers do not; access stays operator-only", async () => {
-    await db.prepare("UPDATE main.decisions SET answer = 'a', answer_note = 'private note', answered_by = 'boss', answered_at = ? WHERE id = 'vault#1:scope'").run(new Date().toISOString());
+    await db.run(db.k.updateTable("main.decisions").set({ answer: "a", answer_note: "private note", answered_by: "boss", answered_at: new Date().toISOString() }).where("id", "=", "vault#1:scope"));
     const note = async (login: string) => (await (await signedIn(login)).get<DecisionOne>("/api/decisions/vault%231%3Ascope")).answerNote;
     for (const login of ["reader", "maint", "boss"]) {
       const c = await signedIn(login);
@@ -206,7 +206,7 @@ describe("repo visibility", () => {
     const reader = await signedIn("reader");
     for (const path of ["/api/repos/all", "/api/audit"]) assert.equal(await reader.status(path), 403, path);
     await db.prepare("DELETE FROM audit WHERE target IN ('someone', 'vault', 'account:a') AND login = 'boss' AND action IN ('access-add', 'repo-track', 'account-change')").run();
-    await db.prepare("UPDATE main.decisions SET answer = NULL, answer_note = NULL, answered_by = NULL, answered_at = NULL WHERE id = 'vault#1:scope'").run();
+    await db.run(db.k.updateTable("main.decisions").set({ answer: null, answer_note: null, answered_by: null, answered_at: null }).where("id", "=", "vault#1:scope"));
   });
 
   test("the item page gives viewers verdicts without review text, and answers since with unchanged", async () => {
