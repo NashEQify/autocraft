@@ -11,6 +11,7 @@ import { importReference, referenceDir } from "../src/reference.ts";
 import { trackRepo } from "../src/repos.ts";
 import { SCRATCH } from "./scratch.ts";
 import { openDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "reference-test-"));
@@ -54,9 +55,9 @@ test("import installs a good archive and refuses unsafe ones without writing any
   await assert.rejects(async () => await importReference(db, "test", "app", good), /--replace/);
   await importReference(db, "test", "app", tarOf("good2", { "index.txt": "new\n" }), true);
   assert.deepEqual(readdirSync(referenceDir("app")!), ["index.txt"]);
-  const row = await db.prepare("SELECT target, details FROM audit WHERE action = 'reference-import' ORDER BY rowid DESC LIMIT 1").get() as { target: string; details: string };
+  const row = (await db.get(db.k.selectFrom("audit").select(["target", "details"]).where("action", "=", "reference-import").orderBy(kx.rowid("audit"), "desc").limit(1)))!;
   assert.equal(row.target, "app");
-  assert.deepEqual(JSON.parse(row.details), { repo: "app", files: 1, bytes: 4 });
+  assert.deepEqual(JSON.parse(row.details!), { repo: "app", files: 1, bytes: 4 });
 });
 
 test("archive modes cannot make the tree unreadable or block a later replace", async () => {

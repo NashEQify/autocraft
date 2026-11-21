@@ -12,6 +12,7 @@ import { ask, getDecision } from "../src/decisions.ts";
 import { setAsideSupersededQuestions, withdrawClosedQuestions } from "../src/merge/withdraw.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const T0 = "2026-01-01T00:00:00Z";
@@ -19,11 +20,12 @@ const OPTIONS = [{ key: "take", label: "Wanted" }, { key: "close", label: "Out o
 
 async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "cleanup-test-")), "t.db"));
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  const item = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at, labels) VALUES ('app', ?, 'issue', ?, ?, 'Body', 'someone', '${T0}', '${T0}', '[]')`);
-  await item.run(1, "OPEN", "Open issue");
-  await item.run(2, "OPEN", "Closes later");
-  await item.run(3, "OPEN", "Stays open");
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
+  const item = async (number: number, state: string, title: string) =>
+    await db.run(db.k.insertInto("items").values({ repo: "app", number, kind: "issue", state, title, body: "Body", author: "someone", created_at: T0, updated_at: T0, labels: "[]" }));
+  await item(1, "OPEN", "Open issue");
+  await item(2, "OPEN", "Closes later");
+  await item(3, "OPEN", "Stays open");
   return db;
 }
 
@@ -35,19 +37,18 @@ describe("withdrawing questions about closed items", () => {
       { id: "app#2:scope", kind: "scope", repo: "app", number: 2, question: "Scope?", options: OPTIONS },
       { id: "app:dupegroup:1", kind: "duplicate", repo: "app", items: [{ repo: "app", number: 1 }, { repo: "app", number: 2 }, { repo: "app", number: 3 }], question: "Duplicates?", options: OPTIONS },
     ]);
-    const member = db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, base_role) VALUES ('app:dupegroup:1', 'app', ?, 'issue', 'stay', 'stay')");
-    for (const n of [1, 2, 3]) await member.run(n);
+    for (const n of [1, 2, 3]) await db.run(db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:1", repo: "app", number: n, kind: "issue", role: "stay", base_role: "stay" }));
     assert.equal(await withdrawClosedQuestions(db, T0), 0);
 
-    await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 2").run();
+    await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 2));
     assert.equal(await withdrawClosedQuestions(db, T0), 1, "the group still has two open members");
     assert.equal((await getDecision(db, "app#1:scope"))!.answer, null);
     assert.equal(await getDecision(db, "app#2:scope"), undefined, "the closed item's question left its id, so a reopened item is asked again");
-    const old = (await db.prepare("SELECT answer, answered_by, answer_note FROM decisions WHERE id LIKE 'app#2:scope~replaced-%'").get())!;
+    const old = (await db.get(db.k.selectFrom("decisions").select(["answer", "answered_by", "answer_note"]).where((eb) => kx.like(db, "id", eb.val("app#2:scope~replaced-%")))))!;
     assert.deepEqual({ ...old }, { answer: "withdrawn", answered_by: "pipeline", answer_note: "the issue was closed on GitHub" });
     assert.equal((await getDecision(db, "app:dupegroup:1"))!.answer, null);
 
-    await db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 3").run();
+    await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 3));
     assert.equal(await withdrawClosedQuestions(db, T0), 1);
     assert.equal((await getDecision(db, "app:dupegroup:1"))!.answer_note, "the duplicate group has one open item left");
     assert.equal(await withdrawClosedQuestions(db, T0), 0, "nothing is left to withdraw");
@@ -78,7 +79,7 @@ describe("one open question per item", () => {
     await ask(db, [q("app#1:merge@aaa", "merge", 1, "2026-01-01T00:00:00Z"), q("app#1:merge@bbb", "merge", 1, "2026-01-01T01:00:00Z"), q("app#1:close@bbb", "close", 1, "2026-01-01T02:00:00Z"),
       q("app#2:scope", "scope", 2, "2026-01-01T00:00:00Z"), q("app#2:merge@ccc", "merge", 2, "2026-01-01T01:00:00Z")]);
     assert.equal(await setAsideSupersededQuestions(db, T0), 3);
-    const open = (await db.prepare("SELECT id FROM decisions WHERE answer IS NULL ORDER BY id").all() as { id: string }[]).map((r) => r.id);
+    const open = (await db.all(db.k.selectFrom("decisions").select("id").where("answer", "is", null).orderBy("id"))).map((r) => r.id);
     assert.deepEqual(open, ["app#1:close@bbb", "app#2:merge@ccc"]);
     assert.equal((await getDecision(db, `app#1:merge@aaa~replaced-${T0}`))?.answer, "withdrawn");
     assert.equal(await setAsideSupersededQuestions(db, T0), 0);
@@ -88,13 +89,12 @@ describe("one open question per item", () => {
 describe("questions at a head the PR moved past", () => {
   test("an open merge question at an old head is set aside; an answered one and the current head's stay", async () => {
     const db = await fresh();
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at, labels, head_oid) VALUES ('app', 10, 'pr', 'OPEN', 'PR', 'Body', 'someone', '${T0}', '${T0}', '[]', 'bbb')`).run();
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at, labels, head_oid) VALUES ('app', 11, 'pr', 'OPEN', 'PR', 'Body', 'someone', '${T0}', '${T0}', '[]', 'bbb')`).run();
+    await db.run(db.k.insertInto("items").values([10, 11].map((number) => ({ repo: "app", number, kind: "pr", state: "OPEN", title: "PR", body: "Body", author: "someone", created_at: T0, updated_at: T0, labels: "[]", head_oid: "bbb" }))));
     await ask(db, [
       { id: "app#10:merge@aaa", kind: "merge", repo: "app", number: 10, question: "Merge?", options: OPTIONS },
       { id: "app#11:merge@aaa", kind: "merge", repo: "app", number: 11, question: "Merge?", options: OPTIONS },
     ]);
-    await db.prepare("UPDATE main.decisions SET answer = 'merge', answered_by = 'op', answered_at = ? WHERE id = 'app#11:merge@aaa'").run(T0);
+    await db.run(db.k.updateTable("main.decisions").set({ answer: "merge", answered_by: "op", answered_at: T0 }).where("id", "=", "app#11:merge@aaa"));
     assert.equal(await setAsideSupersededQuestions(db, T0), 1);
     assert.equal(await getDecision(db, "app#10:merge@aaa"), undefined);
     assert.equal((await getDecision(db, `app#10:merge@aaa~replaced-${T0}`))?.answer, "withdrawn");

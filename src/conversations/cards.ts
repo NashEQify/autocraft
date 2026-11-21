@@ -6,15 +6,16 @@ import { writeEffect } from "../act/index.ts";
 import { cleanReason } from "../act/templates.ts";
 import { optionsOf, getDecision, type DecisionRow, type Kind } from "../decisions.ts";
 import { KEEP_IN_CORE } from "../core/rules.ts";
-import { backlogHeldSql, notOwnIntegrationSql } from "../dupes/held.ts";
+import { backlogHeldExpr, notOwnIntegrationExpr } from "../dupes/held.ts";
 import { ALL_LABELS, isTypeLabel, sameLabel } from "../labels/set.ts";
-import { pilotSql } from "../pilot.ts";
+import { pilotExpr } from "../pilot.ts";
 import { isQuiet } from "../security/quiet.ts";
 import { LOGIN } from "../access.ts";
 import { CLOSE_REASONS, COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, RESOLVE_MAX, type CardKind, type CloseReason } from "./types.ts";
 import { findSeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { ciEq } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
+import type { Expression, SqlBool } from "kysely";
 
 /**
  * One step of a resolution. The comment step's text is the card's `text`. Every kind but `review` and `fixup` is one GitHub write
@@ -65,13 +66,13 @@ const ref = (repo: string, n: number) => `${repo}#${n}`;
 
 /** The item's open decision: the newest unanswered one that is about this item alone and is not a duplicate-group decision. */
 export async function openDecision(db: Db, repo: string, n: number): Promise<DecisionRow | undefined> {
-  return await db.prepare(`SELECT * FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'
-    ORDER BY asked_at DESC, id DESC LIMIT 1`).get(repo, n) as DecisionRow | undefined;
+  return await db.get(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: Kind }>().where("repo", "=", repo).where("number", "=", n)
+    .where("answer", "is", null).where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%")))).orderBy("asked_at", "desc").orderBy("id", "desc").limit(1));
 }
 
 /** Identifies the state of a decision a card was written for: its ask time and how often it was answered, undone or reopened. A re-ask or Reopen keeps the id, so the id alone cannot tell. */
 export async function decisionStamp(db: Db, d: DecisionRow): Promise<string> {
-  const n = (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE target = ? AND action IN ('answer', 'undo', 'reopen')").get(d.id) as { n: number }).n;
+  const n = (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("target", "=", d.id).where("action", "in", ["answer", "undo", "reopen"])))!.n;
   return `${d.asked_at}|${n}`;
 }
 
@@ -255,18 +256,19 @@ export function cleanComment(s: string): string {
 
 /** Why Act would not close this item (an integration PR of ours, held by Backlog, outside the pilot), or null. */
 export async function closeRefusal(db: Db, repo: string, n: number): Promise<string | null> {
-  const has = async (cond: string) => !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${cond}`).get(repo, n);
-  if (!await has("1 = 1")) return `${ref(repo, n)} is not in the mirror`;
-  if (!await has(notOwnIntegrationSql(db, "i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
-  if (!await has(pilotSql(db, "i"))) return `${ref(repo, n)} is outside the pilot`;
-  if (await has(backlogHeldSql(db, "i"))) return `${ref(repo, n)} is held by a Backlog answer`;
+  const has = async (cond?: (eb: kx.AnyEb) => Expression<SqlBool>) => !!await db.get(db.k.selectFrom("items as i").select((eb) => eb.lit(1).as("one"))
+    .where("i.repo", "=", repo).where("i.number", "=", n).$if(!!cond, (q) => q.where((eb) => cond!(eb))));
+  if (!await has()) return `${ref(repo, n)} is not in the mirror`;
+  if (!await has((eb) => notOwnIntegrationExpr(db, eb, "i"))) return `${ref(repo, n)} is an integration PR the pipeline opened`;
+  if (!await has((eb) => pilotExpr(db, eb, "i"))) return `${ref(repo, n)} is outside the pilot`;
+  if (await has((eb) => backlogHeldExpr(db, eb, "i"))) return `${ref(repo, n)} is held by a Backlog answer`;
   return null;
 }
 
 /** The type label the item has besides `label` (type labels are exclusive), or null. */
 export async function otherTypeLabel(db: Db, repo: string, n: number, label: string, removing: readonly string[] = []): Promise<string | null> {
   if (!isTypeLabel(label)) return null;
-  const row = await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("items").select("labels").where("repo", "=", repo).where("number", "=", n));
   let have: unknown[] = [];
   try { have = JSON.parse(row?.labels ?? "[]") as unknown[]; } catch { /* unreadable labels count as none */ }
   return have.map(String).find((l) => isTypeLabel(l) && !sameLabel(l, label) && !removing.some((r) => sameLabel(r, l))) ?? null;
@@ -295,14 +297,14 @@ export async function closeStep(db: Db, repo: string, n: number, reason: unknown
   if (!CLOSE_REASONS.includes(reason as CloseReason)) return { note: "dropped a resolution whose close step has no reason of completed or not_planned" };
   const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };
-  const row = await db.prepare("SELECT kind, state FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; state: string };
+  const row = (await db.get(db.k.selectFrom("items").select(["kind", "state"]).where("repo", "=", repo).where("number", "=", n)))!;
   if (row.state !== "OPEN") return { note: `dropped a resolution: ${ref(repo, n)} is not open` };
   return { value: { kind: "close", reason: reason as CloseReason, pr: row.kind === "pr" } };
 }
 
 export async function duplicateStep(db: Db, repo: string, n: number, of: unknown): Promise<Checked<Step>> {
   if (!Number.isInteger(of) || of === n) return { note: "dropped a resolution whose duplicate step names no other item number" };
-  if (!await db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ?").get(repo, of as number)) return { note: `dropped a resolution: ${ref(repo, of as number)} is not in the mirror` };
+  if (!await db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", of as number))) return { note: `dropped a resolution: ${ref(repo, of as number)} is not in the mirror` };
   const why = await closeRefusal(db, repo, n);
   if (why) return { note: `dropped a resolution: ${why}` };
   return { value: { kind: "duplicate", of: of as number } };
@@ -310,14 +312,14 @@ export async function duplicateStep(db: Db, repo: string, n: number, of: unknown
 
 type ItemFacts = { kind: string; state: string; author: string | null };
 const itemFacts = async (db: Db, repo: string, n: number): Promise<ItemFacts | undefined> =>
-  await db.prepare("SELECT kind, state, author FROM items WHERE repo = ? AND number = ?").get(repo, n) as ItemFacts | undefined;
+  await db.get(db.k.selectFrom("items").select(["kind", "state", "author"]).where("repo", "=", repo).where("number", "=", n));
 /** A repository name as the model wrote it, without a leading `owner/`. An owner that is not the repo's own leaves the value as written, which is no tracked repo. */
 const bareRepo = (v: unknown): unknown => {
   if (typeof v !== "string" || !v.includes("/")) return v;
   const { owner, name } = splitSlug(v);
   return owner.toLowerCase() === ownerOf(name).toLowerCase() ? name : v;
 };
-const isTracked = async (db: Db, repo: string): Promise<boolean> => !!(await db.prepare("SELECT 1 FROM tracked_repos WHERE name = ?").get(repo));
+const isTracked = async (db: Db, repo: string): Promise<boolean> => !!(await db.get(db.k.selectFrom("tracked_repos").select((eb) => eb.lit(1).as("one")).where("name", "=", repo)));
 const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLowerCase() === b.toLowerCase();
 
 /**
@@ -325,9 +327,12 @@ const sameLogin = (a: string | null, b: string): boolean => a !== null && a.toLo
  * member or collaborator on an item or comment in the repo. The association is a hint only; Act reads the live permission before it writes.
  */
 export async function mayWrite(db: Db, repo: string, login: string): Promise<boolean> {
-  if (await db.prepare("SELECT 1 FROM repo_permissions WHERE repo = ? AND login = ? AND permission IN ('write', 'maintain', 'admin')").get(repo, login)) return true;
-  return !!await db.prepare(`SELECT 1 FROM items WHERE repo = ? AND ${ciEq(db, "author", "?")} AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR')
-    UNION ALL SELECT 1 FROM comments WHERE repo = ? AND ${ciEq(db, "author", "?")} AND author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') LIMIT 1`).get(repo, login, repo, login);
+  if (await db.get(db.k.selectFrom("repo_permissions").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("login", "=", login).where("permission", "in", ["write", "maintain", "admin"]))) return true;
+  return !!await db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where((eb) => kx.ciEq(db, "author", eb.val(login)))
+    .where("author_association", "in", ["OWNER", "MEMBER", "COLLABORATOR"])
+    .unionAll(db.k.selectFrom("comments").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where((eb) => kx.ciEq(db, "author", eb.val(login)))
+      .where("author_association", "in", ["OWNER", "MEMBER", "COLLABORATOR"]))
+    .limit(1));
 }
 
 const pr = (f: ItemFacts | undefined): boolean => f?.kind === "pr";
@@ -383,7 +388,7 @@ export async function reviewersStep(db: Db, repo: string, n: number, raw: unknow
 export async function unlabelStep(db: Db, repo: string, n: number, raw: unknown): Promise<Checked<Step>> {
   const l = typeof raw === "string" ? ALL_LABELS.find((x) => sameLabel(x.name, raw)) : undefined;
   if (!l) return { note: `dropped a resolution: "${String(raw).slice(0, 40)}" is not a label the pipeline manages` };
-  const row = await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("items").select("labels").where("repo", "=", repo).where("number", "=", n));
   let have: unknown[] = [];
   try { have = JSON.parse(row?.labels ?? "[]") as unknown[]; } catch { /* unreadable labels count as none */ }
   if (!have.some((x) => sameLabel(String(x), l.name))) return { note: `dropped a resolution: the item does not have the label "${l.name}"` };
