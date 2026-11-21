@@ -21,7 +21,7 @@ mkdirSync(SCRATCH, { recursive: true });
 test("a call whose only taker went stale is withdrawn, its caller skips it, and the health check names the repo", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-no-taker-")), "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft", pipeline: 1 }).onConflict((oc) => oc.column("name").doUpdateSet({ pipeline: 1 })));
   await db.run(db.k.insertInto("access").values({ login: "dave", role: "maintainer" }));
   await db.run(db.k.insertInto("repo_permissions").values({ login: "dave", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() }));
   const t0 = Date.now();
