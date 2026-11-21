@@ -9,6 +9,7 @@ import { coreKey, type ChoicesBlockExtra, type ChoicesRow, type CoreKey, type Ex
 import { cardsToDrafts } from "./choices-convert.ts";
 import { PREPARE_REASON_MAX } from "./prepare-types.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** A validated `choices` block: what a prepare writes whole and a conversation turn merges. */
 export interface ParsedChoices {
@@ -335,7 +336,7 @@ export async function parseTurn(db: Db, repo: string, n: number, reply: string, 
  */
 export async function storeParsedChoices(db: Db, d: DecisionRow, p: ParsedChoices, o: { turnId: number | null; seen: string | null; source: "prepare" | "conversation"; by?: string | null; /** The decision's stamp when the reply's prompt was built. */ stampThen?: string | null }): Promise<void> {
   // A late reply: the decision was answered, undone or asked again while the call ran.
-  const now = await db.prepare("SELECT * FROM main.decisions WHERE id = ?").get(d.id) as unknown as DecisionRow | undefined;
+  const now = await db.get(db.k.selectFrom("main.decisions").select(kx.cols("main.decisions")).$narrowType<{ kind: DecisionRow["kind"] }>().where("id", "=", d.id));
   if (!now || now.answer !== null || (o.stampThen != null && await decisionStamp(db, now) !== o.stampThen)) return;
   let seen: ChoicesRow["seen"] = { head: null, lastComment: null };
   try { const v = JSON.parse(o.seen ?? "{}") as { head?: string | null; last_comment?: string | null }; seen = { head: v.head ?? null, lastComment: v.last_comment ?? null }; } catch { /* no snapshot */ }
