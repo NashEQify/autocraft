@@ -12,10 +12,13 @@
 //   warm-publish  publishes the target, less the units the build did not use (src/warm/trim.ts), and CARGO_HOME dirs
 //                 as a new version of the key
 //   warm-gc       deletes old manifests and unreferenced blobs from the warm store
+//   mirror-wait   (mirror pods, after disk) waits until the crate mirror accepts a TCP connection: the cluster's network policy
+//                 admits a new pod's IP a few seconds after the pod starts, and until then connections are refused
 //   warm-copy     fills a build pod's target from its node's warm version (src/worker/warm-copy.ts)
 // Warm phases read AUTOCRAFT_WARM_* (warmOptions below). The store layout is in src/warm/store-client.ts.
 import type { KeyObject } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { connect } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
 import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, type Roots } from "../warm/manifest.ts";
@@ -164,6 +167,34 @@ function diskPhase(e: PodEnv, limit: number): number {
   if (!over) return 0;
   writeFileSync(e.message, over);
   return 4;
+}
+
+export const MIRROR_UNREACHABLE = "the crate mirror is not reachable";
+
+/** True when a TCP connection to the address succeeds within `attemptMs`. */
+function canConnect(host: string, port: number, attemptMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const s = connect({ host, port });
+    const done = (ok: boolean) => { s.destroy(); resolve(ok); };
+    s.setTimeout(attemptMs, () => done(false));
+    s.once("connect", () => done(true));
+    s.once("error", () => done(false));
+  });
+}
+
+/** Retries a TCP connect every `everyMs` until `limitMs` have passed; the failure is an environment error, not the build's. */
+export async function mirrorWaitPhase(e: PodEnv, address: string | undefined, port = 443, limitMs = 30_000, everyMs = 200): Promise<number> {
+  if (!address) { e.log("mirror-wait: AUTOCRAFT_MIRROR_ADDR is required"); return 1; }
+  const end = Date.now() + limitMs;
+  for (;;) {
+    const t = Date.now();
+    if (await canConnect(address, port, Math.max(200, Math.min(2000, end - t)))) return 0;
+    if (Date.now() + everyMs >= end) break;
+    await new Promise((r) => setTimeout(r, Math.max(0, everyMs - (Date.now() - t))));
+  }
+  e.log(MIRROR_UNREACHABLE);
+  writeFileSync(e.message, MIRROR_UNREACHABLE);
+  return 5;
 }
 
 /**
@@ -335,6 +366,7 @@ export async function podPhase(phase: string | undefined, env: NodeJS.ProcessEnv
     if (phase === "source") return await sourcePhase(e);
     if (phase === "upload") return await uploadPhase(e);
     if (phase === "disk") return diskPhase(e, Number(env.AUTOCRAFT_POD_DISK_LIMIT) || 0);
+    if (phase === "mirror-wait") return await mirrorWaitPhase(e, env.AUTOCRAFT_MIRROR_ADDR);
     if (phase === "warm-restore") return await warmRestorePhase(e, env);
     if (phase === "warm-publish") return await warmPublishPhase(e, env);
     if (phase === "warm-gc") return await warmGcPhase(e, env);
@@ -343,6 +375,6 @@ export async function podPhase(phase: string | undefined, env: NodeJS.ProcessEnv
     e.log(`${phase} failed: ${(err as Error).message}`);
     return 1;
   }
-  e.log("usage: autocraft-server worker pod task|source|upload|disk|warm-restore|warm-publish|warm-gc|warm-copy");
+  e.log("usage: autocraft-server worker pod task|source|upload|disk|mirror-wait|warm-restore|warm-publish|warm-gc|warm-copy");
   return 2;
 }

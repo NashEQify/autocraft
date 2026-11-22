@@ -23,7 +23,7 @@ import { gib, raiseAfterOom, repoMemory, repoWarmTarget } from "./sizing.ts";
 import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { WarmStatus } from "./warm-status.ts";
 import {
-  ARCH_LABEL, DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
+  ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
   WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
 } from "./pods.ts";
@@ -648,7 +648,7 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
     const results = json<TaskResult[]>(run.results, []);
     let failed: string | null = null;
     let ran = run.ran;
-    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"], [WARM_RESTORE_CONTAINER, "the warm restore failed"], [WARM_COPY_CONTAINER, "the warm copy failed"]] as const) {
+    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [MIRROR_WAIT_CONTAINER, "the crate mirror is not reachable"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"], [WARM_RESTORE_CONTAINER, "the warm restore failed"], [WARM_COPY_CONTAINER, "the warm copy failed"]] as const) {
       const term = statusOf(pod, name)?.state?.terminated;
       if (!term || failed) continue;
       // The restore's and the copy's output say which version the build starts from, or why it starts cold.
