@@ -360,12 +360,13 @@ describe("access", () => {
       () => conv.doIt(db, req("viewer", { id: cardId })),
       () => conv.dismiss(db, req("viewer", { id: cardId })),
       () => conv.editCardText(db, req("viewer", { id: cardId }, { text: "x" })),
+      () => conv.postInclude(db, req("viewer", { repo: "app", n: "1" }, { source: "decision-comment:1", on: true })),
     ]) await assert.rejects(f, (e) => e instanceof HttpError && e.status === 403);
     assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state")))!.state, "proposed");
     const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
     assert.equal(writes.length, 7);
-    // Chat is operator-only; the card routes check who may settle in the handler (refused for the viewer above).
-    assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern).sort(), ["/api/conversations/:repo/:n/includes", "/api/conversations/:repo/:n/messages"]);
+    // Chat is operator-only; the include and card routes check who may settle in the handler (refused for the viewer above).
+    assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern).sort(), ["/api/conversations/:repo/:n/messages"]);
     // A second message while Opus has not answered the first is refused.
     await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "More" }));
     await assert.rejects(() => conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Again" })), (e) => e instanceof HttpError && e.status === 409);

@@ -4,7 +4,7 @@ import { localActions, useLocal } from "../../decisions/state";
 import { useQuery } from "../../../api/client";
 import type { ItemPageData } from "../../../api/types";
 import { useUser } from "../../../shell/UserContext";
-import { canAct, canComment } from "../../../registry/permissions";
+import { canAct, canComment, canRun } from "../../../registry/permissions";
 import { HeldAnswers } from "../../decisions/AnswerHold";
 import { OpenQuestions, useItemDecisions } from "../ItemDecisions";
 import { ActionCard } from "../OpusCards";
@@ -45,7 +45,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
       <HeldAnswers ds={(ds ?? []).filter((x) => !x.dispute && !x.orphaned)} />
       {!updating && suggestions.length > 0 && (
         <section className="space-y-3" aria-label="Suggested follow-up">
-          {suggestions.map((a) => <ActionCard key={a.id} a={a} operator={canAct(user, [d.repo])} editInstructions={user.role === "operator"} className="" item={{ repo: d.repo, number: d.number }} />)}
+          {suggestions.map((a) => <ActionCard key={a.id} a={a} operator={canAct(user, [d.repo])} editInstructions={canRun(user, d.repo)} className="" item={{ repo: d.repo, number: d.number }} />)}
         </section>
       )}
       {open.length === 0 && <DisclosurePanel title="Evidence" summary="Review, checks and related items"><ItemEvidence d={d} /></DisclosurePanel>}
