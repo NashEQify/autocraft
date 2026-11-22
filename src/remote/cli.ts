@@ -99,18 +99,20 @@ async function testCall(args: string[]): Promise<void> {
     console.error("refused: the inference mode is server; Task Runners take calls only in user-local");
     process.exit(1);
   }
-  const role = (await db.get(db.k.selectFrom("access").select("role").where("login", "=", login)))?.role;
-  if (role !== "maintainer" && role !== "operator") {
+  // access.login compares without case (NOCASE, citext): the call is bound to the login as the access list spells it.
+  const user = await db.get(db.k.selectFrom("access").select(["login", "role"]).where("login", "=", login));
+  const role = user?.role;
+  if (!user || (role !== "maintainer" && role !== "operator")) {
     console.error(`refused: ${login} is ${role ? `a ${role}` : "not on the access list"}; only maintainers and operators run model calls`);
     process.exit(1);
   }
   const promptId = "remote.test", model = CLAUDE_PROMPTS["classify.haiku"].models[0]!;
   const args0 = ["-p", "--model", model, "--effort", "low", "--output-format", "json", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
   const id = await enqueueCall(db, {
-    promptId, promptVersion: "1", tier: "small", effort: "low", askedModel: model, items: ref ? [ref] : [], level: 0, maxAttempts: 1, forLogin: login, boundSlot: slot,
+    promptId, promptVersion: "1", tier: "small", effort: "low", askedModel: model, items: ref ? [ref] : [], level: 0, maxAttempts: 1, forLogin: user.login, boundSlot: slot,
     bundle: { promptId, promptVersion: "1", tier: "small", effort: "low", timeoutSeconds: 120, maxTurns: null, stdin: "Reply with the single word: ok", system: null, mounts: [], mcpServers: [], keepSession: false, hints: { claude: { args: args0 } } },
   });
-  console.log(`queued call ${id} for ${login}'s Task Runner (${slot ? "a slot" : "the own lane"}); waiting up to ${TEST_CALL_WAIT_MS / 60_000} min`);
+  console.log(`queued call ${id} for ${user.login}'s Task Runner (${slot ? "a slot" : "the own lane"}); waiting up to ${TEST_CALL_WAIT_MS / 60_000} min`);
   let reply: string | null = null;
   try {
     const o = await awaitCall(db, id, { maxWaitMs: TEST_CALL_WAIT_MS, log: (line) => console.error(line) });

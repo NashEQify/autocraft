@@ -186,7 +186,7 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
   const sticky = parent?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
   const forLogin = c.forLogin ?? parent?.for_login ?? null;
-  const boundSlot = forLogin !== null && (c.forLogin !== undefined ? c.boundSlot === true : parent?.bound_slot === 1);
+  const boundSlot = forLogin !== null && (c.forLogin !== undefined ? c.boundSlot === true : Number(parent?.bound_slot) === 1);
   const id = Number((await db.get(db.k.insertInto("main.remote_calls").values({
     job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
     bundle: JSON.stringify(c.bundle), bundle_hash: hash, state: "queued", items: JSON.stringify(c.items), repo: q.repo, class: q.cls, level: c.level, since: nowMs, seen_at: nowMs, queued_since: nowMs,
