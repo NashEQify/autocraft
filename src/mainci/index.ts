@@ -14,6 +14,7 @@ import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
+import { warmPass } from "../build/warm-queue.ts";
 
 /** Branch prefix of the PRs AutoCraft opens to fix a red main; the merge queue does not hold them while main is red. */
 export const MAIN_FIX_BRANCH_PREFIX = "autocraft/main-ci-";
@@ -108,7 +109,9 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
   // A red head whose culprit is a PR we merged stops the merge path.
   for (const r of await mainCiRepos(db)) if (r.state === "red" && r.culprit?.pr) await mainRedAfterMerge(db, r.repo, r.culprit.pr, r.culprit.sha);
   if (!only) await db.run(db.k.insertInto("settings").values({ key: KEY_POLLED_AT, value: new Date().toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
-  log(`main-ci: ${heads} heads of ${repos.length} repos`);
+  // A new head, or a new toolchain image of the warm producer, queues the repo's warm build.
+  const warm = await warmPass(db);
+  log(`main-ci: ${heads} heads of ${repos.length} repos${warm ? `; ${warm} warm build${warm === 1 ? "" : "s"} queued` : ""}`);
   return { repos: repos.length, heads };
 }
 

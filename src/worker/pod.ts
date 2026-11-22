@@ -85,15 +85,15 @@ async function sourcePhase(e: PodEnv): Promise<number> {
     e.log(err ?? "patch applied");
     if (err) return fail(err);
   }
-  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null, cacheVersion: null as string | null };
+  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null, cacheVersion: null as string | null, warmCommand: null as string | null };
   try {
     const gate = t.baseSha ? await resolveGate(t.repo, t.baseSha, e.fetchImpl) : null;
     if (!t.baseSha || !gate) e.log(`${t.baseSha ? "no CI gate for this repo at the base commit" : "no base commit for this task"}; the steps run in the toolchain image as it is`);
     else {
       const g = await gateInputs(e.work, t.repo, t.baseSha, gate, { fetchImpl: e.fetchImpl, log: e.log });
       const root = realpathSync(e.work);
-      Object.assign(out, { env: g.env, packages: gate.packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: g.craftI18nRev, cacheVersion: gate.cacheVersion, mounts: g.mounts.map((m) => ({ sub: relative(root, realpathSync(m.source)), target: m.target })) });
-      e.log(`environment: gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), packages ${gate.packages.join(" ") || "none"}, craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${g.craftI18nRev?.slice(0, 12) ?? "none"}, cache version ${gate.cacheVersion ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}`);
+      Object.assign(out, { env: g.env, packages: gate.packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: g.craftI18nRev, cacheVersion: gate.cacheVersion, warmCommand: t.warm ? gate.warmCommand : null, mounts: g.mounts.map((m) => ({ sub: relative(root, realpathSync(m.source)), target: m.target })) });
+      e.log(`environment: gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), packages ${gate.packages.join(" ") || "none"}, craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${g.craftI18nRev?.slice(0, 12) ?? "none"}, cache version ${gate.cacheVersion ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}${t.warm ? `, warm-command ${gate.warmCommand ? "from the gate" : "none (the default warm build)"}` : ""}`);
     }
   } catch (err) {
     return fail(`environment failed: ${(err as Error).message}`);
@@ -170,6 +170,9 @@ function diskPhase(e: PodEnv, limit: number): number {
  *   REPO, COMMIT     default to the task file's repo and head
  *   EXCLUDE          comma-separated exclusion patterns (default DEFAULT_EXCLUDES)
  *   RECHECK          comma-separated sha256s a restore reported as badBlobs (publish repairs them)
+ *   BAD_BLOBS_FILE   restore writes its badBlobs there, one per line, and publish rechecks them too (a producer pod's
+ *                    restore and publish share the file)
+ *   IMAGE            on a restore: a version built with another toolchain image is a cold start
  *   GC_KEEP (3), GC_MIN_AGE_HOURS (24, publish uses it too), GC_CAP_GB (150)
  * A configuration error fails every phase (exit 1); only store and content problems make warm-restore a cold start.
  */
@@ -227,6 +230,8 @@ async function warmRestorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   const out = (o: object) => writeFileSync(e.message, JSON.stringify(o).slice(0, MESSAGE_MAX));
   const cold = (summary: string, badBlobs: string[] = []) => {
     e.log(`${summary}; cold start`);
+    const badFile = w.v("BAD_BLOBS_FILE");
+    if (badFile && badBlobs.length) writeFileSync(badFile, badBlobs.map((b) => `${b}\n`).join(""));
     out({ ok: true, warm: null, badBlobs, summary: summary.slice(0, 300) });
     return 0;
   };
@@ -238,6 +243,12 @@ async function warmRestorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   try {
     const r = await store.restore(key, roots, verifyKeys);
     if (!r) return cold(`warm restore: the store has no version of ${key}`);
+    const image = w.v("IMAGE");
+    if (image && r.manifest.header.image !== image) {
+      // Cargo would rebuild everything beside the old artifacts, and the next publish would carry both.
+      for (const d of dirs) clearDir(d);
+      return cold(`warm restore: ${key}@${r.latest.commit.slice(0, 12)} was built with ${r.manifest.header.image ?? "an unrecorded image"}, not ${image}`);
+    }
     const s = r.stats;
     const summary = `warm restore: ${key}@${r.latest.commit.slice(0, 12)}, ${s.files} files (${(s.bytes / 1024 ** 3).toFixed(2)} GB), ${s.fetched} fetched, ${s.linked + s.copied} linked or copied, in ${((Date.now() - t0) / 1000).toFixed(1)} s`;
     e.log(summary);
@@ -257,6 +268,9 @@ async function warmRestorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   }
 }
 
+const badBlobsOf = (file: string | undefined): string[] =>
+  file && existsSync(file) ? readFileSync(file, "utf8").slice(0, 64 * 1024).split("\n").map((x) => x.trim()).filter(Boolean) : [];
+
 async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> {
   const w = warmOptions(env, e);
   const roots = w.roots();
@@ -270,7 +284,7 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
     key: w.key(), repo: w.v("REPO") ?? task!.repo, commit: w.v("COMMIT") ?? task!.headSha,
     image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null,
     source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), signKey: w.signKey(), log: e.log,
-    recheck: w.list("RECHECK").filter((x) => /^[0-9a-f]{64}$/.test(x)), minBlobAgeMs: w.count("GC_MIN_AGE_HOURS", 24) * 3600_000,
+    recheck: [...new Set([...w.list("RECHECK"), ...badBlobsOf(w.v("BAD_BLOBS_FILE"))])].filter((x) => /^[0-9a-f]{64}$/.test(x)), minBlobAgeMs: w.count("GC_MIN_AGE_HOURS", 24) * 3600_000,
   });
   writeFileSync(e.message, JSON.stringify({ ok: true, commit: s.latest.commit, files: s.files, bytes: s.bytes, blobs: s.blobs, uploaded: s.uploaded, uploadedBytes: s.uploadedBytes, repaired: s.repaired }));
   return 0;

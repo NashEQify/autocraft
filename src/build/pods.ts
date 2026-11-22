@@ -3,17 +3,21 @@
 // A task runs as a sequence of pods that share one volume (PVC) on a build node:
 //   stage 0  task     AutoCraft image, network `api`: fetches the task with the pod key, writes /work/task.json
 //   stage 1  source   AutoCraft image, network `fetch`: source tarball, patch, CI gate inputs; reports them in its termination message
-//   stage 2+ steps    toolchain image, one pod per run of consecutive plan steps with the same network mode (`fetch` or `none`);
+//   stage 2+ steps    toolchain image, one pod per run of consecutive plan steps with the same network mode (`fetch`, `mirror` or `none`);
 //                     each step is a container (ordered init containers, the last one the pod's container), so the runner
 //                     reads exit codes, OOM kills and times from pod status and output from the pod log
 //   last     upload   AutoCraft image, network `api`: uploads the artifacts of the steps that ran (only when a step names any)
 // The pod key reaches only the `api` pods, which run no repository code; it can fetch the task and upload artifacts,
-// never report a result. `none` pods have no egress; `fetch` pods reach DNS and public 80/443 (the cluster's NetworkPolicies).
+// never report a result. `none` pods have no egress; `fetch` pods reach DNS and public 80/443; `mirror` pods reach only the
+// crate mirror, which stands in for crates.io and GitHub (the cluster's NetworkPolicies).
+// A warm producer environment (`warmWriter`) runs step `warm` tasks: its offline pod restores the previous warm version,
+// builds at the CI paths with compile-cache writes, and publishes the result (warmPod below).
+import { createHash } from "node:crypto";
 import type { Capabilities, KubeSettings, TaskStep } from "../../web/src/api/types.ts";
 export type { KubeSettings };
 import { BuildError } from "./envs.ts";
 import { slugOf } from "../owners.ts";
-import { CACHE_VERSION } from "../worker/gate.ts";
+import { CACHE_VERSION, MAX_WARM_COMMAND } from "../worker/gate.ts";
 
 
 export const DEFAULT_SETTINGS: KubeSettings = {
@@ -22,6 +26,7 @@ export const DEFAULT_SETTINGS: KubeSettings = {
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
   workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
   workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
+  warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -33,6 +38,8 @@ const DNS_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const IMAGE_RE = /^[A-Za-z0-9][A-Za-z0-9._\-/:@]{0,299}$/;
 const QUANTITY = /^([0-9]+(\.[0-9]+)?)(m|k|M|G|T|Ki|Mi|Gi|Ti)?$/;
 const TOOLCHAIN_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,39}$/;
+const URL_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~/-]*)?$/;
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 const UNITS: Record<string, number> = { "": 1, m: 1e-3, k: 1e3, M: 1e6, G: 1e9, T: 1e12, Ki: 1024, Mi: 1024 ** 2, Gi: 1024 ** 3, Ti: 1024 ** 4 };
 
 /** A Kubernetes quantity as a number (cores or bytes). */
@@ -114,9 +121,21 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         if (v !== null && (typeof v !== "string" || !DNS_LABEL.test(v))) throw new BuildError(400, "runtimeClassName must be a runtime class name or null");
         out.runtimeClassName = v as string | null;
         break;
-      case "sccacheUrl":
-        if (v !== null && (typeof v !== "string" || !/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~/-]*)?$/.test(v))) throw new BuildError(400, "sccacheUrl must be http(s)://host[:port][/path] or null");
-        out.sccacheUrl = v as string | null;
+      case "sccacheUrl": case "cacheWriteUrl":
+        if (v !== null && (typeof v !== "string" || !URL_RE.test(v))) throw new BuildError(400, `${k} must be http(s)://host[:port][/path] or null`);
+        out[k] = v as string | null;
+        break;
+      case "writerSecret": case "signingSecret":
+        if (v !== null && (typeof v !== "string" || !/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v))) throw new BuildError(400, `${k} must be a Secret name or null`);
+        out[k] = v as string | null;
+        break;
+      case "crateMirror":
+        if (v !== null && (typeof v !== "string" || !IPV4.test(v))) throw new BuildError(400, "crateMirror must be the mirror's ClusterIP (IPv4) or null");
+        out.crateMirror = v as string | null;
+        break;
+      case "warmWriter":
+        if (typeof v !== "boolean") throw new BuildError(400, "warmWriter must be true or false");
+        out.warmWriter = v;
         break;
       case "arch":
         if (v !== "x86_64" && v !== "aarch64") throw new BuildError(400, "arch must be x86_64 or aarch64");
@@ -129,6 +148,10 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
   for (const [req, lim] of [["cpuRequest", "cpuLimit"], ["memoryRequest", "memoryLimit"], ["ephemeralRequest", "ephemeralLimit"],
     ["workspaceCpuRequest", "workspaceCpuLimit"], ["workspaceMemoryRequest", "workspaceMemoryLimit"], ["workspaceEphemeralRequest", "workspaceEphemeralLimit"]] as const) {
     if (quantity(out[req]) > quantity(out[lim])) throw new BuildError(400, `${req} must not exceed ${lim}`);
+  }
+  if (out.warmWriter) {
+    const missing = (["sccacheUrl", "cacheWriteUrl", "writerSecret", "signingSecret"] as const).filter((k) => !out[k]);
+    if (missing.length) throw new BuildError(400, `a warm writer needs ${missing.join(", ")}`);
   }
   return out;
 }
@@ -159,7 +182,7 @@ export const PULL_REASONS = new Set(["ErrImagePull", "ImagePullBackOff", "Invali
 
 // ---- stages ------------------------------------------------------------------
 
-export type Group = { network: "none" | "fetch"; steps: number[] };
+export type Group = { network: TaskStep["network"]; steps: number[] };
 
 /** Runs of consecutive steps with the same network mode. */
 export function groupsOf(plan: TaskStep[]): Group[] {
@@ -189,6 +212,8 @@ export type Prepared = {
   env: Record<string, string>; mounts: { sub: string; target: string }[]; packages: string[]; craftFontsRef: string | null; craftI18nRev: string | null;
   /** The CI gate's cache-version; null (or absent, in a run prepared before it was reported) when the repo has no gate. */
   cacheVersion?: string | null;
+  /** The CI gate's warm-command, reported for warm tasks only; null: the default warm build. */
+  warmCommand?: string | null;
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -212,12 +237,13 @@ export function parsePrepared(message: string | undefined): { ok: true; prepared
   const ref = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" && REF.test(v) ? v : undefined);
   const fonts = ref(o.craftFontsRef), i18n = ref(o.craftI18nRev);
   const cacheVersion = o.cacheVersion === undefined || o.cacheVersion === null ? null : typeof o.cacheVersion === "string" && CACHE_VERSION.test(o.cacheVersion) ? o.cacheVersion : undefined;
+  const warmCommand = o.warmCommand === undefined || o.warmCommand === null ? null : typeof o.warmCommand === "string" && o.warmCommand.length <= MAX_WARM_COMMAND && !o.warmCommand.includes("\0") ? o.warmCommand : undefined;
   const bad =
     !env || typeof env !== "object" || Array.isArray(env) || Object.keys(env).length > 40 || Object.entries(env).some(([k, v]) => !ENV_NAME.test(k) || typeof v !== "string" || v.length > 1000 || v.includes("\0")) ||
     !Array.isArray(mounts) || mounts.length > 2 || mounts.some((m) => typeof m.sub !== "string" || !MOUNT_SUB.test(m.sub) || (m.target !== "/craft-fonts" && m.target !== "/craft-i18n")) ||
-    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined || cacheVersion === undefined;
+    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined || cacheVersion === undefined || warmCommand === undefined;
   if (bad) return { ok: false, summary: "source: the source pod's report is not valid" };
-  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n, cacheVersion } };
+  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n, cacheVersion, warmCommand } };
 }
 
 // ---- specs -------------------------------------------------------------------
@@ -245,12 +271,40 @@ export const CACHE_STEP_WRAPPER = [
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
 ].join("\n");
+/**
+ * A warm producer's build step: as CACHE_STEP_WRAPPER, with compile-cache writes. It records `rustc -vV` for the warm
+ * manifest. The step runs with CARGO_NET_OFFLINE (the gate's warm-command does not say --offline); the rustc wrapper drops
+ * it, because sccache keys on CARGO_* variables and the CI runners whose entries the build shares do not set it.
+ */
+export const WARM_STEP_WRAPPER = [
+  COPY_SOURCE,
+  "rustc -vV > /meta/rustc.txt 2>/dev/null || true",
+  'if [ -z "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then echo "the CI gate names no cache version: this step builds without the compile cache" >&2',
+  "elif command -v sccache >/dev/null 2>&1; then",
+  `  printf '%s\n' '#!/bin/sh' 'exec env -u CARGO_NET_OFFLINE "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
+  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-write):"; timeout 60 sccache --show-stats; fi',
+  "exit $s",
+].join("\n");
 /** Fails before any step when the toolchain image lacks a package the repo's CI gate installs: pod mode cannot add packages. */
 export const PACKAGES_CHECK = "missing=''; for p in \"$@\"; do dpkg-query -W -f='${Status}' \"$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"$missing $p\"; done; " +
   "if [ -n \"$missing\" ]; then echo \"the toolchain image lacks packages the CI gate installs:$missing (build pods cannot install packages)\" | tee /dev/termination-log >&2; exit 3; fi";
 export const PACKAGES_CONTAINER = "packages";
 /** First in every step pod: the AutoCraft image measures the task's volume, which local-path does not cap (`worker pod disk`). */
 export const DISK_CONTAINER = "disk";
+export const WARM_RESTORE_CONTAINER = "warm-restore";
+export const WARM_PUBLISH_CONTAINER = "warm-publish";
+export const WARM_GC_CONTAINER = "warm-gc";
+/** Hosts a `mirror` pod reaches through the crate mirror (hostAliases); nothing else resolves there. */
+export const MIRROR_HOSTS = ["index.crates.io", "static.crates.io", "github.com", "api.github.com"];
+/** ConfigMap in the build namespace with the mirror's CA certificate (`ca.crt`). */
+export const MIRROR_CA_CONFIGMAP = "craft-mirror-ca";
+const MIRROR_CA = "/etc/craft-mirror/ca.crt";
+const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA };
+const SIGNING_KEY = "/keys/signing/private.pem";
+const RUSTC_FILE = "/meta/rustc.txt";
+const BAD_BLOBS_FILE = "/meta/bad-blobs";
 const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
@@ -271,7 +325,7 @@ function container(s: KubeSettings, name: string, image: string, extra: Record<s
 
 const envList = (o: Record<string, string>) => Object.entries(o).map(([name, value]) => ({ name, value }));
 
-function pod(c: PodCtx, network: "api" | "fetch" | "none", volumes: object[], initContainers: object[], containers: object[], labels: Record<string, string> = {}) {
+function pod(c: PodCtx, network: "api" | TaskStep["network"], volumes: object[], initContainers: object[], containers: object[], labels: Record<string, string> = {}, spec: Record<string, unknown> = {}) {
   return {
     apiVersion: "v1", kind: "Pod",
     metadata: {
@@ -287,6 +341,7 @@ function pod(c: PodCtx, network: "api" | "fetch" | "none", volumes: object[], in
       volumes: [{ name: "work", persistentVolumeClaim: { claimName: c.pvc } }, ...volumes],
       ...(initContainers.length ? { initContainers } : {}),
       containers,
+      ...spec,
     },
   };
 }
@@ -323,54 +378,100 @@ export function ciCheckout(repo: string): string | null {
 }
 
 /**
- * The env of a step that reads the compile cache. sccache's key covers the compiler, the arguments, the CARGO_* variables
+ * The env of a step that uses the compile cache. sccache's key covers the compiler, the arguments, the CARGO_* variables
  * and the working directory, so the step matches the CI gate's job: its env (CARGO_TERM_COLOR through the rustc wrapper),
  * CARGO_HOME, and the checkout and default target dir at the runner's paths (`ciCheckout`, no CARGO_TARGET_DIR). The store
- * is the gate's `sccache/<cache-version>`, read-only; build pods never get the cache's write credentials.
+ * is the gate's `sccache/<cache-version>`: read-only for build pods, which never get the cache's write credentials; a warm
+ * producer's steps write it (their credentials come from the writer Secret, `writerEnv`).
  */
-function cacheEnv(url: string, cacheVersion: string, gate: Record<string, string>): Record<string, string> {
+function ciEnv(gate: Record<string, string>): Record<string, string> {
+  return { CARGO_INCREMENTAL: "0", CARGO_NET_RETRY: "10", RUST_BACKTRACE: "1", ...gate, AUTOCRAFT_CI_TERM_COLOR: gate.CARGO_TERM_COLOR ?? "always" };
+}
+function sccacheEnv(url: string, cacheVersion: string, write: boolean): Record<string, string> {
   return {
-    CARGO_INCREMENTAL: "0", CARGO_NET_RETRY: "10", RUST_BACKTRACE: "1", ...gate,
-    AUTOCRAFT_CI_TERM_COLOR: gate.CARGO_TERM_COLOR ?? "always",
-    SCCACHE_WEBDAV_ENDPOINT: url, SCCACHE_WEBDAV_KEY_PREFIX: `sccache/${cacheVersion}`, SCCACHE_WEBDAV_RW_MODE: "READ_ONLY",
+    SCCACHE_WEBDAV_ENDPOINT: url, SCCACHE_WEBDAV_KEY_PREFIX: `sccache/${cacheVersion}`, ...(write ? {} : { SCCACHE_WEBDAV_RW_MODE: "READ_ONLY" }),
     // A step falls back to plain rustc when the cache cannot be reached, and the server lives until the step ends.
     SCCACHE_IGNORE_SERVER_IO_ERROR: "1", SCCACHE_IDLE_TIMEOUT: "0",
   };
 }
+/** The writer Secret's credentials as env references: the values never pass through the runner or the pod spec. */
+const writerEnv = (secret: string, user: string, password: string) => [
+  { name: user, valueFrom: { secretKeyRef: { name: secret, key: "username" } } },
+  { name: password, valueFrom: { secretKeyRef: { name: secret, key: "password" } } },
+];
+
+/** What a warm producer's offline pod adds (warmWriter environments, step `warm` tasks): the key, the toolchain image, and whether the store's gc runs after the publish. */
+export type WarmPod = {
+  key: string; gc: boolean;
+  /** Blob sha256s consumers failed on (warm-sync's status): the publish fetches and repairs them. */
+  recheck?: string[];
+};
+/** At most this many rechecked blobs go into one publish's env. */
+export const MAX_RECHECK = 200;
 
 /**
  * One group of steps, after a disk check (and, in the first group, a package check). Offline steps get the CI gate's env and
- * the craft-fonts / craft-i18n checkouts; a `fetch` step gets neither, as in the container runtime. With `sccacheUrl` set and
- * a CI gate, offline steps that mount the build dirs read the CI runners' compile cache (`cacheEnv`), and their pod carries
- * the `craft.build/cache=read` label that lets it reach the cache's read-only port.
+ * the craft-fonts / craft-i18n checkouts; a `fetch` or `mirror` step gets neither, as in the container runtime. A `mirror`
+ * pod resolves crates.io and GitHub to the crate mirror and trusts its CA. With `sccacheUrl` set and a CI gate, offline
+ * steps that mount the build dirs read the CI runners' compile cache (`ciEnv`, `sccacheEnv`), and their pod carries the
+ * `craft.build/cache=read` label that lets it reach the cache's read-only port.
+ *
+ * With `warm` (an offline group of a warm producer): `warm-restore` fills a memory-backed target dir at the checkout with the
+ * key's newest warm version, the steps build at the CI paths and write the compile cache, and `warm-publish` (then, when
+ * due, `warm-gc`) publishes the target and CARGO_HOME. The pod carries `craft.build/cache=write`. Only the steps, the
+ * publish and the gc get the writer credentials; only the AutoCraft-image containers mount the signing key (the restore
+ * and the gc verify with its public half, so the producer needs no separate verify key).
  */
-export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string) {
+export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string, warm?: WarmPod) {
   const offline = group.network === "none";
+  const mirror = group.network === "mirror";
   const checkout = ciCheckout(repo);
   const cacheVersion = prepared.cacheVersion;
-  const cached = (step: TaskStep): boolean => offline && !step.bare && !!c.s.sccacheUrl && !!cacheVersion && !!checkout;
+  const writing = !!warm && offline && !!checkout;
+  const cacheUrl = writing ? c.s.cacheWriteUrl : c.s.sccacheUrl;
+  const cached = (step: TaskStep): boolean => offline && !step.bare && !!cacheUrl && !!cacheVersion && !!checkout;
+  const atCi = (step: TaskStep): boolean => cached(step) || (writing && !step.bare);
+  const target = writing ? `${checkout}/target` : null;
   const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
+  if (mirror) volumes.push({ name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } });
+  if (writing) {
+    volumes.push(
+      // The pod's memory limit covers the target as well as the build.
+      { name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: c.s.memoryLimit } },
+      { name: "warm-meta", emptyDir: { sizeLimit: "1Mi" } }, { name: "warm-tmp", emptyDir: { sizeLimit: "2Gi" } },
+      { name: "warm-signing", secret: { secretName: c.s.signingSecret, items: [{ key: "private.pem", path: "private.pem" }], defaultMode: 0o440 } },
+    );
+  }
+  const gateEnv = { ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" };
   const steps = group.steps.map((i) => {
     const step = plan[i]!;
-    const cache = cached(step);
+    const ci = atCi(step);
     volumes.push({ name: `src-${i}`, emptyDir: { sizeLimit: c.s.ephemeralLimit } }, { name: `tmp-${i}`, emptyDir: { sizeLimit: "2Gi" } });
-    // A cached step works in the runner's checkout path; /src is the same directory, for scripts that name it.
+    // A step at the CI paths works in the runner's checkout path; /src is the same directory, for scripts that name it.
     const mounts: object[] = [
       { name: "work", mountPath: "/pristine", subPath: "src", readOnly: true },
       { name: `src-${i}`, mountPath: "/src" },
-      ...(cache ? [{ name: `src-${i}`, mountPath: checkout }] : []),
+      ...(ci ? [{ name: `src-${i}`, mountPath: checkout }] : []),
       { name: `tmp-${i}`, mountPath: "/tmp" },
-      ...(step.bare ? [] : [{ name: "work", mountPath: cache ? `${checkout}/target` : "/target", subPath: "target" }, { name: "work", mountPath: "/cache", subPath: "cache" }]),
+      ...(step.bare ? [] : [
+        target ? { name: "warm-target", mountPath: target } : { name: "work", mountPath: ci ? `${checkout}/target` : "/target", subPath: "target" },
+        { name: "work", mountPath: "/cache", subPath: "cache" },
+      ]),
+      ...(writing ? [{ name: "warm-meta", mountPath: "/meta" }] : []),
       { name: "work", mountPath: "/out", subPath: `out/${i}` },
       ...(offline ? prepared.mounts.map((m) => ({ name: "work", mountPath: m.target, subPath: m.sub, readOnly: true })) : []),
+      ...(mirror ? [{ name: "mirror-ca", mountPath: "/etc/craft-mirror", readOnly: true }] : []),
     ];
-    const env = cache
-      ? { ...cacheEnv(c.s.sccacheUrl!, cacheVersion!, prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" }
-      : { ...(offline ? prepared.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
+    const env = ci
+      ? {
+        ...gateEnv, ...(cached(step) ? sccacheEnv(cacheUrl!, cacheVersion!, writing) : {}),
+        ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
+      }
+      : { ...(offline ? prepared.env : {}), ...(mirror ? MIRROR_ENV : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
     return container(c.s, stepContainer(i), image, {
-      command: ["/bin/sh", "-c", cache ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
-      workingDir: cache ? checkout : "/src",
-      env: envList(env),
+      command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
+      workingDir: ci ? checkout : "/src",
+      env: [...envList(env), ...(writing && cached(step) ? writerEnv(c.s.writerSecret!, "SCCACHE_WEBDAV_USERNAME", "SCCACHE_WEBDAV_PASSWORD") : [])],
       volumeMounts: mounts,
     });
   });
@@ -382,8 +483,38 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   const check = checkPackages && prepared.packages.length
     ? [container(c.s, PACKAGES_CONTAINER, image, { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
-  const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
-  return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1), labels);
+  const spec = mirror && c.s.crateMirror ? { hostAliases: [{ ip: c.s.crateMirror, hostnames: MIRROR_HOSTS }] } : {};
+  if (!writing) {
+    const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
+    return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
+  }
+  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, gateEnv, cacheVersion ?? null);
+  const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
+  return pod(c, group.network, volumes, [disk, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
+}
+
+/** The AutoCraft-image containers of a warm producer's pod (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
+function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, gateEnv: Record<string, string>, cacheVersion: string | null) {
+  const v = (o: Record<string, string>) => envList({ HOME: "/tmp", ...Object.fromEntries(Object.entries(o).map(([k, x]) => [`AUTOCRAFT_WARM_${k}`, x])) });
+  const signing = { name: "warm-signing", mountPath: "/keys/signing", readOnly: true };
+  const tmp = { name: "warm-tmp", mountPath: "/tmp" };
+  // What the tree was built with besides the image and the paths: the env every build step shares.
+  const envHash = createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
+  const writer = writerEnv(c.s.writerSecret!, "AUTOCRAFT_WARM_STORE_USER", "AUTOCRAFT_WARM_STORE_PASSWORD");
+  const phase = (name: string, env: object[], mounts: object[]) => container(c.s, name, appImage, { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });
+  return {
+    restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: SIGNING_KEY, IMAGE: image, BAD_BLOBS_FILE }),
+      [{ name: "warm-target", mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, signing]),
+    publish: phase(WARM_PUBLISH_CONTAINER, [
+      ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE,
+        ...(warm.recheck?.length ? { RECHECK: warm.recheck.filter((x) => /^[0-9a-f]{64}$/.test(x)).slice(0, MAX_RECHECK).join(",") } : {}) }),
+      ...writer,
+    ], [
+      { name: "work", mountPath: "/work", readOnly: true }, { name: "work", mountPath: "/cache", subPath: "cache", readOnly: true },
+      { name: "warm-target", mountPath: target, readOnly: true }, { name: "warm-meta", mountPath: "/meta", readOnly: true }, signing,
+    ]),
+    gc: phase(WARM_GC_CONTAINER, [...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, VERIFY_KEYS: SIGNING_KEY }), ...writer], [signing]),
+  };
 }
 
 /** A step's time limit: its own, capped by the environment's. */

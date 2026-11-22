@@ -988,13 +988,13 @@ A task runs as a sequence of pods that share one volume (a PersistentVolumeClaim
 |---|---|---|---|
 | task | AutoCraft | `api` | Fetches the task (source URL, patch, steps) with a one-time key and writes it to the volume. |
 | source | AutoCraft | `fetch` | Downloads the source tarball, applies the patch and reads the CI gate at the base commit (env, craft-fonts and craft-i18n checkouts). Reports what it found in its termination message. |
-| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. Steps that read the compile cache run at the CI runners' checkout path (Compile cache below). |
+| steps | toolchain | `fetch`, `mirror` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. Steps that read the compile cache run at the CI runners' checkout path (Compile cache below). |
 | upload | AutoCraft | `api` | Uploads the artifacts of the steps that ran, when a step names any. |
 
 - The runner reads each step's exit code, OOM kill and times from pod status, and its output from the pod log. Nothing in a pod reports a result.
 - The one-time key reaches only the `api` pods. It can read its task and upload its artifacts; it stops working when the task pod ends, and the upload pod gets a new one. No key is valid while repository code runs.
 - Every pod: `restartPolicy: Never`, a `kubernetes.io/arch` node selector from `--arch`, no service-account token, no service links, non-root (uid 10001, `fsGroup` 10001), `RuntimeDefault` seccomp, no privilege escalation, all capabilities dropped, read-only root, CPU, memory and ephemeral-storage requests and limits, `activeDeadlineSeconds`, and the optional runtime class.
-- `fetch` steps get neither the CI gate's env nor the checkouts, as in the container runtime. Tasks that need a display are not taken. A task whose CI gate names a package the toolchain image lacks fails with the package named: pods cannot install packages. Warm build caches are not used.
+- `fetch` and `mirror` steps get neither the CI gate's env nor the checkouts, as in the container runtime. Tasks that need a display are not taken. A task whose CI gate names a package the toolchain image lacks fails with the package named: pods cannot install packages. Warm build caches are not used.
 - A pod that disappears, cannot pull its image for 3 minutes, is not scheduled within 15 minutes, stays in deletion or on a node that stopped reporting for 5 minutes, or runs 5 minutes past a deadline Kubernetes should have enforced, loses its task: requeued once, then failed, as for a worker that stops answering. The runner owns these tasks, so the worker heartbeat timeout does not apply to them.
 - A failed create of a later stage's pod (rate limit, quota, an API error) is retried after 15 s, doubling to at most 5 minutes; after 6 tries or 15 minutes the task is lost. A task whose first pod cannot be created goes back to the queue without using an attempt, and the environment takes no task for a minute.
 - After a restart the runner deletes pods and volumes whose task is no longer the environment's. The namespace cannot change while tasks run.
@@ -1039,6 +1039,33 @@ Settings (`envs add` and `envs set` options; `envs list` shows them):
 | `--runtime-class` | none | A sandbox runtime class (gVisor, Kata) when the cluster has one. |
 | `--arch` | `x86_64` | Architecture the pods run on, for claim matching. |
 | `--sccache-url` | none | Read-only WebDAV endpoint of the CI runners' compile cache (Compile cache above); `none` turns it off. |
+| `--crate-mirror` | none | ClusterIP of the crate mirror that `mirror` steps use (Crate mirror above). |
+| `--warm-writer` | `no` | The warm producer (Warm producer above); needs `--sccache-url`, `--cache-write-url`, `--writer-secret` and `--signing-secret`. |
+| `--cache-write-url` | none | Read-write WebDAV endpoint of the compile cache and warm store. |
+| `--writer-secret`, `--signing-secret` | none | Secrets in the namespace: the cache's write credentials (`username`, `password`) and the warm store's Ed25519 signing key (`private.pem`). |
+
+Crate mirror. A `mirror` step reaches crates.io and GitHub only through the crate mirror: its pod (`craft.build/network=mirror`) has `hostAliases` that resolve `index.crates.io`, `static.crates.io`, `github.com` and `api.github.com` to `--crate-mirror` (the mirror's fixed ClusterIP), mounts the ConfigMap `craft-mirror-ca` (key `ca.crt`) at `/etc/craft-mirror`, and sets `CARGO_HTTP_CAINFO`, `GIT_SSL_CAINFO` and `SSL_CERT_FILE` to it. The dependency fetch passes these three through its cleared environment. Only an environment with `--crate-mirror` takes a task with a `mirror` step.
+
+Warm producer. An environment with `--warm-writer yes` builds the current default-branch head of each repo in the pipeline scope and publishes the result to the warm store (`warm/v1/` on the compile cache's WebDAV server, signed; src/warm/). It takes only tasks of step `warm`, and no other environment takes those, so it never runs PR code, a patch or a merge batch. Run it in its own namespace (`--namespace craft-warm`), since its pods hold the cache's write credentials and the signing key.
+
+```
+autocraft-server envs add warm --label "Warm producer" --kind kubernetes --slots 2 --namespace craft-warm --warm-writer yes \
+  --sccache-url http://<cache>:8080 --cache-write-url http://<cache>:8081 --writer-secret craft-warm-cache-writer \
+  --signing-secret craft-warm-signing [--crate-mirror <mirror ClusterIP>] --memory-limit 48Gi --toolchain-image rust-stable=<image>
+autocraft-server envs warm-interval 15
+```
+
+| Rule | Detail |
+|---|---|
+| Queue | The main-CI poll (every 2 minutes) queues a `warm` task for a repo whose current head has no ended warm build with the writer's `rust-stable` image, unless one is queued or running. A new head and a new toolchain image both queue one. A head whose warm build failed is not built again. |
+| Claim | The task builds the newest head when it starts (merges that land while it waits share one build), at most one runs per repo, and builds of one repo start at least `warm_min_interval_minutes` apart (default 15, `envs warm-interval`). The plan is the environment's: `fetch deps` through the crate mirror when `--crate-mirror` is set, else over `fetch`. |
+| Build pod | `warm-restore` (AutoCraft image) fills a memory-backed target dir at `/home/runner/_work/<repo>/<repo>/target` with the key's newest version; a missing, unverifiable or other-image version is a cold start. The build step runs at the CI paths with the gate's env, `CARGO_HOME=/cache/cargo` and sccache writing `sccache/<cache-version>` on `--cache-write-url`: the gate's `warm-command` (bash, offline) when it has one, else `cargo test --workspace --no-run --locked` and `cargo build --workspace --all-targets --locked`. `warm-publish` then publishes the target and `CARGO_HOME`, with the `rustc -vV` the step recorded; once a day `warm-gc` follows it (3 versions per key, 24 h blob grace, 150 GiB). |
+| Credentials | The writer Secret (keys `username`, `password`) reaches the build step, the publish and the gc as `secretKeyRef` env; the signing Secret (key `private.pem`) is mounted only into the restore, the publish and the gc, which verify with its public half. |
+| Labels | The build pod carries `craft.build/network=none` and `craft.build/cache=write`, which reaches the cache's read and write ports. |
+| Memory | The target dir is in memory, so `--memory-limit` must hold the target plus the build's peak. |
+| Results | The task's results end with `warm publish`; a failed publish fails the task, a failed gc only logs. |
+
+Worker environments keep their own warm builds (step `verify`, once a day per repo, queued only while a worker environment is enabled); build pods never take those.
 
 What the cluster must provide:
 
@@ -1047,7 +1074,8 @@ What the cluster must provide:
 | `AUTOCRAFT_IMAGE` on the runner container | The image the runner itself runs, by digest (the downward API does not expose it). Or set `--image`. |
 | Runner service account | Its token mounted into the runner container only, at the standard path. |
 | Role in the build namespace | `pods`: create, get, list, watch, delete; `pods/log`: get; `persistentvolumeclaims`: create, get, list, delete. |
-| NetworkPolicies in the build namespace | No ingress. `craft.build/network=none`: no egress. `fetch`: DNS and public 80/443, no private ranges. `api`: DNS and the runner's 8981. With `--sccache-url`: `craft.build/cache=read` reaches the cache's read-only port (and DNS, for its service name). |
+| NetworkPolicies in the build namespace | No ingress. `craft.build/network=none`: no egress. `fetch`: DNS and public 80/443, no private ranges. `api`: DNS and the runner's 8981. `mirror`: the crate mirror's 443 only, no DNS. With `--sccache-url`: `craft.build/cache=read` reaches the cache's read-only port (and DNS, for its service name). A warm producer's namespace: `craft.build/cache=write` reaches both cache ports and DNS. |
+| ConfigMap `craft-mirror-ca` | With `--crate-mirror`: in the build namespace, key `ca.crt`. |
 | Ingress to the runner | 8981 from the build namespace, if the runner's namespace denies by default. |
 
 The health check `worker:<env id>` fails when the runner is not in a cluster, the API does not answer, the service account lacks a permission (checked with SelfSubjectAccessReview every minute), no AutoCraft image is known, or a pod could not be created. It warns when a pod has waited more than 3 minutes to start and when no toolchain image is set.

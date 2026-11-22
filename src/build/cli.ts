@@ -12,6 +12,7 @@ import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from 
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
+import { setWarmMinInterval, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
@@ -27,7 +28,9 @@ const USAGE = `usage: autocraft-server envs list
            --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
            --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
            --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q --sccache-url URL|none
+           --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
        autocraft-server envs rotate-key <id> (--out FILE | --print)
+       autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
@@ -101,7 +104,9 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   "workspace-slots": "workspaceSlots", "workspace-cpu-request": "workspaceCpuRequest", "workspace-cpu-limit": "workspaceCpuLimit",
   "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
   "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage", "sccache-url": "sccacheUrl",
+  "crate-mirror": "crateMirror", "warm-writer": "warmWriter", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
 };
+const NULLABLE = new Set<keyof KubeSettings>(["runtimeClassName", "sccacheUrl", "crateMirror", "cacheWriteUrl", "writerSecret", "signingSecret"]);
 
 /** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
 function podSettings(opt: Map<string, string>, current: KubeSettings | null): Partial<KubeSettings> | undefined {
@@ -109,7 +114,9 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : (key === "image" && v === "runner") || ((key === "runtimeClassName" || key === "sccacheUrl") && v === "none") ? null : v;
+    if (key === "warmWriter" && v !== "yes" && v !== "no") die("--warm-writer must be yes or no");
+    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : key === "warmWriter" ? v === "yes"
+      : (key === "image" && v === "runner") || (NULLABLE.has(key) && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
     const m = /^([^=]+)=(.+)$/.exec(opt.get("toolchain-image")!) ?? die("--toolchain-image takes NAME=REF or NAME=none");
@@ -126,7 +133,8 @@ const settingsLine = (s: KubeSettings): string =>
   `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
   `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
   `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
-  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}`;
+  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
+  (s.warmWriter ? `, warm writer (writes ${s.cacheWriteUrl}, credentials ${s.writerSecret}, signing key ${s.signingSecret})` : "");
 
 /** A yes|no option as a boolean; undefined when it is not given. */
 function yesNo(opt: Map<string, string>, name: string): boolean | undefined {
@@ -193,6 +201,10 @@ async function envs(args: string[]): Promise<void> {
     const e = await run(async () => await updateEnv(db, pos[0], input, "cli"));
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
     if (e.settings) console.log(settingsLine(e.settings));
+  } else if (sub === "warm-interval") {
+    if (rest.length > 1) die(USAGE);
+    if (rest[0] !== undefined) await run(async () => await setWarmMinInterval(db, rest[0]!, "cli"));
+    console.log(`${WARM_INTERVAL_KEY} ${await warmMinInterval(db)}`);
   } else if (sub === "rotate-key") {
     const { pos, opt } = options(rest, ["print"]);
     if (!pos[0]) die(USAGE);
@@ -393,7 +405,7 @@ async function workspace(args: string[]): Promise<void> {
 }
 
 export const commands = {
-  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id>", run: async (args: string[]) => await envs(args) },
+  envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id> | warm-interval [<minutes>]", run: async (args: string[]) => await envs(args) },
   tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: async (args: string[]) => await tasks(args) },
   workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | tool <id> <tool> <json> | try <repo> <sha> | end <id>", run: async (args: string[]) => await workspace(args) },
 };
