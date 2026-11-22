@@ -286,7 +286,7 @@ describe("api", () => {
       // Work and answers the maintainer started count only while the conditions hold; a flip to legacy stops them everywhere.
       await db.run(db.k.insertInto("repo_permissions").values({ login: "maint", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() })
         .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(kx.excluded(["permission", "checked_at"]))));
-      await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES ('photocraft', 7, 'h1', 'fix it', 'maint', ?)").run(new Date().toISOString());
+      await db.run(db.k.insertInto("operator_fixups").values({ repo: "photocraft", number: 7, from_head: "h1", instructions: "fix it", by: "maint", at: new Date().toISOString() }));
       await identity(true);
       assert.ok(await queuedOperatorFix(db, "photocraft", 7, "h1"));
       assert.equal((await scopeAnswers(db)).get("photocraft#7"), "small");
