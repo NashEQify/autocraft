@@ -7,6 +7,7 @@ import { closeSync, openSync, unlinkSync, writeSync } from "node:fs";
 import type { EnvKind, KubeSettings } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { trackedNames } from "../repos.ts";
+import { warmLineText } from "./warm-status.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
@@ -153,6 +154,7 @@ async function envs(args: string[]): Promise<void> {
       const c = e.capabilities;
       console.log(`${e.id.padEnd(16)} ${safe(e.label).padEnd(24)} ${e.kind.padEnd(14)} ${e.enabled ? (e.online ? "online " : "offline") : "disabled"} ${e.running}/${e.slots} slots${e.confidential ? "  confidential" : ""}  ${c ? `${c.os}/${c.arch} ${c.cpus} cpu ${c.memGb} GB ${c.toolchains.join(",")}` : "no report yet"}${e.pausedReason ? `  paused: ${safe(e.pausedReason)}` : ""}`);
       if (e.settings) console.log(`${"".padEnd(16)} ${settingsLine(e.settings)}`);
+      for (const w of c?.warm ?? []) console.log(`${"".padEnd(16)} ${warmLineText(w)}`);
     }
   } else if (sub === "add") {
     const { pos, opt } = options(rest, ["print"]);

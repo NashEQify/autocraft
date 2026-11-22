@@ -168,6 +168,21 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
             <dd className="code min-w-0 break-words">{e.capabilities.toolchains.join(", ") || "none"}</dd>
           </>
         )}
+        {e.capabilities?.warm?.length ? (
+          <>
+            <dt className="text-ink/55">Warm</dt>
+            <dd className="min-w-0">
+              <ul>
+                {e.capabilities.warm.map((w) => (
+                  <li key={w.key} className="break-words">
+                    <span className="code">{w.key}</span> <span className="code text-ink/60">{w.commit.slice(0, 12)}</span>{" "}
+                    <span className="num">on {w.nodes} of {w.of} nodes</span>
+                  </li>
+                ))}
+              </ul>
+            </dd>
+          </>
+        ) : null}
         {e.settings ? (
           <>
             <dt className="text-ink/55">Namespace</dt>

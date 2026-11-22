@@ -10,7 +10,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Requires, SandboxEnv, TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
-import { guardedApi, inClusterApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
+import { guardedApi, inClusterApi, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
+import { WarmStatus } from "./warm-status.ts";
 import {
   DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   PULL_REASONS, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, toolchainImage, uploadPod, uploadStage,
@@ -44,14 +45,17 @@ export type LauncherDeps = {
   db: Db;
   /** null outside a cluster: the environments then report that they cannot start pods. */
   api: KubeApi | null;
+  /** Reads the nodes' warm status (src/build/warm-status.ts); null or left out: no warm status is shown. */
+  configMaps?: Pick<ConfigMapApi, "listConfigMaps"> | null;
   /** The runner's own image (AUTOCRAFT_IMAGE), for environments that name none. */
   defaultImage: string | null;
   log: (line: string) => void;
   now?: () => number;
 };
 
-/** Caches between passes: the access review, a pause after a task could not be started, and when a pod's node stopped reporting. */
+/** Caches between passes: the access review, a pause after a task could not be started, when a pod's node stopped reporting, and the nodes' warm status. */
 export class LauncherState {
+  warm: WarmStatus | null = null;
   access = new Map<string, { at: number; missing: string[] }>();
   backoff = new Map<string, { until: number; why: string }>();
   unknownSince = new Map<string, number>();
@@ -71,6 +75,10 @@ const clean = (s: string | undefined): string => (s ?? "").replace(/[\u0000-\u00
 
 export async function launcherPass(d: LauncherDeps, state: LauncherState): Promise<void> {
   const envs = await d.db.all(d.db.k.selectFrom("build_envs").select(["id", "enabled", "slots", "settings"]).where("kind", "=", "kubernetes").orderBy("id"));
+  if (envs.length && d.configMaps) {
+    state.warm ??= new WarmStatus(d.configMaps, { namespace: envVar("WARM_STATUS_NAMESPACE"), now: d.now, log: d.log });
+    await state.warm.refresh();
+  }
   for (const env of envs) {
     try {
       await envPass(d, state, env);
@@ -86,7 +94,8 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   const { db } = d;
   const now = d.now ?? Date.now;
   const s = settingsOf(env.settings);
-  const caps = kubeCapabilities(s);
+  const warm = state.warm?.summary() ?? [];
+  const caps = { ...kubeCapabilities(s), ...(warm.length ? { warm } : {}) };
   const report = async (health: Omit<EnvHealth, "since"> | null, reachable: boolean) => await kubeReport(db, env.id, caps, env.slots, health, reachable);
   const image = s.image ?? d.defaultImage;
   const ctx: EnvCtx = { d, state, api: d.api, env, s, image, pods: [], pending: [], now };
@@ -426,7 +435,7 @@ async function finish(c: EnvCtx, run: Run, failed: string | null): Promise<void>
 /** `guard` runs before every Kubernetes call that changes something, and stops it by throwing (src/build/kube-api.ts guardedApi). */
 export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string) => void, guard?: () => Promise<void>): void {
   const api = inClusterApi();
-  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, defaultImage: envVar("IMAGE") ?? null, log };
+  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, defaultImage: envVar("IMAGE") ?? null, log };
   const state = new LauncherState();
   const workspaces = new WorkspaceState();
   void (async () => {

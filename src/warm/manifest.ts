@@ -345,6 +345,12 @@ export type BlobSource = (sha256: string, size: number) => Promise<AsyncIterable
 export type Previous = { manifest: Manifest; roots: Partial<Roots> };
 export type ApplyStats = { files: number; dirs: number; symlinks: number; linked: number; copied: number; fetched: number; fetchedBytes: number; bytes: number };
 
+/**
+ * `pace` is awaited before each chunk of file content is written (fetched or copied, not hard-linked) with its size in
+ * bytes; a rate limiter there throttles the restore's disk writes.
+ */
+export type ApplyOptions = { previous?: Previous; concurrency?: number; touchConcurrency?: number; pace?: (bytes: number) => Promise<void> };
+
 /** Fails once more than `max` bytes have passed. */
 function capped(max: number, what: string): Transform {
   let seen = 0;
@@ -363,7 +369,7 @@ function capped(max: number, what: string): Transform {
  * written once and linked or copied; the rest come from `fetch`. Modes and mtimes are restored exactly (mtimes to the
  * nanosecond). Throws on the first failure and leaves the partial tree for the caller to remove.
  */
-export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch: BlobSource, opts: { previous?: Previous; concurrency?: number; touchConcurrency?: number } = {}): Promise<ApplyStats> {
+export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch: BlobSource, opts: ApplyOptions = {}): Promise<ApplyStats> {
   validateEntries(full.entries);
   const given = ROOTS.filter((r) => roots[r] !== undefined);
   if (!given.length) throw new ManifestError("restore names no root");
@@ -420,10 +426,11 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
         continue;
       }
       if (local) {
+        await opts.pace?.(e.size);
         copyFileSync(abs(roots, local.path), dest);
         stats.copied++;
       } else {
-        await fetchOne(e, dest, fetch);
+        await fetchOne(e, dest, fetch, opts.pace);
         stats.fetched++;
         stats.fetchedBytes += e.size;
         local = e;
@@ -448,10 +455,17 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   return stats;
 }
 
-async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource): Promise<void> {
+async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (bytes: number) => Promise<void>): Promise<void> {
   const h = createHash("sha256");
   let n = 0;
-  const tap = new Transform({ transform(chunk: Buffer, _e, cb) { h.update(chunk); n += chunk.length; cb(null, chunk); } });
+  const tap = new Transform({
+    transform(chunk: Buffer, _e, cb) {
+      h.update(chunk);
+      n += chunk.length;
+      if (!pace) return cb(null, chunk);
+      pace(chunk.length).then(() => cb(null, chunk), cb);
+    },
+  });
   try {
     await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }));
   } catch (err) {

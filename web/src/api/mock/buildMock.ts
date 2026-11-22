@@ -29,7 +29,10 @@ const envs: BuildEnv[] = [
   },
   {
     id: "cluster", label: "Cluster pods", kind: "kubernetes", enabled: true, online: true, lastSeenAt: iso(3_000), slots: 4, running: 1, version: null, pausedReason: null, confidential: false,
-    capabilities: { os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [] },
+    capabilities: {
+      os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [],
+      warm: [{ key: "deckcraft", commit: "3f9c1e07a2b4d8e6f0a1b2c3d4e5f60718293a4b", nodes: 6, of: 6 }, { key: "photocraft", commit: "a07b3c9d1e2f4a5b6c7d8e9f0a1b2c3d4e5f6071", nodes: 4, of: 6 }],
+    },
     settings: {
       namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi",
       ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
