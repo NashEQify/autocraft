@@ -235,6 +235,8 @@ The pipeline runs Claude agents under the operator's own Claude account on the o
 | Whitelist overrides, whitelist rule, settings (including `maintainer_writes`) | operator |
 | Access list, sessions, access-management audit rows | operator |
 | Repo settings and the audit log (without access rows), read-only | operator or maintainer |
+| Per repo and per item, on a repo the person runs: snooze or wake a decision, prepare it again, include a maintainer post for Opus, edit a fix-up's instructions, review, verify, fix or batch an item again, stop a fix, cancel or retry a pre-approval, hold or release a merge, remove a PR from a batch, stop a batch, fast track and its weight (also the MCP tools `set_weight` and `cancel_queued`), release one held outside item, edit an area list, start area steps, accept or dismiss area proposals, put a repo's open decisions on the Backlog in bulk | operator, or maintainer with GitHub write permission on the repo (read live; a batch or decision spanning repos needs write on each). `mayRunRepo` in `src/dash/repo-access.ts`; `GET /api/me` lists the repos in `runRepos`, and the interface reads it instead of the role |
+| Backlog in bulk without a repo, release all items held for an outside author | operator |
 | Turn the pipeline on or off, change limits, cancel jobs | operator; everyone signed in sees the Pipeline page |
 | Resume a push-breaker trip (fix-up, CI fix, fix issue, merge) | operator; a maintainer with GitHub write permission (read live) on every repo the trip's evidence names; a trip that names no repo is operator-only; the outside-surge breaker is operator-only (audited, the resume records the login) |
 

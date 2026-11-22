@@ -726,6 +726,8 @@ export interface User {
   role: Role;
   /** repos where GitHub grants write, maintain or admin */
   writeRepos: RepoName[];
+  /** repos the user runs: an operator on every repo, a maintainer where GitHub grants write; per-repo and per-item actions (releases, hold, fast track, areas, Backlog) show for these */
+  runRepos: RepoName[];
   /** Deployment setting `maintainer_writes`: maintainers with write access settle decisions on repos that use the app's identity. */
   maintainerWrites: boolean;
   /** Computed by the server: maintainers with write access settle now (`maintainer_writes` on and the app's identity), so Queue items is open to them. */

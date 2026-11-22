@@ -291,7 +291,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
       async editCard(id, edit) {
         const k = find(id);
         needCard(k);
-        if (edit.instructions !== undefined && me.role !== "operator") throw new Error("only operators edit a fix-up's instructions");
+        if (edit.instructions !== undefined && me.role === "viewer") throw new Error("only operators edit a fix-up's instructions");
         if (edit.text !== undefined) k.text = edit.text;
         if (edit.issue && k.issue) Object.assign(k.issue, edit.issue);
         if (edit.instructions !== undefined && k.fixup) k.fixup.instructions = edit.instructions;
@@ -329,7 +329,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
         const core = ch.cores.find((c) => c.key === body.core);
         if (!core) throw new Error(`no core ${body.core}`);
         if (body.note && body.note.length > 500) throw new Error("the note is longer than 500 characters");
-        if (body.params?.instructions !== undefined && me.role !== "operator") throw new Error("only operators edit a fix-up's instructions");
+        if (body.params?.instructions !== undefined && me.role === "viewer") throw new Error("only operators edit a fix-up's instructions");
         ch.run = { cardId: nextId, state: "running" };
         changed();
         await new Promise((r) => setTimeout(r, 1500));

@@ -31,6 +31,7 @@ import { backlogHeld } from "../../dupes/held.ts";
 import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import { canSettleCached, canSettleExpr, requireSettle, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
 import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
@@ -100,12 +101,16 @@ const requireRepoSettler = (db: Db, req: Req, repos: string[]): Promise<void> =>
 /** `requireRepoSettler` on the decision's repos. `own`: the decision's answer must be this login's (undo, retry, reopen), unless an operator asks. */
 async function requireSettler(db: Db, req: Req, d: DecisionRow, own = false): Promise<void> {
   await requireRepoSettler(db, req, reposOf(d));
-  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase()) throw new HttpError(403, "only an operator takes back someone else's answer");
+  // Someone who can no longer settle has an orphaned answer; any settler takes it back.
+  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase() && await settledBy(db, d)) throw new HttpError(403, "only an operator takes back someone else's answer");
 }
 
-async function requireOperator(req: Req, d: DecisionRow): Promise<void> {
-  if (!isOperator(req)) throw new HttpError(403, "only the operator answers decisions");
-  const blocked = await blockedRepos(req, d);
+/** Snooze, wake and prepare again: whoever runs every repo the decision covers (src/dash/repo-access.ts). A decision with no repo is the operator's. */
+async function requireRunner(req: Req, d: DecisionRow): Promise<void> {
+  const repos = reposOf(d);
+  const ok = await Promise.all(repos.map((r) => mayRunRepo(req.user, r)));
+  if (req.user.role === "viewer" || (!isOperator(req) && repos.length === 0)) throw new HttpError(403, "no write access");
+  const blocked = repos.filter((_, i) => !ok[i]);
   if (blocked.length) throw new HttpError(403, `no write access to ${blocked.map((r) => slugOf(r)).join(", ")}`);
 }
 
@@ -745,10 +750,10 @@ export async function applyAnswer(db: Db, d: DecisionRow, login: string, b: Reco
   }
 }
 
-/** Operator: snooze (`on`) or wake an open decision. It stays open for the pipeline; only the inbox hides it until the item has new activity. */
+/** Snooze (`on`) or wake an open decision. It stays open for the pipeline; only the inbox hides it until the item has new activity. */
 export async function snooze(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
-  await requireOperator(req, d);
+  await requireRunner(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be snoozed");
   const b = body(req);
   if (typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
@@ -759,12 +764,12 @@ export async function snooze(db: Db, req: Req): Promise<Decision> {
 }
 
 /**
- * Operator: prepare an open decision again. Clears what marks it prepared or failed, so the next pass runs the prepare step for
+ * Prepare an open decision again. Clears what marks it prepared or failed, so the next pass runs the prepare step for
  * it before the other due ones; its current choices stay until the new ones replace them.
  */
 export async function reprepare(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
-  await requireOperator(req, d);
+  await requireRunner(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be prepared again");
   if (!d.repo || d.number === null || !await db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", d.repo).where("number", "=", d.number))) throw new HttpError(409, "the decision has no item to prepare it for");
   await db.run(db.k.updateTable("main.decisions").set({
@@ -908,11 +913,12 @@ async function releaseBacklogItem(db: Db, d: DecisionRow, login: string, action:
   return null;
 }
 
-/** Operator bulk: answers every open decision in scope (`outsidePilot`, `repo`) with Backlog. Dry run unless `apply` is true. */
+/** Bulk: answers every open decision in scope (`outsidePilot`, `repo`) with Backlog. Dry run unless `apply` is true. */
 export async function backlogBulk(db: Db, req: Req): Promise<{ applied: boolean; count: number; decisions: { id: string; kind: string; repo: string | null; number: number | null }[] }> {
-  if (!isOperator(req)) throw new HttpError(403, "only operators put decisions in the Backlog");
   const b = body(req);
   const repo = typeof b.repo === "string" && b.repo ? b.repo : undefined;
+  // Unscoped (the outside pilot) stays the operator's; a maintainer backlogs one repo they write to.
+  if (repo ? !(await mayRunRepo(req.user, repo)) : !isOperator(req)) throw new HttpError(403, repo ? "no write access to this repo" : "only operators put decisions in the Backlog outside one repo");
   if (b.repo !== undefined && b.repo !== null && repo === undefined) throw new HttpError(400, "repo must be a repo name");
   if (b.apply !== undefined && typeof b.apply !== "boolean") throw new HttpError(400, "apply must be true or false");
   if (b.outsidePilot !== undefined && typeof b.outsidePilot !== "boolean") throw new HttpError(400, "outsidePilot must be true or false");

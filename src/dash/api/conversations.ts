@@ -16,6 +16,7 @@ import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle } from "../../settlers.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 
@@ -198,9 +199,9 @@ export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<C
 
 /** Shares a maintainer post with Opus (`on`) or stops sharing it; the next asked message carries it. */
 export async function postInclude(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
-  needOperator(req);
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
+  if (!(await mayRunRepo(req.user, repo))) throw new HttpError(403, "no write access to this repo");
   const b = req.json as { source?: unknown; on?: unknown } | null;
   if (!b || typeof b !== "object" || typeof b.source !== "string" || typeof b.on !== "boolean") throw new HttpError(400, "the body must be an object with a source and on (true or false)");
   await guard(async () => await setInclude(db, repo, n, b.source as string, b.on as boolean, req.user.login, deps));
@@ -220,8 +221,8 @@ async function needCard(db: Db, req: Req): Promise<CardRow> {
 export async function editCardText(db: Db, req: Req): Promise<ConversationCard> {
   const c = await needCard(db, req);
   const edit = cardEdit(req);
-  // The fix-up instructions go to the fix-up model: only an operator writes them.
-  if (edit.instructions !== undefined && !isOperator(req)) throw new HttpError(403, "only operators edit a fix-up's instructions");
+  // The fix-up instructions go to the fix-up model: only someone who runs the repo writes them.
+  if (edit.instructions !== undefined && !(await mayRunRepo(req.user, c.repo))) throw new HttpError(403, "no write access to edit a fix-up's instructions");
   return await cardView(db, await guard(async () => await editCard(db, c.id, req.user.login, edit)), req.user);
 }
 
@@ -344,7 +345,7 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
   });
   const drafted = core.params?.instructions ?? "";
   const params = { reason: body.params.reason ?? core.params?.reason, instructions: body.params.instructions ?? core.params?.instructions };
-  if (body.params.instructions !== undefined && body.params.instructions.trim() !== drafted.trim() && !isOperator(req)) throw new HttpError(403, "only operators edit a fix-up's instructions");
+  if (body.params.instructions !== undefined && body.params.instructions.trim() !== drafted.trim() && !(await mayRunRepo(req.user, row.repo))) throw new HttpError(403, "no write access to edit a fix-up's instructions");
   const composed = compose(core, extras, params);
   if ("note" in composed) throw new HttpError(400, composed.note);
   const v = await validateCard(db, row.repo, row.number, composed.card);
