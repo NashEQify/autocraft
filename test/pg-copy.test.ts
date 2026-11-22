@@ -7,7 +7,6 @@ import { DatabaseSync } from "node:sqlite";
 import { gzipSync } from "node:zlib";
 import { connect } from "../src/db.ts";
 import { copyDatabase, RUNTIME_TABLES, verifyDatabases } from "../src/db/copy.ts";
-import { connectDb } from "../src/db/open.ts";
 import { SCRATCH } from "./scratch.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
 
@@ -54,9 +53,9 @@ test("a SQLite database copied to Postgres and back verifies equal; a changed ro
     // The SQLite target keeps its own schema stamp (the copy never carries one over), so opening it migrates nothing.
     const stamp = (f: string) => { const d = new DatabaseSync(f, { readOnly: true }); try { return d.prepare("SELECT value FROM settings WHERE key = 'schema_stamp'").get()?.value; } finally { d.close(); } };
     assert.equal(stamp(back), stamp(file));
-    const b = await connectDb(back);
-    const hits = (await b.prepare("SELECT count(*) AS n FROM items_fts WHERE items_fts MATCH 'parser'").get()) as { n: number };
-    await b.close();
+    const b = connect(back);
+    const hits = b.prepare("SELECT count(*) AS n FROM items_fts WHERE items_fts MATCH 'parser'").get() as { n: number };
+    b.close();
     assert.equal(hits.n, 1, "the search index was rebuilt");
 
     const db = await pg.open();
