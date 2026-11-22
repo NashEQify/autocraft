@@ -29,10 +29,19 @@ export type ChangedFile = {
 };
 
 export type ImplementationCheck =
-  | { ok: true; files: ChangedFile[]; /** Changed text lines. */ changed: number; /** Changed Cargo manifests and lockfiles: allowed, and flagged in the PR body. */ manifests: string[] }
+  | {
+    ok: true; files: ChangedFile[]; /** Changed text lines. */ changed: number; /** Changed Cargo manifests and lockfiles: allowed, and flagged in the PR body. */ manifests: string[];
+    /**
+     * Manifest changes that make Cargo run new code at compile time (a proc-macro crate, build dependencies, `[patch]` or
+     * `[replace]` entries), one line each: such a change opens only as a draft PR for a maintainer. Empty when no manifest
+     * texts were given.
+     */
+    compileTime: CompileTimeChange[];
+  }
   | { ok: false; reason: string; /** Every problem, one line each, for the session's "undo" turn. */ problems: string[] };
 
 const MANIFEST = /(^|\/)Cargo\.(toml|lock)$/;
+const CARGO_TOML = /(^|\/)Cargo\.toml$/;
 const REGULAR = new Set(["100644", "100755"]);
 
 const modeWord = (m: string): string =>
@@ -52,10 +61,12 @@ function headerPath(line: string): string | null {
  * Checks a workspace diff (`git diff --binary` against the base commit, DIFF_FLAGS) for the PR: every path is safe and not a
  * trust path (workflows, build scripts per `scripts`, cargo and tool config, agent instruction files); no symlink, submodule
  * or mode change, and an added file is not executable; at most MAX_IMPLEMENTATION_FILES files, MAX_IMPLEMENTATION_LINES
- * changed text lines and MAX_BINARY_BYTES per binary file. Cargo.toml and Cargo.lock changes pass and are listed in `manifests`.
- * Whether it applies is decided by `git apply --check` in the clone.
+ * changed text lines and MAX_BINARY_BYTES per binary file. Cargo.toml and Cargo.lock changes pass and are listed in `manifests`;
+ * with `manifestTexts` (each changed Cargo.toml before and after, null where it does not exist) their compile-time changes
+ * are listed in `compileTime`. Whether it applies is decided by `git apply --check` in the clone, and pr.ts counts the
+ * committed lines again with `git diff --numstat`.
  */
-export function validateImplementation(diff: string | Uint8Array, scripts: BuildScripts): ImplementationCheck {
+export function validateImplementation(diff: string | Uint8Array, scripts: BuildScripts, manifestTexts?: ManifestTexts): ImplementationCheck {
   let text: string;
   if (typeof diff === "string") text = diff;
   else {
@@ -89,7 +100,12 @@ export function validateImplementation(diff: string | Uint8Array, scripts: Build
   if (files.length > MAX_IMPLEMENTATION_FILES) problems.push(`${files.length} files changed; at most ${MAX_IMPLEMENTATION_FILES}`);
   if (changed > MAX_IMPLEMENTATION_LINES) problems.push(`${changed} lines changed; at most ${MAX_IMPLEMENTATION_LINES}`);
   if (problems.length) return refuse(problems);
-  return { ok: true, files, changed, manifests: files.map((f) => f.path).filter((p) => MANIFEST.test(p)) };
+  const manifests = files.map((f) => f.path).filter((p) => MANIFEST.test(p));
+  const compileTime = manifestTexts ? manifests.filter((p) => CARGO_TOML.test(p)).flatMap((p) => {
+    const t = manifestTexts.get(p);
+    return t ? compileTimeChanges(p, t.before, t.after) : [{ path: p, what: "its text could not be read" }];
+  }) : [];
+  return { ok: true, files, changed, manifests, compileTime };
 }
 
 function refuse(problems: string[]): ImplementationCheck {
@@ -134,6 +150,7 @@ function section(lines: string[], problems: string[]): ChangedFile | null {
     if (Number(m[2]) > MAX_BINARY_BYTES) { problems.push(`${path}: a binary file over ${MAX_BINARY_BYTES / 1024 ** 2} MiB`); return null; }
     return f;
   }
+  if (rest[0]?.startsWith("@@")) { problems.push(`${path}: hunks without --- and +++ lines`); return null; }
   if (rest.length && rest[0]!.startsWith("--- ")) {
     // git ends the name with a tab when it holds a space.
     const from = rest[0]!.slice(4).replace(/\t$/, ""), to = rest[1]?.startsWith("+++ ") ? rest[1].slice(4).replace(/\t$/, "") : null;
@@ -149,6 +166,106 @@ function section(lines: string[], problems: string[]): ChangedFile | null {
     }
   }
   return f;
+}
+
+/** One compile-time change of a manifest: its path and what it does. */
+export type CompileTimeChange = { path: string; what: string };
+
+/** Per changed Cargo.toml path: its text at the base and in the change, null where the file does not exist. */
+export type ManifestTexts = Map<string, { before: string | null; after: string | null }>;
+
+/** A manifest's entries as `key path = value` lines: the table path joined with the dotted key, quotes and spaces dropped. */
+function manifestEntries(text: string | null): string[] {
+  if (text === null) return [];
+  const out: string[] = [];
+  let table: string[] = [];
+  let depth = 0;
+  for (const raw of text.replace(/\r\n/g, "\n").split("\n")) {
+    const line = stripComment(raw).trim();
+    if (!line) continue;
+    if (depth > 0) {
+      // A multi-line array: its lines belong to the entry before.
+      out[out.length - 1] += ` ${line}`;
+      depth = Math.max(0, depth + nesting(line));
+      continue;
+    }
+    const header = /^\[\[?(.*?)\]\]?$/.exec(line);
+    if (header) { table = keyPath(header[1]!); continue; }
+    const eq = equalsAt(line);
+    if (eq < 0) continue;
+    out.push(`${[...table, ...keyPath(line.slice(0, eq))].join(".")}=${line.slice(eq + 1).replace(/\s+/g, "")}`);
+    depth = Math.max(0, nesting(line.slice(eq + 1)));
+  }
+  return out;
+}
+
+/** The line without a `#` comment outside strings. */
+function stripComment(line: string): string {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) { if (c === "\\" && quote === "\"") i++; else if (c === quote) quote = null; }
+    else if (c === "\"" || c === "'") quote = c;
+    else if (c === "#") return line.slice(0, i);
+  }
+  return line;
+}
+
+/** Index of the `=` that ends the key (outside quotes), or -1. */
+function equalsAt(line: string): number {
+  let quote: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) { if (c === quote) quote = null; }
+    else if (c === "\"" || c === "'") quote = c;
+    else if (c === "=") return i;
+  }
+  return -1;
+}
+
+/** Opened minus closed brackets and braces outside strings. */
+function nesting(s: string): number {
+  let n = 0, quote: string | null = null;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (quote) { if (c === "\\" && quote === "\"") i++; else if (c === quote) quote = null; }
+    else if (c === "\"" || c === "'") quote = c;
+    else if (c === "[" || c === "{") n++;
+    else if (c === "]" || c === "}") n--;
+  }
+  return n;
+}
+
+/** A dotted TOML key as its parts, quotes removed and `_` read as `-` (Cargo takes both spellings). */
+function keyPath(key: string): string[] {
+  const parts: string[] = [];
+  let cur = "", quote: string | null = null;
+  for (const c of key.trim()) {
+    if (quote) { if (c === quote) quote = null; else cur += c; }
+    else if (c === "\"" || c === "'") quote = c;
+    else if (c === ".") { parts.push(cur.trim()); cur = ""; }
+    else cur += c;
+  }
+  parts.push(cur.trim());
+  return parts.map((p) => p.replace(/_/g, "-"));
+}
+
+/**
+ * The compile-time changes of one Cargo.toml, one line each: it becomes a proc-macro crate, its build dependencies are
+ * added or changed (any `build-dependencies` table, target-specific ones too), or it adds or changes `[patch]` or
+ * `[replace]` entries. Cargo runs such code while it builds, as it runs build.rs.
+ */
+export function compileTimeChanges(path: string, before: string | null, after: string | null): CompileTimeChange[] {
+  const was = manifestEntries(before), now = manifestEntries(after);
+  const had = new Set(was);
+  const added = now.filter((e) => !had.has(e));
+  const out: CompileTimeChange[] = [];
+  const procMacro = (es: string[]) => es.some((e) => /^lib\.proc-macro=true$/.test(e));
+  if (procMacro(now) && !procMacro(was)) out.push({ path, what: before === null ? "adds a proc-macro crate" : "makes the crate a proc-macro crate" });
+  const build = (e: string) => e.split("=")[0]!.split(".").includes("build-dependencies");
+  if (added.some(build)) out.push({ path, what: "adds or changes build dependencies" });
+  if (added.some((e) => /^(patch|replace)[.=]/.test(e))) out.push({ path, what: "adds or changes [patch] or [replace] entries" });
+  return out;
 }
 
 /**

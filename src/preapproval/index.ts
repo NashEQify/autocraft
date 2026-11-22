@@ -216,6 +216,12 @@ function notReviewableWhy(state: string, scopeAnswer: string | null): string {
 /** Why a pre-approval pinned to a head (a comment's) was refused: the PR has another head now. */
 export const HEAD_CHANGED = "the PR changed after your comment; comment again";
 
+/** preapproveMerge's refusal by rule (the PR, its state or the repo's approval); other errors may pass on a later try. `active`: one is in progress already. */
+export class PreapprovalRefused extends Error {
+  readonly active: boolean;
+  constructor(message: string, active = false) { super(message); this.active = active; }
+}
+
 /**
  * "Queue items" (a PR line): an operator's Merge answer given ahead, with no fix-up. A row starts in `review` at the current head,
  * the way a carried answer does, so the PR merges only after a take review, a clean pre-merge review and green CI there. The approval
@@ -230,22 +236,22 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
   const { repo, number, by, via } = o;
   const ref = `${repo}#${number}`;
   const it = await prRow(db, repo, number);
-  if (!it || it.kind !== "pr") throw new Error(`${ref} is not a pull request`);
-  if (it.state !== "OPEN") throw new Error(`${ref} is not open`);
+  if (!it || it.kind !== "pr") throw new PreapprovalRefused(`${ref} is not a pull request`);
+  if (it.state !== "OPEN") throw new PreapprovalRefused(`${ref} is not open`);
   const fact = await loadPrFact(db, repo, number);
   const planState = preapprovedState(fact);
-  if (!planState || planState === "out-of-scope" || planState === "integration") throw new Error(`${ref} is outside the pipeline's scope`);
-  if (NOT_REVIEWABLE.includes(planState)) throw new Error(`${ref} cannot be reviewed yet: ${notReviewableWhy(planState, fact?.scopeAnswer ?? null)}`);
+  if (!planState || planState === "out-of-scope" || planState === "integration") throw new PreapprovalRefused(`${ref} is outside the pipeline's scope`);
+  if (NOT_REVIEWABLE.includes(planState)) throw new PreapprovalRefused(`${ref} cannot be reviewed yet: ${notReviewableWhy(planState, fact?.scopeAnswer ?? null)}`);
   const head = it.head_oid;
   if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
   if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
-  if (!await mergeApprovalOf(db, repo)) throw new Error(`merging is not approved for ${repo}`);
+  if (!await mergeApprovalOf(db, repo)) throw new PreapprovalRefused(`merging is not approved for ${repo}`);
   const active = async () => await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("state", "in", ACTIVE));
-  if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
+  if (await active()) throw new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
   const at = iso();
   await db.write(async () => {
     // Checked again under the write lock: another writer may have started one since the first check.
-    if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
+    if (await active()) throw new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
     const id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions: "", state: "review", from_head: head, head, updated_at: at, fix_id: null }).returning("id")))!.id;
     await audit(db, by, "preapproval", ref, { id, state: "review", head, queued: "merge-queue", ...(via ? { via } : {}) });
   });
