@@ -35,10 +35,10 @@ test("an artifact upload that finishes after its task ended is refused and leave
       const req = request(`${w.url}/worker/tasks/${id}/artifacts/r.txt`, { method: "PUT", headers: { authorization: `Bearer ${key}`, "content-length": "10" } }, (res) => { res.resume(); resolve(res.statusCode ?? 0); });
       req.on("error", reject);
       req.write("hello");
-      setTimeout(async () => { await db.prepare("UPDATE build_tasks SET state = 'failed' WHERE id = ?").run(id); req.end("world"); }, 100);
+      setTimeout(async () => { await db.run(db.k.updateTable("build_tasks").set({ state: "failed" }).where("id", "=", id)); req.end("world"); }, 100);
     });
     assert.equal(status, 409);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM build_artifacts").get())!.n, 0);
+    assert.equal((await db.get(db.k.selectFrom("build_artifacts").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
     assert.deepEqual(readdirSync(join(dir, "artifacts")).filter((f) => f.startsWith(".upload-")), []);
   } finally {
     await w.close();
