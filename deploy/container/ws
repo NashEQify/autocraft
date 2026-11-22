@@ -31,7 +31,15 @@ die() { # code exit message...
   exit "$st"
 }
 
-now_ms() { date +%s%3N; }
+# Milliseconds on the kernel's monotonic clock (10 ms steps). `date +%s%3N` is not used: some date
+# implementations read the seconds and the nanoseconds separately, so successive calls can go back by
+# up to a second.
+now_ms() {
+  read -r _up _ </proc/uptime
+  _f=${_up#*.}
+  case $_f in 0?) _f=${_f#0} ;; esac
+  echo $((${_up%.*} * 1000 + _f * 10))
+}
 
 is_uint() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
 is_pos() { is_uint "$1" && case $1 in 0*) return 1 ;; esac; }
@@ -303,7 +311,10 @@ cmd_run() {
     else
       echo "ws: no such directory: $d" >"$c/$n.log"; rc=127
     fi
-    date +%s%3N >"$c/$n.end"
+    read -r _up _ </proc/uptime
+    _f=${_up#*.}
+    case $_f in 0?) _f=${_f#0} ;; esac
+    echo $((${_up%.*} * 1000 + _f * 10)) >"$c/$n.end"
     echo "$rc" >"$c/$n.exit.tmp"
     mv "$c/$n.exit.tmp" "$c/$n.exit"
   ' ws-wrap "$CALLS" "$n" "$t" "$cwd" "$ROOT/home" "$@" </dev/null >/dev/null 2>&1 &
@@ -689,7 +700,10 @@ launch_app() {
       ap=$!
       echo "$ap" >"$a/$n.pid"
       wait "$ap"; rc=$?
-      date +%s%3N >"$a/$n.end"
+      read -r _up _ </proc/uptime
+      _f=${_up#*.}
+      case $_f in 0?) _f=${_f#0} ;; esac
+      echo $((${_up%.*} * 1000 + _f * 10)) >"$a/$n.end"
       echo "$rc" >"$a/$n.exit.tmp"
       mv "$a/$n.exit.tmp" "$a/$n.exit"
     ' ws-app "$APPS" "$n" "$scale" "$ROOT/home" "$ROOT/src" "$DPY" "$setsid_bin" "$env_bin" "$bin" "$k" "$@" </dev/null >/dev/null 2>&1 9>&- &
