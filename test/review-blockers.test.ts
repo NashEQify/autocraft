@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { loadPlanSet } from "../src/core/plan-set.ts";
 import { cifixBucket } from "../src/core/decide.ts";
 import { detectAutopilot } from "../src/runner/autopilot.ts";
-import { isCounted, liveGate, markReviewsStale, staleReviews } from "../src/review/discussion.ts";
+import { discussionOf, isCounted, liveGate, markReviewsStale, staleReviews } from "../src/review/discussion.ts";
 import { recordReviewFailure, setReviewMinInterval } from "../src/review/gate.ts";
 import { saveOpus } from "../src/review/opus.ts";
 import { parseOpusReply } from "../src/review/opus-parse.ts";
@@ -46,9 +46,8 @@ test("on a reviewed head only a maintainer's comment makes the review stale; com
   const w = await noGaps(await (await (await world()).repo()).pr(1, { head: "h1", author: "regular" }));
   await review(w, 1, "h1", "hold");
   const at = new Date(Date.now() + 5000).toISOString();
-  const add = async (id: string, author: string, assoc: string, body: string) => await w.db.prepare(
-    "INSERT INTO comments (repo, number, id, kind, author, created_at, body, counted, author_association) VALUES ('app', 1, ?, 'comment', ?, ?, ?, ?, ?)")
-    .run(id, author, at, body, Number(isCounted({ author, association: assoc, prAuthor: "regular", body })), assoc);
+  const add = async (id: string, author: string, assoc: string, body: string) => await w.db.run(w.db.k.insertInto("comments")
+    .values({ repo: "app", number: 1, id, kind: "comment", author, created_at: at, body, counted: Number(isCounted({ author, association: assoc, prAuthor: "regular", body })), author_association: assoc }));
   await add("c1", "regular", "CONTRIBUTOR", "Fixed in abc123");
   assert.equal((await staleReviews(w.db)).has("app#1@h1"), false);
   await add("c2", "maint", "MEMBER", "Please also check the parser");
@@ -192,4 +191,24 @@ test("a review records why it ran: new head, same head again, same head after an
   await markReviewsStale(w.db, "test", "app", 1);
   await review(w, 1, "h2", "hold");
   assert.deepEqual(await triggers(), ["new-head", "new-head", "discussion", "operator"]);
+});
+
+test("the mirror discussion leaves out our own comments, our review posts and the pipeline's audited text", async () => {
+  const w = await (await (await world()).repo()).pr(1, { head: "h1", author: "regular" });
+  const at = (n: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, n)).toISOString();
+  const add = async (id: string, author: string, assoc: string, body: string, n: number) => await w.db.run(w.db.k.insertInto("comments")
+    .values({ repo: "app", number: 1, id, kind: "comment", author, created_at: at(n), body, counted: 1, author_association: assoc }));
+  await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
+  await w.db.run(w.db.k.insertInto("access").values({ login: "Dash", role: "operator" }));
+  await add("c1", "regular", "OWNER", "from the author", 1);
+  await add("c2", "bot", "CONTRIBUTOR", "our own comment", 2);
+  await add("c3", "maint", "MEMBER", "from a maintainer", 3);
+  await add("c4", "dash", "CONTRIBUTOR", "from a dashboard user", 4);
+  await add("c5", "stranger", "NONE", "from a stranger", 5);
+  await add("c6", "maint", "MEMBER", "posted by the pipeline", 6);
+  await add("c7", "maint", "MEMBER", "our review body", 7);
+  await w.db.run(w.db.k.insertInto("audit").values({ at: at(6), login: "maint", action: "comment", target: "app#1", details: JSON.stringify({ text: "posted by the pipeline" }) }));
+  await w.db.run(w.db.k.insertInto("review_posts").values({ repo: "app", number: 1, review_id: "c7", head_oid: "h1", posted_at: at(7) }));
+  const { entries } = await discussionOf(w.db, "app", 1);
+  assert.deepEqual(entries.map((e) => e.author), ["regular", "maint", "dash", "stranger"]);
 });
