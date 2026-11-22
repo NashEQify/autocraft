@@ -148,8 +148,9 @@ export function setMtimes(work: string, commit: string, trimmed: boolean): strin
 }
 
 /**
- * Moves every entry of `from` into `to` with renames (same file system), replacing what `to` holds at the same path, then
- * removes `from`. Each file lands whole, so a CARGO_HOME never holds a half-copied file.
+ * Moves every entry of `from` into `to` with renames (same file system), then removes `from`. What `to` already holds is
+ * kept: an earlier step fetched it for this checkout (a newer index cache, a newly pinned crate). Each file lands whole, so
+ * a CARGO_HOME never holds a half-copied file.
  */
 function mergeInto(from: string, to: string): void {
   if (!existsSync(to)) {
@@ -161,10 +162,7 @@ function mergeInto(from: string, to: string): void {
     const a = join(from, n), b = join(to, n);
     const sb = lstatSync(b, { throwIfNoEntry: false });
     if (sb?.isDirectory() && lstatSync(a).isDirectory()) mergeInto(a, b);
-    else {
-      if (sb) rmSync(b, { recursive: true, force: true });
-      renameSync(a, b);
-    }
+    else if (!sb) renameSync(a, b);
   }
   rmSync(from, { recursive: true, force: true });
 }

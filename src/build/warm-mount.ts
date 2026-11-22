@@ -89,8 +89,10 @@ export const warmNodeVolume = (use: WarmUse) => ({ name: "warm-node", persistent
 /** Optional: without the ConfigMap the pod still starts, and warm-copy starts cold. */
 export const warmVerifyVolume = () => ({ name: "warm-copy-verify", configMap: { name: WARM_VERIFY_CONFIGMAP, items: [{ key: "public.pem", path: "public.pem" }], optional: true } });
 
+/** Fixed room on top of a memory-backed target: a Cargo.lock change builds a second set of dependency units beside the copy. */
+export const WARM_TMPFS_HEADROOM_BYTES = 4 * 1024 ** 3;
 /** A memory-backed target's size limit, and what it adds to the pod's memory request and limit: the copy and what the build adds. */
-export const warmTmpfsBytes = (bytes: number): number => Math.ceil(bytes * WARM_MEMORY_FACTOR);
+export const warmTmpfsBytes = (bytes: number): number => Math.ceil(bytes * WARM_MEMORY_FACTOR) + WARM_TMPFS_HEADROOM_BYTES;
 
 /**
  * The warm-copy container's args, env and mounts (pods.ts adds image and resources). `target` is the target volume as the

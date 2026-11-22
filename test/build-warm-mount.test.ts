@@ -10,7 +10,7 @@ test("warm starts need the key on the task's node and, on the volume, the same C
   const prepared: Prepared = { env: { CARGO_TERM_COLOR: "always" }, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null, cacheVersion: "v1", cargoLock: "a".repeat(64) };
   const envHash = warmEnvHash(prepared);
   const status = { commit: "c".repeat(40), stored: 1, bytes: 5e9, image: "rust:1", envHash, synced: 1, cargoLock: "a".repeat(64) };
-  const base: WarmInputs = { target: "pvc", key: "deckcraft-0123", node: "k3s-2", status, image: "rust:1", envHash, checkout: ciCheckout("deckcraft"), cargoLock: prepared.cargoLock!, memoryLimitBytes: 16 * 1024 ** 3, memoryRoomBytes: 8 * 1024 ** 3, nodeMaxBytes: 64 * 1024 ** 3 };
+  const base: WarmInputs = { target: "pvc", key: "deckcraft-0123", node: "k3s-2", status, image: "rust:1", envHash, checkout: ciCheckout("deckcraft"), cargoLock: prepared.cargoLock!, memoryLimitBytes: 16 * 1024 ** 3, memoryRoomBytes: 16 * 1024 ** 3, nodeMaxBytes: 64 * 1024 ** 3 };
 
   assert.ok(decideWarm(base).use);
   assert.equal(decideWarm({ ...base, status: null }).use, null, "the node holds no version");
