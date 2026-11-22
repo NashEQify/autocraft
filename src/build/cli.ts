@@ -15,7 +15,7 @@ import { inClusterApi } from "./kube-api.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
-import { enqueue, JobError } from "../runner/jobs.ts";
+import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
 import { capJson, createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
@@ -374,13 +374,17 @@ async function workspace(args: string[]): Promise<void> {
     const envId = workspaceId === null ? await envOf(opt) : opt.get("env") ?? "";
     const session = await run(async () => await requestTrySession(db, { repo, baseSha: sha, item, prompt, envId, keep: opt.has("keep"), ...(deadlineSec !== undefined && { deadlineSec }), workspaceId, by: "cli" }));
     try {
-      const job = await enqueue(db, TRY_STEP, { repo, session }, "cli");
-      await db.run(db.k.updateTable("workspace_sessions").set({ job_id: job.id }).where("id", "=", session));
+      // Queued, not run here: the runner runs the job, so a runner restart resumes it.
+      const job = await enqueue(db, TRY_STEP, { repo, session }, CLI_QUEUE_BY);
+      // Recorded now so the session sweep sees a job that ends before it starts; a job that already claimed it keeps it.
+      await db.run(db.k.updateTable("workspace_sessions").set({ job_id: job.id }).where("id", "=", session).where("job_id", "is", null));
       console.log(`session ${session}: job ${job.id} queued; its log has the result`);
     } catch (e) {
+      const why = (e as Error).message ?? String(e);
+      await db.run(db.k.updateTable("workspace_sessions").set({ state: "failed", outcome: `not queued: ${why}`.slice(0, 300), ended_at: new Date().toISOString() })
+        .where("id", "=", session).where("job_id", "is", null));
       if (!(e instanceof JobError)) throw e;
-      await db.run(db.k.updateTable("workspace_sessions").set({ state: "failed", outcome: `not queued: ${e.message}`.slice(0, 300), ended_at: new Date().toISOString() }).where("id", "=", session));
-      die(`session ${session} not queued: ${e.message}`);
+      die(`session ${session} not queued: ${why}`);
     }
   } else if (sub === "end") {
     const id = idOf(rest[0]);

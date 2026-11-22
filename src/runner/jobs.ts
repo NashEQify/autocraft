@@ -19,6 +19,8 @@ export const RUNNER_STOPPED = "The runner stopped while this job ran; start it a
 /** Error of a job the runner stopped for running past its step's deadline; set when the stop is asked, so the job can finish its current item. */
 export const DEADLINE_ERROR = /^stopped: (ran past|no progress for) /;
 export const now = (): string => new Date().toISOString();
+/** Requester of a job that a command line queues for the runner to run (`workspace try`), as opposed to a command-line run (`cli`). */
+export const CLI_QUEUE_BY = "cli-queue";
 
 export class JobError extends Error {
   status: number;
@@ -227,7 +229,8 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
  * start, with a fresh deadline. Its remote calls stay for the resumed run to adopt (enqueueCall), with their agent runs;
  * the stopped process's local model calls, model-queue waits and work leases end. False, and nothing changes, when it may
  * not resume: a cancel was asked, it was told to stop at its deadline, it resumed MAX_RESUMES times already, or it is a
- * command-line run (`requested_by` cli: its process belongs to the command, which records its end).
+ * command-line run (`requested_by` cli: its process belongs to the command, which records its end). A job a command only
+ * queues (CLI_QUEUE_BY) runs under the runner like any other, so it resumes.
  */
 export async function resumeJob(db: Db, id: number, why: string): Promise<boolean> {
   const r = await db.get(db.k.updateTable("jobs")

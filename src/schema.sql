@@ -506,7 +506,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   step TEXT NOT NULL,
   params TEXT NOT NULL,               -- JSON object, validated
-  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot) or 'cli'
+  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot), 'cli' (a command-line run) or 'cli-queue' (queued by a command)
   requested_at TEXT NOT NULL,
   state TEXT NOT NULL,                -- queued | running | done | failed | cancelled
   started_at TEXT, ended_at TEXT,

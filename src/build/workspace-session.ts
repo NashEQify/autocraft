@@ -1,12 +1,14 @@
 // A model session in a workspace, recorded in workspace_sessions. `workspace try` (kind 'try') is the operator's test
 // session: the CLI records the request, the `workspace-try` job creates or takes the workspace, waits for it to be ready,
 // runs one bound remote call (served by awaitCall) and logs what the session did. The prompt is operator text: it goes
-// into the call's stdin only, never into job params, progress or the job log, which every signed-in user can read.
+// into the call's stdin and so into its agent run's prompt text, which operators and maintainers can read, and never
+// into job params, progress or the job log, which every signed-in user can read.
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { promptTier } from "../remote/bundle.ts";
 import { awaitCall, type Outcome } from "../remote/calls.ts";
+import type { JobState } from "../../web/src/api/types.ts";
 import { trackedNames } from "../repos.ts";
 import type { Params, StepContext } from "../runner/steps.ts";
 import { BuildError } from "./envs.ts";
@@ -26,8 +28,13 @@ const TRY_MAX_TURNS = 400;
 /** The launcher fails a workspace that takes longer than this to start and seed; a minute more covers its pass interval. */
 export const READY_LIMIT_MS = PENDING_LIMIT_MS + SEED_LIMIT_MS + 60_000;
 const READY_POLL_MS = 3000;
-/** The pod outlives the call by its seeding time and a margin, so the session's own limit ends it first. */
-const POD_MARGIN_SEC = 25 * 60;
+/** The most a session call may wait in the remote call queue in all; past it the call is withdrawn and the session fails. */
+export const TRY_QUEUE_WAIT_MS = 30 * 60_000;
+/**
+ * The pod's time limit (activeDeadlineSeconds, counted from its start) over the call's: seeding, the call's longest wait in
+ * the queue, and a margin for the lease's start and end, so the call's own limit or the queue wait ends the session first.
+ */
+const POD_MARGIN_SEC = (SEED_LIMIT_MS + TRY_QUEUE_WAIT_MS) / 1000 + 10 * 60;
 /** Workspaces a try can take: live ones with a pod coming or up (nothing restarts a parked pod yet). */
 const TAKEN_STATES = ["requested", "starting", "seeding", "ready"];
 
@@ -95,7 +102,12 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
   if (!s || s.prompt === null) throw new Error(`no try session ${id}`);
   const update = async (set: { state?: string; outcome?: string; workspace_id?: number; remote_call_id?: number; ended_at?: string }) =>
     await db.run(db.k.updateTable("workspace_sessions").set({ ...set, updated_at: iso() }).where("id", "=", id));
-  await db.run(db.k.updateTable("workspace_sessions").set({ job_id: ctx.job.id, state: "starting", updated_at: iso() }).where("id", "=", id));
+  // One job runs a session: the first to claim it, or the same job resumed. Another job stops here and touches nothing.
+  const claimed = await db.get(db.k.updateTable("workspace_sessions").set({ job_id: ctx.job.id, updated_at: iso() })
+    .where("id", "=", id).where((eb) => eb.or([eb("job_id", "is", null), eb("job_id", "=", ctx.job.id)])).where("state", "in", ["queued", "starting", "running"])
+    .returning("state"));
+  if (!claimed) throw new Error(`session ${id} belongs to another job or has ended`);
+  if (claimed.state === "queued") await update({ state: "starting" });
   const model = IMPLEMENT.models[0]!;
   ctx.log(`session ${id}: ${s.repo}#${s.item} at ${s.base_sha.slice(0, 8)}, ${model} (effort ${IMPLEMENT.effort}), time limit ${s.deadline_sec} s${s.keep ? ", workspace kept" : ""}`);
 
@@ -113,52 +125,59 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
   };
 
   try {
-    if (wsId === null) {
-      // The workspace and the session's link to it in one write, so a resumed job takes the same workspace.
-      wsId = await db.write(async () => {
-        const w = await createWorkspace(db, { repo: s.repo, baseSha: s.base_sha, envId: s.env_id, limits: { deadlineSec: s.deadline_sec + POD_MARGIN_SEC }, owner: `job ${ctx.job.id}` });
-        await update({ workspace_id: w });
-        return w;
-      });
-      ctx.log(`workspace ${wsId} requested on ${s.env_id}`);
-    }
-    // An external wait (registry GLOBAL_WAITS "Workspace start"): the launcher moves the row and fails it past its own limits.
-    const waitFrom = Date.now();
-    for (let last = "";;) {
-      const w = await getWorkspace(db, wsId);
-      if (!w) return await fail(`workspace ${wsId} is gone`);
-      if (w.state === "ready") break;
-      if (!TAKEN_STATES.includes(w.state)) return await fail(`workspace ${wsId} is ${w.state}${w.error ? `: ${w.error}` : ""}`);
-      if (Date.now() - waitFrom > READY_LIMIT_MS) return await fail(`workspace ${wsId} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
-      if (await ctx.cancelled()) return await fail("cancelled while the workspace started");
-      if (w.state !== last) {
-        last = w.state;
-        await ctx.progress(`session ${id}: workspace ${wsId} ${w.state}`);
-        ctx.log(`workspace ${wsId}: ${w.state}`);
+    let callId = s.remote_call_id;
+    if (callId !== null) ctx.log(`session ${id}: resuming with model call ${callId}`);
+    else {
+      if (wsId === null) {
+        // The workspace and the session's link to it in one write, so a resumed job takes the same workspace.
+        wsId = await db.write(async () => {
+          const w = await createWorkspace(db, { repo: s.repo, baseSha: s.base_sha, envId: s.env_id, limits: { deadlineSec: s.deadline_sec + POD_MARGIN_SEC }, owner: `job ${ctx.job.id}` });
+          await update({ workspace_id: w });
+          return w;
+        });
+        ctx.log(`workspace ${wsId} requested on ${s.env_id}`);
       }
-      await sleep(READY_POLL_MS);
-    }
-    ctx.log(`workspace ${wsId} ready`);
+      // An external wait (registry GLOBAL_WAITS "Workspace start"): the launcher moves the row and fails it past its own limits.
+      const waitFrom = Date.now();
+      for (let last = "";;) {
+        const w = await getWorkspace(db, wsId);
+        if (!w) return await fail(`workspace ${wsId} is gone`);
+        if (w.state === "ready") break;
+        if (!TAKEN_STATES.includes(w.state)) return await fail(`workspace ${wsId} is ${w.state}${w.error ? `: ${w.error}` : ""}`);
+        if (Date.now() - waitFrom > READY_LIMIT_MS) return await fail(`workspace ${wsId} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
+        if (await ctx.cancelled()) return await fail("cancelled while the workspace started");
+        if (w.state !== last) {
+          last = w.state;
+          await ctx.progress(`session ${id}: workspace ${wsId} ${w.state}`);
+          ctx.log(`workspace ${wsId}: ${w.state}`);
+        }
+        await sleep(READY_POLL_MS);
+      }
+      ctx.log(`workspace ${wsId} ready`);
 
-    const system = SYSTEM.replaceAll("{{repo}}", s.repo).replace("{{sha}}", s.base_sha).replace("{{item}}", String(s.item));
-    const callId = await queueWorkspaceCall(db, {
-      workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("fixissue.patch"), effort: IMPLEMENT.effort,
-      stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }],
-    });
-    await update({ remote_call_id: callId, state: "running" });
-    ctx.log(`session ${id}: model call ${callId} queued`);
+      const system = SYSTEM.replaceAll("{{repo}}", s.repo).replace("{{sha}}", s.base_sha).replace("{{item}}", String(s.item));
+      callId = await queueWorkspaceCall(db, {
+        workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("fixissue.patch"), effort: IMPLEMENT.effort,
+        stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }],
+      });
+      await update({ remote_call_id: callId, state: "running" });
+      ctx.log(`session ${id}: model call ${callId} queued`);
+    }
+    if (wsId === null) return await fail("the session has a model call but no workspace");
     await ctx.progress(`session ${id}: model call ${callId} in workspace ${wsId}`);
     ctx.handled(1);
     let out: Outcome;
     try {
-      out = await awaitCall(db, callId, { log: ctx.log });
+      // A resumed job waits on the same call, even one that ended while no job waited (its outcome is read from the row).
+      out = await awaitCall(db, callId, { log: ctx.log, maxWaitMs: TRY_QUEUE_WAIT_MS });
     } catch (e) {
-      // Withdrawn for want of a Task Runner, cancelled or stopped: recorded, then the job ends the way the error says.
+      // Withdrawn for want of a Task Runner or past the queue wait, cancelled or stopped: recorded, then the job ends the way the error says.
       await finish("failed", `the model call ended: ${(e as Error).message}`);
       throw e;
     }
 
     const outcome = describeOutcome(out);
+    await update({ outcome: outcome.slice(0, 300) });
     ctx.log(`session ${id}: model call ${callId} ${outcome}`);
     const stats = await sessionStats(db, wsId, callId);
     ctx.log(`session ${id}: ${stats.calls} workspace tool calls, ${formatMs(stats.shellMs)} of shell time`);
@@ -234,4 +253,27 @@ async function logDiffStat(ctx: StepContext, wsId: number): Promise<string | nul
     ctx.log(`diff stat: ${(e as Error).message}`);
     return null;
   }
+}
+
+/**
+ * Ends the sessions whose job ended without ending them: a job stopped by its deadline, a cancel or a runner stop that
+ * it may not resume from exits without running the session's own cleanup. Each is marked failed and its workspace ended
+ * unless kept. A job queued to resume keeps its session. Run on the launcher's passes; returns the sessions ended.
+ */
+export async function sweepSessions(db: Db, log: (line: string) => void = () => {}): Promise<number> {
+  const rows = await db.all(db.k.selectFrom("workspace_sessions as s").innerJoin("jobs as j", "j.id", "s.job_id")
+    .select(["s.id", "s.workspace_id", "s.keep", "j.id as job", "j.state as job_state", "j.error"])
+    .where("s.state", "not in", ["done", "failed"]).where("j.state", "in", ["done", "failed", "cancelled"] satisfies JobState[]));
+  let n = 0;
+  for (const r of rows) {
+    const outcome = `job ${r.job} ended (${r.job_state}${r.error ? `: ${r.error}` : ""}) before the session did`.slice(0, 300);
+    const at = iso();
+    const ch = await db.run(db.k.updateTable("workspace_sessions").set({ state: "failed", outcome, ended_at: at, updated_at: at })
+      .where("id", "=", r.id).where("state", "not in", ["done", "failed"]));
+    if (!ch.changes) continue;
+    n++;
+    const ended = r.workspace_id !== null && !r.keep && await endWorkspace(db, r.workspace_id);
+    log(`workspace sessions: session ${r.id} failed: ${outcome}${ended ? `; workspace ${r.workspace_id} ended` : ""}`);
+  }
+  return n;
 }
