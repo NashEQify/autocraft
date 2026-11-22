@@ -87,3 +87,27 @@ While the query is slow, every planner pass and every guarded GitHub write waits
 ## Follow-up: attribution
 
 Queries carry no SQL comment tags, so the insights cannot split load by loop. A bounded tag per caller (planner pass, runner step, dashboard topic, launcher pass, guard) would show which loop runs a pattern without a code search.
+
+## After fix 1
+
+Fixes 1 and 2 shipped together: each item is a correlated key lookup in the `live` CTE, and partial loads count pairs only for the items being loaded. New pods started at 21:21. The numbers below cover 21:21 to 21:32.
+
+| Query | Calls | Mean | Rows read per call | CPU s |
+|---|---|---|---|---|
+| Pair counts, before (last hour up to 21:21) | 43 | 71 s | 102 M | 2,965 |
+| Pair counts, full load (new pattern) | 34 | 0.27 s | 198 K | 8.9 |
+| Pair counts, scoped to loaded refs (new pattern) | 162 | 17 ms | 6 K | 2.3 |
+
+The old pattern last ran at 20:58 plus a few in-flight runs ending 21:20, and has not run since the deploy. Total query CPU fell from about 4,500 CPU seconds per hour, about 1.25 cores busy, to about 0.15 cores. Samples of `pg_stat_activity` after the deploy show no long-running client queries.
+
+The CPU now goes to the patterns that were second to sixth before. Each is under 2% of the last hour:
+
+| # | Pattern | Mean | Rows read per call | Code |
+|---|---|---|---|---|
+| 1 | Discussion aggregates over `comments` | 0.77 s | 261 K | `src/review/discussion.ts:308`, `:324` |
+| 2 | Item facts rows | 1.1 s | 980 K | `src/core/issue-facts.ts:59` |
+| 3 | Classifications load | 0.88 s | 26 K | `src/core/issue-facts.ts:194` |
+| 4 | Workspace snapshot comment paging | 29 ms (1,773 calls) | 2 K | `src/itemtools/snapshot.ts:245` |
+| 5 | PR facts rows | 0.52 s | 491 K | PR facts loader |
+
+Fixes 3 to 7 remain open and are no longer urgent.
