@@ -9,6 +9,7 @@ import { choicesJson, storeParsedChoices, type ParsedChoices } from "../decide/c
 import { coreSummaries } from "../decide/choices.ts";
 import { ITEM_BODY_LIMIT, ITEM_COMMENT_LIMIT, ITEM_COMMENTS, ITEM_DIFF_LIMIT, MESSAGE_MAX, OPENING_MAX, PERSON_KINDS, type PersonKind, type TurnKind } from "./types.ts";
 import { flatMapSeq } from "../async-seq.ts";
+import { withdrawCall } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import type { NotNull } from "kysely";
@@ -477,7 +478,15 @@ export async function withdrawTurn(db: Db, repo: string, n: number, by: { login:
     const wait = await pendingTurn(db, repo, n);
     if (!wait || wait.kind !== "maintainer") throw new ConversationError(409, "no maintainer's message waits for Opus here");
     if (!by.operator && wait.login.toLowerCase() !== by.login.toLowerCase()) throw new ConversationError(403, "only an operator, or the person who wrote it, withdraws a message");
-    await settleWait(db, repo, n, wait, "failed", `withdrawn by ${by.login}`);
+    const why = `withdrawn by ${by.login}`;
+    await settleWait(db, repo, n, wait, "failed", why);
+    // The turn's model call (and its follow-ups) is bound to the writer's login: a queued one is dropped and a leased one is cancelled,
+    // so the waiting job gets a failed outcome at its next poll instead of running Opus for a message nobody waits on.
+    const live = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "for_login"]).where("prompt_id", "=", "conversation.turn").where("repo", "=", repo).where("state", "in", ["queued", "leased"]));
+    for (const c of live) {
+      if (c.for_login?.toLowerCase() !== wait.login.toLowerCase() || !(JSON.parse(c.items) as { repo: string; number: number }[]).some((i) => i.repo === repo && i.number === n)) continue;
+      await withdrawCall(db, Number(c.id), why);
+    }
   });
 }
 

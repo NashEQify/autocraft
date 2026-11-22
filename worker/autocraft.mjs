@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.7";
+export const HELPER_VERSION = "1.3.8";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).

@@ -61,7 +61,13 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
   if (p.limit !== undefined) todo = (await takersFirst(db, todo, (c) => [c.repo], (c) => [c], CONVERSATION_PROMPT.id)).slice(0, Math.max(0, p.limit));
   const checkouts = new Map<string, Promise<string | null>>();
   let answered = 0, handled = 0;
+  // One running turn per maintainer login: the next one waits, so its reference check does not queue behind it on the same runner.
+  const busy = new Set<string>();
+  const loginOf = (i: number): string | undefined => ownerOf(todo[i]!)?.toLowerCase();
   await pool(todo.map((c, k) => async () => {
+    const mine = ownerOf(c)?.toLowerCase();
+    if (mine !== undefined) busy.add(mine);
+    try {
     if (await p.cancelled?.()) return;
     const { repo, number: n } = c;
     const start = now();
@@ -123,14 +129,17 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     } finally {
       if (forLogin !== undefined && !released) p.onHandled?.(++handled);
     }
-  }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined), { first: p.kind !== "maintainer" });
+    } finally {
+      if (mine !== undefined) busy.delete(mine);
+    }
+  }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined, (i) => { const l = loginOf(i); return l !== undefined && busy.has(l); }), { first: p.kind !== "maintainer" });
   return answered;
 }
 
 /** The shared queue's room for the operators' messages; a maintainer's own message always has room and a taker, its own runners, which take it beside their other calls (checked when it starts). */
-const ownFirst = (shared: PoolRoom, own: (i: number) => boolean): PoolRoom => ({
+const ownFirst = (shared: PoolRoom, own: (i: number) => boolean, busy: (i: number) => boolean): PoolRoom => ({
   round: () => shared.round(),
-  room: async (i) => (own(i) ? 1 : await shared.room(i)),
+  room: async (i) => (own(i) ? (busy(i) ? 0 : 1) : await shared.room(i)),
   taker: async (i) => own(i) || await shared.taker(i),
 });
 

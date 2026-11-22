@@ -110,10 +110,19 @@ export function Composer({ repo, number, talk, withdrawable, operator, commenter
       </div>
       </>
     );
-  if (commenter && feedbackOn)
+  // Someone who lost the right to talk still withdraws their own waiting message.
+  if (withdrawable || (commenter && feedbackOn))
     return (
       <div className={shell}>
-        <FeedbackBox d={feedbackOn} />
+        {commenter && feedbackOn && <FeedbackBox d={feedbackOn} />}
+        {withdrawable && (
+          <div className={`flex justify-end ${commenter && feedbackOn ? "mt-2" : ""}`}>
+            <Button variant="secondary" className="max-md:h-11" disabled={sending} onClick={() => void withdraw()}>
+              Withdraw message
+            </Button>
+          </div>
+        )}
+        {error && <p className="mt-1.5 text-xs text-bad">{error}</p>}
       </div>
     );
   return null;
