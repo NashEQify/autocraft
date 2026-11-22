@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { authenticate, createEnv, kubeReport } from "../src/build/envs.ts";
-import type { ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
+import type { CapacityApi, ExecResult, KNode, KPod, KResourceQuota, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { DEFAULT_SETTINGS, groupsOf, kubeCapabilities, parseSettings, quantity, stepPod, type Prepared } from "../src/build/pods.ts";
 import { claim, createTask, getTask } from "../src/build/tasks.ts";
@@ -32,7 +32,7 @@ after(async () => {
 type Pod = Omit<KPod, "spec"> & { spec: Record<string, any> };
 const matches = (labels: Record<string, string> | undefined, selector: string) => selector.split(",").every((kv) => labels?.[kv.split("=")[0]!] === kv.split("=")[1]);
 
-class FakeKube implements KubeApi {
+class FakeKube implements KubeApi, CapacityApi {
   pods = new Map<string, Pod>();
   pvcs = new Map<string, { metadata: { name: string; labels?: Record<string, string> } }>();
   /** Makes the next creates that match throw, as a rate limit or quota would. */
@@ -53,6 +53,14 @@ class FakeKube implements KubeApi {
   async createPvc(_ns: string, pvc: object) { this.#refused("pvc", pvc); const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
   async deletePvc(_ns: string, name: string) { this.pvcs.delete(name); }
   async getNode() { return null; }
+  /** What the capacity reads return; `forbidden` makes the cluster-wide reads throw as a 403 would. */
+  nodes: object[] = [];
+  clusterPods: object[] = [];
+  quotas: object[] = [];
+  forbidden = false;
+  async listNodes() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.nodes) as KNode[]; }
+  async listClusterPods() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.clusterPods) as KPod[]; }
+  async getQuota() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.quotas) as KResourceQuota[]; }
   async canI() { return true; }
   /** What the next execs return, and the argv of each call. */
   execResult: ExecResult = { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false };
