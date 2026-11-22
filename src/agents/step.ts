@@ -104,7 +104,8 @@ type Reply = { text: string; usage: Usage; problems?: LintProblem[]; fixTurn?: b
 
 /**
  * Runs one declared step on `input`: the call, the parse, up to `attempts` calls (a parse error or a failed call repeats
- * the call; a parser that returns `rest` repeats it for the rest only), the usage row, and the error result.
+ * the call; a parser that returns `rest` repeats it for the rest only), the usage row, and the error result. A call the
+ * model's safety filter declined, which the queue already ran once more elsewhere, ends the attempts with its error.
  * Values of every answered attempt are in `values`, in order; `rest` is what no attempt answered. A call withdrawn for lack of
  * a taker (NoTakerError) ends the attempts: with earlier answers they are returned with the rest unanswered, as when the
  * attempts run out; without, the usage of what ran is saved and the error is thrown.
@@ -124,11 +125,13 @@ export async function runModelStep<I, V, C = void>(db: Db, step: ClaudeStep<I, V
     if (attempt > 0 && step.backoffMs) await sleep(step.backoffMs);
     opts.onAttempt?.(todo, attempt);
     let r: Reply | null;
-    try { r = await call(db, step, todo, opts); } catch (e) {
+    let refusal: string | null = null;
+    try { r = await call(db, step, todo, { ...opts, onRefused: (e) => { refusal = e; opts.onRefused?.(e); } }); } catch (e) {
       if (!(e instanceof NoTakerError)) throw e;
       if (!values.length) untaken = e;
       break;
     }
+    if (!r && refusal !== null) { error = refusal; break; }
     if (!r) { error = "no answer"; continue; }
     usage = add(usage, r.usage);
     if ("text" in r) opts.onReply?.(r as LintedReply);

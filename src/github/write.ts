@@ -48,10 +48,10 @@ function covers(g: Guarded | Grant, repo: string, number?: number): void {
 }
 
 /** A push to the pipeline's own branch and a new PR are made only under the grants of the steps that open the pipeline's own PRs. */
-function opensOwnPr(g: Grant, repo: string): void {
+function opensOwnPr(g: Grant | Guarded<"implement">, repo: string): void {
   covers(g, repo);
-  const ok = g.scope === "item" ? g.action.kind === "fixissue-collect" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
-  if (!ok) throw new Error(`a ${g.scope === "item" ? `${g.action.kind} grant` : `grant for ${g.need ?? "no approval"}`} does not allow a push to a new branch or a new pull request`);
+  const ok = g.scope === "repo" ? g.need === "main-fix" || g.need === "merge" || g.need === "security" : g.action.kind === "implement";
+  if (!ok) throw new Error(`a ${g.scope === "repo" ? `grant for ${g.need ?? "no approval"}` : `${g.action.kind} grant`} does not allow a push to a new branch or a new pull request`);
 }
 
 /**
@@ -127,9 +127,9 @@ async function laneQuery(w: Writer, g: Guarded | Grant, q: Querier, kind: WriteK
 // identities) are exempt.
 export const PACE_PER_MINUTE = 60;
 export const PACE_PER_HOUR = 400;
-/** Bulk writes (the label writes of the labels-apply step) start only while the key has used less than this share of each limit, so they leave room for the writes that move PRs. */
+/** Bulk writes (the label writes of the labels-apply step, the PR status comments) start only while the key has used less than this share of each limit, so they leave room for the writes that move PRs. */
 export const BULK_SHARE = 0.5;
-const BULK_ACTIONS = new Set(["labels-apply"]);
+const BULK_ACTIONS = new Set(["labels-apply", "pr-status-comment", "pr-status-comment-edit"]);
 /** The longest a write waits for the budget; past it the write is refused as paced and the caller retries later. */
 export const PACE_MAX_WAIT_MS = 15_000;
 /** After a secondary-limit failure the key pauses this long. */
@@ -606,7 +606,7 @@ export function ghAskComment(w: Writer, exec: Exec, action: string, g: Guarded<A
   return ghComment(w, g, exec, action, { repo: g.repo, number: g.number, pr: true }, note, text, details);
 }
 
-/** `action` is the audit action of the caller's stage (act, fixup or fixissue comment). Not for asks: those use ghAskComment. */
+/** `action` is the audit action of the caller's stage (act, fixup or implement comment). Not for asks: those use ghAskComment. */
 export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; pr: boolean }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
   exec = await laneExec(w, g, exec);
@@ -647,13 +647,14 @@ export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, ac
     (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
 }
 
-export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string }, note: Note, details: Details = {}): Promise<ExecResult> {
+/** Opens a PR from the pipeline's own branch; `draft` opens it as a draft. */
+export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string; draft?: boolean }, note: Note, details: Details = {}): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
   exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
   // GitHub keeps one open PR per head and base: a resumed job's PR is the one its earlier run opened, whatever the text.
-  return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body },
-    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, o.base, o.head));
+  return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body, ...(o.draft && { draft: true }) },
+    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-", ...(o.draft ? ["--draft"] : [])], body, onceKey(o.repo, o.base, o.head));
 }
 
 export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
@@ -737,6 +738,46 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
   }
 }
 
+/** Runs `gh` under the grant's app lane; a not-sent failure when the write would not be the GitHub App's (the instance writes as the box account). Never the box account. */
+async function asBot(w: Writer, g: GuardedRepo, exec: Exec, args: string[], input?: string): Promise<ExecResult> {
+  if (!await inAppLane(w, g)) return { code: 1, stdout: "", stderr: "app identity: the instance writes as the box account, not the GitHub App", sent: false };
+  return (await laneExec(w, g, exec))("gh", args, input === undefined ? undefined : { input });
+}
+
+/**
+ * Opens an issue as the GitHub App for a Discord reporter who chose "Submit for me": audited as `discord-issue-bot`
+ * with the grant's identity, with the URL and number but not the text. Throws an IssueError like createIssue.
+ */
+export async function createBotIssue(w: Writer, g: GuardedRepo, exec: Exec, o: { repo: string; title: string; body: string }, note: Note): Promise<{ number: number; url: string }> {
+  covers(g, o.repo);
+  const body = posted(note, o.body);
+  const title = scrub(o.title);
+  let r: ExecResult;
+  try {
+    r = await recorded(w, await idOf(w, g), "discord-issue-bot", o.repo, {}, () => asBot(w, g, exec, ["issue", "create", "--repo", slugOf(o.repo), "--title", title, "--body-file", "-"], body),
+      (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
+      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`));
+  } catch (e) {
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
+  }
+  const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
+  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m)); }
+  if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
+  return { number: Number(url[1]), url: url[0] };
+}
+
+/** Adds a label to an issue the GitHub App filed for a Discord reporter; audited as `discord-issue-label` with the grant's identity. A refusal is recorded and returned as false, never thrown. */
+export async function labelBotIssue(w: Writer, g: GuardedRepo, exec: Exec, o: { repo: string; number: number; label: string }): Promise<boolean> {
+  try {
+    covers(g, o.repo);
+    const r = await recorded(w, await idOf(w, g), "discord-issue-label", refOf(o.repo, o.number), { label: o.label },
+      () => asBot(w, g, exec, ["issue", "edit", String(o.number), "--repo", slugOf(o.repo), "--add-label", o.label]), undefined, (x) => (x.code === 0 ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`));
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Approves one Actions run that waits for a maintainer's approval (a run from an outside contributor's PR). */
 export async function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
   exec = await laneExec(w, g, exec);
@@ -805,12 +846,17 @@ export function pushRepin(w: Writer, g: GuardedRepo, git: Pick<Git, "git">, o: {
   return pushed(w, g, git, "autorepin-push", refOf(o.repo, o.number), o, `--force-with-lease=refs/heads/${o.branch}:${o.head}`, { ...details, from: o.head }, { repo: o.repo, number: o.number });
 }
 
-/** Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. */
-export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
+/**
+ * Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. Under a PR grant (a revision of our open PR, whose
+ * push outcome this is) the commit goes on top of the guarded head, and git refuses the push when the branch has moved since
+ * (a base merge or someone else's push).
+ */
+export function pushOwnBranch(w: Writer, g: Grant | Guarded<"implement">, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/.test(o.remote) || o.branch.startsWith("-") || !/^[0-9a-f]{40,64}$/.test(o.sha)) throw new Error("the push target is not a repository and branch");
+  const lease = g.scope === "pr" ? `--force-with-lease=refs/heads/${o.branch}:${g.head}` : "--force";
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
-  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then(async (r) => {
+  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, lease, details, { repo: o.repo, number: g.scope === "pr" ? g.number : null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
     if (r.code === 0) try { await w.db.run(w.db.k.insertInto("main.own_commits").values({ repo: o.repo, sha: o.sha, action, at: new Date().toISOString() }).onConflict((oc) => oc.doNothing())); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;

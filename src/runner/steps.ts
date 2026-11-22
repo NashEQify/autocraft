@@ -12,11 +12,14 @@ import { featureOn } from "../build/features.ts";
 import { envVar } from "../env.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { stepDeadlineMin } from "./deadlines.ts";
+import { CLAUDE_PROMPTS } from "../prompts/index.ts";
+import { IMPLEMENT_BUCKETS } from "../implement/types.ts";
 import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
 
-type Base = { name: string; label: string; help?: string; required?: boolean };
+/** `cliOnly`: set from the command line only; the dashboard's run-step form does not offer it and refuses it. */
+type Base = { name: string; label: string; help?: string; required?: boolean; cliOnly?: boolean };
 export type ParamDef =
   | (Base & { kind: "enum"; options: string[]; default?: string })
   | (Base & { kind: "repo" })                                        // a tracked repo
@@ -128,10 +131,18 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
   return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
 }
 
-/** Opening fix PRs from issues is opt-in per repo. */
-async function checkFixIssueApproved(db: Db, p: Params): Promise<string | null> {
-  const { fixIssueApprovalOf } = await import("../fixissue/approval.ts");
-  return await fixIssueApprovalOf(db, String(p.repo)) ? null : `fixing issues in ${p.repo} is not approved`;
+/** The `implement` buckets this build carries out. */
+const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build", "revise"]);
+
+/** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
+async function checkImplement(db: Db, p: Params): Promise<string | null> {
+  const { implementRefusal } = await import("../implement/gate.ts");
+  const bucket = String(p.bucket ?? "plan");
+  if (!IMPLEMENT_BUILT.has(bucket)) return `Implement's ${bucket} work is not built yet`;
+  // A dry run writes nothing but its workspace and model call, so it may run before the repo's Implement switch is on;
+  // it still needs the repo's approval and a queuer who settles on the repo, whose Task Runner runs the call.
+  if (p.mode === "dry" && bucket !== "plan") return "a dry run only plans";
+  return await implementRefusal(db, String(p.repo), Number(p.number), { dry: p.mode === "dry" });
 }
 
 const SECURITY_FINDING_PARAMS: ParamDef[] = [
@@ -484,42 +495,73 @@ export const STEPS: StepDef[] = [
     },
   },
   {
-    name: "fixissue",
+    name: "implement",
     priority: 1,
-    title: "Fix issues",
-    description: "The issue path of the pipeline. For open bugfix issues with a clear fix, Sonnet triages the issue, then writes a fix and a regression test as a diff that is checked and queued as build tasks: the test must fail on main and everything must pass with the fix. Rounds that fail are tried again, three at most.",
-    stage: runStage("fixissue"),
+    title: "Implement issues",
+    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue.",
+    stage: runStage("implement"),
     requires: "operator",
-    models: ["sonnet", "haiku"],
+    models: ["opus"],
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 20, default: 3, help: "issues to start in this job" },
+      { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
+      { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
+      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", cliOnly: true, help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
     ],
-    check: checkFixIssueApproved,
+    check: checkImplement,
     run: async (ctx) => {
-      const { runFixIssue } = await import("../fixissue/index.ts");
-      const refused = await checkFixIssueApproved(ctx.db, ctx.params);
+      const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      const r = await runFixIssue(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.usageRun(r.runId);
-      return `${r.repo}: ${r.started.length} started, ${r.skipped.length} not a clear fix, ${r.queued.length} further rounds queued`;
+      const repo = String(ctx.params.repo), number = Number(ctx.params.number);
+      // The item page and the Now feed find the job by its item: its outcome, or its failure, is the job item.
+      const { jobItem } = await import("./job-items.ts");
+      try {
+        if (String(ctx.params.bucket ?? "plan") === "plan") {
+          const { runPlan } = await import("../implement/plan.ts");
+          const summary = await runPlan(ctx, { repo, number, dry: ctx.params.mode === "dry" });
+          await jobItem(ctx.db, repo, number, summary, ctx.log);
+          return summary;
+        }
+        const run = { ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) };
+        ctx.handled(1);
+        let r: { summary: string; moved: boolean };
+        if (String(ctx.params.bucket) === "revise") {
+          const { runRevise } = await import("../implement/revise.ts");
+          r = await runRevise(run, repo, number);
+        } else {
+          const { runBuild } = await import("../implement/build.ts");
+          r = await runBuild(run, repo, number);
+        }
+        if (r.moved) ctx.acted(1);
+        await jobItem(ctx.db, repo, number, r.summary, ctx.log);
+        return r.summary;
+      } catch (e) {
+        // A skip for want of a Task Runner or a stop is no outcome of the item's.
+        const { NoTakerError, StoppedError } = await import("../agents/call.ts");
+        if (!(e instanceof NoTakerError || e instanceof StoppedError)) await jobItem(ctx.db, repo, number, `failed: ${(e as Error).message}`, ctx.log);
+        throw e;
+      }
     },
   },
   {
-    name: "fixissue-collect",
+    name: "workspace-try",
     priority: 1,
-    title: "Collect fix results",
-    description: "Reads the finished build tasks of each fix attempt. A fix passes when its tests pass and the regression test fails without it; Opus then checks the patch; on a reject the round fails and Opus's reasons go into the next round. Then the commit is pushed to the pipeline's fork, the pull request is opened and the issue gets one comment. For a failed round, Haiku summarises the log for the next round.",
-    stage: runStage("fixissue-collect"),
+    title: "Workspace session",
+    description: "An operator's test of a model session in a workspace pod: creates the workspace (or takes a live one), waits for it to be ready, runs one session with the implementation model through the workspace tools, and logs the outcome, cost, tool calls, shell time and the diff stat. Started only with `workspace try` on the command line; nothing goes to GitHub.",
+    stage: runStage("workspace-try"),
     requires: "operator",
-    models: ["haiku", "opus"],
-    params: [],
+    models: [CLAUDE_PROMPTS["implement.session"].models[0]],
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "session", label: "Session", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the session row `workspace try` created" },
+    ],
+    check: async (db, p) => {
+      const { checkTrySession } = await import("../build/workspace-session.ts");
+      return await checkTrySession(db, p);
+    },
     run: async (ctx) => {
-      const { runFixIssueCollect } = await import("../fixissue/index.ts");
-      const r = await runFixIssueCollect(ctx.db, { stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.usageRun(r.runId);
-      ctx.handled(r.changed);
-      return `${r.looked} pending: ${r.passed} passed, ${r.opened} PRs opened, ${r.failedRounds} failed rounds, ${r.failed} failed, ${r.retried} retried`;
+      const { runTrySession } = await import("../build/workspace-session.ts");
+      return await runTrySession(ctx);
     },
   },
   {
@@ -791,14 +833,30 @@ export const STEPS: StepDef[] = [
     name: "conversation",
     priority: 1,
     title: "Answer conversations",
-    description: "Answers each operator message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
+    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
     stage: runStage("conversation"),
     requires: "operator",
     models: ["opus"],
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 200, default: 30, help: "messages to answer in this job" }],
     run: async (ctx) => {
       const { runConversations } = await import("../conversations/run.ts");
-      const r = await runConversations(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
+      const r = await runConversations(ctx.db, { kind: "operator", limit: Number(ctx.params.limit), onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
+      ctx.usageRun(r.usageRun);
+      return `${r.answered} of ${r.waiting} messages answered`;
+    },
+  },
+  {
+    name: "conversation-maintainer",
+    priority: 1,
+    title: "Answer maintainers' conversations",
+    description: "Answers each maintainer's message in an item's conversation with one Opus call on that maintainer's own Task Runner, which takes it beside its other calls, with the same tools as the operators' conversations. A message none of their runners takes within two minutes waits for a later job. The reply may propose action cards; nothing runs by itself. These calls use the maintainers' own subscriptions, so the step has no daily limit and its messages do not count toward the operators' conversations.",
+    stage: runStage("conversation-maintainer"),
+    requires: "operator",
+    models: ["opus"],
+    params: [],
+    run: async (ctx) => {
+      const { runConversations } = await import("../conversations/run.ts");
+      const r = await runConversations(ctx.db, { kind: "maintainer", onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
       ctx.usageRun(r.usageRun);
       return `${r.answered} of ${r.waiting} messages answered`;
     },
@@ -872,6 +930,29 @@ export const STEPS: StepDef[] = [
       ctx.acted(r.unassigned.length);
       if (r.due && r.failed.length === r.due) throw new Error(`${repo}: could not unassign on ${r.failed.join(", ")}`);
       return `${repo}: ${r.unassigned.length} unassigned${r.failed.length ? `, ${r.failed.length} failed` : ""}`;
+    },
+  },
+  {
+    name: "pr-status",
+    title: "PR status comments",
+    description: "Keeps one status comment on each pull request the pipeline works on: posted once the PR is past triage, then edited in place when its step or place in the merge queue changes, and when it merges or closes. Only in repos where the PR status switch is on. Calls no model.",
+    stage: runStage("pr-status"),
+    requires: "operator",
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 2000, default: 100, help: "comments to post or edit in this job" },
+    ],
+    check: async (db, p) => {
+      const { statusApprovalOf } = await import("../prstatus/approval.ts");
+      return await statusApprovalOf(db, String(p.repo)) ? null : `PR status comments are off for ${p.repo}`;
+    },
+    run: async (ctx) => {
+      const { runPrStatus } = await import("../prstatus/index.ts");
+      const repo = String(ctx.params.repo);
+      const r = await runPrStatus(ctx.db, { repo, by: byOfJob(ctx.job.requestedBy), runId: `pr-status-${ctx.job.id}`, limit: Number(ctx.params.limit), log: ctx.log });
+      ctx.acted(r.posted.length + r.edited.length);
+      if (r.due && r.failed.length === r.due) throw new Error(`${repo}: no status comment could be written (${r.failed.join(", ")})`);
+      return `${repo}: ${r.posted.length} posted, ${r.edited.length} edited${r.failed.length ? `, ${r.failed.length} failed` : ""}${r.gone.length ? `, ${r.gone.length} deleted on GitHub` : ""}${r.paced ? "; the rest wait for the write budget" : ""}`;
     },
   },
   {

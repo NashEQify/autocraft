@@ -9,9 +9,11 @@ import type { CommandDef, DiscordRest, EditBody } from "./rest.ts";
 /** A submitted modal's components: action rows hold `components`; a Label (type 18) holds one `component`. A select gives `values`, a text input `value`. */
 export type ModalComponent = { type?: number; custom_id?: string; value?: string; values?: string[]; component?: ModalComponent; components?: ModalComponent[] };
 
+export type DiscordUser = { id: string; username?: string; global_name?: string | null };
+
 export type Interaction = {
   id: string; token: string; type: number; application_id?: string; guild_id?: string; channel_id?: string;
-  member?: { user?: { id: string } }; user?: { id: string };
+  member?: { nick?: string | null; user?: DiscordUser }; user?: DiscordUser;
   data?: {
     name?: string; type?: number; custom_id?: string; target_id?: string;
     values?: string[];
@@ -25,6 +27,8 @@ export type Call = {
   interaction: Interaction;
   /** The Discord user id of whoever pressed it. */
   userId: string | null;
+  /** The name Discord shows for them here: server nickname, else display name, else user name. */
+  userName: string | null;
   /** The value of an option of the invoked (sub)command, when it is text. */
   option(name: string): string | undefined;
   /** The option being typed in an autocomplete interaction. */
@@ -45,6 +49,11 @@ export type Call = {
   reply(body: { content: string; components?: unknown[] }): Promise<void>;
   /** For handlers added with `immediate`: shows "thinking" so `edit` can answer later. */
   defer(): Promise<void>;
+};
+
+const nameOf = (i: Interaction): string | null => {
+  const u = i.member?.user ?? i.user;
+  return i.member?.nick || u?.global_name || u?.username || null;
 };
 
 export type Handler = (call: Call) => Promise<void>;
@@ -138,7 +147,7 @@ export class Interactions {
     if (!find) return;
     try {
       const opts = sub?.options ?? i.data?.options ?? [];
-      const call = { interaction: i, userId: i.member?.user?.id ?? i.user?.id ?? null, option: () => undefined, targetText: () => undefined, edit: async () => {}, fields: () => ({}), values: () => [], ack: async () => {}, showModal: async () => {}, reply: async () => {}, defer: async () => {},
+      const call = { interaction: i, userId: i.member?.user?.id ?? i.user?.id ?? null, userName: null, option: () => undefined, targetText: () => undefined, edit: async () => {}, fields: () => ({}), values: () => [], ack: async () => {}, showModal: async () => {}, reply: async () => {}, defer: async () => {},
         focused: () => { const o = opts.find((x) => x.focused); return o ? { name: o.name, value: typeof o.value === "string" ? o.value : "" } : undefined; } } as Call;
       await this.#rest.interactionCallback(i.id, i.token, 8, { choices: (await find(call)).slice(0, 25) });
     } catch (e) {
@@ -169,6 +178,7 @@ export class Interactions {
       const call: Call = {
         interaction: i,
         userId: i.member?.user?.id ?? i.user?.id ?? null,
+        userName: nameOf(i),
         option: (name) => { const v = opts.find((o) => o.name === name)?.value; return typeof v === "string" ? v : undefined; },
         focused: () => { const o = opts.find((x) => x.focused); return o ? { name: o.name, value: typeof o.value === "string" ? o.value : "" } : undefined; },
         targetText: () => (i.data?.type === MESSAGE_COMMAND && i.data.target_id ? i.data.resolved?.messages?.[i.data.target_id]?.content : undefined),

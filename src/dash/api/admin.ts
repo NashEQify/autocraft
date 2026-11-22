@@ -4,6 +4,7 @@
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
 import { filtered, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import type {
   AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
 } from "../../../web/src/api/types.ts";
@@ -11,11 +12,12 @@ import { AccessError, addLogin, getAccess, isRole, LOGIN, listAccess, removeLogi
 import { approvalOf, setApproval } from "../../labels/approval.ts";
 import { commentApprovalOf, setCommentApproval } from "../../act/approval.ts";
 import { pushApprovalOf, setPushApproval } from "../../fixup/approval.ts";
-import { fixIssueApprovalOf, setFixIssueApproval } from "../../fixissue/approval.ts";
+import { fixIssueApprovalOf, setFixIssueApproval } from "../../implement/approval.ts";
 import { mergeApprovalOf, setMergeApproval } from "../../merge/approval.ts";
 import { ciApprovalOf, setCiApproval } from "../../merge/ci-approval.ts";
 import { optionalChecks, seenChecks, setOptionalCheck } from "../../optional-checks.ts";
 import { mainFixApprovalOf, setMainFixApproval } from "../../mainfix/approval.ts";
+import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts";
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
 import { setRepoPipeline } from "../../pilot.ts";
@@ -36,6 +38,7 @@ import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Expression, SqlBool } from "kysely";
+import { setting } from "../../settings-read.ts";
 
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;
@@ -44,7 +47,7 @@ const AUDIT_PAGE = 50;
 export const operatorOnly = (a: string) => a.startsWith("access-") || a.startsWith("github-app-") || a.startsWith("account-") || a.startsWith("mcp-token-") || a.startsWith("runner-") || ["session-revoke", "sign-in", "sign-in-refused", "usage-reserve", "my-repos", "max-calls", "manual-only"].includes(a);
 export const AUDIT_ACTIONS = [
   "answer", "undo", "dispute", "dispute-resolve", "answer-sweep", "adopt", "opinion", "opinion-retract", "comment", "override", "rule", "access-add", "access-remove", "access-role",
-  "session-revoke", "mcp-token-create", "mcp-token-revoke", "runner-migrate", "runner-approve", "runner-deny", "runner-revoke", "runner-scopes", "usage-reserve", "my-repos", "max-calls", "manual-only", "runner-private", "remote-pick", "remote-unpick", "remote-pick-minutes", "sign-in", "sign-in-refused", "account-add", "account-change", "account-login-start", "account-login-code", "account-login-cancel", "account-token-start", "account-token-code", "account-token-cancel", "account-token-set", "account-token-remove", "account-sign-out", "account-refresh", "repo-track", "repo-untrack", "reference-import", "labels-approve", "labels-revoke", "labels-apply", "merge-approve", "merge-revoke", "comment-approve", "comment-revoke", "act-comment", "act-close", "act-reopen", "act-open-issue", "discord-issue-open", "discord-issue-label", "act-unlabel", "act-transfer", "act-request-reviewers", "act-skip", "push-approve", "push-revoke", "fixup-push", "fixup-comment", "fixup-comment-edit", "fixissue-approve", "fixissue-revoke", "mainfix-approve", "mainfix-revoke", "optional-check-add", "optional-check-remove", "fixissue-push", "fixissue-pr", "fixissue-comment",
+  "session-revoke", "mcp-token-create", "mcp-token-revoke", "runner-migrate", "runner-approve", "runner-deny", "runner-revoke", "runner-scopes", "usage-reserve", "my-repos", "max-calls", "manual-only", "runner-private", "remote-pick", "remote-unpick", "remote-pick-minutes", "sign-in", "sign-in-refused", "account-add", "account-change", "account-login-start", "account-login-code", "account-login-cancel", "account-token-start", "account-token-code", "account-token-cancel", "account-token-set", "account-token-remove", "account-sign-out", "account-refresh", "repo-track", "repo-untrack", "reference-import", "labels-approve", "labels-revoke", "labels-apply", "merge-approve", "merge-revoke", "comment-approve", "comment-revoke", "act-comment", "act-close", "act-reopen", "act-open-issue", "discord-issue-open", "discord-issue-bot", "discord-issue-label", "act-unlabel", "act-transfer", "act-request-reviewers", "act-skip", "push-approve", "push-revoke", "fixup-push", "fixup-comment", "fixup-comment-edit", "fixissue-approve", "fixissue-revoke", "prstatus-approve", "prstatus-revoke", "pr-status-comment", "pr-status-comment-edit", "mainfix-approve", "mainfix-revoke", "optional-check-add", "optional-check-remove", "fixissue-push", "fixissue-pr", "fixissue-comment", "implement-push", "implement-pr", "implement-comment",
   "job-request", "job-cancel", "security-scan-start", "security-scan-stop", "security-finding-dismiss", "security-finding-backlog", "security-finding-reopen", "security-finding-fix", "security-finding-land", "security-finding-advisory", "security-finding-publish", "security-land-push", "security-land", "security-land-opened", "security-landed", "security-advisory", "security-advisory-fork", "security-advisory-push", "security-advisory-pr", "security-advisory-ready", "security-publish", "security-published", "security-cve", "pipeline-switch", "stage-limit", "limit-reset", "pilot-set", "pilot-clear", "repo-pipeline", "github-identity", "review-post", "review-edit", "batch-again", "reopen", "backlog-bulk", "withdraw",
   "single-merge-max", "label-create", "batch-pr-close", "fork-create", "assign", "unassign", "merge", "batch-push", "batch-pr", "shared-repos",
   "fasttrack-add", "fasttrack-remove", "fasttrack-weight", "abuse-limits", "outside-release", "outside-release-author", "merge-hold", "merge-release", "batch-remove", "batch-stop", "areas-edit", "areas-accept", "ci-approve", "ci-revoke", "ci-run-approve", "ci-rerun", "cifix-push", "cifix-comment", "cifix-check", "postmerge-file", "postmerge-file-one", "postmerge-review", "postmerge-backfill",
@@ -55,6 +58,11 @@ const isOperator = (req: Req): boolean => req.user.role === "operator";
 
 function requireOperator(req: Req, what: string): void {
   if (!isOperator(req)) throw new HttpError(403, `only operators ${what}`);
+}
+
+// An operator, or a maintainer with GitHub write permission on the repo, runs it; the rule is mayRunRepo.
+async function requireRunRepo(req: Req, repo: string): Promise<void> {
+  if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, changes its settings");
 }
 
 function body(req: Req): Record<string, unknown> {
@@ -139,7 +147,7 @@ export function clearContributorCache(db: Db): void {
   contributorCache.delete(db);
 }
 async function cachedContributors(db: Db, repo: string | undefined): Promise<Row[]> {
-  const hw = (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "org_high_water")))?.value ?? null;
+  const hw = (await setting(db, "org_high_water")) ?? null;
   const byRepo = contributorCache.get(db) ?? new Map<string, { at: number; hw: string | null; rows: Row[] }>();
   contributorCache.set(db, byRepo);
   const key = repo ?? "";
@@ -268,10 +276,11 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r));
+  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r, req));
 }
 
-async function toTrackedRepo(db: Db, r: RepoRow): Promise<TrackedRepo> {
+async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo> {
+  const canSwitch = !!r.tracked && await maySwitch(req, r.name);
   return {
     name: r.name, owner: r.owner, tracked: !!r.tracked, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
     labels: r.tracked ? await labelsInfo(db, r.name) : null,
@@ -281,17 +290,20 @@ async function toTrackedRepo(db: Db, r: RepoRow): Promise<TrackedRepo> {
     fixing: r.tracked ? approvalInfo(await fixIssueApprovalOf(db, r.name)) : null,
     mainFixing: r.tracked ? approvalInfo(await mainFixApprovalOf(db, r.name)) : null,
     ciApproving: r.tracked ? approvalInfo(await ciApprovalOf(db, r.name)) : null,
+    statusComments: r.tracked ? approvalInfo(await statusApprovalOf(db, r.name)) : null,
     optionalChecks: r.tracked ? await optionalChecks(db, r.name) : [],
     seenChecks: r.tracked ? await seenChecks(db, r.name) : [],
     pipeline: !!r.tracked && !!r.pipeline,
+    canSwitch,
+    canManage: canSwitch,
   };
 }
 
 // One repo, for the endpoints that change a single repo's settings: the web patches it into its list, so the answer skips every other repo's label plan.
-async function oneRepo(db: Db, name: string): Promise<TrackedRepo> {
+async function oneRepo(db: Db, req: Req, name: string): Promise<TrackedRepo> {
   const r = (await listAll(db)).find((x) => x.name === name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return await toTrackedRepo(db, r);
+  return await toTrackedRepo(db, r, req);
 }
 
 function approvalInfo(a: { by: string; at: string } | null): RepoApproval {
@@ -309,10 +321,10 @@ async function labelsInfo(db: Db, repo: string): Promise<RepoLabels> {
   return { approved: !!a, approvedBy: a?.by ?? null, approvedAt: a?.at ?? null, toAdd: c.toAdd, skipped: c.already + c.unsettled, conflicts: c.conflicts };
 }
 
-// Only an operator lets the Label stage write to a repo on GitHub.
+// An operator, or a maintainer with write access to the repo, lets the Label stage write to a repo on GitHub.
 export async function labelsApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve labelling");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setApproval(db, req.user.login, name, approved);
@@ -321,13 +333,13 @@ export async function labelsApproval(db: Db, req: Req, approved: boolean): Promi
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for labelling`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator lets the pipeline merge pull requests in a repo.
+// An operator, or a maintainer with write access to the repo, lets the pipeline merge pull requests in a repo.
 export async function mergeApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve merging");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setMergeApproval(db, req.user.login, name, approved);
@@ -336,13 +348,13 @@ export async function mergeApproval(db: Db, req: Req, approved: boolean): Promis
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for merging`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator lets the pipeline approve the CI runs GitHub holds for outside contributors' PRs in a repo.
+// An operator, or a maintainer with write access to the repo, lets the pipeline approve the CI runs GitHub holds for outside contributors' PRs in a repo.
 export async function ciApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve CI runs");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setCiApproval(db, req.user.login, name, approved);
@@ -351,7 +363,7 @@ export async function ciApproval(db: Db, req: Req, approved: boolean): Promise<T
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for approving CI runs`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 export async function workspaceInfo(db: Db, req: Req): Promise<{ excluded: string[] }> {
@@ -381,10 +393,10 @@ export async function setSingleMerge(db: Db, req: Req): Promise<{ max: number }>
   }
 }
 
-// Only an operator lets the pipeline comment on and close items in a repo.
+// An operator, or a maintainer with write access to the repo, lets the pipeline comment on and close items in a repo.
 export async function commentApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve commenting");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setCommentApproval(db, req.user.login, name, approved);
@@ -393,13 +405,13 @@ export async function commentApproval(db: Db, req: Req, approved: boolean): Prom
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for commenting`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator lets the pipeline push fix-up commits to contributors' branches in a repo.
+// An operator, or a maintainer with write access to the repo, lets the pipeline push fix-up commits to contributors' branches in a repo.
 export async function pushApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve pushing");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setPushApproval(db, req.user.login, name, approved);
@@ -408,13 +420,13 @@ export async function pushApproval(db: Db, req: Req, approved: boolean): Promise
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for pushing`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator lets the pipeline open fix PRs for issues in a repo.
+// An operator, or a maintainer with write access to the repo, lets the pipeline open fix PRs for issues in a repo.
 export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve fixing issues");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setFixIssueApproval(db, req.user.login, name, approved);
@@ -423,13 +435,15 @@ export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Pro
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing issues`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator switches the pipeline stages on or off for a repo (off: sync only).
+// An operator, or a maintainer with write permission on the repo (read live from GitHub), switches the pipeline stages on or off for it (off: sync only).
+const maySwitch = async (req: Req, repo: string): Promise<boolean> => await mayRunRepo(req.user, repo);
+
 export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "switch the pipeline");
   const name = required(body(req).name, "name");
+  if (!await maySwitch(req, name)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, switches its pipeline");
   const changed = await refused(async () => {
     try {
       return await setRepoPipeline(db, req.user.login, name, on);
@@ -438,7 +452,7 @@ export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<Tra
     }
   });
   if (!changed) throw new HttpError(409, `the pipeline is already ${on ? "on" : "off"} for ${name}`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 export async function track(db: Db, req: Req, on: boolean): Promise<TrackedRepo[]> {
@@ -596,10 +610,10 @@ export async function putPilot(db: Db, req: Req) {
   return pipelineState(db);
 }
 
-// Only an operator sets the checks whose failure does not stop a merge.
+// An operator, or a maintainer with write access to the repo, sets the checks whose failure does not stop a merge.
 export async function optionalCheck(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "set optional checks");
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const check = required(body(req).check, "check");
   const changed = await refused(async () => {
     try {
@@ -609,13 +623,28 @@ export async function optionalCheck(db: Db, req: Req, on: boolean): Promise<Trac
     }
   });
   if (!changed) throw new HttpError(409, `${check} is ${on ? "already" : "not"} an optional check of ${name}`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator lets the pipeline act on a red default branch in a repo: rerun failed jobs, and open an issue on an operator's answer.
-export async function mainFixApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "approve fixing a red main");
+// An operator, or a maintainer with write access to the repo, switches the PR status comment on or off for a repo.
+export async function statusApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
   const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
+  const changed = await refused(async () => {
+    try {
+      return await setStatusApproval(db, req.user.login, name, approved);
+    } catch (e) {
+      throw new RepoError((e as Error).message);
+    }
+  });
+  if (!changed) throw new HttpError(409, `PR status comments are already ${approved ? "on" : "off"} for ${name}`);
+  return await oneRepo(db, req, name);
+}
+
+// An operator, or a maintainer with write access to the repo, lets the pipeline act on a red default branch in a repo: rerun failed jobs, and open an issue on an operator's answer.
+export async function mainFixApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
+  const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
   const changed = await refused(async () => {
     try {
       return await setMainFixApproval(db, req.user.login, name, approved);
@@ -624,5 +653,5 @@ export async function mainFixApproval(db: Db, req: Req, approved: boolean): Prom
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing a red main`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }

@@ -466,7 +466,7 @@ export interface ItemPremerge {
 
 export type FixupState = "pushed" | "failed" | "refused" | "cannot-push" | "too-large" | "asked" | "rejected" | "push-denied" | "superseded" | "infra" | "rerun" | "rerunning" | "formatting" | "pushing" | "skipped" | "capped" | "comment-failed" | "comment-unsent";
 /** The operator releases of an item: the last path segment of POST /api/items/:repo/:n/<action>. */
-export type ReleaseAction = "review-again" | "verify-again" | "fix-again" | "batch-again";
+export type ReleaseAction = "review-again" | "verify-again" | "batch-again";
 
 /** Operator releases that apply to an item right now. */
 export interface ItemReleases {
@@ -475,7 +475,6 @@ export interface ItemReleases {
   /** A failed or errored verification at the current head can be planned again. */
   verifyAgain: boolean;
   /** A skipped or failed fix attempt can be tried again. */
-  fixAgain: boolean;
   /** A PR held by a failed single-PR batch at its current head can go through a batch again. */
   batchAgain: boolean;
 }
@@ -573,6 +572,10 @@ export interface ItemFilter {
   discord?: boolean;
   /** A flowchart branch, `<node>.<branch>` (FlowNode.id, FlowBranch.id): only the items it counts. */
   flow?: string;
+  /** Area names, any of them; `none` is the items without an area. */
+  area?: string[];
+  /** `area`: rows ordered by area name, items without one last, the sort within each; the list carries `byArea`. */
+  group?: "area";
   /** Default `relevance` with a query, else `updated`. */
   sort?: ItemSort;
   /** Default true. */
@@ -604,6 +607,8 @@ export interface ItemListRow extends ItemRef {
   mergedHow?: "rule" | "operator" | "batch" | null;
   /** When AutoCraft merged it; set with `mergedHow`. */
   mergedAt?: string | null;
+  /** The item's area in its repo's list; null without one. */
+  area?: string | null;
 }
 
 export interface ItemList {
@@ -612,6 +617,8 @@ export interface ItemList {
   /** Matches per settled status, under every filter except `status`. */
   byStatus: Record<SettledStatus, number>;
   run: string | null;
+  /** With `group=area`: matching items per area under every filter; `area` null counts the items without one. */
+  byArea?: { area: string | null; items: number }[];
 }
 
 export interface SearchHit extends ItemRef {
@@ -726,6 +733,8 @@ export interface User {
   role: Role;
   /** repos where GitHub grants write, maintain or admin */
   writeRepos: RepoName[];
+  /** repos the user runs: an operator on every repo, a maintainer where GitHub grants write; per-repo and per-item actions (releases, hold, fast track, areas, Backlog) show for these */
+  runRepos: RepoName[];
   /** Deployment setting `maintainer_writes`: maintainers with write access settle decisions on repos that use the app's identity. */
   maintainerWrites: boolean;
   /** Computed by the server: maintainers with write access settle now (`maintainer_writes` on and the app's identity), so Queue items is open to them. */
@@ -898,12 +907,18 @@ export interface TrackedRepo {
   mainFixing: RepoApproval | null;
   /** CI runs: approves the runs GitHub holds for reviewed outside pull requests. */
   ciApproving: RepoApproval | null;
+  /** PR status comments: one status comment per pull request, edited in place. */
+  statusComments: RepoApproval | null;
   /** Checks whose failure does not stop a merge or turn main red; set by operators. Empty for repos that are not tracked. */
   optionalChecks: string[];
   /** Check names seen on the repo's recent PRs and default-branch heads. */
   seenChecks: string[];
   /** Whether the pipeline stages run on this repo; off means sync only. False for repos that are not tracked. */
   pipeline: boolean;
+  /** Whether the viewer may switch this repo's pipeline: an operator, or a maintainer with write access to the repo. */
+  canSwitch: boolean;
+  /** The caller may change the repo's GitHub-write approvals and optional checks (the same rule as canSwitch). */
+  canManage: boolean;
 }
 
 export interface AccessEntry {
@@ -982,12 +997,14 @@ export interface DiscordAccount {
 /** A live agent token of any login (operators see all of them). */
 export type AccessToken = McpToken & { login: string };
 export interface GithubAppStatus {
-  /** The app's keys are in the secrets file. */
+  /** The app's keys are stored and readable. */
   configured: boolean;
   /** The instance-wide GitHub identity: the box account, or the GitHub App (writes and dashboard sign-in). */
   identity: "box" | "app";
-  /** False when the server has no secrets file to keep the keys in. */
+  /** False when the server has nowhere to keep the keys. */
   canRegister: boolean;
+  /** Stored keys exist that this process cannot open (sealed with another session_key); registering needs the replace confirmation. */
+  keysUnreadable: boolean;
   defaultName: string;
   /** The session's CSRF token, for the registration form. */
   csrf: string;
@@ -1203,6 +1220,8 @@ export interface JobItem extends ItemRef, ItemShown {
 }
 
 export interface JobDetail extends Job {
+  /** The caller may cancel the job: an operator, or a maintainer with write access to its repo. The server sets it per request. */
+  canCancel: boolean;
   /** The items the job handled, in the order it handled them; hidden repos left out. */
   items: JobItem[];
   /** The end of the job's log, with anything token-like replaced; null for viewers. */
@@ -1222,9 +1241,14 @@ export interface JobFilter {
   offset?: number;
 }
 
+/**
+ * A stage's circuit breaker that tripped: on one repo (the stage works no item there until an operator, or a maintainer with write
+ * access to the repo, resumes it), or on every repo (`repo` null: broken pushes on several repos; an operator resumes it).
+ */
+export type StageTrip = { /** The breaker as resume takes it: `<stage>:<repo>` (implement:deckcraft), or `<stage>` for every repo. */ key: string; repo: RepoName | null; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
 export type StageLimit = { step: string; title: string; perDay: number | null; usedToday: number; pausedReason: string | null;
-  /** The circuit-breaker stage that paused this step (fixup, cifix, fixissue, merge); an operator resumes it. */
-  tripped?: string;
+  /** Where the step's push stage (fixup, cifix, implement, merge) tripped, oldest first: per repo (the step goes on for every other repo), or on every repo. */
+  trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
 export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState };
@@ -1369,6 +1393,8 @@ export interface QueueBatch {
   size: number;
   /** The member PRs in batch order, as queue rows. */
   prs: QueueRow[];
+  /** The members' areas, each once, in batch order; the first is the area the batch was filled around. Absent in older mocks. */
+  areas?: string[];
   /** The batch's own PR on the storytold repo, once opened. */
   prNumber: number | null;
   prUrl: string | null;
@@ -1751,7 +1777,11 @@ export type Capabilities = {
   gpu: boolean;
   toolchains: string[];      // e.g. ["rust-stable", "node-24"]
   warmSigner?: boolean;      // holds the warm-snapshot signing key; takes no PR-code tasks
+  warm?: WarmLine[];         // kubernetes: warm keys the cluster's nodes hold (src/build/warm-status.ts)
+  warmErrors?: string[];     // kubernetes: nodes whose warm-sync agent cannot work, as "node: why"
 };
+/** A warm key's newest version on the cluster's nodes: held by `nodes` of the `of` nodes that report. */
+export type WarmLine = { key: string; commit: string; nodes: number; of: number };
 export type Requires = Partial<Pick<Capabilities, "os" | "arch" | "display" | "gpu">> & {
   toolchains?: string[]; minMemGb?: number; minDiskGb?: number;
 };
@@ -1776,9 +1806,19 @@ export type KubeSettings = {
   /** Toolchain name → image the steps run in. Empty until a toolchain image is published; the environment then takes no task that names a toolchain. */
   toolchainImages: Record<string, string>;
   workerUrl: string;
+  /** Each step container's CPU; the task, source and upload pods take a fixed small share. */
   cpuRequest: string; cpuLimit: string;
+  /** Each step container's memory for a repository without its own size (src/build/sizing.ts). */
   memoryRequest: string; memoryLimit: string;
   ephemeralRequest: string; ephemeralLimit: string;
+  /** No step pod's memory request or limit goes above this, also after OOM raises. */
+  maxPodMemory: string;
+  /** `cluster`: the runner takes as many tasks as the nodes have room for, up to the slots; `fixed`: exactly the slots. */
+  capacity: "cluster" | "fixed";
+  /** CPU and memory per node that capacity leaves free for others. */
+  nodeReserveCpu: string; nodeReserveMemory: string;
+  /** The priority class of every build pod; null: the cluster's default. */
+  priorityClassName: string | null;
   /** Size and storage class of the task's volume. */
   storage: string; storageClass: string;
   /** Longest a task may take from its first pod to its last. */
@@ -1787,13 +1827,34 @@ export type KubeSettings = {
   maxStepSec: number;
   runtimeClassName: string | null;
   arch: "x86_64" | "aarch64";
+  /** Workspace pods: how many run at once in the environment, and each one's resources and volume size. */
+  workspaceSlots: number;
+  workspaceCpuRequest: string; workspaceCpuLimit: string;
+  workspaceMemoryRequest: string; workspaceMemoryLimit: string;
+  workspaceEphemeralRequest: string; workspaceEphemeralLimit: string;
+  workspaceStorage: string;
+  /** Read-only WebDAV endpoint of the CI runners' compile cache (sccache) that offline Rust steps read; null: no cache. */
+  sccacheUrl: string | null;
+  /**
+   * The warm producer: the environment builds only default-branch heads (step `warm` tasks), writes the compile cache and
+   * publishes the warm store. Needs cacheWriteUrl, writerSecret, signingSecret and sccacheUrl.
+   */
+  warmWriter: boolean;
+  /** Read-write WebDAV endpoint of the compile cache and warm store (warm producer only). */
+  cacheWriteUrl: string | null;
+  /** Secret in the namespace with `username` and `password` for cacheWriteUrl. */
+  writerSecret: string | null;
+  /** Secret in the namespace with the warm store's signing key, `private.pem`. */
+  signingSecret: string | null;
+  /** ClusterIP of the crate mirror; `mirror` steps reach crates.io and GitHub only through it. null: no mirror. */
+  crateMirror: string | null;
 };
 export type EnvInput = { label?: string; enabled?: boolean; slots?: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type EnvCreate = { id: string; label: string; kind: EnvKind; slots: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type TaskStep = {
   name: string;                         // "fetch deps", "build", "test", "screenshot"
   cmd: string[];                        // argv, run inside the container
-  network: "fetch" | "none";            // "fetch": registry/GitHub egress allowed; "none": no network
+  network: "fetch" | "none" | "mirror"; // "fetch": registry/GitHub egress allowed; "none": no network; "mirror": crates.io and GitHub through the crate mirror only
   timeoutSec: number;
   artifacts?: string[];                 // globs under /out to return
   bare?: boolean;                       // run without the /target and /cache mounts
@@ -1832,11 +1893,11 @@ export type TaskBatch = { id: number; branch: string; fork: string | null; commi
 /** Image and CI-gate inputs a task ran with. Worker-sent: shown as plain text only. */
 export type SandboxEnv = { image: string; baseImage: string; packages: string[]; craftFontsRef: string | null; craftI18nRev: string | null };
 /** Worker-sent text: shown as plain text only, never as markup. */
-export type BuildTaskDetail = BuildTask & { /** null (with the patch) for viewers: staff only. */ logTail: string | null; logBytes: number; logTruncated: boolean; patch: string | null };
+export type BuildTaskDetail = BuildTask & { /** null (with the patch) for viewers: staff only. */ logTail: string | null; logBytes: number; logTruncated: boolean; patch: string | null; /** The caller may cancel the task: an operator, or a maintainer with write access to its repo. The server sets it per request. */ canCancel: boolean };
 export type TaskFilter = { state?: TaskState | "active"; env?: string; repo?: string; cursor?: string; limit?: number };
 export type TaskPage = { tasks: BuildTask[]; next: string | null };
 /** Queued and running tasks and the slots left over the online, enabled environments (the flowchart's Verify node). */
-export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "scan-tests" | "nightly" | "pr-builds";
+export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "scan-tests" | "nightly" | "pr-builds" | "implement";
 /** `repos` lists the repos whose own switch is on; scan-tests has none. */
 export type BuildFeatureState = { feature: BuildFeatureName; on: boolean; repoScoped: boolean; repos: string[] };
 export type PrBuildScope = "outside" | "all";
@@ -1852,7 +1913,8 @@ export type ScreenshotCommand = { doc: string; params: Record<string, Screenshot
 /** The operator-edited setup of one repo; also the body of PUT /api/build/screenshots/:repo. */
 export type ScreenshotConfigJson = { package: string; example: string; driver: "args" | "jsonl"; commands: Record<string, ScreenshotCommand>; ui_paths: string[]; size?: string };
 export type ScreenshotSetup = { repo: string; config: ScreenshotConfigJson; updatedBy: string; updatedAt: string };
-export type ScreenshotSetups = { setups: ScreenshotSetup[] };
+/** `manageable`: the repos whose setup the caller may change (an operator, or a maintainer with write access). */
+export type ScreenshotSetups = { setups: ScreenshotSetup[]; manageable: string[] };
 // ---- Nightly page (/api/nightly) ---------------------------------------------
 
 export type NightlyState = "queued" | "pass" | "fail" | "error" | "skipped" | "warn";
@@ -1866,7 +1928,7 @@ export type NightlyCheckRow = {
   crates: string[]; targets: string[]; cells: (NightlyCell | null)[];
 };
 export type NightlyBench = { name: string; unit: string; latest: number; /** Latest against the median of the 7 nights before it, in percent (positive = slower); null with too little history. */ deltaPct: number | null; points: number[]; at: string };
-export type NightlyRepo = { repo: string; on: boolean; nights: { runId: number; startedAt: string; sha: string }[]; checks: NightlyCheckRow[]; benches: NightlyBench[] };
+export type NightlyRepo = { repo: string; on: boolean; /** The caller may change the repo's nightly checks. */ canSelect: boolean; nights: { runId: number; startedAt: string; sha: string }[]; checks: NightlyCheckRow[]; benches: NightlyBench[] };
 export type NightlyGrid = { repos: NightlyRepo[] };
 export type NightlySeries = { repo: string; bench: string; unit: string; points: { sha: string; at: string; value: number }[] };
 export type NightlySelectInput = { repo: string; check: string; enabled: boolean; crates?: string[]; targets?: string[] };
@@ -1935,7 +1997,9 @@ export interface QueuePendingRow {
   title: string;
   author: string;
   size: "S" | "M" | "L" | "XL" | null;
-  step: "fixup" | "review" | "ci" | "build" | "pr" | "next";
+  step: "fixup" | "review" | "ci" | "build" | "pr" | "next" | "implement";
+  /** An issue AutoCraft implements: the attempt's state, what it does in words, and what it waits for. */
+  implement?: { state: ImplementationStateName; text: string; wait: string | null };
   fast: FastPosition | null;
   held: boolean;
   added: QueueOrigin;
@@ -2112,6 +2176,8 @@ export interface DecisionChoices {
   run?: { cardId: number; state: ConversationCardState; error?: string };
   source: "prepare" | "conversation" | "converted";
   at: string;
+  /** Source conversation: the login whose message to Opus led to this version. */
+  after?: string;
 }
 
 /** Body of `conversations.doChoice`. */
@@ -2125,8 +2191,8 @@ export interface DoChoiceBody {
 
 export interface ConversationTurn {
   id: number;
-  kind: "operator" | "opus" | "system";
-  /** The operator's login, "opus" or "system". */
+  kind: "operator" | "maintainer" | "opus" | "system";
+  /** The writer's login, "opus" or "system". */
   login: string;
   at: string;
   body: string;
@@ -2134,7 +2200,7 @@ export interface ConversationTurn {
   actions: ConversationCard[];
   /** Opus turns: why proposed cards were dropped. */
   notes: string[];
-  /** Operator turns: pending while Opus has not answered, failed when it gave no usable reply. */
+  /** Operator and maintainer turns: pending while Opus has not answered, failed when it gave no usable reply. */
   status?: "pending" | "answered" | "failed";
   error?: string;
 }
@@ -2144,8 +2210,12 @@ export interface Conversation {
   number: number;
   /** False when the item has no conversation yet; turns is then empty. */
   exists: boolean;
-  /** An operator message waits for Opus's reply. */
+  /** A person's message waits for Opus's reply. */
   pending: boolean;
+  /** The viewer may write to Opus here: an operator, or a maintainer with write access to the repo (their messages run on their own Task Runner). */
+  canTalk: boolean;
+  /** A maintainer's message waits for Opus and the viewer may withdraw it: an operator, or the maintainer who wrote it. */
+  canWithdraw: boolean;
   /** While a reply is being written: what Opus did last, up to five plain lines, newest last. */
   progress?: string[];
   startedBy: string | null;
@@ -2271,11 +2341,15 @@ export type NeedsFeedbackRow = {
   handled: boolean;
 };
 export type NeedsFeedbackPage = { rows: NeedsFeedbackRow[]; nextCursor: string | null };
-export type NeedsResume = { type: "trip"; stage: string } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
+export type NeedsResume = { type: "trip"; /** The breaker: `<stage>:<repo>`, or outside-surge. */ stage: string; /** Whether the viewer may resume it: an operator, or for a push breaker a maintainer with write access to its repo. */ canResume: boolean } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
 export type NeedsStoppedRow = {
   id: string;
-  kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group";
+  kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group" | "implement-stuck" | "implement-question";
   title: string;
+  /** An implementation row: the issue it is about. */
+  item?: ItemRef & ItemShown;
+  /** A breaker row of a push stage: the repo it stopped the stage on (absent: every repo, or not a push stage). */
+  repo?: RepoName;
   reason: string;
   since: string | null;
   /** A fix-group row: how many issues of the repo have a stopped fix. */
@@ -2478,6 +2552,10 @@ export type FindingState = "new" | "dismissed" | "backlog" | "fixing" | "ready" 
 export type FindingAction = "fix" | "dismiss" | "backlog" | "reopen" | "land" | "advisory" | "publish";
 
 export interface ScanView {
+  /** The caller may stop the scan and decide its findings (continuing stays with operators); the server sets it per request. */
+  canAct: boolean;
+  /** The caller may continue a capped scan with a new cap (same rule as starting one). */
+  canContinue: boolean;
   id: number;
   repo: string;
   /** The pinned commit of the default branch; null before the scan has fetched it. */
@@ -2549,7 +2627,12 @@ export interface FindingView extends FindingSummary {
   timeline: FindingCall[];
 }
 
-export interface SecurityOverview { scans: ScanView[]; findings: FindingSummary[] }
+export interface SecurityOverview {
+  /** The caller may start a scan on this repo (maintainers need a spend cap). */
+  canStart: boolean;
+  scans: ScanView[];
+  findings: FindingSummary[];
+}
 
 export type ScanAreaState = "pending" | "running" | "done" | "failed";
 export interface ScanArea { idx: number; name: string; risk: number; why: string | null; paths: string[]; state: ScanAreaState; costUsd: number }
@@ -2602,7 +2685,7 @@ export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: strin
 export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
-export type ModelQueueWhyCode = "picked" | "session" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
+export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
 
 /** One queued model call of the user-local inference mode, as GET /api/model-queue shows it to the signed-in user's role. */
 export interface ModelQueueCall {
@@ -2837,6 +2920,94 @@ export interface ScreenshotRun {
   at: string;
   shots: { name: string; before: { taskId: number; name: string }; after: { taskId: number; name: string } }[];
 }
+export type ImplementationStateName =
+  | "planning" | "asked" | "planned" | "implementing" | "checking" | "fixing" | "opening" | "pr-opened" | "revising" | "stuck"
+  | "merged" | "closed" | "failed" | "cancelled";
+/** One model call of an implementation: its agent run, cost and, for a session turn, the workspace tool calls it made. */
+export interface ImplementationCall {
+  at: string;
+  /** plan, or the session turn's purpose: start, retry, fresh, findings, report, lint */
+  purpose: string;
+  /** queued, done, failed, unclaimed, withdrawn */
+  outcome: string;
+  /** The session's report status; null for the plan or without a report. */
+  status: "done" | "blocked" | null;
+  /** Staff: the report's or the plan's summary. */
+  summary: string | null;
+  /** Staff: why a turn failed or its reply is not the report. */
+  error: string | null;
+  turns: number | null;
+  toolCalls: number;
+  shellMs: number;
+  costUsd: number | null;
+  runId: number | null;
+  via?: RemoteVia;
+}
+export interface ImplementationCheckPart { ran: boolean; exit: number | null; findings: number; noVerdict: boolean; note: string | null }
+/** One round of AutoCraft's own checks in the workspace. */
+export interface ImplementationCheckRound {
+  at: string;
+  round: number;
+  diffStat: string;
+  crates: string[];
+  fmt: ImplementationCheckPart;
+  clippy: ImplementationCheckPart;
+  tests: ImplementationCheckPart;
+  clean: boolean;
+  /** Staff: the findings sent back to the session. */
+  findings: { check: "fmt" | "clippy" | "test"; file: string; line: number; message: string }[];
+  /** Staff: why a check gave no verdict or passed only on a rerun. */
+  notes: string[];
+}
+export interface ImplementationQuestion {
+  at: string;
+  audience: "author" | "maintainer";
+  text: string;
+  /** A maintainer question's decision. */
+  decision: { id: string; path: string } | null;
+  /** The decision's chosen option, or the first reply on the issue after an author question. */
+  answer: { by: string; at: string; text: string } | null;
+}
+/** The plan call's reply. */
+export interface ImplementationPlan {
+  ready: boolean;
+  kind: "bugfix" | "feature" | "change";
+  size: "S" | "M" | "L" | "XL";
+  summary: string;
+  markdown: string;
+  acceptance: string[];
+  tests: string[];
+  app: string | null;
+  risks: string[];
+}
+/**
+ * The issue's current (or newest ended) implementation attempt. Viewers get the state, the PR, the change size, the check
+ * outcomes and the cost; the plan, questions, screenshots, call summaries, findings and the reason's detail are for staff.
+ */
+export interface ItemImplementation {
+  id: number;
+  attempt: number;
+  /** Attempts made on the issue, this one included. */
+  attempts: number;
+  state: ImplementationStateName;
+  /** Staff: who queued it; its model calls run on their Task Runner. */
+  queuedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Why it is stuck or ended; viewers get the cause without its detail. */
+  reason: string | null;
+  plan: ImplementationPlan | null;
+  questions: ImplementationQuestion[];
+  calls: ImplementationCall[];
+  checks: ImplementationCheckRound[];
+  diffStat: string | null;
+  pr: (ItemRef & ItemShown & { url: string | null }) | null;
+  /** Screenshots the session took, copied out by AutoCraft. */
+  shots: { n: number; what: string; url: string; width: number; height: number }[];
+  /** The stuck decision. */
+  decision: { id: string; path: string } | null;
+  costUsd: number;
+}
 export interface ItemPageData {
   repo: RepoName;
   number: number;
@@ -2860,6 +3031,8 @@ export interface ItemPageData {
   prBuild?: ItemPrBuild | null;
   /** The latest head's screenshot run, for operators and maintainers; empty otherwise. */
   screenshots: ScreenshotRun[];
+  /** Issues: the implementation attempt AutoCraft works or worked on; null or absent when there is none. */
+  implementation?: ItemImplementation | null;
 }
 /** The answer to `since=<stamp>` when nothing on the item page has changed. */
 export type ItemPageUnchanged = { unchanged: true; stamp: string };
@@ -2896,7 +3069,7 @@ export interface ItemPeek {
 }
 /** A PR's merge checks as the merge queue shows them. */
 export type ItemChecks = Pick<QueueRow, "verdict" | "ci" | "mergeable" | "verify" | "size" | "prBuild">;
-export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
+export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Area names, `none` for the items without one. */ area?: string[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
 /** `byPhase` and `total` count every row that matches the filter except `phase`; `nextCursor` is null on the last page. */
 export interface ItemStatusList { rows: ItemStatusRow[]; byPhase: Record<ItemPhase, number>; total: number; nextCursor: string | null }
 

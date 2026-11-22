@@ -39,7 +39,7 @@ import { type Exec, exec, fixupDir } from "../fixup/git.ts";
 import { whoAmI } from "../fixup/index.ts";
 import { setPipelineLogin } from "../github/pipeline-account.ts";
 import { commitIdentity } from "../github/identity.ts";
-import { branchOf, forkOf } from "../fixissue/index.ts";
+import { branchOf, forkOf, mainHeadOf } from "../github/fork.ts";
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { BatchGit } from "./batch-git.ts";
@@ -104,12 +104,23 @@ const diffProblem = (patch: string): string =>
 
 type Cand = { number: number; head: string; size: string; lines: number };
 
+/**
+ * Candidates in the order a new batch takes them: the top-ranked PR, then the other PRs of its area in rank order, then
+ * the rest in rank order. Only the order changes, so a ready PR is never left out for an area match; a PR with no area
+ * matches nothing and comes in through the rank-order fill.
+ */
+export function areaFirst<T extends { number: number }>(ranked: readonly T[], areaOf: (n: number) => string | null): T[] {
+  const area = ranked.length ? areaOf(ranked[0]!.number) : null;
+  if (area === null) return [...ranked];
+  const same = ranked.filter((c) => areaOf(c.number) === area);
+  return [...same, ...ranked.filter((c) => areaOf(c.number) !== area)];
+}
+
 export async function defaultBatchDeps(): Promise<BatchDeps> {
   const { Client } = await import("../mirror.ts");
-  const { defaultDeps } = await import("../fixissue/index.ts");
   return {
     exec, querier: new Client(1000), run: mergeRun, mergeCommand: envVar("MERGE_CMD") || DEFAULT_MERGE_COMMAND,
-    mainHead: defaultDeps().mainHead, now: () => new Date(), root: fixupDir(),
+    mainHead: mainHeadOf, now: () => new Date(), root: fixupDir(),
   };
 }
 
@@ -704,8 +715,9 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       .map((p): Cand => ({ number: p.facts.number, head: p.action.head!, size: p.facts.size, lines: p.facts.lines }));
     if (ranked.length) {
       const max = Math.min(await batchSizeOf(db, repo), params.limit ?? Infinity);
+      const areas = new Map((await db.all(db.k.selectFrom("item_areas").select(["number", "area"]).where("repo", "=", repo))).map((r) => [r.number, r.area]));
       log(`merge ${repo}: ${ranked.length} PRs may merge; batch of up to ${max}`);
-      await startBatch(ranked, max, null);
+      await startBatch(areaFirst(ranked, (n) => areas.get(n) ?? null), max, null);
     }
   }
   log(`merge ${repo}: ${s.merged.length} merged, ${s.started.length} batches started, ${s.published.length} opened, ${s.split.length} split, ${s.superseded.length} rebuilt, ${s.waiting.length} waiting; run ${runId}`);

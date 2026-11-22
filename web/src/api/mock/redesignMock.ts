@@ -6,6 +6,7 @@ import { decisionPath } from "../../lib/links";
 import { setClock } from "../../lib/format";
 import { requestProject } from "../scope";
 import { realData } from "./realStore";
+import { mockAreaMatch } from "./areasMock";
 import { FINDING_HISTORY_11, FIX_ROUNDS_11, FIX_ROUNDS_4, at, barFromStatus, findingStatus, itemPageFor, mockHeader, statusRows } from "./redesignData";
 
 const wait = <T,>(v: T, ms = 60) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
@@ -89,7 +90,7 @@ export function createRedesignMock(me: User, base: Pick<Api, "decisions" | "secu
     },
     itemPage: async (repo, number) => {
       const p = real?.pages.find((x) => x.repo === repo && x.number === number) ?? itemPageFor(repo, number);
-      if (p) return wait(me.role === "viewer" ? { ...p, reviews: { latest: p.reviews.latest && { ...p.reviews.latest, fixes: [], risks: [], claims: [] }, earlier: [] }, timeline: p.timeline.map((h) => ({ ...h, calls: [], body: null, lines: [] })), bar: { ...p.bar, headline: { ...p.bar.headline, text: p.bar.headline.tone === "failed" ? p.bar.headline.text.split(":")[0]! : p.bar.headline.text } } } : p);
+      if (p) return wait(me.role === "viewer" ? { ...p, reviews: { latest: p.reviews.latest && { ...p.reviews.latest, fixes: [], risks: [], claims: [] }, earlier: [] }, timeline: p.timeline.map((h) => ({ ...h, calls: [], body: null, lines: [] })), implementation: p.implementation && { ...p.implementation, queuedBy: null, plan: null, questions: [], shots: [], calls: p.implementation.calls.map((c) => ({ ...c, summary: null, error: null, runId: null, via: undefined })), checks: p.implementation.checks.map((c) => ({ ...c, findings: [], notes: [] })) }, bar: { ...p.bar, headline: { ...p.bar.headline, text: p.bar.headline.tone === "failed" ? p.bar.headline.text.split(":")[0]! : p.bar.headline.text } } } : p);
       const it = await base.item(repo, number);
       const status = { phase: it.state === "merged" ? "Merged" : it.state === "closed" ? "Closed" : "Triage", waiting: null, next: null, since: it.updatedAt } as const;
       return wait({
@@ -112,7 +113,7 @@ export function createRedesignMock(me: User, base: Pick<Api, "decisions" | "secu
         ...statusRows().filter((r) => !real?.rows.some((x) => x.repo === r.repo && x.number === r.number)),
       ];
       const q = f.q?.trim().toLowerCase();
-      const base1 = all.filter((r) => (!f.discord || r.number % 3 === 0) && (!f.kind || r.kind === f.kind) && (!f.repo?.length || f.repo.includes(r.repo)) && (!q || `${r.repo}#${r.number} ${r.title}`.toLowerCase().includes(q)));
+      const base1 = all.filter((r) => (!f.discord || r.number % 3 === 0) && (!f.kind || r.kind === f.kind) && (!f.repo?.length || f.repo.includes(r.repo)) && mockAreaMatch(f.area, r.number) && (!q || `${r.repo}#${r.number} ${r.title}`.toLowerCase().includes(q)));
       const byPhase = Object.fromEntries(PHASES.map((p) => [p, base1.filter((r) => r.status.phase === p).length])) as Record<ItemPhase, number>;
       const isReal = (r: ItemStatusRow) => !!real?.rows.some((x) => x.repo === r.repo && x.number === r.number);
       const rows = base1.filter((r) => !f.phase || r.status.phase === f.phase).sort((a, b) => Number(isReal(b)) - Number(isReal(a)) || b.updatedAt.localeCompare(a.updatedAt));

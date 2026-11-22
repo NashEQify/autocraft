@@ -38,8 +38,8 @@ export async function docsAt(g: Git, sha: string): Promise<Record<string, string
 export function defaultDocsDeps(): DocsDeps {
   return {
     async headOf(repo, branch) {
-      const { defaultDeps } = await import("../fixissue/index.ts");
-      return defaultDeps().mainHead(repo, branch);
+      const { mainHeadOf } = await import("../github/fork.ts");
+      return mainHeadOf(repo, branch);
     },
     async read(repo, branch, sha) {
       const g = new Git(exec, fixupDir(), repo);

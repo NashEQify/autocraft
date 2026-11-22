@@ -26,19 +26,19 @@ const itemKindOf = (k: string | undefined): "pr" | "issue" | null => (k === unde
 async function phases(db: Db, hidden: string[]): Promise<Record<ItemPhase, number>> {
   const hide = excludeHiddenExpr(db, "i.repo", hidden);
   const out = Object.fromEntries(ITEM_PHASES.map((x) => [x, 0])) as Record<ItemPhase, number>;
-  for (const r of await db.all(db.k.selectFrom("items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-    .select((eb) => [phaseExpr(db, eb).as("phase"), eb.fn.countAll<number>().as("n")])
-    .$if(!!hide, (q) => q.where(hide!)).groupBy("phase")))
-    if (r.phase in out) out[r.phase] += r.n;
   // Home's Merged and Closed tiles are today's (UTC), not every item ever closed.
   const day = new Date().toISOString().slice(0, 10);
-  const t = (await db.get(db.k.selectFrom("items as i")
+  const [byPhase, today] = await Promise.all([db.all(db.k.selectFrom("items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select((eb) => [phaseExpr(db, eb).as("phase"), eb.fn.countAll<number>().as("n")])
+    .$if(!!hide, (q) => q.where(hide!)).groupBy("phase")), db.get(db.k.selectFrom("items as i")
     .select((eb) => [
       eb.fn.sum<number | null>(eb.case().when("i.merged_at", ">=", day).then(eb.lit(1)).else(eb.lit(0)).end()).as("merged"),
       eb.fn.sum<number | null>(eb.case().when(eb.and([eb("i.merged_at", "is", null), eb("i.closed_at", ">=", day)])).then(eb.lit(1)).else(eb.lit(0)).end()).as("closed"),
     ])
     .where((eb) => eb.or([eb("i.merged_at", ">=", day), eb("i.closed_at", ">=", day)]))
-    .$if(!!hide, (q) => q.where(hide!))))!;
+    .$if(!!hide, (q) => q.where(hide!)))]);
+  for (const r of byPhase) if (r.phase in out) out[r.phase] += r.n;
+  const t = today!;
   out.Merged = t.merged ?? 0;
   out.Closed = t.closed ?? 0;
   return out;
@@ -60,7 +60,13 @@ async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page
   if (counts.stopped) byKind.stopped = counts.stopped;
   if (!staff) return { total, byKind, oldest: [] };
 
-  const oldest = await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: DecisionRow["kind"] }>().where(where).orderBy("asked_at").orderBy("id").limit(OLDEST));
+  const fhide = excludeHiddenExpr(db, "repo", hidden);
+  const findings = () => db.k.selectFrom("security_findings").where("state", "=", "new").where("severity", "in", ["high", "critical"]).$if(!!fhide, (q) => q.where(fhide!));
+  const [oldest, fcRow, foundRows] = await Promise.all([
+    db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: DecisionRow["kind"] }>().where(where).orderBy("asked_at").orderBy("id").limit(OLDEST)),
+    db.get(findings().select((eb) => eb.fn.countAll<number>().as("n"))),
+    db.all(findings().select(["repo", "number", "title", "created_at"]).orderBy("created_at").orderBy("number").limit(OLDEST)),
+  ]);
   const items = await itemsByRef(db, oldest.flatMap((d) => (d.number !== null && d.repo ? [[d.repo, d.number] as [string, number]] : [])));
   const asked: HomeNeed[] = oldest.map((d) => {
     const it = d.number !== null && d.repo ? items.get(`${d.repo}#${d.number}`) : undefined;
@@ -71,10 +77,8 @@ async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page
     };
   });
 
-  const fhide = excludeHiddenExpr(db, "repo", hidden);
-  const findings = () => db.k.selectFrom("security_findings").where("state", "=", "new").where("severity", "in", ["high", "critical"]).$if(!!fhide, (q) => q.where(fhide!));
-  const fc = (await db.get(findings().select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
-  const found: HomeNeed[] = (await db.all(findings().select(["repo", "number", "title", "created_at"]).orderBy("created_at").orderBy("number").limit(OLDEST)))
+  const fc = fcRow!.n;
+  const found: HomeNeed[] = foundRows
     .map((f) => ({ id: `finding:${f.repo}:${f.number}`, kind: "security" as const, repo: f.repo, number: f.number, title: f.title, recommendation: null, askedAt: f.created_at, itemKind: null, to: `/security/${f.repo}/${f.number}` }));
   if (fc) byKind.security = fc;
   return { total, byKind, oldest: [...asked, ...found].sort((a, b) => a.askedAt.localeCompare(b.askedAt)).slice(0, OLDEST) };
@@ -82,22 +86,25 @@ async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page
 
 async function problems(db: Db, hidden: string[], staff: boolean, stops: NeedsStoppedRow[]): Promise<HomeProblem[]> {
   const out: HomeProblem[] = [];
-  for (const s of stops) out.push({ kind: "stopped", title: s.title, detail: staff ? s.reason : "", to: "/needs/stopped" });
+  for (const s of stops) out.push({ kind: "stopped", title: s.repo ? `${s.title} in ${s.repo}` : s.title, detail: staff ? s.reason : "", to: "/needs/stopped" });
   const seen = new Set(stops.map((s) => s.id));
   // The health list repeats breakers, limits and paused accounts; those are the stopped rows above.
-  for (const p of (await healthOf(db, hidden, staff, Date.now())).problems)
-    if (!seen.has(p.id)) out.push({ kind: p.area === "deadline" ? "stuck" : "health", title: p.text, detail: "", to: p.to });
-  if (staff) {
-    const fhide = excludeHiddenExpr(db, "repo", hidden);
-    for (const f of await db.all(db.k.selectFrom("security_findings").select(["repo", "number", "fix_attempts", "last_failure"]).$narrowType<{ last_failure: NotNull }>()
-      .where("state", "=", "new").where("last_failure", "is not", null).$if(!!fhide, (q) => q.where(fhide!)).orderBy("updated_at", "desc")))
-      out.push({ kind: "gave-up", title: `${f.repo} finding ${f.number}: fix gave up after ${f.fix_attempts} round${f.fix_attempts === 1 ? "" : "s"}`, detail: f.last_failure, to: `/security/${f.repo}/${f.number}` });
-    const ihide = excludeHiddenExpr(db, "i.repo", hidden);
-    for (const r of await db.all(db.k.selectFrom("item_plans as p").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+  const fhide = excludeHiddenExpr(db, "repo", hidden);
+  const ihide = excludeHiddenExpr(db, "i.repo", hidden);
+  const [health, gaveUp, cifixFailed] = await Promise.all([
+    healthOf(db, hidden, staff, Date.now()),
+    staff ? db.all(db.k.selectFrom("security_findings").select(["repo", "number", "fix_attempts", "last_failure"]).$narrowType<{ last_failure: NotNull }>()
+      .where("state", "=", "new").where("last_failure", "is not", null).$if(!!fhide, (q) => q.where(fhide!)).orderBy("updated_at", "desc")) : [],
+    staff ? db.all(db.k.selectFrom("item_plans as p").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
       .select(["p.repo", "p.number", "i.title"]).where("i.state", "=", "OPEN").where((eb) => eb(kx.jsonText(db, "p.view", "$.cifix"), "=", "cifix-failed"))
-      .$if(!!ihide, (q) => q.where(ihide!)).orderBy("p.planned_at", "desc").limit(20)))
-      out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
-  }
+      .$if(!!ihide, (q) => q.where(ihide!)).orderBy("p.planned_at", "desc").limit(20)) : [],
+  ]);
+  for (const p of health.problems)
+    if (!seen.has(p.id)) out.push({ kind: p.area === "deadline" ? "stuck" : "health", title: p.text, detail: "", to: p.to });
+  for (const f of gaveUp)
+    out.push({ kind: "gave-up", title: `${f.repo} finding ${f.number}: fix gave up after ${f.fix_attempts} round${f.fix_attempts === 1 ? "" : "s"}`, detail: f.last_failure, to: `/security/${f.repo}/${f.number}` });
+  for (const r of cifixFailed)
+    out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
   return out;
 }
 
@@ -139,10 +146,14 @@ async function done(db: Db, hidden: string[]): Promise<HomeDone[]> {
 
 async function running(db: Db, hidden: string[]): Promise<string> {
   const hide = excludeHiddenExpr(db, "repo", hidden);
-  const jobs = (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running")
-    .$if(!!hide, (q) => q.where((eb) => eb.or([eb("repo", "is", null), hide!])))))!.n;
   const bhide = excludeHiddenExpr(db, "repo", hidden);
-  const batches = (await db.all(db.k.selectFrom("merge_batches").select("id").where("state", "=", "checking").$if(!!bhide, (q) => q.where(bhide!)).orderBy("id"))).map((b) => `#${b.id}`);
+  const [jobRow, batchRows] = await Promise.all([
+    db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running")
+      .$if(!!hide, (q) => q.where((eb) => eb.or([eb("repo", "is", null), hide!])))),
+    db.all(db.k.selectFrom("merge_batches").select("id").where("state", "=", "checking").$if(!!bhide, (q) => q.where(bhide!)).orderBy("id")),
+  ]);
+  const jobs = jobRow!.n;
+  const batches = batchRows.map((b) => `#${b.id}`);
   const parts = [jobs ? `${jobs} job${jobs === 1 ? "" : "s"} running` : "", batches.length ? `batch${batches.length === 1 ? "" : "es"} ${batches.join(", ")} checking` : ""].filter(Boolean);
   return parts.length ? parts.join(", ") : "Nothing running";
 }
@@ -171,16 +182,21 @@ async function byAutoCraftPct(db: Db, hidden: string[], since: string): Promise<
 export async function home(db: Db, req: Req, deps: Deps): Promise<Home> {
   const hidden = await hiddenRepos(db, req);
   const staff = canSeeInternals(req);
-  const pg = await deps.progress(hidden);
+  // The parts read independently, so they run together.
+  const [pg, page, phasesNow, runningNow, spend, doneNow] = await Promise.all([
+    deps.progress(hidden),
+    // The Needs page's stopped rows are the problems list's first rows.
+    needsPage(db, req),
+    phases(db, hidden), running(db, hidden), spendToday(db, hidden), done(db, hidden),
+  ]);
   const start = pg.repos.reduce((s, r) => s + (r.openTrend[0] ?? 0), 0);
-  // The Needs page's stopped rows are the problems list's first rows.
-  const page = await needsPage(db, req);
+  const [needsNow, problemsNow, pct] = await Promise.all([needs(db, req, hidden, staff, page), problems(db, hidden, staff, page.stopped), byAutoCraftPct(db, hidden, pg.trackingSince)]);
   return {
-    needs: await needs(db, req, hidden, staff, page),
-    problems: await problems(db, hidden, staff, page.stopped),
-    phases: await phases(db, hidden),
-    running: await running(db, hidden),
-    progress: { openNow: pg.funnel.open, openAtStart: start, done24h: pg.perHour.reduce((a, b) => a + b, 0), byAutoCraftPct: await byAutoCraftPct(db, hidden, pg.trackingSince), perHour: pg.perHour, spendTodayUsd: await spendToday(db, hidden) },
-    done: await done(db, hidden),
+    needs: needsNow,
+    problems: problemsNow,
+    phases: phasesNow,
+    running: runningNow,
+    progress: { openNow: pg.funnel.open, openAtStart: start, done24h: pg.perHour.reduce((a, b) => a + b, 0), byAutoCraftPct: pct, perHour: pg.perHour, spendTodayUsd: spend },
+    done: doneNow,
   };
 }

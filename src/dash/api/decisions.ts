@@ -16,6 +16,7 @@ import { BACKLOG, BACKLOG_KIND, BACKLOG_QUESTION, backlogDecisionId, HANDLED, is
 import { commentPreview, writeEffect } from "../../act/index.ts";
 import { optionTextsMany, optionTextsOf, textsFor, textsHash } from "../../dupes/texts.ts";
 import { audit } from "../audit.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import { heldLookup, type Held } from "../../runner/autopilot.ts";
 import { queuePlace, queueReason } from "../../conversations/queue.ts";
 import { initExecState, resetActTries, retryDecision } from "../../github/user-lane.ts";
@@ -26,12 +27,12 @@ import { HttpError, type RateLimiter } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { areaNameOf } from "../../areas/store.ts";
 import { queueSlots } from "../../rank/position.ts";
-import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
+import { allVisibleRepos, hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { backlogHeld } from "../../dupes/held.ts";
 import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
-import { canSettleCached, canSettleExpr, requireSettle, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
+import { canSettleCached, canSettleExpr, requireSettle, settleRefusal, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
 import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
 
@@ -100,12 +101,16 @@ const requireRepoSettler = (db: Db, req: Req, repos: string[]): Promise<void> =>
 /** `requireRepoSettler` on the decision's repos. `own`: the decision's answer must be this login's (undo, retry, reopen), unless an operator asks. */
 async function requireSettler(db: Db, req: Req, d: DecisionRow, own = false): Promise<void> {
   await requireRepoSettler(db, req, reposOf(d));
-  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase()) throw new HttpError(403, "only an operator takes back someone else's answer");
+  // Someone who can no longer settle has an orphaned answer; any settler takes it back. A dispute does not orphan it.
+  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase() && await settledBy(db, { ...d, exec_state: null })) throw new HttpError(403, "only an operator takes back someone else's answer");
 }
 
-async function requireOperator(req: Req, d: DecisionRow): Promise<void> {
-  if (!isOperator(req)) throw new HttpError(403, "only the operator answers decisions");
-  const blocked = await blockedRepos(req, d);
+/** Snooze, wake and prepare again: whoever runs every repo the decision covers (src/dash/repo-access.ts). A decision with no repo is the operator's. */
+async function requireRunner(req: Req, d: DecisionRow): Promise<void> {
+  const repos = reposOf(d);
+  const ok = await Promise.all(repos.map((r) => mayRunRepo(req.user, r)));
+  if (req.user.role === "viewer" || (!isOperator(req) && repos.length === 0)) throw new HttpError(403, "no write access");
+  const blocked = repos.filter((_, i) => !ok[i]);
   if (blocked.length) throw new HttpError(403, `no write access to ${blocked.map((r) => slugOf(r)).join(", ")}`);
 }
 
@@ -323,13 +328,39 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   const singles = ds.filter((d) => !isBatch(d)).map((d) => ({ repo: d.repo!, number: d.number! }));
   const refs = singles.map((r) => [r.repo, r.number] as [string, number]);
   const itemRows = (of: [string, number][]) => db.all(db.k.selectFrom("items").select(["repo", "number", "title", "body", "kind", "state", "closing_issues"]).where(kx.refIn(db, "items", of)));
+  const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
+  const adoptedIds = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
+  const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h] as [string, number, string]] : []; });
+  const groupIds = ds.filter(isGroup).map((d) => d.id);
+  // The page's reads do not depend on each other, so they run together.
+  const [itemsRead, dupRows, shown, opinions, adopted, claims, comments, classes, areas, priority, risks, groups, texts, quiet, members] = await Promise.all([
+    itemRows(refs),
+    // In dup_of order, as the (repo, dup_of) index gives them to the one-item read.
+    db.all(db.k.selectFrom("classifications").select(["repo", "number", "dup_of"]).distinct().where(kx.refIn(db, "classifications", refs))
+      .where("dup_of", "is not", null).$narrowType<{ dup_of: NotNull }>().orderBy("repo").orderBy("number").orderBy("dup_of")),
+    batchRefs.length ? shownMap(db, batchRefs) : undefined,
+    db.all(db.k.selectFrom("decision_opinions").select(["decision_id", "id", "login", "option", "note", "at", "permission", "via"])
+      .where(kx.inList(db, "decision_id", ids)).where("retracted_at", "is", null).orderBy("decision_id").orderBy("at", "desc")),
+    adoptedIds.length ? db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where(kx.inList(db, "id", adoptedIds))) : [],
+    db.all(db.k.selectFrom("decision_claims").select(["decision_id", "login", "since"]).where(kx.inList(db, "decision_id", ids))
+      .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("decision_id").orderBy("at", "desc")),
+    db.all(db.k.selectFrom("decision_comments").select(["decision_id", (eb) => eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "decision_id", ids)).groupBy("decision_id")),
+    // In the primary key's order within an item, as the one-item read walks it.
+    singles.length ? db.all(db.k.selectFrom("classifications").select(["repo", "number", "classifier", "at", "type_label", "want", "reference", "reason", "dup_of"])
+      .where(kx.refIn(db, "classifications", refs)).orderBy("repo").orderBy("number").orderBy("classifier").orderBy("run_id")) : [],
+    singles.length ? db.all(db.k.selectFrom("item_areas").select(["repo", "number", "area"]).where(kx.refIn(db, "item_areas", refs))) : [],
+    singles.length ? db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).$narrowType<{ impact: Level }>().where(kx.refIn(db, "item_priority", refs))) : [],
+    heads.length ? db.all(db.k.selectFrom("opus_reviews").select(["repo", "number", "head_oid", "risks"])
+      .where(kx.tupleIn(db, ["repo", "number", "head_oid"], heads, ["text", "bigint", "text"])).where("verdict", "is not", null)) : [],
+    groupIds.length ? db.all(groupRows(db).where(kx.inList(db, "gi.decision_id", groupIds))) : [],
+    groupIds.length ? optionTextsMany(db, groupIds) : undefined,
+    viewer.staff ? undefined : quietFixPrs(db),
+    viewer.staff ? [] : db.all(db.k.selectFrom("dupe_group_items").select(["decision_id", "repo", "number"]).where(kx.inList(db, "decision_id", ids))),
+  ]);
   const items = new Map<string, PageItem>();
-  for (const r of await itemRows(refs)) items.set(keyOf(r), r);
+  for (const r of itemsRead) items.set(keyOf(r), r);
   const dupOf = new Map<string, number[]>();
-  // In dup_of order, as the (repo, dup_of) index gives them to the one-item read.
-  for (const r of await db.all(db.k.selectFrom("classifications").select(["repo", "number", "dup_of"]).distinct().where(kx.refIn(db, "classifications", refs))
-    .where("dup_of", "is not", null).$narrowType<{ dup_of: NotNull }>().orderBy("repo").orderBy("number").orderBy("dup_of")))
-    pushTo(dupOf, keyOf(r), r.dup_of);
+  for (const r of dupRows) pushTo(dupOf, keyOf(r), r.dup_of);
   const page: DecisionPage = {
     items, shown: new Map(), opinions: new Map(), adopted: new Map(), claims: new Map(), comments: new Map(), classes: new Map(), dupOf,
     areas: new Map(), priority: new Map(), risks: new Map(), groups: new Map(), texts: new Map(), members: new Map(),
@@ -339,47 +370,28 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   for (const r of singles) for (const x of await relatedNumbers(db, r.repo, r.number, viewer.related, page)) if (!items.has(`${r.repo}#${x.number}`)) related.set(`${r.repo}#${x.number}`, [r.repo, x.number]);
   if (related.size) for (const r of await itemRows([...related.values()])) items.set(keyOf(r), r);
 
-  const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
-  if (batchRefs.length) page.shown = await shownMap(db, batchRefs);
-  for (const o of await db.all(db.k.selectFrom("decision_opinions").select(["decision_id", "id", "login", "option", "note", "at", "permission", "via"])
-    .where(kx.inList(db, "decision_id", ids)).where("retracted_at", "is", null).orderBy("decision_id").orderBy("at", "desc"))) {
+  if (shown) page.shown = shown;
+  for (const o of opinions) {
     const { decision_id, ...op } = o;
     pushTo(page.opinions, decision_id, op);
   }
-  const adopted = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
-  if (adopted.length) for (const o of await db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where(kx.inList(db, "id", adopted)))) page.adopted.set(o.id, o);
-  for (const c of await db.all(db.k.selectFrom("decision_claims").select(["decision_id", "login", "since"]).where(kx.inList(db, "decision_id", ids))
-    .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("decision_id").orderBy("at", "desc")))
-    if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
-  for (const c of await db.all(db.k.selectFrom("decision_comments").select(["decision_id", (eb) => eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "decision_id", ids)).groupBy("decision_id"))) page.comments.set(c.decision_id, c.n);
-  if (singles.length) {
-    // In the primary key's order within an item, as the one-item read walks it.
-    for (const c of await db.all(db.k.selectFrom("classifications").select(["repo", "number", "classifier", "at", "type_label", "want", "reference", "reason", "dup_of"])
-      .where(kx.refIn(db, "classifications", refs)).orderBy("repo").orderBy("number").orderBy("classifier").orderBy("run_id"))) {
-      const { repo, number, ...row } = c;
-      pushTo(page.classes, `${repo}#${number}`, row);
-    }
-    for (const a of await db.all(db.k.selectFrom("item_areas").select(["repo", "number", "area"]).where(kx.refIn(db, "item_areas", refs)))) page.areas.set(keyOf(a), a.area);
-    for (const p of await db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).$narrowType<{ impact: Level }>().where(kx.refIn(db, "item_priority", refs))))
-      page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
+  for (const o of adopted) page.adopted.set(o.id, o);
+  for (const c of claims) if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
+  for (const c of comments) page.comments.set(c.decision_id, c.n);
+  for (const c of classes) {
+    const { repo, number, ...row } = c;
+    pushTo(page.classes, `${repo}#${number}`, row);
   }
-  const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h] as [string, number, string]] : []; });
-  if (heads.length) for (const o of await db.all(db.k.selectFrom("opus_reviews").select(["repo", "number", "head_oid", "risks"])
-    .where(kx.tupleIn(db, ["repo", "number", "head_oid"], heads, ["text", "bigint", "text"])).where("verdict", "is not", null)))
-    page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
-  const groups = ds.filter(isGroup).map((d) => d.id);
-  if (groups.length) {
-    for (const g of await db.all(groupRows(db).where(kx.inList(db, "gi.decision_id", groups)))) {
-      const { decision_id, ...row } = g;
-      pushTo(page.groups, decision_id, row);
-    }
-    page.texts = await optionTextsMany(db, groups);
+  for (const a of areas) page.areas.set(keyOf(a), a.area);
+  for (const p of priority) page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
+  for (const o of risks) page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
+  for (const g of groups) {
+    const { decision_id, ...row } = g;
+    pushTo(page.groups, decision_id, row);
   }
-  if (!viewer.staff) {
-    page.quiet = await quietFixPrs(db);
-    for (const m of await db.all(db.k.selectFrom("dupe_group_items").select(["decision_id", "repo", "number"]).where(kx.inList(db, "decision_id", ids))))
-      pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
-  }
+  if (texts) page.texts = texts;
+  if (quiet) page.quiet = quiet;
+  for (const m of members) pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
   return page;
 }
 
@@ -615,9 +627,14 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   const rowOf = new Map((shownIds.length ? await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where(kx.inList(db, "id", shownIds.map((r) => r.id)))) as DecisionRow[] : []).map((d) => [d.id, d]));
   const shown = shownIds.map((r) => rowOf.get(r.id)!);
   const viewer = shown.length ? await viewerWith(db, req) : viewerOf(req);
-  viewer.prep = await prepareStates(db, shown);
-  if (shown.some((d) => d.answer === null)) viewer.blocks = await blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN));
-  if (shown.some((d) => d.number !== null)) viewer.related = await relatedIndex(db);
+  const [prep, blocks, related] = await Promise.all([
+    prepareStates(db, shown),
+    shown.some((d) => d.answer === null) ? blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)) : undefined,
+    shown.some((d) => d.number !== null) ? relatedIndex(db) : undefined,
+  ]);
+  viewer.prep = prep;
+  if (blocks) viewer.blocks = blocks;
+  if (related) viewer.related = related;
   if (shown.length) viewer.page = await decisionPage(db, shown, viewer);
   return {
     decisions: await mapSeq(shown, async (d) => await toDecision(db, d, viewer)), total, byKind, oldestAskedAt,
@@ -733,10 +750,10 @@ export async function applyAnswer(db: Db, d: DecisionRow, login: string, b: Reco
   }
 }
 
-/** Operator: snooze (`on`) or wake an open decision. It stays open for the pipeline; only the inbox hides it until the item has new activity. */
+/** Snooze (`on`) or wake an open decision. It stays open for the pipeline; only the inbox hides it until the item has new activity. */
 export async function snooze(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
-  await requireOperator(req, d);
+  await requireRunner(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be snoozed");
   const b = body(req);
   if (typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
@@ -747,12 +764,12 @@ export async function snooze(db: Db, req: Req): Promise<Decision> {
 }
 
 /**
- * Operator: prepare an open decision again. Clears what marks it prepared or failed, so the next pass runs the prepare step for
+ * Prepare an open decision again. Clears what marks it prepared or failed, so the next pass runs the prepare step for
  * it before the other due ones; its current choices stay until the new ones replace them.
  */
 export async function reprepare(db: Db, req: Req): Promise<Decision> {
   const d = await needDecision(db, req, req.params.id!);
-  await requireOperator(req, d);
+  await requireRunner(req, d);
   if (d.answer) throw new HttpError(409, "only an open decision can be prepared again");
   if (!d.repo || d.number === null || !await db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", d.repo).where("number", "=", d.number))) throw new HttpError(409, "the decision has no item to prepare it for");
   await db.run(db.k.updateTable("main.decisions").set({
@@ -896,16 +913,25 @@ async function releaseBacklogItem(db: Db, d: DecisionRow, login: string, action:
   return null;
 }
 
-/** Operator bulk: answers every open decision in scope (`outsidePilot`, `repo`) with Backlog. Dry run unless `apply` is true. */
+/** Bulk: answers every open decision in scope (`outsidePilot`, `repo`) with Backlog. Dry run unless `apply` is true. */
 export async function backlogBulk(db: Db, req: Req): Promise<{ applied: boolean; count: number; decisions: { id: string; kind: string; repo: string | null; number: number | null }[] }> {
-  if (!isOperator(req)) throw new HttpError(403, "only operators put decisions in the Backlog");
   const b = body(req);
   const repo = typeof b.repo === "string" && b.repo ? b.repo : undefined;
+  // Unscoped (the outside pilot) stays the operator's; a maintainer backlogs one repo they write to.
+  if (repo ? !(await mayRunRepo(req.user, repo)) : !isOperator(req)) throw new HttpError(403, repo ? "no write access to this repo" : "only operators put decisions in the Backlog outside one repo");
   if (b.repo !== undefined && b.repo !== null && repo === undefined) throw new HttpError(400, "repo must be a repo name");
   if (b.apply !== undefined && typeof b.apply !== "boolean") throw new HttpError(400, "apply must be true or false");
   if (b.outsidePilot !== undefined && typeof b.outsidePilot !== "boolean") throw new HttpError(400, "outsidePilot must be true or false");
   if (!b.outsidePilot && !repo) throw new HttpError(400, "give outsidePilot: true or a repo");
-  const res = await backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo }, req.user.login, b.apply === true);
+  let only: ((repos: string[]) => Promise<boolean>) | undefined;
+  if (repo) {
+    // Scoped: the settle rule on the repo, and only decisions whose every repo the requester sees and settles on.
+    await needVisible(db, req, repo);
+    await requireRepoSettler(db, req, [repo]);
+    const visible = new Set(await allVisibleRepos(db, req));
+    only = async (repos) => repos.every((r) => visible.has(r)) && await settleRefusal(db, req.user, repos, "settles decisions") === null;
+  }
+  const res = await backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo, only }, req.user.login, b.apply === true);
   return { applied: res.applied, count: res.decisions.length, decisions: res.decisions };
 }
 
@@ -943,8 +969,10 @@ function requireWriter(req: Req): void {
 }
 
 // Maintainers: a fixed number of opinion and comment writes per login per hour.
-function limited(req: Req, limiter: RateLimiter): void {
-  if (!isOperator(req) && !limiter.allow(req.user.login.toLowerCase())) throw new HttpError(429, "too many feedback posts this hour; try again later");
+// Operators and maintainers who may run the decision's repo are exempt.
+async function limited(req: Req, limiter: RateLimiter, repo: string | null): Promise<void> {
+  if (isOperator(req) || (repo && await mayRunRepo(req.user, repo))) return;
+  if (!limiter.allow(req.user.login.toLowerCase())) throw new HttpError(429, "too many feedback posts this hour; try again later");
 }
 
 /**
@@ -955,7 +983,7 @@ function limited(req: Req, limiter: RateLimiter): void {
 export async function feedback(db: Db, req: Req, limiter: RateLimiter, via?: "mcp"): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
-  limited(req, limiter);
+  await limited(req, limiter, d.repo);
   const b = body(req);
   const option = b.option ?? null;
   if (option !== null && (typeof option !== "string" || !optionsOf(d).some((o) => o.key === option))) throw new HttpError(400, "option must be an option key or null");
@@ -987,7 +1015,7 @@ export async function feedback(db: Db, req: Req, limiter: RateLimiter, via?: "mc
 export async function retract(db: Db, req: Req, limiter: RateLimiter): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
-  limited(req, limiter);
+  await limited(req, limiter, d.repo);
   if (d.answer) throw new HttpError(409, "the decision is answered; picks are closed");
   const r = await db.run(db.k.updateTable("decision_opinions").set({ retracted_at: new Date().toISOString() }).where("decision_id", "=", d.id).where("login", "=", req.user.login).where("retracted_at", "is", null));
   if (r.changes !== 1) throw new HttpError(404, "you have no opinion on this decision");

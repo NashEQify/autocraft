@@ -2,6 +2,7 @@
 // plan Verify again after it failed or errored, try a skipped or failed issue fix again, try the integration batch
 // again after a single-PR batch failed. Each changes
 // only local tables (the pipeline then picks the item up as usual) and is audited; none writes to GitHub.
+import { FIX_RETIRED_REASON } from "./db/fix-retire.ts";
 import { audit } from "./dash/audit.ts";
 import { batchStates, updateBatch } from "./merge/batch-store.ts";
 import { headOf } from "./review/candidates.ts";
@@ -16,7 +17,7 @@ export class ActionError extends Error {
   }
 }
 
-export type ItemActions = { reviewAgain: boolean; verifyAgain: boolean; fixAgain: boolean; batchAgain: boolean };
+export type ItemActions = { reviewAgain: boolean; verifyAgain: boolean; batchAgain: boolean };
 
 type ItemRow = { kind: string; state: string; head_oid: string | null; updated_at: string | null; c_head: string | null; c_at: string | null };
 
@@ -36,7 +37,9 @@ const failedVerify = async (db: Db, repo: string, n: number, head: string | null
   head ? await db.get(db.k.selectFrom("verifications").select(["state", "summary"]).where("repo", "=", repo).where("number", "=", n).where("head_sha", "=", head).where("state", "in", ["failed", "error"])) : undefined;
 export const stoppedFix = async (db: Db, repo: string, n: number) =>
   await db.get(db.k.selectFrom("fix_attempts").select(["state", "round", "retries", "push_tries", "reason", "summary"])
-    .where("repo", "=", repo).where("number", "=", n).where("state", "in", ["skipped", "failed"]).where("pr_url", "is", null));
+    .where("repo", "=", repo).where("number", "=", n).where("state", "in", ["skipped", "failed"]).where("pr_url", "is", null)
+    // An attempt the Implement migration ended is not the fix step's to retry.
+    .where((eb) => eb.or([eb("reason", "is", null), eb("reason", "<>", FIX_RETIRED_REASON)])));
 
 const failedBatch = async (db: Db, repo: string, n: number, head: string | null) =>
   head && (await batchStates(db, repo)).get(`${repo}#${n}@${head}`) === "batch-failed"
@@ -51,11 +54,11 @@ export async function actionsOf(db: Db, repo: string, n: number): Promise<ItemAc
     .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "i.repo").onRef("c.number", "=", "i.number"))
     .select(["i.kind", "i.state", "i.head_oid", "i.updated_at", "c.head_oid as c_head", "c.fetched_at as c_at"])
     .where("i.repo", "=", repo).where("i.number", "=", n));
-  if (!r || r.state !== "OPEN") return { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false };
+  if (!r || r.state !== "OPEN") return { reviewAgain: false, verifyAgain: false, batchAgain: false };
   const head = headOf(r);
   return r.kind === "pr"
-    ? { reviewAgain: !!await heldReview(db, repo, n, head), verifyAgain: !!await failedVerify(db, repo, n, head), fixAgain: false, batchAgain: !!await failedBatch(db, repo, n, head) }
-    : { reviewAgain: false, verifyAgain: false, fixAgain: !!await stoppedFix(db, repo, n), batchAgain: false };
+    ? { reviewAgain: !!await heldReview(db, repo, n, head), verifyAgain: !!await failedVerify(db, repo, n, head), batchAgain: !!await failedBatch(db, repo, n, head) }
+    : { reviewAgain: false, verifyAgain: false, batchAgain: false };
 }
 
 /** Removes the hold review at the PR's current head so the Review stage reviews that head again. */
@@ -76,16 +79,6 @@ export async function verifyAgain(db: Db, by: string, repo: string, n: number): 
   if (!v) throw new ActionError(409, `${repo}#${n} has no failed or errored verification at its current head`);
   await db.run(db.k.updateTable("verifications").set({ state: "stale" }).where("repo", "=", repo).where("number", "=", n).where("head_sha", "=", it.head!));
   await audit(db, by, "verify-again", `${repo}#${n}`, { head: it.head, was: v.state, summary: v.summary });
-}
-
-/** Forgets a skipped or failed fix attempt (and so its round and retry counts) so the issue is eligible for Fix once more. */
-export async function fixAgain(db: Db, by: string, repo: string, n: number): Promise<void> {
-  const it = await openItem(db, repo, n);
-  if (it.kind !== "issue") throw new ActionError(409, `${repo}#${n} is not an issue`);
-  const a = await stoppedFix(db, repo, n);
-  if (!a) throw new ActionError(409, `${repo}#${n} has no skipped or failed fix attempt`);
-  await db.run(db.k.deleteFrom("fix_attempts").where("repo", "=", repo).where("number", "=", n));
-  await audit(db, by, "fix-again", `${repo}#${n}`, { was: a.state, round: a.round, reason: a.reason ?? a.summary });
 }
 
 /** Marks the failed batch that holds the PR's current head superseded, keeping its summary, so the merge queue considers the PR again. */

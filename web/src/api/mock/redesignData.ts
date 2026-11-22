@@ -1,5 +1,5 @@
 // Mock content for the redesign: the curated items, their status lines, reviews, results, history and GitHub sides, and findings.
-import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemKind, ItemPageData, ItemPageHeader, ItemPhase, ItemStatus, ItemStatusRow, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
+import type { FixRound, GithubEvent, ItemBar, ItemBarStep, GithubSide, HistoryEntry, ItemImplementation, ItemKind, ItemPageData, ItemPageHeader, ItemPhase, ItemStatus, ItemStatusRow, OpusReviewEntry, ScreenshotRun, TimelineEntry } from "../types";
 import { withTimeline, type MockPage, type ResultCard } from "./storyMock";
 import { NOW } from "./fixtures";
 
@@ -13,7 +13,7 @@ const HEADER_1484: Partial<ItemPageHeader> = {
   labels: ["enhancement", "i18n", "needs-decision"], assignees: ["rhea-m"], autocraftAssigned: true,
   discord: { count: 2, links: [{ url: "https://discord.example/channels/1/2/3", at: at(3 * H) }], signals: 1, signalLinks: [{ url: "https://discord.example/channels/1/2/3", at: at(3 * H) }] },
   queue: { stage: "Merge", tab: "merge", place: 3 }, tier: "whitelisted", size: "XL",
-  releases: { reviewAgain: true, verifyAgain: true, fixAgain: false, batchAgain: true },
+  releases: { reviewAgain: true, verifyAgain: true, batchAgain: true },
   preapproval: { id: 7, by: "rhea-m", at: at(4 * H), instructions: "Use load_pack for the dictionary, then merge when CI is green.", state: "failed", fromHead: "e6a09b1", head: null, reason: "the fix-up refused: crates/doc/Cargo.toml is not a file a fix-up may edit", updatedAt: at(3 * H) },
 };
 
@@ -123,7 +123,7 @@ function seedRows(): ItemStatusRow[] {
 export function mockHeader(kind: ItemKind, labels: string[] = []): ItemPageHeader {
   return {
     labels, assignees: [], autocraftAssigned: false, pipelineOn: true, discord: null, queue: null, fastTracked: false, held: false, preapproval: null,
-    releases: { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false }, tier: "not", size: kind === "pr" ? "S" : null,
+    releases: { reviewAgain: false, verifyAgain: false, batchAgain: false }, tier: "not", size: kind === "pr" ? "S" : null,
     backlog: { held: false, canSettle: true },
   };
 }
@@ -241,11 +241,40 @@ const GITHUB_9981: GithubSide = {
 const HISTORY_2214: HistoryEntry[] = [
   hist("h1", 3 * H, "Classify", "bug, three of three agree", "Jev", 0, "model"),
   hist("h2", 3 * H - 10, "Assigned", "Assigned to autocraft", null, null, "write", [], "h2"),
-  hist("h3", 2 * H + 30, "Fix", "Opened wordcraft#2231 with a first patch", "Opus", 2.31, "model", [{ label: "Read crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }, { label: "Edit crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }, { label: "Opus, 61k tokens", kind: "model", costUsd: 2.31 }]),
+  hist("h3a", 3 * H, "Implementation attempt 1", "Started, queued by ochre-fox", null, null, "event"),
+  hist("h3b", 2 * H + 58, "Plan", "Planned the change (bugfix, size S)", "Opus", 0.84, "model", [{ label: "Plan (opus)", kind: "model", costUsd: 0.84, runId: 5120 }]),
+  hist("h3c", 2 * H + 50, "Implementation session", "Done, 48 tool calls, 6 min in the shell", "Opus", 1.92, "model", [{ label: "Implementation session (opus)", kind: "model", costUsd: 1.92, runId: 5131 }, { label: "48 workspace tool calls", kind: "tool", costUsd: null }]),
+  hist("h3d", 2 * H + 40, "Checks, round 1", "1 finding (1 file changed, 24 insertions, 3 deletions)", null, null, "event"),
+  hist("h3e", 2 * H + 35, "Follow-up turn on the checks' findings", "Done, 6 tool calls", "Opus", 0.21, "model", [{ label: "Follow-up turn on the checks' findings (opus)", kind: "model", costUsd: 0.21, runId: 5140 }]),
+  hist("h3", 2 * H + 30, "Checks, round 2", "Clean (2 files changed, 61 insertions, 3 deletions)", null, null, "event"),
   hist("h4", 2 * H + 25, "Opened pull request", "wordcraft#2231", null, null, "write", [], "h4"),
   hist("h5", 100, "Review of the patch", "Take with fixes: the link rect ignores the last line's descent", "Opus", 0.7, "model"),
   hist("h6", 70, "Fix-up", "Round 2 started on wordcraft#2231", "Sonnet", null, "model", [{ label: "Edit crates/export/src/pdf/links.rs", kind: "tool", costUsd: null }]),
 ];
+const IMPL_2214: ItemImplementation = {
+  id: 41, attempt: 1, attempts: 1, state: "pr-opened", queuedBy: "ochre-fox", createdAt: at(3 * H), updatedAt: at(2 * H + 25), reason: null,
+  plan: {
+    ready: true, kind: "bugfix", size: "S", summary: "The PDF writer closes the link annotation before the last line box of a paragraph is laid out, so a link that ends the paragraph gets no rectangle.",
+    markdown: "1. Reproduce with a paragraph whose last run is a link; export and read the annotations back.\n2. In `crates/export/src/pdf/links.rs`, emit the pending link rect after the final line box, not at the paragraph break.\n3. Add a regression test that exports such a paragraph and asserts one `/Link` annotation covering the last words.",
+    acceptance: ["A paragraph that ends with a hyperlink exports a clickable link area over the link text", "Links in the middle of a paragraph keep their current rectangles"],
+    tests: ["cargo test -p export pdf_links"], app: "Export a document with a trailing link and click it in the PDF viewer", risks: ["Multi-line links that wrap onto the last line"],
+  },
+  questions: [],
+  calls: [
+    { at: at(2 * H + 58), purpose: "plan", outcome: "done", status: null, summary: "Ready: one file, a regression test in the export crate.", error: null, turns: null, toolCalls: 0, shellMs: 0, costUsd: 0.84, runId: 5120, via: { login: "ochre-fox", harness: "claude-code", model: "opus" } },
+    { at: at(2 * H + 50), purpose: "start", outcome: "done", status: "done", summary: "Moved the link rect flush after the last line box and added `trailing_link_gets_annotation`.", error: null, turns: 31, toolCalls: 48, shellMs: 6 * 60_000, costUsd: 1.92, runId: 5131, via: { login: "ochre-fox", harness: "claude-code", model: "opus" } },
+    { at: at(2 * H + 35), purpose: "findings", outcome: "done", status: "done", summary: "Fixed the clippy finding: the rect is built with `Rect::from_points`.", error: null, turns: 4, toolCalls: 6, shellMs: 90_000, costUsd: 0.21, runId: 5140, via: { login: "ochre-fox", harness: "claude-code", model: "opus" } },
+  ],
+  checks: [
+    { at: at(2 * H + 40), round: 1, diffStat: "1 file changed, 24 insertions(+), 3 deletions(-)", crates: ["export"], fmt: { ran: true, exit: 0, findings: 0, noVerdict: false, note: null }, clippy: { ran: true, exit: 0, findings: 1, noVerdict: false, note: null }, tests: { ran: true, exit: 0, findings: 0, noVerdict: false, note: null }, clean: false,
+      findings: [{ check: "clippy", file: "crates/export/src/pdf/links.rs", line: 142, message: "manual construction of a rectangle from two points" }], notes: [] },
+    { at: at(2 * H + 30), round: 2, diffStat: "2 files changed, 61 insertions(+), 3 deletions(-)", crates: ["export"], fmt: { ran: true, exit: 0, findings: 0, noVerdict: false, note: null }, clippy: { ran: true, exit: 0, findings: 0, noVerdict: false, note: null }, tests: { ran: true, exit: 0, findings: 0, noVerdict: false, note: null }, clean: true, findings: [], notes: [] },
+  ],
+  diffStat: "2 files changed, 61 insertions(+), 3 deletions(-)",
+  pr: { repo: "wordcraft", number: 2231, kind: "pr", state: "open", title: "Keep the hyperlink run when exporting the last paragraph", url: "https://github.com/storytold/wordcraft/pull/2231" },
+  shots: [{ n: 1, what: "Exported PDF with the trailing link selected", url: "/api/implementations/41/shots/0123456789abcdef0123456789abcdef.png", width: 640, height: 400 }],
+  decision: null, costUsd: 2.97,
+};
 const GITHUB_2214: GithubSide = {
   syncedAt: at(1),
   description: "When a paragraph ends with a hyperlink, the exported PDF has the text but the link area is missing.\n\nSteps: type a paragraph, make the last words a link, export to PDF, click the link in a viewer.",
@@ -314,7 +343,7 @@ const FULL: Record<string, Omit<MockPage, "repo" | "number" | "kind" | "state" |
       { id: "c1", kind: "fixup", title: "Fix-ups", outcome: "Round 2 of 3 running", tone: "accent", at: at(70), detail: "Round 1: review asked to cover the last line's descent.", earlier: [{ at: at(100), outcome: "Round 1 pushed, review wants changes" }] },
       { id: "c2", kind: "classifiers", title: "Classifiers", outcome: "Bug, 3 of 3 agree", tone: "neutral", at: at(3 * H), detail: null, earlier: [] },
     ],
-    history: HISTORY_2214, github: GITHUB_2214,
+    history: HISTORY_2214, github: GITHUB_2214, implementation: IMPL_2214,
   },
   "photocraft#9970": {
     reviews: { latest: review({ id: "m1", head: "c04d9be", current: true, at: at(2 * D), trigger: "new-head", why: "First review of the pull request", verdict: "take", summary: "Clamps the handles to the plot rectangle. Small and covered by a test.", claims: [{ path: "crates/curves/src/plot.rs", line: 88, text: "t is already normalised here" }], costUsd: 0.9 }), earlier: [] },

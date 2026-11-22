@@ -1,0 +1,151 @@
+// Our implementation PRs go back to their session: a take-fix review and red CI plan implement{revise} for the PR's issue
+// instead of the fix-up and the CI fix; a conflict still goes to the conflict step, and a head is revised once. While the repo's
+// Implement feature is off the PR waits on it, and a PR that closed ends its attempt from the PR side.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { decidePr, implementOffWait } from "../src/core/decide.ts";
+import { loadPrFacts } from "../src/core/facts.ts";
+import { prFacts } from "./world.ts";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { SCRATCH } from "./scratch.ts";
+import { world } from "./world-db.ts";
+import { setFeature } from "../src/build/features.ts";
+import { exec as realExec, type Exec, type ExecResult } from "../src/fixup/git.ts";
+import { DIFF_FLAGS } from "../src/implement/diff.ts";
+import { lastPush, openImplementationPr } from "../src/implement/pr.ts";
+import { pushRevision, type ReviseDeps } from "../src/implement/revise.ts";
+import { implementationById, setImplementationState, startImplementation } from "../src/implement/store.ts";
+import type { Implementation, ReviseRound } from "../src/implement/types.ts";
+
+const kinds = (f: Parameters<typeof prFacts>[0]) =>
+  decidePr(prFacts(f)).actions.filter((a) => a.kind !== "unassign").map((a) => `${a.kind}${a.params?.bucket ? `:${a.params.bucket}` : ""}${a.params?.issue ? `#${a.params.issue}` : ""}`);
+
+test("an implementation PR's review fixes and red CI go to its session; a conflict goes to the conflict step", () => {
+  const ours = { implementation: { issue: 7, state: "pr-opened", revisedHeads: [] as string[] } };
+  const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
+  const red = { ci: "failure" as const, cifix: { states: [] as string[], tries: 0, rerunAt: null, infraRuns: null, formattingTask: null, formatterEnded: true, totalPushes: 0, totalTries: 0, skipReason: null, checksAt: null } };
+
+  // A contributor's PR gets the fix-up and the CI fix; ours gets the revision instead.
+  assert.ok(kinds(takeFix).includes("fixup:fix"));
+  assert.deepEqual(kinds({ ...takeFix, ...ours }).filter((k) => /^(fixup|cifix|implement)/.test(k)), ["implement:revise#7"]);
+  assert.ok(kinds(red).some((k) => k.startsWith("cifix")));
+  assert.deepEqual(kinds({ ...red, ...ours }).filter((k) => /^(fixup|cifix|implement)/.test(k)), ["implement:revise#7"]);
+
+  // A conflict is merged away by the conflict step first.
+  const conflict = kinds({ ...takeFix, ...ours, mergeable: "CONFLICTING", conflict: { bucket: "merge", base: "main", baseOk: true } });
+  assert.ok(conflict.includes("conflict:merge"), conflict.join());
+  assert.ok(!conflict.some((k) => k.startsWith("implement")), conflict.join());
+
+  // A head the session already revised waits for its push, a revision that started goes on from the PR (its issue may be
+  // closed or held), and a stuck one plans nothing new.
+  assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, revisedHeads: ["h1"] } }).some((k) => /^(fixup|implement)/.test(k)));
+  assert.deepEqual(kinds({ ...takeFix, implementation: { ...ours.implementation, state: "revising", revisedHeads: ["h1"] } }).filter((k) => /^(fixup|implement)/.test(k)), ["implement:revise#7"]);
+  assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, state: "stuck" } }).some((k) => /^(fixup|implement)/.test(k)));
+});
+
+test("an implementation PR waits on the Implement switch while it is off, and on a revision in progress instead of merging", () => {
+  const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
+  const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [] }, repoFacts: { implementOn: false } }));
+  assert.ok(!off.actions.some((a) => a.kind === "implement"), JSON.stringify(off.actions));
+  assert.equal(off.wait, implementOffWait("app"));
+  // A ready PR whose session is revising it is not merged meanwhile: it waits on the revision.
+  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"] } }));
+  assert.ok(!revising.eligible && !revising.actions.some((a) => a.kind === "merge"), JSON.stringify(revising.actions));
+  assert.match(revising.wait ?? "", /revision for #7/);
+});
+
+test("a closed, unmerged implementation PR whose issue is closed too still ends its attempt, with Implement off", async () => {
+  const w = await (await (await (await world()).repo()).pr(1)).issue(2);
+  const impl = await startImplementation(w.db, { repo: "app", number: 2, queuedBy: "op", textHash: "t" });
+  await setImplementationState(w.db, impl.id, "pr-opened", { prNumber: 1 });
+  await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "in", [1, 2]));
+  const f = (await loadPrFacts(w.db)).find((x) => x.number === 1);
+  assert.ok(f, "the closed PR of a live implementation is loaded");
+  assert.ok(decidePr(f).actions.some((a) => a.kind === "implement" && a.params?.bucket === "revise" && a.params?.issue === 2));
+});
+
+test("a revision after a base merge keeps main's change, also in the revision after it and with the cache made again", async () => {
+  const LOGIN = "pipeline-bot";
+  const dir = mkdtempSync(join(SCRATCH, "impl-revise-"));
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "-c", "core.hooksPath=/dev/null", ...args], { cwd, encoding: "utf8" }).trim();
+  const work = join(dir, "work");
+  mkdirSync(join(work, "src"), { recursive: true });
+  git(work, "init", "-q", "-b", "main");
+  writeFileSync(join(work, "src/lib.rs"), "pub fn a() {}\n");
+  writeFileSync(join(work, "src/other.rs"), "pub fn b() {}\n");
+  git(work, "add", "-A");
+  git(work, "commit", "-q", "-m", "base");
+  const base = git(work, "rev-parse", "HEAD");
+  const upstream = join(dir, "upstream.git"), fork = join(dir, "fork.git");
+  git(dir, "clone", "-q", "--bare", work, upstream);
+  git(dir, "init", "-q", "--bare", fork);
+  const diffFor = (lib: string) => {
+    writeFileSync(join(work, "src/lib.rs"), lib);
+    return execFileSync("git", ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...DIFF_FLAGS.split(" "), base], { cwd: work, encoding: "utf8" });
+  };
+
+  const w = await (await (await world()).repo()).issue(5, { title: "Crash on start" });
+  const db = w.db;
+  await db.run(db.k.insertInto("fast_track").values({ repo: "app", number: 5, added_by: "op", added_at: "2026-01-01T00:00:00.000Z" }));
+  await setFeature(db, "implement", true, "op");
+  await setFeature(db, "implement", true, "op", "app");
+  const started = await startImplementation(db, { repo: "app", number: 5, queuedBy: "op", textHash: "h", baseSha: base });
+  await setImplementationState(db, started.id, "opening", { plan: { kind: "bugfix", summary: "Return 1.", plan: "1. Return 1." } as Implementation["plan"] });
+
+  let branch = "";
+  const ok = (stdout = "", code = 0): ExecResult => ({ code, stdout, stderr: code ? "failed" : "" });
+  const exec: Exec = async (cmd, args, opt = {}) => {
+    if (cmd === "gh") {
+      const path = args[0] === "api" ? args[1]! : "";
+      if (path === "user") return ok(JSON.stringify({ login: LOGIN, id: 42, node_id: "U42" }));
+      if (path === `repos/${LOGIN}/app`) return ok("storytold/app\n");
+      if (path === "repos/storytold/app/issues/5") return ok("open\n");
+      if (path === "repos/storytold/app/pulls/12") return ok(args.includes(".head.sha") ? `${git(fork, "rev-parse", `refs/heads/${branch}`)}\n` : "open\n");
+      if (args[0] === "pr" && args[1] === "list") return ok("");
+      if (args[0] === "pr" && args[1] === "create") {
+        branch = args[args.indexOf("--head") + 1]!.split(":")[1]!;
+        await w.pr(12, { head: git(fork, "rev-parse", `refs/heads/${branch}`), author: LOGIN, authorId: null });
+        return ok("https://github.com/storytold/app/pull/12\n");
+      }
+      if (args[0] === "issue" && args[1] === "comment") return ok("https://github.com/storytold/app/issues/5#issuecomment-1\n");
+      return ok("", 1);
+    }
+    const at = args.findIndex((a) => a.startsWith("https://github.com/"));
+    if (at < 0) return realExec(cmd, args, opt);
+    const target = args[at]!.includes("/storytold/") ? upstream : fork;
+    return realExec(cmd, args.map((a, i) => (i === at ? target : a)).filter((a, i, all) => a !== "protocol.file.allow=never" && !(a === "-c" && all[i + 1] === "protocol.file.allow=never")), opt);
+  };
+  const opened = await openImplementationPr(db, { implementation: (await implementationById(db, started.id))!, diff: diffFor("pub fn a() -> u8 { 1 }\n"), base, model: "claude-opus-5-5", checks: [], by: "pipeline" }, { exec, root: join(dir, "cache"), log: () => {} });
+  assert.ok(opened.ok, opened.ok ? "" : opened.reason);
+
+  // The conflict step merges main, which changed another file, into the PR's branch.
+  const clone = join(dir, "clone");
+  git(dir, "clone", "-q", fork, clone, "-b", branch);
+  git(clone, "fetch", "-q", upstream, "main");
+  writeFileSync(join(clone, "src/other.rs"), "pub fn b() -> u8 { 2 }\n");
+  git(clone, "commit", "-q", "-am", "main's change");
+  const mainChange = git(clone, "rev-parse", "HEAD");
+  git(clone, "reset", "-q", "--hard", "HEAD~1");
+  git(clone, "merge", "-q", "--no-edit", mainChange);
+  git(clone, "push", "-q", "origin", branch);
+
+  const revise = async (lib: string, root: string) => {
+    const impl = (await implementationById(db, started.id))!;
+    const from = (await lastPush(db, impl, branch))!.commit;
+    const head = git(fork, "rev-parse", `refs/heads/${branch}`);
+    // The PR's plan has the revision: a take-fix review at its head.
+    await w.synced(12, head);
+    await w.review(12, { verdict: "take-fix" });
+    const req: ReviseRound = { prNumber: 12, head, from, review: true, ci: false, message: "fix" };
+    const r = await pushRevision(db, { exec, root, gh: (args: string[]) => exec("gh", args).then((x) => x.stdout) } as unknown as ReviseDeps, impl, req, diffFor(lib), "pipeline", () => {});
+    assert.ok(r.ok, r.ok ? "" : r.reason);
+    const at = (path: string) => git(fork, "show", `refs/heads/${branch}:${path}`);
+    assert.equal(at("src/other.rs"), "pub fn b() -> u8 { 2 }", "main's change stays");
+    assert.equal(at("src/lib.rs"), lib.trim());
+  };
+  await revise("pub fn a() -> u8 { 3 }\n", join(dir, "cache"));
+  await revise("pub fn a() -> u8 { 4 }\n", join(dir, "cache"));
+  await revise("pub fn a() -> u8 { 5 }\n", join(dir, "cache-again"));
+});

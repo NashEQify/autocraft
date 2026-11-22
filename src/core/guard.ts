@@ -7,12 +7,13 @@ import { decidePr } from "./decide.ts";
 import { pipelineWrites, verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
 import { commentApprovalOf } from "../act/approval.ts";
-import { fixIssueApprovalOf } from "../fixissue/approval.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
 import { mainFixApprovalOf } from "../mainfix/approval.ts";
 import { mergeApprovalOf } from "../merge/approval.ts";
 import { ciApprovalOf } from "../merge/ci-approval.ts";
+import { statusApprovalOf } from "../prstatus/approval.ts";
 import { decideItem } from "./decide-item.ts";
 import { gateRepo, gates, type By, type RepoNeed, type Want } from "./gates.ts";
 import { loadItemFact } from "./issue-facts.ts";
@@ -146,7 +147,8 @@ export async function repoApprovals(db: Db, repo: string): Promise<Parameters<ty
   const on = pipelineWrites(await setting(db, "pipeline_enabled"));
   return {
     merge: !!await mergeApprovalOf(db, repo), push: await pushApprovalOf(db, repo) !== null, comment: await commentApprovalOf(db, repo) !== null, ci: await ciApprovalOf(db, repo) !== null,
-    labels: await labelsApprovalOf(db, repo) !== null, "fix-issue": await fixIssueApprovalOf(db, repo) !== null, "main-fix": await mainFixApprovalOf(db, repo) !== null, pipelineOn: on,
+    labels: await labelsApprovalOf(db, repo) !== null, "fix-issue": await fixIssueApprovalOf(db, repo) !== null, "main-fix": await mainFixApprovalOf(db, repo) !== null,
+    status: await statusApprovalOf(db, repo) !== null, pipelineOn: on,
   };
 }
 

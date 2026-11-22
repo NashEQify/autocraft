@@ -14,7 +14,7 @@ import { diffCacheDir, recordDiffFacts } from "../src/review/diff.ts";
 import { ask } from "../src/decisions.ts";
 import type { ActDeps } from "../src/act/index.ts";
 import { setCommentApproval } from "../src/act/approval.ts";
-import { setFixIssueApproval } from "../src/fixissue/approval.ts";
+import { setFixIssueApproval } from "../src/implement/approval.ts";
 import { setPushApproval } from "../src/fixup/approval.ts";
 import { setMergeApproval } from "../src/merge/approval.ts";
 import { setCiApproval } from "../src/merge/ci-approval.ts";

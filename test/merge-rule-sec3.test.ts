@@ -18,7 +18,6 @@ import { EXTRAS_PENDING_REASON } from "../src/core/sensitive.ts";
 import { NOW, prFacts } from "./world.ts";
 
 const NONE = { runs: [], actions: [] };
-import { parseTriage, sourcePaths } from "../src/fixissue/parse.ts";
 
 /** A section that edits `path` from `before` to `after` in one hunk (whole file), and the head text the cache keeps for it. */
 const edit = (path: string, before: string[], after: string[]) =>
@@ -113,11 +112,6 @@ test("the reviews are shown test files while they fit, the rule counts the rest 
 
   const forms = ['package = { name = "a", build = "gen.rs" }', '[package]\n"build" = "gen.rs"', '["package"]\nbuild = "gen.rs"', '[package]\nbuild = """gen.rs"""', '[package]\nbuild = "g\\u0065n.rs"', 'package . build = "gen.rs"'];
   for (const toml of forms) assert.deepEqual([...buildScripts(["c/Cargo.toml", "c/gen.rs"], () => toml)], ["c/gen.rs"], toml);
-  // The Fix-issue triage is neither offered nor allowed a build script a manifest names.
-  const scripts = new Set(["c/gen.rs"]);
-  assert.deepEqual(sourcePaths(["c/gen.rs", "c/src/lib.rs"], 10, scripts), ["c/src/lib.rs"]);
-  const reply = (f: string) => JSON.stringify([{ ref: "app#5", fixable: true, reason: "r", crate: "c", files: [f] }]);
-  assert.deepEqual([reply("c/src/lib.rs"), reply("c/gen.rs")].map((r) => parseTriage(r, "app#5", [{ name: "c", dir: "c" }], ["c/gen.rs", "c/src/lib.rs"], scripts).ok), [true, false]);
   // A cached diff that needs what the rule reads beside it waits for it, a few reads at most; one that needs nothing does not.
   const script = added("ci/run.sh", "x");
   const incomplete = { files: {}, runs: null, complete: false };

@@ -16,7 +16,7 @@ import { join } from "node:path";
 
 const INDEX_DIR = /^[A-Za-z0-9._-]+$/;
 const CRATE_FILE = /^[A-Za-z0-9._+-]+\.crate$/;
-const MAX_CRATE_BYTES = 100 * 1024 * 1024;
+export const MAX_CRATE_BYTES = 100 * 1024 * 1024;
 
 export function crateFilesOf(root: string): { index: string; file: string; path: string }[] {
   const base = join(root, "registry", "cache");
@@ -75,8 +75,9 @@ export class CrateVerifier {
     if (!p) {
       p = (async () => {
         const res = await this.#fetch(`${this.#base}/${indexPath(name)}`, { signal: AbortSignal.timeout(30_000) });
-        if (!res.ok) throw new Error(`index HTTP ${res.status}`);
         const m = new Map<string, string>();
+        if (res.status === 404 || res.status === 410) return m; // no such crate
+        if (!res.ok) throw new Error(`index HTTP ${res.status}`);
         for (const line of (await res.text()).split("\n")) {
           if (!line.trim()) continue;
           const e = JSON.parse(line) as { name?: string; vers?: string; cksum?: string };
@@ -84,10 +85,16 @@ export class CrateVerifier {
         }
         return m;
       })();
-      p.catch(() => this.#cache.delete(name)); // retry failed lookups next time
+      // Retry failed lookups and unknown names next time: a crate may be published after the first look.
+      void p.then((m) => { if (!m.size) this.#cache.delete(name); }, () => this.#cache.delete(name));
       this.#cache.set(name, p);
     }
     return p;
+  }
+
+  /** The index's sha256 for one version of a crate, or undefined when the index does not list it. */
+  async checksum(name: string, version: string): Promise<string | undefined> {
+    return (await this.#versions(name)).get(version);
   }
 
   /** True when `file` ("name-1.2.3.crate") has content with the index's checksum. */

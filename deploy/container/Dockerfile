@@ -122,13 +122,14 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts
 COPY src ./src
 COPY scripts ./scripts
-COPY deploy/backup.sh deploy/container/entrypoint.sh ./deploy/
+COPY deploy/backup.sh deploy/periodic.sh deploy/container/entrypoint.sh ./deploy/
+COPY deploy/container/ws ./deploy/ws
 COPY web/src ./web/src
 COPY --from=web /app/web/dist ./web/dist
 # Shown on the dashboard's prompts page (src/dash/api/prompts.ts); there is no .git in the image.
 RUN set -eux; \
     if [ -n "$SOURCE_COMMIT" ]; then printf '%s\n' "$SOURCE_COMMIT" > .source-commit; fi; \
-    chmod 0755 deploy/entrypoint.sh deploy/backup.sh
+    chmod 0755 deploy/entrypoint.sh deploy/backup.sh deploy/ws
 
 ################################################################################
 # Production. Nothing is installed here: the shell-less runtime base receives the

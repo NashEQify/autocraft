@@ -5,7 +5,7 @@ import { useQuery } from "../../api/client";
 import { useUser } from "../../shell/UserContext";
 import { useItemPreview } from "../../lib/useItemPreview";
 import { Link } from "react-router-dom";
-import { CaretDownIcon, GithubLogoIcon } from "@phosphor-icons/react";
+import { CaretDownIcon, GithubLogoIcon, SquaresFourIcon } from "@phosphor-icons/react";
 import type { Decision, Item, ItemPageData } from "../../api/types";
 import { Badge, type Tone } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
@@ -38,6 +38,7 @@ export function ItemRow({ facts, open, onToggle, children }: { facts: RowFacts; 
         className="h-auto min-h-7 w-full flex-wrap justify-start whitespace-normal px-0 py-1 text-left font-normal max-md:min-h-11">
         {token ? <Badge tone={TONE[token.tone] ?? "neutral"}>{token.text}</Badge> : facts.status ? <Badge tone="neutral">{facts.status.phase}</Badge> : null}
         {facts.flags.includes("security") && <Badge tone="bad">Security</Badge>}
+        {facts.area && <span className="inline-flex min-w-0 items-center gap-1 break-words text-ink/60"><SquaresFourIcon aria-hidden className="shrink-0 text-ink/45" /><span className="sr-only">Area </span>{facts.area}</span>}
         {rowWord(facts) && <span className="min-w-0 break-words text-ink/60">{rowWord(facts)}</span>}
         <span className="ml-auto shrink-0 text-ink/60"><TimeAgo iso={facts.updatedAt} /></span>
         <span className="inline-flex items-center gap-1">Details<span className="sr-only"> for {facts.repo}#{facts.number}</span> <CaretDownIcon aria-hidden className={cn("transition-transform duration-150", open && "rotate-180")} /></span>

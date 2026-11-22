@@ -1,5 +1,5 @@
 // Items with a phase: the same browser, scoped to the status endpoint (phase, q, kind,
-// repositories, Discord, cursor). State, classification, label and flag are locked, not faked.
+// repositories, areas, Discord, cursor). State, classification, label and flag are locked, not faked.
 // The rows are the same compact rows as the normal list; the expansion states what this payload
 // does not carry instead of inventing a classification.
 import { useMemo } from "react";
@@ -15,6 +15,7 @@ import { ItemRow, OpenRowDetail, SelectionUnavailable } from "./ItemRows";
 import { factsFromStatusRow, refKey, selectionProblem } from "./rows";
 import { useDisplayRows } from "./rowContinuity";
 import { statusFilter } from "./browseState";
+import { useAreaNames } from "./useAreaNames";
 
 /** Phase mode: the status endpoint behind the same toolbar, rows and inline expansion. */
 export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhase, onReset, onRemove, selection, onToggleRow, onCloseSelection, selectionNote, resetKey, continuity }: BrowserProps) {
@@ -29,6 +30,7 @@ export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhas
     (receipt) => receipt.page.nextCursor,
   );
   const { data: repoOptions } = useQuery("repos", (api) => api.repos());
+  const areas = useAreaNames(browse);
   // Every loaded page must carry this reader's scope; anything else is the previous reader's data.
   const pages = !error && receipts && receipts.every((receipt) => receipt.scope === queryScope) ? receipts.map((receipt) => receipt.page) : undefined;
   const firstPage = pages?.[0];
@@ -44,7 +46,7 @@ export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhas
     ? <>Filtered view · {num(total)} {total === 1 ? "item" : "items"} in {browse.phase}</>
     : undefined;
   return <Page title="Items" sub={ready && !loading && total !== undefined ? `${num(total)} ${total === 1 ? "item" : "items"}` : undefined}>
-    <BrowserChrome browse={browse} repos={repoOptions ?? []} phone={phone} phaseCounts={first?.byPhase} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
+    <BrowserChrome browse={browse} repos={repoOptions ?? []} areas={areas} phone={phone} phaseCounts={first?.byPhase} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
       {error && <div className="flex items-center gap-2 px-4 py-3" role="alert"><ErrorLine error={error.message || "Could not read these items."} /><Button variant="ghost" size="sm" onClick={refetch}>Retry</Button></div>}
       {!ready && !error && !display.retained && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
       {display.retained && <p role="status" className="sr-only">Loading items…</p>}

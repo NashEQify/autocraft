@@ -10,6 +10,9 @@ import { ownLogins } from "../github/identity.ts";
 import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/held.ts";
 import { conflictAskRetryAtOf, conflictBucketOf } from "../fixup/conflict-state.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
+import { featureOn } from "../build/features.ts";
+import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo, type LongLived } from "../fixup/pushable.ts";
 import { FAST_FLOOR, fastScoreExpr } from "../fasttrack.ts";
@@ -49,6 +52,7 @@ import { CIFIX_PUSH_STATES, CIFIX_TRY_STATES, MAX_FAILURES, labelWithScopeAnswer
 import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import { settledByExpr } from "../settlers.ts";
 import { activeTrips, brokeHeads } from "../push-outcomes.ts";
+import { tripsOfRepo } from "./push-outcome.ts";
 import { setting } from "../settings-read.ts";
 import { allOf, everySeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
@@ -106,7 +110,10 @@ const selectRows = (db: Db) => db.k.selectFrom("items as i")
   .$narrowType<{ state: "OPEN" | "MERGED" | "CLOSED" }>()
   .where("i.kind", "=", "pr")
   .where((eb) => eb.or([eb("i.state", "=", "OPEN"), eb.and([eb("i.state", "=", "MERGED"), eb("l.verdict", "in", ["take", "take-fix"])]),
-    eb.exists(eb.selectFrom("merges as mm").select(eb.lit(1).as("one")).whereRef("mm.repo", "=", "i.repo").whereRef("mm.number", "=", "i.number").where("mm.outcome", "=", "merged"))]));
+    eb.exists(eb.selectFrom("merges as mm").select(eb.lit(1).as("one")).whereRef("mm.repo", "=", "i.repo").whereRef("mm.number", "=", "i.number").where("mm.outcome", "=", "merged")),
+    // A PR of a live implementation, merged or closed: its attempt still has to end with it (decidePr).
+    eb.exists(eb.selectFrom("main.implementations as im").select(eb.lit(1).as("one")).whereRef("im.repo", "=", "i.repo").whereRef("im.pr_number", "=", "i.number")
+      .where("im.state", "not in", [...ENDED_STATES]))]));
 
 /** The statements named by the given stored `conflicts` values (JSON [{id, reason}]), one entry per id with the first reason; unknown ids and unreadable values count for nothing. */
 async function statementConflicts(find: { get(id: number): Promise<unknown> }, stored: unknown[]): Promise<PrFacts["statementConflicts"]> {
@@ -170,6 +177,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const mainRed = await redMainRepos(db);
   const tripped = await activeTrips(db);
   const brokeAt = await brokeHeads(db, opts.repo);
+  const implPrs = await implementationPrs(db, opts.repo);
   // The per-PR rows below are independent reads: they run together (on Postgres, over the pool).
   const { ourFixupHead, ourSameDiffMerge, pushedHere, pushedOffAt, carries, fixupsOf, fixupAt, lintFixup, lintOperator, lintCifix, carryRows, conflictRowsOf, lintConflict, cifixOf, merges, waiting, verifRows, otherOpen, openQuestion, unsureAt, reviewRows } = await allOf({
     // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
@@ -258,7 +266,8 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       const t = await repoTables(), row = t.repos.get(repo);
       m = {
         f: { mergeApproved: !!await mergeApprovalOf(db, repo), pushApproved: await pushApprovalOf(db, repo) !== null, commentApproved: await commentApprovalOf(db, repo) !== null, ciApproved: await ciApprovalOf(db, repo) !== null,
-          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo) },
+          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo), fixIssueApproved: await fixIssueApprovalOf(db, repo) !== null,
+          implementOn: await featureOn(db, "implement", repo) },
         pub: row?.visibility === "public",
         longLived: t.longLived(repo),
         defaultBranch: row?.default_branch ?? null,
@@ -343,7 +352,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     const pushedOff = r.state === "OPEN" && !integration && !!head && (pushedOffAt.get(`${ref}@${head}`) ?? []).some((p) => !r.updated_at || Date.parse(r.updated_at) < Date.parse(p.at));
     const lines = (r.additions ?? 0) + (r.deletions ?? 0);
     const base: PrFacts = {
-      repo: r.repo, number: r.number, ...(pushedOff ? { pushedOff } : {}), assignment: assigned(ref, r.assignees), now, pipelineOn, tripped, ghState: r.state, head, draft: fresh ? r.c_state !== "OPEN" || !!r.c_draft : !!r.is_draft,
+      repo: r.repo, number: r.number, ...(pushedOff ? { pushedOff } : {}), assignment: assigned(ref, r.assignees), now, pipelineOn, tripped: tripsOfRepo(tripped, r.repo), ghState: r.state, head, draft: fresh ? r.c_state !== "OPEN" || !!r.c_draft : !!r.is_draft,
       author: r.author, authorIsPipeline: r.author !== null && await own.isOwn(r.repo, r.author), tier: "not", lines, size: sizeOf(lines), label: null, needsDecisionFlag: false,
       scopeAnswer: scope.get(ref) ?? null,
       inScope, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration, batchPr: !!r.batch_pr, heldBacklog: !!r.held_backlog, heldDuplicate: !r.held_backlog && !!r.held_dup, quiet: own.quiet.has(ref), mergeHeld: holds.has(ref),
@@ -355,6 +364,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: activeBatched.has(ref), fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     };
     base.inFlight = r.state === "OPEN" && !integration && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref);
+    base.implementation = implPrs.get(ref) ?? null;
     if (integration) {
       base.runs = runsOf(await batchTip(r.repo, r.number), rf.f.ciApproved);
       out.push(base);
@@ -602,6 +612,26 @@ function carriedSources(rows: CarrySource[]): { number: number; author: string |
 export { tierKey, tiersOf, type AuthorRef };
 
 /** PRs the pipeline opened itself from a Fix issues attempt or for a red default branch, as `repo#number`, when authored by its own account. */
+/** The PRs our implementations opened, by ref: the latest attempt that opened each (ended ones too), its issue, its state and the heads its revisions started from (its `revise` rounds). */
+async function implementationPrs(db: Db, repo?: string): Promise<Map<string, NonNullable<PrFacts["implementation"]>>> {
+  const rows = await db.all(db.k.selectFrom("main.implementations").select(["id", "repo", "number", "pr_number", "state"]).where("pr_number", "is not", null)
+    .$if(!!repo, (q) => q.where("repo", "=", repo!)).orderBy("id").$narrowType<{ pr_number: number }>());
+  const out = new Map<string, NonNullable<PrFacts["implementation"]>>();
+  const byId = new Map<number, NonNullable<PrFacts["implementation"]>>();
+  for (const r of rows) {
+    const v = { issue: r.number, state: r.state, revisedHeads: [] as string[] };
+    out.set(`${r.repo}#${r.pr_number}`, v);
+    if (!ENDED_STATES.has(r.state as ImplementationState)) byId.set(r.id, v);
+  }
+  if (byId.size) {
+    for (const g of await db.all(db.k.selectFrom("main.implementation_rounds").select(["implementation_id", "result"]).where("kind", "=", "revise").where(inList(db, "implementation_id", [...byId.keys()], "bigint")))) {
+      const head = (safeJson(g.result) as { head?: unknown } | null)?.head;
+      if (typeof head === "string") byId.get(g.implementation_id)?.revisedHeads.push(head);
+    }
+  }
+  return out;
+}
+
 export async function ownFixPrs(db: Db, repo?: string, slug?: string | null): Promise<{ login: string | null; prs: Set<string>; quiet: Set<string>; isOwn: (repo: string, author: string | null) => Promise<boolean> }> {
   const logins = new Map<string, Set<string>>();
   const isOwn = async (r: string, author: string | null): Promise<boolean> => {

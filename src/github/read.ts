@@ -10,6 +10,7 @@ import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { AppNotInstalledError, TOKEN_ENV, appChildEnv, installationToken } from "./install-token.ts";
 import type { Db } from "../db/index.ts";
 import { dbFor, dbTarget, isPgUrl, openDb } from "../db/open.ts";
+import { setting } from "../settings-read.ts";
 
 export type ReadEnv = Record<string, string>;
 export type ReadDeps = { db?: Db; mint?: (owner: string) => Promise<string>; defaultOwner?: () => Promise<string> };
@@ -60,7 +61,7 @@ async function retried<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const settingOf = (db: Db): Promise<string | undefined> =>
-  retried(async () => (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "github_identity")))?.value ?? undefined);
+  retried(async () => (await setting(db, "github_identity")) ?? undefined);
 
 /** The identity setting as this process holds it, with the `settings` change counter it was read at (null: unknown). */
 let held: { app: boolean; seq: number | null } | null = null;

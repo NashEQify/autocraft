@@ -7,13 +7,13 @@ export function detailOf(action: string, d: Record<string, unknown>): string {
   switch (action) {
     case "labels-apply": return list;
     case "label-create": return String(d.name ?? "");
-    case "act-comment": case "fixup-comment": case "fixup-comment-edit": case "conflict-comment-edit": case "fixissue-comment": return clip(String(d.text ?? ""), 160);
+    case "act-comment": case "fixup-comment": case "fixup-comment-edit": case "conflict-comment-edit": case "pr-status-comment": case "pr-status-comment-edit": case "fixissue-comment": case "implement-comment": return clip(String(d.text ?? ""), 160);
     case "batch-pr-close": return clip(String(d.text ?? ""), 160);
     case "merge": return [d.method, d.commit ? short(d.commit) : "", d.batch ? `in ${d.batch}` : ""].filter(Boolean).join(" ");
     case "assign": case "unassign": return String(d.assignee ?? "");
     case "review-post": case "review-edit": return d.head ? `at ${short(d.head)}` : "";
-    case "fixup-push": case "batch-push": case "fixissue-push": return [d.branch, d.commit ? `@ ${short(d.commit)}` : ""].filter(Boolean).join(" ");
-    case "batch-pr": case "fixissue-pr": return String(d.branch ?? d.batch ?? "");
+    case "fixup-push": case "batch-push": case "fixissue-push": case "implement-push": return [d.branch, d.commit ? `@ ${short(d.commit)}` : ""].filter(Boolean).join(" ");
+    case "batch-pr": case "fixissue-pr": case "implement-pr": return String(d.branch ?? d.batch ?? "");
     case "fork-create": return "";
     default: return "";
   }

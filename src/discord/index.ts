@@ -2,6 +2,7 @@
 // are set; the runner starts it next to the worker server. See docs/pipeline.md.
 import { loadConfig, type Config } from "../dash/server/config.ts";
 import { TokenBox } from "../dash/server/crypto.ts";
+import { bindSecrets, processAppKeys } from "../github/app-keys.ts";
 import { githubIdentity } from "../github/identity.ts";
 import { providerFor } from "../dash/server/provider.ts";
 import { userForLogin } from "../dash/server/sessions.ts";
@@ -23,6 +24,7 @@ import { installAccountCommands } from "./commands.ts";
 import { DecisionAlerts, installAlertCommands } from "./alerts.ts";
 import { installSearchCommands } from "./search-commands.ts";
 import { dropIssueTexts, installIssueNew } from "./issue-new.ts";
+import { installPanel, postPanel } from "./panel.ts";
 import { DiscordConfigError, readKeyFile, readTokenFile, type DiscordKeys } from "./keys.ts";
 import { forgetAuthor, forgetMessages, handleDispatch, setStatus, upsertCategory, upsertChannel } from "./store.ts";
 import type { Db } from "../db/index.ts";
@@ -82,6 +84,8 @@ export function dispatcher(db: Db, keys: DiscordKeys, interactions: Interactions
 function installDecisionAlerts(db: Db, keys: DiscordKeys, rest: RestClient, interactions: Interactions, signal: AbortSignal, log: (l: string) => void): void {
   let config: Config | null = null;
   try { config = loadConfig(process.env); } catch (e) { log(`runner: Discord alerts use cached permissions only: ${(e as Error).message}`); }
+  const appKeys = processAppKeys();
+  if (config && appKeys) bindSecrets(config.secrets, appKeys);
   const box = config ? new TokenBox(config.secrets.sessionKey) : null;
   const provider = config ? providerFor(config, async () => await githubIdentity(db)) : null;
   const alerts = new DecisionAlerts({
@@ -115,7 +119,7 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
   const interactions = new Interactions(rest, log);
   installSearchCommands(interactions, { db, keys, search });
   installAccountCommands(interactions, { db, keys });
-  installIssueNew(interactions, { db, keys, search, log });
+  installPanel(interactions, db, installIssueNew(interactions, { db, keys, search, log }));
   installDecisionAlerts(db, keys, rest, interactions, signal, log);
   const pings = new Pings({ db, keys, rest, search, log });
   const signals = new Signals({ db, keys, log });
@@ -134,7 +138,8 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
 
 const USAGE = `usage: autocraft-server discord forget --message <message link or id> | --user <user id>
        autocraft-server discord channels
-       autocraft-server discord watch <channel id> | unwatch <channel id>`;
+       autocraft-server discord watch <channel id> | unwatch <channel id>
+       autocraft-server discord panel post <channel id>`;
 
 function die(msg: string): never {
   console.error(msg);
@@ -188,9 +193,18 @@ async function discord(args: string[]): Promise<void> {
     if (!r.changes) die("no such channel; the bot has not reported it");
     await audit(db, "cli", sub === "watch" ? "discord-watch" : "discord-unwatch", a);
     console.log(`${sub === "watch" ? "watching" : "no longer watching"} ${a}`);
+  } else if (sub === "panel" && a === "post" && b) {
+    const tokenFile = envVar("DISCORD_TOKEN_FILE");
+    if (!tokenFile) die("AUTOCRAFT_DISCORD_TOKEN_FILE is not set");
+    let token: string;
+    try { token = readTokenFile(tokenFile); } catch (e) { die((e as Error).message); }
+    const r = await postPanel(db, new RestClient({ token }), b).catch((e: Error) => die(`posting the panel failed: ${e.message}`));
+    if (!r) die("no such channel; the bot has not reported it");
+    await audit(db, "cli", "discord-panel", b, { message: r.messageId, created: r.created });
+    console.log(`${r.created ? "posted" : "updated"} the panel in ${b} (message ${r.messageId})${r.pinError ? `; not pinned: ${r.pinError}` : ""}`);
   } else die(USAGE);
 }
 
 export const commands = {
-  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch", run: (args: string[]) => discord(args) },
+  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post", run: (args: string[]) => discord(args) },
 };

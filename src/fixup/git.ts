@@ -46,7 +46,7 @@ export function fixupDir(): string {
 }
 
 /** The empty tree: attributes are read from it, never from a tree in the repository (in a bare repository git may otherwise read HEAD's). */
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /**
  * Options of every git command on a cached clone. The repository is named by GIT_DIR (`gitDirEnv`), so with
@@ -123,7 +123,7 @@ export class Git {
   /** Fetches `branch` of `org/repo` and reports whether the commit `sha` is now available (it may be older than the branch head). */
   async fetchBranch(org: string, repo: string, branch: string, sha: string): Promise<boolean> {
     await this.init();
-    await this.must(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", `https://github.com/${org}/${repo}.git`, `+refs/heads/${branch}:refs/fixissue/main`]);
+    await this.must(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", `https://github.com/${org}/${repo}.git`, `+refs/heads/${branch}:refs/fixup/main-head`]);
     const have = (await this.git(["cat-file", "-e", `${sha}^{commit}`])).code === 0;
     return have;
   }

@@ -8,8 +8,7 @@ import { describe, test } from "node:test";
 import { setRunner, askClaude, type Runner } from "../src/classify/run.ts";
 import { claudeArgs, claudeParts } from "../src/prompts/index.ts";
 import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
-import { SAMPLE_PATCH, SAMPLE_TRIAGE } from "../src/fixissue/types.ts";
-import { SAMPLE_FIXISSUE_CHECK, SAMPLE_FIXUP_CHECK } from "../src/patchcheck/types.ts";
+import { SAMPLE_FIXUP_CHECK } from "../src/patchcheck/types.ts";
 import { SAMPLE_FIXUP_PRS } from "../src/prompts/samples.ts";
 import { SAMPLE_VERIFY_PLAN } from "../src/verify/types.ts";
 import { buildCheckout, safePath } from "../src/sandbox/checkout.ts";
@@ -68,8 +67,8 @@ describe("sandbox command", () => {
 
 describe("sandbox adoption", () => {
   const cases = [
-    ["fixup.patch", SAMPLE_FIXUP_PRS, 20], ["cifix.patch", SAMPLE_CIFIX_PRS, 20], ["verify.plan", SAMPLE_VERIFY_PLAN, 20], ["fixissue.triage", SAMPLE_TRIAGE, 20],
-    ["fixissue.patch", SAMPLE_PATCH, 30], ["fixup.check", SAMPLE_FIXUP_CHECK, 20], ["fixissue.check", SAMPLE_FIXISSUE_CHECK, 20],
+    ["fixup.patch", SAMPLE_FIXUP_PRS, 20], ["cifix.patch", SAMPLE_CIFIX_PRS, 20], ["verify.plan", SAMPLE_VERIFY_PLAN, 20],
+    ["fixup.check", SAMPLE_FIXUP_CHECK, 20],
   ] as const;
   for (const [id, sample, turns] of cases) {
   }

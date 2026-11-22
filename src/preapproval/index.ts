@@ -16,7 +16,7 @@ import { settleMemo, settlesNow } from "../settlers.ts";
 import type { Preapproval } from "../../web/src/api/types.ts";
 import type { Step } from "../conversations/cards.ts";
 import { conversationOf, insertTurn, systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { withSettingsSnapshot } from "../settings-read.ts";
 import { HEAD_FACT, MERGE_OPTIONS, PREMERGE_MAX_TRIES, mergeDecisionId } from "../core/rules.ts";
@@ -216,6 +216,12 @@ function notReviewableWhy(state: string, scopeAnswer: string | null): string {
 /** Why a pre-approval pinned to a head (a comment's) was refused: the PR has another head now. */
 export const HEAD_CHANGED = "the PR changed after your comment; comment again";
 
+/** preapproveMerge's refusal by rule (the PR, its state or the repo's approval); other errors may pass on a later try. `active`: one is in progress already. */
+export class PreapprovalRefused extends Error {
+  readonly active: boolean;
+  constructor(message: string, active = false) { super(message); this.active = active; }
+}
+
 /**
  * "Queue items" (a PR line): an operator's Merge answer given ahead, with no fix-up. A row starts in `review` at the current head,
  * the way a carried answer does, so the PR merges only after a take review, a clean pre-merge review and green CI there. The approval
@@ -230,22 +236,22 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
   const { repo, number, by, via } = o;
   const ref = `${repo}#${number}`;
   const it = await prRow(db, repo, number);
-  if (!it || it.kind !== "pr") throw new Error(`${ref} is not a pull request`);
-  if (it.state !== "OPEN") throw new Error(`${ref} is not open`);
+  if (!it || it.kind !== "pr") throw new PreapprovalRefused(`${ref} is not a pull request`);
+  if (it.state !== "OPEN") throw new PreapprovalRefused(`${ref} is not open`);
   const fact = await loadPrFact(db, repo, number);
   const planState = preapprovedState(fact);
-  if (!planState || planState === "out-of-scope" || planState === "integration") throw new Error(`${ref} is outside the pipeline's scope`);
-  if (NOT_REVIEWABLE.includes(planState)) throw new Error(`${ref} cannot be reviewed yet: ${notReviewableWhy(planState, fact?.scopeAnswer ?? null)}`);
+  if (!planState || planState === "out-of-scope" || planState === "integration") throw new PreapprovalRefused(`${ref} is outside the pipeline's scope`);
+  if (NOT_REVIEWABLE.includes(planState)) throw new PreapprovalRefused(`${ref} cannot be reviewed yet: ${notReviewableWhy(planState, fact?.scopeAnswer ?? null)}`);
   const head = it.head_oid;
   if (!head) throw new Error(`${ref} has no head commit in the mirror yet`);
   if (o.head !== undefined && head !== o.head) throw new Error(HEAD_CHANGED);
-  if (!await mergeApprovalOf(db, repo)) throw new Error(`merging is not approved for ${repo}`);
+  if (!await mergeApprovalOf(db, repo)) throw new PreapprovalRefused(`merging is not approved for ${repo}`);
   const active = async () => await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("state", "in", ACTIVE));
-  if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
+  if (await active()) throw new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
   const at = iso();
   await db.write(async () => {
     // Checked again under the write lock: another writer may have started one since the first check.
-    if (await active()) throw new Error(`${ref} already has a pre-approved merge in progress`);
+    if (await active()) throw new PreapprovalRefused(`${ref} already has a pre-approved merge in progress`, true);
     const id = (await db.get(db.k.insertInto("preapprovals").values({ repo, number, by, at, instructions: "", state: "review", from_head: head, head, updated_at: at, fix_id: null }).returning("id")))!.id;
     await audit(db, by, "preapproval", ref, { id, state: "review", head, queued: "merge-queue", ...(via ? { via } : {}) });
   });
@@ -358,7 +364,7 @@ async function noteOnce(db: Db, p: Row, head: string, note: string, line: string
 }
 
 /**
- * "base merge", "autorepin" or "fix-up for the review's fixes" when the pipeline itself pushed `cur` on top of the row's head, else null.
+ * "base merge", "autorepin", "fix-up for the review's fixes" or the implementation session's revision when the pipeline itself pushed `cur` on top of the row's head, else null.
  * The review's fix-up counts for every row: the merge approval says the change is wanted, and the fix-up's push gets a fresh review.
  */
 async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
@@ -366,10 +372,15 @@ async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
     .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", "review")).where("state", "in", ["pushing", "pushed"]))) return "fix-up for the review's fixes";
   // Only a base merge that left the PR's own diff unchanged continues an answer; a CI fix or a resolved conflict is model-written code nobody saw.
   if (await db.get(db.k.selectFrom("conflict_merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur).where("state", "=", "merged").where("own_diff", "=", "same"))) return "base merge";
+  // A revision of our implementation PR by the session that wrote it: the PR is the queuer's implementation, and the push gets a fresh review.
+  if (await db.get(db.k.selectFrom("push_outcomes").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("action", "=", "implement-push").where("from_oid", "=", p.head).where("to_oid", "=", cur))) return "implementation session's revision";
   // An autorepin (src/repin) is no model's code either: the revs of a dependency moved to a merge commit on its default branch, as someone who may queue the PR asked.
   if (await db.get(db.k.selectFrom("main.autorepins").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head", "=", p.head).where("to_head", "=", cur).where("state", "in", ["waiting", "locking", "pushed"]))) return "autorepin";
   return null;
 }
+
+/** Our implementation PR whose revision by its session is planned or running: the review's fixes and red CI are its to repair. */
+const revisesNow = (f: PrFacts): boolean => !!reviseOf(f) || ownImplementation(f)?.state === "revising";
 
 /** Why the planner does not list the operator's fix-up for the PR now; null when it does. */
 async function whyNotPlanned(db: Db, f: PrFacts): Promise<string | null> {
@@ -466,6 +477,8 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
       // The planner's fix-up of the review's fixes runs next, sure or unsure (fixupOf). Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
       const f = cur === head ? await factOf() : null;
       const fx = f ? fixupOf(f) : null;
+      // Our implementation PR goes back to the session that wrote it instead; its push is our own as well.
+      if (f && revisesNow(f)) return await noteOnce(db, p, head, "review-revise", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the implementation session makes them.`);
       if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) {
         return await noteOnce(db, p, head, "review-fixup", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the fix-up runs.`);
       }
@@ -488,6 +501,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
     if (c.overall === "failure") {
       // The CI fix step works the red head as it would for any PR; its push is a head the operator did not see, so the row ends and the Merge? question is asked there. The operator decides when the step has given up.
       const f = await factOf();
+      if (f && revisesNow(f)) return;
       const bucket = f ? cifixBucket(f) : null;
       if (bucket !== null && ["work", "formatting", "linting", "collect", "rerun", "rerun-wait"].includes(bucket) && stepRuns(f!, "cifix")) return;
       return await stop("asked", `CI failed at ${headName(p)} and the CI fix did not repair it`, head, [reviewFact(p, "take"), `CI failed at ${headName(p)}`]);

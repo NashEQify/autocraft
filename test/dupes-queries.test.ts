@@ -24,6 +24,8 @@ test("canonical info, unchecked pairs, duplicate holds and comparison re-marking
   assert.equal((await uncheckedPairs(db, -1)).length, 1);
   assert.equal((await uncheckedPairs(db, 0)).length, 0);
   assert.deepEqual([...await uncheckedPairCounts(db)].sort(), [["app#1", 1], ["app#2", 1]]);
+  assert.deepEqual([...await uncheckedPairCounts(db, { refs: ["app#1"] })], [["app#1", 1]]);
+  assert.deepEqual([...await uncheckedPairCounts(db, { refs: ["app#3"] })], []);
   await db.run(db.k.insertInto("decisions").values({ id: "d1", kind: "duplicate", repo: "app", number: 2, question: "q", options: "[]", asked_at: T0, facts: JSON.stringify(["duplicate of app#1"]) }));
   assert.equal(await duplicateCount(db, "app", 1), 1);
   assert.equal(await duplicateHeld(db, "app", 2), true);

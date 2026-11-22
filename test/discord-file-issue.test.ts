@@ -1,12 +1,14 @@
 // Filing from Discord under the person's GitHub account: no token gives a stored-hashed sign-in state, the callback stores
 // the token, a signed-in report is created with the footer and audited, junk and the per-login limit refuse, and
-// forgetting removes the token and queues its revoke. No network: the provider, `gh` and the junk judges are fakes.
+// forgetting removes the token and queues its revoke. "Submit for me" files as the GitHub App only, credits the reporter
+// and stops at the per-person limit. No network: the provider, `gh` and the junk judges are fakes.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { fileIssue, forgetReporter, type FileHooks } from "../src/discord/file-issue.ts";
+import { botRefusal, fileAsBot, fileIssue, forgetReporter, type FileHooks } from "../src/discord/file-issue.ts";
+import { setGithubIdentity } from "../src/github/identity.ts";
 import { readReporter } from "../src/discord/reporter.ts";
 import { TokenBox } from "../src/dash/server/crypto.ts";
 import type { Provider, Tokens } from "../src/dash/server/provider.ts";
@@ -99,5 +101,33 @@ describe("filing from Discord", () => {
     const q = (await db.get(db.k.selectFrom("user_token_revocations").select(["login", "kind", "aad"])))!;
     assert.deepEqual({ ...q }, { login: "octo", kind: "token", aad: "reporter_tokens:rep1" });
     assert.equal(await forgetReporter(db, "rep1"), false);
+  });
+});
+
+describe("Submit for me", () => {
+  test("the GitHub App files with the reporter credited, never as the box account, up to the per-person limit", async () => {
+    const ran: { args: string[]; input?: string; token?: string }[] = [];
+    const bot = {
+      judge: hooks.judge, mint: async () => "ghs_install",
+      exec: (async (_cmd, args, opts) => { ran.push({ args, input: opts?.input, token: opts?.env?.GH_TOKEN }); return { code: 0, stdout: args[1] === "create" ? "https://github.com/storytold/photocraft/issues/77\n" : "", stderr: "" }; }) as NonNullable<FileHooks["exec"]>,
+    };
+    const ask = { ...req, reporter: "rep2", reporterName: "Ana @everyone [x](https://evil.example)", drafted: true };
+    assert.equal((await fileAsBot(deps, ask, bot)).status, "refused", "the box account never files for Discord");
+    assert.equal(ran.length, 0);
+
+    await setGithubIdentity(db, "test", "app");
+    assert.equal(await botRefusal(db, "rep2", "photocraft"), null);
+    assert.deepEqual(await fileAsBot(deps, ask, bot), { status: "filed", number: 77, url: "https://github.com/storytold/photocraft/issues/77" });
+    assert.equal(ran[0]!.token, "ghs_install");
+    assert.match(ran[0]!.input!, /\n\nReported on Discord by Ana everyone x\. Filed by AutoCraft on their behalf\.$/);
+    assert.doesNotMatch(ran[0]!.input!, /@|:\/\//, "no mention or link from the name");
+    const a = (await db.get(db.k.selectFrom("audit").select(["details"]).where("action", "=", "discord-issue-bot")))!;
+    assert.equal(JSON.parse(a.details!).identity, "app");
+
+    await fileAsBot(deps, ask, bot);
+    await fileAsBot(deps, ask, bot);
+    assert.notEqual(await botRefusal(db, "rep2", "photocraft"), null, "past the limit the draft offers only the GitHub link");
+    assert.equal((await fileAsBot(deps, ask, bot)).status, "refused");
+    assert.equal(ran.filter((r) => r.args[1] === "create").length, 3);
   });
 });

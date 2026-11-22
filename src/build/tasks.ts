@@ -13,6 +13,8 @@ import { draining } from "./worker-update.ts";
 import { baseScopeRepos } from "../pilot.ts";
 import { fastTask } from "../fasttrack.ts";
 import { featureOn } from "./features.ts";
+import { settingsOf } from "./pods.ts";
+import { warmClaim } from "./warm-queue.ts";
 import { slugOf } from "../owners.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
@@ -42,7 +44,7 @@ type TaskRow = {
   requires: string; priority: number; plan: string; state: TaskState; env_id: string | null; attempts: number;
   queued_at: string; claimed_at: string | null; started_at: string | null; ended_at: string | null; heartbeat_at: string | null;
   cancel_requested_at: string | null; results: string; summary: string | null; log_bytes: number; artifact_bytes: number;
-  patch?: string | null; warm_key?: string | null; warm_role?: string | null; sandbox_env?: string | null;
+  patch?: string | null; warm_key?: string | null; warm_role?: string | null; sandbox_env?: string | null; warm_image?: string | null;
   env_label?: string | null; default_branch?: string | null;
 };
 
@@ -61,9 +63,13 @@ export type NewTask = {
   patch?: string;
   /** Tasks of one repo share a build cache under `key`: `build` fills it, `use` reads it. */
   warm?: Warm;
+  /** A warm producer task: the toolchain image it was queued with. */
+  warmImage?: string;
 };
 
 export type Warm = { key: string; role: "use" | "build" };
+/** The step of the warm producer's builds (src/build/warm-queue.ts): only a `warmWriter` environment takes them, and it takes nothing else. */
+export const WARM_STEP = "warm";
 export const MAX_PATCH_BYTES = 1024 * 1024;
 /** A warm-cache key for a repo name: a readable slug (at most 49 characters) and a hash of the lowercased name, so distinct names never share a key; always valid. */
 export function warmKeyOf(name: string): string {
@@ -111,7 +117,7 @@ export function parsePlan(v: unknown): TaskStep[] {
     if (!o || typeof o !== "object") throw new BuildError(400, `${where} must be an object`);
     if (typeof o.name !== "string" || !STEP_NAME_RE.test(o.name)) throw new BuildError(400, `${where}.name is not valid`);
     if (!Array.isArray(o.cmd) || o.cmd.length < 1 || o.cmd.length > 64 || o.cmd.some((a) => typeof a !== "string" || a.length > 8192 || a.includes("\0"))) throw new BuildError(400, `${where}.cmd must be 1 to 64 strings`);
-    if (o.network !== "fetch" && o.network !== "none") throw new BuildError(400, `${where}.network must be fetch or none`);
+    if (o.network !== "fetch" && o.network !== "none" && o.network !== "mirror") throw new BuildError(400, `${where}.network must be fetch, none or mirror`);
     if (typeof o.timeoutSec !== "number" || !Number.isInteger(o.timeoutSec) || o.timeoutSec < 1 || o.timeoutSec > 7200) throw new BuildError(400, `${where}.timeoutSec must be 1 to 7200`);
     const step: TaskStep = { name: o.name, cmd: o.cmd as string[], network: o.network, timeoutSec: o.timeoutSec };
     if (o.artifacts !== undefined) {
@@ -144,7 +150,7 @@ export async function createTask(db: Db, t: NewTask): Promise<number> {
   const r = await db.get(db.k.insertInto("build_tasks").values({
     job_id: t.jobId ?? currentJobId(), step: t.step, repo: t.repo, number: t.number ?? null, head_sha: t.headSha, base_sha: t.baseSha ?? null,
     requires: JSON.stringify(requires), priority, plan: JSON.stringify(plan), state: "queued", queued_at: nowIso(),
-    patch, warm_key: warm?.key ?? null, warm_role: warm?.role ?? null,
+    patch, warm_key: warm?.key ?? null, warm_role: warm?.role ?? null, warm_image: t.warmImage ?? null,
   }).returning("id"));
   return r!.id;
 }
@@ -178,19 +184,28 @@ export async function cancelIds(db: Db, envId: string): Promise<number[]> {
 const runsPrCode = (t: { step: string; number: number | null }): boolean => t.step === "pr-build" || t.step === "merge-batch" || t.number !== null;
 
 /**
+ * Whether an environment has room for a task it would claim (the pod launcher's cluster capacity): "fit" claims it,
+ * "stop" ends claiming for now (no later task is taken in its place, so priority order holds), "skip" passes over a task
+ * this environment can never run but another may, and `fail` ends the task at once with that summary (no environment can run it).
+ */
+export type ClaimFit = (t: { id: number; repo: string; step: string; warmKey: string | null; requires: Requires }) => Promise<"fit" | "stop" | "skip" | { fail: string }>;
+
+/**
  * Hands out queued tasks to an environment that has `free` slots: the oldest of the highest priority
  * whose requirements it meets, at most min(free, its slots minus the tasks it is running). A disabled,
  * paused or unreported environment gets none. One write transaction, so two environments never get the same task.
+ * With `fit`, its slots are only the ceiling (not the slots it reported) and `fit` decides each task.
  */
-export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now()): Promise<ClaimResult> {
+export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now(), fit?: ClaimFit): Promise<ClaimResult> {
   await reapLost(db, nowMs);
   const tasks = await db.write(async () => {
-    const env = await db.get(db.k.selectFrom("build_envs").select(["enabled", "kind", "slots", "reported_slots", "capabilities", "paused_reason", "confidential"]).where("id", "=", envId));
+    const env = await db.get(db.k.selectFrom("build_envs").select(["enabled", "kind", "slots", "reported_slots", "capabilities", "paused_reason", "confidential", "settings"]).where("id", "=", envId));
     const caps = env?.capabilities ? json<Capabilities | null>(env.capabilities, null) : null;
+    const kube = env?.kind === "kubernetes" ? settingsOf(env.settings) : null;
     const out: ClaimedTask[] = [];
     if (env && env.enabled === 1 && caps && !env.paused_reason && !await draining(db, env.kind) && Number.isInteger(free) && free > 0) {
       const running = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("env_id", "=", envId).where("state", "in", ["claimed", "running"])))!.n;
-      const room = Math.min(free, slotsOf(env) - running);
+      const room = Math.min(free, (fit ? env.slots : slotsOf(env)) - running);
       if (room > 0) {
         const queued = await db.all(db.k.selectFrom("build_tasks").select(cols("build_tasks")).$narrowType<{ state: TaskState }>().where("state", "=", "queued").orderBy("priority", "desc").orderBy("id").limit(500));
         const scope = await baseScopeRepos(db);
@@ -198,6 +213,12 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
         for (const t of queued) {
           if (out.length >= room) break;
           if (!satisfies(caps, json<Requires>(t.requires, {}))) continue;
+          // The warm producer builds trusted default-branch heads with the cache's write credentials: it takes nothing else, and nothing else takes its builds.
+          if (!!kube?.warmWriter !== (t.step === WARM_STEP)) continue;
+          // A worker's warm build fills its own warm dirs; build pods have none.
+          if (kube && t.warm_role === "build" && t.step !== WARM_STEP) continue;
+          let plan = json<TaskStep[]>(t.plan, []);
+          if (plan.some((s) => s.network === "mirror") && !kube?.crateMirror) continue;
           // Untrusted-code builds run only while their feature's switch is on for the repo.
           // A worker that holds the warm-snapshot signing key runs only default-branch code as it is: no PR, no patch, no merge batch.
           if (caps.warmSigner && (runsPrCode(t) || !!t.patch)) continue;
@@ -210,11 +231,29 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
           if (t.step === "screenshot" && !await featureOn(db, "screenshots", t.repo)) continue;
           // Operator smoke tests and the security fix's builds (an operator's request, under the finding's real repo) run anywhere; pipeline builds only for repos in scope, or for fast-tracked items of any repo.
           if (t.step !== "smoke-test" && t.step !== "fix-check" && !scope.has(t.repo) && !await fastTask(db, t)) continue;
-          await db.run(db.k.updateTable("build_tasks").set((eb) => ({ state: "claimed", env_id: envId, attempts: eb("attempts", "+", 1), claimed_at: at, heartbeat_at: at }))
-            .where("id", "=", t.id).where("state", "=", "queued"));
+          // A warm build waits for its repo's interval and takes the newest default-branch head, with the plan this environment runs.
+          let head = t.head_sha, base = t.base_sha;
+          if (t.step === WARM_STEP) {
+            const w = await warmClaim(db, t.repo, kube!, nowMs);
+            if (!w) continue;
+            [head, base, plan] = [w.head, w.head, w.plan];
+          }
+          if (fit) {
+            const f = await fit({ id: t.id, repo: t.repo, step: t.step, warmKey: t.warm_key, requires: json<Requires>(t.requires, {}) });
+            if (f === "stop") break;
+            if (f === "skip") continue;
+            if (f !== "fit") {
+              await db.run(db.k.updateTable("build_tasks").set({ state: "failed", ended_at: at, summary: f.fail.slice(0, 300) }).where("id", "=", t.id).where("state", "=", "queued"));
+              continue;
+            }
+          }
+          await db.run(db.k.updateTable("build_tasks").set((eb) => ({
+            state: "claimed", env_id: envId, attempts: eb("attempts", "+", 1), claimed_at: at, heartbeat_at: at,
+            ...(t.step === WARM_STEP ? { head_sha: head, base_sha: base, plan: JSON.stringify(plan) } : {}),
+          })).where("id", "=", t.id).where("state", "=", "queued"));
           out.push({
-            id: t.id, repo: t.repo, headSha: t.head_sha, baseSha: t.base_sha, requires: json<Requires>(t.requires, {}), plan: json<TaskStep[]>(t.plan, []),
-            sourceUrl: `https://codeload.github.com/${slugOf(t.repo)}/tar.gz/${t.head_sha}`,
+            id: t.id, repo: t.repo, headSha: head, baseSha: base, requires: json<Requires>(t.requires, {}), plan,
+            sourceUrl: `https://codeload.github.com/${slugOf(t.repo)}/tar.gz/${head}`,
             ...(t.patch ? { patch: t.patch } : {}),
             ...(t.warm_key && (t.warm_role === "use" || t.warm_role === "build") ? { warm: { key: t.warm_key, role: t.warm_role } } : {}),
           });
@@ -269,7 +308,11 @@ export async function touchTask(db: Db, envId: string, id: number): Promise<void
 }
 
 /** What a build pod's API containers need of their task: the source to fetch, the patch, and each step's name and artifact patterns. */
-export type PodTask = { id: number; repo: string; headSha: string; baseSha: string | null; sourceUrl: string; patch?: string; steps: { name: string; artifacts: string[] }[] };
+export type PodTask = {
+  id: number; repo: string; headSha: string; baseSha: string | null; sourceUrl: string; patch?: string; steps: { name: string; artifacts: string[] }[];
+  /** A warm producer's task (step `warm`): its source pod also reports the CI gate's warm-command. */
+  warm?: true;
+};
 
 export async function podTask(db: Db, envId: string, id: number): Promise<PodTask> {
   const t = await mine(db, envId, id);
@@ -277,6 +320,7 @@ export async function podTask(db: Db, envId: string, id: number): Promise<PodTas
     id: t.id, repo: t.repo, headSha: t.head_sha, baseSha: t.base_sha, sourceUrl: `https://codeload.github.com/${slugOf(t.repo)}/tar.gz/${t.head_sha}`,
     ...(t.patch ? { patch: t.patch } : {}),
     steps: json<TaskStep[]>(t.plan, []).map((s) => ({ name: s.name, artifacts: s.artifacts ?? [] })),
+    ...(t.step === WARM_STEP ? { warm: true as const } : {}),
   };
 }
 
@@ -490,7 +534,7 @@ export async function getTaskDetail(db: Db, id: number): Promise<BuildTaskDetail
   if (!t) return null;
   const l = await logTail(db, id);
   const p = await db.get(db.k.selectFrom("build_tasks").select("patch").where("id", "=", id));
-  return { ...t, logTail: l.text, logBytes: l.bytes, logTruncated: l.truncated, patch: p?.patch ?? null };
+  return { ...t, logTail: l.text, logBytes: l.bytes, logTruncated: l.truncated, patch: p?.patch ?? null, canCancel: false };
 }
 
 const CURSOR_RE = /^[1-9][0-9]{0,15}$/;

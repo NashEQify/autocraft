@@ -149,7 +149,7 @@ export async function batchesDue(db: Db, now = new Date()): Promise<string[]> {
 }
 
 /** One page of batches, newest first (ids below `before`), with their members in order: two queries, whatever the page size. */
-export async function pageBatches(db: Db, o: { repo?: string; hidden?: HiddenRepos; before?: number; limit: number }): Promise<{ batches: (BatchRow & { prs: BatchMember[] })[]; total: number; more: boolean }> {
+export async function pageBatches(db: Db, o: { repo?: string; hidden?: HiddenRepos; before?: number; limit: number }): Promise<{ batches: (BatchRow & { prs: BatchMember[]; areas: string[] })[]; total: number; more: boolean }> {
   // A list from the dashboard's `hiddenRepos` allows only its visible repos, so batches of untracked repos stay out too.
   const visible = <QB extends SelectQueryBuilder<DB, "main.merge_batches", any>>(q: QB): QB =>
     q.$if(!!o.repo, (q) => q.where("repo", "=", o.repo!))
@@ -176,8 +176,17 @@ export async function pageBatches(db: Db, o: { repo?: string; hidden?: HiddenRep
       try { const f = (JSON.parse(a.details ?? "{}") as { fork?: unknown }).fork; if (typeof f === "string" && f) forks.set(a.target, f); } catch { /* not JSON */ }
     }
   }
+  const areaOf = new Map<string, string>();
+  const nums = [...new Set([...members.values()].flat().map((m) => m.number))];
+  if (nums.length) {
+    const as = await db.all(db.k.selectFrom("main.item_areas").select(["repo", "number", "area"]).where("area", "is not", null)
+      .where(inList(db, "repo", [...new Set(page.map((b) => b.repo))])).where(inList(db, "number", nums, "bigint")));
+    for (const a of as) areaOf.set(`${a.repo}#${a.number}`, a.area!);
+  }
+  // The members' areas, each once, in batch order: the first is the area the batch was filled around.
+  const areasOf = (b: BatchRow): string[] => [...new Set((members.get(b.id) ?? []).flatMap((m) => areaOf.get(`${b.repo}#${m.number}`) ?? []))];
   return {
-    batches: page.map((b) => ({ ...b, fork: b.fork ?? forks.get(`${b.repo}:${b.branch}`) ?? null, prs: members.get(b.id) ?? [] })),
+    batches: page.map((b) => ({ ...b, fork: b.fork ?? forks.get(`${b.repo}:${b.branch}`) ?? null, prs: members.get(b.id) ?? [], areas: areasOf(b) })),
     total, more: rows.length > o.limit,
   };
 }

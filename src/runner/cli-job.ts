@@ -3,6 +3,7 @@
 // (requested by `cli`, so counted toward the limits and visible on the Pipeline page), and the runner's exec child, whose
 // output is shown here. The writer is an operator (CLI_BY): the guard skips the global switch, the approvals still apply.
 // Commands not listed in CLI_STEPS, and runs with options a step has no parameter for, keep their own direct path.
+import { copyLogs, JOB_LOG_FLUSH_MS, JobLogCopy } from "./job-log.ts";
 import { spawn } from "node:child_process";
 import { closeSync, createWriteStream, mkdirSync, openSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -19,7 +20,7 @@ export type CliStep = { step: string; when: "apply" | "dry-run" | "always" };
 export const CLI_STEPS: Record<string, CliStep> = {
   act: { step: "act", when: "apply" }, merge: { step: "merge", when: "apply" }, premerge: { step: "premerge", when: "apply" },
   "review-post": { step: "review-post", when: "apply" }, cifix: { step: "cifix", when: "apply" }, "cifix-rerun": { step: "cifix-rerun", when: "apply" },
-  "main-fix": { step: "main-fix", when: "apply" }, fixissue: { step: "fixissue", when: "apply" }, "fixissue-collect": { step: "fixissue-collect", when: "apply" },
+  "main-fix": { step: "main-fix", when: "apply" },
   fixup: { step: "fixup", when: "apply" },
   verify: { step: "verify", when: "dry-run" }, "verify-collect": { step: "verify-collect", when: "dry-run" }, "opus-review": { step: "opus-review", when: "dry-run" },
   dupes: { step: "dupes", when: "dry-run" }, "dupe-compare": { step: "dupes-compare", when: "dry-run" }, decide: { step: "decide", when: "dry-run" },
@@ -75,6 +76,8 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
   closeSync(openSync(logPath, "a"));
   await db.run(db.k.updateTable("jobs").set({ log_path: logPath }).where("id", "=", job));
   const log = createWriteStream(logPath, { flags: "a" });
+  const logCopy = await JobLogCopy.open(db, job, logPath);
+  const copying = setInterval(() => void copyLogs(db, [logCopy]).catch(() => { /* the next copy reads the lines again */ }), JOB_LOG_FLUSH_MS);
   const child = spawn(process.execPath, [fileURLToPath(new URL("../cli.ts", import.meta.url)), "runner", "exec", String(job)], {
     stdio: ["ignore", "pipe", "pipe"], env: dbEnv(dbTarget()),
   });
@@ -85,8 +88,10 @@ export async function runCliJob(db: Db, req: CliRequest): Promise<number> {
   let spawnError: string | null = null;
   child.on("error", (e) => (spawnError = e.message));
   const [code, signal] = await new Promise<[number | null, NodeJS.Signals | null]>((resolve) => child.on("close", (c, s) => resolve([c, s])));
-  log.end();
+  clearInterval(copying);
+  await new Promise<void>((resolve) => log.end(resolve));
   const r = await endJob(db, job, code, signal, spawnError);
+  await copyLogs(db, [logCopy], true).catch((e: Error) => console.error(`job ${job}: log not stored: ${e.message}`));
   console.error(`job ${job}: ${r?.state ?? "ended"}${r?.error ? `: ${r.error}` : ""}`);
   return r?.state === "done" ? 0 : 1;
 }

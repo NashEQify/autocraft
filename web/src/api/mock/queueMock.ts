@@ -54,7 +54,7 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
   const stopped = new Set<number>();
   const key = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
   const need = () => {
-    if (me.role !== "operator") throw new Error("not allowed");
+    if (me.role === "viewer") throw new Error("not allowed");
   };
   const pos = (r: { repo: string; number: number }): FastPosition | null => {
     const i = fast.indexOf(key(r));
@@ -102,9 +102,10 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
         ...work
           .filter((w) => w.kind === "issue" && w.fast)
           .slice(0, 2)
-          .map((w): QueuePendingRow => ({
-            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: w.next === "Fix" || w.next === "Fix: in progress" ? "build" : "next", fast: w.fast, held: false,
+          .map((w, i): QueuePendingRow => ({
+            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: i === 0 ? "implement" : w.next === "Fix" || w.next === "Fix: in progress" ? "build" : "next", fast: w.fast, held: false,
             added: { how: "fast", by: "operator", at: new Date(Date.now() - 1800_000).toISOString() }, prs: [], next: w.next,
+            ...(i === 0 && { implement: { state: "planning" as const, text: "Planning, attempt 2", wait: "Runs only on ochre-fox's Task Runner, which is not ready" } }),
           })),
       ];
       const count = (t: QueueTab) => (t === "all" ? work.length : t === "merge" ? entries.length + pending.length : work.filter((w) => tabOf(w.next) === t).length);
@@ -169,7 +170,12 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
         const closers = allMerge.filter((r) => r.repo === repo && r.closes?.includes(n)).map((r) => r.number);
         if (issueLink || closers.length || allWork.some((w) => w.repo === repo && w.number === n && w.kind === "issue")) {
           mark(item);
-          let rest = "no open PR closes it yet";
+          if (!closers.length) {
+            resort();
+            changed();
+            return { label: `Queued: AutoCraft plans and implements it${ignored}`, fast: [...fast] };
+          }
+          let rest = "";
           if (closers.length > 1) rest = `${closers.map((c) => `#${c}`).join(", ")} close it; queue one of them`;
           else if (closers.length === 1) {
             const pr = `${repo}#${closers[0]}`;

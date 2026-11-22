@@ -18,18 +18,24 @@ const snapshotOf = (db: Db): Map<string, string | null> | undefined => {
  * keep it current. Other contexts and connections (the runner thread, the dashboard) keep writing: the pass sees settings as
  * they were at its start, and applyProposals re-checks limits and blocks with fresh reads.
  */
-export async function withSettingsSnapshot<T>(db: Db, fn: () => Promise<T>): Promise<T> {
+export async function withSettingsSnapshot<T>(db: Db, fn: () => Promise<T>, read?: Promise<SettingsSnapshot>): Promise<T> {
   if (snapshotOf(db)) return await fn();
+  return await pass.run({ db, map: await (read ?? readSettingsSnapshot(db)) }, fn);
+}
+
+export type SettingsSnapshot = Map<string, string | null>;
+
+/** One reading of the table for withSettingsSnapshot, so a caller can start it alongside its other reads. */
+export async function readSettingsSnapshot(db: Db): Promise<SettingsSnapshot> {
   const rows = await db.all(db.k.selectFrom("main.settings").select(["key", "value"]));
-  return await pass.run({ db, map: new Map(rows.map((r) => [r.key, r.value])) }, fn);
+  return new Map(rows.map((r) => [r.key, r.value]));
 }
 
 /** Reads the table again for the snapshot of a pass on `db` (none: nothing), so a pass sees the settings of a read transaction it opens later. */
 export async function rereadSettingsSnapshot(db: Db): Promise<void> {
   const s = pass.getStore();
   if (s?.db !== db) return;
-  const rows = await db.all(db.k.selectFrom("main.settings").select(["key", "value"]));
-  s.map = new Map(rows.map((r) => [r.key, r.value]));
+  s.map = await readSettingsSnapshot(db);
 }
 
 /** The stored value, undefined when the key has no row. */

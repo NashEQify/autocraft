@@ -40,7 +40,7 @@ function randomPr(x: Rnd): PrFacts {
     needsDecisionFlag: x.bool(0.1), scopeAnswer: x.pick([null, null, null, "take", "small-extra", "close"]),
     inScope: x.bool(0.9), integration: x.bool(0.05), batchPr: x.bool(0.05), heldBacklog: x.bool(0.05), heldDuplicate: x.bool(0.05), mergeHeld: x.bool(0.1),
     authorIsPipeline: x.bool(0.1), pipelineOn: x.bool(0.9),
-    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1) },
+    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1), implementOn: x.bool(0.8) },
     ci: x.pick(["success", "success", "success", "failure", "pending", "none", "unknown"]),
     mergeable: x.pick(["MERGEABLE", "MERGEABLE", "MERGEABLE", "CONFLICTING", "UNKNOWN"]),
     checksHere: x.bool(0.9), checksOpen: x.bool(0.9), pushable: x.bool(0.7), inActiveBatch: x.bool(0.1), mainFix: x.bool(0.05), baseOffDefault: x.bool(0.05), stackedOn: x.bool(0.05) ? 1 : null,
@@ -92,6 +92,13 @@ function randomItem(x: Rnd): ItemFacts {
     fix: {
       attempt: x.bool(0.3) ? { state: x.pick(["retry", "testing", "passed", "skipped", "failed"]), textChanged: x.bool(), headDone: x.bool(), baseDone: x.bool() } : null,
       publicRepo: x.bool(0.9), notRust: x.bool(0.1), openPr: x.bool(0.1) ? { number: 7, closes: x.bool(0.5) } : null, impact: x.pick(["P0", "P2", "P4"]), scopeDecision: null,
+    },
+    implement: {
+      queuedBy: x.pick([null, "maint"]), settles: x.bool(0.8), featureOn: x.bool(0.7), liveInRepo: x.int(3),
+      row: x.bool(0.4) ? {
+        state: x.pick(["planning", "asked", "planned", "implementing", "pr-opened", "revising", "stuck", "failed", "merged"]), attempt: 1 + x.int(2),
+        textChanged: x.bool(0.3), newCommentAfterQuestion: x.bool(0.3), decisionAnswered: x.bool(0.3), requeuedAfterEnd: x.bool(0.2), asked: x.pick(["author", "maintainer", null] as const), prOpen: x.bool(),
+      } : null,
     },
   } as Parameters<typeof itemFacts>[0]);
 }
@@ -148,7 +155,7 @@ function checkPr(f: PrFacts): void {
 
 function checkItem(f: ItemFacts): void {
   const p = decideItem(f);
-  const writes = p.actions.filter((a) => ["label", "fixissue", "fixissue-collect", "act"].includes(a.kind));
+  const writes = p.actions.filter((a) => ["label", "implement", "act"].includes(a.kind));
   // 6. Out of scope: no write, except the answered close of a security-scan question.
   if (!f.inScope) for (const a of writes) assert.ok(a.kind === "act" && a.params?.security === true, `${label(a)} for an out-of-scope item`);
   // A Backlog hold stops labelling, closing and fixing.
@@ -156,7 +163,11 @@ function checkItem(f: ItemFacts): void {
   // A closed item has only its answered close left.
   if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act" && !a.params?.ask), "action for a closed item other than its close");
   if (!f.pipelineOn) for (const a of p.actions) assert.ok(gates(f, asWant(a), "pipeline"), `${label(a)} passes the gates with the pipeline off`);
-  for (const a of writes) if (a.kind === "fixissue" || a.kind === "fixissue-collect") assert.equal(f.kind, "issue", "fix-issue for a PR");
+  for (const a of writes) if (a.kind === "implement") assert.equal(f.kind, "issue", "implement for a PR");
+  // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending
+  // an attempt whose PR merged or closed is bookkeeping and needs no switch.
+  const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
+  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
 }
 
 test("safety invariants hold on random facts", () => {

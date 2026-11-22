@@ -1,5 +1,6 @@
 // Build environments and tasks on fake data: a local sandbox, two remote servers (one paused for disk, one offline), a disabled one,
 // and a few dozen tasks in every state.
+import { mayRunMock } from "./adminMock";
 import type { Api } from "../client";
 import type { ItemShown, BuildEnv, BuildFeatureName, BuildFeatures, ScreenshotConfigJson, ScreenshotSetup, BuildTask, PrBuildScope, BuildTaskDetail, TaskResult, TaskState, TaskStep, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
@@ -28,10 +29,17 @@ const envs: BuildEnv[] = [
   },
   {
     id: "cluster", label: "Cluster pods", kind: "kubernetes", enabled: true, online: true, lastSeenAt: iso(3_000), slots: 4, running: 1, version: null, pausedReason: null, confidential: false,
-    capabilities: { os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [] },
+    capabilities: {
+      os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 40, display: false, gpu: false, toolchains: [],
+      warm: [{ key: "deckcraft", commit: "3f9c1e07a2b4d8e6f0a1b2c3d4e5f60718293a4b", nodes: 6, of: 6 }, { key: "photocraft", commit: "a07b3c9d1e2f4a5b6c7d8e9f0a1b2c3d4e5f6071", nodes: 4, of: 6 }],
+    },
     settings: {
-      namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi",
+      namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "4", cpuLimit: "16", memoryRequest: "4Gi", memoryLimit: "8Gi",
+      maxPodMemory: "64Gi", capacity: "cluster", nodeReserveCpu: "0", nodeReserveMemory: "0", priorityClassName: "craft-build-task",
       ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
+      workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
+      workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
+      warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
     },
   },
   { id: "old-box", label: "Old build box", kind: "remote", enabled: false, online: false, lastSeenAt: iso(9 * 24 * HOUR), slots: 2, running: 0, version: null, pausedReason: null, confidential: true, settings: null, capabilities: null },
@@ -122,7 +130,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
   const featureOn = new Set<string>(["screenshots", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
   const scopes: Record<string, PrBuildScope> = { pdfcraft: "all" };
   let perDay = 10;
-  const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true };
+  const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true };
   const features = (): BuildFeatures => ({
     features: (Object.keys(SCOPED) as BuildFeatureName[]).map((feature) => ({
       feature, on: featureOn.has(feature), repoScoped: SCOPED[feature],
@@ -139,7 +147,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
       commands: { snap: { doc: "Render the main window.", params: { size: { enum: ["1440x900", "1024x768"] } }, argv: ["--out", "{out}", "--size", "{size}", "--scale", "2"], capture: true }, open_doc: { doc: "Open a document by name.", params: { name: { chars: "A-Za-z0-9_. -", min: 1, max: 60 } }, argv: ["--open", "{name}"] } },
     },
   }];
-  const setupsOut = () => ({ setups: structuredClone(setups) });
+  const setupsOut = () => ({ setups: structuredClone(setups), manageable: [...new Set([...setups.map((x) => x.repo), "designcraft", "pdfcraft", "craft-libs"])].filter((r) => mayRunMock(me, r)) });
   const visible = (t: BuildTask) => me.role === "operator" || t.repo !== "vault";
   const operator = () => {
     if (me.role !== "operator") throw new Error("only operators change build environments");
@@ -220,7 +228,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
         const t = TASKS.find((x) => x.id === taskId && visible(x));
         if (!t) throw new Error("no such task");
         const logged = t.state !== "queued";
-        const d: BuildTaskDetail = { ...t, logTail: logged ? LOG(t) : "", logBytes: logged ? LOG(t).length : 0, logTruncated: false, patch: t.patchBytes ? PATCH : null };
+        const d: BuildTaskDetail = { ...t, logTail: logged ? LOG(t) : "", logBytes: logged ? LOG(t).length : 0, logTruncated: false, patch: t.patchBytes ? PATCH : null, canCancel: mayRunMock(me, t.repo) };
         return wait(d);
       },
       async cancel(taskId) {

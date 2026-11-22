@@ -134,7 +134,7 @@ export const runExists = async (db: Db, run: string): Promise<boolean> =>
 
 /** Makes `run` the current classification run (settings.classify_run), audited. */
 export async function setCurrentRun(db: Db, run: string, by: string): Promise<void> {
-  const prev = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "classify_run")))?.value ?? null;
+  const prev = (await setting(db, "classify_run")) ?? null;
   await db.run(db.k.insertInto("settings").values({ key: "classify_run", value: run }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   await audit(db, by, "classify-run", `run:${run}`, { previous: prev });
 }

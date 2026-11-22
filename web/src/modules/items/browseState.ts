@@ -25,10 +25,10 @@ export const SORTS: [ItemSort, string][] = [["relevance", "Relevance"], ["update
 const SORT_KEYS = SORTS.map(([key]) => key);
 
 /** Every key this browser knows, applied or not; anything else in the URL is only carried. */
-export const KNOWN_KEYS = ["q", "state", "kind", "repo", "phase", "label", "status", "flag", "author", "since", "discord", "flow", "run", "sort", "desc", "limit", "offset", "open", "peek", "mode"] as const;
+export const KNOWN_KEYS = ["q", "state", "kind", "repo", "area", "group", "phase", "label", "status", "flag", "author", "since", "discord", "flow", "run", "sort", "desc", "limit", "offset", "open", "peek", "mode"] as const;
 
 /** A key the phase endpoint cannot read. Selecting a phase never sends them (filter-contracts §3). */
-export const PHASE_UNSUPPORTED = ["state", "label", "status", "flag", "author", "since", "flow", "sort", "desc", "limit", "offset", "run", "mode"] as const;
+export const PHASE_UNSUPPORTED = ["state", "label", "status", "flag", "author", "since", "flow", "group", "sort", "desc", "limit", "offset", "run", "mode"] as const;
 
 export interface BrowseState {
   search: string;
@@ -40,6 +40,11 @@ export interface BrowseState {
   kindRaw?: string;
   /** Repositories, in URL order. The toolbar's select writes one; older comma lists stay applied. */
   repos: string[];
+  /** Area names, in URL order; `none` is the items without an area. Both endpoints take them. */
+  areas: string[];
+  /** List mode only: rows grouped by area. */
+  group?: "area";
+  groupRaw?: string;
   phase?: ItemPhase;
   phaseRaw?: string;
   labels: TypeLabel[];
@@ -93,6 +98,7 @@ export function parseBrowse(search: string): BrowseState {
   const flagRaw = csv(read("flag"));
   const sortRaw = read("sort");
   const sinceRaw = read("since");
+  const groupRaw = read("group");
   const labels = labelRaw.filter((label): label is TypeLabel => LABELS.includes(label as TypeLabel));
   const status = statusRaw.filter((value): value is StatusFilter => value === "unsettled" || STATUS_KEYS.includes(value as SettledStatus));
   const flags = flagRaw.filter((value) => FLAG_KEYS.includes(value));
@@ -105,6 +111,9 @@ export function parseBrowse(search: string): BrowseState {
     kind: kindRaw === "pr" || kindRaw === "issue" ? kindRaw : undefined,
     kindRaw,
     repos: csv(read("repo")),
+    areas: csv(read("area")),
+    group: groupRaw === "area" ? "area" : undefined,
+    groupRaw,
     phase,
     phaseRaw,
     labels,
@@ -141,6 +150,8 @@ export function itemFilter(browse: BrowseState): ItemFilter {
     since: browse.since,
     discord: browse.discord || undefined,
     flow: browse.flow,
+    area: browse.areas.length ? browse.areas : undefined,
+    group: browse.group,
     sort: (browse.sort === "relevance" && !browse.q) || (browse.sort === "merged" && browse.state !== "merged-by-us") ? undefined : browse.sort,
     desc: browse.desc,
     limit: browse.limit,
@@ -156,6 +167,7 @@ export function statusFilter(browse: BrowseState): ItemStatusFilter {
     phase: browse.phase,
     kind: browse.kind,
     repo: browse.repos.length ? browse.repos : undefined,
+    ...(browse.areas.length ? { area: browse.areas } : {}),
     discord: browse.discord || undefined,
   };
 }
@@ -163,6 +175,7 @@ export function statusFilter(browse: BrowseState): ItemStatusFilter {
 const stateLabel = (state: string) => STATE_OPTIONS.find(([key]) => key === state)?.[1] ?? state;
 const statusLabel = (value: string) => (value === "unsettled" ? "Waiting or disagreeing" : CLASSIFICATIONS.find(([key]) => key === value)?.[1] ?? value);
 const flagLabel = (value: string) => (value === "needs decision" ? "Needs a decision" : value === "security" ? "Security" : value);
+export const areaLabel = (value: string) => (value === "none" ? "No area" : value);
 const sortLabel = (value: string) => SORTS.find(([key]) => key === value)?.[1] ?? value;
 
 /** One line of the effective filter state: a value the endpoint receives (`applied`) or a URL
@@ -186,6 +199,7 @@ export function constraints(browse: BrowseState): Constraint[] {
     add("phase", "Phase", browse.phase, true);
     add("kind", "Type", status.kind === "pr" ? "Pull requests" : status.kind === "issue" ? "Issues" : undefined, !!status.kind);
     add("repo", "Repository", status.repo?.join(" + "), !!status.repo?.length);
+    for (const value of status.area ?? []) add("area", "Area", areaLabel(value), true, value);
     add("discord", "Seen on Discord", status.discord ? "yes" : undefined, true);
     // Kept in the link, never sent: these values remain visibly unapplied in phase mode.
     add("state", "State", browse.stateRaw ? stateLabel(browse.stateRaw) : undefined, false, browse.stateRaw);
@@ -195,6 +209,7 @@ export function constraints(browse: BrowseState): Constraint[] {
     add("author", "Author", browse.author, false);
     add("since", "Updated since", browse.since, false);
     add("flow", "Pipeline branch", browse.flow, false);
+    add("group", "Group", browse.groupRaw ? (browse.group ? "By area" : browse.groupRaw) : undefined, false, browse.groupRaw);
     add("run", "Classification run", browse.run, false);
     add("sort", "Sort", browse.sort ? sortLabel(browse.sort) : new URLSearchParams(browse.search).get("sort") ?? undefined, false);
     add("desc", "Direction", browse.desc ? undefined : "Oldest first", false);
@@ -208,6 +223,7 @@ export function constraints(browse: BrowseState): Constraint[] {
     if (browse.kindRaw && !list.kind) add("kind", "Type", browse.kindRaw, false);
     if (browse.phaseRaw && !browse.phase) add("phase", "Phase", browse.phaseRaw, false);
     add("repo", "Repository", list.repo?.join(" + "), !!list.repo?.length);
+    for (const value of list.area ?? []) add("area", "Area", areaLabel(value), true, value);
     // The endpoint takes one type label: the first valid value is applied, the rest stay in the link.
     if (list.label) add("label", "Type label", list.label, true);
     for (const value of browse.labelsRaw) if (value !== list.label) add("label", "Type label", value, false);
@@ -219,6 +235,8 @@ export function constraints(browse: BrowseState): Constraint[] {
     add("since", "Updated since", list.since, true);
     add("discord", "Seen on Discord", list.discord ? "yes" : undefined, true);
     add("flow", "Pipeline branch", list.flow, true);
+    add("group", "Group", list.group ? "By area" : undefined, true, list.group);
+    if (browse.groupRaw && !list.group) add("group", "Group", browse.groupRaw, false);
     add("run", "Classification run", list.run, true);
     add("sort", "Sort", list.sort ? sortLabel(list.sort) : undefined, !!list.sort);
     const rawSort = new URLSearchParams(browse.search).get("sort");
@@ -250,7 +268,7 @@ export function ignoredPhaseScopes(browse: BrowseState): boolean {
 /** Reference-count parity: state, kind, repository, label, classification, flag. */
 export function filterCount(browse: BrowseState): number {
   const applied = appliedConstraints(browse);
-  return ["state", "kind", "repo", "label", "status", "flag"].filter((key) => applied.some((constraint) => constraint.key === key)).length;
+  return ["state", "kind", "repo", "area", "label", "status", "flag"].filter((key) => applied.some((constraint) => constraint.key === key)).length;
 }
 
 export function isActive(browse: BrowseState): boolean {
@@ -261,7 +279,7 @@ export function isActive(browse: BrowseState): boolean {
 export function hiddenFilterCount(browse: BrowseState, phone: boolean): number {
   const applied = appliedConstraints(browse);
   const has = (key: string) => applied.some((constraint) => constraint.key === key);
-  return [has("repo"), !!browse.phase, ...(phone ? [has("status"), has("label"), has("flag")] : [])].filter(Boolean).length;
+  return [has("repo"), !!browse.phase, ...(phone ? [has("area"), has("status"), has("label"), has("flag")] : [])].filter(Boolean).length;
 }
 
 /** What the phone shows when its secondary controls are folded away: only values that apply. */
@@ -269,6 +287,7 @@ export function secondarySummary(browse: BrowseState): string[] {
   const applied = appliedConstraints(browse);
   const values = (key: string) => applied.filter((constraint) => constraint.key === key).map((constraint) => constraint.value);
   return [
+    values("area").length ? `Area: ${values("area").join(" + ")}` : "",
     values("status").length ? `Classification: ${values("status").join(" + ")}` : "",
     values("label").length ? `Label: ${values("label").join(" + ")}` : "",
     values("flag").length ? `Flag: ${values("flag").join(" + ")}` : "",
@@ -278,7 +297,7 @@ export function secondarySummary(browse: BrowseState): string[] {
 
 /** The applied filter values that no primary control shows, named for the closed `More filters` line. */
 export function appliedDetail(browse: BrowseState): string[] {
-  const primary = new Set(["q", "phase", "state", "kind", "repo", "label", "status", "flag"]);
+  const primary = new Set(["q", "phase", "state", "kind", "repo", "area", "label", "status", "flag"]);
   return appliedConstraints(browse).filter((constraint) => !primary.has(constraint.key)).map((constraint) => `${constraint.label}: ${constraint.value}`);
 }
 
@@ -292,7 +311,7 @@ export function compatExtras(browse: BrowseState): CompatExtra[] {
     // A primary key keeps its chip only while it is *not* applied: an ignored phase or state
     // must still be visible and removable, while an applied one is already in its control.
     .filter((constraint) => !(constraint.applied && primary.has(constraint.key)))
-    .filter((constraint) => !(constraint.applied && ["label", "status", "flag"].includes(constraint.key)))
+    .filter((constraint) => !(constraint.applied && ["area", "label", "status", "flag"].includes(constraint.key)))
     .map(({ key, label, value, rawValue, applied }) => ({ key, label, value, rawValue: rawValue ?? value, applied }));
 }
 
@@ -316,7 +335,8 @@ function multiSelect(applied: string[], base: [string, string][], labelOf: (valu
 }
 
 /** Exactly what each primary field displays, including the values the endpoint cannot take. */
-export function primarySelects(browse: BrowseState, repos: string[]): { state: SelectState; kind: SelectState; classification: SelectState; repository: SelectState; label: SelectState; flag: SelectState } {
+/** `areas`: the names of the one listed repository's areas; empty with no repository or several. */
+export function primarySelects(browse: BrowseState, repos: string[], areas: string[] = []): { state: SelectState; kind: SelectState; classification: SelectState; repository: SelectState; area: SelectState; label: SelectState; flag: SelectState } {
   const phase = browse.phase !== undefined;
   // A phase decides state, classification, label and flag, so those fields show that in words.
   const byPhase: SelectState = { value: "phase", options: [["phase", "By phase"]] };
@@ -330,6 +350,7 @@ export function primarySelects(browse: BrowseState, repos: string[]): { state: S
     kind: { value: browse.kind ?? "", options: KIND_OPTIONS },
     classification,
     repository,
+    area: multiSelect(browse.areas, [["", "Any area"], ["none", "No area"], ...areas.map((name) => [name, name] as [string, string])], areaLabel),
     label,
     flag,
   };
@@ -337,7 +358,7 @@ export function primarySelects(browse: BrowseState, repos: string[]): { state: S
 
 /** Every filter key, for Reset. `peek` is not a filter; unknown keys still survive a reset. */
 export function resetPatch(): Record<string, null> {
-  return Object.fromEntries(["q", "state", "kind", "repo", "phase", "label", "status", "flag", "author", "since", "discord", "flow", "run", "sort", "desc", "limit", "offset", "mode", "open", "peek"].map((key) => [key, null]));
+  return Object.fromEntries(["q", "state", "kind", "repo", "area", "group", "phase", "label", "status", "flag", "author", "since", "discord", "flow", "run", "sort", "desc", "limit", "offset", "mode", "open", "peek"].map((key) => [key, null]));
 }
 
 /** Clear phase in place: the ignored scopes go with it, shared filters stay, state returns to its default. */
@@ -374,7 +395,7 @@ export function aliasHref(search: string): string {
 
 /** Removing one chip: CSV values and unknown URL entries are removed individually; known scalars clear. */
 export function removeValuePatch(browse: BrowseState, key: string, value: string): UrlPatch {
-  const listKeys: Record<string, string[]> = { repo: browse.repos, label: browse.labelsRaw, status: browse.statusRaw, flag: browse.flagsRaw };
+  const listKeys: Record<string, string[]> = { repo: browse.repos, area: browse.areas, label: browse.labelsRaw, status: browse.statusRaw, flag: browse.flagsRaw };
   const list = Object.hasOwn(listKeys, key) ? listKeys[key] : undefined;
   if (!list) return { [key]: (KNOWN_KEYS as readonly string[]).includes(key) ? null : { removeValue: value } };
   const next = list.filter((entry) => entry !== value);

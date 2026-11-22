@@ -174,13 +174,18 @@ export async function fastFirst(db: Db, repos: string[], top: (repo: string) => 
 
 /** Work score of every ranked open item of the repo, with fast-tracked items raised above all others. */
 export async function workScores(db: Db, repo: string): Promise<Map<number, number>> {
-  const out = new Map((await db.all(db.k.selectFrom("main.item_rank").select(["number", "score"]).where("repo", "=", repo))).map((r) => [r.number, r.score]));
-  for (const f of await db.all(db.k.selectFrom("main.fast_track as ft").select((eb) => ["ft.number", rowScoreExpr(eb, "ft").as("s")]).where("ft.repo", "=", repo))) out.set(f.number, f.s);
+  const [ranks, fast, fixes] = await Promise.all([
+    db.all(db.k.selectFrom("main.item_rank").select(["number", "score"]).where("repo", "=", repo)),
+    db.all(db.k.selectFrom("main.fast_track as ft").select((eb) => ["ft.number", rowScoreExpr(eb, "ft").as("s")]).where("ft.repo", "=", repo)),
+    db.all(db.k.selectFrom("main.fast_track as ft")
+      .innerJoin("main.fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "ft.repo").onRef("fa.number", "=", "ft.number"))
+      .select((eb) => ["fa.pr_url", rowScoreExpr(eb, "ft").as("s")]).$narrowType<{ pr_url: string }>()
+      .where("ft.repo", "=", repo).where("fa.pr_url", "is not", null)),
+  ]);
+  const out = new Map(ranks.map((r) => [r.number, r.score]));
+  for (const f of fast) out.set(f.number, f.s);
   // A fast-tracked issue's Fix PR takes the issue's place.
-  for (const f of await db.all(db.k.selectFrom("main.fast_track as ft")
-    .innerJoin("main.fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "ft.repo").onRef("fa.number", "=", "ft.number"))
-    .select((eb) => ["fa.pr_url", rowScoreExpr(eb, "ft").as("s")]).$narrowType<{ pr_url: string }>()
-    .where("ft.repo", "=", repo).where("fa.pr_url", "is not", null))) {
+  for (const f of fixes) {
     const n = Number(/\/pull\/(\d+)$/.exec(f.pr_url)?.[1]);
     const own = out.get(n) ?? 0;
     // The higher score (heavier, then earlier addition) counts, like fastScoreSql.

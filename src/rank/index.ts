@@ -3,15 +3,19 @@
 // Reads the stored priority, the settled classification and the size; calls no model. The rank step
 // writes the item_rank row of an open item in a tracked repo only when it is new or its score or breakdown changed
 // (computed_at is the time the score last changed) and removes the rows of the others.
-import { latestRun, settledLookup } from "../classify/settled.ts";
+import { latestRun, settledSet } from "../classify/settled.ts";
 import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 import type { Level } from "../priority/score.ts";
 import { isSize, rankOf, sizeOfLines, type RankBreakdown, type RankInput, type Size } from "./score.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import { excluded } from "../db/kx.ts";
+import { excluded, refIn } from "../db/kx.ts";
 
 const now = () => new Date().toISOString();
+
+/** Rows per multi-row statement: five bound values a row stays far under both engines' parameter limits. */
+const BATCH_ROWS = 500;
+const batches = <T>(rows: readonly T[]): T[][] => Array.from({ length: Math.ceil(rows.length / BATCH_ROWS) }, (_, i) => rows.slice(i * BATCH_ROWS, (i + 1) * BATCH_ROWS));
 
 /** Size of an item: the fix triage's estimate for an issue, the changed lines for a PR. */
 export function sizeOfItem(kind: string, lines: number | null, fixSize: string | null): Pick<RankInput, "size" | "sizeSource"> {
@@ -21,7 +25,8 @@ export function sizeOfItem(kind: string, lines: number | null, fixSize: string |
 
 /** Recomputes the rank of every open item in a tracked repo. Returns the number of rows written. */
 export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ items: number; changed: number; removed: number }> {
-  const settled = settledLookup(db, await latestRun(db));
+  // The run's verdicts in one read: a read per open item (tens of thousands) is a network round trip each on Postgres.
+  const settled = await settledSet(db, await latestRun(db));
   const rows = await db.all(db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
     .leftJoin("item_priority as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
     .leftJoin("fix_attempts as f", (j) => j.onRef("f.repo", "=", "i.repo").onRef("f.number", "=", "i.number"))
@@ -35,7 +40,7 @@ export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ ite
     .map((r) => [`${r.repo}#${r.number}`, r]));
   const at = new Date(nowMs).toISOString();
   const keep = new Set<string>();
-  const puts: [string, number, number, string][] = [];
+  const puts: { repo: string; number: number; score: number; breakdown: string; computed_at: string }[] = [];
   for (const r of rows) {
     const s = await settled(r.repo, r.number);
     const { score, breakdown } = rankOf({ level: r.level, reach: r.reach, label: s.label, security: s.flags.includes("security"), ...sizeOfItem(r.kind, r.lines, r.fix_size) });
@@ -43,16 +48,17 @@ export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ ite
     keep.add(k);
     const prev = old.get(k);
     if (prev && prev.score === score && prev.breakdown === json) continue;
-    puts.push([r.repo, r.number, score, json]);
+    puts.push({ repo: r.repo, number: r.number, score, breakdown: json, computed_at: at });
   }
-  const dels = [...old].filter(([k]) => !keep.has(k)).map(([, r]) => r);
+  const dels = [...old].filter(([k]) => !keep.has(k)).map(([, r]) => [r.repo, r.number] as const);
   return await db.write(async () => {
+    // Multi-row statements: on Postgres each statement is a round trip, and these run inside the write lock.
     const write = async (): Promise<void> => {
-      for (const [repo, number, score, json] of puts) {
-        await db.run(db.k.insertInto("item_rank").values({ repo, number, score, breakdown: json, computed_at: at })
+      for (const rows of batches(puts)) {
+        await db.run(db.k.insertInto("item_rank").values(rows)
           .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["score", "breakdown", "computed_at"]))));
       }
-      for (const r of dels) await db.run(db.k.deleteFrom("item_rank").where("repo", "=", r.repo).where("number", "=", r.number));
+      for (const keys of batches(dels)) await db.run(db.k.deleteFrom("item_rank").where(refIn(db, "item_rank", keys)));
     };
     // Many changed rows (a first ranking, a new formula): one full-pass mark instead of a log row per item.
     if (puts.length + dels.length >= BULK_ROWS) await bulkWrites(db, "rank", write); else await write();

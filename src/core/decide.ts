@@ -6,6 +6,7 @@ import {
   FIXUP_MAX_ATTEMPTS, CIFIX_FINAL_STATES, CIFIX_MAX_PUSHES_PER_PR, CIFIX_MAX_TRIES, CIFIX_MAX_TRIES_PER_PR, STATE_REFUSAL, TRANSIENT_REFUSAL, UNKNOWN_REREADS,
 } from "./rules.ts";
 import { UNCHECKED_REASON } from "./sensitive.ts";
+import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { inFlightNow, unassignActions } from "./assignment.ts";
 import type { Action, PassFacts, Plan, PlanState, PrFacts, QueueState, UnsentAsk, WaitKind } from "./plan.ts";
 
@@ -118,9 +119,12 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: "backlog" | "dupli
   return e.path === "rule" ? "ready" : "decision-answered-merge";
 }
 
-/** True when the PR may be merged now (ready, approved, or retried after a refusal). */
+/**
+ * True when the PR may be merged now (ready, approved, or retried after a refusal). Not while its implementation session
+ * revises it: the merge (or a batch) waits for the revision's push and the review of the new head.
+ */
 const eligible = (f: PrFacts, e: Entry): boolean =>
-  !f.mergeHeld && e.path !== null && verifyAllows(e.path, f.verification?.state, f.verifyOverride) && ciAllows(e.path, f.ci, e.noCi) && f.mergeable === "MERGEABLE"
+  !f.mergeHeld && ownImplementation(f)?.state !== "revising" && e.path !== null && verifyAllows(e.path, f.verification?.state, f.verifyOverride) && ciAllows(e.path, f.ci, e.noCi) && f.mergeable === "MERGEABLE"
   && (e.state === "ready" || e.state === "decision-answered-merge" || e.state === "refused");
 
 /** A PR refused at its current head waits until its CI or mergeable state differs from what GitHub reported at the refusal. */
@@ -152,6 +156,37 @@ const PERSON_WAITS: ReadonlySet<string> = new Set(["needs-decision", "ci-approva
 /** An operator's Hold or Close answer at the head: nothing is pushed or asked of the contributor, whatever the source. */
 const declinedBy = (f: PrFacts): boolean => f.decision.answer !== null && f.decision.answer !== "merge";
 
+/**
+ * The implementation whose PR this is, while it is not merged, closed, failed or cancelled. Its session takes the PR's review
+ * fixes and red CI (implement{revise}); the fix-up and the CI fix leave the PR alone. A conflict still goes to the conflict step.
+ */
+export const ownImplementation = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
+  f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
+
+/** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. */
+export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
+
+/** Red CI at the PR's current head: at the reviewed head, our own push that broke it, or the review gate's red CI at a new head. */
+const redAtHead = (f: PrFacts): boolean =>
+  (!!f.review && f.review.head === f.head && f.ci === "failure") || !!f.brokeByUs || !!f.gateRed || (f.reviewHold?.kind === "ci" && f.reviewHold.red === true);
+
+/**
+ * What an implementation PR's head needs from its session: the review's fixes (a take-fix at the head), red CI, or both; null
+ * when no revision is due. One revision per head: a head a revision started from waits for the revision's push, a new
+ * review or a person.
+ */
+export function reviseOf(f: PrFacts): { review: boolean; ci: boolean } | null {
+  const im = ownImplementation(f), r = f.review;
+  if (!im || im.state !== "pr-opened" || f.ghState !== "OPEN" || !f.head || im.revisedHeads.includes(f.head)) return null;
+  if (declinedBy(f) || f.draft || !notHeld(f) || f.mergeHeld || f.changesRequested || f.mergeable === "CONFLICTING") return null;
+  const atHead = !!r && r.head === f.head && !r.stale;
+  // A hold or close review at the head is a person's to settle.
+  if (atHead && (r.verdict === "hold" || r.verdict === "close")) return null;
+  const review = atHead && r.verdict === "take-fix" && r.fixes > 0;
+  const ci = redAtHead(f);
+  return review || ci ? { review, ci } : null;
+}
+
 /** ask-retry: the ask comment never reached GitHub and is due again after a backoff (fixup.unsent). */
 export type FixupBucket = "fix" | "unapproved" | "cannot-push" | "ask" | "ask-retry" | "asked" | "hold";
 const notHeld = (f: PrFacts): boolean => f.inScope && !f.integration && !f.heldBacklog && !f.heldDuplicate;
@@ -159,7 +194,7 @@ const notHeld = (f: PrFacts): boolean => f.inScope && !f.integration && !f.heldB
 /** Where a take-fix review at the current head stands with the fix-up: the bucket and whether the step has recorded a final row for the head. */
 export function fixupOf(f: PrFacts): { bucket: FixupBucket; done: boolean } | null {
   const r = f.review, x = f.fixup;
-  if (declinedBy(f) || !r || !x || r.verdict !== "take-fix" || r.head !== f.head || r.stale || f.draft || !notHeld(f) || f.ghState !== "OPEN" || f.mergeHeld) return null;
+  if (ownImplementation(f) || declinedBy(f) || !r || !x || r.verdict !== "take-fix" || r.head !== f.head || r.stale || f.draft || !notHeld(f) || f.ghState !== "OPEN" || f.mergeHeld) return null;
   // A maintainer's changes-requested review is the person's to resolve first.
   if (f.mergeable === "CONFLICTING" || x.fixes === 0 || f.changesRequested) return null;
   const has = (s: string) => x.recorded.includes(s);
@@ -221,6 +256,7 @@ function unreviewedRed(f: PrFacts): boolean {
 /** Where the CI fix step stands for a PR whose CI fails at the reviewed head, or null when it is no candidate. */
 export function cifixBucket(f: PrFacts): CifixBucket | null {
   const r = f.review, c = f.cifix;
+  if (ownImplementation(f)) return null;
   // Our own push that turned the checks red is repaired against the pushed head, whose review is still the one of the head before.
   const broke = !!f.brokeByUs || !!f.gateRed;
   // The next review waits for green CI at a head no take review covers, and the CI fix needs a take review: the contributor is asked once.
@@ -305,7 +341,7 @@ const worksOn = (a: Action): boolean => {
     case "fixup": return b === "fix" && a.params?.source !== "carry";
     case "conflict": return b === "merge";
     case "cifix": return b === "work" || b === "collect" || b === "rerun";
-    case "merge": case "premerge": case "lint": return true;
+    case "merge": case "premerge": case "lint": case "implement": return true;
     default: return false;
   }
 };
@@ -326,7 +362,7 @@ function unassignOf(f: PrFacts, state: PlanState, actions: Action[]): Action[] {
   const retrying = (f.mergeable === "CONFLICTING" && f.conflict?.bucket === "ask-retry") || fx?.bucket === "ask-retry" || cf === "comment-wait";
   const gaveUp = state === "opus-close" || state === "verify-failed" || state === "verify-error" || state === "batch-failed" || conflictStuck
     || (!!fx && (fx.bucket === "cannot-push" || fx.bucket === "asked" || (fx.bucket === "hold" && !fx.done))) || cf === "failed" || cf === "capped" || cf === "cannot-push" || cf === "done"
-    || f.mergeHeld || (state === "ci-approval" && !f.repoFacts.ciApproved);
+    || f.mergeHeld || (state === "ci-approval" && !f.repoFacts.ciApproved) || ownImplementation(f)?.state === "stuck";
   const keep = working || retrying || (!gaveUp && (waitingToReview || PROGRESS_STATES.has(state)));
   return unassignActions(f.assignment, f.ghState === "OPEN", !keep);
 }
@@ -369,6 +405,16 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
 
   // Actions that do not depend on the PR's place in the queue.
   const extra: Action[] = [];
+  const im = ownImplementation(f);
+  // The session's next step on the PR: the revision due at the head, a revision that has started (also when its issue was
+  // closed or held, where the issue plans nothing), or, once the PR merged or closed, the end of the attempt (the revise
+  // work records it and ends the workspace). While the repo's Implement feature is off an open PR plans no revision and
+  // waits on the switch.
+  const implDue = !!im && (!open || im.state === "revising" || !!reviseOf(f));
+  // Ending the attempt is bookkeeping (no GitHub write, no session): it runs whatever the switch says.
+  const implOff = implDue && open && !f.repoFacts.implementOn ? person(implementOffWait(f.repo)) : null;
+  const implementAct = implDue && !implOff ? act("implement", open ? f.head : null, { bucket: "revise", issue: im!.issue }) : null;
+  if (implementAct && !open) extra.push(implementAct);
   const pm = f.postmerge;
   if (pm && pm.mergedAt >= pm.since) {
     const retryAfter = new Date(f.now - RETRY_AFTER_MS).toISOString();
@@ -459,6 +505,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     if (f.conflict.bucket === "merge" || f.conflict.bucket === "ask") actions.push(act("conflict", f.head, { bucket: f.conflict.bucket }));
   }
 
+  // An implementation PR goes back to its session for the review's fixes and red CI, after a conflict is merged away.
+  if (implementAct && open) actions.push(implementAct);
+
   const cf = cifixOf(f);
   if (cf && cf !== "other") {
     // Repairing our own breakage comes before every other action of the PR.
@@ -511,7 +560,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
 
   actions.push(...unassignOf(f, state, actions));
 
-  const main = actions.some((a) => ["review", "carry", "premerge", "ask-merge", "merge", "verify"].includes(a.kind));
+  const main = actions.some((a) => ["review", "carry", "premerge", "ask-merge", "merge", "verify", "implement"].includes(a.kind));
   const queueWait = (st: QueueState): Wait | null => {
     if (st === "waiting-ci" && f.mergeable !== "MERGEABLE" && f.mergeable !== "CONFLICTING" && f.unknown) {
       const stuck = unknownStuck(f);
@@ -528,7 +577,12 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     : hq.answer === "wait" ? contributor("the author (the Hold question was answered: wait)")
     : hq.answer === "close" ? system("the close answer to be carried out")
     : f.operator?.hold ? null : person("a person: the Hold question was settled but nothing is pending");
-  const wait: Wait | null = main ? null : e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null;
+  // An implementation PR whose session revises it, or whose revision is stuck: that is what it waits on, whatever the queue state.
+  const implWait: Wait | null = implOff ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
+    : im?.state === "stuck" ? person(`a decision on the stuck implementation of #${im.issue}`)
+    : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null);
+  // A revision in progress is what the PR waits on, also while its continuation is planned.
+  const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
   // A PR the review never takes up still names what it waits on: its scope answer, or a label that gets no review.
   // No scope answer yet: the question is open (a person) or the Decide step has it to ask (the item's decide action).

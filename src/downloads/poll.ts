@@ -41,8 +41,14 @@ export const ghFetcher = (db?: Db): Fetcher => async (owner, repo) => {
   return { stars: Number(info.stdout.trim()) || 0, releases };
 };
 
-const addDelta = (db: Db, assetId: number, t: string, span: "h" | "d", delta: number) => db.run(db.k.insertInto("download_deltas").values({ asset_id: assetId, t, span, delta })
+type Delta = { asset_id: number; t: string; span: "h" | "d"; delta: number };
+/** Adds the deltas to their buckets; at most one row per (asset_id, t, span), as one statement cannot update a row twice. */
+const addDeltas = (db: Db, rows: Delta[]) => db.run(db.k.insertInto("download_deltas").values(rows)
   .onConflict((oc) => oc.columns(["asset_id", "t", "span"]).doUpdateSet((eb) => ({ delta: eb("download_deltas.delta", "+", eb.ref("excluded.delta")) }))));
+
+/** Rows per multi-row statement: under both engines' bound-parameter limits at sixteen columns a row. */
+const BATCH_ROWS = 500;
+const batches = <T>(rows: readonly T[]): T[][] => Array.from({ length: Math.ceil(rows.length / BATCH_ROWS) }, (_, i) => rows.slice(i * BATCH_ROWS, (i + 1) * BATCH_ROWS));
 
 const hourOf = (ms: number): string => new Date(ms - (ms % 3600_000)).toISOString().replace(/\.\d+Z$/, "Z");
 const dayOf = (ms: number): string => new Date(ms - (ms % 86400_000)).toISOString().replace(/\.\d+Z$/, "Z");
@@ -59,25 +65,29 @@ export async function recordRepo(db: Db, repo: string, data: RepoReleases, now: 
   const lastRead = (await db.get(db.k.selectFrom("release_assets").select((eb) => eb.fn.max<string | null>("updated_at").as("t")).where("repo", "=", repo)))!.t;
   const baseline = mine.length === 0 || (lastRead !== null && now - Date.parse(lastRead) > STALE_MS);
   const live = data.releases.filter((r) => !r.draft);
-  const seen = new Set<number>();
+  // One row per asset id (a listing that shifted between pages can repeat one; the last reading wins), written in multi-row
+  // statements: a repo has hundreds of assets, and one statement each held the write lock for many seconds on Postgres.
+  const latest = new Map<number, { rel: GhRelease; a: GhAsset }>();
+  for (const rel of live) for (const a of rel.assets) latest.set(a.id, { rel, a });
+  const assets = [...latest.values()].map(({ rel, a }) => {
+    const c = classifyAsset(a.name), count = a.download_count ?? 0, prev = known.get(a.id)?.downloads;
+    return {
+      row: {
+        asset_id: a.id, repo, release_id: rel.id, tag: rel.tag_name, release_name: rel.name, published_at: rel.published_at ?? rel.created_at ?? null, prerelease: rel.prerelease ? 1 : 0,
+        name: a.name, platform: c?.platform ?? null, processor: c?.processor ?? null, format: c?.format ?? null, downloads: count, first_seen: at, updated_at: at, gone_at: null,
+      },
+      delta: c ? (baseline ? 0 : prev === undefined ? count : count - prev) : 0,
+    };
+  });
+  const deltas = assets.filter((x) => x.delta > 0).map((x) => ({ asset_id: x.row.asset_id, t: bucket, span: "h" as const, delta: x.delta }));
+  const gone = mine.filter((r) => !latest.has(r.asset_id)).map((r) => r.asset_id);
   await db.write(async () => {
-    for (const rel of live) {
-      for (const a of rel.assets) {
-        seen.add(a.id);
-        const c = classifyAsset(a.name);
-        const prev = known.get(a.id)?.downloads;
-        const count = a.download_count ?? 0;
-        await db.run(db.k.insertInto("release_assets")
-          .values({
-            asset_id: a.id, repo, release_id: rel.id, tag: rel.tag_name, release_name: rel.name, published_at: rel.published_at ?? rel.created_at ?? null, prerelease: rel.prerelease ? 1 : 0,
-            name: a.name, platform: c?.platform ?? null, processor: c?.processor ?? null, format: c?.format ?? null, downloads: count, first_seen: at, updated_at: at, gone_at: null,
-          })
-          .onConflict((oc) => oc.column("asset_id").doUpdateSet((eb) => ({ ...excluded(["repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "updated_at"])(eb), gone_at: null }))));
-        const delta = baseline ? 0 : prev === undefined ? count : count - prev;
-        if (delta > 0 && c) await addDelta(db, a.id, bucket, "h", delta);
-      }
+    for (const rows of batches(assets.map((x) => x.row))) {
+      await db.run(db.k.insertInto("release_assets").values(rows)
+        .onConflict((oc) => oc.column("asset_id").doUpdateSet((eb) => ({ ...excluded(["repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "updated_at"])(eb), gone_at: null }))));
     }
-    for (const r of mine) if (!seen.has(r.asset_id)) await db.run(db.k.updateTable("release_assets").set({ gone_at: at }).where("asset_id", "=", r.asset_id).where("gone_at", "is", null));
+    for (const rows of batches(deltas)) await addDeltas(db, rows);
+    for (const ids of batches(gone)) await db.run(db.k.updateTable("release_assets").set({ gone_at: at }).where("asset_id", "in", ids).where("gone_at", "is", null));
     const counted = live.filter((r) => r.assets.some((a) => classifyAsset(a.name)));
     if (counted.length) {
       const latest = [...counted].sort((a, b) => Date.parse(b.published_at ?? b.created_at ?? "") - Date.parse(a.published_at ?? a.created_at ?? ""))[0]!;
@@ -100,7 +110,12 @@ export async function foldDeltas(db: Db, now: number): Promise<void> {
   const old = await db.all(db.k.selectFrom("download_deltas").select(["asset_id", "t", "delta"]).where("span", "=", "h").where("t", "<", cutoff));
   if (!old.length) return;
   await db.write(async () => {
-    for (const r of old) await addDelta(db, r.asset_id, dayOf(Date.parse(r.t)), "d", r.delta);
+    const days = new Map<string, Delta>();
+    for (const r of old) {
+      const t = dayOf(Date.parse(r.t)), k = `${r.asset_id} ${t}`, d = days.get(k);
+      if (d) d.delta += r.delta; else days.set(k, { asset_id: r.asset_id, t, span: "d", delta: r.delta });
+    }
+    for (const rows of batches([...days.values()])) await addDeltas(db, rows);
     await db.run(db.k.deleteFrom("download_deltas").where("span", "=", "h").where("t", "<", cutoff));
   });
 }

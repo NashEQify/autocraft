@@ -353,6 +353,16 @@ CREATE TABLE IF NOT EXISTS user_token_revocations (
   attempts INTEGER NOT NULL DEFAULT 0 -- failed sweeps so far
 );
 
+-- The registered GitHub App (src/github/app-keys.ts): at most one row, id 1. keys_enc null: the app was removed, and a
+-- secrets file's app keys are not imported again (they are imported only while no row exists).
+CREATE TABLE IF NOT EXISTS github_app (
+  id INTEGER PRIMARY KEY,
+  app_id TEXT,
+  slug TEXT,
+  keys_enc TEXT,                      -- sealed JSON of the app's keys (TokenBox, aad 'github_app:1')
+  updated_at TEXT NOT NULL
+);
+
 -- The GitHub App user token of a Discord reporter (src/discord/reporter.ts), keyed by the Discord user's keyed hash. Not a
 -- dashboard login: it grants no access, it only lets the bot file an issue as that GitHub account.
 CREATE TABLE IF NOT EXISTS reporter_tokens (
@@ -506,7 +516,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   step TEXT NOT NULL,
   params TEXT NOT NULL,               -- JSON object, validated
-  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot) or 'cli'
+  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot), 'cli' (a command-line run) or 'cli-queue' (queued by a command)
   requested_at TEXT NOT NULL,
   state TEXT NOT NULL,                -- queued | running | done | failed | cancelled
   started_at TEXT, ended_at TEXT,
@@ -524,6 +534,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   resumes INTEGER NOT NULL DEFAULT 0  -- times a runner stop or restart put the running job back in the queue (src/runner/resuming.ts)
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
+-- The end of each job's log, copied by the runner from the job's log file in chunks of whole lines (src/runner/job-log.ts),
+-- for a dashboard that does not share the runner's disk. Only the last 256 KiB of a job are kept, for 90 days; pruneJobs also deletes them with the job.
+CREATE TABLE IF NOT EXISTS job_log_chunks (
+  job_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  start INTEGER NOT NULL,             -- byte offset of the chunk in the log file; the first kept chunk's > 0: earlier text was dropped
+  next_start INTEGER NOT NULL,        -- byte offset after the chunk in the log file (the chunk is scrubbed, so its length may differ)
+  chunk TEXT NOT NULL,                -- scrubbed
+  at TEXT NOT NULL,                   -- when it was copied; pruneJobLogs deletes chunks after 90 days
+  PRIMARY KEY (job_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS job_log_chunks_at ON job_log_chunks(at);
 CREATE INDEX IF NOT EXISTS jobs_step ON jobs(step, id);
 CREATE INDEX IF NOT EXISTS jobs_step_started ON jobs(step, started_at);
 CREATE INDEX IF NOT EXISTS jobs_user_ended ON jobs(requested_by, ended_at);
@@ -888,6 +910,9 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   timeout_ms INTEGER NOT NULL,        -- the bundle's wall-clock limit
   parent_id INTEGER,                  -- a follow-up turn: the call whose harness session it continues
   sticky_login TEXT COLLATE NOCASE,   -- a follow-up turn: only this user's helper holds the session
+  for_login TEXT COLLATE NOCASE,      -- the call runs on this user's own Task Runners only (a maintainer's conversation turn); follow-ups keep it
+  own_lane INTEGER NOT NULL DEFAULT 0, -- 1 while leased on the Task Runner's own lane (Claim.ownLane): counts toward no slot or Max calls at once
+  bound_slot INTEGER NOT NULL DEFAULT 0, -- 1: a call bound to for_login that runs in one of that user's Task Runner slots (counts toward Max calls at once), never in the own lane
   released_by TEXT COLLATE NOCASE, released_at INTEGER, -- the last helper that gave the lease back: not offered that login again for a while
   progress TEXT,                      -- the helper's last progress line
   reply TEXT, usage TEXT, turns INTEGER, session_id TEXT, duration_ms INTEGER,
@@ -901,7 +926,10 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   pick_until INTEGER,                 -- the pick counts until then
   no_taker_since INTEGER,             -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
   bundle_hash TEXT,                   -- sha256 of the canonical bundle JSON: a resumed job adopts its earlier run's call with the same bundle
-  consumed_at INTEGER                 -- when the caller read the done reply; a done call not yet read can still be adopted
+  consumed_at INTEGER,                -- when the caller read the done reply; a done call not yet read can still be adopted
+  base_stdin TEXT,                    -- the bundle's stdin as queued, once a lease rewrote it (a workspace session's resume note)
+  refusals INTEGER NOT NULL DEFAULT 0, -- retries after a model's safety filter declined the call (submitCall): at most one, and none uses an attempt
+  refused_token INTEGER               -- the runner token whose model declined the call, when it was queued again for another Task Runner: not offered it again
 );
 CREATE INDEX IF NOT EXISTS remote_calls_state ON remote_calls(state, tier);
 CREATE INDEX IF NOT EXISTS remote_calls_ended ON remote_calls(state, ended_at);
@@ -1028,7 +1056,8 @@ CREATE TABLE IF NOT EXISTS build_tasks (
   patch TEXT,                         -- unified git diff the worker applies to the checkout (at most 1 MiB)
   warm_key TEXT,                      -- build-cache key shared by tasks of one repo
   warm_role TEXT,                     -- use | build
-  sandbox_env TEXT                    -- JSON SandboxEnv: image and CI-gate inputs the worker used
+  sandbox_env TEXT,                   -- JSON SandboxEnv: image and CI-gate inputs the worker used
+  warm_image TEXT                     -- warm tasks: the toolchain image the task was queued with
 );
 CREATE INDEX IF NOT EXISTS build_tasks_queue ON build_tasks(priority DESC, id) WHERE state = 'queued';
 CREATE INDEX IF NOT EXISTS build_tasks_env ON build_tasks(env_id, state);
@@ -1053,7 +1082,96 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   create_tries INTEGER NOT NULL DEFAULT 0, -- failed creates of the stage's pod in a row
   failing_since TEXT,                 -- the first of them
   retry_at TEXT,                      -- when the next create is tried
-  started_at TEXT NOT NULL
+  started_at TEXT NOT NULL,
+  node TEXT,                          -- the node the run was placed on; its volume binds there
+  reserved_cpu_m INTEGER,             -- the run's largest stage request, held on that node for the run's life
+  reserved_mem_bytes INTEGER,
+  disruptions INTEGER NOT NULL DEFAULT 0, -- stage pods the cluster took away (preemption, eviction) and that were recreated
+  replaces INTEGER NOT NULL DEFAULT 0  -- first pods no node had room for, deleted and placed again
+);
+
+-- A repository's memory for build step pods (src/build/sizing.ts); a repository without a row gets the environment's.
+CREATE TABLE IF NOT EXISTS build_sizes (
+  repo TEXT PRIMARY KEY,
+  memory_request_bytes INTEGER NOT NULL,
+  memory_limit_bytes INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT NOT NULL                -- what set it: an operator, or an OOM-killed step
+);
+
+-- A workspace: one session's pod and volume in a kubernetes environment (src/build/workspace-launch.ts). The row
+-- outlives both, so a lost volume can be rebuilt from the base plus the checkpoint.
+CREATE TABLE IF NOT EXISTS workspaces (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  base_sha TEXT NOT NULL,             -- the repository commit the source comes from
+  base_commit TEXT,                   -- the commit `ws untar` made of it in the pod; checkpoints diff against it
+  app TEXT,
+  env_id TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'requested', -- requested | starting | seeding | ready | parked | ended | failed
+  state_at TEXT NOT NULL,             -- when the row entered its state
+  pod TEXT,
+  pod_created_at TEXT,                -- the last create of the pod, failed or not
+  create_tries INTEGER NOT NULL DEFAULT 0, -- creates of the pod since it last started
+  pvc TEXT,                           -- null once deleted (a parked volume past its keep time)
+  node TEXT,                          -- where the volume lives (local-path pins it)
+  limits TEXT NOT NULL DEFAULT '{}',  -- JSON WorkspaceLimits
+  checkpoint BLOB,                    -- `git diff --binary` against base_commit, at most 5 MiB
+  checkpoint_at TEXT,
+  last_call_at TEXT,
+  next_call INTEGER NOT NULL DEFAULT 1, -- the next `ws run` call number
+  error TEXT,                         -- why it failed, or the last checkpoint problem
+  owner TEXT,                         -- what asked for it: `cli` or a job id
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT,
+  remote_call_id INTEGER,             -- the remote call whose session uses the workspace's tools (src/build/workspace-relay.ts)
+  volume_fresh INTEGER NOT NULL DEFAULT 0, -- 1: the volume was made empty for the current start, so seeding fills it
+  resume_tries INTEGER NOT NULL DEFAULT 0, -- resumes that failed since the workspace was last ready
+  checkpoint_error TEXT,              -- why the last checkpoint failed; while set, the volume holds work no checkpoint has
+  restored TEXT,                      -- how the last resume brought the tree back: kept | checkpoint <checkpoint_at> | empty
+  restored_at TEXT
+);
+CREATE INDEX IF NOT EXISTS workspaces_env ON workspaces(env_id, state);
+
+-- Every exec in a workspace: the session's tool calls and the launcher's own seeding and checkpoints. Text is untrusted.
+CREATE TABLE IF NOT EXISTS workspace_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL,
+  n INTEGER,                          -- the `ws run` call number; null for other helper subcommands
+  tool TEXT NOT NULL,
+  args TEXT NOT NULL DEFAULT '{}',    -- JSON
+  state TEXT NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+  result TEXT,                        -- JSON: the helper's header and the cleaned, capped output
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  deadline_at TEXT,                   -- past this a call still marked running no longer keeps the pod from parking
+  finished_at TEXT,
+  run_id INTEGER                      -- a session's call: the agent run of the lease it came from
+);
+CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, id);
+
+-- A model session in a workspace (src/build/workspace-session.ts): what it was asked, where it ran and how it ended.
+-- `prompt` is operator text: it goes only into the session's model call, never into job params or logs.
+CREATE TABLE IF NOT EXISTS workspace_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT,                          -- what the session is for: try (an operator's test session)
+  repo TEXT NOT NULL,
+  base_sha TEXT NOT NULL,
+  item INTEGER NOT NULL,              -- the issue or PR in repo the session works for
+  prompt TEXT,
+  env_id TEXT NOT NULL,               -- the kubernetes environment of a workspace the session creates
+  keep INTEGER NOT NULL DEFAULT 0,    -- 1: the workspace stays live after the session
+  deadline_sec INTEGER NOT NULL,      -- the session call's time limit
+  state TEXT NOT NULL DEFAULT 'queued', -- queued | starting | running | done | failed
+  outcome TEXT,                       -- one line once it ended
+  workspace_id INTEGER,               -- given, or set when the job creates the workspace
+  remote_call_id INTEGER,
+  job_id INTEGER,
+  requested_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
 );
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);
 CREATE INDEX IF NOT EXISTS build_tasks_ended ON build_tasks(ended_at);
@@ -1259,6 +1377,45 @@ CREATE TABLE IF NOT EXISTS fix_attempts (
 CREATE INDEX IF NOT EXISTS fix_attempts_state ON fix_attempts(state);
 INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('fixissue', 10);
 
+-- One attempt to implement a queued issue on workspace sessions (src/implement). One row per attempt; at most one row
+-- of an issue is not ended. state: planning | asked (a question waits for its answer) | planned | implementing |
+-- checking | fixing (check findings go back to the session) | opening | pr-opened | revising (a follow-up on our PR) |
+-- stuck (a decision waits) | merged | closed | failed | cancelled.
+CREATE TABLE IF NOT EXISTS implementations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  queued_by TEXT NOT NULL,            -- the login of the fast_track row: every model call runs on their Task Runner
+  state TEXT NOT NULL,
+  attempt INTEGER NOT NULL,           -- 1 for the issue's first attempt
+  text_hash TEXT NOT NULL,            -- of the issue title and body when the attempt started or last planned
+  base_sha TEXT,                      -- default branch head the work is based on
+  workspace_id INTEGER,
+  plan_json TEXT,                     -- the plan call's reply (JSON)
+  plan_md TEXT,
+  plan_call_id INTEGER, session_call_id INTEGER,
+  report_json TEXT,                   -- the session's last report (JSON)
+  diff_hash TEXT, diff_stat TEXT,
+  branch TEXT,
+  pr_number INTEGER, pr_url TEXT,
+  decision_id TEXT,                   -- the open question or stuck decision
+  reason TEXT,                        -- why it is stuck, failed or cancelled (one line)
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS implementations_current ON implementations(repo, number) WHERE state NOT IN ('merged', 'closed', 'failed', 'cancelled');
+CREATE INDEX IF NOT EXISTS implementations_item ON implementations(repo, number, attempt);
+CREATE INDEX IF NOT EXISTS implementations_state ON implementations(state);
+-- What each step of an implementation did: kind plan | session | follow-up | checks | refusal | question.
+CREATE TABLE IF NOT EXISTS implementation_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  implementation_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  call_id INTEGER,                    -- remote_calls.id of the round's model call, if it had one
+  result TEXT,                        -- JSON
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS implementation_rounds_of ON implementation_rounds(implementation_id, id);
+INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('implement', NULL);
+
 -- Work rank of an open item (src/rank): level, type, size and reach in one sortable integer, recomputed
 -- by the rank step from stored results, without a model. breakdown is JSON with each part.
 CREATE TABLE IF NOT EXISTS item_rank (
@@ -1319,6 +1476,20 @@ CREATE TABLE IF NOT EXISTS merge_batch_prs (
   PRIMARY KEY (batch_id, number)
 );
 CREATE INDEX IF NOT EXISTS merge_batch_prs_pr ON merge_batch_prs(number, head_oid);
+
+-- The PR status comment of each PR (src/prstatus): one comment, edited in place when the status line changes.
+CREATE TABLE IF NOT EXISTS pr_status_comments (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  comment_id TEXT,                    -- the number in the comment's #issuecomment- URL; null when none is known
+  author TEXT,                        -- login that posted it (plainLogin); a comment of another identity is not edited
+  line TEXT,                          -- the status line as last posted; null before the first post
+  steps TEXT NOT NULL DEFAULT '[]',   -- JSON [{step, at}]: the steps the comment has shown, oldest first
+  final INTEGER NOT NULL DEFAULT 0,   -- 1 once the merged line is posted or the comment was deleted on GitHub: no more writes
+  failures INTEGER NOT NULL DEFAULT 0, -- writes that failed in a row
+  retry_at TEXT,                      -- after 3 failures in a row: not tried again before this time
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo, number)
+);
 
 -- Last `claude auth status` of each account: sign-in state, method, plan and
 -- the login's end date. Nothing else of the status (no email) is kept.
@@ -1477,12 +1648,12 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
-  kind TEXT NOT NULL,                 -- operator | opus | system
-  login TEXT NOT NULL,                -- operator login, 'opus' or 'system'
+  kind TEXT NOT NULL,                 -- operator | maintainer | opus | system
+  login TEXT NOT NULL,                -- the writer's login, 'opus' or 'system'
   at TEXT NOT NULL,
   body TEXT NOT NULL,
   block TEXT NOT NULL,
-  status TEXT,                        -- operator turns: pending | answering | answered | failed; system turns: held | NULL
+  status TEXT,                        -- operator and maintainer turns: pending | answering | answered | failed; system turns: held | NULL
   error TEXT,
   notes TEXT,                         -- opus turns: JSON array of notes about dropped cards
   seq INTEGER,                        -- position in the prompt; NULL while pending, answering or held
@@ -1565,7 +1736,8 @@ CREATE TABLE IF NOT EXISTS decision_choices (
   added TEXT NOT NULL DEFAULT '[]',   -- JSON: core keys Opus added
   pick TEXT NOT NULL,                 -- JSON {core, reason}
   state TEXT NOT NULL DEFAULT 'current',  -- current | replaced
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  asked_by TEXT                       -- source conversation: the login whose message the reply that wrote it answered
 );
 CREATE INDEX IF NOT EXISTS decision_choices_item ON decision_choices(repo, number, state);
 CREATE INDEX IF NOT EXISTS decision_choices_decision ON decision_choices(decision_id, state);
@@ -1858,11 +2030,14 @@ CREATE TABLE IF NOT EXISTS push_outcomes (
 CREATE INDEX IF NOT EXISTS push_outcomes_to ON push_outcomes(repo, to_oid);
 CREATE INDEX IF NOT EXISTS push_outcomes_stage ON push_outcomes(stage, id);
 
--- Circuit breaker: a stage that stopped itself. One row per stage; active = 1 while tripped, and only an operator clears it
--- (autocraft-server pipeline resume <stage>, or the Resume button on the Pipeline page). Pushes and merges from before cleared_at
--- do not count towards the next trip. evidence: JSON of refs (repo#number and commits).
+-- Circuit breaker: a stage that stopped itself. One row per push stage and repo (stage `<stage>:<repo>`, stage one of fixup,
+-- cifix, fixissue, merge), one per push stage for its trip on every repo (`<stage>`), and `outside-surge` for the outside-author
+-- protections; active = 1 while tripped, until an operator, or for a repo's row a maintainer with write access to it, clears it
+-- (autocraft-server pipeline resume <key>, or the Resume button). Pushes and merges from before cleared_at do not count towards
+-- the next trip of that row.
+-- evidence: JSON of refs (repo#number and commits).
 CREATE TABLE IF NOT EXISTS stage_trips (
-  stage TEXT PRIMARY KEY,             -- fixup | cifix | fixissue | merge
+  stage TEXT PRIMARY KEY,             -- <stage>:<repo> | <stage> | outside-surge
   active INTEGER NOT NULL DEFAULT 1,
   reason TEXT NOT NULL,
   evidence TEXT NOT NULL,
@@ -2186,7 +2361,8 @@ CREATE TABLE IF NOT EXISTS discord_channels (
   parent_id TEXT,
   default_repo TEXT,                  -- tracked repo whose new-issue page the bot's "File a new issue" button opens
   position INTEGER,                   -- Discord's sort key within its category; NULL until the bot next connects
-  category_id TEXT                    -- the channel's category (discord_categories), not the thread parent
+  category_id TEXT,                   -- the channel's category (discord_categories), not the thread parent
+  panel_message TEXT                  -- the bot's issue panel message in this channel (src/discord/panel.ts), edited in place on re-post
 );
 -- Channel categories (type 4), for ordering the admin list like Discord's sidebar.
 CREATE TABLE IF NOT EXISTS discord_categories (

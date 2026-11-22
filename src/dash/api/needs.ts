@@ -1,7 +1,7 @@
 // "Needs you": feedback people left that nobody has answered, and what the pipeline stopped. Decisions have their own API.
 // Dashboard users' text is shown here and never read by a prompt.
 import type { NeedsFeedbackPage, NeedsFeedbackRow, NeedsFixPage, NeedsPage, NeedsStoppedRow } from "../../../web/src/api/types.ts";
-import { listAccounts } from "../../agents/accounts.ts";
+import { accountListOrNull } from "../../agents/account-actions.ts";
 import { getDecision, reposOf } from "../../decisions.ts";
 import { needingExpr, touchesQuiet, withoutHiddenExpr } from "./decisions.ts";
 import { zeroLimits } from "./limits.ts";
@@ -18,8 +18,13 @@ import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import type { SelectQueryBuilder, SqlBool } from "kysely";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
+import { mayResumeTrip } from "../../push-outcomes.ts";
+import { parseTripKey } from "../../core/push-outcome.ts";
+import { stepTitle } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { setting } from "../../settings-read.ts";
+import { latestAttempts } from "../../implement/store.ts";
 
 export const NEEDS_PAGE = 30;
 /** Older feedback is not asked for any more; the window also bounds the scans. */
@@ -92,7 +97,7 @@ const feedbackUnion = (db: Db, w: Window): Source => {
   return union;
 };
 
-const ownLogin = async (db: Db): Promise<string> => (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "pipeline_login")))?.value ?? "";
+const ownLogin = async (db: Db): Promise<string> => (await setting(db, "pipeline_login")) ?? "";
 
 /** True when a feedback row is about a quiet pull request: its item, or any item of its decision (batch and duplicate-group members too). */
 async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, memo: Map<string, boolean>): Promise<boolean> {
@@ -107,7 +112,8 @@ async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, me
 }
 
 async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: string } | null, limit: number, staff: boolean): Promise<{ rows: Raw[]; more: boolean; unhandled: number }> {
-  const window = { since: new Date(Date.now() - WINDOW_MS).toISOString(), own: await ownLogin(db), owns: [...await allOwnLogins(db)], bots: reviewBots() };
+  const [own, owns] = await Promise.all([ownLogin(db), allOwnLogins(db)]);
+  const window = { since: new Date(Date.now() - WINDOW_MS).toISOString(), own, owns: [...owns], bots: reviewBots() };
   const unhiddenRepo = <QB extends SelectQueryBuilder<any, "u", any>>(q: QB): QB =>
     (filtered(hidden) ? q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])) : q) as QB;
   const size = limit * 3 + 1;
@@ -123,6 +129,10 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
     }
     return ok;
   };
+  // The unhandled count reads alongside the page.
+  const openRead = db.all(unhiddenRepo(db.k.selectFrom(feedbackUnion(db, { ...window, cur: "9999" }).as("u")).select((eb) => ["u.source", eb.fn.max<number | null>("u.number").as("number"), "u.decision", eb.fn.countAll<number>().as("n")]))
+    .where((eb) => eb.not(kx.ref<SqlBool>("u.handled"))).groupBy(["u.source", (eb) => eb("u.number", "is", null), "u.decision"]));
+  openRead.catch(() => {});
   // Time-ordered, so each source reads its index range; rows that are filtered out make it read on until the page is full.
   const rows: Raw[] = [];
   let pos = cursor ?? { at: "9999", id: "\uffff" };
@@ -135,8 +145,7 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
     if (batch.length < size || !tail) break;
     pos = { at: tail.at, id: tail.id };
   }
-  const open = await db.all(unhiddenRepo(db.k.selectFrom(feedbackUnion(db, { ...window, cur: "9999" }).as("u")).select((eb) => ["u.source", eb.fn.max<number | null>("u.number").as("number"), "u.decision", eb.fn.countAll<number>().as("n")]))
-    .where((eb) => eb.not(kx.ref<SqlBool>("u.handled"))).groupBy(["u.source", (eb) => eb("u.number", "is", null), "u.decision"]));
+  const open = await openRead;
   const unhandled = await reduceSeq(open, async (sum, r) => sum + (await visible(r) ? r.n : 0), 0);
   // What staff wrote about a quiet pull request reaches viewers as the row only, as the decision and conversation APIs give it.
   const quiet = new Map<string, boolean>();
@@ -154,16 +163,20 @@ async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
   return { id: r.id, source: r.source, item, author: r.author, at: r.at, text: r.text, href, hrefLabel, handled: !!r.handled };
 }
 
-const humanize = (id: string): string => { const t = id.replace(/[-_]+/g, " ").trim(); return t.charAt(0).toUpperCase() + t.slice(1); };
 
-export async function stopped(db: Db, hidden: HiddenRepos): Promise<NeedsStoppedRow[]> {
+export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): Promise<NeedsStoppedRow[]> {
   const out: NeedsStoppedRow[] = [];
-  for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at")))
-    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: humanize(t.stage), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at, resume: { type: "trip", stage: t.stage } });
+  // One row per tripped repo of a push stage, one per push stage tripped on every repo (no repo), and the outside-author surge breaker.
+  for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at").orderBy("stage"))) {
+    const k = parseTripKey(t.stage);
+    if (k && isHiddenRepo(hidden, k.repo)) continue;
+    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: stepTitle(k?.stage ?? t.stage), ...(k ? { repo: k.repo } : {}), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at,
+      resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(user, t.stage) } });
+  }
   const updated = new Map((await db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"]))).map((r) => [r.step, r.updated_at]));
   for (const l of await zeroLimits(db))
     out.push({ id: `limit:${l.step}`, kind: "limit", title: l.title, reason: "The daily limit is 0", since: updated.get(l.step) ?? null, resume: { type: "link", to: "/pipeline" } });
-  for (const a of await listAccounts(db))
+  for (const a of await accountListOrNull(db) ?? [])
     if (a.enabled && a.pausedReason) out.push({ id: `account:${a.id}`, kind: "account", title: a.label, reason: blankIfHidden(a.pausedReason, hidden), since: null, resume: { type: "link", to: "/accounts" } });
   // Targets Act stopped after repeated failures, while the answer still stands: an operator retries them from here.
   for (const a of await db.all(db.k.selectFrom("main.actions as a").innerJoin("main.decisions as d", "d.id", "a.decision_id").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number"))
@@ -181,6 +194,7 @@ export async function stopped(db: Db, hidden: HiddenRepos): Promise<NeedsStopped
     const parts = [g.prs && `${g.prs} PR${g.prs === 1 ? "" : "s"}`, g.n - g.prs && `${g.n - g.prs} issue${g.n - g.prs === 1 ? "" : "s"}`].filter(Boolean).join(", ");
     out.push({ id: `outside:${g.author}`, kind: "outside-group", title: g.author, reason: `${parts} waiting for ${g.surge ? "the outside-surge breaker or " : ""}the author's daily limit`, since: g.since, count: g.n, resume: { type: "outside", author: g.author } });
   }
+  out.push(...await implementationRows(db, hidden, canSeeInternals({ user })));
   // Issues whose fix attempt was skipped or failed wait on a person: one group row per repo, listed by `fixes`.
   const groups = await db.all(db.k.selectFrom("main.item_plans as p").leftJoin("fix_attempts as a", (j) => j.onRef("a.repo", "=", "p.repo").onRef("a.number", "=", "p.number"))
     .select((eb) => ["p.repo", eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("a.updated_at", "p.planned_at")).as("since")])
@@ -190,6 +204,29 @@ export async function stopped(db: Db, hidden: HiddenRepos): Promise<NeedsStopped
     out.push({ id: `fixes:${g.repo}`, kind: "fix-group", title: g.repo, reason: `${g.n} issue${g.n === 1 ? "" : "s"} with a stopped fix`, since: g.since, count: g.n, resume: { type: "fixes", repo: g.repo } });
   }
   return out;
+}
+
+/**
+ * Implementations of open issues that wait on a maintainer: a stuck attempt, or a plan question asked of the maintainers. Each
+ * links to its decision. The reason after the cause is the attempt's detail (job and model text): staff only.
+ */
+async function implementationRows(db: Db, hidden: HiddenRepos, staff: boolean): Promise<NeedsStoppedRow[]> {
+  const waiting = [...(await latestAttempts(db)).values()].filter((r) => !isHiddenRepo(hidden, r.repo) && r.decisionId
+    && (r.state === "stuck" || (r.state === "asked" && r.question?.audience === "maintainer")));
+  if (!waiting.length) return [];
+  const items = new Map((await db.all(db.k.selectFrom("items").select(["repo", "number", "state", "title"])
+    .where(kx.tupleIn(db, ["repo", "number"], waiting.map((r) => [r.repo, r.number] as [string, number]), ["text", "bigint"])))).map((i) => [`${i.repo}#${i.number}`, i]));
+  return waiting.flatMap((r): NeedsStoppedRow[] => {
+    const it = items.get(`${r.repo}#${r.number}`);
+    if (!it || it.state !== "OPEN") return [];
+    const stuck = r.state === "stuck";
+    const reason = stuck ? (staff ? r.reason : r.reason?.split(": ")[0]) ?? "The implementation is stuck" : "The plan asked the maintainers a question";
+    return [{
+      id: `implement:${r.repo}#${r.number}`, kind: stuck ? "implement-stuck" : "implement-question", title: `${r.repo}#${r.number}`,
+      item: { repo: r.repo, number: r.number, kind: "issue", state: itemState(it.state), title: it.title }, reason, since: stuck ? r.updatedAt : r.question?.at ?? r.updatedAt,
+      resume: { type: "link", to: decisionPath({ id: r.decisionId!, repo: r.repo, number: r.number }) },
+    }];
+  }).sort((a, b) => ((a.since ?? "") < (b.since ?? "") ? -1 : 1));
 }
 
 export const FIXES_PAGE = 25;
@@ -238,7 +275,7 @@ export async function needs(db: Db, req: Req): Promise<NeedsPage> {
   // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
   const decisions = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => needingExpr(db, eb, req))
     .$if(filtered(hidden), (q) => q.where((eb) => withoutHiddenExpr(db, eb, hidden)!))))!.n;
-  const rows = await stopped(db, hidden);
+  const rows = await stopped(db, hidden, req.user);
   const last = fb.rows[fb.rows.length - 1];
   return {
     counts: { decisions, feedback: fb.unhandled, stopped: rows.length },

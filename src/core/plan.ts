@@ -36,7 +36,7 @@ export type ActionKind =
   | "fixup" | "conflict" | "cifix" | "lint" | "postmerge"
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupe-answer" | "dupes-compare" | "decide" | "label"
-  | "act" | "fixissue" | "fixissue-collect"
+  | "act" | "implement"
   // the pipeline's account leaves an item that is off the path to merge (src/core/assignment.ts)
   | "unassign";
 
@@ -107,8 +107,8 @@ export type PrFacts = {
   refreshAt?: number;
   /** The global pipeline switch. decide() ignores it; gates() applies it to the pipeline's own writes. */
   pipelineOn: boolean;
-  /** Stages that stopped themselves (circuit breaker), by stage name (fixup, cifix, fixissue, merge): the reason. gates() refuses their writes. */
-  tripped?: Partial<Record<string, string>>;
+  /** The push stages that stopped themselves on this item's repo (circuit breaker), by stage name (fixup, cifix, implement, merge): the reason. gates() refuses their writes. */
+  tripped?: Partial<Record<"fixup" | "cifix" | "implement" | "merge", string>>;
   /** A push of ours made the required checks at this head go red: CI fix works on it ahead of other work, even before a review of this head. */
   brokeByUs?: boolean;
   /** The head is new and its CI is red, and the PR has a take or take-fix review of an earlier head: CI fix works from that review and the contributor path is the normal one. */
@@ -168,6 +168,10 @@ export type PrFacts = {
     noCi: boolean;
     /** The default branch's CI is red. */
     mainRed: boolean;
+    /** Issue implementations are approved for the repo: the gate of an implementation PR's revisions. */
+    fixIssueApproved?: boolean;
+    /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
+    implementOn: boolean;
   };
 
   review: ReviewFacts | null;
@@ -269,6 +273,12 @@ export type PrFacts = {
   batch: "batch-checking" | "in-batch" | "batch-failed" | null;
   /** The PR is one AutoCraft opened to fix main CI. */
   mainFix: boolean;
+  /**
+   * The implementation (src/implement) whose PR this is: the latest attempt that opened it, with its issue, its state and the
+   * heads its revisions started from. Absent or null for every other PR. A live one takes the PR's review fixes and red CI
+   * itself (implement{revise}) instead of the fix-up and the CI fix.
+   */
+  implementation?: { issue: number; state: string; revisedHeads: string[] } | null;
   /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
   baseOffDefault: boolean;
   /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */
@@ -326,8 +336,8 @@ export type ItemFacts = {
   /** The global pipeline switch. decideItem ignores it; gates() applies it to the pipeline's own writes. */
   pipelineOn: boolean;
   /** As on PrFacts. */
-  tripped?: Partial<Record<string, string>>;
-  /** An open fix round for the issue (retry, testing or passed), or the item is our own fix PR. */
+  tripped?: Partial<Record<"fixup" | "cifix" | "implement" | "merge", string>>;
+  /** A live implementation of the issue (src/implement/types.ts LIVE_STATES), or the item is our own fix PR. */
   inFlight?: boolean;
   assignment: AssignFacts;
   /** The repo's approvals for the writes below. decideItem does not apply them: gates() does. */
@@ -406,6 +416,36 @@ export type ItemFacts = {
     impact: string | null;
     /** The latest scope decision about the issue itself, and whether an operator answered it. */
     scopeDecision: { answer: string | null; byOperator: boolean } | null;
+  };
+
+  /** The Implement stage's view of an issue (a PR's has queuedBy null and row null). */
+  implement: {
+    /** Who queued the issue for implementation: the `added_by` of its fast_track row; null when it has none. */
+    queuedBy: string | null;
+    /** queuedBy settles decisions on the repo now (an operator, or a maintainer with write access under src/settlers.ts). */
+    settles: boolean;
+    /** The repo's `implement` build feature is on (src/build/features.ts). */
+    featureOn: boolean;
+    /** The issue's current attempt, else its newest ended one; null when it has none. */
+    row: {
+      /** An implementations state (src/implement/types.ts). */
+      state: string;
+      attempt: number;
+      /** The issue's title or body changed since the attempt last planned. */
+      textChanged: boolean;
+      /** An `asked` attempt: a comment by a person (no bot, not ours) came after its newest question. */
+      newCommentAfterQuestion: boolean;
+      /** An `asked` attempt's decision was answered after its newest question, or a `stuck` attempt's after it got stuck. */
+      decisionAnswered: boolean;
+      /** An ended attempt, and the issue was queued again after it ended (its fast_track row is newer). */
+      requeuedAfterEnd: boolean;
+      /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (a decision); null in other states. */
+      asked: "author" | "maintainer" | null;
+      /** The attempt's PR is open. */
+      prOpen: boolean;
+    } | null;
+    /** Live implementations in the repo other than this issue's. */
+    liveInRepo: number;
   };
 };
 

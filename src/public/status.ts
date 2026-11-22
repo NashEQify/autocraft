@@ -72,16 +72,23 @@ export function hiddenExpr(db: Db, eb: Eb, repo: Ex, number: Ex, labels: Ex): Al
   ]);
 }
 
-export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
-  if (!await isPublicRepo(db, repo)) return null;
-  const row = await db.get(db.k.selectFrom("main.items as i")
+/** The stored facts the step mapping reads, for items of one repo (`numbers`: only these). */
+async function statusRows(db: Db, repo: string, numbers: number[]) {
+  if (!numbers.length) return [];
+  return await db.all(db.k.selectFrom("main.items as i")
     .leftJoin("main.item_stage as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
     .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-    .select((eb) => ["i.title", "i.url", "i.kind", "i.state", hiddenExpr(db, eb, "i.repo", "i.number", "i.labels").as("hidden"),
+    .select((eb) => ["i.number", "i.title", "i.url", "i.kind", "i.state", hiddenExpr(db, eb, "i.repo", "i.number", "i.labels").as("hidden"),
       "s.stage", "s.reviewed", "p.state as plan", "p.view",
       eb.exists(eb.selectFrom("main.decisions as d").select(eb.lit(1).as("one")).whereRef("d.repo", "=", "i.repo").whereRef("d.number", "=", "i.number").where("d.answer", "is", null)).as("decision")])
-    .where("i.repo", "=", repo).where("i.number", "=", number));
-  if (!row || row.hidden || !row.url) return null;
+    .where("i.repo", "=", repo).where("i.number", "in", numbers));
+}
+type StatusRow = Awaited<ReturnType<typeof statusRows>>[number];
+
+/** The step of one item (see the mapping above). `place`: its place in the merge queue, null when it is not in it. */
+async function statusOf(repo: string, row: StatusRow, place: () => Promise<{ position: number; of: number } | null>): Promise<PublicStatus | null> {
+  if (!row.url) return null;
+  const number = row.number;
   const kind = row.kind === "pr" ? "pr" : "issue";
   const base = { ref: `${repo}#${number}`, title: row.title ?? "", url: row.url, kind } as const;
   if (row.state === "MERGED") return { ...base, state: "merged", step: "Merged" };
@@ -98,7 +105,7 @@ export async function publicStatus(db: Db, repo: string, number: number): Promis
   }
   const plan = row.plan ?? "";
   if (QUEUED.includes(plan) && !view.queue?.held) {
-    const q = await queuePlace(db, repo, number);
+    const q = await place();
     if (q) return { ...open, step: "In the merge queue", queue: q };
   }
   if (FIXING.includes(plan) || view.fixup === "fix" || view.cifix === "cifix-queued" || view.cifix === "cifix-rerun") return { ...open, step: "Fix-up in progress" };
@@ -108,19 +115,50 @@ export async function publicStatus(db: Db, repo: string, number: number): Promis
   return { ...open, step: "In review" };
 }
 
-/** Open PRs of a repo that are queued to merge, in the dashboard queue page's order: fast-tracked first, batch members after ready ones, then by work rank, repo and number. */
-async function queueOf(db: Db, repo: string): Promise<number[]> {
+export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
+  if (!await isPublicRepo(db, repo)) return null;
+  const row = (await statusRows(db, repo, [number]))[0];
+  if (!row || row.hidden) return null;
+  return await statusOf(repo, row, () => queuePlace(db, repo, number));
+}
+
+/**
+ * The statuses of PRs of one repo, for the PR status comment (src/prstatus), which the PR's own readers see on GitHub:
+ * private repos too, and the security cases `publicStatus` leaves out get the same steps and places as any PR (the queue
+ * counts them here), so their comment does not single them out. The queue is read once.
+ */
+export async function commentStatuses(db: Db, repo: string, numbers: number[]): Promise<Map<number, PublicStatus>> {
+  const out = new Map<number, PublicStatus>();
+  let queue: number[] | null = null;
+  for (const row of await statusRows(db, repo, numbers)) {
+    const s = await statusOf(repo, row, async () => {
+      queue ??= await queueOf(db, repo, true);
+      const at = queue.indexOf(row.number);
+      return at < 0 ? null : { position: at + 1, of: queue.length };
+    });
+    if (s) out.set(row.number, s);
+  }
+  return out;
+}
+
+/**
+ * Open PRs of a repo that are queued to merge, in merge order: members of an integration batch first (they merge before
+ * anything else), then fast-tracked, then by work rank and number. A PR waiting on a maintainer decision is left out.
+ * `withHidden`: include the security cases (the PR status comment counts them; the anonymous views do not).
+ */
+async function queueOf(db: Db, repo: string, withHidden = false): Promise<number[]> {
   const rows = await db.all(db.k.selectFrom("main.item_plans as p")
     .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
     .select(["p.number", "p.state"])
     .where("p.repo", "=", repo).where("p.kind", "=", "pr").where("p.state", "in", QUEUED)
     .where((eb) => eb(jsonText(db, "p.view", "$.gh"), "=", "OPEN"))
     .where((eb) => eb(eb.fn.coalesce(jsonBool(db, "p.view", "$.queue.held"), eb.lit(0)), "=", 0))
-    .where((eb) => eb.not(hiddenExpr(db, eb, "p.repo", "p.number", "i.labels"))));
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("main.decisions as d").select(eb.lit(1).as("one")).whereRef("d.repo", "=", "p.repo").whereRef("d.number", "=", "p.number").where("d.answer", "is", null))))
+    .$if(!withHidden, (qb) => qb.where((eb) => eb.not(hiddenExpr(db, eb, "p.repo", "p.number", "i.labels")))));
   const fast = await fastPositions(db), score = scoreLookup(db);
   const fp = (n: number): number => fast.get(`${repo}#${n}`)?.position ?? 1e9;
-  const cls = (s: string) => (s === "in-batch" || s === "batch-checking" ? 1 : 0);
-  return (await sortSeq(rows, async (a, b) => fp(a.number) - fp(b.number) || cls(a.state) - cls(b.state)
+  const cls = (s: string) => (s === "in-batch" || s === "batch-checking" ? 0 : 1);
+  return (await sortSeq(rows, async (a, b) => cls(a.state) - cls(b.state) || fp(a.number) - fp(b.number)
     || (await score(repo, b.number) ?? -1) - (await score(repo, a.number) ?? -1) || a.number - b.number)).map((r) => r.number);
 }
 

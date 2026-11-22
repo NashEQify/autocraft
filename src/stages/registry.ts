@@ -36,7 +36,7 @@ export type StageDef = {
   /** The `stage` label of the stage's prompts: equal, or followed by " (...)". */
   promptStage: string;
   waits: { name: string; why: string; howLong: string; showsAs: string; kind: "external" | "backoff" }[];
-  writes: { what: string; approval?: "label" | "comment" | "push" | "fix" | "merge" | "ci" | "main-fix" }[];
+  writes: { what: string; approval?: "label" | "comment" | "push" | "fix" | "merge" | "ci" | "main-fix" | "status" }[];
   /** What stops for a person, or null. */
   person: string | null;
   swimlane: { id: string; lane: LaneId; row: number; lines: string[]; approval?: string }[];
@@ -166,8 +166,8 @@ export const STAGES: StageDef[] = [
   {
     id: "decide", title: "Decide", order: 5, runStage: 3, docSection: "Decide", mode: "gate",
     description: "Asks an operator for scope calls, prepares every open decision with a summary, a pick and drafted answers, and answers questions about an item in its conversation.",
-    steps: [{ name: "decide", maxMin: 75, label: "Decide", limit: null, seeded: 100 }, { name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }],
-    lanes: [{ name: "decide", steps: ["decide"], order: 6 }, { name: "conversation", steps: ["conversation"], order: 20 }],
+    steps: [{ name: "decide", maxMin: 75, label: "Decide", limit: null, seeded: 100 }, { name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }, { name: "conversation-maintainer", maxMin: 30, label: "Maintainers' conversations", limit: null }],
+    lanes: [{ name: "decide", steps: ["decide"], order: 6 }, { name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
     reads: ["Classified items", "Reviews", "Operator answers"],
     sets: ["Decisions with summary, pick and drafted answers", "Conversation replies"],
     states: [
@@ -253,35 +253,36 @@ export const STAGES: StageDef[] = [
     edges: [{ to: "fixup", branch: "take-fix", label: "take with fixes" }, { to: "verify", branch: "take", label: "taken" }],
   },
   {
-    id: "fix", title: "Fix", order: 8, runStage: 7, docSection: "Fix", mode: "steps",
-    description: "Writes a patch for a bugfix issue where the fix is clear, tests it in the sandbox and opens a PR.",
-    steps: [{ name: "fixissue", maxMin: 50, label: "Fix", limit: null, seeded: 10 }, { name: "fixissue-collect", maxMin: 10 }],
-    lanes: [{ name: "fixissue", steps: ["fixissue"], order: 16 }, { name: "fixissue-collect", steps: ["fixissue-collect"], order: 17 }],
-    reads: ["Open bugfix issues", "Repo checkout at the base commit"],
-    sets: ["Fix attempts", "Pull requests"],
+    id: "fix", title: "Implement", order: 8, runStage: 7, docSection: "Implement", mode: "steps",
+    description: "Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. A review that asks for fixes or red CI on that pull request goes back to the same session, and AutoCraft pushes the checked revision for a new review.",
+    steps: [
+      { name: "implement", maxMin: 300, label: "Implement", limit: null },
+      { name: "workspace-try", maxMin: 160 },
+    ],
+    lanes: [{ name: "implement", steps: ["implement"], order: 16 }],
+    reads: ["Queued issues and their comments", "Repo checkout in a workspace pod", "Review fix lists and failed CI check logs of our implementation PRs"],
+    sets: ["Implementations", "Pull requests"],
     states: [
-      { id: "candidates", label: "Candidates", waitsOn: "model", tone: "neutral", hint: "Open bugfix issues without an attempt; Sonnet triages the highest work score first" },
-      { id: "retry", label: "Patch due", waitsOn: "model", tone: "neutral", hint: "Triage found a clear fix; Sonnet writes the patch, or the next round" },
-      { id: "testing", label: "In sandbox", waitsOn: "sandbox", tone: "neutral", hint: "The patched head and the base commit are built and tested" },
-      { id: "passed", label: "Passed, PR next", waitsOn: "runner", tone: "ok", hint: "The next collect pushes the branch and opens the PR" },
-      { id: "pr-opened", label: "PR opened", waitsOn: "nothing", tone: "ok", hint: "The PR goes through Review" },
-      { id: "skipped", label: "Held: not a clear fix", waitsOn: "person", tone: "warn", hint: "Retried only when the issue text changes" },
-      { id: "failed", label: "Held: rounds failed", waitsOn: "person", tone: "bad", hint: "Three failed rounds end the attempt" },
-      { id: "unapproved", label: "Repo not approved for fixing", waitsOn: "person", tone: "warn", hint: "Candidates in a repo without fix approval; an operator approves it on the Repos page", gate: true },
+      { id: "queued", label: "Queued", waitsOn: "model", tone: "neutral", hint: "Queued by a maintainer; the plan call runs next" },
+      { id: "asked", label: "Question asked", waitsOn: "person", tone: "warn", hint: "The plan found facts or choices the issue leaves open; waits for the author's or a maintainer's answer" },
+      { id: "working", label: "In progress", waitsOn: "model", tone: "neutral", hint: "Planning, the session, AutoCraft's checks, or opening the PR" },
+      { id: "pr-opened", label: "PR opened", waitsOn: "nothing", tone: "ok", hint: "The PR goes through Review; the review's fixes and red CI go back to the session" },
+      { id: "stuck", label: "Stuck", waitsOn: "person", tone: "bad", hint: "A decision with options waits for a maintainer" },
+      { id: "off", label: "Implement off", waitsOn: "person", tone: "warn", hint: "Queued issues in a repo whose Implement switch or issue implementation approval is off", gate: true },
     ],
     models: [
-      { model: "sonnet", use: "Triages the issue and writes the patch" },
-      { model: "opus", use: "Checks the patch" },
-      { model: "haiku", use: "Failure summaries" },
+      { model: "opus", use: "Plans the implementation and writes it in a workspace session", remark: "Every call runs on the Task Runner of the person who queued the issue" },
     ],
-    promptIds: ["fixissue.triage", "fixissue.patch", "fixissue.check"], promptStage: "Fix",
+    promptIds: ["implement.plan", "implement.session"], promptStage: "Fix",
     waits: [
+      { name: "Queuer's Task Runner", why: "Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots", howLong: "Until that Task Runner is ready and has a free slot", showsAs: "Queue view \"Runs only on <login>'s Task Runner\"", kind: "external" },
+      { name: "Author's answer", why: "The plan found facts the issue leaves open and asked its author in a comment; the plan runs again when the issue text changes or a person comments after the question", howLong: "Until the author or another person answers; no timer", showsAs: "Plan wait \"the author's answer\"", kind: "external" },
       { name: "Fix landing poll", why: "A deep-scan fix that went out as a pull request waits for its merge, which the mirror reports; a fix that went the advisory way waits for a repository admin to merge it, which shows as the patch reaching the default branch", howLong: "2 minutes, read by the sync run, with the pipeline on or off", showsAs: "The finding's state: landing, awaiting admin, then landed or advisory", kind: "external" },
     ],
-    writes: [{ what: "Branch and pull request", approval: "fix" }],
-    person: "Per-repo approval",
+    writes: [{ what: "Branch and pull request", approval: "fix" }, { what: "A question to the author on the issue, and on a maintainer's Close answer a comment and the close", approval: "comment" }],
+    person: "Queueing an issue, per-repo approval, questions the plan leaves open, stuck implementations",
     swimlane: [
-      { id: "fix", lane: "sandbox", row: 10, lines: ["Fix (issues)", "Sonnet patch, Opus check"], approval: "fix approval" },
+      { id: "fix", lane: "sandbox", row: 10, lines: ["Implement (issues)", "Opus plan and session"], approval: "fix approval" },
       { id: "hold1", lane: "operator", row: 11, lines: ["Hold", "waits for a person"] },
       { id: "prfork", lane: "writes", row: 11, lines: ["Open PR from fork", "our fix, as a PR"], approval: "fix approval" },
     ],
@@ -348,7 +349,8 @@ export const STAGES: StageDef[] = [
       { name: "Sandbox build", why: "External", howLong: "Until the task ends; a build-environment error queues it again once per head", showsAs: "Verification state `planned` or `running`", kind: "external" },
       { name: "PR build", why: "External", howLong: "Until the task ends; a build-environment error queues it again once per head", showsAs: "Our build on the item: running", kind: "external" },
       { name: "Screenshot render", why: "External", howLong: "Until both tasks end", showsAs: "Screenshot run `planned` or `running`", kind: "external" },
-      { name: "Warm build of the default branch", why: "Limits sandbox load; never blocks a PR", howLong: "Once a day per repo", showsAs: "Sandbox tasks", kind: "backoff" },
+      { name: "Warm build of the default branch", why: "Fills a build worker's own warm dirs (worker environments only); limits sandbox load; never blocks a PR", howLong: "Once a day per repo", showsAs: "Sandbox tasks", kind: "backoff" },
+      { name: "Warm producer build", why: "A new default-branch head (or a new toolchain image) queues one build of the repo for the warm store, on the warm writer environment; merges that land while it waits share it, as it builds the newest head when it starts. Builds of one repo start at least warm_min_interval_minutes apart (default 15; `autocraft-server envs warm-interval`), so a burst of merges costs one build. Never blocks a PR or an item", howLong: "Until the build ends, and at least the setting's minutes after the repo's previous warm build started", showsAs: "Builds page, step `warm` (queued)", kind: "external" },
       { name: "Nightly checks", why: "The nightly schedule of the Nightly checks build feature: queued at most once a day per repo, below all PR work", howLong: "Once a day per repo; a failure backs off to the next night", showsAs: "Sandbox tasks of the step `nightly`", kind: "backoff" },
       { name: "Nightly build", why: "External", howLong: "Until the task ends", showsAs: "Nightly results in state `queued`", kind: "external" },
     ],
@@ -363,8 +365,8 @@ export const STAGES: StageDef[] = [
   {
     id: "merge", title: "Merge queue", order: 11, runStage: 6, docSection: "Merge queue", mode: "steps",
     description: "Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge, and asks for a Merge? decision on PRs outside the rules. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up or a Merge? question (for a pre-approved merge, a Merge? question). Approves held CI runs of outside contributors where the repo allows it.",
-    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "merge-ask", maxMin: 10 }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }],
-    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge-ask", steps: ["merge-ask"], order: 10 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }],
+    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "merge-ask", maxMin: 10 }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }, { name: "pr-status", maxMin: 10, label: "PR status comments", limit: 2000 }],
+    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge-ask", steps: ["merge-ask"], order: 10 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }, { name: "pr-status", steps: ["pr-status"], order: 17 }],
     reads: ["Reviews", "Verification results", "CI state", "Merge decisions"],
     sets: ["Integration batches", "Merged PRs", "Merge? decisions"],
     states: [
@@ -405,9 +407,10 @@ export const STAGES: StageDef[] = [
       { name: "Batch CI red at the base", why: "Every failed check of the batch PR also failed on the default branch at the batch's base, so no PR in the batch is to blame and rerunning would not help", howLong: "Until the default branch head changes; the batch is then rebuilt on it. No timer", showsAs: "Batch note \"failed on the default branch at the base too; waits for the default branch to change\"", kind: "external" },
       { name: "Batch CI runs in progress", why: "GitHub shows the batch PR's CI red as soon as one job fails while the run's other jobs go on, and refuses to rerun the failed jobs of a run in progress; the one rerun waits until every failed check's run has completed", howLong: "Until those runs complete (read again with each merge run); no timer, and no rerun is recorded meanwhile", showsAs: "Batch note \"waiting for the failed CI runs to finish before the one rerun\"", kind: "external" },
       { name: "Batch CI rerun", why: "With no PR traced, the failed runs of the batch tip were rerun once, and the batch waits for new results", howLong: "Up to 45 minutes after the rerun for results newer than it; older or unreadable results do not count. If every rerun call was refused the batch does not wait: it splits or fails at once", showsAs: "Batch note \"no PR traced, rerunning the failed runs once\"; audit `batch-rerun`", kind: "external" },
+      { name: "PR status comment retry", why: "Writing a PR's status comment failed 3 times in a row (GitHub refused it, or the PR's comments could not be read)", howLong: "1 hour, doubling with each further failure up to 24 hours; a success resets it", showsAs: "Job log of the pr-status step: \"status comment failed\" on the item", kind: "backoff" },
       { name: "Changes requested", why: "A reviewer with write access has a formal review that blocks the merge", howLong: "Until that reviewer approves or a maintainer dismisses the review; no timer. Blocked PRs are read again every merge run", showsAs: "Queue state `changes-requested` with the reviewer in its note", kind: "external" },
     ],
-    writes: [{ what: "Merge of the batch PR", approval: "merge" }, { what: "Approval of held workflow runs", approval: "ci" }, { what: "Rerun of the failed CI runs of the batch PR (once per batch)", approval: "merge" }],
+    writes: [{ what: "Merge of the batch PR", approval: "merge" }, { what: "Approval of held workflow runs", approval: "ci" }, { what: "Rerun of the failed CI runs of the batch PR (once per batch)", approval: "merge" }, { what: "One status comment per PR, edited in place", approval: "status" }],
     person: "Merge? decision for PRs outside the rules",
     swimlane: [
       { id: "queue", lane: "auto", row: 14, lines: ["Merge queue", "rule met at this head?"] },
@@ -480,7 +483,7 @@ export const STAGES: StageDef[] = [
 /**
  * Floor of the longest run of a job of a step, in minutes (StageDef.steps[].maxMin): about twice the longest realistic job, from the 30-day
  * history of finished jobs (longest done job: fixup 92 incl. one stuck check, decide 35, opus-review 33, premerge 31,
- * dupes-compare 25, fixissue 25, cifix 17, postmerge 14, prioritize 10, labels-apply 9, classify-new 7, others under 2) and the
+ * dupes-compare 25, cifix 17, postmerge 14, prioritize 10, labels-apply 9, classify-new 7, others under 2) and the
  * limits in the code. The runner's deadline is the larger of this and the bound the code allows (src/runner/deadlines.ts: model calls,
  * check time and lint rounds times the job's items); it stops a job past it and fails it.
  * A step with no registry entry (the security steps, review-batch) gets DEFAULT_STEP_MAX_MIN.
@@ -497,10 +500,12 @@ export const GLOBAL_WAITS: { name: string; why: string; howLong: string; showsAs
   { name: "Job past its deadline", why: "The runner stopped a job for running past its step's deadline; running the same paid work again at once would stop it again", howLong: "At least 1 hour (longer after more failures in a row); no timer runs, the planner reads the failure", showsAs: "\"failed N times in a row; retry at HH:MM UTC\"", kind: "backoff" },
   { name: "Daily limit", why: "Cost control. For Act, which card presses share with its closes, a press that finds no room is queued and carried out in order (item priority level, then time of the press) when room returns", howLong: "Until 00:00 UTC, or until an operator raises the limit", showsAs: "\"daily limit of N items reached; resumes at 00:00 UTC\"", kind: "backoff" },
   { name: "Jev unavailable", why: "Jev is switched off (`autocraft-server accounts jev off`), the `jev` command is missing, or its account fails: out of credit, or a missing or rejected key (status 401, 402, 403, or a message about credit, billing, quota or the key). Haiku does Jev's classify, priority and duplicate work through the Claude accounts. Off or not installed: no retry until it is switched on or the command exists (checked on each pass). Account failure: the first pass an hour after the last failure tries Jev again; no timer runs. Other Jev errors (timeouts, server errors, bad answers) are retried as before", howLong: "1 hour after an account failure", showsAs: "Accounts page and run logs", kind: "external" },
-  { name: "Circuit breaker", why: "A push stage (fix-up, CI fix, fix issue) stops when 2 of its last 10 pushes turned a required check red; the merge path stops when main CI turns red because of a merge of ours or a post-merge review finds a defect in it", howLong: "Until an operator resumes the stage (`autocraft-server pipeline resume <stage>` or the Resume button on the Pipeline page); no timer", showsAs: "\"tripped: ...\" as the stage's pause reason", kind: "external" },
+  { name: "Circuit breaker", why: "Two tiers per stage. Per repo: a push stage (fix-up, CI fix, implement) stops on a repo when 2 of its last 10 pushes there turned a required check red; merges stop on a repo when its main CI turns red because of a merge of ours or a post-merge review finds a defect in one; other repos go on. On every repo: a push stage stops everywhere when the broken pushes among its last 10 across repos come from 2 or more repos (a fault in the step itself)", howLong: "Until resumed (`autocraft-server pipeline resume <stage>:<repo>` or `<stage>`, or the Resume button on the Pipeline and Needs pages): a repo's trip by an operator or a maintainer with write access to the repo, a trip on every repo by an operator; no timer", showsAs: "A breaker row naming the stage and its repo, or all repos, on Needs and the Pipeline page; \"<Stage> is paused: ...\" as the reason an item is not worked", kind: "external" },
   { name: "Claude account slots", why: "Each Claude account runs a limited number of calls at once (set by operators on the Accounts page); calls beyond that wait in a queue, security first, then the path to merge, then triage", howLong: "Until a running call ends or an operator raises an account's slots", showsAs: "\"waiting for a Claude account\" in the job log", kind: "external" },
   { name: "Confidential build environment", why: "A private security fix starts its model call only once a confidential build environment is ready (its worker reported after it was marked), so its checks and builds can run; no job holds the wait", howLong: "Until an operator marks an environment confidential and its worker reports", showsAs: "\"Waiting for a confidential build environment.\" as the finding's note; the confidential-env health check", kind: "external" },
   { name: "Security fix build", why: "The private fix of a security finding waits for its build tasks in a confidential build environment; no job holds the wait", howLong: "Until the tasks end, at most 4 hours from when a confidential environment was ready for them; then they are cancelled and the round is read as failed", showsAs: "\"Waiting for a confidential build environment.\" on the task while none is ready; the confidential-env health check", kind: "external" },
+  { name: "Build pod capacity", why: "A kubernetes build environment with cluster capacity claims a queued task only while it fits the namespace's ResourceQuota and the room our own runs leave on a node, and claims nothing while one of its pods is Unschedulable; the first task that does not fit holds the ones behind it. A later stage's pod the scheduler has no room for on its volume's node, or one the quota refuses, waits too. A first pod the quota refuses holds the environment's claims for a minute. The launcher re-reads nodes and quota on its passes", howLong: "Until running builds end or the quota or nodes grow; a running task's wait ends at its deadline (3 hours by default), and the task fails", showsAs: "\"New tasks wait for build pod capacity\" or \"Task N waits for room on node X\" as the environment's health warning on the Environments page; the build-queue health check", kind: "external" },
+  { name: "Workspace start", why: "A workspace session (`workspace try`) waits for its workspace's pod to be created, started and seeded with the source; the launcher moves the workspace row on its passes, and the job reads the row", howLong: "Until the workspace is ready; the launcher fails it when the pod is not running after 15 minutes or seeding takes over 10, and the job gives up after 26 minutes", showsAs: "\"session N: workspace M starting\" as the job's progress and in its log", kind: "external" },
   { name: "Security scan test", why: "The scan test of a finding (feature Run scan tests) waits for its build task in a confidential build environment; no job holds the wait", howLong: "Until the task ends, at most 4 hours from when a confidential environment was ready for it; then it is cancelled and the finding reads as could-not-build", showsAs: "Test badge on the finding; \"Waiting for a confidential build environment.\" on the task while none is ready; the confidential-env health check", kind: "external" },
   { name: "User-local Task Runners", why: "In the user-local inference mode a Claude model call waits in the remote call queue until the Task Runner of a maintainer or operator who may take it claims it (in the model queue's order). A follow-up turn waits only for the Task Runner that holds its session, at most 2 minutes; then a resumed session is asked anew as a fresh call, while a lint fix turn or a clippy reminder is skipped", howLong: "Until a Task Runner claims it. Up to 12 hours of a job's queue time (the time in which any of its calls waited) is left out of its deadline and no-progress stop; past that the job is stopped as past its deadline, so a call no eligible Task Runner takes does not hold the job and its item. A call that no ready Task Runner outside a cool-off may take for 10 minutes (Manual only ones count) (the dashboard checks once a minute) is withdrawn and the work that made it skipped without a failure, for a later pass", showsAs: "\"waiting for a user-local Task Runner\" in the job log; \"skipped: no Task Runner can take calls on <repos>\" once withdrawn", kind: "external" },
   { name: "Lost remote lease", why: "A Task Runner that sends no heartbeat for 2 minutes while the dashboard serves, that is still preparing 15 minutes after the claim, or that runs past the call's time limit (counted from its first running heartbeat) plus 2 minutes loses the call: it goes back to the queue for any Task Runner. A failed reply sends it back the same way, not offered to that user's Task Runners for 10 minutes. Time in which the dashboard was down or stalled does not count. Checked on the caller's poll and on every claim, no timer", howLong: "At once, up to the prompt's attempts; then the call fails as a local call does", showsAs: "The agent run, failed with \"lease expired\" or the Task Runner's error", kind: "backoff" },

@@ -90,6 +90,7 @@ export const MOCK_USERS: Record<"operator" | "maintainer" | "settler" | "viewer"
     login: "ochre-fox",
     role: "operator",
     writeRepos: ["photocraft", "filmcraft", "designcraft", "pdfcraft", "wordcraft", "gridcraft", "vectorcraft", "deckcraft", "craft-libs", "effectcraft"],
+    runRepos: ["photocraft", "filmcraft", "designcraft", "pdfcraft", "wordcraft", "gridcraft", "vectorcraft", "deckcraft", "craft-libs", "effectcraft"],
     maintainerWrites: false,
     maintainerSettles: false,
     inference: "user-local",
@@ -98,6 +99,7 @@ export const MOCK_USERS: Record<"operator" | "maintainer" | "settler" | "viewer"
     login: "kiri-n",
     role: "maintainer",
     writeRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
+    runRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
     maintainerWrites: false,
     maintainerSettles: false,
     inference: "user-local",
@@ -107,11 +109,12 @@ export const MOCK_USERS: Record<"operator" | "maintainer" | "settler" | "viewer"
     login: "kiri-n",
     role: "maintainer",
     writeRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
+    runRepos: ["photocraft", "designcraft", "vectorcraft", "deckcraft", "pdfcraft", "filmcraft"],
     maintainerWrites: true,
     maintainerSettles: true,
     inference: "user-local",
   },
-  viewer: { login: "glasswing", role: "viewer", writeRepos: [], maintainerWrites: false, maintainerSettles: false, inference: "user-local" },
+  viewer: { login: "glasswing", role: "viewer", writeRepos: [], runRepos: [], maintainerWrites: false, maintainerSettles: false, inference: "user-local" },
 };
 export type MockRole = keyof typeof MOCK_USERS;
 
@@ -1074,7 +1077,7 @@ export function itemFor(repo: string, number: number): Item {
     preapproval: PREAPPROVALS[`${repo}#${number}`] ?? null,
     reviews: null,
     actions: [],
-    releases: { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false },
+    releases: { reviewAgain: false, verifyAgain: false, batchAgain: false },
     queue: mockSlot(number),
     ...(repo === PIPELINE_OFF.repo && number === PIPELINE_OFF.number
       ? { state: "merged" as const, pipelineOn: false, mergedAt: iso(3 * H), mergedBy: "maintainer", closedAt: iso(3 * H) }

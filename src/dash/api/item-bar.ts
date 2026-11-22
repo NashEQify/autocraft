@@ -145,30 +145,34 @@ export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; merg
   if (c.veiled) return { headline: { tone: "idle", text: status.phase, next: null, model: null, startedAt: null, jobId: null }, steps: [] };
 
   // A job_items row of a running job means the item is finished, so running work is matched by the job's params and by the item's own running calls.
-  const active = await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "started_at"])
-    .where("state", "in", ["running", "queued"]).where("repo", "=", repo).where((eb) => eb(kx.jsonNum(db, "params", "$.number"), "=", n)).orderBy("id"));
-  const runs = await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.model", "r.job_id", "r.started_at"])
-    .where("i.repo", "=", repo).where("i.number", "=", n).where("r.state", "=", "running").orderBy("r.id"));
+  const open = it.state === "open";
+  // The bar's reads do not depend on each other, so they run together.
+  const [active, runs, mergedByUs, costRows, pre] = await Promise.all([
+    db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "started_at"])
+      .where("state", "in", ["running", "queued"]).where("repo", "=", repo).where((eb) => eb(kx.jsonNum(db, "params", "$.number"), "=", n)).orderBy("id")),
+    db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.model", "r.job_id", "r.started_at"])
+      .where("i.repo", "=", repo).where("i.number", "=", n).where("r.state", "=", "running").orderBy("r.id")),
+    it.state === "merged" && db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n).where("outcome", "=", "merged").limit(1)).then((r) => r !== undefined),
+    db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.cost_usd as cost"]).$narrowType<{ cost: NotNull }>()
+      .where("i.repo", "=", repo).where("i.number", "=", n).where("r.cost_usd", "is not", null).where((eb) => hiddenExpr(db, eb, c.hidden) ?? eb.lit(true)).orderBy("i.run_id")),
+    open ? db.get(db.k.selectFrom("preapprovals").select(["state", "reason"]).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1)) : undefined,
+  ]);
   const job = active.find((j) => j.state === "running");
   const run = runs.find((r) => job && r.job_id === job.id) ?? runs[0];
   const queued = active.find((j) => j.state === "queued");
 
-  const mergedByUs = it.state === "merged" && await db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n).where("outcome", "=", "merged").limit(1)) !== undefined;
   const evidence = await evidenceOf(c, it.mergedAt, mergedByUs);
   const costs = new Map<StageId, number>();
-  for (const r of await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.cost_usd as cost"]).$narrowType<{ cost: NotNull }>()
-    .where("i.repo", "=", repo).where("i.number", "=", n).where("r.cost_usd", "is not", null).where((eb) => hiddenExpr(db, eb, c.hidden) ?? eb.lit(true)).orderBy("i.run_id"))) {
+  for (const r of costRows) {
     const id = stageOfStep(r.step)?.id;
     if (id) costs.set(id, (costs.get(id) ?? 0) + r.cost);
   }
 
   const runningStep = job?.step ?? run?.step ?? null;
-  const open = it.state === "open";
   const phaseStage = PHASE_STAGE[status.phase];
   const latestFail = [...evidence].filter((e) => e.state === "failed").sort((a, b) => (a.at < b.at ? 1 : -1))
     .find((f) => !evidence.some((e) => e.stage === f.stage && e.state === "done" && e.at > f.at) && (!phaseStage || f.stage === phaseStage || Date.now() - Date.parse(f.at) < RECENT_MS));
   // A failed pre-approval heads the bar until a newer one replaces it or the PR merges.
-  const pre = open ? await db.get(db.k.selectFrom("preapprovals").select(["state", "reason"]).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1)) : undefined;
   const preFailed = pre?.state === "failed" ? { label: /fix-up/i.test(pre.reason ?? "") ? "Fix-up" : "Pre-approved merge", reason: c.staff && pre.reason ? clip(pre.reason, 160) : null } : null;
   const current: StageId | null = runningStep ? stageOfStep(runningStep)?.id ?? null : queued ? stageOfStep(queued.step)?.id ?? null : open ? phaseStage ?? null : null;
 
