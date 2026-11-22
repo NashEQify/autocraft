@@ -16,6 +16,7 @@ import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
 import { SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
 import { SIM_THRESHOLD } from "./dupes/scan.ts";
+import { splitStageTripsSqlite } from "./db/trip-split.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
 
@@ -340,7 +341,7 @@ export const HISTORY_COPY_SQL = `INSERT INTO main.opus_review_history (repo, num
   WHERE NOT EXISTS (SELECT 1 FROM main.opus_review_history h WHERE h.repo = o.repo AND h.number = o.number AND h.head_oid = o.head_oid AND h.at = o.at)`;
 
 // Bump when migrateValues() or backfill() change what they do.
-const MIGRATION_VERSION = 18;
+const MIGRATION_VERSION = 19;
 
 // Rows written before their column existed.
 function backfill(db: DatabaseSync): void {
@@ -581,6 +582,8 @@ function migrateValues(db: DatabaseSync): void {
   db.exec("DROP TABLE IF EXISTS main.repo_directions; DROP TABLE IF EXISTS main.direction_proposals");
   db.prepare("DELETE FROM main.settings WHERE key = 'direction_proposals_since'").run();
   if (!db.prepare("SELECT 1 FROM main.settings WHERE key = 'ci_first_done'").get()) ciFirst(db);
+  // Breaker rows of a whole push stage become one row per repo.
+  splitStageTripsSqlite(db);
   // Jev usage saved without a cost is priced from its input tokens.
   const JEV_UNPRICED = "model LIKE 'jev%' AND cost_usd IS NULL AND input_tokens IS NOT NULL";
   if (db.prepare(`SELECT 1 FROM main.token_usage WHERE ${JEV_UNPRICED} LIMIT 1`).get()) {

@@ -19,6 +19,8 @@ import { canSeeInternals } from "./staff.ts";
 import type { SelectQueryBuilder, SqlBool } from "kysely";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
 import { mayResumeTrip } from "../../push-outcomes.ts";
+import { parseTripKey } from "../../core/push-outcome.ts";
+import { stepTitle } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { setting } from "../../settings-read.ts";
@@ -160,12 +162,16 @@ async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
   return { id: r.id, source: r.source, item, author: r.author, at: r.at, text: r.text, href, hrefLabel, handled: !!r.handled };
 }
 
-const humanize = (id: string): string => { const t = id.replace(/[-_]+/g, " ").trim(); return t.charAt(0).toUpperCase() + t.slice(1); };
 
 export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): Promise<NeedsStoppedRow[]> {
   const out: NeedsStoppedRow[] = [];
-  for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at")))
-    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: humanize(t.stage), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at, resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(db, user, t.stage) } });
+  // One row per tripped repo of a push stage; the outside-author surge breaker is the one instance-wide row.
+  for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at").orderBy("stage"))) {
+    const k = parseTripKey(t.stage);
+    if (k && isHiddenRepo(hidden, k.repo)) continue;
+    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: stepTitle(k?.stage ?? t.stage), ...(k ? { repo: k.repo } : {}), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at,
+      resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(user, t.stage) } });
+  }
   const updated = new Map((await db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"]))).map((r) => [r.step, r.updated_at]));
   for (const l of await zeroLimits(db))
     out.push({ id: `limit:${l.step}`, kind: "limit", title: l.title, reason: "The daily limit is 0", since: updated.get(l.step) ?? null, resume: { type: "link", to: "/pipeline" } });

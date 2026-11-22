@@ -1230,11 +1230,11 @@ export interface JobFilter {
   offset?: number;
 }
 
+/** A repo where a stage's circuit breaker tripped: the stage works no item of that repo until an operator, or a maintainer with write access to the repo, resumes it. */
+export type StageTrip = { /** The breaker, `<stage>:<repo>` (fixissue:deckcraft), as resume takes it. */ key: string; repo: RepoName; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
 export type StageLimit = { step: string; title: string; perDay: number | null; usedToday: number; pausedReason: string | null;
-  /** The circuit-breaker stage that paused this step (fixup, cifix, fixissue, merge); an operator or a maintainer resumes it. */
-  tripped?: string;
-  /** With `tripped`: whether the viewer may resume it. */
-  canResume?: boolean;
+  /** The repos where the step's push stage (fixup, cifix, fixissue, merge) tripped, oldest first; the step goes on for every other repo. */
+  trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
 export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState };
@@ -2290,11 +2290,13 @@ export type NeedsFeedbackRow = {
   handled: boolean;
 };
 export type NeedsFeedbackPage = { rows: NeedsFeedbackRow[]; nextCursor: string | null };
-export type NeedsResume = { type: "trip"; stage: string; /** Whether the viewer may resume it: an operator, or a maintainer with write access to the repos it names. */ canResume: boolean } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
+export type NeedsResume = { type: "trip"; /** The breaker: `<stage>:<repo>`, or outside-surge. */ stage: string; /** Whether the viewer may resume it: an operator, or for a push breaker a maintainer with write access to its repo. */ canResume: boolean } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
 export type NeedsStoppedRow = {
   id: string;
   kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group";
   title: string;
+  /** A breaker row of a push stage: the repo it stopped the stage on. */
+  repo?: RepoName;
   reason: string;
   since: string | null;
   /** A fix-group row: how many issues of the repo have a stopped fix. */

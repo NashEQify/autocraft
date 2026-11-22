@@ -12,6 +12,7 @@ import { pipelineSwitch, zeroLimits } from "./limits.ts";
 import { computeChecks } from "../../health-checks.ts";
 import type { Req } from "../types.ts";
 import { clip, stepTitle, writeEvent } from "./trace.ts";
+import { parseTripKey } from "../../core/push-outcome.ts";
 import { shownLater } from "./shown.ts";
 import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
@@ -102,8 +103,11 @@ export async function healthOf(db: Db, hidden: HiddenRepos, internals: boolean, 
   for (const p of checks) add(p);
 
   for (const t of trips) {
+    // A push stage trips per repo: the problem names the repo, and a trip on a hidden repo is left out.
+    const k = parseTripKey(t.stage);
+    if (k && isHiddenRepo(hidden, k.repo)) continue;
     const why = blankIfHidden(t.reason, hidden);
-    add({ id: `breaker:${t.stage}`, area: "breaker", tone: "bad", text: `${stepTitle(t.stage)} is stopped by its breaker${why ? `: ${clip(why, 120)}` : ""}`, to: "/pipeline", since: t.tripped_at });
+    add({ id: `breaker:${t.stage}`, area: "breaker", tone: "bad", text: `${stepTitle(k?.stage ?? t.stage)}${k ? ` in ${k.repo}` : ""} is stopped by its breaker${why ? `: ${clip(why, 120)}` : ""}`, to: "/pipeline", since: t.tripped_at });
   }
   for (const l of zero) add({ id: `limit:${l.step}`, area: "limit", tone: "warn", text: `${l.title} is paused (limit 0 a day)`, to: "/pipeline", since: null });
 

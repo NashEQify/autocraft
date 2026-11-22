@@ -16,7 +16,7 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { blankIfHidden, hiddenRepos, visibleRepos } from "./visible.ts";
 import { cols } from "../../db/kx.ts";
-import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
+import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import { SECURITY_PREFIX, SECURITY_STEP } from "../../security/rules.ts";
@@ -42,11 +42,13 @@ function requireOperator(req: Req, step?: StepDef): void {
   if (req.user.role !== "operator" || (step && step.requires !== "operator")) throw new HttpError(403, "only operators run or cancel pipeline steps and change the pipeline switch and limits");
 }
 
-/** The pipeline state for the requester: reasons that name a hidden repo are left out. */
+/** The pipeline state for the requester: reasons that name a hidden repo and trips on one are left out. */
 async function pipelineState(db: Db, req: Req): Promise<PipelineState> {
   const [s, hidden] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req)]);
-  const limits = await mapSeq(s.limits, async (l) => ({ ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null,
-    ...(l.tripped ? { canResume: await mayResumeTrip(db, req.user, l.tripped) } : {}) }));
+  const limits = await mapSeq(s.limits, async ({ trips, ...l }) => {
+    const shown = await mapSeq((trips ?? []).filter((t) => !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(req.user, t.key) }));
+    return { ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null, ...(shown.length ? { trips: shown } : {}) };
+  });
   return { ...s, outside: await outsideState(db, hidden), limits };
 }
 
@@ -237,9 +239,9 @@ export async function putLimit(db: Db, req: Req) {
   return (await pipelineState(db, req)).limits.find((l) => l.step === req.params.step)!;
 }
 
-/** An operator, or a maintainer with write access to every repo the trip names, clears a stage the circuit breaker paused. */
+/** An operator, or a maintainer with write access to the trip's repo, clears a breaker (`<stage>:<repo>`, or outside-surge). */
 export async function resumeTrip(db: Db, req: Req) {
-  if (!await mayResumeTrip(db, req.user, req.params.stage!)) throw new HttpError(403, "only an operator, or a maintainer with write access to every repo the breaker names, resumes it");
+  if (!await mayResumeTrip(req.user, req.params.stage!)) throw new HttpError(403, "only an operator, or a maintainer with write access to the breaker's repo, resumes it");
   try {
     await resumeStage(db, req.params.stage, req.user.login);
   } catch (e) {
