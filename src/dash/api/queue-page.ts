@@ -28,7 +28,10 @@ import { audit } from "../audit.ts";
 import { applyAnswer } from "./decisions.ts";
 import { getDecision, optionsOf } from "../../decisions.ts";
 import { decisionId as scopeDecisionId, SCOPE_OPTIONS } from "../../decide/decision.ts";
-import { currentImplementation } from "../../implement/store.ts";
+import { currentImplementation, latestAttempts, type LatestAttempt } from "../../implement/store.ts";
+import { ENDED_STATES, type ImplementationState } from "../../implement/types.ts";
+import { takerTest } from "../../remote/takers.ts";
+import { promptTier } from "../../remote/bundle.ts";
 import { implementRefusal } from "../../implement/gate.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../../db/kx.ts";
@@ -39,7 +42,7 @@ const NEXT_LIMIT = 10;
 /** The tab a work row belongs to besides All, from its next step. */
 export function tabOfNext(next: string): QueueTab | null {
   if (next === stageById("review").title) return "review";
-  if (next.startsWith("Fix")) return "fix";
+  if (next.startsWith("Fix") || next.startsWith("Implement")) return "fix";
   if (next.startsWith("Verify")) return "verify";
   return null;
 }
@@ -186,7 +189,7 @@ async function pendingRows(db: Db, entries: CachedEntry[], all: CachedEntry[], w
     db.all(db.k.selectFrom("main.fast_track as f").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number"))
     .leftJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number"))
     .leftJoin("item_plans as pl", (j) => j.onRef("pl.repo", "=", "f.repo").onRef("pl.number", "=", "f.number"))
-    .select(["f.repo", "f.number", "i.title", "i.author", "r.breakdown", "f.added_by", "f.added_at", kx.jsonText(db, "pl.view", "$.next").as("next")])
+    .select(["f.repo", "f.number", "i.title", "i.author", "r.breakdown", "f.added_by", "f.added_at", kx.jsonText(db, "pl.view", "$.next").as("next"), "pl.wait"])
     .where("i.state", "=", "OPEN").where("i.kind", "=", "issue").orderBy("f.weight", "desc").orderBy("f.id"))]);
   const seen = new Set<string>();
   const sizeOf = (breakdown: string | null) => (breakdown ? ((JSON.parse(breakdown) as RankBreakdown).size ?? null) : null);
@@ -205,16 +208,20 @@ async function pendingRows(db: Db, entries: CachedEntry[], all: CachedEntry[], w
   const queuedAll = new Set(all.map((e) => `${e.repo}#${e.number}`));
   const pendingAll = new Set(rows.map((p) => `${p.repo}#${p.number}`).filter((k) => !queuedAll.has(k)));
   const listed = (repo: string, n: number) => shownAll.has(`${repo}#${n}`) || pendingAll.has(`${repo}#${n}`);
-  const closingOf = fast.length ? await openClosingIndex(db) : new Map<string, number[]>();
+  const [closingOf, attempts] = fast.length ? await Promise.all([openClosingIndex(db), latestAttempts(db)]) : [new Map<string, number[]>(), new Map<string, LatestAttempt>()];
+  const takes = takerTest(db, Date.now());
   const issues = await flatMapSeq(fast, async (f): Promise<QueuePendingRow[]> => {
     if (!want(f.repo, f.number)) return [];
     const closing = closingOf.get(`${f.repo}#${f.number}`) ?? [];
     if (closing.some((n) => listed(f.repo, n))) return [];
-    const step = closing.length ? "pr" : f.next !== null && FIX_BUILDS.has(f.next) ? "build" : "next";
+    const im = attempts.get(`${f.repo}#${f.number}`);
+    const live = im && !ENDED_STATES.has(im.state) ? im : undefined;
+    const step = closing.length ? "pr" : live ? "implement" : f.next !== null && FIX_BUILDS.has(f.next) ? "build" : "next";
     return [{
       repo: f.repo, number: f.number, kind: "issue", title: f.title ?? "", author: f.author ?? "", size: sizeOf(f.breakdown), step,
       fast: fastOf(f.repo, f.number), held: false, added: { how: "fast", by: staff ? f.added_by || null : null, at: f.added_at },
       prs: closing, next: statusFor(reader, f.repo, f.number, { waiting: null, next: f.next ?? NOT_PLANNED }).next,
+      ...(live && { implement: { state: live.state, text: implementText(live), wait: await implementWait(live, f.wait, takes, staff) } }),
     }];
   });
   return [...prs, ...issues];
@@ -398,6 +405,29 @@ async function openClosingIndex(db: Db, repo?: string): Promise<Map<string, numb
   }
   for (const l of out.values()) l.sort((a, b) => a - b);
   return out;
+}
+
+/** What an implementation in each state does, for the Queue's step column. */
+const IMPLEMENT_STEP: Record<ImplementationState, string> = {
+  planning: "Planning", asked: "Question asked", planned: "Planned", implementing: "Writing the change", checking: "AutoCraft's checks", fixing: "Follow-up on findings",
+  opening: "Opening the PR", "pr-opened": "PR opened", revising: "Revising the PR", stuck: "Stuck", merged: "Merged", closed: "Closed", failed: "Failed", cancelled: "Cancelled",
+};
+const implementText = (im: { state: ImplementationState; attempt: number }): string => `${IMPLEMENT_STEP[im.state]}${im.attempt > 1 ? `, attempt ${im.attempt}` : ""}`;
+
+/**
+ * What an implementation waits for: a person's answer or decision, the planner's wait, or the queuer's Task Runner, which
+ * takes every model call of the implementation (viewers do not see whose it is).
+ */
+async function implementWait(im: { state: ImplementationState; queuedBy: string; repo: string; question: { audience: string | null } | null }, wait: string | null,
+  takes: ReturnType<typeof takerTest>, staff: boolean): Promise<string | null> {
+  if (im.state === "asked") return im.question?.audience === "maintainer" ? "Waits for a maintainer's answer" : "Waits for the author's answer";
+  if (im.state === "stuck") return "Waits for a decision";
+  if (im.state === "pr-opened") return null;
+  const prompt = im.state === "planning" ? "implement.plan" : "implement.session";
+  if (!await takes({ prompt_id: prompt, repos: [im.repo], forLogin: im.queuedBy, tier: promptTier(prompt) })) {
+    return `Runs only on ${staff ? `${im.queuedBy}'s` : "the queuer's"} Task Runner, which is not ready`;
+  }
+  return wait ? `Waits for ${wait}` : null;
 }
 
 /** The planner's next steps of an issue whose PR Fix is building (src/core/decide-item.ts nextStep). */

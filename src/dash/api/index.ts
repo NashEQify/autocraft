@@ -610,6 +610,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/tasks/:id", build.task),
     { method: "POST", pattern: "/api/tasks/:id/cancel", handler: ok(build.cancel) },
     { method: "GET", pattern: "/api/tasks/:id/artifacts/:name", handler: build.artifact },
+    { method: "GET", pattern: "/api/implementations/:id/shots/:file", handler: build.implementationShot },
     get("/api/nightly", nightly.grid),
     get("/api/nightly/bench/:repo/:bench", nightly.series),
     { method: "POST", pattern: "/api/nightly/select", handler: ok(nightly.select) },

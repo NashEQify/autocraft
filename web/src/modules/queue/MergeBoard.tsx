@@ -12,6 +12,7 @@ import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { WorkableGroup, WorkableRow, WorkableTable, type WorkableColumn } from "../../ui/organisms/Workable";
 import { cn } from "../../ui/cn";
 import { num } from "../../lib/format";
+import { IMPLEMENTATION_STATE } from "../../lib/status";
 import { ConfirmButton, ErrorLine, useWrite } from "../admin/parts";
 import { FastMark } from "./fastTrack";
 import { useIsLinked } from "./highlight";
@@ -120,7 +121,7 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
 /** The Queued group: queued or pre-approved PRs before their take review, and fast-tracked issues whose PR is not in the queue yet. */
 const QUEUED = { id: "queued", label: "Queued", dot: "bg-ink/40" };
 
-const PENDING_STEP: Record<Exclude<QueuePendingRow["step"], "next">, string> = {
+const PENDING_STEP: Record<Exclude<QueuePendingRow["step"], "next" | "implement">, string> = {
   fixup: "Fix-up first",
   review: "Waiting for review",
   ci: "Reviewed: take",
@@ -131,8 +132,10 @@ const PENDING_STEP: Record<Exclude<QueuePendingRow["step"], "next">, string> = {
 function PendingRow({ r }: { r: QueuePendingRow }) {
   const linked = useIsLinked(r.repo, r.number);
   // A `next` row's step is the planner's next step itself, so the line below does not repeat it.
-  const label = r.step === "next" ? r.next : PENDING_STEP[r.step];
-  const next = r.step === "next" ? null : r.next;
+  const im = r.step === "implement" ? r.implement : undefined;
+  const label = r.step === "next" ? r.next : r.step === "implement" ? im?.text ?? "Implementing" : PENDING_STEP[r.step];
+  // An implementation says what it waits for in place of the planner's next step.
+  const next = r.step === "next" ? null : r.step === "implement" ? im?.wait ?? null : r.next;
   const prs = r.prs ?? [];
   const sub = r.kind === "issue" && (prs.length > 0 || next) ? (
     <span className="flex flex-wrap items-center gap-x-3">
@@ -150,7 +153,7 @@ function PendingRow({ r }: { r: QueuePendingRow }) {
       cells={{
         step: (
           <span className="flex flex-wrap items-center gap-1">
-            {label && <Badge tone="neutral">{label}</Badge>}
+            {label && <Badge tone={im ? IMPLEMENTATION_STATE[im.state].tone : "neutral"}>{label}</Badge>}
             {r.held && <Badge tone="warn">Held</Badge>}
           </span>
         ),

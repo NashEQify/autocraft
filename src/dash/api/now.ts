@@ -69,6 +69,19 @@ async function batchIdsOf(db: Db, keys: [string, string][]): Promise<Map<string,
   return out;
 }
 
+/** What a job of the implement step does, by its bucket (src/implement/types.ts IMPLEMENT_BUCKETS). */
+const IMPLEMENT_TITLE: Record<string, string> = { plan: "Implement: plan", build: "Implement: write and check", revise: "Implement: revise the PR" };
+const paramsOf = (j: { params: string | null }): Record<string, unknown> => {
+  try { const v = JSON.parse(j.params ?? "{}") as unknown; return v && typeof v === "object" ? v as Record<string, unknown> : {}; } catch { return {}; }
+};
+const jobTitle = (j: { step: string; params: string | null }): string => (j.step === "implement" ? IMPLEMENT_TITLE[String(paramsOf(j).bucket ?? "plan")] ?? stepTitle(j.step) : stepTitle(j.step));
+/** The issue of an implement job, from its parameters: the job records it as a job item only when it ends. */
+const paramItem = (j: { step: string; repo: string | null; params: string | null }): { repo: string; number: number } | null => {
+  if (j.step !== "implement" || !j.repo) return null;
+  const n = Number(paramsOf(j).number);
+  return Number.isSafeInteger(n) && n > 0 ? { repo: j.repo, number: n } : null;
+};
+
 // ---- health ------------------------------------------------------------------
 
 /** The health checks that are not ok, as the warnings list shows them; viewers get the short text and no checks of repos they cannot see. */
@@ -182,7 +195,7 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
   const actions = [...Object.keys(GITHUB_ACTIONS).filter((a) => a !== "merge" && !HOUSEKEEPING.has(a)), ...(staff ? Object.keys(BATCH_ACTIONS) : [])];
   // Events of a merge batch (details.batch, or a `repo:branch` target) show as one row per batch and action, linking to the batch page.
   const batchEvents = new Map<string, { id: number; repo: string; action: string; at: string; oldest: string; key: string }>();
-  const jobCols = (eb: kx.Eb) => ["id", "step", "state", eb.fn.coalesce("started_at", "requested_at").as("at"), "ended_at", "progress", "summary", "error", "repo", "items", "acted"] as const;
+  const jobCols = (eb: kx.Eb) => ["id", "step", "state", eb.fn.coalesce("started_at", "requested_at").as("at"), "ended_at", "progress", "summary", "error", "repo", "items", "acted", "params"] as const;
   // Every source reads on its own, so the reads run together; the rows are placed below in the order of the sources.
   const [audit, merges, running, finished, liveRuns, liveTasks, openBatches, decisions, runs, tasks] = await Promise.all([
     db.all(db.k.selectFrom("audit").select([kx.rowid("audit").as("rowid"), "at", "login", "action", "target", "details"]).where(kx.inList(db, "action", actions))
@@ -270,14 +283,15 @@ async function feed(db: Db, hidden: HiddenRepos, staff: boolean, operator: boole
       continue;
     }
     const its = itemsOfJob.get(j.id) ?? [];
-    const idle = !its.length && !j.items && !j.acted;
+    const one = its.length ? null : paramItem(j);
+    const idle = !its.length && !one && !j.items && !j.acted;
     const e = base({
-      key: `job:${j.id}`, kind: "job", state: live ? "running" : j.state === "failed" ? "failed" : "done", at: j.at, endedAt: j.ended_at, title: stepTitle(j.step),
+      key: `job:${j.id}`, kind: "job", state: live ? "running" : j.state === "failed" ? "failed" : "done", at: j.at, endedAt: j.ended_at, title: jobTitle(j),
       // A job without a repo works across repos: its texts name no item of a repo hidden from the reader.
       summary: live ? null : j.state === "failed" ? (staff && j.error ? clip(blankIfHidden(j.error, hidden) || "failed", 100) : null) : blankIfHidden(j.summary, hidden) || null,
       progress: live ? blankIfHidden(j.progress, hidden) || null : null,
-      item: its[0] ? item(its[0].repo, its[0].number) : null, items: its.slice(0, ITEM_CAP).map((i) => item(i.repo, i.number)), itemCount: its.length, repo: j.repo,
-      event: its[0] ? `job:${its[0].id}` : null, detail: `/pipeline/${j.id}`,
+      item: its[0] ? item(its[0].repo, its[0].number) : one ? item(one.repo, one.number) : null, items: its.length ? its.slice(0, ITEM_CAP).map((i) => item(i.repo, i.number)) : one ? [item(one.repo, one.number)] : [],
+      itemCount: its.length || (one ? 1 : 0), repo: j.repo, event: its[0] ? `job:${its[0].id}` : null, detail: `/pipeline/${j.id}`,
     });
     if (!live && idle && j.state !== "failed") continue;
     jobEntries.set(j.id, { entry: e, its: new Set(its.map((i) => `${i.repo}#${i.number}`)), from: Date.parse(j.at), to: live ? nowMs : Date.parse(j.ended_at ?? j.at) });
