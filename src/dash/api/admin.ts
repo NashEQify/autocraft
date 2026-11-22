@@ -4,6 +4,7 @@
 // are for operators. The server has already checked the Origin, the CSRF
 // header and the body size on POSTs.
 import { filtered, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import type {
   AccessOverview, AuditEntry, AuditPage, Contributor, ContributorList, ContributorSort, RulePreview, RepoApproval, RepoLabels, Tier, TrackedRepo, WhitelistRule,
 } from "../../../web/src/api/types.ts";
@@ -429,10 +430,7 @@ export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Pro
 }
 
 // An operator, or a maintainer with write permission on the repo (read live from GitHub), switches the pipeline stages on or off for it (off: sync only).
-async function maySwitch(req: Req, repo: string): Promise<boolean> {
-  if (req.user.role === "operator") return true;
-  return req.user.role === "maintainer" && await req.user.canWrite(repo).catch(() => false);
-}
+const maySwitch = async (req: Req, repo: string): Promise<boolean> => await mayRunRepo(req.user, repo);
 
 export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
   const name = required(body(req).name, "name");
