@@ -14,6 +14,7 @@ import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
 import type { Req } from "../types.ts";
 import type { Db } from "../../db/index.ts";
+import { setting } from "../../settings-read.ts";
 
 const PRIVACY_PATH = DISCORD_PRIVACY_PATH;
 
@@ -33,7 +34,7 @@ export function discordKeys(): DiscordKeys | null {
 }
 
 export const contactOf = async (db: Db): Promise<string> =>
-  (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "discord_contact")))?.value ?? "";
+  (await setting(db, "discord_contact")) ?? "";
 
 /** Count for everyone who sees the item; message links only with the key. */
 export async function discordOf(db: Db, repo: string, n: number): Promise<DiscordInfo> {

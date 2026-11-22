@@ -6,6 +6,7 @@ import { countAll, type Counts } from "./count.ts";
 import type { Db } from "../db/index.ts";
 import type { SelectQueryBuilder } from "kysely";
 import * as kx from "../db/kx.ts";
+import { setting } from "../settings-read.ts";
 
 /** A row older than this is counted again even when nothing changed: the 24-hour windows move. */
 export const MAX_AGE_MS = 10 * 60_000;
@@ -14,7 +15,7 @@ const MARKS_KEY = "flow_summary_marks";
 type Marks = { items: string; cls: number; stages: number; opus: number; merges: number; checks: string; plans?: string; global: string; vers?: Record<string, string> };
 
 const getMarks = async (db: Db): Promise<Marks | null> => {
-  const v = (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", MARKS_KEY)))?.value;
+  const v = await setting(db, MARKS_KEY);
   try { return v ? (JSON.parse(v) as Marks) : null; } catch { return null; }
 };
 

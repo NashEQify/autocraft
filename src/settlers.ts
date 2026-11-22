@@ -11,11 +11,12 @@ import type { Db } from "./db/index.ts";
 import { nowParam } from "./db/portable.ts";
 import * as kx from "./db/kx.ts";
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
+import { setting } from "./settings-read.ts";
 
 export const MAINTAINER_WRITES_KEY = "maintainer_writes";
 
 export const maintainerWritesOn = async (db: Db): Promise<boolean> =>
-  (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", MAINTAINER_WRITES_KEY)))?.value === "1";
+  (await setting(db, MAINTAINER_WRITES_KEY)) === "1";
 
 /** Maintainers settle now where they have write access: `maintainer_writes` on and the app's identity (which is instance-wide, as `allAppIdentity` reads it). */
 export const maintainersSettle = async (db: Db): Promise<boolean> => await maintainerWritesOn(db) && await githubIdentity(db) === "app";

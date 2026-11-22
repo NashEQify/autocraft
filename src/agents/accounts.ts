@@ -53,10 +53,10 @@ const validPct = (v: unknown): v is number => typeof v === "number" && Number.is
 
 /** The usage levels at which an account stops taking calls; absent or unreadable gives the defaults. */
 export async function usagePause(db: Db): Promise<UsagePause> {
-  const row = await db.get(db.k.selectFrom("settings").select("value").where("key", "=", USAGE_PAUSE_KEY));
-  if (!row || row.value === null) return USAGE_PAUSE_DEFAULT;
+  const value = await setting(db, USAGE_PAUSE_KEY);
+  if (value === undefined) return USAGE_PAUSE_DEFAULT;
   try {
-    const v = JSON.parse(row.value) as Partial<UsagePause> | null;
+    const v = JSON.parse(value) as Partial<UsagePause> | null;
     return v && validPct(v.fiveHour) && validPct(v.weekly) ? { fiveHour: v.fiveHour, weekly: v.weekly } : USAGE_PAUSE_DEFAULT;
   } catch {
     return USAGE_PAUSE_DEFAULT;
