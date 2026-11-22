@@ -132,8 +132,11 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
 
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
-  const { implementRefusal } = await import("../implement/gate.ts");
-  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? "Implement is not built yet";
+  const { implementRefusal, queuerOf } = await import("../implement/gate.ts");
+  if (p.bucket !== "plan") return `Implement's ${p.bucket} work is not built yet`;
+  // A dry run writes nothing but its workspace and model call: it needs only the queuer whose Task Runner runs the call.
+  if (p.mode === "dry") return await queuerOf(db, String(p.repo), Number(p.number)) ? null : `${p.repo}#${p.number} is not queued`;
+  return await implementRefusal(db, String(p.repo), Number(p.number));
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -503,12 +506,14 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
       { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
+      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
     ],
     check: checkImplement,
     run: async (ctx) => {
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      return `${ctx.params.repo}#${ctx.params.number}: nothing was done`;
+      const { runPlan } = await import("../implement/plan.ts");
+      return await runPlan(ctx, { repo: String(ctx.params.repo), number: Number(ctx.params.number), dry: ctx.params.mode === "dry" });
     },
   },
   {

@@ -275,13 +275,13 @@ export const STAGES: StageDef[] = [
     models: [
       { model: "opus", use: "Plans the implementation and writes it in a workspace session", remark: "Every call runs on the Task Runner of the person who queued the issue" },
     ],
-    promptIds: ["fixissue.triage", "fixissue.patch", "fixissue.check"], promptStage: "Fix",
+    promptIds: ["implement.plan", "fixissue.triage", "fixissue.patch", "fixissue.check"], promptStage: "Fix",
     waits: [
       { name: "Queuer's Task Runner", why: "Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots", howLong: "Until that Task Runner is ready and has a free slot", showsAs: "Queue view \"Runs only on <login>'s Task Runner\"", kind: "external" },
       { name: "Author's answer", why: "The plan found facts the issue leaves open and asked its author in a comment; the plan runs again when the issue text changes or a person comments after the question", howLong: "Until the author or another person answers; no timer", showsAs: "Plan wait \"the author's answer\"", kind: "external" },
       { name: "Fix landing poll", why: "A deep-scan fix that went out as a pull request waits for its merge, which the mirror reports; a fix that went the advisory way waits for a repository admin to merge it, which shows as the patch reaching the default branch", howLong: "2 minutes, read by the sync run, with the pipeline on or off", showsAs: "The finding's state: landing, awaiting admin, then landed or advisory", kind: "external" },
     ],
-    writes: [{ what: "Branch and pull request", approval: "fix" }],
+    writes: [{ what: "Branch and pull request", approval: "fix" }, { what: "A question to the author on the issue, and on a maintainer's Close answer a comment and the close", approval: "comment" }],
     person: "Queueing an issue, per-repo approval, questions the plan leaves open, stuck implementations",
     swimlane: [
       { id: "fix", lane: "sandbox", row: 10, lines: ["Implement (issues)", "Opus plan and session"], approval: "fix approval" },
