@@ -74,6 +74,6 @@ export async function openOperatorFixups(db: Db, nowMs: number = Date.now()): Pr
       eb.exists(eb.selectFrom("fixups as f").select(eb.lit(1).as("one")).whereRef("f.operator_fix", "=", "o.id")).as("started")])
     .where("o.state", "=", "queued").where((eb) => bySettles(eb, nowMs)).where((eb) => eb.not(ended(eb)))
     .where("o.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
-    .orderBy("o.id"));
+    .orderBy("o.repo").orderBy("o.number").orderBy("o.from_head").orderBy("o.id"));
   return rows.map((r) => ({ id: r.id, repo: r.repo, number: r.number, head: r.from_head, preapprovalId: r.preapproval_id, started: !!r.started }));
 }

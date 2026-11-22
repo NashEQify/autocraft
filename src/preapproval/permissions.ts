@@ -34,7 +34,7 @@ async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: strin
     if (login && maintainers.has(login)) pairs.set(settleKey(login, repo), { login, repo });
   };
   const active = await db.all(db.k.selectFrom("preapprovals").select(["repo", "number", "state", "head", "by"]).where("state", "in", ["fixup", "review", "ci", "queued"])
-    .where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).orderBy("id"));
+    .where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).orderBy("repo").orderBy("number").orderBy("id"));
   for (const p of active) {
     add(p.by, p.repo);
     if (p.state === "queued" && p.head) add(await answeredMerge(db, p.repo, p.number, p.head), p.repo);
@@ -47,7 +47,7 @@ async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: strin
     .where("m.state", "=", "merged").where("m.own_diff", "=", "same").where("i.state", "=", "OPEN").whereRef("i.head_oid", "=", "m.to_head")
     .where("m.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
     .where((eb) => eb.not(eb.exists(eb.selectFrom("preapprovals as p").select(eb.lit(1).as("one")).whereRef("p.repo", "=", "m.repo").whereRef("p.number", "=", "m.number").whereRef("p.head", "=", "m.to_head"))))
-    .orderBy(rowid("conflict_merges", "m")));
+    .orderBy("m.repo").orderBy("m.number").orderBy("m.created_at").orderBy(rowid("conflict_merges", "m")));
   for (const x of carries) add(await answeredMerge(db, x.repo, x.number, x.from_head), x.repo);
   return [...pairs.values()];
 }
