@@ -9,8 +9,8 @@
 // then copies target and CARGO_HOME. Anything that does not match is a cold start, logged. It also sets the checkout's
 // mtimes so cargo rebuilds only what changed since the warm commit.
 //
-// Targets: `tmpfs` puts the copy in a memory-backed dir, counted inside the repository's step memory (its build_sizes row
-// sets it); `pvc` puts it on the task's volume and only when the version was built from the same Cargo.lock as the
+// Targets: `tmpfs` puts the copy in a memory-backed dir of warmTmpfsBytes, which the pod's memory request and limit grow by
+// (the run reserves it on its node when it starts, launcher.ts requestOf); `pvc` puts it on the task's volume and only when the version was built from the same Cargo.lock as the
 // checkout: a target one dependency update behind saves about what the copy costs.
 import type { KeyStatus } from "../warm/sync-agent.ts";
 
@@ -51,8 +51,12 @@ export type WarmInputs = {
   image: string; envHash: string; checkout: string | null;
   /** sha256 of the checkout's Cargo.lock as the source pod found it; null when it has none. */
   cargoLock: string | null;
-  /** The step containers' memory limit, which a memory-backed target counts against. */
+  /** The step containers' memory limit before a memory-backed target is added to it. */
   memoryLimitBytes: number;
+  /** What the run reserved on its node beyond the step containers' request; null when no reservation was made (no capacity view). */
+  memoryRoomBytes: number | null;
+  /** The most allocatable memory of any build node; null when not known. */
+  nodeMaxBytes: number | null;
 };
 
 /** Whether the task's offline pod starts warm, or why it starts cold. */
@@ -68,8 +72,10 @@ export function decideWarm(i: WarmInputs): { use: WarmUse; why: null } | { use: 
   if (s.image !== i.image) return cold(`${at} was built with ${s.image ?? "an unrecorded image"}, not ${i.image}`);
   if (s.envHash !== i.envHash) return cold(`${at} was built with another CI env`);
   if (i.target === "tmpfs") {
-    const need = s.bytes * WARM_MEMORY_FACTOR;
-    if (need > WARM_MEMORY_MAX_BYTES || need >= i.memoryLimitBytes) return cold(`${at} (${gb(s.bytes)} GB) does not fit in memory`);
+    const need = warmTmpfsBytes(s.bytes);
+    if (need > WARM_MEMORY_MAX_BYTES || (i.memoryRoomBytes !== null && need > i.memoryRoomBytes) || (i.nodeMaxBytes !== null && i.memoryLimitBytes + need > i.nodeMaxBytes)) {
+      return cold(`${at} (${gb(s.bytes)} GB) does not fit in memory`);
+    }
   } else if (!s.cargoLock || !i.cargoLock || s.cargoLock !== i.cargoLock) {
     return cold(`${at} was built from ${s.cargoLock ? "another Cargo.lock" : "an unrecorded Cargo.lock"}${i.cargoLock ? "" : " (the checkout has none)"}`);
   }
@@ -83,8 +89,8 @@ export const warmNodeVolume = (use: WarmUse) => ({ name: "warm-node", persistent
 /** Optional: without the ConfigMap the pod still starts, and warm-copy starts cold. */
 export const warmVerifyVolume = () => ({ name: "warm-copy-verify", configMap: { name: WARM_VERIFY_CONFIGMAP, items: [{ key: "public.pem", path: "public.pem" }], optional: true } });
 
-/** A memory-backed target's size limit: room for the copy and what the build adds, at most the memory limit. */
-export const warmTmpfsLimit = (use: WarmUse, memoryLimitBytes: number): number => Math.min(Math.ceil(use.bytes * 1.5 + 8 * 1024 ** 3), memoryLimitBytes);
+/** A memory-backed target's size limit, and what it adds to the pod's memory request and limit: the copy and what the build adds. */
+export const warmTmpfsBytes = (bytes: number): number => Math.ceil(bytes * WARM_MEMORY_FACTOR);
 
 /**
  * The warm-copy container's args, env and mounts (pods.ts adds image and resources). `target` is the target volume as the

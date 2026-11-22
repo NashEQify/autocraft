@@ -2,15 +2,15 @@
 // volume-backed target only from the checkout's own Cargo.lock; the warm pod copies from that node's claim first.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ciCheckout, gateEnvOf, groupsOf, parseSettings, stepPod, warmEnvHash, type Prepared } from "../src/build/pods.ts";
+import { ciCheckout, groupsOf, parseSettings, stepPod, warmEnvHash, type Prepared } from "../src/build/pods.ts";
 import { decideWarm, WARM_COPY_CONTAINER, type WarmInputs } from "../src/build/warm-mount.ts";
 import type { TaskStep } from "../web/src/api/types.ts";
 
 test("warm starts need the key on the task's node and, on the volume, the same Cargo.lock; otherwise cold", () => {
   const prepared: Prepared = { env: { CARGO_TERM_COLOR: "always" }, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null, cacheVersion: "v1", cargoLock: "a".repeat(64) };
-  const envHash = warmEnvHash(gateEnvOf(prepared), "v1");
+  const envHash = warmEnvHash(prepared);
   const status = { commit: "c".repeat(40), stored: 1, bytes: 5e9, image: "rust:1", envHash, synced: 1, cargoLock: "a".repeat(64) };
-  const base: WarmInputs = { target: "pvc", key: "deckcraft-0123", node: "k3s-2", status, image: "rust:1", envHash, checkout: ciCheckout("deckcraft"), cargoLock: prepared.cargoLock!, memoryLimitBytes: 16 * 1024 ** 3 };
+  const base: WarmInputs = { target: "pvc", key: "deckcraft-0123", node: "k3s-2", status, image: "rust:1", envHash, checkout: ciCheckout("deckcraft"), cargoLock: prepared.cargoLock!, memoryLimitBytes: 16 * 1024 ** 3, memoryRoomBytes: 8 * 1024 ** 3, nodeMaxBytes: 64 * 1024 ** 3 };
 
   assert.ok(decideWarm(base).use);
   assert.equal(decideWarm({ ...base, status: null }).use, null, "the node holds no version");
@@ -19,6 +19,7 @@ test("warm starts need the key on the task's node and, on the volume, the same C
   assert.equal(decideWarm({ ...base, status: { ...status, cargoLock: null } }).use, null, "pvc: the version records no Cargo.lock");
   assert.ok(decideWarm({ ...base, target: "tmpfs", cargoLock: "b".repeat(64) }).use, "tmpfs does not need the same Cargo.lock");
   assert.equal(decideWarm({ ...base, target: "tmpfs", status: { ...status, bytes: 30e9 } }).use, null, "tmpfs: larger than memory allows");
+  assert.equal(decideWarm({ ...base, target: "tmpfs", memoryRoomBytes: 1024 ** 3 }).use, null, "tmpfs: more than the run reserved");
   assert.equal(decideWarm({ ...base, status: { ...status, image: "rust:2" } }).use, null, "another toolchain image");
   assert.equal(decideWarm({ ...base, target: "none" }).use, null);
 

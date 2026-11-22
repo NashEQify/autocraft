@@ -125,17 +125,24 @@ function bytesOf(p: string): number {
 
 /**
  * The stale entries of every profile dir under `target` (a dir with a `.fingerprint` child, at depth 1 or 2), as paths
- * relative to `target`, with the units and bytes they hold.
+ * relative to `target`, with the units and bytes they hold. `unattributed` counts the units kept only because a file of
+ * theirs was read at some time not known to be this build (atime after mtime but before the start): such a unit may hold
+ * dep-info of an older commit, so the publish is not `trimmed` (src/warm/manifest.ts) when there is one.
  */
-export function trimTarget(target: string, start: BuildStart): { paths: string[]; units: number; bytes: number } {
-  const touched = (st: { mtimeNs: bigint; atimeNs: bigint }) => st.mtimeNs >= start.stampNs || st.atimeNs >= start.stampNs || st.atimeNs > st.mtimeNs;
+export function trimTarget(target: string, start: BuildStart): { paths: string[]; units: number; bytes: number; unattributed: number } {
+  // 2: read or written by this build; 1: read at an unknown time; 0: not read since warm-restore set its times.
+  const use = (st: { mtimeNs: bigint; atimeNs: bigint }) => (st.mtimeNs >= start.stampNs || st.atimeNs >= start.stampNs ? 2 : st.atimeNs > st.mtimeNs ? 1 : 0);
+  let unattributed = 0;
   const dirTouched = (d: string, deep: boolean) => {
     const st = lstatSync(d, { bigint: true });
     if (st.mtimeNs >= start.stampNs) return true;
     if (!deep) return false;
     const files = readdirSync(d);
-    // An empty fingerprint dir says nothing: keep it.
-    return !files.length || files.some((f) => touched(lstatSync(join(d, f), { bigint: true })));
+    // An empty fingerprint dir says nothing: keep it. It holds no dep-info, so cargo rebuilds its unit anyway.
+    if (!files.length) return true;
+    const level = Math.max(...files.map((f) => use(lstatSync(join(d, f), { bigint: true }))));
+    if (level === 1) unattributed++;
+    return level > 0;
   };
   const profiles: string[] = [];
   for (const a of names(target)) {
@@ -143,7 +150,7 @@ export function trimTarget(target: string, start: BuildStart): { paths: string[]
     if (isDir(join(p, ".fingerprint"))) profiles.push(a);
     else for (const b of names(p)) if (isDir(join(p, b, ".fingerprint"))) profiles.push(`${a}/${b}`);
   }
-  const out = { paths: [] as string[], units: 0, bytes: 0 };
+  const out = { paths: [] as string[], units: 0, bytes: 0, unattributed: 0 };
   for (const rel of profiles) {
     const p = join(target, rel);
     const listing: ProfileListing = {
@@ -158,5 +165,6 @@ export function trimTarget(target: string, start: BuildStart): { paths: string[]
       out.bytes += bytesOf(join(p, x));
     }
   }
+  out.unattributed = unattributed;
   return out;
 }

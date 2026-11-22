@@ -53,6 +53,11 @@ export type ManifestHeader = {
   cargoHome: string;
   /** sha256 of the checkout's Cargo.lock; null or absent when it had none or the publisher did not record it. */
   cargoLock?: string | null;
+  /**
+   * Every unit the target keeps was read by the build at `commit` (the publish's trim ran and attributed every kept unit),
+   * so a consumer may set unchanged sources to an old mtime. Absent or false: a consumer counts every source as changed.
+   */
+  trimmed?: boolean;
   /** Sum of file sizes. */
   bytes: number;
   files: number;
@@ -228,7 +233,7 @@ function isDir(p: string): boolean {
 // ---------------------------------------------------------------------------------------------------------------
 // Encoding: zstd of JSON lines, the header first, then one entry per line in path order.
 
-type HeaderLine = { format: string; version: 1; key: string; repo: string; commit: string; stored: number; image: string | null; rustc: string | null; env_hash: string | null; checkout: string | null; target_dir: string; cargo_home: string; cargo_lock: string | null; bytes: number; files: number };
+type HeaderLine = { format: string; version: 1; key: string; repo: string; commit: string; stored: number; image: string | null; rustc: string | null; env_hash: string | null; checkout: string | null; target_dir: string; cargo_home: string; cargo_lock: string | null; trimmed: boolean; bytes: number; files: number };
 
 export function makeHeader(h: Omit<ManifestHeader, "bytes" | "files">, entries: Entry[]): ManifestHeader {
   let bytes = 0, files = 0;
@@ -240,7 +245,7 @@ export function encodeManifest(m: Manifest): Buffer {
   validateHeader(m.header);
   validateEntries(m.entries);
   const h = m.header;
-  const head: HeaderLine = { format: MANIFEST_FORMAT, version: 1, key: h.key, repo: h.repo, commit: h.commit, stored: h.stored, image: h.image, rustc: h.rustc, env_hash: h.envHash, checkout: h.checkout, target_dir: h.targetDir, cargo_home: h.cargoHome, cargo_lock: h.cargoLock ?? null, bytes: h.bytes, files: h.files };
+  const head: HeaderLine = { format: MANIFEST_FORMAT, version: 1, key: h.key, repo: h.repo, commit: h.commit, stored: h.stored, image: h.image, rustc: h.rustc, env_hash: h.envHash, checkout: h.checkout, target_dir: h.targetDir, cargo_home: h.cargoHome, cargo_lock: h.cargoLock ?? null, trimmed: h.trimmed === true, bytes: h.bytes, files: h.files };
   const lines = [JSON.stringify(head)];
   for (const e of m.entries) {
     const ns = e.mtimeNs.toString();
@@ -280,7 +285,7 @@ export function decodeManifest(buf: Buffer): Manifest {
   if (h.format !== MANIFEST_FORMAT || h.version !== 1) throw new ManifestError("not a v1 warm manifest");
   const header: ManifestHeader = {
     key: h.key as string, repo: h.repo as string, commit: h.commit as string, stored: h.stored as number, image: (h.image ?? null) as string | null, rustc: (h.rustc ?? null) as string | null,
-    envHash: (h.env_hash ?? null) as string | null, checkout: (h.checkout ?? null) as string | null, targetDir: h.target_dir as string, cargoHome: h.cargo_home as string, cargoLock: (h.cargo_lock ?? null) as string | null, bytes: h.bytes as number, files: h.files as number,
+    envHash: (h.env_hash ?? null) as string | null, checkout: (h.checkout ?? null) as string | null, targetDir: h.target_dir as string, cargoHome: h.cargo_home as string, cargoLock: (h.cargo_lock ?? null) as string | null, trimmed: h.trimmed === true, bytes: h.bytes as number, files: h.files as number,
   };
   validateHeader(header);
   if (lines.length - 1 > MAX_ENTRIES) throw new ManifestError(`manifest lists more than ${MAX_ENTRIES} entries`);

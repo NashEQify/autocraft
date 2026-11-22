@@ -195,6 +195,8 @@ export type PublishInput = {
   image: string | null; rustc: string | null; envHash: string | null; checkout: string | null;
   /** sha256 of the built checkout's Cargo.lock: consumers that need the same lock compare it. */
   cargoLock?: string | null;
+  /** The target holds only units the build at `commit` read (ManifestHeader.trimmed). */
+  trimmed?: boolean;
   source: WalkSource; exclude?: string[]; omit?: ReadonlySet<string>; signKey: KeyObject; stored?: number; log?: (s: string) => void;
   /**
    * Blobs a restore found bad (its badBlobs): each is fetched and hashed, and re-uploaded from this tree when wrong,
@@ -277,7 +279,7 @@ export class WarmStore {
   async publish(p: PublishInput): Promise<PublishStats> {
     const dav = this.rw();
     const entries = await walkTree(p.source, { exclude: p.exclude, omit: p.omit, concurrency: this.concurrency, log: p.log });
-    const header = makeHeader({ key: checkKey(p.key), repo: p.repo, commit: p.commit, stored: p.stored ?? Date.now(), image: p.image, rustc: p.rustc, envHash: p.envHash, checkout: p.checkout, cargoLock: p.cargoLock ?? null, targetDir: p.source.target, cargoHome: p.source.cargoHome }, entries);
+    const header = makeHeader({ key: checkKey(p.key), repo: p.repo, commit: p.commit, stored: p.stored ?? Date.now(), image: p.image, rustc: p.rustc, envHash: p.envHash, checkout: p.checkout, cargoLock: p.cargoLock ?? null, trimmed: p.trimmed === true, targetDir: p.source.target, cargoHome: p.source.cargoHome }, entries);
     const manifest = encodeManifest({ header, entries });
     const firstPath = new Map<string, string>();
     const abs = (path: string) => (path.startsWith("target/") ? `${p.source.target}/${path.slice(7)}` : `${p.source.cargoHome}/${path.slice(6)}`);

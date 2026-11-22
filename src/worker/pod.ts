@@ -306,10 +306,11 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   // Before the walk, which reads every file and so moves the atimes the trim reads.
   const start = readBuildStart(w.v("STAMP_FILE"));
   const trim = start?.atime ? trimTarget(roots.target, start) : null;
-  if (!trim) e.log(`warm publish: ${start ? "reads do not update atimes on the target's file system" : "no build start recorded"}; nothing trimmed`);
+  if (!trim) e.log(`warm publish: ${start ? "reads do not update atimes on the target's file system" : "no build start recorded"}; nothing trimmed, and consumers count every source as changed`);
+  else if (trim.unattributed) e.log(`warm publish: ${trim.unattributed} kept units were read at an unknown time; consumers count every source as changed`);
   const s = await w.store(true).publish({
     key: w.key(), repo: w.v("REPO") ?? task!.repo, commit: w.v("COMMIT") ?? task!.headSha,
-    image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null, cargoLock: cargoLockOf(join(e.work, "src")),
+    image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null, cargoLock: cargoLockOf(join(e.work, "src")), trimmed: !!trim && trim.unattributed === 0,
     source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), omit: new Set(trim?.paths.map((p) => `target/${p}`)), signKey: w.signKey(), log: e.log,
     recheck: [...new Set([...w.list("RECHECK"), ...badBlobsOf(w.v("BAD_BLOBS_FILE"))])].filter((x) => /^[0-9a-f]{64}$/.test(x)), minBlobAgeMs: w.count("GC_MIN_AGE_HOURS", 24) * 3600_000,
   });

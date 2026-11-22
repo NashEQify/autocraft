@@ -18,7 +18,7 @@ export type { KubeSettings };
 import { BuildError } from "./envs.ts";
 import { slugOf } from "../owners.ts";
 import { CACHE_VERSION, MAX_WARM_COMMAND } from "../worker/gate.ts";
-import { WARM_COPY_CONTAINER, WARM_MEMORY_FACTOR, WARM_MEMORY_MAX_BYTES, WARM_VERIFY_CONFIGMAP, warmCopyParts, warmNodeVolume, warmTmpfsLimit, warmVerifyVolume, type WarmUse } from "./warm-mount.ts";
+import { WARM_COPY_CONTAINER, WARM_MEMORY_FACTOR, WARM_MEMORY_MAX_BYTES, WARM_VERIFY_CONFIGMAP, warmCopyParts, warmNodeVolume, warmTmpfsBytes, warmVerifyVolume, type WarmUse } from "./warm-mount.ts";
 
 
 export const DEFAULT_SETTINGS: KubeSettings = {
@@ -386,14 +386,20 @@ export function warmMemory(warm: WarmPod): number | null {
   const bytes = Math.ceil(warm.bytes * WARM_MEMORY_FACTOR);
   return bytes > WARM_MEMORY_MAX_BYTES ? null : bytes;
 }
+/** The memory a consumer's pod adds for a memory-backed warm target of a version of `bytes`, or null when it is too large for memory. */
+export function warmCopyMemory(bytes: number | null | undefined): number | null {
+  if (!bytes || bytes <= 0) return null;
+  const n = warmTmpfsBytes(bytes);
+  return n > WARM_MEMORY_MAX_BYTES ? null : n;
+}
 
 /**
  * The most CPU (millicores) and memory (bytes) one stage of a task requests: what its run holds on its node while it lives.
  * Stages run one at a time and a pod's request is its largest container's (steps are init containers), so this is the larger
- * of an app pod and a step pod. With `warm` it counts the in-memory warm target, which only a warm producer's offline pod has.
+ * of an app pod and a step pod. `extra` is an in-memory warm target's bytes (warmMemory for a producer, warmCopyMemory for a
+ * consumer), which the offline pod's step containers add.
  */
-export function taskRequest(s: KubeSettings, memory?: StepMemory | null, warm?: WarmPod): { cpuM: number; memBytes: number } {
-  const extra = warm ? warmMemory(warm) ?? 0 : 0;
+export function taskRequest(s: KubeSettings, memory?: StepMemory | null, extra = 0): { cpuM: number; memBytes: number } {
   return {
     cpuM: Math.ceil(Math.max(quantity(APP_CPU_REQUEST), quantity(s.cpuRequest)) * 1000),
     memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_REQUEST), quantity(stepMemory(s, memory).request) + extra)),
@@ -404,8 +410,7 @@ export function taskRequest(s: KubeSettings, memory?: StepMemory | null, warm?: 
  * The limits and ephemeral storage one stage counts against a quota, beside taskRequest's requests: the largest container's,
  * since every pod runs its containers one after another (steps are init containers).
  */
-export function taskLimits(s: KubeSettings, memory?: StepMemory | null, warm?: WarmPod): { cpuM: number; memBytes: number; ephRequest: number; ephLimit: number } {
-  const extra = warm ? warmMemory(warm) ?? 0 : 0;
+export function taskLimits(s: KubeSettings, memory?: StepMemory | null, extra = 0): { cpuM: number; memBytes: number; ephRequest: number; ephLimit: number } {
   return {
     cpuM: Math.ceil(Math.max(quantity(APP_CPU_LIMIT), quantity(s.cpuLimit)) * 1000),
     memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_LIMIT), quantity(stepMemory(s, memory).limit) + extra)),
@@ -497,10 +502,14 @@ function sccacheEnv(url: string, cacheVersion: string, write: boolean): Record<s
   };
 }
 /** The env every step at the CI paths shares: the gate's (ciEnv), HOME, CARGO_HOME and CI. */
-export const gateEnvOf = (prepared: Prepared): Record<string, string> => ({ ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" });
-/** What a warm tree was built with besides the image and the paths: the shared step env and the cache version. */
-export const warmEnvHash = (gateEnv: Record<string, string>, cacheVersion: string | null): string =>
-  createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
+export const gateEnvOf = (prepared: Pick<Prepared, "env">): Record<string, string> => ({ ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" });
+/**
+ * What a warm tree was built with besides the image and the paths: the shared step env, the cache version, and the
+ * craft-fonts and craft-i18n commits. Those checkouts are mounted at fixed paths, and a build script that reads them without
+ * a rerun-if-changed for them would otherwise count as fresh against another commit's files.
+ */
+export const warmEnvHash = (prepared: Pick<Prepared, "env" | "cacheVersion" | "craftFontsRef" | "craftI18nRev">): string =>
+  createHash("sha256").update(JSON.stringify([Object.entries(gateEnvOf(prepared)).sort(), prepared.cacheVersion ?? null, prepared.craftFontsRef ?? null, prepared.craftI18nRev ?? null])).digest("hex");
 /** The writer Secret's credentials as env references: the values never pass through the runner or the pod spec. */
 const writerEnv = (secret: string, user: string, password: string) => [
   { name: user, valueFrom: { secretKeyRef: { name: secret, key: "username" } } },
@@ -550,12 +559,14 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   if (mirror) volumes.push({ name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } });
   // In memory when the version's size is known and moderate (the build containers' memory limit grows by it); else on the task's volume.
   const extraMemory = writing ? warmMemory(warm!) : null;
-  const targetVolume: { name: string; subPath?: string } = extraMemory !== null || (starting && use!.target === "tmpfs")
+  // A consumer's memory-backed target is charged to the pod: warm-copy and the steps get its size on top of their memory.
+  const copyMemory = starting && use!.target === "tmpfs" ? warmTmpfsBytes(use!.bytes) : null;
+  const targetVolume: { name: string; subPath?: string } = extraMemory !== null || copyMemory !== null
     ? { name: "warm-target" }
     : { name: "work", subPath: "target" };
   if (starting) {
     volumes.push(warmNodeVolume(use!), warmVerifyVolume());
-    if (use!.target === "tmpfs") volumes.push({ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(warmTmpfsLimit(use!, quantity(stepMemory(c.s, c.memory).limit))) } });
+    if (copyMemory !== null) volumes.push({ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(copyMemory) } });
   }
   if (writing) {
     volumes.push(
@@ -591,7 +602,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
         ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
       }
       : { ...(offline ? prepared.env : {}), ...(mirror ? MIRROR_ENV : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
-    return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? 0), {
+    return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? copyMemory ?? 0), {
       command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: ci ? checkout : "/src",
       env: [...envList(env), ...(writing && cached(step) ? writerEnv(c.s.writerSecret!, "SCCACHE_WEBDAV_USERNAME", "SCCACHE_WEBDAV_PASSWORD") : [])],
@@ -610,22 +621,21 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   if (!writing) {
     const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
     const copy = starting
-      ? [container(WARM_COPY_CONTAINER, appImage, stepResources(c.s, c.memory), warmCopyParts(use!, { checkout: checkout!, image, envHash: warmEnvHash(gateEnv, cacheVersion ?? null), targetVolume, tmpVolume: "check-tmp" }))]
+      ? [container(WARM_COPY_CONTAINER, appImage, stepResources(c.s, c.memory, copyMemory ?? 0), warmCopyParts(use!, { checkout: checkout!, image, envHash: warmEnvHash(prepared), targetVolume, tmpVolume: "check-tmp" }))]
       : [];
     return pod(c, group.network, volumes, [disk, ...check, ...copy, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
   }
-  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, gateEnv, cacheVersion ?? null, targetVolume, extraMemory);
+  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, warmEnvHash(prepared), targetVolume, extraMemory);
   const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
   return pod(c, group.network, volumes, [disk, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
 }
 
 /** The AutoCraft-image containers of a warm producer's pod (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
-function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, gateEnv: Record<string, string>, cacheVersion: string | null, targetVolume: { name: string; subPath?: string }, extraMemory: number | null) {
+function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, envHash: string, targetVolume: { name: string; subPath?: string }, extraMemory: number | null) {
   const v = (o: Record<string, string>) => envList({ HOME: "/tmp", ...Object.fromEntries(Object.entries(o).map(([k, x]) => [`AUTOCRAFT_WARM_${k}`, x])) });
   const signing = { name: "warm-signing", mountPath: "/keys/signing", readOnly: true };
   const verify = { name: "warm-verify", mountPath: "/keys/verify", readOnly: true };
   const tmp = { name: "warm-tmp", mountPath: "/tmp" };
-  const envHash = warmEnvHash(gateEnv, cacheVersion);
   const writer = writerEnv(c.s.writerSecret!, "AUTOCRAFT_WARM_STORE_USER", "AUTOCRAFT_WARM_STORE_PASSWORD");
   const phase = (name: string, env: object[], mounts: object[], extraMemory: number | null = null) =>
     container(name, appImage, stepResources(c.s, c.memory, extraMemory ?? 0), { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });
