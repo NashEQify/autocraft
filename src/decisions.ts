@@ -192,7 +192,8 @@ export async function actionable(db: Db): Promise<Actionable[]> {
   }));
 }
 
-export type BacklogScope = { outsidePilot?: boolean; repo?: string };
+/** `only`: a decision is in scope only when this accepts every repo it covers (its repos and its duplicate-group items'). */
+export type BacklogScope = { outsidePilot?: boolean; repo?: string; only?: (repos: string[]) => Promise<boolean> };
 export type BacklogResult = { applied: boolean; decisions: { id: string; kind: Kind; repo: string | null; number: number | null }[] };
 
 /** Open decisions in scope: of the repo when given, and, with `outsidePilot`, none of whose items is in the pilot (with no pilot set, none is outside). */
@@ -202,6 +203,7 @@ export async function backlogCandidates(db: Db, scope: BacklogScope): Promise<De
   return await filterSeq(rows, async (d) => {
     const refs = [...itemsOf(d), ...(await db.all(db.k.selectFrom("dupe_group_items").select(["repo", "number"]).where("decision_id", "=", d.id)))];
     if (scope.repo && !reposOf(d).includes(scope.repo) && !refs.some((x) => x.repo === scope.repo)) return false;
+    if (scope.only && !await scope.only([...new Set([...reposOf(d), ...refs.map((x) => x.repo)])])) return false;
     // Outside the scope: no item in a repo whose pipeline is on and, with an item pilot, in that pilot.
     // An item held for its outside author (src/outside.ts) is in scope: the hold is temporary.
     return !scope.outsidePilot || !await someSeq(refs, async (x) => await inPilot(db, x.repo, x.number) || !!await db.get(db.k.selectFrom("main.outside_holds").select("repo").where("repo", "=", x.repo).where("number", "=", x.number)));
@@ -220,7 +222,7 @@ export async function backlogOpen(db: Db, scope: BacklogScope, by: string, apply
         .where("id", "=", d.id).where("answer", "is", null).where((eb) => eb.not(lockLiveExpr(db, eb, "decisions")));
       if ((await db.run(set)).changes === 1) await audit(db, by, "answer", d.id, { answer: BACKLOG.key, bulk: true });
     }
-    await audit(db, by, "backlog-bulk", null, { ...scope, count: rows.length });
+    await audit(db, by, "backlog-bulk", null, { outsidePilot: scope.outsidePilot, repo: scope.repo, count: rows.length });
   });
   return { applied: true, decisions };
 }

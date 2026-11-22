@@ -6,7 +6,7 @@ export const canActOn = (user: User, ds: Decision[]): boolean =>
 
 /** Snooze and prepare again: the user runs every repo the decision covers. */
 export const canRunDecision = (user: User, d: Decision): boolean =>
-  (d.items.length ? d.items.map((i) => i.repo) : [d.repo]).every((r) => canRun(user, r));
+  [...new Set([...d.items.map((i) => i.repo), ...(d.repo ? [d.repo] : [])])].every((r) => canRun(user, r));
 
-/** Undo and retry: an operator takes back any answer, a maintainer only their own. */
-export const canTakeBack = (user: User, d: Decision): boolean => canActOn(user, [d]) && (user.role === "operator" || d.answeredBy?.toLowerCase() === user.login.toLowerCase());
+/** Undo and retry: an operator takes back any answer, a maintainer only their own, or one whose answerer can no longer settle (orphaned; a dispute does not orphan it). */
+export const canTakeBack = (user: User, d: Decision): boolean => canActOn(user, [d]) && (user.role === "operator" || d.answeredBy?.toLowerCase() === user.login.toLowerCase() || !!d.orphaned);

@@ -10,6 +10,7 @@ import type { Req } from "../types.ts";
 import { needVisible } from "./visible.ts";
 import type { Db } from "../../db/index.ts";
 import { mayRunRepo } from "../repo-access.ts";
+import { requireSettle } from "../../settlers.ts";
 
 async function run(db: Db, req: Req, f: (db: Db, by: string, repo: string, n: number) => Promise<void>): Promise<{ ok: true }> {
   const repo = req.params.repo!;
@@ -60,7 +61,7 @@ export async function retryItemPreapproval(db: Db, req: Req) {
  */
 export async function stopFixItem(db: Db, req: Req): Promise<{ ok: true }> {
   const repo = req.params.repo!;
-  if (!(await mayRunRepo(req.user, repo))) throw new HttpError(403, "no write access to this repo");
+  await requireSettle(db, req.user, [repo], "decides an issue");
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);

@@ -26,13 +26,13 @@ import { HttpError, type RateLimiter } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { areaNameOf } from "../../areas/store.ts";
 import { queueSlots } from "../../rank/position.ts";
-import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
+import { allVisibleRepos, hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { backlogHeld } from "../../dupes/held.ts";
 import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
 import { mayRunRepo } from "../repo-access.ts";
-import { canSettleCached, canSettleExpr, requireSettle, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
+import { canSettleCached, canSettleExpr, requireSettle, settleRefusal, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
 import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
 
@@ -101,8 +101,8 @@ const requireRepoSettler = (db: Db, req: Req, repos: string[]): Promise<void> =>
 /** `requireRepoSettler` on the decision's repos. `own`: the decision's answer must be this login's (undo, retry, reopen), unless an operator asks. */
 async function requireSettler(db: Db, req: Req, d: DecisionRow, own = false): Promise<void> {
   await requireRepoSettler(db, req, reposOf(d));
-  // Someone who can no longer settle has an orphaned answer; any settler takes it back.
-  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase() && await settledBy(db, d)) throw new HttpError(403, "only an operator takes back someone else's answer");
+  // Someone who can no longer settle has an orphaned answer; any settler takes it back. A dispute does not orphan it.
+  if (own && !isOperator(req) && d.answered_by?.toLowerCase() !== req.user.login.toLowerCase() && await settledBy(db, { ...d, exec_state: null })) throw new HttpError(403, "only an operator takes back someone else's answer");
 }
 
 /** Snooze, wake and prepare again: whoever runs every repo the decision covers (src/dash/repo-access.ts). A decision with no repo is the operator's. */
@@ -923,7 +923,15 @@ export async function backlogBulk(db: Db, req: Req): Promise<{ applied: boolean;
   if (b.apply !== undefined && typeof b.apply !== "boolean") throw new HttpError(400, "apply must be true or false");
   if (b.outsidePilot !== undefined && typeof b.outsidePilot !== "boolean") throw new HttpError(400, "outsidePilot must be true or false");
   if (!b.outsidePilot && !repo) throw new HttpError(400, "give outsidePilot: true or a repo");
-  const res = await backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo }, req.user.login, b.apply === true);
+  let only: ((repos: string[]) => Promise<boolean>) | undefined;
+  if (repo) {
+    // Scoped: the settle rule on the repo, and only decisions whose every repo the requester sees and settles on.
+    await needVisible(db, req, repo);
+    await requireRepoSettler(db, req, [repo]);
+    const visible = new Set(await allVisibleRepos(db, req));
+    only = async (repos) => repos.every((r) => visible.has(r)) && await settleRefusal(db, req.user, repos, "settles decisions") === null;
+  }
+  const res = await backlogOpen(db, { outsidePilot: b.outsidePilot === true, repo, only }, req.user.login, b.apply === true);
   return { applied: res.applied, count: res.decisions.length, decisions: res.decisions };
 }
 

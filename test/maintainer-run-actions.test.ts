@@ -57,5 +57,18 @@ test("bulk Backlog without a repo and release-all of outside authors stay with o
   await assert.rejects(backlogBulk(db, as("maintainer", ["app"], {}, { outsidePilot: true })), { status: 403 });
   await assert.rejects(releaseAll(db, as("maintainer", ["app"], {}, { author: "x" })), { status: 403 });
   await assert.rejects(backlogBulk(db, as("maintainer", [], {}, { repo: "app" })), { status: 403 });
-  assert.equal((await backlogBulk(db, as("maintainer", ["app"], {}, { repo: "app" }))).applied, false);
+});
+
+test("scoped bulk Backlog leaves a decision alone when it covers a repo the maintainer cannot write, and does not list it", async () => {
+  const db = await world();
+  await db.run(db.k.insertInto("repos").values({ name: "other", visibility: "public" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "other", added_by: "op", added_at: t, pipeline: 1 }));
+  await db.run(db.k.insertInto("access").values({ login: "u1", role: "maintainer" }));
+  await db.run(db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]));
+  await ask(db, [{
+    id: "batch:x", kind: "scope", repo: "app", number: null, question: "batch", context: "c", facts: [], items: [{ repo: "app", number: 1 }, { repo: "other", number: 5 }],
+    options: [{ ...SCOPE_OPTIONS.close }, { ...SCOPE_OPTIONS.take }], recommended: null, asked_by: "pipeline", asked_at: t,
+  }]);
+  const res = await backlogBulk(db, as("maintainer", ["app"], {}, { repo: "app" }));
+  assert.deepEqual(res.decisions.map((d) => d.id), ["app#1:scope:x"]);
 });
