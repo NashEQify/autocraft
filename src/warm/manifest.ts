@@ -491,7 +491,7 @@ async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (b
       h.update(chunk);
       n += chunk.length;
       if (!pace) return cb(null, chunk);
-      pace(chunk.length).then(() => cb(null, chunk), cb);
+      void pace(chunk.length).then(() => cb(null, chunk), cb);
     },
   });
   try {

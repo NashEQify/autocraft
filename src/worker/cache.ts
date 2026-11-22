@@ -86,7 +86,7 @@ export class CrateVerifier {
         return m;
       })();
       // Retry failed lookups and unknown names next time: a crate may be published after the first look.
-      p.then((m) => { if (!m.size) this.#cache.delete(name); }, () => this.#cache.delete(name));
+      void p.then((m) => { if (!m.size) this.#cache.delete(name); }, () => this.#cache.delete(name));
       this.#cache.set(name, p);
     }
     return p;

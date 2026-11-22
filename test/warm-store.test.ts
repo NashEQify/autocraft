@@ -99,6 +99,8 @@ test("a main build's target dir reaches another worker; bad keys and interrupted
     assert.deepEqual(after2, before);
     assert.equal(readdirSync(join(root, "store")).filter((f) => f.startsWith(".up-") && f.endsWith(".tmp")).length, 0);
   } finally {
+    // close() alone waits for every open connection, including the cut-off upload's.
+    store.closeAllConnections();
     await new Promise((r) => store.close(r));
   }
 });
