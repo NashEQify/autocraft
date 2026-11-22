@@ -19,7 +19,7 @@ function Resume({ row, onDone }: { row: NeedsStoppedRow; onDone: () => void }) {
   const operator = useUser().role === "operator";
   const r = row.resume;
   if (r.type === "fixes" || r.type === "outside") return null;
-  if (r.type === "link") return <TextLink to={r.to}>Open</TextLink>;
+  if (r.type === "link") return <TextLink to={r.to}>{row.kind === "implement-stuck" || row.kind === "implement-question" ? "Decision" : "Open"}</TextLink>;
   if (r.type === "trip" ? !r.canResume : !operator) return null;
   if (r.type === "retry") {
     return (

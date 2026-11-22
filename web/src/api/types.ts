@@ -1976,7 +1976,9 @@ export interface QueuePendingRow {
   title: string;
   author: string;
   size: "S" | "M" | "L" | "XL" | null;
-  step: "fixup" | "review" | "ci" | "build" | "pr" | "next";
+  step: "fixup" | "review" | "ci" | "build" | "pr" | "next" | "implement";
+  /** An issue AutoCraft implements: the attempt's state, what it does in words, and what it waits for. */
+  implement?: { state: ImplementationStateName; text: string; wait: string | null };
   fast: FastPosition | null;
   held: boolean;
   added: QueueOrigin;
@@ -2321,8 +2323,10 @@ export type NeedsFeedbackPage = { rows: NeedsFeedbackRow[]; nextCursor: string |
 export type NeedsResume = { type: "trip"; /** The breaker: `<stage>:<repo>`, or outside-surge. */ stage: string; /** Whether the viewer may resume it: an operator, or for a push breaker a maintainer with write access to its repo. */ canResume: boolean } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
 export type NeedsStoppedRow = {
   id: string;
-  kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group";
+  kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group" | "implement-stuck" | "implement-question";
   title: string;
+  /** An implementation row: the issue it is about. */
+  item?: ItemRef & ItemShown;
   /** A breaker row of a push stage: the repo it stopped the stage on (absent: every repo, or not a push stage). */
   repo?: RepoName;
   reason: string;
@@ -2895,6 +2899,94 @@ export interface ScreenshotRun {
   at: string;
   shots: { name: string; before: { taskId: number; name: string }; after: { taskId: number; name: string } }[];
 }
+export type ImplementationStateName =
+  | "planning" | "asked" | "planned" | "implementing" | "checking" | "fixing" | "opening" | "pr-opened" | "revising" | "stuck"
+  | "merged" | "closed" | "failed" | "cancelled";
+/** One model call of an implementation: its agent run, cost and, for a session turn, the workspace tool calls it made. */
+export interface ImplementationCall {
+  at: string;
+  /** plan, or the session turn's purpose: start, retry, fresh, findings, report, lint */
+  purpose: string;
+  /** queued, done, failed, unclaimed, withdrawn */
+  outcome: string;
+  /** The session's report status; null for the plan or without a report. */
+  status: "done" | "blocked" | null;
+  /** Staff: the report's or the plan's summary. */
+  summary: string | null;
+  /** Staff: why a turn failed or its reply is not the report. */
+  error: string | null;
+  turns: number | null;
+  toolCalls: number;
+  shellMs: number;
+  costUsd: number | null;
+  runId: number | null;
+  via?: RemoteVia;
+}
+export interface ImplementationCheckPart { ran: boolean; exit: number | null; findings: number; noVerdict: boolean; note: string | null }
+/** One round of AutoCraft's own checks in the workspace. */
+export interface ImplementationCheckRound {
+  at: string;
+  round: number;
+  diffStat: string;
+  crates: string[];
+  fmt: ImplementationCheckPart;
+  clippy: ImplementationCheckPart;
+  tests: ImplementationCheckPart;
+  clean: boolean;
+  /** Staff: the findings sent back to the session. */
+  findings: { check: "fmt" | "clippy" | "test"; file: string; line: number; message: string }[];
+  /** Staff: why a check gave no verdict or passed only on a rerun. */
+  notes: string[];
+}
+export interface ImplementationQuestion {
+  at: string;
+  audience: "author" | "maintainer";
+  text: string;
+  /** A maintainer question's decision. */
+  decision: { id: string; path: string } | null;
+  /** The decision's chosen option, or the first reply on the issue after an author question. */
+  answer: { by: string; at: string; text: string } | null;
+}
+/** The plan call's reply. */
+export interface ImplementationPlan {
+  ready: boolean;
+  kind: "bugfix" | "feature" | "change";
+  size: "S" | "M" | "L" | "XL";
+  summary: string;
+  markdown: string;
+  acceptance: string[];
+  tests: string[];
+  app: string | null;
+  risks: string[];
+}
+/**
+ * The issue's current (or newest ended) implementation attempt. Viewers get the state, the PR, the change size, the check
+ * outcomes and the cost; the plan, questions, screenshots, call summaries, findings and the reason's detail are for staff.
+ */
+export interface ItemImplementation {
+  id: number;
+  attempt: number;
+  /** Attempts made on the issue, this one included. */
+  attempts: number;
+  state: ImplementationStateName;
+  /** Staff: who queued it; its model calls run on their Task Runner. */
+  queuedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Why it is stuck or ended; viewers get the cause without its detail. */
+  reason: string | null;
+  plan: ImplementationPlan | null;
+  questions: ImplementationQuestion[];
+  calls: ImplementationCall[];
+  checks: ImplementationCheckRound[];
+  diffStat: string | null;
+  pr: (ItemRef & ItemShown & { url: string | null }) | null;
+  /** Screenshots the session took, copied out by AutoCraft. */
+  shots: { n: number; what: string; url: string; width: number; height: number }[];
+  /** The stuck decision. */
+  decision: { id: string; path: string } | null;
+  costUsd: number;
+}
 export interface ItemPageData {
   repo: RepoName;
   number: number;
@@ -2918,6 +3010,8 @@ export interface ItemPageData {
   prBuild?: ItemPrBuild | null;
   /** The latest head's screenshot run, for operators and maintainers; empty otherwise. */
   screenshots: ScreenshotRun[];
+  /** Issues: the implementation attempt AutoCraft works or worked on; null or absent when there is none. */
+  implementation?: ItemImplementation | null;
 }
 /** The answer to `since=<stamp>` when nothing on the item page has changed. */
 export type ItemPageUnchanged = { unchanged: true; stamp: string };

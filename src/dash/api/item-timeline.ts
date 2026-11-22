@@ -9,6 +9,7 @@ import { filingOutcome, heldOf, HELD_STUCK_MS } from "../../conversations/held.t
 import { arr, clip, stepTitle, type Ctx, type Ev } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 import { inList, jsonNum } from "../../db/kx.ts";
+import { implementationLines, implementationRunIds, type ImplementationData } from "./item-implementation.ts";
 
 const short = (s: string | null | undefined): string => (s ?? "").slice(0, 7);
 const validRunId = (id: unknown): id is number => typeof id === "number" && Number.isSafeInteger(id) && id > 0;
@@ -35,12 +36,15 @@ const PLAIN: Record<string, string> = {
 
 const PLAIN_BY_TITLE = new Map(Object.entries(PLAIN).map(([id, text]) => [stepTitle(id), text]));
 
-/** The page's timeline. `ev` is the item trace; `preapprovals` are the item's rows, oldest first. */
-export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]): Promise<TimelineEntry[]> {
+/** The page's timeline. `ev` is the item trace; `preapprovals` are the item's rows, oldest first; `impl` the issue's implementation attempt. */
+export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[], impl: ImplementationData | null = null): Promise<TimelineEntry[]> {
   const { db, repo, n, staff } = c;
   const out: TimelineEntry[] = [];
+  // The implementation's model calls show on its own lines (implementationLines), not on its jobs' lines.
+  const implRuns = implementationRunIds(impl);
+  const ownLine = (e: Ev) => typeof e.ref.runId === "number" && implRuns.has(e.ref.runId);
   const callsOf = (jobId: unknown): HistoryCall[] =>
-    !staff ? [] : ev.filter((x) => x.kind === "model-call" && x.ref.jobId === jobId).map(modelCall);
+    !staff ? [] : ev.filter((x) => x.kind === "model-call" && x.ref.jobId === jobId && !ownLine(x)).map(modelCall);
   const callCost = (calls: HistoryCall[]): number | null => (calls.some((x) => x.costUsd !== null) ? calls.reduce((s, x) => s + (x.costUsd ?? 0), 0) : null);
   const fixSteps = ev.filter((e) => e.kind === "step" && /^(fixup|cifix|conflict):/.test(e.id));
   const stepOfJob = new Map((await db.all(db.k.selectFrom("jobs").select(["id", "step"]).where(jsonNum(db, "params", "$.number"), "=", n).where("repo", "=", repo)
@@ -60,7 +64,7 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
     }
     if (e.kind === "plan" || e.kind === "decision" || e.kind === "conversation") continue;
     if (e.kind === "model-call") {
-      if (jobsWithCalls.has(e.ref.jobId)) continue;
+      if (jobsWithCalls.has(e.ref.jobId) || ownLine(e)) continue;
       const title = e.call?.step ?? "Model call";
       const t = base(e.id, e.at, "harness", "AutoCraft", "job", PLAIN_BY_TITLE.get(title) ?? `${title}: ${e.summary.replace(/^[^:]*:\s*/, "")}`);
       t.costUsd = e.call?.costUsd ?? null;
@@ -235,6 +239,8 @@ export async function timelineOf(c: Ctx, ev: Ev[], preapprovals: Preapproval[]):
     end.major = true; end.tone = h.state === "dropped" ? "warn" : "bad";
     out.push(end);
   }
+
+  out.push(...implementationLines(c, impl, base));
 
   out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
   return out;

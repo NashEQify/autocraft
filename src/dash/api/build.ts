@@ -8,7 +8,7 @@ import { filterSeq } from "../../async-seq.ts";
 import { mayRunRepo } from "../repo-access.ts";
 import { readFileSync } from "node:fs";
 import type { BuildEnv, BuildFeatureState, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, TaskFilter, TaskPage, TaskState } from "../../../web/src/api/types.ts";
-import { absolute } from "../../build/artifacts.ts";
+import { absolute, implementationShotPath, SHOT_FILE } from "../../build/artifacts.ts";
 import { callRunner, runnerClient, RunnerError } from "../../remote/runner-client.ts";
 import { BuildError, createEnv, listEnvs, rotateKey, updateEnv } from "../../build/envs.ts";
 import { PRIVATE_STEPS, cancelTask, getTaskDetail, listTasks, summary } from "../../build/tasks.ts";
@@ -19,7 +19,7 @@ import { scopeOf, perDayOf, setScope, setPerDay } from "../../prbuild/select.ts"
 import type { PrBuildScope } from "../../../web/src/api/types.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, Res } from "../types.ts";
-import { hiddenRepos, visibleRepos } from "./visible.ts";
+import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { canSeeInternals } from "./staff.ts";
 import { isHiddenRepo } from "../../hidden-sql.ts";
 import type { Db } from "../../db/index.ts";
@@ -176,6 +176,34 @@ async function artifactBytes(db: Db, taskId: number, name: string, login: string
     return readFileSync(path);
   } catch {
     throw new HttpError(404, "the artifact file is gone");
+  }
+}
+
+/** A screenshot an implementation session took (src/implement/session.ts storeShot), for operators and maintainers of its repo. */
+export async function implementationShot(db: Db, req: Req): Promise<Res> {
+  try {
+    if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers see implementation screenshots");
+    const id = Number(req.params.id), file = req.params.file ?? "";
+    if (!Number.isSafeInteger(id) || !SHOT_FILE.test(file)) throw new HttpError(404, "no such screenshot");
+    const row = await db.get(db.k.selectFrom("main.implementations").select("repo").where("id", "=", id));
+    if (!row) throw new HttpError(404, "no such screenshot");
+    await needVisible(db, req, row.repo);
+    let data: Buffer;
+    const c = runnerClient();
+    if (c) {
+      try {
+        data = Buffer.from(await (await callRunner(c, "GET", `/internal/implementation-shots/${id}/${file}`, req.user.login)).arrayBuffer());
+      } catch (e) {
+        if (e instanceof RunnerError && e.status === 404) throw new HttpError(404, e.message);
+        throw e;
+      }
+    } else {
+      try { data = readFileSync(implementationShotPath(id, file)); } catch { throw new HttpError(404, "the screenshot file is gone"); }
+    }
+    return { body: data, headers: { "content-type": "image/png", "content-disposition": "inline", "content-security-policy": "sandbox", "cache-control": "private, max-age=3600" } };
+  } catch (e) {
+    if (e instanceof HttpError) return { status: e.status, json: { error: e.message } };
+    throw e;
   }
 }
 

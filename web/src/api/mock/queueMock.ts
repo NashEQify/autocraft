@@ -102,9 +102,10 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
         ...work
           .filter((w) => w.kind === "issue" && w.fast)
           .slice(0, 2)
-          .map((w): QueuePendingRow => ({
-            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: w.next === "Fix" || w.next === "Fix: in progress" ? "build" : "next", fast: w.fast, held: false,
+          .map((w, i): QueuePendingRow => ({
+            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: i === 0 ? "implement" : w.next === "Fix" || w.next === "Fix: in progress" ? "build" : "next", fast: w.fast, held: false,
             added: { how: "fast", by: "operator", at: new Date(Date.now() - 1800_000).toISOString() }, prs: [], next: w.next,
+            ...(i === 0 && { implement: { state: "planning" as const, text: "Planning, attempt 2", wait: "Runs only on ochre-fox's Task Runner, which is not ready" } }),
           })),
       ];
       const count = (t: QueueTab) => (t === "all" ? work.length : t === "merge" ? entries.length + pending.length : work.filter((w) => tabOf(w.next) === t).length);

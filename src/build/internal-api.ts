@@ -8,7 +8,7 @@ import { ACCOUNT_ACTIONS } from "../agents/account-actions.ts";
 import { AccountError, listAccounts } from "../agents/accounts.ts";
 import type { Db } from "../db/index.ts";
 import { INTERNAL_HEADER, verifyInternal } from "../remote/runner-client.ts";
-import { absolute } from "./artifacts.ts";
+import { absolute, implementationShotPath, SHOT_FILE } from "./artifacts.ts";
 
 const BODY_LIMIT = 64 * 1024;
 
@@ -53,6 +53,15 @@ export async function handleInternal(db: Db, key: string | null, req: IncomingMe
     if (!path) return send(res, 404, { error: "no such artifact" });
     let data: Buffer;
     try { data = await readFile(path); } catch { return send(res, 404, { error: "the artifact file is gone" }); }
+    res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store", "content-length": data.length });
+    return void res.end(data);
+  }
+
+  const shot = /^\/internal\/implementation-shots\/(\d{1,15})\/([^/]{1,80})$/.exec(url.pathname);
+  if (shot && method === "GET") {
+    if (!SHOT_FILE.test(shot[2]!)) return send(res, 404, { error: "no such screenshot" });
+    let data: Buffer;
+    try { data = await readFile(implementationShotPath(Number(shot[1]), shot[2]!)); } catch { return send(res, 404, { error: "the screenshot file is gone" }); }
     res.writeHead(200, { "content-type": "application/octet-stream", "cache-control": "no-store", "content-length": data.length });
     return void res.end(data);
   }

@@ -519,15 +519,27 @@ export const STEPS: StepDef[] = [
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
       const repo = String(ctx.params.repo), number = Number(ctx.params.number);
-      if (String(ctx.params.bucket ?? "plan") === "plan") {
-        const { runPlan } = await import("../implement/plan.ts");
-        return await runPlan(ctx, { repo, number, dry: ctx.params.mode === "dry" });
+      // The item page and the Now feed find the job by its item: its outcome, or its failure, is the job item.
+      const { jobItem } = await import("./job-items.ts");
+      try {
+        if (String(ctx.params.bucket ?? "plan") === "plan") {
+          const { runPlan } = await import("../implement/plan.ts");
+          const summary = await runPlan(ctx, { repo, number, dry: ctx.params.mode === "dry" });
+          await jobItem(ctx.db, repo, number, summary, ctx.log);
+          return summary;
+        }
+        const { runBuild } = await import("../implement/build.ts");
+        ctx.handled(1);
+        const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
+        if (r.moved) ctx.acted(1);
+        await jobItem(ctx.db, repo, number, r.summary, ctx.log);
+        return r.summary;
+      } catch (e) {
+        // A skip for want of a Task Runner or a stop is no outcome of the item's.
+        const { NoTakerError, StoppedError } = await import("../agents/call.ts");
+        if (!(e instanceof NoTakerError || e instanceof StoppedError)) await jobItem(ctx.db, repo, number, `failed: ${(e as Error).message}`, ctx.log);
+        throw e;
       }
-      const { runBuild } = await import("../implement/build.ts");
-      ctx.handled(1);
-      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
-      if (r.moved) ctx.acted(1);
-      return r.summary;
     },
   },
   {
