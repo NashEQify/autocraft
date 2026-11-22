@@ -1,6 +1,6 @@
-// `/autocraft search` and the "File a new issue" button: a form (app and description), a look for an existing issue, up
-// to three follow-up questions, and a draft the person files under their own GitHub account (file-issue.ts) or opens on
-// GitHub themselves.
+// `/autocraft search`, the panel's buttons and the "File a new issue" button: a form (app and description), a look for an
+// existing issue, up to three follow-up questions, and a draft the GitHub App files for the person ("Submit for me",
+// file-issue.ts) or the person opens on GitHub themselves.
 //
 // What a person typed lives in memory for the session only (15 minutes) and is never stored or logged. The model calls
 // (step `discord-issue`) record their cost under a daily cap of their own; their prompt and reply texts are deleted when
@@ -10,10 +10,10 @@ import { randomBytes } from "node:crypto";
 import { askClaude } from "../classify/run.ts";
 import { publicRepoNames } from "../public/status.ts";
 import { BUTTON_URL_MAX, ISSUE_URL_MAX, cleanDraft, followUp, formDraft, issueUrl, sanitize, seedOf, type PublicRepo } from "./issue-draft.ts";
-import { FOLLOW_UPS, ISSUE_ANSWER_CHARS, ISSUE_BODY_CHARS, ISSUE_FORM_BODY_CHARS, ISSUE_TITLE_CHARS, parseDraft, parseQuestions, type FollowUpId, type IssueDraftInput, type IssueQuestionsInput } from "./issue-prompt.ts";
+import { fallbackQuestions, ISSUE_ANSWER_CHARS, ISSUE_BODY_CHARS, ISSUE_FORM_BODY_CHARS, ISSUE_TITLE_CHARS, parseDraft, parseQuestions, type FollowUpId, type IssueDraftInput, type IssueQuestionsInput } from "./issue-prompt.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
-import { FILING_IN_DISCORD, fileIssue, type FileDeps, type FileRequest, type FileResult, type IssueKind } from "./file-issue.ts";
+import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, type BotRequest, type BotResult, type FileDeps, type FileRequest, type FileResult, type IssueKind } from "./file-issue.ts";
 import { fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { trackedRepos } from "./store.ts";
@@ -63,6 +63,14 @@ type Session = {
   answers: { question: string; answer: string }[];
   draft?: { title: string; body: string };
   kind: IssueKind;
+  /** The kind the person chose on the panel (Report a bug, Request a feature); the model's guess does not replace it. */
+  chosen?: IssueKind;
+  /** A model wrote the draft (the note line of a bot-filed issue says so). */
+  drafted: boolean;
+  /** The draft offers "Submit for me": the app may file for this person in this repo now. */
+  bot: boolean;
+  /** The Discord name a bot-filed issue credits. */
+  name: string;
   /** True while File it runs, so a second press cannot file twice. */
   filing: boolean;
   /** The new-issue limit's slot was taken. */
@@ -79,6 +87,10 @@ export type IssueNewDeps = {
   file?: (deps: FileDeps, req: FileRequest) => Promise<FileResult>;
   /** Whether the draft offers File it; FILING_IN_DISCORD unless a test sets it. */
   filing?: boolean;
+  /** Replaced in tests. */
+  fileBot?: (deps: FileDeps, req: BotRequest) => Promise<BotResult>;
+  /** Why the app cannot file for this person now (null: it can); botRefusal unless a test sets it. */
+  botRefusal?: (db: Db, reporter: string, repo: string) => Promise<string | null>;
 };
 
 const field = (custom_id: string, label: string, style: 1 | 2, max: number, opts: { required?: boolean; value?: string; placeholder?: string } = {}) => ({
@@ -159,21 +171,22 @@ export class IssueNew {
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
   }
 
-  /** `/autocraft search` and the "File a new issue" button: the form with the app select (`repo` preselected) and the description box. */
-  async open(call: Call, repo: string | null, question = ""): Promise<void> {
+  /** `/autocraft search`, the panel and the "File a new issue" button: the form with the app select (`repo` preselected) and the description box. `kind`: what the person said they are reporting. */
+  async open(call: Call, repo: string | null, question = "", kind?: IssueKind): Promise<void> {
     const apps = await this.#apps(repo);
     if (!apps.length) return void (await call.reply({ content: "No public repo to search yet." }));
     if (!call.userId) return void (await call.reply({ content: "Something went wrong. Try again in a moment." }));
     const sid = randomBytes(6).toString("base64url");
     this.#sessions.set(sid, {
       user: call.userId, repo: "", repoUrl: "", expires: this.#now() + SESSION_MS,
-      title: "", description: "", matches: [], questions: [], capped: false, answers: [], stage: "form", calls: 0, kind: "bug", filing: false, counted: false,
+      title: "", description: "", matches: [], questions: [], capped: false, answers: [], stage: "form", calls: 0, kind: kind ?? "bug", chosen: kind, filing: false, counted: false,
+      drafted: false, bot: false, name: call.userName ?? "",
     });
     await call.showModal({
-      custom_id: `inew:form:${sid}`, title: "Find or report an issue",
+      custom_id: `inew:form:${sid}`, title: kind === "bug" ? "Report a bug" : kind === "feature" ? "Request a feature" : "Find or report an issue",
       components: [
         labelled("App", { type: 3, custom_id: "app", required: true, options: apps.map((a) => ({ label: a.label.slice(0, 100), value: a.name, ...(a.name === repo ? { default: true } : {}) })) }),
-        labelled("Describe the problem or the idea", { type: 4, custom_id: "description", style: 2, required: true, max_length: ISSUE_FORM_BODY_CHARS, placeholder: "What happened, or what would you like?",
+        labelled(kind === "bug" ? "Describe the problem" : kind === "feature" ? "Describe the idea" : "Describe the problem or the idea", { type: 4, custom_id: "description", style: 2, required: true, max_length: ISSUE_FORM_BODY_CHARS, placeholder: "What happened, or what would you like?",
           ...(question.trim() ? { value: question.replace(/\s+/g, " ").trim().slice(0, ISSUE_FORM_BODY_CHARS) } : {}) }),
       ],
     });
@@ -196,11 +209,11 @@ export class IssueNew {
     s.stage = "matched";
     s.capped = await this.#overCap();
     if (!s.capped) s.calls++;
-    const asking = s.capped ? Promise.resolve(null) : this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description });
+    const asking = s.capped ? Promise.resolve(null) : this.#model("discord.issue-questions", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }) });
     const [found, reply] = await Promise.all([this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo), asking]);
     s.matches = found.matches.filter((m) => m.repo === s.repo);
-    // A failed or unparseable call asks the first three of the list; a model that finds nothing missing asks none.
-    s.questions = s.capped ? [] : ((reply === null ? null : parseQuestions(reply)) ?? FOLLOW_UPS.map((q) => q.id)).slice(0, 3);
+    // A failed or unparseable call asks the questions of the kind; a model that finds nothing missing asks none.
+    s.questions = s.capped ? [] : ((reply === null ? null : parseQuestions(reply)) ?? fallbackQuestions(s.chosen)).slice(0, 3);
     if (!s.matches.length) {
       // Nothing to compare with: go on at once. A form needs a button press, so questions wait behind one. Starting the new issue takes a slot of the new-issue limit.
       if (!s.questions.length) {
@@ -247,13 +260,25 @@ export class IssueNew {
     let draft: { title: string; body: string } | null = null;
     if (!s.capped && s.calls < MAX_CALLS && !await this.#overCap()) {
       s.calls++;
-      const text = await this.#model("discord.issue-draft", { ref: "discord", repo: s.repo, title: s.title, description: s.description, answers: s.answers });
+      const text = await this.#model("discord.issue-draft", { ref: "discord", repo: s.repo, title: s.title, description: s.description, ...(s.chosen && { kind: s.chosen }), answers: s.answers });
       const raw = text === null ? null : parseDraft(text);
       draft = raw ? cleanDraft(raw, repos) : null;
-      if (raw && draft) s.kind = raw.kind;
+      if (raw && draft) { s.kind = s.chosen ?? raw.kind; s.drafted = true; }
     }
     s.draft = draft ?? formDraft(s, repos);
-    await call.edit(this.#render(s, sid));
+    await call.edit(await this.#rendered(s, sid));
+  }
+
+  /** The draft message, offering "Submit for me" only while the app may file for this person in this repo. */
+  async #rendered(s: Session, sid: string): Promise<{ content: string; components: unknown[] }> {
+    const { db, keys, log } = this.#d;
+    try {
+      s.bot = await (this.#d.botRefusal ?? ((d, r, repo) => botRefusal(d, r, repo, this.#now())))(db, keys.hash("author", s.user), s.repo) === null;
+    } catch (e) {
+      log(`discord: reading the filing limits failed: ${(e as Error).message.slice(0, 200)}`);
+      s.bot = false;
+    }
+    return this.#render(s, sid);
   }
 
   /** Takes one slot of the new-issue limit, once per session: when the person chooses to file a new issue, not at each search. */
@@ -270,7 +295,8 @@ export class IssueNew {
     const fence = (t: string): string => `\`\`\`\n${t.replace(/`{3,}/g, "``")}\n\`\`\``;
     const head = `Your draft for ${s.repo}:\n**${plain(d.title)}**\n`;
     const asButton = url.length <= BUTTON_URL_MAX;
-    const foot = `${asButton ? "" : `\n[Open on GitHub instead](<${url}>)`}${trimmed ? "\nThe GitHub link holds only the start of the text; Edit shows all of it." : ""}`;
+    const credit = s.bot ? "\nSubmit for me files it from the AutoCraft bot and names you as the reporter." : "";
+    const foot = `${credit}${asButton ? "" : `\n[Open on GitHub instead](<${url}>)`}${trimmed ? "\nThe GitHub link holds only the start of the text; Edit shows all of it." : ""}`;
     const room = MESSAGE_CHARS - head.length - foot.length - 10;
     const preview = room > 80 ? fence(d.body.length > room ? `${d.body.slice(0, room - 1)}…` : d.body) : "";
     return {
@@ -278,9 +304,10 @@ export class IssueNew {
       components: [
         { type: 1, components: [{ type: 3, custom_id: `inewi:kind:${sid}`, options: KINDS.map((k) => ({ label: k.label, value: k.value, default: k.value === s.kind })) }] },
         { type: 1, components: [
-          ...(this.#filing ? [button("File it", `inewi:file:${sid}`, 1)] : []),
+          ...(s.bot ? [button("Submit for me", `inewi:bot:${sid}`, 1)] : []),
+          ...(this.#filing ? [button("File it", `inewi:file:${sid}`, s.bot ? 2 : 1)] : []),
           button("Edit", `inewi:edit:${sid}`),
-          ...(asButton ? [{ type: 2, style: 5, label: this.#filing ? "Open on GitHub instead" : "Open on GitHub", url }] : []),
+          ...(asButton ? [{ type: 2, style: 5, label: s.bot || this.#filing ? "Open on GitHub instead" : "Open on GitHub", url }] : []),
         ] },
       ],
     };
@@ -325,6 +352,31 @@ export class IssueNew {
     }
   }
 
+  /** "Submit for me": the GitHub App files the draft and credits the person; a refusal leaves the GitHub link. */
+  async bot(call: Call, sid: string): Promise<void> {
+    const { keys, log } = this.#d;
+    const s = this.#session(call, sid);
+    if (!s?.draft) return void (await call.reply({ content: "This draft has expired. Start again with /autocraft search." }));
+    if (s.filing) return void (await call.reply({ content: "Filing is already in progress." }));
+    s.filing = true;
+    await call.defer();
+    const { url } = issueUrl(s.repoUrl, s.draft.title, s.draft.body, ISSUE_URL_MAX);
+    const asButton = url.length <= BUTTON_URL_MAX;
+    try {
+      const r = await (this.#d.fileBot ?? fileAsBot)({ db: this.#d.db, log }, {
+        reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted,
+      });
+      if (r.status === "filed") {
+        this.#sessions.delete(sid);
+        await call.edit({ content: `Filed as ${s.repo}#${r.number}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
+      } else {
+        await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${asButton ? "" : `\n[Open on GitHub](<${url}>)`}`, components: asButton ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] });
+      }
+    } finally {
+      s.filing = false;
+    }
+  }
+
   /** "Edit": the draft's title and body in a form. */
   async edit(call: Call, sid: string): Promise<void> {
     const s = this.#session(call, sid);
@@ -341,7 +393,7 @@ export class IssueNew {
     const f = call.fields();
     const d = cleanDraft({ title: f.title ?? "", body: f.body ?? "" }, await this.#repos());
     if (d) s.draft = d;
-    await call.edit(this.#render(s, sid));
+    await call.edit(await this.#rendered(s, sid));
   }
 }
 
@@ -359,6 +411,7 @@ export function installIssueNew(ix: Interactions, deps: IssueNewDeps): IssueNew 
     else if (action === "none") await flow.none(call, a ?? "");
     else if (action === "edit") await flow.edit(call, a ?? "");
     else if (action === "kind") await flow.kind(call, a ?? "");
+    else if (action === "bot") await flow.bot(call, a ?? "");
     else if (action === "file" && (deps.filing ?? FILING_IN_DISCORD)) await flow.file(call, a ?? "");
     else await call.reply({ content: "This form has expired. Start again with /autocraft search." });
   }, { immediate: true });

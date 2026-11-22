@@ -8,7 +8,8 @@ import { TokenBox } from "../dash/server/crypto.ts";
 import { readSecrets } from "../dash/server/config.ts";
 import { GitHubProvider, type Provider } from "../dash/server/provider.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
-import { createReporterIssue, IssueError, labelReporterIssue } from "../github/write.ts";
+import { createBotIssue, createReporterIssue, IssueError, labelBotIssue, labelReporterIssue, type Note } from "../github/write.ts";
+import { githubIdentity } from "../github/identity.ts";
 import { appChildEnv } from "../github/install-token.ts";
 import { openAppKeys } from "../github/app-keys.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
@@ -48,6 +49,10 @@ export const PER_REPO = 30;
 export const DAILY_WRITES = 50;
 export const FOOTER = "Filed from Discord with AutoCraft.";
 export const AUDIT_ACTION = "discord-issue-open";
+export const BOT_ACTION = "discord-issue-bot";
+/** The `login` of a `discord_filed` row the GitHub App filed; no GitHub login has parentheses, so it never meets a reporter's own. The per-person limit counts by `reporter`. */
+export const BOT_LOGIN = "(app)";
+const NAME_MAX = 64;
 const DAY_MS = 86_400_000;
 const TITLE_MAX = 256;
 const LABEL: Record<IssueKind, string> = { bug: "bug", feature: "enhancement" };
@@ -172,4 +177,77 @@ export async function fileIssue(deps: FileDeps, req: FileRequest, hooks: FileHoo
 /** Removes the person's GitHub sign-in (on /autocraft unlink and `discord forget --user`) and queues its token's revoke. Returns whether one existed. */
 export async function forgetReporter(db: Db, reporter: string): Promise<boolean> {
   return await forgetReporterRow(db, reporter);
+}
+
+// ---- Submit for me: the GitHub App files the draft ---------------------------------------------------------------
+
+export type BotRequest = FileRequest & {
+  /** The Discord name the issue credits (display name, else user name). */
+  reporterName: string;
+  /** Whether a model wrote the draft: it decides the note line. */
+  drafted: boolean;
+};
+
+export type BotResult = { status: "filed"; number: number; url: string } | { status: "refused"; reason: string };
+
+/** The reporter's name as the issue shows it: one line, no mentions, links or Markdown, capped. */
+export function creditName(name: string): string {
+  const t = name.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\b[a-z][\w+.-]*:\/\/\S*|\bwww\.\S*/gi, " ").replace(/[@#*_~`|<>\[\]()\\]/g, "").replace(/\s+/g, " ").trim().slice(0, NAME_MAX);
+  return t || "a Discord member";
+}
+
+export const botFooter = (name: string): string => `Reported on Discord by ${creditName(name)}. Filed by AutoCraft on their behalf.`;
+
+const botFiledSince = (db: Db, since: string) => db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("c"))
+  .where("action", "in", [AUDIT_ACTION, BOT_ACTION]).where("at", ">=", since).where(kx.jsonText(db, "details", "$.state"), "<>", "failed");
+
+/** Why the GitHub App cannot file for this person in this repo now, or null when it can: the app identity and the limits over 24 hours (per person, per repo, all of Discord). Reads only; the draft shows "Submit for me" only when this is null. */
+export async function botRefusal(db: Db, reporter: string, repo: string, now: number = Date.now(), /** Rows of this request already reserved in `discord_filed`. */ reserved = 0): Promise<string | null> {
+  if (!await isPublicRepo(db, repo)) return "That repo is not open for filing from Discord.";
+  if (await githubIdentity(db) !== "app") return "Filing from Discord is not set up.";
+  const since = new Date(now - DAY_MS).toISOString();
+  if (await count(db, db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("c")).where("reporter", "=", reporter).where("at", ">=", since)) >= PER_LOGIN + reserved) return `You have filed ${PER_LOGIN} issues from Discord in the last 24 hours.`;
+  if (await count(db, db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("c")).where("repo", "=", repo).where("at", ">=", since)) >= PER_REPO + reserved) return "This repo has reached its limit of issues filed from Discord today.";
+  if (await count(db, botFiledSince(db, since)) >= DAILY_WRITES) return "Filing from Discord has reached its daily limit.";
+  return null;
+}
+
+/** "Submit for me": the GitHub App files the draft, crediting the Discord reporter. Same limits (counted per Discord person) and junk check as fileIssue. */
+export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<FileHooks, "exec" | "now" | "judge"> & { mint?: (owner: string, repo: string) => Promise<string> } = {}): Promise<BotResult> {
+  const { db, log } = deps;
+  const now = (hooks.now ?? Date.now)();
+  const title = req.title.replace(/\s+/g, " ").trim();
+  const body = req.body.trim();
+  if (!title || !body) return { status: "refused", reason: "The title and the description must not be empty." };
+  if (title.length > TITLE_MAX) return { status: "refused", reason: "The title is too long." };
+  await db.run(db.k.deleteFrom("discord_filed").where("at", "<", new Date(now - DAY_MS).toISOString()));
+  const why = await botRefusal(db, req.reporter, req.repo, now);
+  if (why) return { status: "refused", reason: why };
+  // The slot is reserved and the limits counted again with it, so parallel presses never pass a limit together; every failure below frees it.
+  const slot = Number((await db.get(db.k.insertInto("discord_filed").values({ repo: req.repo, number: 0, login: BOT_LOGIN, reporter: req.reporter, at: new Date(now).toISOString() }).returning(kx.rowid("discord_filed").as("rowid"))))!.rowid);
+  let filed = false;
+  try {
+    const late = await botRefusal(db, req.reporter, req.repo, now, 1);
+    if (late) return { status: "refused", reason: late };
+    const junk = await junkCheck(db, { title, body }, hooks.judge ?? modelJudge, log);
+    if (junk === "junk") return { status: "refused", reason: "That does not look like a bug report or a feature request." };
+    if (junk === "unknown") return { status: "refused", reason: "The report could not be checked just now. Try again in a few minutes." };
+    const run = hooks.exec ?? defaultExec;
+    const w = { db, login: "discord", now: () => now, ...(hooks.mint && { mint: hooks.mint }) };
+    const note: Note = req.drafted ? { by: "model", kind: "issue", model: "haiku" } : { by: "fixed" };
+    let made: { number: number; url: string };
+    try {
+      made = await createBotIssue(w, run, { repo: req.repo, title, body: `${body}\n\n${botFooter(req.reporterName)}` }, note);
+    } catch (e) {
+      if (e instanceof IssueError && !e.clear) { filed = true; return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
+      log(`discord: filing as the app failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
+      return { status: "refused", reason: "GitHub did not accept the issue." };
+    }
+    filed = true;
+    await db.run(db.k.updateTable("discord_filed").set({ number: made.number }).where(kx.rowid("discord_filed"), "=", slot));
+    await labelBotIssue(w, run, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
+    return { status: "filed", number: made.number, url: made.url };
+  } finally {
+    if (!filed) await db.run(db.k.deleteFrom("discord_filed").where(kx.rowid("discord_filed"), "=", slot));
+  }
 }

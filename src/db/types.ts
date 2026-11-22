@@ -583,6 +583,7 @@ export interface DiscordChannels {
   default_repo: string | null;
   position: number | null;
   category_id: string | null;
+  panel_message: string | null;
 }
 
 export interface DiscordFiled {
@@ -2683,7 +2684,7 @@ export const COLUMNS = {
   discord_alert_msgs: ["decision_id", "user_hash", "sealed", "choices_id", "sent_at"],
   discord_alerts: ["user_hash", "sealed", "created_at"],
   discord_categories: ["category_id", "guild_id", "name", "position"],
-  discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id"],
+  discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id", "panel_message"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],

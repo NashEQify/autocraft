@@ -121,6 +121,11 @@ export class RestClient implements DiscordRest {
     await this.#queue("PATCH", `/webhooks/${applicationId}/${token}/messages/@original`, { allowed_mentions: { parse: [] }, ...body }, false);
   }
 
+  /** Pins a message in its channel; the bot needs the pin permission there. */
+  async pinMessage(channelId: string, messageId: string): Promise<void> {
+    await this.#queue("PUT", `/channels/${channelId}/messages/pins/${messageId}`, undefined, true);
+  }
+
   /** The direct-message channel with a user (the same channel each time). */
   async createDm(userId: string): Promise<{ id: string }> {
     return (await this.#queue("POST", "/users/@me/channels", { recipient_id: userId }, true)) as { id: string };
