@@ -41,7 +41,6 @@ import { actLimit, actUsedToday } from "../conversations/usage.ts";
 import { queueHead } from "../conversations/queue.ts";
 import { filingWakes, heldDue } from "../conversations/held.ts";
 import { compareKeys, targetKeys } from "../act/order.ts";
-import { openedToday, perDay } from "../fixissue/index.ts";
 import { audit } from "../dash/audit.ts";
 import { defaultPerDay, lanesInOrder, limitSteps, zeroOnlySteps } from "../stages/registry.ts";
 import { applyUsedAnswers } from "../decisions-used.ts";
@@ -342,16 +341,10 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
   return [...after, ...sorted.filter((r) => !after.includes(r))];
 }
 
-/** Per repo approved for fixing issues: whether a patch round is due and its first new candidate (highest score). */
-async function fixWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, { retry: boolean; top?: { number: number; score: number | null } }>> {
-  const repos = new Set(tracked), out = new Map<string, { retry: boolean; top?: { number: number; score: number | null } }>();
-  for (const p of allowed(await plannedItems(db, "fixissue", { plans }))) {
-    const { repo, number, score } = p.facts;
-    if (!repos.has(repo)) continue;
-    const w = out.get(repo) ?? out.set(repo, { retry: false }).get(repo)!;
-    if (p.action.params?.source === "retry") w.retry = true;
-    else w.top ??= { number, score };
-  }
+/** Per repo, the queued issue its next implement job works on: the first in the planned order (work of ours in flight, then the work score). */
+async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, PlannedItem>> {
+  const repos = new Set(tracked), out = new Map<string, PlannedItem>();
+  for (const p of allowed(await plannedItems(db, "implement", { plans }))) if (repos.has(p.facts.repo) && !out.has(p.facts.repo)) out.set(p.facts.repo, p);
   return out;
 }
 
@@ -640,24 +633,15 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     },
   },
   {
-    name: "fixissue",
+    // One queued issue per job: plan (and build in the same job when the plan is ready), build from a stored plan, or revise our PR.
+    name: "implement",
     perRepo: true,
-    extra: tasksSig,
     detect: async (db, ctx) => {
-      const work = await fixWork(db, ctx.tracked, await plansOf(db, ctx));
-      return flightFirst(await plansOf(db, ctx), await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.top?.number, await fastOf(db, ctx))).map((repo) => ({ step: "fixissue", params: { repo } }));
+      const plans = await plansOf(db, ctx), work = await implementWork(db, ctx.tracked, plans);
+      return flightFirst(plans, await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.facts.number, await fastOf(db, ctx)))
+        .map((repo) => { const p = work.get(repo)!; return { step: "implement", params: { repo, number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan") } }; });
     },
-    topScore: async (db, ctx) => bestScore([...(await fixWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((w) => w.top?.score)),
-  },
-  {
-    name: "fixissue-collect",
-    extra: tasksSig,
-    // Finished build tasks, or a passed fix to open in a repo approved for fixing while the day's pull request limit has room.
-    detect: async (db, ctx) => {
-      const due = await plannedItems(db, "fixissue-collect", { plans: await plansOf(db, ctx) });
-      const opens = allowed(due).some((p) => p.action.params?.source === "passed") && await openedToday(db, new Date()) < await perDay(db);
-      return due.some((p) => p.action.params?.source === "testing") || opens ? [{ step: "fixissue-collect", params: {} }] : [];
-    },
+    topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((p) => p.facts.score)),
   },
   {
     // Label disagreements outside the scope labels, after Jev and Haiku have both answered.
@@ -1353,7 +1337,7 @@ export async function stageStatus(db: Db): Promise<Record<string, string>> {
 export const LANE_KINDS: Record<string, ActionKind[]> = {
   classify: ["classify"], priority: ["prioritize"], embed: ["embed"], dupes: ["dupes", "dupe-answer"], "dupes-compare": ["dupes-compare"], decide: ["decide"],
   review: ["review"], labels: ["label"], "merge-ask": ["ask-merge"], merge: ["merge"], act: ["act"], fixup: ["fixup", "conflict"], verify: ["verify"],
-  fixissue: ["fixissue"], "fixissue-collect": ["fixissue-collect"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
+  implement: ["implement"], referee: ["referee"], "review-carry": ["carry"], "review-post": ["post-review"],
   "ci-approve": ["approve-ci"], cifix: ["cifix", "lint"], unassign: ["unassign"], premerge: ["premerge"],
 };
 
@@ -1445,8 +1429,8 @@ export async function storedLaneItems(db: Db): Promise<StoredLaneItems> {
   return out;
 }
 
-/** The lanes that carry out the write of an answered decision: close and comment, merge, label, fix-up and issue fix. */
-const HELD_LANES = ["act", "merge", "labels", "fixup", "fixissue"];
+/** The lanes that carry out the write of an answered decision: close and comment, merge, label, fix-up and implementation. */
+const HELD_LANES = ["act", "merge", "labels", "fixup", "implement"];
 
 export type Held = { reason: string; approval: boolean };
 /** Reads the stored lane lists once; call it once per request and ask per decision. */

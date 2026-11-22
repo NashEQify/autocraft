@@ -296,7 +296,7 @@ function EnvsPanel() {
 
 const FEATURE_LABEL: Record<BuildFeatureName, string> = {
   screenshots: "Screenshots", "push-tests": "Tests before push", "batch-build": "Build batches",
-  "scan-tests": "Run scan tests", nightly: "Nightly checks", "pr-builds": "Build pull requests",
+  "scan-tests": "Run scan tests", nightly: "Nightly checks", "pr-builds": "Build pull requests", implement: "Implement queued issues",
 };
 
 function FeatureState({ on, label, operator, busy, onChange }: { on: boolean; label: string; operator: boolean; busy: boolean; onChange: (on: boolean) => void }) {

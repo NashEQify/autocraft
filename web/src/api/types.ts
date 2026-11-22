@@ -1236,9 +1236,9 @@ export interface JobFilter {
  * A stage's circuit breaker that tripped: on one repo (the stage works no item there until an operator, or a maintainer with write
  * access to the repo, resumes it), or on every repo (`repo` null: broken pushes on several repos; an operator resumes it).
  */
-export type StageTrip = { /** The breaker as resume takes it: `<stage>:<repo>` (fixissue:deckcraft), or `<stage>` for every repo. */ key: string; repo: RepoName | null; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
+export type StageTrip = { /** The breaker as resume takes it: `<stage>:<repo>` (implement:deckcraft), or `<stage>` for every repo. */ key: string; repo: RepoName | null; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
 export type StageLimit = { step: string; title: string; perDay: number | null; usedToday: number; pausedReason: string | null;
-  /** Where the step's push stage (fixup, cifix, fixissue, merge) tripped, oldest first: per repo (the step goes on for every other repo), or on every repo. */
+  /** Where the step's push stage (fixup, cifix, implement, merge) tripped, oldest first: per repo (the step goes on for every other repo), or on every repo. */
   trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
@@ -1859,7 +1859,7 @@ export type BuildTaskDetail = BuildTask & { /** null (with the patch) for viewer
 export type TaskFilter = { state?: TaskState | "active"; env?: string; repo?: string; cursor?: string; limit?: number };
 export type TaskPage = { tasks: BuildTask[]; next: string | null };
 /** Queued and running tasks and the slots left over the online, enabled environments (the flowchart's Verify node). */
-export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "scan-tests" | "nightly" | "pr-builds";
+export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "scan-tests" | "nightly" | "pr-builds" | "implement";
 /** `repos` lists the repos whose own switch is on; scan-tests has none. */
 export type BuildFeatureState = { feature: BuildFeatureName; on: boolean; repoScoped: boolean; repos: string[] };
 export type PrBuildScope = "outside" | "all";

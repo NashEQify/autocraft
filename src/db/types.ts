@@ -876,6 +876,41 @@ export interface HeldFollowups {
   updated_at: string;
 }
 
+export interface ImplementationRounds {
+  id: Generated<number>;
+  implementation_id: number;
+  kind: string;
+  call_id: number | null;
+  result: string | null;
+  at: string;
+}
+
+export interface Implementations {
+  id: Generated<number>;
+  repo: string;
+  number: number;
+  queued_by: string;
+  state: string;
+  attempt: number;
+  text_hash: string;
+  base_sha: string | null;
+  workspace_id: number | null;
+  plan_json: string | null;
+  plan_md: string | null;
+  plan_call_id: number | null;
+  session_call_id: number | null;
+  report_json: string | null;
+  diff_hash: string | null;
+  diff_stat: string | null;
+  branch: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  decision_id: string | null;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ItemActivity {
   repo: string;
   number: number;
@@ -2276,6 +2311,8 @@ export interface DB {
   github_commands: GithubCommands;
   github_setup_links: GithubSetupLinks;
   held_followups: HeldFollowups;
+  implementation_rounds: ImplementationRounds;
+  implementations: Implementations;
   item_activity: ItemActivity;
   item_areas: ItemAreas;
   item_changes: ItemChanges;
@@ -2455,6 +2492,8 @@ export interface DB {
   "main.github_commands": GithubCommands;
   "main.github_setup_links": GithubSetupLinks;
   "main.held_followups": HeldFollowups;
+  "main.implementation_rounds": ImplementationRounds;
+  "main.implementations": Implementations;
   "main.item_activity": ItemActivity;
   "main.item_areas": ItemAreas;
   "main.item_changes": ItemChanges;
@@ -2638,6 +2677,8 @@ export const COLUMNS = {
   github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch"],
   github_setup_links: ["id", "org", "created_by", "hash", "created_at", "expires_at", "revoked_at", "used_at", "used_by", "installation_id"],
   held_followups: ["id", "card_id", "choice_id", "decision_id", "answer_seq", "preapproval_id", "repo", "number", "issue_repo", "title", "body", "by", "at", "state", "issue_number", "url", "reason", "attempts", "updated_at"],
+  implementation_rounds: ["id", "implementation_id", "kind", "call_id", "result", "at"],
+  implementations: ["id", "repo", "number", "queued_by", "state", "attempt", "text_hash", "base_sha", "workspace_id", "plan_json", "plan_md", "plan_call_id", "session_call_id", "report_json", "diff_hash", "diff_stat", "branch", "pr_number", "pr_url", "decision_id", "reason", "created_at", "updated_at"],
   item_activity: ["repo", "number", "id", "kind", "at", "actor", "label", "before_oid", "after_oid"],
   item_areas: ["repo", "number", "area", "source", "confidence", "list_version", "at"],
   item_changes: ["seq", "repo", "number"],

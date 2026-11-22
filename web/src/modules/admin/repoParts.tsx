@@ -141,9 +141,9 @@ export const WRITES: WriteKind[] = [
   },
   {
     field: "fixing",
-    name: "Fix issues",
-    short: "Fix",
-    line: "Pushes issue fixes to the pipeline fork and opens pull requests and comments",
+    name: "Issue implementations",
+    short: "Implement",
+    line: "Implements queued issues: pushes to the pipeline fork, opens pull requests and comments on issues",
     run: (a, n, on) => a.repoAdmin.approveFixing(n, on),
   },
   {

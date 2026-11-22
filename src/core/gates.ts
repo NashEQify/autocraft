@@ -12,7 +12,7 @@ export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string
 /** The repo approvals a write can need. */
 export type Approval = "merge" | "push" | "comment" | "ci" | "labels" | "fix-issue" | "main-fix";
 
-const WHAT: Record<Approval, string> = { merge: "Merges", push: "Pushes", comment: "Comments", ci: "CI run approvals", labels: "Labels", "fix-issue": "Issue fixes", "main-fix": "Main CI fixes" };
+const WHAT: Record<Approval, string> = { merge: "Merges", push: "Pushes", comment: "Comments", ci: "CI run approvals", labels: "Labels", "fix-issue": "Issue implementations", "main-fix": "Main CI fixes" };
 
 /** A repo's approvals and the global switch, as the repo-level guard loads them. */
 export type RepoApprovals = Record<Approval, boolean> & { pipelineOn: boolean };
@@ -33,6 +33,7 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
     // security-scan question is in scope for it whatever the pilot says; decideItem already covers that).
     case "label": return "labels";
     case "act": return "comment";
+    case "implement":
     case "fixissue":
     case "fixissue-collect": return "fix-issue";
     case "merge": return "merge";

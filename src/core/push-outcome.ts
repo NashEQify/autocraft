@@ -5,7 +5,7 @@ export type Required = "green" | "red" | "pending" | "none";
 export type Outcome = "kept-green" | "fixed" | "broke" | "still-red" | "unknown";
 
 /** The stages that push or merge, as the circuit breaker names them. */
-export const TRIP_STAGES = ["fixup", "cifix", "fixissue", "merge"] as const;
+export const TRIP_STAGES = ["fixup", "cifix", "implement", "merge"] as const;
 export type TripStage = (typeof TRIP_STAGES)[number];
 
 /** Pushes the breaker looks at, and how many of them breaking a required check trips the stage. */
@@ -33,10 +33,10 @@ export function breakerTripped(newestFirst: (Outcome | null)[]): boolean {
 }
 
 /** The breaker stage of an audit push action. */
-export const PUSH_STAGE: Record<string, TripStage> = { "fixup-push": "fixup", "conflict-push": "fixup", "cifix-push": "cifix", "fixissue-push": "fixissue" };
+export const PUSH_STAGE: Record<string, TripStage> = { "fixup-push": "fixup", "conflict-push": "fixup", "cifix-push": "cifix", "implement-push": "implement", "fixissue-push": "implement" };
 
 /** The breaker stage a runner step belongs to. */
-export const STEP_STAGE: Record<string, TripStage> = { fixup: "fixup", cifix: "cifix", fixissue: "fixissue", "fixissue-collect": "fixissue", merge: "merge" };
+export const STEP_STAGE: Record<string, TripStage> = { fixup: "fixup", cifix: "cifix", implement: "implement", fixissue: "implement", "fixissue-collect": "implement", merge: "merge" };
 
 /** The stage an action's push or merge belongs to, or null for an action that writes no commit (asks, comments, reruns). */
 export function tripStageOf(a: { kind: string; bucket?: string }): TripStage | null {
@@ -45,7 +45,7 @@ export function tripStageOf(a: { kind: string; bucket?: string }): TripStage | n
     case "conflict": return a.bucket === "merge" ? "fixup" : null;
     case "cifix": return a.bucket === "work" || a.bucket === "collect" ? "cifix" : null;
     case "lint": return a.bucket === "cifix" ? "cifix" : "fixup";
-    case "fixissue": case "fixissue-collect": return "fixissue";
+    case "implement": case "fixissue": case "fixissue-collect": return "implement";
     case "merge": return "merge";
     default: return null;
   }
@@ -58,7 +58,7 @@ export function tripStageOf(a: { kind: string; bucket?: string }): TripStage | n
  */
 export const tripKey = (stage: TripStage, repo: string): string => `${stage}:${repo}`;
 
-/** The stage and repo of a per-repo push-breaker key (`fixissue:deckcraft`), or null for any other key (`fixissue`, `outside-surge`). */
+/** The stage and repo of a per-repo push-breaker key (`implement:deckcraft`), or null for any other key (`implement`, `outside-surge`). */
 export function parseTripKey(key: string): { stage: TripStage; repo: string } | null {
   const i = key.indexOf(":");
   if (i < 1 || i === key.length - 1) return null;
@@ -91,17 +91,21 @@ export function tripsOfRepo(trips: Readonly<Record<string, string>>, repo: strin
 
 export type StageTripRow = { stage: string; active: number; reason: string; evidence: string; tripped_at: string; cleared_at: string | null; cleared_by: string | null };
 
+/** The push stages when every push stage came to trip per repo: the stage rows splitStageTrips splits are theirs. */
+export const SPLIT_STAGES = ["fixup", "cifix", "fixissue", "merge"] as const;
+
 /**
  * The per-repo rows that a stage row (key `fixup`, `cifix`, `fixissue` or `merge`, from before every push stage tripped per repo)
  * splits into. An active row becomes an active row for each repo its evidence names, with that repo's entries; with none named,
  * for each of `reposOf(stage)`, so nothing that was paused starts. The last resume of a stage row (`cleared_at`) carries to every
  * repo of `reposOf(stage)` that gets no active row, so pushes before it still do not count. Each reason names its repo.
  */
-export function splitStageTrips(rows: StageTripRow[], reposOf: (stage: TripStage) => string[]): StageTripRow[] {
+export function splitStageTrips(rows: StageTripRow[], reposOf: (stage: string) => string[]): StageTripRow[] {
   const out = new Map<string, StageTripRow>();
+  const tripKey = (stage: string, repo: string): string => `${stage}:${repo}`;
   for (const r of rows) {
-    if (!(TRIP_STAGES as readonly string[]).includes(r.stage)) continue;
-    const stage = r.stage as TripStage;
+    if (!(SPLIT_STAGES as readonly string[]).includes(r.stage)) continue;
+    const stage = r.stage;
     let evidence: string[] = [];
     try { const v = JSON.parse(r.evidence) as unknown; if (Array.isArray(v)) evidence = v.filter((e): e is string => typeof e === "string"); } catch { /* no evidence */ }
     const named = r.active ? evidenceRepos(evidence) : [];

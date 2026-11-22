@@ -1360,6 +1360,45 @@ CREATE TABLE IF NOT EXISTS fix_attempts (
 CREATE INDEX IF NOT EXISTS fix_attempts_state ON fix_attempts(state);
 INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('fixissue', 10);
 
+-- One attempt to implement a queued issue on workspace sessions (src/implement). One row per attempt; at most one row
+-- of an issue is not ended. state: planning | asked (a question waits for its answer) | planned | implementing |
+-- checking | fixing (check findings go back to the session) | opening | pr-opened | revising (a follow-up on our PR) |
+-- stuck (a decision waits) | merged | closed | failed | cancelled.
+CREATE TABLE IF NOT EXISTS implementations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  queued_by TEXT NOT NULL,            -- the login of the fast_track row: every model call runs on their Task Runner
+  state TEXT NOT NULL,
+  attempt INTEGER NOT NULL,           -- 1 for the issue's first attempt
+  text_hash TEXT NOT NULL,            -- of the issue title and body when the attempt started or last planned
+  base_sha TEXT,                      -- default branch head the work is based on
+  workspace_id INTEGER,
+  plan_json TEXT,                     -- the plan call's reply (JSON)
+  plan_md TEXT,
+  plan_call_id INTEGER, session_call_id INTEGER,
+  report_json TEXT,                   -- the session's last report (JSON)
+  diff_hash TEXT, diff_stat TEXT,
+  branch TEXT,
+  pr_number INTEGER, pr_url TEXT,
+  decision_id TEXT,                   -- the open question or stuck decision
+  reason TEXT,                        -- why it is stuck, failed or cancelled (one line)
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS implementations_current ON implementations(repo, number) WHERE state NOT IN ('merged', 'closed', 'failed', 'cancelled');
+CREATE INDEX IF NOT EXISTS implementations_item ON implementations(repo, number, attempt);
+CREATE INDEX IF NOT EXISTS implementations_state ON implementations(state);
+-- What each step of an implementation did: kind plan | session | follow-up | checks | refusal | question.
+CREATE TABLE IF NOT EXISTS implementation_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  implementation_id INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  call_id INTEGER,                    -- remote_calls.id of the round's model call, if it had one
+  result TEXT,                        -- JSON
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS implementation_rounds_of ON implementation_rounds(implementation_id, id);
+INSERT OR IGNORE INTO stage_limits (step, per_day) VALUES ('implement', NULL);
+
 -- Work rank of an open item (src/rank): level, type, size and reach in one sortable integer, recomputed
 -- by the rank step from stored results, without a model. breakdown is JSON with each part.
 CREATE TABLE IF NOT EXISTS item_rank (

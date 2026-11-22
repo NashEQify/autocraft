@@ -3,7 +3,7 @@
 // as the instance-wide tier's rows, inactive and resumed at the split, so pushes before it never trip that tier. Runs on SQLite with
 // the value migrations of connect() (src/db.ts) and on Postgres inside migratePg's transaction (src/db/pg-triggers.ts).
 import type { DatabaseSync } from "node:sqlite";
-import { splitStageTrips, TRIP_STAGES, type StageTripRow, type TripStage } from "../core/push-outcome.ts";
+import { SPLIT_STAGES, splitStageTrips, type StageTripRow } from "../core/push-outcome.ts";
 import type { PgClient } from "./pg-triggers.ts";
 
 /** Part of the Postgres stamp, so a database migrated before this code opens migratePg and reaches the split; the TRIP_SPLIT_DONE marker, not this number, decides whether the split runs. */
@@ -12,7 +12,7 @@ export const TRIP_SPLIT_VERSION = 2;
 /** Set once the split ran: from then on a stage row is the instance-wide breaker and is never split again. */
 export const TRIP_SPLIT_DONE = "stage_trips_split";
 
-const STAGE_ROWS = `stage IN (${TRIP_STAGES.map((s) => `'${s}'`).join(", ")})`;
+const STAGE_ROWS = `stage IN (${SPLIT_STAGES.map((s) => `'${s}'`).join(", ")})`;
 const COLS = "stage, active, reason, evidence, tripped_at, cleared_at, cleared_by";
 const ROWS_SQL = (main: string) => `SELECT ${COLS} FROM ${main}stage_trips WHERE ${STAGE_ROWS}`;
 // Repos whose earlier pushes or merges count for a stage's breaker: those the last resume of a stage row carries to.
@@ -25,7 +25,7 @@ const RESUME_SQL = (main: string, p: (n: number) => string) => `UPDATE ${main}st
 const DONE_SQL = (main: string, p: (n: number) => string) => `INSERT INTO ${main}settings (key, value) VALUES ('${TRIP_SPLIT_DONE}', ${p(1)}) ON CONFLICT (key) DO NOTHING`;
 const DONE_READ = (main: string) => `SELECT 1 FROM ${main}settings WHERE key = '${TRIP_SPLIT_DONE}'`;
 
-const reposBy = (rows: { stage: string; repo: string }[]) => (stage: TripStage): string[] => [...new Set(rows.filter((r) => r.stage === stage).map((r) => r.repo))].sort();
+const reposBy = (rows: { stage: string; repo: string }[]) => (stage: string): string[] => [...new Set(rows.filter((r) => r.stage === stage).map((r) => r.repo))].sort();
 const values = (r: StageTripRow) => [r.stage, r.active, r.reason, r.evidence, r.tripped_at, r.cleared_at, r.cleared_by];
 
 export function splitStageTripsSqlite(db: DatabaseSync, at = new Date().toISOString()): void {

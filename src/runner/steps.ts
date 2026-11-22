@@ -13,6 +13,7 @@ import { envVar } from "../env.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { stepDeadlineMin } from "./deadlines.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
+import { IMPLEMENT_BUCKETS } from "../implement/types.ts";
 import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
@@ -127,6 +128,12 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
   const { pushApprovalOf } = await import("../fixup/approval.ts");
   const { commentApprovalOf } = await import("../act/approval.ts");
   return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
+}
+
+/** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
+async function checkImplement(db: Db, p: Params): Promise<string | null> {
+  const { implementRefusal } = await import("../implement/gate.ts");
+  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? "Implement is not built yet";
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -482,6 +489,26 @@ export const STEPS: StepDef[] = [
       const v = Object.entries(r.verdicts).map(([k, n]) => `${n} ${k}`).join(", ");
       ctx.acted(r.scanned + r.pairsAdded + r.asked.length + r.answersApplied);
       return `scanned ${r.scanned} items, ${r.pairsAdded} new pairs; checked ${r.checked}${v ? ` (${v})` : ""}; ${r.asked.length} decisions asked, ${r.answersApplied} answers applied`;
+    },
+  },
+  {
+    name: "implement",
+    priority: 1,
+    title: "Implement issues",
+    description: "Works one queued issue on workspace sessions: plans it with Opus (asking when the issue leaves facts or choices open), writes the change and its tests, runs the formatter, clippy and the tests in the workspace, and opens the pull request; or revises our open PR. Every model call runs on the Task Runner of the person who queued the issue.",
+    stage: runStage("implement"),
+    requires: "operator",
+    models: ["opus"],
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
+      { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
+    ],
+    check: checkImplement,
+    run: async (ctx) => {
+      const refused = await checkImplement(ctx.db, ctx.params);
+      if (refused) throw new Error(refused);
+      return `${ctx.params.repo}#${ctx.params.number}: nothing was done`;
     },
   },
   {
