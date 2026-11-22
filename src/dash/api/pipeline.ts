@@ -10,7 +10,7 @@ import { loadSteps, type StepDef } from "../../runner/steps.ts";
 import { JUDGEMENT_MODELS, judgementModel, setJudgementModel } from "../../decide/judgement.ts";
 import { audit } from "../audit.ts";
 import { outsideState } from "../../outside.ts";
-import { resumeStage, TripError } from "../../push-outcomes.ts";
+import { mayResumeTrip, resumeStage, TripError } from "../../push-outcomes.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { blankIfHidden, hiddenRepos, visibleRepos } from "./visible.ts";
@@ -44,7 +44,9 @@ function requireOperator(req: Req, step?: StepDef): void {
 /** The pipeline state for the requester: reasons that name a hidden repo are left out. */
 async function pipelineState(db: Db, req: Req): Promise<PipelineState> {
   const [s, hidden] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req)]);
-  return { ...s, outside: await outsideState(db, hidden), limits: s.limits.map((l) => ({ ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null })) };
+  const limits = await mapSeq(s.limits, async (l) => ({ ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null,
+    ...(l.tripped ? { canResume: await mayResumeTrip(db, req.user, l.tripped) } : {}) }));
+  return { ...s, outside: await outsideState(db, hidden), limits };
 }
 
 /** Viewers read that a job failed, not why: the error carries log and command text. */
@@ -227,9 +229,9 @@ export async function putLimit(db: Db, req: Req) {
   return (await pipelineState(db, req)).limits.find((l) => l.step === req.params.step)!;
 }
 
-/** An operator clears a stage the circuit breaker paused. */
+/** An operator, or a maintainer with write access to every repo the trip names, clears a stage the circuit breaker paused. */
 export async function resumeTrip(db: Db, req: Req) {
-  requireOperator(req);
+  if (!await mayResumeTrip(db, req.user, req.params.stage!)) throw new HttpError(403, "only an operator, or a maintainer with write access to every repo the breaker names, resumes it");
   try {
     await resumeStage(db, req.params.stage, req.user.login);
   } catch (e) {

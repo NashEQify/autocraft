@@ -110,7 +110,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
     step: step as string, title: title as string, perDay: perDay as number | null, usedToday: usedToday as number,
     pausedReason: perDay !== null && (usedToday as number) >= (perDay as number) ? `daily limit of ${perDay} items reached` : null,
   }));
-  Object.assign(limits.find((l) => l.step === "fixup")!, { tripped: "fixup", pausedReason: "tripped: 2 of the last 10 fixup pushes broke a required check; an operator resumes it" });
+  Object.assign(limits.find((l) => l.step === "fixup")!, { tripped: "fixup", canResume: true, pausedReason: "tripped: 2 of the last 10 fixup pushes broke a required check; an operator, or a maintainer with write access to the repos named, resumes it" });
   const pilot: string[] = [];
   const state = (): PipelineState => ({ ...judgement, ...flag, heartbeat: iso(0), limits, pilot: [...pilot], outside: { ...outside } });
   const requireOperator = () => {
@@ -228,7 +228,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
       async resumeTrip(stage) {
         requireOperator();
         if (stage === "outside-surge") resumeSurge();
-        for (const l of limits) if (l.tripped === stage) { delete l.tripped; l.pausedReason = null; }
+        for (const l of limits) if (l.tripped === stage) { delete l.tripped; delete l.canResume; l.pausedReason = null; }
         changed();
         return wait(state(), 30);
       },

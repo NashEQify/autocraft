@@ -236,6 +236,7 @@ The pipeline runs Claude agents under the operator's own Claude account on the o
 | Access list, sessions, access-management audit rows | operator |
 | Repo settings and the audit log (without access rows), read-only | operator or maintainer |
 | Turn the pipeline on or off, change limits, cancel jobs | operator; everyone signed in sees the Pipeline page |
+| Resume a push-breaker trip (fix-up, CI fix, fix issue, merge) | operator; a maintainer with GitHub write permission (read live) on every repo the trip's evidence names; a trip that names no repo is operator-only; the outside-surge breaker is operator-only (audited, the resume records the login) |
 
 Roles on the access list: `operator`, `maintainer`, `viewer`. A `viewer` is read-only: every write returns 403 and the interface shows no write controls. A `maintainer` sends feedback, and settles decisions under the rule in the Trust boundary while `maintainer_writes` is on. GitHub write permission on the repo is required for an answer about that repo, from an operator too.
 

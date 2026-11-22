@@ -39,11 +39,11 @@ export function needsPage(f: { feedback?: boolean; cursor?: string }): NeedsPage
     counts: { decisions: 40, feedback: ROWS.filter((r) => !r.handled).length, stopped: 6 + 1 + outsideGroups().length },
     feedback: f.feedback ? { rows: ROWS.slice(start, start + size), nextCursor: start + size < ROWS.length ? String(start + size) : null } : null,
     stopped: [
-      { id: "breaker:merge", kind: "breaker", title: "Merge", reason: "Two merges in a row left the default branch red", since: at(95), resume: { type: "trip", stage: "merge" } },
+      { id: "breaker:merge", kind: "breaker", title: "Merge", reason: "Two merges in a row left the default branch red", since: at(95), resume: { type: "trip", stage: "merge", canResume: true } },
       { id: "limit:fixup", kind: "limit", title: "Fix-up", reason: "The daily limit is 0", since: at(60 * 30), resume: { type: "link", to: "/pipeline" } },
       { id: "account:b", kind: "account", title: "Second account", reason: "paused: 5-hour use 92% (pause at 80%)", since: null, resume: { type: "link", to: "/accounts" } },
       { id: "act:photocraft#4:7", kind: "act", title: "photocraft#4080", reason: "stopped after 3 failed tries: GitHub refused the close", since: at(120), resume: { type: "retry", decision: "photocraft#4080:scope" } },
-      { id: "breaker:outside-surge", kind: "breaker", title: "Outside surge", reason: outside.tripped?.reason ?? "", since: outside.tripped?.since ?? null, resume: { type: "trip", stage: "outside-surge" } },
+      { id: "breaker:outside-surge", kind: "breaker", title: "Outside surge", reason: outside.tripped?.reason ?? "", since: outside.tripped?.since ?? null, resume: { type: "trip", stage: "outside-surge", canResume: true } },
       ...outsideGroups(),
       { id: "fixes:craft-libs", kind: "fix-group", title: "craft-libs", reason: "52 issues with a stopped fix", since: at(60 * 20), count: 52, resume: { type: "fixes", repo: "craft-libs" } },
       { id: "fixes:photocraft", kind: "fix-group", title: "photocraft", reason: "1 issue with a stopped fix", since: at(60 * 90), count: 1, resume: { type: "fixes", repo: "photocraft" } },

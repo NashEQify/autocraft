@@ -139,7 +139,7 @@ export async function activeTrips(db: Db): Promise<Partial<Record<TripStage, str
   return out;
 }
 
-const tripReason = (reason: string): string => `tripped: ${reason}; an operator resumes it`;
+const tripReason = (reason: string): string => `tripped: ${reason}; an operator, or a maintainer with write access to the repos named, resumes it`;
 
 /** Why the runner step cannot start because its stage tripped, or null. */
 export async function tripReasonOfStep(db: Db, step: string): Promise<string | null> {
@@ -205,11 +205,32 @@ export async function mergeDefect(db: Db, repo: string, number: number, defects:
   await trip(db, key, `the post-merge review of ${repo}#${number} found ${defects} defect${defects === 1 ? "" : "s"}`, [`${repo}#${number}`], at);
 }
 
+/** The repos a push-breaker trip names: its evidence entries ("repo#7@6df9331b", "repo@sha") and, for `merge:<repo>`, the repo in the key. */
+export function tripRepos(stage: string, evidence: string[]): string[] {
+  const repos = new Set<string>();
+  if (stage.startsWith("merge:")) repos.add(stage.slice("merge:".length));
+  for (const e of evidence) { const m = /^([^#@\s]+)[#@]/.exec(e); if (m) repos.add(m[1]!); }
+  return [...repos];
+}
+
+/**
+ * Who may resume a trip: an operator any trip; a maintainer a push-breaker trip when GitHub gives them write permission on every repo
+ * its evidence names (none named: operator only). The outside-author surge breaker is operator-only.
+ */
+export async function mayResumeTrip(db: Db, user: { role: string; canWrite(repo: string): Promise<boolean> }, stage: string): Promise<boolean> {
+  if (user.role === "operator") return true;
+  if (user.role !== "maintainer" || stage === "outside-surge") return false;
+  const repos = tripRepos(stage, await tripEvidence(db, stage));
+  if (!repos.length) return false;
+  for (const r of repos) if (!await user.canWrite(r).catch(() => false)) return false;
+  return true;
+}
+
 export class TripError extends Error {
   status = 400;
 }
 
-/** An operator clears a trip. Pushes and merges before this moment no longer count. */
+/** An operator or a maintainer (mayResumeTrip) clears a trip. Pushes and merges before this moment no longer count. */
 export async function resumeStage(db: Db, stage: string, by: string): Promise<void> {
   // `merge:<repo>` is a test repo's own merge breaker; `outside-surge` is the breaker of the outside-author protections (src/outside.ts).
   if (stage !== "outside-surge" && !(TRIP_STAGES as readonly string[]).includes(stage.split(":")[0]!)) throw new TripError(`no such stage: ${stage}; stages: ${TRIP_STAGES.join(", ")}`);

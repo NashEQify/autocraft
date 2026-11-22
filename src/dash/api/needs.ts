@@ -18,6 +18,7 @@ import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
 import type { SelectQueryBuilder, SqlBool } from "kysely";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
+import { mayResumeTrip } from "../../push-outcomes.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { setting } from "../../settings-read.ts";
@@ -161,10 +162,10 @@ async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
 
 const humanize = (id: string): string => { const t = id.replace(/[-_]+/g, " ").trim(); return t.charAt(0).toUpperCase() + t.slice(1); };
 
-export async function stopped(db: Db, hidden: HiddenRepos): Promise<NeedsStoppedRow[]> {
+export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): Promise<NeedsStoppedRow[]> {
   const out: NeedsStoppedRow[] = [];
   for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at")))
-    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: humanize(t.stage), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at, resume: { type: "trip", stage: t.stage } });
+    out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: humanize(t.stage), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at, resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(db, user, t.stage) } });
   const updated = new Map((await db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"]))).map((r) => [r.step, r.updated_at]));
   for (const l of await zeroLimits(db))
     out.push({ id: `limit:${l.step}`, kind: "limit", title: l.title, reason: "The daily limit is 0", since: updated.get(l.step) ?? null, resume: { type: "link", to: "/pipeline" } });
@@ -243,7 +244,7 @@ export async function needs(db: Db, req: Req): Promise<NeedsPage> {
   // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
   const decisions = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => needingExpr(db, eb, req))
     .$if(filtered(hidden), (q) => q.where((eb) => withoutHiddenExpr(db, eb, hidden)!))))!.n;
-  const rows = await stopped(db, hidden);
+  const rows = await stopped(db, hidden, req.user);
   const last = fb.rows[fb.rows.length - 1];
   return {
     counts: { decisions, feedback: fb.unhandled, stopped: rows.length },
