@@ -152,18 +152,19 @@ export const ROUND_BUILD_LIMIT_MS = 4 * 3_600_000;
  * Queues a fix job for each fixing finding whose build round has ended (its tasks are done, or it has been building past
  * ROUND_BUILD_LIMIT_MS, when the tasks are cancelled), or that waited for a confidential build environment that is now ready, and that has no fix job queued or running: the job reads the result and
  * writes the next round or the commit. The job is requested by whoever started the fix; fixes the pipeline started continue
- * only while `pipelineOn`. Returns how many jobs it queued.
+ * only while `pipelineOn` (read by the caller at the same time as the rows here). Returns how many jobs it queued.
  */
-export async function advanceSecurityFixes(db: Db, pipelineOn = true): Promise<number> {
+export async function advanceSecurityFixes(db: Db, pipelineOnRead: boolean | Promise<boolean> = true): Promise<number> {
   const noJob = (eb: kx.AnyEb) => eb.not(eb.exists(eb.selectFrom("jobs as j").select(eb.lit(1).as("one")).where("j.step", "=", "security-fix").where("j.state", "in", ["queued", "running"])
     .where((e) => e.and([e(kx.jsonText(db, "j.params", "$.repo"), "=", e.ref("f.repo")), e(kx.jsonNum(db, "j.params", "$.number"), "=", e.ref("f.number"))]))));
-  const rows: { repo: string; number: number; by: string | null; created_at: string | null; head_task: number | null; base_task: number | null }[] = await db.all(db.k.selectFrom("security_findings as f")
+  const [building, ready, pipelineOn] = await Promise.all([db.all(db.k.selectFrom("security_findings as f")
     .innerJoin("security_fix_rounds as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number").on("r.state", "=", "building"))
     .select(["f.repo", "f.number", "f.decided_by as by", "r.created_at", "r.head_task", "r.base_task"])
     .where("f.state", "=", "fixing").where(noJob)
-    .orderBy("f.repo").orderBy("f.number"));
+    .orderBy("f.repo").orderBy("f.number")), confidentialReadyAt(db), pipelineOnRead]);
+  const rows: { repo: string; number: number; by: string | null; created_at: string | null; head_task: number | null; base_task: number | null }[] = building;
   // A fix that waits for a confidential build environment continues once one is ready.
-  if (await confidentialReadyAt(db) !== null) {
+  if (ready !== null) {
     rows.push(...await db.all(db.k.selectFrom("security_findings as f")
       .select((eb) => ["f.repo", "f.number", "f.decided_by as by", eb.lit(null).as("created_at"), eb.lit(null).as("head_task"), eb.lit(null).as("base_task")])
       .where("f.state", "=", "fixing").where("f.env_wait_at", "is not", null).where(noJob)

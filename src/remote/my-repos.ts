@@ -5,16 +5,20 @@ import { trackedNames } from "../repos.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
 
-const KEY = "repos";
+export const REPOS_KEY = "repos";
 /** The most repos one user may pick. */
 export const MAX_PICKS = 500;
 
 /** The user's picked repos, sorted; empty when they never picked any (every repo). */
 export async function userRepos(db: Db, login: string): Promise<string[]> {
-  const row = await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", KEY));
-  if (!row) return [];
+  return reposOf((await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", REPOS_KEY)))?.value);
+}
+
+/** The picks of a stored `repos` value (undefined: no row). */
+export function reposOf(value: string | undefined): string[] {
+  if (value === undefined) return [];
   try {
-    const v = JSON.parse(row.value) as unknown;
+    const v = JSON.parse(value) as unknown;
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").sort() : [];
   } catch {
     return [];
@@ -33,7 +37,7 @@ export async function parseRepos(db: Db, raw: unknown): Promise<string[]> {
 /** Stores the user's picks; a change is audited. */
 export async function setUserRepos(db: Db, login: string, repos: string[]): Promise<string[]> {
   const was = await userRepos(db, login);
-  await db.run(db.k.insertInto("main.user_settings").values({ login, key: KEY, value: JSON.stringify(repos), updated_at: new Date().toISOString() })
+  await db.run(db.k.insertInto("main.user_settings").values({ login, key: REPOS_KEY, value: JSON.stringify(repos), updated_at: new Date().toISOString() })
     .onConflict((oc) => oc.columns(["login", "key"]).doUpdateSet(excluded(["value", "updated_at"]))));
   if (was.join("\n") !== repos.join("\n")) await audit(db, login, "my-repos", login, { repos, was });
   return repos;
@@ -44,7 +48,11 @@ export async function setUserRepos(db: Db, login: string, repos: string[]): Prom
  * neither limits it. A call that names no repo is not limited by this (claimOrder checks only the repos a call names).
  */
 export async function claimRepos(db: Db, login: string, helperRepos: readonly string[] | undefined): Promise<Set<string> | null> {
-  const picks = await userRepos(db, login);
+  return claimReposOf(await userRepos(db, login), helperRepos);
+}
+
+/** claimRepos for picks already read. */
+export function claimReposOf(picks: readonly string[], helperRepos: readonly string[] | undefined): Set<string> | null {
   if (!picks.length) return helperRepos ? new Set(helperRepos) : null;
   if (!helperRepos) return new Set(picks);
   const own = new Set(helperRepos);

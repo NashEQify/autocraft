@@ -421,6 +421,15 @@ export function rowArray(d: D, q: SelectQueryBuilder<any, any, any>): RawBuilder
 }
 
 /**
+ * The column values of the first row of each query in select order (`[]` when there is none), read in one statement (rowArray).
+ * Every value is an integer, text or null, which a JSON array carries unchanged.
+ */
+export async function rowValues(db: Db, queries: readonly SelectQueryBuilder<any, any, any>[]): Promise<unknown[][]> {
+  const row: Record<string, string | null> | undefined = await db.get(db.k.selectNoFrom(queries.map((q, k) => rowArray(db, q).as(`c${k}`))));
+  return queries.map((_, k) => { const v = row?.[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
+}
+
+/**
  * The expression builder a fragment twin takes from its caller's callback (`.where((eb) => quietExprFor(db, eb, "i.repo",
  * "i.number"))`). Its tables are the caller's, so the twin's column references are not checked against them.
  */

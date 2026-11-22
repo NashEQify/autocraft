@@ -13,8 +13,10 @@ export const INFERENCE_KEY = "inference";
 
 export const isInferenceMode = (v: unknown): v is InferenceMode => typeof v === "string" && (INFERENCE_MODES as readonly string[]).includes(v);
 
-export const inferenceMode = async (db: Db): Promise<InferenceMode> =>
-  await setting(db, INFERENCE_KEY) === "user-local" ? "user-local" : "server";
+export const inferenceMode = async (db: Db): Promise<InferenceMode> => modeOf(await setting(db, INFERENCE_KEY));
+
+/** The mode of a stored `inference` value (undefined: no row). */
+export const modeOf = (value: string | undefined): InferenceMode => (value === "user-local" ? "user-local" : "server");
 
 /** Sets the mode and audits the change as `by`; false when it already was `mode`. */
 export async function setInferenceMode(db: Db, mode: InferenceMode, by: string): Promise<boolean> {
@@ -43,8 +45,7 @@ export const CODEX_TOP_PLACEHOLDER = "astra";
 export const DEFAULT_REMOTE_MODELS: Record<Tier, string[]> = { top: ["opus", CODEX_TOP_PLACEHOLDER], mid: ["sonnet"], small: ["haiku"] };
 const FAMILY = /^[a-z0-9][a-z0-9.-]{0,39}$/;
 
-const rawModels = async (db: Db): Promise<Record<string, unknown>> => {
-  const raw = await setting(db, REMOTE_MODELS_KEY);
+const parsedModels = (raw: string | undefined): Record<string, unknown> => {
   if (!raw) return {};
   try {
     const v = JSON.parse(raw) as unknown;
@@ -52,16 +53,31 @@ const rawModels = async (db: Db): Promise<Record<string, unknown>> => {
   } catch { return {}; }
 };
 
-export async function acceptedModels(db: Db): Promise<Record<Tier, string[]>> {
-  const { minEffort: _, ...fams } = await rawModels(db);
+const rawModels = async (db: Db): Promise<Record<string, unknown>> => parsedModels(await setting(db, REMOTE_MODELS_KEY));
+
+const acceptedOf = (raw: Record<string, unknown>): Record<Tier, string[]> => {
+  const { minEffort: _, ...fams } = raw;
   try { return { ...DEFAULT_REMOTE_MODELS, ...checkModels(fams) }; } catch { return DEFAULT_REMOTE_MODELS; }
+};
+const floorsOf = (raw: Record<string, unknown>): Partial<Record<Tier, Effort>> => {
+  try { return checkEfforts(raw.minEffort ?? {}); } catch { return {}; }
+};
+
+export async function acceptedModels(db: Db): Promise<Record<Tier, string[]>> {
+  return acceptedOf(await rawModels(db));
+}
+
+/** The accepted models and effort floors (acceptedModels, minEfforts) of a stored `remote_models` value (undefined: no row). */
+export function modelsOf(value: string | undefined): { accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>> } {
+  const raw = parsedModels(value);
+  return { accepted: acceptedOf(raw), floors: floorsOf(raw) };
 }
 
 export const isEffort = (v: unknown): v is Effort => typeof v === "string" && (EFFORTS as readonly string[]).includes(v);
 
 /** The lowest effort each tier accepts, for the tiers that set one (stored as `minEffort` beside the families in the `remote_models` setting). */
 export async function minEfforts(db: Db): Promise<Partial<Record<Tier, Effort>>> {
-  try { return checkEfforts((await rawModels(db)).minEffort ?? {}); } catch { return {}; }
+  return floorsOf(await rawModels(db));
 }
 
 /** `{tier: effort}` for some or all tiers, checked; throws with the reason. */

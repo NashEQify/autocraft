@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
-import { advancePreapprovals } from "../preapproval/index.ts";
+import { advancePreapprovals, preapprovalInputs } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
 import { recordUsageSamples } from "../agents/accounts.ts";
 import { AccountWatcher } from "../agents/manage.ts";
@@ -119,6 +119,8 @@ export class Runner {
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
   private detected: Detected | null = null;
+  /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
+  private preapprovalMark: { sig: string; wakeAt: number } | null = null;
   private flowing: Promise<void> | null = null;
   private readonly planThread: OffThread;
   private readonly flowThread: OffThread;
@@ -306,7 +308,7 @@ export class Runner {
     }
     // A private fix waits for its build without a job; the next job starts when the build tasks end, for operator-started fixes with the pipeline off too.
     try {
-      const next = await advanceSecurityFixes(this.db, await isEnabled(this.db));
+      const next = await advanceSecurityFixes(this.db, isEnabled(this.db));
       if (next) this.o.log(`security: continued the private fix of ${next} findings after their builds`);
     } catch (e) { this.o.log(`security fixes: ${(e as Error).message}`); }
     // The build task of a scan test is read here (database only); a finding whose test ended can then start its automatic fix.
@@ -317,11 +319,27 @@ export class Runner {
       }
     } catch (e) { this.o.log(`security scan tests: ${(e as Error).message}`); }
     // Pre-approved merges move on rows other steps wrote; they are read here, not on a timer of their own.
-    try { await advancePreapprovals(this.db, this.o.log); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
+    try { await this.preapprovals(); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
     if (this.planning || !await planDue(this.db)) return;
     this.planning = this.detect(Date.now())
       .then((d) => { this.detected = d; }, (e) => this.o.log(`autopilot: detection failed: ${(e as Error).message}`))
       .finally(() => (this.planning = null));
+  }
+
+  /**
+   * The pre-approval pass, when what it reads changed since the last one (read before it runs, so its own moves make the next tick run it
+   * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that throws runs
+   * again on the next tick.
+   */
+  private async preapprovals(): Promise<void> {
+    const t = Date.now();
+    const sig = await preapprovalInputs(this.db);
+    const m = this.preapprovalMark;
+    if (m && m.sig === sig && t < m.wakeAt) return;
+    this.preapprovalMark = null;
+    const next = { sig, wakeAt: Infinity };
+    await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < next.wakeAt) next.wakeAt = at; });
+    this.preapprovalMark = next;
   }
 
   private updateAt = 0;
@@ -448,8 +466,9 @@ export class Runner {
     const steps = await loadSteps();
     const queued = (await this.db.all(this.db.k.selectFrom("jobs").select(["id", "step", "params", "requested_by", "repo"]).where("state", "=", "queued").orderBy("id")))
       .sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
+    if (!queued.length) return;
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
-    const on = await isEnabled(this.db), draining = await isDraining(this.db);
+    const [on, draining] = await Promise.all([isEnabled(this.db), isDraining(this.db)]);
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
     const room = new Map<number, Map<string, number>>();
     const pass = await queueRoomPass(this.db);

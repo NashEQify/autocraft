@@ -228,16 +228,21 @@ export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "e
 const takersOf = async (db: Db): Promise<string> => (await inferenceMode(db) === "user-local" ? await takerSignature(db) : "");
 
 /** Sandbox tasks that ended, for lanes that read their results. */
-const tasksSig = async (db: Db): Promise<string> =>
-  String((await db.get(db.k.selectFrom("main.build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["done", "failed", "cancelled", "lost"])))!.n);
+const tasksSig = async (db: Db): Promise<string> => String((await db.get(endedTasks(db)))!.n);
+const endedTasks = (db: Db) => db.k.selectFrom("main.build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["done", "failed", "cancelled", "lost"]);
 
 /** Daily limits are not a topic of their own (they share `jobs`). */
-const limitsSig = async (db: Db): Promise<string> =>
-  String((await db.get(db.k.selectFrom("stage_limits")
-    .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s"))))!.s ?? "")
-  + String((await db.get(db.k.selectFrom("settings")
+const limitsSig = async (db: Db): Promise<string> => {
+  const [limits, resets] = await Promise.all(limitRows(db).map((q) => db.get(q)));
+  return String(limits!.s ?? "") + String(resets!.s ?? "");
+};
+const limitRows = (db: Db) => [
+  db.k.selectFrom("stage_limits")
+    .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s")),
+  db.k.selectFrom("settings")
     .select((eb) => kx.groupConcat(db, eb(eb("key", "||", eb.val("=")), "||", eb.ref("value")), ",", "key").as("s"))
-    .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")]))))!.s ?? "");
+    .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")])),
+] as const;
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
@@ -1222,11 +1227,9 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
   return applyProposals(db, found.proposals, { ...opts, wakeAt: found.wakeAt ?? null, ...(found.status ? { status: found.status } : {}) });
 }
 
-/** What the planner's marks say about the content stages read and the limits that apply to them. */
-async function inputSignature(db: Db): Promise<string> {
-  const seqs = await readSeqs(db);
-  return [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), await limitsSig(db), await tasksSig(db), await takersOf(db)].join(",");
-}
+/** What the planner's marks say about the content stages read and the limits that apply to them, from its parts read. */
+const inputSignature = (seqs: Record<string, number>, limits: string, tasks: string, takers: string): string =>
+  [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers].join(",");
 
 /**
  * Whether the planner is due now (also with the switch off: the Plan cache must follow the data; the runner queues nothing then): a content topic changed, an autopilot job finished, an operator released
@@ -1235,13 +1238,21 @@ async function inputSignature(db: Db): Promise<string> {
  */
 export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
   const t = nowMs;
-  const sig = await inputSignature(db);
-  const changed = sig !== (await getSetting(db, KEY_SEQS_SEEN) ?? "");
-  const plannedAt = await getSetting(db, KEY_PLANNED_AT);
+  // The single-row reads in one statement, with the change markers, the mode and the takers (read in every mode, used in user-local) at the same time.
+  const mark = (key: string) => db.k.selectFrom("main.settings").select("value").where("key", "=", key);
+  const since = (eb: kx.Eb) => eb.fn.coalesce(mark(KEY_PLANNED_AT), eb.val(""));
+  const [v, seqs, mode, takers] = await Promise.all([
+    kx.rowValues(db, [...limitRows(db), endedTasks(db), mark(KEY_SEQS_SEEN), mark(KEY_PLANNED_AT), mark(KEY_WAKE_AT),
+      db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where((eb) => eb("ended_at", ">", since(eb))).limit(1),
+      db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where((eb) => eb("at", ">", since(eb))).limit(1)]),
+    readSeqs(db), inferenceMode(db), takerSignature(db),
+  ]);
+  const text = (r: unknown[] | undefined): string | null => (typeof r?.[0] === "string" ? r[0] : null);
+  const sig = inputSignature(seqs, (text(v[0]) ?? "") + (text(v[1]) ?? ""), String(Number(v[2]![0])), mode === "user-local" ? takers : "");
+  const [seen, plannedAt, wake] = [text(v[3]), text(v[4]), text(v[5])];
+  const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
-  const wake = await getSetting(db, KEY_WAKE_AT);
-  const finished = await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where("ended_at", ">", plannedAt ?? "").limit(1));
-  const released = await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where("at", ">", plannedAt ?? "").limit(1));
+  const finished = v[6]!.length > 0, released = v[7]!.length > 0;
   const woken = wake !== null && Date.parse(wake) <= t;
   if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !released && !woken) return false;
   await setSetting(db, KEY_SEQS_SEEN, sig);

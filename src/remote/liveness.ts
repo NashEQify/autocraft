@@ -39,7 +39,14 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
  * dashboard has run against it) counts as always alive.
  */
 export async function dashboardAlive(db: Db, nowMs: number): Promise<{ alive: boolean; since: number }> {
-  const r = await db.get(db.k.selectFrom("main.remote_liveness").select(["alive_at", "since"]).where("id", "=", 1));
+  return aliveOf(await db.get(livenessRow(db)), nowMs);
+}
+
+/** The stamp row dashboardAlive reads. */
+export const livenessRow = (db: Db) => db.k.selectFrom("main.remote_liveness").select(["alive_at", "since"]).where("id", "=", 1);
+
+/** dashboardAlive for the stamp row already read (undefined: none). */
+export function aliveOf(r: { alive_at: number; since: number } | undefined, nowMs: number): { alive: boolean; since: number } {
   if (!r) return { alive: true, since: -Infinity };
   return { alive: nowMs - Number(r.alive_at) <= ALIVE_STALE_MS, since: Number(r.since) };
 }
