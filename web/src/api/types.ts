@@ -466,7 +466,7 @@ export interface ItemPremerge {
 
 export type FixupState = "pushed" | "failed" | "refused" | "cannot-push" | "too-large" | "asked" | "rejected" | "push-denied" | "superseded" | "infra" | "rerun" | "rerunning" | "formatting" | "pushing" | "skipped" | "capped" | "comment-failed" | "comment-unsent";
 /** The operator releases of an item: the last path segment of POST /api/items/:repo/:n/<action>. */
-export type ReleaseAction = "review-again" | "verify-again" | "fix-again" | "batch-again";
+export type ReleaseAction = "review-again" | "verify-again" | "batch-again";
 
 /** Operator releases that apply to an item right now. */
 export interface ItemReleases {
@@ -475,7 +475,6 @@ export interface ItemReleases {
   /** A failed or errored verification at the current head can be planned again. */
   verifyAgain: boolean;
   /** A skipped or failed fix attempt can be tried again. */
-  fixAgain: boolean;
   /** A PR held by a failed single-PR batch at its current head can go through a batch again. */
   batchAgain: boolean;
 }

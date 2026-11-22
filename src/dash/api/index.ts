@@ -497,7 +497,6 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/items/:repo/:n/review-again", handler: ok(operator.reviewItemAgain) },
     { method: "POST", pattern: "/api/items/:repo/:n/verify-again", handler: ok(operator.verifyItemAgain) },
     { method: "POST", pattern: "/api/items/:repo/:n/stop-fix", handler: ok(operator.stopFixItem) },
-    { method: "POST", pattern: "/api/items/:repo/:n/fix-again", handler: ok(operator.fixItemAgain) },
     get("/api/areas/:repo", areas.repoAreas),
     { method: "POST", pattern: "/api/areas/:repo/edit", handler: ok(areas.edit) },
     { method: "POST", pattern: "/api/areas/:repo/run", handler: ok(areas.run) },

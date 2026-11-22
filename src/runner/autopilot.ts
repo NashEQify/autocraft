@@ -856,7 +856,7 @@ export async function cliGate(db: Db, step: { name: string }, steps: Map<string,
 
 /** The steps an operator release (operator-actions.ts) hands new work to. */
 const RELEASE_STEPS: Record<string, string[]> = {
-  "batch-again": ["merge"], "review-again": ["opus-review"], "verify-again": ["verify"], "fix-again": ["fixissue"],
+  "batch-again": ["merge"], "review-again": ["opus-review"], "verify-again": ["verify"],
 };
 
 /** When an operator last released work for the step, or null. */

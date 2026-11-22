@@ -1077,7 +1077,7 @@ export function itemFor(repo: string, number: number): Item {
     preapproval: PREAPPROVALS[`${repo}#${number}`] ?? null,
     reviews: null,
     actions: [],
-    releases: { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false },
+    releases: { reviewAgain: false, verifyAgain: false, batchAgain: false },
     queue: mockSlot(number),
     ...(repo === PIPELINE_OFF.repo && number === PIPELINE_OFF.number
       ? { state: "merged" as const, pipelineOn: false, mergedAt: iso(3 * H), mergedBy: "maintainer", closedAt: iso(3 * H) }

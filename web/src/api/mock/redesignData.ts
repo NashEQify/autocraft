@@ -13,7 +13,7 @@ const HEADER_1484: Partial<ItemPageHeader> = {
   labels: ["enhancement", "i18n", "needs-decision"], assignees: ["rhea-m"], autocraftAssigned: true,
   discord: { count: 2, links: [{ url: "https://discord.example/channels/1/2/3", at: at(3 * H) }], signals: 1, signalLinks: [{ url: "https://discord.example/channels/1/2/3", at: at(3 * H) }] },
   queue: { stage: "Merge", tab: "merge", place: 3 }, tier: "whitelisted", size: "XL",
-  releases: { reviewAgain: true, verifyAgain: true, fixAgain: false, batchAgain: true },
+  releases: { reviewAgain: true, verifyAgain: true, batchAgain: true },
   preapproval: { id: 7, by: "rhea-m", at: at(4 * H), instructions: "Use load_pack for the dictionary, then merge when CI is green.", state: "failed", fromHead: "e6a09b1", head: null, reason: "the fix-up refused: crates/doc/Cargo.toml is not a file a fix-up may edit", updatedAt: at(3 * H) },
 };
 
@@ -123,7 +123,7 @@ function seedRows(): ItemStatusRow[] {
 export function mockHeader(kind: ItemKind, labels: string[] = []): ItemPageHeader {
   return {
     labels, assignees: [], autocraftAssigned: false, pipelineOn: true, discord: null, queue: null, fastTracked: false, held: false, preapproval: null,
-    releases: { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false }, tier: "not", size: kind === "pr" ? "S" : null,
+    releases: { reviewAgain: false, verifyAgain: false, batchAgain: false }, tier: "not", size: kind === "pr" ? "S" : null,
     backlog: { held: false, canSettle: true },
   };
 }

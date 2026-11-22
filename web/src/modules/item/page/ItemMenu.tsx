@@ -13,7 +13,6 @@ import { canRun } from "../../../registry/permissions";
 const RELEASES: { key: keyof ItemReleases; action: ReleaseAction; label: string; confirm: string }[] = [
   { key: "reviewAgain", action: "review-again", label: "Review again at this head", confirm: "Delete the hold, review again" },
   { key: "verifyAgain", action: "verify-again", label: "Verify again", confirm: "Plan Verify again" },
-  { key: "fixAgain", action: "fix-again", label: "Try the fix again", confirm: "Forget the attempt, try again" },
   { key: "batchAgain", action: "batch-again", label: "Try the batch again", confirm: "Release the PR, try the batch again" },
 ];
 

@@ -29,7 +29,6 @@ function FixRow({ row, onDone }: { row: NeedsFixRow; onDone: () => void }) {
       {operator && (
         <div className="flex flex-col items-end gap-1">
           <div className="flex flex-wrap justify-end gap-2">
-            <ConfirmButton idle="secondary" label="Fix again" confirmLabel="Confirm fix again" loading={write.busy === "fix"} onConfirm={() => void write.run("fix", async () => { await api.release(row.repo, row.number, "fix-again"); onDone(); })} />
             <ConfirmButton idle="secondary" label="Backlog" confirmLabel="Confirm backlog" loading={write.busy === "backlog"} onConfirm={() => void write.run("backlog", async () => { await api.stopFix(row.repo, row.number, "backlog"); onDone(); })} />
             <ConfirmButton idle="secondary" label="Close" confirmLabel="Confirm close" loading={write.busy === "close"} onConfirm={() => void write.run("close", async () => { await api.stopFix(row.repo, row.number, "close"); onDone(); })} />
           </div>
