@@ -16,7 +16,8 @@ import type { Preapproval } from "../../web/src/api/types.ts";
 import type { Step } from "../conversations/cards.ts";
 import { conversationOf, insertTurn, systemBlock } from "../conversations/store.ts";
 import { cifixBucket, decidePr, fixupOf } from "../core/decide.ts";
-import { loadPrFact } from "../core/facts.ts";
+import { loadPrFact, loadPrFacts } from "../core/facts.ts";
+import { withSettingsSnapshot } from "../settings-read.ts";
 import { HEAD_FACT, MERGE_OPTIONS, PREMERGE_MAX_TRIES, mergeDecisionId } from "../core/rules.ts";
 import { audit } from "../dash/audit.ts";
 import { ask, getDecision, replaceProposedCards } from "../decisions.ts";
@@ -372,7 +373,7 @@ function stepRuns(f: PrFacts, step: "cifix" | "conflict"): boolean {
 const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large", "push-denied", "asked", "comment-failed", "superseded"];
 
 /** One pre-approved merge: reads what the other steps recorded and makes at most one transition. */
-async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void> {
+async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => Promise<PrFacts | null>): Promise<void> {
   const it = await prRow(db, p.repo, p.number);
   const cancel = async (reason: string) => void await cancelRow(db, p.id, ACTOR, reason, `The pre-approved merge was cancelled: ${reason}.`);
   const stop = async (to: "asked" | "failed", why: string, head: string, facts: string[] = [why]) => {
@@ -401,7 +402,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (cur !== null && cur !== p.from_head && cur !== fx?.to_head) return cancel(`another push moved the head to ${short(cur)}`);
     // No try yet and the planner would not work the request (not pushable, conflicting, a draft, ...): it would wait for ever.
     if (!fx) {
-      const f = await loadPrFact(db, p.repo, p.number);
+      const f = await factOf();
       const why = f ? await whyNotPlanned(db, f) : null;
       if (why) await stop("asked", `the fix-up cannot run: ${why}`, cur ?? p.from_head);
     }
@@ -428,7 +429,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (r.kind === "stale") return;
     if (r.kind === "none") {
       // No review is coming for a PR the planner does not review (an open scope question, a draft, a hold).
-      const f = cur === head ? await loadPrFact(db, p.repo, p.number) : null;
+      const f = cur === head ? await factOf() : null;
       const state = f ? decidePr(f).state : null;
       if (state && NOT_REVIEWABLE.includes(state)) return await stop("asked", `${headName(p)} cannot be reviewed (${state})`, head);
       // The gate lifts every hold for a pre-approved head except a review that failed for good, which only a new request or push ends.
@@ -441,7 +442,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (r.kind === "takefix" && p.fix_id === null) return await stop("asked", `the review of ${headName(p)} asks for fixes`, head, [reviewFact(p, `take-fix${r.why ? `: ${r.why}` : ""}`)]);
     if (r.kind === "takefix") {
       // The planner's fix-up of the review's fixes runs next. Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
-      const f = cur === head ? await loadPrFact(db, p.repo, p.number) : null;
+      const f = cur === head ? await factOf() : null;
       const fx = f ? fixupOf(f) : null;
       if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) return;
       return await stop("asked", `the review of the fix-up says take-fix and its fix-up cannot run${fx ? ` (${fx.bucket})` : ""}`, head, [`review of the fix-up: take-fix${r.why ? `: ${r.why}` : ""}`, "Recommended: Fix up first, then merge"]);
@@ -462,7 +463,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (!c || c.overall === "pending") return;
     if (c.overall === "failure") {
       // The CI fix step works the red head as it would for any PR; its push is a head the operator did not see, so the row ends and the Merge? question is asked there. The operator decides when the step has given up.
-      const f = await loadPrFact(db, p.repo, p.number);
+      const f = await factOf();
       const bucket = f ? cifixBucket(f) : null;
       if (bucket !== null && ["work", "formatting", "linting", "collect", "rerun", "rerun-wait"].includes(bucket) && stepRuns(f!, "cifix")) return;
       return await stop("asked", `CI failed at ${headName(p)} and the CI fix did not repair it`, head, [reviewFact(p, "take"), `CI failed at ${headName(p)}`]);
@@ -470,7 +471,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
     if (c.overall === "none" && !await repoHasNoCi(db, p.repo)) return;
     if (c.mergeable === "CONFLICTING") {
       // The conflict step merges the base into the PR when it can; its push is a new head that continues this pre-approval.
-      const f = await loadPrFact(db, p.repo, p.number);
+      const f = await factOf();
       if (f?.conflict?.baseOk && ["merge", "linting"].includes(f.conflict.bucket) && stepRuns(f, "conflict")) return;
       return await stop("asked", "the PR conflicts with its base branch", head);
     }
@@ -577,11 +578,23 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
     log(`preapproval requests: ${(e as Error).message}`);
   }
   const rows = await db.all(preapprovalRows(db).where("state", "in", ACTIVE).where((eb) => eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name"))).orderBy("id"));
-  for (const p of rows) {
+  // The facts of the PRs of this row and the rows after it, loaded together when a row first needs its PR's, with the settings
+  // read once for the load as in a planner pass. A row that moved or failed may have written what they read, so the next row
+  // that needs them loads them again.
+  let facts: Map<string, PrFacts> | null = null;
+  for (const [i, p] of rows.entries()) {
+    const factOf = async (): Promise<PrFacts | null> => {
+      facts ??= new Map((await withSettingsSnapshot(db, () => loadPrFacts(db, { refs: rows.slice(i).map((r) => `${r.repo}#${r.number}`) }))).map((f) => [`${f.repo}#${f.number}`, f]));
+      return facts.get(`${p.repo}#${p.number}`) ?? null;
+    };
     try {
-      await advance(db, p, held);
-      if ((await db.get(db.k.selectFrom("preapprovals").select("state").where("id", "=", p.id)))!.state !== p.state) n++;
+      await advance(db, p, held, factOf);
+      if ((await db.get(db.k.selectFrom("preapprovals").select("state").where("id", "=", p.id)))!.state !== p.state) {
+        n++;
+        facts = null;
+      }
     } catch (e) {
+      facts = null;
       const msg = oneLine(String((e as Error).message ?? e), 300);
       log(`preapproval ${p.repo}#${p.number}: ${msg}`);
       // Runs every tick: the item's trace gets the error once, not once per tick.

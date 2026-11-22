@@ -448,7 +448,7 @@ export class Runner {
     const queued = (await this.db.all(this.db.k.selectFrom("jobs").select(["id", "step", "params", "requested_by", "repo"]).where("state", "=", "queued").orderBy("id")))
       .sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
-    const on = await isEnabled(this.db), draining = await isDraining(this.db);
+    const [on, draining] = await Promise.all([isEnabled(this.db), isDraining(this.db)]);
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
     const room = new Map<number, Map<string, number>>();
     const pass = await queueRoomPass(this.db);

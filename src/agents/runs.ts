@@ -21,6 +21,8 @@ export type RunStart = {
   items: ItemRef[];
   /** The prompt text, or the stored form packPrompt made of it. */
   prompt: string | Uint8Array;
+  /** A call a Task Runner leased: its user, harness and the model the claim named. */
+  remote?: { userLogin: string; harness: string; reportedModel: string };
 };
 
 export type RunEnd = {
@@ -60,8 +62,9 @@ export async function insertRun(db: Db, s: RunStart): Promise<number> {
   const id = Number((await db.get(db.k.insertInto("agent_runs").values({
     job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: s.promptId, prompt_version: s.promptVersion, provider: s.provider, model: s.model,
     account_id: s.accountId, items: JSON.stringify(refs), item_count: s.items.length, state: "running", started_at: now(),
+    ...(s.remote && { user_login: s.remote.userLogin, harness: s.remote.harness, reported_model: s.remote.reportedModel }),
   }).returning("id")))!.id);
-  for (const r of s.items) await db.run(db.k.insertInto("agent_run_items").values({ run_id: id, repo: r.repo, number: r.number }).onConflict((oc) => oc.doNothing()));
+  if (s.items.length) await db.run(db.k.insertInto("agent_run_items").values(s.items.map((r) => ({ run_id: id, repo: r.repo, number: r.number }))).onConflict((oc) => oc.doNothing()));
   await db.run(db.k.insertInto("agent_run_texts").values({ run_id: id, prompt: typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt }));
   return id;
 }

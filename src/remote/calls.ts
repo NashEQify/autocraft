@@ -18,7 +18,7 @@ import { scrub } from "../runner/scrub.ts";
 import { cooloffOf, noteDrop, noteFailure, noteSuccess, pruneCooloffs } from "./cooloff.ts";
 import { dashboardAlive } from "./liveness.ts";
 import { acceptedModels, familyOf, isEffort, isTier, meetsEffort, minEfforts, TIERS } from "./mode.ts";
-import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, HEARTBEAT_S, PREPARE_MAX_S, ROUTES, type Claim, type ClaimReply, type HarnessId, type Heartbeat, type Release, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
+import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, HEARTBEAT_S, PREPARE_MAX_S, ROUTES, type Claim, type ClaimReply, type Effort, type HarnessId, type Heartbeat, type Release, type Reserve, type Submit, type SubmitReply, type TaskBundle, type Tier } from "./protocol.ts";
 import { claimRepos } from "./my-repos.ts";
 import { taskOfStep, userSkips } from "./my-tasks.ts";
 import { itemFilter, itemsFit, type ItemFilter } from "./task-items.ts";
@@ -249,29 +249,47 @@ async function unlease(db: Db, r: { id: number; runId: number | null; hash: stri
  * caller's poll (`id`: that call only); old rows go with pruneRemote.
  */
 export async function expireLeases(db: Db, nowMs: number = Date.now(), id?: number): Promise<void> {
-  const live = await dashboardAlive(db, nowMs);
-  if (live.alive) {
+  await applyExpiry(db, await readExpiry(db, nowMs, id), nowMs, id);
+}
+
+type Expiry = { idle: number; lost: LostLease[]; gone: { id: number }[] };
+type LostLease = Pick<Row, "id" | "run_id" | "attempt" | "max_attempts" | "heartbeat_at" | "leased_at" | "started_at" | "timeout_ms" | "token_id" | "user_login" | "lease_secret_hash">;
+
+/** Queued and leased calls whose caller stopped polling. The calls of a resumed job's earlier runs have no caller until the resumed run adopts them; they end with the job (endJob). */
+const goneCalls = async (db: Db, nowMs: number, id?: number): Promise<{ id: number }[]> =>
+  await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"]).where("seen_at", "<", nowMs - CALLER_GONE_MS)
+    .$if(id !== undefined, (q) => q.where("id", "=", id!)).where((eb) => eb.not(earlierRunCallExpr(db, eb))));
+
+/** What expireLeases reads before it writes: the lost leases (after the liveness stamp) and, at the same time, the gone calls. */
+async function readExpiry(db: Db, nowMs: number, id?: number): Promise<Expiry> {
+  const lost = async (): Promise<Pick<Expiry, "idle" | "lost">> => {
+    const live = await dashboardAlive(db, nowMs);
+    if (!live.alive) return { idle: 0, lost: [] };
     const idle = live.since <= nowMs - LEASE_IDLE_MS ? 1 : 0;
     // One call: by its id.
-    const lost = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "attempt", "max_attempts", "heartbeat_at", "leased_at", "started_at", "timeout_ms", "token_id", "user_login", "lease_secret_hash"])
+    const rows = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "attempt", "max_attempts", "heartbeat_at", "leased_at", "started_at", "timeout_ms", "token_id", "user_login", "lease_secret_hash"])
       .where((eb) => eb.and([eb("state", "=", "leased"), eb.or([
         ...(idle === 1 ? [eb("heartbeat_at", "<", nowMs - LEASE_IDLE_MS)] : []),
         eb.and([eb("started_at", "is", null), eb(eb("leased_at", "+", scaled(PREPARE_MAX_S * 1000)), "<", nowMs)]),
         eb.and([eb("started_at", "is not", null), eb(eb(eb("started_at", "+", eb.ref("timeout_ms")), "+", LEASE_MARGIN_MS), "<", nowMs)]),
       ])])).$if(id !== undefined, (q) => q.where("id", "=", id!)));
-    for (const r of lost) {
-      const why = idle && Number(r.heartbeat_at) < nowMs - LEASE_IDLE_MS ? `lease expired: no heartbeat for ${Math.round(LEASE_IDLE_MS / 1000)} s`
-        : r.started_at === null ? `lease expired: still preparing ${Math.round(scaled(PREPARE_MAX_S * 1000) / 1000)} s after the claim` : "lease expired: past the call's time limit";
-      // A lost lease counts toward its login's cool-off (cooloff.ts), and uses an attempt like a failed call. A lease that never
-      // had a heartbeat does not count: the helper most likely never got the claim's reply.
-      const beaten = Number(r.heartbeat_at) > Number(r.leased_at);
-      if (await requeue(db, r, why, nowMs) && beaten && r.token_id !== null && r.user_login !== null) await noteDrop(db, Number(r.token_id), r.user_login, Number(r.id), nowMs);
-    }
+    return { idle, lost: rows };
+  };
+  const [l, gone] = await Promise.all([lost(), goneCalls(db, nowMs, id)]);
+  return { ...l, gone };
+}
+
+/** The writes of expireLeases. A requeued lost lease changes the rows the gone calls are read from, so they are read again after it. */
+async function applyExpiry(db: Db, e: Expiry, nowMs: number, id?: number): Promise<void> {
+  for (const r of e.lost) {
+    const why = e.idle && Number(r.heartbeat_at) < nowMs - LEASE_IDLE_MS ? `lease expired: no heartbeat for ${Math.round(LEASE_IDLE_MS / 1000)} s`
+      : r.started_at === null ? `lease expired: still preparing ${Math.round(scaled(PREPARE_MAX_S * 1000) / 1000)} s after the claim` : "lease expired: past the call's time limit";
+    // A lost lease counts toward its login's cool-off (cooloff.ts), and uses an attempt like a failed call. A lease that never
+    // had a heartbeat does not count: the helper most likely never got the claim's reply.
+    const beaten = Number(r.heartbeat_at) > Number(r.leased_at);
+    if (await requeue(db, r, why, nowMs) && beaten && r.token_id !== null && r.user_login !== null) await noteDrop(db, Number(r.token_id), r.user_login, Number(r.id), nowMs);
   }
-  // The calls of a resumed job's earlier runs have no caller until the resumed run adopts them; they end with the job (endJob).
-  const gone = await db.all(db.k.selectFrom("main.remote_calls").select("id").where("state", "in", ["queued", "leased"]).where("seen_at", "<", nowMs - CALLER_GONE_MS)
-    .$if(id !== undefined, (q) => q.where("id", "=", id!)).where((eb) => eb.not(earlierRunCallExpr(db, eb))));
-  for (const r of gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
+  for (const r of e.lost.length ? await goneCalls(db, nowMs, id) : e.gone) await withdrawCall(db, Number(r.id), "the caller stopped waiting", undefined, nowMs);
 }
 
 /**
@@ -485,9 +503,10 @@ async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role 
  * its own pick or a follow-up); the pick ends with the lease. The agent run starts now, on no account, with the user and
  * harness. With `cap`, only while the login holds fewer leases than that (checked in the same transaction, so parallel claims
  * of one user cannot pass it together); "limit" when it holds that many. `live` is asked inside the same transaction, just
- * before the lease is written: "gone" when no one waits for the reply any more, and nothing is written.
+ * before the lease is written: "gone" when no one waits for the reply any more, and nothing is written. With `clearIdle`, the
+ * lease also marks the caller's credential busy (idle_claim_at).
  */
-async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
+async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean, clearIdle: boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
   // The run's stored prompt is built before the write lock is taken: scrubbing and compressing a large prompt takes milliseconds.
   const queued = await db.get(db.k.selectFrom("main.remote_calls").select("bundle").where("id", "=", id).where("state", "=", "queued"));
@@ -496,7 +515,6 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   return await db.write(async () => {
     if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
     if (!live()) return "gone";
-    const manual = await manualOnly(db, caller.login);
     const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
       state: "leased", token_id: caller.tokenId, user_login: caller.login, harness: claim.harness, harness_version: claim.harnessVersion, model, root: claim.root ?? null, lease_secret_hash: sha256hex(secret),
       leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId,
@@ -504,14 +522,17 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
       picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
     })).where("id", "=", id).where("state", "=", "queued")
       .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", caller.login), pickLapsedExpr(db, eb, nowMs)]))
-      .$if(manual, (q) => q.where((eb) => eb.or([eb("parent_id", "is not", null), eb("picked_by", "=", caller.login)])))
+      // A Manual only caller takes only follow-ups and its own picks.
+      .where((eb) => eb.or([eb.not(manualExpr(db, eb, eb.val(caller.login))), eb("parent_id", "is not", null), eb("picked_by", "=", caller.login)]))
       .where((eb) => eb.exists(db.k.selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(nowMs).toISOString())))
       .returning(COLS).$narrowType<{ tier: Tier; state: Row["state"] }>());
     if (!r) return null;
     const refs = JSON.parse(r.items) as ItemRef[];
-    const runId = await insertRun(db, { jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version, provider: "claude", model: r.asked_model, accountId: null, items: refs, prompt: packed ?? promptOf(r.bundle) });
-    await db.run(db.k.updateTable("main.agent_runs").set({ user_login: caller.login, harness: claim.harness, reported_model: model }).where("id", "=", runId));
+    const runId = await insertRun(db, { jobId: r.job_id, step: r.step, stage: r.stage, promptId: r.prompt_id, promptVersion: r.prompt_version, provider: "claude", model: r.asked_model, accountId: null, items: refs, prompt: packed ?? promptOf(r.bundle),
+      remote: { userLogin: caller.login, harness: claim.harness, reportedModel: model } });
     await db.run(db.k.updateTable("main.remote_calls").set({ run_id: runId }).where("id", "=", id));
+    // The fast lane says nothing about the helper's other slots: only their claims mark it idle or busy.
+    if (clearIdle) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: null }).where("id", "=", caller.tokenId));
     return { id, secret, title: titleOf(r.prompt_id, refs), requiredHelper: REQUIRED_HELPER };
   });
 }
@@ -556,26 +577,30 @@ async function queuedCalls(db: Db, nowMs: number): Promise<QueueCache> {
   const hit = queueCaches.get(db);
   if (hit && hit.sig === sig && nowMs >= hit.at && nowMs - hit.at < QUEUE_CACHE_MS) return hit;
   const known = parsedCalls.get(db) ?? new Map<number, Parsed>(), seen = new Map<number, Parsed>();
-  const rows = await mapSeq(await db.all(db.k.selectFrom("main.remote_calls")
+  const queued = await db.all(db.k.selectFrom("main.remote_calls")
     .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until"])
-    .where("state", "=", "queued").$narrowType<{ tier: Tier }>()), async (r): Promise<Cand> => {
-      const id = Number(r.id);
-      let p = known.get(id);
-      if (!p) {
-        const x = (await db.get(db.k.selectFrom("main.remote_calls").select(["items", "authors"]).where("id", "=", id)))!;
-        const refs = JSON.parse(x.items) as ItemRef[];
-        // Calls queued before authors were stored on the row are read now.
-        const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
-        p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors) };
-      }
-      seen.set(id, p);
-      return {
-        id, cls: r.cls, level: r.level, step: r.step, repo: r.repo, since: r.since, seen_at: r.seen_at, prompt_id: r.prompt_id, tier: r.tier, parent_id: r.parent_id, sticky_login: r.sticky_login,
-        ...p, releasedBy: r.released_by?.toLowerCase() ?? null, releasedAt: r.released_at,
-        pickedBy: r.picked_by?.toLowerCase() ?? null, pickedAt: r.picked_at, pickUntil: r.pick_until,
-        ...(r.picked_by !== null && { unpick: async () => void await clearPick(db, id) }),
-      };
-    });
+    .where("state", "=", "queued").$narrowType<{ tier: Tier }>());
+  // The items and authors of the calls not parsed yet, in one read.
+  const fresh = queued.map((r) => Number(r.id)).filter((id) => !known.has(id));
+  const texts = new Map(fresh.length ? (await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors"]).where(inList(db, "id", fresh, "bigint")))).map((x) => [Number(x.id), x]) : []);
+  const rows = await mapSeq(queued, async (r): Promise<Cand> => {
+    const id = Number(r.id);
+    let p = known.get(id);
+    if (!p) {
+      const x = texts.get(id)!;
+      const refs = JSON.parse(x.items) as ItemRef[];
+      // Calls queued before authors were stored on the row are read now.
+      const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
+      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors) };
+    }
+    seen.set(id, p);
+    return {
+      id, cls: r.cls, level: r.level, step: r.step, repo: r.repo, since: r.since, seen_at: r.seen_at, prompt_id: r.prompt_id, tier: r.tier, parent_id: r.parent_id, sticky_login: r.sticky_login,
+      ...p, releasedBy: r.released_by?.toLowerCase() ?? null, releasedAt: r.released_at,
+      pickedBy: r.picked_by?.toLowerCase() ?? null, pickedAt: r.picked_at, pickUntil: r.pick_until,
+      ...(r.picked_by !== null && { unpick: async () => void await clearPick(db, id) }),
+    };
+  });
   parsedCalls.set(db, seen);
   const c: QueueCache = {
     at: nowMs, sig,
@@ -592,6 +617,14 @@ export async function queueSnapshot(db: Db, nowMs: number): Promise<readonly Rea
   return [...q.followUps, ...q.ordered];
 }
 
+type OrderReads = { q: QueueCache; manual: boolean; skip: Set<string>; items: ItemFilter };
+
+/** What claimOrder reads, all at once: the queued calls and the user's Manual only switch, skipped tasks and item filter. */
+const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderReads> => {
+  const [q, manual, skip, items] = await Promise.all([queuedCalls(db, nowMs), manualOnly(db, login), userSkips(db, login), itemFilter(db, login)]);
+  return { q, manual, skip, items };
+};
+
 /**
  * The queued calls a claim could take in the order it takes them, before eligibility: follow-up turns of the sessions its
  * helper holds first, then the user's own live picks (picks.ts) oldest first, then the model queue's order with gating and
@@ -601,8 +634,8 @@ export async function queueSnapshot(db: Db, nowMs: number): Promise<readonly Rea
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
-async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false): Promise<Cand[]> {
-  const q = await queuedCalls(db, nowMs);
+async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads): Promise<Cand[]> {
+  const { q, manual, skip, items } = reads ?? await orderReads(db, caller.login, nowMs);
   const login = caller.login.toLowerCase();
   const live = (r: Cand): boolean => r.seen_at >= nowMs - CALLER_STALE_MS;
   const released = (r: Cand): boolean => r.releasedBy === login && r.releasedAt !== null && r.releasedAt >= nowMs - RELEASE_SKIP_MS;
@@ -619,8 +652,7 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
     else if (live(r) && tiers.has(r.tier) && (!fastLane || fastLaneFits(r))) mine.push(r);
   }
   mine.sort((a, b) => a.pickedAt! - b.pickedAt! || a.id - b.id);
-  if (await manualOnly(db, caller.login)) return [...followUps, ...mine];
-  const skip = await userSkips(db, caller.login), items = await itemFilter(db, caller.login);
+  if (manual) return [...followUps, ...mine];
   return [...followUps, ...mine, ...await filterSeq(q.ordered, async (r) => fits(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && await counts(r)) && (!fastLane || fastLaneFits(r)))];
 }
 
@@ -758,6 +790,20 @@ async function claimNew(db: Db, caller: Caller, claim: Claim, canWrite: (repo: s
   return hold.waits.hold(hold.ticket, nowMs + hold.ms, { ...c, blocked: hold.blocked });
 }
 
+type TryReads = {
+  role: Role | null; cooled: { until: number; reason: string } | null; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>>;
+  repos: ReadonlySet<string> | null; max: number | null; leased: number; reserve: Reserve; order: OrderReads;
+};
+
+/** What a full claim try reads, all at once; nothing here writes. */
+async function tryReads(db: Db, caller: Caller, helperRepos: readonly string[] | undefined, now: number): Promise<TryReads> {
+  const [role, cooled, accepted, floors, repos, max, leased, reserve, order] = await Promise.all([
+    runnerRole(db, caller.tokenId, now), cooloffOf(db, caller.login, now), acceptedModels(db), minEfforts(db), claimRepos(db, caller.login, helperRepos),
+    userMaxCalls(db, caller.login), leasedBy(db, caller.login), userReserve(db, caller.login), orderReads(db, caller.login, now),
+  ]);
+  return { role, cooled, accepted, floors, repos, max, leased, reserve, order };
+}
+
 /**
  * The once-per-claim part of a claim: the helper's version, and a lease of a repeated claim the dashboard no longer remembers.
  * Returns a reply when the claim is answered here, else its tries: `attempt` re-reads the cool-off, the accepted models, the
@@ -768,33 +814,51 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
   // A repeat the dashboard no longer remembers (it restarted in between): the lease the first claim took cannot be given
   // out again, as only its secret's hash is stored, so it goes back to the queue unused and this claim is answered afresh.
-  const orphan = await db.get(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "lease_secret_hash"]).where("token_id", "=", caller.tokenId).where("claim_id", "=", claim.requestId).where("state", "=", "leased"));
-  if (orphan) await unlease(db, { id: Number(orphan.id), runId: orphan.run_id, hash: orphan.lease_secret_hash }, "returned to the queue: the claim that leased it was repeated after a server restart", nowMs);
-  await expireLeases(db, nowMs);
+  const orphanOf = async () => await db.get(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "lease_secret_hash"]).where("token_id", "=", caller.tokenId).where("claim_id", "=", claim.requestId).where("state", "=", "leased"));
+  // The reads of the first full try run with these; when the orphan or the expiry wrote, they are read again.
+  const firstReads = tryReads(db, caller, claim.repos, nowMs);
+  // Awaited by the first try when used; a failure of reads that are not used is not left unhandled.
+  firstReads.catch(() => {});
+  const [orphan, expiry] = await Promise.all([orphanOf(), readExpiry(db, nowMs)]);
+  if (orphan) {
+    await unlease(db, { id: Number(orphan.id), runId: orphan.run_id, hash: orphan.lease_secret_hash }, "returned to the queue: the claim that leased it was repeated after a server restart", nowMs);
+    await expireLeases(db, nowMs);
+  } else await applyExpiry(db, expiry, nowMs);
+  let pending: Promise<TryReads> | null = orphan || expiry.lost.length || expiry.gone.length ? null : firstReads;
+  if (!pending) {
+    // The queue those reads cached may predate the writes, under the same count and newest id.
+    await firstReads.catch(() => {});
+    dropQueueCache(db);
+  }
   const fast = claim.fastLane === true;
   // What the latest full try took, for a quick try's look at the queue.
   let tiers = new Set<Tier>(), repos: ReadonlySet<string> | null = null;
+  // The user's reserve as the latest full try read it, and when.
+  let last: { at: number; reserve: Reserve } | null = null;
   const attempt: ClaimTry = async (now, { quick, live }) => {
     // A quick try with nothing to take changes nothing; the full tries, at least every RETRY_MS, check the credential as well.
     if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast)).length) return null;
+    const x = now === nowMs && pending ? await pending : await tryReads(db, caller, claim.repos, now);
+    pending = null;
+    last = { at: now, reserve: x.reserve };
     // A held claim outlives the route's credential check: a credential removed, expired or demoted meanwhile ends the hold untaken.
-    if (await runnerRole(db, caller.tokenId, now) !== caller.role) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "this Task Runner credential was removed or its user's role changed", reserve: await userReserve(db, caller.login) };
-    const cooled = await cooloffOf(db, caller.login, now);
-    if (cooled) return { lease: null, retryAfter: Math.ceil((cooled.until - now) / 1000), reason: cooled.reason, until: cooled.until, reserve: await userReserve(db, caller.login) };
-    const accepted = await acceptedModels(db), floors = await minEfforts(db);
+    if (x.role !== caller.role) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "this Task Runner credential was removed or its user's role changed", reserve: x.reserve };
+    const cooled = x.cooled;
+    if (cooled) return { lease: null, retryAfter: Math.ceil((cooled.until - now) / 1000), reason: cooled.reason, until: cooled.until, reserve: x.reserve };
+    const { accepted, floors } = x;
     tiers = new Set((Object.keys(claim.tiers) as Tier[]).filter((t) => familyOf(claim.tiers[t]!, accepted[t]) !== null && meetsEffort(claim.efforts?.[t], floors[t], claim.harness)));
     if (!tiers.size) throw new HttpError(400, `no tier of the claim has an accepted model at the minimum effort; accepted: ${(Object.keys(accepted) as Tier[]).map((t) => `${t} ${accepted[t].join("/")}${floors[t] ? ` at effort ${floors[t]} or higher` : ""}`).join(", ")}`);
     const can = memoWrite(canWrite), others = idleOthers(db, caller.login, now);
-    repos = await claimRepos(db, caller.login, claim.repos);
-    const max = await userMaxCalls(db, caller.login);
-    const full = max !== null && await leasedBy(db, caller.login) >= max;
+    repos = x.repos;
+    const max = x.max;
+    const full = max !== null && x.leased >= max;
     let limited = full;
-    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast)) {
+    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order)) {
       // Only follow-ups of the helper's own sessions carry a parent here (claimOrder).
       if (full && r.parent_id === null) continue;
       if (!(await eligible(caller, r, can, others))) continue;
       // The client left, or shutdown answered the claim: nothing is leased to nobody.
-      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null ? null : r.parent_id !== null ? max + 1 : max, live);
+      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null ? null : r.parent_id !== null ? max + 1 : max, live, !fast);
       if (lease === "gone") return null;
       if (lease === "limit") {
         limited = true;
@@ -802,11 +866,9 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       }
       if (!lease) continue;
       takeFromQueueCache(db, Number(r.id));
-      // The fast lane says nothing about the helper's other slots: only their claims mark it idle or busy.
-      if (!fast) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: null }).where("id", "=", caller.tokenId));
-      return { lease, reserve: await userReserve(db, caller.login) };
+      return { lease, reserve: x.reserve };
     }
-    if (limited) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers run ${max} calls, your limit of calls at once (Connect page, My settings)`, reserve: await userReserve(db, caller.login) };
+    if (limited) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers run ${max} calls, your limit of calls at once (Connect page, My settings)`, reserve: x.reserve };
     return null;
   };
   return {
@@ -814,7 +876,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
     // (idleOthers). The fast lane says nothing about the helper's other slots.
     idle: async (now) => { if (!fast) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: now, idle_tiers: JSON.stringify([...tiers]), idle_repos: repos ? JSON.stringify([...repos]) : null }).where("id", "=", caller.tokenId)); },
-    empty: async (_now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: await userReserve(db, caller.login) }),
+    empty: async (now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: last?.at === now ? last.reserve : await userReserve(db, caller.login) }),
   };
 }
 

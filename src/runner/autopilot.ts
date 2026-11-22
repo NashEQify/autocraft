@@ -232,12 +232,16 @@ const tasksSig = async (db: Db): Promise<string> =>
   String((await db.get(db.k.selectFrom("main.build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["done", "failed", "cancelled", "lost"])))!.n);
 
 /** Daily limits are not a topic of their own (they share `jobs`). */
-const limitsSig = async (db: Db): Promise<string> =>
-  String((await db.get(db.k.selectFrom("stage_limits")
-    .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s"))))!.s ?? "")
-  + String((await db.get(db.k.selectFrom("settings")
-    .select((eb) => kx.groupConcat(db, eb(eb("key", "||", eb.val("=")), "||", eb.ref("value")), ",", "key").as("s"))
-    .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")]))))!.s ?? "");
+const limitsSig = async (db: Db): Promise<string> => {
+  const [limits, resets] = await Promise.all([
+    db.get(db.k.selectFrom("stage_limits")
+      .select((eb) => kx.groupConcat(db, eb(eb("step", "||", eb.val("=")), "||", eb.fn.coalesce(eb.cast<string>("per_day", "text"), eb.val("n"))), ",", "step").as("s"))),
+    db.get(db.k.selectFrom("settings")
+      .select((eb) => kx.groupConcat(db, eb(eb("key", "||", eb.val("=")), "||", eb.ref("value")), ",", "key").as("s"))
+      .where((eb) => eb.or([kx.like(db, "key", eb.val(`${KEY_RESET}%`)), eb("key", "=", "step_parallel")]))),
+  ]);
+  return String(limits!.s ?? "") + String(resets!.s ?? "");
+};
 
 const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "string" ? c.params.repo : null);
 
@@ -1224,8 +1228,8 @@ export async function planAutopilot(db: Db, opts: PlanOptions = {}): Promise<num
 
 /** What the planner's marks say about the content stages read and the limits that apply to them. */
 async function inputSignature(db: Db): Promise<string> {
-  const seqs = await readSeqs(db);
-  return [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), await limitsSig(db), await tasksSig(db), await takersOf(db)].join(",");
+  const [seqs, limits, tasks, takers] = await Promise.all([readSeqs(db), limitsSig(db), tasksSig(db), takersOf(db)]);
+  return [...INPUT_TOPICS.map((t) => seqs[t] ?? 0), limits, tasks, takers].join(",");
 }
 
 /**
@@ -1235,13 +1239,13 @@ async function inputSignature(db: Db): Promise<string> {
  */
 export async function planDue(db: Db, nowMs: number = Date.now()): Promise<boolean> {
   const t = nowMs;
-  const sig = await inputSignature(db);
-  const changed = sig !== (await getSetting(db, KEY_SEQS_SEEN) ?? "");
-  const plannedAt = await getSetting(db, KEY_PLANNED_AT);
+  const [sig, seen, plannedAt, wake] = await Promise.all([inputSignature(db), getSetting(db, KEY_SEQS_SEEN), getSetting(db, KEY_PLANNED_AT), getSetting(db, KEY_WAKE_AT)]);
+  const changed = sig !== (seen ?? "");
   const planned = plannedAt === null ? 0 : Date.parse(plannedAt);
-  const wake = await getSetting(db, KEY_WAKE_AT);
-  const finished = await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where("ended_at", ">", plannedAt ?? "").limit(1));
-  const released = await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where("at", ">", plannedAt ?? "").limit(1));
+  const [finished, released] = await Promise.all([
+    db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("requested_by", "=", AUTOPILOT_USER).where("ended_at", ">", plannedAt ?? "").limit(1)),
+    db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "in", Object.keys(RELEASE_STEPS)).where("at", ">", plannedAt ?? "").limit(1)),
+  ]);
   const woken = wake !== null && Date.parse(wake) <= t;
   if (!changed && plannedAt !== null && t - planned < PLAN_EVERY_MS && !finished && !released && !woken) return false;
   await setSetting(db, KEY_SEQS_SEEN, sig);

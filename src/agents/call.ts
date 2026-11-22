@@ -106,7 +106,7 @@ export const agedLevel = (level: number, sinceMs: number, nowMs: number): number
  * Sorts `rows` in place.
  */
 export async function queueOrder<T extends Waiter>(db: Db, nowMs: number, rows: T[], clsOf: (r: T) => number = (r) => r.cls): Promise<T[]> {
-  const repoN = await runningBy(db, nowMs, "j.repo"), stepN = await runningBy(db, nowMs, "r.step");
+  const [repoN, stepN] = await Promise.all([runningBy(db, nowMs, "j.repo"), runningBy(db, nowMs, "r.step")]);
   const cls = new Map(rows.map((r) => [r, clsOf(r)]));
   return rows.sort((x, y) => cls.get(y)! - cls.get(x)! || (repoN.get(x.repo ?? "") ?? 0) - (repoN.get(y.repo ?? "") ?? 0) || agedLevel(y.level, y.since, nowMs) - agedLevel(x.level, x.since, nowMs) || (stepN.get(x.step) ?? 0) - (stepN.get(y.step) ?? 0) || x.since - y.since || x.id - y.id);
 }
