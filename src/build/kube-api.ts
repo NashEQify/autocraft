@@ -14,9 +14,17 @@ export type ContainerState = {
   terminated?: { exitCode: number; reason?: string; message?: string; startedAt?: string; finishedAt?: string };
 };
 export type ContainerStatus = { name: string; ready?: boolean; state?: ContainerState };
+export type KContainerSpec = { name?: string; resources?: { requests?: Record<string, string> }; restartPolicy?: string };
 export type KPod = {
   metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string; deletionTimestamp?: string };
-  spec?: { activeDeadlineSeconds?: number; nodeName?: string };
+  spec?: {
+    activeDeadlineSeconds?: number;
+    nodeName?: string;
+    priority?: number;
+    containers?: KContainerSpec[];
+    initContainers?: KContainerSpec[];
+    overhead?: Record<string, string>;
+  };
   status?: {
     phase?: "Pending" | "Running" | "Succeeded" | "Failed" | "Unknown";
     reason?: string;
@@ -27,7 +35,12 @@ export type KPod = {
   };
 };
 export type KPvc = { metadata: { name: string; labels?: Record<string, string>; deletionTimestamp?: string } };
-export type KNode = { metadata: { name: string }; status?: { conditions?: { type: string; status: string; lastTransitionTime?: string }[] } };
+export type KNode = {
+  metadata: { name: string; labels?: Record<string, string> };
+  spec?: { unschedulable?: boolean };
+  status?: { conditions?: { type: string; status: string; lastTransitionTime?: string }[]; allocatable?: Record<string, string> };
+};
+export type KResourceQuota = { metadata: { name: string }; status?: { hard?: Record<string, string>; used?: Record<string, string> } };
 export type KConfigMap = { metadata: { name: string; labels?: Record<string, string>; resourceVersion?: string }; data?: Record<string, string> };
 
 /** ConfigMap calls, for the warm-sync agent (writes its node's status) and the runner (reads every node's). */
@@ -39,6 +52,15 @@ export interface ConfigMapApi {
   patchConfigMap(ns: string, name: string, patch: object): Promise<void>;
   /** `selector` is a label selector, e.g. `key=value`. */
   listConfigMaps(ns: string, selector?: string): Promise<KConfigMap[]>;
+}
+
+/** Cluster reads for the capacity model; a 403 KubeError means the service account may not read that. */
+export interface CapacityApi {
+  listNodes(): Promise<KNode[]>;
+  /** Every pod in the cluster that is not finished (Succeeded or Failed). */
+  listClusterPods(): Promise<KPod[]>;
+  /** The namespace's ResourceQuotas. */
+  getQuota(ns: string): Promise<KResourceQuota[]>;
 }
 
 export interface KubeApi {
@@ -101,7 +123,7 @@ export class KubeError extends Error {
 const enc = encodeURIComponent;
 
 /** The client for the cluster the runner runs in, or null outside a cluster (no KUBERNETES_SERVICE_HOST). */
-export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): (KubeApi & ConfigMapApi) | null {
+export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): (KubeApi & ConfigMapApi & CapacityApi) | null {
   const host = env.KUBERNETES_SERVICE_HOST;
   if (!host) return null;
   const port = Number(env.KUBERNETES_SERVICE_PORT || 443);
@@ -126,7 +148,7 @@ function statusMessage(text: string): string {
 }
 
 /** The client for an explicit API server; `conn` is called at each request, so credentials may rotate. */
-export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapApi {
+export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapApi & CapacityApi {
   const get = typeof conn === "function" ? conn : () => conn;
 
   function call(method: string, path: string, body?: object, accept = "application/json", contentType = "application/json"): Promise<string> {
@@ -177,6 +199,9 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapA
     listPvcs: async (ns, selector) => (JSON.parse(await call("GET", `${pvcs(ns)}?labelSelector=${enc(selector)}`)) as { items: KPvc[] }).items,
     createPvc: async (ns, pvc) => void (await call("POST", pvcs(ns), pvc)),
     deletePvc: (ns, name) => call("DELETE", `${pvcs(ns)}/${enc(name)}`).then(() => {}, gone),
+    listNodes: async () => (JSON.parse(await call("GET", "/api/v1/nodes")) as { items: KNode[] }).items,
+    listClusterPods: async () => (JSON.parse(await call("GET", `/api/v1/pods?fieldSelector=${enc("status.phase!=Succeeded,status.phase!=Failed")}`)) as { items: KPod[] }).items,
+    getQuota: async (ns) => (JSON.parse(await call("GET", `/api/v1/namespaces/${enc(ns)}/resourcequotas`)) as { items: KResourceQuota[] }).items,
     getNode: (name) => call("GET", `/api/v1/nodes/${enc(name)}`).then((t) => JSON.parse(t) as KNode, (e: unknown) => {
       if (e instanceof KubeError && e.status === 404) return null;
       throw e;
