@@ -14,6 +14,7 @@ import { DatabaseSync } from "node:sqlite";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { planChangesSql } from "../core/plan-changes.ts";
 import type { Db, Param, Row, Value } from "./index.ts";
+import { connect } from "../db.ts";
 import { connectDb, dbFor, isPgUrl, loadPg } from "./open.ts";
 import { applyPgSchema, MIGRATION_LOCK_KEY, pgSchemaSql } from "./pg-migrate.ts";
 import { migratePg } from "./pg-triggers.ts";
@@ -138,7 +139,7 @@ async function openSide(target: string, opts: { readOnly: boolean }): Promise<Si
   else if (opts.readOnly) {
     if (!existsSync(target)) throw new Error(`no SQLite database at ${target}`);
     db = await dbFor(new DatabaseSync(target, { readOnly: true }));
-  } else db = await connectDb(target, { role: "cli" });
+  } else db = await dbFor(connect(target)); // The file itself, also where a test hook makes connectDb open Postgres for a path.
   return { db, label: describeTarget(target), tables: new Map() };
 }
 

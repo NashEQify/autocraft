@@ -9,6 +9,7 @@ import { SCRATCH } from "./scratch.ts";
 import { mapSeq } from "../src/async-seq.ts";
 import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "plan-cache-"));
@@ -25,7 +26,6 @@ describe("Plan cache", async () => {
   const unhashed = async () => (await db.get(db.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n")).where("embed_hash", "is", null)))!;
 
   test("a pass writes one row per item, writes nothing else, and writes only changed rows the next time", async () => {
-    const changes = async () => (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
     const before = await unhashed();
     const first = await detectAutopilot(db);
     assert.equal(first.timing!.written, 2);
@@ -33,11 +33,16 @@ describe("Plan cache", async () => {
     assert.ok(JSON.parse((await cache())[0]!.actions).some((a: { kind: string }) => a.kind === "embed"), "the embed action is cached");
     assert.deepEqual(await unhashed(), before, "planning fills no hashes");
     const s = await seq();
-    const n = await changes();
     const second = await detectAutopilot(db);
     assert.deepEqual([second.timing!.written, second.timing!.deleted], [0, 0]);
-    assert.equal(await changes(), n, "an unchanged pass writes nothing");
     assert.equal(await seq(), s);
+  });
+
+  test("an unchanged pass changes no row in any table", { skip: sqliteOnly("counts row changes with SQLite's total_changes()") }, async () => {
+    const changes = async () => (await db.prepare("SELECT total_changes() AS n").get() as { n: number }).n;
+    const n = await changes();
+    await detectAutopilot(db);
+    assert.equal(await changes(), n, "an unchanged pass writes nothing");
   });
 
   test("a changed item rewrites its row only, and an item that closed leaves the cache", async () => {

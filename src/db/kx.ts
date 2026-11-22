@@ -170,9 +170,13 @@ export function ciEq(d: D, a: Ex, b: Ex): RawBuilder<SqlBool> {
   return pgOf(d) ? sql`(${x(a)})::citext = (${x(b)})::citext` : sql`${x(a)} = ${x(b)} COLLATE NOCASE`;
 }
 
-/** `e` compared and sorted case-insensitively (SQLite NOCASE), for `orderBy(...)` and `groupBy(...)`. */
+/**
+ * `e` sorted and grouped case-insensitively as SQLite's NOCASE does (ASCII letters folded to lower case, then by code
+ * point), for `orderBy(...)` and `groupBy(...)`. On Postgres it is `lower(e)` by code point: citext would sort in the
+ * database's collation. Compare with `ciEq` or `inList(..., "citext")`.
+ */
 export function nocase<T = string>(d: D, e: Ex): RawBuilder<T> {
-  return pgOf(d) ? sql`(${x(e)})::citext` : sql`${x(e)} COLLATE NOCASE`;
+  return pgOf(d) ? sql`lower(${x(e)}) COLLATE "C"` : sql`${x(e)} COLLATE NOCASE`;
 }
 
 /**
