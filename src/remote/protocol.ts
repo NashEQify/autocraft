@@ -84,6 +84,11 @@ export type Claim = {
    * maintainer's own conversation turn) and their follow-ups, which count toward no slot or Max calls at once.
    */
   ownLane?: boolean;
+  /**
+   * The claim comes from one of the helper's interactive slots (the user's Interactive slots setting): the server offers it only
+   * interactive calls (discord.* prompts), which count toward no slot or Max calls at once. Other claims are offered none.
+   */
+  interactiveLane?: boolean;
   /** A claim from a slot or the fast lane of a helper that also runs an own lane: the calls bound to its user are left to that lane. */
   withOwnLane?: boolean;
   /**
@@ -218,7 +223,7 @@ export type PendingRunnerLogin = {
  * GET and PUT /api/me/settings (session routes): the signed-in user's own settings. `repos`: the repos their helpers take calls
  * from, empty for every repo. A PUT sends any of the fields.
  */
-export type UserSettings = { reserve: Reserve; repos: string[]; /** The most calls the user's helpers run at once, all helpers together; null for no limit. */ maxCalls: number | null };
+export type UserSettings = { reserve: Reserve; repos: string[]; /** Calls the user's helpers may hold on the interactive lane together (0 to 4). */ interactiveSlots: number; /** The most calls the user's helpers run at once, all helpers together; null for no limit. */ maxCalls: number | null };
 /** The settings with `repoChoices`: the tracked repos with the pipeline on where the user has write permission, sorted. */
 export type UserSettingsReply = UserSettings & { repoChoices: string[] };
 
