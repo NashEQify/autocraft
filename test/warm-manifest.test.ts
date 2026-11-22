@@ -2,20 +2,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, linkSync } from "node:fs";
+import { chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { decodeManifest, ManifestError, signLatest, walkTree } from "../src/warm/manifest.ts";
+import { clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, walkTree, type Entry } from "../src/warm/manifest.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
 import { podPhase } from "../src/worker/pod.ts";
 
 /** In-memory WebDAV: PUT needs an existing parent collection (as many servers do), writes need Basic auth. */
-function fakeDav(): Promise<{ server: Server; url: string; files: Map<string, { body: Buffer; modified: number }>; puts: string[] }> {
+function fakeDav(): Promise<{ server: Server; url: string; files: Map<string, { body: Buffer; modified: number }>; puts: string[]; refusedMoves: () => number }> {
   const files = new Map<string, { body: Buffer; modified: number }>();
   const dirs = new Set<string>([""]);
   const puts: string[] = [];
+  let refused = 0;
   const auth = `Basic ${Buffer.from("w:secret").toString("base64")}`;
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
@@ -23,7 +24,7 @@ function fakeDav(): Promise<{ server: Server; url: string; files: Map<string, { 
     const path = decodeURIComponent(new URL(req.url!, "http://x").pathname).replace(/^\/+/, "").replace(/\/+$/, "");
     const parent = path.split("/").slice(0, -1).join("/");
     const send = (code: number, body = "", headers: Record<string, string> = {}) => res.writeHead(code, headers).end(body);
-    if (["PUT", "DELETE", "MKCOL"].includes(req.method!) && req.headers.authorization !== auth) return send(401);
+    if (["PUT", "DELETE", "MKCOL", "MOVE"].includes(req.method!) && req.headers.authorization !== auth) return send(401);
     if (req.method === "GET" || req.method === "HEAD") {
       const f = files.get(path);
       if (!f) return send(404);
@@ -32,9 +33,19 @@ function fakeDav(): Promise<{ server: Server; url: string; files: Map<string, { 
     }
     if (req.method === "PUT") {
       if (!dirs.has(parent)) return send(409);
-      // A second per write, so listings order writes the way a real store's would.
-      files.set(path, { body: Buffer.concat(chunks), modified: Date.now() + puts.length * 1000 });
+      // Uploads take a while, so two publishers of one blob overlap.
+      if (path.includes(".tmp-")) await new Promise((r) => setTimeout(r, 30));
+      files.set(path, { body: Buffer.concat(chunks), modified: Date.now() });
       puts.push(path);
+      return send(201);
+    }
+    if (req.method === "MOVE") {
+      const to = decodeURIComponent(new URL(String(req.headers.destination)).pathname).replace(/^\/+/, "");
+      const f = files.get(path);
+      if (!f) return send(404);
+      if (files.has(to) && req.headers.overwrite === "F") return (refused++, send(412));
+      files.delete(path);
+      files.set(to, { ...f, modified: Date.now() });
       return send(201);
     }
     if (req.method === "MKCOL") {
@@ -54,7 +65,7 @@ function fakeDav(): Promise<{ server: Server; url: string; files: Map<string, { 
     }
     send(405);
   });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, files, puts })));
+  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({ server, url: `http://127.0.0.1:${(server.address() as { port: number }).port}`, files, puts, refusedMoves: () => refused })));
 }
 
 /** Sets an exact nanosecond mtime, which Node's utimes cannot. */
@@ -81,6 +92,17 @@ function makeTree(root: string) {
   touchNs(join(c, "registry/src/index.crates.io-0000/foo-1.0.0/src/lib.rs"), "1700000000000000000");
   touchNs(join(t, "debug/build/b-2/out"), "1763800002999999999");
   return { target: t, cargoHome: c };
+}
+
+/** Trees match: same entries and contents; mtimes exact for whole seconds, else within MTIME_SLACK_NS. */
+function sameTree(got: Entry[], want: Entry[]) {
+  const plain = (es: Entry[]) => es.map((e) => ({ ...e, mtimeNs: 0n }));
+  assert.deepEqual(plain(got), plain(want));
+  for (const [i, w] of want.entries()) {
+    const d = got[i].mtimeNs - w.mtimeNs;
+    if (w.mtimeNs % 1_000_000_000n === 0n) assert.equal(d, 0n, `${w.path} mtime is exact`);
+    else assert.ok(d < MTIME_SLACK_NS && -d < MTIME_SLACK_NS, `${w.path} mtime within slack`);
+  }
 }
 
 test("warm store: publish, restore, delta publish, hard-linked restore, gc and refusals", async (t) => {
@@ -111,7 +133,7 @@ test("warm store: publish, restore, delta publish, hard-linked restore, gc and r
   assert.equal(await podPhase("warm-restore", env({ AUTOCRAFT_WARM_TARGET: r1.target, AUTOCRAFT_WARM_CARGO_HOME: r1.cargoHome })), 0);
   assert.equal(JSON.parse(readFileSync(msg, "utf8")).warm.commit, "a".repeat(40));
   const want = await walkTree(src);
-  assert.deepEqual(await walkTree(r1), want, "restored tree has the same paths, modes, sizes, mtimes and contents");
+  sameTree(await walkTree(r1), want);
   assert.ok(want.some((e) => e.path === "target/debug/a.d" && e.type === "symlink"));
   assert.ok(!want.some((e) => e.path.includes("incremental") || e.path.startsWith("cargo/bin")), "exclusions and the CARGO_HOME subset hold");
 
@@ -130,7 +152,11 @@ test("warm store: publish, restore, delta publish, hard-linked restore, gc and r
   assert.equal(res.stats.fetched, 1);
   assert.equal(res.stats.linked + res.stats.copied + res.stats.fetched, res.stats.files);
   assert.equal(statSync(join(r2.target, "debug/deps/liba-1.rlib")).ino, statSync(join(r1.target, "debug/deps/liba-1.rlib")).ino);
-  assert.deepEqual(await walkTree({ target: r2.target, cargoHome: r2.cargo }), await walkTree(src));
+  sameTree(await walkTree({ target: r2.target, cargoHome: r2.cargo }), await walkTree(src));
+
+  // A stored blob close to gc's age limit is uploaded again, which renews its time.
+  const refresh = await store.publish({ key: "deckcraft", repo: "storytold/deckcraft", commit: "b".repeat(40), image: null, rustc: null, envHash: null, checkout: null, source: src, signKey: privateKey, minBlobAgeMs: 1 });
+  assert.equal(refresh.uploaded, refresh.blobs);
 
   // gc keeps the newest three manifests and drops blobs only the older ones use, once they are old enough.
   for (const [i, c] of ["c", "d", "e"].entries()) {
@@ -139,7 +165,7 @@ test("warm store: publish, restore, delta publish, hard-linked restore, gc and r
   }
   const blobs = () => [...dav.files.keys()].filter((p) => p.includes("/blobs/")).length;
   const before = blobs();
-  const gc = await store.gc({ now: Date.now() + 48 * 3600_000 });
+  const gc = await store.gc({ verifyKeys: [publicKey], now: Date.now() + 48 * 3600_000 });
   assert.equal(gc.manifestsKept, 3);
   assert.equal(gc.manifestsDeleted, 2);
   assert.ok(blobs() < before);
@@ -165,6 +191,52 @@ test("warm store: publish, restore, delta publish, hard-linked restore, gc and r
   const blobPath = `warm/v1/blobs/${(rlib as { sha256: string }).sha256.slice(0, 2)}/${(rlib as { sha256: string }).sha256}.zst`;
   dav.files.get(blobPath)!.body = zstdCompressSync(Buffer.from("RLIB bytes ".repeat(1000)));
   await assert.rejects(store.restore("deckcraft", { target: join(tmp, "r7/target") }, [publicKey]), /sha256/);
+
+  // The restore phase reports it, leaves its roots empty, and a publish told to recheck it repairs it.
+  const r8 = { target: join(tmp, "r8/target"), cargo: join(tmp, "r8/cargo") };
+  assert.equal(await podPhase("warm-restore", env({ AUTOCRAFT_WARM_TARGET: r8.target, AUTOCRAFT_WARM_CARGO_HOME: r8.cargo })), 0);
+  const report = JSON.parse(readFileSync(msg, "utf8"));
+  assert.deepEqual([report.warm, report.badBlobs], [null, [(rlib as { sha256: string }).sha256]]);
+  assert.deepEqual([readdirSync(r8.target), readdirSync(r8.cargo)], [[], []]);
+  const fixed = await store.publish({ key: "deckcraft", repo: "storytold/deckcraft", commit: "e".repeat(40), image: null, rustc: null, envHash: null, checkout: null, source: src, signKey: privateKey, recheck: report.badBlobs });
+  assert.equal(fixed.repaired, 1);
+  assert.ok(await store.restore("deckcraft", { target: join(tmp, "r9/target") }, [publicKey]));
+
+  // A configuration error, such as a verify key that is not Ed25519, fails the phase instead of starting cold.
+  writeFileSync(join(tmp, "ec.pem"), generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ type: "spki", format: "pem" }));
+  assert.equal(await podPhase("warm-restore", env({ AUTOCRAFT_WARM_TARGET: join(tmp, "r10"), AUTOCRAFT_WARM_VERIFY_KEYS: join(tmp, "ec.pem") })), 1);
+});
+
+test("warm store: two publishers of the same blob both succeed and the blob survives", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-race-"));
+  const dav = await fakeDav();
+  t.after(() => {
+    dav.server.close();
+    rmSync(tmp, { recursive: true, force: true });
+  });
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const src = makeTree(join(tmp, "src"));
+  const store = () => new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "secret" } });
+  const pub = (key: string) => store().publish({ key, repo: "storytold/deckcraft", commit: "a".repeat(40), image: null, rustc: null, envHash: null, checkout: null, source: src, signKey: privateKey });
+  const [a, b] = await Promise.all([pub("one"), pub("two")]);
+  assert.ok(a.uploaded > 0 && b.uploaded > 0, "both found the blobs missing");
+  assert.ok(dav.refusedMoves() > 0, "the later move kept the stored blob");
+  assert.ok(![...dav.files.keys()].some((p) => p.includes(".tmp-")), "no temporary upload is left");
+  for (const key of ["one", "two"]) assert.ok(await store().restore(key, { target: join(tmp, key, "target"), cargo: join(tmp, key, "cargo") }, [publicKey]));
+});
+
+test("clearDir empties a tree with read-only directories and files", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-clear-"));
+  try {
+    mkdirSync(join(tmp, "a/b"), { recursive: true });
+    writeFileSync(join(tmp, "a/b/f"), "x", { mode: 0o444 });
+    chmodSync(join(tmp, "a/b"), 0o555);
+    chmodSync(join(tmp, "a"), 0o500);
+    clearDir(tmp);
+    assert.deepEqual(readdirSync(tmp), []);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("warm manifest: path traversal, absolute paths, escaping links and entries under a link are refused", () => {
