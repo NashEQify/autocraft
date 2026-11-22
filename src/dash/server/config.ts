@@ -6,6 +6,7 @@ import { randomToken } from "./crypto.ts";
 import { dbTarget } from "../../db/open.ts";
 import { defaultImageCacheDir } from "./images.ts";
 import { envVar } from "../../env.ts";
+import { dashReplicas } from "./util.ts";
 
 // The GitHub App that AutoCraft registered through the manifest flow. The
 // private key and client secret leave this object only to sign a JWT or to
@@ -155,6 +156,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   } else if (!devAuth) {
     throw new ConfigError("AUTOCRAFT_BASE_URL is not set");
   }
+  try { dashReplicas(env); } catch (e) { throw new ConfigError((e as Error).message); }
   const webDistEnv = envVar("WEB_DIST", env);
   const trustRaw = envVar("TRUST_PROXY", env) || "0";
   if (!/^[0-9]$/.test(trustRaw)) throw new ConfigError("AUTOCRAFT_TRUST_PROXY must be the number of trusted proxies in front of the server, 0 to 9");

@@ -17,7 +17,7 @@ import { excludeHiddenExpr, hiddenRepos, allVisibleRepos, needVisible, repoOwner
 import { withoutHiddenExpr } from "./decisions.ts";
 import { contributors } from "../../whitelist.ts";
 import { doneByRepo, funnelByRepo, latestCteExpr, trackedExpr, trackingStart, trend, type DoneRow, type FunnelRow } from "./stats.ts";
-import { HttpError, RateLimiter } from "../server/util.ts";
+import { HttpError, RateLimiter, share } from "../server/util.ts";
 import { findingsOf, type PremergeRow } from "../../premerge/store.ts";
 import type { Req, Res, Route } from "../types.ts";
 import * as adm from "./admin.ts";
@@ -422,7 +422,7 @@ async function progress(db: Db, hidden: HiddenRepos): Promise<Progress> {
 // ---- routes --------------------------------------------------------------
 
 export function apiRoutes(opts: ApiOptions = {}): Route[] {
-  const limiter = opts.limiter ?? new RateLimiter(opts.writesPerHour ?? 60, 3600_000);
+  const limiter = opts.limiter ?? new RateLimiter(share(opts.writesPerHour ?? 60), 3600_000);
   const vectors = new VectorIndex(opts.embedder ?? localEmbedder({ threads: 2 }));
   const get = (pattern: string, fn: (db: Db, req: Req) => Promise<unknown>): Route => ({ method: "GET", pattern, handler: ok(fn) });
   const post = (pattern: string, fn: (db: Db, req: Req) => Promise<unknown>): Route => ({ method: "POST", pattern, handler: ok(fn) });

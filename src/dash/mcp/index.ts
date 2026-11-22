@@ -22,7 +22,7 @@ import { listHelpers } from "../../remote/helpers.ts";
 import { isTier, TIERS } from "../../remote/mode.ts";
 import { toolContent, type HarnessId, type Tier } from "../../remote/protocol.ts";
 import type { ToolImage } from "../../build/workspace-tools.ts";
-import { HttpError, RateLimiter } from "../server/util.ts";
+import { HttpError, RateLimiter, share } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
@@ -410,8 +410,8 @@ async function getItem(env: McpEnv, raw: unknown): Promise<ToolResult> {
 }
 
 // What an agent can leave behind is bounded per login: the text is capped by the feedback endpoint (4000 characters), the count here.
-const feedbackHour = new RateLimiter(10, 3600_000);
-const feedbackDay = new RateLimiter(50, 24 * 3600_000);
+const feedbackHour = new RateLimiter(share(10), 3600_000);
+const feedbackDay = new RateLimiter(share(50), 24 * 3600_000);
 
 async function sendFeedback(env: McpEnv, raw: unknown): Promise<ToolResult> {
   const a = args(raw, { id: "id", option: "option", text: "text" }, ["id"]);
