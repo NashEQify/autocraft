@@ -12,6 +12,7 @@ import { pairRef, settlePair, type DupePair, type PairVerdict } from "./pair.ts"
 import { pilotExprFor } from "../pilot.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** The two items of a pair, as its call names them. */
 const pairRefs = (p: DupePair): { repo: string; number: number }[] => [{ repo: p.repo, number: p.a.number }, { repo: p.repo, number: p.b.number }];
@@ -20,31 +21,42 @@ const HAIKU = CLAUDE_PROMPTS["dupes.haiku"];
 
 export type PairKey = { repo: string; a: number; b: number; a_hash: string; b_hash: string; similarity: number };
 
-// Unchecked pairs whose items still have the hashed text and of which at least one is open. The join is a materialized CTE
-// with the scope filter applied to its rows: the item hash matches each pair's hash, which Postgres cannot know, so it
-// expects almost no joined rows and, planned together with the scope filter, scanned items once per pair.
-const unchecked = (db: Db) => db.k.with((cte) => cte("live").materialized(), (qb) => qb.selectFrom("duplicate_pairs as p")
-  .innerJoin("items as ia", (j) => j.onRef("ia.repo", "=", "p.repo").onRef("ia.number", "=", "p.a").onRef("ia.embed_hash", "=", "p.a_hash"))
-  .innerJoin("items as ib", (j) => j.onRef("ib.repo", "=", "p.repo").onRef("ib.number", "=", "p.b").onRef("ib.embed_hash", "=", "p.b_hash"))
-  .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
-  .where("p.verdict", "is", null)
-  .where((eb) => eb.or([eb("ia.state", "=", "OPEN"), eb("ib.state", "=", "OPEN")]))
-  .where("p.repo", "in", (eb) => eb.selectFrom("tracked_repos").select("name")))
-  .selectFrom("live as p")
-  .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
-  .where((eb) => eb.or([pilotExprFor(db, eb, "p.repo", "p.a"), pilotExprFor(db, eb, "p.repo", "p.b")]));
+// Unchecked pairs whose items still have the hashed text and of which at least one is open, optionally only the pairs of
+// one repo or of some items ("repo#number"). Each item's state is a scalar subquery keyed on (repo, number, embed_hash):
+// Postgres cannot know that the item hash matches the pair's hash, so as a join it estimated one row and planned the
+// second item as a scan of the repo's items per pair; a scalar subquery is always one index probe per pair and side.
+// The CTE is materialized so the scope filter applies to its rows, not to every pair.
+type PairScope = { repo?: string; refs?: Iterable<string> };
+const unchecked = (db: Db, scope: PairScope = {}) => {
+  const refs = scope.refs ? [...scope.refs].map((r) => { const i = r.lastIndexOf("#"); return [r.slice(0, i), Number(r.slice(i + 1))] as const; }) : null;
+  return db.k.with((cte) => cte("live").materialized(), (qb) => qb.selectFrom("duplicate_pairs as p")
+    .select((eb) => ["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity",
+      eb.selectFrom("items as ia").select("ia.state").whereRef("ia.repo", "=", "p.repo").whereRef("ia.number", "=", "p.a").whereRef("ia.embed_hash", "=", "p.a_hash").as("a_state"),
+      eb.selectFrom("items as ib").select("ib.state").whereRef("ib.repo", "=", "p.repo").whereRef("ib.number", "=", "p.b").whereRef("ib.embed_hash", "=", "p.b_hash").as("b_state")])
+    .where("p.verdict", "is", null)
+    .where("p.repo", "in", (eb) => eb.selectFrom("tracked_repos").select("name"))
+    .$if(!!scope.repo, (q) => q.where("p.repo", "=", scope.repo!))
+    .$if(!!refs, (q) => q.where((eb) => eb.or([kx.tupleIn(db, ["p.repo", "p.a"], refs!, ["text", "bigint"]), kx.tupleIn(db, ["p.repo", "p.b"], refs!, ["text", "bigint"])]))))
+    .selectFrom("live as p")
+    .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
+    .where("p.a_state", "is not", null).where("p.b_state", "is not", null)
+    .where((eb) => eb.or([eb("p.a_state", "=", "OPEN"), eb("p.b_state", "=", "OPEN")]))
+    .where((eb) => eb.or([pilotExprFor(db, eb, "p.repo", "p.a"), pilotExprFor(db, eb, "p.repo", "p.b")]));
+};
 
 /** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. A negative limit means all. */
 export async function uncheckedPairs(db: Db, limit: number): Promise<PairKey[]> {
   return await db.all(unchecked(db).orderBy("p.similarity", "desc").orderBy("p.repo").orderBy("p.a").orderBy("p.b").$if(limit >= 0, (q) => q.limit(limit)));
 }
 
-/** The number of unchecked pairs (uncheckedPairs) each item is in, keyed by `repo#number`. */
-export async function uncheckedPairCounts(db: Db): Promise<Map<string, number>> {
-  const rows = await db.all(db.k.with("u", () => unchecked(db))
+/** The number of unchecked pairs (uncheckedPairs) each item is in, keyed by `repo#number`: of every item, or only of the items in scope. */
+export async function uncheckedPairCounts(db: Db, scope: PairScope = {}): Promise<Map<string, number>> {
+  const rows = await db.all(db.k.with("u", () => unchecked(db, scope))
     .selectFrom((eb) => eb.selectFrom("u").select(["repo", "a as number"]).unionAll(eb.selectFrom("u").select(["repo", "b as number"])).as("m"))
     .select((eb) => ["m.repo", "m.number", eb.fn.countAll<number>().as("n")]).groupBy(["m.repo", "m.number"]));
-  return new Map(rows.map((r) => [`${r.repo}#${r.number}`, r.n]));
+  // A pair in scope through one item also counts its other item, which may have pairs out of scope: only the items in scope get a count.
+  const only = scope.refs ? new Set(scope.refs) : null;
+  return new Map(rows.map((r) => [`${r.repo}#${r.number}`, r.n] as const).filter(([k]) => !only || only.has(k)));
 }
 
 export async function pairInput(db: Db, k: PairKey): Promise<DupePair> {
