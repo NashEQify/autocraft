@@ -38,7 +38,7 @@ test("a retarget makes the review stale like a push, and the re-review against t
   assert.equal((await w.rows("SELECT trigger FROM opus_review_history WHERE number = 1 ORDER BY rowid DESC LIMIT 1"))[0]!.trigger, "base");
 });
 
-test("a Merge answer carried across a clean base merge ends when the review there asks for fixes", async () => {
+test("a Merge answer carried across a clean base merge runs the review's fix-up and goes on at its new head", async () => {
   const w = (current = await (await (await (await (await world()).repo()).pr(30)).review(30, { verdict: "take" })).answer(30, "merge"));
   await w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number: 30, from_head: "sha30", to_head: "sha30m", state: "merged", attempt: 1, created_at: T0, own_diff: "same" }));
   await w.synced(30, "sha30m");
@@ -47,13 +47,13 @@ test("a Merge answer carried across a clean base merge ends when the review ther
 
   await w.review(30, { head: "sha30m", verdict: "take-fix" });
   for (let i = 0; i < 3; i++) await advancePreapprovals(w.db);
-  assert.equal((await preapprovalOf(w.db, "app", 30))?.state, "asked");
-  assert.deepEqual(await answerOf(w, 30, "sha30m"), [{ answer: null }]);
+  // The Merge answer is a merge approval: the review's fixes are the pipeline's fix-up to make, and no question is asked.
+  assert.equal((await preapprovalOf(w.db, "app", 30))?.state, "review");
+  assert.deepEqual(await answerOf(w, 30, "sha30m"), []);
 
-  // The review's fix-up pushes model-written code: nothing answers Merge there in the operator's name.
+  // The fix-up's push is the row's own; its new head is reviewed again and goes on to CI on a take.
   await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 30, from_head: "sha30m", to_head: "sha30f", state: "pushed", attempt: 1, created_at: T0 }));
   await (await w.synced(30, "sha30f")).review(30, { head: "sha30f" });
   for (let i = 0; i < 3; i++) await advancePreapprovals(w.db);
-  assert.equal((await w.rows("SELECT 1 FROM preapprovals WHERE number = 30 AND state NOT IN ('asked', 'cancelled')")).length, 0);
-  assert.deepEqual(await answerOf(w, 30, "sha30f"), []);
+  assert.equal((await preapprovalOf(w.db, "app", 30))?.state, "ci");
 });
