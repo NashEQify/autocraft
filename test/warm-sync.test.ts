@@ -243,7 +243,7 @@ test("warm sync: a new version that fits the cap only after a grace version expi
   await publish("a".repeat(40), "x".repeat(1000));
   await agent.cycle();
   const one = agent.status().keys.deckcraft!.bytes;
-  assign = { keys: ["deckcraft"], maxBytes: one * 2 + 10 };
+  assign = { keys: ["deckcraft"], maxBytes: Math.floor(one * 1.5) };
   await publish("b".repeat(40), "y".repeat(1000));
   await agent.cycle();
   assert.equal(cur(), b);
@@ -261,4 +261,37 @@ test("warm sync: a new version that fits the cap only after a grace version expi
   assert.equal(cur(), c);
   assert.ok(!existsSync(join(dir, "deckcraft", a)));
   assert.equal(agent.status().pending.deckcraft, undefined);
+
+  // The stored manifest is the fetched bytes, so its sha256 is the one latest.json names.
+  const stored1 = readFileSync(join(dir, "deckcraft", c, "manifest.zst"));
+  assert.equal(createHash("sha256").update(stored1).digest("hex"), JSON.parse(readFileSync(join(dir, "deckcraft", c, "latest.json"), "utf8")).sha256);
+});
+
+test("warm sync: a key bigger than half the cap updates when nothing is in grace", async (t) => {
+  const root = join(SCRATCH, "warm-sync-big-key");
+  const dav = await fakeDav();
+  t.after(dav.close);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const store = new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "p" } });
+  const src = { target: join(root, "src", "target"), cargoHome: join(root, "src", "cargo") };
+  mkdirSync(join(src.target, "debug"), { recursive: true });
+  mkdirSync(src.cargoHome, { recursive: true });
+  let stored = Date.now();
+  const publish = async (commit: string, body: string) => {
+    writeFileSync(join(src.target, "debug", "app"), body);
+    await store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: (stored += 1000) });
+  };
+  let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
+  const dir = join(root, "node");
+  const agent = new SyncAgent({
+    dir, node: "n1", namespace: "ns", kube: null, store, log: () => {}, verifyKeys: () => [publicKey], assign: () => assign,
+    writeBytesPerSec: 0, graceMs: 3600_000, now: () => Date.now(), diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
+  });
+  await publish("a".repeat(40), "x".repeat(1000));
+  await agent.cycle();
+  const one = agent.status().keys.deckcraft!.bytes;
+  assign = { keys: ["deckcraft"], maxBytes: Math.floor(one * 1.5) };
+  await publish("b".repeat(40), "y".repeat(1000));
+  await agent.cycle();
+  assert.equal(readlinkSync(join(dir, "deckcraft", "current")), `gen-${"b".repeat(12)}`);
 });
