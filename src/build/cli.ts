@@ -10,12 +10,12 @@ import { trackedNames } from "../repos.ts";
 import { warmLineText } from "./warm-status.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
-import { clearBuildSize, gib, listBuildSizes, setBuildSize } from "./sizing.ts";
+import { clearBuildSize, gib, listBuildSizes, setBuildSize, setWarmTarget } from "./sizing.ts";
 import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { setWarmMinInterval, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
+import { changeWarmRepos, setWarmMinInterval, WARM_REPOS_KEY, warmRepos, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
@@ -34,12 +34,13 @@ const USAGE = `usage: autocraft-server envs list
            --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
            --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
+       autocraft-server envs warm-repos [add|remove <owner/name>]   (repos the warm producer builds; none by default)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
-       autocraft-server tasks sizes list | set <repo> --memory Q [--limit Q] | clear <repo>   (step pod memory per repo)
+       autocraft-server tasks sizes list | set <repo> [--memory Q [--limit Q]] [--warm-target tmpfs|pvc|none] | clear <repo>   (step pod memory and warm target per repo)
        autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA [--build]
        autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
        autocraft-server workspace list [--all]
@@ -210,6 +211,10 @@ async function envs(args: string[]): Promise<void> {
     const e = await run(async () => await updateEnv(db, pos[0], input, "cli"));
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
     if (e.settings) console.log(settingsLine(e.settings));
+  } else if (sub === "warm-repos") {
+    if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && rest[0] !== "add" && rest[0] !== "remove")) die(USAGE);
+    if (rest.length === 2) await run(async () => await changeWarmRepos(db, rest[0] as "add" | "remove", rest[1]!, "cli"));
+    console.log(`${WARM_REPOS_KEY} ${(await warmRepos(db)).join(", ") || "(none)"}`);
   } else if (sub === "warm-interval") {
     if (rest.length > 1) die(USAGE);
     if (rest[0] !== undefined) await run(async () => await setWarmMinInterval(db, rest[0]!, "cli"));
@@ -242,12 +247,19 @@ async function sizes(db: Db, args: string[]): Promise<void> {
   if (sub === "list") {
     const rows = await listBuildSizes(db);
     if (!rows.length) console.log("no repo has its own size: step pods get their environment's memory");
-    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
+    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} warm ${r.warmTarget.padEnd(6)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
   } else if (sub === "set") {
     const memory = bytes("memory");
-    if (!pos[0] || memory === null) die(USAGE);
-    const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
-    console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
+    const warm = opt.get("warm-target");
+    if (!pos[0] || (memory === null && warm === undefined)) die(USAGE);
+    if (memory !== null) {
+      const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
+      console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
+    }
+    if (warm !== undefined) {
+      await run(async () => await setWarmTarget(db, pos[0]!, warm, "cli"));
+      console.log(`${safe(pos[0]!)}: warm target ${safe(warm)}`);
+    }
   } else if (sub === "clear") {
     if (!pos[0]) die(USAGE);
     console.log(await clearBuildSize(db, pos[0], "cli") ? `${safe(pos[0])}: step pods get their environment's memory` : `${safe(pos[0])} had no size of its own`);

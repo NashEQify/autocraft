@@ -193,7 +193,11 @@ export type StoreConfig = {
 export type PublishInput = {
   key: string; repo: string; commit: string;
   image: string | null; rustc: string | null; envHash: string | null; checkout: string | null;
-  source: WalkSource; exclude?: string[]; signKey: KeyObject; stored?: number; log?: (s: string) => void;
+  /** sha256 of the built checkout's Cargo.lock: consumers that need the same lock compare it. */
+  cargoLock?: string | null;
+  /** The target holds only units the build at `commit` read (ManifestHeader.trimmed). */
+  trimmed?: boolean;
+  source: WalkSource; exclude?: string[]; omit?: ReadonlySet<string>; signKey: KeyObject; stored?: number; log?: (s: string) => void;
   /**
    * Blobs a restore found bad (its badBlobs): each is fetched and hashed, and re-uploaded from this tree when wrong,
    * or deleted when this tree does not hold it.
@@ -247,12 +251,17 @@ export class WarmStore {
 
   /** The manifest latest.json names, checked against its sha256, key and commit. */
   async manifest(l: Latest, dav: WebDav = this.read): Promise<Manifest> {
+    return (await this.manifestWithBytes(l, dav)).manifest;
+  }
+
+  /** Like `manifest`, with the verified bytes as stored, for copies that must keep the sha256 latest.json names. */
+  async manifestWithBytes(l: Latest, dav: WebDav = this.read): Promise<{ manifest: Manifest; raw: Buffer }> {
     const buf = await dav.get(WarmStore.manifestPath(l.key, l.commit), l.size, true);
     if (!buf) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} is missing`);
     if (buf.length !== l.size || createHash("sha256").update(buf).digest("hex") !== l.sha256) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} does not match latest.json`);
     const m = decodeManifest(buf);
     if (m.header.key !== l.key || m.header.commit !== l.commit || m.header.bytes !== l.bytes) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} is for another version`);
-    return m;
+    return { manifest: m, raw: buf };
   }
 
   blobs(dav: WebDav = this.read): BlobSource {
@@ -274,8 +283,8 @@ export class WarmStore {
   /** Walks the tree, uploads the blobs the store lacks, then the manifest, then the signed latest.json. */
   async publish(p: PublishInput): Promise<PublishStats> {
     const dav = this.rw();
-    const entries = await walkTree(p.source, { exclude: p.exclude, concurrency: this.concurrency, log: p.log });
-    const header = makeHeader({ key: checkKey(p.key), repo: p.repo, commit: p.commit, stored: p.stored ?? Date.now(), image: p.image, rustc: p.rustc, envHash: p.envHash, checkout: p.checkout, targetDir: p.source.target, cargoHome: p.source.cargoHome }, entries);
+    const entries = await walkTree(p.source, { exclude: p.exclude, omit: p.omit, concurrency: this.concurrency, log: p.log });
+    const header = makeHeader({ key: checkKey(p.key), repo: p.repo, commit: p.commit, stored: p.stored ?? Date.now(), image: p.image, rustc: p.rustc, envHash: p.envHash, checkout: p.checkout, cargoLock: p.cargoLock ?? null, trimmed: p.trimmed === true, targetDir: p.source.target, cargoHome: p.source.cargoHome }, entries);
     const manifest = encodeManifest({ header, entries });
     const firstPath = new Map<string, string>();
     const abs = (path: string) => (path.startsWith("target/") ? `${p.source.target}/${path.slice(7)}` : `${p.source.cargoHome}/${path.slice(6)}`);

@@ -7,9 +7,12 @@
 //   disk    (first in every step pod) fails the pod when the task's volume holds more than the environment's size,
 //           which a local-path volume does not enforce itself
 //   warm-restore  fills empty target / CARGO_HOME dirs from the warm store's newest signed version; a store or content
-//                 failure is a cold start (logged, dirs emptied again, bad blob in `badBlobs`, exit 0)
-//   warm-publish  publishes the target and CARGO_HOME dirs as a new version of the key
+//                 failure is a cold start (logged, dirs emptied again, bad blob in `badBlobs`, exit 0); then records the
+//                 build's start for the publish's trim
+//   warm-publish  publishes the target, less the units the build did not use (src/warm/trim.ts), and CARGO_HOME dirs
+//                 as a new version of the key
 //   warm-gc       deletes old manifests and unreferenced blobs from the warm store
+//   warm-copy     fills a build pod's target from its node's warm version (src/worker/warm-copy.ts)
 // Warm phases read AUTOCRAFT_WARM_* (warmOptions below). The store layout is in src/warm/store-client.ts.
 import type { KeyObject } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -17,6 +20,7 @@ import { isAbsolute, join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
 import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, type Roots } from "../warm/manifest.ts";
 import { WarmStore } from "../warm/store-client.ts";
+import { markBuildStart, readBuildStart, trimTarget } from "../warm/trim.ts";
 import { checkServiceUrl } from "./config.ts";
 import { WorkerApi } from "./client.ts";
 import { gateInputs } from "./environment.ts";
@@ -24,17 +28,20 @@ import { collectArtifacts, contentTypeOf } from "./executor.ts";
 import { resolveGate } from "./gate.ts";
 import { applyPatch } from "./patch.ts";
 import { downloadAndExtract } from "./tarball.ts";
+import { cargoLockOf, warmCopyPhase, writeChanged } from "./warm-copy.ts";
 
 const MAX_SOURCE_BYTES = 300 * 1024 * 1024;
 /** Kubernetes keeps at most 4096 bytes of a termination message. */
 const MESSAGE_MAX = 4096;
 
-type PodEnv = { work: string; message: string; key?: string; url?: string; ran: number; fetchImpl?: typeof fetch; log: (s: string) => void };
+type PodEnv = { work: string; message: string; key?: string; url?: string; ran: number; fetchImpl?: typeof fetch; log: (s: string) => void;
+  /** The warm commit the task's node holds: the source pod lists the files that changed since (src/worker/warm-copy.ts). */
+  warmCommit?: string };
 
 function podEnv(env: NodeJS.ProcessEnv = process.env): PodEnv {
   return {
     work: env.AUTOCRAFT_POD_WORK || "/work", message: env.AUTOCRAFT_POD_MESSAGE || "/dev/termination-log",
-    key: env.AUTOCRAFT_POD_KEY, url: env.AUTOCRAFT_WORKER_URL, ran: Number(env.AUTOCRAFT_POD_RAN ?? 0),
+    key: env.AUTOCRAFT_POD_KEY, url: env.AUTOCRAFT_WORKER_URL, ran: Number(env.AUTOCRAFT_POD_RAN ?? 0), warmCommit: env.AUTOCRAFT_POD_WARM_COMMIT || undefined,
     log: (s) => process.stdout.write(s.endsWith("\n") ? s : `${s}\n`),
   };
 }
@@ -85,7 +92,7 @@ async function sourcePhase(e: PodEnv): Promise<number> {
     e.log(err ?? "patch applied");
     if (err) return fail(err);
   }
-  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null, cacheVersion: null as string | null, warmCommand: null as string | null };
+  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null, cacheVersion: null as string | null, warmCommand: null as string | null, cargoLock: cargoLockOf(src) };
   try {
     const gate = t.baseSha ? await resolveGate(t.repo, t.baseSha, e.fetchImpl) : null;
     if (!t.baseSha || !gate) e.log(`${t.baseSha ? "no CI gate for this repo at the base commit" : "no base commit for this task"}; the steps run in the toolchain image as it is`);
@@ -98,6 +105,7 @@ async function sourcePhase(e: PodEnv): Promise<number> {
   } catch (err) {
     return fail(`environment failed: ${(err as Error).message}`);
   }
+  if (e.warmCommit) await writeChanged(e.work, t.repo, e.warmCommit, e.log);
   report(e, out);
   return 0;
 }
@@ -220,7 +228,22 @@ function warmOptions(env: NodeJS.ProcessEnv, e: PodEnv) {
   };
 }
 
+/** Restores the target, then records the build's start for the publish's trim (src/warm/trim.ts). */
 async function warmRestorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> {
+  const rc = await restorePhase(e, env);
+  const w = warmOptions(env, e);
+  const target = w.roots().target, file = w.v("STAMP_FILE");
+  if (rc === 0 && target && file) {
+    try {
+      if (!markBuildStart(target, file).atime) e.log("warm restore: reads do not update atimes on the target's file system; the publish trims nothing");
+    } catch (err) {
+      e.log(`warm restore: could not record the build start (${(err as Error).message}); the publish trims nothing`);
+    }
+  }
+  return rc;
+}
+
+async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> {
   const w = warmOptions(env, e);
   const key = w.key();
   const roots = w.roots();
@@ -280,12 +303,21 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   const rustcFile = w.v("RUSTC_FILE");
   const rustc = rustcFile && existsSync(rustcFile) ? readFileSync(rustcFile, "utf8").trim().slice(0, 4096) : null;
   if (!rustc) e.log("warm publish: no rustc -vV output; the manifest records none");
+  // Before the walk, which reads every file and so moves the atimes the trim reads.
+  const start = readBuildStart(w.v("STAMP_FILE"));
+  const trim = start?.atime ? trimTarget(roots.target, start) : null;
+  if (!trim) e.log(`warm publish: ${start ? "reads do not update atimes on the target's file system" : "no build start recorded"}; nothing trimmed, and consumers count every source as changed`);
+  else if (trim.unattributed) e.log(`warm publish: ${trim.unattributed} kept units were read at an unknown time; consumers count every source as changed`);
   const s = await w.store(true).publish({
     key: w.key(), repo: w.v("REPO") ?? task!.repo, commit: w.v("COMMIT") ?? task!.headSha,
-    image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null,
-    source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), signKey: w.signKey(), log: e.log,
+    image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null, cargoLock: cargoLockOf(join(e.work, "src")), trimmed: !!trim && trim.unattributed === 0,
+    source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), omit: new Set(trim?.paths.map((p) => `target/${p}`)), signKey: w.signKey(), log: e.log,
     recheck: [...new Set([...w.list("RECHECK"), ...badBlobsOf(w.v("BAD_BLOBS_FILE"))])].filter((x) => /^[0-9a-f]{64}$/.test(x)), minBlobAgeMs: w.count("GC_MIN_AGE_HOURS", 24) * 3600_000,
   });
+  if (trim) {
+    const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
+    e.log(`warm trim: ${trim.units} stale units left out, ${gb(s.bytes + trim.bytes)} GB -> ${gb(s.bytes)} GB`);
+  }
   writeFileSync(e.message, JSON.stringify({ ok: true, commit: s.latest.commit, files: s.files, bytes: s.bytes, blobs: s.blobs, uploaded: s.uploaded, uploadedBytes: s.uploadedBytes, repaired: s.repaired }));
   return 0;
 }
@@ -306,10 +338,11 @@ export async function podPhase(phase: string | undefined, env: NodeJS.ProcessEnv
     if (phase === "warm-restore") return await warmRestorePhase(e, env);
     if (phase === "warm-publish") return await warmPublishPhase(e, env);
     if (phase === "warm-gc") return await warmGcPhase(e, env);
+    if (phase === "warm-copy") return await warmCopyPhase(e.work, env, e.log);
   } catch (err) {
     e.log(`${phase} failed: ${(err as Error).message}`);
     return 1;
   }
-  e.log("usage: autocraft-server worker pod task|source|upload|disk|warm-restore|warm-publish|warm-gc");
+  e.log("usage: autocraft-server worker pod task|source|upload|disk|warm-restore|warm-publish|warm-gc|warm-copy");
   return 2;
 }

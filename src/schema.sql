@@ -1096,7 +1096,8 @@ CREATE TABLE IF NOT EXISTS build_sizes (
   memory_request_bytes INTEGER NOT NULL,
   memory_limit_bytes INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
-  reason TEXT NOT NULL                -- what set it: an operator, or an OOM-killed step
+  reason TEXT NOT NULL,               -- what set it: an operator, or an OOM-killed step
+  warm_target TEXT NOT NULL DEFAULT 'none'  -- tmpfs | pvc | none: where its build pods put a warm target (src/build/warm-mount.ts)
 );
 
 -- A workspace: one session's pod and volume in a kubernetes environment (src/build/workspace-launch.ts). The row

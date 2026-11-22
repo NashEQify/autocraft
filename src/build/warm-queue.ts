@@ -25,6 +25,30 @@ export const WARM_GC_EVERY_MS = 24 * 3600_000;
 export const WARM_PRIORITY = -10;
 const TOOLCHAINS = ["rust-stable"];
 
+export const WARM_REPOS_KEY = "warm_repos";
+
+/** The repos the warm producer builds, sorted; empty means none. Stored as a JSON array. */
+export async function warmRepos(db: Db): Promise<string[]> {
+  try {
+    const v = JSON.parse((await setting(db, WARM_REPOS_KEY)) ?? "[]");
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").sort() : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Adds or removes `repo` (owner/name) in the allowlist; returns the list after the change. */
+export async function changeWarmRepos(db: Db, action: "add" | "remove", repo: string, by: string): Promise<string[]> {
+  if (!/^[\w.-]+(\/[\w.-]+)?$/.test(repo)) throw new BuildError(400, "a repo is written as it is tracked, e.g. owner/name");
+  const was = await warmRepos(db);
+  const now = (action === "add" ? [...new Set([...was, repo])] : was.filter((r) => r !== repo)).sort();
+  if (now.join() !== was.join()) {
+    await writeSetting(db, WARM_REPOS_KEY, JSON.stringify(now));
+    await audit(db, by, "warm-repos", "builds", { action, repo });
+  }
+  return now;
+}
+
 export async function warmMinInterval(db: Db): Promise<number> {
   const v = await setting(db, WARM_INTERVAL_KEY);
   const n = Number(v);
@@ -90,12 +114,13 @@ async function writers(db: Db): Promise<KubeSettings[]> {
     .map((r) => settingsOf(r.settings)).filter((s) => s.warmWriter);
 }
 
-/** Queues the warm builds the repos in the pipeline scope need; returns how many. Nothing without an enabled warm writer. */
+/** Queues the warm builds the repos in both the pipeline scope and the warm_repos allowlist need; returns how many. Nothing without an enabled warm writer. */
 export async function warmPass(db: Db): Promise<number> {
   const w = (await writers(db))[0];
   if (!w) return 0;
   let n = 0;
-  for (const repo of [...await baseScopeRepos(db)].sort()) if (await queueWarm(db, repo, w) !== null) n++;
+  const allowed = new Set(await warmRepos(db));
+  for (const repo of [...await baseScopeRepos(db)].filter((r) => allowed.has(r)).sort()) if (await queueWarm(db, repo, w) !== null) n++;
   return n;
 }
 

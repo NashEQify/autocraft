@@ -19,12 +19,13 @@ import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
 import { computeCapacity, feedbackCapacity, overQuota, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
 import { classifyPodEnd, disruptionPolicy, MAX_DISRUPTIONS, pendingKind } from "./disruption.ts";
 import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQuota, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
-import { gib, raiseAfterOom, repoMemory } from "./sizing.ts";
+import { gib, raiseAfterOom, repoMemory, repoWarmTarget } from "./sizing.ts";
+import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { WarmStatus } from "./warm-status.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
-  PULL_REASONS, pvcSpec, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
-  WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod,
+  ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
+  WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
 } from "./pods.ts";
 import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
@@ -43,6 +44,8 @@ const CREATE_BACKOFF_MS = 60_000;
 const APP_POD_SEC = 30 * 60;
 /** What a warm producer's pod adds to its deadline: the restore, the publish and the store's gc. */
 const WARM_PHASES_SEC = 30 * 60;
+/** What a build pod that starts warm adds to its deadline: the copy from its node. */
+const WARM_COPY_SEC = 15 * 60;
 /** A stage's pod the quota had no room for is created again after this long (an external wait, until the task's deadline). */
 const QUOTA_RETRY_MS = 60_000;
 /** A first pod no node had room for is placed again at most this often; after that it is lost as before. */
@@ -288,14 +291,20 @@ const cpuText = (m: number): string => String(Math.round(m / 100) / 10);
 /** A pod create the namespace's ResourceQuota refused: a wait for capacity, not a failure. */
 const quotaRefused = (e: unknown): boolean => e instanceof KubeError && e.status === 403 && /exceeded quota/i.test(e.message);
 
-/** The repository's step memory and what one of its runs reserves on its node (pods.ts taskRequest). */
+/**
+ * The repository's step memory and what one of its runs reserves on its node (pods.ts taskRequest), with an in-memory warm
+ * target: a producer's, or a consumer's sized from the key's last published version (decideWarm checks the node's version
+ * against what was reserved).
+ */
 async function requestOf(c: EnvCtx, repo: string, step: string): Promise<{ res: Res; memory: StepMemory }> {
   const { db } = c.d;
   const memory = await repoMemory(db, repo, c.s);
   const key = warmKeyOf(repo);
-  const warm: WarmPod | undefined = step === WARM_STEP && c.s.warmWriter ? { key, gc: false, bytes: await warmBytes(db, key) } : undefined;
-  const lim = taskLimits(c.s, memory, warm);
-  return { res: { ...toRes(taskRequest(c.s, memory, warm)), limCpu: lim.cpuM, limMem: lim.memBytes, ephReq: lim.ephRequest, ephLim: lim.ephLimit }, memory };
+  let extra = 0;
+  if (step === WARM_STEP && c.s.warmWriter) extra = warmMemory({ key, gc: false, bytes: await warmBytes(db, key) }) ?? 0;
+  else if (step !== WARM_STEP && !c.s.warmWriter && await repoWarmTarget(db, repo) === "tmpfs") extra = warmCopyMemory(await warmBytes(db, key)) ?? 0;
+  const lim = taskLimits(c.s, memory, extra);
+  return { res: { ...toRes(taskRequest(c.s, memory, extra)), limCpu: lim.cpuM, limMem: lim.memBytes, ephReq: lim.ephRequest, ephLim: lim.ephLimit }, memory };
 }
 
 /** This pass's capacity view for the env (see CapView); the reads happen on the first call that needs them. */
@@ -368,6 +377,15 @@ async function otherEnvMayRun(c: EnvCtx, requires: Requires, by: "nodes" | "quot
 
 /** The nodes whose warm status holds the task's warm key, tried first so its build starts warm. */
 const warmNodes = (c: EnvCtx, t: TaskRow): string[] => c.state.warm?.warmNodesFor(t.warm_key ?? warmKeyOf(t.repo)).map((n) => n.node) ?? [];
+
+/** The warm version of the repository's key that `node`'s fresh status lists, or null. */
+const nodeWarm = (c: EnvCtx, repo: string, node: string | null) =>
+  (node && c.state.warm?.warmNodesFor(warmKeyOf(repo)).find((n) => n.node === node)) || null;
+
+/** Whether a task of this environment may start warm at all: not a warm producer's, and its repository has a warm target. */
+async function warmTargetOf(c: EnvCtx, t: TaskRow) {
+  return t.step === WARM_STEP || c.s.warmWriter ? "none" as const : await repoWarmTarget(c.d.db, t.repo);
+}
 
 /**
  * Places a run under cluster capacity: picks its node (warm nodes first, then the most free room now; with `avoid`, any
@@ -630,13 +648,14 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
     const results = json<TaskResult[]>(run.results, []);
     let failed: string | null = null;
     let ran = run.ran;
-    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"], [WARM_RESTORE_CONTAINER, "the warm restore failed"]] as const) {
+    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"], [WARM_RESTORE_CONTAINER, "the warm restore failed"], [WARM_COPY_CONTAINER, "the warm copy failed"]] as const) {
       const term = statusOf(pod, name)?.state?.terminated;
       if (!term || failed) continue;
-      // The restore's output says which version the build starts from, or why it starts cold.
-      if (name === WARM_RESTORE_CONTAINER) await podLog(c, run, name, "warm restore");
+      // The restore's and the copy's output say which version the build starts from, or why it starts cold.
+      const warmLog = name === WARM_RESTORE_CONTAINER ? "warm restore" : name === WARM_COPY_CONTAINER ? "warm copy" : null;
+      if (warmLog) await podLog(c, run, name, warmLog);
       if (term.exitCode !== 0) {
-        if (name !== WARM_RESTORE_CONTAINER) await podLog(c, run, name, "environment");
+        if (!warmLog) await podLog(c, run, name, "environment");
         failed = (name === WARM_RESTORE_CONTAINER ? reported(term.message) : clean(term.message)) || fallback;
       }
     }
@@ -732,7 +751,11 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     const key = newPodKey(run.task_id);
     await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(key) }).where("task_id", "=", run.task_id));
     spec = (ctx) => taskPod(ctx, c.image!, key);
-  } else if (stage === STAGE_SOURCE) spec = (ctx) => sourcePod(ctx, c.image!);
+  } else if (stage === STAGE_SOURCE) {
+    // The source pod lists what changed since the version the node holds now; a later version means touching every file.
+    const commit = (await warmTargetOf(c, t)) !== "none" ? nodeWarm(c, t.repo, run.node)?.commit ?? null : null;
+    spec = (ctx) => sourcePod(ctx, c.image!, commit);
+  }
   else if (stage >= FIRST_GROUP && stage < FIRST_GROUP + groups.length) {
     const index = stage - FIRST_GROUP;
     const g = groups[index]!;
@@ -747,10 +770,24 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
       gcTaken = await takeGc(db, c.now());
       warm = { key, gc: gcTaken, bytes: await warmBytes(db, key), recheck: c.d.warmRecheck ? await c.d.warmRecheck(key).catch(() => []) : c.state.warm?.badBlobsFor(key) ?? [] };
     }
-    // The steps' limits, a minute each to copy the source, and two minutes to start the pod and measure its volume.
-    deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120) + (warm ? WARM_PHASES_SEC : 0);
     memory = await repoMemory(db, t.repo, c.s);
-    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0, t.repo, warm);
+    let use: WarmUse | undefined;
+    const target = g.network === "none" && !warm ? await warmTargetOf(c, t) : "none";
+    if (target !== "none") {
+      const step = stepMemory(c.s, memory);
+      const view = target === "tmpfs" && c.cluster ? await capacityView(c) : null;
+      const d = decideWarm({
+        target, key: warmKeyOf(t.repo), node: run.node, status: nodeWarm(c, t.repo, run.node), image: kept.image, envHash: warmEnvHash(kept),
+        checkout: ciCheckout(t.repo), cargoLock: kept.cargoLock ?? null, memoryLimitBytes: quantity(step.limit),
+        memoryRoomBytes: run.reserved_mem_bytes === null ? null : Math.max(0, run.reserved_mem_bytes - quantity(step.request)),
+        nodeMaxBytes: view && !("error" in view) ? view.nodeMaxMem : null,
+      });
+      use = d.use ?? undefined;
+      await appendLog(db, c.env.id, run.task_id, "warm copy", d.use ? `starts warm from ${d.use.key}@${d.use.commit.slice(0, 12)} (${d.use.target})\n` : `starts cold: ${d.why}\n`);
+    }
+    // The steps' limits, a minute each to copy the source, and two minutes to start the pod and measure its volume.
+    deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120) + (warm ? WARM_PHASES_SEC : 0) + (use ? WARM_COPY_SEC : 0);
+    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0, t.repo, warm, use);
   } else if (stage === uploadStage(plan)) {
     const key = newPodKey(run.task_id);
     await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(key) }).where("task_id", "=", run.task_id));

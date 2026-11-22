@@ -1,24 +1,29 @@
 // Memory of build step pods per repository (table build_sizes). A repository without a row gets its environment's
 // memoryRequest and memoryLimit. A step the kernel OOM-killed raises its repository's request and limit (raiseAfterOom),
-// up to the environment's maxPodMemory; an operator sets or clears a size with `tasks sizes`.
+// up to the environment's maxPodMemory; an operator sets or clears a size with `tasks sizes`. A row also says where the
+// repository's build pods put a warm target from their node (warm_target, src/build/warm-mount.ts); a repository without a
+// row starts cold.
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
 import { excluded } from "../db/kx.ts";
 import { BuildError } from "./envs.ts";
 import { quantity, type KubeSettings, type StepMemory } from "./pods.ts";
+import { WARM_TARGETS, type WarmTarget } from "./warm-mount.ts";
 
 /** An OOM kill raises the request and the limit by this factor. */
 export const OOM_RAISE = 1.5;
 const MiB = 1024 ** 2;
 const REPO_RE = /^[A-Za-z0-9._-]{1,100}$/;
 
-export type BuildSize = StepMemory & { repo: string; updatedAt: string; reason: string };
+export type BuildSize = StepMemory & { repo: string; updatedAt: string; reason: string; warmTarget: WarmTarget };
+
+const warmTargetOf = (v: string | null | undefined): WarmTarget => (WARM_TARGETS as readonly string[]).includes(v ?? "") ? v as WarmTarget : "none";
 
 const roundUp = (bytes: number): number => Math.ceil(bytes / MiB) * MiB;
 
 export async function listBuildSizes(db: Db): Promise<BuildSize[]> {
   const rows = await db.all(db.k.selectFrom("build_sizes").selectAll().orderBy("repo"));
-  return rows.map((r) => ({ repo: r.repo, requestBytes: Number(r.memory_request_bytes), limitBytes: Number(r.memory_limit_bytes), updatedAt: r.updated_at, reason: r.reason }));
+  return rows.map((r) => ({ repo: r.repo, requestBytes: Number(r.memory_request_bytes), limitBytes: Number(r.memory_limit_bytes), updatedAt: r.updated_at, reason: r.reason, warmTarget: warmTargetOf(r.warm_target) }));
 }
 
 /** The repository's step memory: its own size, or the environment's when it has none. Pods cap it at maxPodMemory (pods.ts stepMemory). */
@@ -27,6 +32,20 @@ export async function repoMemory(db: Db, repo: string, s: KubeSettings): Promise
   return r
     ? { requestBytes: Number(r.memory_request_bytes), limitBytes: Number(r.memory_limit_bytes) }
     : { requestBytes: quantity(s.memoryRequest), limitBytes: quantity(s.memoryLimit) };
+}
+
+/** Where the repository's build pods put a warm target: `none` without a row. */
+export async function repoWarmTarget(db: Db, repo: string): Promise<WarmTarget> {
+  const r = await db.get(db.k.selectFrom("build_sizes").select("warm_target").where("repo", "=", repo));
+  return warmTargetOf(r?.warm_target);
+}
+
+/** Sets the warm target of a repository that has a size; with none, set its memory first (the row holds both). */
+export async function setWarmTarget(db: Db, repo: string, target: string, by: string): Promise<void> {
+  if (!(WARM_TARGETS as readonly string[]).includes(target)) throw new BuildError(400, `the warm target must be one of ${WARM_TARGETS.join(", ")}`);
+  const r = await db.run(db.k.updateTable("build_sizes").set({ warm_target: target, updated_at: new Date().toISOString() }).where("repo", "=", repo));
+  if (!r.changes) throw new BuildError(400, "the repo has no size of its own: give --memory with --warm-target");
+  await audit(db, by, "build-warm-target-set", `repo:${repo}`, { warmTarget: target });
 }
 
 async function write(db: Db, repo: string, m: StepMemory, reason: string): Promise<void> {

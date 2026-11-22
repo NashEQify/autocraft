@@ -1,6 +1,7 @@
 // The warm-sync agent. One runs on every node (a DaemonSet) and keeps the newest signed version of each assigned warm
 // key in a node directory that build and workspace pods mount read-only:
 //   <dir>/<key>/gen-<sha12>/{target,cargo,meta.json,manifest.zst}   one version of the key
+//   <dir>/<key>/gen-<sha12>/latest.json                            its signed record, which consumers verify
 //   <dir>/<key>/current -> gen-<sha12>                             the version consumers start from
 // A new version is built as `gen-<sha12>.tmp` with the current one as `previous`, so files that did not change are hard
 // links and only the rest is downloaded (writes paced to a byte rate). The finished dir is renamed into place and
@@ -16,7 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, BadBlobError, clearDir, decodeManifest, encodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -43,6 +44,8 @@ export type NodeStatus = {
   /** ms since the epoch, by the node's clock. */
   updated: number;
   fs: { sizeBytes: number; usedBytes: number; usedPct: number };
+  /** Warm bytes on the node: current versions, and retired versions still in their grace period. Both count against the node cap. */
+  warmBytes: { current: number; grace: number };
   /** The version each key's `current` names. */
   keys: Record<string, KeyStatus>;
   /** Assigned keys that are not held at their newest version, and why. */
@@ -52,12 +55,12 @@ export type NodeStatus = {
   /** Why the agent cannot work at all (the assignment cannot be read); absent when it can. */
   error?: string;
 };
-export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number };
+export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number; cargoLock?: string | null };
 
 /** meta.json of a version. Consumers build at `checkout`, `targetDir` and `cargoHome`: cargo fingerprints hold absolute paths. */
 export type GenMeta = {
   key: string; repo: string; commit: string; stored: number; bytes: number; files: number;
-  image: string | null; rustc: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string;
+  image: string | null; rustc: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string; cargoLock?: string | null;
   manifestSha256: string; synced: number;
 };
 
@@ -241,7 +244,7 @@ export class SyncAgent {
       if (!fit.has(k) || !l) continue;
       const h = this.held(k);
       if (h && h.meta.commit === l.commit && h.meta.manifestSha256 === l.sha256) continue;
-      const why = await this.sync(k, l, h);
+      const why = await this.sync(k, l, h, assign.maxBytes);
       if (why) pending[k] = why;
       else delete pending[k];
       this.pending = pending;
@@ -343,7 +346,7 @@ export class SyncAgent {
   // ---- sync ------------------------------------------------------------------------------------------------------
 
   /** Makes `l` the key's current version; returns why not, or null when it is. */
-  private async sync(key: string, l: Latest, h: Held | null): Promise<string | null> {
+  private async sync(key: string, l: Latest, h: Held | null, maxBytes: number): Promise<string | null> {
     const { dir, log } = this.c;
     const kd = join(dir, key);
     mkdirSync(kd, { recursive: true, mode: 0o755 });
@@ -354,6 +357,14 @@ export class SyncAgent {
       this.swap(key, base, h);
       log(`warm sync: ${key}@${l.commit.slice(0, 12)} is current again`);
       return null;
+    }
+    // Retired versions stay on disk for the grace period, so they count: the new version waits until they expire.
+    // The held version of this key moves into grace after the swap, so it is not counted twice.
+    const wb = this.warmBytes();
+    const others = wb.current - (h ? this.metaOf(join(kd, h.gen))?.bytes ?? 0 : 0);
+    if (others + wb.grace + l.bytes > maxBytes) {
+      const why = wb.grace > 0 ? "waiting for retired versions to expire" : "over the node cap";
+      return `${why}: ${gb(l.bytes)} GiB more on top of ${gb(others)} GiB current (other keys) and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
     }
     const fs = this.fsUse();
     if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
@@ -370,7 +381,7 @@ export class SyncAgent {
     const final = join(kd, gen), tmp = `${final}.tmp`;
     const t0 = performance.now();
     try {
-      const manifest = await this.c.store.manifest(l);
+      const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
@@ -381,10 +392,11 @@ export class SyncAgent {
       const hd = manifest.header;
       const meta: GenMeta = {
         key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc,
-        envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, manifestSha256: l.sha256, synced: this.c.now(),
+        envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, cargoLock: hd.cargoLock ?? null, manifestSha256: l.sha256, synced: this.c.now(),
       };
-      writeFileSync(join(tmp, "manifest.zst"), encodeManifest(manifest), { mode: 0o644 });
+      writeFileSync(join(tmp, "manifest.zst"), raw, { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
+      writeFileSync(join(tmp, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
       renameSync(tmp, final);
       this.swap(key, gen, h);
       this.failed.delete(key);
@@ -422,6 +434,23 @@ export class SyncAgent {
     }
   }
 
+  /** Bytes of the versions `current` names, and of retired versions whose grace period has not ended. */
+  private warmBytes(): { current: number; grace: number } {
+    const now = this.c.now();
+    let current = 0, grace = 0;
+    for (const k of this.keyDirs()) {
+      const kd = join(this.c.dir, k);
+      const cur = this.held(k)?.gen;
+      for (const n of readdirSync(kd)) {
+        if (!GEN.test(n)) continue;
+        const bytes = this.metaOf(join(kd, n))?.bytes ?? 0;
+        if (n === cur) current += bytes;
+        else if (now - lstatSync(join(kd, n)).mtimeMs < this.c.graceMs) grace += bytes;
+      }
+    }
+    return { current, grace };
+  }
+
   /** The current version as hard-link source; none when its manifest cannot be read (everything is fetched then). */
   private previousOf(genDir: string): Previous | undefined {
     try {
@@ -451,10 +480,10 @@ export class SyncAgent {
     const keys: Record<string, KeyStatus> = {};
     for (const k of this.keyDirs()) {
       const h = this.held(k);
-      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced };
+      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced, cargoLock: h.meta.cargoLock ?? null };
     }
     const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
-    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
+    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), warmBytes: this.warmBytes(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
   }
 
   /** Writes the status ConfigMap when what it says changed, and every `statusEveryMs` so readers see the node is alive. */
