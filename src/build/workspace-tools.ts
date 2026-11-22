@@ -13,7 +13,8 @@ import {
   ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, imageSize, isToolName, OUTPUT_CAP, podPath,
   READ_LINE_CHARS, seconds, SESSION_IMAGES, SRC_ROOT, TOOL_DEFINITIONS, type Args, type WorkspaceToolName,
 } from "./workspace-tool-specs.ts";
-import { CALL_GRACE_MS, cleanOutput, execHelper, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
+import { READY_LIMIT_MS } from "./workspace-launch.ts";
+import { CALL_GRACE_MS, cleanOutput, execHelper, resumeWorkspace, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
 
 /** The MCP server of a workspace session's tools. Claude Code reserves the name `workspace` and drops a server so named. */
 export const WORKSPACE_SERVER = "work";
@@ -42,6 +43,8 @@ const NO_OUTPUT = "999999999999";
 export const OWN_CALLS = ["seed", "checkpoint", "cli", "report"];
 /** A killed command's process group gets this long after SIGTERM. */
 const KILL_GRACE_MS = 5_000;
+/** How often a call waiting for its workspace to come back reads the row. */
+const READY_POLL_MS = 3000;
 
 /** Bookkeeping a call row's result carries, read back when a session is rebuilt. Numbers only, so SQL can read them. */
 type Acct = { ms?: number; bytes?: number; bg?: 1; limit?: number; ref?: number; ended?: 0 | 1; images?: number };
@@ -104,6 +107,8 @@ export class WorkspaceSession {
   private images = 0;
   private readonly gate = new Gate(SESSION_LIMITS.execs);
   private readonly pathLocks = new Map<string, Promise<void>>();
+  /** The wait for the workspace to be ready that the session's calls share. */
+  private ready: Promise<void> | null = null;
 
   constructor(db: Db, api: KubeApi, workspaceId: number) {
     this.db = db;
@@ -129,7 +134,9 @@ export class WorkspaceSession {
       this.counted.add(row);
       try {
         if (!isToolName(name)) throw new Refused(`there is no workspace tool ${JSON.stringify(name.slice(0, 64))}`);
-        out = await this.run(name, checkArgs(name, args), row);
+        const checked = checkArgs(name, args);
+        await (this.ready ??= this.untilReady().finally(() => { this.ready = null; }));
+        out = await this.run(name, checked, row);
       } catch (e) {
         if (e instanceof Refused || e instanceof ArgError) out = { text: `refused: ${e.message}`, isError: true };
         else {
@@ -186,6 +193,22 @@ export class WorkspaceSession {
     }
     const used = this.usedMs();
     for (const c of launching) c.limitMs = Math.max(0, SESSION_LIMITS.shellMs - used);
+  }
+
+  /**
+   * Returns once the workspace is ready. A parked one is resumed (a new pod, on its volume or rebuilt from the checkpoint);
+   * one that is starting or seeding is waited for, up to the launcher's own limit.
+   */
+  private async untilReady(): Promise<void> {
+    const from = Date.now();
+    for (;;) {
+      const w = await this.db.get(this.db.k.selectFrom("workspaces").select(["state", "error"]).where("id", "=", this.workspaceId));
+      if (w?.state === "ready") return;
+      if (!w || w.state === "ended" || w.state === "failed") throw new Refused(`the workspace is ${w?.state ?? "gone"}${w?.error ? ` (${w.error})` : ""}; submit your work`);
+      if (w.state === "parked") await resumeWorkspace(this.db, this.workspaceId);
+      if (Date.now() - from > READY_LIMIT_MS) throw new Error(`the workspace did not come back within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
+      await new Promise((r) => setTimeout(r, READY_POLL_MS));
+    }
   }
 
   private async touch(): Promise<void> {

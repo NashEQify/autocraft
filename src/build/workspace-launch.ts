@@ -3,22 +3,28 @@
 //   requested  → starting  volume and pod created when a workspace slot is free
 //   starting   → seeding   the pod runs and its container is ready; the node is recorded
 //   seeding    → ready     `git archive <base_sha>` from AutoCraft's clone streamed into `ws untar`, which commits it
-//   ready      → parked    no call for IDLE_PARK_MS and no bound remote call queued or leased: checkpoint, pod deleted,
-//                          volume kept (PARKED_VOLUME_MS, then deleted)
+//   ready      → parked    no call for IDLE_PARK_MS, no bound remote call queued or leased and no background command
+//                          running: checkpoint, pod deleted, volume kept (PARKED_VOLUME_MS, then deleted)
+//   parked     → requested its bound remote call is queued or leased, or a session asks for it (resumeWorkspace). The new
+//                          pod uses the kept volume, which already holds the tree; without one, seeding rebuilds the tree
+//                          from the base and applies the checkpoint. A resume onto a volume whose node takes no pod within
+//                          RESUME_PENDING_MS (the node is gone) drops the volume and rebuilds.
 //   any live   → failed    the pod could not start or seed, or passed its time limit; pod and volume deleted
 //   ended                  set by whoever is done with it; the pass deletes pod and volume
 // While ready, a checkpoint (`git diff --binary` against the base commit) is stored every CHECKPOINT_EVERY_MS. Seeding,
 // checkpoints and parking run in the background, at most one per workspace, so a slow exec never holds up the pass.
 // Stateless between passes apart from what is in flight: after a restart a `seeding` row seeds again (from an empty tree).
+// A pod of a resumed workspace has a new name (workspaceName with an incarnation), and so has a volume it rebuilds on.
 import { spawn } from "node:child_process";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 import { exec, fixupDir, GIT_ENV, gitDirEnv, Git, HARDENING } from "../fixup/git.ts";
 import { ownerOf } from "../owners.ts";
 import { KubeError, type KPod, type KubeApi } from "./kube-api.ts";
 import type { LauncherDeps } from "./launcher.ts";
 import { CREATE_TRIES, LIST_GRACE_MS, PENDING_LIMIT_MS, PULL_LIMIT_MS, PULL_REASONS, settingsOf, STUCK_MS, type KubeSettings } from "./pods.ts";
 import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER } from "./workspace-pods.ts";
-import { describeHeader, execInWorkspace, execWs, getWorkspace, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
+import { describeHeader, execInWorkspace, execWs, getCheckpoint, getWorkspace, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, resumeWorkspace, WORKSPACE_COLUMNS, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
 
 export const SEED_LIMIT_MS = 10 * 60_000;
 export const IDLE_PARK_MS = 30 * 60_000;
@@ -27,12 +33,23 @@ export const CHECKPOINT_EVERY_MS = 10 * 60_000;
 export const PARKED_VOLUME_MS = 60 * 60_000;
 /** A parked workspace whose volume is gone ends this long after it parked; the checkpoint stays on the row. */
 export const PARKED_END_MS = 24 * 3600_000;
+/** A resume onto a kept volume whose pod is still unscheduled after this long takes it that the volume's node is gone. */
+export const RESUME_PENDING_MS = 3 * 60_000;
+/** The longest a workspace takes from requested (or parked) to ready before the launcher fails it; a minute more covers its pass interval. */
+export const READY_LIMIT_MS = PENDING_LIMIT_MS + SEED_LIMIT_MS + 60_000;
+/** While the bound remote call is leased, the idle time is counted from at most this long ago, so it parks only after the lease ends. */
+const LEASE_TOUCH_MS = 60_000;
+/** A bound call back in the queue (its Task Runner was lost) gets a fresh checkpoint for the next session's prompt, tried this often. */
+const REQUEUE_CHECKPOINT_MS = 60_000;
 export const MAX_SOURCE_BYTES = 512 * 1024 ** 2;
 export const MAX_CHECKPOINT_BYTES = 5 * 1024 ** 2;
 /** The toolchain image workspace pods run. */
 export const WORKSPACE_TOOLCHAIN = "rust-stable";
 const CREATE_BACKOFF_MS = 60_000;
 const CHECKPOINT_FILE = "/work/.ws/checkpoint.diff";
+const RESUME_FILE = "/work/.ws/resume.diff";
+/** Grace past a background command's own limit before the launcher stops counting it as running (the helper's kill -k 5). */
+const BACKGROUND_GRACE_MS = 30_000;
 // The diff is cut one byte past the cap, so an oversized one shows as such; head stopping early makes git's status 141.
 // It works on a copy of the index, so the session's index and its lock are never touched.
 const CHECKPOINT_SH = `set -e
@@ -162,9 +179,11 @@ async function start(c: Ctx, w: WorkspaceRow): Promise<boolean> {
     await fail(c, w, images);
     return true;
   }
-  const name = workspaceName(w.id);
-  if (!await moveWorkspace(c.d.db, w.id, ["requested"], "starting", { pod: name, pvc: name, create_tries: 0, error: null }, c.now())) return true;
-  return await create(c, { ...w, state: "starting", pod: name, pvc: name, create_tries: 0 }, images);
+  // A workspace that was ready before (it has a base commit) is resuming: its pod gets a new name, and so does a volume it rebuilds on.
+  const name = workspaceName(w.id, w.base_commit ? c.now().toString(36) : undefined);
+  const pvc = w.pvc ?? name;
+  if (!await moveWorkspace(c.d.db, w.id, ["requested"], "starting", { pod: name, pvc, create_tries: 0, error: null }, c.now())) return true;
+  return await create(c, { ...w, state: "starting", pod: name, pvc, create_tries: 0 }, images);
 }
 
 /** A pod of the same name is still being deleted: the create is tried again once it is gone. */
@@ -183,10 +202,10 @@ async function create(c: Ctx, w: WorkspaceRow, images: Images): Promise<boolean>
   // A create that answered with an error may still have made the object; the name is the workspace's own.
   const conflict = (e: unknown) => e instanceof KubeError && e.status === 409;
   try {
-    await c.api.createPvc(ns, workspacePvcSpec(c.s, c.env.id, w.id)).catch((e: unknown) => {
+    await c.api.createPvc(ns, workspacePvcSpec(c.s, c.env.id, w.id, w.pvc ?? undefined)).catch((e: unknown) => {
       if (!conflict(e)) throw e;
     });
-    await c.api.createPod(ns, workspacePodSpec({ s: c.s, envId: c.env.id, id: w.id, ...images, limits: limitsOf(w) })).catch(async (e: unknown) => {
+    await c.api.createPod(ns, workspacePodSpec({ s: c.s, envId: c.env.id, id: w.id, ...images, limits: limitsOf(w), pod: w.pod ?? undefined, pvc: w.pvc ?? undefined })).catch(async (e: unknown) => {
       if (!conflict(e)) throw e;
       const old = (await c.api.listPods(ns, workspaceSelector(w.id))).find((p) => p.metadata.name === w.pod);
       if (old?.metadata.deletionTimestamp) throw new PodDeleting();
@@ -217,6 +236,11 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   const now = c.now();
   const age = now - Date.parse(w.state_at);
   if (w.state === "parked") {
+    const bound = await boundCall(c, w);
+    if (bound) {
+      if (await resumeWorkspace(c.d.db, w.id, now)) c.d.log(`workspace launcher: workspace ${w.id} resuming for call ${w.remote_call_id} (${bound})${w.pvc ? " on its volume" : "; rebuilding from base and checkpoint"}`);
+      return;
+    }
     // TODO(AUTO-43): also delete parked volumes oldest first when the node's disk passes 70%, once there is a disk metric.
     if (w.pvc && age > PARKED_VOLUME_MS) {
       await c.api.deletePvc(c.s.namespace, w.pvc);
@@ -269,8 +293,10 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
       }
       return;
     }
+    const sched = pod.status?.conditions?.find((x) => x.type === "PodScheduled");
+    // `node` is set in starting only for a resume onto a kept volume, which local-path pins to its node.
+    if (w.node !== null && sched?.status === "False" && now - Date.parse(w.pod_created_at ?? w.state_at) > RESUME_PENDING_MS) return dropVolume(c, w, clean(sched.message ?? sched.reason ?? "not scheduled"));
     if (age > PENDING_LIMIT_MS) {
-      const sched = pod.status?.conditions?.find((x) => x.type === "PodScheduled");
       const why = sched?.status === "False" ? clean(sched.message ?? sched.reason ?? "not scheduled") : pull ? pull.state!.waiting!.reason! : "its container did not become ready";
       return fail(c, w, `The workspace pod did not start within ${PENDING_LIMIT_MS / 60_000} min: ${why}`);
     }
@@ -284,9 +310,16 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   }
   // ready
   const lastCall = Math.max(Date.parse(w.state_at), w.last_call_at ? Date.parse(w.last_call_at) : 0);
-  if (now - lastCall > IDLE_PARK_MS && !await callRunning(c, w.id, now) && !await sessionLive(c, w)) return background(c, w.id, () => park(c, w.id));
-  const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, c.state.checkpointTried.get(w.id) ?? 0);
-  if (now - lastCheckpoint > CHECKPOINT_EVERY_MS) {
+  const bound = await boundCall(c, w);
+  if (bound === "leased" && now - lastCall > LEASE_TOUCH_MS) {
+    const at = new Date(now).toISOString();
+    await c.d.db.run(c.d.db.k.updateTable("workspaces").set({ last_call_at: at, updated_at: at }).where("id", "=", w.id).where("state", "=", "ready"));
+  } else if (!bound && now - lastCall > IDLE_PARK_MS && !await callRunning(c, w.id, now) && !await backgroundRunning(c, w, now)) return background(c, w.id, () => park(c, w.id));
+  const tried = c.state.checkpointTried.get(w.id) ?? 0;
+  const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, tried);
+  // A call back in the queue after its session did work: the next session's prompt states the checkpoint's changes.
+  const requeued = bound === "queued" && w.last_call_at !== null && (w.checkpoint_at === null || w.last_call_at > w.checkpoint_at) && now - tried > REQUEUE_CHECKPOINT_MS;
+  if (now - lastCheckpoint > CHECKPOINT_EVERY_MS || requeued) {
     c.state.checkpointTried.set(w.id, now);
     background(c, w.id, async () => void await checkpoint(c, w.id));
   }
@@ -299,11 +332,46 @@ async function callRunning(c: Ctx, id: number, now: number): Promise<boolean> {
     .where("deadline_at", ">", new Date(now).toISOString()).limit(1));
 }
 
-/** Whether the remote call bound to the workspace is queued or leased: its session may still make tool calls. */
-async function sessionLive(c: Ctx, w: WorkspaceRow): Promise<boolean> {
-  if (w.remote_call_id === null) return false;
+/** The state of the remote call bound to the workspace while it is queued or leased (its session may still make tool calls), else null. */
+async function boundCall(c: Ctx, w: WorkspaceRow): Promise<"queued" | "leased" | null> {
+  if (w.remote_call_id === null) return null;
   const { db } = c.d;
-  return !!await db.get(db.k.selectFrom("remote_calls").select("id").where("id", "=", w.remote_call_id).where("state", "in", ["queued", "leased"]));
+  const r = await db.get(db.k.selectFrom("remote_calls").select("state").where("id", "=", w.remote_call_id).where("state", "in", ["queued", "leased"]));
+  return r ? (r.state as "queued" | "leased") : null;
+}
+
+/**
+ * Whether a background shell command the session started in the current pod may still run, by the session's bookkeeping
+ * on its rows (WorkspaceSession): started, not seen ending by a shell_status or shell_kill, and within its own limit.
+ */
+async function backgroundRunning(c: Ctx, w: WorkspaceRow, now: number): Promise<boolean> {
+  const { db } = c.d;
+  const rows = await db.all(db.k.selectFrom("workspace_calls")
+    .select((eb) => {
+      const res = eb.case().when(kx.jsonValid(db, "result")).then(eb.ref("result")).end();
+      return ["id", "tool", "started_at", kx.jsonNum(db, res, "$.acct.bg").as("bg"), kx.jsonNum(db, res, "$.acct.limit").as("lim"),
+        kx.jsonNum(db, res, "$.acct.ref").as("ref"), kx.jsonNum(db, res, "$.acct.ended").as("ended")] as const;
+    })
+    .where("workspace_id", "=", w.id).where("tool", "in", ["shell", "shell_status", "shell_kill"]).where("state", "=", "done")
+    .where("started_at", ">=", w.pod_created_at ?? w.state_at));
+  const ended = new Set(rows.filter((r) => r.tool !== "shell" && Number(r.ended) === 1).map((r) => Number(r.ref)));
+  return rows.some((r) => r.tool === "shell" && Number(r.bg) === 1 && !ended.has(Number(r.id)) && r.started_at !== null
+    && Date.parse(r.started_at) + Number(r.lim ?? 0) * 1000 + BACKGROUND_GRACE_MS > now);
+}
+
+/**
+ * The kept volume of a resuming workspace cannot take its pod (its node is gone): the pod and volume are deleted and the
+ * workspace starts on a new volume, which seeding rebuilds from the base and the checkpoint.
+ */
+async function dropVolume(c: Ctx, w: WorkspaceRow, why: string): Promise<void> {
+  const name = workspaceName(w.id, c.now().toString(36));
+  const at = new Date(c.now()).toISOString();
+  const r = await c.d.db.run(c.d.db.k.updateTable("workspaces").set({ pod: name, pvc: name, node: null, create_tries: 0, pod_created_at: null, updated_at: at })
+    .where("id", "=", w.id).where("state", "=", "starting").where("pod", "=", w.pod));
+  if (!r.changes) return;
+  c.d.log(`workspace launcher: workspace ${w.id}: its volume's node takes no pod (${why}); rebuilding on a new volume from base and checkpoint`);
+  if (w.pod) await c.api.deletePod(c.s.namespace, w.pod).catch(() => {});
+  if (w.pvc) await c.api.deletePvc(c.s.namespace, w.pvc).catch(() => {});
 }
 
 /** The pod went away. A ready workspace keeps its volume and checkpoint (parked, for a resume); an earlier one failed. */
@@ -358,6 +426,14 @@ async function seed(c: Ctx, id: number): Promise<void> {
   if (!w || w.state !== "seeding") return;
   const deadline = Date.parse(w.state_at) + SEED_LIMIT_MS;
   try {
+    if (w.base_commit) {
+      // A resume: a kept volume still holds the tree, its base commit and every change since.
+      const kept = await execWs(db, c.api, id, ["run", "60", "--", "git", "cat-file", "-e", `${w.base_commit}^{commit}`], { tool: "seed", args: { resume: "check" }, timeoutMs: 70_000 }, c.now);
+      if (kept.header?.kind === "status" && kept.header.state === "exited" && kept.header.exit === 0) {
+        if (await moveWorkspace(db, id, ["seeding"], "ready", {}, c.now())) c.d.log(`workspace launcher: workspace ${id} resumed on its volume`);
+        return;
+      }
+    }
     const src = await sourceArchive(w.repo, w.base_sha);
     const untar = async () => await execWs(db, c.api, id, ["untar"], { tool: "seed", args: { repo: w.repo, sha: w.base_sha, bytes: src.bytes }, stdin: src.open(), timeoutMs: Math.max(10_000, deadline - c.now()) }, c.now);
     let r = await untar();
@@ -369,10 +445,27 @@ async function seed(c: Ctx, id: number): Promise<void> {
     }
     const commit = untarCommit(r);
     if (!commit) throw new Error(`ws untar: ${r.error ?? describeHeader(r.header)}${r.stderr ? `: ${r.stderr.trim().split("\n").pop()}` : ""}`);
-    if (await moveWorkspace(db, id, ["seeding"], "ready", { base_commit: commit }, c.now())) c.d.log(`workspace launcher: workspace ${id} ready (base ${commit.slice(0, 8)})`);
+    const applied = w.base_commit ? await applyCheckpoint(c, id) : null;
+    if (await moveWorkspace(db, id, ["seeding"], "ready", { base_commit: commit }, c.now())) {
+      c.d.log(`workspace launcher: workspace ${id} ${w.base_commit ? `rebuilt from base and ${applied ? `the checkpoint of ${w.checkpoint_at}` : "no checkpoint"}` : "ready"} (base ${commit.slice(0, 8)})`);
+    }
   } catch (e) {
     await fail(c, w, `Seeding failed: ${errText(e)}`);
   }
+}
+
+/** Applies the stored checkpoint to a rebuilt tree; false when there is none. Throws when it does not apply. */
+async function applyCheckpoint(c: Ctx, id: number): Promise<boolean> {
+  const { db } = c.d;
+  const diff = await getCheckpoint(db, id);
+  if (!diff?.length) return false;
+  const put = await execWs(db, c.api, id, ["put", RESUME_FILE], { tool: "seed", args: { resume: "checkpoint", bytes: diff.length }, stdin: Buffer.from(diff), timeoutMs: 120_000 }, c.now);
+  if (put.header?.kind !== "ok") throw new Error(`the checkpoint could not be copied in: ${put.error ?? describeHeader(put.header)}`);
+  const r = await execWs(db, c.api, id, ["run", "300", "--", "git", "apply", "--binary", "--whitespace=nowarn", RESUME_FILE], { tool: "seed", args: { resume: "apply" }, timeoutMs: 310_000 }, c.now);
+  if (r.header?.kind !== "status" || r.header.state !== "exited" || r.header.exit !== 0) {
+    throw new Error(`the checkpoint does not apply (${r.error ?? describeHeader(r.header)})${r.output.trim() ? `: ${clean(r.output.trim().split("\n").pop())}` : ""}`);
+  }
+  return true;
 }
 
 // ---- checkpoints and parking -------------------------------------------------------

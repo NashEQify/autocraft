@@ -34,6 +34,7 @@ import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { endChecks, serveChecks } from "./check-relay.ts";
 import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
+import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
@@ -518,12 +519,18 @@ class Taken extends Error {}
 async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean, clearIdle: boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
   // The run's stored prompt is built before the write lock is taken: scrubbing and compressing a large prompt takes milliseconds.
-  // What the run is made of never changes on a call's row, so it is read here with the bundle and the run goes in before the lease.
+  // What the run is made of changes on a call's row only here (a workspace session's resume note), so it is read with the
+  // bundle and the run goes in before the lease.
   const q = await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "job_id", "step", "stage", "prompt_id", "prompt_version", "asked_model", "items"]).where("id", "=", id).where("state", "=", "queued"));
   if (!q) return null;
   const bundle = JSON.parse(q.bundle) as Omit<TaskBundle, "callId">;
   // A workspace session runs only in Claude Code with its own tools off; another harness would keep a shell of its own.
-  if (bundle.mcpServers.includes(WORKSPACE_SERVER) && claim.harness !== "claude") return null;
+  const workspace = bundle.mcpServers.includes(WORKSPACE_SERVER);
+  if (workspace && claim.harness !== "claude") return null;
+  // Its prompt tells a session after a lost lease that the workspace keeps the earlier session's work; stored with the lease.
+  const stdin = workspace ? await resumePrompt(db, id, bundle.stdin) : bundle.stdin;
+  const rewritten = stdin !== bundle.stdin;
+  bundle.stdin = stdin;
   const refs = JSON.parse(q.items) as ItemRef[];
   const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "")));
   try {
@@ -534,7 +541,7 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
         remote: { userLogin: caller.login, harness: claim.harness, reportedModel: model } });
       const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
         state: "leased", token_id: caller.tokenId, user_login: caller.login, harness: claim.harness, harness_version: claim.harnessVersion, model, root: claim.root ?? null, lease_secret_hash: sha256hex(secret),
-        leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId, run_id: runId,
+        leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId, run_id: runId, ...(rewritten && { bundle: JSON.stringify(bundle) }),
         queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, [eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since"))])).end()), queued_since: null, progress: null, error: null,
         picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
       })).where("id", "=", id).where("state", "=", "queued")

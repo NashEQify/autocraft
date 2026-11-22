@@ -9,8 +9,8 @@ import { enqueueCall } from "../remote/calls.ts";
 import type { TaskBundle, Tier } from "../remote/protocol.ts";
 import { MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { BuildError } from "./envs.ts";
-import { WORKSPACE_SERVER } from "./workspace-tools.ts";
-import { LIVE_STATES } from "./workspaces.ts";
+import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
+import { diffStat, LIVE_STATES } from "./workspaces.ts";
 
 /** Servers a workspace session may have beside `workspace`. */
 const EXTRA_SERVERS = new Set([ITEM_SERVER, REFERENCE_SERVER]);
@@ -79,4 +79,26 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
     await db.run(db.k.updateTable("workspaces").set({ remote_call_id: id, updated_at: new Date().toISOString() }).where("id", "=", ws.id));
     return id;
   });
+}
+
+/** Starts the note a lease adds to a workspace session's prompt; what follows it is replaced at each lease. */
+const RESUME_MARK = "\n\n---\nNote from AutoCraft: ";
+
+/**
+ * A workspace session's prompt for its next lease: `stdin` without an earlier lease's note, plus a note when an earlier
+ * lease of the call already worked in the workspace (its Task Runner was lost): the workspace keeps that work, and the
+ * note gives its changes as of the last checkpoint, which the launcher takes when the call goes back to the queue.
+ */
+export async function resumePrompt(db: Db, callId: number, stdin: string): Promise<string> {
+  const mark = stdin.indexOf(RESUME_MARK);
+  const prompt = mark < 0 ? stdin : stdin.slice(0, mark);
+  const w = await db.get(db.k.selectFrom("workspaces").select(["id", "checkpoint", "checkpoint_at"]).where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
+  const since = (await db.get(db.k.selectFrom("remote_calls").select("since").where("id", "=", callId)))?.since;
+  if (!w || since == null) return prompt;
+  const worked = await db.get(db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS)
+    .where("created_at", ">=", new Date(Number(since)).toISOString()).limit(1));
+  if (!worked) return prompt;
+  const at = w.checkpoint_at ? `${w.checkpoint_at.slice(11, 16)} UTC` : null;
+  const stat = w.checkpoint?.length && at ? `Its changes against the base commit as of ${at} (the last checkpoint):\n${diffStat(w.checkpoint)}\n` : "";
+  return `${prompt}${RESUME_MARK}an earlier session on this task was cut off before it finished. The workspace keeps its work, so /work/src may already hold changes, and commands it started may have ended.\n${stat}Check the current state with \`git status\` and \`git diff --stat\` in /work/src before you continue.\n`;
 }

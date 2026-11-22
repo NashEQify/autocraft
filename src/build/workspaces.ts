@@ -72,6 +72,19 @@ export async function moveWorkspace(db: Db, id: number, from: WorkspaceStateName
   return r.changes > 0;
 }
 
+/**
+ * Brings a parked workspace back: the launcher starts a new pod when a slot is free, on the kept volume when there is one
+ * (its node is kept, so the launcher can tell a resume onto it), else on a new volume rebuilt from the base and the
+ * checkpoint. True when the row is coming back or up; false when it is gone, ended or failed.
+ */
+export async function resumeWorkspace(db: Db, id: number, now = Date.now()): Promise<boolean> {
+  const w = await getWorkspace(db, id);
+  if (!w) return false;
+  if (w.state !== "parked") return POD_STATES.includes(w.state as WorkspaceStateName) || w.state === "requested";
+  if (await moveWorkspace(db, id, ["parked"], "requested", { create_tries: 0, error: null, ...(w.pvc ? {} : { node: null }) }, now)) return true;
+  return await resumeWorkspace(db, id, now);
+}
+
 /** Ends a live workspace; the launcher's next pass deletes its pod and volume. */
 export async function endWorkspace(db: Db, id: number, now = Date.now()): Promise<boolean> {
   return await moveWorkspace(db, id, LIVE_STATES, "ended", {}, now);
@@ -125,12 +138,13 @@ export async function workspacePod(db: Db, api: KubeApi, id: number): Promise<{ 
   if ((row.state !== "seeding" && row.state !== "ready") || !row.pod) throw new BuildError(409, `workspace ${id} is ${row.state}, with no pod to run in`);
   const env = await db.get(db.k.selectFrom("build_envs").select(["settings"]).where("id", "=", row.env_id));
   const ns = settingsOf(env?.settings ?? null).namespace;
-  const pods = await api.listPods(ns, workspaceSelector(id));
+  // An earlier pod of the workspace may still be shutting down (a resume while its node is gone); it never runs anything.
+  const pods = (await api.listPods(ns, workspaceSelector(id))).filter((p) => !p.metadata.deletionTimestamp);
   const pod = pods.find((p) => p.metadata.name === row.pod);
   if (pods.length !== 1 || !pod || pod.metadata.labels?.["craft.build/workspace"] !== String(id)) {
     throw new BuildError(409, `workspace ${id}: the pod labelled with its id is not ${row.pod}`);
   }
-  if (pod.metadata.deletionTimestamp || pod.status?.phase !== "Running") throw new BuildError(409, `workspace ${id}: its pod is not running`);
+  if (pod.status?.phase !== "Running") throw new BuildError(409, `workspace ${id}: its pod is not running`);
   return { ns, pod: row.pod, row };
 }
 
@@ -223,4 +237,33 @@ export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o
   await finish(header && header.kind !== "error" && r.error === undefined ? "done" : "failed",
     { header, output: out.output, ...(out.stderr ? { stderr: out.stderr } : {}), ...(r.error ? { error: r.error } : {}), ...(r.truncated ? { truncated: true } : {}) });
   return out;
+}
+
+// ---- diff stat ------------------------------------------------------------------
+
+/**
+ * A `git diff --stat`-like summary of a `git diff --binary` (a checkpoint), read from its headers and hunks: one line per
+ * file (at most `maxFiles`) and a total. The diff is the session's own data; names are cleaned of control characters.
+ */
+export function diffStat(diff: Uint8Array, maxFiles = 40): string {
+  const files: { name: string; add: number; del: number; binary: boolean }[] = [];
+  let cur: (typeof files)[number] | null = null;
+  let inHunk = false;
+  for (const line of cleanOutput(diff).split("\n")) {
+    const head = /^diff --git a\/(.*) b\/(.*)$/.exec(line);
+    if (head) {
+      cur = { name: head[2]!, add: 0, del: 0, binary: false };
+      files.push(cur);
+      inHunk = false;
+    } else if (!cur) continue;
+    else if (line.startsWith("@@")) inHunk = true;
+    else if (!inHunk && (line.startsWith("GIT binary patch") || line.startsWith("Binary files "))) cur.binary = true;
+    else if (inHunk && line.startsWith("+")) cur.add++;
+    else if (inHunk && line.startsWith("-")) cur.del++;
+  }
+  if (!files.length) return "no changes";
+  const shown = files.slice(0, maxFiles).map((f) => ` ${f.name} | ${f.binary ? "binary" : `+${f.add} -${f.del}`}`);
+  const add = files.reduce((a, f) => a + f.add, 0), del = files.reduce((a, f) => a + f.del, 0);
+  return [...shown, ...(files.length > maxFiles ? [` (${files.length - maxFiles} more files)`] : []),
+    ` ${files.length} ${files.length === 1 ? "file" : "files"} changed, ${add} insertions(+), ${del} deletions(-)`].join("\n");
 }
