@@ -7,7 +7,7 @@ import { decidePr } from "./decide.ts";
 import { pipelineWrites, verifyAllows } from "./rules.ts";
 import { loadPass, loadPrFact } from "./facts.ts";
 import { commentApprovalOf } from "../act/approval.ts";
-import { fixIssueApprovalOf } from "../fixissue/approval.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
 import { mainFixApprovalOf } from "../mainfix/approval.ts";

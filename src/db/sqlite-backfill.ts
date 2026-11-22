@@ -3,7 +3,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { markFull, BULK_ROWS } from "../core/plan-changes.ts";
 import { BATCH, FIELD_COLUMNS, SCHEME_ID, classifyHash, embedHash, type Fields } from "../itemhash.ts";
-import { textRefs } from "../fixissue/candidates.ts";
+import { textRefs } from "../core/open-prs.ts";
 import type { Db } from "./index.ts";
 
 const FIELDS = FIELD_COLUMNS.join(", ");

@@ -1,10 +1,6 @@
-// What the Fix stage reads about issues from the local tables. Which issues it works on is the Plans' (core/decide-item.ts).
+// What the Implement stage and the planner read about open PRs and issue text from the local tables.
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
-
-export const ATTEMPT_STATES = ["retry", "testing", "passed", "pr-opened", "skipped", "failed"] as const;
-
-export type IssueCandidate = { repo: string; number: number; title: string; body: string; hash: string; score: number | null };
 
 /** Setting that marks a repo without a Rust workspace at its root, set by the step when it finds out. */
 export const notRustKey = (repo: string): string => `fixissue_not_rust:${repo}`;

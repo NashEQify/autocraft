@@ -2,7 +2,7 @@
 // (the regression test alone, which must fail without the fix). A round is queued in one job and read in a later one, so no
 // job waits on a build.
 import { TERMINAL, createTask, getTask, type NewTask } from "./tasks.ts";
-import { tasksFor } from "../fixissue/index.ts";
+import { tasksFor } from "./fix-tasks.ts";
 import { readLint } from "../prepush/index.ts";
 import { baseScopeRepos } from "../pilot.ts";
 import { cloneTask, queueWarmBuild } from "../verify/tasks.ts";

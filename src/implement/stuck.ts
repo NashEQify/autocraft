@@ -7,7 +7,7 @@ import type { Db } from "../db/index.ts";
 import { actionable, ask, BACKLOG, factsOf, getDecision, optionsOf, type DecisionRow, type Option } from "../decisions.ts";
 import { tripKey } from "../core/push-outcome.ts";
 import { sinceOf, trip, tripRow } from "../push-outcomes.ts";
-import { textHash } from "../fixissue/candidates.ts";
+import { textHash } from "../core/open-prs.ts";
 import { queuerOf } from "./gate.ts";
 import { closeOnAnswer, type CloseDeps } from "./close.ts";
 import { settleQuestions } from "./questions.ts";

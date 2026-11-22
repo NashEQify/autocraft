@@ -12,7 +12,7 @@ import { LOST_REPLY_MESSAGE } from "../src/implement/session.ts";
 import { implementDecisionId, STUCK_OPTIONS } from "../src/implement/stuck.ts";
 import { currentImplementation, implementationById, roundsOf, setImplementationState, startImplementation } from "../src/implement/store.ts";
 import type { PlanReply, SessionReport } from "../src/implement/types.ts";
-import { textHash } from "../src/fixissue/candidates.ts";
+import { textHash } from "../src/core/open-prs.ts";
 import { OPERATOR, world } from "./world-db.ts";
 
 const BASE = "b".repeat(40);

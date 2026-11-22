@@ -46,7 +46,7 @@ export function lintSteps(files: string[]): TaskStep[] {
 }
 
 export type LintJob = {
-  /** The pipeline step that queues it (fixup, cifix, fixissue). */
+  /** The pipeline step that queues it (fixup, cifix, implement). */
   step: string; repo: string; number: number | null; head: string;
   /** The default-branch commit the task takes its CI gate from; null runs it in the stock image. */
   base: string | null;

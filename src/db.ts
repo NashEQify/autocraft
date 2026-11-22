@@ -41,7 +41,7 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "base_ref", "TEXT"],
   ["fast_track", "weight", "INTEGER NOT NULL DEFAULT 5"],
   ["items", "reactions_count", "INTEGER"],
-  // src/fixissue/candidates.ts textRefs(): the issue numbers a PR's text names, so the planner does not read every open PR's body.
+  // src/core/open-prs.ts textRefs(): the issue numbers a PR's text names, so the planner does not read every open PR's body.
   ["items", "text_refs", "TEXT"],
   ["discord_channels", "default_repo", "TEXT"],
   ["discord_channels", "position", "INTEGER"],

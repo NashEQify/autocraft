@@ -33,9 +33,9 @@ const PROMPT_STEP: Record<string, { step: string; stage: number }> = {
   "fixup.patch": { step: "fixup", stage: 6 }, "verify.plan": { step: "verify", stage: 6 }, "verify.screenshot": { step: "verify", stage: 6 }, "verify.compare": { step: "verify-collect", stage: 6 },
   "verify.summary": { step: "verify-collect", stage: 6 }, "priority.jev": { step: "prioritize", stage: 2 }, "priority.haiku": { step: "prioritize", stage: 2 },
   "dupes.jev": { step: "dupes", stage: 3 }, "dupes.haiku": { step: "dupes", stage: 3 },
-  "fixissue.triage": { step: "fixissue", stage: 7 }, "fixissue.patch": { step: "fixissue", stage: 7 }, "review.opus": { step: "opus-review", stage: 5 }, "postmerge.opus": { step: "postmerge", stage: 8 }, "premerge.opus": { step: "premerge", stage: 6 },
+  "review.opus": { step: "opus-review", stage: 5 }, "postmerge.opus": { step: "postmerge", stage: 8 }, "premerge.opus": { step: "premerge", stage: 6 },
   "dupes.compare-prs.opus": { step: "dupes-compare", stage: 3 }, "dupes.compare-issues.sonnet": { step: "dupes-compare", stage: 3 },
-  "decide.prepare": { step: "decide", stage: 3 }, "fixup.check": { step: "fixup", stage: 6 }, "fixissue.check": { step: "fixissue", stage: 7 },
+  "decide.prepare": { step: "decide", stage: 3 }, "fixup.check": { step: "fixup", stage: 6 },
   "conversation.turn": { step: "conversation", stage: 3 },
   "areas.jev": { step: "classify-new", stage: 2 }, "areas.haiku": { step: "classify-new", stage: 2 },
   "areas.propose": { step: "areas-propose", stage: 2 }, "areas.suggest": { step: "areas-suggest", stage: 2 },
@@ -73,7 +73,7 @@ export const isHalt = (e: unknown): boolean => e instanceof CancelledError || e 
 /** Queue class of a call outside a job, from the step its prompt belongs to (inside a job the step's priority is used). */
 const classOfStep = (step: string): 0 | 1 | 2 =>
   step.startsWith("security-") ? 2
-    : ["fixup", "cifix", "main-fix", "fixissue", "fixissue-collect", "verify", "verify-collect", "premerge", "opus-review", "decide", "conversation"].includes(step) ? 1 : 0;
+    : ["fixup", "cifix", "main-fix", "verify", "verify-collect", "premerge", "opus-review", "decide", "conversation"].includes(step) ? 1 : 0;
 
 /** The queue class of the call being made: the job step's priority, or for calls outside a job the class of the prompt's step. */
 export const currentClass = (promptId?: string): 0 | 1 | 2 =>

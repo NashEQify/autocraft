@@ -23,8 +23,8 @@ import { classifyHash, embedHash as hashOfText, SCHEME_ID } from "../itemhash.ts
 import { actionable } from "../decisions.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { TERMINAL } from "../build/tasks.ts";
-import { fixIssueApprovalOf } from "../fixissue/approval.ts";
-import { issuesWithOpenPrAll, type OpenPr, notRustKey, textHash } from "../fixissue/candidates.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
+import { issuesWithOpenPrAll, type OpenPr, notRustKey, textHash } from "./open-prs.ts";
 import { headOf, scopeAnswers, unsettledScope } from "../review/candidates.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
 import { pilotExpr } from "../pilot.ts";

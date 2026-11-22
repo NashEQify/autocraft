@@ -8,7 +8,7 @@ import { exec } from "../fixup/git.ts";
 import { guardItem } from "../core/guard.ts";
 import { byOfJob } from "../core/gates.ts";
 import { commentApprovalOf } from "../act/approval.ts";
-import { textHash } from "../fixissue/candidates.ts";
+import { textHash } from "../core/open-prs.ts";
 import { actionable } from "../decisions.ts";
 import { ghComment } from "../github/write.ts";
 import { ownLoginTest } from "../github/identity.ts";

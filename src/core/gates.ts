@@ -33,9 +33,7 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
     // security-scan question is in scope for it whatever the pilot says; decideItem already covers that).
     case "label": return "labels";
     case "act": return "comment";
-    case "implement":
-    case "fixissue":
-    case "fixissue-collect": return "fix-issue";
+    case "implement": return "fix-issue";
     case "merge": return "merge";
     case "post-review": return "comment";
     case "approve-ci": return "ci";

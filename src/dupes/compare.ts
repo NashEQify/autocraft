@@ -59,10 +59,10 @@ export type CompareSummary = { due: number; compared: number; byRule: number; cl
 
 /** A read-only checkout of the repo's default branch at its current head, or null (no sandbox, no head, fetch failed). */
 export async function baseCheckout(db: Db, repo: string): Promise<string | null> {
-  const { branchOf, defaultDeps } = await import("../fixissue/index.ts");
+  const { branchOf, mainHeadOf } = await import("../github/fork.ts");
   const { checkoutForCommit } = await import("../sandbox/index.ts");
   const branch = await branchOf(db, repo);
-  const sha = await defaultDeps().mainHead(repo, branch);
+  const sha = await mainHeadOf(repo, branch);
   return sha ? checkoutForCommit(repo, branch, sha, console.log) : null;
 }
 

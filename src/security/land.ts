@@ -6,7 +6,7 @@ import { guardRepo } from "../core/guard.ts";
 import type { By } from "../core/gates.ts";
 import { audit } from "../dash/audit.ts";
 import { Git, type Exec } from "../fixup/git.ts";
-import { branchOf, forkOf } from "../fixissue/index.ts";
+import { branchOf, forkOf } from "../github/fork.ts";
 import { slugOf, ownerOf } from "../owners.ts";
 import { githubIdentity } from "../github/identity.ts";
 import {

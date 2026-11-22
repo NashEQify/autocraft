@@ -37,8 +37,6 @@ export type ActionKind =
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupe-answer" | "dupes-compare" | "decide" | "label"
   | "act" | "implement"
-  // the retired Fix stage's steps, run only from the command line until their code goes; the planner plans neither
-  | "fixissue" | "fixissue-collect"
   // the pipeline's account leaves an item that is off the path to merge (src/core/assignment.ts)
   | "unassign";
 

@@ -50,7 +50,7 @@ export const STAGES: Stage[] = [
   { slug: "decide", title: "Decide", icon: QuestionIcon, refs: ["Decide"] },
   { slug: "label", title: "Label", icon: TagIcon, refs: ["Label"] },
   { slug: "review", title: "Review", icon: MagnifyingGlassIcon, refs: ["Review"] },
-  { slug: "fix", title: "Fix", icon: WrenchIcon, refs: ["Fix"] },
+  { slug: "fix", title: "Implement", icon: WrenchIcon, refs: ["Implement"] },
   { slug: "fix-up", title: "Fix-up", icon: HammerIcon, refs: ["Fix-up"] },
   { slug: "verify", title: "Verify", icon: CheckCircleIcon, refs: ["Verify"] },
   { slug: "merge-queue", title: "Merge queue", icon: GitMergeIcon, refs: ["Merge queue", "Pre-approved merge"] },

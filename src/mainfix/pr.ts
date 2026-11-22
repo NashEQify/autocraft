@@ -15,7 +15,7 @@ import { errorFiles, patchFromFailure, type CifixDeps } from "../cifix/index.ts"
 import { isQuiet } from "../security/quiet.ts";
 import { readFailure } from "../cifix/logs.ts";
 import type { CifixPr } from "../cifix/types.ts";
-import { forkOf } from "../fixissue/index.ts";
+import { forkOf } from "../github/fork.ts";
 import { outsideShown } from "../fixup/excerpt.ts";
 import { Git, type Exec } from "../fixup/git.ts";
 import { setPipelineLogin } from "../github/pipeline-account.ts";
