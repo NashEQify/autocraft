@@ -10,6 +10,7 @@ import { GitHubProvider, type Provider } from "../dash/server/provider.ts";
 import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { createBotIssue, createReporterIssue, IssueError, labelBotIssue, labelReporterIssue, type Note } from "../github/write.ts";
 import { githubIdentity } from "../github/identity.ts";
+import { guardRepo } from "../core/guard.ts";
 import { appChildEnv } from "../github/install-token.ts";
 import { openAppKeys } from "../github/app-keys.ts";
 import { JEV_PROMPTS } from "../prompts/index.ts";
@@ -232,12 +233,15 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
     const junk = await junkCheck(db, { title, body }, hooks.judge ?? modelJudge, log);
     if (junk === "junk") return { status: "refused", reason: "That does not look like a bug report or a feature request." };
     if (junk === "unknown") return { status: "refused", reason: "The report could not be checked just now. Try again in a few minutes." };
+    // A repo grant with no approval: filing for a reporter is not a pipeline action, so neither the repo's approvals nor its Pipeline switch apply. Its identity is the app's.
+    const g = await guardRepo(db, req.repo, null, { operator: "discord" });
+    if ("refused" in g) return { status: "refused", reason: "Filing from Discord is not set up." };
     const run = hooks.exec ?? defaultExec;
     const w = { db, login: "discord", now: () => now, ...(hooks.mint && { mint: hooks.mint }) };
     const note: Note = req.drafted ? { by: "model", kind: "issue", model: "haiku" } : { by: "fixed" };
     let made: { number: number; url: string };
     try {
-      made = await createBotIssue(w, run, { repo: req.repo, title, body: `${body}\n\n${botFooter(req.reporterName)}` }, note);
+      made = await createBotIssue(w, g, run, { repo: req.repo, title, body: `${body}\n\n${botFooter(req.reporterName)}` }, note);
     } catch (e) {
       if (e instanceof IssueError && !e.clear) { filed = true; return { status: "refused", reason: "GitHub could not be reached. Try again in a minute." }; }
       log(`discord: filing as the app failed: ${String((e as Error).message ?? e).slice(0, 200)}`);
@@ -245,7 +249,7 @@ export async function fileAsBot(deps: FileDeps, req: BotRequest, hooks: Pick<Fil
     }
     filed = true;
     await db.run(db.k.updateTable("discord_filed").set({ number: made.number }).where(kx.rowid("discord_filed"), "=", slot));
-    await labelBotIssue(w, run, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
+    await labelBotIssue(w, g, run, { repo: req.repo, number: made.number, label: LABEL[req.kind] });
     return { status: "filed", number: made.number, url: made.url };
   } finally {
     if (!filed) await db.run(db.k.deleteFrom("discord_filed").where(kx.rowid("discord_filed"), "=", slot));
