@@ -6,7 +6,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { splitStageTrips, TRIP_STAGES, type StageTripRow, type TripStage } from "../core/push-outcome.ts";
 import type { PgClient } from "./pg-triggers.ts";
 
-/** Bump when splitStageTripsPg changes what it does: it is part of the Postgres stamp, so a database migrated before runs it again. */
+/** Part of the Postgres stamp, so a database migrated before this code opens migratePg and reaches the split; the TRIP_SPLIT_DONE marker, not this number, decides whether the split runs. */
 export const TRIP_SPLIT_VERSION = 2;
 
 /** Set once the split ran: from then on a stage row is the instance-wide breaker and is never split again. */

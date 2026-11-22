@@ -194,10 +194,11 @@ const evidenceOfPushes = (rows: { repo: string; number: number | null; to_oid: s
  * After a push of `stage` on `repo` broke a required check: trips the stage on `repo` when BREAKER_BROKE of that repo's last
  * BREAKER_WINDOW pushes of the stage since its last resume broke one, and on every repo when the broken ones among the stage's
  * last BREAKER_WINDOW pushes across repos since the instance-wide row's last resume come from 2 or more repos (a fault in the step
- * itself, caught before it breaks 2 heads in every repo).
+ * itself, caught before it breaks 2 heads in every repo). A repo's own breaker has dealt with its broken pushes up to its last resume,
+ * and with all of them while it is tripped (the repo is stopped already): those do not count towards the instance-wide one.
  */
 export async function evaluatePushBreaker(db: Db, stage: TripStage, repo: string, at = new Date().toISOString()): Promise<void> {
-  const last = async (key: string, oneRepo: boolean) => await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid"]).$narrowType<{ outcome: Outcome | null }>()
+  const last = async (key: string, oneRepo: boolean) => await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid", "at"]).$narrowType<{ outcome: Outcome | null }>()
     .where("stage", "=", stage).$if(oneRepo, (q) => q.where("repo", "=", repo)).where("at", ">", await sinceOf(db, key)).orderBy("id", "desc").limit(BREAKER_WINDOW));
   const key = tripKey(stage, repo);
   if (!(await tripRow(db, key))?.active) {
@@ -209,7 +210,10 @@ export async function evaluatePushBreaker(db: Db, stage: TripStage, repo: string
   }
   if ((await tripRow(db, stage))?.active) return;
   const rows = await last(stage, false);
-  const bad = rows.filter((r) => r.outcome === "broke"), repos = [...new Set(bad.map((r) => r.repo))].sort();
+  const own = new Map<string, TripRow | undefined>();
+  for (const r of rows) if (r.outcome === "broke" && !own.has(r.repo)) own.set(r.repo, await tripRow(db, tripKey(stage, r.repo)));
+  const bad = rows.filter((r) => { const o = own.get(r.repo); return r.outcome === "broke" && !o?.active && !(o?.cleared_at && r.at <= o.cleared_at); });
+  const repos = [...new Set(bad.map((r) => r.repo))].sort();
   if (repos.length < 2) return;
   await trip(db, stage, `${bad.length} of the last ${rows.length} ${stage} pushes broke a required check, in ${repos.length} repos (${repos.join(", ")})`, evidenceOfPushes(bad), at);
 }

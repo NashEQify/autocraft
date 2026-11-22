@@ -42,9 +42,9 @@ test("broken pushes on one repo stop fix issue there; broken pushes on two repos
     await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(repo);
     await db.run(db.k.insertInto("items").values({ repo, number: 10, kind: "issue", state: "OPEN", title: "Crash on start" }));
   }
-  // Two broken pushes on a; b's push kept its checks green.
+  // Two broken pushes on a and one on b: a's own breaker stops a, and a's pushes then no longer count for every repo.
   await push("a", 1, 1);
-  await push("b", 2, 2, "kept-green");
+  await push("b", 2, 2);
   await push("a", 3, 3);
   for (const repo of ["a", "b"]) await evaluatePushBreaker(db, "fixissue", repo, t(4));
   assert.deepEqual(Object.keys(await activeTrips(db)), ["fixissue:a"]);
@@ -55,14 +55,14 @@ test("broken pushes on one repo stop fix issue there; broken pushes on two repos
   await assert.rejects(resumeTrip(db, as("maintainer", "fixissue:a", ["b"])), { status: 403 });
   await resumeTrip(db, as("maintainer", "fixissue:a", ["a"]));
   assert.doesNotMatch(await why("a"), /is paused/);
-  // The pushes before the resume no longer count: one more broken push on a after it does not trip it again.
-  await push("a", 4, 61);
-  await evaluatePushBreaker(db, "fixissue", "a", t(62));
+  // a's broken pushes up to its resume stay dealt with: b's alone do not stop every repo.
+  await push("b", 4, 5, "kept-green");
+  await evaluatePushBreaker(db, "fixissue", "b", t(6));
   assert.deepEqual(Object.keys(await activeTrips(db)), []);
 
-  // A broken push on b too: the stage's broken pushes now come from two repos, and it stops on every repo.
-  await push("b", 5, 63);
-  await evaluatePushBreaker(db, "fixissue", "b", t(64));
+  // A fresh broken push on a after its resume, with b's: broken pushes from two repos stop the stage on every repo.
+  await push("a", 5, 61);
+  await evaluatePushBreaker(db, "fixissue", "a", t(62));
   assert.deepEqual(Object.keys(await activeTrips(db)), ["fixissue"]);
   assert.match(await why("b"), /is paused/);
   await assert.rejects(resumeTrip(db, as("maintainer", "fixissue", ["a", "b"])), { status: 403 });
