@@ -20,7 +20,7 @@ export type CliStep = { step: string; when: "apply" | "dry-run" | "always" };
 export const CLI_STEPS: Record<string, CliStep> = {
   act: { step: "act", when: "apply" }, merge: { step: "merge", when: "apply" }, premerge: { step: "premerge", when: "apply" },
   "review-post": { step: "review-post", when: "apply" }, cifix: { step: "cifix", when: "apply" }, "cifix-rerun": { step: "cifix-rerun", when: "apply" },
-  "main-fix": { step: "main-fix", when: "apply" }, fixissue: { step: "fixissue", when: "apply" }, "fixissue-collect": { step: "fixissue-collect", when: "apply" },
+  "main-fix": { step: "main-fix", when: "apply" },
   fixup: { step: "fixup", when: "apply" },
   verify: { step: "verify", when: "dry-run" }, "verify-collect": { step: "verify-collect", when: "dry-run" }, "opus-review": { step: "opus-review", when: "dry-run" },
   dupes: { step: "dupes", when: "dry-run" }, "dupe-compare": { step: "dupes-compare", when: "dry-run" }, decide: { step: "decide", when: "dry-run" },

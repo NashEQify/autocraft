@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { connectDb } from "../src/db/open.ts";
-import { ActionError, actionsOf, batchAgain, fixAgain, reviewAgain, verifyAgain } from "../src/operator-actions.ts";
+import { ActionError, actionsOf, batchAgain, reviewAgain, verifyAgain } from "../src/operator-actions.ts";
 import { optionalChecks, optionalChecksOf, seenChecks, setOptionalCheck } from "../src/optional-checks.ts";
 
 const t = "2026-11-01T00:00:00.000Z";
@@ -24,20 +24,16 @@ test("a held review, a failed verification and a stopped fix are released once, 
     { repo: "app", number: 1, head_oid: "old", at: t, mode: "full", verdict: "hold", reason: "older head" },
   ]));
   await db.run(db.k.insertInto("verifications").values({ repo: "app", number: 1, head_sha: "h1", kind: "k", reason: "r", state: "failed", summary: "red", created_at: t }));
-  await db.run(db.k.insertInto("fix_attempts").values({ repo: "app", number: 2, main_sha: "m", text_hash: "x", state: "skipped", created_at: t, updated_at: t }));
-  assert.deepEqual(await actionsOf(db, "app", 1), { reviewAgain: true, verifyAgain: true, fixAgain: false, batchAgain: false });
-  assert.deepEqual(await actionsOf(db, "app", 2), { reviewAgain: false, verifyAgain: false, fixAgain: true, batchAgain: false });
+  assert.deepEqual(await actionsOf(db, "app", 1), { reviewAgain: true, verifyAgain: true, batchAgain: false });
+  assert.deepEqual(await actionsOf(db, "app", 2), { reviewAgain: false, verifyAgain: false, batchAgain: false });
 
   await reviewAgain(db, "op", "app", 1);
   await verifyAgain(db, "op", "app", 1);
-  await fixAgain(db, "op", "app", 2);
   const reviews = await db.all(db.k.selectFrom("opus_reviews").select("head_oid"));
   assert.deepEqual(reviews.map((r) => r.head_oid), ["old"]);
   assert.equal((await db.get(db.k.selectFrom("verifications").select("state").where("repo", "=", "app")))!.state, "stale");
-  assert.equal((await db.all(db.k.selectFrom("fix_attempts").select("number"))).length, 0);
-  assert.deepEqual(await actionsOf(db, "app", 1), { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false });
+  assert.deepEqual(await actionsOf(db, "app", 1), { reviewAgain: false, verifyAgain: false, batchAgain: false });
   await assert.rejects(() => reviewAgain(db, "op", "app", 1), (e) => e instanceof ActionError && e.status === 409);
-  await assert.rejects(() => fixAgain(db, "op", "app", 3), (e) => e instanceof ActionError && e.status === 404);
 });
 
 test("optional checks are kept per repo, only for tracked repos, and listed from recent check results", async () => {

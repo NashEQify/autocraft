@@ -61,8 +61,8 @@ export type WorkspaceDeps = {
 export function defaultWorkspaceDeps(): WorkspaceDeps {
   return {
     async headOf(repo, branch) {
-      const { defaultDeps } = await import("../fixissue/index.ts");
-      return defaultDeps().mainHead(repo, branch);
+      const { mainHeadOf } = await import("../github/fork.ts");
+      return mainHeadOf(repo, branch);
     },
     checkout: (repo, branch, sha) => checkoutForCommit(repo, branch, sha, console.log),
     now: Date.now, boundMs: 20_000, headTtlMs: 5 * 60_000, keepMs: 3 * 3600_000,

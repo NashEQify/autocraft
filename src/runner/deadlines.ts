@@ -31,7 +31,6 @@ export const STEP_PLANS: Record<string, Plan> = {
   fixup: { calls: [item("fixup.patch", true), item("fixup.conflict", true)], items: 5 },
   cifix: { calls: [item("cifix.patch", true)], items: 5 },
   "main-fix": { calls: [item("mainfix.classify"), item("cifix.patch", true)], items: 1 },
-  fixissue: { calls: [item("fixissue.triage"), item("fixissue.patch", true)], items: 3 },
   verify: { calls: [item("verify.plan")], items: 10 },
   "verify-collect": { calls: [item("verify.summary")], items: 10 },
   // One threat model, then per area an audit and a verify of each finding it may report, and a scan test of each (feature scan-tests).

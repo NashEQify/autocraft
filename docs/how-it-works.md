@@ -30,9 +30,9 @@ Writes each settled type and flag to GitHub as a label. A label a person set is 
 
 Opus reads every wanted pull request at its current head, with read access to the repo. It gives a verdict and the complete list of fixes. It runs once CI is green. New commits or discussion bring it back for another review, at most every two hours and three times a day per pull request. The item page shows the review and its reasons.
 
-## Fix
+## Implement
 
-Writes a patch for a bugfix issue when the fix is clear, tests it in a sandbox and opens a pull request. Unclear issues are held with the reason. It needs the repo's fix approval.
+Implements an issue a maintainer queued: Opus plans it in a workspace on the queuer's Task Runner, asks the author or a maintainer when the issue leaves something open, writes the change and its tests, and opens a pull request after AutoCraft's own checks pass. A stuck attempt becomes a decision. It needs the repo's issue implementations approval.
 
 ## Fix-up
 

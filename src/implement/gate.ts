@@ -1,6 +1,6 @@
 // What an implement job needs before it starts, checked again at the run: the repo's issue implementation approval, its
 // Implement switch, and a fast_track row on the issue by someone who settles on the repo (src/settlers.ts).
-import { fixIssueApprovalOf } from "../fixissue/approval.ts";
+import { fixIssueApprovalOf } from "./approval.ts";
 import { featureOn } from "../build/features.ts";
 import { settlesNow } from "../settlers.ts";
 import type { Db } from "../db/index.ts";

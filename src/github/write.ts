@@ -50,7 +50,7 @@ function covers(g: Guarded | Grant, repo: string, number?: number): void {
 /** A push to the pipeline's own branch and a new PR are made only under the grants of the steps that open the pipeline's own PRs. */
 function opensOwnPr(g: Grant, repo: string): void {
   covers(g, repo);
-  const ok = g.scope === "item" ? g.action.kind === "fixissue-collect" || g.action.kind === "implement" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
+  const ok = g.scope === "item" ? g.action.kind === "implement" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
   if (!ok) throw new Error(`a ${g.scope === "item" ? `${g.action.kind} grant` : `grant for ${g.need ?? "no approval"}`} does not allow a push to a new branch or a new pull request`);
 }
 
@@ -606,7 +606,7 @@ export function ghAskComment(w: Writer, exec: Exec, action: string, g: Guarded<A
   return ghComment(w, g, exec, action, { repo: g.repo, number: g.number, pr: true }, note, text, details);
 }
 
-/** `action` is the audit action of the caller's stage (act, fixup or fixissue comment). Not for asks: those use ghAskComment. */
+/** `action` is the audit action of the caller's stage (act, fixup or implement comment). Not for asks: those use ghAskComment. */
 export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; pr: boolean }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
   exec = await laneExec(w, g, exec);

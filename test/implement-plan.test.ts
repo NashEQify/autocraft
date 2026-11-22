@@ -14,7 +14,7 @@ import { rememberSlug } from "../src/github/identity.ts";
 import { applyStuckAnswer, implementDecisionId, markStuck, STUCK_OPTIONS } from "../src/implement/stuck.ts";
 import { implementationById } from "../src/implement/store.ts";
 import { setFeature } from "../src/build/features.ts";
-import { textHash } from "../src/fixissue/candidates.ts";
+import { textHash } from "../src/core/open-prs.ts";
 
 const notReady: PlanReply = {
   ready: false, kind: "bugfix", summary: "The export dialog should reopen in the last folder.", plan: "Found the dialog in src/export.rs; the folder is not stored.",

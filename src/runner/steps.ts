@@ -145,12 +145,6 @@ async function checkImplement(db: Db, p: Params): Promise<string | null> {
   return await implementRefusal(db, String(p.repo), Number(p.number), { dry: p.mode === "dry" });
 }
 
-/** Opening fix PRs from issues is opt-in per repo. */
-async function checkFixIssueApproved(db: Db, p: Params): Promise<string | null> {
-  const { fixIssueApprovalOf } = await import("../fixissue/approval.ts");
-  return await fixIssueApprovalOf(db, String(p.repo)) ? null : `fixing issues in ${p.repo} is not approved`;
-}
-
 const SECURITY_FINDING_PARAMS: ParamDef[] = [
   { name: "repo", label: "Repo", kind: "repo", required: true },
   { name: "number", label: "Finding", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the finding's number in the repo" },
@@ -528,45 +522,6 @@ export const STEPS: StepDef[] = [
       const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
       if (r.moved) ctx.acted(1);
       return r.summary;
-    },
-  },
-  {
-    name: "fixissue",
-    priority: 1,
-    title: "Fix issues",
-    description: "The issue path of the pipeline. For open bugfix issues with a clear fix, Sonnet triages the issue, then writes a fix and a regression test as a diff that is checked and queued as build tasks: the test must fail on main and everything must pass with the fix. Rounds that fail are tried again, three at most.",
-    stage: runStage("fixissue"),
-    requires: "operator",
-    models: ["sonnet", "haiku"],
-    params: [
-      { name: "repo", label: "Repo", kind: "repo", required: true },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 20, default: 3, help: "issues to start in this job" },
-    ],
-    check: checkFixIssueApproved,
-    run: async (ctx) => {
-      const { runFixIssue } = await import("../fixissue/index.ts");
-      const refused = await checkFixIssueApproved(ctx.db, ctx.params);
-      if (refused) throw new Error(refused);
-      const r = await runFixIssue(ctx.db, { repo: String(ctx.params.repo), limit: Number(ctx.params.limit), dryRun: false, onHandled: ctx.handled, stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.usageRun(r.runId);
-      return `${r.repo}: ${r.started.length} started, ${r.skipped.length} not a clear fix, ${r.queued.length} further rounds queued`;
-    },
-  },
-  {
-    name: "fixissue-collect",
-    priority: 1,
-    title: "Collect fix results",
-    description: "Reads the finished build tasks of each fix attempt. A fix passes when its tests pass and the regression test fails without it; Opus then checks the patch; on a reject the round fails and Opus's reasons go into the next round. Then the commit is pushed to the pipeline's fork, the pull request is opened and the issue gets one comment. For a failed round, Haiku summarises the log for the next round.",
-    stage: runStage("fixissue-collect"),
-    requires: "operator",
-    models: ["haiku", "opus"],
-    params: [],
-    run: async (ctx) => {
-      const { runFixIssueCollect } = await import("../fixissue/index.ts");
-      const r = await runFixIssueCollect(ctx.db, { stopping: ctx.stopping, by: byOfJob(ctx.job.requestedBy) }, ctx.log);
-      ctx.usageRun(r.runId);
-      ctx.handled(r.changed);
-      return `${r.looked} pending: ${r.passed} passed, ${r.opened} PRs opened, ${r.failedRounds} failed rounds, ${r.failed} failed, ${r.retried} retried`;
     },
   },
   {

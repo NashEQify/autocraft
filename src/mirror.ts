@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 import { reloadRepoOwners, trackedNames } from "./repos.ts";
 import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
-import { textRefs } from "./fixissue/candidates.ts";
+import { textRefs } from "./core/open-prs.ts";
 import { syncActivity } from "./activity.ts";
 import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";

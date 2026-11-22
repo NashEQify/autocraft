@@ -108,8 +108,8 @@ export async function checkLimitMs(db: Db, repo: string, i: Pick<CheckInput, "co
 /** What the item is and which commit the patch applies to. */
 export type CheckTarget = {
   db: Db;
-  /** The pipeline step that owns the model call: fixup, cifix or fixissue. */
-  step: "fixup" | "cifix" | "fixissue" | "fix-check";
+  /** The pipeline step that owns the model call: fixup, cifix or fix-check. */
+  step: "fixup" | "cifix" | "fix-check";
   repo: string; number: number | null; head: string;
   /** The default-branch commit the check tasks take their CI gate from; null runs them in the stock image. */
   base: string | null;

@@ -7,7 +7,7 @@ import { featureOn } from "../build/features.ts";
 import { BuildError } from "../build/envs.ts";
 import { excluded } from "../db/kx.ts";
 import { TERMINAL, cancelTask, createTask, getTask, privateClockStart } from "../build/tasks.ts";
-import { tasksFor } from "../fixissue/index.ts";
+import { tasksFor } from "../build/fix-tasks.ts";
 import { cloneTask } from "../verify/tasks.ts";
 import { outcomeOf } from "../verify/results.ts";
 import { patchFor, patchProblem, regressionPath } from "../verify/plan.ts";

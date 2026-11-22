@@ -123,7 +123,7 @@ export class Git {
   /** Fetches `branch` of `org/repo` and reports whether the commit `sha` is now available (it may be older than the branch head). */
   async fetchBranch(org: string, repo: string, branch: string, sha: string): Promise<boolean> {
     await this.init();
-    await this.must(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", `https://github.com/${org}/${repo}.git`, `+refs/heads/${branch}:refs/fixissue/main`]);
+    await this.must(["fetch", "--quiet", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head", `https://github.com/${org}/${repo}.git`, `+refs/heads/${branch}:refs/fixup/main-head`]);
     const have = (await this.git(["cat-file", "-e", `${sha}^{commit}`])).code === 0;
     return have;
   }

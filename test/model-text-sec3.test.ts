@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { reviewBody } from "../src/review/post-template.ts";
 import { issueBody } from "../src/postmerge/template.ts";
 import { cleanReason } from "../src/act/templates.ts";
-import { commitMessage, prTitle } from "../src/fixissue/template.ts";
+import { implCommitMessage, implTitle } from "../src/implement/template.ts";
 import { relatedStatements } from "../src/memory/retrieve.ts";
 import { publicTexts, statementsList } from "../src/review/opus-parse.ts";
 import { quotedTexts, shingleSet, statementProblems } from "../src/reference-lint.ts";
@@ -37,11 +37,11 @@ test("posted model text keeps no mention, tag, link or issue reference, however 
   // Legitimate text stays readable: code keeps its brackets, a link under the repo's owner and an e-mail-like word stay.
   assert.match(review("`Vec<u8>` is copied; see [the PR](https://github.com/acme/app/pull/3), ask a@b.example"), /- `Vec<u8>` is copied; see \[the PR\]\(https:\/\/github\.com\/acme\/app\/pull\/3\), ask a@b\.example/);
 
-  // The Fix PR's title and commit subject carry no reference, closing keyword target or mention of the issue's author.
+  // The implementation PR's title and commit subject carry no reference, closing keyword target or mention of the issue's author.
   for (const t of ["#42 panic in decode_rows", "Panic, closes #7 and other/repo#8", "Crash @alice @@org/team", "closes https://github.com/o/r/issues/7 now"]) {
-    for (const line of [prTitle(t), commitMessage(9, t, ["a.rs"]).split("\n")[0]!]) assert.doesNotMatch(line, /#\d|@\w|https?:/, line);
+    for (const line of [implTitle("bugfix", t), implCommitMessage(implTitle("bugfix", t), 9, ["a.rs"]).split("\n")[0]!]) assert.doesNotMatch(line, /#\d|@\w|https?:/, line);
   }
-  assert.equal(commitMessage(9, "#42 panic", ["a.rs"]).match(/#\d+/g)?.join(), "#9");
+  assert.equal(implCommitMessage(implTitle("bugfix", "#42 panic"), 9, ["a.rs"]).match(/#\d+/g)?.join(), "#9");
 });
 
 test("a review gets owner statements of its own repo only, never of a quiet PR, framed as data, and its public text may not repeat them or the reference pages", async () => {

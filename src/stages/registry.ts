@@ -253,12 +253,10 @@ export const STAGES: StageDef[] = [
     edges: [{ to: "fixup", branch: "take-fix", label: "take with fixes" }, { to: "verify", branch: "take", label: "taken" }],
   },
   {
-    id: "fix", title: "Implement", order: 8, runStage: 7, docSection: "Fix", mode: "steps",
+    id: "fix", title: "Implement", order: 8, runStage: 7, docSection: "Implement", mode: "steps",
     description: "Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request.",
     steps: [
       { name: "implement", maxMin: 300, label: "Implement", limit: null },
-      // The retired text-only fix steps, run only from the command line until their code goes.
-      { name: "fixissue", maxMin: 50 }, { name: "fixissue-collect", maxMin: 10 },
       { name: "workspace-try", maxMin: 160 },
     ],
     lanes: [{ name: "implement", steps: ["implement"], order: 16 }],
@@ -275,7 +273,7 @@ export const STAGES: StageDef[] = [
     models: [
       { model: "opus", use: "Plans the implementation and writes it in a workspace session", remark: "Every call runs on the Task Runner of the person who queued the issue" },
     ],
-    promptIds: ["implement.plan", "implement.session", "fixissue.triage", "fixissue.patch", "fixissue.check"], promptStage: "Fix",
+    promptIds: ["implement.plan", "implement.session"], promptStage: "Fix",
     waits: [
       { name: "Queuer's Task Runner", why: "Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots", howLong: "Until that Task Runner is ready and has a free slot", showsAs: "Queue view \"Runs only on <login>'s Task Runner\"", kind: "external" },
       { name: "Author's answer", why: "The plan found facts the issue leaves open and asked its author in a comment; the plan runs again when the issue text changes or a person comments after the question", howLong: "Until the author or another person answers; no timer", showsAs: "Plan wait \"the author's answer\"", kind: "external" },
@@ -485,7 +483,7 @@ export const STAGES: StageDef[] = [
 /**
  * Floor of the longest run of a job of a step, in minutes (StageDef.steps[].maxMin): about twice the longest realistic job, from the 30-day
  * history of finished jobs (longest done job: fixup 92 incl. one stuck check, decide 35, opus-review 33, premerge 31,
- * dupes-compare 25, fixissue 25, cifix 17, postmerge 14, prioritize 10, labels-apply 9, classify-new 7, others under 2) and the
+ * dupes-compare 25, cifix 17, postmerge 14, prioritize 10, labels-apply 9, classify-new 7, others under 2) and the
  * limits in the code. The runner's deadline is the larger of this and the bound the code allows (src/runner/deadlines.ts: model calls,
  * check time and lint rounds times the job's items); it stops a job past it and fails it.
  * A step with no registry entry (the security steps, review-batch) gets DEFAULT_STEP_MAX_MIN.
