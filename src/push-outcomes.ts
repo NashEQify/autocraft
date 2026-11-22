@@ -3,7 +3,7 @@
 import { audit } from "./dash/audit.ts";
 import { optionalChecks } from "./optional-checks.ts";
 import {
-  BREAKER_WINDOW, breakerTripped, classifyPush, parseTripKey, PUSH_STAGE, requiredResult, STEP_STAGE, TRIP_STAGES, tripKey,
+  BREAKER_WINDOW, breakerTripped, classifyPush, parseTripKey, PUSH_STAGE, requiredResult, STEP_STAGE, TRIP_STAGES, tripKey, tripOf,
   type Outcome, type Required, type StageTripRow, type TripStage,
 } from "./core/push-outcome.ts";
 import { filterSeq } from "./async-seq.ts";
@@ -128,40 +128,48 @@ export async function brokeHeads(db: Db, repo?: string): Promise<Map<string, str
 }
 
 // ---- circuit breaker --------------------------------------------------------------------------------------
-// Every push stage trips per repo (key `<stage>:<repo>`, core/push-outcome.ts tripKey): a repo's broken pushes or merges stop that
-// stage on that repo only. `outside-surge` (src/outside.ts) is the one instance-wide row in the table.
+// Two tiers per push stage (core/push-outcome.ts tripKey): `<stage>:<repo>`, which a repo's own broken pushes or merges trip and
+// which stops the stage on that repo, and the bare `<stage>`, which broken pushes on 2 or more repos trip and which stops it on
+// every repo until an operator resumes it. `outside-surge` (src/outside.ts) is the outside-author protections' breaker.
 
 export type TripRow = StageTripRow;
 /** The key of the outside-author surge breaker (OUTSIDE_SURGE in src/outside.ts, which imports this module). */
 const OUTSIDE_SURGE_KEY = "outside-surge";
 export const tripRow = async (db: Db, key: string): Promise<TripRow | undefined> => await db.get(db.k.selectFrom("stage_trips").select(kx.cols("stage_trips")).where("stage", "=", key));
 
-/** Push-breaker trips active now, by key (`fixissue:deckcraft`), with the reason. */
+/** Push-breaker trips active now, by key (`fixissue:deckcraft`, or `fixissue` for the instance-wide tier), with the reason. */
 export async function activeTrips(db: Db): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
-  for (const r of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason"]).where("active", "=", 1))) if (parseTripKey(r.stage)) out[r.stage] = r.reason;
+  for (const r of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason"]).where("active", "=", 1))) if (tripOf(r.stage)) out[r.stage] = r.reason;
   return out;
 }
 
-/** Push-breaker trips active now, with their stage and repo, oldest first: one row per tripped repo. */
-export async function activeTripRows(db: Db): Promise<(TripRow & { tripStage: TripStage; repo: string })[]> {
+/** Push-breaker trips active now, with their stage and repo (null: instance-wide), oldest first. */
+export async function activeTripRows(db: Db): Promise<(TripRow & { tripStage: TripStage; repo: string | null })[]> {
   const rows = await db.all(db.k.selectFrom("stage_trips").select(kx.cols("stage_trips")).where("active", "=", 1).orderBy("tripped_at").orderBy("stage"));
-  return rows.flatMap((r) => { const k = parseTripKey(r.stage); return k ? [{ ...r, tripStage: k.stage, repo: k.repo }] : []; });
+  return rows.flatMap((r) => { const k = tripOf(r.stage); return k ? [{ ...r, tripStage: k.stage, repo: k.repo }] : []; });
 }
 
-const tripReason = (reason: string): string => `tripped: ${reason}; an operator, or a maintainer with write access to the repo, resumes it`;
+const tripReason = (reason: string, wide: boolean): string =>
+  `tripped: ${reason}; ${wide ? "an operator resumes it" : "an operator, or a maintainer with write access to the repo, resumes it"}`;
 
-/** Why the runner step cannot work `repo` because its stage tripped there, or null. */
-export async function tripReasonOfStep(db: Db, step: string, repo: string): Promise<string | null> {
+/** Why the runner step cannot start because its stage tripped on every repo, or (with `repo`) on that repo; null when it did not. */
+export async function tripReasonOfStep(db: Db, step: string, repo?: string | null): Promise<string | null> {
   const stage = STEP_STAGE[step];
-  const r = stage ? await tripRow(db, tripKey(stage, repo)) : undefined;
-  return r?.active ? tripReason(r.reason) : null;
+  if (!stage) return null;
+  const wide = await tripRow(db, stage);
+  if (wide?.active) return tripReason(wide.reason, true);
+  const r = repo ? await tripRow(db, tripKey(stage, repo)) : undefined;
+  return r?.active ? tripReason(r.reason, false) : null;
 }
 
 /** tripReasonOfStep from the trips active now (activeTrips). */
-export function tripReasonIn(trips: Readonly<Record<string, string>>, step: string, repo: string): string | null {
-  const stage = STEP_STAGE[step], reason = stage ? trips[tripKey(stage, repo)] : undefined;
-  return reason === undefined ? null : tripReason(reason);
+export function tripReasonIn(trips: Readonly<Record<string, string>>, step: string, repo?: string | null): string | null {
+  const stage = STEP_STAGE[step];
+  if (!stage) return null;
+  if (trips[stage] !== undefined) return tripReason(trips[stage], true);
+  const reason = repo ? trips[tripKey(stage, repo)] : undefined;
+  return reason === undefined ? null : tripReason(reason, false);
 }
 
 /** Evidence of a trip, for the Pipeline page and the audit log. */
@@ -180,15 +188,30 @@ export async function trip(db: Db, key: string, reason: string, evidence: string
 
 export const sinceOf = async (db: Db, key: string): Promise<string> => (await tripRow(db, key))?.cleared_at ?? "";
 
-/** Trips a push stage on `repo` when BREAKER_BROKE of that repo's last BREAKER_WINDOW pushes of the stage since its last resume broke a required check. */
+const evidenceOfPushes = (rows: { repo: string; number: number | null; to_oid: string }[]): string[] => rows.map((r) => `${r.repo}#${r.number}@${r.to_oid.slice(0, 8)}`);
+
+/**
+ * After a push of `stage` on `repo` broke a required check: trips the stage on `repo` when BREAKER_BROKE of that repo's last
+ * BREAKER_WINDOW pushes of the stage since its last resume broke one, and on every repo when the broken ones among the stage's
+ * last BREAKER_WINDOW pushes across repos since the instance-wide row's last resume come from 2 or more repos (a fault in the step
+ * itself, caught before it breaks 2 heads in every repo).
+ */
 export async function evaluatePushBreaker(db: Db, stage: TripStage, repo: string, at = new Date().toISOString()): Promise<void> {
+  const last = async (key: string, oneRepo: boolean) => await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid"]).$narrowType<{ outcome: Outcome | null }>()
+    .where("stage", "=", stage).$if(oneRepo, (q) => q.where("repo", "=", repo)).where("at", ">", await sinceOf(db, key)).orderBy("id", "desc").limit(BREAKER_WINDOW));
   const key = tripKey(stage, repo);
-  if ((await tripRow(db, key))?.active) return;
-  const rows = await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid"]).$narrowType<{ outcome: Outcome | null }>()
-    .where("stage", "=", stage).where("repo", "=", repo).where("at", ">", await sinceOf(db, key)).orderBy("id", "desc").limit(BREAKER_WINDOW));
-  if (!breakerTripped(rows.map((r) => r.outcome))) return;
-  const bad = rows.filter((r) => r.outcome === "broke");
-  await trip(db, key, `${bad.length} of the last ${rows.length} ${stage} pushes in ${repo} broke a required check`, bad.map((r) => `${r.repo}#${r.number}@${r.to_oid.slice(0, 8)}`), at);
+  if (!(await tripRow(db, key))?.active) {
+    const rows = await last(key, true);
+    if (breakerTripped(rows.map((r) => r.outcome))) {
+      const bad = rows.filter((r) => r.outcome === "broke");
+      await trip(db, key, `${bad.length} of the last ${rows.length} ${stage} pushes in ${repo} broke a required check`, evidenceOfPushes(bad), at);
+    }
+  }
+  if ((await tripRow(db, stage))?.active) return;
+  const rows = await last(stage, false);
+  const bad = rows.filter((r) => r.outcome === "broke"), repos = [...new Set(bad.map((r) => r.repo))].sort();
+  if (repos.length < 2) return;
+  await trip(db, stage, `${bad.length} of the last ${rows.length} ${stage} pushes broke a required check, in ${repos.length} repos (${repos.join(", ")})`, evidenceOfPushes(bad), at);
 }
 
 const weMerged = async (db: Db, repo: string, number: number): Promise<{ at: string } | undefined> =>
@@ -210,8 +233,8 @@ export async function mergeDefect(db: Db, repo: string, number: number, defects:
 }
 
 /**
- * Who may resume a trip: an operator any trip; a maintainer a push-breaker trip (`<stage>:<repo>`) when GitHub gives them write
- * permission on its repo. The outside-author surge breaker is operator-only.
+ * Who may resume a trip: an operator any trip; a maintainer a per-repo push-breaker trip (`<stage>:<repo>`) when GitHub gives them
+ * write permission on its repo. An instance-wide push-stage trip (`<stage>`) and the outside-author surge breaker are operator-only.
  */
 export async function mayResumeTrip(user: { role: string; canWrite(repo: string): Promise<boolean> }, key: string): Promise<boolean> {
   if (user.role === "operator") return true;
@@ -224,9 +247,9 @@ export class TripError extends Error {
   status = 400;
 }
 
-/** An operator or a maintainer (mayResumeTrip) clears a trip. Pushes and merges before this moment no longer count for its stage and repo. */
+/** An operator or a maintainer (mayResumeTrip) clears a trip. Pushes and merges before this moment no longer count for that breaker. */
 export async function resumeStage(db: Db, key: string, by: string): Promise<void> {
-  if (key !== OUTSIDE_SURGE_KEY && !parseTripKey(key)) throw new TripError(`no such breaker: ${key}; breakers are <stage>:<repo> with stage one of ${TRIP_STAGES.join(", ")}, or ${OUTSIDE_SURGE_KEY}`);
+  if (key !== OUTSIDE_SURGE_KEY && !tripOf(key)) throw new TripError(`no such breaker: ${key}; breakers are <stage>:<repo> or <stage> with stage one of ${TRIP_STAGES.join(", ")}, or ${OUTSIDE_SURGE_KEY}`);
   const r = await tripRow(db, key);
   if (!r?.active) throw new TripError(`${key} is not paused by the circuit breaker`);
   const at = new Date().toISOString();

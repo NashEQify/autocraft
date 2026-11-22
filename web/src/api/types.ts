@@ -1230,10 +1230,13 @@ export interface JobFilter {
   offset?: number;
 }
 
-/** A repo where a stage's circuit breaker tripped: the stage works no item of that repo until an operator, or a maintainer with write access to the repo, resumes it. */
-export type StageTrip = { /** The breaker, `<stage>:<repo>` (fixissue:deckcraft), as resume takes it. */ key: string; repo: RepoName; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
+/**
+ * A stage's circuit breaker that tripped: on one repo (the stage works no item there until an operator, or a maintainer with write
+ * access to the repo, resumes it), or on every repo (`repo` null: broken pushes on several repos; an operator resumes it).
+ */
+export type StageTrip = { /** The breaker as resume takes it: `<stage>:<repo>` (fixissue:deckcraft), or `<stage>` for every repo. */ key: string; repo: RepoName | null; reason: string; since: string; /** Whether the viewer may resume it. */ canResume: boolean };
 export type StageLimit = { step: string; title: string; perDay: number | null; usedToday: number; pausedReason: string | null;
-  /** The repos where the step's push stage (fixup, cifix, fixissue, merge) tripped, oldest first; the step goes on for every other repo. */
+  /** Where the step's push stage (fixup, cifix, fixissue, merge) tripped, oldest first: per repo (the step goes on for every other repo), or on every repo. */
   trips?: StageTrip[];
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
@@ -2295,7 +2298,7 @@ export type NeedsStoppedRow = {
   id: string;
   kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group";
   title: string;
-  /** A breaker row of a push stage: the repo it stopped the stage on. */
+  /** A breaker row of a push stage: the repo it stopped the stage on (absent: every repo, or not a push stage). */
   repo?: RepoName;
   reason: string;
   since: string | null;

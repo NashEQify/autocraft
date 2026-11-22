@@ -123,7 +123,7 @@ function ResetCount({ l }: { l: StageLimit }) {
   );
 }
 
-/** One repo where the stage's circuit breaker tripped; Resume shows for whoever the server allows (an operator, or a maintainer with write access to the repo). */
+/** A stage's circuit breaker tripped on one repo or on every repo; Resume shows for whoever the server allows (an operator; for one repo also a maintainer with write access to it). */
 function TripLine({ t, stage }: { t: StageTrip; stage?: string }) {
   const api = useApi();
   const write = useWrite();
@@ -132,7 +132,7 @@ function TripLine({ t, stage }: { t: StageTrip; stage?: string }) {
       <div className="min-w-0 flex-1 basis-60">
         <div className="flex flex-wrap items-center gap-2">
           {stage && <span className="text-sm font-medium">{stage}</span>}
-          <span className="code text-sm font-medium">{t.repo}</span>
+          {t.repo ? <span className="code text-sm font-medium">{t.repo}</span> : <span className="text-sm font-medium">all repos</span>}
           <Badge tone="warn">Tripped</Badge>
           <TimeAgo iso={t.since} className="text-xs text-ink/50" />
         </div>
@@ -140,7 +140,7 @@ function TripLine({ t, stage }: { t: StageTrip; stage?: string }) {
       </div>
       {t.canResume && (
         <div className="flex flex-col items-end gap-1">
-          <ConfirmButton label="Resume" confirmLabel="Confirm resume" target={t.repo} loading={write.busy === "resume"} onConfirm={() => void write.run("resume", () => api.pipeline.resumeTrip(t.key))} />
+          <ConfirmButton label="Resume" confirmLabel="Confirm resume" target={`${stage ? `${stage} ` : ""}${t.repo ?? "all repos"}`} loading={write.busy === "resume"} onConfirm={() => void write.run("resume", () => api.pipeline.resumeTrip(t.key))} />
           <ErrorLine error={write.error} />
         </div>
       )}
@@ -152,15 +152,17 @@ function TripLine({ t, stage }: { t: StageTrip; stage?: string }) {
 function StageTrips({ l, className }: { l: StageLimit; className?: string }) {
   if (!l.trips?.length) return null;
   return (
-    <ul aria-label={`${l.title}: tripped repos`} className={cn("flex flex-col gap-2", className)}>
+    <ul aria-label={`${l.title}: tripped breakers`} className={cn("flex flex-col gap-2", className)}>
       {l.trips.map((t) => <TripLine key={t.key} t={t} />)}
     </ul>
   );
 }
 
-const trippedIn = (n: number) => `Tripped in ${n} repo${n === 1 ? "" : "s"}`;
+const trippedIn = (trips: StageTrip[]) => (trips.some((t) => t.repo === null) ? "Tripped on all repos" : `Tripped in ${trips.length} repo${trips.length === 1 ? "" : "s"}`);
 
 function PauseBadge({ l }: { l: StageLimit }) {
+  // A trip on every repo is the pause reason; StageTrips shows it.
+  if (l.trips?.some((t) => t.repo === null)) return null;
   if (l.pausedReason) return <Badge tone="warn">{l.pausedReason}</Badge>;
   return l.status ? <span className="text-xs text-ink/50">{l.status}</span> : null;
 }
@@ -242,8 +244,9 @@ export function StageLimits() {
                   <td className="px-3 py-1.5">{operator ? <LimitEditor l={l} /> : limitText(l)}</td>
                   <td className="px-3">
                     <div className="flex flex-wrap items-center gap-2">
-                      {l.pausedReason ? <Badge tone="warn">{l.pausedReason}</Badge> : <span className="text-ink/45">{l.status ?? "ready"}</span>}
-                      {l.trips?.length ? <Badge tone="warn">{trippedIn(l.trips.length)}</Badge> : null}
+                      {/* A trip on every repo is the pause reason; its row below the table says why. */}
+                      {l.trips?.some((t) => t.repo === null) ? null : l.pausedReason ? <Badge tone="warn">{l.pausedReason}</Badge> : <span className="text-ink/45">{l.status ?? "ready"}</span>}
+                      {l.trips?.length ? <Badge tone="warn">{trippedIn(l.trips)}</Badge> : null}
                       {operator && <ResetCount l={l} />}
                     </div>
                   </td>
@@ -255,7 +258,7 @@ export function StageLimits() {
       )}
       {/* Outside the scrolling table, so the reason and Resume fit a phone screen. */}
       {q.data?.limits.some((l) => l.trips?.length) && (
-        <ul aria-label="Tripped repos" className="flex flex-col gap-2 border-t border-line p-3">
+        <ul aria-label="Tripped breakers" className="flex flex-col gap-2 border-t border-line p-3">
           {q.data.limits.flatMap((l) => (l.trips ?? []).map((t) => <TripLine key={t.key} t={t} stage={l.title} />))}
         </ul>
       )}

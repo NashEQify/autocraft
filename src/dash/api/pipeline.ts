@@ -46,7 +46,7 @@ function requireOperator(req: Req, step?: StepDef): void {
 async function pipelineState(db: Db, req: Req): Promise<PipelineState> {
   const [s, hidden] = await Promise.all([rawPipelineState(db), hiddenRepos(db, req)]);
   const limits = await mapSeq(s.limits, async ({ trips, ...l }) => {
-    const shown = await mapSeq((trips ?? []).filter((t) => !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(req.user, t.key) }));
+    const shown = await mapSeq((trips ?? []).filter((t) => t.repo === null || !isHiddenRepo(hidden, t.repo)), async (t) => ({ ...t, reason: blankIfHidden(t.reason, hidden), canResume: await mayResumeTrip(req.user, t.key) }));
     return { ...l, pausedReason: blankIfHidden(l.pausedReason, hidden) || null, status: blankIfHidden(l.status, hidden) || null, ...(shown.length ? { trips: shown } : {}) };
   });
   return { ...s, outside: await outsideState(db, hidden), limits };

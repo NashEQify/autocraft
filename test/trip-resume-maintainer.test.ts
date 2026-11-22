@@ -1,4 +1,5 @@
-// Push breakers trip per repo: a trip stops its stage on that repo only, and a maintainer who can write to that repo resumes it.
+// Push breakers trip per repo (a trip stops its stage on that repo only, and a maintainer who can write to that repo resumes it)
+// and on every repo when broken pushes come from several repos (an operator resumes it).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { activeTrips, evaluatePushBreaker, trip } from "../src/push-outcomes.ts";
@@ -30,20 +31,20 @@ test("a maintainer resumes a push breaker only with write access to its repo", a
   assert.equal((await db.get(db.k.selectFrom("stage_trips").select("active").where("stage", "=", "outside-surge")))?.active, 0);
 });
 
-test("broken pushes on one repo stop fix issue there while another repo's items keep going", async () => {
+test("broken pushes on one repo stop fix issue there; broken pushes on two repos stop it everywhere", async () => {
   const db = await connectDb(":memory:");
   const start = Date.now() - 3_600_000;
   const t = (m: number) => new Date(start + m * 60_000).toISOString();
-  const push = (repo: string, number: number, m: number) => db.run(db.k.insertInto("push_outcomes").values({
-    at: t(m), stage: "fixissue", action: "fixissue-push", repo, number, from_oid: null, to_oid: `${repo}${number}`.padEnd(40, "0"), before_res: "green", after_res: "red", outcome: "broke", resolved_at: t(m),
+  const push = (repo: string, number: number, m: number, outcome = "broke") => db.run(db.k.insertInto("push_outcomes").values({
+    at: t(m), stage: "fixissue", action: "fixissue-push", repo, number, from_oid: null, to_oid: `${repo}${number}`.padEnd(40, "0"), before_res: "green", after_res: outcome === "broke" ? "red" : "green", outcome, resolved_at: t(m),
   }));
   for (const repo of ["a", "b"]) {
     await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(repo);
     await db.run(db.k.insertInto("items").values({ repo, number: 10, kind: "issue", state: "OPEN", title: "Crash on start" }));
   }
-  // Three broken pushes across the two repos: two on a, one on b.
+  // Two broken pushes on a; b's push kept its checks green.
   await push("a", 1, 1);
-  await push("b", 2, 2);
+  await push("b", 2, 2, "kept-green");
   await push("a", 3, 3);
   for (const repo of ["a", "b"]) await evaluatePushBreaker(db, "fixissue", repo, t(4));
   assert.deepEqual(Object.keys(await activeTrips(db)), ["fixissue:a"]);
@@ -58,4 +59,13 @@ test("broken pushes on one repo stop fix issue there while another repo's items 
   await push("a", 4, 61);
   await evaluatePushBreaker(db, "fixissue", "a", t(62));
   assert.deepEqual(Object.keys(await activeTrips(db)), []);
+
+  // A broken push on b too: the stage's broken pushes now come from two repos, and it stops on every repo.
+  await push("b", 5, 63);
+  await evaluatePushBreaker(db, "fixissue", "b", t(64));
+  assert.deepEqual(Object.keys(await activeTrips(db)), ["fixissue"]);
+  assert.match(await why("b"), /is paused/);
+  await assert.rejects(resumeTrip(db, as("maintainer", "fixissue", ["a", "b"])), { status: 403 });
+  await resumeTrip(db, as("operator", "fixissue", []));
+  assert.doesNotMatch(await why("b"), /is paused/);
 });

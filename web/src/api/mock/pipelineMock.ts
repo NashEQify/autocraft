@@ -111,7 +111,10 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
     step: step as string, title: title as string, perDay: perDay as number | null, usedToday: usedToday as number,
     pausedReason: perDay !== null && (usedToday as number) >= (perDay as number) ? `daily limit of ${perDay} items reached` : null,
   }));
+  const wide = "3 of the last 10 fixup pushes broke a required check, in 2 repos (designcraft, photocraft)";
+  Object.assign(limits.find((l) => l.step === "fixup")!, { pausedReason: `tripped: ${wide}; an operator resumes it` });
   limits.find((l) => l.step === "fixup")!.trips = [
+    { key: "fixup", repo: null, reason: wide, since: iso(30), canResume: true },
     { key: "fixup:designcraft", repo: "designcraft", reason: "2 of the last 10 fixup pushes in designcraft broke a required check", since: iso(140), canResume: true },
     { key: "fixup:photocraft", repo: "photocraft", reason: "2 of the last 7 fixup pushes in photocraft broke a required check", since: iso(35), canResume: false },
   ];
@@ -235,7 +238,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
       async resumeTrip(stage) {
         requireOperator();
         if (stage === "outside-surge") resumeSurge();
-        for (const l of limits) if (l.trips) { l.trips = l.trips.filter((t) => t.key !== stage); if (!l.trips.length) delete l.trips; }
+        for (const l of limits) if (l.trips) { if (l.step === stage) l.pausedReason = null; l.trips = l.trips.filter((t) => t.key !== stage); if (!l.trips.length) delete l.trips; }
         changed();
         return wait(state(), 30);
       },

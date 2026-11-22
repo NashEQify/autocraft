@@ -280,7 +280,7 @@ type PassReads = {
   takers?: string;
   /** Act's usage per UTC day start. */
   act?: Map<string, number>;
-  /** Push-breaker trips active now, by key (`<stage>:<repo>`), with their reasons. */
+  /** Push-breaker trips active now, by key (`<stage>:<repo>`, or `<stage>` on every repo), with their reasons. */
   trips?: Record<string, string>;
 };
 let passReads: PassReads | null = null;
@@ -901,19 +901,19 @@ export async function failureBackoff(db: Db, step: string, ms: number = Date.now
 
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
-/** Why a job of the step cannot work `repo` because the step's push stage tripped there (circuit breaker), or null. */
-async function repoTripOf(db: Db, step: string, repo: string): Promise<string | null> {
+/** Why the step cannot start because its push stage tripped on every repo, or (with `repo`) a job of it cannot work that repo because it tripped there; null when neither. */
+async function tripOfStep(db: Db, step: string, repo: string | null): Promise<string | null> {
   const pass = passOf(db);
   return pass ? tripReasonIn(pass.trips ??= await activeTrips(db), step, repo) : await tripReasonOfStep(db, step, repo);
 }
 
 /**
  * Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused.
- * With `repo`, a job for that repo: a breaker tripped there pauses it too (breakers trip per repo, so they never pause the whole stage). A step's models are taken at their defaults.
+ * A breaker of the step's push stage tripped on every repo pauses it; with `repo`, a job for that repo, one tripped on that repo pauses it too (the stage goes on for other repos). A step's models are taken at their defaults.
  */
 export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean; repo?: string | null } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
   const l = await limitRow(db, step), used = await usageToday(db, step, ms);
-  const tripped = o.repo ? await repoTripOf(db, step, o.repo) : null;
+  const tripped = await tripOfStep(db, step, o.repo ?? null);
   if (tripped) return { why: tripped, wakeAt: null };
   if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
   if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
@@ -1131,8 +1131,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
-    // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row.
-    if (repo0 !== null && await repoTripOf(db, stepName, repo0)) return null;
+    // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row (pausedWhy covers a trip on every repo).
+    if (repo0 !== null && await tripOfStep(db, stepName, repo0)) return null;
     const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params });
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {

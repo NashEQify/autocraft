@@ -582,7 +582,7 @@ function migrateValues(db: DatabaseSync): void {
   db.exec("DROP TABLE IF EXISTS main.repo_directions; DROP TABLE IF EXISTS main.direction_proposals");
   db.prepare("DELETE FROM main.settings WHERE key = 'direction_proposals_since'").run();
   if (!db.prepare("SELECT 1 FROM main.settings WHERE key = 'ci_first_done'").get()) ciFirst(db);
-  // Breaker rows of a whole push stage become one row per repo.
+  // Once: breaker rows of a whole push stage are split into one row per repo.
   splitStageTripsSqlite(db);
   // Jev usage saved without a cost is priced from its input tokens.
   const JEV_UNPRICED = "model LIKE 'jev%' AND cost_usd IS NULL AND input_tokens IS NOT NULL";

@@ -165,7 +165,7 @@ async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
 
 export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): Promise<NeedsStoppedRow[]> {
   const out: NeedsStoppedRow[] = [];
-  // One row per tripped repo of a push stage; the outside-author surge breaker is the one instance-wide row.
+  // One row per tripped repo of a push stage, one per push stage tripped on every repo (no repo), and the outside-author surge breaker.
   for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at").orderBy("stage"))) {
     const k = parseTripKey(t.stage);
     if (k && isHiddenRepo(hidden, k.repo)) continue;
