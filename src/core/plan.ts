@@ -107,8 +107,8 @@ export type PrFacts = {
   refreshAt?: number;
   /** The global pipeline switch. decide() ignores it; gates() applies it to the pipeline's own writes. */
   pipelineOn: boolean;
-  /** Stages that stopped themselves (circuit breaker), by stage name (fixup, cifix, fixissue, merge): the reason. gates() refuses their writes. */
-  tripped?: Partial<Record<string, string>>;
+  /** The push stages that stopped themselves on this item's repo (circuit breaker), by stage name (fixup, cifix, fixissue, merge): the reason. gates() refuses their writes. */
+  tripped?: Partial<Record<"fixup" | "cifix" | "fixissue" | "merge", string>>;
   /** A push of ours made the required checks at this head go red: CI fix works on it ahead of other work, even before a review of this head. */
   brokeByUs?: boolean;
   /** The head is new and its CI is red, and the PR has a take or take-fix review of an earlier head: CI fix works from that review and the contributor path is the normal one. */
@@ -326,7 +326,7 @@ export type ItemFacts = {
   /** The global pipeline switch. decideItem ignores it; gates() applies it to the pipeline's own writes. */
   pipelineOn: boolean;
   /** As on PrFacts. */
-  tripped?: Partial<Record<string, string>>;
+  tripped?: Partial<Record<"fixup" | "cifix" | "fixissue" | "merge", string>>;
   /** An open fix round for the issue (retry, testing or passed), or the item is our own fix PR. */
   inFlight?: boolean;
   assignment: AssignFacts;

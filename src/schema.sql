@@ -1959,11 +1959,14 @@ CREATE TABLE IF NOT EXISTS push_outcomes (
 CREATE INDEX IF NOT EXISTS push_outcomes_to ON push_outcomes(repo, to_oid);
 CREATE INDEX IF NOT EXISTS push_outcomes_stage ON push_outcomes(stage, id);
 
--- Circuit breaker: a stage that stopped itself. One row per stage; active = 1 while tripped, and only an operator clears it
--- (autocraft-server pipeline resume <stage>, or the Resume button on the Pipeline page). Pushes and merges from before cleared_at
--- do not count towards the next trip. evidence: JSON of refs (repo#number and commits).
+-- Circuit breaker: a stage that stopped itself. One row per push stage and repo (stage `<stage>:<repo>`, stage one of fixup,
+-- cifix, fixissue, merge), one per push stage for its trip on every repo (`<stage>`), and `outside-surge` for the outside-author
+-- protections; active = 1 while tripped, until an operator, or for a repo's row a maintainer with write access to it, clears it
+-- (autocraft-server pipeline resume <key>, or the Resume button). Pushes and merges from before cleared_at do not count towards
+-- the next trip of that row.
+-- evidence: JSON of refs (repo#number and commits).
 CREATE TABLE IF NOT EXISTS stage_trips (
-  stage TEXT PRIMARY KEY,             -- fixup | cifix | fixissue | merge
+  stage TEXT PRIMARY KEY,             -- <stage>:<repo> | <stage> | outside-surge
   active INTEGER NOT NULL DEFAULT 1,
   reason TEXT NOT NULL,
   evidence TEXT NOT NULL,

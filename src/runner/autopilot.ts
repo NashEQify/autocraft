@@ -54,8 +54,8 @@ import { DEADLINE_ERROR, enqueue, JobError, now, requestCancel, RUNNER_STOPPED }
 import { claudePauseReason } from "../agents/accounts.ts";
 import { inferenceMode } from "../remote/mode.ts";
 import { takerSignature } from "../remote/takers.ts";
-import { activeTrips, tripReasonIn, tripReasonOfStep } from "../push-outcomes.ts";
-import { STEP_STAGE, type TripStage } from "../core/push-outcome.ts";
+import { activeTripRows, activeTrips, tripReasonIn, tripReasonOfStep } from "../push-outcomes.ts";
+import { STEP_STAGE } from "../core/push-outcome.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
 import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { knownStep, loadSteps, STEPS, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
@@ -281,8 +281,8 @@ type PassReads = {
   takers?: string;
   /** Act's usage per UTC day start. */
   act?: Map<string, number>;
-  /** Tripped stages with their reasons. */
-  trips?: Partial<Record<TripStage, string>>;
+  /** Push-breaker trips active now, by key (`<stage>:<repo>`, or `<stage>` on every repo), with their reasons. */
+  trips?: Record<string, string>;
 };
 let passReads: PassReads | null = null;
 const passOf = (db: Db): PassReads | null => (passReads?.db === db ? passReads : null);
@@ -867,7 +867,7 @@ export async function jobLimit(db: Db, step: StepDef, ms: number = Date.now(), w
 export async function cliGate(db: Db, step: { name: string }, steps: Map<string, StepDef>, params: Params = {}, ms: number = Date.now()): Promise<string | null> {
   const busy = await jobBlock(db, steps, { step: step.name, repo: typeof params.repo === "string" ? params.repo : null, number: typeof params.number === "number" ? params.number : null }, { mutex: true });
   if (busy) return busy;
-  return await pauseReason(db, step.name, ms, { backoff: false });
+  return await pauseReason(db, step.name, ms, { backoff: false, repo: typeof params.repo === "string" ? params.repo : null });
 }
 
 /** The steps an operator release (operator-actions.ts) hands new work to. */
@@ -916,11 +916,19 @@ export async function failureBackoff(db: Db, step: string, ms: number = Date.now
 
 const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)} UTC`;
 
-/** Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused. A step's models are taken at their defaults. */
-export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
-  const l = await limitRow(db, step), used = await usageToday(db, step, ms);
+/** Why the step cannot start because its push stage tripped on every repo, or (with `repo`) a job of it cannot work that repo because it tripped there; null when neither. */
+async function tripOfStep(db: Db, step: string, repo: string | null): Promise<string | null> {
   const pass = passOf(db);
-  const tripped = pass ? tripReasonIn(pass.trips ??= await activeTrips(db), step) : await tripReasonOfStep(db, step);
+  return pass ? tripReasonIn(pass.trips ??= await activeTrips(db), step, repo) : await tripReasonOfStep(db, step, repo);
+}
+
+/**
+ * Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused.
+ * A breaker of the step's push stage tripped on every repo pauses it; with `repo`, a job for that repo, one tripped on that repo pauses it too (the stage goes on for other repos). A step's models are taken at their defaults.
+ */
+export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean; repo?: string | null } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
+  const l = await limitRow(db, step), used = await usageToday(db, step, ms);
+  const tripped = await tripOfStep(db, step, o.repo ?? null);
   if (tripped) return { why: tripped, wakeAt: null };
   if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
   if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
@@ -936,7 +944,7 @@ export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: 
 }
 
 /** Why the stage cannot start jobs now, or null. The one place a stage's pause is decided. */
-export const pauseReason = async (db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<string | null> => (await pauseOf(db, step, ms, o))?.why ?? null;
+export const pauseReason = async (db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean; repo?: string | null } = {}): Promise<string | null> => (await pauseOf(db, step, ms, o))?.why ?? null;
 
 // ---- state ---------------------------------------------------------------------
 
@@ -1036,9 +1044,12 @@ async function stepStatus(db: Db, step: string, why: string | undefined): Promis
 export async function stageLimits(db: Db): Promise<StageLimit[]> {
   const steps = await loadSteps();
   const why = await stageStatus(db);
+  const trips = await activeTripRows(db);
   return await mapSeq(LIMIT_STEPS, async (step) => {
     const l = await limitRow(db, step);
-    return { step, title: steps.get(step)?.title ?? step, perDay: l.per_day, usedToday: await usageToday(db, step), pausedReason: await pauseReason(db, step), tripped: await tripReasonOfStep(db, step) !== null ? STEP_STAGE[step] : undefined, status: await stepStatus(db, step, why[step]) };
+    // canResume is the viewer's: the dashboard API sets it per request.
+    const mine = trips.filter((t) => t.tripStage === STEP_STAGE[step]).map((t) => ({ key: t.stage, repo: t.repo, reason: t.reason, since: t.tripped_at, canResume: false }));
+    return { step, title: steps.get(step)?.title ?? step, perDay: l.per_day, usedToday: await usageToday(db, step), pausedReason: await pauseReason(db, step), ...(mine.length ? { trips: mine } : {}), status: await stepStatus(db, step, why[step]) };
   });
 }
 
@@ -1135,6 +1146,8 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     if (await jobBlock(db, steps, { step: stepName, repo: repo0, number: typeof params.number === "number" ? params.number : null }, { extra: pending, precheck, untaken, active })) return null;
     const reason = await pausedWhy(stepName);
     if (reason) { note(stepName, reason); return null; }
+    // A breaker tripped on the candidate's repo; the step goes on for other repos, and the trip shows as its own row (pausedWhy covers a trip on every repo).
+    if (repo0 !== null && await tripOfStep(db, stepName, repo0)) return null;
     const waits = repo0 === null ? null : await untaken({ step: stepName, repo: repo0, params });
     if (waits !== null) { note(stepName, waits); return null; }
     if (lane) {
@@ -1466,14 +1479,13 @@ export async function heldLookup(db: Db): Promise<(repo: string, number: number,
 }
 
 /**
- * Why no Act job will run for `repo` now, or null: the pipeline is off or draining, off for the repo, Act is tripped, or its daily limit is 0.
+ * Why no Act job will run for `repo` now, or null: the pipeline is off or draining, off for the repo, or Act's daily limit is 0. Act writes
+ * no commit, so no push breaker stops it.
  * A reached daily limit is not a block: queued presses wait for it. Presses that cannot be carried out are refused with this reason instead of queued.
  */
 export async function actBlockedReason(db: Db, repo: string): Promise<string | null> {
   if (!await isEnabled(db)) return await isDraining(db) ? "the pipeline is draining" : "the pipeline is off";
   if (!(await scopeRepos(db)).has(repo)) return `the pipeline is off for ${repo}`;
-  const tripped = await tripReasonOfStep(db, "act");
-  if (tripped) return `Act is ${tripped}`;
   if ((await limitRow(db, "act")).per_day === 0) return "the daily limit of Act is 0";
   return null;
 }

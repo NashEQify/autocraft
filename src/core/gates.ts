@@ -55,10 +55,9 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
 /** Why the write is refused, or null. */
 export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (by === "pipeline" && !f.pipelineOn) return "The pipeline is off";
-  // A stage that stopped itself (circuit breaker) writes nothing until an operator resumes it, whoever asks.
+  // A stage that stopped itself on the item's repo (circuit breaker) writes nothing there until it is resumed, whoever asks.
   const stage = tripStageOf(a);
-  const trips = (f as { tripped?: Partial<Record<string, string>> }).tripped;
-  const tripped = stage && (trips?.[stage] ?? trips?.[`${stage}:${f.repo}`]);
+  const tripped = stage && f.tripped?.[stage];
   if (tripped) return `${stage[0]!.toUpperCase()}${stage.slice(1)} is paused: ${tripped}`;
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;

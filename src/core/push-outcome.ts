@@ -50,3 +50,66 @@ export function tripStageOf(a: { kind: string; bucket?: string }): TripStage | n
     default: return null;
   }
 }
+
+/**
+ * Each push stage has two tiers of breaker: one per repo (`<stage>:<repo>`), which a repo's own broken pushes or merges trip and
+ * which stops the stage on that repo only, and one instance-wide (the bare `<stage>`), which broken pushes on 2 or more repos trip
+ * and which stops the stage everywhere: a fault in the step itself rather than in one repo.
+ */
+export const tripKey = (stage: TripStage, repo: string): string => `${stage}:${repo}`;
+
+/** The stage and repo of a per-repo push-breaker key (`fixissue:deckcraft`), or null for any other key (`fixissue`, `outside-surge`). */
+export function parseTripKey(key: string): { stage: TripStage; repo: string } | null {
+  const i = key.indexOf(":");
+  if (i < 1 || i === key.length - 1) return null;
+  const stage = key.slice(0, i);
+  return (TRIP_STAGES as readonly string[]).includes(stage) ? { stage: stage as TripStage, repo: key.slice(i + 1) } : null;
+}
+
+/** The stage of a push-breaker key of either tier, with its repo (null: the instance-wide breaker), or null for any other key (`outside-surge`). */
+export function tripOf(key: string): { stage: TripStage; repo: string | null } | null {
+  if ((TRIP_STAGES as readonly string[]).includes(key)) return { stage: key as TripStage, repo: null };
+  return parseTripKey(key);
+}
+
+/** The repos a trip's evidence entries name ("repo#7@6df9331b", "repo@sha"). */
+export function evidenceRepos(evidence: string[]): string[] {
+  const repos = new Set<string>();
+  for (const e of evidence) { const m = /^([^#@\s]+)[#@]/.exec(e); if (m) repos.add(m[1]!); }
+  return [...repos];
+}
+
+/** The evidence entries that name `repo`. */
+export const evidenceOf = (evidence: string[], repo: string): string[] => evidence.filter((e) => evidenceRepos([e])[0] === repo);
+
+/** The trips of one repo's push stages, by stage, from active trips by key (an instance-wide trip first): what an item of `repo` is paused by. */
+export function tripsOfRepo(trips: Readonly<Record<string, string>>, repo: string): Partial<Record<TripStage, string>> {
+  const out: Partial<Record<TripStage, string>> = {};
+  for (const s of TRIP_STAGES) { const r = trips[s] ?? trips[tripKey(s, repo)]; if (r !== undefined) out[s] = r; }
+  return out;
+}
+
+export type StageTripRow = { stage: string; active: number; reason: string; evidence: string; tripped_at: string; cleared_at: string | null; cleared_by: string | null };
+
+/**
+ * The per-repo rows that a stage row (key `fixup`, `cifix`, `fixissue` or `merge`, from before every push stage tripped per repo)
+ * splits into. An active row becomes an active row for each repo its evidence names, with that repo's entries; with none named,
+ * for each of `reposOf(stage)`, so nothing that was paused starts. The last resume of a stage row (`cleared_at`) carries to every
+ * repo of `reposOf(stage)` that gets no active row, so pushes before it still do not count. Each reason names its repo.
+ */
+export function splitStageTrips(rows: StageTripRow[], reposOf: (stage: TripStage) => string[]): StageTripRow[] {
+  const out = new Map<string, StageTripRow>();
+  for (const r of rows) {
+    if (!(TRIP_STAGES as readonly string[]).includes(r.stage)) continue;
+    const stage = r.stage as TripStage;
+    let evidence: string[] = [];
+    try { const v = JSON.parse(r.evidence) as unknown; if (Array.isArray(v)) evidence = v.filter((e): e is string => typeof e === "string"); } catch { /* no evidence */ }
+    const named = r.active ? evidenceRepos(evidence) : [];
+    const active = new Set(r.active ? (named.length ? named : reposOf(stage)) : []);
+    const row = (repo: string, on: number, ev: string[]): StageTripRow => ({ ...r, stage: tripKey(stage, repo), active: on, reason: `${r.reason} in ${repo}`, evidence: JSON.stringify(ev) });
+    for (const repo of active) out.set(tripKey(stage, repo), row(repo, 1, named.length ? evidenceOf(evidence, repo) : evidence));
+    if (!r.cleared_at) continue;
+    for (const repo of reposOf(stage)) if (!active.has(repo)) out.set(tripKey(stage, repo), row(repo, 0, evidenceOf(evidence, repo)));
+  }
+  return [...out.values()];
+}

@@ -5,6 +5,7 @@ import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
 import { activeTrips } from "../push-outcomes.ts";
+import { tripsOfRepo } from "./push-outcome.ts";
 import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/held.ts";
 import { FAST_FLOOR, fastScoreExpr } from "../fasttrack.ts";
 import { latestRun, needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
@@ -265,7 +266,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     const embedHash = r.embed_hash ?? (() => { const b = texts.get(ref)!; return hashOfText(b.title, b.body); })();
     const note = labeled.get(ref) ?? null;
     return {
-      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped, inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
+      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped: tripsOfRepo(tripped, r.repo), inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
       inScope: !!r.in_pilot, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration: !r.not_integration,
       held: r.held_backlog ? "backlog" : r.held_dup ? "duplicate" : null,
       fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: await labelsApproved(r.repo), commentApproved: (await repoOf(r.repo)).comment, fixIssueApproved: (await repoOf(r.repo)).fix },

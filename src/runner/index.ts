@@ -201,7 +201,7 @@ async function cancel(args: string[]): Promise<void> {
 const SUB: Record<string, (args: string[]) => Promise<void> | void> = { serve, exec, steps, enqueue: enqueueCmd, jobs, cancel };
 
 export const commands = {
-  pipeline: { summary: "pipeline switch and limits: on | off | drain | status | limit <step> --per-day N | resume <stage>", run: (args: string[]) => pipeline(args) },
+  pipeline: { summary: "pipeline switch and limits: on | off | drain | status | limit <step> --per-day N | resume <stage>[:<repo>]", run: (args: string[]) => pipeline(args) },
   runner: {
     summary: "pipeline runner: serve | steps | enqueue | jobs | cancel",
     run: async (args: string[]) => {
@@ -245,7 +245,7 @@ const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | of
        autocraft-server pipeline parallel [<N|none>]
        autocraft-server pipeline review-interval [<minutes>]
        autocraft-server pipeline pick-minutes [<minutes>]
-       autocraft-server pipeline resume <fixup|cifix|fixissue|merge>
+       autocraft-server pipeline resume <fixup|cifix|fixissue|merge>[:<repo>] | outside-surge
        autocraft-server pipeline pilot set <repo#number>... | show | clear`;
 
 // Recorded as `cli`: only someone with a shell on the host can run this.
@@ -338,5 +338,6 @@ async function pipeline(args: string[]): Promise<void> {
   console.log(`pipeline ${s.enabled ? "ON" : s.draining ? "DRAINING" : "OFF"}${s.changedAt ? ` (set by ${s.changedBy} at ${s.changedAt.slice(0, 16)})` : ""}`);
   for (const l of s.limits) {
     console.log(`${l.step.padEnd(14)} ${String(l.usedToday).padStart(5)} / ${l.perDay === null ? "no limit" : l.perDay}${l.pausedReason ? `  ${l.pausedReason}` : ""}`);
+    for (const t of l.trips ?? []) console.log(`${"".padEnd(14)} tripped ${t.repo ? `in ${t.repo}` : "on every repo"}: ${t.reason} (resume ${t.key})`);
   }
 }

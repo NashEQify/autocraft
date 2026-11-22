@@ -158,7 +158,7 @@ Per stage and model: agent runs, items handled, tokens (input, output, cache), t
 
 ### Pipeline (`/pipeline`)
 
-The stages of the pipeline with each one's state; the On/Off switch and the daily limits with use today; the job list (live), each job's settings, progress, result, token use and the end of its log; recent sync runs. Everyone signed in sees it; operators also turn the pipeline on and off, change limits and cancel jobs. Architecture: docs/pipeline.md.
+The stages of the pipeline with each one's state; the On/Off switch and the daily limits with use today; below the daily limits, one row per tripped circuit breaker of a push stage (fix-up, CI fix, fix issue, merge), naming its repo, or all repos for a trip on every repo, with the reason, the time and Resume for those who may resume it (a repo's trip leaves the stage running for other repos; the Stopped tab of Needs lists the same rows); the job list (live), each job's settings, progress, result, token use and the end of its log; recent sync runs. Everyone signed in sees it; operators also turn the pipeline on and off, change limits and cancel jobs. Architecture: docs/pipeline.md.
 
 The Pipeline page also shows the Claude accounts panel (see Agents).
 
@@ -244,7 +244,7 @@ The pipeline runs Claude agents under the operator's own Claude account on the o
 | Feedback rate limit | operators and maintainers with write on the decision's repo are exempt |
 | Per repo and per item, on a repo the person runs: snooze or wake a decision, prepare it again, include a maintainer post for Opus, edit a fix-up's instructions, review, verify, fix or batch an item again, stop a fix, cancel or retry a pre-approval, hold or release a merge, remove a PR from a batch, stop a batch, fast track and its weight (also the MCP tools `set_weight` and `cancel_queued`), release one held outside item, edit an area list, start area steps, accept or dismiss area proposals, put a repo's open decisions on the Backlog in bulk | operator, or maintainer with GitHub write permission on the repo (read live; a batch or decision spanning repos needs write on each). `mayRunRepo` in `src/dash/repo-access.ts`; `GET /api/me` lists the repos in `runRepos`, and the interface reads it instead of the role |
 | Backlog in bulk without a repo, release all items held for an outside author | operator |
-| Resume a push-breaker trip (fix-up, CI fix, fix issue, merge) | operator; a maintainer with GitHub write permission (read live) on every repo the trip's evidence names; a trip that names no repo is operator-only; the outside-surge breaker is operator-only (audited, the resume records the login) |
+| Resume a push-breaker trip (fix-up, CI fix, fix issue, merge) | a repo's trip (`<stage>:<repo>`): operator, or a maintainer with GitHub write permission (read live) on that repo; a trip on every repo (`<stage>`) and the outside-surge breaker: operator only (audited, the resume records the login) |
 
 Roles on the access list: `operator`, `maintainer`, `viewer`. A `viewer` is read-only: every write returns 403 and the interface shows no write controls. A `maintainer` sends feedback, and settles decisions under the rule in the Trust boundary while `maintainer_writes` is on. GitHub write permission on the repo is required for an answer about that repo, from an operator too.
 
