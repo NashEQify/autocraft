@@ -36,7 +36,7 @@ export type Contributor = {
 export async function getRule(db: Db): Promise<Rule> {
   const rows = await db.all(db.k.selectFrom("settings").select(["key", "value"]).where("key", "in", ["whitelist_min_merged", "whitelist_min_merge_rate"]));
   const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
-  return { minMerged: Number("whitelist_min_merged" in m ? m.whitelist_min_merged : 5), minRate: Number("whitelist_min_merge_rate" in m ? m.whitelist_min_merge_rate : 0.6) };
+  return { minMerged: Number(m.whitelist_min_merged ?? 5), minRate: Number(m.whitelist_min_merge_rate ?? 0.6) };
 }
 
 export async function setRule(db: Db, rule: Rule, by: string): Promise<void> {
