@@ -4,10 +4,9 @@
 //
 // The store is not trusted for content: latest.json is signed (Ed25519), it names the manifest's sha256, and the
 // manifest names every blob's sha256, so whatever is fetched is checked before it is kept.
-import { spawn } from "node:child_process";
-import { createHash, sign, verify, type KeyObject } from "node:crypto";
-import { copyFileSync, createReadStream, createWriteStream, linkSync, lstatSync, mkdirSync, readdirSync, readlinkSync, symlinkSync } from "node:fs";
-import { chmod, lstat, lutimes } from "node:fs/promises";
+import { createHash, createPrivateKey, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
+import { chmodSync, copyFileSync, createReadStream, createWriteStream, linkSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { chmod, lutimes } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -308,6 +307,13 @@ export type Latest = { version: 2; key: string; commit: string; sha256: string; 
  */
 export const signedTextV2 = (key: string, r: Pick<Latest, "commit" | "sha256" | "stored" | "bytes">) => Buffer.from(`autocraft-warm-v2\n${key}\n${r.commit}\n${r.sha256}\n${r.stored}\n${r.bytes}`);
 
+/** Loads a PEM key for latest.json; throws unless it is an Ed25519 key of the asked kind. */
+export function loadEd25519(pem: Buffer | string, kind: "public" | "private"): KeyObject {
+  const k = kind === "public" ? createPublicKey(pem) : createPrivateKey(pem);
+  if (k.asymmetricKeyType !== "ed25519") throw new ManifestError(`not an Ed25519 ${kind} key (${k.asymmetricKeyType ?? "unknown type"})`);
+  return k;
+}
+
 export function signLatest(key: string, r: Omit<Latest, "version" | "key" | "signature">, signKey: KeyObject): Latest {
   return { version: 2, key, ...r, signature: sign(null, signedTextV2(key, r), signKey).toString("base64") };
 }
@@ -349,7 +355,7 @@ export type ApplyStats = { files: number; dirs: number; symlinks: number; linked
  * `pace` is awaited before each chunk of file content is written (fetched or copied, not hard-linked) with its size in
  * bytes; a rate limiter there throttles the restore's disk writes.
  */
-export type ApplyOptions = { previous?: Previous; concurrency?: number; touchConcurrency?: number; pace?: (bytes: number) => Promise<void> };
+export type ApplyOptions = { previous?: Previous; concurrency?: number; pace?: (bytes: number) => Promise<void> };
 
 /** Fails once more than `max` bytes have passed. */
 function capped(max: number, what: string): Transform {
@@ -362,12 +368,30 @@ function capped(max: number, what: string): Transform {
   });
 }
 
+/** A blob that is missing, too large or does not match its sha256: the store copy is bad (see PublishInput.recheck). */
+export class BadBlobError extends ManifestError {
+  readonly sha256: string;
+  constructor(sha256: string, msg: string) {
+    super(msg);
+    this.sha256 = sha256;
+  }
+}
+
+/**
+ * How far a restored mtime may be from the manifest's: Node sets times from a double, which holds today's times to a
+ * few hundred nanoseconds (see setMtimes).
+ */
+export const MTIME_SLACK_NS = 1000n;
+
 /**
  * Builds the tree a manifest describes under `roots`, which must be missing or empty directories; entries under a root
- * that `roots` leaves out are skipped. A file whose sha256,
- * mode and mtime match a file of `previous` is hard-linked from it; files that share content within the manifest are
- * written once and linked or copied; the rest come from `fetch`. Modes and mtimes are restored exactly (mtimes to the
- * nanosecond). Throws on the first failure and leaves the partial tree for the caller to remove.
+ * that `roots` leaves out are skipped. A file whose sha256 and mode match a file of `previous`, with an mtime within
+ * MTIME_SLACK_NS, is hard-linked from it; files that share content within the manifest are written once and linked or
+ * copied; the rest come from `fetch`. Modes are restored exactly, mtimes as setMtimes describes. Throws on the first
+ * failure (BadBlobError for a bad blob) and leaves the partial tree for the caller to remove (clearDir).
+ *
+ * `previous` must be a tree only the sync agent writes and consumers mount read-only: a linked file shares its inode,
+ * so anything that can write the previous tree can change the new one. Pass no `previous` otherwise.
  */
 export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch: BlobSource, opts: ApplyOptions = {}): Promise<ApplyStats> {
   validateEntries(full.entries);
@@ -377,19 +401,21 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
     mkdirSync(roots[r]!, { recursive: true, mode: 0o700 });
     if (!lstatSync(roots[r]!).isDirectory() || readdirSync(roots[r]!).length) throw new ManifestError(`restore root ${r} is not an empty directory`);
   }
-  const m = { ...full, entries: full.entries.filter((e) => roots[e.path.slice(0, e.path.indexOf("/")) as RootName] !== undefined) };
-  const abs = (rs: Partial<Roots>, p: string) => {
-    const i = p.indexOf("/");
-    return join(rs[p.slice(0, i) as RootName]!, p.slice(i + 1));
-  };
+  const rootOf = (p: string) => p.slice(0, p.indexOf("/")) as RootName;
+  const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined) };
+  const abs = (rs: Partial<Roots>, p: string) => join(rs[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
   const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0 };
-  const sig = (e: FileEntry) => `${e.sha256}:${e.mode}:${e.mtimeNs}`;
-  const prev = new Map<string, string>();
+  const prev = new Map<string, { abs: string; mtimeNs: bigint }[]>();
   if (opts.previous) {
     validateEntries(opts.previous.manifest.entries);
     const pr = opts.previous.roots;
-    for (const e of opts.previous.manifest.entries) if (e.type === "file" && pr[e.path.slice(0, e.path.indexOf("/")) as RootName] !== undefined) prev.set(sig(e), abs(pr, e.path));
+    for (const e of opts.previous.manifest.entries) {
+      if (e.type !== "file" || pr[rootOf(e.path)] === undefined) continue;
+      const k = `${e.sha256}:${e.mode}`, v = { abs: abs(pr, e.path), mtimeNs: e.mtimeNs };
+      prev.get(k)?.push(v) ?? prev.set(k, [v]);
+    }
   }
+  const near = (a: bigint, b: bigint) => (a > b ? a - b : b - a) < MTIME_SLACK_NS;
   const dirs = m.entries.filter((e): e is DirEntry => e.type === "dir");
   for (const d of dirs) mkdirSync(abs(roots, d.path), { mode: 0o700 });
   stats.dirs = dirs.length;
@@ -397,17 +423,20 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   const groups = new Map<string, FileEntry[]>();
   for (const e of m.entries) if (e.type === "file") groups.get(e.sha256)?.push(e) ?? groups.set(e.sha256, [e]);
   const times: { abs: string; ns: bigint }[] = [];
+  /** Links `dest` to a previous file with the same content and mode whose mtime, on disk too, is near the entry's. */
   const linkFromPrev = (e: FileEntry, dest: string): boolean => {
-    const src = prev.get(sig(e));
-    if (!src) return false;
-    try {
-      const st = lstatSync(src, { bigint: true });
-      if (!st.isFile() || Number(st.size) !== e.size || st.mtimeNs !== e.mtimeNs || Number(st.mode & 0o777n) !== e.mode) return false;
-      linkSync(src, dest);
-      return true;
-    } catch {
-      return false;
+    for (const c of prev.get(`${e.sha256}:${e.mode}`) ?? []) {
+      if (!near(c.mtimeNs, e.mtimeNs)) continue;
+      try {
+        const st = lstatSync(c.abs, { bigint: true });
+        if (!st.isFile() || Number(st.size) !== e.size || !near(st.mtimeNs, e.mtimeNs) || Number(st.mode & 0o777n) !== e.mode) continue;
+        linkSync(c.abs, dest);
+        return true;
+      } catch {
+        // Gone or unreadable: try the next candidate, else fetch.
+      }
     }
+    return false;
   };
   await mapLimit([...groups.values()], opts.concurrency ?? 8, async (group) => {
     let local: FileEntry | undefined;
@@ -446,12 +475,11 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
     times.push({ abs: dest, ns: e.mtimeNs });
     stats.symlinks++;
   }
-  // Directory modes and times last: creating entries changes a directory's mtime, and a read-only mode blocks writes.
-  for (const d of dirs) {
-    await chmod(abs(roots, d.path), d.mode);
-    times.push({ abs: abs(roots, d.path), ns: d.mtimeNs });
-  }
-  await setMtimes(times, opts.touchConcurrency ?? 8);
+  // Directory times after all entries exist (creating one changes its directory's mtime); directory modes last, since
+  // a read-only directory blocks writes and chmod leaves mtimes alone.
+  for (const d of dirs) times.push({ abs: abs(roots, d.path), ns: d.mtimeNs });
+  await setMtimes(times);
+  for (const d of dirs) await chmod(abs(roots, d.path), d.mode);
   return stats;
 }
 
@@ -469,37 +497,36 @@ async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (b
   try {
     await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }));
   } catch (err) {
-    if (err instanceof ManifestError) throw err;
-    throw new ManifestError(`blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`);
+    throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`);
   }
-  if (n !== e.size || h.digest("hex") !== e.sha256) throw new ManifestError(`blob ${e.sha256.slice(0, 12)} for ${e.path} does not match its sha256`);
+  if (n !== e.size || h.digest("hex") !== e.sha256) throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path} does not match its sha256`);
 }
 
-/** Seconds as a double nearest to `ns`; exact for whole seconds, within a fraction of a microsecond otherwise. */
-const seconds = (ns: bigint) => Number(ns / 1_000_000_000n) + Number(ns % 1_000_000_000n) / 1e9;
-
 /**
- * Sets mtimes (and atimes) without following links. Node's utimes takes seconds as a double, which cannot hold most
- * nanosecond values at today's epoch, so whatever it misses is set with GNU `touch -d @S.N`, one call per distinct value.
+ * Sets mtimes (and atimes) without following links. Node takes seconds as a double, which at today's epoch holds a
+ * time to a few hundred nanoseconds: whole seconds (registry sources, the OLD stamp of checkouts) come back exactly,
+ * others within MTIME_SLACK_NS. The rounding is monotone, so every "not newer than" relation cargo's freshness checks
+ * use still holds.
  */
-export async function setMtimes(items: { abs: string; ns: bigint }[], concurrency = 8): Promise<void> {
-  const miss = new Map<bigint, string[]>();
+export async function setMtimes(items: { abs: string; ns: bigint }[]): Promise<void> {
   await mapLimit(items, 32, async ({ abs, ns }) => {
-    const t = seconds(ns);
+    const t = Number(ns / 1_000_000_000n) + Number(ns % 1_000_000_000n) / 1e9;
     await lutimes(abs, t, t);
-    if ((await lstat(abs, { bigint: true })).mtimeNs !== ns) miss.get(ns)?.push(abs) ?? miss.set(ns, [abs]);
   });
-  const calls: { ns: bigint; paths: string[] }[] = [];
-  for (const [ns, paths] of miss) for (let i = 0; i < paths.length; i += 256) calls.push({ ns, paths: paths.slice(i, i + 256) });
-  await mapLimit(calls, concurrency, async ({ ns, paths }) => {
-    const stamp = `@${ns / 1_000_000_000n}.${(ns % 1_000_000_000n).toString().padStart(9, "0")}`;
-    await new Promise<void>((resolve, reject) => {
-      const c = spawn("touch", ["-h", "-c", "-d", stamp, "--", ...paths], { stdio: ["ignore", "ignore", "pipe"] });
-      let err = "";
-      c.stderr!.on("data", (d: Buffer) => (err += d.toString()).length > 2000 && (err = err.slice(0, 2000)));
-      c.on("error", (e) => reject(new ManifestError(`touch failed: ${e.message}`)));
-      c.on("close", (code) => (code === 0 ? resolve() : reject(new ManifestError(`touch exited ${code}: ${err.trim().slice(0, 300)}`))));
-    });
-    for (const p of paths) if ((await lstat(p, { bigint: true })).mtimeNs !== ns) throw new ManifestError(`cannot set the mtime of ${p} exactly`);
-  });
+}
+
+/** Removes everything inside `dir` (not `dir` itself, which is often a mount point), read-only directories included. */
+export function clearDir(dir: string): void {
+  const open = (d: string) => {
+    chmodSync(d, 0o700);
+    for (const n of readdirSync(d)) {
+      const p = join(d, n);
+      if (lstatSync(p).isDirectory()) open(p);
+    }
+  };
+  for (const n of readdirSync(dir)) {
+    const p = join(dir, n);
+    if (lstatSync(p).isDirectory()) open(p);
+    rmSync(p, { recursive: true, force: true });
+  }
 }

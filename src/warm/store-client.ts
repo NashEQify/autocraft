@@ -3,10 +3,11 @@
 //   <key>/<commit>.manifest.zst        one manifest per published commit (src/warm/manifest.ts)
 //   <key>/latest.json                  the newest manifest, signed
 // Reads go to the read-only base URL (no credentials); writes, and the reads of a publish or gc, to the read-write one.
-import { createHash, type KeyObject } from "node:crypto";
+import { createHash, randomBytes, type KeyObject } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { pipeline, Readable, Transform } from "node:stream";
-import { constants as zc, createZstdCompress } from "node:zlib";
+import { pipeline as pipelineAsync } from "node:stream/promises";
+import { constants as zc, createZstdCompress, createZstdDecompress } from "node:zlib";
 import { WARM_KEY } from "../worker/warm.ts";
 import {
   applyManifest, decodeManifest, encodeManifest, makeHeader, mapLimit, ManifestError, parseLatest, signLatest, verifyLatest, walkTree,
@@ -58,19 +59,12 @@ export class WebDav {
     return { size: len === null ? null : Number(len), modified: mod ? Date.parse(mod) : null };
   }
 
-  /** Whole body, at most `max` bytes; null when the path does not exist. */
-  async get(path: string, max: number): Promise<Buffer | null> {
-    const r = await this.req("GET", path);
+  /** Whole body, at most `max` bytes; null when the path does not exist. `transfer` applies the transfer timeout. */
+  async get(path: string, max: number, transfer = false): Promise<Buffer | null> {
+    const r = await this.req("GET", path, { transfer });
     if (r.status === 404) return null;
     if (!r.ok || !r.body) throw new StoreError(`GET ${path} answered ${r.status}`);
-    const parts: Buffer[] = [];
-    let n = 0;
-    for await (const chunk of r.body as AsyncIterable<Uint8Array>) {
-      n += chunk.length;
-      if (n > max) throw new StoreError(`GET ${path}: larger than ${max} bytes`);
-      parts.push(Buffer.from(chunk));
-    }
-    return Buffer.concat(parts);
+    return readCapped(r, max, `GET ${path}`);
   }
 
   /** The body as a stream that fails past `max` bytes; throws when the path does not exist. */
@@ -101,6 +95,17 @@ export class WebDav {
     this.made.add(path);
   }
 
+  /**
+   * Renames `from` to `to`. Without `overwrite` an existing `to` stays and the answer is false (412); true when moved.
+   */
+  async move(from: string, to: string, overwrite: boolean): Promise<boolean> {
+    const r = await this.req("MOVE", from, { headers: { destination: this.url(to), overwrite: overwrite ? "T" : "F" } });
+    await r.body?.cancel();
+    if (r.status === 412) return false;
+    if (!r.ok) throw new StoreError(`MOVE ${from} answered ${r.status}`);
+    return true;
+  }
+
   /** true when something was deleted. */
   async delete(path: string): Promise<boolean> {
     const r = await this.req("DELETE", path);
@@ -117,8 +122,22 @@ export class WebDav {
     const r = await this.req("PROPFIND", dir, { body: Buffer.from(body), headers: { depth: "1", "content-type": "application/xml" } });
     if (r.status === 404) return null;
     if (r.status !== 207) throw new StoreError(`PROPFIND ${path} answered ${r.status}`);
-    return parseMultistatus(await r.text(), new URL(this.url(dir)).pathname);
+    return parseMultistatus((await readCapped(r, PROPFIND_MAX, `PROPFIND ${path}`)).toString("utf8"), new URL(this.url(dir)).pathname);
   }
+}
+
+/** A listing this large means something is wrong with the store; 16 MiB holds about 50,000 entries. */
+const PROPFIND_MAX = 16 * 1024 ** 2;
+
+async function readCapped(r: Response, max: number, what: string): Promise<Buffer> {
+  const parts: Buffer[] = [];
+  let n = 0;
+  for await (const chunk of (r.body ?? []) as AsyncIterable<Uint8Array>) {
+    n += chunk.length;
+    if (n > max) throw new StoreError(`${what}: larger than ${max} bytes`);
+    parts.push(Buffer.from(chunk));
+  }
+  return Buffer.concat(parts);
 }
 
 const tag = (name: string) => `<(?:[A-Za-z][\\w.-]*:)?${name}\\b[^>]*>([\\s\\S]*?)</(?:[A-Za-z][\\w.-]*:)?${name}>`;
@@ -168,14 +187,23 @@ export type PublishInput = {
   key: string; repo: string; commit: string;
   image: string | null; rustc: string | null; envHash: string | null; checkout: string | null;
   source: WalkSource; exclude?: string[]; signKey: KeyObject; stored?: number; log?: (s: string) => void;
+  /**
+   * Blobs a restore found bad (its badBlobs): each is fetched and hashed, and re-uploaded from this tree when wrong,
+   * or deleted when this tree does not hold it.
+   */
+  recheck?: string[];
+  /** gc's minimum blob age: a stored blob older than half of it is uploaded again, so a running gc cannot take it. */
+  minBlobAgeMs?: number;
 };
-export type PublishStats = { files: number; bytes: number; blobs: number; uploaded: number; uploadedBytes: number; manifestBytes: number; latest: Latest };
+export type PublishStats = { files: number; bytes: number; blobs: number; uploaded: number; uploadedBytes: number; manifestBytes: number; repaired: number; latest: Latest };
 export type RestoreResult = { latest: Latest; manifest: Manifest; stats: ApplyStats };
-export type GcOptions = { keep?: number; minBlobAgeMs?: number; capBytes?: number; now?: number; log?: (s: string) => void };
+export type GcOptions = { verifyKeys: KeyObject[]; keep?: number; minBlobAgeMs?: number; capBytes?: number; now?: number; log?: (s: string) => void };
 export type GcStats = { keys: number; manifestsKept: number; manifestsDeleted: number; blobsKept: number; blobsDeleted: number; bytesKept: number; bytesDeleted: number; overCap: boolean };
 
 const MANIFEST_NAME = /^([0-9a-f]{7,64})\.manifest\.zst$/;
 const BLOB_NAME = /^([0-9a-f]{64})\.zst$/;
+const TEMP_NAME = /^[0-9a-f]{64}\.zst\.tmp-[0-9a-f]{16}$/;
+const DAY = 24 * 3600_000;
 /** zstd frames add a little to incompressible data. */
 const blobCap = (size: number) => size + Math.ceil(size / 64) + 65_536;
 
@@ -212,7 +240,7 @@ export class WarmStore {
 
   /** The manifest latest.json names, checked against its sha256, key and commit. */
   async manifest(l: Latest, dav: WebDav = this.read): Promise<Manifest> {
-    const buf = await dav.get(WarmStore.manifestPath(l.key, l.commit), l.size);
+    const buf = await dav.get(WarmStore.manifestPath(l.key, l.commit), l.size, true);
     if (!buf) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} is missing`);
     if (buf.length !== l.size || createHash("sha256").update(buf).digest("hex") !== l.sha256) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} does not match latest.json`);
     const m = decodeManifest(buf);
@@ -245,10 +273,23 @@ export class WarmStore {
     const firstPath = new Map<string, string>();
     const abs = (path: string) => (path.startsWith("target/") ? `${p.source.target}/${path.slice(7)}` : `${p.source.cargoHome}/${path.slice(6)}`);
     for (const e of entries) if (e.type === "file" && !firstPath.has(e.sha256)) firstPath.set(e.sha256, abs(e.path));
-    let uploaded = 0, uploadedBytes = 0;
-    await mapLimit([...firstPath], this.concurrency, async ([sha, file]) => {
-      if (await dav.head(WarmStore.blobPath(sha))) return;
-      const n = await this.uploadBlob(dav, sha, file);
+    let uploaded = 0, uploadedBytes = 0, repaired = 0;
+    const recheck = new Set(p.recheck ?? []);
+    for (const sha of recheck) {
+      if (await this.blobIntact(dav, sha)) continue;
+      const file = firstPath.get(sha);
+      if (file) {
+        uploadedBytes += await this.uploadBlob(dav, sha, file, true);
+        uploaded++;
+      } else await dav.delete(WarmStore.blobPath(sha));
+      repaired++;
+      p.log?.(`warm store: blob ${sha.slice(0, 12)} was bad, ${file ? "uploaded again" : "deleted"}`);
+    }
+    const stale = Date.now() - (p.minBlobAgeMs ?? DAY) / 2;
+    await mapLimit([...firstPath].filter(([sha]) => !recheck.has(sha)), this.concurrency, async ([sha, file]) => {
+      const st = await dav.head(WarmStore.blobPath(sha));
+      if (st && st.modified !== null && st.modified >= stale) return;
+      const n = await this.uploadBlob(dav, sha, file, st !== null);
       uploadedBytes += n;
       uploaded++;
     });
@@ -256,11 +297,26 @@ export class WarmStore {
     const latest = signLatest(p.key, { commit: p.commit, sha256: createHash("sha256").update(manifest).digest("hex"), size: manifest.length, stored: header.stored, bytes: header.bytes }, p.signKey);
     await dav.put(WarmStore.latestPath(p.key), Buffer.from(JSON.stringify(latest)), "application/json");
     p.log?.(`warm store: published ${p.key}@${p.commit.slice(0, 12)}: ${header.files} files, ${firstPath.size} blobs, ${uploaded} uploaded (${uploadedBytes} bytes compressed)`);
-    return { files: header.files, bytes: header.bytes, blobs: firstPath.size, uploaded, uploadedBytes, manifestBytes: manifest.length, latest };
+    return { files: header.files, bytes: header.bytes, blobs: firstPath.size, uploaded, uploadedBytes, manifestBytes: manifest.length, repaired, latest };
   }
 
-  /** Compresses and uploads one file; the stream fails before its end when the content no longer has `sha`. */
-  private async uploadBlob(dav: WebDav, sha: string, file: string): Promise<number> {
+  /** Whether the stored blob exists and decompresses to content with this sha256. */
+  private async blobIntact(dav: WebDav, sha: string): Promise<boolean> {
+    try {
+      const h = createHash("sha256");
+      await pipelineAsync(await dav.stream(WarmStore.blobPath(sha), 64 * 1024 ** 3), createZstdDecompress(), h);
+      return h.digest("hex") === sha;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Compresses and uploads one file to a temporary name, checks it, then moves it into place: a reader never sees a
+   * partial blob. The stream fails before its end when the content no longer has `sha`. Without `replace`, a blob
+   * another publisher stored meanwhile wins (same content). Returns the compressed bytes sent.
+   */
+  private async uploadBlob(dav: WebDav, sha: string, file: string, replace = false): Promise<number> {
     const h = createHash("sha256");
     let sent = 0;
     const check = new Transform({
@@ -268,15 +324,16 @@ export class WarmStore {
       flush(cb) { cb(h.digest("hex") === sha ? null : new ManifestError(`${file} changed after it was hashed`)); },
     });
     const count = new Transform({ transform(chunk: Buffer, _e, cb) { sent += chunk.length; cb(null, chunk); } });
-    const path = WarmStore.blobPath(sha);
+    const final = WarmStore.blobPath(sha);
+    const temp = `${final}.tmp-${randomBytes(8).toString("hex")}`;
     const body = pipeline(createReadStream(file), check, createZstdCompress({ params: { [zc.ZSTD_c_compressionLevel]: 3 } }), count, () => {});
     try {
-      await dav.put(path, body, "application/zstd");
-      // A PUT cut short can leave a partial file behind; a size check catches it before anything references the blob.
-      const st = await dav.head(path);
+      await dav.put(temp, body, "application/zstd");
+      const st = await dav.head(temp);
       if (!st || (st.size !== null && st.size !== sent)) throw new StoreError(`blob ${sha.slice(0, 12)} was stored incompletely`);
+      if (!(await dav.move(temp, final, replace))) await dav.delete(temp);
     } catch (e) {
-      await dav.delete(path).catch(() => {});
+      await dav.delete(temp).catch(() => {});
       throw e;
     }
     return sent;
@@ -287,7 +344,7 @@ export class WarmStore {
    * blobs no kept manifest references that are older than `minBlobAgeMs`. Over `capBytes`, it runs again keeping fewer
    * manifests, down to one per key. Deletes no blob when any kept manifest cannot be read.
    */
-  async gc(o: GcOptions = {}): Promise<GcStats> {
+  async gc(o: GcOptions): Promise<GcStats> {
     let keep = Math.max(1, o.keep ?? 3);
     for (;;) {
       const s = await this.gcPass(keep, o);
@@ -303,7 +360,7 @@ export class WarmStore {
   private async gcPass(keep: number, o: GcOptions): Promise<GcStats> {
     const dav = this.rw();
     const now = o.now ?? Date.now();
-    const minAge = o.minBlobAgeMs ?? 24 * 3600_000;
+    const minAge = o.minBlobAgeMs ?? DAY;
     const top = (await dav.propfind(WARM_ROOT)) ?? [];
     const keys = top.filter((i) => i.collection && i.name !== "blobs" && WARM_KEY.test(i.name)).map((i) => i.name);
     const stats: GcStats = { keys: keys.length, manifestsKept: 0, manifestsDeleted: 0, blobsKept: 0, blobsDeleted: 0, bytesKept: 0, bytesDeleted: 0, overCap: false };
@@ -319,8 +376,7 @@ export class WarmStore {
       return m ? [{ commit: m[1], modified: i.modified ?? 0 }] : [];
     });
     await mapLimit(keys, 4, async (key) => {
-      const raw = await dav.get(WarmStore.latestPath(key), 64 * 1024);
-      const current = raw ? parseLatest(key, raw.toString("utf8"))?.commit : undefined;
+      const current = (await this.latest(key, o.verifyKeys, dav).catch(() => null))?.commit;
       // Newest first; on a tie (listings carry whole seconds) the one latest.json names ranks first.
       const list = (await manifestsOf(key)).sort((a, b) => b.modified - a.modified || Number(b.commit === current) - Number(a.commit === current));
       const kept = list.filter((m, i) => i < keep || m.commit === current);
@@ -333,10 +389,14 @@ export class WarmStore {
       stats.manifestsKept += kept.length;
     });
     const shards = ((await dav.propfind(`${WARM_ROOT}/blobs`)) ?? []).filter((i) => i.collection && /^[0-9a-f]{2}$/.test(i.name));
+    const temps: string[] = [];
     const blobs = (await mapLimit(shards, this.concurrency, async (s) => ((await dav.propfind(`${WARM_ROOT}/blobs/${s.name}`)) ?? []).flatMap((i) => {
+      if (!i.collection && TEMP_NAME.test(i.name) && now - (i.modified ?? now) > DAY) temps.push(`${WARM_ROOT}/blobs/${s.name}/${i.name}`);
       const m = !i.collection ? BLOB_NAME.exec(i.name) : null;
       return m ? [{ sha: m[1], size: i.size ?? 0, modified: i.modified ?? now }] : [];
     }))).flat();
+    // Uploads that never reached their move.
+    await mapLimit(temps, this.concurrency, (t) => dav.delete(t));
     // A publish that finished meanwhile references blobs the first listing did not know about.
     await mapLimit(keys, 4, async (key) => {
       for (const m of await manifestsOf(key)) if (!seen.has(`${key}/${m.commit}`)) await reference(key, m.commit);
