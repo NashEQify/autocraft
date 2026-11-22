@@ -104,12 +104,12 @@ async function serve(): Promise<void> {
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
   const runner = new Runner({ db, lockFile: lock, maxJobs: Number(envVar("RUNNER_JOBS")) || DEFAULT_MAX_JOBS });
-  // Fencing: a leader that lost its lock starts nothing more, kills its jobs and exits at once, so its container restarts
+  // Fencing: a leader that lost its lease starts nothing more, kills its jobs and exits at once, so its container restarts
   // as a standby. Its writes already fail (src/db/fence.ts); the new leader resumes the jobs as after a crash. GitHub and
   // Kubernetes calls already in flight finish; the pod launcher checks the fence before each Kubernetes change.
   const fenced = () => {
     runner.abandon();
-    writeSync(2, `runner: lost the leader lock (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
+    writeSync(2, `runner: lost the leader lease (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
     process.exit(LOST_LEADER_EXIT);
   };
   if (lease.lost.aborted) fenced();

@@ -1,6 +1,6 @@
 // The fence of a process that works as the leader of a role (src/db/leader.ts). Every write transaction it opens on
-// Postgres checks, right after it takes the writer lock, that the role's epoch is still the one this process won; a later
-// winner moves the epoch, so the writes of a process that lost its lock fail. Child processes inherit the fence through
+// Postgres checks, right after it takes the writer lock, that the role's lease (`leader_leases`) still has the epoch this
+// process won; a later winner moves the epoch, so the writes of a process that lost its lease fail. Child processes inherit the fence through
 // AUTOCRAFT_FENCE, so a job's writes are fenced with its runner's.
 import { envVar } from "../env.ts";
 import type { Db } from "./index.ts";
@@ -10,9 +10,6 @@ export const LEADER_ROLES: readonly LeaderRole[] = ["runner", "periodic"];
 
 /** SQLSTATE of a write refused by the fence. */
 export const FENCED_CODE = "ACF01";
-
-/** Settings row that holds the role's current epoch: a counter moved by every new leader. */
-export const epochKey = (role: LeaderRole): string => `leader:${role}:epoch`;
 
 export type Fence = { role: LeaderRole; epoch: number };
 
@@ -43,7 +40,7 @@ export function currentFence(): Fence | null {
 export function fenceSql(): string {
   const f = currentFence();
   if (!f) return "";
-  return `; DO $fence$BEGIN IF NOT EXISTS (SELECT 1 FROM settings WHERE key = '${epochKey(f.role)}' AND value = '${f.epoch}') THEN `
+  return `; DO $fence$BEGIN IF NOT EXISTS (SELECT 1 FROM leader_leases WHERE role = '${f.role}' AND epoch = ${f.epoch}) THEN `
     + `RAISE EXCEPTION 'this process no longer leads the ${f.role}: another copy took over' USING ERRCODE = '${FENCED_CODE}'; END IF; END$fence$`;
 }
 
@@ -61,6 +58,6 @@ export class FencedError extends Error {
 export async function assertFence(db: Db): Promise<void> {
   const f = currentFence();
   if (!f || db.dialect !== "postgres") return;
-  const r = await db.prepare("SELECT value FROM settings WHERE key = ?").get(epochKey(f.role)) as { value: string } | undefined;
-  if (r?.value !== String(f.epoch)) throw new FencedError(`this process no longer leads the ${f.role}: another copy took over`);
+  const r = await db.get(db.k.selectFrom("leader_leases").select("epoch").where("role", "=", f.role));
+  if (r === undefined || Number(r.epoch) !== f.epoch) throw new FencedError(`this process no longer leads the ${f.role}: another copy took over`);
 }

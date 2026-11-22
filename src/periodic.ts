@@ -32,7 +32,7 @@ async function periodic(args: string[]): Promise<void> {
   // Fencing: the chores stop at once and this process exits, so the container restarts as a standby.
   lease.lost.addEventListener("abort", () => {
     if (child.pid) killGroup(child.pid, "SIGKILL");
-    writeSync(2, `periodic: lost the leader lock (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); chores killed, exiting\n`);
+    writeSync(2, `periodic: lost the leader lease (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); chores killed, exiting\n`);
     process.exit(LOST_LEADER_EXIT);
   }, { once: true });
   // A stop reaches the loop alone, which lets a sync or backup in progress finish and then exits.
