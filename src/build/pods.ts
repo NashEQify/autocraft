@@ -322,6 +322,8 @@ export const PACKAGES_CHECK = "missing=''; for p in \"$@\"; do dpkg-query -W -f=
 export const PACKAGES_CONTAINER = "packages";
 /** First in every step pod: the AutoCraft image measures the task's volume, which local-path does not cap (`worker pod disk`). */
 export const DISK_CONTAINER = "disk";
+/** After `disk` in a mirror pod: waits until the crate mirror accepts connections (`worker pod mirror-wait`). */
+export const MIRROR_WAIT_CONTAINER = "mirror-wait";
 export const WARM_RESTORE_CONTAINER = "warm-restore";
 export const WARM_PUBLISH_CONTAINER = "warm-publish";
 export const WARM_GC_CONTAINER = "warm-gc";
@@ -614,6 +616,9 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
     env: envList({ HOME: "/tmp", AUTOCRAFT_POD_DISK_LIMIT: String(Math.floor(quantity(c.s.storage))) }),
     volumeMounts: [{ name: "work", mountPath: "/work", readOnly: true }, { name: "check-tmp", mountPath: "/tmp" }],
   });
+  const wait = mirror && c.s.crateMirror
+    ? [container(MIRROR_WAIT_CONTAINER, appImage, appResources(c.s), { args: ["worker", "pod", "mirror-wait"], env: envList({ HOME: "/tmp", AUTOCRAFT_MIRROR_ADDR: c.s.crateMirror }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
+    : [];
   const check = checkPackages && prepared.packages.length
     ? [container(PACKAGES_CONTAINER, image, appResources(c.s), { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
@@ -623,11 +628,11 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
     const copy = starting
       ? [container(WARM_COPY_CONTAINER, appImage, stepResources(c.s, c.memory, copyMemory ?? 0), warmCopyParts(use!, { checkout: checkout!, image, envHash: warmEnvHash(prepared), targetVolume, tmpVolume: "check-tmp" }))]
       : [];
-    return pod(c, group.network, volumes, [disk, ...check, ...copy, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
+    return pod(c, group.network, volumes, [disk, ...wait, ...check, ...copy, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
   }
   const w = warmPhases(c, appImage, warm!, target!, checkout!, image, warmEnvHash(prepared), targetVolume, extraMemory);
   const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
-  return pod(c, group.network, volumes, [disk, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
+  return pod(c, group.network, volumes, [disk, ...wait, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
 }
 
 /** The AutoCraft-image containers of a warm producer's pod (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
