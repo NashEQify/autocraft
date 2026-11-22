@@ -1157,7 +1157,7 @@ export const SAFETY_REFUSAL = /safeguards flagged this message|appears to violat
 export const REFUSED_PREFIX = "refused by the model's safety filter";
 
 /**
- * Where a call the model's safety filter declined runs once more: on another runner token for the same tier, else a tier
+ * Where a call the model's safety filter declined runs once more: on another runner token for the same tier, else, for a call that does not judge, a tier
  * lower (top to mid, the instance's model for it), else nowhere. A follow-up turn stays with its session and is not retried;
  * neither is a call that was retried already.
  */
@@ -1166,7 +1166,8 @@ async function refusalRetry(db: Db, r: Row, nowMs: number): Promise<{ token: num
   const refs = JSON.parse(r.items) as ItemRef[];
   const c = { prompt_id: r.prompt_id, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], step: r.step, refs, forLogin: r.for_login };
   if (r.token_id !== null && await tierTaker(db, { ...c, tier: r.tier }, r.token_id, nowMs)) return { token: r.token_id };
-  const lower: Tier | null = r.tier === "top" ? "mid" : null;
+  // A call that judges (gates a merge or a security finding) is never answered by a lower tier: without another runner it fails as refused.
+  const lower: Tier | null = r.tier === "top" && !judges(r.prompt_id) && !r.prompt_id.startsWith("security.") ? "mid" : null;
   if (lower === null || !await tierTaker(db, { ...c, tier: lower }, null, nowMs)) return null;
   return { tier: lower, model: (await acceptedModels(db))[lower][0] ?? lower };
 }
