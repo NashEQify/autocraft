@@ -1,7 +1,8 @@
 // The operator's GitHub App registration: the status the admin page reads, the
 // start page that posts the manifest to GitHub, and the callback that turns the
-// returned code into the app's keys. The keys go to the secrets file only; no
-// response, log line or audit row carries the private key or client secret.
+// returned code into the app's keys. The keys are stored sealed in the database
+// (src/github/app-keys.ts) only; no response, log line or audit row carries the
+// private key or client secret.
 import type { IncomingMessage } from "node:http";
 import type { GithubAppStatus } from "../../../web/src/api/types.ts";
 import { audit } from "../audit.ts";
@@ -9,7 +10,8 @@ import type { Session } from "./sessions.ts";
 import { AppError, APP_NAME, appManifest, appName, convertManifest, installUrl, installations, installationRepos, registrationUrl, settingsUrl, transferUrl, type AppDeps } from "../../github/app.ts";
 import type { Res, Route } from "../types.ts";
 import { envVar } from "../../env.ts";
-import { checkSecretsWritable, removeAppSecrets, writeAppSecrets, type Config } from "./config.ts";
+import type { Config } from "./config.ts";
+import { boundAppKeys } from "../../github/app-keys.ts";
 import { githubIdentity, IdentityRefused, setGithubIdentityChecked } from "../../github/identity.ts";
 import { randomToken } from "./crypto.ts";
 import { esc, plainPage } from "./util.ts";
@@ -55,14 +57,9 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
       const app = config.secrets.app;
       if (!app) return { status: 409, json: { error: "No app is registered." } };
       if (await githubIdentity(db) === "app") return { status: 409, json: { error: "GitHub writes and sign-in use the GitHub App. Switch the GitHub identity back to the box account first." } };
-      if (!config.secretsFile) return { status: 409, json: { error: "AUTOCRAFT_SECRETS_FILE is not set." } };
-      try {
-        removeAppSecrets(config.secretsFile);
-      } catch (e) {
-        console.error(`github-app remove: file not updated (${errorCode(e)})`);
-        return { status: 500, json: { error: `The file holding the app's keys could not be updated (${errorCode(e)}).` } };
-      }
-      config.secrets.app = null;
+      const keys = boundAppKeys(config.secrets);
+      if (keys) await keys.clear();
+      else config.secrets.app = null;
       await db.run(db.k.deleteFrom("github_app_states"));
       // The stored user tokens belong to the removed app.
       await db.run(db.k.deleteFrom("user_tokens"));
@@ -89,7 +86,7 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
 export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Promise<Omit<GithubAppStatus, "csrf" | "authorized">> {
   const app = config.secrets.app;
   const status: Omit<GithubAppStatus, "csrf" | "authorized"> = {
-    configured: !!app, identity: await githubIdentity(db), canRegister: !!config.secretsFile,
+    configured: !!app, identity: await githubIdentity(db), canRegister: !!boundAppKeys(config.secrets),
     defaultName: envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME, app: null, installations: [], links: await openLinks(db), error: null,
   };
   if (!app) return status;
@@ -117,16 +114,11 @@ const refuse = (nonce: string, status: number, text: string, to: { back: string;
 export async function startRegistration(db: Db, config: Config, req: IncomingMessage, form: URLSearchParams, nonce: string, session: Session): Promise<Res> {
   if (session.role !== "operator") return refuse(nonce, 403, "Only operators can register the GitHub App.");
   if (config.secrets.app) return refuse(nonce, 409, "An app is already registered.");
-  if (!config.secretsFile) return refuse(nonce, 409, "AUTOCRAFT_SECRETS_FILE is not set, so there is nowhere to keep the app's keys.");
+  if (!boundAppKeys(config.secrets)) return refuse(nonce, 409, "There is nowhere to keep the app's keys.");
   const name = (form.get("name") ?? "").trim() || envVar("GITHUB_APP_NAME") || DEFAULT_APP_NAME;
   const org = (form.get("org") ?? "").trim() || null;
   if (!APP_NAME.test(name)) return refuse(nonce, 400, "The app name must be 1 to 34 letters, digits, spaces, dashes or underscores.");
   if (org && !ORG.test(org)) return refuse(nonce, 400, "That is not a GitHub organization name.");
-  try {
-    checkSecretsWritable(config.secretsFile);
-  } catch (e) {
-    return refuse(nonce, 409, `The secrets file cannot be updated (${errorCode(e)}), so the app's keys could not be kept.`);
-  }
   const state = randomToken(24);
   await db.run(db.k.deleteFrom("github_app_states").where("created_at", "<=", new Date(Date.now() - STATE_TTL_MS).toISOString()));
   await db.run(db.k.insertInto("github_app_states").values({ state, login: session.login, session_hash: session.idHash, created_at: new Date().toISOString() }));
@@ -169,15 +161,8 @@ export type Actor = { login: string; back: string; backLabel: string; redirect: 
  */
 export async function convertAndStore(db: Db, config: Config, deps: AppDeps, code: string, state: string, nonce: string, actor: Actor, stale: string): Promise<Res> {
   const refuseTo = (status: number, text: string): Res => refuse(nonce, status, text, actor);
-  if (config.secrets.app || !config.secretsFile || converting.has(config)) return refuseTo(409, "An app is already registered, or no secrets file is set.");
-  // Prove the file can take the keys before the state is consumed: GitHub's code works once, and a lost PEM leaves an app nobody holds keys for.
-  // GitHub has already created the app by now; a failed probe keeps the state and the unconverted code, so a reload recovers.
-  try {
-    checkSecretsWritable(config.secretsFile);
-  } catch (e) {
-    console.error(`github-app registration: secrets file not writable (${errorCode(e)})`);
-    return refuseTo(409, `The app exists on GitHub, but the secrets file cannot be updated (${errorCode(e)}). Fix the file and reload this page within an hour.`);
-  }
+  const keys = boundAppKeys(config.secrets);
+  if (config.secrets.app || !keys || converting.has(config)) return refuseTo(409, "An app is already registered, or there is nowhere to keep its keys.");
   if ((await db.run(db.k.deleteFrom("github_app_states").where("state", "=", state))).changes !== 1) return refuseTo(400, stale);
   converting.add(config);
   try {
@@ -200,17 +185,16 @@ export async function convertAndStore(db: Db, config: Config, deps: AppDeps, cod
     }
     try {
       if (config.secrets.app) throw Object.assign(new Error("another app was registered meanwhile"), { code: "EEXIST" });
-      writeAppSecrets(config.secretsFile, app);
+      await keys.save(app);
     } catch (e) {
       console.error(`github-app registration: app ${app.slug} exists on GitHub but its keys were not stored (${errorCode(e)})`);
       await audit(db, actor.login, "github-app-register-failed", app.slug, { id: app.id, code: errorCode(e) });
       const link = settingsUrl(app.slug, app.owner);
       return {
         status: 500,
-        html: plainPage(nonce, "GitHub App", `<p>GitHub created the app <code>${esc(app.slug)}</code>, but its keys could not be stored (${esc(errorCode(e))}). Delete the app on GitHub, fix the secrets file and start again.</p><p><a href="${esc(link)}">${esc(link)}</a></p><p><a href="${esc(actor.back)}">${esc(actor.backLabel)}</a></p>`),
+        html: plainPage(nonce, "GitHub App", `<p>GitHub created the app <code>${esc(app.slug)}</code>, but its keys could not be stored (${esc(errorCode(e))}). Delete the app on GitHub and start again.</p><p><a href="${esc(link)}">${esc(link)}</a></p><p><a href="${esc(actor.back)}">${esc(actor.backLabel)}</a></p>`),
       };
     }
-    config.secrets.app = app;
     await audit(db, actor.login, "github-app-register", app.slug, { id: app.id, name, owner: app.owner?.login ?? null, ...actor.details });
   } finally {
     converting.delete(config);

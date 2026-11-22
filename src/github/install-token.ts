@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import type { AppSecrets } from "../dash/server/config.ts";
 import { appSecretsOf, checkSecretsFileMode } from "../dash/server/config.ts";
 import { envVar } from "../env.ts";
+import { openAppKeys, processAppKeys } from "./app-keys.ts";
 import { AppError, appJwt, call, GITHUB_API, type AppDeps } from "./app.ts";
 
 export class AppNotInstalledError extends Error {
@@ -147,8 +148,13 @@ export class InstallTokenMinter {
   }
 }
 
-/** The app's keys from the secrets file (the runner reads the same file as the dashboard); null when no app is registered. */
+/**
+ * The app's keys: from the process's store (src/github/app-keys.ts) when one is in use, otherwise from the secrets file
+ * (a command-line process that has not opened the store); null when no app is registered.
+ */
 export function readAppSecrets(path = envVar("SECRETS_FILE")): AppSecrets | null {
+  const store = processAppKeys();
+  if (store) return store.current();
   if (!path) return null;
   checkSecretsFileMode(path);
   return appSecretsOf(JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>);
@@ -156,8 +162,9 @@ export function readAppSecrets(path = envVar("SECRETS_FILE")): AppSecrets | null
 
 let shared: { appId: string; minter: InstallTokenMinter } | null = null;
 /** The process-wide minter; throws when no app is registered. Its caches belong to one app: another app (or none) starts them afresh. */
-export function installationToken(owner: string, repo?: string, scope?: TokenScope): Promise<string> {
-  const app = readAppSecrets();
+export async function installationToken(owner: string, repo?: string, scope?: TokenScope): Promise<string> {
+  const store = processAppKeys() ?? await openAppKeys(async () => (await import("../db/open.ts")).openDb()).catch(() => null);
+  const app = store ? store.current() ?? await store.fresh() : readAppSecrets();
   if (!app) { shared = null; throw new AppError("no GitHub App is registered"); }
   if (shared?.appId !== app.id) shared = { appId: app.id, minter: new InstallTokenMinter(() => readAppSecrets() ?? app) };
   return shared.minter.token(owner, repo, scope);

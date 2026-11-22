@@ -353,6 +353,16 @@ CREATE TABLE IF NOT EXISTS user_token_revocations (
   attempts INTEGER NOT NULL DEFAULT 0 -- failed sweeps so far
 );
 
+-- The registered GitHub App (src/github/app-keys.ts): at most one row, id 1. keys_enc null: the app was removed, and a
+-- secrets file's app keys are not imported again (they are imported only while no row exists).
+CREATE TABLE IF NOT EXISTS github_app (
+  id INTEGER PRIMARY KEY,
+  app_id TEXT,
+  slug TEXT,
+  keys_enc TEXT,                      -- sealed JSON of the app's keys (TokenBox, aad 'github_app:1')
+  updated_at TEXT NOT NULL
+);
+
 -- The GitHub App user token of a Discord reporter (src/discord/reporter.ts), keyed by the Discord user's keyed hash. Not a
 -- dashboard login: it grants no access, it only lets the bot file an issue as that GitHub account.
 CREATE TABLE IF NOT EXISTS reporter_tokens (

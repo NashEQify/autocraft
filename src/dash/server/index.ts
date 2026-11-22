@@ -1,5 +1,6 @@
 // HTTP server: sign-in, sessions, CSRF, rate limits, security headers and
 // routing for the dashboard. Handlers only ever see authenticated requests.
+import { AppKeys, bindSecrets, useAppKeys } from "../../github/app-keys.ts";
 import { maintainerWritesOn } from "../../settlers.ts";
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
@@ -235,6 +236,10 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const resealed = await resealLegacyValues(db, box);
   const resealedTotal = Object.values(resealed).reduce((a, b) => a + b, 0);
   if (resealedTotal) console.log(`re-sealed ${resealedTotal} stored token values under the current key (${Object.entries(resealed).map(([t, n]) => `${t} ${n}`).join(", ")})`);
+  // The GitHub App's keys live in the database, imported once from the secrets file; `config.secrets.app` reads them.
+  const dbAppKeys = await new AppKeys(db, box, config.secretsFile).load();
+  bindSecrets(config.secrets, dbAppKeys);
+  useAppKeys(dbAppKeys);
   // The GitHub App's own provider: it signs users in under login=github-app, and always makes and refreshes their user tokens (the "act as you" authorization).
   // Read at each use: registering or removing the app takes effect without a restart.
   const appProviderNow = (): Provider | null => {

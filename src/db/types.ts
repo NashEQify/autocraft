@@ -802,6 +802,14 @@ export interface FlowSummary {
   decisions_sig: string | null;
 }
 
+export interface GithubApp {
+  id: Generated<number>;
+  app_id: string | null;
+  slug: string | null;
+  keys_enc: string | null;
+  updated_at: string;
+}
+
 export interface GithubAppStates {
   state: string;
   login: string;
@@ -2244,6 +2252,7 @@ export interface DB {
   fix_attempts: FixAttempts;
   fixups: Fixups;
   flow_summary: FlowSummary;
+  github_app: GithubApp;
   github_app_states: GithubAppStates;
   github_commands: GithubCommands;
   github_setup_links: GithubSetupLinks;
@@ -2421,6 +2430,7 @@ export interface DB {
   "main.fix_attempts": FixAttempts;
   "main.fixups": Fixups;
   "main.flow_summary": FlowSummary;
+  "main.github_app": GithubApp;
   "main.github_app_states": GithubAppStates;
   "main.github_commands": GithubCommands;
   "main.github_setup_links": GithubSetupLinks;
@@ -2602,6 +2612,7 @@ export const COLUMNS = {
   fix_attempts: ["repo", "number", "main_sha", "text_hash", "state", "round", "files", "crate", "crate_dir", "patch", "test_patch", "head_task_id", "base_task_id", "retries", "push_tries", "summary", "pr_url", "reason", "created_at", "updated_at", "size", "format_diff"],
   fixups: ["repo", "number", "from_head", "to_head", "state", "reason", "files", "attempt", "created_at", "source", "patch", "lint_task", "lint_round", "lint_state", "carry_decision", "operator_fix", "changes", "session"],
   flow_summary: ["repo", "counts", "counted_at", "stale", "decisions_sig"],
+  github_app: ["id", "app_id", "slug", "keys_enc", "updated_at"],
   github_app_states: ["state", "login", "session_hash", "created_at"],
   github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch"],
   github_setup_links: ["id", "org", "created_by", "hash", "created_at", "expires_at", "revoked_at", "used_at", "used_by", "installation_id"],
