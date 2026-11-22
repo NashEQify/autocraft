@@ -30,6 +30,8 @@ import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params } from "./steps.ts";
 import { jobBlock } from "./concurrency.ts";
 import { queueRoomPass } from "../agents/call.ts";
+import { TRY_STEP } from "../build/workspace-session.ts";
+import { noTakerFor } from "../remote/takers.ts";
 import { stepDeadlineMin, stepNoProgressMin } from "./deadlines.ts";
 import { envVar } from "../env.ts";
 import { anyRepinDue } from "../repin/due.ts";
@@ -502,7 +504,12 @@ export class Runner {
       if (!byRepo) room.set(cls, (byRepo = new Map()));
       const key = `${q.step}\n${q.repo ?? ""}`;
       const roomOf = async (): Promise<number> => byRepo.get(key) ?? await pass.room(cls, q.repo ? [q.repo] : undefined, q.step) - started;
-      if (claude && q.repo && !await pass.taker([q.repo], q.step)) continue;
+      if (claude && q.repo && !await pass.taker([q.repo], q.step)) {
+        // A pipeline job waits for a Task Runner; a command-line session job (`workspace try`) is not replanned, so it fails.
+        const why = q.step === TRY_STEP ? await noTakerFor(this.db, q.repo, q.step) : null;
+        if (why) await this.db.run(this.db.k.updateTable("jobs").set({ state: "failed", ended_at: now(), error: why }).where("id", "=", q.id).where("state", "=", "queued"));
+        continue;
+      }
       if (claude && !await this.db.get(this.db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", step.name).where("state", "=", "running").limit(1))) {
         // Nothing of the step runs: it starts anyway, and takes a slot of the room.
       } else if (claude) {

@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { sweepSessions } from "../src/build/workspace-session.ts";
+import { requestTrySession, sweepSessions } from "../src/build/workspace-session.ts";
+import { setInferenceMode } from "../src/remote/mode.ts";
+import { world } from "./world-db.ts";
 import { connectDb } from "../src/db/open.ts";
 import { SCRATCH } from "./scratch.ts";
 
@@ -39,4 +41,14 @@ test("sessions of ended jobs fail and end their workspace unless kept; resuming 
   assert.deepEqual(await state(resuming), { session: "running", workspace: "ready" }, "a job queued to resume keeps its session");
   assert.deepEqual(await state(running), { session: "running", workspace: "ready" });
   assert.equal(await sweepSessions(db), 0, "an ended session is not swept again");
+});
+
+test("a try on a repo no Task Runner takes is refused, and records no session", async () => {
+  const w = await (await (await world()).repo()).issue(1, { title: "crash on open" });
+  await setInferenceMode(w.db, "user-local", "test");
+  const req = { repo: "app", baseSha: "a".repeat(40), item: 1, prompt: "try it", envId: "k", keep: false, workspaceId: null, by: "cli" };
+  await assert.rejects(requestTrySession(w.db, req), /no Task Runner can take calls/);
+  assert.equal((await w.db.all(w.db.k.selectFrom("workspace_sessions").select("id"))).length, 0);
+  await setInferenceMode(w.db, "server", "test");
+  assert.ok(await requestTrySession(w.db, req) > 0, "outside the user-local mode the server's accounts take the call");
 });
