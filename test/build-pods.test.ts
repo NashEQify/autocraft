@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { authenticate, createEnv } from "../src/build/envs.ts";
-import type { KPod, KubeApi } from "../src/build/kube-api.ts";
+import type { ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { createTask, getTask } from "../src/build/tasks.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
@@ -48,6 +48,10 @@ class FakeKube implements KubeApi {
   async createPvc(_ns: string, pvc: object) { this.#refused("pvc", pvc); const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
   async deletePvc(_ns: string, name: string) { this.pvcs.delete(name); }
   async canI() { return true; }
+  /** What the next execs return, and the argv of each call. */
+  execResult: ExecResult = { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false };
+  execs: string[][] = [];
+  async exec(_ns: string, _pod: string, _container: string, argv: string[]) { this.execs.push(argv); return { ...this.execResult }; }
   /** The single pod of a task, or fails. */
   only(task: number): Pod {
     const p = [...this.pods.values()].filter((x) => x.metadata.labels?.["craft.build/task"] === String(task));
