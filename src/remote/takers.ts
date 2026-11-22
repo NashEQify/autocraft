@@ -166,6 +166,17 @@ async function whyNoTaker(db: Db, nowMs: number, takes: (c: TakerCall) => Promis
 }
 
 /**
+ * Why no connected Task Runner may take a call of `step` on `repo` now, or null when one may (always null outside the user-local
+ * mode). For a request that would otherwise queue work nothing takes.
+ */
+export async function noTakerFor(db: Db, repo: string, step: string, nowMs: number = Date.now()): Promise<string | null> {
+  if (await inferenceMode(db) !== "user-local") return null;
+  const takes = takerTest(db, nowMs);
+  if (await takes({ prompt_id: "", repos: [repo], step })) return null;
+  return await whyNoTaker(db, nowMs, takes, { prompt_id: "", repos: [repo], step });
+}
+
+/**
  * One maintenance pass at `nowMs`. Each pipeline-on repo with no taker whose user takes some task keeps the time it was first seen so
  * (remote_no_taker); one with a taker loses it. Each queued call with a live caller that is no follow-up and has no pick
  * that counts gets the same mark (no_taker_since), and is withdrawn once the mark is NO_TAKER_MS old. Returns the number of
