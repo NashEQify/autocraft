@@ -134,7 +134,8 @@ describe("per-lease tools of remote calls", async () => {
       assert.ok(served <= PASSAGES_PER_LEASE);
     }
     assert.equal(served, PASSAGES_PER_LEASE);
-    const rows = await db.prepare("SELECT COUNT(*) AS n, MIN(user_login) AS login, MIN(repo) AS repo FROM remote_passages WHERE call_id = ?").get(leases.get("tools")!.id) as { n: number; login: string; repo: string };
+    const rows = (await db.get(db.k.selectFrom("remote_passages").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<string | null>("user_login").as("login"), eb.fn.min<string | null>("repo").as("repo")])
+      .where("call_id", "=", leases.get("tools")!.id)))!;
     assert.deepEqual({ ...rows }, { n: PASSAGES_PER_LEASE, login: "bob", repo: "photocraft" });
   });
 
@@ -142,7 +143,7 @@ describe("per-lease tools of remote calls", async () => {
     const rs = await Promise.all(Array.from({ length: 20 }, () => tool("race", "reference", "reference_search", { query: "layer", limit: 8 })));
     const served = rs.reduce((n, r) => n + (r.body.isError ? 0 : r.body.content[0]!.text.match(/^passage \d+:/gm)!.length), 0);
     assert.ok(served <= PASSAGES_PER_LEASE);
-    const rows = await db.prepare("SELECT COUNT(*) AS n FROM remote_passages WHERE call_id = ?").get(leases.get("race")!.id) as { n: number };
+    const rows = (await db.get(db.k.selectFrom("remote_passages").select((eb) => eb.fn.countAll<number>().as("n")).where("call_id", "=", leases.get("race")!.id)))!;
     assert.equal(Number(rows.n), served);
   });
 
