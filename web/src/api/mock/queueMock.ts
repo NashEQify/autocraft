@@ -103,7 +103,7 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
           .filter((w) => w.kind === "issue" && w.fast)
           .slice(0, 1)
           .map((w): QueuePendingRow => ({
-            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: "build", fast: w.fast, held: false,
+            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: w.next === "Fix" ? "build" : "next", fast: w.fast, held: false,
             added: { how: "fast", by: "operator", at: new Date(Date.now() - 1800_000).toISOString() }, prs: [], next: w.next,
           })),
       ];

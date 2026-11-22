@@ -1925,7 +1925,8 @@ export interface QueueMergeRow extends QueueRow {
 /**
  * A PR queued with Queue items or pre-approved that is no merge queue row yet: `fixup` (the operator's fix-up runs first), `review`
  * (waits for a take review at its head), `ci` (reviewed take; becomes a queue row on the next plan).
- * Or an open fast-tracked issue whose PR is not in the queue: `build` (no open PR closes it yet), `pr` (open PRs close it, none queued).
+ * Or an open fast-tracked issue whose PR is not in the queue: `build` (Fix builds its PR; no open PR closes it yet), `pr` (open PRs close it,
+ * none queued), `next` (no open PR closes it and Fix is not its next step: `next` says what is).
  */
 export interface QueuePendingRow {
   repo: RepoName;
@@ -1934,7 +1935,7 @@ export interface QueuePendingRow {
   title: string;
   author: string;
   size: "S" | "M" | "L" | "XL" | null;
-  step: "fixup" | "review" | "ci" | "build" | "pr";
+  step: "fixup" | "review" | "ci" | "build" | "pr" | "next";
   fast: FastPosition | null;
   held: boolean;
   added: QueueOrigin;

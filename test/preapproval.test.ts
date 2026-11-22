@@ -399,7 +399,7 @@ describe("queue items: an issue", () => {
     assert.deepEqual([before?.kind, before?.step, before?.added.how, before?.added.by], ["issue", "build", "fast", OPERATOR]);
     assert.equal((await issueRow("view", "viewer"))?.added.by, null);
     // A PR that closes it but is not queued: the issue stays and names it.
-    await w.db.prepare("UPDATE items SET closing_issues = '[36]' WHERE repo = 'app' AND number = 37").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[36]" }).where("repo", "=", "app").where("number", "=", 37));
     const open = await issueRow();
     assert.deepEqual([open?.step, open?.prs], ["pr", [37]]);
     // Once that PR is queued, its own row stands for the issue.
@@ -411,7 +411,7 @@ describe("queue items: an issue", () => {
 
   test("a closing PR the board shows in no group, such as a declined one, does not hide the issue", async () => {
     const w = await (await (await (await fresh()).issue(38)).pr(39)).review(39, { verdict: "take" });
-    await w.db.prepare("UPDATE items SET closing_issues = '[38]' WHERE repo = 'app' AND number = 39").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[38]" }).where("repo", "=", "app").where("number", "=", 39));
     await w.answer(39, "hold");
     const req = { query: new URLSearchParams("tab=merge&repos=all"), json: { item: "app#38" }, user: { login: OPERATOR, role: "operator", canWrite: async () => true, canRead: async () => true } } as unknown as Req;
     await addFastTrack(w.db, OPERATOR, "app#38");

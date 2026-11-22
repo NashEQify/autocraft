@@ -119,7 +119,7 @@ function PrRow({ r, next }: { r: Row; next: Next }) {
 /** The Queued group: queued or pre-approved PRs before their take review, and fast-tracked issues whose PR is not in the queue yet. */
 const QUEUED = { id: "queued", label: "Queued", dot: "bg-ink/40" };
 
-const PENDING_STEP: Record<QueuePendingRow["step"], string> = {
+const PENDING_STEP: Record<Exclude<QueuePendingRow["step"], "next">, string> = {
   fixup: "Fix-up first",
   review: "Waiting for review",
   ci: "Reviewed: take",
@@ -129,12 +129,14 @@ const PENDING_STEP: Record<QueuePendingRow["step"], string> = {
 
 function PendingRow({ r }: { r: QueuePendingRow }) {
   const linked = useIsLinked(r.repo, r.number);
-  const label = PENDING_STEP[r.step];
+  // A `next` row's step is the planner's next step itself, so the line below does not repeat it.
+  const label = r.step === "next" ? r.next : PENDING_STEP[r.step];
+  const next = r.step === "next" ? null : r.next;
   const prs = r.prs ?? [];
-  const sub = r.kind === "issue" && (prs.length > 0 || r.next) ? (
+  const sub = r.kind === "issue" && (prs.length > 0 || next) ? (
     <span className="flex flex-wrap items-center gap-x-3">
-      {prs.length > 0 && <span>{prs.map((n) => `#${n}`).join(", ")} {prs.length === 1 ? "closes" : "close"} it{prs.length > 1 ? "; queue one of them" : ""}</span>}
-      {r.next && <span>{r.next}</span>}
+      {prs.length > 0 && <span>{prs.map((n) => `#${n}`).join(", ")} {prs.length === 1 ? "closes" : "close"} it</span>}
+      {next && <span>{next}</span>}
     </span>
   ) : undefined;
   return (
@@ -147,7 +149,7 @@ function PendingRow({ r }: { r: QueuePendingRow }) {
       cells={{
         step: (
           <span className="flex flex-wrap items-center gap-1">
-            <Badge tone="neutral">{label}</Badge>
+            {label && <Badge tone="neutral">{label}</Badge>}
             {r.held && <Badge tone="warn">Held</Badge>}
           </span>
         ),
