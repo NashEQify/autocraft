@@ -22,6 +22,7 @@ import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, HEARTBEAT_S, PREPARE_MAX_S, ROUTES,
 import { claimRepos, claimReposOf, reposOf, REPOS_KEY } from "./my-repos.ts";
 import { SKIP_TASKS_KEY, skipsOf, taskOfStep, userSkips } from "./my-tasks.ts";
 import { itemFilter, itemFilterOf, itemsFit, TASK_ITEMS_KEY, taskItemsOf, type ItemFilter } from "./task-items.ts";
+import { INTERACTIVE_HELPER, INTERACTIVE_PROMPTS, interactive, userInteractiveSlots } from "./interactive-slots.ts";
 import { MAX_CALLS_KEY, MAX_CALLS_MAX, maxCallsOf, userMaxCalls } from "./max-calls.ts";
 import { claimClass, gating } from "./claim-class.ts";
 import { holdMs, Ticket, type ClaimTry, type ClaimWaits, type EmptyReply } from "./claim-wait.ts";
@@ -65,6 +66,8 @@ export const CALLER_GONE_MS = scaled(5 * 60_000);
 export const CLAIM_RETRY_S = scaledS(15);
 /** The oldest helper version that may run a lease. */
 export const REQUIRED_HELPER = "1.2.0";
+/** Where interactive calls go (claimOrder): only to the interactive lane, to no claim (the claim's pipeline slots), or, for a helper older than INTERACTIVE_HELPER that has no such lane, to any claim. */
+type InteractiveMode = "lane" | "off" | "legacy";
 /** Where a claim's bound calls go (claimOrder). */
 type BoundCalls = "only" | "with" | "without";
 /** A call this login released is not offered to it again for this long (its helper could not run it). */
@@ -500,11 +503,13 @@ export function parseClaim(raw: unknown): Claim {
   if (typeof c.requestId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(c.requestId)) throw new HttpError(400, "requestId must be 8 to 64 letters, digits, - or _");
   if (c.fastLane !== undefined && typeof c.fastLane !== "boolean") throw new HttpError(400, "fastLane must be a boolean");
   if (c.ownLane !== undefined && typeof c.ownLane !== "boolean") throw new HttpError(400, "ownLane must be a boolean");
+  if (c.interactiveLane !== undefined && typeof c.interactiveLane !== "boolean") throw new HttpError(400, "interactiveLane must be a boolean");
+  if (c.interactiveLane === true && (c.fastLane === true || c.ownLane === true || c.withOwnLane === true)) throw new HttpError(400, "interactiveLane excludes the other lanes");
   if (c.withOwnLane !== undefined && typeof c.withOwnLane !== "boolean") throw new HttpError(400, "withOwnLane must be a boolean");
   // Protocol 3 helpers know no wait; a field they might send is not read.
   const wait = protocol >= 4 ? c.wait : undefined;
   if (wait !== undefined && (!Number.isInteger(wait) || (wait as number) < 0 || (wait as number) > 30)) throw new HttpError(400, "wait must be whole seconds from 0 to 30");
-  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(c.ownLane === true && { ownLane: true }), ...(c.withOwnLane === true && { withOwnLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }) };
+  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(c.ownLane === true && { ownLane: true }), ...(c.withOwnLane === true && { withOwnLane: true }), ...(c.interactiveLane === true && { interactiveLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }) };
 }
 
 /** Whether dotted version `v` is older than `min` (numeric parts compared in order; a part that is not a number counts as 0). */
@@ -543,6 +548,9 @@ export const ownLaneLeases = (db: Db, login: Ex) => db.k.selectFrom(indexedBy(db
 /** The same for the leases of one helper credential (`tokenCol`: the outer query's mcp_tokens id column), for its free slots. */
 export const ownLaneLeasesOfToken = (db: Db, tokenCol: string) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_own", "bt")).select((e) => e.fn.countAll<number>().as("n"))
   .where("bt.state", "=", literal("leased")).where("bt.own_lane", "=", literal(1)).where((eb) => eb(eb.ref("bt.token_id"), "=", ref<number>(tokenCol)));
+/** The interactive-lane leases the login holds: own-lane leases of interactive calls (a maintainer's own-lane turns are not). */
+export const interactiveLeased = async (db: Db, login: string): Promise<number> => Number((await db.get(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_own", "il")).select((e) => e.fn.countAll<number>().as("n"))
+  .where((eb) => eb.and([eb("il.state", "=", literal("leased")), eb("il.own_lane", "=", literal(1)), ciEqExpr(db, "il.user_login", eb.val(login)), eb.or(INTERACTIVE_PROMPTS.map((p) => eb("il.prompt_id", "like", `${p}%`)))]))))!.n);
 const leasedRow = (db: Db, login: string) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb(eb.fn.countAll<number>(), "-", ownLaneLeases(db, eb.val(login))).as("n"))
   .where((eb) => eb.and([eb("c.state", "=", literal("leased")), ciEqExpr(db, "c.user_login", eb.val(login))]));
 
@@ -562,7 +570,7 @@ class Taken extends Error {}
  * lease also marks the caller's credential busy (idle_claim_at). A call whose bundle lists the workspace server goes only to
  * the claude harness (null for another).
  */
-async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean, clearIdle: boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
+async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean, clearIdle: boolean, interactiveCap: number | null = null): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
   // The run's stored prompt is built before the write lock is taken: scrubbing and compressing a large prompt takes milliseconds.
   // What the run is made of changes on a call's row only here (a workspace session's resume note), so it is read with the
@@ -583,12 +591,13 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   try {
     return await db.write(async () => {
       if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
+      if (interactiveCap !== null && await interactiveLeased(db, caller.login) >= interactiveCap) return "limit";
       if (!live()) return "gone";
       const runId = await insertRun(db, { jobId: q.job_id, step: q.step, stage: q.stage, promptId: q.prompt_id, promptVersion: q.prompt_version, provider: "claude", model: q.asked_model, accountId: null, items: refs, prompt,
         remote: { userLogin: caller.login, harness: claim.harness, reportedModel: model } });
       const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
         state: "leased", token_id: caller.tokenId, user_login: caller.login, harness: claim.harness, harness_version: claim.harnessVersion, model, root: claim.root ?? null, lease_secret_hash: sha256hex(secret),
-        leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId, run_id: runId, own_lane: claim.ownLane ? 1 : 0, ...(rewritten && { bundle: JSON.stringify(bundle), base_stdin: base }),
+        leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId, run_id: runId, own_lane: claim.ownLane || interactiveCap !== null ? 1 : 0, ...(rewritten && { bundle: JSON.stringify(bundle), base_stdin: base }),
         queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, [eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since"))])).end()), queued_since: null, progress: null, error: null,
         picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
       })).where("id", "=", id).where("state", "=", "queued")
@@ -727,7 +736,11 @@ const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderRe
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
-async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with"): Promise<Cand[]> {
+async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with", lane: InteractiveMode = "off"): Promise<Cand[]> {
+  const all = await claimOrderAll(db, caller, tiers, repos, sessionIds, nowMs, fastLane, reads, bound);
+  return lane === "legacy" ? all : all.filter((r) => interactive(r) === (lane === "lane"));
+}
+async function claimOrderAll(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with"): Promise<Cand[]> {
   const { q, manual, skip, items } = reads ?? await orderReads(db, caller.login, nowMs);
   const login = caller.login.toLowerCase();
   const live = (r: Cand): boolean => r.seen_at >= nowMs - CALLER_STALE_MS;
@@ -862,7 +875,7 @@ export function claimCall(db: Db, caller: Caller, claim: Claim, canWrite: (repo:
   const ms = hold && claim.protocol >= 4 ? holdMs(claim.wait) : 0;
   const ticket = hold && ms > 0 ? new Ticket(hold.signal) : undefined;
   // An own-lane claim's reply says the lane was honoured: a server without it ignores the field and would offer any call.
-  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o).then((r): ClaimReply => (claim.ownLane ? { ...r, ownLane: true } : r));
+  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o).then(async (r): Promise<ClaimReply> => (claim.interactiveLane ? { ...r, interactiveSlots: await userInteractiveSlots(db, caller.login, caller.role) } : claim.ownLane ? { ...r, ownLane: true } : r));
   claimReplies.set(key, { at: nowMs, reply, ticket });
   reply.catch(() => { if (claimReplies.get(key)?.reply === reply) claimReplies.delete(key); });
   // Every request for a held claim left before its reply: a retry with the same id claims afresh. A lease already given stays
@@ -977,7 +990,8 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     await firstReads.catch(() => {});
     dropQueueCache(db);
   }
-  const fast = claim.fastLane === true, own = claim.ownLane === true;
+  const fast = claim.fastLane === true, own = claim.ownLane === true, lane = claim.interactiveLane === true;
+  const mode: InteractiveMode = lane ? "lane" : olderVersion(claim.helperVersion, INTERACTIVE_HELPER) ? "legacy" : "off";
   const bound: BoundCalls = own ? "only" : claim.withOwnLane === true ? "without" : "with";
   // What the latest full try took, for a quick try's look at the queue.
   let tiers = new Set<Tier>(), repos: ReadonlySet<string> | null = null;
@@ -985,7 +999,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   let last: { at: number; reserve: Reserve } | null = null;
   const attempt: ClaimTry = async (now, { quick, live }) => {
     // A quick try with nothing to take changes nothing; the full tries, at least every RETRY_MS, check the credential as well.
-    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, undefined, bound)).length) return null;
+    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, undefined, bound, mode)).length) return null;
     const x = (now === nowMs && pending ? await pending : null) ?? await tryReads(db, caller, claim.repos, now);
     pending = null;
     last = { at: now, reserve: x.reserve };
@@ -999,16 +1013,19 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     const can = memoWrite(canWrite), others = idleOthers(db, caller.login, now);
     repos = x.repos;
     const max = x.max;
-    const full = max !== null && x.leased >= max;
+    // An interactive-lane claim is bounded by the user's Interactive slots alone; Max calls at once and the pipeline slots do not apply to it.
+    const slots = lane ? await userInteractiveSlots(db, caller.login, caller.role) : null;
+    if (lane && !slots) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "your Interactive slots are 0 (Connect page, My settings)", reserve: x.reserve };
+    const full = !lane && max !== null && x.leased >= max;
     let limited = full && !own;
-    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order, bound)) {
+    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order, bound, mode)) {
       // Only follow-ups of the helper's own sessions carry a parent here (claimOrder). The own lane's calls count toward no
       // calls at once: it takes them at the limit too, with no limit of its own. An older helper runs them in a slot, as any call.
       if (full && r.parent_id === null && !own) continue;
       if (!(await eligible(caller, r, can, others))) continue;
       // The client left, or shutdown answered the claim: nothing is leased to nobody.
       // A credential the try read as busy needs no busy mark.
-      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null || own ? null : r.parent_id !== null ? max + 1 : max, live, !fast && !own && x.idle);
+      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), lane || max === null || own ? null : r.parent_id !== null ? max + 1 : max, live, !fast && !own && !lane && x.idle, slots);
       if (lease === "gone") return null;
       if (lease === "limit") {
         limited = true;
@@ -1018,6 +1035,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       takeFromQueueCache(db, Number(r.id));
       return { lease, reserve: x.reserve };
     }
+    if (limited && lane) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers hold ${slots} interactive calls, your Interactive slots (Connect page, My settings)`, reserve: x.reserve };
     if (limited) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: `your helpers run ${max} calls, your limit of calls at once (Connect page, My settings)`, reserve: x.reserve };
     return null;
   };

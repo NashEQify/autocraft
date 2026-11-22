@@ -35,6 +35,7 @@ export function MySettings() {
   const [picks, setPicks] = useState<string[]>([]);
   const [tasks, setTasks] = useState<string[]>([]);
   const [maxCalls, setMaxCalls] = useState("");
+  const [slots, setSlots] = useState("");
   const [manual, setManual] = useState(false);
   const [priv, setPriv] = useState(false);
   const [taskItems, setTaskItems] = useState<TaskItems>("all");
@@ -68,6 +69,7 @@ export function MySettings() {
     setTasks(data.tasks);
     taskSaves.current.confirmed = data.tasks;
     setMaxCalls(data.maxCalls === null ? "" : String(data.maxCalls));
+    setSlots(String(data.interactiveSlots));
   }, [data]);
   if (!data || !vals) return error ? <ErrorLine error={error.message} className="mt-4" /> : null;
   /** Saves through the shared write state and marks the time it succeeded. */
@@ -122,6 +124,16 @@ export function MySettings() {
     const next = v.trim() === "" ? null : Number(v);
     if (next === data.maxCalls) return;
     saveRun("max-calls", () => api.me.settings.put({ maxCalls: next }));
+  };
+  const validSlots = (v: string) => /^\d$/.test(v.trim()) && Number(v) <= 4;
+  const saveSlots = (v: string) => {
+    if (!validSlots(v)) {
+      setProblem("Enter a whole number from 0 to 4.");
+      return;
+    }
+    setProblem(null);
+    if (Number(v) === data.interactiveSlots) return;
+    saveRun("interactive-slots", () => api.me.settings.put({ interactiveSlots: Number(v) }));
   };
   const saveManual = (on: boolean) => {
     setManual(on);
@@ -218,6 +230,28 @@ export function MySettings() {
               if (e.key === "Enter") saveMax(maxCalls);
             }}
             aria-label="Max calls at once"
+            className="w-20 text-right"
+          />
+        </label>
+        <label className={item}>
+          <span className="text-ink/80">Interactive slots</span>
+          <Input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            max={4}
+            step={1}
+            value={slots}
+            invalid={!validSlots(slots)}
+            onChange={(e) => {
+              setSlots(e.target.value);
+              edited();
+            }}
+            onBlur={() => saveSlots(slots)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") saveSlots(slots);
+            }}
+            aria-label="Interactive slots"
             className="w-20 text-right"
           />
         </label>

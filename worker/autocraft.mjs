@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.9";
+export const HELPER_VERSION = "1.4.0";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -86,6 +86,7 @@ export const ROUTES = {
  * @property {string} [root]
  * @property {string} requestId
  * @property {boolean} [fastLane]
+ * @property {boolean} [interactiveLane]  an interactive slot: only interactive calls (the user's Interactive slots)
  * @property {boolean} [ownLane]  the own lane: only calls bound to this user and their follow-ups
  * @property {boolean} [withOwnLane]  a slot's or the fast lane's claim while an own lane runs beside them
  * @property {number} [wait]  protocol 4: seconds the server may hold the claim open when nothing is queued (0 to 30)
@@ -95,7 +96,7 @@ export const ROUTES = {
 export const ENCODINGS = /** @type {const} */ (["gzip+base64"]);
 /** @typedef {(typeof ENCODINGS)[number]} Encoding */
 /** @typedef {{ encoding: Encoding, body: string }} Envelope  `body`: base64 of the gzip of the plain JSON body */
-/** @typedef {{ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true }} ClaimReply */
+/** @typedef {{ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number }} ClaimReply */
 /** @typedef {"ready" | "quota-held" | "paused" | "cooled-off" | "sandbox-failed" | "version-refused" | "harness-missing" | "failing"} Readiness */
 /** @typedef {{ usedPercent: number, resetsAt: string | null }} UsageWindow */
 /** @typedef {{ fiveHour: UsageWindow | null, weekly: UsageWindow | null, at: string }} UsageReading */
@@ -2943,9 +2944,9 @@ export async function claimRequest(server, token, base, signal) {
  * A lease that comes back with a higher reserve than the one checked, which the usage no longer allows, is released.
  * `fastLane`: the claim comes from the fast-lane slot (Claim.fastLane); `ownLane`: from the own lane (Claim.ownLane). `requestId`:
  * a caller whose last claim failed in transit passes that claim's id again, so the server answers with the lease it may have taken.
- * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @param {boolean} [ownLane] @param {boolean} [withOwnLane] @returns {Promise<ClaimReply | { held: Ready }>}
+ * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @param {boolean} [ownLane] @param {boolean} [withOwnLane] @param {boolean} [interactiveLane] @returns {Promise<ClaimReply | { held: Ready }>}
  */
-async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined, ownLane = false, withOwnLane = false) {
+async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined, ownLane = false, withOwnLane = false, interactiveLane = false) {
   const { server, agentToken } = needLogin(cfg);
   const ready = await checkReady(cfg);
   const cooled = ready.readiness === "cooled-off" && ready.quotaReady === true;
@@ -2954,7 +2955,7 @@ async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), 
   const mac = process.platform === "darwin";
   const n = mac ? slot ?? pickSlot(slotBase()) : undefined;
   const root = n === undefined ? undefined : slotRoot(slotBase(), n);
-  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }), ...(ownLane && { ownLane: true }), ...(withOwnLane && !ownLane && { withOwnLane: true }) };
+  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }), ...(ownLane && { ownLane: true }), ...(withOwnLane && !ownLane && { withOwnLane: true }), ...(interactiveLane && { interactiveLane: true }) };
   /** @type {ClaimReply} */
   let reply;
   try {
@@ -3703,6 +3704,8 @@ async function cmdWork(argv) {
   const own = !exclusive.exclusive && !(process.platform === "darwin" && n + (fast ? 1 : 0) >= MAC_MAX_SLOTS);
   // Whether the own lane runs: the slots then leave the bound calls to it (Claim.withOwnLane). It stops against a server without it.
   let ownLaneOn = own;
+  // The interactive lanes run where the own lane does (same slot limits).
+  const interactiveOn = own;
   const ac = new AbortController();
   for (const sig of STOP_SIGNALS) {
     process.on(sig, () => {
@@ -3726,20 +3729,27 @@ async function cmdWork(argv) {
     heldSaid = heldLine({ readiness, reason, until });
     console.log(`not claiming: ${heldSaid}; running calls finish`);
   };
-  /** @param {boolean} fastLane @param {boolean} [ownLane] */
-  const loop = async (fastLane, ownLane = false) => {
+  /** @param {boolean} fastLane @param {boolean} [ownLane] @param {boolean} [interactiveLane] */
+  const loop = async (fastLane, ownLane = false, interactiveLane = false) => {
     // macOS: each loop holds one slot for its lifetime, so its claims name that slot's root and sessions.
     const held = process.platform === "darwin" ? holdSlot(slotBase()) : null;
-    try { await claimLoop(held?.n, fastLane, ownLane); } finally { held?.release(); }
+    try { await claimLoop(held?.n, fastLane, ownLane, interactiveLane); } finally { held?.release(); }
   };
-  /** @param {number | undefined} slot @param {boolean} fastLane @param {boolean} ownLane */
-  const claimLoop = async (slot, fastLane, ownLane) => {
+  // Interactive lanes (Claim.interactiveLane): one loop runs from the start and the server's reply tells how many the user's
+  // Interactive slots allow; the rest start then. A loop beyond the slots, or with 0, waits quietly.
+  let interactiveLoops = interactiveOn ? 1 : 0;
+  /** @type {Promise<void>[]} */
+  const interactiveRuns = [];
+  /** @param {number} want */
+  const startInteractive = (want) => { while (interactiveLoops < want) { interactiveLoops++; interactiveRuns.push(loop(false, false, true).then(() => {})); } };
+  /** @param {number | undefined} slot @param {boolean} fastLane @param {boolean} ownLane @param {boolean} [interactiveLane] */
+  const claimLoop = async (slot, fastLane, ownLane, interactiveLane = false) => {
     let claimId = newClaimId();
     let blockedRun = 0;
     while (!ac.signal.aborted) {
       if (Date.now() < notBefore) { await pause(notBefore - Date.now()); continue; }
       let r;
-      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane, ownLaneOn); claimId = newClaimId(); blockedRun = 0; } catch (e) {
+      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane, ownLaneOn, interactiveLane); claimId = newClaimId(); blockedRun = 0; } catch (e) {
         if (ac.signal.aborted) break;
         // A claim lost in transit may have leased a call: the next try sends the same id and gets that lease back.
         if (!transient(e)) claimId = newClaimId();
@@ -3768,7 +3778,12 @@ async function cmdWork(argv) {
       const ownLaneUnknown = ownLane && r.ownLane !== true;
       if (ownLaneUnknown) ownLaneOn = false;
       if (ownLaneUnknown && !r.lease) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
+      // A server older than the interactive lane ignores the field and offers any call: the lane runs what it got and then stops.
+      const interactiveUnknown = interactiveLane && typeof r.interactiveSlots !== "number";
+      if (interactiveLane && !interactiveUnknown) startInteractive(r.interactiveSlots ?? 0);
+      if (interactiveUnknown && !r.lease) { console.log("the server has no interactive lane; that lane stops"); return; }
       if (!r.lease) {
+        if (interactiveLane) { await pause(Math.max(TIME_SCALE, r.retryAfter) * 1000); continue; }
         // The own lane waits quietly: the slots' loops say what the helper is doing.
         if (ownLane) { await pause(Math.max(TIME_SCALE, r.retryAfter) * 1000); continue; }
         const say = r.reason ? `no calls for this helper: ${r.reason}${r.until ? ` (until ${new Date(r.until).toLocaleString()})` : ""}` : `no task queued; claiming again in ${r.retryAfter} s`;
@@ -3777,13 +3792,14 @@ async function cmdWork(argv) {
         continue;
       }
       idleSaid = "";
-      console.log(`lease ${r.lease.id}${fastLane ? " (fast lane)" : ownLane ? " (own lane)" : ""}: ${r.lease.title}`);
-      const counted = !ownLane;
+      console.log(`lease ${r.lease.id}${fastLane ? " (fast lane)" : interactiveLane ? " (interactive lane)" : ownLane ? " (own lane)" : ""}: ${r.lease.title}`);
+      const counted = !ownLane && !interactiveLane;
       if (counted) capacity.busy++;
       let s;
       try { s = await runLease(loadConfig(), r.lease.id, { signal: ac.signal, slotHeld: slot !== undefined }); } finally { if (counted) capacity.busy--; }
       console.log(s.line);
       if (ownLaneUnknown) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
+      if (interactiveUnknown) { console.log("the server has no interactive lane; that lane stops"); return; }
       if (s.hold) hold(s.hold.readiness, s.line, s.hold.ms === null ? null : Date.now() + s.hold.ms);
       else if (s.state === "submitted") {
         if (failures >= FAILURES_TO_HOLD) clearHold("failing");
@@ -3799,7 +3815,8 @@ async function cmdWork(argv) {
       }
     }
   };
-  await Promise.all([...Array.from({ length: n }, () => loop(false)), ...(fast ? [loop(true)] : []), ...(own ? [loop(false, true)] : [])]);
+  await Promise.all([...Array.from({ length: n }, () => loop(false)), ...(fast ? [loop(true)] : []), ...(own ? [loop(false, true)] : []), ...(interactiveOn ? [loop(false, false, true)] : [])]);
+  await Promise.all(interactiveRuns);
   return 0;
 }
 

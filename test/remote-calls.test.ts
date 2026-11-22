@@ -371,4 +371,31 @@ describe("user-local remote calls", async () => {
     assert.equal((await claimCall(db, callers.bob!, both(), canWrite)).lease?.id, opus, "no limit: the review");
     await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("state", "in", ["queued", "leased"]));
   });
+  test("an interactive call takes only an interactive slot and a pipeline call never does", async () => {
+    await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("state", "in", ["queued", "leased"]));
+    const q = async (promptId: string) => enqueueCall(db, { promptId, promptVersion: "1", tier: "small", effort: "medium", askedModel: "haiku", items: [{ repo: "photocraft", number: 1287 }], level: 0, maxAttempts: 1,
+      bundle: { promptId, promptVersion: "1", tier: "small", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: true, hints: {} } });
+    const both = (extra: Partial<Claim> = {}): Claim => ({ ...claim(), tiers: { top: "opus", small: "haiku" }, ...extra });
+    await db.run(db.k.insertInto("access").values({ login: "opera", role: "operator" }));
+    const op: Caller = { tokenId: (await createToken(db, "opera", "helper", { kind: "runner" })).row.id, login: "opera", role: "operator" };
+    await userSettings.setSettings(db, req("opera", "operator", { maxCalls: 1 }));
+    await q("lint.reference.haiku");
+    assert.ok((await claimCall(db, op, both(), canWrite)).lease, "the lint call fills the pipeline slots");
+    const lint = await q("lint.reference.haiku");
+    const search = await q("discord.search");
+    assert.equal((await claimCall(db, op, both(), canWrite)).lease, null, "a pipeline claim never takes the Discord call");
+    assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease?.id, search, "the interactive slot takes it with the pipeline slots full");
+    const next = await q("discord.search");
+    assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease, null, "one interactive slot, held");
+    await userSettings.setSettings(db, req("opera", "operator", { interactiveSlots: 2 }));
+    assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease?.id, next, "a second slot takes the next one");
+    await userSettings.setSettings(db, req("opera", "operator", { maxCalls: null }));
+    await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("state", "=", "queued"));
+    const old = await q("discord.search");
+    assert.equal((await claimCall(db, op, both({ helperVersion: "1.3.9" }), canWrite)).lease?.id, old, "a helper older than the lane is offered it in an ordinary claim");
+    const other = await q("lint.reference.haiku");
+    assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease, null, "the interactive slot never takes a pipeline call");
+    assert.ok(other);
+    await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("state", "in", ["queued", "leased"]));
+  });
 });

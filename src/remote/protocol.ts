@@ -84,6 +84,11 @@ export type Claim = {
    * maintainer's own conversation turn) and their follow-ups, which count toward no slot or Max calls at once.
    */
   ownLane?: boolean;
+  /**
+   * The claim comes from one of the helper's interactive slots (the user's Interactive slots setting): the server offers it only
+   * interactive calls (discord.* prompts), which count toward no slot or Max calls at once. Other claims are offered none.
+   */
+  interactiveLane?: boolean;
   /** A claim from a slot or the fast lane of a helper that also runs an own lane: the calls bound to its user are left to that lane. */
   withOwnLane?: boolean;
   /**
@@ -113,8 +118,8 @@ export type Encoding = (typeof ENCODINGS)[number];
 export type Envelope = { encoding: Encoding; body: string };
 
 export type ClaimReply =
-  | { lease: null; /** Seconds to wait before the next claim when nothing is queued. */ retryAfter: number; reserve: Reserve; /** Present while the token gets no calls: why (repeated lost leases, the user's limit of calls at once), and with a cool-off when it may claim again (ms since epoch). `retryAfter` then runs to `until`. */ reason?: string; until?: number; /** The body encodings the server accepts (ENCODINGS); absent from a server that takes plain JSON only. */ encodings?: Encoding[]; /** The server answered the claim's `ownLane`; a server without it ignores the field and leaves this out. */ ownLane?: true }
-  | { lease: { id: number; secret: string; /** One line: prompt id and the item, e.g. "review.opus on designcraft#1502". */ title: string; requiredHelper: string }; reserve: Reserve; encodings?: Encoding[]; ownLane?: true };
+  | { lease: null; /** Seconds to wait before the next claim when nothing is queued. */ retryAfter: number; reserve: Reserve; /** Present while the token gets no calls: why (repeated lost leases, the user's limit of calls at once), and with a cool-off when it may claim again (ms since epoch). `retryAfter` then runs to `until`. */ reason?: string; until?: number; /** The body encodings the server accepts (ENCODINGS); absent from a server that takes plain JSON only. */ encodings?: Encoding[]; /** The server answered the claim's `ownLane`; a server without it ignores the field and leaves this out. */ ownLane?: true; /** On an interactive-lane claim: the user's Interactive slots; a server without the lane leaves it out. */ interactiveSlots?: number }
+  | { lease: { id: number; secret: string; /** One line: prompt id and the item, e.g. "review.opus on designcraft#1502". */ title: string; requiredHelper: string }; reserve: Reserve; encodings?: Encoding[]; ownLane?: true; /** On an interactive-lane claim: the user's Interactive slots; a server without the lane leaves it out. */ interactiveSlots?: number };
 
 /**
  * Whether a helper takes calls now. `ready`: it claims. `quota-held`: a plan window is at or below the reserve, its usage
@@ -218,7 +223,7 @@ export type PendingRunnerLogin = {
  * GET and PUT /api/me/settings (session routes): the signed-in user's own settings. `repos`: the repos their helpers take calls
  * from, empty for every repo. A PUT sends any of the fields.
  */
-export type UserSettings = { reserve: Reserve; repos: string[]; /** The most calls the user's helpers run at once, all helpers together; null for no limit. */ maxCalls: number | null };
+export type UserSettings = { reserve: Reserve; repos: string[]; /** Calls the user's helpers may hold on the interactive lane together (0 to 4). */ interactiveSlots: number; /** The most calls the user's helpers run at once, all helpers together; null for no limit. */ maxCalls: number | null };
 /** The settings with `repoChoices`: the tracked repos with the pipeline on where the user has write permission, sorted. */
 export type UserSettingsReply = UserSettings & { repoChoices: string[] };
 
