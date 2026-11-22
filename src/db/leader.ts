@@ -318,7 +318,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     if (checkingOn === current.client || recovering) return;
     const sent = Date.now(), c = current.client;
     checkingOn = c;
-    c.query("SELECT 1").then(
+    void c.query("SELECT 1").then(
       () => { if (c === current.client) lastOk = Math.max(lastOk, sent); },
       (e: Error) => { if (c === current.client) void reacquire(e.message); },
     ).finally(() => { if (checkingOn === c) checkingOn = null; });
