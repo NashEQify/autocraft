@@ -238,14 +238,10 @@ src/priority/reach.ts
 
 src/priority/read.ts
 
-src/public/status.ts
 
 
-src/rank/index.ts
 
-src/rank/level.ts
 
-src/rank/position.ts
 
 
 

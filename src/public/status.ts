@@ -7,7 +7,7 @@ import type { AliasableExpression, SqlBool } from "kysely";
 import { quietExprFor, quietSqlFor } from "../security/quiet.ts";
 import { sortSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { jsonEach, jsonValid, like, ref, type Eb, type Ex } from "../db/kx.ts";
+import { jsonBool, jsonEach, jsonText, jsonValid, like, ref, type Eb, type Ex } from "../db/kx.ts";
 
 export const STEPS = ["New", "Triaged", "In review", "Waiting for CI", "Fix-up in progress", "Needs a maintainer decision", "In the merge queue", "Merged", "Closed"] as const;
 export type PublicStep = (typeof STEPS)[number];
@@ -43,15 +43,15 @@ const FIXING = ["needs-fix-up"];
 const WAITING = ["waiting-ci", "waiting-premerge", "waiting-verify", "ci-approval", "waiting-main-ci"];
 const NEVER_REVIEWED = ["not-reviewed", "label-not-reviewed", "out-of-scope", "scope", "draft"];
 
-const sqlList = (xs: string[]): string => xs.map((x) => `'${x}'`).join(",");
-
 /** True for a repo that is tracked and public. */
 export const isPublicRepo = async (db: Db, repo: string): Promise<boolean> =>
-  !!await db.prepare("SELECT 1 FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE t.name = ? AND lower(r.visibility) = 'public'").get(repo);
+  !!await db.get(db.k.selectFrom("main.tracked_repos as t").innerJoin("main.repos as r", "r.name", "t.name").select((eb) => eb.lit(1).as("one"))
+    .where("t.name", "=", repo).where((eb) => eb(eb.fn("lower", ["r.visibility"]), "=", "public")));
 
 /** Names of the tracked repos that are public. */
 export const publicRepoNames = async (db: Db): Promise<string[]> =>
-  (await db.prepare("SELECT t.name FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE lower(r.visibility) = 'public' ORDER BY t.name").all() as { name: string }[]).map((r) => r.name);
+  (await db.all(db.k.selectFrom("main.tracked_repos as t").innerJoin("main.repos as r", "r.name", "t.name").select("t.name")
+    .where((eb) => eb(eb.fn("lower", ["r.visibility"]), "=", "public")).orderBy("t.name"))).map((r) => r.name);
 
 /** The security cases an anonymous viewer must not see: a quiet fix PR, any finding's fix PR, an item the classifier flagged or a label marks as security. */
 export const hiddenSql = (repo: string, number: string, labels: string): string => `(${quietSqlFor(repo, number)}
@@ -72,15 +72,15 @@ export function hiddenExpr(db: Db, eb: Eb, repo: Ex, number: Ex, labels: Ex): Al
   ]);
 }
 
-type Row = { title: string | null; url: string | null; kind: string; state: string; hidden: number; stage: string | null; reviewed: number | null; plan: string | null; view: string | null; decision: number };
-
 export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
   if (!await isPublicRepo(db, repo)) return null;
-  const row = await db.prepare(`SELECT i.title, i.url, i.kind, i.state, ${hiddenSql("i.repo", "i.number", "i.labels")} AS hidden,
-      s.stage, s.reviewed, p.state AS plan, p.view,
-      EXISTS (SELECT 1 FROM main.decisions d WHERE d.repo = i.repo AND d.number = i.number AND d.answer IS NULL) AS decision
-    FROM main.items i LEFT JOIN main.item_stage s ON s.repo = i.repo AND s.number = i.number LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number
-    WHERE i.repo = ? AND i.number = ?`).get(repo, number) as Row | undefined;
+  const row = await db.get(db.k.selectFrom("main.items as i")
+    .leftJoin("main.item_stage as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
+    .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select((eb) => ["i.title", "i.url", "i.kind", "i.state", hiddenExpr(db, eb, "i.repo", "i.number", "i.labels").as("hidden"),
+      "s.stage", "s.reviewed", "p.state as plan", "p.view",
+      eb.exists(eb.selectFrom("main.decisions as d").select(eb.lit(1).as("one")).whereRef("d.repo", "=", "i.repo").whereRef("d.number", "=", "i.number").where("d.answer", "is", null)).as("decision")])
+    .where("i.repo", "=", repo).where("i.number", "=", number));
   if (!row || row.hidden || !row.url) return null;
   const kind = row.kind === "pr" ? "pr" : "issue";
   const base = { ref: `${repo}#${number}`, title: row.title ?? "", url: row.url, kind } as const;
@@ -110,9 +110,13 @@ export async function publicStatus(db: Db, repo: string, number: number): Promis
 
 /** Open PRs of a repo that are queued to merge, in the dashboard queue page's order: fast-tracked first, batch members after ready ones, then by work rank, repo and number. */
 async function queueOf(db: Db, repo: string): Promise<number[]> {
-  const rows = await db.prepare(`SELECT p.number, p.state FROM main.item_plans p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
-    WHERE p.repo = ? AND p.kind = 'pr' AND p.state IN (${sqlList(QUEUED)}) AND json_extract(p.view, '$.gh') = 'OPEN'
-      AND COALESCE(json_extract(p.view, '$.queue.held'), 0) = 0 AND NOT ${hiddenSql("p.repo", "p.number", "i.labels")}`).all(repo) as { number: number; state: string }[];
+  const rows = await db.all(db.k.selectFrom("main.item_plans as p")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .select(["p.number", "p.state"])
+    .where("p.repo", "=", repo).where("p.kind", "=", "pr").where("p.state", "in", QUEUED)
+    .where((eb) => eb(jsonText(db, "p.view", "$.gh"), "=", "OPEN"))
+    .where((eb) => eb(eb.fn.coalesce(jsonBool(db, "p.view", "$.queue.held"), eb.lit(0)), "=", 0))
+    .where((eb) => eb.not(hiddenExpr(db, eb, "p.repo", "p.number", "i.labels"))));
   const fast = await fastPositions(db), score = scoreLookup(db);
   const fp = (n: number): number => fast.get(`${repo}#${n}`)?.position ?? 1e9;
   const cls = (s: string) => (s === "in-batch" || s === "batch-checking" ? 1 : 0);
@@ -144,17 +148,28 @@ export async function publicStats(db: Db, repo?: string, now = Date.now()): Prom
   const repos = repo !== undefined ? [repo] : await publicRepoNames(db);
   const out: PublicStats = { repo: repo ?? null, openIssues: 0, openPrs: 0, mergedLast7Days: 0, mergedByAutoCraftLast7Days: 0, reviewsPostedLast7Days: 0, medianOpenToMergeHours30Days: null, queueLength: 0 };
   const since7 = new Date(now - 7 * DAY).toISOString(), since30 = new Date(now - 30 * DAY).toISOString();
-  const open = db.prepare(`SELECT COUNT(*) AS n FROM main.items i WHERE i.repo = ? AND i.kind = ? AND i.state = 'OPEN' AND NOT ${hiddenSql("i.repo", "i.number", "i.labels")}`);
-  const merged = db.prepare(`SELECT i.created_at, i.merged_at, (EXISTS (SELECT 1 FROM main.merges m WHERE m.repo = i.repo AND m.number = i.number AND m.outcome = 'merged')
-      OR EXISTS (SELECT 1 FROM main.merge_batch_prs bp JOIN main.merge_batches b ON b.id = bp.batch_id WHERE b.repo = i.repo AND bp.number = i.number AND b.state = 'merged')) AS ours
-    FROM main.items i WHERE i.repo = ? AND i.state = 'MERGED' AND i.kind = 'pr' AND i.merged_at >= ? AND NOT ${hiddenSql("i.repo", "i.number", "i.labels")}`);
-  const reviews = db.prepare(`SELECT COUNT(*) AS n FROM main.review_posts rp JOIN main.items i ON i.repo = rp.repo AND i.number = rp.number
-    WHERE rp.repo = ? AND rp.posted_at >= ? AND NOT ${hiddenSql("i.repo", "i.number", "i.labels")}`);
+  const open = async (r: string, kind: string): Promise<number> => (await db.get(db.k.selectFrom("main.items as i").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("i.repo", "=", r).where("i.kind", "=", kind).where("i.state", "=", "OPEN")
+    .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels")))))!.n;
+  const merged = (r: string) => db.all(db.k.selectFrom("main.items as i")
+    .select((eb) => ["i.created_at", "i.merged_at", eb.or([
+      eb.exists(eb.selectFrom("main.merges as m").select(eb.lit(1).as("one")).whereRef("m.repo", "=", "i.repo").whereRef("m.number", "=", "i.number").where("m.outcome", "=", "merged")),
+      eb.exists(eb.selectFrom("main.merge_batch_prs as bp").innerJoin("main.merge_batches as b", "b.id", "bp.batch_id").select(eb.lit(1).as("one"))
+        .whereRef("b.repo", "=", "i.repo").whereRef("bp.number", "=", "i.number").where("b.state", "=", "merged")),
+    ]).as("ours")])
+    .where("i.repo", "=", r).where("i.state", "=", "MERGED").where("i.kind", "=", "pr").where("i.merged_at", ">=", since30)
+    .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels")))
+    .$narrowType<{ merged_at: string }>());
+  const reviews = async (r: string): Promise<number> => (await db.get(db.k.selectFrom("main.review_posts as rp")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "rp.repo").onRef("i.number", "=", "rp.number"))
+    .select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("rp.repo", "=", r).where("rp.posted_at", ">=", since7)
+    .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels")))))!.n;
   const hours: number[] = [];
   for (const r of repos) {
-    out.openIssues += (await open.get(r, "issue") as { n: number }).n;
-    out.openPrs += (await open.get(r, "pr") as { n: number }).n;
-    for (const m of await merged.all(r, since30) as { created_at: string | null; merged_at: string; ours: number }[]) {
+    out.openIssues += await open(r, "issue");
+    out.openPrs += await open(r, "pr");
+    for (const m of await merged(r)) {
       const dur = m.created_at ? Date.parse(m.merged_at) - Date.parse(m.created_at) : NaN;
       if (dur >= 0) hours.push(dur / 3_600_000);
       if (m.merged_at >= since7) {
@@ -162,7 +177,7 @@ export async function publicStats(db: Db, repo?: string, now = Date.now()): Prom
         if (m.ours) out.mergedByAutoCraftLast7Days++;
       }
     }
-    out.reviewsPostedLast7Days += (await reviews.get(r, since7) as { n: number }).n;
+    out.reviewsPostedLast7Days += await reviews(r);
     out.queueLength += (await queueOf(db, r)).length;
   }
   if (hours.length) {

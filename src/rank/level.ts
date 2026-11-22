@@ -8,6 +8,6 @@ export const DEFAULT_BAND = LEVELS.length - 1 - LEVELS.indexOf("P2");
 /** 4 for P0 down to 0 for P4. */
 export async function levelBand(db: Db, repo: string | null | undefined, number: number | null | undefined): Promise<number> {
   if (!repo || number === null || number === undefined) return DEFAULT_BAND;
-  const r = await db.prepare("SELECT score FROM main.item_rank WHERE repo = ? AND number = ?").get(repo, number) as { score: number } | undefined;
+  const r = await db.get(db.k.selectFrom("main.item_rank").select("score").where("repo", "=", repo).where("number", "=", number));
   return r ? Math.floor(r.score / 10000) : DEFAULT_BAND;
 }
