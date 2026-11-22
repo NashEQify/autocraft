@@ -24,11 +24,12 @@ export const PERMANENT: readonly string[] = [
 
 export const TODO_FILE = join(ROOT, "test/raw-sql-not-converted.txt");
 
-// Statement text, Kysely's raw `sql` tag, and DatabaseSync's exec with literal SQL text (not a command's name such as `d.exec("gh", ...)`).
-const USE = /\.prepare\(|\.script\(|\bsql(?:<[^>\n]*>)?`|\bsql\.(?:raw|lit)\(|\.exec\(\s*[`"']/g;
-// SQLite maintenance that has no builder form and runs on SQLite only: PRAGMA, ATTACH/DETACH, sqlite_master.
+// Statement text, Kysely's raw `sql` tag (with type arguments nested up to three deep), an import that renames the tag,
+// CompiledQuery.raw, and DatabaseSync's exec with literal SQL text (not a command's name such as `d.exec("gh", ...)`).
+const USE = /\.prepare\(|\.script\(|\bsql(?:<(?:[^<>\n]|<(?:[^<>\n]|<[^<>\n]*>)*>)*>)?`|\bsql\.(?:raw|lit)\(|\bimport\s*\{[^}]*\bsql\s+as\s+\w+[^}]*\}\s*from\s*["']kysely["']|\bCompiledQuery\.raw\(|\.exec\(\s*[`"']/g;
+// SQLite maintenance that has no builder form and runs on SQLite only: PRAGMA, ATTACH/DETACH, and reads of sqlite_master.
 const SQL_START = /^\s*(?:select|insert|update|delete|replace|with|create|drop|alter|pragma|attach|detach|begin|commit|rollback|savepoint|release|vacuum|analyze|reindex|explain)\b/i;
-const MAINTENANCE = /^\s*[`"'](?:PRAGMA|ATTACH|DETACH)\b|^[^;]*?\bsqlite_master\b/;
+const MAINTENANCE = /^\s*[`"'](?:PRAGMA|ATTACH|DETACH)\b|^\s*[`"']\s*SELECT\b[^;]*?\bFROM\s+(?:main\.)?sqlite_master\b/;
 
 /** The raw SQL uses in `text` (comment lines skipped), each as its 1-based line number. */
 export function rawSqlUses(text: string): number[] {
