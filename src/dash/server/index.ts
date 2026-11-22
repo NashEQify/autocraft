@@ -51,7 +51,7 @@ import { ENCODINGS, ROUTES, toolContent, type ClaimReply, type LoginPollReply, t
 import { userReserve } from "../../remote/reserve.ts";
 import { startLiveness } from "../../remote/liveness.ts";
 import { WORKSPACE_SERVER } from "../../build/workspace-tools.ts";
-import { archiveOf, callTaskTool, runnerUrl, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
+import { archiveOf, callTaskTool, LeaseGone, runnerUrl, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
 import { useRunnerClient } from "../../remote/runner-client.ts";
 import { handleDelivery, WEBHOOK_BODY_LIMIT, WEBHOOK_PATH } from "../../github/webhooks.ts";
 import { esc, HttpError, parseCookies, plainPage, previewTags, RateLimiter, safeReturnTo, share, shareRate } from "./util.ts";
@@ -931,7 +931,16 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
 
   /** Streams the tar archive of one tarball mount of the lease's bundle. */
   async function sendArchive(res: ServerResponse, lease: TaskLease, secret: string, repo: string, sha: string): Promise<void> {
-    const tar = await archiveOf(lease, repo, sha, { secret });
+    const ac = new AbortController();
+    res.on("close", () => { if (!res.writableEnded) ac.abort(); });
+    let tar: Awaited<ReturnType<typeof archiveOf>>;
+    try {
+      tar = await archiveOf(lease, repo, sha, { secret, signal: ac.signal });
+    } catch (e) {
+      if (!(e instanceof LeaseGone)) throw e;
+      res.writeHead(410, secure({ "cache-control": "no-store", "content-type": "application/json; charset=utf-8" }, "default-src 'none'"));
+      return void res.end(JSON.stringify({ error: "the lease is gone (expired, withdrawn or already submitted)" }));
+    }
     if (!tar) {
       res.writeHead(404, secure({ "cache-control": "no-store", "content-type": "application/json; charset=utf-8" }, "default-src 'none'"));
       return void res.end(JSON.stringify({ error: "the call has no such tarball" }));

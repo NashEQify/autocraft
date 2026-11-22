@@ -206,6 +206,14 @@ export async function callTaskTool(db: Db, lease: TaskLease, secret: string, ser
   }
 }
 
+/** The runner's answer to a tarball request must begin within this. */
+const RUNNER_HEADERS_MS = 30_000;
+
+/** The runner no longer knows the lease (it ended while the dashboard asked). */
+export class LeaseGone extends Error {
+  constructor() { super("the lease is gone"); }
+}
+
 const ARCHIVE_SLOTS = 4;
 /** Archives kept on disk (total bytes); the least recently used are removed first. */
 const ARCHIVE_CACHE_BYTES = 2 * 1024 ** 3;
@@ -250,14 +258,28 @@ const gitOk = (args: string[], env: NodeJS.ProcessEnv): Promise<boolean> =>
  * Instruction files stay in; the helper removes them. Without the clones on this disk (`runnerUrl`, unless `local`) the
  * runner streams it, authenticated by the lease's `secret`.
  */
-export async function archiveOf(lease: TaskLease, repo: string, sha: string, opts: { secret?: string; local?: boolean } = {}): Promise<Readable | null> {
+export async function archiveOf(lease: TaskLease, repo: string, sha: string, opts: { secret?: string; local?: boolean; signal?: AbortSignal } = {}): Promise<Readable | null> {
   if (!lease.mounts.some((m) => m.kind === "tarball" && m.repo === repo && m.sha === sha)) return null;
   const runner = opts.local ? null : runnerUrl();
   if (runner) {
-    const res = await fetch(`${runner}/remote/tarball?${new URLSearchParams({ repo, sha })}`, { headers: { authorization: `Bearer ${opts.secret ?? ""}` } });
-    if (res.status === 404 || res.status === 401 || res.status === 410) { await res.body?.cancel(); return null; }
+    // The runner must start answering within RUNNER_HEADERS_MS; the body then streams for as long as the client reads it.
+    // `signal` (the client going away) ends either.
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(new Error("the runner did not answer in time")), RUNNER_HEADERS_MS);
+    const stop = (): void => ac.abort(opts.signal?.reason);
+    opts.signal?.addEventListener("abort", stop, { once: true });
+    let res: Response;
+    try {
+      res = await fetch(`${runner}/remote/tarball?${new URLSearchParams({ repo, sha })}`, { headers: { authorization: `Bearer ${opts.secret ?? ""}` }, signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.status === 401 || res.status === 410) { await res.body?.cancel(); throw new LeaseGone(); }
+    if (res.status === 404) { await res.body?.cancel(); return null; }
     if (!res.ok || !res.body) { await res.body?.cancel(); throw new Error(`the runner answered ${res.status} for a tarball`); }
-    return Readable.fromWeb(res.body as import("node:stream/web").ReadableStream);
+    const out = Readable.fromWeb(res.body as import("node:stream/web").ReadableStream);
+    out.on("close", () => opts.signal?.removeEventListener("abort", stop));
+    return out;
   }
   const dir = archiveDir(), name = `${repo}@${sha}.tar`, file = join(dir, name);
   if (existsSync(file)) {
