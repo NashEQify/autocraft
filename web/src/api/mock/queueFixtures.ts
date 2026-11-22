@@ -103,7 +103,7 @@ const BATCHES: QueueBatch[] = Array.from({ length: 45 }, (_, k) => {
   const opened = state !== "checking";
   return {
     id, repo, branch, fork: opened ? `pipeline-bot/${repo}` : null, state, baseSha: (id * 2654435761 >>> 0).toString(16).padStart(8, "0") + "b3d5a9f1c2e4078615a4d3b2c1f0e9d8",
-    size, prs, prNumber: opened ? 500 + id : null, prUrl: opened ? `https://github.com/storytold/${repo}/pull/${500 + id}` : null,
+    size, areas: [["Rendering"], ["Text layout"], [], ["Rendering", "File formats"]][id % 4]!, prs, prNumber: opened ? 500 + id : null, prUrl: opened ? `https://github.com/storytold/${repo}/pull/${500 + id}` : null,
     summary: state === "failed" ? "the regression test panics at png.rs:91: the decoded stride is 4096 where 8192 is expected" : state === "split" ? "upstream CI failed on the batch PR" : state === "superseded" ? "main moved: a new batch took over" : null,
     createdAt: created, updatedAt: new Date(NOW - k * 7 * 3_600_000 - 600_000).toISOString(),
   };
@@ -117,7 +117,7 @@ const OPEN_BATCH: QueueBatch = (() => {
   const created = new Date(NOW - 50 * 60_000).toISOString();
   return {
     id: 99, repo: "designcraft", branch: "integration-designcraft-20261103-4", fork: "pipeline-bot/designcraft", state: "open", baseSha: "7c1e9a04b3d5a9f1c2e4078615a4d3b2",
-    size: prs.length, prs, prNumber: 2202, prUrl: "https://github.com/storytold/designcraft/pull/2202", summary: null, createdAt: created, updatedAt: new Date(NOW - 12 * 60_000).toISOString(),
+    size: prs.length, areas: ["Rendering"], prs, prNumber: 2202, prUrl: "https://github.com/storytold/designcraft/pull/2202", summary: null, createdAt: created, updatedAt: new Date(NOW - 12 * 60_000).toISOString(),
   };
 })();
 const BATCH_MEMBERS = new Set(OPEN_BATCH.prs.map((r) => r.number));

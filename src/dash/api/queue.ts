@@ -108,9 +108,9 @@ export async function queueBatches(db: Db, req: Req): Promise<BatchList> {
 
 /** A batch row with its member PRs as queue rows. */
 /** `summary` can hold raw push, PR and gh errors, so only staff get it. */
-export function toBatch(b: BatchRow & { prs: unknown[] }, reader: Reader, prs: QueueRow[]): QueueBatch {
+export function toBatch(b: BatchRow & { prs: unknown[]; areas: string[] }, reader: Reader, prs: QueueRow[]): QueueBatch {
   return {
-    id: b.id, repo: b.repo, branch: b.branch, fork: b.fork, state: b.state as BatchState, baseSha: b.base_sha, size: b.prs.length, prs,
+    id: b.id, repo: b.repo, branch: b.branch, fork: b.fork, state: b.state as BatchState, baseSha: b.base_sha, size: b.prs.length, areas: b.areas, prs,
     prNumber: b.pr_number, prUrl: b.pr_url, summary: reader.staff ? b.summary : null, createdAt: b.created_at, updatedAt: b.updated_at,
   };
 }
