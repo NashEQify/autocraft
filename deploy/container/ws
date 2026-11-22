@@ -1,0 +1,266 @@
+#!/bin/sh
+# In-pod workspace helper: `ws <subcommand> <fixed args> -- <data>`. Every subcommand's
+# first stdout line is a header `WS <fields...>`; helper errors are `WS error <code> <msg>`
+# with exit 2 (usage), 3 (no such call) or 4 (conflict). A command's own exit code
+# goes in the header, never in the helper's exit status.
+
+ROOT=${WS_ROOT:-/work}
+CALLS=$ROOT/.ws/calls
+CAP=30720
+HEAD_BYTES=4096
+TAIL_BYTES=26624
+IN_LIMIT=1048576
+
+die() { # code exit message...
+  code=$1; st=$2; shift 2
+  printf 'WS error %s %s\n' "$code" "$*"
+  exit "$st"
+}
+
+now_ms() { date +%s%3N; }
+
+is_uint() { case $1 in '' | *[!0-9]*) return 1 ;; esac; }
+is_pos() { is_uint "$1" && case $1 in 0*) return 1 ;; esac; }
+
+# Prints the status header for call $1.
+status_header() {
+  _n=$1
+  _log=$CALLS/$_n.log
+  _total=0
+  [ -f "$_log" ] && _total=$(wc -c <"$_log" | tr -d ' ')
+  _start=$(cat "$CALLS/$_n.start" 2>/dev/null || now_ms)
+  if [ -f "$CALLS/$_n.exit" ]; then
+    _code=$(cat "$CALLS/$_n.exit")
+    _end=$(cat "$CALLS/$_n.end" 2>/dev/null || now_ms)
+    if [ -e "$CALLS/$_n.killed" ]; then _state=killed
+    # 124 and 137 also come from the command itself (its own exit, an OOM kill), so
+    # only a run that lasted its whole limit counts as timed out.
+    elif { [ "$_code" = 124 ] || [ "$_code" = 137 ]; } &&
+      [ $((_end - _start)) -ge $(($(cat "$CALLS/$_n.limit" 2>/dev/null || echo 0) * 1000)) ]; then _state=timed-out
+    else _state=exited; fi
+  else
+    _code=-
+    _end=$(now_ms)
+    _state=running
+  fi
+  printf 'WS %s %s %s %s\n' "$_state" "$_code" "$((_end - _start))" "$_total"
+}
+
+# Prints the log of call $1 from byte offset $2, capped.
+emit_log() {
+  _log=$CALLS/$1.log
+  [ -f "$_log" ] || return 0
+  _total=$(wc -c <"$_log" | tr -d ' ')
+  _since=$2
+  [ "$_since" -gt "$_total" ] && _since=$_total
+  _sel=$((_total - _since))
+  if [ "$_sel" -gt "$CAP" ]; then
+    tail -c +$((_since + 1)) "$_log" | head -c "$HEAD_BYTES"
+    printf '\n[ws: %s bytes cut; full log %s]\n' "$((_sel - HEAD_BYTES - TAIL_BYTES))" "$_log"
+    tail -c "$TAIL_BYTES" "$_log"
+  else
+    tail -c +$((_since + 1)) "$_log"
+  fi
+}
+
+# Waits up to $2 seconds for call $1 to end.
+wait_exit() {
+  _deadline=$(($(now_ms) + $2 * 1000))
+  while [ ! -f "$CALLS/$1.exit" ] && [ "$(now_ms)" -lt "$_deadline" ]; do sleep 0.05; done
+}
+
+cmd_init() {
+  mkdir -p "$ROOT/.ws/calls" "$ROOT/.ws/locks" "$ROOT/src" "$ROOT/home" || die io 2 "cannot create $ROOT"
+  printf 'WS ok init\n'
+  xpid=
+  if command -v Xvfb >/dev/null 2>&1; then
+    Xvfb :0 -screen 0 2880x1800x24 -dpi 96 -nolisten tcp -noreset >"$ROOT/.ws/xvfb.log" 2>&1 &
+    xpid=$!
+    echo "$xpid" >"$ROOT/.ws/xvfb.pid"
+  else
+    echo "ws: Xvfb not installed, skipping display"
+  fi
+  trap '[ -n "$xpid" ] && kill "$xpid" 2>/dev/null; exit 0' TERM INT
+  while :; do
+    sleep 1 &
+    wait $!
+  done
+}
+
+cmd_run() {
+  [ $# -ge 2 ] || die usage 2 "run <n> <timeout_sec> [--cwd <dir>] [--background] -- <argv...>"
+  n=$1; t=$2; shift 2
+  is_pos "$n" || die usage 2 "call number must be a positive integer"
+  is_pos "$t" || die usage 2 "timeout must be a positive integer"
+  cwd=$ROOT/src
+  bg=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --cwd) [ $# -ge 2 ] || die usage 2 "--cwd needs a value"; cwd=$2; shift 2 ;;
+      --background) bg=1; shift ;;
+      --) shift; break ;;
+      *) die usage 2 "unknown argument $1" ;;
+    esac
+  done
+  [ $# -gt 0 ] || die usage 2 "missing command after --"
+  mkdir -p "$CALLS" || die io 2 "cannot create $CALLS"
+  for f in "$CALLS/$n".*; do
+    [ -e "$f" ] && die conflict 4 "call $n already used"
+  done
+  start=$(now_ms)
+  (set -C; echo "$start" >"$CALLS/$n.start") 2>/dev/null || die conflict 4 "call $n already used"
+  echo "$t" >"$CALLS/$n.limit"
+  head -c $((IN_LIMIT + 1)) >"$CALLS/$n.in"
+  if [ "$(wc -c <"$CALLS/$n.in" | tr -d ' ')" -gt "$IN_LIMIT" ]; then
+    rm -f "$CALLS/$n.in" "$CALLS/$n.start"
+    die usage 2 "stdin larger than $IN_LIMIT bytes"
+  fi
+  : >"$CALLS/$n.log"
+  # shellcheck disable=SC2016
+  setsid sh -c '
+    c=$1; n=$2; t=$3; d=$4; HOME=$5; shift 5
+    export HOME; DISPLAY=:0; export DISPLAY
+    if cd "$d" 2>/dev/null; then
+      timeout -k 5 "$t" "$@" <"$c/$n.in" >"$c/$n.log" 2>&1 &
+      tp=$!
+      echo "$tp" >"$c/$n.pid"
+      wait "$tp"; rc=$?
+    else
+      echo "ws: no such directory: $d" >"$c/$n.log"; rc=127
+    fi
+    date +%s%3N >"$c/$n.end"
+    echo "$rc" >"$c/$n.exit.tmp"
+    mv "$c/$n.exit.tmp" "$c/$n.exit"
+  ' ws-wrap "$CALLS" "$n" "$t" "$cwd" "$ROOT/home" "$@" </dev/null >/dev/null 2>&1 &
+  if [ "$bg" = 1 ]; then
+    printf 'WS started %s\n' "$n"
+    return 0
+  fi
+  while [ ! -f "$CALLS/$n.exit" ]; do sleep 0.05; done
+  status_header "$n"
+  emit_log "$n" 0
+}
+
+need_call() {
+  is_pos "$1" || die usage 2 "call number must be a positive integer"
+  [ -f "$CALLS/$1.start" ] || die nocall 3 "no such call $1"
+}
+
+cmd_status() {
+  [ $# -ge 1 ] || die usage 2 "status <n> [--wait <sec>] [--since <bytes>]"
+  n=$1; shift
+  need_call "$n"
+  wait=0; since=0
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --wait) [ $# -ge 2 ] || die usage 2 "--wait needs a value"; wait=$2; shift 2 ;;
+      --since) [ $# -ge 2 ] || die usage 2 "--since needs a value"; since=$2; shift 2 ;;
+      *) die usage 2 "unknown argument $1" ;;
+    esac
+  done
+  is_uint "$wait" && [ "$wait" -le 300 ] || die usage 2 "--wait must be 0-300"
+  is_uint "$since" || die usage 2 "--since must be a byte offset"
+  wait_exit "$n" "$wait"
+  status_header "$n"
+  emit_log "$n" "$since"
+}
+
+cmd_kill() {
+  [ $# -eq 1 ] || die usage 2 "kill <n>"
+  n=$1
+  need_call "$n"
+  if [ ! -f "$CALLS/$n.exit" ]; then
+    : >"$CALLS/$n.killed"
+    wait_pid=0
+    while [ ! -f "$CALLS/$n.pid" ] && [ ! -f "$CALLS/$n.exit" ] && [ "$wait_pid" -lt 40 ]; do
+      sleep 0.05; wait_pid=$((wait_pid + 1))
+    done
+    pid=$(cat "$CALLS/$n.pid" 2>/dev/null)
+    if [ -n "$pid" ] && [ ! -f "$CALLS/$n.exit" ]; then
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null
+      wait_exit "$n" 5
+      if [ ! -f "$CALLS/$n.exit" ]; then
+        kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
+        wait_exit "$n" 5
+      fi
+    fi
+  fi
+  status_header "$n"
+}
+
+cmd_put() {
+  [ $# -ge 1 ] || die usage 2 "put <path> [--expect <sha256>|none]"
+  p=$1; shift
+  expect=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --expect) [ $# -ge 2 ] || die usage 2 "--expect needs a value"; expect=$2; shift 2 ;;
+      *) die usage 2 "unknown argument $1" ;;
+    esac
+  done
+  case $p in
+    /*) ;;
+    *) die usage 2 "path must be absolute" ;;
+  esac
+  case $p in
+    */.. | */../* | */. | */./* | *//*) die usage 2 "path must not contain . or .. components" ;;
+  esac
+  case $p in
+    "$ROOT"/*) ;;
+    *) die usage 2 "path must be under $ROOT" ;;
+  esac
+  mkdir -p "$ROOT/.ws/locks" || die io 2 "cannot create lock dir"
+  key=$(printf '%s' "$p" | sha256sum | cut -d' ' -f1)
+  (
+    flock 9
+    if [ -e "$p" ]; then
+      cur=$(sha256sum <"$p" | cut -d' ' -f1)
+    else
+      cur=none
+    fi
+    if [ -n "$expect" ] && [ "$expect" != "$cur" ]; then
+      die conflict 4 "$cur"
+    fi
+    dir=$(dirname "$p")
+    mkdir -p "$dir" || die io 2 "cannot create $dir"
+    tmp=$(mktemp "$dir/.ws-put.XXXXXX") || die io 2 "cannot write in $dir"
+    cat >"$tmp"
+    chmod 0644 "$tmp"
+    bytes=$(wc -c <"$tmp" | tr -d ' ')
+    sha=$(sha256sum <"$tmp" | cut -d' ' -f1)
+    mv -f "$tmp" "$p" || { rm -f "$tmp"; die io 2 "cannot replace $p"; }
+    printf 'WS ok %s %s\n' "$bytes" "$sha"
+  ) 9>"$ROOT/.ws/locks/$key"
+}
+
+cmd_untar() {
+  [ $# -eq 0 ] || die usage 2 "untar takes no arguments"
+  mkdir -p "$ROOT/src" "$ROOT/home" || die io 2 "cannot create $ROOT/src"
+  if [ -n "$(ls -A "$ROOT/src" 2>/dev/null)" ]; then
+    die conflict 4 "$ROOT/src is not empty"
+  fi
+  tar -x -f - -C "$ROOT/src" --no-same-owner --no-same-permissions >&2 || die tar 2 "tar extraction failed"
+  cd "$ROOT/src" || die io 2 "cannot enter $ROOT/src"
+  HOME=$ROOT/home
+  export HOME
+  GIT_AUTHOR_NAME=workspace GIT_AUTHOR_EMAIL=workspace@localhost
+  GIT_COMMITTER_NAME=workspace GIT_COMMITTER_EMAIL=workspace@localhost
+  export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+  git init -q >&2 || die git 2 "git init failed"
+  git add -A >&2 || die git 2 "git add failed"
+  git -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=workspace -c user.email=workspace@localhost \
+    commit -q --allow-empty -m base >&2 || die git 2 "git commit failed"
+  printf 'WS ok %s\n' "$(git rev-parse HEAD)"
+}
+
+[ $# -ge 1 ] || die usage 2 "ws <init|run|status|kill|put|untar>"
+sub=$1; shift
+case $sub in
+  init) cmd_init "$@" ;;
+  run) cmd_run "$@" ;;
+  status) cmd_status "$@" ;;
+  kill) cmd_kill "$@" ;;
+  put) cmd_put "$@" ;;
+  untar) cmd_untar "$@" ;;
+  *) die usage 2 "unknown subcommand $sub" ;;
+esac
