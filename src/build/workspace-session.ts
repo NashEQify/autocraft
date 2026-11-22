@@ -12,7 +12,8 @@ import type { JobState } from "../../web/src/api/types.ts";
 import { trackedNames } from "../repos.ts";
 import type { Params, StepContext } from "../runner/steps.ts";
 import { BuildError } from "./envs.ts";
-import { inClusterApi } from "./kube-api.ts";
+import { assertFence } from "../db/fence.ts";
+import { guardedApi, inClusterApi } from "./kube-api.ts";
 import { queueWorkspaceCall } from "./workspace-call.ts";
 import { READY_LIMIT_MS, SEED_LIMIT_MS } from "./workspace-launch.ts";
 import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
@@ -233,11 +234,12 @@ const DIFF_SCRIPT = `git -C /work/src diff --stat "$1" && git -C /work/src ls-fi
 
 /** Logs the session's change against the base commit (tracked and new files) and returns the stat's last line, or null. */
 async function logDiffStat(ctx: StepContext, wsId: number): Promise<string | null> {
-  const api = inClusterApi();
-  if (!api) {
+  const cluster = inClusterApi();
+  if (!cluster) {
     ctx.log("diff stat: this runner is not in the cluster, so it cannot reach the workspace");
     return null;
   }
+  const api = guardedApi(cluster, () => assertFence(ctx.db));
   const w = await getWorkspace(ctx.db, wsId);
   if (!w || w.state !== "ready") {
     ctx.log(`diff stat: workspace ${wsId} is ${w?.state ?? "gone"}`);

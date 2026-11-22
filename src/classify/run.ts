@@ -15,6 +15,7 @@ import { clockLine, saveTools, type ToolClock } from "../agents/tools.ts";
 import { fixTurnMessage, mergeFixFields, needsFixTurn, type Lint, type LintProblem } from "../replylint.ts";
 import { coalesce, lineFeed } from "./progress.ts";
 import { scrubError } from "../agents/text.ts";
+import { registerGroup, unregisterGroup } from "../runner/groups.ts";
 import { hasFixedCredential, scrub } from "../runner/scrub.ts";
 import { itemTools } from "../itemtools/index.ts";
 import { startBridge, CHECK_SERVER, type Bridge } from "../checktool/bridge.ts";
@@ -85,6 +86,7 @@ export function exec(cmd: string, args: string[], input: string, cwd?: string, t
   return new Promise((resolve) => {
     // With a watchdog the child leads its own process group, so the stop reaches everything it started.
     const p = spawn(cmd, args, { cwd, stdio: ["pipe", "pipe", "pipe"], timeout: timeoutMs, windowsHide: true, ...(watch && { detached: true }), ...(env && { env: exactEnv ? env : { ...process.env, ...env } }) });
+    if (watch) registerGroup(p.pid);
     let stdout = "", stderr = "";
     let partial = "";
     let last = Date.now(), idle = false, ended = false;
@@ -97,7 +99,7 @@ export function exec(cmd: string, args: string[], input: string, cwd?: string, t
       setTimeout(() => { if (!ended) signal("SIGKILL"); }, IDLE_KILL_GRACE_MS).unref();
     }, Math.max(10, Math.min(30_000, Math.floor(watch.idleMs / 4))));
     timer?.unref();
-    const done = (r: Proc) => { ended = true; if (timer) clearInterval(timer); resolve(idle ? { ...r, idle: true } : r); };
+    const done = (r: Proc) => { ended = true; if (timer) clearInterval(timer); if (watch) unregisterGroup(p.pid); resolve(idle ? { ...r, idle: true } : r); };
     p.stdout.on("data", (d) => {
       last = Date.now();
       stdout += d;
