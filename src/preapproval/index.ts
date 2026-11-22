@@ -4,7 +4,8 @@
 //   fixup   -> the fix-up step works the operator's instructions (source 'operator' in its fixups rows)
 //   review  -> the fix-up pushed; waiting for the Opus review of the pushed head. A row with no fix-up (a Merge answer carried across a
 //              base merge, or "Queue items") starts here at its head.
-//   ci      -> that review says take (and is sure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it
+//   ci      -> that review says take (sure or unsure, not stale); waiting for CI of the pushed head, then for a clean pre-merge review of it.
+//              A take-fix review keeps the row in review while the pipeline's fix-up of its fixes runs; that push is reviewed again.
 //   queued  -> CI is green and the pre-merge review is clean: the PR's Merge? decision at the head is answered Merge by the operator,
 //              exactly as a dashboard answer would be, in the same transaction that moves the row from ci to queued; the merge queue
 //              then merges it with every check it always makes (safe-merge included)
@@ -25,7 +26,7 @@ import { longLivedOf, pushable } from "../fixup/pushable.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
 import { mergeApprovalOf } from "../merge/approval.ts";
 import { repoHasNoCi } from "../merge/no-ci.ts";
-import { setAsideSupersededQuestions, withdrawOtherHeadQuestions } from "../merge/withdraw.ts";
+import { setAsideSupersededQuestions, withdrawMergeQuestion, withdrawOtherHeadQuestions } from "../merge/withdraw.ts";
 import { findingsOf, premergeAt } from "../premerge/store.ts";
 import { releaseMerge, removeFromBatch } from "../merge/controls.ts";
 import type { Exec } from "../fixup/git.ts";
@@ -214,8 +215,10 @@ export const HEAD_CHANGED = "the PR changed after your comment; comment again";
 
 /**
  * "Queue items" (a PR line): an operator's Merge answer given ahead, with no fix-up. A row starts in `review` at the current head,
- * the way a carried answer does, so the PR merges only after a sure take review, a clean pre-merge review and green CI there;
- * a take-fix review, a defect or a red head asks the Merge? question instead. Throws when it cannot start.
+ * the way a carried answer does, so the PR merges only after a take review, a clean pre-merge review and green CI there. The approval
+ * says the change is wanted, so an unsure review does not stop it, and a take-fix review's fixes are made by the pipeline's fix-up,
+ * whose push is reviewed again; a pre-merge defect, a red head the CI fix cannot repair or a fix-up that cannot run asks the
+ * Merge? question instead. Throws when it cannot start.
  *
  * The PR's label does not matter (the pre-approval lifts the label gate); a draft, the backlog, a duplicate hold or a scope question still refuse it.
  * `head`, when given, is the only head it may pre-approve: the head the person saw (a command's comment-time head).
@@ -250,11 +253,11 @@ export async function preapproveMerge(db: Db, o: { repo: string; number: number;
 // ---- the state machine ---------------------------------------------------------------------------------------------------
 
 /**
- * What the thread calls the row's head: the fix-up's push; for a row without a fix-up, the base merge it carried to or, for one added to
- * the merge queue and not merged since, the PR's own head.
+ * What the thread calls the row's head: the fix-up's push; for a row without a fix-up, the pipeline's push it went on with (a base merge,
+ * an autorepin or the fix-up of a review's fixes) or, for one added to the merge queue and not pushed to since, the PR's own head.
  */
 function headName(p: Row): string {
-  return p.fix_id !== null ? "the pushed head" : p.head !== p.from_head ? "the merged head" : "the PR's head";
+  return p.fix_id !== null ? "the pushed head" : p.head !== p.from_head ? "the new head" : "the PR's head";
 }
 
 /** The fact line naming the review a stop or hand-over rests on. */
@@ -321,26 +324,41 @@ async function handOver(db: Db, p: Row, head: string, held: ReadonlySet<string>)
   return { done: true };
 }
 
-type ReviewRead = { kind: "none" | "stale" | "take" | "takefix" | "bad"; why: string };
+type ReviewRead = { kind: "none" | "stale" | "take" | "takefix" | "bad"; why: string; unsure: boolean };
 
-/** The Opus review at `head`: a sure take that is not stale is the only one a pre-approved merge goes on with. */
+/**
+ * The Opus review at `head`. A take or take-fix that is not stale goes on, sure or unsure: the merge approval says the change is wanted,
+ * so a take-fix is the pipeline's own fix-up to make and the pre-approval goes on with its push. Any other verdict stops it.
+ */
 async function reviewAt(db: Db, p: Row, head: string): Promise<ReviewRead> {
   const r = await db.get(db.k.selectFrom("opus_reviews").select(["verdict", "sure", "reason"]).$narrowType<{ verdict: NotNull }>()
     .where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head).where("verdict", "is not", null));
-  if (!r) return { kind: "none", why: "" };
-  if ((await staleReviews(db, p.repo)).has(`${p.repo}#${p.number}@${head}`)) return { kind: "stale", why: "" };
-  if (r.verdict === "take" && r.sure === 1) return { kind: "take", why: "" };
-  // A sure take-fix is the pipeline's own fix-up to make; the pre-approval goes on with its push.
-  if (r.verdict === "take-fix" && r.sure === 1) return { kind: "takefix", why: r.reason ? oneLine(r.reason, 160) : "" };
-  return { kind: "bad", why: `the review says ${r.verdict}${r.sure === 1 ? "" : " (unsure)"}${r.reason ? `: ${oneLine(r.reason, 160)}` : ""}` };
+  if (!r) return { kind: "none", why: "", unsure: false };
+  if ((await staleReviews(db, p.repo)).has(`${p.repo}#${p.number}@${head}`)) return { kind: "stale", why: "", unsure: false };
+  const unsure = r.sure !== 1;
+  if (r.verdict === "take") return { kind: "take", why: "", unsure };
+  if (r.verdict === "take-fix") return { kind: "takefix", why: r.reason ? oneLine(r.reason, 160) : "", unsure };
+  return { kind: "bad", why: `the review says ${r.verdict}${unsure ? " (unsure)" : ""}${r.reason ? `: ${oneLine(r.reason, 160)}` : ""}`, unsure };
+}
+
+/** Why an unsure review or a take-fix does not stop the row, for its thread line. */
+const approvedAhead = (p: Row) => (p.fix_id !== null ? "the merge was approved with a fix-up" : "the PR was queued to merge");
+
+/** Says `line` in the thread once per row, head and note (the audit entry is the memory): for a wait that moves the row nowhere. */
+async function noteOnce(db: Db, p: Row, head: string, note: string, line: string): Promise<void> {
+  const ref = `${p.repo}#${p.number}`;
+  if (await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "preapproval").where("target", "=", ref)
+    .where(kx.jsonNum(db, "details", "$.id"), "=", p.id).where(kx.jsonText(db, "details", "$.note"), "=", note).where(kx.jsonText(db, "details", "$.head"), "=", head).limit(1))) return;
+  await audit(db, ACTOR, "preapproval", ref, { id: p.id, head, note });
+  await say(db, p.repo, p.number, line);
 }
 
 /**
- * "base merge", "autorepin" or "fix-up for the review's fixes" when the pipeline itself pushed `cur` on top of the row's head without adding code a person did not see, else null.
- * The review's fix-up counts only for a row that began with the operator's own fix-up: a plain Merge answer carried across a base merge never covered model-written code.
+ * "base merge", "autorepin" or "fix-up for the review's fixes" when the pipeline itself pushed `cur` on top of the row's head, else null.
+ * The review's fix-up counts for every row: the merge approval says the change is wanted, and the fix-up's push gets a fresh review.
  */
 async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
-  if (p.fix_id !== null && await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur)
+  if (await db.get(db.k.selectFrom("fixups").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur)
     .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", "review")).where("state", "in", ["pushing", "pushed"]))) return "fix-up for the review's fixes";
   // Only a base merge that left the PR's own diff unchanged continues an answer; a CI fix or a resolved conflict is model-written code nobody saw.
   if (await db.get(db.k.selectFrom("conflict_merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur).where("state", "=", "merged").where("own_diff", "=", "same"))) return "base merge";
@@ -436,15 +454,19 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
       if (hold?.kind === "failed" && hold.until === undefined) return await stop("asked", `the review of ${headName(p)} waits on ${hold.wait}`, head);
       return;
     }
-    if (r.kind === "take") return void await move(db, p, "ci", { line: `The review of ${p.fix_id !== null ? "the fix-up" : headName(p)} says take; waiting for CI.` });
-    // A Merge answer carried across a base merge covers no fix-up: a person decides on the fixes.
-    if (r.kind === "takefix" && p.fix_id === null) return await stop("asked", `the review of ${headName(p)} asks for fixes`, head, [reviewFact(p, `take-fix${r.why ? `: ${r.why}` : ""}`)]);
+    const name = p.fix_id !== null ? "the fix-up" : headName(p);
+    if (r.kind === "take") {
+      return void await move(db, p, "ci", { line: r.unsure ? `The review of ${name} says take but is unsure; ${approvedAhead(p)}, so it goes on: waiting for CI.` : `The review of ${name} says take; waiting for CI.` });
+    }
     if (r.kind === "takefix") {
-      // The planner's fix-up of the review's fixes runs next. Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
+      // The planner's fix-up of the review's fixes runs next, sure or unsure (fixupOf). Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
       const f = cur === head ? await loadPrFact(db, p.repo, p.number) : null;
       const fx = f ? fixupOf(f) : null;
-      if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) return;
-      return await stop("asked", `the review of the fix-up says take-fix and its fix-up cannot run${fx ? ` (${fx.bucket})` : ""}`, head, [`review of the fix-up: take-fix${r.why ? `: ${r.why}` : ""}`, "Recommended: Fix up first, then merge"]);
+      if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) {
+        return await noteOnce(db, p, head, "review-fixup", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the fix-up runs.`);
+      }
+      return await stop("asked", `the review of ${name} asks for fixes and its fix-up cannot run${fx ? ` (${fx.bucket})` : ""}`, head,
+        [reviewFact(p, `take-fix${r.unsure ? " (unsure)" : ""}${r.why ? `: ${r.why}` : ""}`), "Recommended: Fix up first, then merge"]);
     }
     return await stop("asked", r.why, head, [reviewFact(p, r.why)]);
   }
@@ -452,11 +474,10 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>): Promise<void>
   if (!await mergeApprovalOf(db, p.repo)) return p.state === "queued" ? cancel("merging is no longer approved for the repo") : await stop("asked", "merging is no longer approved for the repo", head);
 
   if (p.state === "ci") {
-    // A re-review since the move to ci counts: the hand-over needs a sure take at this head now.
+    // A re-review since the move to ci counts: the hand-over needs a take at this head now.
     const r = await reviewAt(db, p, head);
     if (r.kind === "none" || r.kind === "stale") return void await move(db, p, "review", { line: `The review of ${headName(p)} is out of date; Opus reviews it again.` });
-    if (r.kind === "takefix" && p.fix_id === null) return await stop("asked", `the review of ${headName(p)} asks for fixes`, head, [reviewFact(p, `take-fix${r.why ? `: ${r.why}` : ""}`)]);
-    if (r.kind === "takefix") return void await move(db, p, "review", { line: "The review of the pushed head now asks for fixes; the pipeline's fix-up comes first." });
+    if (r.kind === "takefix") return void await move(db, p, "review", { line: `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.` });
     if (r.kind === "bad") return await stop("asked", r.why, head, [reviewFact(p, r.why)]);
     const c = await db.get(db.k.selectFrom("pr_checks").select(["overall", "mergeable"]).where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head));
     if (!c || c.overall === "pending") return;
@@ -555,6 +576,37 @@ async function carryAnswers(db: Db, held: ReadonlySet<string>): Promise<void> {
   }
 }
 
+/** The reasons of rows that stopped only on their review under the earlier rule: an unsure take or take-fix, or a take-fix of a row without a fix-up. */
+const REVIEW_ONLY_STOP = /^the review says take(-fix)? \(unsure\)|^the review of (the PR's head|the merged head) asks for fixes$/;
+
+/**
+ * A row that stopped in asked only because of a review the rule now goes on with, at the head that is still the PR's, goes back to review
+ * while its Merge? question there is still open, and that question is withdrawn: the next evaluation takes it on from the review.
+ */
+async function resumeReviewStops(db: Db, held: ReadonlySet<string>): Promise<void> {
+  const rows = await db.all(preapprovalRows(db).$narrowType<{ head: NotNull; reason: NotNull }>().where("state", "=", "asked").where("head", "is not", null).where("reason", "is not", null)
+    .where((eb) => eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name"))).orderBy("id"));
+  for (const p of rows) {
+    if (!REVIEW_ONLY_STOP.test(p.reason)) continue;
+    // A later row of the PR took over from this one.
+    if (await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("id", ">", p.id))) continue;
+    const it = await prRow(db, p.repo, p.number);
+    if (!it || it.state !== "OPEN" || it.head_oid !== p.head) continue;
+    const r = await reviewAt(db, p, p.head);
+    if (r.kind !== "take" && r.kind !== "takefix") continue;
+    const d = await getDecision(db, mergeDecisionId(p.repo, p.number, p.head));
+    if (!d || d.answer !== null) continue;
+    if (!await isOperator(db, p.by, p.repo, held) || !await mergeApprovalOf(db, p.repo)) continue;
+    const at = iso();
+    const moved = await db.write(async () => {
+      if (!await moveRaw(db, p, "review", { reason: null })) return false;
+      await withdrawMergeQuestion(db, p.repo, p.number, p.head, at, `${approvedAhead(p)}, so the pre-approved merge goes on`);
+      return true;
+    });
+    if (moved) await say(db, p.repo, p.number, `The review of ${p.fix_id !== null ? "the fix-up" : headName(p)} ${r.kind === "take" ? "is unsure" : r.unsure ? "is unsure and asks for fixes" : "asks for fixes"}; ${approvedAhead(p)}, so the pre-approved merge goes on and its Merge? question is withdrawn.`);
+  }
+}
+
 /**
  * Runs on every runner tick: moves each pre-approved merge that other steps' rows have carried to a new state. Writes nothing when nothing moved,
  * except the maintainers' write permissions it reads again first (refreshSettlers).
@@ -573,6 +625,7 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
     await endStaleRequests(db, held);
     await settleCancelled(db);
     await carryAnswers(db, held);
+    await resumeReviewStops(db, held);
   } catch (e) {
     log(`preapproval requests: ${(e as Error).message}`);
   }

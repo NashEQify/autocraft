@@ -98,24 +98,29 @@ describe("pre-approved merge", () => {
     assert.ok(!(await kindsOf(w, 8)).some((k) => k.startsWith("merge") || k.startsWith("ask-merge")), (await kindsOf(w, 8)).join());
   });
 
-  test("an unsure or non-take review of the push asks a Merge question", async () => {
+  test("an unsure take of the push goes on to CI; a hold review of it asks a Merge question", async () => {
     const w = await (await (await fresh()).pr(4)).review(4, { verdict: "take-fix" });
     await start(w, 4);
     await pushed(w, 4, "sha4b");
     await (await w.synced(4, "sha4b")).review(4, { head: "sha4b", sure: false });
     await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 4))?.state, "ci");
+    await w.db.run(w.db.k.updateTable("opus_reviews").set({ verdict: "hold" }).where("number", "=", 4).where("head_oid", "=", "sha4b"));
+    await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 4))?.state, "asked");
     assert.deepEqual(await answerOf(w, 4, "sha4b"), [{ answer: null }]);
   });
 
-  test("a re-review that turns unsure during ci hands nothing over", async () => {
+  test("a re-review that turns unsure during ci still hands over, after the review", async () => {
     const w = await (await (await fresh()).pr(5)).review(5, { verdict: "take-fix" });
     await inCi(w, 5);
     await w.premerge(5, "clean");
     await w.db.run(w.db.k.updateTable("opus_reviews").set({ sure: 0 }).where("number", "=", 5).where("head_oid", "=", "sha5b"));
     await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "asked");
-    assert.deepEqual(await answerOf(w, 5, "sha5b"), [{ answer: null }]);
+    assert.equal((await preapprovalOf(w.db, "app", 5))?.state, "queued");
+    // The merge queue keeps a Merge answer at an unsure head only when it came after the review.
+    const f = (await w.plan()).prs.find((x) => x.facts.number === 5)!.facts;
+    assert.ok(f.decision.mergeAnswerAfterReview && f.review!.unsure);
   });
 
   test("the pre-merge review gates the hand-over: no review waits, a defect asks", async () => {
@@ -288,16 +293,19 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     assert.deepEqual((await answerOf(w, 11, "sha11")).map((r) => r.answer), ["merge"]);
   });
 
-  test("a take-fix review asks the Merge question instead: the add covers no model-written fixes", async () => {
+  test("an unsure take-fix review of a queued PR goes to the pipeline's fix-up, whose push is reviewed again", async () => {
     const w = await (await fresh()).pr(12);
     await preapproveMerge(w.db, { repo: "app", number: 12, by: OPERATOR });
-    await w.review(12, { head: "sha12", verdict: "take-fix" });
+    await w.review(12, { head: "sha12", verdict: "take-fix", sure: false });
     await settle(w);
-    assert.equal((await preapprovalOf(w.db, "app", 12))?.state, "asked");
-    // The question talks about the PR's head, not a fix-up it never had.
-    const q = (await w.db.get(w.db.k.selectFrom("decisions").select(["context", "facts"]).where("id", "=", mergeDecisionId("app", 12, "sha12"))))!;
-    assert.doesNotMatch(`${q.context} ${q.facts}`, /fix-up/);
-    assert.match(q.facts!, /review of the PR's head: take-fix/);
+    assert.equal((await preapprovalOf(w.db, "app", 12))?.state, "review");
+    assert.ok((await kindsOf(w, 12)).includes("fixup:review"), (await kindsOf(w, 12)).join());
+    assert.deepEqual(await answerOf(w, 12, "sha12"), []);
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 12, from_head: "sha12", to_head: "sha12b", state: "pushed", attempt: 1, created_at: T0, source: "review" }));
+    await w.synced(12, "sha12b");
+    await settle(w);
+    const p = (await preapprovalOf(w.db, "app", 12))!;
+    assert.deepEqual([p.state, p.head], ["review", "sha12b"]);
   });
 
   test("the add asks for no review of its own: running CI still holds the review of the PR's head", async () => {
