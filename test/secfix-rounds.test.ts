@@ -78,11 +78,11 @@ const plan = JSON.stringify([{ name: "test", cmd: ["cargo", "test"], network: "n
 /** Ends a round's tasks as the worker would: the head task with `head` as the exit code of its step, the base task with `base`. */
 async function end(n: number, head: number, base: number): Promise<void> {
   const r = (await rounds(n)).at(-1)!;
-  await db.prepare("UPDATE build_tasks SET state = ?, plan = ?, results = ? WHERE id = ?").run(head === 0 ? "done" : "failed", plan, result(head), r.head_task);
-  await db.prepare("UPDATE build_tasks SET state = 'failed', plan = ?, results = ? WHERE id = ?").run(plan, result(base), r.base_task);
-  await db.prepare("INSERT INTO build_task_logs (task_id, seq, step, chunk) VALUES (?, 1, 'test', 'assertion failed: left == right')").run(r.head_task);
+  await db.run(db.k.updateTable("build_tasks").set({ state: head === 0 ? "done" : "failed", plan, results: result(head) }).where("id", "=", r.head_task!));
+  await db.run(db.k.updateTable("build_tasks").set({ state: "failed", plan, results: result(base) }).where("id", "=", r.base_task!));
+  await db.run(db.k.insertInto("build_task_logs").values({ task_id: r.head_task!, seq: 1, step: "test", chunk: "assertion failed: left == right" }));
 }
-const tasks = async (): Promise<number> => (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks").get() as { n: number }).n;
+const tasks = async (): Promise<number> => (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
 const fixJobs = async (n: number): Promise<number> => (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("c")).where("step", "=", "security-fix").where((eb) => eb(jsonNum(db, "params", "$.number"), "=", n))))!.c;
 
 describe("security fix rounds", () => {
@@ -170,7 +170,7 @@ describe("security fix rounds", () => {
     const job = await db.get(db.k.selectFrom("jobs").select("requested_by").where("step", "=", "security-fix").where((eb) => eb(jsonNum(db, "params", "$.number"), "=", n)));
     assert.equal(job!.requested_by, "boss");
     const r = (await rounds(n))[0]!;
-    assert.equal((await db.prepare("SELECT state FROM build_tasks WHERE id = ?").get(r.head_task) as { state: string }).state, "cancelled");
+    assert.equal((await db.get(db.k.selectFrom("build_tasks").select("state").where("id", "=", r.head_task!)))!.state, "cancelled");
     assert.equal(await fixJobs(m), 0);
     assert.equal(await advanceSecurityFixes(db, true), 1);
   });
