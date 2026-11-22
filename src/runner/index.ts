@@ -1,4 +1,5 @@
 // autocraft-server runner serve | exec | enqueue | jobs | cancel | steps; autocraft-server pipeline on | off | status | limit
+import { readSecrets } from "../dash/server/config.ts";
 import { writeSetting } from "../settings-read.ts";
 import { resumeStage, TripError } from "../push-outcomes.ts";
 import { startWorkerServer } from "../build/worker-api.ts";
@@ -59,7 +60,10 @@ async function serve(): Promise<void> {
   process.once("SIGINT", () => ac.abort());
   console.log(`runner: started on ${(await loadSteps()).size} steps`);
   // A failure to listen (port in use) must not stop the pipeline; workers just cannot connect.
-  const workers = await startWorkerServer({ db, log: (l) => console.log(l) }).then(
+  // The session key signs the dashboard's requests for the runner's files (build artifacts, Claude accounts).
+  let internalKey: string | null = null;
+  try { internalKey = readSecrets(envVar("SECRETS_FILE")).sessionKey; } catch (e) { console.error(`runner: dashboard requests are refused: ${(e as Error).message}`); }
+  const workers = await startWorkerServer({ db, internalKey, log: (l) => console.log(l) }).then(
     (w) => (console.log(`runner: worker API on ${w.url}`), w),
     (e: Error) => (console.error(`runner: worker API not started: ${e.message}`), null),
   );

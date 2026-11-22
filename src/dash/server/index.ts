@@ -51,7 +51,8 @@ import { ENCODINGS, ROUTES, toolContent, type ClaimReply, type LoginPollReply, t
 import { userReserve } from "../../remote/reserve.ts";
 import { startLiveness } from "../../remote/liveness.ts";
 import { WORKSPACE_SERVER } from "../../build/workspace-tools.ts";
-import { archiveOf, callTaskTool, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
+import { archiveOf, callTaskTool, runnerUrl, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
+import { useRunnerClient } from "../../remote/runner-client.ts";
 import { handleDelivery, WEBHOOK_BODY_LIMIT, WEBHOOK_PATH } from "../../github/webhooks.ts";
 import { esc, HttpError, parseCookies, plainPage, previewTags, RateLimiter, safeReturnTo, share, shareRate } from "./util.ts";
 import { exclusive } from "../../async-seq.ts";
@@ -240,6 +241,9 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
   const dbAppKeys = await new AppKeys(db, box, config.secretsFile).load();
   bindSecrets(config.secrets, dbAppKeys);
   useAppKeys(dbAppKeys);
+  // Without the runner's disk, build artifacts and the Claude accounts are asked of the runner (src/remote/runner-client.ts).
+  const runnerBase = runnerUrl();
+  useRunnerClient(runnerBase ? { url: runnerBase, sessionKey: config.secrets.sessionKey } : null);
   // The GitHub App's own provider: it signs users in under login=github-app, and always makes and refreshes their user tokens (the "act as you" authorization).
   // Read at each use: registering or removing the app takes effect without a restart.
   const appProviderNow = (): Provider | null => {

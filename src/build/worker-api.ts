@@ -20,6 +20,7 @@ import type { Db } from "../db/index.ts";
 import { archiveOf, callTaskTool, taskLease } from "../remote/tools.ts";
 import { ITEM_SERVER } from "../itemtools/index.ts";
 import { REFERENCE_SERVER } from "../remote/bundle.ts";
+import { handleInternal } from "./internal-api.ts";
 
 /** Largest tool-call body the runner takes for a dashboard (the dashboard's own limit for these tools). */
 const REMOTE_TOOL_BODY_LIMIT = 2 * 1024 * 1024;
@@ -36,6 +37,8 @@ export type WorkerServerOptions = {
   /** Calls a key may make: a burst and a refill per second. */
   burst?: number;
   perSec?: number;
+  /** The secrets file's session_key, which signs the dashboard's /internal/ requests (src/build/internal-api.ts); without it they are refused. */
+  internalKey?: string | null;
 };
 
 class Refusal extends Error {
@@ -150,6 +153,7 @@ export function handler(o: WorkerServerOptions) {
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? "/", "http://worker.invalid");
     if (url.pathname.startsWith("/remote/")) return await remoteRoute(req, res, url);
+    if (url.pathname.startsWith("/internal/")) return await handleInternal(db, o.internalKey ?? null, req, res, url);
     const m = /^Bearer (\S{1,200})$/.exec(String(req.headers.authorization ?? ""));
     const addr = req.socket.remoteAddress ?? "?";
     const env = m ? await authenticate(db, m[1]!) : null;

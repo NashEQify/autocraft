@@ -2,7 +2,7 @@
 // Every query leaves out repos the viewer cannot see, as the pipeline, agents and build endpoints do.
 import type { ItemRef, ItemShown, Now, NowEntry, NowFeed, NowHealth, NowProblem } from "../../../web/src/api/types.ts";
 import { privateStepExpr } from "../../build/tasks.ts";
-import { listAccounts } from "../../agents/accounts.ts";
+import { accountList } from "../../agents/account-actions.ts";
 import { jevEnabled, jevOutage } from "../../agents/jev.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { mainCiRepos } from "../../mainci/index.ts";
@@ -87,7 +87,7 @@ export async function healthOf(db: Db, hidden: HiddenRepos, internals: boolean, 
   const [state, on, checks, trips, zero, accounts, outage, ci, failed] = await Promise.all([
     pipelineSwitch(db), onRead, checkProblems(db, hidden, internals, nowMs),
     db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at")),
-    zeroLimits(db), listAccounts(db),
+    zeroLimits(db), accountList(db),
     (async () => (await jevEnabled(db) ? await jevOutage(db) : null))(),
     mainCiRepos(db, hidden),
     onRead.then((o) => db.all(db.k.selectFrom("jobs").select(["step", (eb) => eb.fn.countAll<number>().as("n")]).where("state", "=", "failed").where("ended_at", ">", since)

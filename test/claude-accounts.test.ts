@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import { listAccounts } from "../src/agents/accounts.ts";
+import { AccountError, listAccounts } from "../src/agents/accounts.ts";
+import { accountAction, accountList } from "../src/agents/account-actions.ts";
+import { startWorkerServer } from "../src/build/worker-api.ts";
+import { INTERNAL_HEADER, signInternal, useRunnerClient } from "../src/remote/runner-client.ts";
 import { readUsage } from "../src/agents/box.ts";
 import { timing } from "../src/agents/login.ts";
 import { AccountWatcher, addAccount, beginLogin, refreshNow, sendCode, signOut, stopLogin } from "../src/agents/manage.ts";
@@ -99,6 +102,31 @@ describe("claude accounts", () => {
     await new AccountWatcher(db, () => {}).tick();
     assert.equal((await listAccounts(db)).find((x) => x.id === c.id)!.auth.loggedIn, true);
     assert.equal(readUsage(c.id)?.fiveHour?.pct, 42);
+  });
+
+  test("with a runner client, account actions and the list run on the runner's worker API as the signed login", async () => {
+    const key = "k".repeat(40);
+    const w = await startWorkerServer({ db, listen: "127.0.0.1:0", internalKey: key });
+    const paths: string[] = [];
+    w.server.prependListener("request", (req) => paths.push(req.url ?? ""));
+    useRunnerClient({ url: w.url, sessionKey: key });
+    try {
+      await assert.rejects(async () => await accountAction(db, "add", undefined, { label: "x@example.com" }, "op"), (e) => e instanceof AccountError && e.status === 400);
+      const a = await accountAction(db, "add", undefined, { label: "Remote" }, "op2");
+      assert.equal((await accountAction(db, "login-start", a.id, undefined, "op2")).login?.url, "https://claude.example/oauth/authorize?code=true&state=abc");
+      assert.ok((await accountList(db)).some((x) => x.id === a.id && x.login?.state === "waiting"));
+      await accountAction(db, "login-cancel", a.id, undefined, "op2");
+      assert.deepEqual(paths, ["/internal/accounts/add", "/internal/accounts/add", "/internal/accounts/login-start", "/internal/accounts/list", "/internal/accounts/login-cancel"]);
+      assert.equal((await db.get(db.k.selectFrom("audit").select("login").where("action", "=", "account-login-start").where("target", "=", `account:${a.id}`)))!.login, "op2");
+      // A request signed with another key, or for another path, is refused.
+      const forged = await fetch(`${w.url}/internal/accounts/list`, { method: "POST", headers: { [INTERNAL_HEADER]: signInternal("x".repeat(40), "POST", "/internal/accounts/list", "{}", "op") }, body: "{}" });
+      assert.equal(forged.status, 401);
+      const moved = await fetch(`${w.url}/internal/accounts/sign-out`, { method: "POST", headers: { [INTERNAL_HEADER]: signInternal(key, "POST", "/internal/accounts/list", "{}", "op") }, body: "{}" });
+      assert.equal(moved.status, 401);
+    } finally {
+      useRunnerClient(null);
+      await w.close();
+    }
   });
 
   test("usage parsing leaves out a window that has not started and rejects other output", () => {

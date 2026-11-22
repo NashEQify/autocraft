@@ -1,7 +1,7 @@
 // Health checks computed from the database: one list read by the dashboard's warnings menu and by GET /healthz/checks.
 // Every check reads rows the runner, the sync and the build workers already write; none starts work or wakes the planner.
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { listAccounts } from "./agents/accounts.ts";
+import { accountList } from "./agents/account-actions.ts";
 import { deadlineStops } from "./runner/autopilot.ts";
 import { stepTitle } from "./dash/api/trace.ts";
 import { repoErrors } from "./sync-errors.ts";
@@ -180,7 +180,7 @@ async function syncRepoChecks({ db }: CheckCtx): Promise<Check[]> {
 }
 
 async function accountsCheck({ db, nowMs, probe }: CheckCtx): Promise<Check[]> {
-  const on = (await listAccounts(db, nowMs, !probe)).filter((a) => a.enabled);
+  const on = (await accountList(db, nowMs, !probe)).filter((a) => a.enabled);
   if (on.length && on.every((a) => a.pausedReason || a.auth.loggedIn === false)) {
     const text = on.length === 1 ? "The Claude account is paused" : "All Claude accounts are paused";
     return [{ id: "accounts", state: "fail", text, brief: text, since: null, to: "/accounts" }];

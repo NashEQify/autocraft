@@ -91,7 +91,7 @@ The frontend is the React app in `web/`. Build it before serving: `pnpm -C web i
 | `AUTOCRAFT_GITHUB_APP_NAME` | Name suggested on the registration form. Default `AutoCraft`; at most 34 letters, digits, spaces, dashes or underscores. |
 | `AUTOCRAFT_TRUST_PROXY` | The number of trusted proxies in front of the server (0 to 9, default 0), for the client address of the rate limits. Each proxy is assumed to append the address it was reached from to `X-Forwarded-For`, so the client is that many entries from the end; with 0 the socket address counts. A proxy that replaces the header with a CDN's client-address header counts as one, and must then refuse connections that do not come from the CDN. |
 | `AUTOCRAFT_IMG_CACHE` | Disk cache of the image proxy. Default `$XDG_CACHE_HOME/autocraft/img` (`~/.cache/...`); empty for no disk cache. It is only a cache, so each replica can have its own scratch directory (a Kubernetes `emptyDir`). |
-| `AUTOCRAFT_RUNNER_URL` | Base URL of the runner's worker API (`AUTOCRAFT_WORKER_LISTEN`), for a dashboard that does not share the runner's disk. The item and reference tools and the tarball mounts of Task Runner calls read the runner's files (the item snapshot, the diff cache, the reference index, the git clones); with this set, the dashboard asks the runner for them under `/remote/`, passing the call's lease secret, which the runner checks again. Unset: the dashboard reads the files itself. |
+| `AUTOCRAFT_RUNNER_URL` | Base URL of the runner's worker API (`AUTOCRAFT_WORKER_LISTEN`), for a dashboard that does not share the runner's disk. The item and reference tools and the tarball mounts of Task Runner calls read the runner's files (the item snapshot, the diff cache, the reference index, the git clones); with this set, the dashboard asks the runner for them under `/remote/`, passing the call's lease secret, which the runner checks again. Build artifact downloads and everything on the Accounts page (the account list, adding and editing accounts, sign-in and token requests, sign-out, refresh) also go to the runner, under `/internal/`, which holds the account directories and runs the `claude` sign-in; the account list is reused for 2 seconds. The dashboard checks the user as before and signs each `/internal/` request with a key derived from `session_key` (method, path, body hash and login, valid for a minute), so the runner needs the same secrets file. Unset: the dashboard reads the files and runs the sign-in itself. |
 | `AUTOCRAFT_DASH_REPLICAS` | Number of dashboard processes serving the same instance (1 to 100, default 1). The rate limits are kept in each process's memory, so each process allows its share of every limit (the limit divided by this number, rounded down, at least 1) and together they allow about what one dashboard allows. That holds when requests are spread over the replicas per request, as an ingress or load balancer in front does; a client whose requests all reach one replica (one kept-alive connection through a per-connection balancer) gets that replica's share only. |
 
 The GitHub OAuth App needs no scopes, and expiring user tokens are supported: the server refreshes them as needed and ends the session when a refresh fails. Tokens are stored encrypted with a key derived from `session_key`; changing `session_key` makes the stored GitHub tokens unreadable until each user signs in again.
@@ -545,7 +545,7 @@ The runner also serves the worker API on its own listener, for workers that run 
 | Variable | Meaning |
 |---|---|
 | `AUTOCRAFT_WORKER_LISTEN` | `host:port` of the worker API. Default `127.0.0.1:8981`. If it cannot listen, the runner logs the error and carries on. |
-| `AUTOCRAFT_ARTIFACT_DIR` | Where task artifacts are stored. Default `artifacts` beside the database. The runner and the dashboard must both see it. |
+| `AUTOCRAFT_ARTIFACT_DIR` | Where task artifacts are stored. Default `artifacts` beside the database. The runner writes it; the dashboard reads it directly, or through the runner with `AUTOCRAFT_RUNNER_URL`. |
 
 Every call carries `Authorization: Bearer <worker key>`, which identifies the environment and refreshes its heartbeat. JSON bodies are sent as `application/json`.
 
@@ -593,7 +593,7 @@ Claude calls run under accounts that an operator enabled. Which accounts exist o
 | `AUTOCRAFT_ACCOUNTS_ROOT` | Directory for the config directories of accounts added on the Accounts page (`<root>/<id>`, mode 0700). Without it, accounts can only come from the file. |
 | `AUTOCRAFT_CLAUDE_BIN` | The `claude` command used for sign-in, status and usage (default: `claude` on the PATH). |
 
-Example: `AUTOCRAFT_ACCOUNTS=/path/to/accounts.json`, `AUTOCRAFT_USAGE_DIR=/path/to/usage`, `AUTOCRAFT_ACCOUNTS_ROOT=/path/to/accounts`.
+Example: `AUTOCRAFT_ACCOUNTS=/path/to/accounts.json`, `AUTOCRAFT_USAGE_DIR=/path/to/usage`, `AUTOCRAFT_ACCOUNTS_ROOT=/path/to/accounts`. With `AUTOCRAFT_RUNNER_URL` set on the dashboard, only the runner needs these.
 
 Each account in the file gets a row (disabled, labelled with its id) the first time anything lists accounts. Operators set the label, the switch and the number of calls at once on the Accounts page or with `autocraft-server accounts list` and `autocraft-server accounts set <id> [--label X] [--enabled yes|no] [--max-concurrent N]` (1 to 100; recorded as `cli`). Jev has no accounts; its calls at once are the `jev_parallel` setting (default 4), changed with `autocraft-server accounts jev [N]`. Claude calls in flight are limited only by the accounts' free slots; waiting calls take freed slots by priority class (security, then the path to merge, then the rest). An operator can also give an account a long-lived token (*Long-lived token* on the Accounts page, stored as `oauth-token` in the account's config directory, mode 0600): calls on that account use it instead of the login's short-lived token, so sandboxed calls never wait for a token refresh. Allocation and pauses are described in [docs/pipeline.md](docs/pipeline.md#claude-accounts-and-agent-runs).
 
@@ -1022,7 +1022,7 @@ A session's `workspace` tools (shell, shell_status, shell_kill, read, write, edi
 
 | Variable | Meaning |
 |---|---|
-| `AUTOCRAFT_MODEL_CACHE` | Where model files are kept. Default `$XDG_CACHE_HOME/autocraft/models` (`~/.cache/...`). |
+| `AUTOCRAFT_MODEL_CACHE` | Where model files are kept. Default `$XDG_CACHE_HOME/autocraft/models` (`~/.cache/...`). Missing files are downloaded at the first embedding, so the directory can be scratch storage (a Kubernetes `emptyDir`); each new process then downloads the model once. |
 | `AUTOCRAFT_EMBED_MODEL` | `bge-small-en-v1.5` (default), `multilingual-e5-small` or `all-MiniLM-L6-v2`. Changing it makes the next `embed` run embed everything again. |
 | `AUTOCRAFT_EMBED_THREADS` | CPU threads for `embed` (default and maximum 8). The server uses 2. |
 
