@@ -1003,6 +1003,10 @@ What the cluster must provide:
 
 The health check `worker:<env id>` fails when the runner is not in a cluster, the API does not answer, the service account lacks a permission (checked with SelfSubjectAccessReview every minute), no AutoCraft image is known, or a pod could not be created. It warns when a pod has waited more than 3 minutes to start and when no toolchain image is set.
 
+### Workspace tools
+
+A session's `workspace` tools (shell, shell_status, shell_kill, read, write, edit, glob, grep) run in its workspace pod through the helper `ws`; the job checks the arguments and the per-session limits (2,000 calls, 3 h of shell time by the job's clock, 4 execs at once, 4 background commands, 300 images). The call files under `/work/.ws` are writable by the session, so what they say about a command only informs those limits: the hard bounds are the pod's own (`activeDeadlineSeconds`, CPU and memory limits, the pid limit). `autocraft-server workspace tool <id> <tool> '<json args>'`, in the runner container, makes one call as a session would and prints its result.
+
 ## Similar items and semantic search
 
 `autocraft-server embed [--all] [--threads N] [--batch N]` embeds every tracked item whose text changed since its last embedding (`--all`: every tracked item) into `item_embeddings`, and removes vectors of items that left the mirror or the tracked repos. Each batch commits on its own, so an interrupted run continues where it stopped. The dashboard reads the table for "Similar items" on the Item page and for the search box's meaning toggle; it embeds search queries, and items without a vector yet, itself.

@@ -140,6 +140,33 @@ export async function execInWorkspace(db: Db, api: KubeApi, id: number, argv: st
   return await api.exec(ns, pod, WS_CONTAINER, argv, opts);
 }
 
+/** One helper call's raw outcome: the parsed first line and the bytes after it, uncleaned (file content, images). */
+export type WsRaw = { header: WsHeader | null; body: Buffer; stderr: string; truncated: boolean; error?: string };
+
+/** Splits the helper's stdout into its header line and the raw bytes after it. */
+export function splitHeader(stdout: Buffer): { header: WsHeader | null; body: Buffer } {
+  const nl = stdout.indexOf(0x0a);
+  const header = parseHeader(cleanOutput(nl < 0 ? stdout : stdout.subarray(0, nl)));
+  return { header, body: header ? (nl < 0 ? Buffer.alloc(0) : stdout.subarray(nl + 1)) : stdout };
+}
+
+/**
+ * Runs `ws <argv>` in the workspace's pod after the pod check (or in `at`, a pod the caller just checked) and returns
+ * the raw outcome, with no call row: the caller records it. Throws when the pod check fails or the exec never started.
+ */
+export async function execHelper(db: Db, api: KubeApi, id: number, argv: string[], opts: ExecOptions, at?: { ns: string; pod: string }): Promise<WsRaw> {
+  const { ns, pod } = at ?? await workspacePod(db, api, id);
+  const r = await api.exec(ns, pod, WS_CONTAINER, [WS_POD_PATH, ...argv], opts);
+  return { ...splitHeader(r.stdout), stderr: cleanOutput(r.stderr).slice(0, 8192), truncated: r.truncated, ...(r.error !== undefined ? { error: r.error } : {}) };
+}
+
+/** Takes the workspace's next `ws run` call number. */
+export async function takeCallNumber(db: Db, id: number): Promise<number> {
+  const r = await db.get(db.k.updateTable("workspaces").set((eb) => ({ next_call: eb("next_call", "+", 1) })).where("id", "=", id).returning("next_call"));
+  if (!r) throw new BuildError(404, `no workspace ${id}`);
+  return Number(r.next_call) - 1;
+}
+
 export type WsCallOptions = {
   /** What the call is for: a session tool name, or the launcher's `seed` and `checkpoint`. */
   tool: string;
@@ -161,13 +188,9 @@ export type WsCallResult = { callId: number; n: number | null; header: WsHeader 
  */
 export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o: WsCallOptions, now: () => number = Date.now): Promise<WsCallResult> {
   const iso = () => new Date(now()).toISOString();
-  const { ns, pod } = await workspacePod(db, api, id);
-  let n: number | null = null;
-  if (argv[0] === "run") {
-    const r = await db.get(db.k.updateTable("workspaces").set((eb) => ({ next_call: eb("next_call", "+", 1) })).where("id", "=", id).returning("next_call"));
-    n = Number(r!.next_call) - 1;
-  }
-  const full = n === null ? [WS_POD_PATH, ...argv] : [WS_POD_PATH, "run", String(n), ...argv.slice(1)];
+  const at = await workspacePod(db, api, id);
+  const n = argv[0] === "run" ? await takeCallNumber(db, id) : null;
+  const full = n === null ? argv : ["run", String(n), ...argv.slice(1)];
   const args = JSON.stringify(capJson(o.args ?? { argv }));
   const deadline = new Date(now() + o.timeoutMs + CALL_GRACE_MS).toISOString();
   let callId = o.row;
@@ -185,18 +208,16 @@ export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o
     await db.run(db.k.updateTable("workspace_calls").set({ state, result: JSON.stringify(result), finished_at: iso() }).where("id", "=", callId!));
     await touch();
   };
-  let r: ExecResult;
+  let r: WsRaw;
   try {
-    r = await api.exec(ns, pod, WS_CONTAINER, full, { stdin: o.stdin, maxOut: o.maxOut ?? MAX_CALL_OUTPUT, timeoutMs: o.timeoutMs });
+    r = await execHelper(db, api, id, full, { stdin: o.stdin, maxOut: o.maxOut ?? MAX_CALL_OUTPUT, timeoutMs: o.timeoutMs }, at);
   } catch (e) {
     await finish("failed", { error: e instanceof KubeError ? e.message : String((e as Error).message) });
     throw e;
   }
-  const text = cleanOutput(r.stdout);
-  const nl = text.indexOf("\n");
-  const header = parseHeader(nl < 0 ? text : text.slice(0, nl));
+  const header = r.header;
   const out: WsCallResult = {
-    callId, n, header, output: (header ? (nl < 0 ? "" : text.slice(nl + 1)) : text).slice(0, MAX_CALL_OUTPUT), stderr: cleanOutput(r.stderr).slice(0, 8192),
+    callId, n, header, output: cleanOutput(r.body).slice(0, MAX_CALL_OUTPUT), stderr: r.stderr,
     truncated: r.truncated, ...(r.error !== undefined ? { error: r.error } : {}),
   };
   await finish(header && header.kind !== "error" && r.error === undefined ? "done" : "failed",

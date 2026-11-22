@@ -1,5 +1,5 @@
 // autocraft-server envs list | add | set | rotate-key, autocraft-server tasks list | show | cancel | enqueue-test,
-// autocraft-server workspace start | list | show | run | end (the operator's tools for workspace pods)
+// autocraft-server workspace start | list | show | run | tool | end (the operator's tools for workspace pods)
 // Recorded as `cli`: only someone with a shell on the host can run these. Worker keys go to a
 // file (mode 0600) and are printed only with --print. Text a worker sent is shown with control
 // characters removed, so it cannot drive the terminal.
@@ -13,7 +13,8 @@ import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
-import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
+import { WorkspaceSession } from "./workspace-tools.ts";
+import { capJson, createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
@@ -34,6 +35,7 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server workspace list [--all]
        autocraft-server workspace show <id>
        autocraft-server workspace run <id> -- <command...>     (in the runner container: needs pods/exec)
+       autocraft-server workspace tool <id> <tool> '<json args>'  (a session tool call, as a session makes it; same container)
        autocraft-server workspace end <id>`;
 
 function die(msg: string): never {
@@ -318,8 +320,8 @@ async function workspace(args: string[]): Promise<void> {
     for (const c of calls.reverse()) {
       let summary = "";
       try {
-        const r = JSON.parse(c.result ?? "{}") as { header?: WsHeader | null; error?: string };
-        summary = r.error ?? describeHeader(r.header ?? null);
+        const r = JSON.parse(c.result ?? "{}") as { header?: WsHeader | null; error?: string; text?: string };
+        summary = r.error ?? (typeof r.text === "string" ? r.text.split("\n", 1)[0]!.slice(0, 120) : describeHeader(r.header ?? null));
       } catch { /* not JSON */ }
       console.log(`  call ${c.id}${c.n !== null ? ` (ws ${c.n})` : ""} ${safe(c.tool)} ${c.state} ${c.created_at.slice(11, 19)}  ${safe(summary)}`);
     }
@@ -334,6 +336,23 @@ async function workspace(args: string[]): Promise<void> {
     if (r.output) process.stdout.write(r.output.endsWith("\n") ? r.output : `${r.output}\n`);
     if (r.stderr) process.stderr.write(r.stderr);
     if (r.error) console.error(`exec: ${r.error}`);
+  } else if (sub === "tool") {
+    const id = idOf(rest[0]);
+    const name = rest[1] ?? die(USAGE);
+    let args: unknown;
+    try {
+      args = JSON.parse(rest[2] ?? "{}");
+    } catch {
+      die("the arguments must be JSON");
+    }
+    if (!await getWorkspace(db, id)) die("no such workspace");
+    const api = inClusterApi() ?? die("this shell is not in the cluster: run it in the runner container, whose service account may exec in workspace pods");
+    const at = new Date().toISOString();
+    const row = Number((await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, tool: name, args: JSON.stringify(capJson(args)), state: "queued", created_at: at }).returning("id")))!.id);
+    const r = await new WorkspaceSession(db, api, id).call(name, args, row);
+    console.log(`call ${row}${r.isError ? " (error)" : ""}`);
+    process.stdout.write(r.text.endsWith("\n") ? r.text : `${r.text}\n`);
+    for (const im of r.images ?? []) console.log(`[image ${im.mimeType}, ${Buffer.from(im.data, "base64").length} bytes]`);
   } else if (sub === "end") {
     const id = idOf(rest[0]);
     console.log(await endWorkspace(db, id) ? `workspace ${id} ended; the launcher deletes its pod and volume` : `workspace ${id} is not live`);
@@ -343,5 +362,5 @@ async function workspace(args: string[]): Promise<void> {
 export const commands = {
   envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id>", run: async (args: string[]) => await envs(args) },
   tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: async (args: string[]) => await tasks(args) },
-  workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | end <id>", run: async (args: string[]) => await workspace(args) },
+  workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | tool <id> <tool> <json> | end <id>", run: async (args: string[]) => await workspace(args) },
 };
