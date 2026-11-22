@@ -6,7 +6,7 @@ import type { ItemFilter, ItemKind, ItemPhase, ItemSort, ItemStatusFilter, Settl
 
 export const PHASES: ItemPhase[] = ["Triage", "Waiting for a person", "Review", "Fixing", "Verifying", "In queue", "Merged", "Closed", "Held", "Out of scope", "Pipeline off"];
 
-/** The state select's own scopes, in the order the approved toolbar lists them. */
+/** The state select's own scopes, in the order the toolbar lists them. */
 export const STATE_OPTIONS: [string, string][] = [["open", "Open"], ["merged", "Merged"], ["closed", "Closed"], ["merged-by-us", "Merged by AutoCraft"], ["all", "Any state"]];
 const APPLIED_STATES: NonNullable<ItemFilter["state"]>[] = ["open", "merged", "closed", "merged-by-us", "all"];
 

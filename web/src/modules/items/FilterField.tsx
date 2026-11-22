@@ -1,6 +1,6 @@
 import { cn } from "../../ui/cn";
 
-/** One labelled native select, as the approved Items toolbar draws it: the name sits inside the
+/** One labelled native select of the Items toolbar: the name sits inside the
     control, above the value. Props only; the page owns the value and the URL. */
 export function FilterField({ label, value, options, onChange, disabled, className }: {
   label: string;

@@ -41,7 +41,7 @@ export function PhaseItems({ browse, phone, onPatch, search, author, onClearPhas
   const settled = ready && !!first && !loading && !error;
   const problem = settled ? selectionProblem(selection, facts.map((row) => row.key)) : null;
   const bar = ready && !loading && total !== undefined
-    ? <>Filtered view · {num(total)} {total === 1 ? "item" : "items"} in {browse.phase} · counts include the search, type and repository filters</>
+    ? <>Filtered view · {num(total)} {total === 1 ? "item" : "items"} in {browse.phase}</>
     : undefined;
   return <Page title="Items" sub={ready && !loading && total !== undefined ? `${num(total)} ${total === 1 ? "item" : "items"}` : undefined}>
     <BrowserChrome browse={browse} repos={repoOptions ?? []} phone={phone} phaseCounts={first?.byPhase} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>

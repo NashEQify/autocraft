@@ -28,7 +28,7 @@ export type DraftField = ReturnType<typeof useDraftField>;
 export interface BrowserProps {
   continuity: RowContinuity;
   browse: BrowseState;
-  /** The approved 860 px phone breakpoint, where the secondary controls fold into Filters. */
+  /** The 860 px phone breakpoint, where the secondary controls fold into Filters. */
   phone: boolean;
   onPatch: (patch: Record<string, string | null>) => void;
   /** Offset paging on the list endpoint; the phase endpoint pages by cursor instead. */
@@ -36,7 +36,7 @@ export interface BrowserProps {
   onClearPhase: () => void;
   onReset: () => void;
   onRemove: (key: string, value: string) => void;
-  /** The open row (approved `open=repo#number`) and the handlers that move it. */
+  /** The open row (`open=repo#number`) and the handlers that move it. */
   selection: Selection;
   onToggleRow: (ref: OpenRef) => void;
   onCloseSelection: () => void;
@@ -166,7 +166,7 @@ function directionLabel(sort: string | undefined, q: string | undefined, desc: b
   return desc ? "Newest first" : "Oldest first";
 }
 
-/** Everything the approved toolbar does not carry: older links and bookmarks keep working,
+/** Everything the toolbar does not carry: author, date, sort, page size and Discord,
     and the closed summary names every applied value that the primary controls cannot show. */
 function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras }: {
   browse: BrowseState;
@@ -180,11 +180,11 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
   const sort = itemFilter(browse).sort ?? (browse.q ? "relevance" : browse.state === "merged-by-us" ? "merged" : "updated");
   const sorts = SORTS.filter(([key]) => (key !== "relevance" || browse.q) && (key !== "merged" || browse.state === "merged-by-us"));
   return <details className="border-b border-line px-3.5 py-2 [&[open]]:pb-3">
-    <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink/60 hover:text-ink">
+    <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-2xs text-ink/60 hover:text-ink">
       <span className="shrink-0">More filters{extras.length > 0 ? ` · ${extras.length}` : ""}</span>
       {detail.length > 0
         ? <span className="min-w-0 break-words text-ink/70">{detail.join(" · ")}</span>
-        : <span className="text-ink/40">from older links and bookmarks{phase ? "" : " · Author, date, sort, page size, Discord"}</span>}
+        : <span className="text-ink/60">{phase ? "Discord" : "Author, date, sort, page size, Discord"}</span>}
     </summary>
     {!phase && <div className="mt-2 grid gap-2 min-[861px]:grid-cols-3">
       <label className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Author</span><Input aria-label="Author" placeholder="GitHub login" value={author.value} onChange={(event) => author.onChange(event.target.value)} className="w-full" /></label>

@@ -4,7 +4,7 @@ import { itemPath } from "../../lib/links.ts";
 import { eventTime } from "../../lib/format.ts";
 import type { Classification, Classifier, Decision, ExecState, Item, ItemKind, ItemListRow, ItemState, ItemStatus, ItemChecks, ItemStatusRow, QueueSlot, Settled, SettledStatus, Snippet, Stage, TimelineEntry } from "../../api/types.ts";
 
-/** The approved selection key: `open=repo#number`. */
+/** The selection key: `open=repo#number`. */
 export interface OpenRef { repo: string; number: number }
 
 export interface Selection {
