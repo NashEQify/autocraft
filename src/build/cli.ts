@@ -15,7 +15,7 @@ import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { setWarmMinInterval, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
+import { changeWarmRepos, setWarmMinInterval, WARM_REPOS_KEY, warmRepos, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { requestTrySession, TRY_DEADLINE_SEC, TRY_PROMPT_MAX_BYTES, TRY_STEP } from "./workspace-session.ts";
@@ -34,6 +34,7 @@ const USAGE = `usage: autocraft-server envs list
            --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
            --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
+       autocraft-server envs warm-repos [add|remove <owner/name>]   (repos the warm producer builds; none by default)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
@@ -210,6 +211,10 @@ async function envs(args: string[]): Promise<void> {
     const e = await run(async () => await updateEnv(db, pos[0], input, "cli"));
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
     if (e.settings) console.log(settingsLine(e.settings));
+  } else if (sub === "warm-repos") {
+    if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && rest[0] !== "add" && rest[0] !== "remove")) die(USAGE);
+    if (rest.length === 2) await run(async () => await changeWarmRepos(db, rest[0] as "add" | "remove", rest[1]!, "cli"));
+    console.log(`${WARM_REPOS_KEY} ${(await warmRepos(db)).join(", ") || "(none)"}`);
   } else if (sub === "warm-interval") {
     if (rest.length > 1) die(USAGE);
     if (rest[0] !== undefined) await run(async () => await setWarmMinInterval(db, rest[0]!, "cli"));
