@@ -3,12 +3,13 @@
 // rows and runs them on its WorkspaceSession, which settles each row (state and result). The rows are the record a resume reads; the wake only
 // shortens the waits. On Postgres both sides wake on NOTIFY and poll slowly behind it; on SQLite both poll at the model
 // queue's interval. workspace_calls is in no change topic, so the relay's writes never wake the planner.
+import { createHash } from "node:crypto";
 import { allocation } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
 import { scaled } from "../remote/time-scale.ts";
 import { inClusterApi } from "./kube-api.ts";
 import { WorkspaceSession, type ToolImage, type WorkspaceToolResult } from "./workspace-tools.ts";
-import { LIVE_STATES } from "./workspaces.ts";
+import { capJson, LIVE_STATES } from "./workspaces.ts";
 
 /** Dashboard to job: a tool call was queued. Payload: the workspace id. */
 export const CALL_CHANNEL = "workspace_call";
@@ -17,7 +18,7 @@ export const REPLY_CHANNEL = "workspace_reply";
 
 /** How often the waiting dashboard request calls `tick` (the HTTP layer writes a keep-alive byte). */
 const TICK_MS = scaled(15_000);
-/** The poll behind the wake on Postgres; a side whose listening connection failed polls at the model queue's interval. */
+/** The poll behind the wake on Postgres; while a side is not listening (connecting, or the connection failed) it polls at the model queue's interval. */
 const SAFETY_POLL_MS = scaled(10_000);
 
 /** What the job runs a tool call on: a WorkspaceSession, or a stand-in in tests. */
@@ -78,18 +79,23 @@ export async function relayWorkspaceCall(db: Db, lease: { id: number; runId: num
   if (!ws) return refusal("this call has no live workspace");
   const waker = new Waker();
   let id = -1;
-  const off = await db.listen(REPLY_CHANNEL, (p) => { if (p === null || p === String(id)) waker.poke(); });
+  const sub = db.listen(REPLY_CHANNEL, (p) => { if (p === null || p === String(id)) waker.poke(); });
   try {
     id = Number((await db.get(db.k.insertInto("workspace_calls").values({
       workspace_id: ws.id, run_id: lease.runId, tool: name, args: JSON.stringify(args ?? {}), state: "queued", created_at: iso(),
     }).returning("id")))!.id);
     await db.notify(CALL_CHANNEL, String(ws.id));
-    const pollMs = off ? SAFETY_POLL_MS : allocation.pollMs;
-    let lastTick = Date.now();
+    let lastTick = Date.now(), listening = false;
     for (;;) {
-      await waker.wait(Math.min(pollMs, TICK_MS), opts.signal);
+      await waker.wait(Math.min(listening ? SAFETY_POLL_MS : allocation.pollMs, TICK_MS), opts.signal);
+      // Read before the row: a result written after the read is then sure to wake the next wait.
+      listening = sub?.listening() ?? false;
       const r = await db.get(db.k.selectFrom("workspace_calls").select(["state", "result"]).where("id", "=", id));
-      if ((r?.state === "done" || r?.state === "failed") && r.result) return parseResult(r.result);
+      if ((r?.state === "done" || r?.state === "failed") && r.result) {
+        const out = parseResult(r.result);
+        if (out.images) await stubImages(db, id, r.result);
+        return out;
+      }
       const gone = opts.signal?.aborted ? "the request was cancelled" : !r ? "the call is gone" : !await opts.live() ? "the lease is gone" : null;
       if (gone) {
         const withdrawn = await db.run(db.k.updateTable("workspace_calls").set({ state: "failed", result: JSON.stringify(refusal(gone)), finished_at: iso() })
@@ -102,8 +108,21 @@ export async function relayWorkspaceCall(db: Db, lease: { id: number; runId: num
       }
     }
   } finally {
-    off?.();
+    sub?.off();
   }
+}
+
+/** Once the session has a result's images, the row keeps only their type, size and hash; the rest of the result stays as the record. */
+async function stubImages(db: Db, id: number, stored: string): Promise<void> {
+  let o: { images?: { data?: unknown; mimeType?: unknown }[] };
+  try { o = JSON.parse(stored) as typeof o; } catch { return; }
+  if (!Array.isArray(o.images)) return;
+  const images = o.images.map((i) => {
+    if (typeof i?.data !== "string") return i;
+    const bytes = Buffer.from(i.data, "base64");
+    return { mimeType: i.mimeType, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") };
+  });
+  await db.run(db.k.updateTable("workspace_calls").set({ result: JSON.stringify({ ...o, images }) }).where("id", "=", id).where("result", "=", stored));
 }
 
 // ---- the job's side -------------------------------------------------------------
@@ -126,22 +145,27 @@ export function jobSession(db: Db, workspaceId: number): ToolSession {
   return s;
 }
 
+const parseArgs = (text: string): unknown => {
+  try { return JSON.parse(text); } catch { return null; }
+};
+
+/** The run of the call's live lease: only calls queued under it are served, so a row queued around a requeue never runs without a lease. */
+const leasedRun = (db: Db, callId: number) => db.k.selectFrom("remote_calls").select("run_id").where("id", "=", callId).where("state", "=", "leased");
+
 /**
  * Job side: serves the workspace bound to one remote call while the job waits for that call. `serve` claims the queued
- * calls that came under the call's current lease and runs them side by side on the session (which queues beyond its own
- * limit and settles each row); a call from an earlier lease is left for its dashboard request to withdraw. The first
- * serve also hands back the rows of the lease still running from an earlier process of the job (a runner restart): the
- * session re-attaches a command it started instead of running it again. `end` answers what is still queued.
+ * calls that came under the call's live lease and runs them side by side on the session (which queues beyond its own
+ * limit and settles each row); a call from an earlier lease is left for its dashboard request to withdraw. `end` answers
+ * what is still queued.
  */
 export class WorkspaceServer {
   readonly db: Db;
   readonly callId: number;
   readonly workspaceId: number;
   readonly session: ToolSession;
-  #off: (() => void) | null = null;
+  #sub: { off(): void } | null = null;
   /** Rows this process handed to the session and that have not settled. */
   readonly #running = new Set<number>();
-  #adopted = false;
 
   private constructor(db: Db, callId: number, workspaceId: number, session: ToolSession) {
     this.db = db;
@@ -150,12 +174,23 @@ export class WorkspaceServer {
     this.session = session;
   }
 
-  /** The server of the workspace bound to `callId`, listening for its calls; null when no live workspace is bound to it. */
+  /**
+   * The server of the workspace bound to `callId`, listening for its calls; null when no live workspace is bound to it.
+   * First it takes over the rows of the lease that an earlier process of the job left running (a runner restart): a shell
+   * command the session started is handed back to it, which re-attaches instead of running it again; any other such call
+   * is failed, since its outcome is unknown and its stored arguments are cut.
+   */
   static async open(db: Db, callId: number, sessionOf: (db: Db, workspaceId: number) => ToolSession = jobSession): Promise<WorkspaceServer | null> {
     const ws = await db.get(db.k.selectFrom("workspaces").select("id").where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
     if (!ws) return null;
     const s = new WorkspaceServer(db, callId, ws.id, sessionOf(db, ws.id));
-    s.#off = await db.listen(CALL_CHANNEL, (p) => { if (p === null || p === String(ws.id)) void s.serve().catch(() => { /* the next poll serves */ }); });
+    const left = await db.all(db.k.selectFrom("workspace_calls").select(["id", "tool", "args", "n"]).where("workspace_id", "=", ws.id).where("state", "=", "running")
+      .where("run_id", "=", leasedRun(db, callId)).orderBy("id"));
+    for (const r of left) {
+      if (r.n !== null) s.#run(r.id, r.tool, parseArgs(r.args));
+      else if (await s.#settle(r.id, "failed", { text: "failed: the runner restarted while this call ran, so its outcome is unknown; check the workspace and call it again", isError: true })) await db.notify(REPLY_CHANNEL, String(r.id));
+    }
+    s.#sub = db.listen(CALL_CHANNEL, (p) => { if (p === null || p === String(ws.id)) void s.serve().catch(() => { /* the next poll serves */ }); });
     return s;
   }
 
@@ -166,40 +201,52 @@ export class WorkspaceServer {
 
   async serve(): Promise<void> {
     const { db } = this;
-    const adopt = !this.#adopted;
-    this.#adopted = true;
-    const rows = await db.all(db.k.selectFrom("workspace_calls").select(["id", "tool", "args", "state"]).where("workspace_id", "=", this.workspaceId)
-      .where("state", "in", adopt ? ["queued", "running"] : ["queued"])
-      .where((eb) => eb("run_id", "=", eb.selectFrom("remote_calls").select("run_id").where("id", "=", this.callId)))
-      .orderBy("id"));
+    const rows = await db.all(db.k.selectFrom("workspace_calls").select(["id", "tool", "args"]).where("workspace_id", "=", this.workspaceId).where("state", "=", "queued")
+      .where("run_id", "=", leasedRun(db, this.callId)).orderBy("id"));
     for (const r of rows) {
       if (this.#running.has(r.id)) continue;
       this.#running.add(r.id);
-      if (r.state === "queued" && Number((await db.run(db.k.updateTable("workspace_calls").set({ state: "running", started_at: iso() }).where("id", "=", r.id).where("state", "=", "queued"))).changes) !== 1) {
+      const args = parseArgs(r.args);
+      // The session gets the whole arguments; the row keeps them cut to its record size.
+      const claimed = await db.run(db.k.updateTable("workspace_calls").set({ state: "running", started_at: iso(), args: JSON.stringify(capJson(args ?? {})) })
+        .where("id", "=", r.id).where("state", "=", "queued"));
+      if (Number(claimed.changes) !== 1) {
         this.#running.delete(r.id);
         continue;
       }
-      let args: unknown;
-      try { args = JSON.parse(r.args); } catch { args = null; }
-      void this.session.call(r.tool, args, r.id)
-        .catch(async (e: unknown) => await this.#fail(r.id, e))
-        .then(async () => await db.notify(REPLY_CHANNEL, String(r.id)))
-        .catch(() => { /* the database is closed: the process is ending */ })
-        .finally(() => this.#running.delete(r.id));
+      this.#run(r.id, r.tool, args);
     }
   }
 
-  /** Settles a row whose session call threw (it never throws for a tool error), so its dashboard request gets an answer. */
-  async #fail(id: number, e: unknown): Promise<void> {
-    const { db } = this;
-    await db.run(db.k.updateTable("workspace_calls").set({ state: "failed", result: JSON.stringify({ text: `failed: ${String((e as Error)?.message ?? e).slice(0, 200)}`, isError: true }), finished_at: iso() })
-      .where("id", "=", id).where("state", "in", ["queued", "running"]));
+  /** Runs one claimed row on the session and wakes the dashboard. A row the session left unsettled gets the result it returned. */
+  #run(id: number, tool: string, args: unknown): void {
+    this.#running.add(id);
+    void this.session.call(tool, args, id)
+      .then(async (res) => { await this.#settle(id, "done", res); }, async (e: unknown) => {
+        await this.#settle(id, "failed", { text: `failed: ${String((e as Error)?.message ?? e).slice(0, 200)}`, isError: true });
+      })
+      .then(async () => await this.db.notify(REPLY_CHANNEL, String(id)))
+      .catch(() => { /* the database is closed: the process is ending */ })
+      .finally(() => this.#running.delete(id));
   }
 
-  /** The call has ended: stops listening and refuses its calls nobody will run. Calls running on the session finish and store their reply. */
+  /** Settles a row that is still queued or running; true when it did. */
+  async #settle(id: number, state: "done" | "failed", res: WorkspaceToolResult): Promise<boolean> {
+    const r = await this.db.run(this.db.k.updateTable("workspace_calls").set({ state, result: JSON.stringify(res), finished_at: iso() })
+      .where("id", "=", id).where("state", "in", ["queued", "running"]));
+    return Number(r.changes) === 1;
+  }
+
+  /**
+   * The call has ended: stops listening and refuses the calls of its last lease that nobody will run. Refusing needs no
+   * live lease, since nothing runs. Calls running on the session finish and settle their rows.
+   */
   async end(): Promise<void> {
-    this.#off?.();
-    this.#off = null;
+    try {
+      this.#sub?.off();
+    } finally {
+      this.#sub = null;
+    }
     const { db } = this;
     const refused = await db.all(db.k.updateTable("workspace_calls").set({ state: "failed", result: JSON.stringify(refusal("the model call is over")), finished_at: iso() })
       .where("workspace_id", "=", this.workspaceId).where("state", "=", "queued")

@@ -73,6 +73,13 @@ export type DbEvent =
   /** A write transaction ended; `holdMs` is how long it held the write lock. */
   | { kind: "write-lock"; holdMs: number; site: string };
 
+/** One `Db.listen` registration. */
+export interface Subscription {
+  /** Whether the channel's notifications arrive now. */
+  listening(): boolean;
+  off(): void;
+}
+
 export interface Db {
   readonly dialect: Dialect;
   /** Kysely, routed to the transaction open in the current async context. */
@@ -120,11 +127,12 @@ export interface Db {
    */
   notify(channel: string, payload: string): Promise<void>;
   /**
-   * Postgres: calls `fn` with the payload of each notification on `channel` until the returned function is called, on the
-   * handle's one listening connection; with null after that connection was lost and opened again, when some may have been
-   * missed. A notification is a hint to look again, never the data. SQLite: null, and the caller polls.
+   * Postgres: calls `fn` with the payload of each notification on `channel` until `off()`, on the handle's one listening
+   * connection, which opens in the background; with null after that connection was lost and opened again, when some may
+   * have been missed. `listening()` is false until the LISTEN is in effect and while the connection is down: poll at the
+   * short interval then. A notification is a hint to look again, never the data. SQLite: null, and the caller polls.
    */
-  listen(channel: string, fn: (payload: string | null) => void): Promise<(() => void) | null>;
+  listen(channel: string, fn: (payload: string | null) => void): Subscription | null;
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */
   observe(fn: (e: DbEvent) => void): () => void;
   close(): Promise<void>;

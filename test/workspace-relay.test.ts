@@ -40,11 +40,13 @@ describe("workspace relay", async () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  const request = (workspaceId: number) => ({ workspaceId, promptId: "workspace.try", promptVersion: "1", model: "opus", tier: "top" as const, effort: "medium" as const, stdin: "x", timeoutSeconds: 600, maxTurns: 50, items: [{ repo: "photocraft", number: 7 }], servers: ["items"] });
+
   /** A ready workspace with a leased session call bound to it. */
   const session = async (): Promise<{ ws: number; id: number; secret: string; runId: number | null }> => {
     const now = new Date().toISOString();
     const ws = Number((await db.get(db.k.insertInto("workspaces").values({ repo: "photocraft", base_sha: "a".repeat(40), env_id: "k", state: "ready", state_at: now, created_at: now, updated_at: now }).returning("id")))!.id);
-    await queueWorkspaceCall(db, { workspaceId: ws, promptId: "workspace.try", promptVersion: "1", model: "opus", tier: "top", effort: "medium", stdin: "x", timeoutSeconds: 600, maxTurns: 50, items: [{ repo: "photocraft", number: 7 }], servers: ["items"] });
+    await queueWorkspaceCall(db, request(ws));
     const r = await claimCall(db, caller, { requestId: `ws-relay-claim-${++claims}`, protocol: PROTOCOL_VERSION, helperVersion: "1.3.6", harness: "claude", harnessVersion: "2", tiers: { top: "opus" } }, async () => true);
     assert.ok(r.lease, JSON.stringify(r));
     const lease = r.lease;
@@ -58,6 +60,7 @@ describe("workspace relay", async () => {
     assert.deepEqual(b.mcpServers, ["items", "workspace"]);
     const allowed = b.hints.claude!.args[b.hints.claude!.args.indexOf("--allowedTools") + 1];
     assert.ok(allowed!.split(",").includes("mcp__workspace__*"));
+    await assert.rejects(queueWorkspaceCall(db, request(s.ws)), /in use by call/, "a workspace serves one live call at a time");
 
     // Each call waits until both have started: served one after the other, neither would finish.
     let started = 0, both: () => void = () => {};
@@ -81,6 +84,9 @@ describe("workspace relay", async () => {
     assert.equal(a.text, `shell ran ${JSON.stringify({ command: "ls", stdin: "x".repeat(5000) })}`, "the arguments reach the session whole");
     assert.deepEqual(c.images, [{ data: PNG, mimeType: "image/png" }]);
     assert.deepEqual(Object.keys(a).sort(), ["images", "text"], "the session's bookkeeping stays in the row");
+    const rows = await db.all(db.k.selectFrom("workspace_calls").select(["args", "result"]).where("workspace_id", "=", s.ws).orderBy("id"));
+    assert.ok(rows[0]!.args.length < 5000, "the row keeps the arguments cut once claimed");
+    assert.ok(rows.every((r) => !r.result!.includes(PNG) && r.result!.includes('"sha256"')), "a delivered image is kept as its hash");
 
     await submitCall(db, s.secret, { ok: false, error: "done", durationMs: 1 });
     assert.equal((await waiting).state, "failed");

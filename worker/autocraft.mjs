@@ -1940,6 +1940,25 @@ export function transient(e, signal) {
   return x.name === "TimeoutError" || NET_CODES.has(x.code ?? "") || NET_CODES.has(x.cause?.code ?? "");
 }
 
+/** Servers whose tool calls run commands and writes that must not run twice: a request that may have reached the server is not sent again. */
+const ONCE_SERVERS = new Set(["workspace"]);
+/** Codes of a connection that was never made, so the request reached nobody. */
+const UNSENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/**
+ * Whether a failed request certainly did not run on the server: refused for the rate (429, answered before the body is
+ * read) or never connected.
+ * @param {unknown} e
+ */
+export function notRun(e) {
+  if (e instanceof HttpError) return e.status === 429;
+  const x = /** @type {{ code?: string, cause?: { code?: string } } | null} */ (e && typeof e === "object" ? e : null);
+  return UNSENT_CODES.has(x?.code ?? "") || UNSENT_CODES.has(x?.cause?.code ?? "");
+}
+
+/** The error for a cut-off call of a ONCE_SERVERS server. @param {unknown} e */
+const mayHaveRun = (e) => new Error(`${msg(e)}; the call may have run in the workspace and is not sent again: look with shell_status or read before you repeat it`);
+
 /** The wait before retry `attempt` (0 first): exponential from `baseMs` up to 30 s with jitter, at least the server's Retry-After. @param {number} attempt @param {number | null} retryAfter */
 export function backoffMs(attempt, retryAfter, baseMs = scaled(1000)) {
   const exp = Math.min(scaled(30_000), baseMs * 2 ** attempt);
@@ -1948,16 +1967,16 @@ export function backoffMs(attempt, retryAfter, baseMs = scaled(1000)) {
 }
 
 /**
- * Runs `fn` until it succeeds, fails for good (`transient` says no) or runs out of time (`deadline`, ms since epoch) or of
- * `tries`; then throws its last error. `signal` ends the waits between tries.
- * @template T @param {() => Promise<T>} fn @param {{ deadline: number, tries?: number, signal?: AbortSignal, baseMs?: number }} o
+ * Runs `fn` until it succeeds, fails for good (`transient` says no, or `again` when given) or runs out of time (`deadline`,
+ * ms since epoch) or of `tries`; then throws its last error. `signal` ends the waits between tries.
+ * @template T @param {() => Promise<T>} fn @param {{ deadline: number, tries?: number, signal?: AbortSignal, baseMs?: number, again?: (e: unknown) => boolean }} o
  * @returns {Promise<T>}
  */
 export async function withRetry(fn, o) {
   for (let attempt = 0; ; attempt++) {
     try { return await fn(); }
     catch (e) {
-      if (!transient(e, o.signal) || (o.tries !== undefined && attempt + 1 >= o.tries)) throw e;
+      if (!transient(e, o.signal) || (o.again && !o.again(e)) || (o.tries !== undefined && attempt + 1 >= o.tries)) throw e;
       const wait = backoffMs(attempt, e instanceof HttpError ? e.retryAfterMs : null, o.baseMs);
       if (Date.now() + wait >= o.deadline) throw e;
       try { await sleep(wait, undefined, o.signal && { signal: o.signal }); } catch { throw e; }
@@ -4191,6 +4210,8 @@ async function cmdMcp(argv) {
   const forward = async (line) => {
     let m;
     try { m = JSON.parse(line); } catch { return; }
+    // A tool call of a server whose calls must not run twice is sent again only when it certainly did not run.
+    const once = ONCE_SERVERS.has(name) && m?.method === "tools/call";
     try {
       // Retried until the server answers with a status that is not transient; a reply's body, once read, is not.
       const res = await withRetry(async () => {
@@ -4198,7 +4219,7 @@ async function cmdMcp(argv) {
         if (res.status === 410) throw new Gone("the lease is gone");
         if (!res.ok && res.status !== 202) throw new HttpError(`${ROUTES.mcp}/${name}`, res.status, await res.text().catch(() => ""), retryAfterMs(res.headers.get("retry-after")));
         return res;
-      }, { deadline: Date.now() + TOOL_RETRY_MS });
+      }, { deadline: Date.now() + TOOL_RETRY_MS, ...(once && { again: notRun }) });
       const sid = res.headers.get("mcp-session-id");
       if (sid) session = sid;
       if (res.status === 202) return;
@@ -4220,7 +4241,8 @@ async function cmdMcp(argv) {
         if (text) { const j = JSON.parse(text); for (const x of Array.isArray(j) ? j : [j]) emit(x); }
       }
     } catch (e) {
-      if (m && m.id !== undefined && m.method) out({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: `autocraft proxy: ${msg(e)}` } });
+      const why = once && !(e instanceof Gone) && !notRun(e) ? msg(mayHaveRun(e)) : msg(e);
+      if (m && m.id !== undefined && m.method) out({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: `autocraft proxy: ${why}` } });
     }
   };
   for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
@@ -4256,9 +4278,16 @@ async function cmdTool(argv) {
   let args;
   try { args = JSON.parse(json ?? "{}"); } catch { throw new Error("the tool arguments must be JSON"); }
   const { secret, server } = leaseAccess(id);
-  // A `check` streams whitespace while it runs; a reply cut off or a 5xx runs the call again.
+  // A `check` streams whitespace while it runs; a reply cut off or a 5xx runs the call again, except for a server whose calls must not run twice.
+  const once = ONCE_SERVERS.has(name);
   /** @type {{ content?: { type?: string, text?: string }[], isError?: boolean }} */
-  const r = await withRetry(() => api(server, `${ROUTES.tool}/${name}/${tool}`, secret, args, { timeoutMs: 60 * 60_000 }), { deadline: Date.now() + TOOL_RETRY_MS });
+  let r;
+  try {
+    r = await withRetry(() => api(server, `${ROUTES.tool}/${name}/${tool}`, secret, args, { timeoutMs: 60 * 60_000 }), { deadline: Date.now() + TOOL_RETRY_MS, ...(once && { again: notRun }) });
+  } catch (e) {
+    if (once && !(e instanceof Gone) && !notRun(e)) throw mayHaveRun(e);
+    throw e;
+  }
   console.log(contentText(r.content));
   return r.isError ? 1 : 0;
 }

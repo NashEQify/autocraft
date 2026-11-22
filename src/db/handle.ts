@@ -3,7 +3,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Compilable, DatabaseConnection, Kysely, TransactionBuilder } from "kysely";
 import type { DatabaseSync } from "node:sqlite";
-import type { DB, Db, DbEvent, Dialect, NamedParams, Param, Row, RunResult, Statement, WriteOptions } from "./index.ts";
+import type { DB, Db, DbEvent, Dialect, NamedParams, Param, Row, RunResult, Statement, Subscription, WriteOptions } from "./index.ts";
 
 export type Op = "get" | "all" | "run";
 export type Args = readonly (Param | NamedParams)[];
@@ -48,7 +48,7 @@ export interface Engine {
 
 /** Notifications from other connections: what `Db.listen` sits on. */
 export interface Listener {
-  listen(channel: string, fn: (payload: string | null) => void): Promise<() => void>;
+  listen(channel: string, fn: (payload: string | null) => void): Subscription;
   close(): Promise<void>;
 }
 
@@ -243,10 +243,10 @@ export class Handle implements Db {
     await this.prepare("SELECT pg_notify(?, ?) AS n").get(channel, payload);
   }
 
-  async listen(channel: string, fn: (payload: string | null) => void): Promise<(() => void) | null> {
+  listen(channel: string, fn: (payload: string | null) => void): Subscription | null {
     if (!this.#engine.listener) return null;
     this.#listener ??= this.#engine.listener();
-    return await this.#listener.listen(channel, fn);
+    return this.#listener.listen(channel, fn);
   }
 
   async close(): Promise<void> {

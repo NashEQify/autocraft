@@ -47,8 +47,9 @@ export function workspaceClaudeArgs(r: Pick<WorkspaceCallRequest, "model" | "eff
 
 /**
  * Queues a remote call for a session in workspace `workspaceId` and binds the workspace to it, in one transaction, so no
- * Task Runner can lease the call before its tool calls have a workspace to go to. Returns the call id; the caller waits
- * with awaitCall, which serves the session's tool calls meanwhile.
+ * Task Runner can lease the call before its tool calls have a workspace to go to. Refused while another call bound to the
+ * workspace is queued or leased, unless it is the new call's parent. Returns the call id; the caller waits with
+ * awaitCall, which serves the session's tool calls meanwhile.
  */
 export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promise<number> {
   const extra = [...new Set(r.servers ?? [])];
@@ -57,7 +58,7 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
   if (extra.includes(REFERENCE_SERVER) && !r.referenceRepo) throw new BuildError(400, "the reference server needs referenceRepo");
   const servers = [WORKSPACE_SERVER, ...extra].sort();
   return await db.write(async () => {
-    const ws = await db.get(db.k.selectFrom("workspaces").select("id").where("id", "=", r.workspaceId).where("state", "in", LIVE_STATES));
+    const ws = await db.get(db.k.selectFrom("workspaces").select(["id", "remote_call_id"]).where("id", "=", r.workspaceId).where("state", "in", LIVE_STATES));
     if (!ws) throw new BuildError(409, `workspace ${r.workspaceId} is not live`);
     const id = await enqueueCall(db, {
       promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, askedModel: r.model, items: r.items, level: r.level ?? 2, maxAttempts: r.maxAttempts ?? 1,
@@ -69,6 +70,12 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
         hints: { claude: { args: workspaceClaudeArgs(r, servers) } },
       },
     });
+    // Checked after the enqueue: a resumed job adopts its earlier call, which is then the one bound already.
+    const bound = ws.remote_call_id;
+    if (bound !== null && bound !== id && bound !== r.parentId) {
+      const other = await db.get(db.k.selectFrom("remote_calls").select("state").where("id", "=", bound).where("state", "in", ["queued", "leased"]));
+      if (other) throw new BuildError(409, `workspace ${ws.id} is in use by call ${bound}, which is ${other.state}`);
+    }
     await db.run(db.k.updateTable("workspaces").set({ remote_call_id: id, updated_at: new Date().toISOString() }).where("id", "=", ws.id));
     return id;
   });
