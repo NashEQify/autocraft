@@ -50,22 +50,8 @@ export const WITHDRAWN_OPTION: Option = { key: "withdrawn", label: "Withdrawn" }
 /**
  * A decision is snoozed while `snoozed_at` is set and the item has had no activity since: a GitHub comment or review, a pushed commit or force-push,
  * a decision comment or opinion, an operator conversation message. Evaluated at read time, so no writer has to clear it and a missed
- * clear is impossible. Use with the table unaliased (`decisions`).
+ * clear is impossible. `a` names the decisions table in the caller's query.
  */
-export const SNOOZED_SQL = (() => {
-  // The item itself, or for a duplicate-group decision any of its member items.
-  const onItem = (a: string): string => `((${a}.repo = decisions.repo AND ${a}.number = decisions.number)
-    OR EXISTS (SELECT 1 FROM dupe_group_items gi WHERE gi.decision_id = decisions.id AND gi.repo = ${a}.repo AND gi.number = ${a}.number))`;
-  return `(decisions.answer IS NULL AND decisions.snoozed_at IS NOT NULL AND NOT (
-  EXISTS (SELECT 1 FROM comments sc WHERE ${onItem("sc")} AND sc.created_at > decisions.snoozed_at)
-  OR EXISTS (SELECT 1 FROM pr_commits sp WHERE ${onItem("sp")} AND COALESCE(sp.first_seen_at, sp.committed_at) > decisions.snoozed_at)
-  OR EXISTS (SELECT 1 FROM item_activity sf WHERE ${onItem("sf")} AND sf.kind = 'force-push' AND sf.at > decisions.snoozed_at)
-  OR EXISTS (SELECT 1 FROM decision_comments sd WHERE sd.decision_id = decisions.id AND sd.at > decisions.snoozed_at)
-  OR EXISTS (SELECT 1 FROM decision_opinions so WHERE so.decision_id = decisions.id AND so.at > decisions.snoozed_at)
-  OR EXISTS (SELECT 1 FROM conversation_turns st WHERE ${onItem("st")} AND st.kind = 'operator' AND st.at > decisions.snoozed_at)))`;
-})();
-
-/** `SNOOZED_SQL` as an expression; `a` names the decisions table in the caller's query. */
 export function snoozedExpr(eb: kx.AnyEb, a = "decisions"): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb), c = (col: string) => eb.ref(`${a}.${col}`), at = c("snoozed_at");
   // The item itself, or for a duplicate-group decision any of its member items.

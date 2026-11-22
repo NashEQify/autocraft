@@ -165,7 +165,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     // Stage notes quote review reasons, verification summaries and fix-up reasons: staff only.
     stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: canSeeInternals(req) ? s.note : null })),
     discord: await discord.discordOf(db, repo, n),
-    comments: comments.map((x) => ({ ...x, kind: x.kind ?? "comment", at: x.at ?? "", author: x.author ?? "", body: x.body ?? "" })),
+    comments: comments.map((x) => ({ ...x, author: x.author ?? "", body: x.body ?? "" })),
     decisionIds, settled: unflagged(await settledOf(db, repo, n), await isQuiet(db, repo, n), !veil) as Item["settled"], priority: await priorityOf(db, repo, n),
     ...(it.kind === "pr" ? await prWork(db, repo, n, canSeeInternals(req)) : { verification: null, fixups: [], prBuild: null }),
     // The reviewer's reasons quote the patch, so viewers get the verdict only.

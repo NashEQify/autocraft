@@ -8,7 +8,7 @@ import { HttpError } from "./dash/server/util.ts";
 import { slugOf } from "./owners.ts";
 import { everySeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
-import { distinctFrom, jsonArrayLength, jsonEach, jsonText, jsonValid, nowParam, quote } from "./db/portable.ts";
+import { nowParam } from "./db/portable.ts";
 import * as kx from "./db/kx.ts";
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
@@ -26,10 +26,6 @@ export async function setMaintainerWrites(db: Db, on: boolean): Promise<boolean>
   else await db.run(db.k.deleteFrom("main.settings").where("key", "=", MAINTAINER_WRITES_KEY));
   return true;
 }
-
-/** SQL for the logins whose answers the pipeline acts on: operators, and maintainers while `maintainer_writes` is on. */
-export const SETTLER_LOGINS_SQL = `(SELECT login FROM main.access WHERE role = 'operator'
-  OR (role = 'maintainer' AND EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')))`;
 
 export async function settlerLogins(db: Db): Promise<Set<string>> {
   return new Set((await db.all(db.k.selectFrom((eb) => settlerLoginsQuery(eb).as("s")).select("s.login"))).map((r) => r.login));
@@ -59,8 +55,6 @@ export async function allAppIdentity(db: Db, repos: string[], m: SettleMemo = se
     return v;
   });
 }
-
-const WRITE = "('write', 'maintain', 'admin')";
 
 /** A cached write permission younger than PERM_READ_TTL, or an older one the memo holds; the write itself reads the live permission again. */
 async function cachedWrite(db: Db, login: string, repo: string, m: SettleMemo): Promise<boolean> {
@@ -114,42 +108,10 @@ export async function settlesNow(db: Db, login: string | null, repos: string[], 
   return m.operators!.has(login) || (m.maintainers!.has(login) && await canSettleCached(db, login, "maintainer", repos, m));
 }
 
-/**
- * SQL: `login` (an expression) is an operator, or a maintainer who settles on the repo expression (setting on, app identity, fresh cached write).
- * Binds `:settles_after` (settlesAfter): a cached write permission read before it is not fresh.
- */
-export const settlesLoginSql = (login: string, repo: string): string => `(${login} IN (SELECT login FROM main.access WHERE role = 'operator')
-  OR (${login} IN ${SETTLER_LOGINS_SQL}
-    AND EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')
-    AND EXISTS (SELECT 1 FROM main.repo_permissions rp WHERE rp.login = ${login} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}
-      AND rp.checked_at > :settles_after)))`;
-
-/** The named parameter settlesLoginSql binds, at `nowMs`. */
+/** The cutoff settlesLoginExpr reads a cached write permission against, at `nowMs`: one read before it is not fresh. */
 export const settlesAfter = (nowMs: number): { settles_after: string } => ({ settles_after: new Date(nowMs - PERM_READ_TTL).toISOString() });
 
-/** SQL: when the cached write permission that lets `login` settle on `repo` (expressions) was read; null for an operator, whose settling does not age. Freshness ends PERM_READ_TTL after it. */
-export const settlesCheckedAtSql = (login: string, repo: string): string => `(CASE WHEN ${login} IN (SELECT login FROM main.access WHERE role = 'operator') THEN NULL
-  ELSE (SELECT max(rp.checked_at) FROM main.repo_permissions rp WHERE rp.login = ${login} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}) END)`;
-
-/**
- * SQL condition on a decisions row (`a` is its table name or alias): a disputed answer never counts. Otherwise its answer counts because its answerer is an operator, or a
- * maintainer while `maintainer_writes` is on and every repo the decision covers (its own and its batch items') has the app's
- * identity, so its merge or close is made as that person. Checked wherever the pipeline reads answers.
- */
-export const settledBySql = (db: Db, a: string): string => `(${distinctFrom(db, `${a}.exec_state`, "'disputed'")} AND (${a}.answered_by IN (SELECT login FROM main.access WHERE role = 'operator')
-  OR (${a}.answered_by IN ${SETTLER_LOGINS_SQL}
-    AND (${a}.repo IS NOT NULL OR ${itemsCount(db, a)} > 0)
-    AND NOT EXISTS (SELECT 1 WHERE ${a}.repo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app'))
-    AND NOT EXISTS (SELECT 1 FROM ${itemsEach(db, a)}
-      WHERE ${jsonText(db, "j.value", "$.repo")} IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')))))`;
-
-/** The batch items of decisions row `a` as a FROM item `j` (none when `items` is not a JSON array). */
-const itemsEach = (db: Db, a: string): string => jsonEach(db, `CASE WHEN ${jsonValid(db, `${a}.items`)} THEN ${a}.items ELSE '[]' END`, "j");
-
-/** How many batch items decisions row `a` has. */
-const itemsCount = (db: Db, a: string): string => jsonArrayLength(db, `CASE WHEN ${jsonValid(db, `${a}.items`)} THEN ${a}.items ELSE '[]' END`);
-
-/** The same check for one loaded decision row. */
+/** settledByExpr's check for one loaded decision row. */
 export async function settledBy(db: Db, d: { answered_by: string | null; repo: string | null; items: string | null; exec_state?: string | null }, m: SettleMemo = settleMemo()): Promise<boolean> {
   if (!d.answered_by || d.exec_state === "disputed") return false;
   await roles(db, m);
@@ -160,34 +122,12 @@ export async function settledBy(db: Db, d: { answered_by: string | null; repo: s
   return await allAppIdentity(db, [...new Set([...(d.repo ? [d.repo] : []), ...items.map((i) => i.repo)])], m);
 }
 
-/**
- * SQL condition on a decisions row (`a`: its table name or alias): `login` with `role` settles it, as `canSettleCached` decides for one row. An operator
- * settles everything. A maintainer needs `maintainer_writes` on, and for the decision's repo and every batch item's repo the app's identity and a fresh
- * cached write permission. Anyone else settles nothing.
- */
-export function canSettleSql(db: Db, login: string, role: string, a = "decisions"): string {
-  if (role === "operator") return "TRUE";
-  if (role !== "maintainer") return "FALSE";
-  const me = `'${login.replace(/'/g, "''")}'`;
-  const fresh = quote(nowParam({ offsetMs: -PERM_READ_TTL }));
-  const ok = (repo: string): string => `(EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')
-    AND EXISTS (SELECT 1 FROM main.repo_permissions rp WHERE rp.login = ${me} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}
-      AND rp.checked_at > ${fresh}))`;
-  return `(EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')
-    AND (${a}.repo IS NOT NULL OR ${itemsCount(db, a)} > 0)
-    AND (${a}.repo IS NULL OR ${ok(`${a}.repo`)})
-    AND NOT EXISTS (SELECT 1 FROM ${itemsEach(db, a)}
-      WHERE ${jsonText(db, "j.value", "$.repo")} IS NOT NULL AND NOT ${ok(jsonText(db, "j.value", "$.repo"))}))`;
-}
-
-// Typed twins of the SQL fragments above, for queries built with `db.k`.
-
 const WRITE_PERMISSIONS = ["write", "maintain", "admin"];
 
 /** The logins of operators. */
 const operatorLogins = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("main.access").select("login").where("role", "=", "operator");
 
-/** `SETTLER_LOGINS_SQL`: operators, and maintainers while `maintainer_writes` is on. */
+/** The logins whose answers the pipeline acts on: operators, and maintainers while `maintainer_writes` is on. */
 const settlerLoginsQuery = (eb: kx.AnyEb) => {
   const t = kx.schemaEb(eb);
   return t.selectFrom("main.access").select("login").where((w) => w.or([w("role", "=", "operator"), w.and([w("role", "=", "maintainer"),
@@ -201,7 +141,7 @@ const appIdentity = (eb: kx.AnyEb) =>
 /** The `items` of decisions row `a` when it is a JSON array, else `[]`. */
 const itemsJson = (db: Db, eb: kx.AnyEb, a: string) => eb.case().when(kx.jsonValid(db, `${a}.items`)).then(eb.ref(`${a}.items`)).else(eb.val("[]")).end();
 
-/** `settlesLoginSql` as an expression; `nowMs` takes the place of the bound `:settles_after` (settlesAfter). */
+/** `login` is an operator, or a maintainer who settles on `repo` (setting on, app identity, a cached write permission read after settlesAfter(nowMs)). */
 export function settlesLoginExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex, nowMs: number): AliasableExpression<SqlBool> {
   const l = kx.exprOf(eb, login);
   return eb.or([eb(l, "in", operatorLogins(eb)), eb.and([eb(l, "in", settlerLoginsQuery(eb)), appIdentity(eb),
@@ -209,7 +149,7 @@ export function settlesLoginExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex, nowMs:
       .where("rp.permission", "in", WRITE_PERMISSIONS).where("rp.checked_at", ">", settlesAfter(nowMs).settles_after))])]);
 }
 
-/** `settlesCheckedAtSql` as an expression. */
+/** When the cached write permission that lets `login` settle on `repo` (expressions) was read; null for an operator, whose settling does not age. Freshness ends PERM_READ_TTL after it. */
 export function settlesCheckedAtExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex): AliasableExpression<string | null> {
   const l = kx.exprOf(eb, login);
   return eb.case().when(l, "in", operatorLogins(eb)).then(eb.lit(null))
@@ -217,7 +157,11 @@ export function settlesCheckedAtExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex): A
       .where("rp.repo", "=", kx.exprOf(eb, repo)).where("rp.permission", "in", WRITE_PERMISSIONS)).end();
 }
 
-/** `settledBySql` as an expression (`a`: the decisions table name or alias in the caller's query). */
+/**
+ * Condition on a decisions row (`a` is its table name or alias): a disputed answer never counts. Otherwise its answer counts because its answerer is an operator, or a
+ * maintainer while `maintainer_writes` is on and every repo the decision covers (its own and its batch items') has the app's
+ * identity, so its merge or close is made as that person. Checked wherever the pipeline reads answers.
+ */
 export function settledByExpr(db: Db, eb: kx.AnyEb, a: string): AliasableExpression<SqlBool> {
   const c = (col: string) => eb.ref(`${a}.${col}`);
   return eb.and([eb(c("exec_state"), "is distinct from", "disputed"), eb.or([eb(c("answered_by"), "in", operatorLogins(eb)), eb.and([
@@ -229,7 +173,11 @@ export function settledByExpr(db: Db, eb: kx.AnyEb, a: string): AliasableExpress
   ])])]);
 }
 
-/** `canSettleSql` as an expression. */
+/**
+ * Condition on a decisions row (`a`: its table name or alias): `login` with `role` settles it, as `canSettleCached` decides for one row. An operator
+ * settles everything. A maintainer needs `maintainer_writes` on, and for the decision's repo and every batch item's repo the app's identity and a fresh
+ * cached write permission. Anyone else settles nothing.
+ */
 export function canSettleExpr(db: Db, eb: kx.AnyEb, login: string, role: string, a = "decisions"): AliasableExpression<SqlBool> {
   if (role === "operator") return eb.lit(true);
   if (role !== "maintainer") return eb.lit(false);

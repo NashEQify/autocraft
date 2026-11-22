@@ -221,9 +221,11 @@ export interface ChangedFile {
 export interface ItemComment {
   id: string;
   author: string;
-  at: string;
+  /** Null when the mirror has no creation time for it. */
+  at: string | null;
   body: string;
-  kind: "comment" | "review";
+  /** Null when the mirror did not record the kind. */
+  kind: "comment" | "review" | null;
   /** reviews: APPROVED | CHANGES_REQUESTED | COMMENTED */
   reviewState: string | null;
 }

@@ -19,7 +19,7 @@ async function small(dialect: Dialect, fn: (db: Db) => Promise<unknown>): Promis
   const t = await testDatabase("", dialect);
   try {
     const db = await t.open();
-    const ci = dialect === "postgres" ? "citext" : "TEXT COLLATE NOCASE";
+    const ci = dialect === "postgres" ? 'citext COLLATE "C"' : "TEXT COLLATE NOCASE";
     if (dialect === "postgres") await db.script("CREATE EXTENSION IF NOT EXISTS citext");
     await db.script(`
       CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, login ${ci}, j TEXT, n INTEGER, m INTEGER);
@@ -150,7 +150,7 @@ both("NULL order, IS DISTINCT FROM, scalar greatest/least and ordered group conc
     ids(await db.all(k(db).selectFrom("t").select("id").orderBy("n", (o) => o.desc().nullsLast()))),
     ids(await db.all(k(db).selectFrom("t").select("id").where("n", "is distinct from", 3).orderBy("id"))),
     ids(await db.all(k(db).selectFrom("t").select("id").where("n", "is not distinct from", null))),
-    await db.all(k(db).selectFrom("t").select((eb) => [kx.greatest(db, "n", "m", eb.val(5)).as("g"), kx.least(db, "n", "m").as("l")]).orderBy("id")),
+    await db.all(k(db).selectFrom("t").select((eb) => [kx.greatest(db, ["n", "m", eb.val(5)]).as("g"), kx.least(db, ["n", "m"]).as("l")]).orderBy("id")),
     await db.get(k(db).selectFrom("t").select([kx.groupConcat(db, "name", "|", "id", "desc").as("names"), kx.groupConcat(db, "n", ",", "n").as("ns")])),
   ];
   assert.deepEqual(out, [[2, 1, 3], [3, 1, 2], [2, 3], [2], [{ g: 7, l: 3 }, { g: null, l: null }, { g: null, l: null }], { names: "a\\b|Bob|alice", ns: "3,9" }]);

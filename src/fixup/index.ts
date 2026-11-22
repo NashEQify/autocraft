@@ -429,9 +429,15 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       wake = [];
       for (const r of w) r();
     };
-    if (await pushesUnsettled(db, repo, log)) { giveBack(); return; }
-    const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
-    if (!release) { giveBack(); return; }
+    // Every exit before the lease is held, a throw included, gives the unit back here; after it, the finally below does.
+    let release: (() => Promise<void>) | null = null;
+    try {
+      if (await pushesUnsettled(db, repo, log)) return;
+      release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
+    } finally {
+      if (!release) giveBack();
+    }
+    if (!release) return;
     const ref = refOf(c);
     let files = [...new Set(c.fixes.map((f) => f.file))];
     const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
@@ -625,8 +631,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (isHalt(e)) throw e;
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
-      await release();
-      giveBack();
+      try { await release(); } finally { giveBack(); }
     }
   };
   // Items of one PR run one after the other inside one pool item; PRs run side by side.

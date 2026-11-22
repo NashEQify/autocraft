@@ -3,12 +3,11 @@
 // decisions.exec_state; the pipeline reads a disputed answer as no answer (see settlers.ts).
 import { BACKLOG, getDecision, optionsOf, type DecisionRow, type Kind } from "../decisions.ts";
 import { audit } from "../dash/audit.ts";
-import { settledBy, settledByExpr, settledBySql } from "../settlers.ts";
+import { settledBy, settledByExpr } from "../settlers.ts";
 import { writeEffect } from "../act/index.ts";
 import { queuePlace } from "../conversations/queue.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
-import { ciEq, distinctFrom } from "../db/portable.ts";
 import * as kx from "../db/kx.ts";
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
@@ -19,27 +18,19 @@ export const DISPUTED = "disputed";
 export const RUNNING_STALE_MS = 10 * 60_000;
 
 /**
- * SQL: the lock of `t` (a decisions table or alias) is live: its card is still running and not stale, or is queued for room under the
+ * The lock of `t` (the decisions table name or alias in the caller's query) is live: its card is still running and not stale, or is queued for room under the
  * daily GitHub write limit. A lock whose card ended or died counts for nothing, so no path has to clear it for the decision to be answerable.
  */
-export const lockLiveSql = (t = "decisions", now: Date = new Date()): string =>
-  // CASE, not AND: in a select list SQLite evaluates both sides of AND, and the card scan would run for every row.
-  `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN EXISTS (SELECT 1 FROM main.conversation_cards lc WHERE (lc.state = 'queued' OR (lc.state = 'running' AND lc.acted_at > '${new Date(now.getTime() - RUNNING_STALE_MS).toISOString()}')) AND ${t}.exec_reason LIKE lc.id || ':%') ELSE FALSE END)`;
-
-/** `lockLiveSql` as an expression (`t`: the decisions table name or alias in the caller's query). */
 export function lockLiveExpr(db: Db, eb: kx.AnyEb, t = "decisions", now: Date = new Date()): AliasableExpression<SqlBool> {
   const since = new Date(now.getTime() - RUNNING_STALE_MS).toISOString();
+  // CASE, not AND: in a select list SQLite evaluates both sides of AND, and the card scan would run for every row.
   return eb.case().when(eb.ref(`${t}.exec_state`), "=", SETTLING).then(eb.exists(kx.schemaEb(eb).selectFrom("main.conversation_cards as lc").select(eb.lit(1).as("one"))
     .where((w) => w.or([w("lc.state", "=", "queued"), w.and([w("lc.state", "=", "running"), w("lc.acted_at", ">", since)])]))
     .where(kx.like(db, eb.ref(`${t}.exec_reason`), eb(eb.ref("lc.id"), "||", eb.val(":%"))))))
     .else(eb.lit(false)).end();
 }
 
-/** SQL: when the running card that holds the lock of `t` started (its lock is not live from RUNNING_STALE_MS later); null when no running card holds it. */
-export const lockRunningAtSql = (t = "decisions"): string =>
-  `(CASE WHEN ${t}.exec_state = '${SETTLING}' THEN (SELECT max(lc.acted_at) FROM main.conversation_cards lc WHERE lc.state = 'running' AND ${t}.exec_reason LIKE lc.id || ':%') END)`;
-
-/** `lockRunningAtSql` as an expression. */
+/** When the running card that holds the lock of `t` started (its lock is not live from RUNNING_STALE_MS later); null when no running card holds it. */
 export function lockRunningAtExpr(db: Db, eb: kx.AnyEb, t = "decisions"): AliasableExpression<string | null> {
   return eb.case().when(eb.ref(`${t}.exec_state`), "=", SETTLING).then(kx.schemaEb(eb).selectFrom("main.conversation_cards as lc").select((s) => s.fn.max("lc.acted_at").as("at"))
     .where("lc.state", "=", "running").where(kx.like(db, eb.ref(`${t}.exec_reason`), eb(eb.ref("lc.id"), "||", eb.val(":%"))))).end();
@@ -146,22 +137,10 @@ export async function clearDispute(db: Db, id: string): Promise<void> {
 }
 
 /**
- * SQL (decisions unaliased): an answered, unapplied decision the viewer has to look at: a disputed one (the answerer, or any operator), or one an
+ * An answered, unapplied decision the viewer has to look at: a disputed one (the answerer, or any operator), or one an
  * operator has to reassign because its answerer no longer settles and its option writes to GitHub.
+ * `a` names the decisions table in the caller's query.
  */
-export function heldOpenSql(db: Db, login: string, operator: boolean): string {
-  const me = `'${login.replace(/'/g, "''")}'`;
-  const writes = `((decisions.answer = 'close' AND decisions.kind IN ('scope', 'close', 'duplicate', 'merge', 'hold')) OR (decisions.answer = 'merge' AND decisions.kind = 'merge')
-    OR (decisions.kind = 'duplicate' AND (decisions.answer = 'accept' OR decisions.answer LIKE 'keep:%')))`;
-  // An open decision whose queued press someone disputed: the presser and operators look at it.
-  const queuedDispute = `(decisions.answer IS NULL AND decisions.exec_state = '${SETTLING}' AND EXISTS (SELECT 1 FROM main.conversation_cards hc WHERE hc.state = 'queued' AND hc.dispute_by IS NOT NULL
-    AND decisions.exec_reason LIKE hc.id || ':%' AND ${operator ? "TRUE" : ciEq(db, "hc.acted_by", me)}))`;
-  return `(${queuedDispute} OR decisions.answer IS NOT NULL AND decisions.applied_at IS NULL AND decisions.answer <> '${BACKLOG.key}' AND decisions.id NOT LIKE '%~replaced-%'
-    AND ((decisions.exec_state = '${DISPUTED}' AND ${operator ? "TRUE" : ciEq(db, "decisions.answered_by", me)})
-      OR (${operator ? "TRUE" : "FALSE"} AND ${distinctFrom(db, "decisions.exec_state", `'${DISPUTED}'`)} AND decisions.answered_by IS NOT NULL AND decisions.answered_by <> 'pipeline' AND ${writes} AND NOT ${settledBySql(db, "decisions")})))`;
-}
-
-/** `heldOpenSql` as an expression; `a` names the decisions table in the caller's query. */
 export function heldOpenExpr(db: Db, eb: kx.AnyEb, login: string, operator: boolean, a = "decisions"): AliasableExpression<SqlBool> {
   const t = kx.schemaEb(eb);
   const c = (col: string) => eb.ref(`${a}.${col}`);

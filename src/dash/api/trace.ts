@@ -14,7 +14,7 @@ import { detailOf } from "./github-detail.ts";
 import { canSeeInternals } from "./staff.ts";
 import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import { reasonsFor, waitFor, type Reader } from "./reader.ts";
-import { filtered, hiddenTest, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
+import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { ownLogins } from "../../github/identity.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
 import type { AliasedExpression, AliasableExpression, SelectQueryBuilder, SqlBool } from "kysely";
@@ -87,7 +87,7 @@ const github: Source = {
       out.push(commentEvent(c, own));
     }
     for (const c of await db.all(db.k.selectFrom("pr_commits")
-      .select((eb) => ["oid", kx.least<string>(db, "committed_at", eb.fn.coalesce("first_seen_at", "committed_at")).as("committed_at"), "author"])
+      .select((eb) => ["oid", kx.least<string>(db, ["committed_at", eb.fn.coalesce("first_seen_at", "committed_at")], "text").as("committed_at"), "author"])
       .where("repo", "=", repo).where("number", "=", n)
       .$narrowType<{ committed_at: string }>())) {
       // Our own commits are shown by their audit rows.
@@ -135,12 +135,7 @@ const jobs: Source = {
     .select(["ji.id", "ji.job_id", "ji.outcome", "ji.at", "j.step", "j.state", "j.error"]).where("ji.repo", "=", repo).where("ji.number", "=", n))).map(jobEvent),
 };
 
-/** SQL that leaves out runs that also touched a hidden repo (one `?` per name). */
-export const hiddenSql = (hidden: HiddenRepos): string => (filtered(hidden) ? ` AND NOT EXISTS (SELECT 1 FROM agent_run_items x WHERE x.run_id = r.id AND ${hiddenTest("x.repo", hidden).sql})` : "");
-/** The `?` arguments of `hiddenSql`. */
-export const hiddenArgs = (hidden: HiddenRepos): string[] => (filtered(hidden) ? hiddenTest("x.repo", hidden).args : []);
-
-/** `hiddenSql` as an expression on the run `r` (without the leading AND); null when nothing is hidden. */
+/** Leaves out runs `r` that also touched a hidden repo; null when nothing is hidden. */
 export const hiddenExpr = (db: Db, eb: kx.Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> | null => (filtered(hidden)
   ? eb.not(eb.exists(db.k.selectFrom("agent_run_items as x").select(eb.lit(1).as("one")).where("x.run_id", "=", eb.ref("r.id")).where(hiddenTestExpr(db, "x.repo", hidden))))
   : null);
@@ -148,9 +143,7 @@ export const hiddenExpr = (db: Db, eb: kx.Eb, hidden: HiddenRepos): AliasableExp
 /** Prompts whose calls are named by what they do, not by the step that makes them. */
 const PROMPT_TITLES: Record<string, string> = { "lint.reference.jev": "Reference lint", "lint.reference.haiku": "Reference lint" };
 
-export const RUN_COLUMNS = `r.id, r.step, r.prompt_id, r.model, r.provider, r.state, r.started_at, r.ended_at, r.input_tokens, r.output_tokens, r.cost_usd, r.summary, r.job_id, r.user_login, r.harness, r.reported_model,
-       COALESCE(a.label, r.account_id) AS label, (SELECT COUNT(*) FROM agent_run_tools t WHERE t.run_id = r.id) AS tools`;
-/** `RUN_COLUMNS` as selections on `r` (agent_runs) and `a` (claude_accounts, left joined): `.select((eb) => runColumnsExpr(db, eb))`. */
+/** The event columns of a run, as selections on `r` (agent_runs) and `a` (claude_accounts, left joined): `.select((eb) => runColumnsExpr(db, eb))`. */
 export const runColumnsExpr = (db: Db, eb: kx.Eb) => [
   "r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd",
   "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",

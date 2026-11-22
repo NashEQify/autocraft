@@ -151,7 +151,7 @@ Asks the operator for a scope call on open items that either carry the needs-dec
 
 Model: Opus. Daily limit 100.
 
-**Snooze.** An operator can snooze an open decision (`POST /api/decisions/<id>/snooze` with `{on}`). It stays open and the pipeline keeps waiting; the inbox (`status=open`) and the Needs-you counts leave it out and `status=snoozed` lists it, until the item has activity after the snooze: a GitHub comment or review, a pushed commit, a decision comment or opinion, an operator conversation message. This is computed when read (`SNOOZED_SQL`), so no writer clears it. The columns are not part of the `decisions` live topic; `decision-snooze` reports them and is not planner input.
+**Snooze.** An operator can snooze an open decision (`POST /api/decisions/<id>/snooze` with `{on}`). It stays open and the pipeline keeps waiting; the inbox (`status=open`) and the Needs-you counts leave it out and `status=snoozed` lists it, until the item has activity after the snooze: a GitHub comment or review, a pushed commit, a decision comment or opinion, an operator conversation message. This is computed when read (`snoozedExpr` in src/decisions.ts), so no writer clears it. The columns are not part of the `decisions` live topic; `decision-snooze` reports them and is not planner input.
 
 **Handled answer.** An operator can answer any single-item decision with `handled` and a required note (up to 500 characters): the decision closes, nothing is written to GitHub and no step acts on it. It counts as applied at once and Undo still works.
 

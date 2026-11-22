@@ -12,7 +12,7 @@ import { resetGroupAnswer } from "../../dupes/decide.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
 import { conversationOf, insertTurn, systemBlock } from "../../conversations/store.ts";
 import { blocksFacts, blocksIndex } from "../../review/blockers.ts";
-import { BACKLOG, BACKLOG_KIND, BACKLOG_QUESTION, backlogDecisionId, HANDLED, isBacklog, SNOOZED_SQL, snoozedExpr, replaceProposedCards, WITHDRAWN_OPTION, backlogOpen, exceptionsOf, factsOf, getDecision, isBatch, itemsOf, KINDS, optionsOf, reposOf, type DecisionRow, type Exception } from "../../decisions.ts";
+import { BACKLOG, BACKLOG_KIND, BACKLOG_QUESTION, backlogDecisionId, HANDLED, isBacklog, snoozedExpr, replaceProposedCards, WITHDRAWN_OPTION, backlogOpen, exceptionsOf, factsOf, getDecision, isBatch, itemsOf, KINDS, optionsOf, reposOf, type DecisionRow, type Exception } from "../../decisions.ts";
 import { commentPreview, writeEffect } from "../../act/index.ts";
 import { optionTextsMany, optionTextsOf, textsFor, textsHash } from "../../dupes/texts.ts";
 import { audit } from "../audit.ts";
@@ -20,7 +20,7 @@ import { heldLookup, type Held } from "../../runner/autopilot.ts";
 import { queuePlace, queueReason } from "../../conversations/queue.ts";
 import { initExecState, resetActTries, retryDecision } from "../../github/user-lane.ts";
 import { inActiveBatch, mergeRunning } from "../../preapproval/index.ts";
-import { clearDispute, DISPUTED, heldOpenSql, heldOpenExpr, lockLiveExpr, isDisputed, openDispute, queuedLock, lockMessage, settlingBy } from "../../answers/hold.ts";
+import { clearDispute, DISPUTED, heldOpenExpr, lockLiveExpr, isDisputed, openDispute, queuedLock, lockMessage, settlingBy } from "../../answers/hold.ts";
 import { randomToken } from "../server/crypto.ts";
 import { HttpError, type RateLimiter } from "../server/util.ts";
 import type { Req } from "../types.ts";
@@ -28,10 +28,10 @@ import { areaNameOf } from "../../areas/store.ts";
 import { queueSlots } from "../../rank/position.ts";
 import { hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { backlogHeld } from "../../dupes/held.ts";
-import { filtered, hiddenTest, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
+import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
-import { canSettleCached, canSettleSql, canSettleExpr, requireSettle, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
+import { canSettleCached, canSettleExpr, requireSettle, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
 import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
 
@@ -52,7 +52,6 @@ import type { DB } from "../../db/types.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Eb } from "../../db/kx.ts";
-import { jsonEach, jsonText, jsonValid } from "../../db/portable.ts";
 
 const json = <T>(s: string | null | undefined, d: T): T => {
   if (!s) return d;
@@ -458,28 +457,7 @@ const concat = (eb: Eb, ...parts: Expression<unknown>[]): AliasableExpression<st
 
 const list = (req: Req, key: string): string[] => req.query.getAll(key).flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean);
 
-// Decisions touching any of the given repos: the decision's own repo, or an item of a batch.
-export function inRepos(db: Db, prefix: string, repos: string[], params: Record<string, string>): string {
-  const names = repos.map((r, k) => {
-    params[`${prefix}${k}`] = r;
-    return `:${prefix}${k}`;
-  }).join(",") || "NULL";
-  return `(COALESCE(repo IN (${names}), FALSE) OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "j")}
-    WHERE ${jsonText(db, "j.value", "$.repo")} IN (${names})))`;
-}
-
-/** SQL that leaves out decisions touching a hidden repo (the decision's own, or an item of a batch); null when nothing is hidden. */
-export function withoutHidden(db: Db, hidden: HiddenRepos, params: Record<string, string>): string | null {
-  if (!filtered(hidden)) return null;
-  const bind = (h: { sql: string; args: string[] }): string => { let k = 0; return h.sql.replace(/\?/g, () => { params[`hd${k}`] = h.args[k]!; return `:hd${k++}`; }); };
-  if (!hidden.visible) return `NOT ${inRepos(db, "hd", hidden, params)}`;
-  // Allow-list: a decision is shown only when every repo it names (its own, and each item of a batch) is one the viewer may see.
-  const own = bind(hiddenTest("repo", hidden));
-  const member = bind(hiddenTest(`${jsonText(db, "j.value", "$.repo")}`, hidden));
-  return `NOT ((repo IS NOT NULL AND ${own}) OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "items")} THEN items ELSE '[]' END`, "j")} WHERE ${jsonText(db, "j.value", "$.repo")} IS NOT NULL AND ${member}))`;
-}
-
-/** `withoutHidden` as an expression on decisions (unaliased `repo` and `items`); null when nothing is hidden. */
+/** Leaves out decisions touching a hidden repo (the decision's own, or an item of a batch), on decisions with unaliased `repo` and `items`; null when nothing is hidden. */
 export function withoutHiddenExpr(db: Db, eb: Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> | null {
   if (!filtered(hidden)) return null;
   const items = eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end();
@@ -500,7 +478,7 @@ export function withoutHiddenExpr(db: Db, eb: Eb, hidden: HiddenRepos): Aliasabl
   ]));
 }
 
-/** `inRepos` as an expression on decisions. */
+/** Decisions touching any of the given repos: the decision's own repo, or an item of a batch. */
 function inReposExpr(db: Db, eb: Eb, repos: string[]): AliasableExpression<SqlBool> {
   const items = eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end();
   return eb.or([
@@ -510,17 +488,9 @@ function inReposExpr(db: Db, eb: Eb, repos: string[]): AliasableExpression<SqlBo
 }
 
 /**
- * SQL for the decisions a person has to look at (decisions unaliased): open ones they can settle, plus the disputes and unsettled answers they resolve
+ * The decisions a person has to look at (decisions unaliased): open ones they can settle, plus the disputes and unsettled answers they resolve
  * (src/answers/hold.ts). `everything` leaves out the can-settle test, for a view of all open questions; viewers always get it.
  */
-export function needingSql(db: Db, req: Req, everything = false): string {
-  // A viewer settles nothing, so a can-settle default would leave them an empty list: they read every question they may see.
-  everything ||= req.user.role === "viewer";
-  const open = `answer IS NULL AND NOT ${SNOOZED_SQL}${everything ? "" : ` AND ${canSettleSql(db, req.user.login, req.user.role)}`}`;
-  return `((${open}) OR ${heldOpenSql(db, req.user.login, isOperator(req))})`;
-}
-
-/** `needingSql` as an expression on unaliased `decisions`. */
 export function needingExpr(db: Db, eb: Eb, req: Req, everything = false): AliasableExpression<SqlBool> {
   everything ||= req.user.role === "viewer";
   const open = [eb("decisions.answer", "is", null), eb.not(snoozedExpr(eb)), ...(everything ? [] : [canSettleExpr(db, eb, req.user.login, req.user.role)])];
