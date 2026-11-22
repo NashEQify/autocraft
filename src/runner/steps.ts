@@ -12,6 +12,7 @@ import { featureOn } from "../build/features.ts";
 import { envVar } from "../env.ts";
 import { stageOfStep } from "../stages/registry.ts";
 import { stepDeadlineMin } from "./deadlines.ts";
+import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
@@ -520,6 +521,27 @@ export const STEPS: StepDef[] = [
       ctx.usageRun(r.runId);
       ctx.handled(r.changed);
       return `${r.looked} pending: ${r.passed} passed, ${r.opened} PRs opened, ${r.failedRounds} failed rounds, ${r.failed} failed, ${r.retried} retried`;
+    },
+  },
+  {
+    name: "workspace-try",
+    priority: 1,
+    title: "Workspace session",
+    description: "An operator's test of a model session in a workspace pod: creates the workspace (or takes a live one), waits for it to be ready, runs one session with the implementation model through the workspace tools, and logs the outcome, cost, tool calls, shell time and the diff stat. Started only with `workspace try` on the command line; nothing goes to GitHub.",
+    stage: runStage("workspace-try"),
+    requires: "operator",
+    models: [CLAUDE_PROMPTS["fixissue.patch"].models[0]],
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "session", label: "Session", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the session row `workspace try` created" },
+    ],
+    check: async (db, p) => {
+      const { checkTrySession } = await import("../build/workspace-session.ts");
+      return await checkTrySession(db, p);
+    },
+    run: async (ctx) => {
+      const { runTrySession } = await import("../build/workspace-session.ts");
+      return await runTrySession(ctx);
     },
   },
   {

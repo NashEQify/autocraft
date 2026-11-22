@@ -506,7 +506,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   step TEXT NOT NULL,
   params TEXT NOT NULL,               -- JSON object, validated
-  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot) or 'cli'
+  requested_by TEXT NOT NULL,         -- login, 'pipeline' (autopilot), 'cli' (a command-line run) or 'cli-queue' (queued by a command)
   requested_at TEXT NOT NULL,
   state TEXT NOT NULL,                -- queued | running | done | failed | cancelled
   started_at TEXT, ended_at TEXT,
@@ -1102,6 +1102,29 @@ CREATE TABLE IF NOT EXISTS workspace_calls (
   run_id INTEGER                      -- a session's call: the agent run of the lease it came from
 );
 CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, id);
+
+-- A model session in a workspace (src/build/workspace-session.ts): what it was asked, where it ran and how it ended.
+-- `prompt` is operator text: it goes only into the session's model call, never into job params or logs.
+CREATE TABLE IF NOT EXISTS workspace_sessions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT,                          -- what the session is for: try (an operator's test session)
+  repo TEXT NOT NULL,
+  base_sha TEXT NOT NULL,
+  item INTEGER NOT NULL,              -- the issue or PR in repo the session works for
+  prompt TEXT,
+  env_id TEXT NOT NULL,               -- the kubernetes environment of a workspace the session creates
+  keep INTEGER NOT NULL DEFAULT 0,    -- 1: the workspace stays live after the session
+  deadline_sec INTEGER NOT NULL,      -- the session call's time limit
+  state TEXT NOT NULL DEFAULT 'queued', -- queued | starting | running | done | failed
+  outcome TEXT,                       -- one line once it ended
+  workspace_id INTEGER,               -- given, or set when the job creates the workspace
+  remote_call_id INTEGER,
+  job_id INTEGER,
+  requested_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+);
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);
 CREATE INDEX IF NOT EXISTS build_tasks_ended ON build_tasks(ended_at);
 

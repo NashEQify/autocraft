@@ -2128,6 +2128,27 @@ export interface WorkspaceCalls {
   run_id: number | null;
 }
 
+export interface WorkspaceSessions {
+  id: Generated<number>;
+  kind: string | null;
+  repo: string;
+  base_sha: string;
+  item: number;
+  prompt: string | null;
+  env_id: string;
+  keep: Generated<number>;
+  deadline_sec: number;
+  state: Generated<string>;
+  outcome: string | null;
+  workspace_id: number | null;
+  remote_call_id: number | null;
+  job_id: number | null;
+  requested_by: string;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
 export interface Workspaces {
   id: Generated<number>;
   repo: string;
@@ -2331,6 +2352,7 @@ export interface DB {
   whitelist_overrides: WhitelistOverrides;
   work_leases: WorkLeases;
   workspace_calls: WorkspaceCalls;
+  workspace_sessions: WorkspaceSessions;
   workspaces: Workspaces;
   "main.access": Access;
   "main.account_usage_samples": AccountUsageSamples;
@@ -2507,6 +2529,7 @@ export interface DB {
   "main.whitelist_overrides": WhitelistOverrides;
   "main.work_leases": WorkLeases;
   "main.workspace_calls": WorkspaceCalls;
+  "main.workspace_sessions": WorkspaceSessions;
   "main.workspaces": Workspaces;
 }
 
@@ -2687,5 +2710,6 @@ export const COLUMNS = {
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
+  workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "created_at", "updated_at", "ended_at"],
   workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id"],
 } as const;

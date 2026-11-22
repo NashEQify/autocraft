@@ -3,7 +3,8 @@
 //   requested  → starting  volume and pod created when a workspace slot is free
 //   starting   → seeding   the pod runs and its container is ready; the node is recorded
 //   seeding    → ready     `git archive <base_sha>` from AutoCraft's clone streamed into `ws untar`, which commits it
-//   ready      → parked    no call for IDLE_PARK_MS: checkpoint, pod deleted, volume kept (PARKED_VOLUME_MS, then deleted)
+//   ready      → parked    no call for IDLE_PARK_MS and no bound remote call queued or leased: checkpoint, pod deleted,
+//                          volume kept (PARKED_VOLUME_MS, then deleted)
 //   any live   → failed    the pod could not start or seed, or passed its time limit; pod and volume deleted
 //   ended                  set by whoever is done with it; the pass deletes pod and volume
 // While ready, a checkpoint (`git diff --binary` against the base commit) is stored every CHECKPOINT_EVERY_MS. Seeding,
@@ -66,6 +67,13 @@ const clean = (s: string | undefined): string => (s ?? "").replace(/[\u0000-\u00
 const errText = (e: unknown): string => clean(e instanceof Error ? e.message : String(e));
 
 export async function workspacePass(d: LauncherDeps, state: WorkspaceState): Promise<void> {
+  try {
+    // Loaded here: the session module imports this one.
+    const { sweepSessions } = await import("./workspace-session.ts");
+    await sweepSessions(d.db, d.log);
+  } catch (e) {
+    d.log(`workspace launcher: session sweep: ${(e as Error).stack ?? e}`);
+  }
   const api = d.api;
   if (!api) return;
   const envs = await d.db.all(d.db.k.selectFrom("build_envs").select(["id", "enabled", "settings"]).where("kind", "=", "kubernetes").orderBy("id"));
@@ -276,7 +284,7 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   }
   // ready
   const lastCall = Math.max(Date.parse(w.state_at), w.last_call_at ? Date.parse(w.last_call_at) : 0);
-  if (now - lastCall > IDLE_PARK_MS && !await callRunning(c, w.id, now)) return background(c, w.id, () => park(c, w.id));
+  if (now - lastCall > IDLE_PARK_MS && !await callRunning(c, w.id, now) && !await sessionLive(c, w)) return background(c, w.id, () => park(c, w.id));
   const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, c.state.checkpointTried.get(w.id) ?? 0);
   if (now - lastCheckpoint > CHECKPOINT_EVERY_MS) {
     c.state.checkpointTried.set(w.id, now);
@@ -289,6 +297,13 @@ async function callRunning(c: Ctx, id: number, now: number): Promise<boolean> {
   const { db } = c.d;
   return !!await db.get(db.k.selectFrom("workspace_calls").select(["id"]).where("workspace_id", "=", id).where("state", "=", "running")
     .where("deadline_at", ">", new Date(now).toISOString()).limit(1));
+}
+
+/** Whether the remote call bound to the workspace is queued or leased: its session may still make tool calls. */
+async function sessionLive(c: Ctx, w: WorkspaceRow): Promise<boolean> {
+  if (w.remote_call_id === null) return false;
+  const { db } = c.d;
+  return !!await db.get(db.k.selectFrom("remote_calls").select("id").where("id", "=", w.remote_call_id).where("state", "in", ["queued", "leased"]));
 }
 
 /** The pod went away. A ready workspace keeps its volume and checkpoint (parked, for a resume); an earlier one failed. */

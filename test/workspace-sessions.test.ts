@@ -1,0 +1,42 @@
+// The workspace session sweep: a session whose job ended without ending it is failed and its workspace ended unless
+// kept; a session whose job is queued to resume, or still runs, is left alone.
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { sweepSessions } from "../src/build/workspace-session.ts";
+import { connectDb } from "../src/db/open.ts";
+import { SCRATCH } from "./scratch.ts";
+
+mkdirSync(SCRATCH, { recursive: true });
+const dir = mkdtempSync(join(SCRATCH, "workspace-sessions-"));
+const db = await connectDb(join(dir, "t.db"));
+after(async () => {
+  await db.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("sessions of ended jobs fail and end their workspace unless kept; resuming jobs keep theirs", async () => {
+  const at = new Date().toISOString();
+  const session = async (jobState: string, keep: boolean) => {
+    const job = Number((await db.get(db.k.insertInto("jobs").values({ step: "workspace-try", params: "{}", requested_by: "cli-queue", requested_at: at, state: jobState, error: jobState === "failed" ? "stopped: ran past 160 min" : null }).returning("id")))!.id);
+    const ws = Number((await db.get(db.k.insertInto("workspaces").values({ repo: "app", base_sha: "a".repeat(40), env_id: "k", state: "ready", state_at: at, created_at: at, updated_at: at }).returning("id")))!.id);
+    const id = Number((await db.get(db.k.insertInto("workspace_sessions").values({
+      kind: "try", repo: "app", base_sha: "a".repeat(40), item: 1, prompt: "p", env_id: "k", keep: keep ? 1 : 0, deadline_sec: 600, state: "running",
+      workspace_id: ws, job_id: job, requested_by: "cli", created_at: at, updated_at: at,
+    }).returning("id")))!.id);
+    return { id, ws };
+  };
+  const stopped = await session("failed", false), kept = await session("cancelled", true), resuming = await session("queued", false), running = await session("running", false);
+
+  assert.equal(await sweepSessions(db), 2);
+  const state = async (s: { id: number; ws: number }) => ({
+    session: (await db.get(db.k.selectFrom("workspace_sessions").select("state").where("id", "=", s.id)))!.state,
+    workspace: (await db.get(db.k.selectFrom("workspaces").select("state").where("id", "=", s.ws)))!.state,
+  });
+  assert.deepEqual(await state(stopped), { session: "failed", workspace: "ended" });
+  assert.deepEqual(await state(kept), { session: "failed", workspace: "ready" }, "a kept workspace stays live");
+  assert.deepEqual(await state(resuming), { session: "running", workspace: "ready" }, "a job queued to resume keeps its session");
+  assert.deepEqual(await state(running), { session: "running", workspace: "ready" });
+  assert.equal(await sweepSessions(db), 0, "an ended session is not swept again");
+});
