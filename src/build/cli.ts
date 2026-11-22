@@ -22,7 +22,7 @@ const USAGE = `usage: autocraft-server envs list
            --cpu-request Q --cpu-limit Q --memory-request Q --memory-limit Q --ephemeral-request Q --ephemeral-limit Q
            --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
            --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
-           --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q
+           --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q --sccache-url URL|none
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
@@ -93,7 +93,7 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   "deadline-sec": "deadlineSec", "max-step-sec": "maxStepSec", "runtime-class": "runtimeClassName", arch: "arch",
   "workspace-slots": "workspaceSlots", "workspace-cpu-request": "workspaceCpuRequest", "workspace-cpu-limit": "workspaceCpuLimit",
   "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
-  "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage",
+  "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage", "sccache-url": "sccacheUrl",
 };
 
 /** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
@@ -102,7 +102,7 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
+    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : (key === "image" && v === "runner") || ((key === "runtimeClassName" || key === "sccacheUrl") && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
     const m = /^([^=]+)=(.+)$/.exec(opt.get("toolchain-image")!) ?? die("--toolchain-image takes NAME=REF or NAME=none");
@@ -119,7 +119,7 @@ const settingsLine = (s: KubeSettings): string =>
   `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
   `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
   `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
-  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage})`;
+  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}`;
 
 /** A yes|no option as a boolean; undefined when it is not given. */
 function yesNo(opt: Map<string, string>, name: string): boolean | undefined {

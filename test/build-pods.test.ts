@@ -1,7 +1,7 @@
 // Kubernetes build environments with a fake API: a queued task goes through its task, source, step and upload pods, the
 // runner reads the results from pod status, and the pod key can read the task but never report a result; a task whose
 // pod disappears or whose node is lost is requeued once, then failed; a claim that cannot start goes back to the queue;
-// a stage's pod that cannot be created is retried.
+// a stage's pod that cannot be created is retried; with a compile cache, only offline build steps read it, as CI would.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import { after, test } from "node:test";
 import { authenticate, createEnv } from "../src/build/envs.ts";
 import type { ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
+import { DEFAULT_SETTINGS, groupsOf, stepPod, type Prepared } from "../src/build/pods.ts";
 import { createTask, getTask } from "../src/build/tasks.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -258,4 +259,34 @@ test("a pod on a lost node loses its task", async () => {
   assert.equal(t.state, "failed");
   assert.match(t.summary ?? "", /stopped reporting/);
   assert.equal(kube.pods.size, 0);
+});
+
+test("with a compile cache, offline build steps read it at the CI runners' paths; fetch and bare steps never reach it", () => {
+  const s = { ...DEFAULT_SETTINGS, sccacheUrl: "http://cache.test:8080" };
+  const plan = [
+    { name: "fetch deps", cmd: ["cargo", "fetch"], network: "fetch" as const, timeoutSec: 600 },
+    { name: "build", cmd: ["cargo", "build"], network: "none" as const, timeoutSec: 600 },
+    { name: "format", cmd: ["cargo", "fmt"], network: "none" as const, timeoutSec: 600, bare: true },
+  ];
+  const gate: Prepared = { env: { CARGO_PROFILE_DEV_DEBUG: "0" }, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null, cacheVersion: "v2" };
+  const [fetchGroup, offlineGroup] = groupsOf(plan);
+  const podOf = (group: typeof fetchGroup, prepared: Prepared) =>
+    stepPod({ s, envId: "pods", taskId: 1, stage: 2, name: "p", pvc: "v", deadlineSec: 600 }, "rust-stable:test", "autocraft:test", plan, group!, prepared, false, "open-app") as unknown as Pod;
+  const steps = (p: Pod): Record<string, any> => Object.fromEntries([...p.spec.initContainers, ...p.spec.containers].map((c: { name: string }) => [c.name, c]));
+
+  assert.equal(podOf(fetchGroup, gate).metadata.labels!["craft.build/cache"], undefined);
+  assert.equal(envOf(steps(podOf(fetchGroup, gate))["step-0"]).RUSTC_WRAPPER, undefined);
+
+  const offline = podOf(offlineGroup, gate);
+  assert.equal(offline.metadata.labels!["craft.build/cache"], "read");
+  const build = steps(offline)["step-1"], env = envOf(build);
+  assert.equal(env.SCCACHE_WEBDAV_RW_MODE, "READ_ONLY");
+  assert.equal(env.CARGO_PROFILE_DEV_DEBUG, "0", "the gate's env reaches the cached step");
+  assert.equal(env.CARGO_TARGET_DIR, undefined, "sccache keys on CARGO_* variables, and CI sets no target dir");
+  assert.ok(build.workingDir.startsWith("/home/runner/_work/"), "the step works where CI checks the repo out");
+  const target = build.volumeMounts.find((m: { subPath?: string }) => m.subPath === "target");
+  assert.equal(target.mountPath, `${build.workingDir}/target`, "the build output is the checkout's default target dir");
+  assert.equal(envOf(steps(offline)["step-2"]).SCCACHE_WEBDAV_ENDPOINT, undefined, "a bare step has no build dirs and no cache");
+
+  assert.equal(podOf(offlineGroup, { ...gate, cacheVersion: null }).metadata.labels!["craft.build/cache"], undefined, "no CI gate, no cache");
 });

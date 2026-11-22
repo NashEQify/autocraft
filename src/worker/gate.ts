@@ -11,6 +11,7 @@ const GATE_USES = /^storytold\/craft-common-actions\/\.github\/workflows\/gate\.
 const PACKAGE = /^[a-z0-9][a-z0-9+.-]{0,99}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,99}$/;
+export const CACHE_VERSION = /^[A-Za-z0-9._-]{1,40}$/;
 /**
  * Env names a gate may set besides the repo's own switches (names that start with the repo's name, such as
  * `PDFCRAFT_ORACLES_REQUIRED`): output, retry and cargo profile settings. Nothing that selects a program, a
@@ -130,8 +131,10 @@ export type GateEnv = {
   /** craft-fonts commit; null when the gate builds without it. */
   craftFontsRef: string | null;
   requireFonts: boolean;
-  /** The gate's extra env for Linux (`env`, `linux-env`, `dev-debug`), only the names `gateEnvAllowed` keeps. */
+  /** The gate's extra env for Linux (`env`, `linux-env`, `dev-debug`, `dev-strip`), only the names `gateEnvAllowed` keeps. */
   env: Record<string, string>;
+  /** The gate's `cache-version`, which names its sccache store (`sccache/<version>`); null when it is not a plain name. */
+  cacheVersion: string | null;
   /** Env lines that were left out, for the task log. */
   dropped: string[];
 };
@@ -149,6 +152,7 @@ export function gateEnv(call: GateCall, defaults: Record<string, string>, repo: 
   const debug = input("dev-debug").trim();
   if (debug && DEV_DEBUG.test(debug)) env.CARGO_PROFILE_DEV_DEBUG = debug;
   else if (debug) dropped.push("CARGO_PROFILE_DEV_DEBUG");
+  if (input("dev-strip").trim() === "true") Object.assign(env, { CARGO_PROFILE_TEST_DEBUG: "0", CARGO_PROFILE_TEST_STRIP: "symbols" });
   for (const line of `${input("env")}\n${input("linux-env")}`.split("\n")) {
     const t = line.trim();
     if (!t) continue;
@@ -161,7 +165,11 @@ export function gateEnv(call: GateCall, defaults: Record<string, string>, repo: 
     }
     env[name] = value;
   }
-  return { gateRef: call.ref, packages, craftFontsRef: fonts || null, requireFonts: input("require-craft-fonts").trim() !== "false", env, dropped };
+  const cacheVersion = input("cache-version").trim();
+  return {
+    gateRef: call.ref, packages, craftFontsRef: fonts || null, requireFonts: input("require-craft-fonts").trim() !== "false", env, dropped,
+    cacheVersion: CACHE_VERSION.test(cacheVersion) ? cacheVersion : null,
+  };
 }
 
 const RAW = "https://raw.githubusercontent.com";

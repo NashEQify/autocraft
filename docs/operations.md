@@ -939,7 +939,7 @@ A task runs as a sequence of pods that share one volume (a PersistentVolumeClaim
 |---|---|---|---|
 | task | AutoCraft | `api` | Fetches the task (source URL, patch, steps) with a one-time key and writes it to the volume. |
 | source | AutoCraft | `fetch` | Downloads the source tarball, applies the patch and reads the CI gate at the base commit (env, craft-fonts and craft-i18n checkouts). Reports what it found in its termination message. |
-| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. |
+| steps | toolchain | `fetch` or `none` | One pod per run of consecutive plan steps with the same network mode. A `disk` container (AutoCraft image) first measures the task's volume. Each step is then a container (ordered init containers, the last one the pod's container) that copies the pristine source into its own `/src` and runs under `timeout`. Steps that read the compile cache run at the CI runners' checkout path (Compile cache below). |
 | upload | AutoCraft | `api` | Uploads the artifacts of the steps that ran, when a step names any. |
 
 - The runner reads each step's exit code, OOM kill and times from pod status, and its output from the pod log. Nothing in a pod reports a result.
@@ -949,6 +949,18 @@ A task runs as a sequence of pods that share one volume (a PersistentVolumeClaim
 - A pod that disappears, cannot pull its image for 3 minutes, is not scheduled within 15 minutes, stays in deletion or on a node that stopped reporting for 5 minutes, or runs 5 minutes past a deadline Kubernetes should have enforced, loses its task: requeued once, then failed, as for a worker that stops answering. The runner owns these tasks, so the worker heartbeat timeout does not apply to them.
 - A failed create of a later stage's pod (rate limit, quota, an API error) is retried after 15 s, doubling to at most 5 minutes; after 6 tries or 15 minutes the task is lost. A task whose first pod cannot be created goes back to the queue without using an attempt, and the environment takes no task for a minute.
 - After a restart the runner deletes pods and volumes whose task is no longer the environment's. The namespace cannot change while tasks run.
+
+Compile cache. With `--sccache-url` set, offline steps that mount the build dirs read the compile cache the cluster's CI runners fill (sccache over WebDAV, the read-only endpoint), when the repo has a CI gate. rustc runs through sccache in read-only mode; a step never writes the cache, and the pods never get its write credentials. The step's pod carries `craft.build/cache=read`, which the cluster's NetworkPolicy uses to let it reach the cache. sccache keys a compile on the compiler's libraries and version, its own release, the arguments, every `CARGO_*` variable and the working directory, so a cached step matches the gate's job:
+
+| Matches CI | How |
+|---|---|
+| Rust release and sccache release | The `rust-stable` image pins both (`deploy/container/Containerfile.rust-stable`): the Rust release the gate's `stable` currently installs, and the sccache release the gate pins. A new Rust stable release means a new image. |
+| `CARGO_HOME` | `/cache/cargo`, as on the runners, so registry crates compile in the same directory. |
+| Checkout and target dir | The step works in `/home/runner/_work/<repo>/<repo>` (the same directory is also `/src`), with the target dir at its default `target/` there, not `CARGO_TARGET_DIR`. |
+| Env | The gate's job env (`CARGO_INCREMENTAL=0`, `CARGO_NET_RETRY=10`, `RUST_BACKTRACE=1`, `CARGO_TERM_COLOR=always`, the last given to rustc only, so the step's output stays plain), then its `env`, `linux-env`, `dev-debug` and `dev-strip`. |
+| Store | `sccache/<cache-version>` from the gate's `cache-version`. |
+
+The step's output ends with `sccache --show-stats` (hits and misses). A step falls back to plain rustc when the cache cannot be reached, and a toolchain image without sccache builds uncached with a line saying so. Entries exist only for what the runners compiled (main-branch runs of repos whose gate enables sccache, for dependencies of every repo), so workspace crates of other repos and anything built with other features or profiles miss.
 
 Disk use. The `local-path` provisioner does not enforce a volume's size: a step can write to `/target`, `/cache` and `/out` until the node's disk is full, and a node under disk pressure evicts other pods. What bounds it:
 
@@ -977,6 +989,7 @@ Settings (`envs add` and `envs set` options; `envs list` shows them):
 | `--max-step-sec` | `7200` | Longest one step may run, below its own limit. |
 | `--runtime-class` | none | A sandbox runtime class (gVisor, Kata) when the cluster has one. |
 | `--arch` | `x86_64` | Architecture the pods run on, for claim matching. |
+| `--sccache-url` | none | Read-only WebDAV endpoint of the CI runners' compile cache (Compile cache above); `none` turns it off. |
 
 What the cluster must provide:
 
@@ -985,7 +998,7 @@ What the cluster must provide:
 | `AUTOCRAFT_IMAGE` on the runner container | The image the runner itself runs, by digest (the downward API does not expose it). Or set `--image`. |
 | Runner service account | Its token mounted into the runner container only, at the standard path. |
 | Role in the build namespace | `pods`: create, get, list, watch, delete; `pods/log`: get; `persistentvolumeclaims`: create, get, list, delete. |
-| NetworkPolicies in the build namespace | No ingress. `craft.build/network=none`: no egress. `fetch`: DNS and public 80/443, no private ranges. `api`: DNS and the runner's 8981. |
+| NetworkPolicies in the build namespace | No ingress. `craft.build/network=none`: no egress. `fetch`: DNS and public 80/443, no private ranges. `api`: DNS and the runner's 8981. With `--sccache-url`: `craft.build/cache=read` reaches the cache's read-only port (and DNS, for its service name). |
 | Ingress to the runner | 8981 from the build namespace, if the runner's namespace denies by default. |
 
 The health check `worker:<env id>` fails when the runner is not in a cluster, the API does not answer, the service account lacks a permission (checked with SelfSubjectAccessReview every minute), no AutoCraft image is known, or a pod could not be created. It warns when a pod has waited more than 3 minutes to start and when no toolchain image is set.

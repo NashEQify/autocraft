@@ -36,7 +36,7 @@ type Run = {
   prepared: string | null; results: string; failed: string | null; ran: number; logged: string; create_tries: number; failing_since: string | null;
   retry_at: string | null; started_at: string;
 };
-type TaskRow = { id: number; state: string; env_id: string | null; plan: string; requires: string; log_bytes: number };
+type TaskRow = { id: number; state: string; env_id: string | null; repo: string; plan: string; requires: string; log_bytes: number };
 type EnvRow = { id: string; enabled: number; slots: number; settings: string | null };
 type Kept = Prepared & { image: string };
 
@@ -153,7 +153,7 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   await report(health, true);
 }
 
-const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build_tasks").select(["id", "state", "env_id", "plan", "requires", "log_bytes"]).where("id", "=", id));
+const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build_tasks").select(["id", "state", "env_id", "repo", "plan", "requires", "log_bytes"]).where("id", "=", id));
 const overdue = (c: EnvCtx, run: Run): boolean => c.now() > Date.parse(run.started_at) + c.s.deadlineSec * 1000 + DEADLINE_MARGIN_MS;
 const overdueText = (c: EnvCtx) => `The task passed its deadline of ${c.s.deadlineSec} s and its pod did not stop`;
 
@@ -383,7 +383,7 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     if (!kept) return lose(c, run, "The build pod run lost its source report");
     // The steps' limits, a minute each to copy the source, and two minutes to start the pod and measure its volume.
     deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120);
-    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0);
+    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0, t.repo);
   } else if (stage === uploadStage(plan)) {
     const key = newPodKey(run.task_id);
     await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(key) }).where("task_id", "=", run.task_id));
