@@ -4,6 +4,7 @@
 import { poolRoom, takersCut } from "../agents/call.ts";
 import { pool } from "../classify/run.ts";
 import { runModelStep } from "../agents/step.ts";
+import { REFUSED_PREFIX } from "../remote/calls.ts";
 import { PREMERGE_OPUS } from "../agents/steps.ts";
 import { buildQueue } from "../merge/queue.ts";
 import { planned } from "../core/select.ts";
@@ -143,7 +144,7 @@ export async function runPremerge(db: Db, params: PremergeParams, log: (line: st
         await savePremerge(db, { repo, number: e.number, head, at: now(), runId, model: (r.ok && r.model) || deps.model, findings: got.findings, searched: got.searched, conflicts: got.conflicts, unsure: got.unsure, claims: got.claims, baseRef: p.baseRef });
         await jobItem(db, repo, e.number, `pre-merge review: ${got.findings.length} findings`, log);
         s.reviewed++; s.findings += got.findings.length; s.defects += got.findings.filter((f) => f.severity === "defect").length;
-      } else await fail("retry: no valid reply from the model");
+      } else await fail(!r.ok && r.error.startsWith(REFUSED_PREFIX) ? `retry: ${r.error}` : "retry: no valid reply from the model");
     }
     params.onHandled?.(++handled);
   }), poolRoom(db, () => [repo], (i) => [{ repo, number: cands[i]!.number }]));
