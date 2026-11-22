@@ -24,6 +24,7 @@ import { endJob, JOB_KEEP_MS, now, pruneJobs, resumeJob, RUNNER_STOPPED } from "
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
 import { advanceScanTests } from "../security/scantest.ts";
 import { OffThread } from "./offthread.ts";
+import { groupsFile, killGroups, removeGroupsFile } from "./groups.ts";
 import { buildDiffFacts } from "../review/diff.ts";
 import { loadSteps, modelsOf, usesClaude, type Params } from "./steps.ts";
 import { jobBlock } from "./concurrency.ts";
@@ -524,23 +525,26 @@ export class Runner {
     const claimed = await this.db.write(async () => await this.blocked(steps, id) ? 0
       : (await this.db.run(this.db.k.updateTable("jobs").set({ state: "running", started_at: now(), log_path: logPath }).where("id", "=", id).where("state", "=", "queued"))).changes);
     if (!claimed) return false;
+    const deadlineMin = this.maxMin(stepName, await this.limitOf(id));
+    const groups = groupsFile(this.o.logs, id);
+    removeGroupsFile(groups);
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
     try {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: dbEnv(this.o.dbTarget),
+        env: { ...dbEnv(this.o.dbTarget), AUTOCRAFT_JOB_GROUPS: groups },
       });
     } finally {
       closeSync(fd);
     }
-    await this.db.run(this.db.k.updateTable("jobs").set({ pid: child.pid ?? null }).where("id", "=", id));
-    this.o.log(`job ${id}: started (pid ${child.pid})`);
+    // Registered before any await, so abandon() reaches every child that runs.
     let spawnError: string | null = null;
     child.on("error", (e) => (spawnError = e.message));
     const exited = new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
+        removeGroupsFile(groups);
         void this.finish(id, code, signal, spawnError)
           .catch((e) => {
             this.unrecorded.set(id, { code, signal, spawnError });
@@ -552,7 +556,9 @@ export class Runner {
           });
       });
     });
-    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
+    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin, logPath, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
+    await this.db.run(this.db.k.updateTable("jobs").set({ pid: child.pid ?? null }).where("id", "=", id));
+    this.o.log(`job ${id}: started (pid ${child.pid})`);
     return true;
   }
 
@@ -579,6 +585,8 @@ export class Runner {
   abandon(): void {
     this.stopping = true;
     for (const r of this.running.values()) if (r.child.pid) killGroup(r.child.pid, "SIGKILL");
+    // Model calls run in groups of their own; the jobs list theirs in their groups files.
+    killGroups([...this.running.keys()].map((id) => groupsFile(this.o.logs, id)));
   }
 
   /** Resolves when every running job has ended. */

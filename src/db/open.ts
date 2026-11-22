@@ -94,6 +94,8 @@ export interface ConnectOptions {
   role?: DbRole;
   /** Postgres: bring the schema and triggers up to date first (default). False opens the database as it is. */
   migrate?: boolean;
+  /** Postgres: how long a transaction may sit idle before the server ends its session (default 60 s). */
+  idleInTransactionMs?: number;
 }
 
 /**
@@ -104,7 +106,7 @@ export async function connectDb(target: string = dbTarget(), opts: ConnectOption
   if (testRedirect && !isPgUrl(target)) target = await testRedirect(target);
   if (!isPgUrl(target)) return dbFor(connect(target, opts));
   const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
-  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));
+  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs, idleInTransactionMs: opts.idleInTransactionMs }, ctx));
   if (opts.migrate === false) return db;
   try {
     // A current database costs two reads on the pool; only a stale one opens a connection of its own for the migration.

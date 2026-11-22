@@ -3,6 +3,7 @@
 // winner moves the epoch, so the writes of a process that lost its lock fail. Child processes inherit the fence through
 // AUTOCRAFT_FENCE, so a job's writes are fenced with its runner's.
 import { envVar } from "../env.ts";
+import type { Db } from "./index.ts";
 
 export type LeaderRole = "runner" | "periodic";
 export const LEADER_ROLES: readonly LeaderRole[] = ["runner", "periodic"];
@@ -48,3 +49,15 @@ export function fenceSql(): string {
 
 /** Whether `e` is a write the fence refused. */
 export const isFenced = (e: unknown): boolean => (e as { code?: unknown } | null)?.code === FENCED_CODE;
+
+export class FencedError extends Error {
+  readonly code = FENCED_CODE;
+}
+
+/** Throws a FencedError when this process's fence no longer holds: for actions outside the database (Kubernetes calls). */
+export async function assertFence(db: Db): Promise<void> {
+  const f = currentFence();
+  if (!f) return;
+  const r = await db.prepare("SELECT value FROM settings WHERE key = ?").get(epochKey(f.role)) as { value: string } | undefined;
+  if (r?.value !== String(f.epoch)) throw new FencedError(`this process no longer leads the ${f.role}: another copy took over`);
+}

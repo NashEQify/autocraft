@@ -47,6 +47,18 @@ export interface KubeApi {
   exec(ns: string, pod: string, container: string, argv: string[], opts: ExecOptions): Promise<ExecResult>;
 }
 
+/** `api` with `guard` awaited before every call that changes the cluster or runs a command in it (a fenced leader's check). */
+export function guardedApi(api: KubeApi, guard: () => Promise<void>): KubeApi {
+  return {
+    ...api,
+    createPod: async (ns, pod) => (await guard(), await api.createPod(ns, pod)),
+    deletePod: async (ns, name) => (await guard(), await api.deletePod(ns, name)),
+    createPvc: async (ns, pvc) => (await guard(), await api.createPvc(ns, pvc)),
+    deletePvc: async (ns, name) => (await guard(), await api.deletePvc(ns, name)),
+    exec: async (ns, pod, container, argv, opts) => (await guard(), await api.exec(ns, pod, container, argv, opts)),
+  };
+}
+
 export type ExecOptions = {
   /** A stream that fails ends the exec without closing stdin, so the command never takes a cut-off input as complete. */
   stdin?: Buffer | AsyncIterable<Buffer>;

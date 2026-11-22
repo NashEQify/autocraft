@@ -22,9 +22,9 @@ import { dropPlanChanges } from "../db/sqlite-backfill.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
-import { openDb, setDbRole } from "../db/open.ts";
-import { elect } from "../db/leader.ts";
-import { setFence } from "../db/fence.ts";
+import { closeDb, openDb, setDbRole } from "../db/open.ts";
+import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
+import { assertFence, FencedError, setFence } from "../db/fence.ts";
 import { writeSync } from "node:fs";
 
 const USAGE = `usage: autocraft-server runner serve
@@ -80,6 +80,7 @@ async function serve(): Promise<void> {
   if (!lease) {
     await health?.close();
     release();
+    await closeDb();
     console.log("runner: stopped while standby");
     return;
   }
@@ -95,12 +96,13 @@ async function serve(): Promise<void> {
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
   const runner = new Runner({ db, lockFile: lock, maxJobs: Number(envVar("RUNNER_JOBS")) || DEFAULT_MAX_JOBS });
-  // Fencing: a leader that lost its lock starts nothing more, kills its jobs and exits at once, so its pod restarts as a
-  // standby. Its writes already fail (src/db/fence.ts); the new leader resumes the jobs as after a crash.
+  // Fencing: a leader that lost its lock starts nothing more, kills its jobs and exits at once, so its container restarts
+  // as a standby. Its writes already fail (src/db/fence.ts); the new leader resumes the jobs as after a crash. GitHub and
+  // Kubernetes calls already in flight finish; the pod launcher checks the fence before each Kubernetes change.
   const fenced = () => {
     runner.abandon();
     writeSync(2, `runner: lost the leader lock (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
-    process.kill(process.pid, "SIGKILL");
+    process.exit(LOST_LEADER_EXIT);
   };
   if (lease.lost.aborted) fenced();
   lease.lost.addEventListener("abort", fenced, { once: true });
@@ -111,7 +113,10 @@ async function serve(): Promise<void> {
     (e: Error) => (console.error(`runner: worker API not started: ${e.message}`), null),
   );
   // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
-  startPodLauncher(db, ac.signal, (l) => console.log(l));
+  startPodLauncher(db, ac.signal, (l) => console.log(l), async () => {
+    if (lease.lost.aborted) throw new FencedError("this process no longer leads the runner");
+    await assertFence(db);
+  });
   // Optional: counts Discord mentions of tracked items when a bot token file is configured. A failure is logged and never stops the runner.
   try {
     await startDiscord(db, ac.signal, (l) => console.log(l));

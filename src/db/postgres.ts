@@ -18,6 +18,14 @@ export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remot
 const WRITER_LOCK = 0x61637772; // "acwr"
 
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
+/** A transaction whose client sends nothing for this long is ended by the server, so a dead process cannot keep the writer lock. */
+const DEFAULT_IDLE_IN_TRANSACTION_MS = 60_000;
+
+/**
+ * Server-side TCP settings of every connection: the server drops a client that went silent (a lost node) after about
+ * 5 + 3 × 2 = 11 seconds, with the locks its session held, instead of after the system default of hours.
+ */
+export const SERVER_KEEPALIVE = { tcp_keepalives_idle: 5, tcp_keepalives_interval: 2, tcp_keepalives_count: 3, tcp_user_timeout: 10_000 } as const;
 const DEFAULT_STATEMENT_TIMEOUT_MS = 120_000;
 
 /** Parsed statement texts kept per handle. */
@@ -31,15 +39,20 @@ export interface PgOptions {
   statementTimeoutMs?: number;
   /** The app schema of a scoped handle (src/db/scoped.ts): its connections put the scoped views first on the search path. */
   scope?: string;
+  /** How long a transaction may sit idle before the server ends its session; 0 for no limit. Default 60 s. */
+  idleInTransactionMs?: number;
 }
 
-/** `url` with the startup option that puts the scoped views before the tables of `schema`, after any options it has. */
-function scopedUrl(url: string, schema: string): string {
+/** `url` with `-c name=value` startup options added after any options it has. */
+function withStartupOptions(url: string, settings: Record<string, string | number>): string {
   const u = new URL(url);
   const own = u.searchParams.get("options");
-  u.searchParams.set("options", `${own ? `${own} ` : ""}-c search_path=${SCOPED_SCHEMA},${plainSchema(schema)}`);
+  u.searchParams.set("options", [own, ...Object.entries(settings).map(([k, v]) => `-c ${k}=${v}`)].filter(Boolean).join(" "));
   return u.toString();
 }
+
+/** `url` with the startup option that puts the scoped views before the tables of `schema`. */
+const scopedUrl = (url: string, schema: string): string => withStartupOptions(url, { search_path: `${SCOPED_SCHEMA},${plainSchema(schema)}` });
 
 const LOCAL_HOSTS = new Set(["", "localhost", "[::1]"]);
 
@@ -122,17 +135,24 @@ function schemaPlugin(k: typeof K, mainSchema: string | undefined): K.KyselyPlug
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
 export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, opts: PgOptions, ctx: EngineContext): Engine {
   const pool = new pg.Pool({
-    connectionString: pgConnectionString(opts.scope ? scopedUrl(url, opts.scope) : url),
+    connectionString: pgConnectionString(withStartupOptions(opts.scope ? scopedUrl(url, opts.scope) : url, SERVER_KEEPALIVE)),
     max: POOL_MAX[opts.role],
+    keepAlive: true,
     allowExitOnIdle: true,
     application_name: `autocraft-${opts.role}`,
     // A startup parameter of every connection, so it also bounds statements outside transactions; no SET is sent.
     statement_timeout: opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
+    idle_in_transaction_session_timeout: opts.idleInTransactionMs ?? DEFAULT_IDLE_IN_TRANSACTION_MS,
     types: typesFor(pg),
   });
   // An idle connection that fails (server restart, network) is dropped by the pool; without a listener it would crash the process.
   pool.on("error", (e) => console.warn(`db: idle Postgres connection failed: ${e.message}`));
-  pool.on("connect", (client) => observeClient(client, ctx));
+  pool.on("connect", (client) => {
+    observeClient(client, ctx);
+    // The pool listens only while a connection is idle. One the server ends while it is checked out (an idle transaction
+    // past its limit, a terminated backend) must not crash the process: its next statement fails, and the pool drops it.
+    client.on("error", () => {});
+  });
   const raw = (text: string, values?: unknown[]) => k.CompiledQuery.raw(text, values);
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
   // A fenced process (src/db/fence.ts) checks its epoch after the writer lock: the check sees every write committed before it.
