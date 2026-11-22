@@ -1,9 +1,10 @@
 // The Postgres engine: Kysely's PostgresDialect on a pg.Pool. No session state: settings a transaction needs are SET LOCAL,
-// locks are transaction-scoped advisory locks, statements are unnamed (no server-side prepared statements), no LISTEN.
+// locks are transaction-scoped advisory locks, statements are unnamed (no server-side prepared statements). LISTEN runs
+// only on a handle's one dedicated listening connection (pgListener), never on the pool.
 // Values come back in node:sqlite's shapes (see `types`), so a query returns the same rows on both backends.
 import type * as K from "kysely";
 import type * as Pg from "pg";
-import type { Args, Engine, EngineContext, Op, Tx } from "./handle.ts";
+import type { Args, Engine, EngineContext, Listener, Op, Tx } from "./handle.ts";
 import { callSite, siteError, withoutInsertId } from "./handle.ts";
 import type { DB, DbRole, Row } from "./index.ts";
 import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, type ParsedParams } from "./params.ts";
@@ -214,6 +215,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
   const engine: Engine = {
     dialect: "postgres",
     kysely,
+    listener: () => pgListener(pg, url),
     exec: async (op: Op, text: string, args: Args, tx: Tx | undefined) => {
       const { text: q, values } = bindParams(parse(text), args, (i) => `$${i + 1}`);
       const r = await on(tx, (conn) => conn.executeQuery<Row>(raw(q, values)));
@@ -232,4 +234,106 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     close: () => kysely.destroy(),
   };
   return engine;
+}
+
+/** Channel names a handle may listen on: plain lower-case identifiers, so LISTEN needs no quoting. */
+const CHANNEL = /^[a-z][a-z0-9_]{0,62}$/;
+const RECONNECT_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+/**
+ * LISTEN on one connection of its own, outside the pool, opened at the first listen. A lost connection is opened again
+ * (1 s, then backing off to 30 s) while anything listens; after a reconnect every listener is called with null, since
+ * notifications sent meanwhile are lost. Callers keep a slow poll of their own, so a listener that cannot connect only
+ * makes them slower.
+ */
+export function pgListener(pg: typeof Pg.default, url: string): Listener {
+  const fns = new Map<string, Set<(payload: string | null) => void>>();
+  let client: Pg.Client | null = null;
+  let connecting: Promise<Pg.Client | null> | null = null;
+  let closed = false, failures = 0, warned = false;
+  let retry: NodeJS.Timeout | undefined;
+
+  // The connection keeps the process alive only while something listens, so a process can end once its waits are over.
+  const hold = (): void => {
+    const c = client as (Pg.Client & { ref?: () => void; unref?: () => void }) | null;
+    if (fns.size) c?.ref?.();
+    else c?.unref?.();
+  };
+  const dispatch = (channel: string, payload: string | null): void => {
+    for (const fn of fns.get(channel) ?? []) {
+      try { fn(payload); } catch (e) { console.warn(`db: listener of ${channel} failed: ${(e as Error).message}`); }
+    }
+  };
+  const lost = (c: Pg.Client, why: string): void => {
+    if (client !== c) return;
+    client = null;
+    c.removeAllListeners("notification");
+    void c.end().catch(() => undefined);
+    if (!warned) console.warn(`db: listening connection lost (${why}); reconnecting`);
+    warned = true;
+    schedule();
+  };
+  const schedule = (): void => {
+    if (closed || retry || !fns.size) return;
+    retry = setTimeout(() => { retry = undefined; void connect().then((c) => { if (c) for (const ch of fns.keys()) dispatch(ch, null); }); }, RECONNECT_MS[Math.min(failures, RECONNECT_MS.length - 1)]!);
+    retry.unref();
+  };
+  const connect = (): Promise<Pg.Client | null> => {
+    if (client) return Promise.resolve(client);
+    connecting ??= (async () => {
+      const c = new pg.Client({ connectionString: pgConnectionString(url), application_name: "autocraft-listen", keepAlive: true });
+      c.on("error", (e) => lost(c, e.message));
+      c.on("end", () => lost(c, "closed"));
+      try {
+        await c.connect();
+        for (const ch of fns.keys()) await c.query(`LISTEN ${ch}`);
+        if (closed) { await c.end(); return null; }
+        c.on("notification", (m) => dispatch(m.channel, m.payload ?? ""));
+        client = c;
+        hold();
+        failures = 0;
+        warned = false;
+        return c;
+      } catch (e) {
+        if (!warned) console.warn(`db: cannot open the listening connection: ${(e as Error).message}`);
+        warned = true;
+        failures++;
+        await c.end().catch(() => undefined);
+        schedule();
+        return null;
+      } finally {
+        connecting = null;
+      }
+    })();
+    return connecting;
+  };
+
+  return {
+    async listen(channel, fn) {
+      if (!CHANNEL.test(channel)) throw new Error(`db: bad channel name ${channel}`);
+      if (closed) throw new Error("db: the handle is closed");
+      let set = fns.get(channel);
+      const fresh = !set;
+      if (!set) fns.set(channel, set = new Set());
+      set.add(fn);
+      hold();
+      const c = await connect();
+      if (fresh && c) await c.query(`LISTEN ${channel}`).catch((e: Error) => lost(c, e.message));
+      return () => {
+        set.delete(fn);
+        if (set.size || fns.get(channel) !== set) return;
+        fns.delete(channel);
+        if (client) void client.query(`UNLISTEN ${channel}`).catch(() => undefined);
+        hold();
+      };
+    },
+    async close() {
+      closed = true;
+      clearTimeout(retry);
+      fns.clear();
+      const c = client ?? await connecting;
+      client = null;
+      if (c) { c.removeAllListeners("notification"); await c.end().catch(() => undefined); }
+    },
+  };
 }

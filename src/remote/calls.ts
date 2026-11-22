@@ -33,6 +33,7 @@ import { MANUAL_ONLY_KEY, manualExpr, manualOf, manualOnly } from "./manual-only
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { endChecks, serveChecks } from "./check-relay.ts";
+import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
@@ -1099,17 +1100,23 @@ const runsLiveLease = async (db: Db, parentId: number, nowMs: number): Promise<b
  * after `maxWaitMs` in the queue (WaitLimitError), and, for a follow-up, after STICKY_MS while its session's login runs no live
  * lease, else after STICKY_CAP_MS. A call the dashboard withdrew because no Task Runner could take it (takers.ts) throws a
  * NoTakerError and counts as a skipped item (skipItem), so the planner runs the step again. The helper's progress lines go to `onProgress`.
- * While the call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts).
+ * While the call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts)
+ * and the tool calls of the workspace bound to the call (src/build/workspace-relay.ts), which also run as soon as their wake
+ * arrives. `workspace` gives the session they run on (default: the process's session on the workspace, jobSession).
  */
-export async function awaitCall(db: Db, id: number, opts: { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run"> } = {}): Promise<Outcome> {
+export async function awaitCall(db: Db, id: number, opts: AwaitOptions = {}): Promise<Outcome> {
+  const ws = await WorkspaceServer.open(db, id, opts.workspace);
   try {
-    return await pollCall(db, id, opts);
+    return await pollCall(db, id, opts, ws);
   } finally {
     await endChecks(db, id);
+    await ws?.end();
   }
 }
 
-async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run"> }): Promise<Outcome> {
+type AwaitOptions = { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run">; workspace?: (db: Db, workspaceId: number) => ToolSession };
+
+async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceServer | null): Promise<Outcome> {
   const log = opts.log ?? console.log;
   let lastProgress: string | null = null, lastLog = 0, lastSeen = 0;
   for (;;) {
@@ -1158,6 +1165,7 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
       }
     }
     if (r.state === "leased" && opts.check) await serveChecks(db, id, opts.check);
+    if (r.state === "leased" && ws) await ws.serve();
     if (r.progress && r.progress !== lastProgress) {
       lastProgress = r.progress;
       try { opts.onProgress?.(r.progress); } catch { /* progress is best effort */ }

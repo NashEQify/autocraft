@@ -114,6 +114,17 @@ export interface Db {
   scope(): Promise<void>;
   /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
   script(text: string): Promise<void>;
+  /**
+   * Postgres: NOTIFY `channel` with `payload` for every process listening; inside a write transaction it is sent when the
+   * transaction commits. SQLite: nothing, since its processes poll.
+   */
+  notify(channel: string, payload: string): Promise<void>;
+  /**
+   * Postgres: calls `fn` with the payload of each notification on `channel` until the returned function is called, on the
+   * handle's one listening connection; with null after that connection was lost and opened again, when some may have been
+   * missed. A notification is a hint to look again, never the data. SQLite: null, and the caller polls.
+   */
+  listen(channel: string, fn: (payload: string | null) => void): Promise<(() => void) | null>;
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */
   observe(fn: (e: DbEvent) => void): () => void;
   close(): Promise<void>;

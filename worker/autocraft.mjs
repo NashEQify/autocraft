@@ -42,13 +42,18 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.5";
+export const HELPER_VERSION = "1.3.6";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
 
-/** The server refuses a claim of a protocol it does not accept; a server that knows only 3 is asked again with 3 (claimProtocol). */
-export const PROTOCOL_VERSION = 4;
+/**
+ * The server refuses a claim of a protocol it does not accept; a server not yet updated is asked again with the older
+ * protocols (claimRequest). 5: a tool reply's content may hold images after the text.
+ */
+export const PROTOCOL_VERSION = 5;
+/** The protocols a claim falls back to, newest first: 4 and 3 differ from 5 only in what the server sends, 3 also has no held wait. */
+const OLDER_PROTOCOLS = [4, 3];
 
 export const ROUTES = {
   claim: "/api/remote/claim",
@@ -2848,14 +2853,15 @@ const newClaimId = () => randomBytes(16).toString("hex");
 
 /** Seconds a protocol 4 claim lets the server hold it open while nothing is queued (Claim.wait). */
 export const CLAIM_WAIT_S = 25;
-/** How long a server that refused protocol 4 is asked with protocol 3 before 4 is tried again. */
+/** How long a server that refused the current protocol is asked with an older one before the current one is tried again. */
 const PROTOCOL_FALLBACK_MS = 3600_000;
-/** Until when claims use protocol 3: the server answered 409 to protocol 4 and accepted 3 (a server not yet updated). */
-let protocol3Until = 0;
+/** The older protocol the server accepted after it answered 409 to the current one (a server not yet updated), and until when claims use it. */
+let fallback = { protocol: PROTOCOL_VERSION, until: 0 };
 
 /**
- * Sends a claim: with protocol 4 and a held wait, or with protocol 3 while the server refused 4. A 409 to protocol 4 is
- * asked again at once with protocol 3; only a 409 to that is a refusal of this runner.
+ * Sends a claim: with the current protocol, or with the older one the server accepted while it refuses the current one.
+ * A 409 is asked again at once with each older protocol in turn (a held wait from 4 on); only a 409 to the oldest is a
+ * refusal of this runner.
  * `signal` (a `work` stopping) ends a held claim.
  * @param {string} server @param {string} token @param {Omit<Claim, "protocol" | "wait">} base @param {AbortSignal} [signal] @returns {Promise<ClaimReply>}
  */
@@ -2867,13 +2873,16 @@ export async function claimRequest(server, token, base, signal) {
     // Retries resend the same request id, so a claim whose reply was lost gets its lease back instead of leaving it to expire.
     return withRetry(() => api(server, ROUTES.claim, token, claim, { timeoutMs: scaled(hold * 1000) + 30_000, ...(signal && { signal }) }), { tries: 5, deadline: Date.now() + scaled(hold * 1000) + Math.min(scaled(60_000), CLAIM_ID_TTL_MS / 2), ...(signal && { signal }) });
   };
-  if (Date.now() < protocol3Until) return send(3);
-  try { return await send(PROTOCOL_VERSION); }
-  catch (e) {
-    if (!(e instanceof HttpError && e.status === 409)) throw e;
-    const reply = await send(3);
-    protocol3Until = Date.now() + PROTOCOL_FALLBACK_MS;
-    return reply;
+  if (Date.now() < fallback.until) return send(fallback.protocol);
+  const tries = [PROTOCOL_VERSION, ...OLDER_PROTOCOLS];
+  for (let i = 0; ; i++) {
+    try {
+      const reply = await send(tries[i]);
+      if (i > 0) fallback = { protocol: tries[i], until: Date.now() + PROTOCOL_FALLBACK_MS };
+      return reply;
+    } catch (e) {
+      if (!(e instanceof HttpError && e.status === 409) || i === tries.length - 1) throw e;
+    }
   }
 }
 
@@ -4248,10 +4257,21 @@ async function cmdTool(argv) {
   try { args = JSON.parse(json ?? "{}"); } catch { throw new Error("the tool arguments must be JSON"); }
   const { secret, server } = leaseAccess(id);
   // A `check` streams whitespace while it runs; a reply cut off or a 5xx runs the call again.
-  /** @type {{ content?: { text?: string }[], isError?: boolean }} */
+  /** @type {{ content?: { type?: string, text?: string }[], isError?: boolean }} */
   const r = await withRetry(() => api(server, `${ROUTES.tool}/${name}/${tool}`, secret, args, { timeoutMs: 60 * 60_000 }), { deadline: Date.now() + TOOL_RETRY_MS });
-  console.log((r.content ?? []).map((c) => c.text ?? "").join("\n"));
+  console.log(contentText(r.content));
   return r.isError ? 1 : 0;
+}
+
+/**
+ * The text of a tool reply's content, with a line for each image, which a command cannot show.
+ * @param {{ type?: string, text?: string }[] | undefined} content
+ */
+export function contentText(content) {
+  const c = content ?? [];
+  const texts = c.filter((x) => x.type !== "image").map((x) => x.text ?? "");
+  const images = c.length - texts.length;
+  return [...texts, ...(images ? [`[${images} image${images === 1 ? "" : "s"} not shown: this command prints text only]`] : [])].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -4927,7 +4947,7 @@ export function parseToolArgs(tool, argv, cmd) {
 function printResult(r, json) {
   if (json) console.log(JSON.stringify(r, null, 2));
   else {
-    const text = (r?.content ?? []).map((c) => c.text ?? "").join("\n") || (r?.structuredContent !== undefined ? JSON.stringify(r.structuredContent, null, 2) : "");
+    const text = contentText(r?.content) || (r?.structuredContent !== undefined ? JSON.stringify(r.structuredContent, null, 2) : "");
     (r?.isError ? console.error : console.log)(text);
   }
   return r?.isError ? 1 : 0;

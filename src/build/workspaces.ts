@@ -23,7 +23,7 @@ const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 /** Every column but the checkpoint, which only a resume and `workspace show` read. */
 export const WORKSPACE_COLUMNS = [
   "id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits",
-  "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at",
+  "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id",
 ] as const;
 export const getWorkspace = async (db: Db, id: number) => await db.get(db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).where("id", "=", id));
 export type WorkspaceRow = NonNullable<Awaited<ReturnType<typeof getWorkspace>>>;
