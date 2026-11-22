@@ -29,6 +29,7 @@ import { applyAnswer } from "./decisions.ts";
 import { getDecision, optionsOf } from "../../decisions.ts";
 import { decisionId as scopeDecisionId, SCOPE_OPTIONS } from "../../decide/decision.ts";
 import { currentImplementation } from "../../implement/store.ts";
+import { implementRefusal } from "../../implement/gate.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../../db/kx.ts";
 
@@ -356,9 +357,11 @@ async function queueIssue(db: Db, by: string, repo: string, number: number, w: n
   const had = await db.get(db.k.selectFrom("main.fast_track").select("added_by").where("repo", "=", repo).where("number", "=", number));
   await markFast(db, by, repo, number, w, via);
   if (!had) return;
-  const current = await currentImplementation(db, repo, number);
-  await db.run(db.k.updateTable("main.fast_track").set({ added_at: new Date().toISOString(), ...(current ? {} : { added_by: by }) }).where("repo", "=", repo).where("number", "=", number));
-  await audit(db, by, "fasttrack-requeue", `${repo}#${number}`, { ...(current ? {} : { from: had.added_by }), ...(via ? { via } : {}) });
+  await guarded(async () => {
+    const current = await currentImplementation(db, repo, number);
+    await db.run(db.k.updateTable("main.fast_track").set({ added_at: new Date().toISOString(), ...(current ? {} : { added_by: by }) }).where("repo", "=", repo).where("number", "=", number));
+    await audit(db, by, "fasttrack-requeue", `${repo}#${number}`, { ...(current ? {} : { from: had.added_by }), ...(via ? { via } : {}) });
+  });
 }
 
 /** A queued issue counts as wanted: an open scope decision on it is answered `take` by the person queueing it. Returns a clause for the label. */
@@ -429,7 +432,10 @@ export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number
     await queueIssue(db, by, r.repo, r.number, w, via);
     const prs = await openPrsClosing(db, r.repo, r.number);
     const scope = await takeScope(db, by, r.repo, r.number, via);
-    if (!prs.length) return { label: `Queued: AutoCraft plans and implements it${scope}${ignored}`, fast: await fastTrackRefs(db, req) };
+    if (!prs.length) {
+      const waits = await implementRefusal(db, r.repo, r.number);
+      return { label: `${waits ? `Queued; it is not implemented while ${waits}` : "Queued: AutoCraft plans and implements it"}${scope}${ignored}`, fast: await fastTrackRefs(db, req) };
+    }
     let rest: string;
     if (prs.length > 1) rest = `${prs.map((n) => `#${n}`).join(", ")} close it; queue one of them`;
     else if (pin && pin(prs[0]!) === null) rest = `#${prs[0]} closes it but was opened or pushed to after your comment, so it was not queued; comment on #${prs[0]} to queue it`;

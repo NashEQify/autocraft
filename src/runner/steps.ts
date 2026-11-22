@@ -18,7 +18,8 @@ import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
 
-type Base = { name: string; label: string; help?: string; required?: boolean };
+/** `cliOnly`: set from the command line only; the dashboard's run-step form does not offer it and refuses it. */
+type Base = { name: string; label: string; help?: string; required?: boolean; cliOnly?: boolean };
 export type ParamDef =
   | (Base & { kind: "enum"; options: string[]; default?: string })
   | (Base & { kind: "repo" })                                        // a tracked repo
@@ -135,13 +136,13 @@ const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build"]);
 
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
-  const { implementRefusal, queuerOf } = await import("../implement/gate.ts");
+  const { implementRefusal } = await import("../implement/gate.ts");
   const bucket = String(p.bucket ?? "plan");
   if (!IMPLEMENT_BUILT.has(bucket)) return `Implement's ${bucket} work is not built yet`;
-  // A dry run writes nothing but its workspace and model call: it needs only the queuer whose Task Runner runs the call.
+  // A dry run writes nothing but its workspace and model call, so it may run before the repo's Implement switch is on;
+  // it still needs the repo's approval and a queuer who settles on the repo, whose Task Runner runs the call.
   if (p.mode === "dry" && bucket !== "plan") return "a dry run only plans";
-  if (p.mode === "dry") return await queuerOf(db, String(p.repo), Number(p.number)) ? null : `${p.repo}#${p.number} is not queued`;
-  return await implementRefusal(db, String(p.repo), Number(p.number));
+  return await implementRefusal(db, String(p.repo), Number(p.number), { dry: p.mode === "dry" });
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -511,7 +512,7 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
       { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
-      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
+      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", cliOnly: true, help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
     ],
     check: checkImplement,
     run: async (ctx) => {

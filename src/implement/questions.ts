@@ -6,6 +6,7 @@
 // maintainers decide instead whether to go on with stated assumptions, hold it or close the issue.
 import type { Db } from "../db/index.ts";
 import { ask, BACKLOG, getDecision, optionsOf, type DecisionRow, type Option } from "../decisions.ts";
+import { WITHDRAWN } from "../merge/withdraw.ts";
 import { addRound, roundsOf, setImplementationState } from "./store.ts";
 import { PLAN_QUESTION_CHARS, QUESTION_ROUNDS_MAX, type PlanAsked } from "./plan-types.ts";
 import type { Implementation, PlanQuestion, PlanReply, QuestionRound } from "./types.ts";
@@ -20,6 +21,7 @@ export const LIMIT_CLOSE_COMMENT = "Closing this for now: it does not have the d
 export const questionDecisionId = (repo: string, number: number, attempt: number, round: number): string => `${repo}#${number}:implement-q${attempt}-${round}`;
 export const limitDecisionId = (repo: string, number: number, attempt: number): string => `${repo}#${number}:implement-limit-${attempt}`;
 export const isLimitDecision = (id: string | null): boolean => id !== null && /:implement-limit-\d+$/.test(id);
+const isQuestionDecision = (id: string | null): id is string => id !== null && /:implement-(q\d+-\d+|limit-\d+)$/.test(id);
 
 const cut = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -39,37 +41,65 @@ export type QuestionDeps = {
   now?: () => string;
 };
 
-/** Plan rounds of the attempt that ended in questions. */
-async function questionRounds(db: Db, implementationId: number): Promise<number> {
-  return (await roundsOf(db, implementationId)).filter((r) => r.kind === "plan" && (r.result as { ready?: unknown } | null)?.ready === false).length;
+/**
+ * Sets the attempt's question decisions aside, all but `keep`: an open one is answered withdrawn by the pipeline and an
+ * answered one is marked applied, since the plan round that follows has read its answer.
+ */
+export async function settleQuestions(db: Db, impl: Implementation, keep: string | null, at: string): Promise<void> {
+  const ids = new Set<string>();
+  for (const r of await roundsOf(db, impl.id)) {
+    const id = r.kind === "question" ? (r.result as Partial<QuestionRound> | null)?.decisionId ?? null : null;
+    if (isQuestionDecision(id)) ids.add(id);
+  }
+  if (isQuestionDecision(impl.decisionId)) ids.add(impl.decisionId);
+  if (keep !== null) ids.delete(keep);
+  if (!ids.size) return;
+  const list = [...ids];
+  await db.write(async () => {
+    await db.run(db.k.updateTable("main.decisions").set({ answer: WITHDRAWN, answered_by: "pipeline", answered_at: at, applied_at: at, answer_note: "superseded by a later plan round", adopted_opinion: null })
+      .where("id", "in", list).where("answer", "is", null));
+    await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "in", list).where("answer", "is not", null).where("applied_at", "is", null));
+  });
 }
 
 /**
- * Asks what the reply's questions need and moves the attempt to `asked`. `planRound` is the number of the plan round the
- * reply came from (its questions are counted with the earlier ones). Returns the rounds written.
+ * Asks what the reply's questions need and moves the attempt to `asked`. `planRound` is the id of the plan round the reply
+ * is stored in (its questions are counted with the earlier ones). Running it again on the same plan round writes only what
+ * an earlier run did not: a comment or decision already recorded in a question round after the plan round is not made again.
+ * Returns the rounds written.
  */
-export async function askQuestions(db: Db, impl: Implementation, reply: PlanReply, deps: QuestionDeps): Promise<QuestionRound[]> {
+export async function askQuestions(db: Db, impl: Implementation, reply: PlanReply, deps: QuestionDeps, planRound: number): Promise<QuestionRound[]> {
   const at = deps.now?.() ?? new Date().toISOString();
   const ref = `${impl.repo}#${impl.number}`;
-  const asked = await questionRounds(db, impl.id);
+  const rounds = await roundsOf(db, impl.id);
+  const asked = rounds.filter((r) => r.kind === "plan" && r.id <= planRound && (r.result as { ready?: unknown } | null)?.ready === false).length;
+  const before = rounds.filter((r) => r.kind === "question" && r.id > planRound).map((r) => r.result as Partial<QuestionRound> | null);
+  const did = (audience: QuestionRound["audience"]): boolean => before.some((q) => q?.audience === audience);
   const written: QuestionRound[] = [];
   const round = async (q: QuestionRound): Promise<void> => {
     await addRound(db, impl.id, "question", { callId: impl.planCallId, result: q }, at);
     written.push(q);
+  };
+  // The attempt moves on, and records which plan round it moved on from (plan_call_id), in one write.
+  const moveOn = async (decisionId: string | null): Promise<void> => {
+    await settleQuestions(db, impl, decisionId, at);
+    await setImplementationState(db, impl.id, "asked", { decisionId, planCallId: impl.planCallId }, at);
   };
 
   // Past the limit (this reply's round included): the maintainers choose how to go on.
   if (asked > QUESTION_ROUNDS_MAX) {
     const id = limitDecisionId(impl.repo, impl.number, impl.attempt);
     const text = `Implement ${ref} with the stated assumptions? The plan still has open questions after ${QUESTION_ROUNDS_MAX} rounds.`;
-    await ask(db, [{
-      id, kind: "other", repo: impl.repo, number: impl.number, question: text,
-      context: `The plan so far: ${cut(reply.summary, 400)}\n\nStill open:\n${reply.questions.map((q) => `- ${cut(q.text, 300)}`).join("\n")}`,
-      facts: [`attempt: ${impl.attempt}`, `question rounds: ${asked - 1}`],
-      options: [LIMIT_IMPLEMENT, BACKLOG, LIMIT_CLOSE], asked_by: IMPLEMENT_ASKER, asked_at: at,
-    }]);
-    await round({ audience: "maintainer", text, decisionId: id });
-    await setImplementationState(db, impl.id, "asked", { decisionId: id }, at);
+    if (!did("maintainer")) {
+      await ask(db, [{
+        id, kind: "other", repo: impl.repo, number: impl.number, question: text,
+        context: `The plan so far: ${cut(reply.summary, 400)}\n\nStill open:\n${reply.questions.map((q) => `- ${cut(q.text, 300)}`).join("\n")}`,
+        facts: [`attempt: ${impl.attempt}`, `question rounds: ${asked - 1}`],
+        options: [LIMIT_IMPLEMENT, BACKLOG, LIMIT_CLOSE], asked_by: IMPLEMENT_ASKER, asked_at: at,
+      }]);
+      await round({ audience: "maintainer", text, decisionId: id });
+    }
+    await moveOn(id);
     deps.log(`${ref}: ${asked - 1} rounds of questions; asked the maintainers whether to go on (${id})`);
     return written;
   }
@@ -82,7 +112,7 @@ export async function askQuestions(db: Db, impl: Implementation, reply: PlanRepl
     author = [];
   }
 
-  if (author.length) {
+  if (author.length && !did("author")) {
     const text = authorComment(author);
     const commentId = await deps.postComment(text);
     for (const q of author) await round({ audience: "author", text: q.text, ...(commentId !== null && { commentId }) });
@@ -92,12 +122,14 @@ export async function askQuestions(db: Db, impl: Implementation, reply: PlanRepl
   let decisionId: string | null = null;
   if (maintainer.length) {
     decisionId = questionDecisionId(impl.repo, impl.number, impl.attempt, asked);
-    const [first, ...rest] = maintainer;
-    await ask(db, [maintainerDecision(impl, reply, first!, rest, decisionId, at)]);
-    for (const q of maintainer) await round({ audience: "maintainer", text: q.text, decisionId });
-    deps.log(`${ref}: asked the maintainers (${decisionId})`);
+    if (!did("maintainer")) {
+      const [first, ...rest] = maintainer;
+      await ask(db, [maintainerDecision(impl, reply, first!, rest, decisionId, at)]);
+      for (const q of maintainer) await round({ audience: "maintainer", text: q.text, decisionId });
+      deps.log(`${ref}: asked the maintainers (${decisionId})`);
+    }
   }
-  await setImplementationState(db, impl.id, "asked", { decisionId }, at);
+  await moveOn(decisionId);
   return written;
 }
 
@@ -130,7 +162,8 @@ export async function askedSoFar(db: Db, impl: Implementation): Promise<PlanAske
     if (q.decisionId) {
       if (!decisions.has(q.decisionId)) decisions.set(q.decisionId, await getDecision(db, q.decisionId));
       const d = decisions.get(q.decisionId);
-      if (d?.answer) {
+      // A question set aside unanswered (settleQuestions) has no answer to show.
+      if (d?.answer && d.answer !== WITHDRAWN) {
         const label = optionsOf(d).find((o) => o.key === d.answer)?.label ?? d.answer;
         answer = `${label}${d.answer_note ? `: ${d.answer_note}` : ""}`;
       }

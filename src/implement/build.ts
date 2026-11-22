@@ -217,7 +217,7 @@ async function nextTurn(run: BuildRun, impl: Implementation, ws: { base: string 
     // The follow-up's harness session is gone with its Task Runner, or the follow-up failed: a fresh session on the changes, with what the checks found.
     const lastChecks = rounds.map((x) => x.kind).lastIndexOf("checks");
     const fresh = turns.filter((x) => rounds.indexOf(x) > lastChecks && turnResult(x).purpose === "fresh").length;
-    if (fresh >= FRESH_PER_CHECKS) throw new Stuck("session-failed", `the session started over ${fresh} times without reaching the checks; the last turn was ${r.outcome}`);
+    if (fresh >= FRESH_PER_CHECKS) throw new Stuck("session-lost", `the session started over ${fresh} times without reaching the checks; the last turn was ${r.outcome}`);
     const c = checksOf(rounds).at(-1);
     return { turn: { purpose: "fresh", stdin: await input({ diff_stat: c?.diffStat ?? "", findings: c?.findings ?? [] }) } };
   }

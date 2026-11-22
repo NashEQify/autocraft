@@ -13,6 +13,10 @@ export const PLAN_QUESTION_CHARS = 800;
 export const PLAN_QUESTIONS_MAX = 3;
 export const PLAN_OPTIONS_MAX = 3;
 export const PLAN_ACCEPTANCE_MAX = 12;
+/** Limits of the plan text and of each acceptance criterion, risk and verification item, and items per list: the plan goes into the PR body (65,536 characters at most). */
+export const PLAN_TEXT_CHARS = 16_000;
+export const PLAN_ITEM_CHARS = 600;
+export const PLAN_ITEMS_MAX = 12;
 /** Question rounds an attempt may ask before a maintainer decides whether to go on with stated assumptions. */
 export const QUESTION_ROUNDS_MAX = 3;
 

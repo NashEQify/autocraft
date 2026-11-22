@@ -10,10 +10,10 @@ export async function queuerOf(db: Db, repo: string, number: number): Promise<st
   return (await db.get(db.k.selectFrom("main.fast_track").select("added_by").where("repo", "=", repo).where("number", "=", number)))?.added_by ?? null;
 }
 
-/** Why an implement job of the issue may not run, or null. */
-export async function implementRefusal(db: Db, repo: string, number: number): Promise<string | null> {
+/** Why an implement job of the issue may not run, or null. `dry`: a dry run, which may run while the repo's Implement switch is off. */
+export async function implementRefusal(db: Db, repo: string, number: number, o: { dry?: boolean } = {}): Promise<string | null> {
   if (!await fixIssueApprovalOf(db, repo)) return `issue implementations in ${repo} are not approved`;
-  if (!await featureOn(db, "implement", repo)) return `Implement is off for ${repo}`;
+  if (!o.dry && !await featureOn(db, "implement", repo)) return `Implement is off for ${repo}`;
   const by = await queuerOf(db, repo, number);
   if (!by) return `${repo}#${number} is not queued`;
   if (!await settlesNow(db, by, [repo])) return `${by}, who queued ${repo}#${number}, does not settle on ${repo}`;
