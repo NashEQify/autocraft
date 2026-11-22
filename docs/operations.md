@@ -517,7 +517,7 @@ Codex's own sandbox does not keep its shell tool away from its login on Linux, s
 
 ## Pipeline runner
 
-`autocraft-server runner serve` is the only process that runs pipeline steps (how the parts fit together: [docs/pipeline.md](docs/pipeline.md#architecture)). It polls the `jobs` table every 2 seconds, runs each job in a child process (`autocraft-server runner exec <id>`) with its output in a log file, stops jobs whose cancel was requested, and, while the pipeline is On, queues the jobs the stages need (see [docs/pipeline.md](docs/pipeline.md#on-and-off)). Every 20 seconds it also refreshes the flowchart counts (`flow_summary`) of repos whose data changed. On start it puts jobs that an earlier runner left running back in the queue to resume (see [Restarts and resumed jobs](#restarts-and-resumed-jobs)). A lock file keeps a second runner on the same database from starting.
+`autocraft-server runner serve` is the only process that runs pipeline steps (how the parts fit together: [docs/pipeline.md](docs/pipeline.md#architecture)). It polls the `jobs` table every 2 seconds, runs each job in a child process (`autocraft-server runner exec <id>`) with its output in a log file, stops jobs whose cancel was requested, and, while the pipeline is On, queues the jobs the stages need (see [docs/pipeline.md](docs/pipeline.md#on-and-off)). Every 20 seconds it also refreshes the flowchart counts (`flow_summary`) of repos whose data changed. On start it puts jobs that an earlier runner left running back in the queue to resume (see [Restarts and resumed jobs](#restarts-and-resumed-jobs)). A lock file keeps a second runner on the same host from starting; on Postgres, a second copy elsewhere waits as a standby (see [Two replicas](#two-replicas)).
 
 It reads the same variables as the CLI (`AUTOCRAFT_DB` and the rest), plus:
 
@@ -849,7 +849,7 @@ The dashboard, the runner, sync and backup write to stdout and stderr. The runne
 
 ### Health endpoints
 
-`GET /healthz` answers 200 `ok` while the process is up. `GET /readyz` answers 200 while the database answers a query and 503 otherwise. Neither needs authentication and neither returns data. They are served by the dashboard (before sign-in), by the runner's worker API listener (before the worker key check) and, when `AUTOCRAFT_HEALTH_LISTEN` is set, by a listener of the runner that serves only these two paths.
+`GET /healthz` answers 200 `ok` while the process is up. `GET /readyz` answers 200 while the database answers a query and 503 otherwise. A runner that waits as a standby (see [Two replicas](#two-replicas)) answers `/healthz` with 200 `ok: standby` and `/readyz` with 503 `not ready: standby`, so a Service sends workers only to the leader. Neither needs authentication and neither returns data. They are served by the dashboard (before sign-in), by the runner's worker API listener (before the worker key check) and, when `AUTOCRAFT_HEALTH_LISTEN` is set, by a listener of the runner that serves only these two paths.
 
 ### Health checks
 
@@ -858,6 +858,7 @@ The dashboard computes the checks below from the database on each request; nothi
 | Id | Fails or warns when |
 |---|---|
 | `runner` | `runner_heartbeat` is missing or older than 2 minutes (fail) |
+| `runner-leader`, `periodic-leader` | Postgres with leader election only (see [Two replicas](#two-replicas)): no leader has written its status (`leader:<role>` in `settings`) for 1 minute (fail). While it is `ok`, `since` is when the leader took over and `count` is the number of standbys waiting; a missing standby is not a problem |
 | `worker:<env id>` (`workers` in the endpoint) | an enabled build environment has not reported (`last_seen_at`) for 5 minutes, or never (fail) |
 | `build-queue` | a build task has been queued for over 10 minutes: fail when no enabled environment has reported in 5 minutes, else warn (a security task while no confidential environment is ready counts under `confidential-env` instead) |
 | `remote-calls` | the inference mode is `user-local`, a remote model call has been queued for over 10 minutes, and no helper has claimed any call in that time (warn) |
@@ -889,6 +890,37 @@ A restart of the runner, the dashboard or both (a deploy, a crash, a moved pod) 
 - At the stop the runner signals the job's process alone. A write asked for from then on is not made: its caller waits until the process exits, so no step records it as a failed item, and the resumed run makes it. The writes in flight finish and are recorded (up to 7 seconds), then their callers get up to 1 more second to record what the writes did (a review's row, a push's outcome), cut short once each has asked for its next write or the step returned. Then the process records its usage, stops the rest of its process group (model calls, builds) and exits. A write still in flight when the 7 seconds ran out leaves its audit row in state `started`; the resumed run makes it again and logs it, and the new row names the unknown one in `repeats`.
 - Local model calls (Jev, Claude on an account, Haiku) and local steps (checkouts, builds) run again; model-queue waits and work leases of the stopped run end.
 
+### Two replicas
+
+On Postgres the runner and the periodic chores can run as two copies (for example two pods on different nodes), so that a lost pod or node does not stop the pipeline. One copy of each role leads and works; the other waits as a standby and takes over within seconds. The runner and the periodic chores are elected separately. On SQLite every process runs on one host and always leads.
+
+How it works (`src/db/leader.ts`, `src/db/fence.ts`):
+
+- A copy leads while it holds its role's session-level advisory lock on a database connection of its own (application name `autocraft-leader-runner` or `autocraft-leader-periodic`). The connection must be direct or session-mode, like the listening connection: a transaction-mode pooler drops session locks.
+- A standby tries for the lock every 2 seconds. It logs that it waits, writes its status every 10 seconds (`leader:<role>:standby:<host>:<pid>` in `settings`) and starts nothing. A standby runner answers the probes on the worker API address (`/readyz` 503) and runs neither the worker API, the build pod launcher nor the Discord bot. A standby `periodic` runs no sync.
+- The leader checks its lock every 2 seconds and gives up on a check that takes over 3 seconds. It writes its status (`leader:<role>`) every 10 seconds.
+- A new leader moves its role's epoch (`leader:<role>:epoch`) and fences its process and every process it starts to that epoch (`AUTOCRAFT_FENCE`). Every write transaction of a fenced process checks the epoch right after it takes the writer lock and fails if the epoch moved.
+- Then the new runner does what a restarted runner does: `recover()` queues the jobs left running to resume or ends them (see [Restarts and resumed jobs](#restarts-and-resumed-jobs)), and the build pod and workspace launcher picks up the pods, volumes and workspaces from their rows on its first pass.
+
+When the leader loses its lock (its connection fails or a check fails), it starts nothing more, kills the process groups of its jobs (or of the running chores) with SIGKILL and exits with SIGKILL. The container restarts and the copy comes back as a standby. Its jobs resume on the new leader as after a crash: GitHub writes that recorded a result are not made again, and a write still in flight leaves an audit row in state `started`, which the resumed run makes again.
+
+Why nothing is written twice: all writes run one at a time under the writer lock, and the new leader moves the epoch in a write transaction. A write of the old leader or of one of its jobs either committed before the epoch moved, or sees the new epoch and fails. Every GitHub write first records its audit row in a write transaction, so a fenced job cannot start one either. What is not fenced is a GitHub call already in flight when the epoch moves; the old leader kills it when it notices the loss. In a network split the old leader notices first: its check fails within 5 seconds, while the server drops a silent session only after the keepalive settings of the lock connection (`tcp_keepalives_idle` 5, `tcp_keepalives_interval` 2, `tcp_keepalives_count` 3, `tcp_user_timeout` 10 s: about 11 seconds).
+
+How long a failover takes, until the new leader starts its recovery:
+
+| Event | The lock is free | Takeover |
+|---|---|---|
+| Clean stop (rolling update, pod deleted, node drained) | after the leader has stopped its jobs (at most `AUTOCRAFT_STOP_TIMEOUT`, 25 seconds) and unlocked | at most 2 seconds later |
+| Process or container killed, out of memory | at once: the kernel closes the connection | at most 2 seconds |
+| Node lost, network split | when the server drops the silent session, about 11 seconds | at most 13 seconds; longer if the database provider overrides the keepalive settings |
+
+Running two replicas in Kubernetes:
+
+- Put the runner and the periodic containers in a workload of their own with two replicas and pod anti-affinity on the node, apart from the dashboard. A standby runner is not ready, and a pod is ready only when all its containers are, so a dashboard in the same pod would leave its Service too.
+- The `autocraft-worker-api` Service then reaches only the leading runner; the dashboard and the build workers use it for the worker API.
+- Each replica needs its own `/data` (caches, checkouts, fixup clones) and the same `/config` (accounts and Claude logins): a ReadWriteMany volume for `/config`, or the same contents on each replica's volume.
+- `terminationGracePeriodSeconds` stays above `AUTOCRAFT_STOP_TIMEOUT`, so a clean stop hands over without killing jobs.
+
 ### Sandbox (bubblewrap)
 
 Tool-using Claude calls run in `bwrap` (see Pipeline runner). Docker's default profile blocks it in two places: the seccomp profile denies creating the user namespace, and the masked paths under `/proc` deny the `--proc /proc` mount. Tested with rootless Docker on a kernel that allows unprivileged user namespaces:
@@ -912,7 +944,7 @@ The runner container therefore needs an unconfined seccomp profile and unmasked 
 |---|---|
 | One pod, three containers: `dashboard`, `runner` and `periodic` (three containers, two shared volumes) | The database is SQLite on a ReadWriteOnce volume, so every process that opens it must run on the same node. Separate pods would need node affinity. |
 | StatefulSet, one replica | The old pod is gone before the new one starts, so two runners never share the volume. The lock files cannot exclude a second pod. |
-| `periodic` container instead of CronJobs | A CronJob pod may land on another node, where the volume cannot attach. The container loops `sync` (every 60 seconds after the previous run, like the timer) and runs `backup daily 7` once a day. |
+| `periodic` container instead of CronJobs | A CronJob pod may land on another node, where the volume cannot attach. The container runs `autocraft-server periodic`, which runs `deploy/periodic.sh`: `sync` every 60 seconds after the previous run, like the timer, and `backup daily 7` once a day. |
 | Two volume claims, `data` and `config` (ReadWriteOnce) | `/config` is writable because the app writes accounts, Claude logins and usage readings there. |
 | Pod `hostUsers: false`, `runAsNonRoot`, uid and `fsGroup` 10001 | The user namespace is required for the runner's `procMount: Unmasked`. |
 | Runner container: `procMount: Unmasked`, `seccompProfile: Unconfined` | The sandbox requirement above. The other containers keep the defaults. |

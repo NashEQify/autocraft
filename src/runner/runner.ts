@@ -572,6 +572,15 @@ export class Runner {
     }
   }
 
+  /**
+   * Fencing, after the leader lock was lost (src/db/leader.ts): starts nothing more and kills every job's process group at
+   * once, writing nothing. The new leader's recover() resumes or fails the jobs, as after a crash.
+   */
+  abandon(): void {
+    this.stopping = true;
+    for (const r of this.running.values()) if (r.child.pid) killGroup(r.child.pid, "SIGKILL");
+  }
+
   /** Resolves when every running job has ended. */
   async idle(): Promise<void> {
     while (this.running.size) await Promise.all([...this.running.values()].map((r) => r.exited));

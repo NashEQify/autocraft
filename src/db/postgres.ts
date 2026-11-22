@@ -9,6 +9,7 @@ import { callSite, siteError, withoutInsertId } from "./handle.ts";
 import type { DB, DbRole, Row } from "./index.ts";
 import { bindParams, parseParams, rewriteForPostgres, rewriteScriptForPostgres, type ParsedParams } from "./params.ts";
 import { plainSchema, SCOPED_SCHEMA } from "./scoped.ts";
+import { fenceSql } from "./fence.ts";
 
 /** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
 export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
@@ -134,7 +135,8 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
   pool.on("connect", (client) => observeClient(client, ctx));
   const raw = (text: string, values?: unknown[]) => k.CompiledQuery.raw(text, values);
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
-  const beginWrite = (tx: Tx | undefined) => `BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = ${lockTimeout(tx)}; SELECT pg_advisory_xact_lock(${WRITER_LOCK})`;
+  // A fenced process (src/db/fence.ts) checks its epoch after the writer lock: the check sees every write committed before it.
+  const beginWrite = (tx: Tx | undefined) => `BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = ${lockTimeout(tx)}; SELECT pg_advisory_xact_lock(${WRITER_LOCK})${fenceSql()}`;
   /** Connections between their BEGIN and its COMMIT or ROLLBACK. */
   const inTransaction = new WeakSet<K.DatabaseConnection>();
 
