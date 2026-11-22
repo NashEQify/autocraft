@@ -1,7 +1,5 @@
 // What the Fix stage reads about issues from the local tables. Which issues it works on is the Plans' (core/decide-item.ts).
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
-import { BULK_ROWS, bulkWritesSync } from "../core/plan-changes.ts";
 import type { Db } from "../db/index.ts";
 
 export const ATTEMPT_STATES = ["retry", "testing", "passed", "pr-opened", "skipped", "failed"] as const;
@@ -90,22 +88,3 @@ function openPrMap(prs: OpenPrRow[]): Map<number, OpenPr> {
 
 /** Whether an open PR in the repo closes issue `n` or a person's open PR mentions it. */
 export const hasOpenPr = async (db: Db, repo: string, n: number): Promise<boolean> => (await issuesWithOpenPr(db, repo)).has(n);
-
-/** Writes text_refs of the open PRs without one, in batches so other processes can write between them. */
-export function fillTextRefs(db: DatabaseSync): void {
-  const sel = db.prepare("SELECT repo, number, title, body FROM main.items WHERE kind = 'pr' AND state = 'OPEN' AND text_refs IS NULL LIMIT 2000");
-  const upd = db.prepare("UPDATE main.items SET text_refs = ? WHERE repo = ? AND number = ? AND text_refs IS NULL");
-  for (;;) {
-    const rows = sel.all() as { repo: string; number: number; title: string | null; body: string | null }[];
-    if (!rows.length) return;
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const write = (): void => { for (const r of rows) upd.run(textRefs(r.title, r.body), r.repo, r.number); };
-      if (rows.length >= BULK_ROWS) bulkWritesSync(db, "text-refs", write); else write();
-      db.exec("COMMIT");
-    } catch (e) {
-      db.exec("ROLLBACK");
-      throw e;
-    }
-  }
-}

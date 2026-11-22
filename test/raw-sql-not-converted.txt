@@ -50,7 +50,6 @@
 
 
 
-src/core/plan-changes.ts
 
 
 
@@ -142,7 +141,6 @@ src/core/plan-changes.ts
 
 
 
-src/fixissue/candidates.ts
 
 
 
@@ -168,7 +166,6 @@ src/fixissue/candidates.ts
 
 
 
-src/itemhash.ts
 
 
 

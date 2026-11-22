@@ -18,7 +18,7 @@ import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.t
 import { ParallelError, setStepParallel, stepParallelSetting } from "./concurrency.ts";
 import { DEFAULT_MAX_JOBS, Runner, runnerLockPath } from "./runner.ts";
 import { loadSteps } from "./steps.ts";
-import { dropPlanChanges } from "../core/plan-changes.ts";
+import { dropPlanChanges } from "../db/sqlite-backfill.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
