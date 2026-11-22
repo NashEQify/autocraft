@@ -16,9 +16,9 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { Requires, SandboxEnv, TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
-import { computeCapacity, feedbackCapacity, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
+import { computeCapacity, feedbackCapacity, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
 import { classifyPodEnd, disruptionPolicy, MAX_DISRUPTIONS, pendingKind } from "./disruption.ts";
-import { guardedApi, inClusterApi, KubeError, type CapacityApi, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
+import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQuota, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
 import { gib, raiseAfterOom, repoMemory } from "./sizing.ts";
 import { WarmStatus } from "./warm-status.ts";
 import {
@@ -75,11 +75,11 @@ export type LauncherDeps = {
  * One pass's view of cluster capacity for envs that share a namespace, arch and node reserve: `take` deducts from it, so
  * envs that share it see each other's claims. `error`: the reads failed, and those envs run their fixed slots.
  */
-type CapView = { cap: Capacity; fitsAnyNode: (r: Res) => boolean } | { error: string };
+type CapView = { cap: Capacity; tooLarge: (r: Res) => string | null } | { error: string };
 /** Reads made once per pass: the nodes, each namespace's quota, and the capacity views built from them. */
 class PassReads {
   nodes: Promise<CapNode[]> | null = null;
-  quotas = new Map<string, Promise<Res | null>>();
+  quotas = new Map<string, Promise<KResourceQuota[]>>();
   views = new Map<string, Promise<CapView>>();
 }
 
@@ -187,7 +187,8 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
       if (!view) return "stop";
       if ("error" in view) return "fit";
       const { res } = await requestOf(ctx, t.repo, t.step);
-      if (!view.fitsAnyNode(res)) return { fail: `The task needs ${cpuText(res.cpu)} CPU and ${gib(res.mem)} of memory, more than any build node offers; lower the repository's size with \`tasks sizes\`` };
+      const large = view.tooLarge(res);
+      if (large) return { fail: `${large}; lower the repository's size with \`tasks sizes\`` };
       if (view.cap.fit(res) === null) {
         waiting = res;
         return "stop";
@@ -298,10 +299,11 @@ async function readView(c: EnvCtx): Promise<CapView> {
     reads.nodes ??= api.listNodes().then((ns) => ns.map(toCapNode));
     let q = reads.quotas.get(ns);
     if (!q) {
-      q = api.getQuota(ns).then(quotaRoom);
+      q = api.getQuota(ns);
       reads.quotas.set(ns, q);
     }
-    const [nodes, quota] = await Promise.all([reads.nodes, q]);
+    const [nodes, quotas] = await Promise.all([reads.nodes, q]);
+    const quota = quotaRoom(quotas), hard = quotaHard(quotas);
     const reserve: Res = { cpu: Math.round(quantity(c.s.nodeReserveCpu) * 1000) || 0, mem: Math.round(quantity(c.s.nodeReserveMemory)) || 0 };
     const archLabel = ARCH_LABEL[c.s.arch];
     // Every environment's runs reserve on the nodes they were placed on, whatever their namespace.
@@ -315,8 +317,14 @@ async function readView(c: EnvCtx): Promise<CapView> {
     // Other pods are not visible to the runner (capacity.ts): only our own reservations are taken off.
     const cap = computeCapacity({ nodes, pods: [], quota, reservations, settings: { archLabel, nodeReserve: reserve, buildPriority: 0 } });
     const room = nodes.filter((n) => n.ready && !n.unschedulable && n.arch === archLabel).map((n) => ({ cpu: n.allocatable.cpu - reserve.cpu, mem: n.allocatable.mem - reserve.mem }));
-    // With no eligible node at all nothing is too large: the tasks wait for one.
-    return { cap, fitsAnyNode: (r) => !room.length || room.some((n) => n.cpu >= r.cpu && n.mem >= r.mem) };
+    const need = (r: Res) => `The task needs ${cpuText(r.cpu)} CPU and ${gib(r.mem)} of memory`;
+    const tooLarge = (r: Res): string | null => {
+      if (hard && (r.cpu > hard.cpu || r.mem > hard.mem)) return `${need(r)}, more than the namespace's quota allows in all (${[Number.isFinite(hard.cpu) ? `${cpuText(hard.cpu)} CPU` : "", Number.isFinite(hard.mem) ? gib(hard.mem) : ""].filter(Boolean).join(", ")})`;
+      // With no eligible node at all nothing is too large for the nodes: the tasks wait for one.
+      if (room.length && !room.some((n) => n.cpu >= r.cpu && n.mem >= r.mem)) return `${need(r)}, more than any build node offers`;
+      return null;
+    };
+    return { cap, tooLarge };
   } catch (e) {
     return { error: (e as Error).message };
   }

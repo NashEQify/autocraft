@@ -102,6 +102,18 @@ export function quotaRoom(quotas: readonly KResourceQuota[]): Res | null {
   return cpu === null && mem === null ? null : { cpu: cpu ?? Infinity, mem: mem ?? Infinity };
 }
 
+/** The smallest hard limit on requests of cpu and memory across the namespace's quotas; null when none limits them. A request above it never fits. */
+export function quotaHard(quotas: readonly KResourceQuota[]): Res | null {
+  let cpu = Infinity, mem = Infinity;
+  for (const q of quotas) {
+    const h = q.status?.hard;
+    const c = h?.["requests.cpu"] ?? h?.cpu, m = h?.["requests.memory"] ?? h?.memory;
+    if (c !== undefined) cpu = Math.min(cpu, cpuOf(c));
+    if (m !== undefined) mem = Math.min(mem, memOf(m));
+  }
+  return cpu === Infinity && mem === Infinity ? null : { cpu, mem };
+}
+
 export type CapacityInput = {
   nodes: readonly CapNode[];
   /** Every pod in the cluster; finished pods are ignored. */
