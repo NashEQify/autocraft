@@ -927,7 +927,9 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   no_taker_since INTEGER,             -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
   bundle_hash TEXT,                   -- sha256 of the canonical bundle JSON: a resumed job adopts its earlier run's call with the same bundle
   consumed_at INTEGER,                -- when the caller read the done reply; a done call not yet read can still be adopted
-  base_stdin TEXT                     -- the bundle's stdin as queued, once a lease rewrote it (a workspace session's resume note)
+  base_stdin TEXT,                    -- the bundle's stdin as queued, once a lease rewrote it (a workspace session's resume note)
+  refusals INTEGER NOT NULL DEFAULT 0, -- retries after a model's safety filter declined the call (submitCall): at most one, and none uses an attempt
+  refused_token INTEGER               -- the runner token whose model declined the call, when it was queued again for another Task Runner: not offered it again
 );
 CREATE INDEX IF NOT EXISTS remote_calls_state ON remote_calls(state, tier);
 CREATE INDEX IF NOT EXISTS remote_calls_ended ON remote_calls(state, ended_at);

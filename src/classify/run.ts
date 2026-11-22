@@ -25,7 +25,7 @@ import { agentsFile, mcpFile } from "../sandbox/agent-files.ts";
 import { agentsDefinition, MCP_PATH } from "../sandbox/agents.ts";
 import { levelBand } from "../rank/level.ts";
 import { inferenceMode, tierOfModel } from "../remote/mode.ts";
-import { awaitCall, enqueueCall, type Outcome } from "../remote/calls.ts";
+import { awaitCall, enqueueCall, REFUSED_PREFIX, type Outcome } from "../remote/calls.ts";
 import { bundleMounts, checkoutCommit, REFERENCE_SERVER } from "../remote/bundle.ts";
 import { resolveClaudeBin, sandboxCommand, TOKEN_MARGIN_MS } from "../sandbox/index.ts";
 import { childEnv } from "../agents/status.ts";
@@ -373,6 +373,8 @@ export type AskOptions = {
   forLogin?: string;
   /** User-local mode: the longest wait of the first call alone in the queue (WaitLimitError past it); follow-ups on its session wait as `maxWaitMs` says. */
   firstWaitMs?: number;
+  /** User-local mode: the call failed because the model's safety filter declined it, after its retry elsewhere (src/remote/calls.ts); the ask returns null. */
+  onRefused?: (error: string) => void;
 };
 
 /** The repo-docs directory for the item's repository, or undefined (no docs, or a checkout that is not one of ours). */
@@ -749,6 +751,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
       if (o.state === "unclaimed") return "unclaimed";
       if (o.state === "failed") {
         if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: await scrubError(o.error), summary: "failed" });
+        if (o.error.startsWith(REFUSED_PREFIX)) opts.onRefused?.(o.error);
         return "failed";
       }
       const { usage, all: tokens } = remoteUsage(o, model);

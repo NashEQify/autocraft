@@ -82,12 +82,12 @@ export async function takerSignature(db: Db, nowMs: number = Date.now()): Promis
   return denied.at ? `${s}|${denied.at}` : s;
 }
 
-type Runner = { login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; /** The tiers its models offer (accepted families). */ tiers: ReadonlySet<Tier> };
+type Runner = { tokenId: number; login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; /** The tiers its models offer (accepted families). */ tiers: ReadonlySet<Tier> };
 
 /** The takers as the taker rule reads them. */
 async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; canWrite: (login: string, repo: string) => boolean }> {
   const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").innerJoin("main.access as a", "a.login", "t.login")
-    .select(["t.login", "a.role", "t.idle_repos", "h.models"]).where((eb) => takerExpr(eb, nowMs)));
+    .select(["t.id", "t.login", "a.role", "t.idle_repos", "h.models"]).where((eb) => takerExpr(eb, nowMs)));
   const canWrite = await roomCanWrite(db, rows.map((r) => r.login), nowMs);
   const accepted = await acceptedModels(db);
   const runners = await mapSeq(rows, async (h) => {
@@ -96,7 +96,7 @@ async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; 
     let models: Record<string, unknown> = {};
     try { models = JSON.parse(h.models) as Record<string, unknown>; } catch { /* no models */ }
     const tiers = new Set(Object.entries(models).flatMap(([t, m]) => (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null ? [t] : [])));
-    return { login: h.login, role: h.role, repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login), tiers };
+    return { tokenId: Number(h.id), login: h.login, role: h.role, repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login), tiers };
   });
   return { runners, canWrite };
 }
@@ -107,6 +107,17 @@ async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => bool
   return (c) => c.forLogin
     ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
     : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
+}
+
+/**
+ * Whether a taker other than the runner token `exceptToken` (null: any) may take `c` on `c.tier` now: where a call that a
+ * model's safety filter declined can run once more (calls.ts submitCall). A bound call counts only its user's runners.
+ */
+export async function tierTaker(db: Db, c: TakerCall & { tier: Tier }, exceptToken: number | null, nowMs: number): Promise<boolean> {
+  const { runners, canWrite } = await readRunners(db, nowMs);
+  return runners.some((r) => r.tokenId !== exceptToken && r.tiers.has(c.tier) && (c.forLogin
+    ? r.login.toLowerCase() === c.forLogin.toLowerCase() && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x))
+    : runnerTakes(r, c, canWrite)));
 }
 
 /** A key equal for two units exactly when the same users of `logins` take them under their item choices (task-items.ts); "" when none does. */

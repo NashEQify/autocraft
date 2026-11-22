@@ -1,0 +1,62 @@
+// A call the model's safety filter declines runs once more on another Task Runner without using an attempt, and its agent
+// run says so; a second refusal fails the call as refused and ends the step's attempts with that error.
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { allocation } from "../src/agents/call.ts";
+import { runModelStep } from "../src/agents/step.ts";
+import { textStep } from "../src/agents/steps.ts";
+import { createToken } from "../src/dash/mcp/tokens.ts";
+import { SAMPLE_OPUS_PRS } from "../src/prompts/samples.ts";
+import { claimCall, REFUSED_PREFIX, submitCall, type Caller } from "../src/remote/calls.ts";
+import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
+import { setInferenceMode } from "../src/remote/mode.ts";
+import { PROTOCOL_VERSION } from "../src/remote/protocol.ts";
+import { connectDb } from "../src/db/open.ts";
+import { SCRATCH } from "./scratch.ts";
+
+mkdirSync(SCRATCH, { recursive: true });
+
+test("a refused call is retried once on another Task Runner, then fails the step as refused", async () => {
+  const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-refusal-")), "t.db"));
+  allocation.pollMs = 10;
+  await setInferenceMode(db, "user-local", "test");
+  const T0 = new Date().toISOString();
+  await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 1287, kind: "pr", state: "OPEN", title: "t", author: "alice", created_at: T0, updated_at: T0 }));
+  const callers: Record<string, Caller> = {};
+  for (const login of ["bob", "carol"]) {
+    await db.run(db.k.insertInto("access").values({ login, role: "maintainer" }));
+    await db.run(db.k.insertInto("repo_permissions").values({ login, repo: "photocraft", permission: "write", checked_at: T0 }));
+    const tokenId = (await createToken(db, login, "helper", { kind: "runner" })).row.id;
+    await storeStatus(db, tokenId, login, parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", mid: "sonnet" }, reserve: { fiveHour: 0, weekly: 0 } }), Date.now());
+    callers[login] = { tokenId, login, role: "maintainer" };
+  }
+  let claims = 0;
+  const lease = async (login: string) => (await claimCall(db, callers[login]!, { requestId: `refusal-claim-${String(++claims).padStart(4, "0")}`, protocol: PROTOCOL_VERSION, helperVersion: "1.2.0", harness: "claude", harnessVersion: "2.1", tiers: { top: "opus", mid: "sonnet" } }, async () => true)).lease;
+  const queued = async () => {
+    for (let i = 0; i < 400 && !await db.get(db.k.selectFrom("remote_calls").select("id").where("state", "=", "queued")); i++) await new Promise((r) => setTimeout(r, 5));
+  };
+
+  const step = runModelStep(db, { ...textStep("review.opus"), attempts: 2 }, SAMPLE_OPUS_PRS[0]!);
+  await queued();
+  const first = (await lease("bob"))!;
+  await submitCall(db, first.secret, { ok: false, refused: true, error: "model error API Error: Opus's safeguards flagged this message", durationMs: 5 });
+  const run1 = (await db.get(db.k.selectFrom("agent_runs").select(["state", "summary"]).orderBy("id").limit(1)))!;
+  assert.equal(run1.state, "failed");
+  assert.match(run1.summary ?? "", /^refused by opus on bob's Task Runner; retried on another Task Runner$/);
+  assert.equal(await lease("bob"), null, "the runner that refused is not offered the call again");
+
+  // A helper that does not flag the refusal: the harness's text is enough.
+  const second = (await lease("carol"))!;
+  assert.equal(second.id, first.id, "the same call, queued again");
+  await submitCall(db, second.secret, { ok: false, error: "model error API Error: Opus's safeguards flagged this message", durationMs: 5 });
+  const r = await step;
+  assert.equal(r.ok, false);
+  assert.ok(!r.ok && r.error.startsWith(REFUSED_PREFIX), "the step fails as refused");
+  const calls = await db.all(db.k.selectFrom("remote_calls").select(["state", "attempt", "refusals"]));
+  assert.deepEqual(calls.map((c) => [c.state, Number(c.attempt), Number(c.refusals)]), [["failed", 1, 1]], "one call: no attempt used, and the step asked no more");
+  const runs = await db.all(db.k.selectFrom("agent_runs").select("summary").orderBy("id"));
+  assert.match(runs.at(-1)?.summary ?? "", /^refused by opus on carol's Task Runner$/);
+  await db.close();
+});
