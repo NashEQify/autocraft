@@ -65,6 +65,11 @@ export function BatchFacts({ b }: { b: QueueBatch }) {
       </Link>
       {branch}
       <span className="text-xs text-ink/60">{b.repo}</span>
+      {!!b.areas?.length && (
+        <span className="text-xs text-ink/70 [overflow-wrap:anywhere]">
+          {b.areas.length === 1 ? "Area" : "Areas"} {b.areas.join(", ")}
+        </span>
+      )}
       <span className="num text-xs text-ink/60">
         {b.size} PR{b.size === 1 ? "" : "s"}
       </span>

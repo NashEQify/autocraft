@@ -1385,6 +1385,8 @@ export interface QueueBatch {
   size: number;
   /** The member PRs in batch order, as queue rows. */
   prs: QueueRow[];
+  /** The members' areas, each once, in batch order; the first is the area the batch was filled around. Absent in older mocks. */
+  areas?: string[];
   /** The batch's own PR on the storytold repo, once opened. */
   prNumber: number | null;
   prUrl: string | null;
