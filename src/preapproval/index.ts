@@ -616,13 +616,14 @@ async function resumeReviewStops(db: Db, held: ReadonlySet<string>, wake: Wake):
 export type Wake = (at: number) => void;
 
 /**
- * What advancePreapprovals reads, as change markers: the planner's input topics (the PR facts and the rows the pass reads), `access` (roles and
- * the audit entries an answer's source is read from) and `trace` (the base merges whose own diff it reads). A pass whose markers are the ones it
- * read before and whose wake time (`Wake`) has not come would move nothing.
+ * What advancePreapprovals reads, as change markers: the planner's input topics (the PR facts and most rows the pass reads) and `access`
+ * (roles, and the audit table: the entries an answer's source is read from, and the GitHub writes that follow a base merge's own-diff
+ * mark, which no other topic watches). A pass whose markers are the ones it read before and whose wake time (`Wake`) has not come would
+ * move nothing.
  */
 export async function preapprovalInputs(db: Db): Promise<string> {
   const seqs = await readSeqs(db);
-  return [...INPUT_TOPICS, "access", "trace"].map((t) => seqs[t] ?? 0).join(",");
+  return [...INPUT_TOPICS, "access"].map((t) => seqs[t] ?? 0).join(",");
 }
 
 /**
