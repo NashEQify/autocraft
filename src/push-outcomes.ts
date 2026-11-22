@@ -125,11 +125,19 @@ export async function activeTrips(db: Db): Promise<Partial<Record<TripStage, str
   return out;
 }
 
+const tripReason = (reason: string): string => `tripped: ${reason}; an operator resumes it`;
+
 /** Why the runner step cannot start because its stage tripped, or null. */
 export async function tripReasonOfStep(db: Db, step: string): Promise<string | null> {
   const stage = STEP_STAGE[step];
   const r = stage ? await tripRow(db, stage) : undefined;
-  return r?.active ? `tripped: ${r.reason}; an operator resumes it` : null;
+  return r?.active ? tripReason(r.reason) : null;
+}
+
+/** tripReasonOfStep from the stages tripped now (activeTrips). */
+export function tripReasonIn(trips: Partial<Record<TripStage, string>>, step: string): string | null {
+  const stage = STEP_STAGE[step], reason = stage ? trips[stage] : undefined;
+  return reason === undefined ? null : tripReason(reason);
 }
 
 /** Evidence of a trip, for the Pipeline page and the audit log. */

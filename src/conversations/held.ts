@@ -126,9 +126,11 @@ export async function dueHeld(db: Db, repo?: string): Promise<HeldRow[]> {
  * no room (the planner then wakes when room returns). Also the signature of that input for the planner.
  */
 export async function heldDue(db: Db, ms: number = Date.now()): Promise<{ repos: Map<string, boolean>; sig: string }> {
-  const room = await actRoom(db, 1, ms);
+  // The daily room is read only when a row is due.
+  let room: boolean | undefined;
   const repos = new Map<string, boolean>();
   for (const h of await dueHeld(db)) {
+    room ??= await actRoom(db, 1, ms);
     const v = h.state === "filing" ? null : await heldVerdict(db, h);
     repos.set(h.repo, (repos.get(h.repo) ?? false) || room || h.state === "filing" || (v !== null && "drop" in v));
   }

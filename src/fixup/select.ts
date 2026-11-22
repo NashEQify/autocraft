@@ -32,19 +32,52 @@ async function carriesOf(db: Db, f: PrFacts, head: string): Promise<FixCandidate
   return out;
 }
 
+type FixReads = {
+  titles: Map<string, string | null>;
+  conflictRows: Map<string, (ConflictRow & { number: number })[]>;
+  reviews: Map<string, { fixes: string | null; model: string | null }>;
+};
+
+/** The reads of selectFixups for the given candidates, keyed by `repo#number` (reviews by `repo#number@head`). */
+async function fixReads(db: Db, conflicts: readonly { facts: { repo: string; number: number } }[], fixups: readonly { facts: { repo: string; number: number } }[]): Promise<FixReads> {
+  const refs = (ps: readonly { facts: { repo: string; number: number } }[]): [string, number][] => ps.map((p) => [p.facts.repo, p.facts.number]);
+  const at = (ps: readonly { facts: { repo: string; number: number } }[]) => kx.tupleIn(db, ["repo", "number"], refs(ps), ["text", "bigint"]);
+  const titles = new Map(conflicts.length ? (await db.all(db.k.selectFrom("items").select(["repo", "number", "title"]).where(at(conflicts)))).map((r) => [`${r.repo}#${r.number}`, r.title]) : []);
+  const conflictRows = new Map<string, (ConflictRow & { number: number })[]>();
+  if (conflicts.length) for (const { repo, ...r } of await db.all(db.k.selectFrom("conflict_merges").select(["repo", "number", "from_head", "state", "created_at"]).where(at(conflicts)).orderBy(kx.rowid("conflict_merges"))))
+    (conflictRows.get(`${repo}#${r.number}`) ?? conflictRows.set(`${repo}#${r.number}`, []).get(`${repo}#${r.number}`)!).push(r);
+  const reviews = new Map<string, { fixes: string | null; model: string | null }>();
+  if (fixups.length) for (const r of await db.all(db.k.selectFrom("final_reviews").select(["repo", "number", "head_oid", "fixes", "model"]).where("verdict", "=", "take-fix").where(at(fixups)).$narrowType<{ number: number; head_oid: string }>()))
+    if (!reviews.has(`${r.repo}#${r.number}@${r.head_oid}`)) reviews.set(`${r.repo}#${r.number}@${r.head_oid}`, { fixes: r.fixes, model: r.model });
+  return { titles, conflictRows, reviews };
+}
+
+/** fixReads for every repo's candidates of a planner pass's Plans, read on first use and kept with them. */
+const passFixReads = new WeakMap<PlanSet, Promise<FixReads>>();
+function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Promise<FixReads> {
+  let r = passFixReads.get(plans);
+  if (!r) {
+    const o = { ...(run !== undefined ? { run } : {}), plans };
+    passFixReads.set(plans, (r = (async () => await fixReads(db, await planned(db, "conflict", o), await planned(db, "fixup", o)))()));
+    r.catch(() => { if (passFixReads.get(plans) === r) passFixReads.delete(plans); });
+  }
+  return r;
+}
+
 export async function selectFixups(db: Db, repo: string, run?: string | null, plans?: PlanSet): Promise<FixSelection> {
   const opts = { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) };
   const out: FixSelection = { fix: [], cannotPush: [], ask: [], lint: [], conflictMerge: [], conflictAsk: [] };
-  // Titles and conflict merge rows of the conflict candidates, and the reviews of the fix-up candidates, each read once for the repo.
   const conflicts = await planned(db, "conflict", opts), fixups = await planned(db, "fixup", opts);
-  const numbers = (ps: { facts: { number: number } }[]): number[] => ps.map((p) => p.facts.number);
-  const titles = new Map(conflicts.length ? (await db.all(db.k.selectFrom("items").select(["number", "title"]).where("repo", "=", repo).where(kx.inList(db, "number", numbers(conflicts), "bigint")))).map((r) => [r.number, r.title]) : []);
-  const conflictRowsOf = new Map<number, ConflictRow[]>();
-  if (conflicts.length) for (const r of await db.all(db.k.selectFrom("conflict_merges").select(["number", "from_head", "state", "created_at"]).where("repo", "=", repo).where(kx.inList(db, "number", numbers(conflicts), "bigint")).orderBy(kx.rowid("conflict_merges"))))
-    (conflictRowsOf.get(r.number) ?? conflictRowsOf.set(r.number, []).get(r.number)!).push(r);
-  const reviews = new Map<string, { fixes: string | null; model: string | null }>();
-  if (fixups.length) for (const r of await db.all(db.k.selectFrom("final_reviews").select(["number", "head_oid", "fixes", "model"]).where("repo", "=", repo).where("verdict", "=", "take-fix").where(kx.inList(db, "number", numbers(fixups), "bigint")).$narrowType<{ number: number; head_oid: string }>()))
-    if (!reviews.has(`${r.number}@${r.head_oid}`)) reviews.set(`${r.number}@${r.head_oid}`, { fixes: r.fixes, model: r.model });
+  // Titles and conflict merge rows of the conflict candidates, and the reviews of the fix-up candidates: read once for the
+  // repo, or with a planner pass's Plans once for every repo of the pass.
+  const reads = plans ? await passReads(db, plans, run) : await fixReads(db, conflicts, fixups);
+  const titles = new Map<number, string | null>(), conflictRowsOf = new Map<number, ConflictRow[]>();
+  for (const { facts: f } of conflicts) {
+    const t = reads.titles.get(`${repo}#${f.number}`), rows = reads.conflictRows.get(`${repo}#${f.number}`);
+    if (t !== undefined) titles.set(f.number, t);
+    if (rows) conflictRowsOf.set(f.number, rows);
+  }
+  const reviews = { get: (key: string) => reads.reviews.get(`${repo}#${key}`) };
   for (const { facts: f, action } of conflicts) {
     const c: ConflictCandidate = {
       repo, number: f.number, head: action.head!, base: f.conflict!.base, title: (titles.get(f.number) ?? "").slice(0, 300),

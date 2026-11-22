@@ -54,10 +54,10 @@ import { DEADLINE_ERROR, enqueue, JobError, now, requestCancel, RUNNER_STOPPED }
 import { claudePauseReason } from "../agents/accounts.ts";
 import { inferenceMode } from "../remote/mode.ts";
 import { takerSignature } from "../remote/takers.ts";
-import { tripReasonOfStep } from "../push-outcomes.ts";
-import { STEP_STAGE } from "../core/push-outcome.ts";
+import { activeTrips, tripReasonIn, tripReasonOfStep } from "../push-outcomes.ts";
+import { STEP_STAGE, type TripStage } from "../core/push-outcome.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
-import { activeJobs, jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
+import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { knownStep, loadSteps, STEPS, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { pilotItems, scopeRepos } from "../pilot.ts";
 import { refreshOutsideHolds } from "../outside.ts";
@@ -155,6 +155,10 @@ export type PlanCtx = {
   untaken?: UntakenTest;
   /** The fast-track scores of the pass (fastScores), read on first use. */
   fast?: Map<string, number>;
+  /** The repos in scope (scopeRepos) as the pass read them. */
+  scope?: Set<string>;
+  /** The planner pass's candidates of each lane, by lane name: the Next lists reuse what the pass detected. */
+  detected?: Map<string, Promise<Candidate[]>>;
   /** The incremental pass that built `plans`, when the planner keeps facts between passes. */
   pass?: PlanPass;
 };
@@ -176,12 +180,25 @@ export const planCtx = async (db: Db, incremental = false): Promise<PlanCtx> => 
       const scope = await scopeRepos(db);
       const run = await latestRun(db);
       const pass = await planPass(db, { now: Date.now(), run, fullEveryMs: PLAN_FULL_EVERY_MS });
-      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {} };
+      return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: pass.plans, pass, wake, notes: {}, scope };
     });
   }
   const scope = await scopeRepos(db);
   const run = await latestRun(db);
-  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: await loadPlanSet(db, { run }), wake, notes: {} };
+  return { run, tracked: (await trackedNames(db)).filter((r) => scope.has(r)), plans: await loadPlanSet(db, { run }), wake, notes: {}, scope };
+};
+
+/** The lane's candidates, detected once per planner pass (ctx.detected). */
+const detectOf = (db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "detect">): Promise<Candidate[]> => {
+  if (!ctx.detected) return lane.detect(db, ctx);
+  let c = ctx.detected.get(lane.name);
+  if (!c) {
+    const m = ctx.detected;
+    m.set(lane.name, (c = lane.detect(db, ctx)));
+    // A detect that failed is run again by the next caller.
+    c.catch(() => { if (m.get(lane.name) === c) m.delete(lane.name); });
+  }
+  return c;
 };
 
 /** The pass's Plans (loaded on first use when the ctx came without). */
@@ -225,7 +242,13 @@ function repoAllows(plans: PlanSet, repo: string, want: Want): boolean {
 export const INPUT_TOPICS = TOPICS.filter((t) => !["jobs", "usage", "agents", "envs", "tasks", "access", "github", "plans", "trace", "flow", "limits", "claims", "conversation-includes", "decision-choices", "held-followups", "decision-snooze", "security", "discord", "discord-links", "downloads", "build-features", "pr-builds", "nightly", "remote-helpers", "remote-queue", "rank-inputs"].includes(t));
 
 /** User-local mode: the Task Runners that could take calls (takerSignature). Work a pool left for want of a taker waits on it. */
-const takersOf = async (db: Db): Promise<string> => (await inferenceMode(db) === "user-local" ? await takerSignature(db) : "");
+const takersOf = async (db: Db): Promise<string> => {
+  const pass = passOf(db);
+  if (pass?.takers !== undefined) return pass.takers;
+  const s = await inferenceMode(db) === "user-local" ? await takerSignature(db) : "";
+  if (pass) pass.takers = s;
+  return s;
+};
 
 /** Sandbox tasks that ended, for lanes that read their results. */
 const tasksSig = async (db: Db): Promise<string> => String((await db.get(endedTasks(db)))!.n);
@@ -249,7 +272,17 @@ const repoOf = (c: Candidate): string | null => (typeof c.params.repo === "strin
 type JobEnd = { id: number; endedAt: string; state: string; items: number | null; acted: number | null; lease_skips: number | null; lease_skip_keys: string | null };
 
 /** Job and limit reads of one planner pass, loaded on first use. Other connections may start or end jobs meanwhile; applyProposals re-checks blocks and limits with fresh reads. */
-type PassReads = { db: Db; limits?: Map<string, LimitRow>; started?: { day: string; rows: { step: string; started_at: string; items: number | null }[] }; ends?: (JobEnd & { step: string; repo: string | null; requested_by: string | null })[] };
+type PassReads = {
+  db: Db; limits?: Map<string, LimitRow>; started?: { day: string; rows: { step: string; started_at: string; items: number | null }[] }; ends?: (JobEnd & { step: string; repo: string | null; requested_by: string | null })[];
+  /** Queued and running jobs of every step. */
+  live?: { step: string; params: string; items: number | null; state: string; repo: string | null }[];
+  /** The Task Runner signature (takersOf). */
+  takers?: string;
+  /** Act's usage per UTC day start. */
+  act?: Map<string, number>;
+  /** Tripped stages with their reasons. */
+  trips?: Partial<Record<TripStage, string>>;
+};
 let passReads: PassReads | null = null;
 const passOf = (db: Db): PassReads | null => (passReads?.db === db ? passReads : null);
 
@@ -600,7 +633,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "pr-build",
     perRepo: true,
     extra: tasksSig,
-    detect: async (db, ctx) => (await filterSeq([...new Set([...ctx.tracked, ...await reposWithQueuedBuilds(db)])], async (repo) => await prBuildDue(db, repo))).sort().map((repo) => ({ step: "pr-build", params: { repo } })),
+    detect: async (db, ctx) => {
+      const queued = new Set(await reposWithQueuedBuilds(db));
+      return (await filterSeq([...new Set([...ctx.tracked, ...queued])], async (repo) => await prBuildDue(db, repo, queued))).sort().map((repo) => ({ step: "pr-build", params: { repo } }));
+    },
   },
   {
     name: "fixissue",
@@ -763,9 +799,14 @@ export const limitRow = async (db: Db, step: string): Promise<LimitRow> => {
 
 /** Items handled by the step's jobs that started today (UTC) and after the operator's last reset of its count; for Act, also the GitHub writes of conversation cards. */
 export async function usageToday(db: Db, step: string, ms: number = Date.now()): Promise<number> {
-  if (step === "act") return await actUsedToday(db, ms);
-  const day = dayStart(ms), reset = await getSetting(db, KEY_RESET + step);
   const pass = passOf(db);
+  if (step === "act") {
+    if (!pass) return await actUsedToday(db, ms);
+    const day = dayStart(ms), act = (pass.act ??= new Map());
+    if (!act.has(day)) act.set(day, await actUsedToday(db, ms));
+    return act.get(day)!;
+  }
+  const day = dayStart(ms), reset = await getSetting(db, KEY_RESET + step);
   if (pass) {
     // The jobs started since the start of the day, read once; a reset only moves the start later.
     if (pass.started?.day !== day) pass.started = { day, rows: await db.all(db.k.selectFrom("jobs").select(["step", "started_at", "items"]).where("started_at", ">=", day).$narrowType<{ started_at: string }>()) };
@@ -780,7 +821,10 @@ export async function usageToday(db: Db, step: string, ms: number = Date.now()):
  * A queued job that waits for a Task Runner (untakenTest) keeps none.
  */
 export async function reservedByJobs(db: Db, step: string, untaken?: UntakenTest): Promise<number> {
-  const rows = await db.all(db.k.selectFrom("jobs").select(["params", "items", "state", "repo"]).where("step", "=", step).where("state", "in", ["queued", "running"]));
+  const pass = passOf(db);
+  // In a pass the queued and running jobs of every step are read once.
+  const rows = pass ? (pass.live ??= await db.all(db.k.selectFrom("jobs").select(["step", "params", "items", "state", "repo"]).where("state", "in", ["queued", "running"]))).filter((r) => r.step === step)
+    : await db.all(db.k.selectFrom("jobs").select(["params", "items", "state", "repo"]).where("step", "=", step).where("state", "in", ["queued", "running"]));
   let n = 0;
   for (const r of rows) {
     if (r.state === "queued" && await (untaken ??= await untakenTest(db))({ step, repo: r.repo, params: r.params })) continue;
@@ -860,7 +904,8 @@ const hhmm = (ms: number): string => `${new Date(ms).toISOString().slice(11, 16)
 /** Why the stage cannot start jobs now and when that can lift by itself (null: only a write lifts it, such as a resume or a limit change), or null when it is not paused. A step's models are taken at their defaults. */
 export async function pauseOf(db: Db, step: string, ms: number = Date.now(), o: { backoff?: boolean } = {}): Promise<{ why: string; wakeAt: number | null } | null> {
   const l = await limitRow(db, step), used = await usageToday(db, step, ms);
-  const tripped = await tripReasonOfStep(db, step);
+  const pass = passOf(db);
+  const tripped = pass ? tripReasonIn(pass.trips ??= await activeTrips(db), step) : await tripReasonOfStep(db, step);
   if (tripped) return { why: tripped, wakeAt: null };
   if (l.per_day === 0) return { why: "paused: the daily limit is 0", wakeAt: null };
   if (l.per_day !== null && used >= l.per_day) return { why: `daily limit of ${l.per_day} items reached; resumes at 00:00 UTC`, wakeAt: nextUtcMidnight(ms) };
@@ -1034,13 +1079,19 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   const proposals: Proposal[] = [];
   const t0 = performance.now();
   const ctx = await planCtx(db, opts.incremental === true || process.env.AUTOCRAFT_PLAN_SHADOW === "throw");
+  ctx.detected = new Map();
   // One reading of the Task Runners for the pass: which repos' Claude jobs no runner may take.
   const untaken = (ctx.untaken = await untakenTest(db, steps, ms));
   const loadMs = performance.now() - t0;
-  const scope = await scopeRepos(db);
+  const scope = ctx.scope ?? await scopeRepos(db);
   const seqs = await readSeqs(db);
   const status: Record<string, string> = {};
-  const active = await activeJobs(db);
+  // activeJobs, read with the items the daily limits reserve (reservedByJobs): one read of the queued and running jobs for the pass.
+  const live = await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "repo", kx.jsonNum(db, "params", "$.number").as("number"), "params", "items"])
+    .where("state", "in", ["queued", "running"]));
+  const active: Active[] = live.map(({ items: _, ...a }) => a);
+  const reads = passOf(db);
+  if (reads) reads.live = live;
   const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(await stepParallel(db), 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();
@@ -1102,7 +1153,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
     try {
       // A lane whose steps cannot start is not worth detecting.
       if (lane.steps && !await someSeq(lane.steps, async (s) => await gate(s, {}, undefined, false, true))) continue;
-      const candidates = await lane.detect(db, ctx);
+      const candidates = await detectOf(db, ctx, lane);
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
       for (const c of candidates) {
@@ -1331,7 +1382,7 @@ export async function laneItems(db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | 
     for (const p of await plannedItems(db, k, { plans })) await add(p.facts, p.plan.state, p.action);
   }
   const repos: string[] = [];
-  for (const c of await lane.detect(db, ctx)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
+  for (const c of await detectOf(db, ctx, lane)) { const r = repoOf(c); if (r && !repos.includes(r)) repos.push(r); }
   const picked = (i: LaneItem) => !lane.perRepo || repos.includes(i.repo);
   const first = lane.perRepo ? repos.flatMap((r) => all.filter((i) => i.repo === r)) : all;
   const rest = all.filter((i) => !first.includes(i));

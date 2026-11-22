@@ -47,6 +47,13 @@ export async function settings(db: Db, keys: string[]): Promise<Map<string, stri
   return new Map(rows.flatMap((r) => r.value == null ? [] : [[r.key, r.value] as const]));
 }
 
+/** The rows of `keys` in one read, NULL values kept; keys without a row are left out. */
+export async function settingRows(db: Db, keys: string[]): Promise<Map<string, string | null>> {
+  const snap = snapshotOf(db);
+  if (snap) return new Map(keys.flatMap((k) => snap.has(k) ? [[k, snap.get(k)!] as const] : []));
+  return new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where(kx.inList(db, "key", keys)))).map((r) => [r.key, r.value] as const));
+}
+
 /** True when the key has a row. */
 export async function hasSetting(db: Db, key: string): Promise<boolean> {
   const snap = snapshotOf(db);

@@ -18,6 +18,7 @@
 // settle() is the rule; settledOf() applies it to one item and settledTable()
 // to a whole run for queries.
 import { audit } from "../dash/audit.ts";
+import { setting } from "../settings-read.ts";
 import { REFEREE_MAX_FAILURES } from "../core/item-rules.ts";
 import { flagBand, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./parse.ts";
 import type { Db } from "../db/index.ts";
@@ -122,8 +123,8 @@ export async function newestVerdictRun(db: Db): Promise<string | null> {
 
 // The run the dashboard shows: the current classification run (settings.classify_run), else the one with the newest Jev verdict.
 export async function latestRun(db: Db): Promise<string | null> {
-  const set = await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "classify_run"));
-  if (set?.value) return set.value;
+  const set = await setting(db, "classify_run");
+  if (set) return set;
   return await newestVerdictRun(db);
 }
 

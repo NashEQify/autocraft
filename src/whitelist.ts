@@ -5,6 +5,7 @@ import { githubUserId } from "./github/users.ts";
 import type { Db } from "./db/index.ts";
 import * as kx from "./db/kx.ts";
 import { openDb } from "./db/open.ts";
+import { settingRows } from "./settings-read.ts";
 
 export type Tier = "whitelisted" | "not" | "allow" | "deny";
 
@@ -34,8 +35,7 @@ export type Contributor = {
 };
 
 export async function getRule(db: Db): Promise<Rule> {
-  const rows = await db.all(db.k.selectFrom("settings").select(["key", "value"]).where("key", "in", ["whitelist_min_merged", "whitelist_min_merge_rate"]));
-  const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
+  const m = Object.fromEntries(await settingRows(db, ["whitelist_min_merged", "whitelist_min_merge_rate"]));
   return { minMerged: Number(m.whitelist_min_merged ?? 5), minRate: Number(m.whitelist_min_merge_rate ?? 0.6) };
 }
 
@@ -129,6 +129,12 @@ export async function contributors(db: Db, opts: { repo?: string; login?: string
     return { ...r, merged: s.merged, closed: s.closed, override_in_effect: r.override !== null && s.override === r.override,
       tier: tierOf(s.merged, s.closed, s.override, rule), rate: s.merged + s.closed > 0 ? s.merged / (s.merged + s.closed) : null };
   });
+}
+
+/** isWhitelisted's `ok` of each author account, keyed by tierKey, from one stats query. */
+export async function whitelistedOf(db: Db, authors: AuthorRef[]): Promise<Map<string, boolean>> {
+  const rule = await getRule(db);
+  return new Map([...await standings(db, authors)].map(([k, s]) => [k, s.override === "allow" || (s.override !== "deny" && tierOf(s.merged, s.closed, null, rule) === "whitelisted")]));
 }
 
 /** Whether the author account is whitelisted (by history or an allow override), with the facts; `id` null stands for the login's bound account. */

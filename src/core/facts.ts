@@ -50,7 +50,7 @@ import type { AssignFacts, PassFacts, PrFacts, PrTier } from "./plan.ts";
 import { settledByExpr } from "../settlers.ts";
 import { activeTrips, brokeHeads } from "../push-outcomes.ts";
 import { setting } from "../settings-read.ts";
-import { everySeq, someSeq } from "../async-seq.ts";
+import { allOf, everySeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import type { Compilable, Expression, SqlBool } from "kysely";
 import { bytewise, inList, jsonText, jsonType, jsonValid, like, literal, refIn, rowid, type AnyEb } from "../db/kx.ts";
@@ -170,13 +170,57 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const mainRed = await redMainRepos(db);
   const tripped = await activeTrips(db);
   const brokeAt = await brokeHeads(db, opts.repo);
-  // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
-  const ourFixupHead = await keyed(db.k.selectFrom("fixups as f").select((eb) => keyOf(eb, "f", "to_head").as("k")).where("f.state", "=", "pushed").where("f.source", "is", null).where((eb) => narrow(eb, "f")));
-  const ourSameDiffMerge = await keyed(db.k.selectFrom("conflict_merges as c").select((eb) => keyOf(eb, "c", "to_head").as("k")).where("c.state", "=", "merged").where("c.own_diff", "=", "same").where((eb) => narrow(eb, "c")));
-  // A head we pushed, or the head our push moved off (the mirror may still show it, and our own comment makes its review stale).
-  const pushedHere = await keyed(db.k.selectFrom("push_outcomes as p").select((eb) => keyOf(eb, "p", "to_oid").as("k")).where((eb) => narrow(eb, "p"))
-    .union(db.k.selectFrom("push_outcomes as p").select((eb) => keyOf(eb, "p", "from_oid").as("k")).where("p.from_oid", "is not", null).where((eb) => narrow(eb, "p"))));
-  const pushedOffAt = await keyed(db.k.selectFrom("push_outcomes as p").select((eb) => [keyOf(eb, "p", "from_oid").as("k"), "p.at"]).whereRef("p.to_oid", "<>", "p.from_oid").where((eb) => narrow(eb, "p")));
+  // The per-PR rows below are independent reads: they run together (on Postgres, over the pool).
+  const { ourFixupHead, ourSameDiffMerge, pushedHere, pushedOffAt, carries, fixupsOf, fixupAt, lintFixup, lintOperator, lintCifix, carryRows, conflictRowsOf, lintConflict, cifixOf, merges, waiting, verifRows, otherOpen, openQuestion, unsureAt, reviewRows } = await allOf({
+    // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
+    ourFixupHead: keyed(db.k.selectFrom("fixups as f").select((eb) => keyOf(eb, "f", "to_head").as("k")).where("f.state", "=", "pushed").where("f.source", "is", null).where((eb) => narrow(eb, "f"))),
+    ourSameDiffMerge: keyed(db.k.selectFrom("conflict_merges as c").select((eb) => keyOf(eb, "c", "to_head").as("k")).where("c.state", "=", "merged").where("c.own_diff", "=", "same").where((eb) => narrow(eb, "c"))),
+    // A head we pushed, or the head our push moved off (the mirror may still show it, and our own comment makes its review stale).
+    pushedHere: keyed(db.k.selectFrom("push_outcomes as p").select((eb) => keyOf(eb, "p", "to_oid").as("k")).where((eb) => narrow(eb, "p"))
+      .union(db.k.selectFrom("push_outcomes as p").select((eb) => keyOf(eb, "p", "from_oid").as("k")).where("p.from_oid", "is not", null).where((eb) => narrow(eb, "p")))),
+    pushedOffAt: keyed(db.k.selectFrom("push_outcomes as p").select((eb) => [keyOf(eb, "p", "from_oid").as("k"), "p.at"]).whereRef("p.to_oid", "<>", "p.from_oid").where((eb) => narrow(eb, "p"))),
+    carries: keyed(db.k.selectFrom("dupe_carries as c").select((eb) => [keyOf(eb, "c").as("k"), "c.decision_id", "c.attempts"]).where("c.state", "=", "queued").where((eb) => narrow(eb, "c")).orderBy(rowid("dupe_carries", "c"))),
+    fixupsOf: keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f").as("k"), "f.source", "f.state", "f.reason"]).where((eb) => narrow(eb, "f"))),
+    // A review's own fix-up rows at a head, in the order of the per-PR index (created_at).
+    fixupAt: keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.state", "f.created_at"])
+      .where("f.source", "is", null).where("f.state", "in", ["pushed", "cannot-push", "too-large", "asked", "comment-failed", "push-denied", "linting", "comment-unsent"]).where((eb) => narrow(eb, "f"))
+      .orderBy("f.created_at").orderBy(rowid("fixups", "f"))),
+    lintFixup: keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.source", "f.lint_task"])
+      .where("f.state", "=", "linting").where((eb) => eb(eb.fn.coalesce("f.source", eb.val("")), "!=", "operator")).where((eb) => narrow(eb, "f")).orderBy(rowid("fixups", "f"))),
+    // An operator's fix-up works the current head, with or without a review there, so its stored patch is read at the head before the review is.
+    lintOperator: keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.lint_task"])
+      .where("f.state", "=", "linting").where("f.source", "=", "operator").where((eb) => narrow(eb, "f")).orderBy(rowid("fixups", "f"))),
+    lintCifix: keyed(db.k.selectFrom("ci_fixes as c").select((eb) => [keyOf(eb, "c", "head").as("k"), "c.lint_task"]).where("c.state", "=", "linting").where((eb) => narrow(eb, "c")).orderBy(rowid("ci_fixes", "c"))),
+    carryRows: keyed(db.k.selectFrom("dupe_carries as c")
+      .innerJoin("dupe_group_items as g", (j) => j.onRef("g.decision_id", "=", "c.decision_id").on("g.kind", "=", "pr").on("g.role", "=", "close"))
+      .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "g.number"))
+      .select((eb) => [keyOf(eb, "c").as("k"), "g.number", "g.detail", "i.author", "i.author_id as id"]).distinct()
+      .where((eb) => like(db, "c.outcome", eb.val("pushed%"))).where((eb) => narrow(eb, "c"))),
+    conflictRowsOf: keyed(db.k.selectFrom("conflict_merges as c").select((eb) => [keyOf(eb, "c").as("k"), "c.from_head", "c.state", "c.created_at"]).where((eb) => narrow(eb, "c")).orderBy(rowid("conflict_merges", "c"))),
+    lintConflict: keyed(db.k.selectFrom("conflict_merges as c").select((eb) => [keyOf(eb, "c", "from_head").as("k"), "c.lint_task"]).where("c.state", "=", "linting").where((eb) => narrow(eb, "c")).orderBy(rowid("conflict_merges", "c"))),
+    cifixOf: keyed(db.k.selectFrom("ci_fixes as c").select((eb) => [keyOf(eb, "c").as("k"), "c.head", "c.state", "c.created_at", "c.task_id", "c.runs", "c.reason"]).where((eb) => narrow(eb, "c"))
+      .orderBy("c.created_at").orderBy(rowid("ci_fixes", "c"))),
+    // The latest merge attempt at each head (first in the order) and the refusals there.
+    merges: keyed(db.k.selectFrom("merges as m").select((eb) => [keyOf(eb, "m", "head_oid").as("k"), "m.outcome", "m.reason", "m.ci", "m.mergeable", "m.at",
+      eb.selectFrom("merges as m2").select(eb.fn.countAll<number>().as("n")).whereRef("m2.repo", "=", "m.repo").whereRef("m2.number", "=", "m.number").whereRef("m2.head_oid", "=", "m.head_oid").where("m2.outcome", "=", "refused").$asScalar().$notNull().as("refusals")])
+      .where((eb) => narrow(eb, "m")).orderBy("m.at", "desc").orderBy(rowid("merges", "m"), "desc")),
+    waiting: keyed(db.k.selectFrom("ci_run_approvals as a").select((eb) => [keyOf(eb, "a", "head_oid").as("k"), "a.runs", "a.approved", "a.reread", "a.failed", "a.cross_repo", "a.approved_at"]).where((eb) => narrow(eb, "a"))),
+    verifRows: keyed(db.k.selectFrom("verifications as v").select((eb) => [keyOf(eb, "v", "head_sha").as("k"), "v.state", "v.kind", "v.summary", "v.note"]).where((eb) => narrow(eb, "v"))),
+    // An item has one open question at a time (src/merge/withdraw.ts): a Hold question would set another one aside, so it waits for that one.
+    otherOpen: keyed(db.k.selectFrom("decisions as d").select((eb) => keyOf(eb, "d").as("k")).distinct().where("d.answer", "is", null)
+      .where((eb) => eb.and([eb.not(like(db, "d.id", eb.val("%~replaced-%"))), eb.not(like(db, "d.id", eb.val("%:dupegroup:%")))])).where("d.kind", "in", ["scope", "merge", "close"]).where((eb) => narrow(eb, "d"))),
+    // OPEN_QUESTION_SQL for every PR.
+    openQuestion: keyed(db.k.selectFrom("decisions as d").select((eb) => keyOf(eb, "d").as("k")).distinct().where("d.kind", "=", "merge").where("d.answer", "is", null)
+      .where((eb) => eb.not(like(db, "d.id", eb.val("%~replaced-%")))).where((eb) => narrow(eb, "d"))),
+    // unsureAtQuery for every head: a take or take-fix review there with sure = 0.
+    unsureAt: keyed(db.k.selectFrom("opus_review_history as o").select((eb) => keyOf(eb, "o", "head_oid").as("k")).where("o.verdict", "in", ["take", "take-fix"]).where("o.sure", "=", 0).where((eb) => narrow(eb, "o"))
+      .union(db.k.selectFrom("opus_reviews as o").select((eb) => keyOf(eb, "o", "head_oid").as("k")).where("o.verdict", "in", ["take", "take-fix"]).where("o.sure", "=", 0).where((eb) => narrow(eb, "o")))),
+    // Only formal reviews with an author: changesRequestedBy() reads no others.
+    reviewRows: keyed(db.k.selectFrom("comments as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number").on("i.kind", "=", "pr").on("i.state", "=", "OPEN"))
+      .select((eb) => [keyOf(eb, "c").as("k"), "c.author", "c.author_association as association", "c.review_state as state", "c.created_at as at"])
+      .where("c.kind", "=", "review").where("c.author", "is not", null).where("c.review_state", "in", FORMAL_STATES).where((eb) => narrow(eb, "c")).orderBy(rowid("comments", "c"))
+      .$narrowType<{ author: string }>()),
+  });
   const answers = new Map((await actionable(db)).filter((a) => a.kind === "merge").map((a) => [a.id, a.answer]));
   const pipelineOn = pipelineWrites(await setting(db, "pipeline_enabled"));
   const posts = new Map((await db.all(db.k.selectFrom("review_posts").select(["repo", "number", "review_id", "head_oid", "posted_at", "opus_at"])))
@@ -193,30 +237,9 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const pmReviews = new Map((await db.all(db.k.selectFrom("postmerge_reviews").select((eb) => [keyOf(eb, "postmerge_reviews").as("ref"), "at", "error"]))).map((x) => [x.ref, x]));
   const since = await setting(db, SINCE_KEY) ?? "9999";
   const operator = await operatorWork(db, opts.repo, now);
-  const carries = await keyed(db.k.selectFrom("dupe_carries as c").select((eb) => [keyOf(eb, "c").as("k"), "c.decision_id", "c.attempts"]).where("c.state", "=", "queued").where((eb) => narrow(eb, "c")).orderBy(rowid("dupe_carries", "c")));
   const carryUnsent = (repo: string, number: number, decision: string) => db.all(db.k.selectFrom("fixups").select("created_at").where("repo", "=", repo).where("number", "=", number).where("source", "=", "carry").where("carry_decision", "=", decision).where("state", "=", "comment-unsent"));
   const carryPoints = (decision: string) => db.all(db.k.selectFrom("dupe_group_items").select("detail").where("decision_id", "=", decision).where("kind", "=", "pr").where("role", "=", "close").orderBy("number"));
-  const fixupsOf = await keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f").as("k"), "f.source", "f.state", "f.reason"]).where((eb) => narrow(eb, "f")));
-  // A review's own fix-up rows at a head, in the order of the per-PR index (created_at).
-  const fixupAt = await keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.state", "f.created_at"])
-    .where("f.source", "is", null).where("f.state", "in", ["pushed", "cannot-push", "too-large", "asked", "comment-failed", "push-denied", "linting", "comment-unsent"]).where((eb) => narrow(eb, "f"))
-    .orderBy("f.created_at").orderBy(rowid("fixups", "f")));
-  const lintFixup = await keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.source", "f.lint_task"])
-    .where("f.state", "=", "linting").where((eb) => eb(eb.fn.coalesce("f.source", eb.val("")), "!=", "operator")).where((eb) => narrow(eb, "f")).orderBy(rowid("fixups", "f")));
-  // An operator's fix-up works the current head, with or without a review there, so its stored patch is read at the head before the review is.
-  const lintOperator = (repo: string, number: number, head: string) => db.all(db.k.selectFrom("fixups").select("lint_task").where("repo", "=", repo).where("number", "=", number).where("from_head", "=", head)
-    .where("state", "=", "linting").where("source", "=", "operator").orderBy(rowid("fixups")));
   const taskEnded = async (id: number | null): Promise<boolean> => { const t = id != null ? await getTask(db, id) : null; return !t || TERMINAL.includes(t.state); };
-  const lintCifix = await keyed(db.k.selectFrom("ci_fixes as c").select((eb) => [keyOf(eb, "c", "head").as("k"), "c.lint_task"]).where("c.state", "=", "linting").where((eb) => narrow(eb, "c")).orderBy(rowid("ci_fixes", "c")));
-  const carryRows = await keyed(db.k.selectFrom("dupe_carries as c")
-    .innerJoin("dupe_group_items as g", (j) => j.onRef("g.decision_id", "=", "c.decision_id").on("g.kind", "=", "pr").on("g.role", "=", "close"))
-    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "g.number"))
-    .select((eb) => [keyOf(eb, "c").as("k"), "g.number", "g.detail", "i.author", "i.author_id as id"]).distinct()
-    .where((eb) => like(db, "c.outcome", eb.val("pushed%"))).where((eb) => narrow(eb, "c")));
-  const conflictRowsOf = await keyed(db.k.selectFrom("conflict_merges as c").select((eb) => [keyOf(eb, "c").as("k"), "c.from_head", "c.state", "c.created_at"]).where((eb) => narrow(eb, "c")).orderBy(rowid("conflict_merges", "c")));
-  const lintConflict = await keyed(db.k.selectFrom("conflict_merges as c").select((eb) => [keyOf(eb, "c", "from_head").as("k"), "c.lint_task"]).where("c.state", "=", "linting").where((eb) => narrow(eb, "c")).orderBy(rowid("conflict_merges", "c")));
-  const cifixOf = await keyed(db.k.selectFrom("ci_fixes as c").select((eb) => [keyOf(eb, "c").as("k"), "c.head", "c.state", "c.created_at", "c.task_id", "c.runs", "c.reason"]).where((eb) => narrow(eb, "c"))
-    .orderBy("c.created_at").orderBy(rowid("ci_fixes", "c")));
   const authorWrites = await authorWritesOf(db, now);
   const postSource = await postSourcesOf(db, rows.filter((r) => r.r_mode === CARRIED && r.r_head).map((r) => `${r.repo}#${r.number}`));
   const queued = rows.filter((r) => r.in_pilot && r.not_integration && (r.r_verdict === "take" || r.r_verdict === "take-fix") && r.author);
@@ -253,45 +276,34 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     .where("i.kind", "=", "pr").where("i.state", "=", "OPEN").where("i.head_ref", "is not", null).where("i.head_repo", "is not", null).where(inList(db, "i.repo", [...new Set(rows.map((r) => r.repo))]))
     .where((eb) => eb(eb.refTuple("i.repo", "i.head_ref"), "in", eb.selectFrom("items as b").select(["b.repo", "b.base_ref"]).where("b.kind", "=", "pr").where("b.state", "=", "OPEN").where("b.base_ref", "is not", null).$asTuple("repo", "base_ref")))
     .orderBy("i.number"))) (openByHead.get(o.k) ?? openByHead.set(o.k, []).get(o.k)!).push(o.number);
-  // The latest merge attempt at each head (first in the order) and the refusals there.
-  const merges = await keyed(db.k.selectFrom("merges as m").select((eb) => [keyOf(eb, "m", "head_oid").as("k"), "m.outcome", "m.reason", "m.ci", "m.mergeable", "m.at",
-    eb.selectFrom("merges as m2").select(eb.fn.countAll<number>().as("n")).whereRef("m2.repo", "=", "m.repo").whereRef("m2.number", "=", "m.number").whereRef("m2.head_oid", "=", "m.head_oid").where("m2.outcome", "=", "refused").$asScalar().$notNull().as("refusals")])
-    .where((eb) => narrow(eb, "m")).orderBy("m.at", "desc").orderBy(rowid("merges", "m"), "desc"));
   const retriedAfter = (target: string, at: string) => db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("target", "=", target).where("action", "=", "retry").where("at", ">", at).limit(1));
-  const waiting = await keyed(db.k.selectFrom("ci_run_approvals as a").select((eb) => [keyOf(eb, "a", "head_oid").as("k"), "a.runs", "a.approved", "a.reread", "a.failed", "a.cross_repo", "a.approved_at"]).where((eb) => narrow(eb, "a")));
-  const verifRows = await keyed(db.k.selectFrom("verifications as v").select((eb) => [keyOf(eb, "v", "head_sha").as("k"), "v.state", "v.kind", "v.summary", "v.note"]).where((eb) => narrow(eb, "v")));
   const verifAt = (ref: string, head: string) => verifRows.get(`${ref}@${head}`)?.[0];
   // The answer of the merge and hold decisions at each reviewed head, by id (null: not answered yet); the loop looks up no others.
   const decisionIds = rows.filter((r) => r.r_head && r.r_verdict && r.r_at).flatMap((r) => [mergeDecisionId(r.repo, r.number, r.r_head!), holdDecisionId(r.repo, r.number, r.r_head!)]);
   const decisionAnswers = new Map((await db.all(db.k.selectFrom("decisions").select(["id", "answer"]).where(inList(db, "id", decisionIds)))).map((d) => [d.id, d.answer]));
-  // An item has one open question at a time (src/merge/withdraw.ts): a Hold question would set another one aside, so it waits for that one.
-  const otherOpen = await keyed(db.k.selectFrom("decisions as d").select((eb) => keyOf(eb, "d").as("k")).distinct().where("d.answer", "is", null)
-    .where((eb) => eb.and([eb.not(like(db, "d.id", eb.val("%~replaced-%"))), eb.not(like(db, "d.id", eb.val("%:dupegroup:%")))])).where("d.kind", "in", ["scope", "merge", "close"]).where((eb) => narrow(eb, "d")));
   const holdQuestionOf = (ref: string, id: string): PrFacts["decision"]["hold"] => {
     const asked = decisionAnswers.has(id), answer = decisionAnswers.get(id) ?? null;
     return { asked, open: asked && answer === null, answer, otherOpen: otherOpen.has(ref) };
   };
-  const statement = { get: (id: number) => db.get(db.k.selectFrom("owner_statements").select(["id", "repo", "number", "text"]).where("id", "=", id)) };
-  // OPEN_QUESTION_SQL for every PR.
-  const openQuestion = await keyed(db.k.selectFrom("decisions as d").select((eb) => keyOf(eb, "d").as("k")).distinct().where("d.kind", "=", "merge").where("d.answer", "is", null)
-    .where((eb) => eb.not(like(db, "d.id", eb.val("%~replaced-%")))).where((eb) => narrow(eb, "d")));
   // The settled Merge answers, by decision id: when they were given.
   const mergeAnsweredAt = new Map((await db.all(db.k.selectFrom("decisions").select(["id", "answered_at"]).where("kind", "=", "merge").where("answer", "=", "merge").where("answered_at", "is not", null)
     .where((eb) => settledByExpr(db, eb, "decisions")).$narrowType<{ answered_at: string }>())).map((d) => [d.id, d.answered_at]));
   const answeredAfter = (id: string, at: string): boolean => { const a = mergeAnsweredAt.get(id); return a !== undefined && a > at; };
   const pushChain = await pushChainOf(db);
   const ownHead = await ownHeadOf(db);
-  // unsureAtQuery for every head: a take or take-fix review there with sure = 0.
-  const unsureAt = await keyed(db.k.selectFrom("opus_review_history as o").select((eb) => keyOf(eb, "o", "head_oid").as("k")).where("o.verdict", "in", ["take", "take-fix"]).where("o.sure", "=", 0).where((eb) => narrow(eb, "o"))
-    .union(db.k.selectFrom("opus_reviews as o").select((eb) => keyOf(eb, "o", "head_oid").as("k")).where("o.verdict", "in", ["take", "take-fix"]).where("o.sure", "=", 0).where((eb) => narrow(eb, "o"))));
   // Pre-merge reviews at the head of each PR's latest review (r_head), the only ones the loop reads.
   const premergeKeys = rows.filter((r) => r.r_head).map((r) => `${r.repo}#${r.number}@${r.r_head}`);
   const premerge = await premergeRows(db, (eb) => eb.and([narrow(eb, "p"), inList(db, keyOf(eb, "p", "head_oid"), premergeKeys)]));
-  // Only formal reviews with an author: changesRequestedBy() reads no others.
-  const reviewRows = await keyed(db.k.selectFrom("comments as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number").on("i.kind", "=", "pr").on("i.state", "=", "OPEN"))
-    .select((eb) => [keyOf(eb, "c").as("k"), "c.author", "c.author_association as association", "c.review_state as state", "c.created_at as at"])
-    .where("c.kind", "=", "review").where("c.author", "is not", null).where("c.review_state", "in", FORMAL_STATES).where((eb) => narrow(eb, "c")).orderBy(rowid("comments", "c"))
-    .$narrowType<{ author: string }>());
+  // The owner statements the reviews' and pre-merge reviews' conflicts name, in one read.
+  const statementIds = new Set<number>();
+  for (const r of rows) {
+    if (!r.r_head || !r.r_verdict || !r.r_at) continue;
+    for (const v of [safeJson(r.r_conflicts), safeJson(premerge.get(`${r.repo}#${r.number}@${r.r_head}`)?.conflicts ?? null)]) {
+      if (Array.isArray(v)) for (const h of v as { id?: unknown }[]) if (typeof h?.id === "number") statementIds.add(h.id);
+    }
+  }
+  const statements = new Map(statementIds.size ? (await db.all(db.k.selectFrom("owner_statements").select(["id", "repo", "number", "text"]).where(inList(db, "id", [...statementIds], "bigint")))).map((x) => [x.id, x]) : []);
+  const statement = { get: async (id: number) => statements.get(id) };
   const batchTip = (repo: string, number: number) => db.get(db.k.selectFrom("merge_batches as b").innerJoin("ci_run_approvals as a", (j) => j.onRef("a.repo", "=", "b.repo").onRef("a.number", "=", "b.pr_number").onRef("a.head_oid", "=", "b.commit_sha"))
     .select(["a.runs", "a.approved", "a.reread", "a.failed", "a.cross_repo"]).where("b.repo", "=", repo).where("b.pr_number", "=", number).where("b.state", "=", "open")
     .where((eb) => eb.not(eb.exists(eb.selectFrom("merge_batch_prs as p").select(eb.lit(1).as("one")).whereRef("p.batch_id", "=", "b.id").where((w) => w.not(w.exists(
@@ -377,7 +389,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.
     if (base.operator?.fix && !base.heldBacklog && !base.draft && base.mergeable !== "CONFLICTING" && base.pushable && base.repoFacts.pushApproved && await operatorTriesLeft(db, r.repo, r.number)) base.operator.hold = true;
     if (ow && r.state === "OPEN" && head) {
-      for (const x of await lintOperator(r.repo, r.number, head)) base.lint.push({ step: "fixup", source: "operator", ended: await taskEnded(x.lint_task) });
+      for (const x of lintOperator.get(`${ref}@${head}`) ?? []) base.lint.push({ step: "fixup", source: "operator", ended: await taskEnded(x.lint_task) });
       if (base.lint.length) base.inFlight = true;
     }
     if (r.state === "OPEN" && !base.heldBacklog) {

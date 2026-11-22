@@ -60,14 +60,19 @@ const lateDisagreements = async (db: Db, repo: string): Promise<{ number: number
   await db.all(db.k.selectFrom("main.pr_builds as b").innerJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "b.repo").onRef("c.number", "=", "b.number").onRef("c.head_oid", "=", "b.head_sha"))
     .select(["b.number", "b.head_sha", "b.summary"]).where("b.repo", "=", repo).where("b.state", "=", "failed").where("b.disagree", "=", 0).where("c.overall", "=", "success"));
 
-/** Whether the repo has work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only. */
-export async function prBuildDue(db: Db, repo: string): Promise<boolean> {
+/**
+ * Whether the repo has work for a pr-build job: a PR to build, a queued build whose task ended, whose PR moved on or that must stop, or a failure that now disagrees with CI. Reads only.
+ * `queued`: the repos with queued builds (reposWithQueuedBuilds), when the caller has read them.
+ */
+export async function prBuildDue(db: Db, repo: string, queued?: ReadonlySet<string>): Promise<boolean> {
   const on = await featureOn(db, "pr-builds", repo);
   if (on && (await selectPrBuilds(db, repo)).some((c) => c.rust !== false)) return true;
   if (on && (await lateDisagreements(db, repo)).length) return true;
-  const scope = await baseScopeRepos(db);
+  if (queued && !queued.has(repo)) return false;
+  // The scope is read only for a queued build that gets that far.
+  let scope: Set<string> | undefined;
   return await someSeq(await db.all(pendingOf(db, repo)), async (p) => {
-    if (!on || p.item_state !== "OPEN" || p.item_head !== p.head_sha || p.task_id === null || !await inBuildScope(db, p.repo, p.number, scope)) return true;
+    if (!on || p.item_state !== "OPEN" || p.item_head !== p.head_sha || p.task_id === null || !await inBuildScope(db, p.repo, p.number, scope ??= await baseScopeRepos(db))) return true;
     return !!await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one")).where("id", "=", p.task_id).where("state", "in", TERMINAL));
   });
 }

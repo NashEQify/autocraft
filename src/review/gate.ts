@@ -130,6 +130,11 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
   const interval = await reviewMinInterval(db) * 60_000;
   const today = new Date(nowMs).toISOString().slice(0, 10);
   const states = new Map<string, DiscussionState>();
+  const stateOf = async (repo: string): Promise<DiscussionState> => {
+    let state = states.get(repo);
+    if (!state) states.set(repo, (state = await discussionState(db, repo)));
+    return state;
+  };
   return async (repo, number, head, refresh) => {
     const ref = `${repo}#${number}`;
     const last = (await lastReviews()).get(ref);
@@ -141,15 +146,14 @@ export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Ite
       if (delay === undefined) {
         // Final. A request newer than the last failure grants one more try; a failure then stamps a newer time and makes it final again.
         const since = failed.split("|")[1] ?? "";
-        const asked = (await staleSince())(repo, number, since) || await maintainerSince((await discussionState(db, repo)).get(`${repo}#${number}`), since, null);
+        const asked = (await staleSince())(repo, number, since) || await maintainerSince((await stateOf(repo)).get(`${repo}#${number}`), since, null);
         if (!asked) return { kind: "failed", wait: `its review failed ${n} times at this commit; a new commit, a Review again press or a maintainer's comment gives it one more try` };
       } else if (at + delay > nowMs) return { kind: "failed", wait: `the review after ${n} failed ${n === 1 ? "try" : "tries"} at this commit, from ${new Date(at + delay).toISOString().slice(11, 16)}`, until: at + delay };
     }
     // A person's pre-approved merge waits for the review of the head the pipeline pushed for it: that is their request for it, as a review-again press would be.
     if ((await preapproved()).has(`${ref}@${head}`)) return null;
     if (last) {
-      let state = states.get(repo);
-      if (!state) states.set(repo, (state = await discussionState(db, repo)));
+      const state = await stateOf(repo);
       // reviewRequestedSince() with the stale marks read once.
       if ((await staleSince())(repo, number, last.at) || await maintainerSince(state.get(ref), last.seen_at ?? last.at, last.disc_hash)) return null;
     }

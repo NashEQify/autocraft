@@ -10,7 +10,7 @@ import { delimiter, join } from "node:path";
 import { jevCloudflareConfig } from "./jev-cloudflare.ts";
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { deleteSetting, setting, writeSetting } from "../settings-read.ts";
 
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
@@ -19,8 +19,9 @@ export const JEV_RETRY_MS = 60 * 60_000;
 
 export type JevOutage = { kind: "off" | "missing" | "account"; reason: string; since: string; at: string };
 
-const get = async (db: Db, key: string): Promise<string | undefined> => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", key)))?.value ?? undefined;
-const put = async (db: Db, key: string, value: string): Promise<void> => void await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+// Through settings-read, so a planner pass reads them from its snapshot.
+const get = setting;
+const put = writeSetting;
 
 export const jevEnabled = async (db: Db): Promise<boolean> => await get(db, JEV_ENABLED_KEY) !== "no";
 
@@ -31,7 +32,7 @@ export async function jevOutage(db: Db): Promise<JevOutage | null> {
   } catch { return null; }
 }
 
-const clear = async (db: Db): Promise<void> => void await db.run(db.k.deleteFrom("settings").where("key", "=", JEV_UNAVAILABLE_KEY));
+const clear = async (db: Db): Promise<void> => await deleteSetting(db, JEV_UNAVAILABLE_KEY);
 
 /** True when Jev can be reached: Cloudflare Workers AI is configured, or an executable `jev` is on PATH. */
 export function jevInstalled(): boolean {
