@@ -293,7 +293,7 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     assert.deepEqual((await answerOf(w, 11, "sha11")).map((r) => r.answer), ["merge"]);
   });
 
-  test("an unsure take-fix review of a queued PR goes to the pipeline's fix-up, whose push is reviewed again", async () => {
+  test("an unsure take-fix review of a queued PR goes to the pipeline's fix-up, whose push is reviewed again, and an unsure take of it asks nothing", async () => {
     const w = await (await fresh()).pr(12);
     await preapproveMerge(w.db, { repo: "app", number: 12, by: OPERATOR });
     await w.review(12, { head: "sha12", verdict: "take-fix", sure: false });
@@ -306,6 +306,15 @@ describe("add to merge queue (a pre-approved merge without a fix-up)", () => {
     await settle(w);
     const p = (await preapprovalOf(w.db, "app", 12))!;
     assert.deepEqual([p.state, p.head], ["review", "sha12b"]);
+    // An unsure take of the push waits for CI and the pre-merge review: the queue state needs a decision, but the live pre-approval (operator.hold) keeps the planner from asking.
+    await w.review(12, { head: "sha12b", sure: false });
+    await settle(w);
+    assert.equal((await preapprovalOf(w.db, "app", 12))?.state, "ci");
+    await w.verified(12);
+    const plan = await w.prPlan(12);
+    assert.equal(plan.state, "needs-decision");
+    assert.ok(!(await kindsOf(w, 12)).includes("ask-merge:"), (await kindsOf(w, 12)).join());
+    assert.deepEqual(await answerOf(w, 12, "sha12b"), []);
   });
 
   test("the add asks for no review of its own: running CI still holds the review of the PR's head", async () => {
