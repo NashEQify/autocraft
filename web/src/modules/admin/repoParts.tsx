@@ -222,13 +222,12 @@ export function PipelineBadge({ r }: { r: TrackedRepo }) {
   return r.pipeline ? <Badge tone="ok">On</Badge> : <Badge>Off</Badge>;
 }
 
-/** The repo's pipeline switch for operators; others see the state. */
+/** The repo's pipeline switch for whoever may switch it (operators, maintainers with write access); others see the state. */
 export function PipelineSwitch({ r, write }: { r: TrackedRepo; write: Write }) {
   const api = useApi();
-  const operator = useUser().role === "operator";
   const key = `pipeline:${r.name}`;
   if (!r.tracked) return null;
-  if (!operator) return <PipelineBadge r={r} />;
+  if (!r.canSwitch) return <PipelineBadge r={r} />;
   return <Switch on={r.pipeline} label={`Pipeline in ${r.name}`} onChange={(on) => void write.run(key, () => api.repoAdmin.setPipeline(r.name, on), { repo: r.name, patch: () => ({ pipeline: on }) })} />;
 }
 
