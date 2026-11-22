@@ -44,6 +44,10 @@ The image is the dashboard's home page (mock data). Each column is a stage with 
 
 See [Trust boundary](docs/pipeline.md#trust-boundary).
 
+### Dashboard browsing
+
+Items is one filterable list; a row's details open inline under it. Needs you shows the decision queue beside the selected decision, with its Evidence, Discussion and item timeline. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
+
 ## Setup
 
 ### Requirements

@@ -49,8 +49,9 @@ Not taken: Archivo display headings, uppercase letter-spaced mono labels, regist
 - **Buttons**: primary (accent fill) for the one main action; secondary (raised, hairline) for the rest; ghost for icon and toolbar actions. Sentence-case labels.
 - **Decision options**: a vertical list of 40 px buttons, label then a short hint, key number on the right. The recommended option uses the accent fill and a "Recommended" pill.
 - **Refs** (`photocraft#4127`) are mono. A ref is only ever shown as part of an item (see Items below) or as a mention inside prose.
-- **Items**: every issue or PR is drawn by `ItemRef` (`web/src/ui/molecules/ItemRef.tsx`): the kind and state icon, `repo#number` in mono, then the full title. The title wraps; it is never truncated or clamped. The icon (`ItemIcon`) is a plain icon, one text line tall (`1lh`), so it sits with the text also on wrapped titles. Icon, `repo#number` and title together are one link to the item page; with `stretch` the whole row or card is. Every `ItemRef` ends with a GitHub button (`GithubButton`, Phosphor `GithubLogoIcon`, label "Open repo#number on GitHub") that opens the item on GitHub in a new tab. It is a sibling of the item link, never inside it, and sets `relative z-10` itself. Its visible size is small; an invisible hit area makes it 32 px on desktop and 44 px on touch screens without making rows taller. `github={false}` leaves it out. A row that is an item uses `stretch`, so the row is a `relative` container, and the other controls inside it (queue badge, menu, buttons, selects) sit above the link with `relative z-10`. Elements with a tooltip (`title`) or text people copy, such as dates, hints and error messages, count as controls and get `relative z-10` too. A row with no target of its own, such as a GitHub activity row (an action on an item), stretches to its item. A row that is something else (a decision, an agent run) keeps its own target and shows its items as `ItemRef` without `stretch`. Prose mentions such as `#123` in a summary stay inline: `Refs` links the number to the item page and adds a `GithubButton`. Nothing outside `web/src/ui/` builds an item link by hand; `githubItemUrl` in `web/src/lib/links.ts` is the one URL builder. Icon colours follow GitHub: open green, draft grey, merged purple, closed PR red, closed issue purple. The icon is drawn bold at 1.2× the text size. Sticky headers sit above it (`z-20`).
+- **Items**: every issue or PR is drawn by `ItemRef` (`web/src/ui/molecules/ItemRef.tsx`): the kind and state icon, `repo#number` in mono, then the full title. The title wraps; it is never truncated or clamped. The icon (`ItemIcon`) is a plain icon, one text line tall (`1lh`), so it sits with the text also on wrapped titles. Icon, `repo#number` and title together are one link to the item page; with `stretch` the whole row or card is. Every `ItemRef` ends with a GitHub button (`GithubButton`, Phosphor `GithubLogoIcon`, label "Open repo#number on GitHub") that opens the item on GitHub in a new tab. It is a sibling of the item link, never inside it, and sets `relative z-10` itself. Its visible size is small; an invisible hit area makes it 32 px on desktop and 44 px on touch screens without making rows taller. `github={false}` leaves it out. A row that is an item uses `stretch`, so the row is a `relative` container, and the other controls inside it (queue badge, menu, buttons, selects) sit above the link with `relative z-10`. Elements with a tooltip (`title`) or text people copy, such as dates, hints and error messages, count as controls and get `relative z-10` too. A row with no target of its own, such as a GitHub activity row (an action on an item), stretches to its item. A row that is something else, such as an agent run, keeps its own target and shows its items as `ItemRef` without `stretch`. A decision row in the Needs queue has two parts: its `ItemRef`, stretched over its own `relative` title block, and below it a separate Details button that selects the decision. Prose mentions such as `#123` in a summary stay inline: `Refs` links the number to the item page and adds a `GithubButton`. Nothing outside `web/src/ui/` builds an item link by hand; `githubItemUrl` in `web/src/lib/links.ts` is the one URL builder. Icon colours follow GitHub: open green, draft grey, merged purple, closed PR red, closed issue purple. The icon is drawn bold at 1.2× the text size. Sticky headers sit above it (`z-20`).
 - **Filter chips** are 28 px outlined chips with counts; active chips take an accent tint.
+- **Items rows** show the item as `ItemRef` and, below it, a Details button with classification, security, stage and age. Details opens the row's read-only details inline: classifier reasoning, classification, queue place, the latest three events oldest first, links and metadata, in columns where they fit and stacked on phones.
 - **Tabs** are segmented text buttons with count pills.
 - **Lists** are rows with hairlines, no cards. The selected row gets an accent tint and a 2 px accent bar.
 - **Disclosures** are chevron rows with a sentence-case title and a count pill.
@@ -61,9 +62,9 @@ Not taken: Archivo display headings, uppercase letter-spaced mono labels, regist
 Shared components in `web/src/ui/` are grouped by size:
 
 - `atoms/`: one element, no data fetching, no app domain types, styled only with tokens. ActionTag, Avatar, Badge, Button, Card, Chip, EmptyState, ErrorLine, GithubButton, Heading, Input, ItemIcon, Kbd, Logo, Pending, PriorityBadge, Select, Textarea, TextLink, Th, TimeAgo, Tooltip.
-- `molecules/`: a few atoms doing one job, props only (no queries, no routing except `Link`). Block, CheckRow, ConfirmButton, Dialog, ItemRef, LabelledSelect, Markdown, OpusWorking, Pager, QueueBadge, RadioRow, RateBar, RepoSelect, Segmented, Stat, StepDraft.
+- `molecules/`: a few atoms doing one job, props only (no queries, no routing except `Link`). Block, CheckRow, ConfirmButton, Dialog, DisclosurePanel, ExpandableText, FilterOption, FilterSection, ItemRef, LabelledSelect, Markdown, OpusWorking, Pager, QueueBadge, RadioRow, RateBar, RepoFilter, RepoSelect, SearchField, Segmented, Stat, StepDraft.
 - `ActionTag` is a muted pill (Phosphor icon and a word) for one GitHub write. It is never interactive: no border emphasis, no hover. `RadioRow` and `CheckRow` are the rows of a pick-one and a tick list (title, optional tag, content under the title, `CheckRow` also an action at the right edge). The item page's decision answer (`modules/item/ChoiceGroup.tsx`) shows each core action as a bordered card (an accordion that behaves as a radio group: `role=radio`, `aria-checked`, `aria-expanded`); the open card holds the parameters, the extras as `CheckRow`s, the note and the card's own button. Each card has a "GitHub" line (`ActionTag` pills) and an "AutoCraft" line (plain text, from the server's `ChoiceCore.autocraft`). `RadioRow` serves the plain answer of decisions without choices.
-- `organisms/`: a self-contained block with layout and behaviour (sorting, the phone switch). It may take domain-shaped props and never fetches. Page, PreapprovalRow, Swimlane.
+- `organisms/`: a self-contained block with layout and behaviour (sorting, the phone switch). It may take domain-shaped props and never fetches. BrowseLayout, ItemPreview, Page, PreapprovalRow, Swimlane.
 - `ui/` itself holds helpers that are not components (`cn.ts`, `markdownHtml.ts`).
 - `modules/<m>/`: anything bound to one feature's data or wording. Pages compose the folders above and own their queries.
 
@@ -83,6 +84,36 @@ Rules:
 - **Sidebar** (220 px, collapses to 52 px with `[`): ArtCraft logo, Pipeline flow (the home page, see dashboard-spec.md), Decisions and Progress, then Insight (Contributors, Classifiers, Cost) and Operator (Repos, Access). A backlog meter at the bottom shows the percentage done and the done split.
 - **Workspace**: each view is a row of panels in a `PanelGroup`. Panels are resizable; panels marked `collapsible` fold to a narrow strip with a vertical label. Layouts are saved per user and view (`autocraft:<login>:layout:<view>` in localStorage; the storage adapter is two calls the server can implement later).
 - **Phones** (< 768 px): one column. A view either supplies its own phone component (Decisions) or its panels stack top to bottom, skipping those marked `hideOnPhone`. The bottom tab bar holds the primary entries (Now, Next, Needs you, Items). A hamburger button left of the logo opens the sidebar as a left drawer: the same rail component (groups, icons, permission filtering, active state), scrolling on its own, with a scrim; it closes on scrim tap, Escape, close button and route change, traps focus and locks body scroll. Search opens full screen.
+
+### Project scope
+
+- The sidebar and the phone drawer hold the project picker, with each project's open-decision count.
+- A single `repo` in a list URL wins over the saved pick; a URL with several repositories picks no project. Item, decision and settings pages are not scoped.
+- Picking a project replaces the list URL; it adds no history entry. While a project is picked, lists hide their own repository control.
+
+### Items
+
+- `/items` is one browser. The toolbar has search on its own row, then State, Type, Classification, Repository, Type label and Flag. The toolbar's own width sets its columns: six from 1088 px, three from 488 px, otherwise two.
+- On phones (< 861 px) search, State and Type stay in the first row. A Filters button opens the other controls inline; while it is shut, a line lists the filters it holds.
+- Phase is picked below the desktop toolbar or in the phone Filters panel; Home's phase tiles link to `/items?phase=…`. With a phase set, State, Classification, Type label and Flag read "By phase" and are disabled, and Clear phase returns to the regular list. Phase and classification filters never combine.
+- Each applied filter shows as a control value or a removable chip, and Reset clears them all. A URL value the endpoint does not take is listed as not applied. A field with several values shows them all (`Settled + Classifiers disagree`).
+- A control change adds one history entry; typing in search or author replaces the current one.
+- `open=repo#number` opens a row's details; filter and paging changes close them. `peek` links open the same row, and `/items/filters` redirects to `/items`.
+
+### Needs you
+
+- Three tabs: Decisions, Feedback and Stopped, each with its count.
+- The Decisions queue card has a View select (Waiting, Answered, Backlog, Snoozed, With opinions) and a Filters button. Filters opens an inline scope panel: Repo, Kind, Waiting at least, All questions and Clear scope. A scope value that a select cannot show is a removable chip. View and scope changes add a history entry. Decisions have no text search.
+- Each row has its item link and GitHub button (or the batch link for a batch decision), then a Details button with kind, claim, answer and age. Details selects the row. Arrow keys, Home/End and `j`/`k` move between rows, `p` opens the preview and `o` the item page.
+- The selected decision (`decision=<id>`) opens beside the queue on wide screens, and below it on narrow ones with an "All decisions" button. The panel is read-only: Review and answer opens the item page, which claims the decision and holds the answer form. Evidence, Discussion and Item timeline (the item's latest four events) load when opened. Escape or All decisions closes the panel, and Back reopens it.
+- The Decision tools band above the list holds Preview, Review and answer, queue facts and Undo, and on desktop the batch answer.
+- Editable fields use 16 px text on phones, so the page does not zoom on focus.
+
+### Item page
+
+- The AutoCraft side shows the open question with its answer form and any held or disputed answers, then the History (open by default) and the composer. Model-call and tool details load when opened.
+- The GitHub side sits beside the AutoCraft side from 1024 px and below it from 768 px. Phones show one side at a time with an AutoCraft/GitHub switch; viewers start on GitHub.
+- A link to `#decision-…`, `#hist-…` or `#gh-…` opens the side and the section that hold the target, then scrolls to it.
 
 ## 5. Extensibility
 
@@ -124,7 +155,7 @@ Desktop, three panels: queue (28 %), decision (45 %), discussion (27 %, collapsi
 - **Recommendation**: when a decision has a recommendation and the model gave a reason, one sentence stands above the options in the Workflow box: "Recommended: <option> — <reason>". The recommended option also carries a "Recommended" pill. With no reason there is no sentence.
 - **Duplicate groups** have their own kind, "Duplicates", with its own chip and group header. The item page opens with the group: one card per member, each an `ItemRef` with its role (Keep, Close, Stays open), then the summary. A member's card lists "Does better", "Worth carrying over" and "Adds" as bullets, each point whole; empty lists do not show.
 - **Risks**: a Merge? or Close? decision lists the review's risks as bullets under the summary.
-- **Answering**: an operator's click or number key answers and moves to the next decision. A small notice, "Answered: <option> <repo#number>" with Undo, shows for about 8 seconds or until the next answer, then goes away. Undo shows only while the decision is undoable (the pipeline has not applied or posted it); `u` undoes the notice's answer. On the Answered tab a row keeps its Undo while the decision is undoable. When the server refuses an Undo, its message shows briefly and the notice goes away.
+- **Answering**: the queue explicitly opens the complete native item form. Answers use its prepared choices, extra actions, public text and confirmation; the queue does not submit inline answers or register number/note shortcuts. A small notice, "Answered: <option> <repo#number>" with Undo, shows for about 8 seconds or until the next answer, then goes away. Undo shows only while the decision is undoable (the pipeline has not applied or posted it); `u` undoes the notice's answer. On the Answered tab a row keeps its Undo while the decision is undoable. When the server refuses an Undo, its message shows briefly and the notice goes away.
 
 Description rendering is for untrusted input: raw HTML is dropped, only `http(s)`, `mailto`, relative and anchor links survive, links open in a new tab with `rel="noopener noreferrer nofollow"`, and only GitHub-hosted images load inline. The CSP allows only same-origin images, so the renderer sends images on the hosts the server's image proxy serves (`GET /img`, see the README) through it: lazy-loaded, at most the column's width and 480 px tall, and a click opens the original on GitHub in a new tab. Every other image, and one the proxy refuses, becomes a chip with its alt text that opens the image in a new tab on click.
 
@@ -191,9 +222,9 @@ Charts are hand-written SVG and HTML (no chart library): every bar has a 2 px su
 | `?` | Shortcut sheet for the current screen |
 | `[` | Collapse or expand the sidebar |
 | `g d`, `g p` | Go to decisions, progress |
-| `j` / `k` | Next / previous decision |
-| `1`–`4` | Answer (operator) or feedback with that option (everyone else) |
-| `n` | Focus the note |
+| `j` / `k`, arrows, Home / End | Move through the queue, replacing the current selection history entry |
+| Enter / Space or a row’s Details button | Deliberately activate a decision, pushing a history entry |
+| Close / Escape | Close the selected decision, pushing a history entry |
 | `x` | Check the row for a batch answer; `Esc` clears |
 | `u` | Undo the last answer |
 | `o` | Open the item page |
