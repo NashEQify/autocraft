@@ -2,7 +2,7 @@
 // Runners. Their runners take their picks before the queue's order; other users' runners pass a call over while its pick
 // counts (calls.ts claimOrder, leaseCall). A pick counts until its time is up (setting remote_pick_minutes, 0: no time
 // limit), while one of the picker's runners is fresh and the picker is neither cooling off nor at their Max calls at once
-// (calls.ts pickerSql); it ends with a lease, a requeue, an unpick, or at a claim that finds
+// (calls.ts pickerExpr); it ends with a lease, a requeue, an unpick, or at a claim that finds
 // the call released by or no longer open to the picker. Registered as a wait in src/stages/registry.ts.
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";

@@ -332,11 +332,7 @@ function commentRows(repo: string, kind: Kind, n: Node, own: string[]): Insertab
   return rows;
 }
 
-/** SQL for an upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
-export const KEEP_KNOWN_MERGEABLE = (table: string): string =>
-  `CASE WHEN ${table}.head_oid IS NOT DISTINCT FROM excluded.head_oid AND ${table}.mergeable IN ('CONFLICTING','MERGEABLE') AND excluded.mergeable IS DISTINCT FROM 'CONFLICTING' AND excluded.mergeable IS DISTINCT FROM 'MERGEABLE' THEN ${table}.mergeable ELSE excluded.mergeable END`;
-
-/** `KEEP_KNOWN_MERGEABLE` as an expression, for an upsert built with the query builder. */
+/** An upsert's mergeable value: GitHub reports UNKNOWN while it recomputes, which must not replace a known value at the same head. */
 export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<string | null> =>
   eb.case().when(eb.and([
     eb(eb.ref(`${table}.head_oid`), "is not distinct from", eb.ref("excluded.head_oid")),

@@ -38,9 +38,8 @@ import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
 import { adoptableCallExpr, earlierRunCallExpr, resumedRun, resumingJobsExpr } from "../runner/resuming.ts";
-import type { Db, Dialect } from "../db/index.ts";
+import type { Db } from "../db/index.ts";
 import { ciEq as ciEqExpr, greatest, inList, least, ref, type Eb, type Ex } from "../db/kx.ts";
-import { ciEq, indexedBy } from "../db/portable.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
 export const LEASE_IDLE_MS = scaled(2 * 60_000);
@@ -627,24 +626,13 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
 
 // ---- picks ("Run on my Task Runner", picks.ts) ----------------------------------------
 
-/**
- * SQL on a login expression: the login can take its picks now, so they count. It has a fresh Task Runner (last status within
- * STATUS_FRESH_MS), is not cooling off (cooloff.ts) and holds fewer leases than its "Max calls at once" (max-calls.ts); a
- * picker who cannot take a call does not hold it away from other runners. Bind pickerArgs.
- */
-const pickerSql = (d: { readonly dialect: Dialect }, login: string): string => `(EXISTS (SELECT 1 FROM main.remote_helpers ph JOIN main.mcp_tokens pt ON pt.id = ph.token_id
-    WHERE ph.login = ${login} AND pt.kind = 'runner' AND pt.expires_at > ? AND ph.reported_at >= ?)
-  AND NOT EXISTS (SELECT 1 FROM main.remote_cooloffs pc WHERE pc.login = ${login} AND pc.until > ?)
-  AND NOT EXISTS (SELECT 1 FROM main.user_settings ps WHERE ps.login = ${login} AND ps.key = '${MAX_CALLS_KEY}'
-    AND CAST(CASE WHEN ps.key = '${MAX_CALLS_KEY}' THEN ps.value END AS INTEGER) BETWEEN 1 AND ${MAX_CALLS_MAX}
-    AND (SELECT COUNT(*) FROM main.remote_calls pl${indexedBy(d, "remote_calls_leased")} WHERE pl.state = 'leased' AND ${ciEq(d, "pl.user_login", login)}) >= CAST(CASE WHEN ps.key = '${MAX_CALLS_KEY}' THEN ps.value END AS INTEGER)))`;
 const pickerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS, nowMs];
 
-/** SQL on a remote_calls row that has a pick: the pick no longer counts, as its time is up or its picker cannot take it now (pickerSql). Bind pickLapsedArgs. */
-export const pickLapsedSql = (d: { readonly dialect: Dialect }): string => `(pick_until < ? OR NOT ${pickerSql(d, "remote_calls.picked_by")})`;
-export const pickLapsedArgs = (nowMs: number): [number, string, number, number] => [nowMs, ...pickerArgs(nowMs)];
-
-/** `pickerSql` as an expression on the login in `login`, at `nowMs`. */
+/**
+ * The login in `login` can take its picks at `nowMs`, so they count. It has a fresh Task Runner (last status within
+ * STATUS_FRESH_MS), is not cooling off (cooloff.ts) and holds fewer leases than its "Max calls at once" (max-calls.ts); a
+ * picker who cannot take a call does not hold it away from other runners.
+ */
 function pickerExpr(db: Db, eb: Eb, login: Ex, nowMs: number): AliasableExpression<SqlBool> {
   const [expires, fresh, now] = pickerArgs(nowMs);
   const max = eb.cast<number>(eb.case().when("ps.key", "=", MAX_CALLS_KEY).then(eb.ref("ps.value")).end(), "bigint");
@@ -660,11 +648,11 @@ function pickerExpr(db: Db, eb: Eb, login: Ex, nowMs: number): AliasableExpressi
   ]);
 }
 
-/** `pickLapsedSql` (with its pickLapsedArgs bound) as an expression on a remote_calls row, at `nowMs`. */
+/** On a remote_calls row that has a pick: the pick no longer counts at `nowMs`, as its time is up or its picker cannot take it now (pickerExpr). */
 export const pickLapsedExpr = (db: Db, eb: Eb, nowMs: number): AliasableExpression<SqlBool> =>
   eb.or([eb("pick_until", "<", nowMs), eb.not(pickerExpr(db, eb, "remote_calls.picked_by", nowMs))]);
 
-/** The logins (lowercase) whose picks count now (pickerSql). */
+/** The logins (lowercase) whose picks count now (pickerExpr). */
 export async function pickerLogins(db: Db, nowMs: number): Promise<Set<string>> {
   const rows = await db.all(db.k.selectFrom("main.remote_helpers as h").select((eb) => eb.fn<string>("lower", ["h.login"]).as("login")).distinct().where((eb) => pickerExpr(db, eb, "h.login", nowMs)));
   return new Set(rows.map((r) => r.login));
