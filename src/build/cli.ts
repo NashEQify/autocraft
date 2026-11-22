@@ -10,6 +10,8 @@ import { trackedNames } from "../repos.ts";
 import { warmLineText } from "./warm-status.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
+import { clearBuildSize, gib, listBuildSizes, setBuildSize } from "./sizing.ts";
+import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
@@ -30,12 +32,14 @@ const USAGE = `usage: autocraft-server envs list
            --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
            --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q --sccache-url URL|none
            --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
+           --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
+       autocraft-server tasks sizes list | set <repo> --memory Q [--limit Q] | clear <repo>   (step pod memory per repo)
        autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA [--build]
        autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
        autocraft-server workspace list [--all]
@@ -106,8 +110,9 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
   "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage", "sccache-url": "sccacheUrl",
   "crate-mirror": "crateMirror", "warm-writer": "warmWriter", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
+  capacity: "capacity", "priority-class": "priorityClassName", "node-reserve-cpu": "nodeReserveCpu", "node-reserve-memory": "nodeReserveMemory", "max-pod-memory": "maxPodMemory",
 };
-const NULLABLE = new Set<keyof KubeSettings>(["runtimeClassName", "sccacheUrl", "crateMirror", "cacheWriteUrl", "writerSecret", "signingSecret"]);
+const NULLABLE = new Set<keyof KubeSettings>(["runtimeClassName", "sccacheUrl", "crateMirror", "cacheWriteUrl", "writerSecret", "signingSecret", "priorityClassName"]);
 
 /** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
 function podSettings(opt: Map<string, string>, current: KubeSettings | null): Partial<KubeSettings> | undefined {
@@ -131,7 +136,8 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
 
 const settingsLine = (s: KubeSettings): string =>
   `namespace ${s.namespace}, image ${s.image ?? "the runner's own"}, toolchains ${Object.entries(s.toolchainImages).map(([t, i]) => `${t}=${i}`).join(" ") || "none"}, ` +
-  `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
+  `capacity ${s.capacity}${s.capacity === "cluster" ? ` (node reserve cpu ${s.nodeReserveCpu}, memory ${s.nodeReserveMemory})` : ""}, priority class ${s.priorityClassName ?? "none"}, ` +
+  `step cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit} (at most ${s.maxPodMemory}), ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
   `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
   `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
   `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
@@ -225,6 +231,29 @@ async function envs(args: string[]): Promise<void> {
 
 const OS = ["linux", "macos", "windows"];
 
+async function sizes(db: Db, args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  const { pos, opt } = options(rest);
+  const bytes = (name: string): number | null => {
+    if (!opt.has(name)) return null;
+    const b = quantity(opt.get(name)!);
+    return b > 0 ? b : die(`--${name} must be a Kubernetes quantity such as 6Gi`);
+  };
+  if (sub === "list") {
+    const rows = await listBuildSizes(db);
+    if (!rows.length) console.log("no repo has its own size: step pods get their environment's memory");
+    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
+  } else if (sub === "set") {
+    const memory = bytes("memory");
+    if (!pos[0] || memory === null) die(USAGE);
+    const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
+    console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
+  } else if (sub === "clear") {
+    if (!pos[0]) die(USAGE);
+    console.log(await clearBuildSize(db, pos[0], "cli") ? `${safe(pos[0])}: step pods get their environment's memory` : `${safe(pos[0])} had no size of its own`);
+  } else die(USAGE);
+}
+
 async function tasks(args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   const db = await openDb();
@@ -263,6 +292,8 @@ async function tasks(args: string[]): Promise<void> {
       console.log(`${"repo".padEnd(20)} ${"step".padEnd(16)} ${"steps".padStart(5)} ${"median GB".padStart(10)} ${"max GB".padStart(8)} ${"oom".padStart(4)}`);
       for (const r of rows) console.log(`${safe(r.repo).padEnd(20)} ${safe(r.step).padEnd(16)} ${String(r.steps).padStart(5)} ${gb(r.medianBytes).padStart(10)} ${gb(r.maxBytes).padStart(8)} ${String(r.oom).padStart(4)}`);
     }
+  } else if (sub === "sizes") {
+    await sizes(db, rest);
   } else if (sub === "enqueue-test") {
     await enqueueTest(db, rest);
   } else die(USAGE);
@@ -409,6 +440,6 @@ async function workspace(args: string[]): Promise<void> {
 
 export const commands = {
   envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id> | warm-interval [<minutes>]", run: async (args: string[]) => await envs(args) },
-  tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: async (args: string[]) => await tasks(args) },
+  tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | sizes list|set|clear | enqueue-test", run: async (args: string[]) => await tasks(args) },
   workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | tool <id> <tool> <json> | try <repo> <sha> | end <id>", run: async (args: string[]) => await workspace(args) },
 };

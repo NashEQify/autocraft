@@ -92,7 +92,7 @@ function EditEnv({ e, onDone }: { e: BuildEnv; onDone: () => void }) {
   const [slots, setSlots] = useState(String(e.slots));
   const [enabled, setEnabled] = useState(e.enabled);
   const [confidential, setConfidential] = useState(e.confidential);
-  const valid = label.trim() !== "" && /^\d{1,2}$/.test(slots) && Number(slots) >= 1 && Number(slots) <= 64;
+  const valid = label.trim() !== "" && /^\d{1,3}$/.test(slots) && Number(slots) >= 1 && Number(slots) <= 200;
   return (
     <form
       className="mt-3 flex flex-wrap items-end gap-3 border-t border-line pt-3"
@@ -106,7 +106,7 @@ function EditEnv({ e, onDone }: { e: BuildEnv; onDone: () => void }) {
         <TextInput value={label} maxLength={40} onChange={(ev) => setLabel(ev.target.value)} className="w-48 text-ink" />
       </label>
       <label className="flex flex-col gap-1 text-xs text-ink/60">
-        Slots (1 to 64)
+        Slots (1 to 200)
         <TextInput inputMode="numeric" value={slots} onChange={(ev) => setSlots(ev.target.value)} className="w-24 text-ink" />
       </label>
       <label className="flex h-8 items-center gap-2 text-sm max-md:h-11">
@@ -227,7 +227,7 @@ function AddEnv({ onDone }: { onDone: () => void }) {
   const [slots, setSlots] = useState("2");
   const [confidential, setConfidential] = useState(false);
   const [secret, setSecret] = useState<string | null>(null);
-  const valid = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(id) && label.trim() !== "" && /^\d{1,2}$/.test(slots) && Number(slots) >= 1 && Number(slots) <= 64;
+  const valid = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/.test(id) && label.trim() !== "" && /^\d{1,3}$/.test(slots) && Number(slots) >= 1 && Number(slots) <= 200;
   if (secret) return <KeyOnce secret={secret} onDone={onDone} />;
   return (
     <form

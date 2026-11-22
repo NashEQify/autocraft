@@ -22,7 +22,8 @@ import { CACHE_VERSION, MAX_WARM_COMMAND } from "../worker/gate.ts";
 
 export const DEFAULT_SETTINGS: KubeSettings = {
   namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981",
-  cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi", ephemeralRequest: "4Gi", ephemeralLimit: "16Gi",
+  cpuRequest: "4", cpuLimit: "16", memoryRequest: "4Gi", memoryLimit: "8Gi", ephemeralRequest: "4Gi", ephemeralLimit: "16Gi",
+  maxPodMemory: "64Gi", capacity: "cluster", nodeReserveCpu: "0", nodeReserveMemory: "0", priorityClassName: "craft-build-task",
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
   workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
   workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
@@ -53,6 +54,12 @@ function checkQuantity(v: unknown, name: string): string {
   return v;
 }
 
+/** A quantity that may be zero (a reserve). */
+function checkReserve(v: unknown, name: string): string {
+  if (typeof v !== "string" || !QUANTITY.test(v) || !(quantity(v) >= 0)) throw new BuildError(400, `${name} must be a Kubernetes quantity such as 0, 2 or 8Gi`);
+  return v;
+}
+
 function checkImage(v: unknown, name: string): string {
   if (typeof v !== "string" || !IMAGE_RE.test(v)) throw new BuildError(400, `${name} must be an image reference`);
   return v;
@@ -60,7 +67,9 @@ function checkImage(v: unknown, name: string): string {
 
 export function settingsOf(json: string | null): KubeSettings {
   try {
-    return { ...DEFAULT_SETTINGS, ...(json ? (JSON.parse(json) as Partial<KubeSettings>) : {}) };
+    const stored = json ? (JSON.parse(json) as Partial<KubeSettings>) : {};
+    // Environments stored before capacity existed keep their fixed slots until an operator switches them.
+    return { ...DEFAULT_SETTINGS, ...stored, ...(json && stored.capacity === undefined ? { capacity: "fixed" as const } : {}) };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -96,10 +105,21 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         if (typeof v !== "string" || !/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/.test(v)) throw new BuildError(400, "workerUrl must be http(s)://host[:port]");
         out.workerUrl = v;
         break;
-      case "cpuRequest": case "cpuLimit": case "memoryRequest": case "memoryLimit": case "ephemeralRequest": case "ephemeralLimit": case "storage":
+      case "cpuRequest": case "cpuLimit": case "memoryRequest": case "memoryLimit": case "ephemeralRequest": case "ephemeralLimit": case "storage": case "maxPodMemory":
       case "workspaceCpuRequest": case "workspaceCpuLimit": case "workspaceMemoryRequest": case "workspaceMemoryLimit":
       case "workspaceEphemeralRequest": case "workspaceEphemeralLimit": case "workspaceStorage":
         out[k] = checkQuantity(v, k);
+        break;
+      case "nodeReserveCpu": case "nodeReserveMemory":
+        out[k] = checkReserve(v, k);
+        break;
+      case "capacity":
+        if (v !== "cluster" && v !== "fixed") throw new BuildError(400, "capacity must be cluster or fixed");
+        out.capacity = v;
+        break;
+      case "priorityClassName":
+        if (v !== null && (typeof v !== "string" || !/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v))) throw new BuildError(400, "priorityClassName must be a priority class name or null");
+        out.priorityClassName = v as string | null;
         break;
       case "workspaceSlots":
         if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 200) throw new BuildError(400, "workspaceSlots must be 0 to 200");
@@ -149,6 +169,7 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
     ["workspaceCpuRequest", "workspaceCpuLimit"], ["workspaceMemoryRequest", "workspaceMemoryLimit"], ["workspaceEphemeralRequest", "workspaceEphemeralLimit"]] as const) {
     if (quantity(out[req]) > quantity(out[lim])) throw new BuildError(400, `${req} must not exceed ${lim}`);
   }
+  if (quantity(out.memoryLimit) > quantity(out.maxPodMemory)) throw new BuildError(400, "memoryLimit must not exceed maxPodMemory");
   if (out.warmWriter) {
     const missing = (["sccacheUrl", "cacheWriteUrl", "writerSecret", "signingSecret"] as const).filter((k) => !out[k]);
     if (missing.length) throw new BuildError(400, `a warm writer needs ${missing.join(", ")}`);
@@ -248,7 +269,11 @@ export function parsePrepared(message: string | undefined): { ok: true; prepared
 
 // ---- specs -------------------------------------------------------------------
 
-export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: number; name: string; pvc: string; deadlineSec: number };
+/**
+ * `memory`: the repository's step memory (src/build/sizing.ts); absent, the environment's. `node`: the node the run was placed
+ * on; the pod may run only there (its volume binds or is bound there).
+ */
+export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: number; name: string; pvc: string; deadlineSec: number; memory?: StepMemory | null; node?: string | null };
 
 /**
  * Each step copies the pristine tree into its own /src (the container runtime's "writes are dropped after the step") and runs
@@ -308,15 +333,42 @@ export const WARM_VERIFY_CONFIGMAP = "warm-verify-key";
 const VERIFY_KEY = "/keys/verify/public.pem";
 const RUSTC_FILE = "/meta/rustc.txt";
 const BAD_BLOBS_FILE = "/meta/bad-blobs";
-const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
+export const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
-/** `extraMemory` bytes are added to the memory request and limit (the in-memory warm target). */
-function resources(s: KubeSettings, extraMemory = 0) {
+/** A repository's step memory in bytes (src/build/sizing.ts). */
+export type StepMemory = { requestBytes: number; limitBytes: number };
+
+/** The task, source and upload pods and the disk and package checks: a small request, so they hold little room on a node. */
+export const APP_CPU_REQUEST = "500m";
+export const APP_MEMORY_REQUEST = "1Gi";
+const APP_CPU_LIMIT = "4";
+const APP_MEMORY_LIMIT = "8Gi";
+
+type Resources = { requests: Record<string, string>; limits: Record<string, string> };
+
+function appResources(s: KubeSettings): Resources {
+  return {
+    requests: { cpu: APP_CPU_REQUEST, memory: APP_MEMORY_REQUEST, "ephemeral-storage": s.ephemeralRequest },
+    limits: { cpu: APP_CPU_LIMIT, memory: APP_MEMORY_LIMIT, "ephemeral-storage": s.ephemeralLimit },
+  };
+}
+
+/** A step container's memory request and limit: the repository's size, or the environment's without one, each at most maxPodMemory. */
+export function stepMemory(s: KubeSettings, m: StepMemory | null | undefined): { request: string; limit: string } {
+  if (!m) return { request: s.memoryRequest, limit: s.memoryLimit };
+  const max = quantity(s.maxPodMemory);
+  const limit = Math.min(Math.ceil(m.limitBytes), max);
+  return { request: String(Math.min(Math.ceil(m.requestBytes), limit)), limit: String(limit) };
+}
+
+/** A step container's resources; `extraMemory` bytes (the in-memory warm target) are added to its memory request and limit. */
+function stepResources(s: KubeSettings, m: StepMemory | null | undefined, extraMemory = 0): Resources {
+  const mem = stepMemory(s, m);
   const memory = (q: string) => (extraMemory ? String(Math.ceil(quantity(q) + extraMemory)) : q);
   return {
-    requests: { cpu: s.cpuRequest, memory: memory(s.memoryRequest), "ephemeral-storage": s.ephemeralRequest },
-    limits: { cpu: s.cpuLimit, memory: memory(s.memoryLimit), "ephemeral-storage": s.ephemeralLimit },
+    requests: { cpu: s.cpuRequest, memory: memory(mem.request), "ephemeral-storage": s.ephemeralRequest },
+    limits: { cpu: s.cpuLimit, memory: memory(mem.limit), "ephemeral-storage": s.ephemeralLimit },
   };
 }
 
@@ -331,9 +383,35 @@ export function warmMemory(warm: WarmPod): number | null {
   return bytes > WARM_MEMORY_MAX_BYTES ? null : bytes;
 }
 
-function container(s: KubeSettings, name: string, image: string, extra: Record<string, unknown>) {
+/**
+ * The most CPU (millicores) and memory (bytes) one stage of a task requests: what its run holds on its node while it lives.
+ * Stages run one at a time and a pod's request is its largest container's (steps are init containers), so this is the larger
+ * of an app pod and a step pod. With `warm` it counts the in-memory warm target, which only a warm producer's offline pod has.
+ */
+export function taskRequest(s: KubeSettings, memory?: StepMemory | null, warm?: WarmPod): { cpuM: number; memBytes: number } {
+  const extra = warm ? warmMemory(warm) ?? 0 : 0;
   return {
-    name, image, imagePullPolicy: "IfNotPresent", resources: resources(s),
+    cpuM: Math.ceil(Math.max(quantity(APP_CPU_REQUEST), quantity(s.cpuRequest)) * 1000),
+    memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_REQUEST), quantity(stepMemory(s, memory).request) + extra)),
+  };
+}
+
+/**
+ * The limits and ephemeral storage one stage counts against a quota, beside taskRequest's requests: the largest container's,
+ * since every pod runs its containers one after another (steps are init containers).
+ */
+export function taskLimits(s: KubeSettings, memory?: StepMemory | null, warm?: WarmPod): { cpuM: number; memBytes: number; ephRequest: number; ephLimit: number } {
+  const extra = warm ? warmMemory(warm) ?? 0 : 0;
+  return {
+    cpuM: Math.ceil(Math.max(quantity(APP_CPU_LIMIT), quantity(s.cpuLimit)) * 1000),
+    memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_LIMIT), quantity(stepMemory(s, memory).limit) + extra)),
+    ephRequest: Math.ceil(quantity(s.ephemeralRequest)), ephLimit: Math.ceil(quantity(s.ephemeralLimit)),
+  };
+}
+
+function container(name: string, image: string, resources: Resources, extra: Record<string, unknown>) {
+  return {
+    name, image, imagePullPolicy: "IfNotPresent", resources,
     securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } },
     ...extra,
   };
@@ -352,6 +430,8 @@ function pod(c: PodCtx, network: "api" | TaskStep["network"], volumes: object[],
       restartPolicy: "Never", automountServiceAccountToken: false, enableServiceLinks: false, activeDeadlineSeconds: Math.max(60, Math.round(c.deadlineSec)),
       terminationGracePeriodSeconds: 5,
       nodeSelector: { "kubernetes.io/arch": ARCH_LABEL[c.s.arch] },
+      ...(c.node ? { affinity: { nodeAffinity: { requiredDuringSchedulingIgnoredDuringExecution: { nodeSelectorTerms: [{ matchExpressions: [{ key: "kubernetes.io/hostname", operator: "In", values: [c.node] }] }] } } } } : {}),
+      ...(c.s.priorityClassName ? { priorityClassName: c.s.priorityClassName } : {}),
       ...(c.s.runtimeClassName ? { runtimeClassName: c.s.runtimeClassName } : {}),
       securityContext: { runAsNonRoot: true, runAsUser: POD_UID, runAsGroup: POD_UID, fsGroup: POD_UID, seccompProfile: { type: "RuntimeDefault" } },
       volumes: [{ name: "work", persistentVolumeClaim: { claimName: c.pvc } }, ...volumes],
@@ -373,7 +453,7 @@ export function pvcSpec(s: KubeSettings, envId: string, taskId: number, name: st
 /** A pod of the AutoCraft image running `worker pod <phase>`. */
 function appPod(c: PodCtx, image: string, phase: "task" | "source" | "upload", network: "api" | "fetch", env: Record<string, string>, workReadOnly: boolean) {
   return pod(c, network, [{ name: "tmp", emptyDir: { sizeLimit: "2Gi" } }], [], [
-    container(c.s, phase, image, {
+    container(phase, image, appResources(c.s), {
       args: ["worker", "pod", phase],
       env: envList({ HOME: "/tmp", XDG_CACHE_HOME: "/tmp", AUTOCRAFT_POD_TASK: String(c.taskId), ...env }),
       volumeMounts: [{ name: "work", mountPath: "/work", readOnly: workReadOnly }, { name: "tmp", mountPath: "/tmp" }],
@@ -459,7 +539,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
     : { name: "work", subPath: "target" };
   if (writing) {
     volumes.push(
-      ...(extraMemory !== null ? [{ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(Math.ceil(quantity(c.s.memoryLimit) + extraMemory)) } }] : []),
+      ...(extraMemory !== null ? [{ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(Math.ceil(quantity(stepMemory(c.s, c.memory).limit) + extraMemory)) } }] : []),
       { name: "warm-meta", emptyDir: { sizeLimit: "1Mi" } }, { name: "warm-tmp", emptyDir: { sizeLimit: "2Gi" } },
       { name: "warm-verify", configMap: { name: WARM_VERIFY_CONFIGMAP, items: [{ key: "public.pem", path: "public.pem" }] } },
       { name: "warm-signing", secret: { secretName: c.s.signingSecret, items: [{ key: "private.pem", path: "private.pem" }], defaultMode: 0o440 } },
@@ -491,21 +571,20 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
         ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
       }
       : { ...(offline ? prepared.env : {}), ...(mirror ? MIRROR_ENV : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
-    return container(c.s, stepContainer(i), image, {
+    return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? 0), {
       command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: ci ? checkout : "/src",
       env: [...envList(env), ...(writing && cached(step) ? writerEnv(c.s.writerSecret!, "SCCACHE_WEBDAV_USERNAME", "SCCACHE_WEBDAV_PASSWORD") : [])],
       volumeMounts: mounts,
-      ...(extraMemory ? { resources: resources(c.s, extraMemory) } : {}),
     });
   });
-  const disk = container(c.s, DISK_CONTAINER, appImage, {
+  const disk = container(DISK_CONTAINER, appImage, appResources(c.s), {
     args: ["worker", "pod", "disk"],
     env: envList({ HOME: "/tmp", AUTOCRAFT_POD_DISK_LIMIT: String(Math.floor(quantity(c.s.storage))) }),
     volumeMounts: [{ name: "work", mountPath: "/work", readOnly: true }, { name: "check-tmp", mountPath: "/tmp" }],
   });
   const check = checkPackages && prepared.packages.length
-    ? [container(c.s, PACKAGES_CONTAINER, image, { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
+    ? [container(PACKAGES_CONTAINER, image, appResources(c.s), { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
   const spec = mirror && c.s.crateMirror ? { hostAliases: [{ ip: c.s.crateMirror, hostnames: MIRROR_HOSTS }] } : {};
   if (!writing) {
@@ -527,7 +606,7 @@ function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, 
   const envHash = createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
   const writer = writerEnv(c.s.writerSecret!, "AUTOCRAFT_WARM_STORE_USER", "AUTOCRAFT_WARM_STORE_PASSWORD");
   const phase = (name: string, env: object[], mounts: object[], extraMemory: number | null = null) =>
-    container(c.s, name, appImage, { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp], ...(extraMemory ? { resources: resources(c.s, extraMemory) } : {}) });
+    container(name, appImage, stepResources(c.s, c.memory, extraMemory ?? 0), { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });
   return {
     restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: VERIFY_KEY, IMAGE: image, BAD_BLOBS_FILE }),
       [{ ...targetVolume, mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, verify], extraMemory),

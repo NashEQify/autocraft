@@ -8,7 +8,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { authenticate, createEnv, kubeReport } from "../src/build/envs.ts";
-import type { ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
+import type { CapacityApi, ExecResult, KNode, KPod, KResourceQuota, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { DEFAULT_SETTINGS, groupsOf, kubeCapabilities, parseSettings, quantity, stepPod, type Prepared } from "../src/build/pods.ts";
 import { claim, createTask, getTask } from "../src/build/tasks.ts";
@@ -32,7 +32,7 @@ after(async () => {
 type Pod = Omit<KPod, "spec"> & { spec: Record<string, any> };
 const matches = (labels: Record<string, string> | undefined, selector: string) => selector.split(",").every((kv) => labels?.[kv.split("=")[0]!] === kv.split("=")[1]);
 
-class FakeKube implements KubeApi {
+class FakeKube implements KubeApi, CapacityApi {
   pods = new Map<string, Pod>();
   pvcs = new Map<string, { metadata: { name: string; labels?: Record<string, string> } }>();
   /** Makes the next creates that match throw, as a rate limit or quota would. */
@@ -53,6 +53,14 @@ class FakeKube implements KubeApi {
   async createPvc(_ns: string, pvc: object) { this.#refused("pvc", pvc); const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
   async deletePvc(_ns: string, name: string) { this.pvcs.delete(name); }
   async getNode() { return null; }
+  /** What the capacity reads return; `forbidden` makes the cluster-wide reads throw as a 403 would. */
+  nodes: object[] = [];
+  clusterPods: object[] = [];
+  quotas: object[] = [];
+  forbidden = false;
+  async listNodes() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.nodes) as KNode[]; }
+  async listClusterPods() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.clusterPods) as KPod[]; }
+  async getQuota() { if (this.forbidden) throw new Error("HTTP 403"); return structuredClone(this.quotas) as KResourceQuota[]; }
   async canI() { return true; }
   /** What the next execs return, and the argv of each call. */
   execResult: ExecResult = { exitCode: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), truncated: false };
@@ -264,6 +272,88 @@ test("a pod on a lost node loses its task", async () => {
   assert.equal(t.state, "failed");
   assert.match(t.summary ?? "", /stopped reporting/);
   assert.equal(kube.pods.size, 0);
+});
+
+const capacityPass = () => launcherPass({ db, api: kube, capacity: kube, defaultImage: null, log: () => {}, now: () => clock }, state);
+const node = (name: string, cpu: string) => ({ metadata: { name, labels: { "kubernetes.io/arch": "amd64" } }, status: { conditions: [{ type: "Ready", status: "True" }], allocatable: { cpu, memory: "64Gi" } } });
+const UNSCHEDULABLE = { phase: "Pending" as const, conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message: "0/1 nodes are available: 1 Insufficient cpu." }] };
+
+test("under cluster capacity, claims stop at the first task that does not fit and while one of our pods is unschedulable", async () => {
+  kube.nodes = [node("node-a", "6")];
+  const a = await simple(), b = await simple();
+  await capacityPass();
+  assert.equal((await queued(a)).state, "running");
+  assert.equal((await queued(b)).state, "queued", "the node has no room left for a second step pod");
+  const first = kube.only(a);
+  assert.deepEqual(first.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values, ["node-a"]);
+  const slots = async () => (await db.get(db.k.selectFrom("build_envs").select("reported_slots").where("id", "=", "pods")))!.reported_slots;
+  assert.equal(await slots(), 1);
+
+  kube.nodes = [node("node-a", "64")];
+  first.status = structuredClone(UNSCHEDULABLE);
+  await capacityPass();
+  assert.equal((await queued(b)).state, "queued", "the scheduler found no room for our pod: nothing new is claimed");
+  first.status = { phase: "Running" };
+  await capacityPass();
+  assert.equal((await queued(b)).state, "running");
+  assert.equal(await slots(), 2, "with room to spare the environment offers its slots, the ceiling");
+
+  await db.run(db.k.updateTable("build_tasks").set({ state: "cancelled" }).where("id", "in", [a, b]));
+  await capacityPass();
+  assert.equal(kube.pods.size, 0);
+  kube.nodes = [];
+});
+
+test("a preempted step pod runs again on the same volume without using an attempt", async () => {
+  const id = await simple();
+  await pass();
+  kube.end(kube.only(id));
+  await pass();
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  const step = kube.only(id);
+  step.status = {
+    phase: "Failed", conditions: [{ type: "DisruptionTarget", status: "True", reason: "PreemptionByScheduler", message: "preempted by a higher priority pod" }],
+    initContainerStatuses: [{ name: "step-0", state: { terminated: { exitCode: 137, reason: "Error" } } }],
+  };
+  await pass();
+  const again = kube.only(id);
+  assert.notEqual(again.metadata.name, step.metadata.name);
+  assert.equal(again.metadata.labels!["craft.build/stage"], step.metadata.labels!["craft.build/stage"]);
+  assert.deepEqual(again.spec.volumes[0], step.spec.volumes[0], "the same volume");
+  assert.deepEqual({ ...await queued(id) }, { state: "running", attempts: 1 });
+  kube.end(again);
+  await pass();
+  assert.equal((await queued(id)).state, "done");
+});
+
+test("a task pod recreated after a disruption stays on its volume's node; an eviction for the pod's own size limit is the step's failure", async () => {
+  const id = await simple();
+  await pass();
+  const first = kube.only(id);
+  first.status = { phase: "Failed", conditions: [{ type: "DisruptionTarget", status: "True", reason: "TerminationByKubelet" }] };
+  await pass();
+  const again = kube.only(id);
+  assert.notEqual(again.metadata.name, first.metadata.name);
+  again.status = structuredClone(UNSCHEDULABLE);
+  clock += 20 * 60_000;
+  await pass();
+  assert.equal(kube.only(id).metadata.name, again.metadata.name, "its volume is bound: it waits for room instead of moving");
+  assert.equal((await queued(id)).state, "running");
+  kube.end(again);
+  await pass();
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  const step = kube.only(id);
+  step.status = {
+    phase: "Failed", reason: "Evicted", message: "Usage of EmptyDir volume \"tmp\" exceeds the limit \"16Gi\".",
+    initContainerStatuses: [{ name: "step-0", state: { terminated: { exitCode: 137, reason: "Error" } } }],
+  };
+  await pass();
+  const t = (await getTask(db, id))!;
+  assert.equal(t.state, "failed");
+  assert.equal((await queued(id)).attempts, 1);
+  assert.match(t.summary ?? "", /exceeds the limit/);
 });
 
 test("with a compile cache, offline build steps read it at the CI runners' paths; fetch and bare steps never reach it", () => {

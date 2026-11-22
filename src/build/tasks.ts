@@ -184,11 +184,19 @@ export async function cancelIds(db: Db, envId: string): Promise<number[]> {
 const runsPrCode = (t: { step: string; number: number | null }): boolean => t.step === "pr-build" || t.step === "merge-batch" || t.number !== null;
 
 /**
+ * Whether an environment has room for a task it would claim (the pod launcher's cluster capacity): "fit" claims it,
+ * "stop" ends claiming for now (no later task is taken in its place, so priority order holds), "skip" passes over a task
+ * this environment can never run but another may, and `fail` ends the task at once with that summary (no environment can run it).
+ */
+export type ClaimFit = (t: { id: number; repo: string; step: string; warmKey: string | null; requires: Requires }) => Promise<"fit" | "stop" | "skip" | { fail: string }>;
+
+/**
  * Hands out queued tasks to an environment that has `free` slots: the oldest of the highest priority
  * whose requirements it meets, at most min(free, its slots minus the tasks it is running). A disabled,
  * paused or unreported environment gets none. One write transaction, so two environments never get the same task.
+ * With `fit`, its slots are only the ceiling (not the slots it reported) and `fit` decides each task.
  */
-export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now()): Promise<ClaimResult> {
+export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now(), fit?: ClaimFit): Promise<ClaimResult> {
   await reapLost(db, nowMs);
   const tasks = await db.write(async () => {
     const env = await db.get(db.k.selectFrom("build_envs").select(["enabled", "kind", "slots", "reported_slots", "capabilities", "paused_reason", "confidential", "settings"]).where("id", "=", envId));
@@ -197,7 +205,7 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
     const out: ClaimedTask[] = [];
     if (env && env.enabled === 1 && caps && !env.paused_reason && !await draining(db, env.kind) && Number.isInteger(free) && free > 0) {
       const running = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("env_id", "=", envId).where("state", "in", ["claimed", "running"])))!.n;
-      const room = Math.min(free, slotsOf(env) - running);
+      const room = Math.min(free, (fit ? env.slots : slotsOf(env)) - running);
       if (room > 0) {
         const queued = await db.all(db.k.selectFrom("build_tasks").select(cols("build_tasks")).$narrowType<{ state: TaskState }>().where("state", "=", "queued").orderBy("priority", "desc").orderBy("id").limit(500));
         const scope = await baseScopeRepos(db);
@@ -229,6 +237,15 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
             const w = await warmClaim(db, t.repo, kube!, nowMs);
             if (!w) continue;
             [head, base, plan] = [w.head, w.head, w.plan];
+          }
+          if (fit) {
+            const f = await fit({ id: t.id, repo: t.repo, step: t.step, warmKey: t.warm_key, requires: json<Requires>(t.requires, {}) });
+            if (f === "stop") break;
+            if (f === "skip") continue;
+            if (f !== "fit") {
+              await db.run(db.k.updateTable("build_tasks").set({ state: "failed", ended_at: at, summary: f.fail.slice(0, 300) }).where("id", "=", t.id).where("state", "=", "queued"));
+              continue;
+            }
           }
           await db.run(db.k.updateTable("build_tasks").set((eb) => ({
             state: "claimed", env_id: envId, attempts: eb("attempts", "+", 1), claimed_at: at, heartbeat_at: at,
