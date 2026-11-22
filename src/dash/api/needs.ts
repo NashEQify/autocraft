@@ -33,8 +33,6 @@ type Window = { since: string; cur: string; own: string; owns: string[]; bots: s
 const tag = (eb: kx.Eb, value: string) => eb.cast<string>(eb.val(value), "text");
 const nullText = (eb: kx.Eb) => eb.cast<string | null>(eb.lit(null), "text");
 const nullInt = (eb: kx.Eb) => eb.cast<number | null>(eb.lit(null), "bigint");
-/** `x` with spaces, newlines and tabs trimmed from both ends. */
-const trimText = (eb: kx.Eb, x: kx.Ex) => { const chars = eb.val(" \n\t"); return eb.fn<string | null>("ltrim", [eb.fn("rtrim", [kx.exprOf(eb, x), chars]), chars]); };
 /** The person who wrote `col` has the operator role. */
 const operatorLogin = (eb: kx.Eb, col: string) => eb.exists(eb.selectFrom("access as a").select(eb.lit(1).as("one")).whereRef("a.login", "=", col).where("a.role", "=", "operator"));
 const idOf = (eb: kx.Eb, prefix: string, col: string) => eb(tag(eb, prefix), "||", eb.ref(col));
@@ -80,7 +78,7 @@ const sources = (db: Db, w: Window): Source[] => {
         .orderBy("p.created_at", (o) => o.desc().nullsLast()).limit(1).as("q")).select(eb.lit(1).as("one")).where(kx.inList(db, "q.author", w.owns))
         .where((e) => e.exists(e.selectFrom("audit as a").select(e.lit(1).as("one")).where("a.target", "=", e(e(e.ref("c.repo"), "||", e.val("#")), "||", e.cast<string>("c.number", "text")))
           .where((x) => x.or([
-            x.and([x(kx.jsonText(db, "a.details", "$.url"), "is not", null), x(trimText(x, x.fn("replace", [kx.jsonText(db, "a.details", "$.text"), x.val("\r"), x.val("")])), "=", trimText(x, x.fn("replace", ["q.body", x.val("\r"), x.val("")])))]),
+            x.and([x(kx.jsonText(db, "a.details", "$.url"), "is not", null), x(kx.trimChars(db, x.fn("replace", [kx.jsonText(db, "a.details", "$.text"), x.val("\r"), x.val("")]), " \n\t"), "=", kx.trimChars(db, x.fn("replace", ["q.body", x.val("\r"), x.val("")]), " \n\t"))]),
             x.and([x("a.action", "=", "review-post"), x(kx.jsonText(db, "a.details", "$.review"), "=", x.ref("q.id"))]),
           ]))))),
     ])).$castTo<Raw>());

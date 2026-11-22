@@ -8,7 +8,7 @@ import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemKind, ItemPrBuil
 import { statusFromItem, type ItemStatus } from "../../core/item-status.ts";
 import { triggerWhy } from "../../review/trigger.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
-import { fingerprint, rowValues, context, gather, obj, arr, type Ctx, type Ev, hiddenExpr } from "./trace.ts";
+import { fingerprint, rowValuesOf, context, gather, obj, arr, type Ctx, type Ev, hiddenExpr } from "./trace.ts";
 import { timelineOf } from "./item-timeline.ts";
 import { barOf } from "./item-bar.ts";
 import { discordOf } from "./discord.ts";
@@ -23,7 +23,7 @@ import type { Req } from "../types.ts";
 import { backlogHeld } from "../../dupes/held.ts";
 import { canSettleCached } from "../../settlers.ts";
 import type { Db } from "../../db/index.ts";
-import { cols, least, rowid } from "../../db/kx.ts";
+import { cols, exprOf, groupConcat, jsonNum, least, rowid, type Eb } from "../../db/kx.ts";
 
 export type ItemPhase = ItemStatus["phase"];
 export type { ItemStatus };
@@ -76,24 +76,36 @@ const clean = (s: string, max = 1500): string => {
 // ---- stamp ---------------------------------------------------------------------------------------------------------
 
 /** What the page reads beyond the trace's fingerprint: header parts, comment edits, commits, checks, files and the plan view. */
-const EXTRA = [
-  "SELECT title, labels, LENGTH(COALESCE(body, '')), ci_state, mergeable, additions, deletions, url, closing_issues FROM items WHERE repo = ?1 AND number = ?2",
-  "SELECT synced_at FROM item_reads WHERE repo = ?1 AND number = ?2",
-  "SELECT view FROM item_plans WHERE repo = ?1 AND number = ?2",
-  "SELECT COUNT(*), SUM(LENGTH(COALESCE(body, ''))), SUM(url IS NOT NULL), group_concat(COALESCE(review_state, '')) FROM comments WHERE repo = ?1 AND number = ?2",
-  "SELECT COUNT(*), MAX(first_seen_at), SUM(LENGTH(COALESCE(message, ''))) FROM pr_commits WHERE repo = ?1 AND number = ?2",
-  "SELECT head_oid, fetched_at, checks FROM pr_checks WHERE repo = ?1 AND number = ?2",
-  "SELECT COUNT(*), SUM(additions + deletions) FROM pr_files WHERE repo = ?1 AND number = ?2",
-  "SELECT COUNT(*), MAX(at) FROM item_activity WHERE repo = ?1 AND number = ?2",
-  "SELECT COUNT(*), MAX(at) FROM classifications WHERE repo = ?1 AND number = ?2",
-  "SELECT group_concat(state) FROM postmerge_followups WHERE repo = ?1 AND number = ?2",
-  "SELECT id, state, updated_at FROM preapprovals WHERE repo = ?1 AND number = ?2 ORDER BY id DESC LIMIT 1",
-  "SELECT id FROM fast_track WHERE repo = ?1 AND number = ?2",
-  "SELECT group_concat(head_sha || state || COALESCE(verdict, '') || held) FROM screenshot_runs WHERE repo = ?1 AND number = ?2",
-  "SELECT pipeline FROM tracked_repos WHERE name = ?1 AND ?2 IS NOT NULL",
-  "SELECT COUNT(*), MAX(id), group_concat(state) FROM jobs WHERE state IN ('queued', 'running') AND repo = ?1 AND json_extract(params, '$.number') = ?2",
-  "SELECT group_concat((SELECT COUNT(*) FROM jobs q WHERE q.state = 'queued' AND q.step = j.step AND q.id < j.id)) FROM jobs j WHERE j.state = 'queued' AND j.repo = ?1 AND json_extract(j.params, '$.number') = ?2",
-];
+const extraQueries = (db: Db, repo: string, n: number) => {
+  const flag = (eb: Eb, col: string) => eb.fn.sum<number | null>(eb.case().when(col, "is not", null).then(eb.lit(1)).else(eb.lit(0)).end());
+  const length = (eb: Eb, col: string) => eb.fn<number>("length", [eb.fn.coalesce(col, eb.val(""))]);
+  const queued = (eb: Eb, j: string) => eb(jsonNum(db, `${j}.params`, "$.number"), "=", n);
+  return [
+    db.k.selectFrom("items").select((eb) => ["title", "labels", length(eb, "body").as("body_length"), "ci_state", "mergeable", "additions", "deletions", "url", "closing_issues"])
+      .where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("item_reads").select("synced_at").where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("item_plans").select("view").where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("comments").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>(length(eb, "body")).as("length"), flag(eb, "url").as("urls"),
+      groupConcat(db, eb.fn.coalesce("review_state", eb.val("")), ",", rowid("comments")).as("states")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("pr_commits").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("first_seen_at").as("newest"), eb.fn.sum<number | null>(length(eb, "message")).as("length")])
+      .where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("pr_checks").select(["head_oid", "fetched_at", "checks"]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("pr_files").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>(eb("additions", "+", eb.ref("deletions"))).as("lines")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("item_activity").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("classifications").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("postmerge_followups").select(groupConcat(db, "state", ",", rowid("postmerge_followups")).as("states")).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("preapprovals").select(["id", "state", "updated_at"]).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1),
+    db.k.selectFrom("fast_track").select("id").where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("screenshot_runs").select((eb) => groupConcat(db, eb(eb(eb("head_sha", "||", eb.ref("state")), "||", eb.fn.coalesce("verdict", eb.val(""))), "||", exprOf(eb, "held")), ",", "head_sha").as("states"))
+      .where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo),
+    db.k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), groupConcat(db, "state", ",", "id").as("states")])
+      .where("state", "in", ["queued", "running"]).where("repo", "=", repo).where((eb) => queued(eb, "jobs")),
+    db.k.selectFrom("jobs as j").select((eb) => groupConcat(db, eb.selectFrom("jobs as q").select((e) => e.fn.countAll<number>().as("n"))
+      .where("q.state", "=", "queued").whereRef("q.step", "=", "j.step").whereRef("q.id", "<", "j.id"), ",", "j.id").as("ahead"))
+      .where("j.state", "=", "queued").where("j.repo", "=", repo).where((eb) => queued(eb, "j")),
+  ];
+};
 
 const prBuildOf = async (c: Ctx): Promise<ItemPrBuild | null> => {
   const r = await c.db.get(c.db.k.selectFrom("items").select(["kind", "head_oid"]).where("repo", "=", c.repo).where("number", "=", c.n));
@@ -103,7 +115,7 @@ const prBuildOf = async (c: Ctx): Promise<ItemPrBuild | null> => {
 async function stampOf(c: Ctx, req: Req): Promise<string> {
   const { db, repo, n, ref } = c;
   const parts: unknown[] = [await fingerprint(c, "page"), c.veiled];
-  parts.push(...await rowValues(db, EXTRA, repo, n));
+  parts.push(...await rowValuesOf(db, extraQueries(db, repo, n)));
   parts.push((await queueSlots(db, await visibleRepos(db, req))).get(ref) ?? null, await discordOf(db, repo, n), await releasesOf(db, repo, n), await prBuildOf(c), await backlogOf(c, req));
   return createHash("sha1").update(JSON.stringify(parts)).digest("hex").slice(0, 16);
 }

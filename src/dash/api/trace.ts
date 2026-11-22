@@ -17,10 +17,9 @@ import { reasonsFor, waitFor, type Reader } from "./reader.ts";
 import { filtered, hiddenTest, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { ownLogins } from "../../github/identity.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
-import type { AliasedExpression, AliasableExpression, Compilable, SqlBool } from "kysely";
+import type { AliasedExpression, AliasableExpression, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
-import type { Eb } from "../../db/kx.ts";
 
 export type Ev = TraceEvent & { detail?: Record<string, unknown> };
 /** `staff`: operators and maintainers; `hidden`: repos the viewer may not see, whose runs are left out like getRun does. */
@@ -142,7 +141,7 @@ export const hiddenSql = (hidden: HiddenRepos): string => (filtered(hidden) ? ` 
 export const hiddenArgs = (hidden: HiddenRepos): string[] => (filtered(hidden) ? hiddenTest("x.repo", hidden).args : []);
 
 /** `hiddenSql` as an expression on the run `r` (without the leading AND); null when nothing is hidden. */
-export const hiddenExpr = (db: Db, eb: Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> | null => (filtered(hidden)
+export const hiddenExpr = (db: Db, eb: kx.Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> | null => (filtered(hidden)
   ? eb.not(eb.exists(db.k.selectFrom("agent_run_items as x").select(eb.lit(1).as("one")).where("x.run_id", "=", eb.ref("r.id")).where(hiddenTestExpr(db, "x.repo", hidden))))
   : null);
 
@@ -152,7 +151,7 @@ const PROMPT_TITLES: Record<string, string> = { "lint.reference.jev": "Reference
 export const RUN_COLUMNS = `r.id, r.step, r.prompt_id, r.model, r.provider, r.state, r.started_at, r.ended_at, r.input_tokens, r.output_tokens, r.cost_usd, r.summary, r.job_id, r.user_login, r.harness, r.reported_model,
        COALESCE(a.label, r.account_id) AS label, (SELECT COUNT(*) FROM agent_run_tools t WHERE t.run_id = r.id) AS tools`;
 /** `RUN_COLUMNS` as selections on `r` (agent_runs) and `a` (claude_accounts, left joined): `.select((eb) => runColumnsExpr(db, eb))`. */
-export const runColumnsExpr = (db: Db, eb: Eb) => [
+export const runColumnsExpr = (db: Db, eb: kx.Eb) => [
   "r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd",
   "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",
   eb.fn.coalesce(eb.ref("a.label"), eb.ref("r.account_id")).as("label") as AliasedExpression<string | null, "label">,
@@ -527,45 +526,12 @@ const fingerprintQueries = (db: Db, repo: string, n: number, ref: string) => {
 };
 
 /**
- * The column values of the first row of each query, as `Object.values` of its row (`[]` when there is none), read in one read
- * transaction. Every value is an integer, text or null, which a JSON array carries unchanged.
+ * The column values of the first row of each query in select order (`[]` when there is none), read in one statement. Every
+ * value is an integer, text or null, which a JSON array carries unchanged.
  */
-export async function rowValuesOf(db: Db, queries: readonly Compilable<object>[]): Promise<unknown[][]> {
-  return await db.read(async () => {
-    const out: unknown[][] = [];
-    for (const q of queries) { const row = await db.get(q); out.push(row ? Object.values(row) : []); }
-    return out;
-  });
-}
-
-/**
- * The column values of the first row of each query, as `Object.values` of its row (`[]` when there is none), read in one statement.
- * Each query is `SELECT <columns> FROM ...` with the parameters ?1, ?2 and ?3 (anonymous `?` are numbered in order); every value
- * is an integer, text or null, which a JSON array carries unchanged.
- */
-export async function rowValues(db: Db, queries: readonly string[], ...args: (string | number)[]): Promise<unknown[][]> {
-  const cols = queries.map((sql, k) => {
-    let at = 0;
-    const numbered = sql.replace(/\?(?!\d)/g, () => `?${++at}`);
-    const from = topLevelFrom(numbered);
-    return `(SELECT json_array(${numbered.slice("SELECT ".length, from)})${numbered.slice(from)}) AS c${k}`;
-  });
-  const row = await db.prepare(`SELECT ${cols.join(", ")}`).get(...args) as Record<string, string | null>;
-  return queries.map((_, k) => { const v = row[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
-}
-
-/** The index of the ` FROM ` that ends a query's column list: outside parentheses and quotes. */
-function topLevelFrom(sql: string): number {
-  let depth = 0, quote = "";
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i]!;
-    if (quote) { if (ch === quote) quote = ""; continue; }
-    if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === "(") depth++;
-    else if (ch === ")") depth--;
-    else if (depth === 0 && sql.startsWith(" FROM ", i)) return i;
-  }
-  throw new Error(`no FROM in ${sql}`);
+export async function rowValuesOf(db: Db, queries: readonly SelectQueryBuilder<any, any, any>[]): Promise<unknown[][]> {
+  const row: Record<string, string | null> | undefined = await db.get(db.k.selectNoFrom(queries.map((q, k) => kx.rowArray(db, q).as(`c${k}`))));
+  return queries.map((_, k) => { const v = row?.[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
 }
 
 export async function fingerprint(c: Ctx, qkey: string): Promise<string> {

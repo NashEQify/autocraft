@@ -206,6 +206,25 @@ both("jsonObject builds an object whose values are JSON texts; Postgres spaces t
   return o;
 });
 
+both("rowArray reads the first row of each of several queries as a JSON array in select order, in one statement", async (db) => {
+  const qs = [
+    k(db).selectFrom("t").select(["name", "n", "m as other"]).where("id", "=", 2),
+    k(db).selectFrom("r").select((eb) => [eb.fn.countAll<number>().as("count"), kx.groupConcat(db, "v", ",", "number").as("vs"), eb.fn.max<number | null>("number").as("top")]).where("repo", "=", "app"),
+    k(db).selectFrom("r").select("v").orderBy("number", "desc").limit(1),
+    k(db).selectFrom("t").select("name").where("id", "=", 99),
+  ];
+  const row = await db.get(db.k.selectNoFrom(qs.map((q, i) => kx.rowArray(db, q).as(`c${i}`))));
+  const arrays = Object.values(row!).map((v) => (v === null ? null : JSON.parse(v as string)));
+  assert.deepEqual(arrays, [["Bob", null, 4], [2, "one,two", 2], ["two"], null]);
+  return arrays;
+});
+
+both("trimChars strips the given characters from both ends only", async (db) => {
+  const row = await db.get(db.k.selectNoFrom((eb) => [kx.trimChars(db, eb.val(" \n\ta b\t\n "), " \n\t").as("t"), kx.trimChars(db, eb.val("xxaxbxx"), "x").as("x")]));
+  assert.deepEqual(row, { t: "a b", x: "axb" });
+  return row;
+});
+
 both("cols selects a table's whole row: every column selectAll() reads, without rowid or Postgres' full-text column", async (db) => {
   const whole = await db.all(db.k.selectFrom("main.items as i").select(kx.cols("main.items", "i")).orderBy("i.number"));
   const all: Record<string, unknown>[] = await db.all(db.k.selectFrom("main.items").selectAll().orderBy("number"));

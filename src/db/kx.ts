@@ -13,7 +13,7 @@
  * - `.orderBy("x", (o) => o.asc().nullsFirst())`, `eb("a", "is distinct from", b)`, `eb.and/or/not`, `$if`
  * - `eb.fn.count/sum/max/min/coalesce`, `eb.case()`, `eb.exists(...)`, `with(...)`, `union(...)`, `returning(...)`
  */
-import type { AliasedRawBuilder, Expression, ExpressionBuilder, InsertObject, RawBuilder, SqlBool } from "kysely";
+import type { AliasedRawBuilder, Expression, ExpressionBuilder, InsertObject, RawBuilder, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db, Dialect, Param } from "./index.ts";
 import { nowParam, pgPath, quote, rowidOf } from "./portable.ts";
 import { fts5Query, tsQueryText, type Search } from "./search.ts";
@@ -195,6 +195,11 @@ export function like(d: D, a: Ex, pattern: Ex, escape?: string): RawBuilder<SqlB
   return escape === undefined ? sql`${x(a)} LIKE ${x(pattern)}` : sql`${x(a)} LIKE ${x(pattern)}${esc}`;
 }
 
+/** `e` without any of the characters of `chars` at either end (SQLite `trim(e, chars)`, Postgres `btrim`). */
+export function trimChars(d: D, e: Ex, chars: string): RawBuilder<string | null> {
+  return pgOf(d) ? sql`btrim(${x(e)}, ${chars})` : sql`trim(${x(e)}, ${chars})`;
+}
+
 /** `text` with `esc` (one character), `%` and `_` escaped by `esc`: `like(db, "title", eb.val(`%${likeEscape(s)}%`), "\\")`. */
 export const likeEscape = (text: string, esc = "\\"): string => text.replaceAll(esc, esc + esc).replace(/[%_]/g, (c) => esc + c);
 
@@ -367,6 +372,27 @@ export function jsonObject(d: D, entries: Record<string, Ex>): RawBuilder<string
   const pg = pgOf(d);
   const parts = Object.entries(entries).map(([k, v]) => (pg ? sql`${sql.raw(quote(k))}, (${x(v)})::json` : sql`${sql.raw(quote(k))}, json(${x(v)})`));
   return pg ? sql`json_build_object(${sql.join(parts)})::text` : sql`json_object(${sql.join(parts)})`;
+}
+
+/** The output names of a select's columns, in order. Each column needs one: an alias or a plain column reference. */
+function selectionNames(q: SelectQueryBuilder<any, any, any>): string[] {
+  type Node = { kind: string; name?: string; alias?: Node; column?: Node };
+  return (q.toOperationNode().selections ?? []).map((s) => {
+    const e = s.selection as unknown as Node;
+    const name = e.kind === "AliasNode" ? e.alias?.name : e.kind === "ReferenceNode" ? e.column?.column?.name : e.kind === "ColumnNode" ? e.column?.name : undefined;
+    if (!name) throw new Error(`rowArray: every column needs a name (got ${e.kind})`);
+    return name;
+  });
+}
+
+/**
+ * Scalar subquery: the first row of `q` as JSON array text of its column values in select order (SQLite `json_array`),
+ * NULL when `q` has no row. Several in one `selectNoFrom` read many small queries in one statement. Integers, text and
+ * NULL come back the same on both engines; `q` names every column and selects no booleans.
+ */
+export function rowArray(d: D, q: SelectQueryBuilder<any, any, any>): RawBuilder<string | null> {
+  const values = sql.join(selectionNames(q).map((n) => sql.ref(`s.${n}`)));
+  return pgOf(d) ? sql`(SELECT json_build_array(${values})::text FROM ${q} AS s LIMIT 1)` : sql`(SELECT json_array(${values}) FROM ${q} AS s LIMIT 1)`;
 }
 
 /**
