@@ -163,6 +163,27 @@ export function tupleIn(d: D, cols: readonly Ex[], rows: readonly (readonly Para
   return sql`${left} IN (SELECT ${sql.join(elems)} FROM json_each(${list}))`;
 }
 
+// ---- SQLite planner hints ---------------------------------------------------------------------------------------------
+
+/**
+ * Table `table` named `alias`, read on SQLite through `index` (INDEXED BY), on Postgres as the plain table. Name a
+ * `main.` table: SQLite takes no hint on a view. For a partial index, write the terms of its WHERE with `literal` values
+ * in the query, or SQLite finds no plan and the statement fails. A null `index` gives the plain table on both. `S` is the
+ * schema, for tables outside DB (tests).
+ */
+export function indexedBy<T extends keyof S & string, A extends string, S = DB>(d: D, table: T, index: string | null, alias: A): AliasedRawBuilder<S[T], A> {
+  const t = sql<S[T]>`${sql.table(table)}`;
+  return pgOf(d) || index === null ? t.as(alias) : t.as<A>(sql`${sql.id(alias)} INDEXED BY ${sql.id(index)}`);
+}
+
+/**
+ * The constant `value` written into the statement text instead of bound, so SQLite can match a partial index whose WHERE
+ * names it (`kind = 'pr'`): a bound value never matches one. Constants only, never input.
+ */
+export function literal<V extends string | number>(value: V): RawBuilder<V> {
+  return sql.lit(value);
+}
+
 // ---- comparison and ordering ----------------------------------------------------------------------------------------
 
 /** Case-insensitive equality (ASCII, as SQLite's NOCASE); also for a citext column against a text one on Postgres. */

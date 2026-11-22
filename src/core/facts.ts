@@ -52,7 +52,7 @@ import { setting } from "../settings-read.ts";
 import { everySeq, someSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import type { Compilable, Expression, SqlBool } from "kysely";
-import { bytewise, inList, jsonText, jsonType, jsonValid, like, refIn, rowid, type AnyEb } from "../db/kx.ts";
+import { bytewise, inList, jsonText, jsonType, jsonValid, like, literal, refIn, rowid, type AnyEb } from "../db/kx.ts";
 
 export type { PrFacts } from "./plan.ts";
 
@@ -245,11 +245,12 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   };
 
   // Open PRs by repo, head branch and head repo (lower case), lowest number first: the PR another one is stacked on. Only heads that are an open PR's base.
+  // The bases are one uncorrelated list, which SQLite builds once; a correlated EXISTS rescans the repo's open PRs for every row.
   const openByHead = new Map<string, number[]>();
   for (const o of await db.all(db.k.selectFrom("items as i")
     .select((eb) => [eb(eb(eb(eb(eb.ref("i.repo"), "||", eb.val(" ")), "||", eb.ref("i.head_ref")), "||", eb.val(" ")), "||", eb.fn<string>("lower", [eb.ref("i.head_repo")])).as("k"), "i.number"])
     .where("i.kind", "=", "pr").where("i.state", "=", "OPEN").where("i.head_ref", "is not", null).where("i.head_repo", "is not", null).where(inList(db, "i.repo", [...new Set(rows.map((r) => r.repo))]))
-    .where((eb) => eb.exists(eb.selectFrom("items as b").select(eb.lit(1).as("one")).whereRef("b.repo", "=", "i.repo").whereRef("b.base_ref", "=", "i.head_ref").where("b.kind", "=", "pr").where("b.state", "=", "OPEN")))
+    .where((eb) => eb(eb.refTuple("i.repo", "i.head_ref"), "in", eb.selectFrom("items as b").select(["b.repo", "b.base_ref"]).where("b.kind", "=", "pr").where("b.state", "=", "OPEN").where("b.base_ref", "is not", null).$asTuple("repo", "base_ref")))
     .orderBy("i.number"))) (openByHead.get(o.k) ?? openByHead.set(o.k, []).get(o.k)!).push(o.number);
   // The latest merge attempt at each head (first in the order) and the refusals there.
   const merges = await keyed(db.k.selectFrom("merges as m").select((eb) => [keyOf(eb, "m", "head_oid").as("k"), "m.outcome", "m.reason", "m.ci", "m.mergeable", "m.at",
@@ -613,8 +614,9 @@ export async function ownFixPrs(db: Db, repo?: string, slug?: string | null): Pr
 export async function assignmentsOf(db: Db, repo?: string): Promise<(ref: string, assignees: string | null) => AssignFacts> {
   const login = await setting(db, PIPELINE_LOGIN_KEY) ?? null;
   const last = new Map<string, string | null>();
+  // The actions are literals so the inner read walks the audit_assign partial index, not every audit row.
   for (const r of await db.all(db.k.selectFrom("audit").select(["target", "details"]).where("action", "=", "assign").where((eb) => eb(rowid("audit"), "in", eb.selectFrom("audit as a2")
-    .select((s) => s.fn.max<number>(rowid("audit", "a2")).as("m")).where("a2.action", "in", ["assign", "unassign"])
+    .select((s) => s.fn.max<number>(rowid("audit", "a2")).as("m")).where("a2.action", "in", [literal("assign"), literal("unassign")])
     .where((w) => w.not(like(db, w.fn.coalesce("a2.details", w.val("")), w.val('%"error":%')))).$if(!!repo, (q) => q.where("a2.target", ">=", `${repo}#`).where("a2.target", "<", `${repo}$`)).groupBy("a2.target"))))) {
     if (r.target === null) continue;
     last.set(r.target, (safeJson(r.details) as { assignee?: string } | null)?.assignee ?? null);

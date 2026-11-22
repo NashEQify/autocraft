@@ -100,6 +100,16 @@ both("refPairs and refIn select rows by repo#number refs", async (db) => {
   return [joined, inn];
 });
 
+both("indexedBy reads through a partial index on SQLite and the plain table on Postgres; literal values match the index's WHERE", async (db) => {
+  await db.script("CREATE INDEX r_lib ON r(number) WHERE repo = 'lib'");
+  const rows = await db.all(k(db).selectFrom(kx.indexedBy<"r", "x", T>(db, "r", "r_lib", "x")).select(["x.number", "x.v"])
+    .where("x.repo", "=", kx.literal("lib")).where("x.number", ">", 0).orderBy("x.number"));
+  assert.deepEqual(rows, [{ number: 1, v: "three" }]);
+  // A bound value does not match the partial index's WHERE: SQLite refuses the hint.
+  if (db.dialect === "sqlite") await assert.rejects(db.all(k(db).selectFrom(kx.indexedBy<"r", "x", T>(db, "r", "r_lib", "x")).select("x.v").where("x.repo", "=", "lib")));
+  return rows;
+});
+
 both("onConflict skips a duplicate key or updates the row in place; INSERT ... SELECT needs a WHERE on SQLite", async (db) => {
   const ins = (id: number, name: string) => k(db).insertInto("t").values({ id, name }).onConflict((oc) => oc.doNothing());
   assert.equal((await db.run(ins(1, "dup"))).changes, 0);

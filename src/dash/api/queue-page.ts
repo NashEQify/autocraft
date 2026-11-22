@@ -204,8 +204,8 @@ export async function queueOrigins(db: Db, staff: boolean): Promise<(e: Pick<Cac
 
 /** The issues each PR closes when it merges (GitHub's closing references, from the mirror), by `repo#number`; PRs without any are left out. */
 async function closingIssues(db: Db): Promise<Map<string, number[]>> {
-  const rows = await db.all(db.k.selectFrom("main.items").select(["repo", "number", "closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
-    .where("kind", "=", "pr").where("closing_issues", "is not", null).where("closing_issues", "<>", "[]"));
+  const rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_closing", "i")).select(["i.repo", "i.number", "i.closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
+    .where("i.kind", "=", kx.literal("pr")).where("i.closing_issues", "is not", null).where("i.closing_issues", "<>", kx.literal("[]")));
   const out = new Map<string, number[]>();
   for (const r of rows) {
     try {
@@ -302,8 +302,8 @@ async function markFast(db: Db, by: string, repo: string, number: number, w: num
 
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror). */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
-  const rows = await db.all(db.k.selectFrom("main.items").select(["number", "closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
-    .where("repo", "=", repo).where("kind", "=", "pr").where("state", "=", "OPEN").where("closing_issues", "is not", null).where("closing_issues", "<>", "[]"));
+  const rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_closing", "i")).select(["i.number", "i.closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
+    .where("i.repo", "=", repo).where("i.kind", "=", kx.literal("pr")).where("i.state", "=", "OPEN").where("i.closing_issues", "is not", null).where("i.closing_issues", "<>", kx.literal("[]")));
   return rows
     .filter((p) => {
       try {
