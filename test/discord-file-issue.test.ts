@@ -45,7 +45,7 @@ describe("filing from Discord", () => {
     assert.equal(r.status, "sign-in");
     const state = new URL((r as { url: string }).url).searchParams.get("state")!;
     assert.match((r as { url: string }).url, /^https:\/\/craft\.example\/discord\/github\/start\?state=/);
-    const stored = await db.prepare("SELECT state_hash, reporter FROM reporter_states").get() as { state_hash: string; reporter: string };
+    const stored = (await db.get(db.k.selectFrom("reporter_states").select(["state_hash", "reporter"])))!;
     assert.equal(stored.state_hash, createHash("sha256").update(state).digest("hex"));
     assert.equal(stored.reporter, "rep1");
 
@@ -96,7 +96,7 @@ describe("filing from Discord", () => {
     assert.equal(await forgetReporter(db, "rep1"), true);
     assert.equal((await db.get(db.k.selectFrom("discord_filed").select((eb) => eb.fn.countAll<number>().as("c")).where("reporter", "=", "rep1")))!.c, 0);
     assert.equal(await readReporter(db, box, "rep1"), null);
-    const q = await db.prepare("SELECT login, kind, aad FROM user_token_revocations").get() as { login: string; kind: string; aad: string };
+    const q = (await db.get(db.k.selectFrom("user_token_revocations").select(["login", "kind", "aad"])))!;
     assert.deepEqual({ ...q }, { login: "octo", kind: "token", aad: "reporter_tokens:rep1" });
     assert.equal(await forgetReporter(db, "rep1"), false);
   });
