@@ -58,13 +58,14 @@ export function OpenQuestions({ ds, choices, updating, evidence }: { ds: Decisio
   // mount: a card claims the decision it shows, so mounting the default card first and switching later would claim both. The
   // token is the navigation the link belongs to, so a later link is honored, a removal of the fragment clears the request,
   // and a question the reader picked by hand stays picked (the token no longer changes).
+  const open = ds.filter((d) => !d.answer);
+  const firstId = open[0]?.id ?? null;
   const link = hashDecision(hash);
   const token = `${navKey}:${hash}`;
-  const [sel, setSel] = useState<{ token: string; id: string | null }>(() => ({ token, id: link }));
+  const [sel, setSel] = useState<{ token: string; id: string | null }>(() => ({ token, id: link ?? firstId }));
   useEffect(() => {
-    if (sel.token !== token) setSel({ token, id: link });
-  }, [sel.token, token, link]);
-  const open = ds.filter((d) => !d.answer);
+    if (sel.token !== token || (sel.id === null && firstId !== null)) setSel({ token, id: link ?? firstId });
+  }, [sel.token, sel.id, token, link, firstId]);
   const notices = loc.justAnswered.filter((a) => ds.some((d) => d.id === a.id));
   if (!open.length && !notices.length) return null;
   const requested = sel.token === token ? sel.id : link;

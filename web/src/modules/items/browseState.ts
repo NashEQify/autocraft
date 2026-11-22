@@ -374,7 +374,7 @@ export function aliasHref(search: string): string {
 /** Removing one chip: a comma list loses only that value; a scalar key is deleted. */
 export function removeValuePatch(browse: BrowseState, key: string, value: string): Record<string, string | null> {
   const listKeys: Record<string, string[]> = { repo: browse.repos, label: browse.labelsRaw, status: browse.statusRaw, flag: browse.flagsRaw };
-  const list = listKeys[key];
+  const list = Object.hasOwn(listKeys, key) ? listKeys[key] : undefined;
   if (!list) return { [key]: null };
   const next = list.filter((entry) => entry !== value);
   return { [key]: next.length ? next.join(",") : null };

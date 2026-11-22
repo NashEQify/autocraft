@@ -61,7 +61,7 @@ const fullHref = (facts: RowFacts) => itemPath(facts.repo, facts.number);
  * arrives, guarded by useItemPreview); the classification and the retained metadata come from the
  * row's own endpoint, so this never invents a fact the payload does not carry.
  */
-export function ItemExpansion({ facts, detail, loading, error, item, itemLoading, itemError, decision }: {
+export function ItemExpansion({ facts, detail, loading, error, item, itemLoading, itemError, decision, decisionError, onRetryDecision }: {
   facts: RowFacts;
   detail: ItemPageData | null;
   loading: boolean;
@@ -71,6 +71,8 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
   itemLoading: boolean;
   itemError?: string;
   decision: Decision | null | undefined;
+  decisionError?: string;
+  onRetryDecision?: () => void;
 }) {
   const viewer = useUser().role === "viewer";
   const events = lastEvents(detail?.timeline);
@@ -142,6 +144,10 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
         </ul>}
       </Section>
       <Section title="Links">
+        {decisionError && <div className="mb-2">
+          <ErrorLine error={`The decision could not be read: ${decisionError}`} />
+          {onRetryDecision && <Button type="button" variant="ghost" size="sm" onClick={onRetryDecision}>Retry decision</Button>}
+        </div>}
         <p className="m-0 flex flex-wrap items-center gap-x-3 gap-y-1">
           <Link className="text-accent-ink hover:underline" to={fullHref(facts)}>Full item</Link>
           {decision ? <Link className="text-accent-ink hover:underline" to={decisionPath(decision)}>Open decision</Link> : null}
@@ -207,6 +213,8 @@ export function OpenRowDetail({ facts, note }: { facts: RowFacts; note?: string 
       itemLoading={itemQuery.loading}
       itemError={itemQuery.error?.message}
       decision={decision as Decision | null}
+      decisionError={decisionQuery.error?.message}
+      onRetryDecision={decisionQuery.refetch}
     />
     {note && <p className="mb-0 mt-3 text-2xs text-ink/60">{note}</p>}
   </>;
