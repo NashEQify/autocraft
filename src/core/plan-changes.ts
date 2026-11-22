@@ -40,7 +40,7 @@ type Op = (typeof OPS)[number];
  * recreates a missing marker row, so a write to a global input never fails on it. No OR IGNORE: in a trigger the outer
  * statement's conflict policy replaces it.
  */
-const markFull = (source: string): string => `INSERT INTO plan_full (id, seq) SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM plan_full WHERE id = 1);
+export const markFull = (source: string): string => `INSERT INTO plan_full (id, seq) SELECT 1, 0 WHERE NOT EXISTS (SELECT 1 FROM plan_full WHERE id = 1);
           UPDATE plan_full SET seq = seq + 1 WHERE id = 1;
           INSERT INTO plan_full_causes (source, n, last_seq) VALUES ('${source.replace(/'/g, "''")}', 1, COALESCE((SELECT seq FROM plan_full WHERE id = 1), 0))
             ON CONFLICT (source) DO UPDATE SET n = n + 1, last_seq = excluded.last_seq;`;
@@ -311,33 +311,4 @@ export async function bulkWrites<T>(db: Db, source: string, fn: () => Promise<T>
       throw e;
     }
   });
-}
-
-/** bulkWrites() inside the caller's transaction, for connect()'s migrations, which stay synchronous. */
-export function bulkWritesSync(db: DatabaseSync, source: string, fn: () => void): void {
-  if (db.prepare("SELECT 1 FROM main.plan_bulk").get()) return fn();
-  db.exec("INSERT INTO main.plan_bulk (id) VALUES (1)");
-  try {
-    fn();
-  } finally {
-    db.exec("DELETE FROM main.plan_bulk");
-    db.exec(markFull(`bulk:${source}`));
-  }
-}
-
-/**
- * Removes the change log, its triggers and the incremental planner's tables, and clears the schema stamp so the next connect
- * migrates. For a rollback to a release without the incremental planner, whose migration would leave the triggers logging.
- */
-export async function dropPlanChanges(db: Db): Promise<number> {
-  // Postgres has no release before the change log; its triggers serve the live topics too (src/db/pg-triggers.ts).
-  if (db.dialect === "postgres") throw new Error("dropping the change log is for SQLite databases only");
-  const triggers = await db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'trigger' AND name LIKE 'plan\\_%' ESCAPE '\\'").all() as { name: string }[];
-  await db.write(async () => {
-    for (const { name } of triggers) await db.script(`DROP TRIGGER IF EXISTS main.${name}`);
-    for (const t of ["item_changes", "plan_full", "plan_full_causes", "plan_bulk", "plan_shadow_diffs", "plan_pass_stats", "review_blockers"] as const) await db.run(db.k.schema.dropTable(`main.${t}`).ifExists());
-    await db.script("DELETE FROM main.sqlite_sequence WHERE name = 'item_changes'");
-    await db.run(db.k.deleteFrom("main.settings").where("key", "=", "schema_stamp"));
-  });
-  return triggers.length;
 }

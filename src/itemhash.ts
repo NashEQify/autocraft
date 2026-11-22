@@ -4,8 +4,7 @@
 //   class_hash: the classifier's input hash (scheme, title, body, size); decides re-classifying.
 //     class_scheme names the scheme it was computed under, so a changed scheme rehashes lazily.
 import { createHash } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
-import { BULK_ROWS, bulkWrites, bulkWritesSync } from "./core/plan-changes.ts";
+import { BULK_ROWS, bulkWrites } from "./core/plan-changes.ts";
 import { itemInput, type Item } from "./classify/parse.ts";
 import { LABELS, RULES } from "./classify/rules.ts";
 import { itemText, textHash } from "./embed/text.ts";
@@ -19,7 +18,7 @@ export const inputHash = (i: Item): string =>
 
 export const embedHash = (title: string | null, body: string | null): string => textHash(itemText(title, body));
 
-type Fields = {
+export type Fields = {
   repo: string; number: number; kind: string; title: string | null; body: string | null;
   additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null;
 };
@@ -38,9 +37,8 @@ export function hashColumns(r: Fields): { embed_hash: string; class_hash: string
   return { embed_hash: embedHash(r.title, r.body), class_hash: classifyHash(r), class_scheme: SCHEME_ID };
 }
 
-const FIELD_COLUMNS = ["repo", "number", "kind", "title", "body", "additions", "deletions", "changed_files", "author_association"] as const;
-const FIELDS = FIELD_COLUMNS.join(", ");
-const BATCH = 2000;
+export const FIELD_COLUMNS = ["repo", "number", "kind", "title", "body", "additions", "deletions", "changed_files", "author_association"] as const;
+export const BATCH = 2000;
 
 /** Fills embed_hash where it is missing. Returns the number of rows written. */
 export async function fillEmbedHashes(db: Db): Promise<number> {
@@ -52,45 +50,22 @@ export async function fillClassHashes(db: Db): Promise<number> {
   return await fill(db, CLASS);
 }
 
-/** `select`, `update` and `values` are the SQL text of the synchronous fill; `read` and `write` are the same statements as builders. */
 type Fill = {
-  source: string; select: string; update: string; values: (r: Fields) => string[];
+  source: string;
   read: (db: Db) => Promise<Fields[]>; write: (db: Db, r: Fields) => Promise<unknown>;
 };
 
 const EMBED: Fill = {
-  source: "embed-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
-  update: "UPDATE main.items SET embed_hash = ? WHERE repo = ? AND number = ?", values: (r) => [embedHash(r.title, r.body)],
+  source: "embed-hashes",
   read: (db) => db.all(db.k.selectFrom("main.items").select(FIELD_COLUMNS).where("embed_hash", "is", null).limit(BATCH)),
   write: (db, r) => db.run(db.k.updateTable("main.items").set({ embed_hash: embedHash(r.title, r.body) }).where("repo", "=", r.repo).where("number", "=", r.number)),
 };
 
 const CLASS: Fill = {
-  source: "class-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE state = 'OPEN' AND class_scheme IS NOT '${SCHEME_ID}' LIMIT ${BATCH}`,
-  update: `UPDATE main.items SET class_hash = ?, class_scheme = '${SCHEME_ID}' WHERE repo = ? AND number = ?`, values: (r) => [classifyHash(r)],
+  source: "class-hashes",
   read: (db) => db.all(db.k.selectFrom("main.items").select(FIELD_COLUMNS).where("state", "=", "OPEN").where("class_scheme", "is distinct from", SCHEME_ID).limit(BATCH)),
   write: (db, r) => db.run(db.k.updateTable("main.items").set({ class_hash: classifyHash(r), class_scheme: SCHEME_ID }).where("repo", "=", r.repo).where("number", "=", r.number)),
 };
-
-/** fillEmbedHashes() then fillClassHashes(), for connect()'s migrations, which stay synchronous. */
-export function fillHashesSync(db: DatabaseSync): void {
-  for (const { source, select, update, values } of [EMBED, CLASS]) {
-    const sel = db.prepare(select), upd = db.prepare(update);
-    for (;;) {
-      const rows = sel.all() as unknown as Fields[];
-      if (!rows.length) break;
-      db.exec("BEGIN IMMEDIATE");
-      try {
-        const write = (): void => { for (const r of rows) upd.run(...values(r), r.repo, r.number); };
-        if (rows.length >= BULK_ROWS) bulkWritesSync(db, source, write); else write();
-        db.exec("COMMIT");
-      } catch (e) {
-        db.exec("ROLLBACK");
-        throw e;
-      }
-    }
-  }
-}
 
 async function fill(db: Db, { source, read, write: put }: Fill): Promise<number> {
   let total = 0;
