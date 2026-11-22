@@ -148,7 +148,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     .map((s) => [`${s.repo}#${s.number}`, s.note]));
   const own = await ownFixPrs(db, opts.repo);
   const assigned = await assignmentsOf(db, opts.repo);
-  const pairs = await uncheckedPairCounts(db);
+  const pairs = await uncheckedPairCounts(db, { repo: opts.repo, refs: opts.refs });
   const dupeAnswers = new Map<string, string[]>();
   for (const a of await answersToApply(db)) for (const r of a.refs) (dupeAnswers.get(r) ?? dupeAnswers.set(r, []).get(r)!).push(a.id);
   // Group-level work (which groups to ask about, which sets to compare) is planned per group by dupes/decide.ts and dupes/plan.ts; the items carry its result.
