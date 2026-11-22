@@ -20,7 +20,7 @@ import { readFailure } from "../cifix/logs.ts";
 import type { CiFailure } from "../cifix/types.ts";
 import { reviseOf } from "../core/decide.ts";
 import { loadPrFact } from "../core/facts.ts";
-import { guardItem, guardRepo } from "../core/guard.ts";
+import { guard, guardRepo } from "../core/guard.ts";
 import { branchOf, forkOf } from "../github/fork.ts";
 import { parseFixes, type Fix } from "../fixup/candidates.ts";
 import { exec as realExec, fixupDir, Git, type Exec } from "../fixup/git.ts";
@@ -55,6 +55,10 @@ const FRESH_PER_CHECKS = 2;
 const CHECKS_IN_SAME_JOB_MS = 60 * 60_000;
 /** Pushes of one revision that failed in a way a later run may fix, in a row, before it is stuck. */
 const PUSH_FAILURES_MAX = 3;
+/** Revisions of one PR (heads sent back to the session) before the attempt is stuck: a person decides whether it goes on. */
+export const REVISIONS_MAX = 5;
+/** Where the cache repository keeps each implementation's latest base-plus-change commit, so it is not pruned. */
+const BUILT_REF = "refs/implement";
 const READY_POLL_MS = 3000;
 /** Where a restored workspace gets the stored checkpoint before it is applied. */
 const RESTORE_FILE = "/work/.ws/revise-restore.diff";
@@ -213,6 +217,9 @@ async function start(run: BuildRun, deps: ReviseDeps, impl: Implementation): Pro
   if (!started) return "the attempt left pr-opened meanwhile";
   // Red CI with no failed check to read (a commit status, an optional check): nothing goes to the session; the PR waits for a person or a new run.
   if (!review && !ci) return `#${pr} has red CI at ${short(head)}, but ${ciSkip ?? "nothing to fix"}; nothing goes to the session`;
+  // Counted by head: Try again on a stuck revision repeats its head, so each Try again allows one more revision.
+  const heads = new Set((await roundsOf(db, impl.id)).filter((r) => r.kind === "revise").map((r) => r.result as ReviseRound).filter((r) => r.review || r.ci).map((r) => r.head));
+  if (heads.size > REVISIONS_MAX) throw new Stuck("revision-limit", `#${pr} went back to the session ${heads.size} times`);
   run.log(`${ref(impl)}: revision of #${pr} at ${short(head)} started (${[review && `${review.fixes.length} review fixes`, ci && `${ci.checks.length} failed checks`].filter(Boolean).join(", ")})`);
   return (await implementationById(db, impl.id))!;
 }
@@ -439,6 +446,8 @@ async function pushStep(run: BuildRun, deps: ReviseDeps, impl: Implementation, w
   }
   const r = await pushRevision(db, deps, impl, req, d.diff, run.by ?? "pipeline", run.log);
   if (!r.ok) {
+    // Not a failure of the push: the next job applies the revision onto the new head.
+    if (r.moved) return `not pushed: ${r.reason}; the next job pushes onto the new head`;
     if (r.problems?.length) {
       if (epochOf(all).some((x) => refusalKind(x) === "diff")) throw new Stuck("diff-refused", r.problems.slice(0, 3).join("; "));
       await addRound(db, impl.id, "refusal", { result: { kind: "diff", reason: r.reason, problems: r.problems } });
@@ -463,17 +472,66 @@ async function pushFailed(db: Db, impl: Implementation, reason: string): Promise
   return `not pushed (${reason}); the next run tries again`;
 }
 
-type PushResult = { ok: true; commit: string } | { ok: false; reason: string; retry: boolean; problems?: string[] };
+type PushResult = { ok: true; commit: string } | { ok: false; reason: string; retry: boolean; problems?: string[]; moved?: true };
+
+/** A push of the implementation to its branch, as its audit row records it. */
+type Push = { commit: string; from: string | null; built: string | null; revision: boolean };
+
+/** The implementation's pushes to `branch`, oldest first. */
+async function pushesOf(db: Db, impl: Implementation, branch: string): Promise<Push[]> {
+  const rows = await db.all(db.k.selectFrom("audit").select("details").where("action", "=", "implement-push").where("target", "=", ref(impl)).orderBy("at", "asc"));
+  const sha = (v: unknown): string | null => (typeof v === "string" && SHA.test(v) ? v : null);
+  return rows.flatMap((r) => {
+    let x: Record<string, unknown>;
+    try { x = JSON.parse(r.details ?? "{}"); } catch { return []; }
+    const commit = sha(x.commit);
+    if (x.impl !== impl.id || x.branch !== branch || x.state !== "done" || !commit) return [];
+    return [{ commit, from: sha(x.from), built: sha(x.built), revision: x.revise !== undefined }];
+  });
+}
+
+/**
+ * The tree of the base plus the whole change as of our push of `commit`: what the next revision's change is measured against.
+ * A first push is that commit itself. A revision's push sits on the PR's head, which may hold a base merge of the conflict step,
+ * so it records its own base-plus-change commit (`built`, kept under BUILT_REF); when that is gone (the cache made again), the
+ * tree is rebuilt from the push before it plus what the revision's push changed on the head.
+ */
+async function builtTree(git: Git, root: string, pushes: Push[], commit: string): Promise<string | null> {
+  const have = async (sha: string) => (await git.git(["cat-file", "-e", `${sha}^{commit}`])).code === 0;
+  const treeOf = async (sha: string) => (await git.must(["rev-parse", `${sha}^{tree}`])).trim();
+  const at = async (i: number): Promise<string | null> => {
+    const p = pushes[i]!;
+    if (p.built && await have(p.built)) return await treeOf(p.built);
+    if (!p.revision) return await have(p.commit) ? await treeOf(p.commit) : null;
+    if (i === 0 || !p.from || !await have(p.from) || !await have(p.commit)) return null;
+    const before = await at(i - 1);
+    if (!before) return null;
+    const delta = await git.must(["diff-tree", "-p", "--binary", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", p.from, p.commit]);
+    if (!delta.trim()) return before;
+    mkdirSync(root, { recursive: true });
+    const scratch = mkdtempSync(join(root, ".index-"));
+    try {
+      const applied = await git.applyToTree(before, delta, join(scratch, "index"));
+      return applied.ok ? applied.tree : null;
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+  const i = pushes.map((p) => p.commit).lastIndexOf(commit);
+  return i < 0 ? null : await at(i);
+}
 
 /**
  * Pushes the revision. The whole change is checked against the base as the PR step checks it (commitDiff); what changed since
- * our last push is then applied onto the PR's head as it is now (a base merge of the conflict step may sit on top of our push)
- * and committed on it, so the branch only moves forward. A compile-time manifest change our last push did not have goes back to
- * the session: such a change needs a maintainer's decision before it is pushed.
+ * our last push (base plus change then, builtTree) is then applied onto the PR's head as it is now (a base merge of the conflict
+ * step may sit on top of our push) and committed on it, so the branch only moves forward. The push is refused when the head
+ * moved meanwhile. A compile-time manifest change our last push did not have goes back to the session: such a change needs a
+ * maintainer's decision before it is pushed.
  */
-async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, req: ReviseRound, diff: string, by: NonNullable<BuildRun["by"]>, log: (line: string) => void): Promise<PushResult> {
+export async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, req: ReviseRound, diff: string, by: NonNullable<BuildRun["by"]>, log: (line: string) => void): Promise<PushResult> {
   const { repo, number } = impl;
   const fail = (reason: string, retry: boolean, problems?: string[]): PushResult => { log(`  ${ref(impl)}: revision not pushed: ${reason}`); return { ok: false, reason, retry, ...(problems && { problems }) }; };
+  const moved = (reason: string): PushResult => { log(`  ${ref(impl)}: revision not pushed: ${reason}`); return { ok: false, reason, retry: true, moved: true }; };
   try {
     if (!impl.baseSha || !impl.branch) return fail("the attempt has no base commit or branch", false);
     const w: Writer = { db, login: ACTOR };
@@ -488,16 +546,17 @@ async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, req: Re
     const head = oneLine(await d.gh(["api", `repos/${slugOf(repo)}/pulls/${req.prNumber}`, "--jq", ".head.sha"]), 64);
     if (!SHA.test(head)) return fail(`the head of #${req.prNumber} could not be read`, true);
     if (!await git.fetchBranch(forkOwner, forkName, impl.branch, head)) return fail(`the head ${short(head)} of #${req.prNumber} is not on ${impl.branch}`, true);
-    if ((await git.git(["cat-file", "-e", `${req.from}^{commit}`])).code !== 0) return fail(`our last push ${short(req.from)} is no longer on ${impl.branch}`, false);
+    const before = await builtTree(git, d.root, await pushesOf(db, impl, impl.branch), req.from);
+    if (!before) return fail(`the change as of our last push ${short(req.from)} cannot be rebuilt from ${impl.branch}`, false);
     const author = await commitIdentity(db, repo, async () => who);
     const it = await db.get(db.k.selectFrom("main.items").select("title").where("repo", "=", repo).where("number", "=", number));
     const message = `${implTitle(impl.plan?.kind ?? "change", it?.title ?? "")}: ${[req.review && "the review's fixes", req.ci && "the failing CI checks"].filter(Boolean).join(" and ")}\n\nRevision for #${req.prNumber}.\n`;
     const made = await commitDiff(git, d.root, impl.baseSha, diff, () => message, { name: author.name, email: author.email });
     if (!made.ok) return fail(made.reason, false, made.problems);
-    const before = (await lastPush(db, impl, impl.branch))?.compileTime ?? [];
-    const added = made.check.compileTime.filter((c) => !before.some((b) => b.path === c.path && b.what === c.what));
+    const had = (await lastPush(db, impl, impl.branch))?.compileTime ?? [];
+    const added = made.check.compileTime.filter((c) => !had.some((b) => b.path === c.path && b.what === c.what));
     if (added.length) return fail("new compile-time changes", false, added.map((c) => `${c.path}: ${c.what} (code that runs at build time; a maintainer decides on it before it is pushed)`));
-    const delta = await git.must(["diff-tree", "-p", "--binary", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", req.from, made.commit]);
+    const delta = await git.must(["diff-tree", "-p", "--binary", "-r", "--no-renames", "--no-ext-diff", "--no-textconv", before, made.commit]);
     if (!delta.trim()) return fail("the change is the same as the last push", false);
     mkdirSync(d.root, { recursive: true });
     const scratch = mkdtempSync(join(d.root, ".index-"));
@@ -510,10 +569,16 @@ async function pushRevision(db: Db, d: ReviseDeps, impl: Implementation, req: Re
       rmSync(scratch, { recursive: true, force: true });
     }
     const commit = await git.commit(tree, head, message, { name: author.name, email: author.email });
-    const g = await guardItem(db, { repo, number }, { kind: "implement", bucket: "revise" }, by);
+    const seen = await db.get(db.k.selectFrom("main.items").select("head_oid").where("repo", "=", repo).where("number", "=", req.prNumber));
+    if (seen?.head_oid !== head) return moved(`the mirror has #${req.prNumber} at ${short(seen?.head_oid ?? "")}, not at its head ${short(head)} yet`);
+    // The guard is the PR's: the push changes the PR, and its issue may be closed or held while the PR is revised.
+    const g = await guard(db, { repo, number: req.prNumber }, { kind: "implement", bucket: "revise", head }, by);
     if ("refused" in g) return fail(g.refused, true);
-    const push = await pushOwnBranch(w, g, git, "implement-push", { repo, number, remote: fork, branch: impl.branch, sha: commit, pr: req.prNumber },
-      { fork, base: impl.baseSha, impl: impl.id, from: head, revise: req.prNumber, ...(made.check.compileTime.length && { compileTime: made.check.compileTime }) });
+    // Without the ref a later gc may prune `made`; builtTree then rebuilds it.
+    await git.git(["update-ref", `${BUILT_REF}/${impl.id}`, made.commit]);
+    const push = await pushOwnBranch(w, g, git, "implement-push", { repo, number, remote: fork, branch: impl.branch, sha: commit },
+      { fork, base: impl.baseSha, impl: impl.id, from: head, built: made.commit, revise: req.prNumber, ...(made.check.compileTime.length && { compileTime: made.check.compileTime }) });
+    if (push.code !== 0 && /stale info/i.test(push.stderr)) return moved(`the head of #${req.prNumber} moved from ${short(head)} during the push`);
     if (push.code !== 0) return fail(`the push failed: ${oneLine(push.stderr)}`, true);
     log(`  ${ref(impl)}: pushed ${short(commit)} onto ${short(head)} of #${req.prNumber}`);
     return { ok: true, commit };

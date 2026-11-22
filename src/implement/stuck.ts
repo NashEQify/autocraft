@@ -35,6 +35,7 @@ export const STUCK_CAUSES = {
   "diff-refused": "The change touches what an implementation may not change",
   "push-failed": "Pushing the branch failed repeatedly",
   "workspace-lost": "The workspace could not be started again",
+  "revision-limit": "The pull request went back to the session too many times",
 } as const;
 export type StuckCause = keyof typeof STUCK_CAUSES;
 
