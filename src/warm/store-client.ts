@@ -16,7 +16,14 @@ import {
 
 export const WARM_ROOT = "warm/v1";
 
-export class StoreError extends Error {}
+export class StoreError extends Error {
+  /** "missing": the path does not exist; "oversize": the body is larger than allowed. Both mean the stored copy is bad. */
+  readonly kind: "missing" | "oversize" | undefined;
+  constructor(msg: string, kind?: "missing" | "oversize") {
+    super(msg);
+    this.kind = kind;
+  }
+}
 
 export type DavAuth = { user: string; password: string };
 export type DavItem = { name: string; collection: boolean; size: number | null; modified: number | null };
@@ -70,9 +77,9 @@ export class WebDav {
   /** The body as a stream that fails past `max` bytes; throws when the path does not exist. */
   async stream(path: string, max: number): Promise<AsyncIterable<Uint8Array>> {
     const r = await this.req("GET", path, { transfer: true });
-    if (!r.ok || !r.body) throw new StoreError(`GET ${path} answered ${r.status}`);
+    if (!r.ok || !r.body) throw new StoreError(`GET ${path} answered ${r.status}`, r.status === 404 ? "missing" : undefined);
     let n = 0;
-    const cap = new Transform({ transform(chunk: Buffer, _e, cb) { n += chunk.length; cb(n > max ? new StoreError(`GET ${path}: larger than ${max} bytes`) : null, chunk); } });
+    const cap = new Transform({ transform(chunk: Buffer, _e, cb) { n += chunk.length; cb(n > max ? new StoreError(`GET ${path}: larger than ${max} bytes`, "oversize") : null, chunk); } });
     // pipeline passes a failure of the body (a dropped connection, the timeout) on to the returned stream.
     return pipeline(Readable.fromWeb(r.body as never), cap, () => {});
   }

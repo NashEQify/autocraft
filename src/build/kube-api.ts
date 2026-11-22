@@ -28,6 +28,18 @@ export type KPod = {
 };
 export type KPvc = { metadata: { name: string; labels?: Record<string, string>; deletionTimestamp?: string } };
 export type KNode = { metadata: { name: string }; status?: { conditions?: { type: string; status: string; lastTransitionTime?: string }[] } };
+export type KConfigMap = { metadata: { name: string; labels?: Record<string, string>; resourceVersion?: string }; data?: Record<string, string> };
+
+/** ConfigMap calls, for the warm-sync agent (writes its node's status) and the runner (reads every node's). */
+export interface ConfigMapApi {
+  /** null when there is none of that name. */
+  getConfigMap(ns: string, name: string): Promise<KConfigMap | null>;
+  createConfigMap(ns: string, cm: object): Promise<void>;
+  /** A JSON merge patch (RFC 7386); throws a 404 KubeError when the ConfigMap does not exist. */
+  patchConfigMap(ns: string, name: string, patch: object): Promise<void>;
+  /** `selector` is a label selector, e.g. `key=value`. */
+  listConfigMaps(ns: string, selector?: string): Promise<KConfigMap[]>;
+}
 
 export interface KubeApi {
   listPods(ns: string, selector: string): Promise<KPod[]>;
@@ -89,7 +101,7 @@ export class KubeError extends Error {
 const enc = encodeURIComponent;
 
 /** The client for the cluster the runner runs in, or null outside a cluster (no KUBERNETES_SERVICE_HOST). */
-export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): KubeApi | null {
+export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): (KubeApi & ConfigMapApi) | null {
   const host = env.KUBERNETES_SERVICE_HOST;
   if (!host) return null;
   const port = Number(env.KUBERNETES_SERVICE_PORT || 443);
@@ -97,7 +109,7 @@ export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR)
     try {
       return { host, port, token: readFileSync(`${dir}/token`, "utf8").trim(), ca: readFileSync(`${dir}/ca.crt`) };
     } catch (e) {
-      throw new KubeError(0, `no service-account token in the runner container (${(e as NodeJS.ErrnoException).code ?? "error"})`);
+      throw new KubeError(0, `no service-account token in the container (${(e as NodeJS.ErrnoException).code ?? "error"})`);
     }
   });
 }
@@ -114,10 +126,10 @@ function statusMessage(text: string): string {
 }
 
 /** The client for an explicit API server; `conn` is called at each request, so credentials may rotate. */
-export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi {
+export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapApi {
   const get = typeof conn === "function" ? conn : () => conn;
 
-  function call(method: string, path: string, body?: object, accept = "application/json"): Promise<string> {
+  function call(method: string, path: string, body?: object, accept = "application/json", contentType = "application/json"): Promise<string> {
     let c: KubeConn;
     try {
       c = get();
@@ -132,7 +144,7 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi {
         headers: {
           ...(c.token ? { authorization: `Bearer ${c.token}` } : {}),
           accept,
-          ...(data !== undefined ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}),
+          ...(data !== undefined ? { "content-type": contentType, "content-length": Buffer.byteLength(data) } : {}),
         },
       }, (res) => {
         const chunks: Buffer[] = [];
@@ -155,6 +167,7 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi {
   };
   const pods = (ns: string) => `/api/v1/namespaces/${enc(ns)}/pods`;
   const pvcs = (ns: string) => `/api/v1/namespaces/${enc(ns)}/persistentvolumeclaims`;
+  const cms = (ns: string) => `/api/v1/namespaces/${enc(ns)}/configmaps`;
 
   return {
     listPods: async (ns, selector) => (JSON.parse(await call("GET", `${pods(ns)}?labelSelector=${enc(selector)}`)) as { items: KPod[] }).items,
@@ -168,6 +181,13 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi {
       if (e instanceof KubeError && e.status === 404) return null;
       throw e;
     }),
+    getConfigMap: (ns, name) => call("GET", `${cms(ns)}/${enc(name)}`).then((t) => JSON.parse(t) as KConfigMap, (e: unknown) => {
+      if (e instanceof KubeError && e.status === 404) return null;
+      throw e;
+    }),
+    createConfigMap: async (ns, cm) => void (await call("POST", cms(ns), cm)),
+    patchConfigMap: async (ns, name, patch) => void (await call("PATCH", `${cms(ns)}/${enc(name)}`, patch, "application/json", "application/merge-patch+json")),
+    listConfigMaps: async (ns, selector) => (JSON.parse(await call("GET", `${cms(ns)}${selector ? `?labelSelector=${enc(selector)}` : ""}`)) as { items: KConfigMap[] }).items,
     canI: async (ns, verb, resource) => {
       const r = JSON.parse(await call("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", {
         apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview", spec: { resourceAttributes: { namespace: ns, verb, resource } },

@@ -351,6 +351,12 @@ export type BlobSource = (sha256: string, size: number) => Promise<AsyncIterable
 export type Previous = { manifest: Manifest; roots: Partial<Roots> };
 export type ApplyStats = { files: number; dirs: number; symlinks: number; linked: number; copied: number; fetched: number; fetchedBytes: number; bytes: number };
 
+/**
+ * `pace` is awaited before each chunk of file content is written (fetched or copied, not hard-linked) with its size in
+ * bytes; a rate limiter there throttles the restore's disk writes.
+ */
+export type ApplyOptions = { previous?: Previous; concurrency?: number; pace?: (bytes: number) => Promise<void> };
+
 /** Fails once more than `max` bytes have passed. */
 function capped(max: number, what: string): Transform {
   let seen = 0;
@@ -387,7 +393,7 @@ export const MTIME_SLACK_NS = 1000n;
  * `previous` must be a tree only the sync agent writes and consumers mount read-only: a linked file shares its inode,
  * so anything that can write the previous tree can change the new one. Pass no `previous` otherwise.
  */
-export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch: BlobSource, opts: { previous?: Previous; concurrency?: number } = {}): Promise<ApplyStats> {
+export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch: BlobSource, opts: ApplyOptions = {}): Promise<ApplyStats> {
   validateEntries(full.entries);
   const given = ROOTS.filter((r) => roots[r] !== undefined);
   if (!given.length) throw new ManifestError("restore names no root");
@@ -449,10 +455,11 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
         continue;
       }
       if (local) {
+        await opts.pace?.(e.size);
         copyFileSync(abs(roots, local.path), dest);
         stats.copied++;
       } else {
-        await fetchOne(e, dest, fetch);
+        await fetchOne(e, dest, fetch, opts.pace);
         stats.fetched++;
         stats.fetchedBytes += e.size;
         local = e;
@@ -476,14 +483,25 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   return stats;
 }
 
-async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource): Promise<void> {
+async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (bytes: number) => Promise<void>): Promise<void> {
   const h = createHash("sha256");
   let n = 0;
-  const tap = new Transform({ transform(chunk: Buffer, _e, cb) { h.update(chunk); n += chunk.length; cb(null, chunk); } });
+  const tap = new Transform({
+    transform(chunk: Buffer, _e, cb) {
+      h.update(chunk);
+      n += chunk.length;
+      if (!pace) return cb(null, chunk);
+      pace(chunk.length).then(() => cb(null, chunk), cb);
+    },
+  });
   try {
     await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }));
   } catch (err) {
-    throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`);
+    const msg = `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`;
+    // Only a copy that is missing, too large or not valid zstd is bad; timeouts, 5xx, dropped connections and a full disk say nothing about the store.
+    const code = (err as { code?: unknown }).code;
+    const bad = err instanceof ManifestError || (err as { kind?: string }).kind !== undefined || (typeof code === "string" && code.startsWith("ZSTD_"));
+    throw bad ? new BadBlobError(e.sha256, msg) : new Error(msg, { cause: err });
   }
   if (n !== e.size || h.digest("hex") !== e.sha256) throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path} does not match its sha256`);
 }
