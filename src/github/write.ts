@@ -50,7 +50,7 @@ function covers(g: Guarded | Grant, repo: string, number?: number): void {
 /** A push to the pipeline's own branch and a new PR are made only under the grants of the steps that open the pipeline's own PRs. */
 function opensOwnPr(g: Grant, repo: string): void {
   covers(g, repo);
-  const ok = g.scope === "item" ? g.action.kind === "fixissue-collect" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
+  const ok = g.scope === "item" ? g.action.kind === "fixissue-collect" || g.action.kind === "implement" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
   if (!ok) throw new Error(`a ${g.scope === "item" ? `${g.action.kind} grant` : `grant for ${g.need ?? "no approval"}`} does not allow a push to a new branch or a new pull request`);
 }
 
@@ -647,13 +647,14 @@ export async function ghDeleteComment(w: Writer, g: CommentGrant, exec: Exec, ac
     (r) => (r.code === 0 ? null : oneLine(r.stderr || r.stdout) || `exit code ${r.code}`));
 }
 
-export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string }, note: Note, details: Details = {}): Promise<ExecResult> {
+/** Opens a PR from the pipeline's own branch; `draft` opens it as a draft. */
+export async function ghOpenPr(w: Writer, g: Grant, exec: Exec, action: string, o: { repo: string; target: string; base: string; head: string; title: string; body: string; draft?: boolean }, note: Note, details: Details = {}): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
   exec = await laneExec(w, g, exec);
   const body = posted(note, o.body);
   // GitHub keeps one open PR per head and base: a resumed job's PR is the one its earlier run opened, whatever the text.
-  return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body },
-    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-"], body, onceKey(o.repo, o.base, o.head));
+  return viaGh(w, await idOf(w, g), exec, action, o.target, { ...details, text: body, ...(o.draft && { draft: true }) },
+    ["pr", "create", "--repo", `${slugOf(o.repo)}`, "--base", o.base, "--head", o.head, "--title", scrub(o.title), "--body-file", "-", ...(o.draft ? ["--draft"] : [])], body, onceKey(o.repo, o.base, o.head));
 }
 
 export async function ghClosePr(w: Writer, g: Grant, exec: Exec, o: { repo: string; number: number }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
