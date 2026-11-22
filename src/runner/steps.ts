@@ -132,7 +132,7 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
 }
 
 /** The `implement` buckets this build carries out. */
-const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build"]);
+const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build", "revise"]);
 
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
@@ -522,9 +522,16 @@ export const STEPS: StepDef[] = [
           await jobItem(ctx.db, repo, number, summary, ctx.log);
           return summary;
         }
-        const { runBuild } = await import("../implement/build.ts");
+        const run = { ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) };
         ctx.handled(1);
-        const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
+        let r: { summary: string; moved: boolean };
+        if (String(ctx.params.bucket) === "revise") {
+          const { runRevise } = await import("../implement/revise.ts");
+          r = await runRevise(run, repo, number);
+        } else {
+          const { runBuild } = await import("../implement/build.ts");
+          r = await runBuild(run, repo, number);
+        }
         if (r.moved) ctx.acted(1);
         await jobItem(ctx.db, repo, number, r.summary, ctx.log);
         return r.summary;

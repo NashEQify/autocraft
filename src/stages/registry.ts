@@ -254,19 +254,19 @@ export const STAGES: StageDef[] = [
   },
   {
     id: "fix", title: "Implement", order: 8, runStage: 7, docSection: "Implement", mode: "steps",
-    description: "Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request.",
+    description: "Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. A review that asks for fixes or red CI on that pull request goes back to the same session, and AutoCraft pushes the checked revision for a new review.",
     steps: [
       { name: "implement", maxMin: 300, label: "Implement", limit: null },
       { name: "workspace-try", maxMin: 160 },
     ],
     lanes: [{ name: "implement", steps: ["implement"], order: 16 }],
-    reads: ["Queued issues and their comments", "Repo checkout in a workspace pod"],
+    reads: ["Queued issues and their comments", "Repo checkout in a workspace pod", "Review fix lists and failed CI check logs of our implementation PRs"],
     sets: ["Implementations", "Pull requests"],
     states: [
       { id: "queued", label: "Queued", waitsOn: "model", tone: "neutral", hint: "Queued by a maintainer; the plan call runs next" },
       { id: "asked", label: "Question asked", waitsOn: "person", tone: "warn", hint: "The plan found facts or choices the issue leaves open; waits for the author's or a maintainer's answer" },
       { id: "working", label: "In progress", waitsOn: "model", tone: "neutral", hint: "Planning, the session, AutoCraft's checks, or opening the PR" },
-      { id: "pr-opened", label: "PR opened", waitsOn: "nothing", tone: "ok", hint: "The PR goes through Review" },
+      { id: "pr-opened", label: "PR opened", waitsOn: "nothing", tone: "ok", hint: "The PR goes through Review; the review's fixes and red CI go back to the session" },
       { id: "stuck", label: "Stuck", waitsOn: "person", tone: "bad", hint: "A decision with options waits for a maintainer" },
       { id: "off", label: "Implement off", waitsOn: "person", tone: "warn", hint: "Queued issues in a repo whose Implement switch or issue implementation approval is off", gate: true },
     ],

@@ -16,7 +16,7 @@ import { settleMemo, settlesNow } from "../settlers.ts";
 import type { Preapproval } from "../../web/src/api/types.ts";
 import type { Step } from "../conversations/cards.ts";
 import { conversationOf, insertTurn, systemBlock } from "../conversations/store.ts";
-import { cifixBucket, decidePr, fixupOf } from "../core/decide.ts";
+import { cifixBucket, decidePr, fixupOf, ownImplementation, reviseOf } from "../core/decide.ts";
 import { loadPrFact, loadPrFacts } from "../core/facts.ts";
 import { withSettingsSnapshot } from "../settings-read.ts";
 import { HEAD_FACT, MERGE_OPTIONS, PREMERGE_MAX_TRIES, mergeDecisionId } from "../core/rules.ts";
@@ -364,7 +364,7 @@ async function noteOnce(db: Db, p: Row, head: string, note: string, line: string
 }
 
 /**
- * "base merge", "autorepin" or "fix-up for the review's fixes" when the pipeline itself pushed `cur` on top of the row's head, else null.
+ * "base merge", "autorepin", "fix-up for the review's fixes" or the implementation session's revision when the pipeline itself pushed `cur` on top of the row's head, else null.
  * The review's fix-up counts for every row: the merge approval says the change is wanted, and the fix-up's push gets a fresh review.
  */
 async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
@@ -372,10 +372,15 @@ async function ownPush(db: Db, p: Row, cur: string): Promise<string | null> {
     .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", "review")).where("state", "in", ["pushing", "pushed"]))) return "fix-up for the review's fixes";
   // Only a base merge that left the PR's own diff unchanged continues an answer; a CI fix or a resolved conflict is model-written code nobody saw.
   if (await db.get(db.k.selectFrom("conflict_merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("from_head", "=", p.head).where("to_head", "=", cur).where("state", "=", "merged").where("own_diff", "=", "same"))) return "base merge";
+  // A revision of our implementation PR by the session that wrote it: the PR is the queuer's implementation, and the push gets a fresh review.
+  if (await db.get(db.k.selectFrom("push_outcomes").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("action", "=", "implement-push").where("from_oid", "=", p.head).where("to_oid", "=", cur))) return "implementation session's revision";
   // An autorepin (src/repin) is no model's code either: the revs of a dependency moved to a merge commit on its default branch, as someone who may queue the PR asked.
   if (await db.get(db.k.selectFrom("main.autorepins").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("head", "=", p.head).where("to_head", "=", cur).where("state", "in", ["waiting", "locking", "pushed"]))) return "autorepin";
   return null;
 }
+
+/** Our implementation PR whose revision by its session is planned or running: the review's fixes and red CI are its to repair. */
+const revisesNow = (f: PrFacts): boolean => !!reviseOf(f) || ownImplementation(f)?.state === "revising";
 
 /** Why the planner does not list the operator's fix-up for the PR now; null when it does. */
 async function whyNotPlanned(db: Db, f: PrFacts): Promise<string | null> {
@@ -472,6 +477,8 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
       // The planner's fix-up of the review's fixes runs next, sure or unsure (fixupOf). Its push is our own (ownPush), so the row stays and the new head is reviewed; when no fix-up can run, a person decides.
       const f = cur === head ? await factOf() : null;
       const fx = f ? fixupOf(f) : null;
+      // Our implementation PR goes back to the session that wrote it instead; its push is our own as well.
+      if (f && revisesNow(f)) return await noteOnce(db, p, head, "review-revise", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the implementation session makes them.`);
       if (fx && ((fx.bucket === "fix" && !fx.done) || fx.bucket === "hold")) {
         return await noteOnce(db, p, head, "review-fixup", `The review of ${name} ${r.unsure ? "is unsure and asks" : "asks"} for fixes; ${approvedAhead(p)}, so the fix-up runs.`);
       }
@@ -494,6 +501,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
     if (c.overall === "failure") {
       // The CI fix step works the red head as it would for any PR; its push is a head the operator did not see, so the row ends and the Merge? question is asked there. The operator decides when the step has given up.
       const f = await factOf();
+      if (f && revisesNow(f)) return;
       const bucket = f ? cifixBucket(f) : null;
       if (bucket !== null && ["work", "formatting", "linting", "collect", "rerun", "rerun-wait"].includes(bucket) && stepRuns(f!, "cifix")) return;
       return await stop("asked", `CI failed at ${headName(p)} and the CI fix did not repair it`, head, [reviewFact(p, "take"), `CI failed at ${headName(p)}`]);

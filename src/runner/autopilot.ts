@@ -345,10 +345,18 @@ export function roundRobin(repos: string[], cursor: string | null): string[] {
   return [...after, ...sorted.filter((r) => !after.includes(r))];
 }
 
-/** Per repo, the queued issue its next implement job works on: the first in the planned order (work of ours in flight, then the work score). */
-async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, PlannedItem>> {
-  const repos = new Set(tracked), out = new Map<string, PlannedItem>();
-  for (const p of allowed(await plannedItems(db, "implement", { plans }))) if (repos.has(p.facts.repo) && !out.has(p.facts.repo)) out.set(p.facts.repo, p);
+/** The issue an implement job works on, its bucket and the planned item's work score. */
+type ImplementJob = { number: number; bucket: string; score: number | null };
+
+/**
+ * Per repo, the queued issue its next implement job works on. The revisions of our implementation PRs (planned on the PR,
+ * for the PR's issue) come first, then the issues in the planned order (work of ours in flight, then the work score).
+ */
+async function implementWork(db: Db, tracked: string[], plans: PlanSet): Promise<Map<string, ImplementJob>> {
+  const repos = new Set(tracked), out = new Map<string, ImplementJob>();
+  const add = (repo: string, j: ImplementJob) => { if (repos.has(repo) && !out.has(repo)) out.set(repo, j); };
+  for (const p of allowed(await planned(db, "implement", { plans }))) add(p.facts.repo, { number: Number(p.action.params?.issue), bucket: "revise", score: p.facts.score });
+  for (const p of allowed(await plannedItems(db, "implement", { plans }))) add(p.facts.repo, { number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan"), score: p.facts.score });
   return out;
 }
 
@@ -642,10 +650,10 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     perRepo: true,
     detect: async (db, ctx) => {
       const plans = await plansOf(db, ctx), work = await implementWork(db, ctx.tracked, plans);
-      return flightFirst(plans, await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.facts.number, await fastOf(db, ctx)))
-        .map((repo) => { const p = work.get(repo)!; return { step: "implement", params: { repo, number: p.facts.number, bucket: String(p.action.params?.bucket ?? "plan") } }; });
+      return flightFirst(plans, await fastFirst(db, [...work.keys()].sort(), (r) => work.get(r)!.number, await fastOf(db, ctx)))
+        .map((repo) => { const j = work.get(repo)!; return { step: "implement", params: { repo, number: j.number, bucket: j.bucket } }; });
     },
-    topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((p) => p.facts.score)),
+    topScore: async (db, ctx) => bestScore([...(await implementWork(db, ctx.tracked, await plansOf(db, ctx))).values()].map((j) => j.score)),
   },
   {
     // Label disagreements outside the scope labels, after Jev and Haiku have both answered.

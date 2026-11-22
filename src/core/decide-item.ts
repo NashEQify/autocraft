@@ -50,8 +50,9 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
   if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a decision on the stuck implementation", waitKind: "person" };
-  // pr-opened: the open PR is the wait (fix.openPr); a PR that closed unmerged leaves it to a person.
-  return row!.prOpen ? null : { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
+  // pr-opened: the open PR is the wait (fix.openPr); a PR that merged or closed while the issue stayed open ends the attempt with
+  // it (the revise work records that and ends the workspace). Its revisions are planned on the PR (decidePr).
+  return row!.prOpen ? null : due("revise");
 }
 
 /** Jev and Haiku chose different labels and it is not a scope call: a referee (Sonnet, then Opus when Sonnet was unsure) still has to settle it. An unsure Opus settles the label too and flags a scope decision. */

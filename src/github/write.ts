@@ -806,12 +806,12 @@ export function pushRepin(w: Writer, g: GuardedRepo, git: Pick<Git, "git">, o: {
   return pushed(w, g, git, "autorepin-push", refOf(o.repo, o.number), o, `--force-with-lease=refs/heads/${o.branch}:${o.head}`, { ...details, from: o.head }, { repo: o.repo, number: o.number });
 }
 
-/** Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. */
-export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
+/** Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. `pr`: the open PR of ours the branch heads, whose push outcome this is. */
+export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string; pr?: number }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/.test(o.remote) || o.branch.startsWith("-") || !/^[0-9a-f]{40,64}$/.test(o.sha)) throw new Error("the push target is not a repository and branch");
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
-  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then(async (r) => {
+  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: o.pr ?? null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
     if (r.code === 0) try { await w.db.run(w.db.k.insertInto("main.own_commits").values({ repo: o.repo, sha: o.sha, action, at: new Date().toISOString() }).onConflict((oc) => oc.doNothing())); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;

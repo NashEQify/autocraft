@@ -10,6 +10,8 @@ import { ownLogins } from "../github/identity.ts";
 import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/held.ts";
 import { conflictAskRetryAtOf, conflictBucketOf } from "../fixup/conflict-state.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
+import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo, type LongLived } from "../fixup/pushable.ts";
 import { FAST_FLOOR, fastScoreExpr } from "../fasttrack.ts";
@@ -171,6 +173,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const mainRed = await redMainRepos(db);
   const tripped = await activeTrips(db);
   const brokeAt = await brokeHeads(db, opts.repo);
+  const implPrs = await implementationPrs(db, opts.repo);
   // The per-PR rows below are independent reads: they run together (on Postgres, over the pool).
   const { ourFixupHead, ourSameDiffMerge, pushedHere, pushedOffAt, carries, fixupsOf, fixupAt, lintFixup, lintOperator, lintCifix, carryRows, conflictRowsOf, lintConflict, cifixOf, merges, waiting, verifRows, otherOpen, openQuestion, unsureAt, reviewRows } = await allOf({
     // carriedReview only carries our own plain fix-up (no carry or pre-merge source) as the head: skip its compiles for other PRs.
@@ -259,7 +262,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       const t = await repoTables(), row = t.repos.get(repo);
       m = {
         f: { mergeApproved: !!await mergeApprovalOf(db, repo), pushApproved: await pushApprovalOf(db, repo) !== null, commentApproved: await commentApprovalOf(db, repo) !== null, ciApproved: await ciApprovalOf(db, repo) !== null,
-          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo) },
+          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo), fixIssueApproved: await fixIssueApprovalOf(db, repo) !== null },
         pub: row?.visibility === "public",
         longLived: t.longLived(repo),
         defaultBranch: row?.default_branch ?? null,
@@ -356,6 +359,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       premerge: null, premergeFixUsed: false, sensitive: null, statementConflicts: [], pushable: false, pushChain: [], conflict: null, inActiveBatch: activeBatched.has(ref), fixup: null, carry: [], lint: [], cifix: null, postmerge: null, batch: null, mainFix: false, baseOffDefault: false, stackedOn: null, changesRequested: null, gateFailureNote: null,
     };
     base.inFlight = r.state === "OPEN" && !integration && !!r.author && await own.isOwn(r.repo, r.author) && own.prs.has(ref);
+    base.implementation = implPrs.get(ref) ?? null;
     if (integration) {
       base.runs = runsOf(await batchTip(r.repo, r.number), rf.f.ciApproved);
       out.push(base);
@@ -603,6 +607,26 @@ function carriedSources(rows: CarrySource[]): { number: number; author: string |
 export { tierKey, tiersOf, type AuthorRef };
 
 /** PRs the pipeline opened itself from a Fix issues attempt or for a red default branch, as `repo#number`, when authored by its own account. */
+/** The PRs our implementations opened, by ref: the latest attempt that opened each (ended ones too), its issue, its state and the heads its revisions started from (its `revise` rounds). */
+async function implementationPrs(db: Db, repo?: string): Promise<Map<string, NonNullable<PrFacts["implementation"]>>> {
+  const rows = await db.all(db.k.selectFrom("main.implementations").select(["id", "repo", "number", "pr_number", "state"]).where("pr_number", "is not", null)
+    .$if(!!repo, (q) => q.where("repo", "=", repo!)).orderBy("id").$narrowType<{ pr_number: number }>());
+  const out = new Map<string, NonNullable<PrFacts["implementation"]>>();
+  const byId = new Map<number, NonNullable<PrFacts["implementation"]>>();
+  for (const r of rows) {
+    const v = { issue: r.number, state: r.state, revisedHeads: [] as string[] };
+    out.set(`${r.repo}#${r.pr_number}`, v);
+    if (!ENDED_STATES.has(r.state as ImplementationState)) byId.set(r.id, v);
+  }
+  if (byId.size) {
+    for (const g of await db.all(db.k.selectFrom("main.implementation_rounds").select(["implementation_id", "result"]).where("kind", "=", "revise").where(inList(db, "implementation_id", [...byId.keys()], "bigint")))) {
+      const head = (safeJson(g.result) as { head?: unknown } | null)?.head;
+      if (typeof head === "string") byId.get(g.implementation_id)?.revisedHeads.push(head);
+    }
+  }
+  return out;
+}
+
 export async function ownFixPrs(db: Db, repo?: string, slug?: string | null): Promise<{ login: string | null; prs: Set<string>; quiet: Set<string>; isOwn: (repo: string, author: string | null) => Promise<boolean> }> {
   const logins = new Map<string, Set<string>>();
   const isOwn = async (r: string, author: string | null): Promise<boolean> => {
