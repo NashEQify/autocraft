@@ -1797,9 +1797,19 @@ export type KubeSettings = {
   /** Toolchain name → image the steps run in. Empty until a toolchain image is published; the environment then takes no task that names a toolchain. */
   toolchainImages: Record<string, string>;
   workerUrl: string;
+  /** Each step container's CPU; the task, source and upload pods take a fixed small share. */
   cpuRequest: string; cpuLimit: string;
+  /** Each step container's memory for a repository without its own size (src/build/sizing.ts). */
   memoryRequest: string; memoryLimit: string;
   ephemeralRequest: string; ephemeralLimit: string;
+  /** No step pod's memory request or limit goes above this, also after OOM raises. */
+  maxPodMemory: string;
+  /** `cluster`: the runner takes as many tasks as the nodes have room for, up to the slots; `fixed`: exactly the slots. */
+  capacity: "cluster" | "fixed";
+  /** CPU and memory per node that capacity leaves free for others. */
+  nodeReserveCpu: string; nodeReserveMemory: string;
+  /** The priority class of every build pod; null: the cluster's default. */
+  priorityClassName: string | null;
   /** Size and storage class of the task's volume. */
   storage: string; storageClass: string;
   /** Longest a task may take from its first pod to its last. */

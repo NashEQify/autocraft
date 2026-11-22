@@ -17,7 +17,7 @@ export class BuildError extends Error {
 }
 
 export const ONLINE_MS = 60_000;
-export const MAX_SLOTS = 64;
+export const MAX_SLOTS = 200;
 export const LABEL_MAX = 40;
 export const ENV_ID_RE = /^[a-z][a-z0-9-]{1,30}[a-z0-9]$/;
 export const KINDS: EnvKind[] = ["local-sandbox", "remote", "kubernetes"];

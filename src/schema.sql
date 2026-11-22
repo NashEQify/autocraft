@@ -1080,7 +1080,20 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   create_tries INTEGER NOT NULL DEFAULT 0, -- failed creates of the stage's pod in a row
   failing_since TEXT,                 -- the first of them
   retry_at TEXT,                      -- when the next create is tried
-  started_at TEXT NOT NULL
+  started_at TEXT NOT NULL,
+  node TEXT,                          -- the node the run was placed on; its volume binds there
+  reserved_cpu_m INTEGER,             -- the run's largest stage request, held on that node for the run's life
+  reserved_mem_bytes INTEGER,
+  disruptions INTEGER NOT NULL DEFAULT 0 -- stage pods the cluster took away (preemption, eviction) and that were recreated
+);
+
+-- A repository's memory for build step pods (src/build/sizing.ts); a repository without a row gets the environment's.
+CREATE TABLE IF NOT EXISTS build_sizes (
+  repo TEXT PRIMARY KEY,
+  memory_request_bytes INTEGER NOT NULL,
+  memory_limit_bytes INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  reason TEXT NOT NULL                -- what set it: an operator, or an OOM-killed step
 );
 
 -- A workspace: one session's pod and volume in a kubernetes environment (src/build/workspace-launch.ts). The row
