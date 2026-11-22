@@ -3,7 +3,6 @@ import { refreshSnapshot } from "./itemtools/snapshot.ts";
 import { isCounted } from "./review/discussion.ts";
 import { spawn, spawnSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { SQLInputValue } from "node:sqlite";
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -19,9 +18,10 @@ import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/
 import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
-import type { Expression } from "kysely";
+import type { Expression, Insertable } from "kysely";
 import type { Db } from "./db/index.ts";
-import type * as kx from "./db/kx.ts";
+import * as kx from "./db/kx.ts";
+import type { Comments, Items } from "./db/types.ts";
 import { dbLockName, openDb, setDbRole } from "./db/open.ts";
 
 const OVERLAP_MS = 10 * 60 * 1000;
@@ -35,7 +35,9 @@ const COLUMNS = [
   "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files",
   "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable",
   "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme",
-];
+] as const;
+
+type ItemRow = Pick<Items, (typeof COLUMNS)[number]>;
 
 type Kind = "issue" | "pr";
 type Detail = "full" | "light";
@@ -269,17 +271,17 @@ export async function* untilCutoff(pages: AsyncIterable<Node[]>, cutoff: string 
 
 const login = (n: Node): string | null => n?.login ?? null;
 
-function toRow(repo: string, kind: Kind, n: Node, detail: Detail): Record<string, SQLInputValue> {
+function toRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRow {
   const r = baseRow(repo, kind, n, detail);
-  return Object.assign(r, hashColumns(r as Parameters<typeof hashColumns>[0]));
+  return Object.assign(r, hashColumns(r));
 }
 
 /** True when `nameWithOwner` is the repo of the item at `url` (https://github.com/<owner>/<repo>/...). */
 const sameRepo = (nameWithOwner: unknown, url: unknown): boolean =>
   typeof nameWithOwner === "string" && typeof url === "string" && url.toLowerCase().startsWith(`https://github.com/${nameWithOwner.toLowerCase()}/`);
 
-function baseRow(repo: string, kind: Kind, n: Node, detail: Detail): Record<string, SQLInputValue> {
-  const r: Record<string, SQLInputValue> = Object.fromEntries(COLUMNS.map((c) => [c, null]));
+function baseRow(repo: string, kind: Kind, n: Node, detail: Detail): ItemRow {
+  const r = Object.fromEntries(COLUMNS.map((c) => [c, null])) as unknown as ItemRow;
   Object.assign(r, {
     repo, number: n.number, kind, state: n.state, title: n.title, body: n.body, url: n.url,
     author: login(n.author), author_type: n.author?.__typename ?? null, author_id: typeof n.author?.databaseId === "number" ? n.author.databaseId : null, author_association: n.authorAssociation,
@@ -316,15 +318,15 @@ const mentions = (body: unknown, names: string[]): number => {
   return names.some((n) => n && b.includes(`@${n.toLowerCase()}`)) ? 1 : 0;
 };
 
-function commentRows(repo: string, kind: Kind, n: Node, own: string[]): SQLInputValue[][] {
+function commentRows(repo: string, kind: Kind, n: Node, own: string[]): Insertable<Comments>[] {
   // `counted`: whether the entry counts as new discussion for the review stage (src/review/discussion.ts).
   const counted = (c: Node) => Number(isCounted({ author: login(c.author), association: c.authorAssociation, bot: c.author?.__typename === "Bot", prAuthor: login(n.author), state: c.state, body: c.body, inline: c.comments?.totalCount }));
-  const rows = (n.comments?.nodes ?? []).filter(Boolean).map((c: Node) =>
-    [repo, n.number, c.id, "comment", login(c.author), c.createdAt, c.body, null, null, counted(c), c.authorAssociation ?? null, mentions(c.body, own), c.url ?? null]);
+  const rows: Insertable<Comments>[] = (n.comments?.nodes ?? []).filter(Boolean).map((c: Node) =>
+    ({ repo, number: n.number, id: c.id, kind: "comment", author: login(c.author), created_at: c.createdAt, body: c.body, review_state: null, commit_oid: null, counted: counted(c), author_association: c.authorAssociation ?? null, mentions_pipeline: mentions(c.body, own), url: c.url ?? null }));
   if (kind === "pr") {
     for (const c of (n.reviews?.nodes ?? []).filter(Boolean)) {
       // A review without a body still counts: its inline threads are the discussion, and it makes earlier reviews stale.
-      rows.push([repo, n.number, c.id, "review", login(c.author), c.createdAt, c.body, c.state, c.commit?.oid ?? null, counted(c), c.authorAssociation ?? null, mentions(c.body, own), c.url ?? null]);
+      rows.push({ repo, number: n.number, id: c.id, kind: "review", author: login(c.author), created_at: c.createdAt, body: c.body, review_state: c.state, commit_oid: c.commit?.oid ?? null, counted: counted(c), author_association: c.authorAssociation ?? null, mentions_pipeline: mentions(c.body, own), url: c.url ?? null });
     }
   }
   return rows;
@@ -350,48 +352,50 @@ export const keepKnownMergeableExpr = (eb: kx.AnyEb, table: string): Expression<
  */
 async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes: Node[], force = false, readAt: string = iso(new Date())): Promise<void> {
   // Upserts keep each row's rowid, which the full-text index (schema.sql) is keyed on.
-  const insert = db.prepare(`INSERT INTO main.items (${COLUMNS.join(",")}) VALUES (${COLUMNS.map((c) => `:${c}`).join(",")})
-    ON CONFLICT (repo, number) DO UPDATE SET ${COLUMNS.filter((c) => c !== "repo" && c !== "number").map((c) => c === "mergeable" ? `mergeable=${KEEP_KNOWN_MERGEABLE("items")}` : `${c}=excluded.${c}`).join(",")}`);
-  const stored = db.prepare(`SELECT ${COLUMNS.join(",")} FROM items WHERE repo=? AND number=?`);
-  // The account seen under a login string owns its id-less history for the whitelist; a later account with the same login does not inherit it.
-  // A login with merged or closed PRs mirrored without an id is left to the backfill, which binds the author of that history, not the login's current holder.
-  const bindId = db.prepare(`INSERT OR IGNORE INTO main.author_ids (login, id) SELECT ?1, ?2
-    WHERE NOT EXISTS (SELECT 1 FROM main.items WHERE author = ?1 AND kind = 'pr' AND state IN ('MERGED','CLOSED') AND author_id IS NULL)`);
-  // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
-  const setRefs = db.prepare("UPDATE main.items SET text_refs = ? WHERE repo = ? AND number = ?");
-  const del = db.prepare("DELETE FROM main.comments WHERE repo=? AND number=?");
-  const insComment = db.prepare(`INSERT INTO main.comments (repo, number, id, kind, author, created_at, body, review_state, commit_oid, counted, author_association, mentions_pipeline, url) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (id) DO UPDATE SET
-    repo=excluded.repo, number=excluded.number, kind=excluded.kind, author=excluded.author, created_at=excluded.created_at,
-    body=excluded.body, review_state=excluded.review_state, commit_oid=excluded.commit_oid, counted=excluded.counted, author_association=excluded.author_association, mentions_pipeline=excluded.mentions_pipeline, url=excluded.url`);
+  const itemUpsert = COLUMNS.filter((c) => c !== "repo" && c !== "number" && c !== "mergeable");
+  const commentUpsert = ["repo", "number", "kind", "author", "created_at", "body", "review_state", "commit_oid", "counted", "author_association", "mentions_pipeline", "url"] as const;
   const live = appSlug();
   if (live) { try { await rememberSlug(db, live); } catch { /* read-only connection */ } }
   const own = await mentionNames(db, live);
-  const lastRead = db.prepare("SELECT synced_at FROM main.item_reads WHERE repo = ? AND number = ?");
   await db.write(async () => {
     // A read never replaces what a later-started read stored: the item, its comments and its read time stay the newer read's.
     nodes = await filterSeq(nodes, async (n) => {
-      const last = (await lastRead.get(repo, n.number) as { synced_at: string } | undefined)?.synced_at;
+      const last = (await db.get(db.k.selectFrom("main.item_reads").select("synced_at").where("repo", "=", repo).where("number", "=", n.number)))?.synced_at;
       return last === undefined || !(Date.parse(last) > Date.parse(readAt));
     });
     for (const n of nodes) {
       const row = toRow(repo, kind, n, detail);
       // A row identical to the stored one (overlapping reads re-fetch many) writes nothing.
-      const old = await stored.get(repo, n.number) as Record<string, SQLInputValue> | undefined;
+      const old = await db.get(db.k.selectFrom("items").select(COLUMNS).where("repo", "=", repo).where("number", "=", n.number));
       if (!force && old && COLUMNS.every((c) => old[c] === row[c])) continue;
-      await insert.run(row);
-      if (kind === "pr") await setRefs.run(textRefs(row.title as string | null, row.body as string | null), repo, n.number);
-      if (typeof row.author === "string" && typeof row.author_id === "number") await bindId.run(row.author, row.author_id);
+      await db.run(db.k.insertInto("main.items").values(row).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
+        ...kx.excluded(itemUpsert)(eb),
+        mergeable: keepKnownMergeableExpr(eb, "items"),
+      }))));
+      // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
+      if (kind === "pr") await db.run(db.k.updateTable("main.items").set({ text_refs: textRefs(row.title, row.body) }).where("repo", "=", repo).where("number", "=", n.number));
+      // The account seen under a login string owns its id-less history for the whitelist; a later account with the same login does not inherit it.
+      // A login with merged or closed PRs mirrored without an id is left to the backfill, which binds the author of that history, not the login's current holder.
+      if (typeof row.author === "string" && typeof row.author_id === "number") {
+        const login = row.author;
+        await db.run(db.k.insertInto("main.author_ids").columns(["login", "id"]).expression(
+          db.k.selectNoFrom((eb) => [eb.cast<string>(eb.val(login), "text").as("login"), eb.cast<number>(eb.val(row.author_id), "bigint").as("id")])
+            .where((eb) => eb.not(eb.exists(eb.selectFrom("main.items").select(eb.lit(1).as("one"))
+              .where("author", "=", login).where("kind", "=", "pr").where("state", "in", ["MERGED", "CLOSED"]).where("author_id", "is", null))))
+        ).onConflict((oc) => oc.doNothing()));
+      }
       if (detail === "full") {
         const rows = commentRows(repo, kind, n, own);
         // A forced re-read of an unchanged item upserts in place: an identical comment bumps no topic. Comments past the newest 20 go.
-        if (!force) await del.run(repo, n.number);
-        for (const row of rows) await insComment.run(...row);
-        if (force) await db.prepare(`DELETE FROM main.comments WHERE repo = ? AND number = ? AND id NOT IN (${rows.map(() => "?").join(",") || "''"})`).run(repo, n.number, ...rows.map((r) => r[2] as string));
+        if (!force) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", repo).where("number", "=", n.number));
+        for (const row of rows) await db.run(db.k.insertInto("main.comments").values(row).onConflict((oc) => oc.column("id").doUpdateSet(kx.excluded(commentUpsert))));
+        if (force) await db.run(db.k.deleteFrom("main.comments").where("repo", "=", repo).where("number", "=", n.number).where(kx.inList(db, "id", rows.map((r) => r.id), "text", true)));
       }
     }
     if (nodes.length) {
-      await db.prepare(`INSERT INTO main.item_reads (repo, number, synced_at) VALUES ${nodes.map(() => "(?,?,?)").join(",")}
-        ON CONFLICT (repo, number) DO UPDATE SET synced_at = excluded.synced_at WHERE julianday(excluded.synced_at) >= julianday(item_reads.synced_at)`).run(...nodes.flatMap((n) => [repo, n.number, readAt]));
+      await db.run(db.k.insertInto("main.item_reads").values(nodes.map((n) => ({ repo, number: n.number, synced_at: readAt })))
+        .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["synced_at"]))
+          .where((eb) => eb(eb.fn<number>("julianday", [eb.ref("excluded.synced_at")]), ">=", eb.fn<number>("julianday", [eb.ref("main.item_reads.synced_at")])))));
     }
   });
 }
@@ -439,15 +443,19 @@ async function readRepoSince(db: Db, client: Querier, name: string, cutoff: stri
 async function syncRepo(db: Db, client: Querier, name: string, full: boolean): Promise<number> {
   // synced_at is the start of the sync: every item the sync read is at least as new as it (the pre-approved merge compares it with a push).
   const startedAt = iso(new Date());
-  const row = await db.prepare("SELECT high_water FROM repos WHERE name=?").get(name) as { high_water: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("repos").select("high_water").where("name", "=", name));
   const high = row?.high_water ?? null;
   const cutoff = high && !full ? iso(new Date(new Date(high).getTime() - OVERLAP_MS)) : null;
   const read = await readRepoSince(db, client, name, cutoff);
   const count = read.count;
   const newest = read.newest > (high ?? "") ? read.newest : (high ?? "");
   // max(): an incremental sync may have moved the high water further while a full pass ran.
-  await db.prepare(`UPDATE main.repos SET synced_at=:at, high_water=CASE WHEN :hw IS NOT NULL AND (high_water IS NULL OR high_water < :hw) THEN :hw ELSE high_water END
-    WHERE name=:name`).run({ at: startedAt, hw: newest || null, name });
+  const hw = newest || null;
+  await db.run(db.k.updateTable("main.repos").set((eb) => ({
+    synced_at: startedAt,
+    high_water: hw === null ? eb.ref("high_water")
+      : eb.case().when(eb.or([eb("high_water", "is", null), eb("high_water", "<", hw)])).then(hw).else(eb.ref("high_water")).end(),
+  })).where("name", "=", name));
   return count;
 }
 
@@ -521,9 +529,9 @@ async function failRepo(db: Db, client: Querier, name: string, e: unknown): Prom
 }
 
 const getSetting = async (db: Db, key: string): Promise<string | null> =>
-  ((await db.prepare("SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined)?.value) ?? null;
+  (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", key)))?.value ?? null;
 const setSetting = async (db: Db, key: string, value: string): Promise<void> => {
-  await db.prepare("INSERT INTO settings (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
+  await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
 };
 
 // Search returns at most SEARCH_CAP results per query. A window with more matches is cut in half
@@ -540,7 +548,6 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
   const startedAt = iso(new Date());
   // Search covers the default org only; repos of other owners are read one by one after it.
   const scope = `org:${DEFAULT_OWNER}`;
-  const bump = db.prepare("UPDATE main.repos SET high_water=? WHERE name=? AND (high_water IS NULL OR high_water < ?)");
   // Applied once every window has been read, so a failed run leaves the repos' high water alone.
   const repoNewest = new Map<string, string>();
   let size = SEARCH_PAGE;
@@ -618,7 +625,7 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
   for (const name of tracked.filter((n) => ownerOf(n) !== DEFAULT_OWNER)) {
     try {
       // A repo that failed for a while has its own high water behind the window: read from there.
-      const hw = (await db.prepare("SELECT high_water FROM repos WHERE name = ?").get(name) as { high_water: string | null } | undefined)?.high_water;
+      const hw = (await db.get(db.k.selectFrom("repos").select("high_water").where("name", "=", name)))?.high_water;
       const own = hw ? new Date(new Date(hw).getTime() - OVERLAP_MS) : null;
       const r = await readRepoSince(db, client, name, iso(own && own < from ? own : from));
       await clearRepoFailure(db, name);
@@ -628,7 +635,10 @@ export async function syncBySearch(db: Db, client: Querier, tracked: string[], s
       await failRepo(db, client, name, e);
     }
   }
-  for (const [repo, t] of repoNewest) await bump.run(t, repo, t);
+  for (const [repo, t] of repoNewest) {
+    await db.run(db.k.updateTable("main.repos").set({ high_water: t }).where("name", "=", repo)
+      .where((eb) => eb.or([eb("high_water", "is", null), eb("high_water", "<", t)])));
+  }
   return out;
 }
 
@@ -755,18 +765,18 @@ async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
     }
   }
   // Names are unique across owners: a repo already known under another owner is left alone.
-  const upsert = db.prepare(`INSERT INTO main.repos (name, owner, visibility, default_branch, open_prs, open_issues) VALUES (?,?,?,?,?,?)
-    ON CONFLICT(name) DO UPDATE SET visibility=excluded.visibility, default_branch=excluded.default_branch,
-    open_prs=excluded.open_prs, open_issues=excluded.open_issues WHERE repos.owner = excluded.owner`);
   for (const r of repos) {
-    const res = await upsert.run(r.name, r.owner, r.visibility.toLowerCase(), r.defaultBranchRef?.name ?? null, r.pullRequests.totalCount, r.issues.totalCount);
+    const res = await db.run(db.k.insertInto("main.repos")
+      .values({ name: r.name, owner: r.owner, visibility: r.visibility.toLowerCase(), default_branch: r.defaultBranchRef?.name ?? null, open_prs: r.pullRequests.totalCount, open_issues: r.issues.totalCount })
+      .onConflict((oc) => oc.column("name").doUpdateSet(kx.excluded(["visibility", "default_branch", "open_prs", "open_issues"]))
+        .whereRef("main.repos.owner", "=", "excluded.owner")));
     if (!res.changes) {
       await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
     }
   }
   await reloadOwners(db);
   // A repo the listing shows exists again: its not-found record is stale.
-  for (const r of repos) await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind = 'not-found'").run(r.name);
+  for (const r of repos) await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", r.name).where("kind", "=", "not-found"));
   await setSetting(db, "repos_refreshed_at", iso(new Date()));
   return [...new Set(repos.map((r: Node) => r.name as string))];
 }
@@ -813,7 +823,7 @@ async function syncPerRepo(db: Db, client: Querier, opts: SyncOpts): Promise<num
     if (resumable && !failed) await setSetting(db, "full_sync_cursor", `${scope}|${name}`);
     console.log(`${name}: ${count} items, ${client.spent - before} points used, ${client.remaining} left`);
   }
-  if (resumable && !failed) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
+  if (resumable && !failed) await db.run(db.k.deleteFrom("settings").where("key", "=", "full_sync_cursor"));
   // One broken repo does not fail the run; all of them failing does.
   if (failed > 0 && failed === todo.length) throw lastError;
   syncFailures = failed;
@@ -854,7 +864,8 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
       for (const n of nodes) listed.add(`${kind}\t${n.number}`);
     }
   }
-  const stale = (await db.prepare("SELECT kind, number FROM items WHERE repo = ? AND state = 'OPEN'").all(name) as { kind: Kind; number: number }[])
+  const stale = (await db.all(db.k.selectFrom("items").select(["kind", "number"]).where("repo", "=", name).where("state", "=", "OPEN")
+    .orderBy("number").$narrowType<{ kind: Kind }>()))
     .filter((r) => !listed.has(`${r.kind}\t${r.number}`));
   let updated = 0;
   let gone = 0;
@@ -865,19 +876,19 @@ export async function reconcileRepo(db: Db, client: Querier, name: string, now: 
       await writePage(db, name, n.__typename === "PullRequest" ? "pr" : "issue", n.state === "OPEN" ? "full" : "light", [n], false, sentAt);
       updated++;
     } else {
-      await db.prepare("UPDATE main.items SET state = 'CLOSED', closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'")
-        .run(iso(now), name, r.number);
+      await db.run(db.k.updateTable("main.items").set((eb) => ({ state: "CLOSED", closed_at: eb.fn.coalesce("closed_at", eb.val(iso(now))) }))
+        .where("repo", "=", name).where("number", "=", r.number).where("state", "=", "OPEN"));
       await audit(db, "sync", "item-gone", `${name}#${r.number}`, { reason: "not found or transferred on GitHub; marked CLOSED" });
       gone++;
     }
   }
-  await db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), name);
+  await db.run(db.k.updateTable("main.repos").set({ reconciled_at: iso(now) }).where("name", "=", name));
   return { open: listed.size, updated, gone };
 }
 
 // Of the tracked repos the sync has read in full, the one whose last reconcile is oldest, when it is over a day old (never: first).
 export async function reconcileDue(db: Db, tracked: string[], now: Date): Promise<string | null> {
-  const at = new Map((await db.prepare("SELECT name, reconciled_at FROM repos WHERE synced_at IS NOT NULL AND high_water IS NOT NULL").all() as { name: string; reconciled_at: string | null }[]).map((r) => [r.name, r.reconciled_at ?? ""]));
+  const at = new Map((await db.all(db.k.selectFrom("repos").select(["name", "reconciled_at"]).where("synced_at", "is not", null).where("high_water", "is not", null))).map((r) => [r.name, r.reconciled_at ?? ""]));
   const oldest = [...tracked].filter((n) => at.has(n)).sort((a, b) => at.get(a)!.localeCompare(at.get(b)!))[0];
   if (oldest === undefined) return null;
   const last = at.get(oldest)!;
@@ -894,7 +905,7 @@ export async function reconcileNext(db: Db, client: Querier, now: Date = new Dat
     log(`reconcile ${due}: ${c.open} open, ${c.updated} re-read, ${c.gone} gone`);
   } catch (e) {
     await failRepo(db, client, due, e);
-    await db.prepare("UPDATE main.repos SET reconciled_at = ? WHERE name = ?").run(iso(now), due);
+    await db.run(db.k.updateTable("main.repos").set({ reconciled_at: iso(now) }).where("name", "=", due));
   }
   return due;
 }
@@ -905,10 +916,10 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
   const started = iso(now);
   const orgHigh = await getSetting(db, "org_high_water");
   const tracked = await trackedNames(db);
-  const synced = new Set((await db.prepare("SELECT name FROM repos WHERE synced_at IS NOT NULL").all() as { name: string }[]).map((r) => r.name));
+  const synced = new Set((await db.all(db.k.selectFrom("repos").select("name").where("synced_at", "is not", null))).map((r) => r.name));
   // A repo that cannot be read has no synced_at and would keep every run per-repo.
   // Only a repo that cannot be read at all (not found, no access) is passed over; others are retried per repo for their first full read.
-  const broken = new Set((await db.prepare("SELECT repo FROM sync_repo_errors WHERE kind IN ('not-found', 'forbidden')").all() as { repo: string }[]).map((r) => r.repo));
+  const broken = new Set((await db.all(db.k.selectFrom("sync_repo_errors").select("repo").where("kind", "in", ["not-found", "forbidden"]))).map((r) => r.repo));
   const wantsSearch = !opts.only.length && !opts.all && !opts.full && !opts.perRepo && orgHigh !== null
     && tracked.every((n) => synced.has(n) || broken.has(n));
   const spent0 = client.spent;
@@ -929,10 +940,12 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
       }
       // One org-wide search covers every tracked repo, so each counts as synced now.
       // The search read every default-org repo, so errors of earlier runs other than not-found are stale; a failure of this run (at >= started) stays.
-      for (const n of tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER)) await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ? AND kind IN ('transient', 'error') AND at < ?").run(n, started);
+      for (const n of tracked.filter((x) => ownerOf(x) === DEFAULT_OWNER)) await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", n).where("kind", "in", ["transient", "error"]).where("at", "<", started));
       // Not the repos that were never read in full (no high water) or that cannot be read.
-      const mark = db.prepare("UPDATE main.repos SET synced_at = ? WHERE name = ? AND high_water IS NOT NULL AND NOT EXISTS (SELECT 1 FROM sync_repo_errors e WHERE e.repo = repos.name)");
-      for (const n of tracked) await mark.run(started, n);
+      for (const n of tracked) {
+        await db.run(db.k.updateTable("main.repos").set({ synced_at: started }).where("name", "=", n).where("high_water", "is not", null)
+          .where((eb) => eb.not(eb.exists(eb.selectFrom("sync_repo_errors as e").select(eb.lit(1).as("one")).whereRef("e.repo", "=", "main.repos.name")))));
+      }
       console.log(`search: ${r.slices} slice${r.slices === 1 ? "" : "s"}${r.fallbacks ? `, ${r.fallbacks} listed per repo` : ""}`);
       const at = await getSetting(db, "repos_refreshed_at");
       if (!at || now.getTime() - new Date(at).getTime() >= META_REFRESH_MS) await refreshRepoList(db, client);
@@ -955,7 +968,7 @@ export async function runSync(db: Db, client: Querier, opts: SyncOpts, now: Date
       const bound = await backfillAuthorIds(db, client);
       if (bound) console.log(`bound ${bound} author account id${bound === 1 ? "" : "s"}`);
       await setSetting(db, "author_ids_backfilled", iso(new Date()));
-      await db.prepare("DELETE FROM main.settings WHERE key = 'author_ids_error'").run();
+      await db.run(db.k.deleteFrom("main.settings").where("key", "=", "author_ids_error"));
     } catch (e) {
       const msg = String((e as Error)?.message ?? e).slice(0, 200);
       console.log(`author ids: ${msg}`);
@@ -996,14 +1009,14 @@ async function sync(args: string[]): Promise<void> {
     setDbRole("periodic");
     const db = await openDb();
     const client = new Client(reserve);
-    if (restart) await db.prepare("DELETE FROM settings WHERE key='full_sync_cursor'").run();
+    if (restart) await db.run(db.k.deleteFrom("settings").where("key", "=", "full_sync_cursor"));
     const querier = opts.full ? lowPriority(client, { busy: () => lockHeld(lockPath()), minRemaining: keep }) : client;
     // Each run leaves a row for the Pipeline page; rows older than two days go.
-    const row = (await db.prepare("INSERT INTO sync_runs (started_at) VALUES (?) RETURNING rowid").get(iso(new Date())) as { rowid: number }).rowid;
-    await db.prepare("DELETE FROM sync_runs WHERE started_at < ?").run(iso(new Date(Date.now() - 2 * 86400_000)));
+    const row = (await db.get(db.k.insertInto("sync_runs").values({ started_at: iso(new Date()) }).returning(kx.rowid("sync_runs").as("rowid"))))!.rowid;
+    await db.run(db.k.deleteFrom("sync_runs").where("started_at", "<", iso(new Date(Date.now() - 2 * 86400_000))));
     try {
       const { mode, items } = await runSync(db, querier, opts);
-      await db.prepare("UPDATE sync_runs SET ended_at = ?, mode = ?, items = ? WHERE rowid = ?").run(iso(new Date()), mode, items, row);
+      await db.run(db.k.updateTable("sync_runs").set({ ended_at: iso(new Date()), mode, items }).where(kx.rowid("sync_runs"), "=", row));
       console.log(`sync: mode=${mode} items=${items} points=${client.spent} left=${client.remaining}`);
       // Sandboxed calls read the item snapshot instead of GitHub. The refresh is incremental and writes nothing when nothing differs; a visibility change alone removes a repository's rows.
       await refreshSnapshot(console.log, db);
@@ -1042,7 +1055,7 @@ async function sync(args: string[]): Promise<void> {
         }
       }
     } catch (e) {
-      await db.prepare("UPDATE sync_runs SET ended_at = ?, error = ? WHERE rowid = ?").run(iso(new Date()), String((e as Error)?.message ?? e).slice(0, 300), row);
+      await db.run(db.k.updateTable("sync_runs").set({ ended_at: iso(new Date()), error: String((e as Error)?.message ?? e).slice(0, 300) }).where(kx.rowid("sync_runs"), "=", row));
       throw e;
     }
   } finally {
@@ -1051,11 +1064,12 @@ async function sync(args: string[]): Promise<void> {
 }
 
 async function syncStatus(): Promise<void> {
-  const rows = await (await openDb()).prepare(`
-    SELECT r.name, r.open_prs, r.open_issues, r.synced_at,
-           EXISTS (SELECT 1 FROM tracked_repos t WHERE t.name = r.name) AS tracked,
-           (SELECT COUNT(*) FROM items i WHERE i.repo = r.name) AS n
-    FROM repos r ORDER BY r.name`).all() as Node[];
+  const db = await openDb();
+  const rows = await db.all(db.k.selectFrom("repos as r").select((eb) => [
+    "r.name", "r.open_prs", "r.open_issues", "r.synced_at",
+    eb.exists(eb.selectFrom("tracked_repos as t").select(eb.lit(1).as("one")).whereRef("t.name", "=", "r.name")).as("tracked"),
+    eb.selectFrom("items as i").select(eb.fn.countAll<number>().as("n")).whereRef("i.repo", "=", "r.name").as("n"),
+  ]).orderBy("r.name"));
   console.log(`${"repo".padEnd(28)} ${"tracked".padEnd(7)} ${"open PRs".padStart(8)} ${"open iss".padStart(8)} ${"mirrored".padStart(8)}  synced_at`);
   for (const r of rows) {
     console.log(`${r.name.padEnd(28)} ${(r.tracked ? "yes" : "-").padEnd(7)} ${String(r.open_prs).padStart(8)} ${String(r.open_issues).padStart(8)} ${String(r.n).padStart(8)}  ${r.synced_at ?? "-"}`);
@@ -1069,5 +1083,6 @@ export const commands = {
 
 /** Marks a PR we just merged as merged in the mirror, so counts don't wait for the next sync; the sync later fills in what GitHub reports. */
 export async function markMerged(db: Db, repo: string, number: number, at: string): Promise<void> {
-  await db.prepare("UPDATE main.items SET state = 'MERGED', merged_at = COALESCE(merged_at, ?), closed_at = COALESCE(closed_at, ?) WHERE repo = ? AND number = ? AND state = 'OPEN'").run(at, at, repo, number);
+  await db.run(db.k.updateTable("main.items").set((eb) => ({ state: "MERGED", merged_at: eb.fn.coalesce("merged_at", eb.val(at)), closed_at: eb.fn.coalesce("closed_at", eb.val(at)) }))
+    .where("repo", "=", repo).where("number", "=", number).where("state", "=", "OPEN"));
 }

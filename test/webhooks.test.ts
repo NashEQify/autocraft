@@ -56,9 +56,11 @@ test("the drain re-reads a queued item, sets synced_at and clears the request", 
   const c = validating({ spent: 0, remaining: 4000 as number | null, async query(_q: string, v: Record<string, unknown>) { calls.push(v); return { repository: { issueOrPullRequest: node } }; } });
   assert.equal(await drainSyncRequests(db, c), 1);
   assert.deepEqual(calls, [{ owner: "storytold", name: "a", number: 5 }]);
-  const row = await db.prepare("SELECT title, (SELECT synced_at FROM item_reads r WHERE r.repo = i.repo AND r.number = i.number) AS synced_at FROM items i WHERE repo = 'a' AND number = 5").get() as { title: string; synced_at: string };
+  const row = (await db.get(db.k.selectFrom("items as i").select((eb) => ["i.title",
+    eb.selectFrom("item_reads as r").select("r.synced_at").whereRef("r.repo", "=", "i.repo").whereRef("r.number", "=", "i.number").as("synced_at")])
+    .where("i.repo", "=", "a").where("i.number", "=", 5)))!;
   assert.equal(row.title, "t");
-  assert.match(row.synced_at, /^\d{4}-\d\d-\d\dT/);
+  assert.match(row.synced_at!, /^\d{4}-\d\d-\d\dT/);
   assert.deepEqual(await queued(db), []);
 });
 
@@ -74,7 +76,7 @@ test("synced_at is when the re-read was sent, not when its answer was written", 
   // GitHub takes more than a second to answer: a comment made meanwhile is newer than this read.
   const c = { spent: 0, remaining: 4000 as number | null, async query() { sent = Date.now(); await new Promise((r) => setTimeout(r, 1100)); return { repository: { issueOrPullRequest: node } }; } };
   assert.equal(await drainSyncRequests(db, c), 1);
-  const at = (await db.prepare("SELECT synced_at FROM item_reads WHERE repo = 'a' AND number = 5").get() as { synced_at: string }).synced_at;
+  const at = (await db.get(db.k.selectFrom("item_reads").select("synced_at").where("repo", "=", "a").where("number", "=", 5)))!.synced_at;
   assert.ok(Date.parse(at) <= sent, `${at} is not after the request went out`);
 });
 
@@ -85,7 +87,8 @@ test("a read that started before the stored one does not replace it: the item an
     authorAssociation: "NONE", createdAt: "2026-01-01T00:00:00Z", updatedAt: "2026-11-02T10:00:00Z", closedAt: null, state: "OPEN",
     labels: { nodes: [] }, assignees: { nodes: [] }, commentCount: { totalCount: 0 }, stateReason: null, comments: { nodes: [] },
   });
-  const row = async () => await db.prepare("SELECT i.title, r.synced_at FROM items i JOIN item_reads r USING (repo, number) WHERE repo = 'a' AND number = 6").get() as { title: string; synced_at: string };
+  const row = async () => (await db.get(db.k.selectFrom("items as i").innerJoin("item_reads as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+    .select(["i.title", "r.synced_at"]).where("i.repo", "=", "a").where("i.number", "=", 6)))!;
   assert.ok(await writeItemNode(db, "a", node("new"), new Date("2026-11-20T12:00:10Z")));
   // A reconcile that started earlier writes its answer afterwards.
   await writeItemNode(db, "a", node("old"), new Date("2026-11-20T12:00:05Z"));
@@ -121,5 +124,5 @@ test("re-reading an unchanged item bumps no items topic and keeps its newest com
   assert.equal(await seq(), before);
   node.comments = { nodes: [comment(2)] };
   await read();
-  assert.deepEqual((await db.prepare("SELECT id FROM comments WHERE repo = 'a' AND number = 5").all()).map((r) => r.id), ["c2"]);
+  assert.deepEqual((await db.all(db.k.selectFrom("comments").select("id").where("repo", "=", "a").where("number", "=", 5))).map((r) => r.id), ["c2"]);
 });

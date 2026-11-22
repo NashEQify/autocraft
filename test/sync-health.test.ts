@@ -40,7 +40,7 @@ test("a repo that no longer resolves is skipped and recorded; failures and recov
   const r = await runSync(db, client, { only: [], all: false, full: false, perRepo: false }, new Date("2026-11-02T10:05:00Z"));
   assert.equal(r.mode, "search");
   assert.equal(await reconcileNext(db, client, new Date("2026-11-02T10:05:00Z"), () => {}), "a");
-  const err = await db.prepare("SELECT repo, kind, moved_to FROM sync_repo_errors").all();
+  const err = await db.all(db.k.selectFrom("sync_repo_errors").select(["repo", "kind", "moved_to"]));
   assert.deepEqual(err.map((e) => ({ ...e })), [{ repo: "a", kind: "not-found", moved_to: "elsewhere/a-9" }]);
   // The failing repo gives up its place at the front of the daily reconcile, so repo b is next.
   assert.equal((await db.get(db.k.selectFrom("repos").select("reconciled_at as t").where("name", "=", "a")))!.t, "2026-11-02T10:05:00Z");
@@ -110,7 +110,7 @@ test("GET /healthz/checks answers 503 with a stale worker and shows no repo name
   await db.run(db.k.insertInto("settings").values({ key: "runner_heartbeat", value: at(5_000) }));
   await db.run(db.k.insertInto("sync_runs").values({ started_at: at(70_000), ended_at: at(60_000), mode: "search", items: 0 }));
   await db.run(db.k.insertInto("build_envs").values({ id: "sandbox", label: "Sandbox", kind: "local-sandbox", enabled: 1, slots: 2, key_hash: "h", last_seen_at: at(6 * 60_000), created_at: at(86_400_000) }));
-  await db.prepare("INSERT INTO sync_repo_errors (repo, kind, message, since, at) VALUES ('a','not-found','x',?,?)").run(at(1000), at(1000));
+  await db.run(db.k.insertInto("sync_repo_errors").values({ repo: "a", kind: "not-found", message: "x", since: at(1000), at: at(1000) }));
   // The header stands in for a staff session: anonymous callers get names and states only.
   const server = createServer(async (req, res) => { if (!await serveChecks(req, res, db, now, 0, async (r) => r.headers["x-staff"] === "1")) res.writeHead(404).end(); });
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
