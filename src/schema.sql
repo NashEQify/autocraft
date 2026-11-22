@@ -1461,6 +1461,17 @@ CREATE TABLE IF NOT EXISTS merge_batch_prs (
 );
 CREATE INDEX IF NOT EXISTS merge_batch_prs_pr ON merge_batch_prs(number, head_oid);
 
+-- The PR status comment of each PR (src/prstatus): one comment, edited in place when the status line changes.
+CREATE TABLE IF NOT EXISTS pr_status_comments (
+  repo TEXT NOT NULL, number INTEGER NOT NULL,
+  comment_id TEXT,                    -- the number in the comment's #issuecomment- URL; null when GitHub's answer named none
+  line TEXT NOT NULL,                 -- the status line as last posted
+  steps TEXT NOT NULL,                -- JSON [{step, at}]: the steps the comment has shown, oldest first
+  final INTEGER NOT NULL DEFAULT 0,   -- 1 once the merged or closed line is posted: no more edits
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo, number)
+);
+
 -- Last `claude auth status` of each account: sign-in state, method, plan and
 -- the login's end date. Nothing else of the status (no email) is kept.
 CREATE TABLE IF NOT EXISTS claude_account_status (

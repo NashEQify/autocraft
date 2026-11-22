@@ -7,7 +7,7 @@ export function detailOf(action: string, d: Record<string, unknown>): string {
   switch (action) {
     case "labels-apply": return list;
     case "label-create": return String(d.name ?? "");
-    case "act-comment": case "fixup-comment": case "fixup-comment-edit": case "conflict-comment-edit": case "fixissue-comment": case "implement-comment": return clip(String(d.text ?? ""), 160);
+    case "act-comment": case "fixup-comment": case "fixup-comment-edit": case "conflict-comment-edit": case "pr-status-comment": case "pr-status-comment-edit": case "fixissue-comment": case "implement-comment": return clip(String(d.text ?? ""), 160);
     case "batch-pr-close": return clip(String(d.text ?? ""), 160);
     case "merge": return [d.method, d.commit ? short(d.commit) : "", d.batch ? `in ${d.batch}` : ""].filter(Boolean).join(" ");
     case "assign": case "unassign": return String(d.assignee ?? "");

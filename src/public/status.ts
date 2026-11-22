@@ -72,16 +72,24 @@ export function hiddenExpr(db: Db, eb: Eb, repo: Ex, number: Ex, labels: Ex): Al
   ]);
 }
 
-export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
-  if (!await isPublicRepo(db, repo)) return null;
-  const row = await db.get(db.k.selectFrom("main.items as i")
+/** The stored facts the step mapping reads, for items of one repo (`numbers`: only these). */
+async function statusRows(db: Db, repo: string, numbers: number[]) {
+  if (!numbers.length) return [];
+  return await db.all(db.k.selectFrom("main.items as i")
     .leftJoin("main.item_stage as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
     .leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-    .select((eb) => ["i.title", "i.url", "i.kind", "i.state", hiddenExpr(db, eb, "i.repo", "i.number", "i.labels").as("hidden"),
+    .select((eb) => ["i.number", "i.title", "i.url", "i.kind", "i.state", hiddenExpr(db, eb, "i.repo", "i.number", "i.labels").as("hidden"),
       "s.stage", "s.reviewed", "p.state as plan", "p.view",
       eb.exists(eb.selectFrom("main.decisions as d").select(eb.lit(1).as("one")).whereRef("d.repo", "=", "i.repo").whereRef("d.number", "=", "i.number").where("d.answer", "is", null)).as("decision")])
-    .where("i.repo", "=", repo).where("i.number", "=", number));
-  if (!row || row.hidden || !row.url) return null;
+    .where("i.repo", "=", repo).where("i.number", "in", numbers));
+}
+type StatusRow = Awaited<ReturnType<typeof statusRows>>[number];
+
+type Place = { position: number; of: number };
+/** The step of one item (see the mapping above). `place`: its place in the merge queue; undefined: in the queue with no place shown; null: not in it. */
+async function statusOf(repo: string, row: StatusRow, place: () => Promise<Place | null | undefined>): Promise<PublicStatus | null> {
+  if (!row.url) return null;
+  const number = row.number;
   const kind = row.kind === "pr" ? "pr" : "issue";
   const base = { ref: `${repo}#${number}`, title: row.title ?? "", url: row.url, kind } as const;
   if (row.state === "MERGED") return { ...base, state: "merged", step: "Merged" };
@@ -98,14 +106,41 @@ export async function publicStatus(db: Db, repo: string, number: number): Promis
   }
   const plan = row.plan ?? "";
   if (QUEUED.includes(plan) && !view.queue?.held) {
-    const q = await queuePlace(db, repo, number);
-    if (q) return { ...open, step: "In the merge queue", queue: q };
+    const q = await place();
+    if (q !== null) return { ...open, step: "In the merge queue", ...(q && { queue: q }) };
   }
   if (FIXING.includes(plan) || view.fixup === "fix" || view.cifix === "cifix-queued" || view.cifix === "cifix-rerun") return { ...open, step: "Fix-up in progress" };
   if (WAITING.includes(plan)) return { ...open, step: "Waiting for CI" };
   if (row.stage === null) return { ...open, step: "New" };
   if (!row.reviewed && (NEVER_REVIEWED.includes(plan) || plan === "")) return { ...open, step: "Triaged" };
   return { ...open, step: "In review" };
+}
+
+export async function publicStatus(db: Db, repo: string, number: number): Promise<PublicStatus | null> {
+  if (!await isPublicRepo(db, repo)) return null;
+  const row = (await statusRows(db, repo, [number]))[0];
+  if (!row || row.hidden) return null;
+  return await statusOf(repo, row, () => queuePlace(db, repo, number));
+}
+
+/**
+ * The statuses of PRs of one repo, for the PR status comment (src/prstatus), which the PR's own readers see on GitHub:
+ * private repos too, and the security cases `publicStatus` leaves out get the same plain steps, with no place in the queue
+ * (the queue's places and counts leave them out). The queue is read once.
+ */
+export async function commentStatuses(db: Db, repo: string, numbers: number[]): Promise<Map<number, PublicStatus>> {
+  const out = new Map<number, PublicStatus>();
+  let queue: number[] | null = null;
+  for (const row of await statusRows(db, repo, numbers)) {
+    const s = await statusOf(repo, row, async () => {
+      if (row.hidden) return undefined;
+      queue ??= await queueOf(db, repo);
+      const at = queue.indexOf(row.number);
+      return at < 0 ? null : { position: at + 1, of: queue.length };
+    });
+    if (s) out.set(row.number, s);
+  }
+  return out;
 }
 
 /** Open PRs of a repo that are queued to merge, in the dashboard queue page's order: fast-tracked first, batch members after ready ones, then by work rank, repo and number. */

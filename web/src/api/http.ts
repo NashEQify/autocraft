@@ -226,6 +226,7 @@ export function createHttpApi(): Api {
       approvePushing: (name, approved) => post(approved ? "/api/repos/push-approve" : "/api/repos/push-revoke", { name }),
       approveCommenting: (name, approved) => post(approved ? "/api/repos/comment-approve" : "/api/repos/comment-revoke", { name }),
       approveFixing: (name, approved) => post(approved ? "/api/repos/fixissue-approve" : "/api/repos/fixissue-revoke", { name }),
+      approveStatusComments: (name, approved) => post(approved ? "/api/repos/prstatus-approve" : "/api/repos/prstatus-revoke", { name }),
       approveMainFixing: (name, approved) => post(approved ? "/api/repos/mainfix-approve" : "/api/repos/mainfix-revoke", { name }),
       approveCiRuns: (name, approved) => post(approved ? "/api/repos/ci-approve" : "/api/repos/ci-revoke", { name }),
       setOptionalCheck: (name, check, on) => post(on ? "/api/repos/optional-check-add" : "/api/repos/optional-check-remove", { name, check }),

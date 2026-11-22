@@ -414,6 +414,18 @@ Each merge queue row says how the PR came in, by whom and when (`added` on the r
 
 The Queue page API (`GET /api/queue/page?tab=all|review|fix|verify|merge&repos=pipeline|all|<repo>`) serves the tabs. The default repo filter is the repos whose pipeline is on plus fast-tracked items of any repo. Rows carry their fast-track place ("2 of 5") and hold. `GET /api/merge/held` lists the held PRs as `repo#n`. The Merge tab adds "Next merges": what merges next and what each PR waits for (CI, Verify, re-review, batch check, hold), read from the merge queue states.
 
+### PR status comment
+
+With the repo's **PR status comment** switch on (Repos page, GitHub writes; off by default; an operator or a maintainer with write access to the repo switches it), the `pr-status` step keeps one comment on each PR the pipeline works on. It posts the comment once the PR is past triage (in review, waiting for CI, in a fix-up, waiting for a maintainer decision, or in the merge queue), then edits it in place whenever the status line changes, with a last edit when the PR merges or closes. GitHub sends no notification for an edit. Batch PRs get no comment.
+
+The comment has:
+
+- **Status:** the PR's step from the public status layer (`src/public/status.ts`, the same steps the Discord bot shows): Waiting for review, In review, Waiting for CI, Fix-up in progress, Waiting for a maintainer decision, In the merge queue, Merged, Closed. In the merge queue it adds the place (`next in line`, `#3 in line`; from #11 on, `10 or more PRs ahead`, so a merge edits only the comments near the front) or the merge batch being checked (`checked in merge batch #N`). A merged PR names the batch it merged with. Hold reasons, review text and the reasons behind a step are never shown; a security fix shows the plain step, with no place or batch.
+- **History:** the steps the comment has shown, with their times (UTC), the newest eight.
+- **Details for maintainers:** links to the item page and, in the merge queue, the Merge queue page. Only people with dashboard access can open them. The line is left out when no dashboard address (`AUTOCRAFT_BASE_URL`) is set.
+
+The planner queues the step when a PR's line differs from the one posted; there is no timer. A comment someone deleted is not posted again on that PR. With no stored record of the comment (a restart between the post and its record), the step finds it on GitHub by its hidden marker and edits it. The writes are audited as `pr-status-comment` and `pr-status-comment-edit`, made as the bot with the "Automated message" note, and paced as bulk writes: they start only while the GitHub write budget is less than half used, so they leave room for the writes that move PRs.
+
 ## Pre-approved merge
 
 A resolution card's `fixup` step with `merge` set is an operator's Merge answer given ahead of a fix-up. A `fixup` step without it only queues the fix-up, and a `review` step marks the head's review stale so Opus reviews it again.
@@ -632,6 +644,7 @@ Each write needs the repo's approval (Repos page) and stays within the stage's d
 | Open a fix PR for a bugfix issue | Fix | Fix approval. 10 attempts a day |
 | Merge: singly, or in an integration batch of up to 50 PRs | Merge queue | Merge approval. The merge rule or an operator's Merge answer. 10 a day |
 | Comment, then close, after an answer | Act | Comment approval. 20 a day |
+| Post and edit one status comment per PR | Merge queue (`pr-status`) | PR status comment switch, off by default. 500 posts and edits a day, at half the GitHub write budget |
 | Open a follow-up issue for each defect of a post-merge review | Post-merge review | Comment approval. 20 a day |
 | Private fix of a confirmed security finding | Security deep scan | Starts when Verify confirms the finding. Writes nothing to GitHub: Land, Advisory and Publish are operator presses. Pipeline switch and daily limits do not apply |
 
@@ -732,10 +745,10 @@ Limits count items handled per stage per day (from 00:00 UTC), including by fail
 | Decide | 100 | Merge | 10 |
 | Conversations | 30 | Pre-merge review | none |
 | Maintainers' conversations | none | Approve CI runs | 30 |
-| Label | none | Act | 20 |
-| Review (Opus) | 40 | Post-merge review | none |
-| Checks | none (0 pauses it) | File follow-up issues | 20 |
-| Post reviews | 40 |  |  |
+| Label | none | PR status comments | 500 |
+| Review (Opus) | 40 | Act | 20 |
+| Checks | none (0 pauses it) | Post-merge review | none |
+| Post reviews | 40 | File follow-up issues | 20 |
 <!-- stages:end limits-table -->
 
 Steps not in the table have no limit setting.

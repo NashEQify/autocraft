@@ -127,9 +127,9 @@ async function laneQuery(w: Writer, g: Guarded | Grant, q: Querier, kind: WriteK
 // identities) are exempt.
 export const PACE_PER_MINUTE = 60;
 export const PACE_PER_HOUR = 400;
-/** Bulk writes (the label writes of the labels-apply step) start only while the key has used less than this share of each limit, so they leave room for the writes that move PRs. */
+/** Bulk writes (the label writes of the labels-apply step, the PR status comments) start only while the key has used less than this share of each limit, so they leave room for the writes that move PRs. */
 export const BULK_SHARE = 0.5;
-const BULK_ACTIONS = new Set(["labels-apply"]);
+const BULK_ACTIONS = new Set(["labels-apply", "pr-status-comment", "pr-status-comment-edit"]);
 /** The longest a write waits for the budget; past it the write is refused as paced and the caller retries later. */
 export const PACE_MAX_WAIT_MS = 15_000;
 /** After a secondary-limit failure the key pauses this long. */

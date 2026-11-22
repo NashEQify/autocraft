@@ -959,6 +959,29 @@ export const STEPS: StepDef[] = [
     },
   },
   {
+    name: "pr-status",
+    title: "PR status comments",
+    description: "Keeps one status comment on each pull request the pipeline works on: posted once the PR is past triage, then edited in place when its step or place in the merge queue changes, with a last edit when it merges or closes. Only in repos where the PR status switch is on. Calls no model.",
+    stage: runStage("pr-status"),
+    requires: "operator",
+    params: [
+      { name: "repo", label: "Repo", kind: "repo", required: true },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 100, help: "comments to post or edit in this job" },
+    ],
+    check: async (db, p) => {
+      const { statusApprovalOf } = await import("../prstatus/approval.ts");
+      return await statusApprovalOf(db, String(p.repo)) ? null : `PR status comments are off for ${p.repo}`;
+    },
+    run: async (ctx) => {
+      const { runPrStatus } = await import("../prstatus/index.ts");
+      const repo = String(ctx.params.repo);
+      const r = await runPrStatus(ctx.db, { repo, by: byOfJob(ctx.job.requestedBy), runId: `pr-status-${ctx.job.id}`, limit: Number(ctx.params.limit), log: ctx.log });
+      ctx.acted(r.posted.length + r.edited.length);
+      if (r.due && r.failed.length === r.due) throw new Error(`${repo}: no status comment could be written (${r.failed.join(", ")})`);
+      return `${repo}: ${r.posted.length} posted, ${r.edited.length} edited${r.failed.length ? `, ${r.failed.length} failed` : ""}${r.gone.length ? `, ${r.gone.length} deleted on GitHub` : ""}${r.paced ? "; the rest wait for the write budget" : ""}`;
+    },
+  },
+  {
     name: "ci-approve",
     title: "Approve waiting CI runs",
     description: "Approves the Actions runs that GitHub holds for a maintainer's approval on outside contributors' pull requests, once the PR's current head has a final take or take-fix review. Skips a PR that is closed, a draft or at another head. Calls no model.",

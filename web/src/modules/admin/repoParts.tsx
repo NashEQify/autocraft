@@ -99,7 +99,7 @@ export function useRepoWrite(): Write {
   );
   return { ...w, run };
 }
-type WriteField = "labels" | "commenting" | "pushing" | "fixing" | "mainFixing" | "ciApproving" | "merging";
+type WriteField = "labels" | "commenting" | "pushing" | "fixing" | "mainFixing" | "ciApproving" | "merging" | "statusComments";
 
 export interface WriteKind {
   field: WriteField;
@@ -166,6 +166,13 @@ export const WRITES: WriteKind[] = [
     short: "Merge",
     line: "Merges pull requests that pass the merge rules, through safe-merge",
     run: (a, n, on) => a.repoAdmin.approveMerging(n, on),
+  },
+  {
+    field: "statusComments",
+    name: "PR status comment",
+    short: "Status",
+    line: "Keeps one status comment on each pull request, edited in place as it moves through review and the merge queue",
+    run: (a, n, on) => a.repoAdmin.approveStatusComments(n, on),
   },
 ];
 

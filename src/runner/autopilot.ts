@@ -47,6 +47,8 @@ import { applyUsedAnswers } from "../decisions-used.ts";
 import { premergeCandidates } from "../premerge/review.ts";
 import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
 import { mainFixDue } from "../mainfix/index.ts";
+import { statusApprovalOf } from "../prstatus/approval.ts";
+import { statusDue } from "../prstatus/index.ts";
 import { latestRun } from "../classify/settled.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { DEADLINE_ERROR, enqueue, JobError, now, requestCancel, RUNNER_STOPPED } from "./jobs.ts";
@@ -715,6 +717,23 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
       const plans = await plansOf(db, ctx), repos = new Set(ctx.tracked);
       const due = [...allowed(await planned(db, "unassign", { plans })), ...allowed(await plannedItems(db, "unassign", { plans }))];
       return [...new Set(due.map((p) => p.facts.repo))].filter((r) => repos.has(r)).sort().map((repo) => ({ step: "unassign", params: { repo } }));
+    },
+  },
+  {
+    // One status comment per PR, in repos with the PR status switch on: queued when a PR's status line differs from the posted one.
+    name: "pr-status",
+    perRepo: true,
+    detect: async (db, ctx) => {
+      const now = Date.now();
+      return (await filterSeq(ctx.tracked, async (repo) => {
+        if (!await statusApprovalOf(db, repo) || !(await statusDue(db, repo)).length) return false;
+        // A repo whose GitHub write budget is used up would write nothing (the writes are refused as paced): it waits for the window to move.
+        const wait = await pipelineWriteWait(db, "pr-status-comment", repo, now);
+        if (wait <= PACE_MAX_WAIT_MS) return true;
+        ctx.wake?.push(now + wait);
+        if (ctx.notes) ctx.notes["pr-status"] ??= `The GitHub write budget for ${repo} is used up until ${hhmm(now + wait)}`;
+        return false;
+      })).sort().map((repo) => ({ step: "pr-status", params: { repo } }));
     },
   },
   {
