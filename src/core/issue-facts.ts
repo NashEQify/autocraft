@@ -326,7 +326,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
             state: a.state, attempt: a.attempt,
             textChanged: (() => { const b = texts.get(ref)!; return textHash(b.title ?? "", b.body ?? "") !== a.textHash; })(),
             newCommentAfterQuestion: commentedAfter.has(ref),
-            decisionAnswered: a.state === "asked" && a.decisionId !== null && (answeredAt.get(a.decisionId) ?? "") > askedSince(a),
+            decisionAnswered: (a.state === "asked" || a.state === "stuck") && a.decisionId !== null && (answeredAt.get(a.decisionId) ?? "") > askedSince(a),
             asked: a.state === "asked" ? a.question?.audience ?? (a.decisionId !== null ? "maintainer" : "author") : null,
             requeuedAfterEnd: ENDED_STATES.has(a.state) && q !== null && q.at > a.updatedAt,
             prOpen: a.prNumber !== null && (prState.get(`${r.repo}#${a.prNumber}`) ?? "OPEN") === "OPEN",

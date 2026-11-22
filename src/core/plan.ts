@@ -427,7 +427,7 @@ export type ItemFacts = {
       textChanged: boolean;
       /** An `asked` attempt: a comment by a person (no bot, not ours) came after its newest question. */
       newCommentAfterQuestion: boolean;
-      /** An `asked` attempt's decision was answered after its newest question. */
+      /** An `asked` attempt's decision was answered after its newest question, or a `stuck` attempt's after it got stuck. */
       decisionAnswered: boolean;
       /** An ended attempt, and the issue was queued again after it ended (its fast_track row is newer). */
       requeuedAfterEnd: boolean;

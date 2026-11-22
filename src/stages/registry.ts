@@ -275,7 +275,7 @@ export const STAGES: StageDef[] = [
     models: [
       { model: "opus", use: "Plans the implementation and writes it in a workspace session", remark: "Every call runs on the Task Runner of the person who queued the issue" },
     ],
-    promptIds: ["fixissue.triage", "fixissue.patch", "fixissue.check"], promptStage: "Fix",
+    promptIds: ["fixissue.triage", "fixissue.patch", "fixissue.check", "implement.session"], promptStage: "Fix",
     waits: [
       { name: "Queuer's Task Runner", why: "Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots", howLong: "Until that Task Runner is ready and has a free slot", showsAs: "Queue view \"Runs only on <login>'s Task Runner\"", kind: "external" },
       { name: "Author's answer", why: "The plan found facts the issue leaves open and asked its author in a comment; the plan runs again when the issue text changes or a person comments after the question", howLong: "Until the author or another person answers; no timer", showsAs: "Plan wait \"the author's answer\"", kind: "external" },
