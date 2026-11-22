@@ -21,6 +21,7 @@ import { confidentialReadyAt, privateStepExpr } from "./build/tasks.ts";
 import type { Db } from "./db/index.ts";
 import { setting } from "./settings-read.ts";
 import { BEAT_MS, leaderStatus } from "./db/leader.ts";
+import { ENDPOINT_KEY, type EndpointStatus } from "./build/worker-endpoint.ts";
 import { LEADER_ROLES } from "./db/fence.ts";
 
 /** Thresholds, in one place. */
@@ -29,6 +30,8 @@ export const THRESHOLDS = {
   runnerStaleMs: 2 * 60_000,
   /** The leader of the runner and of the periodic chores writes its status every BEAT_MS; standbys too. */
   leaderStaleMs: 6 * BEAT_MS,
+  /** The leader rewrites the worker API's EndpointSlice at its next beat; past this it names another address for real. */
+  endpointGraceMs: 3 * BEAT_MS,
   /** A build worker polls at least every few seconds while it runs. */
   workerStaleMs: 5 * 60_000,
   /** A queued build task older than this has had time to be claimed. */
@@ -88,7 +91,8 @@ async function runnerCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
 /**
  * Leader election on Postgres (src/db/leader.ts): `runner-leader` and `periodic-leader` are ok while a leader writes its
  * status, with `since` its start and `count` the standbys waiting; a standby is not a problem unless a copy is set to one
- * replica (warn). No row: one process, no check.
+ * replica (warn). No row: one process, no check. In Kubernetes `runner-leader` also fails while the worker API's
+ * EndpointSlice has named another address than the leader's (or could not be read) for longer than endpointGraceMs.
  */
 async function leaderChecks({ db, nowMs }: CheckCtx): Promise<Check[]> {
   const out: Check[] = [];
@@ -101,13 +105,27 @@ async function leaderChecks({ db, nowMs }: CheckCtx): Promise<Check[]> {
       if (s.unwatched) {
         const text = `A standby of the ${name} runs while AUTOCRAFT_RUNNER_REPLICAS is 1, so the leader runs without the watchdog two copies need; set it to the number of copies`;
         out.push({ id, state: "warn", text, brief: `The ${name} copies are misconfigured`, since: s.leader!.since, count: s.standbys, to: "/pipeline" });
-      } else out.push(ok(id, "/pipeline", { since: s.leader!.since, count: s.standbys }));
+      } else {
+        const wrong = role === "runner" ? await wrongEndpoint(db, nowMs) : null;
+        out.push(wrong ? { id, state: "fail", text: wrong.text, brief: "Build workers cannot reach the runner", since: wrong.since, count: s.standbys, to: "/pipeline" }
+          : ok(id, "/pipeline", { since: s.leader!.since, count: s.standbys }));
+      }
       continue;
     }
     const text = `No copy of the ${name} has reported as leader for ${Number.isNaN(at) ? "a while" : minutes(nowMs - at)}${s.standbys ? `; ${s.standbys} standby waiting` : ""}`;
     out.push({ id, state: "fail", text, brief: text, since: s.leader?.at ?? null, count: s.standbys, to: "/pipeline" });
   }
   return out;
+}
+
+/** The leader's latest check of the worker API's EndpointSlice, when it has named something else for too long. */
+async function wrongEndpoint(db: Db, nowMs: number): Promise<{ text: string; since: string } | null> {
+  const raw = await setting(db, ENDPOINT_KEY);
+  let e: EndpointStatus | null = null;
+  try { e = raw ? JSON.parse(raw) as EndpointStatus : null; } catch { /* no status */ }
+  if (!e?.wrongSince || nowMs - Date.parse(e.at) > THRESHOLDS.leaderStaleMs || nowMs - Date.parse(e.wrongSince) <= THRESHOLDS.endpointGraceMs) return null;
+  const names = e.slice === null ? "could not be read" : `names ${e.slice.length ? e.slice.join(", ") : "no address"}`;
+  return { text: `The worker API's EndpointSlice ${names} instead of the leading runner (${e.ip}) for ${minutes(nowMs - Date.parse(e.wrongSince))}${e.error ? `: ${e.error}` : ""}`, since: e.wrongSince };
 }
 
 type Env = { id: string; label: string; kind: string; last_seen_at: string | null; created_at: string; health: string | null; health_at: string | null };

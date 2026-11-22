@@ -95,6 +95,8 @@ export type ElectOptions = {
   beatMs?: number;
   /** Copies of this role the install runs; with one, a failed or slow check alone never aborts `lost`. Default runnerReplicas(). */
   replicas?: number;
+  /** Runs after each status write of the leader; a fenced error from it aborts `lost`, other errors are logged. */
+  onBeat?: () => Promise<void>;
 };
 
 const iso = (ms = Date.now()): string => new Date(ms).toISOString();
@@ -337,6 +339,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     void (async () => {
       await putSetting(db, leaderKey(role), status(iso()));
       await pruneStandbys(db, role);
+      await o.onBeat?.();
     })().catch((e: unknown) => {
       if (isFenced(e)) lose("another copy took over");
       else log(`leader: status of the ${role} not written: ${(e as Error).message}`);

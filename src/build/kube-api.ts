@@ -56,6 +56,21 @@ export interface ConfigMapApi {
   listConfigMaps(ns: string, selector?: string): Promise<KConfigMap[]>;
 }
 
+export type KEndpoint = { addresses: string[]; conditions?: { ready?: boolean; serving?: boolean; terminating?: boolean }; targetRef?: { kind: string; name: string; namespace?: string } };
+export type KEndpointSlice = {
+  metadata: { name: string; resourceVersion?: string };
+  endpoints?: KEndpoint[] | null;
+  ports?: { name?: string; port?: number; protocol?: string }[] | null;
+};
+
+/** The runner's calls on the worker API's EndpointSlice (src/build/worker-endpoint.ts). */
+export interface EndpointSliceApi {
+  /** null when there is none of that name. */
+  getEndpointSlice(ns: string, name: string): Promise<KEndpointSlice | null>;
+  /** A JSON merge patch; one that carries `metadata.resourceVersion` fails with a 409 KubeError when the slice changed since. */
+  patchEndpointSlice(ns: string, name: string, patch: object): Promise<void>;
+}
+
 /** Cluster reads for the capacity model; a 403 KubeError means the service account may not read that. */
 export interface CapacityApi {
   listNodes(): Promise<KNode[]>;
@@ -125,7 +140,7 @@ export class KubeError extends Error {
 const enc = encodeURIComponent;
 
 /** The client for the cluster the runner runs in, or null outside a cluster (no KUBERNETES_SERVICE_HOST). */
-export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): (KubeApi & ConfigMapApi & CapacityApi) | null {
+export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR): (KubeApi & ConfigMapApi & CapacityApi & EndpointSliceApi) | null {
   const host = env.KUBERNETES_SERVICE_HOST;
   if (!host) return null;
   const port = Number(env.KUBERNETES_SERVICE_PORT || 443);
@@ -150,7 +165,7 @@ function statusMessage(text: string): string {
 }
 
 /** The client for an explicit API server; `conn` is called at each request, so credentials may rotate. */
-export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapApi & CapacityApi {
+export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapApi & CapacityApi & EndpointSliceApi {
   const get = typeof conn === "function" ? conn : () => conn;
 
   function call(method: string, path: string, body?: object, accept = "application/json", contentType = "application/json"): Promise<string> {
@@ -192,6 +207,7 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapA
   const pods = (ns: string) => `/api/v1/namespaces/${enc(ns)}/pods`;
   const pvcs = (ns: string) => `/api/v1/namespaces/${enc(ns)}/persistentvolumeclaims`;
   const cms = (ns: string) => `/api/v1/namespaces/${enc(ns)}/configmaps`;
+  const slices = (ns: string) => `/apis/discovery.k8s.io/v1/namespaces/${enc(ns)}/endpointslices`;
 
   return {
     listPods: async (ns, selector) => (JSON.parse(await call("GET", `${pods(ns)}?labelSelector=${enc(selector)}`)) as { items: KPod[] }).items,
@@ -215,6 +231,11 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapA
     createConfigMap: async (ns, cm) => void (await call("POST", cms(ns), cm)),
     patchConfigMap: async (ns, name, patch) => void (await call("PATCH", `${cms(ns)}/${enc(name)}`, patch, "application/json", "application/merge-patch+json")),
     listConfigMaps: async (ns, selector) => (JSON.parse(await call("GET", `${cms(ns)}${selector ? `?labelSelector=${enc(selector)}` : ""}`)) as { items: KConfigMap[] }).items,
+    getEndpointSlice: (ns, name) => call("GET", `${slices(ns)}/${enc(name)}`).then((t) => JSON.parse(t) as KEndpointSlice, (e: unknown) => {
+      if (e instanceof KubeError && e.status === 404) return null;
+      throw e;
+    }),
+    patchEndpointSlice: async (ns, name, patch) => void (await call("PATCH", `${slices(ns)}/${enc(name)}`, patch, "application/json", "application/merge-patch+json")),
     canI: async (ns, verb, resource) => {
       const r = JSON.parse(await call("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", {
         apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview", spec: { resourceAttributes: { namespace: ns, verb, resource } },
