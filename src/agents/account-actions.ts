@@ -44,18 +44,36 @@ export async function accountAction(db: Db, action: keyof typeof ACCOUNT_ACTIONS
 
 /** The runner's list, kept this long: the live and attention pages read it on every refresh. */
 const LIST_TTL_MS = 2_000;
+const LIST_TIMEOUT_MS = 5_000;
 const listMemo = new Map<boolean, { at: number; list: Promise<ClaudeAccount[]> }>();
+/** The last list the runner answered, served while it does not answer. */
+const lastGood = new Map<boolean, ClaudeAccount[]>();
 
-/** listAccounts, on the runner when the account directories are there; `by` is the login the runner logs the read under. */
+/** listAccounts, on the runner when the account directories are there. */
 export async function accountList(db: Db, nowMs: number = Date.now(), sync = true, by = "dashboard"): Promise<ClaudeAccount[]> {
   const c = runnerClient();
   if (!c) return await listAccounts(db, nowMs, sync);
   const m = listMemo.get(sync);
   if (m && Date.now() - m.at < LIST_TTL_MS) return await m.list;
-  const list = (async () => (await (await callRunner(c, "POST", "/internal/accounts/list", by, { sync })).json()) as ClaudeAccount[])();
+  const list = (async () => {
+    try {
+      const got = (await (await callRunner(c, "POST", "/internal/accounts/list", by, { sync }, LIST_TIMEOUT_MS)).json()) as ClaudeAccount[];
+      lastGood.set(sync, got);
+      return got;
+    } catch (e) {
+      const old = lastGood.get(sync);
+      if (old) return old;
+      throw e;
+    }
+  })();
   listMemo.set(sync, { at: Date.now(), list });
   list.catch(() => listMemo.delete(sync));
   return await list;
+}
+
+/** accountList, or null when the runner does not answer and no earlier list is kept: callers then show no account data. */
+export async function accountListOrNull(db: Db, nowMs: number = Date.now(), sync = true, by = "dashboard"): Promise<ClaudeAccount[] | null> {
+  try { return await accountList(db, nowMs, sync, by); } catch { return null; }
 }
 
 /** After a change, the next list reads the runner again. */

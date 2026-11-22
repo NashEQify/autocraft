@@ -46,10 +46,10 @@ export class RunnerError extends Error {
 }
 
 /** One signed request to the runner's /internal/ API as `login`. A refusal the runner explains comes back as RunnerError with its status. */
-export async function callRunner(c: RunnerClient, method: "GET" | "POST", path: string, login: string, body?: unknown): Promise<Response> {
+export async function callRunner(c: RunnerClient, method: "GET" | "POST", path: string, login: string, body?: unknown, timeoutMs = 120_000): Promise<Response> {
   const text = body === undefined ? "" : JSON.stringify(body);
   const res = await fetch(`${c.url}${path}`, {
-    method, signal: AbortSignal.timeout(120_000),
+    method, signal: AbortSignal.timeout(timeoutMs),
     headers: { [INTERNAL_HEADER]: signInternal(c.sessionKey, method, path, text, login), ...(body === undefined ? {} : { "content-type": "application/json" }) },
     ...(body === undefined ? {} : { body: text }),
   });
