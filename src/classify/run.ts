@@ -369,6 +369,8 @@ export type AskOptions = {
   check?: CheckTool; lint?: Lint; onProgress?: (line: string) => void; checkout?: string; reference?: string; maxWaitMs?: number; shared?: { name: string; dir: string }[]; session?: SessionAsk; itemTools?: { mounts: { host: string; path: string }[]; mcpServers: Record<string, unknown> } | null;
   /** The call runs only on this user's own Task Runners (src/remote/calls.ts NewCall.forLogin), never on the server's accounts. */
   forLogin?: string;
+  /** User-local mode: the longest wait of the first call alone in the queue (WaitLimitError past it); follow-ups on its session wait as `maxWaitMs` says. */
+  firstWaitMs?: number;
 };
 
 /** The repo-docs directory for the item's repository, or undefined (no docs, or a checkout that is not one of ours). */
@@ -731,7 +733,8 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
     const level = await levelBand(db, items[0]?.repo, items[0]?.number);
 
     /** One remote turn: the first message, or with `after` a follow-up on the session of that call. The reference folder is named after its repo (referenceDir). */
-    const turn = async (stdin: string, after: number | null, lean = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {
+    const turn = async (stdin: string, after: number | null, lean = false, first = false): Promise<{ reply: Turned; callId: number } | "failed" | "unclaimed"> => {
+      const maxWaitMs = first && opts.firstWaitMs !== undefined ? Math.min(opts.firstWaitMs, opts.maxWaitMs ?? Infinity) : opts.maxWaitMs;
       const callId = await enqueueCall(db, {
         promptId: id, promptVersion: promptVersion(id), tier, effort: p.effort, askedModel: model, items, level, maxAttempts: p.limits.attempts, ...(after !== null && { parentId: after }), ...(reference && { referenceRepo: basename(opts.reference!) }), ...(opts.forLogin !== undefined && { forLogin: opts.forLogin }),
         bundle: {
@@ -740,7 +743,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
           hints: { claude: { args: lean ? noToolArgs(args) : args, ...(agents && { agents }) } },
         },
       });
-      const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(opts.maxWaitMs !== undefined && { maxWaitMs: opts.maxWaitMs }), ...(checkTool && { check: checkTool }) });
+      const o = await awaitCall(db, callId, { ...(opts.onProgress && { onProgress: opts.onProgress }), ...(maxWaitMs !== undefined && { maxWaitMs }), ...(checkTool && { check: checkTool }) });
       if (o.state === "unclaimed") return "unclaimed";
       if (o.state === "failed") {
         if (o.runId !== null) await finishRun(db, o.runId, { state: "failed", ...(o.tokens && { tokens: o.tokens }), error: await scrubError(o.error), summary: "failed" });
@@ -758,7 +761,7 @@ async function askRemote<K extends ClaudePromptId>(id: K, model: string, input: 
       return { reply: { text, usage, ...(turns !== undefined && { turns }), ...(ran && { model: ran }), ...(o.sessionId && { sessionId: o.sessionId }) }, callId };
     };
 
-    const first = await turn(resume ? resume.message : parts.stdin, parent);
+    const first = await turn(resume ? resume.message : parts.stdin, parent, false, true);
     // A resume nobody took: the caller asks anew, as when a local session cannot be resumed.
     if (first === "unclaimed") return undefined;
     if (first === "failed") return null;

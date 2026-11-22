@@ -509,6 +509,10 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
  */
 export const leasedBy = async (db: Db, login: string): Promise<number> => Number((await db.get(leasedRow(db, login)))!.n);
 
+/** Every lease the login's helpers hold, bound calls included: it changes as one of them takes or ends a call. */
+export const leasesHeld = async (db: Db, login: string): Promise<number> => Number((await db.get(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb.fn.countAll<number>().as("n"))
+  .where((eb) => eb.and([eb("c.state", "=", literal("leased")), ciEqExpr(db, "c.user_login", eb.val(login))]))))!.n);
+
 /** The leases of calls bound to the login it holds (`login`: an expression of the login), from their own small partial index. */
 export const boundLeases = (db: Db, login: Ex) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_bound", "bl")).select((e) => e.fn.countAll<number>().as("n"))
   .where("bl.state", "=", literal("leased")).where("bl.for_login", "is not", null).where(ciEqExpr(db, "bl.user_login", login));
@@ -816,7 +820,8 @@ export function claimCall(db: Db, caller: Caller, claim: Claim, canWrite: (repo:
   // Protocol 3 helpers send no wait (parseClaim); their claims are answered at once.
   const ms = hold && claim.protocol >= 4 ? holdMs(claim.wait) : 0;
   const ticket = hold && ms > 0 ? new Ticket(hold.signal) : undefined;
-  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o);
+  // An own-lane claim's reply says the lane was honoured: a server without it ignores the field and would offer any call.
+  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o).then((r): ClaimReply => (claim.ownLane ? { ...r, ownLane: true } : r));
   claimReplies.set(key, { at: nowMs, reply, ticket });
   reply.catch(() => { if (claimReplies.get(key)?.reply === reply) claimReplies.delete(key); });
   // Every request for a held claim left before its reply: a retry with the same id claims afresh. A lease already given stays

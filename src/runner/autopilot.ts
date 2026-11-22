@@ -66,6 +66,7 @@ import { FAST_FLOOR, fastFirst, fastScores } from "../fasttrack.ts";
 import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
 import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
+import { leasesHeld } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 
@@ -692,8 +693,17 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     detect: async (db) => ((await pendingConversations(db, undefined, "operator")).length ? [{ step: "conversation", params: {} }] : []),
   },
   {
-    // Maintainers' messages, each on the maintainer's own Task Runner: apart from the operators' lane and its daily limit.
+    // Maintainers' messages, each on the maintainer's own Task Runner: apart from the operators' lane and its daily limit. A job
+    // whose messages none of their runners took in time gives them back and handled nothing; the lane then runs again when a
+    // message is added or answered, or a waiting maintainer's runners take or end a call (or report ready, the taker signature),
+    // not on the claim and release its own job wrote.
     name: "conversation-maintainer",
+    topics: [],
+    extra: async (db) => {
+      const waiting = await pendingConversations(db, undefined, "maintainer");
+      const logins = [...new Set(waiting.map((c) => c.login.toLowerCase()))].sort();
+      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leasesHeld(db, l)}`)).join(",")}`;
+    },
     detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },
   {

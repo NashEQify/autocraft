@@ -69,50 +69,57 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     const held = await claimPending(db, repo, n);
     if (!held) return;
     const { turn: wait, claim } = held;
-    p.onHandled?.(++handled);
     const forLogin = ownerOf(c);
-    if (forLogin !== undefined) {
-      const why = await inferenceMode(db) !== "user-local" ? "a maintainer's message runs only on their own Task Runner, and model calls run on the server's accounts now"
-        : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
-      if (why) { await failTurn(db, repo, n, claim, why); return; }
-    }
-    const parts = await promptParts(db, repo, n, wait);
-    if (!parts) { await failTurn(db, repo, n, claim, "the conversation has no item block; send the message again"); return; }
-    if (!checkouts.has(repo)) checkouts.set(repo, p.checkout(repo).catch(() => null));
-    const checkout = await checkouts.get(repo)!;
-    let recent: string[] = [];
-    const shown = coalesce(async (lines: string[]) => await setTurnProgress(db, repo, n, claim, lines));
-    const onProgress = async (line: string) => {
-      if (recent.at(-1) === line) return;
-      recent = [...recent, line].slice(-PROGRESS_KEEP);
-      await shown.push(recent);
-    };
-    const bound = await openDecision(db, repo, n), stampThen = bound ? await decisionStamp(db, bound) : null;
-    const dir = referenceDir(repo);
-    // A maintainer's reference check runs on their own Task Runner too.
-    const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`, forLogin === undefined ? {} : { forLogin }) : undefined;
-    const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
-      model, ...(forLogin !== undefined && { forLogin, maxWaitMs: OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
-      usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
-      onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
-    });
-    let r: Awaited<typeof step>;
-    try { r = await step; } catch (e) {
-      if (forLogin === undefined || !(e instanceof NoTakerError || e instanceof WaitLimitError)) throw e;
+    // An operator's message counts when claimed (the step's daily limit). A maintainer's counts once it has an outcome: one given
+    // back for a later job is no work done, so the lane waits for its input to change instead of running again at once.
+    let released = false;
+    if (forLogin === undefined) p.onHandled?.(++handled);
+    try {
+      if (forLogin !== undefined) {
+        const why = await inferenceMode(db) !== "user-local" ? "a maintainer's message runs only on their own Task Runner, and model calls run on the server's accounts now"
+          : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
+        if (why) { await failTurn(db, repo, n, claim, why); return; }
+      }
+      const parts = await promptParts(db, repo, n, wait);
+      if (!parts) { await failTurn(db, repo, n, claim, "the conversation has no item block; send the message again"); return; }
+      if (!checkouts.has(repo)) checkouts.set(repo, p.checkout(repo).catch(() => null));
+      const checkout = await checkouts.get(repo)!;
+      let recent: string[] = [];
+      const shown = coalesce(async (lines: string[]) => await setTurnProgress(db, repo, n, claim, lines));
+      const onProgress = async (line: string) => {
+        if (recent.at(-1) === line) return;
+        recent = [...recent, line].slice(-PROGRESS_KEEP);
+        await shown.push(recent);
+      };
+      const bound = await openDecision(db, repo, n), stampThen = bound ? await decisionStamp(db, bound) : null;
+      const dir = referenceDir(repo);
+      // A maintainer's reference check runs on their own Task Runner too.
+      const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`, forLogin === undefined ? {} : { forLogin }) : undefined;
+      const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
+        model, ...(forLogin !== undefined && { forLogin, firstWaitMs: OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
+        usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
+        onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
+      });
+      let r: Awaited<typeof step>;
+      try { r = await step; } catch (e) {
+        if (forLogin === undefined || !(e instanceof NoTakerError || e instanceof WaitLimitError)) throw e;
+        await shown.flush();
+        // Their runners took nothing in time: the message waits for a later job, which does not hold this one.
+        if (e instanceof WaitLimitError) { released = await releaseTurn(db, repo, n, claim); p.log(`conversation: ${repo}#${n}: ${forLogin}'s Task Runner did not take the message in time; it waits for a later run`); return; }
+        // Their runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
+        await failTurn(db, repo, n, claim, ownRunnerGone(forLogin));
+        return;
+      }
       await shown.flush();
-      // Their runners took nothing in time: the message waits for a later job, which does not hold this one.
-      if (e instanceof WaitLimitError) { await releaseTurn(db, repo, n, claim); p.log(`conversation: ${repo}#${n}: ${forLogin}'s Task Runner did not take the message in time; it waits for a later run`); return; }
-      // Their runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
-      await failTurn(db, repo, n, claim, ownRunnerGone(forLogin));
-      return;
-    }
-    await shown.flush();
-    const parsed = r.ok ? r.value : null;
-    if (parsed) {
-      if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, undefined, parts.seen, parsed.choices && parsed.decision ? { decision: parsed.decision, parsed: parsed.choices, source: "conversation", by: model, stampThen, askedBy: wait.login } : undefined) !== null) { answered++; await jobItem(db, repo, n, "answered a message", p.log); }
-    } else {
-      await failTurn(db, repo, n, claim, "Opus gave no usable reply; send the message again");
-      await jobItem(db, repo, n, "no usable reply to a message", p.log);
+      const parsed = r.ok ? r.value : null;
+      if (parsed) {
+        if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, undefined, parts.seen, parsed.choices && parsed.decision ? { decision: parsed.decision, parsed: parsed.choices, source: "conversation", by: model, stampThen, askedBy: wait.login } : undefined) !== null) { answered++; await jobItem(db, repo, n, "answered a message", p.log); }
+      } else {
+        await failTurn(db, repo, n, claim, "Opus gave no usable reply; send the message again");
+        await jobItem(db, repo, n, "no usable reply to a message", p.log);
+      }
+    } finally {
+      if (forLogin !== undefined && !released) p.onHandled?.(++handled);
     }
   }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined), { first: true });
   return answered;

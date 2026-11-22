@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.6";
+export const HELPER_VERSION = "1.3.7";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -94,7 +94,7 @@ export const ROUTES = {
 export const ENCODINGS = /** @type {const} */ (["gzip+base64"]);
 /** @typedef {(typeof ENCODINGS)[number]} Encoding */
 /** @typedef {{ encoding: Encoding, body: string }} Envelope  `body`: base64 of the gzip of the plain JSON body */
-/** @typedef {{ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[] } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[] }} ClaimReply */
+/** @typedef {{ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true }} ClaimReply */
 /** @typedef {"ready" | "quota-held" | "paused" | "cooled-off" | "sandbox-failed" | "version-refused" | "harness-missing" | "failing"} Readiness */
 /** @typedef {{ usedPercent: number, resetsAt: string | null }} UsageWindow */
 /** @typedef {{ fiveHour: UsageWindow | null, weekly: UsageWindow | null, at: string }} UsageReading */
@@ -3731,6 +3731,9 @@ async function cmdWork(argv) {
         continue;
       }
       if (heldSaid) { console.log("ready again"); heldSaid = ""; }
+      // A server older than the own lane ignores the field and offers any call: the lane runs what it got and then stops.
+      const ownLaneUnknown = ownLane && r.ownLane !== true;
+      if (ownLaneUnknown && !r.lease) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
       if (!r.lease) {
         // The own lane waits quietly: the slots' loops say what the helper is doing.
         if (ownLane) { await pause(Math.max(TIME_SCALE, r.retryAfter) * 1000); continue; }
@@ -3746,6 +3749,7 @@ async function cmdWork(argv) {
       let s;
       try { s = await runLease(loadConfig(), r.lease.id, { signal: ac.signal, slotHeld: slot !== undefined }); } finally { if (counted) capacity.busy--; }
       console.log(s.line);
+      if (ownLaneUnknown) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
       if (s.hold) hold(s.hold.readiness, s.line, s.hold.ms === null ? null : Date.now() + s.hold.ms);
       else if (s.state === "submitted") {
         if (failures >= FAILURES_TO_HOLD) clearHold("failing");
