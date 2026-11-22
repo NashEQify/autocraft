@@ -193,7 +193,7 @@ export type StoreConfig = {
 export type PublishInput = {
   key: string; repo: string; commit: string;
   image: string | null; rustc: string | null; envHash: string | null; checkout: string | null;
-  source: WalkSource; exclude?: string[]; signKey: KeyObject; stored?: number; log?: (s: string) => void;
+  source: WalkSource; exclude?: string[]; omit?: ReadonlySet<string>; signKey: KeyObject; stored?: number; log?: (s: string) => void;
   /**
    * Blobs a restore found bad (its badBlobs): each is fetched and hashed, and re-uploaded from this tree when wrong,
    * or deleted when this tree does not hold it.
@@ -274,7 +274,7 @@ export class WarmStore {
   /** Walks the tree, uploads the blobs the store lacks, then the manifest, then the signed latest.json. */
   async publish(p: PublishInput): Promise<PublishStats> {
     const dav = this.rw();
-    const entries = await walkTree(p.source, { exclude: p.exclude, concurrency: this.concurrency, log: p.log });
+    const entries = await walkTree(p.source, { exclude: p.exclude, omit: p.omit, concurrency: this.concurrency, log: p.log });
     const header = makeHeader({ key: checkKey(p.key), repo: p.repo, commit: p.commit, stored: p.stored ?? Date.now(), image: p.image, rustc: p.rustc, envHash: p.envHash, checkout: p.checkout, targetDir: p.source.target, cargoHome: p.source.cargoHome }, entries);
     const manifest = encodeManifest({ header, entries });
     const firstPath = new Map<string, string>();

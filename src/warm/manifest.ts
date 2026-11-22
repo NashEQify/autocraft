@@ -155,14 +155,20 @@ export async function mapLimit<T, R>(items: readonly T[], n: number, fn: (item: 
 }
 
 export type WalkSource = { target: string; cargoHome: string };
-export type WalkOptions = { exclude?: string[]; concurrency?: number; log?: (s: string) => void };
+export type WalkOptions = {
+  exclude?: string[];
+  /** Manifest paths left out with everything under them (src/warm/trim.ts). */
+  omit?: ReadonlySet<string>;
+  concurrency?: number; log?: (s: string) => void;
+};
 
 /**
  * Lists the warm tree: all of `target` and the CARGO_SUBSET of `cargoHome`, without following links, each file hashed.
  * Sockets, fifos and devices are skipped. Throws on a file name that is not UTF-8 or a file that changes while hashed.
  */
 export async function walkTree(src: WalkSource, opts: WalkOptions = {}): Promise<Entry[]> {
-  const skip = excluder(opts.exclude ?? DEFAULT_EXCLUDES);
+  const excluded = excluder(opts.exclude ?? DEFAULT_EXCLUDES);
+  const skip = (path: string) => !!opts.omit?.has(path) || excluded(path);
   const entries: Entry[] = [];
   const files: { entry: FileEntry; abs: string }[] = [];
   let odd = 0;
