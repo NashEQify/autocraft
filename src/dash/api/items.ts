@@ -235,14 +235,14 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
 
     // The page as rowids first, so only its rows are read in full.
     const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
-    // Newest first within a state: main.items, because through the scoping view the planner walks the repo index and sorts every open item.
+    // Newest first within a state: main.items with its index named, because through the scoping view the planner walks the repo index and sorts every open item.
     const byUpdated = !b.fts && b.sort === "updated" && b.byState;
     const rid = kx.rowid("items", "i").as("rid");
     const idsQuery: Compilable<{ rid: number }> = b.fts && b.sort === "relevance"
       ? pageOrder(db, restrict(db.k.selectFrom(hitsScored(db, b.fts).as("h")).innerJoin("items as i", (j) => j.on(kx.rowid("items", "i"), "=", (eb) => eb.ref("h.rid")))
         .leftJoin("item_settled as s", settledJoin).select(rid), where), b.sort, b.desc).limit(limit).offset(offset)
       : byUpdated
-        ? pageOrder(db, restrict(db.k.selectFrom("main.items as i").leftJoin("item_settled as s", settledJoin).select(rid)
+        ? pageOrder(db, restrict(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_state_updated", "i")).leftJoin("item_settled as s", settledJoin).select(rid)
           .where("i.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")), where), b.sort, b.desc).limit(limit).offset(offset)
         : pageOrder(db, restrict(db.k.selectFrom("items as i").leftJoin("item_settled as s", settledJoin).select(rid), [...where, ...text]), b.sort, b.desc).limit(limit).offset(offset);
     const ids = (await db.all(idsQuery)).map((r) => r.rid);
@@ -329,8 +329,8 @@ export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
     rows = [];
     // A single word may be a login: that author's latest items first.
     if (/^[A-Za-z0-9-]{2,39}$/.test(q)) {
-      // main.items: through the scoping view the planner picks the repo index.
-      rows = await db.all(db.k.selectFrom("main.items").select(["repo", "number", "kind", "title", "author", "state"])
+      // main.items with the index named: through the scoping view the planner picks the repo index.
+      rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_author_nocase", "a")).select(["repo", "number", "kind", "title", "author", "state"])
         .where((eb) => kx.like(db, "author", eb.val(`${q}%`))).where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
         .$if(!!hide, (qb) => qb.where(hide!))
         .orderBy((eb) => eb("state", "<>", "OPEN")).orderBy("updated_at", (o) => o.desc().nullsLast()).limit(5));

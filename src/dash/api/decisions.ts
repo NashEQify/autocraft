@@ -147,8 +147,8 @@ export async function relatedIndex(db: Db): Promise<RelatedIndex> {
     duplicatedBy.set(k, [...(duplicatedBy.get(k) ?? []), r.number]);
   }
   const linkedBy = new Map<string, number[]>();
-  for (const p of await db.all(db.k.selectFrom("main.items").select(["repo", "number", "closing_issues"]).where("kind", "=", "pr").where("closing_issues", "is not", null)
-    .$narrowType<{ closing_issues: NotNull }>().where("closing_issues", "<>", "[]")))
+  for (const p of await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_closing", "i")).select(["i.repo", "i.number", "i.closing_issues"]).where("i.kind", "=", kx.literal("pr")).where("i.closing_issues", "is not", null)
+    .$narrowType<{ closing_issues: NotNull }>().where("i.closing_issues", "<>", kx.literal("[]"))))
     for (const x of json<unknown[]>(p.closing_issues, [])) if (typeof x === "number") linkedBy.set(`${p.repo}#${x}`, [...(linkedBy.get(`${p.repo}#${x}`) ?? []), p.number]);
   return { duplicatedBy, linkedBy };
 }

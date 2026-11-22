@@ -95,9 +95,10 @@ export class Ctx {
   async scopeAnswers(): Promise<Map<string, string>> {
     return (this.answers ??= await scopeAnswers(this.db));
   }
-  /** Items created or closed since `since`. */
+  /** Items created or closed since `since`. Over every repo the named date index reads only the last day; for one repo its own rows are fewer. */
   async recentItems(col: "created_at" | "closed_at"): Promise<number> {
-    return await this.n(this.db.k.selectFrom("main.items").select((eb) => eb.fn.countAll<number>().as("n"))
+    const idx = this.repo ? null : col === "created_at" ? "items_created" : "items_closed";
+    return await this.n(this.db.k.selectFrom(kx.indexedBy(this.db, "main.items", idx, "it")).select((eb) => eb.fn.countAll<number>().as("n"))
       .where(col, ">=", this.since).$if(col === "closed_at", (q) => q.where("state", "<>", "OPEN")).where((eb) => this.tracked(eb)));
   }
 }
