@@ -38,7 +38,8 @@ export function hashColumns(r: Fields): { embed_hash: string; class_hash: string
   return { embed_hash: embedHash(r.title, r.body), class_hash: classifyHash(r), class_scheme: SCHEME_ID };
 }
 
-const FIELDS = "repo, number, kind, title, body, additions, deletions, changed_files, author_association";
+const FIELD_COLUMNS = ["repo", "number", "kind", "title", "body", "additions", "deletions", "changed_files", "author_association"] as const;
+const FIELDS = FIELD_COLUMNS.join(", ");
 const BATCH = 2000;
 
 /** Fills embed_hash where it is missing. Returns the number of rows written. */
@@ -56,8 +57,6 @@ type Fill = {
   source: string; select: string; update: string; values: (r: Fields) => string[];
   read: (db: Db) => Promise<Fields[]>; write: (db: Db, r: Fields) => Promise<unknown>;
 };
-
-const FIELD_COLUMNS = ["repo", "number", "kind", "title", "body", "additions", "deletions", "changed_files", "author_association"] as const;
 
 const EMBED: Fill = {
   source: "embed-hashes", select: `SELECT ${FIELDS} FROM main.items WHERE embed_hash IS NULL LIMIT ${BATCH}`,
