@@ -18,8 +18,8 @@ import { NO_TAKER_MS } from "./remote/takers.ts";
 import { STATUS_FRESH_MS } from "./remote/helpers.ts";
 import { manualExpr } from "./remote/manual-only.ts";
 import { confidentialReadyAt, privateStepExpr } from "./build/tasks.ts";
-import { flatMapSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import { setting } from "./settings-read.ts";
 
 /** Thresholds, in one place. */
 export const THRESHOLDS = {
@@ -74,7 +74,7 @@ const minutes = (ms: number): string => (ms < 90 * 60_000 ? `${Math.max(1, Math.
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 async function runnerCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
-  const hb = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "runner_heartbeat")))?.value ?? null;
+  const hb = (await setting(db, "runner_heartbeat")) ?? null;
   const beat = hb ? Date.parse(hb) : NaN;
   if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) return [ok("runner", "/pipeline")];
   const text = Number.isNaN(beat) ? "The runner has not reported" : `The runner has not reported for ${minutes(nowMs - beat)}`;
@@ -189,7 +189,7 @@ async function accountsCheck({ db, nowMs, probe }: CheckCtx): Promise<Check[]> {
 }
 
 async function rateCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
-  const get = async (k: string) => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", k)))?.value ?? null;
+  const get = async (k: string) => (await setting(db, k)) ?? null;
   const left = Number(await get("sync_rate_remaining"));
   const reset = Date.parse(await get("sync_rate_reset_at") ?? "");
   // A reading from before the last reset says nothing about the new hour.
@@ -237,8 +237,8 @@ async function appIdentityChecks({ db, probe }: CheckCtx): Promise<Check[]> {
 
 /** The last pass that binds contributors' account ids failed: the earlier PRs of the logins it did not bind count toward no tier until a pass succeeds. */
 async function authorIdsCheck({ db }: CheckCtx): Promise<Check[]> {
-  const err = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "author_ids_error")))?.value;
-  const passed = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "author_ids_backfilled")))?.value;
+  const err = await setting(db, "author_ids_error");
+  const passed = await setting(db, "author_ids_backfilled");
   // A pass that succeeded after the error supersedes it.
   if (!err || (passed && passed >= (err.split(" ")[0] ?? ""))) return [ok("author-ids", "/contributors")];
   const n = (await unboundLogins(db)).length;
@@ -332,7 +332,8 @@ const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, workerChe
 
 export async function computeChecks(db: Db, nowMs: number = Date.now(), probe = false): Promise<Check[]> {
   const mode = await inferenceMode(db);
-  return await flatMapSeq(SOURCES, async (f) => await f({ db, nowMs, probe, mode }));
+  // The checks do not depend on each other, so they run together; the list keeps the SOURCES order.
+  return (await Promise.all(SOURCES.map((f) => f({ db, nowMs, probe, mode })))).flat();
 }
 
 /** The answer of GET /healthz/checks for staff: states, times and counts only; no repo, environment, account or error text. */

@@ -20,6 +20,7 @@ import type { SelectQueryBuilder, SqlBool } from "kysely";
 import { filterSeq, mapSeq, reduceSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { setting } from "../../settings-read.ts";
 
 export const NEEDS_PAGE = 30;
 /** Older feedback is not asked for any more; the window also bounds the scans. */
@@ -92,7 +93,7 @@ const feedbackUnion = (db: Db, w: Window): Source => {
   return union;
 };
 
-const ownLogin = async (db: Db): Promise<string> => (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "pipeline_login")))?.value ?? "";
+const ownLogin = async (db: Db): Promise<string> => (await setting(db, "pipeline_login")) ?? "";
 
 /** True when a feedback row is about a quiet pull request: its item, or any item of its decision (batch and duplicate-group members too). */
 async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, memo: Map<string, boolean>): Promise<boolean> {
@@ -107,7 +108,8 @@ async function quietRow(db: Db, r: Pick<Raw, "repo" | "number" | "decision">, me
 }
 
 async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: string } | null, limit: number, staff: boolean): Promise<{ rows: Raw[]; more: boolean; unhandled: number }> {
-  const window = { since: new Date(Date.now() - WINDOW_MS).toISOString(), own: await ownLogin(db), owns: [...await allOwnLogins(db)], bots: reviewBots() };
+  const [own, owns] = await Promise.all([ownLogin(db), allOwnLogins(db)]);
+  const window = { since: new Date(Date.now() - WINDOW_MS).toISOString(), own, owns: [...owns], bots: reviewBots() };
   const unhiddenRepo = <QB extends SelectQueryBuilder<any, "u", any>>(q: QB): QB =>
     (filtered(hidden) ? q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])) : q) as QB;
   const size = limit * 3 + 1;
@@ -123,6 +125,10 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
     }
     return ok;
   };
+  // The unhandled count reads alongside the page.
+  const openRead = db.all(unhiddenRepo(db.k.selectFrom(feedbackUnion(db, { ...window, cur: "9999" }).as("u")).select((eb) => ["u.source", eb.fn.max<number | null>("u.number").as("number"), "u.decision", eb.fn.countAll<number>().as("n")]))
+    .where((eb) => eb.not(kx.ref<SqlBool>("u.handled"))).groupBy(["u.source", (eb) => eb("u.number", "is", null), "u.decision"]));
+  openRead.catch(() => {});
   // Time-ordered, so each source reads its index range; rows that are filtered out make it read on until the page is full.
   const rows: Raw[] = [];
   let pos = cursor ?? { at: "9999", id: "\uffff" };
@@ -135,8 +141,7 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
     if (batch.length < size || !tail) break;
     pos = { at: tail.at, id: tail.id };
   }
-  const open = await db.all(unhiddenRepo(db.k.selectFrom(feedbackUnion(db, { ...window, cur: "9999" }).as("u")).select((eb) => ["u.source", eb.fn.max<number | null>("u.number").as("number"), "u.decision", eb.fn.countAll<number>().as("n")]))
-    .where((eb) => eb.not(kx.ref<SqlBool>("u.handled"))).groupBy(["u.source", (eb) => eb("u.number", "is", null), "u.decision"]));
+  const open = await openRead;
   const unhandled = await reduceSeq(open, async (sum, r) => sum + (await visible(r) ? r.n : 0), 0);
   // What staff wrote about a quiet pull request reaches viewers as the row only, as the decision and conversation APIs give it.
   const quiet = new Map<string, boolean>();

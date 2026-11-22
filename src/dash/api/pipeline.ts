@@ -21,6 +21,7 @@ import { canSeeInternals } from "./staff.ts";
 import { SECURITY_STEP } from "../../security/rules.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { setting } from "../../settings-read.ts";
 
 // Stages of docs/pipeline.md. A stage with registered steps shows them; the
 // mirror also runs on its own timer.
@@ -110,7 +111,7 @@ export async function overview(db: Db, req: Req): Promise<PipelineOverview> {
   const lastSync = raw.find((r) => r.endedAt);
   // A sync error can quote GitHub's answer about any repo: staff read it unless it names a repo hidden from them, viewers read "failed".
   const runs = raw.map((r) => ({ ...r, error: r.error && (canSeeInternals(req) ? blankIfHidden(r.error, hidden) || "failed" : "failed") }));
-  const high = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "org_high_water")))?.value ?? null;
+  const high = (await setting(db, "org_high_water")) ?? null;
   const stages: PipelineStage[] = await mapSeq(STAGES, async (st) => {
     const names = steps.filter((s) => s.stage === st.n).map((s) => s.name);
     const mode = st.automatic ? "automatic" : names.length ? "steps" : "planned";
@@ -119,7 +120,7 @@ export async function overview(db: Db, req: Req): Promise<PipelineOverview> {
       state: mode === "planned" ? "planned" : await stageState(db, names, st.automatic ? (lastSync ? lastSync.error !== null : high ? false : null) : null),
     };
   });
-  const beat = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", HEARTBEAT_KEY)))?.value ?? null;
+  const beat = (await setting(db, HEARTBEAT_KEY)) ?? null;
   const count = async (state: string) => (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", state)
     .$if(filtered(hidden), (q) => q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])))))!.n;
   return {

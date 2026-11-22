@@ -125,29 +125,45 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
-  await needVisible(db, req, repo);
-  const it = await db.get(db.k.selectFrom("items").select(kx.cols("items")).where("repo", "=", repo).where("number", "=", n));
+  // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
+  const [, it] = await Promise.all([needVisible(db, req, repo), db.get(db.k.selectFrom("items").select(kx.cols("items")).where("repo", "=", repo).where("number", "=", n))]);
   if (!it) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
-  const c = it.author ? (await contributors(db, { login: it.author })).find((x) => x.login === it.author) : undefined;
   let labels: string[] = [];
   try {
     const l = JSON.parse(it.labels ?? "[]") as unknown;
     if (Array.isArray(l)) labels = l.filter((x): x is string => typeof x === "string");
   } catch { /* malformed: no labels */ }
-  const stages = await db.all(db.k.selectFrom("stages").select(["stage", "at", "actor as by", "note"]).where("repo", "=", repo).where("number", "=", n)
-    .orderBy("at").orderBy(kx.rowid("stages")).$narrowType<{ stage: Item["stages"][number]["stage"] }>());
-  const comments = await db.all(db.k.selectFrom("comments").select(["id", "author", "created_at as at", "body", "kind", "review_state as reviewState"])
-    .where("repo", "=", repo).where("number", "=", n)
-    .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "=", "")])))
-    .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] | null }>());
-  const decisionIds = (await db.all(db.k.selectFrom("decisions").select("id").where((eb) => eb.or([
-    eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
-    eb.and([eb("number", "is", null), eb.exists(
-      db.k.selectFrom(kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end(), "j")).select(eb.lit(1).as("one"))
-        .where((e) => e.and([e(kx.jsonText(db, "j.value", "$.repo"), "=", repo), e(kx.jsonNum(db, "j.value", "$.number"), "=", n)])))]),
-  ])).orderBy("asked_at"))).map((r) => r.id);
+  const internals = canSeeInternals(req);
+  const pr = it.kind === "pr";
+  // The parts read independently, so they run together.
+  const [c, stages, comments, decisionIds, quiet, files, ciChecks, tracked, related, classifications, area, discordOf, settled, priority, work, checks, reviews, premerge, postmerge, actions, releases, slots, preapproval] = await Promise.all([
+    it.author ? contributors(db, { login: it.author }).then((cs) => cs.find((x) => x.login === it.author)) : undefined,
+    db.all(db.k.selectFrom("stages").select(["stage", "at", "actor as by", "note"]).where("repo", "=", repo).where("number", "=", n)
+      .orderBy("at").orderBy(kx.rowid("stages")).$narrowType<{ stage: Item["stages"][number]["stage"] }>()),
+    db.all(db.k.selectFrom("comments").select(["id", "author", "created_at as at", "body", "kind", "review_state as reviewState"])
+      .where("repo", "=", repo).where("number", "=", n)
+      .where((eb) => eb.not(eb.and([eb("kind", "=", "review"), eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "=", "")])))
+      .orderBy("created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments")).$narrowType<{ kind: ItemComment["kind"] | null }>()),
+    db.all(db.k.selectFrom("decisions").select("id").where((eb) => eb.or([
+      eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
+      eb.and([eb("number", "is", null), eb.exists(
+        db.k.selectFrom(kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end(), "j")).select(eb.lit(1).as("one"))
+          .where((e) => e.and([e(kx.jsonText(db, "j.value", "$.repo"), "=", repo), e(kx.jsonNum(db, "j.value", "$.number"), "=", n)])))]),
+    ])).orderBy("asked_at")).then((rows) => rows.map((r) => r.id)),
+    isQuiet(db, repo, n),
+    pr ? filesOf(db, repo, n) : [], pr ? ciChecksOf(db, repo, n) : [],
+    db.get(db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo)),
+    relatedOf(db, repo, n), classificationsOf(db, repo, n), areaNameOf(db, repo, n), discord.discordOf(db, repo, n), settledOf(db, repo, n), priorityOf(db, repo, n),
+    pr ? prWork(db, repo, n, internals) : { verification: null, fixups: [], prBuild: null },
+    checksOf(db, repo, n),
+    pr ? hiddenRepos(db, req).then((hidden) => reviewsOf(db, repo, n, internals, hidden)) : null,
+    pr ? premergeOf(db, repo, n) : [], pr ? postmergeOf(db, repo, n, internals) : null,
+    actionsOf(db, repo, n), releasesOf(db, repo, n),
+    visibleRepos(db, req).then((v) => queueSlots(db, v)),
+    pr ? preapprovalOf(db, repo, n) : null,
+  ]);
   // The quiet pull request of a security fix: viewers get none of the model text about it.
-  const veil = !canSeeInternals(req) && await isQuiet(db, repo, n);
+  const veil = !internals && quiet;
   const out: Item = {
     repo, number: n, kind: it.kind === "pr" ? "pr" : "issue",
     title: it.title ?? "", body: it.body ?? "", state: itemState(it.state), author: it.author ?? "",
@@ -160,24 +176,24 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     mergeable: MERGEABLE[it.mergeable ?? ""] ?? "unknown",
     labels, createdAt: it.created_at ?? "", updatedAt: it.updated_at ?? "",
     closedAt: it.closed_at, mergedAt: it.merged_at, mergedBy: it.merged_by,
-    pipelineOn: (await db.get(db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo)))?.pipeline === 1,
-    related: await relatedOf(db, repo, n), classifications: await classificationsOf(db, repo, n), area: await areaNameOf(db, repo, n),
+    pipelineOn: tracked?.pipeline === 1,
+    related, classifications, area,
     // Stage notes quote review reasons, verification summaries and fix-up reasons: staff only.
-    stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: canSeeInternals(req) ? s.note : null })),
-    discord: await discord.discordOf(db, repo, n),
+    stages: stages.map((s) => ({ ...s, by: s.by ?? "", note: internals ? s.note : null })),
+    discord: discordOf,
     comments: comments.map((x) => ({ ...x, author: x.author ?? "", body: x.body ?? "" })),
-    decisionIds, settled: unflagged(await settledOf(db, repo, n), await isQuiet(db, repo, n), !veil) as Item["settled"], priority: await priorityOf(db, repo, n),
-    ...(it.kind === "pr" ? await prWork(db, repo, n, canSeeInternals(req)) : { verification: null, fixups: [], prBuild: null }),
+    decisionIds, settled: unflagged(settled, quiet, !veil) as Item["settled"], priority,
+    ...work,
     // The reviewer's reasons quote the patch, so viewers get the verdict only.
-    patchChecks: (await checksOf(db, repo, n)).map(({ kind, subject, patchHash, round, verdict, reasons, problems, model, createdAt }) =>
-      ({ kind, subject, patchHash, round, verdict, reasons: canSeeInternals(req) ? reasons : "", problems: canSeeInternals(req) ? problems : [], model, createdAt })),
-    reviews: it.kind === "pr" ? await reviewsOf(db, repo, n, canSeeInternals(req), await hiddenRepos(db, req)) : null,
-    premerge: it.kind === "pr" ? await premergeOf(db, repo, n) : [],
-    postmerge: it.kind === "pr" ? await postmergeOf(db, repo, n, canSeeInternals(req)) : null,
-    actions: await actionsOf(db, repo, n), releases: await releasesOf(db, repo, n),
-    queue: (await queueSlots(db, await visibleRepos(db, req))).get(`${repo}#${n}`) ?? null,
+    patchChecks: checks.map(({ kind, subject, patchHash, round, verdict, reasons, problems, model, createdAt }) =>
+      ({ kind, subject, patchHash, round, verdict, reasons: internals ? reasons : "", problems: internals ? problems : [], model, createdAt })),
+    reviews,
+    premerge,
+    postmerge,
+    actions, releases,
+    queue: slots.get(`${repo}#${n}`) ?? null,
     // The operator's instructions are shown to those who see the internals only.
-    ...(it.kind === "pr" ? { preapproval: ((p) => (p && !canSeeInternals(req) ? { ...p, instructions: "" } : p))(await preapprovalOf(db, repo, n)) } : {}),
+    ...(pr ? { preapproval: preapproval && !internals ? { ...preapproval, instructions: "" } : preapproval } : {}),
   };
   if (!veil) return out;
   return {

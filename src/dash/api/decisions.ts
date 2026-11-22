@@ -323,13 +323,39 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   const singles = ds.filter((d) => !isBatch(d)).map((d) => ({ repo: d.repo!, number: d.number! }));
   const refs = singles.map((r) => [r.repo, r.number] as [string, number]);
   const itemRows = (of: [string, number][]) => db.all(db.k.selectFrom("items").select(["repo", "number", "title", "body", "kind", "state", "closing_issues"]).where(kx.refIn(db, "items", of)));
+  const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
+  const adoptedIds = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
+  const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h] as [string, number, string]] : []; });
+  const groupIds = ds.filter(isGroup).map((d) => d.id);
+  // The page's reads do not depend on each other, so they run together.
+  const [itemsRead, dupRows, shown, opinions, adopted, claims, comments, classes, areas, priority, risks, groups, texts, quiet, members] = await Promise.all([
+    itemRows(refs),
+    // In dup_of order, as the (repo, dup_of) index gives them to the one-item read.
+    db.all(db.k.selectFrom("classifications").select(["repo", "number", "dup_of"]).distinct().where(kx.refIn(db, "classifications", refs))
+      .where("dup_of", "is not", null).$narrowType<{ dup_of: NotNull }>().orderBy("repo").orderBy("number").orderBy("dup_of")),
+    batchRefs.length ? shownMap(db, batchRefs) : undefined,
+    db.all(db.k.selectFrom("decision_opinions").select(["decision_id", "id", "login", "option", "note", "at", "permission", "via"])
+      .where(kx.inList(db, "decision_id", ids)).where("retracted_at", "is", null).orderBy("decision_id").orderBy("at", "desc")),
+    adoptedIds.length ? db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where(kx.inList(db, "id", adoptedIds))) : [],
+    db.all(db.k.selectFrom("decision_claims").select(["decision_id", "login", "since"]).where(kx.inList(db, "decision_id", ids))
+      .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("decision_id").orderBy("at", "desc")),
+    db.all(db.k.selectFrom("decision_comments").select(["decision_id", (eb) => eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "decision_id", ids)).groupBy("decision_id")),
+    // In the primary key's order within an item, as the one-item read walks it.
+    singles.length ? db.all(db.k.selectFrom("classifications").select(["repo", "number", "classifier", "at", "type_label", "want", "reference", "reason", "dup_of"])
+      .where(kx.refIn(db, "classifications", refs)).orderBy("repo").orderBy("number").orderBy("classifier").orderBy("run_id")) : [],
+    singles.length ? db.all(db.k.selectFrom("item_areas").select(["repo", "number", "area"]).where(kx.refIn(db, "item_areas", refs))) : [],
+    singles.length ? db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).$narrowType<{ impact: Level }>().where(kx.refIn(db, "item_priority", refs))) : [],
+    heads.length ? db.all(db.k.selectFrom("opus_reviews").select(["repo", "number", "head_oid", "risks"])
+      .where(kx.tupleIn(db, ["repo", "number", "head_oid"], heads, ["text", "bigint", "text"])).where("verdict", "is not", null)) : [],
+    groupIds.length ? db.all(groupRows(db).where(kx.inList(db, "gi.decision_id", groupIds))) : [],
+    groupIds.length ? optionTextsMany(db, groupIds) : undefined,
+    viewer.staff ? undefined : quietFixPrs(db),
+    viewer.staff ? [] : db.all(db.k.selectFrom("dupe_group_items").select(["decision_id", "repo", "number"]).where(kx.inList(db, "decision_id", ids))),
+  ]);
   const items = new Map<string, PageItem>();
-  for (const r of await itemRows(refs)) items.set(keyOf(r), r);
+  for (const r of itemsRead) items.set(keyOf(r), r);
   const dupOf = new Map<string, number[]>();
-  // In dup_of order, as the (repo, dup_of) index gives them to the one-item read.
-  for (const r of await db.all(db.k.selectFrom("classifications").select(["repo", "number", "dup_of"]).distinct().where(kx.refIn(db, "classifications", refs))
-    .where("dup_of", "is not", null).$narrowType<{ dup_of: NotNull }>().orderBy("repo").orderBy("number").orderBy("dup_of")))
-    pushTo(dupOf, keyOf(r), r.dup_of);
+  for (const r of dupRows) pushTo(dupOf, keyOf(r), r.dup_of);
   const page: DecisionPage = {
     items, shown: new Map(), opinions: new Map(), adopted: new Map(), claims: new Map(), comments: new Map(), classes: new Map(), dupOf,
     areas: new Map(), priority: new Map(), risks: new Map(), groups: new Map(), texts: new Map(), members: new Map(),
@@ -339,47 +365,28 @@ export async function decisionPage(db: Db, ds: DecisionRow[], viewer: Viewer): P
   for (const r of singles) for (const x of await relatedNumbers(db, r.repo, r.number, viewer.related, page)) if (!items.has(`${r.repo}#${x.number}`)) related.set(`${r.repo}#${x.number}`, [r.repo, x.number]);
   if (related.size) for (const r of await itemRows([...related.values()])) items.set(keyOf(r), r);
 
-  const batchRefs = ds.filter(isBatch).flatMap((d) => itemsOf(d));
-  if (batchRefs.length) page.shown = await shownMap(db, batchRefs);
-  for (const o of await db.all(db.k.selectFrom("decision_opinions").select(["decision_id", "id", "login", "option", "note", "at", "permission", "via"])
-    .where(kx.inList(db, "decision_id", ids)).where("retracted_at", "is", null).orderBy("decision_id").orderBy("at", "desc"))) {
+  if (shown) page.shown = shown;
+  for (const o of opinions) {
     const { decision_id, ...op } = o;
     pushTo(page.opinions, decision_id, op);
   }
-  const adopted = ds.flatMap((d) => (d.adopted_opinion ? [d.adopted_opinion] : []));
-  if (adopted.length) for (const o of await db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where(kx.inList(db, "id", adopted)))) page.adopted.set(o.id, o);
-  for (const c of await db.all(db.k.selectFrom("decision_claims").select(["decision_id", "login", "since"]).where(kx.inList(db, "decision_id", ids))
-    .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("decision_id").orderBy("at", "desc")))
-    if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
-  for (const c of await db.all(db.k.selectFrom("decision_comments").select(["decision_id", (eb) => eb.fn.countAll<number>().as("n")]).where(kx.inList(db, "decision_id", ids)).groupBy("decision_id"))) page.comments.set(c.decision_id, c.n);
-  if (singles.length) {
-    // In the primary key's order within an item, as the one-item read walks it.
-    for (const c of await db.all(db.k.selectFrom("classifications").select(["repo", "number", "classifier", "at", "type_label", "want", "reference", "reason", "dup_of"])
-      .where(kx.refIn(db, "classifications", refs)).orderBy("repo").orderBy("number").orderBy("classifier").orderBy("run_id"))) {
-      const { repo, number, ...row } = c;
-      pushTo(page.classes, `${repo}#${number}`, row);
-    }
-    for (const a of await db.all(db.k.selectFrom("item_areas").select(["repo", "number", "area"]).where(kx.refIn(db, "item_areas", refs)))) page.areas.set(keyOf(a), a.area);
-    for (const p of await db.all(db.k.selectFrom("item_priority").select(["repo", "number", "impact", "model", "reason"]).$narrowType<{ impact: Level }>().where(kx.refIn(db, "item_priority", refs))))
-      page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
+  for (const o of adopted) page.adopted.set(o.id, o);
+  for (const c of claims) if (!page.claims.has(c.decision_id)) page.claims.set(c.decision_id, { login: c.login, since: c.since });
+  for (const c of comments) page.comments.set(c.decision_id, c.n);
+  for (const c of classes) {
+    const { repo, number, ...row } = c;
+    pushTo(page.classes, `${repo}#${number}`, row);
   }
-  const heads = ds.flatMap((d) => { const h = riskHead(d); return h ? [[d.repo!, d.number!, h] as [string, number, string]] : []; });
-  if (heads.length) for (const o of await db.all(db.k.selectFrom("opus_reviews").select(["repo", "number", "head_oid", "risks"])
-    .where(kx.tupleIn(db, ["repo", "number", "head_oid"], heads, ["text", "bigint", "text"])).where("verdict", "is not", null)))
-    page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
-  const groups = ds.filter(isGroup).map((d) => d.id);
-  if (groups.length) {
-    for (const g of await db.all(groupRows(db).where(kx.inList(db, "gi.decision_id", groups)))) {
-      const { decision_id, ...row } = g;
-      pushTo(page.groups, decision_id, row);
-    }
-    page.texts = await optionTextsMany(db, groups);
+  for (const a of areas) page.areas.set(keyOf(a), a.area);
+  for (const p of priority) page.priority.set(keyOf(p), { level: p.impact, model: p.model, reason: p.reason });
+  for (const o of risks) page.risks.set(`${o.repo}#${o.number}@${o.head_oid}`, { risks: o.risks });
+  for (const g of groups) {
+    const { decision_id, ...row } = g;
+    pushTo(page.groups, decision_id, row);
   }
-  if (!viewer.staff) {
-    page.quiet = await quietFixPrs(db);
-    for (const m of await db.all(db.k.selectFrom("dupe_group_items").select(["decision_id", "repo", "number"]).where(kx.inList(db, "decision_id", ids))))
-      pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
-  }
+  if (texts) page.texts = texts;
+  if (quiet) page.quiet = quiet;
+  for (const m of members) pushTo(page.members, m.decision_id, { repo: m.repo, number: m.number });
   return page;
 }
 
@@ -615,9 +622,14 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   const rowOf = new Map((shownIds.length ? await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where(kx.inList(db, "id", shownIds.map((r) => r.id)))) as DecisionRow[] : []).map((d) => [d.id, d]));
   const shown = shownIds.map((r) => rowOf.get(r.id)!);
   const viewer = shown.length ? await viewerWith(db, req) : viewerOf(req);
-  viewer.prep = await prepareStates(db, shown);
-  if (shown.some((d) => d.answer === null)) viewer.blocks = await blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN));
-  if (shown.some((d) => d.number !== null)) viewer.related = await relatedIndex(db);
+  const [prep, blocks, related] = await Promise.all([
+    prepareStates(db, shown),
+    shown.some((d) => d.answer === null) ? blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)) : undefined,
+    shown.some((d) => d.number !== null) ? relatedIndex(db) : undefined,
+  ]);
+  viewer.prep = prep;
+  if (blocks) viewer.blocks = blocks;
+  if (related) viewer.related = related;
   if (shown.length) viewer.page = await decisionPage(db, shown, viewer);
   return {
     decisions: await mapSeq(shown, async (d) => await toDecision(db, d, viewer)), total, byKind, oldestAskedAt,

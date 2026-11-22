@@ -17,7 +17,7 @@ export const knownSlugs = async (db: Db): Promise<string[]> => parseSlugs(await 
 /** Records `slug` in the persisted list when it is new. */
 export async function rememberSlug(db: Db, slug: string): Promise<void> {
   // Read from the table, not a pass snapshot: another connection may have recorded a slug since the pass began.
-  const known = parseSlugs((await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", SLUGS_KEY)))?.value ?? undefined);
+  const known = parseSlugs((await setting(db, SLUGS_KEY)) ?? undefined);
   if (known.includes(slug)) return;
   await writeSetting(db, SLUGS_KEY, JSON.stringify([...known, slug]));
 }

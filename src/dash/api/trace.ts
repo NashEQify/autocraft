@@ -16,10 +16,11 @@ import { blankIfHidden, hiddenRepos, needVisible } from "./visible.ts";
 import { reasonsFor, waitFor, type Reader } from "./reader.ts";
 import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
 import { ownLogins } from "../../github/identity.ts";
-import { flatMapSeq, mapSeq } from "../../async-seq.ts";
+import { mapSeq } from "../../async-seq.ts";
 import type { AliasedExpression, AliasableExpression, SelectQueryBuilder, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
+import { setting } from "../../settings-read.ts";
 
 export type Ev = TraceEvent & { detail?: Record<string, unknown> };
 /** `staff`: operators and maintainers; `hidden`: repos the viewer may not see, whose runs are left out like getRun does. */
@@ -428,7 +429,8 @@ export function veilEvent(e: Ev): Ev {
 
 export async function gather(c: Ctx, kinds: Set<TraceKind> | null): Promise<Ev[]> {
   const all: Ev[] = [];
-  for (const e of await flatMapSeq(SOURCES, async (s) => await s.run(c))) {
+  // The sources read independently, so they run together; events keep the SOURCES order.
+  for (const e of (await Promise.all(SOURCES.map((s) => s.run(c)))).flat()) {
     if (c.veiled && VEILED_KINDS.includes(e.kind)) continue;
     const at = iso(e.at);
     if (at) all.push({ ...(c.veiled ? veilEvent(e) : e), at, ...(c.staff ? {} : { summary: plainSummary(c.veiled ? veilEvent(e) : e) }) });
@@ -536,10 +538,12 @@ export async function context(db: Db, req: Req): Promise<Ctx> {
   const repo = req.params.repo!;
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
-  await needVisible(db, req, repo);
-  if (!await db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n))) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
-  const box = (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "pipeline_login")))?.value ?? "";
-  return { db, repo, n, ref: `${repo}#${n}`, own: await ownLogins(db, repo), box, staff: canSeeInternals(req), veiled: !canSeeInternals(req) && await isQuiet(db, repo, n), operator: req.user.role === "operator", hidden: await hiddenRepos(db, req) };
+  // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
+  const [, found] = await Promise.all([needVisible(db, req, repo), db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n))]);
+  if (!found) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
+  const staff = canSeeInternals(req);
+  const [box, own, veiled, hidden] = await Promise.all([setting(db, "pipeline_login"), ownLogins(db, repo), !staff && isQuiet(db, repo, n), hiddenRepos(db, req)]);
+  return { db, repo, n, ref: `${repo}#${n}`, own, box: box ?? "", staff, veiled, operator: req.user.role === "operator", hidden };
 }
 
 /**

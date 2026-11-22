@@ -30,11 +30,12 @@ export type Stages = Map<string, Entry[]>;
 
 /** Work score of an item with fast-tracked ones raised, one lookup per repo. */
 export function scoreLookup(db: Db): (repo: string, number: number) => Promise<number | undefined> {
-  const by = new Map<string, Map<number, number>>();
+  // The read in flight is kept, so lookups made together read each repo once.
+  const by = new Map<string, Promise<Map<number, number>>>();
   return async (repo, number) => {
     let m = by.get(repo);
-    if (!m) by.set(repo, (m = await workScores(db, repo)));
-    return m.get(number);
+    if (!m) by.set(repo, (m = workScores(db, repo)));
+    return (await m).get(number);
   };
 }
 

@@ -36,6 +36,7 @@ import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import type { Expression, SqlBool } from "kysely";
+import { setting } from "../../settings-read.ts";
 
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;
@@ -139,7 +140,7 @@ export function clearContributorCache(db: Db): void {
   contributorCache.delete(db);
 }
 async function cachedContributors(db: Db, repo: string | undefined): Promise<Row[]> {
-  const hw = (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "org_high_water")))?.value ?? null;
+  const hw = (await setting(db, "org_high_water")) ?? null;
   const byRepo = contributorCache.get(db) ?? new Map<string, { at: number; hw: string | null; rows: Row[] }>();
   contributorCache.set(db, byRepo);
   const key = repo ?? "";

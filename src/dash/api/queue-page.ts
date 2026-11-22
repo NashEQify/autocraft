@@ -21,7 +21,7 @@ import { toBatch, toRow } from "./queue.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
 import { readerOf, statusFor, veiledFor, type Reader } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
-import { flatMapSeq, mapSeq } from "../../async-seq.ts";
+import { flatMapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../../db/kx.ts";
@@ -76,13 +76,26 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const visible = await visibleRepos(db, req);
   const visibleSet = new Set(visible);
   if (reposParam !== "pipeline" && reposParam !== "all" && !visibleSet.has(reposParam)) throw new HttpError(404, `${reposParam} is not a tracked repo`);
-  const scoped = reposParam === "pipeline" ? new Set([...await openViews(db)].filter(([, v]) => v.scope).map(([k]) => k)) : null;
-  const fast = new Map([...await fastPositions(db)].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))));
+  const internals = canSeeInternals(req);
+  // The page's reads do not depend on each other, so they run together.
+  const [views, fastAll, holds, allEntries, slots, ranked, reader, closes, originOf] = await Promise.all([
+    reposParam === "pipeline" ? openViews(db) : null, fastPositions(db),
+    db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"])),
+    // Work rows (All, Review, Fix, Verify): each item's next step is the one its cached Plan stored; the position badges read the same rows.
+    cachedQueue(db, { merged: "exclude" }), queueSlots(db, visible),
+    db.all(db.k.selectFrom("items as i").innerJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+      .leftJoin("item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+      .select(["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
+      .where("i.state", "=", "OPEN").orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number")),
+    readerOf(db, req), closingIssues(db), queueOrigins(db, internals),
+  ]);
+  const scoped = views ? new Set([...views].filter(([, v]) => v.scope).map(([k]) => k)) : null;
+  const fast = new Map([...fastAll].filter(([k]) => visibleSet.has(k.slice(0, k.lastIndexOf("#")))));
   // The default view is the pipeline's scope (src/rank/position.ts), the same one the position badges count.
   const inScope = (repo: string, number: number): boolean =>
     reposParam === "all" ? visibleSet.has(repo) : reposParam === "pipeline" ? visibleSet.has(repo) && scoped!.has(`${repo}#${number}`) : repo === reposParam;
   const fastOf = (repo: string, number: number): FastPosition | null => fast.get(`${repo}#${number}`) ?? null;
-  const held = new Set((await db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
+  const held = new Set(holds.map((r) => `${r.repo}#${r.number}`));
 
   // A linked item (`item=repo:number`) comes with the first page: it is cut long enough to include the item.
   const item = req.query.get("item");
@@ -95,16 +108,9 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     return at === null ? limit : Math.min(500, Math.max(limit, Math.ceil((at + 1) / 100) * 100));
   };
 
-  // Work rows (All, Review, Fix, Verify): each item's next step is the one its cached Plan stored; the position badges read the same rows.
-  const allEntries = await cachedQueue(db, { merged: "exclude" });
-  const slots = await queueSlots(db, visible);
   const score = scoreLookup(db);
-  const ranked = await db.all(db.k.selectFrom("items as i").innerJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
-    .leftJoin("item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
-    .select(["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
-    .where("i.state", "=", "OPEN").orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number"));
   // Fast-tracked items (and the Fix PRs of fast-tracked issues) first, then the work rank.
-  const inView = await mapSeq(ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)), async (r) => ({ r, s: await score(r.repo, r.number) ?? r.score }));
+  const inView = await Promise.all(ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)).map(async (r) => ({ r, s: await score(r.repo, r.number) ?? r.score })));
   inView.sort((a, b) => b.s - a.s);
   const work: QueueWorkRow[] = inView.map(({ r }) => {
     const bd = JSON.parse(r.breakdown) as RankBreakdown;
@@ -117,10 +123,6 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
 
   // Merge queue rows
   const entries = allEntries.filter((e) => e.state !== "merged" && visibleSet.has(e.repo) && inScope(e.repo, e.number));
-  const internals = canSeeInternals(req);
-  const reader = await readerOf(db, req);
-  const closes = await closingIssues(db);
-  const originOf = await queueOrigins(db, internals);
   const asRow = async (e: CachedEntry): Promise<QueueMergeRow> => ({ ...toRow(e, reader), fast: fastOf(e.repo, e.number), held: e.held, prBuild: await prBuildView(db, e.repo, e.number, e.head, internals), closes: closes.get(`${e.repo}#${e.number}`) ?? [], added: await originOf(e) });
   // Tabs come from the stored next step; the text is veiled afterwards, so a quiet pull request stays in its tab.
   const tabOf = new Map(work.map((w) => [w, tabOfNext(w.next)]));
@@ -138,12 +140,19 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
     out.next = offset + out.rows.length < match.length ? offset + out.rows.length : null;
     return out;
   }
-  const { batches } = await pageBatches(db, { hidden: reader.hidden, limit: 100 });
+  const [{ batches }, rows, rankRows, ordered] = await Promise.all([
+    pageBatches(db, { hidden: reader.hidden, limit: 100 }),
+    Promise.all(entries.map(async (e) => [e, await asRow(e)] as const)),
+    db.all(db.k.selectFrom("item_rank").select(["repo", "number", "score"])),
+    mergeOrder(db, entries),
+  ]);
   const active = batches.filter((b) => (b.state === "checking" || b.state === "open") && b.prs.some((p) => inScope(b.repo, p.number)));
-  const rowOf = new Map(await mapSeq(entries, async (e) => [`${e.repo}#${e.number}`, await asRow(e)]));
+  const rowOfEntry = new Map(rows);
+  const rowOf = new Map(rows.map(([e, r]) => [`${e.repo}#${e.number}`, r]));
   const batchOf = new Map(active.flatMap((b) => b.prs.map((p) => [`${b.repo}#${p.number}`, { id: b.id, branch: b.branch }] as const)));
-  const scores = new Map((await db.all(db.k.selectFrom("item_rank").select(["repo", "number", "score"]))).map((r) => [`${r.repo}#${r.number}`, r.score]));
-  const free = await mapSeq((await mergeOrder(db, entries)), asRow);
+  const scores = new Map(rankRows.map((r) => [`${r.repo}#${r.number}`, r.score]));
+  // The merge rows are the ones built above, in merge order.
+  const free = ordered.map((e) => rowOfEntry.get(e)!);
   out.itemIndex = indexOf(free);
   out.mergeRows = free.slice(offset, offset + sizeFor(free, offset));
   out.total = free.length;
@@ -163,26 +172,27 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
 async function pendingRows(db: Db, entries: CachedEntry[], all: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "decisionId" | "reviewedAt">) => Promise<QueueOrigin>,
   fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>, reader: Reader, staff: boolean): Promise<QueuePendingRow[]> {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
-  const rows = await db.all(db.k.selectFrom("preapprovals as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+  const [rows, fast] = await Promise.all([db.all(db.k.selectFrom("preapprovals as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
     .leftJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "p.repo").onRef("r.number", "=", "p.number"))
     .select(["p.repo", "p.number", "p.state", "i.title", "i.author", "r.breakdown"]).$narrowType<{ state: "fixup" | "review" | "ci" }>()
-    .where("p.state", "in", ["fixup", "review", "ci"]).where("i.state", "=", "OPEN").where("i.kind", "=", "pr").orderBy("p.id"));
-  const seen = new Set<string>();
-  const sizeOf = (breakdown: string | null) => (breakdown ? ((JSON.parse(breakdown) as RankBreakdown).size ?? null) : null);
-  const prs = await flatMapSeq(rows, async (p): Promise<QueuePendingRow[]> => {
-    const k = `${p.repo}#${p.number}`;
-    if (seen.has(k) || queued.has(k) || !want(p.repo, p.number)) return [];
-    seen.add(k);
-    return [{
-      repo: p.repo, number: p.number, kind: "pr", title: p.title ?? "", author: p.author ?? "", size: sizeOf(p.breakdown), step: p.state,
-      fast: fastOf(p.repo, p.number), held: held.has(k), added: await originOf({ repo: p.repo, number: p.number, decisionId: null, reviewedAt: "" }),
-    }];
-  });
-  const fast = await db.all(db.k.selectFrom("main.fast_track as f").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number"))
+    .where("p.state", "in", ["fixup", "review", "ci"]).where("i.state", "=", "OPEN").where("i.kind", "=", "pr").orderBy("p.id")),
+    db.all(db.k.selectFrom("main.fast_track as f").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "f.repo").onRef("i.number", "=", "f.number"))
     .leftJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number"))
     .leftJoin("item_plans as pl", (j) => j.onRef("pl.repo", "=", "f.repo").onRef("pl.number", "=", "f.number"))
     .select(["f.repo", "f.number", "i.title", "i.author", "r.breakdown", "f.added_by", "f.added_at", kx.jsonText(db, "pl.view", "$.next").as("next")])
-    .where("i.state", "=", "OPEN").where("i.kind", "=", "issue").orderBy("f.weight", "desc").orderBy("f.id"));
+    .where("i.state", "=", "OPEN").where("i.kind", "=", "issue").orderBy("f.weight", "desc").orderBy("f.id"))]);
+  const seen = new Set<string>();
+  const sizeOf = (breakdown: string | null) => (breakdown ? ((JSON.parse(breakdown) as RankBreakdown).size ?? null) : null);
+  const shownPrs = rows.filter((p) => {
+    const k = `${p.repo}#${p.number}`;
+    if (seen.has(k) || queued.has(k) || !want(p.repo, p.number)) return false;
+    seen.add(k);
+    return true;
+  });
+  const prs = await Promise.all(shownPrs.map(async (p): Promise<QueuePendingRow> => ({
+    repo: p.repo, number: p.number, kind: "pr", title: p.title ?? "", author: p.author ?? "", size: sizeOf(p.breakdown), step: p.state,
+    fast: fastOf(p.repo, p.number), held: held.has(`${p.repo}#${p.number}`), added: await originOf({ repo: p.repo, number: p.number, decisionId: null, reviewedAt: "" }),
+  })));
   // Listed in any scope: a closing PR queued outside the view's scope still stands for the issue.
   const shownAll = new Set(all.filter((e) => e.held || !UNSHOWN_STATES.has(e.state)).map((e) => `${e.repo}#${e.number}`));
   const queuedAll = new Set(all.map((e) => `${e.repo}#${e.number}`));

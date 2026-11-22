@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import type { AddressInfo } from "node:net";
 import { LOGIN, checkGithubId, getAccess } from "../../access.ts";
 import { audit, auditRefusedSignIn } from "../audit.ts";
-import type { Req, Res, Role, Route } from "../types.ts";
+import type { Res, Role, Route } from "../types.ts";
 import { isLoopbackHost, type Config } from "./config.ts";
 import { resealLegacyValues } from "./reseal.ts";
 import { pkceChallenge, randomToken, safeEqual, TokenBox } from "./crypto.ts";
@@ -34,6 +34,7 @@ import { FakeProvider, WRITE_PERMISSIONS, GitHubProvider, oauthProviderFor, prov
 import { retryWaiting } from "../../github/user-lane.ts";
 import { appPermission } from "../../remote/permission.ts";
 import { cachedWrite, createSession, deleteSession, loadSession, makeUser, PERM_READ_TTL, pruneExpired, SESSION_TTL, userForLogin, type Session } from "./sessions.ts";
+import { readSettingsSnapshot, withSettingsSnapshot, type SettingsSnapshot } from "../../settings-read.ts";
 import { answering, handleMcp, mcpReply, writes as mcpWrites, type Msg as McpMsg, type Reply as McpReply } from "../mcp/index.ts";
 import { loadToken, pruneTokens, type McpCaller } from "../mcp/tokens.ts";
 import { sha256hex } from "./crypto.ts";
@@ -363,7 +364,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     }
   }
 
-  async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, session: Session): Promise<void> {
+  async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL, nonce: string, session: Session, snapshot?: Promise<SettingsSnapshot>): Promise<void> {
     const method = req.method;
     const out = (r: Res, cookies?: string[]) =>
       send(res, nonce, { ...r, headers: { ...r.headers, [CSRF_HEADER]: session.csrf } }, cookies);
@@ -388,13 +389,14 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       if (wait) return out({ status: 429, json: { error: "too many requests; wait a moment" }, headers: { "retry-after": String(wait) } });
     }
     if (route.operator && session.role !== "operator") return out(apiError(403, "operators only"));
-    const r: Req = {
+    const run = async (): Promise<Res> => await route.handler(db, {
       method, path: url.pathname, params: params!, query: url.searchParams, form: new URLSearchParams(), json,
       user: makeUser(db, box, provider, session, writes, await githubIdentity(db) === "app"),
       scope: route.scoped && !writes ? scopeOf(req) : null,
       csrf: session.csrf, ip: clientIp(req), nonce,
-    };
-    const res2 = await route.handler(db, r);
+    });
+    // A read request takes its settings from one reading of the table, as a planner pass does.
+    const res2 = writes ? await run() : await withSettingsSnapshot(db, run, snapshot);
     // The writer sees its own change at once; other processes' writes arrive on the watcher's next read.
     if (writes) await live.poke();
     return out(res2);
@@ -595,8 +597,11 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         await pruneTokens(db);
         void vault.sweepRevocations().catch(() => {});
       }
-      // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep.
-      if (await db.get(db.k.selectFrom("user_token_revocations").select("id").where("attempts", "=", 0).limit(1))) void vault.sweepRevocations(true).catch(() => {});
+      // A revoked session's token is revoked at once, not at the next hourly sweep; failures are retried by that sweep. The check
+      // runs alongside the session read; routes that return before it leave it running on its own.
+      const revocations = db.get(db.k.selectFrom("user_token_revocations").select("id").where("attempts", "=", 0).limit(1))
+        .then((r) => { if (r) void vault.sweepRevocations(true).catch(() => {}); });
+      revocations.catch(() => {});
       // Dev auth lets anyone who reaches the port sign in as any login, so
       // a request that came through a proxy or under a public name is refused.
       if (config.devAuth && (req.headers["x-forwarded-for"] !== undefined || !isLoopbackHost(req.headers.host))) {
@@ -627,7 +632,10 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       if (method === "GET" && url.pathname === DISCORD_TERMS_PATH) return send(res, nonce, { html: discordTermsPage(nonce, await contactOf(db)) });
       // Public: the favicon and the preview image, which sign-in pages and link-preview crawlers load without a session.
       if (method === "GET" && PUBLIC_FILES.has(url.pathname)) return await sendWeb(res, nonce, url.pathname);
-      const session = await loadSession(db, cookies.get(SESSION_COOKIE));
+      // A read request's settings snapshot is read with the session (handleApi).
+      const snapshot = method === "GET" && url.pathname.startsWith("/api/") && url.pathname !== "/api/live" ? readSettingsSnapshot(db) : undefined;
+      snapshot?.catch(() => {});
+      const [session] = await Promise.all([loadSession(db, cookies.get(SESSION_COOKIE)), revocations, snapshot]);
       if (!session) {
         const wantsPage = method === "GET" && /text\/html/.test(String(req.headers.accept ?? ""));
         if (wantsPage) {
@@ -640,7 +648,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         return send(res, nonce, { status: 401, json: { error: "sign-in required" } });
       }
       if (method === "GET" && url.pathname === "/api/live") return await handleLive(req, res, nonce, session);
-      if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url, nonce, session);
+      if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url, nonce, session, snapshot);
       if (url.pathname === "/img") return await sendImage(req, res, url, session);
       // Every other address belongs to the React app, which routes on the client.
       if (method === "GET") return await sendWeb(res, nonce, url.pathname);
