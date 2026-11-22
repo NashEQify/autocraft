@@ -298,6 +298,11 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["remote_calls", "bound_slot", "INTEGER NOT NULL DEFAULT 0"],
   // The login whose conversation message the reply that wrote the choices answered.
   ["decision_choices", "asked_by", "TEXT"],
+  // Build pod placement and capacity (src/build/pods.ts, src/build/sizing.ts).
+  ["build_pod_runs", "node", "TEXT"],
+  ["build_pod_runs", "reserved_cpu_m", "INTEGER"],
+  ["build_pod_runs", "reserved_mem_bytes", "INTEGER"],
+  ["build_pod_runs", "disruptions", "INTEGER NOT NULL DEFAULT 0"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

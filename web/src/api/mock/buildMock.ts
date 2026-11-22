@@ -34,7 +34,8 @@ const envs: BuildEnv[] = [
       warm: [{ key: "deckcraft", commit: "3f9c1e07a2b4d8e6f0a1b2c3d4e5f60718293a4b", nodes: 6, of: 6 }, { key: "photocraft", commit: "a07b3c9d1e2f4a5b6c7d8e9f0a1b2c3d4e5f6071", nodes: 4, of: 6 }],
     },
     settings: {
-      namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi",
+      namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "4", cpuLimit: "16", memoryRequest: "4Gi", memoryLimit: "8Gi",
+      maxPodMemory: "64Gi", capacity: "cluster", nodeReserveCpu: "0", nodeReserveMemory: "0", priorityClassName: "craft-build-task",
       ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
       workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
       workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
