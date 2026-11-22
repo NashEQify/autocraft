@@ -4,6 +4,7 @@
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import "./db-template.ts";
 
 const BASE = join(homedir(), ".cache/autocraft-scratch");
 mkdirSync(BASE, { recursive: true });

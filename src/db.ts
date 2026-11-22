@@ -1,7 +1,7 @@
 import { isBotCommand, isBotLogin } from "./review/bots.ts";
 import { loadOwners, type OwnerRow } from "./owners.ts";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -758,8 +758,23 @@ export function connect(path: string = dbPath(), opts: { busyTimeoutMs?: number 
 /** Whether `e` is a lock wait that ran out (SQLITE_BUSY or Postgres 55P03): another connection held the write lock past the timeout. */
 export const isBusy = isLockTimeout;
 
+let newDbSeed: (() => string | undefined) | undefined;
+
+/**
+ * Test hook: a SQLite file that does not exist yet starts as a copy of the file `seed()` names (a database migrated to
+ * the current schema), so opening it takes the up-to-date path instead of migrating from nothing. Files that exist,
+ * and `:memory:`, open as they are.
+ */
+export function setNewDbSeed(seed: (() => string | undefined) | undefined): void {
+  newDbSeed = seed;
+}
+
 function open(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
+  if (newDbSeed && path !== ":memory:" && !existsSync(path)) {
+    const from = newDbSeed();
+    if (from) copyFileSync(from, path);
+  }
   const db = new DatabaseSync(path, { timeout: 30_000 });
   // WAL so the dashboard can read while a sync writes
   db.exec("PRAGMA journal_mode=WAL");
