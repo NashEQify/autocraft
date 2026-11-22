@@ -387,6 +387,39 @@ describe("queue items: an issue", () => {
     assert.equal(await preapprovalOf(w.db, "app", 34), null);
     assert.equal(await preapprovalOf(w.db, "app", 35), null);
   });
+
+  test("the Merge tab lists it in the Queued group until a PR that closes it is listed", async () => {
+    const w = await (await (await fresh()).issue(36)).pr(37);
+    const req = (login: string, role: string) =>
+      ({ query: new URLSearchParams("tab=merge&repos=all"), json: { item: "app#36" }, user: { login, role, canWrite: async () => true, canRead: async () => true } }) as unknown as Req;
+    await queueAdd(w.db, req(OPERATOR, "operator"));
+    await refreshPlanCache(w.db);
+    const issueRow = async (login = OPERATOR, role = "operator") => (await queuePage(w.db, req(login, role))).pending?.find((p) => p.number === 36);
+    const before = await issueRow();
+    assert.deepEqual([before?.kind, before?.step, before?.added.how, before?.added.by], ["issue", "build", "fast", OPERATOR]);
+    assert.equal((await issueRow("view", "viewer"))?.added.by, null);
+    // A PR that closes it but is not queued: the issue stays and names it.
+    await w.db.prepare("UPDATE items SET closing_issues = '[36]' WHERE repo = 'app' AND number = 37").run();
+    const open = await issueRow();
+    assert.deepEqual([open?.step, open?.prs], ["pr", [37]]);
+    // Once that PR is queued, its own row stands for the issue.
+    await preapproveMerge(w.db, { repo: "app", number: 37, by: OPERATOR });
+    const after = await queuePage(w.db, req(OPERATOR, "operator"));
+    assert.ok(after.pending?.some((p) => p.number === 37));
+    assert.ok(!after.pending?.some((p) => p.number === 36));
+  });
+
+  test("a closing PR the board shows in no group, such as a declined one, does not hide the issue", async () => {
+    const w = await (await (await (await fresh()).issue(38)).pr(39)).review(39, { verdict: "take" });
+    await w.db.prepare("UPDATE items SET closing_issues = '[38]' WHERE repo = 'app' AND number = 39").run();
+    await w.answer(39, "hold");
+    const req = { query: new URLSearchParams("tab=merge&repos=all"), json: { item: "app#38" }, user: { login: OPERATOR, role: "operator", canWrite: async () => true, canRead: async () => true } } as unknown as Req;
+    await addFastTrack(w.db, OPERATOR, "app#38");
+    await refreshPlanCache(w.db);
+    const page = await queuePage(w.db, req);
+    assert.ok(page.mergeRows.some((r) => r.number === 39 && r.state === "declined"));
+    assert.deepEqual(page.pending?.filter((p) => p.number === 38).map((p) => [p.step, p.prs]), [["pr", [39]]]);
+  });
 });
 
 describe("queue items: who may add", () => {
