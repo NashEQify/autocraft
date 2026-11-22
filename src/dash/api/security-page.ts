@@ -1,6 +1,7 @@
 // The Security list and the finding page. Staff only; everyone else gets 404, as the other security endpoints do. A
 // finding's open question is built here from its state (never stored as a decision), and answers go to
 // `POST /api/security/findings/:repo/:n`.
+import { mayRunRepo } from "../repo-access.ts";
 import type { ChoiceCore, Decision, DecisionChoices, FindingAction, FindingSeverity, FindingState, FindingView } from "../../../web/src/api/types.ts";
 import { FIX_ROUNDS } from "../../security/rules.ts";
 import { findingRow, INTERNAL_FINDING_STATES, reconcileFindings, toFinding, type FindingRow as StoredFinding } from "../../security/store.ts";
@@ -166,7 +167,7 @@ export async function findingPage(db: Db, req: Req): Promise<FindingPageData> {
   const log = await logRounds(db, repo, n);
   const live = await liveRounds(db, repo, n);
   const row = rowOf(stored, log, live);
-  const { decision, choices } = synthesize(finding, stored, row.status, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), req.user.role === "operator");
+  const { decision, choices } = synthesize(finding, stored, row.status, lastAttemptRounds(log.filter((l) => l.attempt === stored.fix_attempts)), await mayRunRepo(req.user, repo));
   return {
     finding, decision, choices, status: row.status, attempts: stored.fix_attempts, rounds: rounds(finding, log, live), history: history(finding),
     costUsd: finding.timeline.reduce((s, c) => s + (c.costUsd ?? 0), 0),

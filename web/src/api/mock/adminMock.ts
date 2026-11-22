@@ -100,7 +100,9 @@ const SORTS: Record<ContributorSort, (a: Author, b: Author, rule: WhitelistRule)
 const UNTRACKED = ["craft-website", "craft-ci-images", "craft-docs-archive", "artcraft-old-installer", "craft-design-tokens"];
 
 /** Repos where the mock maintainer has write access. */
-const MAINTAINER_WRITES = new Set(["designcraft", "craft-libs"]);
+export const MAINTAINER_WRITES = new Set(["designcraft", "craft-libs"]);
+/** Whether the mock user may run the repo: an operator, or a maintainer with write access. */
+export const mayRunMock = (me: { role: string }, repo: string): boolean => me.role === "operator" || (me.role === "maintainer" && MAINTAINER_WRITES.has(repo));
 
 function buildRepos(role: string): TrackedRepo[] {
   const r = rng(77);
@@ -108,9 +110,9 @@ function buildRepos(role: string): TrackedRepo[] {
     const prs = Math.round(open * (0.3 + r() * 0.2));
     const toAdd = Math.round(prs * (0.4 + r() * 0.3));
     const labels = { approved: false, approvedBy: null, approvedAt: null, toAdd, skipped: Math.round(prs * 0.2), conflicts: r() < 0.3 ? Math.floor(r() * 4) : 0 };
-    return { name, owner: MOCK_REPO_OWNERS[name] ?? "storytold", tracked: true, openPrs: prs, openIssues: open - prs, mirrored: Math.round(open * (3.5 + r())), syncedAt: iso((2 + r() * 40) * 60_000), labels, merging: { approved: false, approvedBy: null, approvedAt: null }, pushing: { approved: false, approvedBy: null, approvedAt: null }, commenting: { approved: false, approvedBy: null, approvedAt: null }, fixing: { approved: false, approvedBy: null, approvedAt: null }, mainFixing: { approved: false, approvedBy: null, approvedAt: null }, ciApproving: { approved: false, approvedBy: null, approvedAt: null }, optionalChecks: name === "designcraft" ? ["sonarcloud / SonarCloud Scan"] : [], seenChecks: ["gate / test", "gate / lint", "sonarcloud / SonarCloud Scan", "docs / link-check"], pipeline: name === "designcraft", canSwitch: role === "operator" || (role === "maintainer" && MAINTAINER_WRITES.has(name)) };
+    return { name, owner: MOCK_REPO_OWNERS[name] ?? "storytold", tracked: true, openPrs: prs, openIssues: open - prs, mirrored: Math.round(open * (3.5 + r())), syncedAt: iso((2 + r() * 40) * 60_000), labels, merging: { approved: false, approvedBy: null, approvedAt: null }, pushing: { approved: false, approvedBy: null, approvedAt: null }, commenting: { approved: false, approvedBy: null, approvedAt: null }, fixing: { approved: false, approvedBy: null, approvedAt: null }, mainFixing: { approved: false, approvedBy: null, approvedAt: null }, ciApproving: { approved: false, approvedBy: null, approvedAt: null }, optionalChecks: name === "designcraft" ? ["sonarcloud / SonarCloud Scan"] : [], seenChecks: ["gate / test", "gate / lint", "sonarcloud / SonarCloud Scan", "docs / link-check"], pipeline: name === "designcraft", canSwitch: role === "operator" || (role === "maintainer" && MAINTAINER_WRITES.has(name)), canManage: role === "operator" || (role === "maintainer" && MAINTAINER_WRITES.has(name)) };
   });
-  const rest = UNTRACKED.map((name) => ({ name, owner: "storytold", tracked: false, openPrs: Math.floor(r() * 30), openIssues: Math.floor(r() * 80), mirrored: name === "craft-docs-archive" ? 412 : 0, syncedAt: name === "craft-docs-archive" ? iso(12 * D) : null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false as const, canSwitch: false }));
+  const rest = UNTRACKED.map((name) => ({ name, owner: "storytold", tracked: false, openPrs: Math.floor(r() * 30), openIssues: Math.floor(r() * 80), mirrored: name === "craft-docs-archive" ? 412 : 0, syncedAt: name === "craft-docs-archive" ? iso(12 * D) : null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false as const, canSwitch: false, canManage: false }));
   return [...tracked, ...rest];
 }
 
@@ -215,8 +217,11 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
   const log = (action: string, target: string | null, details: Record<string, unknown> | null = null) => {
     auditLog.unshift({ at: nowIso(), login: me.login, action, target, details });
   };
+  const requireRun = (name: string) => {
+    if (!mayRunMock(me, name)) throw new Error("only an operator, or a maintainer with write access to the repo, changes its settings");
+  };
   const setKind = (field: "pushing" | "commenting" | "fixing" | "mainFixing" | "ciApproving", audit: string, name: string, approved: boolean) => {
-    requireOperator(`approve ${field}`);
+    requireRun(name);
     const a = repos.find((x) => x.name === name)?.[field];
     if (!a) throw new Error(`${name} is not tracked`);
     if (a.approved === approved) throw new Error(`${name} is ${approved ? "already" : "not"} approved for ${field}`);
@@ -308,7 +313,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         if (!/^[A-Za-z0-9._-]{1,100}$/.test(bare)) throw new Error("Not a repo name.");
         let r = repos.find((x) => x.name === bare);
         if (r?.tracked) throw new Error(`${name} is already tracked`);
-        if (!r) repos.push((r = { name: bare, owner, tracked: true, openPrs: null, openIssues: null, mirrored: 0, syncedAt: null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false, canSwitch: operator }));
+        if (!r) repos.push((r = { name: bare, owner, tracked: true, openPrs: null, openIssues: null, mirrored: 0, syncedAt: null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false, canSwitch: operator, canManage: operator }));
         r.tracked = true;
         r.labels ??= { approved: false, approvedBy: null, approvedAt: null, toAdd: 0, skipped: 0, conflicts: 0 };
         r.merging ??= { approved: false, approvedBy: null, approvedAt: null };
@@ -349,7 +354,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         return { max };
       },
       async approveMerging(name, approved) {
-        requireOperator("approve merging");
+        requireRun(name);
         const r = repos.find((x) => x.name === name);
         if (!r?.merging) throw new Error(`${name} is not tracked`);
         if (r.merging.approved === approved) throw new Error(`${name} is ${approved ? "already" : "not"} approved for merging`);
@@ -379,7 +384,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         return wait(structuredClone(repos.find((x) => x.name === name)!), 40);
       },
       async setOptionalCheck(name, check, on) {
-        requireOperator("set optional checks");
+        requireRun(name);
         const r = repos.find((x) => x.name === name);
         if (!r?.tracked) throw new Error(`${name} is not tracked`);
         if (r.optionalChecks.includes(check) === on) throw new Error(`${check} is ${on ? "already" : "not"} an optional check of ${name}`);
@@ -400,7 +405,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         return wait(structuredClone(repos.find((x) => x.name === name)!), 40);
       },
       async approveLabels(name, approved) {
-        requireOperator("approve labelling");
+        requireRun(name);
         const r = repos.find((x) => x.name === name);
         if (!r?.labels) throw new Error(`${name} is not tracked`);
         if (r.labels.approved === approved) throw new Error(`${name} is ${approved ? "already" : "not"} approved for labelling`);

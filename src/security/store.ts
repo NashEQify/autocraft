@@ -28,7 +28,7 @@ export async function toScan(db: Db, r: ScanRow): Promise<ScanView> {
   const n = (await db.get(db.k.selectFrom("security_findings").select((eb) => eb.fn.countAll<number>().as("n")).where("scan_id", "=", r.id).where("state", "not in", INTERNAL_FINDING_STATES)))!.n;
   return {
     id: r.id, repo: r.repo, commit: r.commit_sha, state: r.state, capUsd: r.cap_usd, costUsd: r.cost_usd, estimateUsd: r.estimate_usd,
-    areasTotal: r.areas_total, areasDone: r.areas_done, findingCount: n, startedBy: r.started_by, startedAt: r.started_at, endedAt: r.ended_at, error: r.error,
+    areasTotal: r.areas_total, areasDone: r.areas_done, findingCount: n, startedBy: r.started_by, startedAt: r.started_at, endedAt: r.ended_at, error: r.error, canAct: false,
   };
 }
 

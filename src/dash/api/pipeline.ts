@@ -2,8 +2,9 @@
 // pipeline switch and the stage limits; only operators request or cancel jobs,
 // flip the switch and change limits. The
 // dashboard never runs a step: it writes job rows that the runner picks up.
+import { mayRunRepo } from "../repo-access.ts";
 import type { Job, JobState, PipelineOverview, PipelineStage, PipelineState, PipelineStep, StepParam } from "../../../web/src/api/types.ts";
-import { enqueue, getJob, jobDetail, JobError, JOB_STATES, listJobs, requestCancel, toJobs } from "../../runner/jobs.ts";
+import { enqueue, getJob, jobDetail, jobRow, JobError, JOB_STATES, listJobs, requestCancel, toJobs } from "../../runner/jobs.ts";
 import { ackDeadline, LimitError, pipelineState as rawPipelineState, resetLimitCount, setEnabled, setLimit } from "../../runner/autopilot.ts";
 import { HEARTBEAT_KEY } from "../../runner/runner.ts";
 import { loadSteps, type StepDef } from "../../runner/steps.ts";
@@ -157,7 +158,10 @@ const jobId = (req: Req): number => {
 
 export const job = async (db: Db, req: Req) => wrap(async () => {
   const hidden = await hiddenRepos(db, req);
-  const d = await jobDetail(db, jobId(req), { hidden, logs: canSeeInternals(req) });
+  const id = jobId(req);
+  const d = await jobDetail(db, id, { hidden, logs: canSeeInternals(req) });
+  const repo = (await jobRow(db, id))?.repo;
+  d.canCancel = req.user.role === "operator" || (!!repo && await mayRunRepo(req.user, repo));
   if (canSeeInternals(req)) return forViewer(req, hidden)(d) as typeof d;
   // An item's outcome reads "failed: <reason>" or carries notes: viewers get the leading state word, and nothing for a quiet pull request.
   const items = await mapSeq(d.items, async (i) => ({ ...i, outcome: await isQuiet(db, i.repo, i.number) ? null : /^[A-Za-z-]+/.exec(i.outcome ?? "")?.[0] ?? null }));
@@ -182,12 +186,13 @@ export async function request(db: Db, req: Req): Promise<Job> {
   return j;
 }
 
+// An operator cancels any job; a maintainer with write access cancels the jobs of that repo. A job without a repo stays operator-only.
 export async function cancel(db: Db, req: Req): Promise<Job> {
-  requireOperator(req);
+  if (req.user.role === "viewer") throw new HttpError(403, "only operators and maintainers cancel pipeline jobs");
   const id = jobId(req);
   const before = await wrap(async () => await getJob(db, id));
-  const step = (await loadSteps()).get(before.step);
-  if (step) requireOperator(req, step);
+  const repo = (await jobRow(db, id))?.repo;
+  if (req.user.role !== "operator" && !(repo && await mayRunRepo(req.user, repo))) throw new HttpError(403, "only an operator, or a maintainer with write access to the job's repo, cancels it");
   const j = await wrap(async () => await requestCancel(db, id, req.user.login));
   await audit(db, req.user.login, "job-cancel", `job:${id}`, { step: j.step, state: before.state });
   return j;

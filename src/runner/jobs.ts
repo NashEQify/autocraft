@@ -219,9 +219,9 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   const shown = shownLookup(db);
   const items = await mapSeq((await db.all(db.k.selectFrom("job_items").select(["repo", "number", "outcome", "ref"]).where("job_id", "=", id).orderBy("id")))
     .filter((i) => !isHiddenRepo(hidden, i.repo)), async (i) => ({ repo: i.repo, number: i.number, ...await shown(i.repo, i.number), outcome: i.outcome, decision: i.ref }));
-  if (view.logs === false) return { ...(await toJobs(db, [r]))[0]!, items, log: null, logTruncated: false };
+  if (view.logs === false) return { ...(await toJobs(db, [r]))[0]!, items, log: null, logTruncated: false, canCancel: false };
   const tail = logTail(r.log_path);
-  return { ...(await toJobs(db, [r]))[0]!, items, ...tail, log: tail.log && hidden.length ? tail.log.split("\n").filter((l) => !l || blankIfHidden(l, hidden)).join("\n") : tail.log };
+  return { ...(await toJobs(db, [r]))[0]!, items, canCancel: false, ...tail, log: tail.log && hidden.length ? tail.log.split("\n").filter((l) => !l || blankIfHidden(l, hidden)).join("\n") : tail.log };
 }
 
 /**

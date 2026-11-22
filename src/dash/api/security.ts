@@ -1,5 +1,6 @@
-// The security deep scan API. Operators and maintainers read; operators act. Everyone else gets 404, so the
+// The security deep scan API. Operators and maintainers read; operators start scans; operators and maintainers with write access to the repo stop scans and decide findings. Everyone else gets 404, so the
 // endpoints do not show that findings exist.
+import { mayRunRepo } from "../repo-access.ts";
 import type { FindingView, ScanDetail, ScanView, SecurityOverview } from "../../../web/src/api/types.ts";
 import { actOnFindingAs, continueScanAs, SecurityError, startScanAs, stopScanAs } from "../../security/actions.ts";
 import { listScans, overview, reconcileFindings, findingRow, scanDetail, toFinding, scanRow } from "../../security/store.ts";
@@ -7,6 +8,7 @@ import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { canSeeInternals } from "./staff.ts";
 import { needVisible, visibleRepos } from "./visible.ts";
+import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 
 const NOT_FOUND = "not found";
@@ -16,7 +18,13 @@ function needStaff(req: Req): void {
 
 function needOperator(req: Req): void {
   needStaff(req);
-  if (req.user.role !== "operator") throw new HttpError(403, "only operators start or stop scans and decide findings");
+  if (req.user.role !== "operator") throw new HttpError(403, "only operators start scans");
+}
+
+/** Stopping or continuing a scan and deciding findings: an operator, or a maintainer with write access to the repo. */
+async function needRunRepo(req: Req, repo: string): Promise<void> {
+  needStaff(req);
+  if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, stops scans and decides findings");
 }
 
 function body(req: Req): Record<string, unknown> {
@@ -32,11 +40,17 @@ function number(v: string | undefined, what: string): number {
   return n;
 }
 
+/** Marks whether the caller may stop or continue the scan and decide its findings. */
+async function withAct<T extends ScanView>(req: Req, s: T): Promise<T> {
+  return { ...s, canAct: await mayRunRepo(req.user, s.repo) };
+}
+
 export async function security(db: Db, req: Req): Promise<SecurityOverview> {
   needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
-  return await overview(db, repo);
+  const o = await overview(db, repo);
+  return { ...o, scans: await mapSeq(o.scans, async (s) => await withAct(req, s)) };
 }
 
 /** Runs a security action and gives its refusals the HTTP status they carry. */
@@ -54,25 +68,27 @@ export async function startScan(db: Db, req: Req): Promise<ScanView> {
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
   const b = body(req);
-  return asHttp(async () => startScanAs(db, repo, req.user.login, b.capUsd));
+  return await withAct(req, await asHttp(async () => startScanAs(db, repo, req.user.login, b.capUsd)));
 }
 
 export async function stopScan(db: Db, req: Req): Promise<ScanView> {
-  needOperator(req);
+  needStaff(req);
   const id = number(req.params.id, "scan");
   const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return asHttp(async () => await stopScanAs(db, id, req.user.login));
+  await needRunRepo(req, scan.repo);
+  return await withAct(req, await asHttp(async () => await stopScanAs(db, id, req.user.login)));
 }
 
 export async function continueScan(db: Db, req: Req): Promise<ScanView> {
-  needOperator(req);
+  needStaff(req);
   const id = number(req.params.id, "scan");
   const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return asHttp(async () => continueScanAs(db, id, req.user.login, body(req).cap));
+  await needRunRepo(req, scan.repo);
+  return await withAct(req, await asHttp(async () => continueScanAs(db, id, req.user.login, body(req).cap)));
 }
 
 export async function finding(db: Db, req: Req): Promise<FindingView> {
@@ -86,9 +102,10 @@ export async function finding(db: Db, req: Req): Promise<FindingView> {
 }
 
 export async function actOnFinding(db: Db, req: Req): Promise<FindingView> {
-  needOperator(req);
+  needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
+  await needRunRepo(req, repo);
   const n = number(req.params.n, "finding");
   const b = body(req);
   return asHttp(async () => actOnFindingAs(db, repo, n, req.user.login, b));
@@ -97,7 +114,7 @@ export async function actOnFinding(db: Db, req: Req): Promise<FindingView> {
 /** Scans of the repos the reader can see, newest first; `?repo=` narrows to one. */
 export async function scans(db: Db, req: Req): Promise<ScanView[]> {
   needStaff(req);
-  return await listScans(db, await visibleRepos(db, req), req.query.get("repo") || undefined);
+  return await mapSeq(await listScans(db, await visibleRepos(db, req), req.query.get("repo") || undefined), async (s) => await withAct(req, s));
 }
 
 export async function scanOf(db: Db, req: Req): Promise<ScanDetail> {
@@ -105,5 +122,6 @@ export async function scanOf(db: Db, req: Req): Promise<ScanDetail> {
   const scan = await scanRow(db, number(req.params.id, "scan"));
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  return await scanDetail(db, scan);
+  const d = await scanDetail(db, scan);
+  return { ...d, scan: await withAct(req, d.scan) };
 }

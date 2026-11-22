@@ -235,10 +235,10 @@ export const synced = (r: TrackedRepo) =>
   r.syncedAt ? `${eventTime(r.syncedAt)}` : "never";
 export const maybe = (n: number | null) => (n === null ? "–" : num(n));
 
-/** The checks whose failure does not stop a merge: a list for everyone, with remove and add for operators. */
+/** The checks whose failure does not stop a merge: a list for everyone, with remove and add for whoever may manage the repo. */
 export function OptionalChecks({ r, write }: { r: TrackedRepo; write: Write }) {
   const api = useApi();
-  const operator = useUser().role === "operator";
+  const operator = r.canManage;
   const [pick, setPick] = useState("");
   const offered = r.seenChecks.filter((c) => !r.optionalChecks.includes(c));
   const choice = offered.includes(pick) ? pick : offered[0] ?? "";

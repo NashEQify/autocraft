@@ -72,7 +72,6 @@ function ContinueDialog({ s, open, onClose }: { s: ScanView; open: boolean; onCl
 export function ScanRow({ s, link }: { s: ScanView; link?: boolean }) {
   const api = useApi();
   const write = useWrite();
-  const operator = useUser().role === "operator";
   const [resume, setResume] = useState(false);
   const active = scanActive(s.state);
   const st = SCAN_STATE[s.state];
@@ -84,12 +83,12 @@ export function ScanRow({ s, link }: { s: ScanView; link?: boolean }) {
         {link && <Link to={scanPath(s.id)} className="num text-sm text-accent-ink hover:underline max-md:flex max-md:min-h-11 max-md:items-center">Scan {s.id}</Link>}
         <span className="num text-sm">{s.areasTotal ? `${s.areasDone} of ${s.areasTotal} areas` : "No areas yet"}</span>
         {s.areasTotal > 0 && <RateBar frac={frac} className="w-24 max-md:flex-1" />}
-        {active && (
+        {active && s.canAct && (
           <Button size="md" icon={StopIcon} loading={write.busy === "stop"} onClick={() => void write.run("stop", () => api.security.stopScan(s.id))} className="ml-auto max-md:h-11">
             Stop
           </Button>
         )}
-        {operator && s.state === "capped" && (
+        {s.canAct && s.state === "capped" && (
           <>
             <Button size="md" icon={PlayIcon} onClick={() => setResume(true)} className="ml-auto max-md:h-11">Continue</Button>
             <ContinueDialog key={s.costUsd} s={s} open={resume} onClose={() => setResume(false)} />

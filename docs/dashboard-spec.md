@@ -235,7 +235,10 @@ The pipeline runs Claude agents under the operator's own Claude account on the o
 | Whitelist overrides, whitelist rule, settings (including `maintainer_writes`) | operator |
 | Access list, sessions, access-management audit rows | operator |
 | Repo settings and the audit log (without access rows), read-only | operator or maintainer |
-| Turn the pipeline on or off, change limits, cancel jobs | operator; everyone signed in sees the Pipeline page |
+| Turn the pipeline on or off, change limits, start a job, cancel a job without a repo | operator; everyone signed in sees the Pipeline page |
+| Per repo (the rule is `mayRunRepo`: an operator, or a maintainer with GitHub write permission on the repo, read live): approve labels, merging, CI runs, comments, pushes, issue fixes and red-main fixes; add or remove optional checks; switch the pipeline; cancel a job or build task of the repo; select its nightly checks; set up its screenshots; stop or continue a deep scan and act on its findings (dismiss, backlog, fix, land, advisory) | operator or maintainer with write on the repo; others get 403 (a viewer gets 404 on security routes). The API returns `canManage`, `canSwitch`, `canAct`, `canCancel`, `canSelect` and `manageable` per repo or row, and the web reads them |
+| Start a deep scan (spends money) | operator |
+| Feedback rate limit | operators and maintainers with write on the decision's repo are exempt |
 | Resume a push-breaker trip (fix-up, CI fix, fix issue, merge) | operator; a maintainer with GitHub write permission (read live) on every repo the trip's evidence names; a trip that names no repo is operator-only; the outside-surge breaker is operator-only (audited, the resume records the login) |
 
 Roles on the access list: `operator`, `maintainer`, `viewer`. A `viewer` is read-only: every write returns 403 and the interface shows no write controls. A `maintainer` sends feedback, and settles decisions under the rule in the Trust boundary while `maintainer_writes` is on. GitHub write permission on the repo is required for an answer about that repo, from an operator too.
