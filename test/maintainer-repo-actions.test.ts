@@ -12,7 +12,7 @@ const as = (login: string, role: "viewer" | "maintainer" | "operator", json: unk
   user: { login, role, canWrite: async (repo: string) => repo === "alpha", canRead: async () => true }, csrf: "", nonce: "",
 });
 
-test("a maintainer with write runs their repo's approvals, findings and jobs; others are refused; scans and repo-less jobs stay operator", async () => {
+test("a maintainer with write runs their repo's approvals, findings and jobs; others are refused; scans need a cap, repo-less jobs stay operator", async () => {
   const db = await connectDb(":memory:");
   for (const name of ["alpha", "beta"]) {
     await db.run(db.k.insertInto("tracked_repos").values({ name }));
@@ -40,14 +40,23 @@ test("a maintainer with write runs their repo's approvals, findings and jobs; ot
   // Advisory and publish open or publish an advisory: operator only.
   for (const action of ["advisory", "publish"]) await assert.rejects(dismiss(as("maint", "maintainer", { action }, { repo: "alpha", n: "1" })), { status: 403 });
 
-  // Continuing a capped scan spends more: operator only, whatever the cap.
+  // Scans spend money: a maintainer with write on the repo starts or continues one only with a cap; others are refused.
   await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "alpha", state: "capped", cap_usd: 10, cost_usd: 5, started_by: "op", started_at: at }));
-  const cont = (cap: number | null) => continueScan(db, as("maint", "maintainer", { cap }, { id: "1" }));
-  await assert.rejects(cont(null), { status: 403 });
-  await assert.rejects(cont(8), { status: 403 });
-
-  // Starting a scan spends money: operator only.
-  await assert.rejects(startScan(db, as("maint", "maintainer", {}, { repo: "alpha" })), { status: 403 });
+  const cont = (who: Req["user"]["role"], cap: number | null) => continueScan(db, as("maint", who, { cap }, { id: "1" }));
+  const start = (login: string, role: "viewer" | "maintainer" | "operator", repo: string, capUsd?: number | null) => startScan(db, as(login, role, capUsd === undefined ? {} : { capUsd }, { repo }));
+  const refused = (e: { status: number }) => e.status === 403 || e.status === 404;
+  await assert.rejects(cont("maintainer", null), { status: 403 });
+  await assert.rejects(start("maint", "maintainer", "alpha"), { status: 403 });
+  await assert.rejects(start("maint", "maintainer", "alpha", 0), { status: 403 });
+  await assert.rejects(start("maint", "maintainer", "beta", 5), { status: 403 });
+  await assert.rejects(start("view", "viewer", "alpha", 5), refused);
+  await assert.rejects(cont("viewer", 8), refused);
+  assert.equal((await cont("maintainer", 8)).capUsd, 8);
+  await db.run(db.k.updateTable("security_scans").set({ state: "stopped" }).where("id", "=", 1));
+  const started = await start("maint", "maintainer", "alpha", 3);
+  assert.equal(started.capUsd, 3);
+  await db.run(db.k.updateTable("security_scans").set({ state: "stopped" }).where("id", "=", started.id));
+  assert.equal((await start("op", "operator", "alpha")).capUsd, null);
 
   // Jobs: the maintainer cancels a job of their repo, not another repo's, not a repo-less one.
   const own = await job("alpha");

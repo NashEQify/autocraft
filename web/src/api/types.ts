@@ -2497,6 +2497,8 @@ export type FindingAction = "fix" | "dismiss" | "backlog" | "reopen" | "land" | 
 export interface ScanView {
   /** The caller may stop the scan and decide its findings (continuing stays with operators); the server sets it per request. */
   canAct: boolean;
+  /** The caller may continue a capped scan with a new cap (same rule as starting one). */
+  canContinue: boolean;
   id: number;
   repo: string;
   /** The pinned commit of the default branch; null before the scan has fetched it. */
@@ -2568,7 +2570,12 @@ export interface FindingView extends FindingSummary {
   timeline: FindingCall[];
 }
 
-export interface SecurityOverview { scans: ScanView[]; findings: FindingSummary[] }
+export interface SecurityOverview {
+  /** The caller may start a scan on this repo (maintainers need a spend cap). */
+  canStart: boolean;
+  scans: ScanView[];
+  findings: FindingSummary[];
+}
 
 export type ScanAreaState = "pending" | "running" | "done" | "failed";
 export interface ScanArea { idx: number; name: string; risk: number; why: string | null; paths: string[]; state: ScanAreaState; costUsd: number }

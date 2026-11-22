@@ -16,9 +16,12 @@ function needStaff(req: Req): void {
   if (!canSeeInternals(req)) throw new HttpError(404, NOT_FOUND);
 }
 
-function needOperator(req: Req): void {
+/** Starting or continuing a scan: an operator with any cap or none, or a maintainer with write access to the repo with a positive cap. */
+async function needStartScan(req: Req, repo: string, cap: unknown): Promise<void> {
   needStaff(req);
-  if (req.user.role !== "operator") throw new HttpError(403, "only operators start or continue scans");
+  if (req.user.role === "operator") return;
+  if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, starts or continues scans");
+  if (typeof cap !== "number" || !(cap > 0)) throw new HttpError(403, "a spend cap is required: only operators run scans without one");
 }
 
 /** Stopping a scan and deciding findings: an operator, or a maintainer with write access to the repo. */
@@ -45,7 +48,8 @@ function number(v: string | undefined, what: string): number {
 
 /** Marks whether the caller may stop or continue the scan and decide its findings. */
 async function withAct<T extends ScanView>(req: Req, s: T): Promise<T> {
-  return { ...s, canAct: await mayRunRepo(req.user, s.repo) };
+  const may = await mayRunRepo(req.user, s.repo);
+  return { ...s, canAct: may, canContinue: may };
 }
 
 export async function security(db: Db, req: Req): Promise<SecurityOverview> {
@@ -53,7 +57,7 @@ export async function security(db: Db, req: Req): Promise<SecurityOverview> {
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
   const o = await overview(db, repo);
-  return { ...o, scans: await mapSeq(o.scans, async (s) => await withAct(req, s)) };
+  return { ...o, canStart: await mayRunRepo(req.user, repo), scans: await mapSeq(o.scans, async (s) => await withAct(req, s)) };
 }
 
 /** Runs a security action and gives its refusals the HTTP status they carry. */
@@ -67,10 +71,11 @@ async function asHttp<T>(run: () => Promise<Promise<T> | T>): Promise<T> {
 }
 
 export async function startScan(db: Db, req: Req): Promise<ScanView> {
-  needOperator(req);
+  needStaff(req);
   const repo = req.params.repo!;
   await needVisible(db, req, repo);
   const b = body(req);
+  await needStartScan(req, repo, b.capUsd);
   return await withAct(req, await asHttp(async () => startScanAs(db, repo, req.user.login, b.capUsd)));
 }
 
@@ -85,12 +90,13 @@ export async function stopScan(db: Db, req: Req): Promise<ScanView> {
 }
 
 export async function continueScan(db: Db, req: Req): Promise<ScanView> {
-  needOperator(req);
+  needStaff(req);
   const id = number(req.params.id, "scan");
   const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
   const cap = body(req).cap;
+  await needStartScan(req, scan.repo, cap);
   return await withAct(req, await asHttp(async () => continueScanAs(db, id, req.user.login, cap)));
 }
 
