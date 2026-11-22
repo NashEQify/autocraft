@@ -36,6 +36,7 @@ export function MySettings() {
   const [tasks, setTasks] = useState<string[]>([]);
   const [maxCalls, setMaxCalls] = useState("");
   const [manual, setManual] = useState(false);
+  const [priv, setPriv] = useState(false);
   const [taskItems, setTaskItems] = useState<TaskItems>("all");
   // When the last change was saved: the header says "Saved" for a few seconds after each save.
   const [savedAt, setSavedAt] = useState<number | null>(null);
@@ -58,6 +59,7 @@ export function MySettings() {
   useEffect(() => {
     if (!data) return;
     setManual(data.manualOnly);
+    setPriv(data.runnerPrivate);
     setTaskItems(data.taskItems);
     itemSaves.current.confirmed = data.taskItems;
     setVals({ fiveHour: String(data.reserve.fiveHour), weekly: String(data.reserve.weekly) });
@@ -128,6 +130,17 @@ export function MySettings() {
         setManual((await api.me.settings.put({ manualOnly: on })).manualOnly);
       } catch (e) {
         setManual(!on);
+        throw e;
+      }
+    });
+  };
+  const savePrivate = (on: boolean) => {
+    setPriv(on);
+    saveRun("runner-private", async () => {
+      try {
+        setPriv((await api.me.settings.put({ runnerPrivate: on })).runnerPrivate);
+      } catch (e) {
+        setPriv(!on);
         throw e;
       }
     });
@@ -211,6 +224,10 @@ export function MySettings() {
         <span className={item}>
           <span className="text-ink/80">Manual only</span>
           <Switch on={manual} onChange={saveManual} label="Manual only" busy={write.busy === "manual-only"} />
+        </span>
+        <span className={item}>
+          <span className="text-ink/80">Private on the Live board</span>
+          <Switch on={priv} onChange={savePrivate} label="Private on the Live board" busy={write.busy === "runner-private"} />
         </span>
       </div>
       <Fold className="mt-2" title="My repos" summary={picks.length ? `${picks.length} of ${shown.length} repos` : "All repos"}>

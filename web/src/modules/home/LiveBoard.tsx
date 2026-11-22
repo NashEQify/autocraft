@@ -1,9 +1,9 @@
 // The Live board at the top of Home: every running and queued unit of the pipeline's work on one time axis. A lane is a job (or a call or
 // build task of its own); its thin bar is the job, the tall bars are its model calls and build steps. Solid: done, pulsing: running now,
 // dashed: the expected rest (median of earlier runs), red line: 90% of earlier runs were done by then. Under the lanes, the latest few
-// finished events of the feed (merges, GitHub writes, answered questions). Staff can switch to the worker view: one row per Task Runner,
-// box account or Jev, with the model calls each ran, coloured by step and marked with their item.
-import { useEffect, useMemo, useReducer, useRef } from "react";
+// finished events of the feed (merges, GitHub writes, answered questions). Staff can switch to the worker view: one row per Task Runner
+// (private ones share one), box account or Jev, with the model calls each ran, coloured by step and marked with their item.
+import { useEffect, useMemo, useReducer, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "../../api/client";
 import type { LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker } from "../../api/types";
@@ -207,8 +207,26 @@ function LatestEvents() {
   );
 }
 
-/** Step colours of the worker view, in the order steps first appear; the chart slots and accent pass the colour-vision checks. */
-const STEP_BG = ["bg-accent", "bg-c2", "bg-c4", "bg-c3", "bg-c5", "bg-c1"];
+type StepGroup = "review" | "fix" | "triage" | "decide" | "security" | "other";
+
+/** Each step's colour on the worker view, fixed by the step's group; the chart slots pass the colour-vision and 3:1 checks. */
+const STEP_GROUP: Record<StepGroup, { label: string; bg: string }> = {
+  review: { label: "Review and verify", bg: "bg-c1" },
+  fix: { label: "Fixes", bg: "bg-c3" },
+  triage: { label: "Triage", bg: "bg-c2" },
+  decide: { label: "Decisions", bg: "bg-c4" },
+  security: { label: "Security", bg: "bg-c5" },
+  other: { label: "Other steps", bg: "bg-ink/50" },
+};
+const STEP_GROUPS = Object.keys(STEP_GROUP) as StepGroup[];
+
+const stepGroup = (step: string): StepGroup =>
+  step.startsWith("security") ? "security"
+    : /^(fixissue|fixup|cifix|main-?fix|conflict|fix-)/.test(step) ? "fix"
+    : /review|^verify|^premerge|^postmerge|^referee/.test(step) ? "review"
+    : /^(classify|dupes|prioritize|rank|areas|labels|details|embed)/.test(step) ? "triage"
+    : /^(decide|merge|act$|conversation|close|unassign)/.test(step) ? "decide"
+    : "other";
 
 const STATUS: Record<LiveWorker["status"], { dot: string; label: string }> = {
   online: { dot: "bg-ok", label: "online" },
@@ -216,38 +234,56 @@ const STATUS: Record<LiveWorker["status"], { dot: string; label: string }> = {
   offline: { dot: "bg-ink/30", label: "offline" },
 };
 
-/** A worker row's left side: who it is, whose tokens, whether it takes calls and how many it runs. */
+/** A worker row's left side: who it is, whose tokens, whether it takes calls, how many it runs of its slots and the models it offers. */
 function WorkerInfo({ w }: { w: LiveWorker }) {
-  const sub = w.kind === "runner" ? ["Task Runner", w.login && `@${w.login}`, w.harness] : w.kind === "account" ? ["Box account"] : ["Batch model"];
+  const sub = w.kind === "runner" ? [w.login && `@${w.login}`, w.harness, STATUS[w.status].label] : w.kind === "account" ? ["Box account", STATUS[w.status].label] : [];
   return (
     <div className="min-w-0">
       <div className="flex items-center gap-2">
         {w.login ? <Avatar login={w.login} size={16} /> : <span className={cn("size-2 shrink-0 rounded-full", STATUS[w.status].dot)} aria-hidden />}
         <span className="truncate text-sm font-medium">{w.name}</span>
-        <span className="num ml-auto shrink-0 text-2xs text-ink/55">
+        <span className="num ml-auto shrink-0 text-2xs text-ink/60">
           {w.busy}
           {w.slots !== null && ` of ${w.slots}`} busy
         </span>
       </div>
-      <div className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-6 text-2xs text-ink/55">
-        {w.login && <span className={cn("size-1.5 shrink-0 rounded-full", STATUS[w.status].dot)} aria-hidden />}
-        <span className="truncate">{[...sub.filter(Boolean), STATUS[w.status].label].join(" · ")}</span>
-      </div>
-      {w.note && <div className={cn("mt-0.5 truncate pl-6 text-2xs", w.status === "held" ? "text-warn" : "text-ink/50")}>{w.note}</div>}
+      {sub.length > 0 && (
+        <div className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-6 text-2xs text-ink/60">
+          {w.login && <span className={cn("size-1.5 shrink-0 rounded-full", STATUS[w.status].dot)} aria-hidden />}
+          <span className="truncate">{sub.filter(Boolean).join(" · ")}</span>
+        </div>
+      )}
+      {w.models.length > 0 && <div className="mt-0.5 truncate pl-6 text-2xs text-ink/60">{w.models.join(", ")}</div>}
+      {w.note && <div className={cn("mt-0.5 truncate pl-6 text-2xs", w.status === "held" ? "text-warn" : "text-ink/60")}>{w.note}</div>}
     </div>
   );
 }
 
-/** A worker's track: one bar per model call, coloured by step, with its item's number on it; a running call pulses and shows its expected rest. */
-function WorkerTrack({ w, from, to, now, stepBg }: { w: LiveWorker; from: number; to: number; now: number; stepBg: (title: string) => string }) {
+/**
+ * A worker's track: one bar per model call, coloured by step, with its item's number on it; a running call pulses and shows its
+ * expected rest. The track is one tab stop: arrow keys, Home and End move focus between its calls.
+ */
+function WorkerTrack({ w, from, to, now }: { w: LiveWorker; from: number; to: number; now: number }) {
   const x = (t: number) => `${((Math.min(Math.max(t, from), to) - from) / (to - from)) * 100}%`;
   const wd = (a: number, b: number) => `${(Math.max(0, Math.min(b, to) - Math.max(a, from)) / (to - from)) * 100}%`;
+  const calls = w.calls.filter((c) => (c.end ? Date.parse(c.end) : now) >= from);
+  const refs = useRef(new Map<number, HTMLAnchorElement>());
+  const [active, setActive] = useState<number | null>(null);
+  // The tab stop: the call last focused, or the newest.
+  const stop = calls.some((c) => c.id === active) ? active : (calls.at(-1)?.id ?? null);
+  const onKey = (e: KeyboardEvent<HTMLAnchorElement>, i: number) => {
+    const j = e.key === "ArrowRight" || e.key === "ArrowDown" ? i + 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? calls.length - 1 : null;
+    if (j === null) return;
+    e.preventDefault();
+    const c = calls[Math.max(0, Math.min(calls.length - 1, j))]!;
+    setActive(c.id);
+    refs.current.get(c.id)?.focus();
+  };
   return (
-    <div className="relative h-7 rounded bg-ink/[0.04]">
-      {w.calls.map((c) => {
+    <div role="group" aria-label={`${w.name}: ${calls.length === 1 ? "1 model call" : `${calls.length} model calls`}`} className="relative h-7 rounded bg-ink/5">
+      {calls.map((c, i) => {
         const s = Date.parse(c.start);
         const e = c.end ? Date.parse(c.end) : now;
-        if (e < from) return null;
         const what = c.item ? `${c.item.repo}#${c.item.number}${c.itemCount > 1 ? ` and ${c.itemCount - 1} more` : ""}` : null;
         const due = c.estimate && c.end === null ? s + c.estimate.median : null;
         // The item's number shows on bars wide enough to hold it; a narrower one has it in its name and tip.
@@ -268,13 +304,20 @@ function WorkerTrack({ w, from, to, now, stepBg }: { w: LiveWorker; from: number
               }
             >
               <Link
+                ref={(el) => {
+                  if (el) refs.current.set(c.id, el);
+                  else refs.current.delete(c.id);
+                }}
                 to={`/agents/${c.id}`}
+                tabIndex={c.id === stop ? 0 : -1}
+                onFocus={() => setActive(c.id)}
+                onKeyDown={(ev) => onKey(ev, i)}
                 aria-label={`${roomy && tag ? `${tag} ` : ""}${c.title}${what ? ` on ${what}` : ""}, ${c.end ? `took ${fmtDur(e - s)}${c.failed ? ", failed" : ""}` : `running for ${fmtDur(now - s)}`}`}
-                className="group absolute top-0.5 flex h-6 items-center overflow-hidden rounded-sm px-0.5 focus-visible:outline-2 focus-visible:outline-accent-ink"
-                style={{ left: x(s), width: wd(s, e), minWidth: 3 }}
+                className="group absolute top-0.5 flex h-6 min-w-1 items-center overflow-hidden rounded-sm px-0.5 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent-ink"
+                style={{ left: x(s), width: wd(s, e) }}
               >
                 {/* Only the fill pulses, so the number keeps its contrast; ink on the panel colour reads on every step colour. */}
-                <span aria-hidden className={cn("absolute inset-0", c.failed ? "bg-bad" : stepBg(c.title), c.end === null ? "animate-pulse" : "opacity-80 group-hover:opacity-100")} />
+                <span aria-hidden className={cn("absolute inset-0", c.failed ? "bg-bad" : STEP_GROUP[stepGroup(c.step)].bg, c.end === null && "animate-pulse")} />
                 {roomy && tag && <span className="num relative truncate rounded-sm bg-panel px-1 text-2xs font-medium leading-4 text-ink">{tag}</span>}
               </Link>
             </Tooltip>
@@ -313,9 +356,8 @@ export function LiveBoard({ to }: { to: string }) {
   // A tick too close to "now" would sit under its label.
   for (let t = Math.ceil(from / step) * step; t < to2; t += step) if (Math.abs(t - now) > (to2 - from) * 0.04) ticks.push(t);
   const pct = (t: number) => `${((t - from) / (to2 - from)) * 100}%`;
-  // Steps get their colour in the order they first appear, so the legend and the bars agree.
-  const steps = [...new Set(calls.map((c) => c.title))];
-  const stepBg = (title: string) => STEP_BG[Math.max(0, steps.indexOf(title)) % STEP_BG.length]!;
+  const groups = new Set(calls.map((c) => stepGroup(c.step)));
+  const legend = STEP_GROUPS.filter((g) => groups.has(g));
   const switcher = workers && (
     <Segmented
       label="Show the Live board"
@@ -359,13 +401,13 @@ export function LiveBoard({ to }: { to: string }) {
       {view === "workers" && workers && (
         <div className="overflow-hidden rounded-md border border-line">
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-ink/[0.03] px-3 py-1.5 text-2xs text-ink/55">
-            {steps.map((s) => (
-              <span key={s} className="inline-flex items-center gap-1.5">
-                <span className={cn("h-2 w-3 rounded-sm", stepBg(s))} aria-hidden />
-                {s}
+            {legend.map((g) => (
+              <span key={g} className="inline-flex items-center gap-1.5">
+                <span className={cn("h-2 w-3 rounded-sm", STEP_GROUP[g].bg)} aria-hidden />
+                {STEP_GROUP[g].label}
               </span>
             ))}
-            {steps.length === 0 && <span>No model calls in the last hour</span>}
+            {legend.length === 0 && <span>No model calls in the last hour</span>}
             {switcher}
           </div>
           {workers.length === 0 ? (
@@ -374,12 +416,12 @@ export function LiveBoard({ to }: { to: string }) {
             <div className="grid md:grid-cols-[minmax(15rem,22rem)_1fr]">
               {axis}
               {workers.map((w) => (
-                <div key={w.key} className={cn("contents", w.status === "offline" && w.busy === 0 && "[&>*]:opacity-60")}>
+                <div key={w.key} className="contents">
                   <div className="px-3 py-2 md:border-b md:border-line">
                     <WorkerInfo w={w} />
                   </div>
                   <div className="flex flex-col justify-center border-b border-line px-3 py-2 max-md:pt-0">
-                    <WorkerTrack w={w} from={from} to={to2} now={now} stepBg={stepBg} />
+                    <WorkerTrack w={w} from={from} to={to2} now={now} />
                   </div>
                 </div>
               ))}
