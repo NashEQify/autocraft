@@ -19,12 +19,14 @@ import { ItemRow, OpenRowDetail, SelectionUnavailable } from "./ItemRows";
 import { PhaseItems } from "./StatusItems";
 import { useRowContinuity, useDisplayRows } from "./rowContinuity";
 import { useDraftField } from "./useDraftField";
+import { useAreaNames } from "./useAreaNames";
 import {
-  aliasHref, clearPhasePatch, historyOptions, isActive, itemFilter, parseBrowse, removeValuePatch, resetPatch,
+  aliasHref, areaLabel, clearPhasePatch, historyOptions, isActive, itemFilter, parseBrowse, removeValuePatch, resetPatch,
 } from "./browseState";
 import {
-  conflictNote, factsFromListRow, parseSelection, refKey, scopedPayload, selectionPatch, selectionProblem, type OpenRef,
+  conflictNote, factsFromListRow, parseSelection, refKey, scopedPayload, selectionPatch, selectionProblem, type OpenRef, type RowFacts,
 } from "./rows";
+import type { ReactNode } from "react";
 
 /** Old links land in the one browser; the alias is not a second view. */
 export function ItemsFiltersAlias() {
@@ -114,6 +116,7 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
   const data = error ? undefined : scopedPayload(receipt, queryScope);
   const ready = !!data;
   const { data: repos } = useQuery("repos", (api) => api.repos());
+  const areas = useAreaNames(browse);
   const rows = ready ? data?.rows ?? [] : [];
   const facts = useMemo(() => rows.map(factsFromListRow), [rows]);
   const display = useDisplayRows(facts, ready, loading, error, continuity);
@@ -125,18 +128,47 @@ function ListItems({ browse, phone, onPatch, onOffset, search, author, onClearPh
     ? <>Filtered view · {num(data.total)} {data.total === 1 ? "item" : "items"}{browse.status.length ? ` of ${num(Object.values(data.byStatus).reduce((sum, count) => sum + count, 0))}` : ""} · {num(data.byStatus.settled)} settled, {num(data.byStatus.waiting)} waiting for a second opinion, {num(data.byStatus.disagree)} disagreements, {num(data.byStatus.unclassified)} not classified{data.run ? ` (run ${data.run})` : ""}</>
     : undefined;
   return <Page title="Items" sub={ready && data && !loading ? `${num(data.total)} ${data.total === 1 ? "item" : "items"}` : undefined}>
-    <BrowserChrome browse={browse} repos={repos ?? []} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
+    <BrowserChrome browse={browse} repos={repos ?? []} areas={areas} phone={phone} onPatch={onPatch} search={search} author={author} onClearPhase={onClearPhase} onReset={onReset} onRemove={onRemove} resetKey={resetKey} bar={bar} hasRows={display.rows.length > 0}>
       {error && <div className="flex items-center gap-2 px-4 py-3" role="alert"><ErrorLine error={error.message || "Could not read these items."} /><Button variant="ghost" size="sm" onClick={refetch}>Retry</Button></div>}
       {!ready && !error && !display.retained && <p role="status" className="px-4 py-6 text-sm text-ink/50">Loading items…</p>}
       {display.retained && <p role="status" className="sr-only">Loading items…</p>}
       {problem && <SelectionUnavailable {...problem} onClose={onCloseSelection} />}
       {data && !rows.length && !problem && <EmptyResults onReset={onReset} />}
-      {display.rows.length > 0 && <ul aria-label="Items" aria-busy={!ready || loading} ref={(node) => { if (node) node.inert = display.retained; }} className="m-0 list-none p-0">
-        {display.rows.map((row) => <ItemRow key={row.key} facts={row} open={!display.retained && !!selection.open && refKey(selection.open) === row.key} onToggle={() => { if (!display.retained && ready) onToggleRow({ repo: row.repo, number: row.number }); }}>
+      {display.rows.length > 0 && (() => {
+        const item = (row: RowFacts) => <ItemRow key={row.key} facts={row} open={!display.retained && !!selection.open && refKey(selection.open) === row.key} onToggle={() => { if (!display.retained && ready) onToggleRow({ repo: row.repo, number: row.number }); }}>
           {!display.retained && selection.open && refKey(selection.open) === row.key && <OpenRowDetail facts={row} note={selectionNote} />}
-        </ItemRow>)}
-      </ul>}
+        </ItemRow>;
+        const inert = (node: HTMLElement | null) => { if (node) node.inert = display.retained; };
+        if (!filter.group) return <ul aria-label="Items" aria-busy={!ready || loading} ref={inert} className="m-0 list-none p-0">{display.rows.map(item)}</ul>;
+        const counts = new Map((data?.byArea ?? []).map((g) => [g.area, g.items]));
+        return <div aria-busy={!ready || loading} ref={inert}>
+          {areaRuns(display.rows).map((run) => <AreaGroup key={run.area ?? ""} title={areaLabel(run.area ?? "none")} count={counts.get(run.area)}>{run.rows.map(item)}</AreaGroup>)}
+        </div>;
+      })()}
       {data && <Pager offset={filter.offset ?? 0} limit={filter.limit ?? 50} total={data.total} onOffset={(offset) => onOffset(offset ? String(offset) : null)} />}
     </BrowserChrome>
   </Page>;
+}
+
+/** Consecutive rows of one area; the server sends a grouped page in area order. */
+function areaRuns(rows: RowFacts[]): { area: string | null; rows: RowFacts[] }[] {
+  const out: { area: string | null; rows: RowFacts[] }[] = [];
+  for (const row of rows) {
+    const area = row.area ?? null;
+    const last = out[out.length - 1];
+    if (last && last.area === area) last.rows.push(row);
+    else out.push({ area, rows: [row] });
+  }
+  return out;
+}
+
+/** One area's heading, with its count under the whole filter, and its rows on this page. */
+function AreaGroup({ title, count, children }: { title: string; count?: number; children: ReactNode }) {
+  return <section aria-label={title} className="border-b border-line last:border-0">
+    <h3 className="flex min-h-9 items-center gap-2.5 border-b border-line bg-ink/[0.04] px-4 py-1.5 text-sm font-semibold">
+      {title}
+      {count !== undefined && <span className="num rounded-full bg-ink/[0.07] px-1.5 text-2xs font-normal text-ink/70">{num(count)}<span className="sr-only"> items</span></span>}
+    </h3>
+    <ul aria-label={`Items in ${title}`} className="m-0 list-none p-0">{children}</ul>
+  </section>;
 }

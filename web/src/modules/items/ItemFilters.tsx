@@ -52,6 +52,8 @@ export interface BrowserProps {
 export interface ChromeProps {
   browse: BrowseState;
   repos: string[];
+  /** Area names of the one repository shown; empty otherwise. */
+  areas: string[];
   phone: boolean;
   phaseCounts?: Record<ItemPhase, number>;
   onPatch: (patch: Record<string, string | null>) => void;
@@ -75,12 +77,12 @@ export function EmptyResults({ onReset }: { onReset: () => void }) {
   </div>;
 }
 
-/* The six-column toolbar needs 1010 px of columns, 50 px of gaps and 28 px of padding. */
-const SIX_COLUMNS = 1088;
+/* The seven-column toolbar needs 1170 px of columns, 60 px of gaps and 28 px of padding. */
+const SEVEN_COLUMNS = 1258;
 /* Three columns need 440 px of columns, 20 px of gaps and 28 px of padding. */
 const THREE_COLUMNS = 488;
 
-export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, search, author, onClearPhase, onReset, onRemove, bar, hasRows, children }: ChromeProps) {
+export function BrowserChrome({ browse, repos, areas, phone, phaseCounts, onPatch, search, author, onClearPhase, onReset, onRemove, bar, hasRows, children }: ChromeProps) {
   const [expanded, setExpanded] = useState(false);
   const { ref: gridRef, width } = useContainerWidth<HTMLDivElement>();
   const panel = useId();
@@ -90,16 +92,17 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
   const summary = secondarySummary(browse);
   const detail = appliedDetail(browse);
   const phaseOption = (p: ItemPhase) => `${p}${phaseCounts ? ` · ${phaseCounts[p] ?? 0}` : ""}`;
-  const selects = primarySelects(browse, repos);
+  const selects = primarySelects(browse, repos, areas);
   const extras = compatExtras(browse);
   // Only the width of this toolbar decides how its fixed columns wrap: the preview panel takes
-  // 340 px from the same row, and the six-column band clips below 1088 px.
-  const columns = phone ? "repeat(2, minmax(0, 1fr))" : width >= SIX_COLUMNS ? "170px 140px minmax(210px,1fr) 160px 170px 160px" : width >= THREE_COLUMNS ? "minmax(130px,1fr) minmax(110px,0.85fr) minmax(200px,1.25fr)" : "repeat(2, minmax(0, 1fr))";
+  // 340 px from the same row, and the seven-column band clips below 1258 px.
+  const columns = phone ? "repeat(2, minmax(0, 1fr))" : width >= SEVEN_COLUMNS ? "170px 140px minmax(210px,1fr) 160px 160px 170px 160px" : width >= THREE_COLUMNS ? "minmax(130px,1fr) minmax(110px,0.85fr) minmax(200px,1.25fr)" : "repeat(2, minmax(0, 1fr))";
 
   const stateField = <FilterField label="State" value={selects.state.value} options={selects.state.options} disabled={phase} onChange={(value) => onPatch({ state: value === "open" ? null : value, sort: null })} />;
   const typeField = <FilterField label="Type" value={selects.kind.value} options={selects.kind.options} onChange={(value) => onPatch({ kind: value || null })} />;
   const classificationField = <FilterField label="Classification" className="max-[860px]:col-span-2" value={selects.classification.value} options={selects.classification.options} disabled={phase} onChange={(value) => onPatch({ status: value || null })} />;
   const repoField = <UnlessProject><FilterField label="Repository" className="max-[860px]:col-span-2" value={selects.repository.value} options={selects.repository.options} onChange={(value) => onPatch({ repo: value || null })} /></UnlessProject>;
+  const areaField = <FilterField label="Area" value={selects.area.value} options={selects.area.options} onChange={(value) => onPatch({ area: value || null })} />;
   const labelField = <FilterField label="Type label" value={selects.label.value} options={selects.label.options} disabled={phase} onChange={(value) => onPatch({ label: value || null })} />;
   const flagField = <FilterField label="Flag" value={selects.flag.value} options={selects.flag.options} disabled={phase} onChange={(value) => onPatch({ flag: value || null })} />;
   const phaseField = <FilterField label="Phase" className="max-[860px]:col-span-2 min-[861px]:w-[220px] min-[861px]:flex-none" value={browse.phase ?? "all"} options={[["all", "No phase"], ...PHASES.map((p) => [p, phaseOption(p)] as [string, string])]} onChange={(value) => (value === "all" ? onClearPhase() : onPatch({ phase: value, peek: null }))} />;
@@ -116,6 +119,7 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
       {typeField}
       {!phone && classificationField}
       {!phone && repoField}
+      {!phone && areaField}
       {!phone && labelField}
       {!phone && flagField}
     </div>
@@ -128,6 +132,7 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
     {phone && <div id={panel} hidden={!expanded} className="border-b border-line bg-bg">
       <div role="group" aria-label="More item filters" className="grid grid-cols-2 gap-2 p-3">
         {classificationField}
+        {areaField}
         {labelField}
         {flagField}
         {repoField}
@@ -184,12 +189,13 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
       <span className="shrink-0">More filters{extras.length > 0 ? ` · ${extras.length}` : ""}</span>
       {detail.length > 0
         ? <span className="min-w-0 break-words text-ink/70">{detail.join(" · ")}</span>
-        : <span className="text-ink/60">{phase ? "Discord" : "Author, date, sort, page size, Discord"}</span>}
+        : <span className="text-ink/60">{phase ? "Discord" : "Author, date, sort, grouping, page size, Discord"}</span>}
     </summary>
     {!phase && <div className="mt-2 grid gap-2 min-[861px]:grid-cols-3">
       <label className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Author</span><Input aria-label="Author" placeholder="GitHub login" value={author.value} onChange={(event) => author.onChange(event.target.value)} className="w-full" /></label>
       <label className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Updated since</span><Input aria-label="Updated since" type="date" value={browse.since ?? ""} onChange={(event) => onPatch({ since: event.target.value || null, offset: null, peek: null })} className="w-full" /></label>
       <div className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Sort</span><div className="flex gap-1.5"><Select aria-label="Sort" value={sort} onChange={(event) => onPatch({ sort: event.target.value, offset: null, peek: null })} className="min-w-0 flex-1">{sorts.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</Select><Select aria-label="Sort direction" value={browse.desc ? "desc" : "asc"} onChange={(event) => onPatch({ desc: event.target.value === "asc" ? "0" : null, offset: null, peek: null })} className="w-[86px]"><option value="desc">{directionLabel(sort, browse.q, true)}</option><option value="asc">{directionLabel(sort, browse.q, false)}</option></Select></div></div>
+      <label className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Group</span><Select aria-label="Group" value={browse.group ?? ""} onChange={(event) => onPatch({ group: event.target.value || null, offset: null, peek: null })} className="w-full"><option value="">No grouping</option><option value="area">By area</option></Select></label>
       <label className="min-w-0 space-y-1 text-2xs text-ink/60"><span className="block">Page size</span><Select aria-label="Page size" value={String(browse.limit)} onChange={(event) => onPatch({ limit: event.target.value === "50" ? null : event.target.value, offset: null, peek: null })} className="w-full">{[...new Set([25, 50, 100, browse.limit])].sort((a, b) => a - b).map((size) => <option key={size} value={size}>{size} per page</option>)}</Select></label>
       <div className="min-w-0 text-2xs text-ink/60"><span className="mb-1 block">Source</span><CheckRow checked={browse.discord} onChange={(on) => onPatch({ discord: on ? "1" : null, offset: null, peek: null })} title="Seen on Discord" /></div>
     </div>}

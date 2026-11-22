@@ -1,6 +1,7 @@
 // Fake rows for the Items browser and the settled label on the Item page.
 import type { ItemFilter, ItemList, ItemListRow, Settled, SettledStatus, Stage, TypeLabel } from "../types";
 import { mockSlot } from "./queueSlotMock";
+import { mockAreaMatch, mockAreaOf } from "./areasMock";
 import { AUTHORS, NOW, REPOS, rng, titleFor } from "./fixtures";
 
 const LABELS: TypeLabel[] = ["bugfix", "performance", "missing feature", "small extra", "plugin candidate", "infra"];
@@ -56,6 +57,7 @@ const POOL: (ItemListRow & { comment: string })[] = (() => {
         queue: st < 0.72 ? mockSlot(number) : null,
         mergedAt: st >= 0.72 && st < 0.86 && kind === "pr" ? new Date(NOW - Math.max(1, updatedH - 1) * H).toISOString() : null,
         mergedHow: st >= 0.72 && st < 0.86 && kind === "pr" ? (["rule", "operator", "batch"] as const)[number % 3] : null,
+        area: mockAreaOf(number),
         comment: COMMENTS[Math.floor(r() * COMMENTS.length)],
       });
     }
@@ -79,6 +81,7 @@ export function itemList(f: ItemFilter): ItemList {
     if (f.author && it.author.toLowerCase() !== f.author.toLowerCase()) return false;
     if (f.since && it.updatedAt < f.since) return false;
     if (f.discord && !it.discord) return false;
+    if (!mockAreaMatch(f.area, it.number)) return false;
     return words.every((w) => `${it.title} ${it.comment}`.toLowerCase().includes(w));
   });
   const byStatus = Object.fromEntries(STATUSES.map((s) => [s, base.filter((it) => it.settled.status === s).length])) as Record<SettledStatus, number>;
@@ -87,14 +90,16 @@ export function itemList(f: ItemFilter): ItemList {
   const sort = f.sort ?? (words.length ? "relevance" : f.state === "merged-by-us" ? "merged" : "updated");
   const key = (it: ItemListRow): string | number =>
     sort === "number" ? it.number : sort === "discord" ? it.discord ?? 0 : sort === "created" ? it.createdAt : sort === "merged" ? it.mergedAt ?? "" : sort === "relevance" ? (it.title.toLowerCase().includes(words[0] ?? "") ? 1 : 0) : it.updatedAt;
+  const byGroup = (a: ItemListRow, b: ItemListRow) => (f.group !== "area" ? 0 : a.area === b.area ? 0 : a.area == null ? 1 : b.area == null ? -1 : a.area.localeCompare(b.area));
   rows.sort((a, b) => {
     const x = key(a), y = key(b);
     const c = typeof x === "number" ? x - (y as number) : x.localeCompare(y as string);
-    return f.desc === false ? c : -c;
+    return byGroup(a, b) || (f.desc === false ? c : -c);
   });
   const from = f.offset ?? 0;
+  const byArea = f.group === "area" ? [...new Set(rows.map((it) => it.area ?? null))].map((area) => ({ area, items: rows.filter((it) => (it.area ?? null) === area).length })) : undefined;
   return {
-    total: rows.length, byStatus, run: "org-1102",
+    total: rows.length, byStatus, run: "org-1102", ...(byArea ? { byArea } : {}),
     rows: rows.slice(from, from + (f.limit ?? 50)).map(({ comment, ...it }) => {
       if (!words.length) return it;
       const t = mark(it.title, words[0]);

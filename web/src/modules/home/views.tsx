@@ -1,6 +1,7 @@
 // Home: what needs me, is anything broken, is it moving.
 import { ProjectMergeQueue } from "./live";
 import { LiveBoard } from "./LiveBoard";
+import { RepoAreasSection } from "./areas";
 import { ALL } from "../../api/scope";
 import { Link, useParams } from "react-router-dom";
 import { ArrowLeftIcon, CaretRightIcon, GitMergeIcon, ProhibitIcon, ChatTeardropTextIcon, ShieldWarningIcon, WarningCircleIcon, XCircleIcon, type Icon } from "@phosphor-icons/react";
@@ -162,6 +163,7 @@ export function HomeView(_: ViewProps) {
             </ul>
           </Section>
         </div>
+        {repo && <RepoAreasSection repo={repo} />}
       </div>
     </div>
   );

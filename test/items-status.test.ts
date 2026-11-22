@@ -40,3 +40,20 @@ test("the item list shows a verdict written after an earlier list, and a failed 
   await db.run(db.k.updateTable("classifications").set({ type_label: "feature", probs: '{"top":0.97}' }).where("repo", "=", "app").where("number", "=", 1));
   assert.equal((await listItems(db, req(""))).rows[0]?.settled.jevLabel, "feature");
 });
+
+test("the item list filters by area, `none` takes the items without one, and grouping puts each area together with the unassigned last", async () => {
+  const db = await connectDb(":memory:");
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
+  await db.run(db.k.insertInto("items").values([1, 2, 3, 4].map((n) => ({ repo: "app", number: n, kind: "issue", state: "OPEN", title: `Item ${n}`, updated_at: `2026-01-0${n}` }))));
+  const at = (number: number, area: string | null) => ({ repo: "app", number, area, source: "jev", confidence: 0.95, list_version: 1, at: "2026-01-05" });
+  await db.run(db.k.insertInto("item_areas").values([at(1, "Text"), at(2, "Canvas"), at(3, null), at(4, "Text")]));
+  const req = (q: string) => ({ query: new URLSearchParams(q), user: { role: "operator", login: "o", canRead: async () => true } }) as unknown as Req;
+  const numbers = async (q: string) => (await listItems(db, req(q))).rows.map((r) => r.number);
+  assert.deepEqual(await numbers("area=Text"), [4, 1]);
+  assert.deepEqual(await numbers("area=none"), [3]);
+  assert.deepEqual(await numbers("area=Canvas,none"), [3, 2]);
+  const grouped = await listItems(db, req("group=area"));
+  assert.deepEqual(grouped.rows.map((r) => r.area ?? null), ["Canvas", "Text", "Text", null]);
+  assert.deepEqual(Object.fromEntries(grouped.byArea!.map((g) => [g.area ?? "-", g.items])), { Canvas: 1, Text: 2, "-": 1 });
+  assert.deepEqual((await statusList(db, req("area=Text"))).rows.map((r) => r.number), [4, 1]);
+});

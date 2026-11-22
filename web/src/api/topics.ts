@@ -97,6 +97,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["nightly", ["nightly", "repos"]],
   ["build-features", ["build-features", "repos"]],
   ["screenshot-setup", ["build-features"]],
+  ["areas:", ["classify", "jobs"]],
   ["envs", ["envs", "tasks"]],
   ["tasks:", ["tasks", "envs"]],
   ["task-", ["tasks", "envs"]],
