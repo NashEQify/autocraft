@@ -46,7 +46,7 @@ const app = (what: string): Field => ({ type: "integer", description: `${what}: 
 
 const SPECS = {
   shell: {
-    description: "Runs a bash command in the workspace (bash -lc, in /work/src by default). Returns the exit code, the time it took and stdout and stderr merged; past 30 KiB, the first 4 KiB and last 26 KiB with the log path. With background, returns {\"id\"} at once: read it with shell_status, end it with shell_kill. The workspace has no network.",
+    description: "Runs a bash command in the workspace (bash -c, in /work/src by default). Returns the exit code, the time it took and stdout and stderr merged; past 30 KiB, the first 4 KiB and last 26 KiB with the log path. With background, returns {\"id\"} at once: read it with shell_status, end it with shell_kill. The workspace has no network.",
     readOnly: false,
     required: ["command"],
     fields: {

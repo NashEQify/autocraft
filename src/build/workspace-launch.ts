@@ -84,6 +84,19 @@ export class WorkspaceState {
   }
 }
 
+/**
+ * Fails the calls still marked running past their deadline (their time limit plus CALL_GRACE_MS): the process that ran them
+ * died (a runner or dashboard pod replaced mid-call), so nothing will settle them. Rows without a deadline are the
+ * session relay's own, taken over when its job resumes. Returns the rows failed.
+ */
+export async function sweepStuckCalls(db: Db, now: number): Promise<number> {
+  const at = new Date(now).toISOString();
+  const rows = await db.all(db.k.updateTable("workspace_calls")
+    .set({ state: "failed", result: JSON.stringify({ text: "failed: the process running this call ended before it finished, so its outcome is unknown; check the workspace and call it again", isError: true }), finished_at: at })
+    .where("state", "=", "running").where("deadline_at", "is not", null).where("deadline_at", "<", at).returning("id"));
+  return rows.length;
+}
+
 type EnvRow = { id: string; enabled: number; settings: string | null };
 type Ctx = { d: LauncherDeps; state: WorkspaceState; api: KubeApi; env: EnvRow; s: KubeSettings; now: () => number };
 
@@ -97,6 +110,11 @@ export async function workspacePass(d: LauncherDeps, state: WorkspaceState): Pro
     await sweepSessions(d.db, d.log);
   } catch (e) {
     d.log(`workspace launcher: session sweep: ${(e as Error).stack ?? e}`);
+  }
+  try {
+    await sweepStuckCalls(d.db, (d.now ?? Date.now)());
+  } catch (e) {
+    d.log(`workspace launcher: call sweep: ${(e as Error).stack ?? e}`);
   }
   const api = d.api;
   if (!api) return;

@@ -3,7 +3,7 @@
 // (src/build/workspace-relay.ts).
 //
 // Everything the session sends goes into fixed argv data positions of a `ws` subcommand or onto stdin; only the shell
-// tool's own command runs as `bash -lc`, in the pod. Output from the pod is decoded with replacement and stripped of
+// tool's own command runs as `bash -c`, so a login profile never resets the image's PATH, in the pod. Output from the pod is decoded with replacement and stripped of
 // control characters; images are only checked for their signature and size, never decoded.
 import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
@@ -317,7 +317,7 @@ export class WorkspaceSession {
     try {
       cmd.n = await takeCallNumber(this.db, this.workspaceId);
       await this.begin(row, timeoutMs, cmd.n);
-      const argv = ["run", String(cmd.n), String(limitSec), "--cwd", cwd, ...(background ? ["--background"] : []), "--", "bash", "-lc", a.command as string];
+      const argv = ["run", String(cmd.n), String(limitSec), "--cwd", cwd, ...(background ? ["--background"] : []), "--", "bash", "-c", a.command as string];
       r = await this.exec(argv, { ...(a.stdin !== undefined ? { stdin: Buffer.from(a.stdin as string) } : {}), maxOut: RUN_OUT, timeoutMs });
     } catch (e) {
       this.cmds.delete(row);
