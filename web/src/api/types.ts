@@ -1793,6 +1793,8 @@ export type KubeSettings = {
   workspaceMemoryRequest: string; workspaceMemoryLimit: string;
   workspaceEphemeralRequest: string; workspaceEphemeralLimit: string;
   workspaceStorage: string;
+  /** Read-only WebDAV endpoint of the CI runners' compile cache (sccache) that offline Rust steps read; null: no cache. */
+  sccacheUrl: string | null;
 };
 export type EnvInput = { label?: string; enabled?: boolean; slots?: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type EnvCreate = { id: string; label: string; kind: EnvKind; slots: number; confidential?: boolean; settings?: Partial<KubeSettings> };

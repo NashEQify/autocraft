@@ -12,6 +12,8 @@
 import type { Capabilities, KubeSettings, TaskStep } from "../../web/src/api/types.ts";
 export type { KubeSettings };
 import { BuildError } from "./envs.ts";
+import { slugOf } from "../owners.ts";
+import { CACHE_VERSION } from "../worker/gate.ts";
 
 
 export const DEFAULT_SETTINGS: KubeSettings = {
@@ -19,7 +21,7 @@ export const DEFAULT_SETTINGS: KubeSettings = {
   cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi", ephemeralRequest: "4Gi", ephemeralLimit: "16Gi",
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
   workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
-  workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi",
+  workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -112,6 +114,10 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         if (v !== null && (typeof v !== "string" || !DNS_LABEL.test(v))) throw new BuildError(400, "runtimeClassName must be a runtime class name or null");
         out.runtimeClassName = v as string | null;
         break;
+      case "sccacheUrl":
+        if (v !== null && (typeof v !== "string" || !/^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~/-]*)?$/.test(v))) throw new BuildError(400, "sccacheUrl must be http(s)://host[:port][/path] or null");
+        out.sccacheUrl = v as string | null;
+        break;
       case "arch":
         if (v !== "x86_64" && v !== "aarch64") throw new BuildError(400, "arch must be x86_64 or aarch64");
         out.arch = v;
@@ -179,7 +185,11 @@ export function toolchainImage(s: KubeSettings, toolchains: string[] | undefined
 }
 
 /** What the source pod found, from its termination message. */
-export type Prepared = { env: Record<string, string>; mounts: { sub: string; target: string }[]; packages: string[]; craftFontsRef: string | null; craftI18nRev: string | null };
+export type Prepared = {
+  env: Record<string, string>; mounts: { sub: string; target: string }[]; packages: string[]; craftFontsRef: string | null; craftI18nRev: string | null;
+  /** The CI gate's cache-version; null (or absent, in a run prepared before it was reported) when the repo has no gate. */
+  cacheVersion?: string | null;
+};
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 const MOUNT_SUB = /^ext\/(craft-fonts|craft-i18n)\/[0-9a-f]{40}$/;
@@ -201,12 +211,13 @@ export function parsePrepared(message: string | undefined): { ok: true; prepared
   const packages = o.packages as unknown[] | undefined;
   const ref = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" && REF.test(v) ? v : undefined);
   const fonts = ref(o.craftFontsRef), i18n = ref(o.craftI18nRev);
+  const cacheVersion = o.cacheVersion === undefined || o.cacheVersion === null ? null : typeof o.cacheVersion === "string" && CACHE_VERSION.test(o.cacheVersion) ? o.cacheVersion : undefined;
   const bad =
     !env || typeof env !== "object" || Array.isArray(env) || Object.keys(env).length > 40 || Object.entries(env).some(([k, v]) => !ENV_NAME.test(k) || typeof v !== "string" || v.length > 1000 || v.includes("\0")) ||
     !Array.isArray(mounts) || mounts.length > 2 || mounts.some((m) => typeof m.sub !== "string" || !MOUNT_SUB.test(m.sub) || (m.target !== "/craft-fonts" && m.target !== "/craft-i18n")) ||
-    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined;
+    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined || cacheVersion === undefined;
   if (bad) return { ok: false, summary: "source: the source pod's report is not valid" };
-  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n } };
+  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n, cacheVersion } };
 }
 
 // ---- specs -------------------------------------------------------------------
@@ -218,7 +229,22 @@ export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: nu
  * under `timeout`: exit 124 is a timeout, 137 a kill after the 10 s grace.
  */
 // The children are copied, not `/pristine/.`: /src is a mount point the pod's user doesn't own, so cp could not set its times.
-export const STEP_WRAPPER = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }; t=$1; shift; exec timeout -k 10 "$t" "$@"';
+const COPY_SOURCE = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }';
+export const STEP_WRAPPER = `${COPY_SOURCE}; t=$1; shift; exec timeout -k 10 "$t" "$@"`;
+/**
+ * A step that reads the compile cache: rustc runs through sccache, and the cache's hit counts end the step's output. sccache
+ * keys a compile on every CARGO_* variable, and the CI gate builds with CARGO_TERM_COLOR set; the wrapper gives that value to
+ * rustc alone, because cargo would colour the step's output and artifacts with it. An image without sccache builds uncached.
+ */
+export const CACHE_STEP_WRAPPER = [
+  COPY_SOURCE,
+  "if command -v sccache >/dev/null 2>&1; then",
+  `  printf '%s\\n' '#!/bin/sh' 'exec env "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
+  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
+  "exit $s",
+].join("\n");
 /** Fails before any step when the toolchain image lacks a package the repo's CI gate installs: pod mode cannot add packages. */
 export const PACKAGES_CHECK = "missing=''; for p in \"$@\"; do dpkg-query -W -f='${Status}' \"$p\" 2>/dev/null | grep -q 'install ok installed' || missing=\"$missing $p\"; done; " +
   "if [ -n \"$missing\" ]; then echo \"the toolchain image lacks packages the CI gate installs:$missing (build pods cannot install packages)\" | tee /dev/termination-log >&2; exit 3; fi";
@@ -245,12 +271,12 @@ function container(s: KubeSettings, name: string, image: string, extra: Record<s
 
 const envList = (o: Record<string, string>) => Object.entries(o).map(([name, value]) => ({ name, value }));
 
-function pod(c: PodCtx, network: "api" | "fetch" | "none", volumes: object[], initContainers: object[], containers: object[]) {
+function pod(c: PodCtx, network: "api" | "fetch" | "none", volumes: object[], initContainers: object[], containers: object[], labels: Record<string, string> = {}) {
   return {
     apiVersion: "v1", kind: "Pod",
     metadata: {
       name: c.name, namespace: c.s.namespace,
-      labels: { ...APP_LABEL, "craft.build/env": c.envId, "craft.build/task": String(c.taskId), "craft.build/stage": String(c.stage), "craft.build/network": network },
+      labels: { ...APP_LABEL, "craft.build/env": c.envId, "craft.build/task": String(c.taskId), "craft.build/stage": String(c.stage), "craft.build/network": network, ...labels },
     },
     spec: {
       restartPolicy: "Never", automountServiceAccountToken: false, enableServiceLinks: false, activeDeadlineSeconds: Math.max(60, Math.round(c.deadlineSec)),
@@ -290,28 +316,61 @@ export const sourcePod = (c: PodCtx, image: string) => appPod(c, image, "source"
 export const uploadPod = (c: PodCtx, image: string, key: string, ran: number) =>
   appPod(c, image, "upload", "api", { AUTOCRAFT_POD_KEY: key, AUTOCRAFT_WORKER_URL: c.s.workerUrl, AUTOCRAFT_POD_RAN: String(ran) }, true);
 
+/** Where the CI runners check `repo` out (GITHUB_WORKSPACE), or null when its name cannot be a path segment. */
+export function ciCheckout(repo: string): string | null {
+  const name = slugOf(repo).split("/").pop() ?? "";
+  return /^[A-Za-z0-9._-]{1,100}$/.test(name) && name !== "." && name !== ".." ? `/home/runner/_work/${name}/${name}` : null;
+}
+
+/**
+ * The env of a step that reads the compile cache. sccache's key covers the compiler, the arguments, the CARGO_* variables
+ * and the working directory, so the step matches the CI gate's job: its env (CARGO_TERM_COLOR through the rustc wrapper),
+ * CARGO_HOME, and the checkout and default target dir at the runner's paths (`ciCheckout`, no CARGO_TARGET_DIR). The store
+ * is the gate's `sccache/<cache-version>`, read-only; build pods never get the cache's write credentials.
+ */
+function cacheEnv(url: string, cacheVersion: string, gate: Record<string, string>): Record<string, string> {
+  return {
+    CARGO_INCREMENTAL: "0", CARGO_NET_RETRY: "10", RUST_BACKTRACE: "1", ...gate,
+    AUTOCRAFT_CI_TERM_COLOR: gate.CARGO_TERM_COLOR ?? "always",
+    SCCACHE_WEBDAV_ENDPOINT: url, SCCACHE_WEBDAV_KEY_PREFIX: `sccache/${cacheVersion}`, SCCACHE_WEBDAV_RW_MODE: "READ_ONLY",
+    // A step falls back to plain rustc when the cache cannot be reached, and the server lives until the step ends.
+    SCCACHE_IGNORE_SERVER_IO_ERROR: "1", SCCACHE_IDLE_TIMEOUT: "0",
+  };
+}
+
 /**
  * One group of steps, after a disk check (and, in the first group, a package check). Offline steps get the CI gate's env and
- * the craft-fonts / craft-i18n checkouts; a `fetch` step gets neither, as in the container runtime.
+ * the craft-fonts / craft-i18n checkouts; a `fetch` step gets neither, as in the container runtime. With `sccacheUrl` set and
+ * a CI gate, offline steps that mount the build dirs read the CI runners' compile cache (`cacheEnv`), and their pod carries
+ * the `craft.build/cache=read` label that lets it reach the cache's read-only port.
  */
-export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean) {
+export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string) {
   const offline = group.network === "none";
+  const checkout = ciCheckout(repo);
+  const cacheVersion = prepared.cacheVersion;
+  const cached = (step: TaskStep): boolean => offline && !step.bare && !!c.s.sccacheUrl && !!cacheVersion && !!checkout;
   const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
   const steps = group.steps.map((i) => {
     const step = plan[i]!;
+    const cache = cached(step);
     volumes.push({ name: `src-${i}`, emptyDir: { sizeLimit: c.s.ephemeralLimit } }, { name: `tmp-${i}`, emptyDir: { sizeLimit: "2Gi" } });
+    // A cached step works in the runner's checkout path; /src is the same directory, for scripts that name it.
     const mounts: object[] = [
       { name: "work", mountPath: "/pristine", subPath: "src", readOnly: true },
       { name: `src-${i}`, mountPath: "/src" },
+      ...(cache ? [{ name: `src-${i}`, mountPath: checkout }] : []),
       { name: `tmp-${i}`, mountPath: "/tmp" },
-      ...(step.bare ? [] : [{ name: "work", mountPath: "/target", subPath: "target" }, { name: "work", mountPath: "/cache", subPath: "cache" }]),
+      ...(step.bare ? [] : [{ name: "work", mountPath: cache ? `${checkout}/target` : "/target", subPath: "target" }, { name: "work", mountPath: "/cache", subPath: "cache" }]),
       { name: "work", mountPath: "/out", subPath: `out/${i}` },
       ...(offline ? prepared.mounts.map((m) => ({ name: "work", mountPath: m.target, subPath: m.sub, readOnly: true })) : []),
     ];
+    const env = cache
+      ? { ...cacheEnv(c.s.sccacheUrl!, cacheVersion!, prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" }
+      : { ...(offline ? prepared.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
     return container(c.s, stepContainer(i), image, {
-      command: ["/bin/sh", "-c", STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
-      workingDir: "/src",
-      env: envList({ ...(offline ? prepared.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" }),
+      command: ["/bin/sh", "-c", cache ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
+      workingDir: cache ? checkout : "/src",
+      env: envList(env),
       volumeMounts: mounts,
     });
   });
@@ -323,7 +382,8 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   const check = checkPackages && prepared.packages.length
     ? [container(c.s, PACKAGES_CONTAINER, image, { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
-  return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1));
+  const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
+  return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1), labels);
 }
 
 /** A step's time limit: its own, capped by the environment's. */

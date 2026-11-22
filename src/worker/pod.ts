@@ -76,15 +76,15 @@ async function sourcePhase(e: PodEnv): Promise<number> {
     e.log(err ?? "patch applied");
     if (err) return fail(err);
   }
-  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null };
+  const out = { ok: true, env: {} as Record<string, string>, mounts: [] as { sub: string; target: string }[], packages: [] as string[], craftFontsRef: null as string | null, craftI18nRev: null as string | null, cacheVersion: null as string | null };
   try {
     const gate = t.baseSha ? await resolveGate(t.repo, t.baseSha, e.fetchImpl) : null;
     if (!t.baseSha || !gate) e.log(`${t.baseSha ? "no CI gate for this repo at the base commit" : "no base commit for this task"}; the steps run in the toolchain image as it is`);
     else {
       const g = await gateInputs(e.work, t.repo, t.baseSha, gate, { fetchImpl: e.fetchImpl, log: e.log });
       const root = realpathSync(e.work);
-      Object.assign(out, { env: g.env, packages: gate.packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: g.craftI18nRev, mounts: g.mounts.map((m) => ({ sub: relative(root, realpathSync(m.source)), target: m.target })) });
-      e.log(`environment: gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), packages ${gate.packages.join(" ") || "none"}, craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${g.craftI18nRev?.slice(0, 12) ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}`);
+      Object.assign(out, { env: g.env, packages: gate.packages, craftFontsRef: gate.craftFontsRef, craftI18nRev: g.craftI18nRev, cacheVersion: gate.cacheVersion, mounts: g.mounts.map((m) => ({ sub: relative(root, realpathSync(m.source)), target: m.target })) });
+      e.log(`environment: gate ${gate.gateRef} (gate.yml sha256 ${gate.gateSha256?.slice(0, 16) ?? "unknown"}), packages ${gate.packages.join(" ") || "none"}, craft-fonts ${gate.craftFontsRef?.slice(0, 12) ?? "none"}, craft-i18n ${g.craftI18nRev?.slice(0, 12) ?? "none"}, cache version ${gate.cacheVersion ?? "none"}, gate env ${Object.keys(gate.env).join(", ") || "none"}`);
     }
   } catch (err) {
     return fail(`environment failed: ${(err as Error).message}`);
