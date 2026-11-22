@@ -12,7 +12,7 @@ import { AccessError, addLogin, getAccess, isRole, LOGIN, listAccess, removeLogi
 import { approvalOf, setApproval } from "../../labels/approval.ts";
 import { commentApprovalOf, setCommentApproval } from "../../act/approval.ts";
 import { pushApprovalOf, setPushApproval } from "../../fixup/approval.ts";
-import { fixIssueApprovalOf, setFixIssueApproval } from "../../fixissue/approval.ts";
+import { fixIssueApprovalOf, setFixIssueApproval } from "../../implement/approval.ts";
 import { mergeApprovalOf, setMergeApproval } from "../../merge/approval.ts";
 import { ciApprovalOf, setCiApproval } from "../../merge/ci-approval.ts";
 import { optionalChecks, seenChecks, setOptionalCheck } from "../../optional-checks.ts";

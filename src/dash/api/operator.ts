@@ -1,6 +1,6 @@
 // Releases (operator, or maintainer with write) on the Item page: review again, verify again, try the fix again.
 // They change local tables only; the pipeline picks the item up on its next pass.
-import { ActionError, batchAgain, fixAgain, reviewAgain, stoppedFix, verifyAgain } from "../../operator-actions.ts";
+import { ActionError, batchAgain, reviewAgain, stoppedFix, verifyAgain } from "../../operator-actions.ts";
 import { ask, getDecision } from "../../decisions.ts";
 import { SCOPE_OPTIONS } from "../../decide/decision.ts";
 import { applyAnswer } from "./decisions.ts";
@@ -83,5 +83,4 @@ export async function stopFixItem(db: Db, req: Req): Promise<{ ok: true }> {
 
 export const reviewItemAgain = async (db: Db, req: Req) => run(db, req, reviewAgain);
 export const verifyItemAgain = async (db: Db, req: Req) => run(db, req, verifyAgain);
-export const fixItemAgain = async (db: Db, req: Req) => run(db, req, fixAgain);
 export const batchItemAgain = async (db: Db, req: Req) => run(db, req, batchAgain);

@@ -20,7 +20,7 @@ Stages run in this order. Details, limits and rules for each are in [docs/pipeli
 | Decide | Asks an operator for scope calls, prepares every open decision with a summary, a pick and drafted answers, and answers questions about an item in its conversation. | Haiku, Opus | yes: an operator answers |
 | Label | Writes each settled type label and flag to GitHub. A label a person set is never changed. | none | yes: per-repo approval |
 | Review | Opus reviews every wanted PR at its current head, reading the repo, and gives a verdict with the complete fix list. It writes nothing to GitHub until the final review is posted. | Opus | yes: hold, close and merge-outside-rule verdicts |
-| Fix | Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. | Opus | yes: queueing an issue, per-repo approval, questions the plan leaves open, stuck implementations |
+| Implement | Implements an issue a maintainer queued: Opus plans it in a workspace pod and asks the author or a maintainer when the issue leaves facts or choices open, then writes the change and its tests in a workspace session; AutoCraft runs the formatter, clippy and the tests itself, sends findings back to the session and opens the pull request. A review that asks for fixes or red CI on that pull request goes back to the same session, and AutoCraft pushes the checked revision for a new review. | Opus | yes: queueing an issue, per-repo approval, questions the plan leaves open, stuck implementations |
 | Fix-up | For a take-with-fixes review, applies the listed small fixes to the contributor's branch, or posts them as a comment when the branch cannot be pushed to. For a wanted PR whose gate check fails, runs the formatter, reruns an infrastructure failure once, or has a model patch the code. For a red default branch in an approved repo, reruns a flaky failure once and asks an operator about reporting an infrastructure failure. | Sonnet, Opus, Haiku | yes: per-repo approval |
 | Verify | Records upstream CI as the verification of taken PRs in repos that have it. A repo without CI, and a bugfix that changes a test file, get a model-planned build in a build environment; a model summarises failures. With the Screenshots feature on, a UI pull request is also rendered at the base and at the head, and a model compares the images; a clear regression holds the merge. | Sonnet, Haiku, Opus | yes: failures and errors |
 | Merge queue | Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge, and asks for a Merge? decision on PRs outside the rules. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up or a Merge? question (for a pre-approved merge, a Merge? question). Approves held CI runs of outside contributors where the repo allows it. | Opus | yes: merge? decision for PRs outside the rules |
@@ -60,7 +60,7 @@ Items is one filterable list; a row's details open inline under it. Needs you sh
 | `claude` (Claude Code CLI) | All Claude calls |
 | `bwrap` (bubblewrap, `/usr/bin/bwrap`) | Sandbox for tool-using calls. Without it, those calls run without tools; `AUTOCRAFT_NO_SANDBOX=1` forces that |
 | `jev` (optional) | CLI for TypeSafe's Jev model, used by the classify, priority and duplicate steps (`jev --compact ask`). Without it, switched off (`autocraft-server accounts jev off`), or when its account is out of credit or its key is rejected, Haiku does Jev's work through the Claude accounts (more Claude usage) |
-| Podman and a second OS user | Build environments for Verify and Fix (optional) |
+| Podman and a second OS user | Build environments for Verify and Implement (optional) |
 | `sqlite3`, `curl` | `deploy/backup.sh` and `deploy/hook.sh` |
 
 ### Install
@@ -221,7 +221,7 @@ The mock API serves fixture data; pick the role with `?as=operator|maintainer|vi
 | `src/mirror.ts`, `src/db.ts`, `src/schema.sql` | Sync and the SQLite schema |
 | `src/classify`, `src/priority`, `src/dupes`, `src/embed`, `src/rank` | Classification, priority, duplicates, embeddings, work rank |
 | `src/decide`, `src/conversations`, `src/act` | Decisions, Opus conversations and cards, applying answers |
-| `src/review`, `src/fixissue`, `src/fixup`, `src/verify`, `src/merge` | Review, fix, fix-up, verify, merge queue |
+| `src/review`, `src/implement`, `src/fixup`, `src/verify`, `src/merge` | Review, fix, fix-up, verify, merge queue |
 | `src/agents`, `src/prompts`, `src/sandbox`, `src/itemtools` | Claude accounts and calls, prompts, bubblewrap, read-only item tools |
 | `src/github` | `write.ts`, the only module that writes to GitHub |
 | `src/runner`, `src/worker`, `src/build` | Job runner, sandbox worker, build environments |

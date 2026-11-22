@@ -39,7 +39,7 @@ import { type Exec, exec, fixupDir } from "../fixup/git.ts";
 import { whoAmI } from "../fixup/index.ts";
 import { setPipelineLogin } from "../github/pipeline-account.ts";
 import { commitIdentity } from "../github/identity.ts";
-import { branchOf, forkOf } from "../fixissue/index.ts";
+import { branchOf, forkOf, mainHeadOf } from "../github/fork.ts";
 import type { Querier } from "../mirror.ts";
 import { refreshChecks } from "../review/checks.ts";
 import { BatchGit } from "./batch-git.ts";
@@ -106,10 +106,9 @@ type Cand = { number: number; head: string; size: string; lines: number };
 
 export async function defaultBatchDeps(): Promise<BatchDeps> {
   const { Client } = await import("../mirror.ts");
-  const { defaultDeps } = await import("../fixissue/index.ts");
   return {
     exec, querier: new Client(1000), run: mergeRun, mergeCommand: envVar("MERGE_CMD") || DEFAULT_MERGE_COMMAND,
-    mainHead: defaultDeps().mainHead, now: () => new Date(), root: fixupDir(),
+    mainHead: mainHeadOf, now: () => new Date(), root: fixupDir(),
   };
 }
 

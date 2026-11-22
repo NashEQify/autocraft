@@ -275,7 +275,7 @@ export type SubmitTool = { name: string; /** The input as JSON, at most 4000 cha
 
 export type Submit =
   | { ok: true; text: string; /** The full model id the harness reported (e.g. from the CLI's result); matched by family against the claim's model for the tier. */ model: string; usage: Usage; /** Per model id, subagents (the explorer) included; `usage` is the whole call when this is absent. */ modelUsage?: Record<string, Usage>; /** The harness's cost for the whole call at list price, when it reports one (the Claude CLI's `total_cost_usd`). */ costUsd?: number; turns?: number; /** The harness session id, kept by the helper for follow-ups. */ sessionId?: string; /** Tool uses in order, subagents included. */ tools?: SubmitTool[]; durationMs: number }
-  | { ok: false; error: string; usage?: Usage; durationMs: number };
+  | { ok: false; error: string; usage?: Usage; durationMs: number; /** The model's safety filter declined the request: the server runs the call once more on another Task Runner or a lower tier, without using an attempt. */ refused?: boolean };
 
 export type SubmitReply = { accepted: boolean; reason?: string };
 

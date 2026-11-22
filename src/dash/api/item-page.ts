@@ -4,12 +4,13 @@
 import { filtered, isHiddenRepo } from "../../hidden-sql.ts";
 import { prBuildView } from "../../prbuild/view.ts";
 import { createHash } from "node:crypto";
-import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemKind, ItemPrBuild, ItemRef, ItemReleases, ItemState, Preapproval, QueueSlot, RepoName, ScreenshotRun, Tier } from "../../../web/src/api/types.ts";
+import type { CiState, TimelineEntry, DiscordInfo, ItemBar, ItemImplementation, ItemKind, ItemPrBuild, ItemRef, ItemReleases, ItemState, Preapproval, QueueSlot, RepoName, ScreenshotRun, Tier } from "../../../web/src/api/types.ts";
 import { statusFromItem, type ItemStatus } from "../../core/item-status.ts";
 import { triggerWhy } from "../../review/trigger.ts";
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
 import { fingerprint, rowValuesOf, context, gather, obj, arr, type Ctx, type Ev, hiddenExpr } from "./trace.ts";
 import { timelineOf } from "./item-timeline.ts";
+import { implementationData, implementationView } from "./item-implementation.ts";
 import { barOf } from "./item-bar.ts";
 import { discordOf } from "./discord.ts";
 import { itemCore } from "./index.ts";
@@ -59,6 +60,8 @@ export interface ItemPageData {
   prBuild: ItemPrBuild | null;
   /** The screenshot run of the PR's latest head, for staff; empty when there is none. */
   screenshots: ScreenshotRun[];
+  /** Issues: the current or newest ended implementation attempt. */
+  implementation: ItemImplementation | null;
 }
 export type ItemPageUnchanged = { unchanged: true; stamp: string };
 
@@ -99,6 +102,10 @@ const extraQueries = (db: Db, repo: string, n: number) => {
     db.k.selectFrom("screenshot_runs").select((eb) => groupConcat(db, eb(eb(eb("head_sha", "||", eb.ref("state")), "||", eb.fn.coalesce("verdict", eb.val(""))), "||", exprOf(eb, "held")), ",", "head_sha").as("states"))
       .where("repo", "=", repo).where("number", "=", n),
     db.k.selectFrom("tracked_repos").select("pipeline").where("name", "=", repo),
+    db.k.selectFrom("implementations").select(["id", "state", "updated_at"]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("implementation_rounds as r").innerJoin("implementations as m", "m.id", "r.implementation_id")
+      .select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("r.id").as("newest"), eb.fn.sum<number | null>(length(eb, "r.result")).as("length")])
+      .where("m.repo", "=", repo).where("m.number", "=", n),
     db.k.selectFrom("jobs").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), groupConcat(db, "state", ",", "id").as("states")])
       .where("state", "in", ["queued", "running"]).where("repo", "=", repo).where((eb) => queued(eb, "jobs")),
     db.k.selectFrom("jobs as j").select((eb) => groupConcat(db, eb.selectFrom("jobs as q").select((e) => e.fn.countAll<number>().as("n"))
@@ -296,19 +303,20 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
   const stamp = await stampOf(c, req);
   if (req.query.get("since") === stamp) return { unchanged: true, stamp };
   // The parts read independently, so they run together.
-  const [it, ev, row, cost] = await Promise.all([
+  const [it, ev, row, cost, impl] = await Promise.all([
     itemCore(db, req), gather(c, null),
     db.get(db.k.selectFrom("items").select(["url", "head_oid", (eb) => eb.selectFrom("item_reads as r").select("r.synced_at").whereRef("r.repo", "=", "items.repo").whereRef("r.number", "=", "items.number").as("synced_at")])
       .where("repo", "=", c.repo).where("number", "=", c.n)).then((r) => r!),
     db.get(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("r.cost_usd"), eb.lit(0)).as("cost"))
       .where("i.repo", "=", c.repo).where("i.number", "=", c.n).$if(filtered(c.hidden), (q) => q.where((eb) => hiddenExpr(db, eb, c.hidden)!))).then((r) => r!.cost),
+    implementationData(c),
   ]);
   const pr = it.kind === "pr";
-  const [status, header, reviews, timeline, github, prBuild, screenshots] = await Promise.all([
+  const [status, header, reviews, timeline, github, prBuild, screenshots, implementation] = await Promise.all([
     statusOf(c, it), headerOf(c, it, it.queue ?? null, req),
     pr ? reviewsOf(c, row.head_oid, ev) : { latest: null, earlier: [] },
-    (pr ? preapprovalsOf(db, c.repo, c.n) : Promise.resolve([])).then((pre) => timelineOf(c, ev, pre)),
-    githubOf(c, it, ev, row.url ?? "", row.synced_at), prBuildOf(c), screenshotsOf(c, row.head_oid),
+    (pr ? preapprovalsOf(db, c.repo, c.n) : Promise.resolve([])).then((pre) => timelineOf(c, ev, pre, impl)),
+    githubOf(c, it, ev, row.url ?? "", row.synced_at), prBuildOf(c), screenshotsOf(c, row.head_oid), implementationView(c, impl),
   ]);
   return {
     repo: c.repo, number: c.n, kind: it.kind, state: it.state, title: it.title, author: it.author, stamp,
@@ -318,5 +326,6 @@ export async function itemPage(db: Db, req: Req): Promise<ItemPageData | ItemPag
     github,
     prBuild,
     screenshots,
+    implementation,
   };
 }

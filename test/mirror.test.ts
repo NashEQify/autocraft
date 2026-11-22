@@ -232,7 +232,7 @@ test("saveChecks of many PRs records waiting runs, settles pushes and follows un
 
 test("the open-PR references follow an edit of the PR's text, from sync and from any other writer", async () => {
   const { writeItemNode } = await import("../src/mirror.ts");
-  const { issuesWithOpenPr } = await import("../src/fixissue/candidates.ts");
+  const { issuesWithOpenPr } = await import("../src/core/open-prs.ts");
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "refs-")), "m.db"));
   const pr = (body: string) => ({
     __typename: "PullRequest", repository: { name: "a", owner: { login: "storytold" } }, number: 7, title: "Change", body, url: "https://github.com/storytold/a/pull/7",

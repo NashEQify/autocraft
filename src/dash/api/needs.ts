@@ -24,6 +24,7 @@ import { stepTitle } from "./trace.ts";
 import type { Db } from "../../db/index.ts";
 import * as kx from "../../db/kx.ts";
 import { setting } from "../../settings-read.ts";
+import { latestAttempts } from "../../implement/store.ts";
 
 export const NEEDS_PAGE = 30;
 /** Older feedback is not asked for any more; the window also bounds the scans. */
@@ -193,6 +194,7 @@ export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): P
     const parts = [g.prs && `${g.prs} PR${g.prs === 1 ? "" : "s"}`, g.n - g.prs && `${g.n - g.prs} issue${g.n - g.prs === 1 ? "" : "s"}`].filter(Boolean).join(", ");
     out.push({ id: `outside:${g.author}`, kind: "outside-group", title: g.author, reason: `${parts} waiting for ${g.surge ? "the outside-surge breaker or " : ""}the author's daily limit`, since: g.since, count: g.n, resume: { type: "outside", author: g.author } });
   }
+  out.push(...await implementationRows(db, hidden, canSeeInternals({ user })));
   // Issues whose fix attempt was skipped or failed wait on a person: one group row per repo, listed by `fixes`.
   const groups = await db.all(db.k.selectFrom("main.item_plans as p").leftJoin("fix_attempts as a", (j) => j.onRef("a.repo", "=", "p.repo").onRef("a.number", "=", "p.number"))
     .select((eb) => ["p.repo", eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("a.updated_at", "p.planned_at")).as("since")])
@@ -202,6 +204,29 @@ export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): P
     out.push({ id: `fixes:${g.repo}`, kind: "fix-group", title: g.repo, reason: `${g.n} issue${g.n === 1 ? "" : "s"} with a stopped fix`, since: g.since, count: g.n, resume: { type: "fixes", repo: g.repo } });
   }
   return out;
+}
+
+/**
+ * Implementations of open issues that wait on a maintainer: a stuck attempt, or a plan question asked of the maintainers. Each
+ * links to its decision. The reason after the cause is the attempt's detail (job and model text): staff only.
+ */
+async function implementationRows(db: Db, hidden: HiddenRepos, staff: boolean): Promise<NeedsStoppedRow[]> {
+  const waiting = [...(await latestAttempts(db)).values()].filter((r) => !isHiddenRepo(hidden, r.repo) && r.decisionId
+    && (r.state === "stuck" || (r.state === "asked" && r.question?.audience === "maintainer")));
+  if (!waiting.length) return [];
+  const items = new Map((await db.all(db.k.selectFrom("items").select(["repo", "number", "state", "title"])
+    .where(kx.tupleIn(db, ["repo", "number"], waiting.map((r) => [r.repo, r.number] as [string, number]), ["text", "bigint"])))).map((i) => [`${i.repo}#${i.number}`, i]));
+  return waiting.flatMap((r): NeedsStoppedRow[] => {
+    const it = items.get(`${r.repo}#${r.number}`);
+    if (!it || it.state !== "OPEN") return [];
+    const stuck = r.state === "stuck";
+    const reason = stuck ? (staff ? r.reason : r.reason?.split(": ")[0]) ?? "The implementation is stuck" : "The plan asked the maintainers a question";
+    return [{
+      id: `implement:${r.repo}#${r.number}`, kind: stuck ? "implement-stuck" : "implement-question", title: `${r.repo}#${r.number}`,
+      item: { repo: r.repo, number: r.number, kind: "issue", state: itemState(it.state), title: it.title }, reason, since: stuck ? r.updatedAt : r.question?.at ?? r.updatedAt,
+      resume: { type: "link", to: decisionPath({ id: r.decisionId!, repo: r.repo, number: r.number }) },
+    }];
+  }).sort((a, b) => ((a.since ?? "") < (b.since ?? "") ? -1 : 1));
 }
 
 export const FIXES_PAGE = 25;

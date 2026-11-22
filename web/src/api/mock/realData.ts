@@ -231,7 +231,7 @@ function headerOf(r: RealItem): ItemPageHeader {
   return {
     labels: it.labels ?? [], assignees: [], autocraftAssigned: false, pipelineOn: it.pipelineOn ?? true, discord: it.discord ?? null,
     queue: it.queue ?? null, fastTracked: false, held: false, preapproval: it.preapproval ?? null,
-    releases: it.releases ?? { reviewAgain: false, verifyAgain: false, fixAgain: false, batchAgain: false }, tier: it.tier ?? "not",
+    releases: it.releases ?? { reviewAgain: false, verifyAgain: false, batchAgain: false }, tier: it.tier ?? "not",
     size: it.kind !== "pr" ? null : lines < 50 ? "S" : lines < 300 ? "M" : lines < 1000 ? "L" : "XL",
     backlog: { held: false, canSettle: true },
   };

@@ -37,8 +37,6 @@ export type ActionKind =
   // item steps (issues and PRs)
   | "classify" | "referee" | "prioritize" | "embed" | "dupes" | "dupe-answer" | "dupes-compare" | "decide" | "label"
   | "act" | "implement"
-  // the retired Fix stage's steps, run only from the command line until their code goes; the planner plans neither
-  | "fixissue" | "fixissue-collect"
   // the pipeline's account leaves an item that is off the path to merge (src/core/assignment.ts)
   | "unassign";
 
@@ -170,6 +168,10 @@ export type PrFacts = {
     noCi: boolean;
     /** The default branch's CI is red. */
     mainRed: boolean;
+    /** Issue implementations are approved for the repo: the gate of an implementation PR's revisions. */
+    fixIssueApproved?: boolean;
+    /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
+    implementOn: boolean;
   };
 
   review: ReviewFacts | null;
@@ -271,6 +273,12 @@ export type PrFacts = {
   batch: "batch-checking" | "in-batch" | "batch-failed" | null;
   /** The PR is one AutoCraft opened to fix main CI. */
   mainFix: boolean;
+  /**
+   * The implementation (src/implement) whose PR this is: the latest attempt that opened it, with its issue, its state and the
+   * heads its revisions started from. Absent or null for every other PR. A live one takes the PR's review fixes and red CI
+   * itself (implement{revise}) instead of the fix-up and the CI fix.
+   */
+  implementation?: { issue: number; state: string; revisedHeads: string[] } | null;
   /** The PR's base is not its repository's default branch: it merges singly (into the base its review read), never in an integration batch. */
   baseOffDefault: boolean;
   /** The open PR of this repository whose head branch is this PR's base (a stacked PR); null when none. */

@@ -89,7 +89,7 @@ export function createRedesignMock(me: User, base: Pick<Api, "decisions" | "secu
     },
     itemPage: async (repo, number) => {
       const p = real?.pages.find((x) => x.repo === repo && x.number === number) ?? itemPageFor(repo, number);
-      if (p) return wait(me.role === "viewer" ? { ...p, reviews: { latest: p.reviews.latest && { ...p.reviews.latest, fixes: [], risks: [], claims: [] }, earlier: [] }, timeline: p.timeline.map((h) => ({ ...h, calls: [], body: null, lines: [] })), bar: { ...p.bar, headline: { ...p.bar.headline, text: p.bar.headline.tone === "failed" ? p.bar.headline.text.split(":")[0]! : p.bar.headline.text } } } : p);
+      if (p) return wait(me.role === "viewer" ? { ...p, reviews: { latest: p.reviews.latest && { ...p.reviews.latest, fixes: [], risks: [], claims: [] }, earlier: [] }, timeline: p.timeline.map((h) => ({ ...h, calls: [], body: null, lines: [] })), implementation: p.implementation && { ...p.implementation, queuedBy: null, plan: null, questions: [], shots: [], calls: p.implementation.calls.map((c) => ({ ...c, summary: null, error: null, runId: null, via: undefined })), checks: p.implementation.checks.map((c) => ({ ...c, findings: [], notes: [] })) }, bar: { ...p.bar, headline: { ...p.bar.headline, text: p.bar.headline.tone === "failed" ? p.bar.headline.text.split(":")[0]! : p.bar.headline.text } } } : p);
       const it = await base.item(repo, number);
       const status = { phase: it.state === "merged" ? "Merged" : it.state === "closed" ? "Closed" : "Triage", waiting: null, next: null, since: it.updatedAt } as const;
       return wait({

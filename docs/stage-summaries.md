@@ -18,7 +18,7 @@
 
 **Model.** Jev first, Haiku for the unclear pairs.
 
-**You see.** A "Duplicate?" question on the Needs you page. An open one holds the item out of Review, Verify, Fix and the merge queue.
+**You see.** A "Duplicate?" question on the Needs you page. An open one holds the item out of Review, Verify, Implement and the merge queue.
 
 **Can go wrong.** A pair you already ruled on is not asked again.
 
@@ -82,17 +82,17 @@
 
 **Can go wrong.** A closed, draft or changed pull request is dropped and returns on a later pass.
 
-## Fix
+## Implement
 
-**What.** Writes a patch for a bugfix issue with a clear fix, tests it in the sandbox and opens a pull request.
+**What.** Implements a queued issue in a workspace: plans it, asks when facts or choices are open, writes the change and its tests, runs the checks and opens a pull request.
 
-**When.** For open bugfix issues in public Rust repos with fix approval.
+**When.** For issues a maintainer queued, in repos with the issue implementations approval and the `implement` feature.
 
-**Model.** Sonnet judges whether the fix is clear; a model writes the patch.
+**Model.** Opus plans and writes, on the queuer's own Task Runner.
 
-**You see.** A new pull request, or the issue held with a reason.
+**You see.** A question to the author or a decision, then a new pull request, or a decision when the attempt is stuck.
 
-**Can go wrong.** An unclear issue, a failed test or a closed issue ends the attempt. An operator can ask for "Try the fix again".
+**Can go wrong.** Checks that still fail after three rounds, a refused diff, a closed issue or a queuer without a ready Task Runner stop the attempt; it becomes a decision with Try again, Open as draft PR, Backlog or Close issue.
 
 ## Fix-up
 

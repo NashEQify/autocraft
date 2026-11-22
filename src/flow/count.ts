@@ -18,7 +18,7 @@ import { isScope } from "../decide/select.ts";
 import { cachedQueue, dueActions, dueRefs } from "../core/plan-read.ts";
 import type { QueueState } from "../core/plan.ts";
 import { commentApprovalOf } from "../act/approval.ts";
-import { fixIssueApprovalOf } from "../fixissue/approval.ts";
+import { fixIssueApprovalOf } from "../implement/approval.ts";
 import { featureOn } from "../build/features.ts";
 import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { approvalOf } from "../labels/approval.ts";

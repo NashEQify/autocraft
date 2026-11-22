@@ -41,7 +41,7 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "base_ref", "TEXT"],
   ["fast_track", "weight", "INTEGER NOT NULL DEFAULT 5"],
   ["items", "reactions_count", "INTEGER"],
-  // src/fixissue/candidates.ts textRefs(): the issue numbers a PR's text names, so the planner does not read every open PR's body.
+  // src/core/open-prs.ts textRefs(): the issue numbers a PR's text names, so the planner does not read every open PR's body.
   ["items", "text_refs", "TEXT"],
   ["discord_channels", "default_repo", "TEXT"],
   ["discord_channels", "position", "INTEGER"],
@@ -296,6 +296,9 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["remote_calls", "own_lane", "INTEGER NOT NULL DEFAULT 0"],
   // 1 for a bound call that runs in one of its user's Task Runner slots, never in the own lane (NewCall.boundSlot).
   ["remote_calls", "bound_slot", "INTEGER NOT NULL DEFAULT 0"],
+  // A call a model's safety filter declined: its retry elsewhere, and the runner token it is not offered to again.
+  ["remote_calls", "refusals", "INTEGER NOT NULL DEFAULT 0"],
+  ["remote_calls", "refused_token", "INTEGER"],
   // The login whose conversation message the reply that wrote the choices answered.
   ["decision_choices", "asked_by", "TEXT"],
   // Build pod placement and capacity (src/build/pods.ts, src/build/sizing.ts).

@@ -1726,6 +1726,8 @@ export interface RemoteCalls {
   bundle_hash: string | null;
   consumed_at: number | null;
   base_stdin: string | null;
+  refusals: Generated<number>;
+  refused_token: number | null;
 }
 
 export interface RemoteChecks {
@@ -2772,7 +2774,7 @@ export const COLUMNS = {
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
-  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "bound_slot", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin"],
+  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "bound_slot", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin", "refusals", "refused_token"],
   remote_checks: ["id", "call_id", "run_id", "input", "state", "result", "requested_at", "ended_at"],
   remote_cooloffs: ["login", "until", "reason", "failures", "failures_since"],
   remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version"],

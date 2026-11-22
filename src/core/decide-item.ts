@@ -3,7 +3,7 @@
 // decideAll adds a PR's review-to-merge Plan (decide.ts) and derives the Work page's next-step text.
 import { BUILD_STATES, ENDED_STATES, MAX_LIVE_PER_REPO, type ImplementBucket, type ImplementationState } from "../implement/types.ts";
 import { isWork, unassignActions } from "./assignment.ts";
-import { decidePr } from "./decide.ts";
+import { decidePr, implementOffWait } from "./decide.ts";
 import { RECOMMEND_MAX_FAILURES, RECOMMEND_RETRY_MS, alreadyLabeled, isScope, labelsToAdd } from "./item-rules.ts";
 import type { Action, ItemFacts, ItemPlan, ItemState, ItemView, PassFacts, PrFacts, WaitKind } from "./plan.ts";
 
@@ -17,8 +17,7 @@ export function scopeReason(f: ItemFacts): "needs-decision" | "scope-disagreemen
   return null;
 }
 
-/** The wait of a queued issue whose Implement feature is off for its repo. */
-export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
+export { implementOffWait };
 /** The wait of a queued issue whose latest attempt ended without a merged PR and whose text has not changed since. */
 export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again";
 
@@ -50,8 +49,11 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
   if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a decision on the stuck implementation", waitKind: "person" };
-  // pr-opened: the open PR is the wait (fix.openPr); a PR that closed unmerged leaves it to a person.
-  return row!.prOpen ? null : { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
+  // pr-opened: the open PR is the wait (fix.openPr); a PR that merged or closed while the issue stayed open ends the attempt with
+  // it (the revise work records that and ends the workspace). Its revisions, and the end of an attempt whose issue is closed
+  // too, are planned on the PR (decidePr).
+  // Ending the attempt is bookkeeping: it needs neither the Implement feature nor the approval (gates()).
+  return row!.prOpen ? null : { bucket: "revise" };
 }
 
 /** Jev and Haiku chose different labels and it is not a scope call: a referee (Sonnet, then Opus when Sonnet was unsure) still has to settle it. An unsure Opus settles the label too and flags a scope decision. */

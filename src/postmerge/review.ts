@@ -45,7 +45,7 @@ export function defaultPostmergeDeps(db: Db): PostmergeDeps {
     fetchMerged: ghMerged, model: PROMPT.models[0]!, maxChars: Math.min(MAX_DIFF_CHARS, MAX_MERGED_DIFF_CHARS),
     checkout: async (repo, number, sha, head) => {
       if (!sha) return checkoutForPr(repo, number, head, console.log);
-      const { branchOf } = await import("../fixissue/index.ts");
+      const { branchOf } = await import("../github/fork.ts");
       return checkoutForCommit(repo, await branchOf(db, repo), sha, console.log);
     },
   };

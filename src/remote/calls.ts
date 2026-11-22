@@ -37,6 +37,7 @@ import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
 import { resumePrompt } from "../build/workspace-call.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
+import { tierTaker } from "./takers.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
@@ -83,7 +84,7 @@ const PROGRESS_MAX = 200;
 const REPLY_MAX = 4_000_000;
 
 /** Prompts that judge an item: an author or co-author of an item they judge gets their calls only when no other helper that could take them is asking for work. */
-const JUDGING = new Set(["review.opus", "premerge.opus", "postmerge.opus", "fixup.check", "fixissue.check", "decide.prepare", "conversation.turn", "verify.compare", "classify.haiku", "security.verify", "security.fixcheck"]);
+const JUDGING = new Set(["review.opus", "premerge.opus", "postmerge.opus", "fixup.check", "decide.prepare", "conversation.turn", "verify.compare", "classify.haiku", "security.verify", "security.fixcheck"]);
 export const judges = (promptId: string): boolean => JUDGING.has(promptId) || promptId.startsWith("dupes.compare-");
 
 /** What a helper's fast-lane slot takes: gating calls (its own sessions' follow-ups among them) and small-tier calls. */
@@ -97,8 +98,9 @@ type Row = {
   token_id: number | null; lease_secret_hash: string | null;
   attempt: number; max_attempts: number; timeout_ms: number; parent_id: number | null; sticky_login: string | null; progress: string | null;
   reply: string | null; usage: string | null; turns: number | null; session_id: string | null; error: string | null; root: string | null;
+  for_login: string | null; refusals: number;
 };
-const COLS = ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class as cls", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "model", "leased_at", "heartbeat_at", "started_at", "token_id", "lease_secret_hash", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "progress", "reply", "usage", "turns", "session_id", "error", "root"] as const;
+const COLS = ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class as cls", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "model", "leased_at", "heartbeat_at", "started_at", "token_id", "lease_secret_hash", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "progress", "reply", "usage", "turns", "session_id", "error", "root", "for_login", "refusals"] as const;
 const rowOf = async (db: Db, id: number): Promise<Row | undefined> =>
   await db.get(db.k.selectFrom("main.remote_calls").select(COLS).where("id", "=", id).$narrowType<{ tier: Tier; state: Row["state"] }>());
 
@@ -392,6 +394,8 @@ type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_logi
   forLogin: string | null;
   /** A bound call that runs in a slot of its user's Task Runners, not their own lane (NewCall.boundSlot). */
   boundSlot: boolean;
+  /** The runner token whose model's safety filter declined the call: it is not offered the call again (submitCall). */
+  refusedToken: number | null;
   /** The lowercase login of the call's pick ("Run on my Task Runner", picks.ts), when it has one, live or not (pickCounts). */
   pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   /** Ends the call's pick; set while it has one. */
@@ -589,6 +593,8 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
         picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
       })).where("id", "=", id).where("state", "=", "queued")
         .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", caller.login), pickLapsedExpr(db, eb, nowMs)]))
+        // The runner whose model declined the call does not take it again (another process's queue cache may still offer it).
+        .where((eb) => eb.or([eb("refused_token", "is", null), eb("refused_token", "!=", caller.tokenId)]))
         // Only the user a call is bound to takes it. A Manual only caller takes only follow-ups, its own picks and calls bound to it.
         .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", caller.login)]))
         .where((eb) => eb.or([eb.not(manualExpr(db, eb, eb.val(caller.login))), eb("parent_id", "is not", null), eb("picked_by", "=", caller.login), eb("for_login", "=", caller.login)]))
@@ -613,7 +619,7 @@ export const QUEUE_CACHE_MS = 2_000;
 type QueueCache = { at: number; sig: string; followUps: Cand[]; ordered: Cand[] };
 const queueCaches = new WeakMap<Db, QueueCache>();
 /** The parsed items, repos, authors and bound login of each queued call by id: they never change, so a rebuild reads them only for new calls. */
-type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin" | "boundSlot">;
+type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin" | "boundSlot" | "refusedToken">;
 const parsedCalls = new WeakMap<Db, Map<number, Parsed>>();
 /** Drops the cached queue order: a call was queued or leased by this process. Other processes' changes show in the signature (count and newest id of the queued calls) or within QUEUE_CACHE_MS. */
 export const dropQueueCache = (db: Db): void => void queueCaches.delete(db);
@@ -661,8 +667,9 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
     .where("state", "=", literal("queued")).$narrowType<{ tier: Tier }>());
   // The items and authors of older calls not parsed yet (a requeued lease), in one read.
   const fresh = queued.filter((r) => !known.has(Number(r.id)) && !r.inline).map((r) => Number(r.id));
-  const texts = new Map<number, { items: string | null; authors: string | null; for_login: string | null; bound_slot: number | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
-  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors", "for_login", "bound_slot"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
+  // A new call has no refused_token yet: only a requeued one, read here, can have one.
+  const texts = new Map<number, { items: string | null; authors: string | null; for_login: string | null; bound_slot: number | null; refused_token?: number | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
+  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors", "for_login", "bound_slot", "refused_token"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
   const rows = await mapSeq(queued, async (r): Promise<Cand> => {
     const id = Number(r.id);
     let p = known.get(id);
@@ -671,7 +678,8 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
       const refs = JSON.parse(x.items!) as ItemRef[];
       // Calls queued before authors were stored on the row are read now.
       const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
-      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors), forLogin: x.for_login?.toLowerCase() ?? null, boundSlot: Number(x.bound_slot) === 1 };
+      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors), forLogin: x.for_login?.toLowerCase() ?? null, boundSlot: Number(x.bound_slot) === 1,
+        refusedToken: x.refused_token == null ? null : Number(x.refused_token) };
     }
     seen.set(id, p);
     return {
@@ -723,7 +731,7 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
   const { q, manual, skip, items } = reads ?? await orderReads(db, caller.login, nowMs);
   const login = caller.login.toLowerCase();
   const live = (r: Cand): boolean => r.seen_at >= nowMs - CALLER_STALE_MS;
-  const released = (r: Cand): boolean => r.releasedBy === login && r.releasedAt !== null && r.releasedAt >= nowMs - RELEASE_SKIP_MS;
+  const released = (r: Cand): boolean => r.refusedToken === caller.tokenId || (r.releasedBy === login && r.releasedAt !== null && r.releasedAt >= nowMs - RELEASE_SKIP_MS);
   const fits = (r: Cand): boolean => live(r) && !released(r) && tiers.has(r.tier) && (!repos || r.repos.every((x) => repos.has(x)));
   const sessions = new Set(sessionIds);
   const allFollowUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && fits(r));
@@ -1131,12 +1139,74 @@ export async function submitCall(db: Db, secret: string | undefined, raw: unknow
   }
   if (s.ok !== false || typeof s.error !== "string") throw new HttpError(400, "ok must be true with text and model, or false with error");
   const r = (await rowOf(db, l.id))!;
+  if (s.refused === true || SAFETY_REFUSAL.test(s.error)) {
+    await refused(db, r, l.login, sha256hex(secret!), await scrubError(`helper: ${unrooted(s.error, l.root)}`), usage, duration, nowMs);
+    return { accepted: true };
+  }
   if (await requeue(db, r, await scrubError(`helper: ${unrooted(s.error, l.root)}`), nowMs, { skipLogin: l.login, summary: "helper failed" })) {
     await noteFailure(db, l.login, nowMs);
     // The last attempt's tokens stay with the failed call.
     await db.run(db.k.updateTable("main.remote_calls").set({ usage: usage ? JSON.stringify(usage) : null, duration_ms: duration }).where("id", "=", l.id).where("state", "=", "failed"));
   }
   return { accepted: true };
+}
+
+/** The harness's text for a request the model's safety filter declined, for helpers that do not say so (Submit.refused). */
+export const SAFETY_REFUSAL = /safeguards flagged this message|appears to violate our usage policy/i;
+/** Starts the error of a call that ended because the model's safety filter declined it (Outcome.error). */
+export const REFUSED_PREFIX = "refused by the model's safety filter";
+
+/**
+ * Where a call the model's safety filter declined runs once more: on another runner token for the same tier, else, for a call that does not judge, a tier
+ * lower (top to mid, the instance's model for it), else nowhere. A follow-up turn stays with its session and is not retried;
+ * neither is a call that was retried already.
+ */
+async function refusalRetry(db: Db, r: Row, nowMs: number): Promise<{ token: number } | { tier: Tier; model: string } | null> {
+  if (r.refusals > 0 || r.parent_id !== null) return null;
+  const refs = JSON.parse(r.items) as ItemRef[];
+  const c = { prompt_id: r.prompt_id, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], step: r.step, refs, forLogin: r.for_login };
+  if (r.token_id !== null && await tierTaker(db, { ...c, tier: r.tier }, r.token_id, nowMs)) return { token: r.token_id };
+  // A call that judges (gates a merge or a security finding) is never answered by a lower tier: without another runner it fails as refused.
+  const lower: Tier | null = r.tier === "top" && !judges(r.prompt_id) && !r.prompt_id.startsWith("security.") ? "mid" : null;
+  if (lower === null || !await tierTaker(db, { ...c, tier: lower }, null, nowMs)) return null;
+  return { tier: lower, model: (await acceptedModels(db))[lower][0] ?? lower };
+}
+
+/**
+ * A lease whose model's safety filter declined the request. The call goes back to the queue once, without using an
+ * attempt (refusalRetry), and fails as refused when it cannot or when the retry is declined too. Neither counts toward
+ * the login's cool-off: the runner did nothing wrong. The agent run says what happened, for the item's history.
+ */
+async function refused(db: Db, r: Row, login: string, hash: string, error: string, usage: ReturnType<typeof usageOf>, duration: number, nowMs: number): Promise<void> {
+  const by = `${r.model ?? r.asked_model} on ${login}'s Task Runner`;
+  const to = await refusalRetry(db, r, nowMs);
+  const lease = (eb: Eb) => eb.and([eb("id", "=", r.id), eb("state", "=", "leased"), eb("lease_secret_hash", "=", hash)]);
+  if (to) {
+    const bundle = "tier" in to ? JSON.stringify({ ...JSON.parse(r.bundle) as Omit<TaskBundle, "callId">, tier: to.tier }) : null;
+    const up = await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+      state: "queued", refusals: eb("refusals", "+", 1), lease_secret_hash: null, token_id: null, claim_id: null, started_at: null, queued_since: nowMs, error, progress: null,
+      picked_by: null, picked_at: null, pick_until: null,
+      // The bundle hash stays: a resumed job adopts the call as it was asked.
+      ...("token" in to ? { refused_token: to.token } : { tier: to.tier, asked_model: to.model, bundle: bundle! }),
+    })).where(lease));
+    if (Number(up.changes) !== 1) return;
+    parsedCalls.get(db)?.delete(r.id);
+    dropQueueCache(db);
+    await bury(db, r.id, hash, nowMs);
+    const where = "token" in to ? "another Task Runner" : `the ${to.tier} tier (${to.model})`;
+    if (r.run_id !== null) await finishRun(db, r.run_id, { state: "failed", ...(usage && { tokens: usage }), error, summary: `refused by ${by}; retried on ${where}` });
+    console.log(`remote call ${r.id} (${r.prompt_id}) refused by ${by}; retried on ${where}`);
+    return;
+  }
+  const why = r.refusals > 0 ? `${REFUSED_PREFIX} again: ${by}, after the retry` : r.parent_id !== null ? `${REFUSED_PREFIX}: ${by}, in a follow-up turn` : `${REFUSED_PREFIX}: ${by}; no other Task Runner or tier could take the call`;
+  const up = await db.run(db.k.updateTable("main.remote_calls").set({
+    state: "failed", error: why, ended_at: nowMs, lease_secret_hash: null, token_id: null, claim_id: null, progress: null, usage: usage ? JSON.stringify(usage) : null, duration_ms: duration,
+  }).where(lease));
+  if (Number(up.changes) !== 1) return;
+  dropQueueCache(db);
+  await bury(db, r.id, hash, nowMs);
+  if (r.run_id !== null) await finishRun(db, r.run_id, { state: "failed", ...(usage && { tokens: usage }), error: `${why}. ${error}`, summary: `refused by ${by}` });
+  console.log(`remote call ${r.id} (${r.prompt_id}) ${why}`);
 }
 
 /** The helper gives the lease back (it could not prepare or start the run): the call returns to the queue without using an attempt and is not offered to that login for a while. False when the lease is gone. */

@@ -20,6 +20,11 @@ export function artifactDir(): string {
   return resolve(envVar("ARTIFACT_DIR") ?? join(dataDir(), "artifacts"));
 }
 
+/** The file name of a stored implementation screenshot: its hash (src/implement/session.ts storeShot). */
+export const SHOT_FILE = /^[0-9a-f]{32}\.png$/;
+/** Where an implementation's screenshot `file` (SHOT_FILE) is stored. */
+export const implementationShotPath = (id: number, file: string): string => join(artifactDir(), "implementations", String(id), file);
+
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 /**

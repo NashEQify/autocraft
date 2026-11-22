@@ -13,6 +13,7 @@ import { DisclosurePanel } from "../../../ui/molecules/DisclosurePanel";
 import { ErrorLine } from "../../../ui/atoms/ErrorLine";
 import { ItemEvidence } from "./ItemEvidence";
 import { Story } from "./Story";
+import { ImplementationPanel } from "./ImplementationPanel";
 
 export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | null }) {
   const user = useUser();
@@ -48,6 +49,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
           {suggestions.map((a) => <ActionCard key={a.id} a={a} operator={canAct(user, [d.repo])} editInstructions={canRun(user, d.repo)} className="" item={{ repo: d.repo, number: d.number }} />)}
         </section>
       )}
+      {d.implementation && <ImplementationPanel m={d.implementation} />}
       {open.length === 0 && <DisclosurePanel title="Evidence" summary="Review, checks and related items"><ItemEvidence d={d} /></DisclosurePanel>}
       <DisclosurePanel title="History" summary={conv?.pending ? "Opus is replying" : `${historyCount} ${historyCount === 1 ? "event" : "events"}`} defaultOpen>
         <Story d={d} flash={flash} conv={conv} />

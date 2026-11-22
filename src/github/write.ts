@@ -48,10 +48,10 @@ function covers(g: Guarded | Grant, repo: string, number?: number): void {
 }
 
 /** A push to the pipeline's own branch and a new PR are made only under the grants of the steps that open the pipeline's own PRs. */
-function opensOwnPr(g: Grant, repo: string): void {
+function opensOwnPr(g: Grant | Guarded<"implement">, repo: string): void {
   covers(g, repo);
-  const ok = g.scope === "item" ? g.action.kind === "fixissue-collect" || g.action.kind === "implement" : g.need === "main-fix" || g.need === "merge" || g.need === "security";
-  if (!ok) throw new Error(`a ${g.scope === "item" ? `${g.action.kind} grant` : `grant for ${g.need ?? "no approval"}`} does not allow a push to a new branch or a new pull request`);
+  const ok = g.scope === "repo" ? g.need === "main-fix" || g.need === "merge" || g.need === "security" : g.action.kind === "implement";
+  if (!ok) throw new Error(`a ${g.scope === "repo" ? `grant for ${g.need ?? "no approval"}` : `${g.action.kind} grant`} does not allow a push to a new branch or a new pull request`);
 }
 
 /**
@@ -606,7 +606,7 @@ export function ghAskComment(w: Writer, exec: Exec, action: string, g: Guarded<A
   return ghComment(w, g, exec, action, { repo: g.repo, number: g.number, pr: true }, note, text, details);
 }
 
-/** `action` is the audit action of the caller's stage (act, fixup or fixissue comment). Not for asks: those use ghAskComment. */
+/** `action` is the audit action of the caller's stage (act, fixup or implement comment). Not for asks: those use ghAskComment. */
 export async function ghComment(w: Writer, g: CommentGrant, exec: Exec, action: string, o: { repo: string; number: number; pr: boolean }, note: Note, text: string, details: Details = {}): Promise<ExecResult> {
   covers(g, o.repo, o.number);
   exec = await laneExec(w, g, exec);
@@ -806,12 +806,17 @@ export function pushRepin(w: Writer, g: GuardedRepo, git: Pick<Git, "git">, o: {
   return pushed(w, g, git, "autorepin-push", refOf(o.repo, o.number), o, `--force-with-lease=refs/heads/${o.branch}:${o.head}`, { ...details, from: o.head }, { repo: o.repo, number: o.number });
 }
 
-/** Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. */
-export function pushOwnBranch(w: Writer, g: Grant, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
+/**
+ * Pushes `sha` to `branch` of the pipeline's own fork, replacing the branch. Under a PR grant (a revision of our open PR, whose
+ * push outcome this is) the commit goes on top of the guarded head, and git refuses the push when the branch has moved since
+ * (a base merge or someone else's push).
+ */
+export function pushOwnBranch(w: Writer, g: Grant | Guarded<"implement">, git: Pick<Git, "git">, action: string, o: { repo: string; number?: number; remote: string; branch: string; sha: string }, details: Details = {}, /** The push needs the box account whatever the repo's identity (an advisory's private fork, which the app cannot reach). */ asBox = false): Promise<ExecResult> {
   opensOwnPr(g, o.repo);
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9._-]+$/.test(o.remote) || o.branch.startsWith("-") || !/^[0-9a-f]{40,64}$/.test(o.sha)) throw new Error("the push target is not a repository and branch");
+  const lease = g.scope === "pr" ? `--force-with-lease=refs/heads/${o.branch}:${g.head}` : "--force";
   // A new branch has no PR yet: its outcome is matched to the PR by commit once the PR's checks arrive.
-  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, "--force", details, { repo: o.repo, number: null }, asBox).then(async (r) => {
+  return pushed(w, g, git, action, o.number === undefined ? `${o.repo}:${o.branch}` : refOf(o.repo, o.number), o, lease, details, { repo: o.repo, number: g.scope === "pr" ? g.number : null }, asBox).then(async (r) => {
     // Without this row the pipeline's own PR at this commit is not counted as its own (a person is asked), so a failed write only holds it.
     if (r.code === 0) try { await w.db.run(w.db.k.insertInto("main.own_commits").values({ repo: o.repo, sha: o.sha, action, at: new Date().toISOString() }).onConflict((oc) => oc.doNothing())); } catch (e) { console.error(`own commit not recorded: ${oneLine(String((e as Error).message ?? e))}`); }
     return r;

@@ -25,8 +25,9 @@ export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
  * `guidance`: a person's note for the attempt (a Try again answer's text), read into its plan and session input.
  * `workspace`: the attempt's workspace was made again; the turns and checks before it belong to the lost one.
  * `ask-failed`: posting or asking a stored plan's questions failed; the next job tries the write again from the stored plan.
+ * `revise`: a revision of our open PR starts (ReviseRound); the turns and checks after it belong to that revision.
  */
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed"] as const;
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed", "revise"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
@@ -80,6 +81,12 @@ export type QuestionRound = { audience: QuestionAudience; text: string; commentI
 /** The result of an `ask-failed` round: what failed, for the plan round whose questions it was writing. */
 export type AskFailedRound = { planRound: number; error: string };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
+
+/**
+ * The result of a `revise` round: the PR head it revises and why (the review's fixes, red CI or both), the commit our last
+ * push made (the revision's push carries the change since it onto the PR's head), and the follow-up it sends the session.
+ */
+export type ReviseRound = { prNumber: number; head: string; from: string; review: boolean; ci: boolean; message: string };
 
 /** The plan call's reply: ready to implement, or the questions that come first. */
 export type PlanReply = {

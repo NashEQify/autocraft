@@ -12,6 +12,7 @@ import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
 import { runBuild } from "./build.ts";
 import { parsePlanReply, planMarkdown, PLAN_PROMPT_ID } from "./plan.ts";
 import { authorComment } from "./questions.ts";
+import { fixIssueApprovalOf } from "./approval.ts";
 import { currentImplementation } from "./store.ts";
 import { BUILD_STATES, type PlanReply } from "./types.ts";
 
@@ -141,5 +142,17 @@ export const commands = {
   implement: {
     summary: "implement queued issues: run <repo#n> --plan-only [--no-post] (stop after the plan; --no-post stores and posts nothing) | run <repo#n> --no-pr (the session, AutoCraft's checks and follow-up turns of the current attempt; nothing to GitHub) | show <repo#n> --call <id>",
     run,
+  },
+  "implement-approval": {
+    summary: "implement-approval [--repo R]: which repos the operator approved for issue implementations",
+    async run(args: string[]): Promise<void> {
+      const i = args.indexOf("--repo");
+      const db = await openDb();
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
+      for (const r of repos) {
+        const a = await fixIssueApprovalOf(db, r);
+        console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);
+      }
+    },
   },
 };

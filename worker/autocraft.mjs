@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.8";
+export const HELPER_VERSION = "1.3.9";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -172,7 +172,7 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
 /** @typedef {{ name: string, args: string, resultBytes: number | null, isError: boolean, startedAt?: string, endedAt?: string }} SubmitTool */
 /**
  * @typedef {{ ok: true, text: string, model: string, usage: Usage, modelUsage?: Record<string, Usage>, costUsd?: number, turns?: number, sessionId?: string, tools?: SubmitTool[], durationMs: number }
- *   | { ok: false, error: string, usage?: Usage, durationMs: number }} Submit
+ *   | { ok: false, error: string, usage?: Usage, durationMs: number, refused?: boolean }} Submit
  */
 /** @typedef {{ accepted: boolean, reason?: string }} SubmitReply */
 /** @typedef {{ reason: string }} Release */
@@ -207,6 +207,7 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
  * @property {number} [turns]
  * @property {string} [sessionId]
  * @property {string} [error]
+ * @property {boolean} [refused]  the model's safety filter declined the request
  */
 /**
  * @typedef {object} Adapter
@@ -388,6 +389,9 @@ function events(stdout) {
   }
 }
 
+/** The CLI's text for a request the model's safety filter declined (as src/remote/calls.ts SAFETY_REFUSAL). */
+const SAFETY_REFUSAL = /safeguards flagged this message|appears to violate our usage policy/i;
+
 /**
  * Reads `claude -p` output (stream-json, or the json event list): the result text, the called model's usage
  * (cache tokens included; with `modelUsage` only the requested model's family, so explorer subagent tokens
@@ -433,7 +437,11 @@ export function parseClaudeOutput(stdout, model) {
     ...(typeof result?.num_turns === "number" && { turns: result.num_turns }), ...(sessionId && { sessionId }) };
   if (!result) return { ok: false, text: "", ...base, error: evs.length ? "no result" : "unreadable output" };
   if (result.subtype === "error_max_turns") return { ok: false, text: "", ...base, error: "turn limit: the model used every turn the prompt allows without an answer" };
-  if (result.is_error || typeof result.result !== "string") return { ok: false, text: "", ...base, error: `model error ${typeof result.result === "string" ? result.result : ""}`.trim().slice(0, 400) };
+  if (result.is_error || typeof result.result !== "string") {
+    const said = typeof result.result === "string" ? result.result : "";
+    const refused = result.stop_reason === "refusal" || SAFETY_REFUSAL.test(said);
+    return { ok: false, text: "", ...base, error: `model error ${said}`.trim().slice(0, 400), ...(refused && { refused: true }) };
+  }
   return { ok: true, text: result.result, ...base };
 }
 
@@ -3019,10 +3027,10 @@ async function runLease(cfg, id, opt = {}) {
   const lost = () => end("lost", `lost: ${lease.title}: the lease was withdrawn`);
   /** @param {string} what @param {unknown} e */
   const undelivered = (what, e) => (e instanceof Gone ? lost() : end("lost", `lost: ${lease.title}: ${what} did not reach the server: ${msg(e)}`));
-  /** @param {string} error @param {Usage} [usage] */
-  const fail = async (error, usage) => {
+  /** @param {string} error @param {Usage} [usage] @param {boolean} [refused] */
+  const fail = async (error, usage, refused) => {
     /** @type {Submit} */
-    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started };
+    const body = { ok: false, error: redact(error).slice(0, 2000), ...(usage && { usage }), durationMs: Date.now() - started, ...(refused && { refused: true }) };
     try { await call(ROUTES.submit, body); } catch (e) { return undelivered(`the failure (${error})`, e); }
     noteError(`${lease.title}: ${error}`, "call");
     return end("failed", `failed: ${lease.title}: ${error}`);
@@ -3106,7 +3114,7 @@ async function runLease(cfg, id, opt = {}) {
         try { await checkReady(cfg); } catch { /* reported with the next check */ }
         return await giveBack(`the provider refused the run for its usage limit: ${refusal.line}`);
       }
-      return await fail(`${reply.error ?? "no result"} (exit ${r.code}) ${r.stderr.trim().slice(-300)}`.trim(), reply.usage);
+      return await fail(`${reply.error ?? "no result"} (exit ${r.code}) ${r.stderr.trim().slice(-300)}`.trim(), reply.usage, reply.refused);
     }
     const usage = reply.usage ?? { inputTokens: 0, outputTokens: 0 };
     /** @type {Submit} */

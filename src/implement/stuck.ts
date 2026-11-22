@@ -7,12 +7,12 @@ import type { Db } from "../db/index.ts";
 import { actionable, ask, BACKLOG, factsOf, getDecision, optionsOf, type DecisionRow, type Option } from "../decisions.ts";
 import { tripKey } from "../core/push-outcome.ts";
 import { sinceOf, trip, tripRow } from "../push-outcomes.ts";
-import { textHash } from "../fixissue/candidates.ts";
+import { textHash } from "../core/open-prs.ts";
 import { queuerOf } from "./gate.ts";
 import { closeOnAnswer, type CloseDeps } from "./close.ts";
 import { settleQuestions } from "./questions.ts";
 import { addRound, implementationsOf, roundsOf, setImplementationState, startImplementation } from "./store.ts";
-import type { Implementation } from "./types.ts";
+import type { Implementation, ReviseRound } from "./types.ts";
 
 const ACTOR = "implement";
 
@@ -35,6 +35,7 @@ export const STUCK_CAUSES = {
   "diff-refused": "The change touches what an implementation may not change",
   "push-failed": "Pushing the branch failed repeatedly",
   "workspace-lost": "The workspace could not be started again",
+  "revision-limit": "The pull request went back to the session too many times",
 } as const;
 export type StuckCause = keyof typeof STUCK_CAUSES;
 
@@ -49,6 +50,8 @@ export const STUCK_OPTIONS = {
   tryAgain: { key: "try-again", label: "Try again", hint: "Plan and implement it again in a new attempt. Text you add goes to the model as guidance." },
   draft: { key: "draft-pr", label: "Open as draft PR", hint: "Open the change as it is as a draft pull request for a person to finish." },
   close: { key: "close-issue", label: "Close issue", hint: "AutoCraft comments that the issue is closed for now and closes it as not planned." },
+  closePr: { key: "close-pr", label: "Close PR", hint: "AutoCraft comments on the pull request and closes it; the implementation ends and the issue stays open." },
+  reviseAgain: { key: "try-again", label: "Try again", hint: "Send the pull request back to the session for the same revision. Text you add goes to the model as guidance." },
 } as const satisfies Record<string, Option>;
 
 /**
@@ -64,6 +67,8 @@ async function currentTextHash(db: Db, repo: string, number: number): Promise<st
   return it ? textHash(it.title ?? "", it.body ?? "") : null;
 }
 
+/** The comment Close PR of a stuck revision posts on our PR before the close. */
+export const STUCK_CLOSE_PR_COMMENT = "Closing this pull request: the implementation could not finish its revision. The issue stays open.";
 /** The comment the stuck decision's Close issue posts before the close. */
 export const STUCK_CLOSE_COMMENT = "Closing this as not planned for now. Reopen it when it should be picked up again.";
 
@@ -87,15 +92,17 @@ export async function markStuck(db: Db, impl: Implementation, cause: StuckCause,
   const id = implementDecisionId(impl.repo, impl.number);
   const hash = await currentTextHash(db, impl.repo, impl.number) ?? impl.textHash;
   const tries = await attemptsOnText(db, impl.repo, impl.number, hash);
-  const draft = cause === "diff-refused" || cause === "no-change" ? { ok: false } : await (o.diffCheck ?? noDiffCheck)(db, impl);
-  const options: Option[] = [
+  // A revision of our open PR is tried again on the same PR; the PR stays open, so there is no draft and no close of the issue.
+  const revising = impl.prNumber !== null;
+  const draft = revising || cause === "diff-refused" || cause === "no-change" ? { ok: false } : await (o.diffCheck ?? noDiffCheck)(db, impl);
+  const options: Option[] = revising ? [STUCK_OPTIONS.reviseAgain, STUCK_OPTIONS.closePr, BACKLOG] : [
     ...(tries < MAX_ATTEMPTS_PER_TEXT ? [STUCK_OPTIONS.tryAgain] : []),
     ...(draft.ok ? [STUCK_OPTIONS.draft] : []),
     STUCK_OPTIONS.close, BACKLOG,
   ];
   const head = STUCK_CAUSES[cause];
   const reason = `${head}${detail ? `: ${detail}` : ""}`.replace(/\s+/g, " ").slice(0, 300);
-  const facts = [
+  const facts = revising ? [`revising pull request #${impl.prNumber}`, ...(impl.diffStat ? [`change: ${impl.diffStat}`] : [])] : [
     `attempt ${impl.attempt}; ${tries} of ${MAX_ATTEMPTS_PER_TEXT} on this issue text`,
     ...(impl.diffStat ? [`change: ${impl.diffStat}`] : []),
     ...(tries >= MAX_ATTEMPTS_PER_TEXT ? [`no Try again: ${MAX_ATTEMPTS_PER_TEXT} attempts were made on this issue text; editing the issue allows more`] : []),
@@ -190,6 +197,21 @@ export async function applyStuckAnswer(db: Db, impl: Implementation, o: { at?: s
     await askAgain(db, impl, d, why, at);
     return { did: `not carried out (${why}); asked again`, next: null };
   };
+  if (a.answer === STUCK_OPTIONS.tryAgain.key && impl.prNumber !== null) {
+    const last = (await roundsOf(db, impl.id)).filter((r) => r.kind === "revise").at(-1);
+    if (!last) return await again("the attempt has no revision to try again");
+    const note = d.answer_note?.trim();
+    const was = last.result as ReviseRound;
+    const message = note ? `${was.message}\n\nA maintainer's note on this revision:\n<guidance>\n${note.slice(0, 4000).replace(/</g, "\\u003c")}\n</guidance>` : was.message;
+    await db.write(async () => {
+      if (note) await addRound(db, impl.id, "guidance", { result: { by: d.answered_by, text: note.slice(0, 4000), decisionId: a.id } }, at);
+      await addRound(db, impl.id, "revise", { result: { ...was, message } satisfies ReviseRound }, at);
+      await setImplementationState(db, impl.id, "revising", {}, at);
+    });
+    await applied();
+    await audit(db, ACTOR, "implement-retry", `${impl.repo}#${impl.number}`, { from: impl.id, to: impl.id, pr: impl.prNumber, by: d.answered_by });
+    return { did: `revision of #${impl.prNumber} started again`, next: null };
+  }
   if (a.answer === STUCK_OPTIONS.tryAgain.key) {
     const hash = await currentTextHash(db, impl.repo, impl.number) ?? impl.textHash;
     if (await attemptsOnText(db, impl.repo, impl.number, hash) >= MAX_ATTEMPTS_PER_TEXT) return await again(`${MAX_ATTEMPTS_PER_TEXT} attempts were made on this issue text, so Try again is not available; editing the issue allows more`);
@@ -206,6 +228,13 @@ export async function applyStuckAnswer(db: Db, impl: Implementation, o: { at?: s
     await setImplementationState(db, impl.id, "opening", {}, at);
     await applied();
     return { did: "handed to the PR step as a draft", next: null };
+  }
+  if (a.answer === STUCK_OPTIONS.closePr.key) {
+    if (impl.prNumber === null) return await again("the attempt has no pull request to close");
+    const r = await closeOnAnswer(db, impl, { decisionId: a.id, answer: a.answer, bucket: "build", comment: STUCK_CLOSE_PR_COMMENT, pr: impl.prNumber }, { ...o.close, now: () => at });
+    if ("done" in r) return { did: r.done, next: null };
+    if ("waiting" in r) return { did: `not closed yet: ${r.waiting}`, next: null };
+    return await again(r.refused);
   }
   if (a.answer === STUCK_OPTIONS.close.key) {
     const r = await closeOnAnswer(db, impl, { decisionId: a.id, answer: a.answer, bucket: "build", comment: STUCK_CLOSE_COMMENT }, { ...o.close, now: () => at });
