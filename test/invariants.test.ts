@@ -164,8 +164,10 @@ function checkItem(f: ItemFacts): void {
   if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act" && !a.params?.ask), "action for a closed item other than its close");
   if (!f.pipelineOn) for (const a of p.actions) assert.ok(gates(f, asWant(a), "pipeline"), `${label(a)} passes the gates with the pipeline off`);
   for (const a of writes) if (a.kind === "implement") assert.equal(f.kind, "issue", "implement for a PR");
-  // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on.
-  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && f.implement.featureOn, "implement for an issue not queued by a settler or with Implement off");
+  // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending
+  // an attempt whose PR merged or closed is bookkeeping and needs no switch.
+  const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
+  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
 }
 
 test("safety invariants hold on random facts", () => {

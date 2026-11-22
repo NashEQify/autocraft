@@ -51,9 +51,15 @@ export function approvalOf(f: { pushable?: boolean }, a: Want): Approval | null 
   }
 }
 
+/** The item's implement work is the end of an attempt whose PR merged or closed (decidePr, implementStep). */
+const endsAttempt = (f: PrFacts | ItemFacts): boolean =>
+  "ghState" in f ? f.ghState !== "OPEN" : f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
+
 /** Why the write is refused, or null. */
 export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   if (by === "pipeline" && !f.pipelineOn) return "The pipeline is off";
+  // An implement action of a live attempt whose PR merged or closed only ends the attempt and its workspace: no write, no breaker.
+  if (a.kind === "implement" && endsAttempt(f)) return null;
   // A stage that stopped itself on the item's repo (circuit breaker) writes nothing there until it is resumed, whoever asks.
   const stage = tripStageOf(a);
   const tripped = stage && f.tripped?.[stage];

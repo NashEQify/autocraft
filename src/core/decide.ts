@@ -119,9 +119,12 @@ function stateOf(f: PrFacts, e: Entry, merged: boolean, held: "backlog" | "dupli
   return e.path === "rule" ? "ready" : "decision-answered-merge";
 }
 
-/** True when the PR may be merged now (ready, approved, or retried after a refusal). */
+/**
+ * True when the PR may be merged now (ready, approved, or retried after a refusal). Not while its implementation session
+ * revises it: the merge (or a batch) waits for the revision's push and the review of the new head.
+ */
 const eligible = (f: PrFacts, e: Entry): boolean =>
-  !f.mergeHeld && e.path !== null && verifyAllows(e.path, f.verification?.state, f.verifyOverride) && ciAllows(e.path, f.ci, e.noCi) && f.mergeable === "MERGEABLE"
+  !f.mergeHeld && ownImplementation(f)?.state !== "revising" && e.path !== null && verifyAllows(e.path, f.verification?.state, f.verifyOverride) && ciAllows(e.path, f.ci, e.noCi) && f.mergeable === "MERGEABLE"
   && (e.state === "ready" || e.state === "decision-answered-merge" || e.state === "refused");
 
 /** A PR refused at its current head waits until its CI or mergeable state differs from what GitHub reported at the refusal. */
@@ -405,10 +408,11 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const im = ownImplementation(f);
   // The session's next step on the PR: the revision due at the head, a revision that has started (also when its issue was
   // closed or held, where the issue plans nothing), or, once the PR merged or closed, the end of the attempt (the revise
-  // work records it and ends the workspace). All of them run as implement jobs, so while the repo's Implement feature is
-  // off the PR plans none and waits on the switch.
+  // work records it and ends the workspace). While the repo's Implement feature is off an open PR plans no revision and
+  // waits on the switch.
   const implDue = !!im && (!open || im.state === "revising" || !!reviseOf(f));
-  const implOff = implDue && !f.repoFacts.implementOn ? person(implementOffWait(f.repo)) : null;
+  // Ending the attempt is bookkeeping (no GitHub write, no session): it runs whatever the switch says.
+  const implOff = implDue && open && !f.repoFacts.implementOn ? person(implementOffWait(f.repo)) : null;
   const implementAct = implDue && !implOff ? act("implement", open ? f.head : null, { bucket: "revise", issue: im!.issue }) : null;
   if (implementAct && !open) extra.push(implementAct);
   const pm = f.postmerge;
@@ -455,10 +459,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   else if (!reviewable) state = "scope";
   else state = r ? "review-stale" : "not-reviewed";
 
-  const offWait = implOff && !extra.length ? { wait: implOff.text, waitKind: implOff.kind } : {};
-  if (!open && !inQueue) return plan("closed", { actions: extra, ...offWait });
+  if (!open && !inQueue) return plan("closed", { actions: extra });
   // A merged PR has only its post-merge review to do.
-  if (merged) return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, eligible: eligible(f, e) } : {}), actions: extra, ...offWait });
+  if (merged) return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, eligible: eligible(f, e) } : {}), actions: extra });
 
   // Review: no review at the head, or one made stale (a PR at its re-review cap waits).
   // A head whose earlier review carries over our checked fix-up is carried, not reviewed.
@@ -578,7 +581,8 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   const implWait: Wait | null = implOff ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
     : im?.state === "stuck" ? person(`a decision on the stuck implementation of #${im.issue}`)
     : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null);
-  const wait: Wait | null = main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
+  // A revision in progress is what the PR waits on, also while its continuation is planned.
+  const wait: Wait | null = im?.state === "revising" && open ? implWait : main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
   // A PR the review never takes up still names what it waits on: its scope answer, or a label that gets no review.
   // No scope answer yet: the question is open (a person) or the Decide step has it to ask (the item's decide action).

@@ -4,7 +4,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decidePr, implementOffWait } from "../src/core/decide.ts";
-import { setFeature } from "../src/build/features.ts";
 import { loadPrFacts } from "../src/core/facts.ts";
 import { setImplementationState, startImplementation } from "../src/implement/store.ts";
 import { prFacts } from "./world.ts";
@@ -36,17 +35,19 @@ test("an implementation PR's review fixes and red CI go to its session; a confli
   assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, state: "stuck" } }).some((k) => /^(fixup|implement)/.test(k)));
 });
 
-test("an implementation PR waits on the Implement switch while it is off", () => {
+test("an implementation PR waits on the Implement switch while it is off, and on a revision in progress instead of merging", () => {
   const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
   const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [] }, repoFacts: { implementOn: false } }));
   assert.ok(!off.actions.some((a) => a.kind === "implement"), JSON.stringify(off.actions));
   assert.equal(off.wait, implementOffWait("app"));
+  // A ready PR whose session is revising it is not merged meanwhile: it waits on the revision.
+  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"] } }));
+  assert.ok(!revising.eligible && !revising.actions.some((a) => a.kind === "merge"), JSON.stringify(revising.actions));
+  assert.match(revising.wait ?? "", /revision for #7/);
 });
 
-test("a closed, unmerged implementation PR whose issue is closed too still ends its attempt", async () => {
+test("a closed, unmerged implementation PR whose issue is closed too still ends its attempt, with Implement off", async () => {
   const w = await (await (await (await world()).repo()).pr(1)).issue(2);
-  await setFeature(w.db, "implement", true, "op");
-  await setFeature(w.db, "implement", true, "op", "app");
   const impl = await startImplementation(w.db, { repo: "app", number: 2, queuedBy: "op", textHash: "t" });
   await setImplementationState(w.db, impl.id, "pr-opened", { prNumber: 1 });
   await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "in", [1, 2]));
