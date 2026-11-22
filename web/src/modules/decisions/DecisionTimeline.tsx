@@ -16,12 +16,12 @@ function ItemTimelineRead({ reference }: { reference: TimelineReference }) {
   const user = useUser();
   const state = timelineReadState(reference, item);
   // The native hook hides wrong-ref responses as loading. This is not proof a request is still pending.
-  if (state === "waiting") return <p role="status" className="text-sm text-ink/55">Waiting for item timeline data…</p>;
-  if (state === "error") return <p className="text-sm text-ink/55">{TIMELINE_READ_ERROR}</p>;
+  if (state === "waiting") return <p role="status" className="text-sm text-ink/60">Waiting for item timeline data…</p>;
+  if (state === "error") return <p className="text-sm text-ink/60">{TIMELINE_READ_ERROR}</p>;
 
   // Matching cache data can coexist with a defined error; the gate above rejects it before projection.
   const model = timelineModel(item.data!.timeline);
-  if (model.empty) return <p className="text-sm text-ink/55">No item events recorded.</p>;
+  if (model.empty) return <p className="text-sm text-ink/60">No item events recorded.</p>;
   return (
     <ol className="space-y-3">
       {model.rows.map((row) => {
@@ -32,7 +32,7 @@ function ItemTimelineRead({ reference }: { reference: TimelineReference }) {
             <p className="whitespace-pre-wrap text-sm leading-6 text-ink/85">
               <strong className="font-medium">{row.text.trim() ? row.text : "Event text unavailable"}</strong>
             </p>
-            <p className="mt-0.5 text-xs text-ink/50">
+            <p className="mt-0.5 text-xs text-ink/60">
               <span className="whitespace-pre-wrap">{row.actor.trim() ? row.actor : "Actor unavailable"}</span>
               <span aria-hidden="true"> · </span>
               {validTime ? <time dateTime={row.at} title={when(row.at)} aria-label={when(row.at)}>{clock(row.at)}</time> : <span>Time unavailable</span>}

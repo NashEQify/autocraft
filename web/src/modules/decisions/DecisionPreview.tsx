@@ -58,7 +58,7 @@ function DecisionPeek({ d }: { d: Decision }) {
   const facts = d.facts.slice(0, 4);
   return (
     <>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/60">
         <KindTag kind={d.kind} batch={d.number === null ? d.items.length : undefined} />
         <span>
           asked <TimeAgo iso={d.askedAt} />
@@ -112,7 +112,7 @@ function DecisionPeek({ d }: { d: Decision }) {
         </section>
       )}
       <DecisionSummary d={d} />
-      {d.number === null && <p className="text-xs leading-5 text-ink/50">The full task answer covers all {d.items.length} items.</p>}
+      {d.number === null && <p className="text-xs leading-5 text-ink/60">The full task answer covers all {d.items.length} items.</p>}
     </>
   );
 }
@@ -147,7 +147,7 @@ export function DecisionPreview({ peek, query, onClose }: { peek: string; query:
       {d ? (
         <DecisionPeek d={d} />
       ) : loading ? (
-        <p role="status" className="text-sm text-ink/55">
+        <p role="status" className="text-sm text-ink/60">
           Loading decision…
         </p>
       ) : one.error ? (
@@ -156,7 +156,7 @@ export function DecisionPreview({ peek, query, onClose }: { peek: string; query:
         <ErrorLine error={`Could not load the decision list: ${query.error.message}`} />
       ) : (
         // No link exists to a decision that could not be read, so this says only what is true.
-        <p className="text-sm text-ink/55">This decision is not available here.</p>
+        <p className="text-sm text-ink/60">This decision is not available here.</p>
       )}
     </ItemPreview>
   );

@@ -10,7 +10,7 @@ const VERDICT_LABEL: Record<ReviewVerdict, string> = { take: "Take", "take-fix":
 export function ReviewDetail({ repo, r, viewer }: { repo: string; r: OpusReviewEntry; viewer: boolean }) {
   return (
     <div className="space-y-2 text-sm">
-      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
+      <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/60">
         <Badge>{VERDICT_LABEL[r.verdict]}</Badge>
         <span>of <span className="code">{r.head}</span> ({r.current ? "current head" : "head has moved"})</span>
         {r.why && <span>· {r.why} ({TRIGGER[r.trigger]})</span>}

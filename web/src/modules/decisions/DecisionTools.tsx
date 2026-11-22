@@ -40,11 +40,11 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
           ? <ItemRef repo={d.repo} number={d.number} kind={d.shown?.kind} state={d.shown?.state} title={null} />
           : <span className="code">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</span>}
       </span>
-      <span className="text-ink/50">{KIND_TEXT[d.kind]}</span>
-      <span className="text-ink/50" title={ageTitle(d.askedAt)}>{compactAge(d.askedAt)}</span>
+      <span className="text-ink/60">{KIND_TEXT[d.kind]}</span>
+      <span className="text-ink/60" title={ageTitle(d.askedAt)}>{compactAge(d.askedAt)}</span>
       {d.number !== null && <QueueBadge slot={d.queue} />}
       {d.opinions.length > 0 && (
-        <span className={cn("inline-flex items-center gap-1", mine ? "text-accent-ink" : "text-ink/55")} title={`picked by ${d.opinions.length}${mine ? ", including you" : ""}`}>
+        <span className={cn("inline-flex items-center gap-1", mine ? "text-accent-ink" : "text-ink/60")} title={`picked by ${d.opinions.length}${mine ? ", including you" : ""}`}>
           {d.opinions.length} {d.opinions.length === 1 ? "opinion" : "opinions"}{mine ? " (yours included)" : ""}
         </span>
       )}
@@ -66,14 +66,14 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
     {d.dispute && <p className="mb-0 mt-1.5 break-words text-warn">{d.dispute.by} disputed {d.answeredBy}&rsquo;s answer: {d.dispute.reason}</p>}
     <ExecLine d={d} canRetry={canUndo} />
     {allowBatch && <div className="mt-2.5 border-t border-line pt-2.5">
-      <p className="mb-1.5 text-ink/55">Batch answer</p>
+      <p className="mb-1.5 text-ink/60">Batch answer</p>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {loaded.map((row) => (
           <li key={row.id}>
             <label className="flex cursor-pointer items-center gap-2 py-0.5">
               <input type="checkbox" checked={checked.has(row.id)} onChange={() => localActions.toggle(row.id)} className="size-3.5 accent-accent" aria-label={`Select ${row.title} for a batch answer`} />
               <span className={cn("min-w-0 truncate", row.id === d.id ? "text-ink" : "text-ink/75")}>{row.title}</span>
-              <span className="code ml-auto shrink-0 text-ink/45">{row.number === null ? `${row.repo} · ${row.items.length}` : `${row.repo}#${row.number}`}</span>
+              <span className="code ml-auto shrink-0 text-ink/60">{row.number === null ? `${row.repo} · ${row.items.length}` : `${row.repo}#${row.number}`}</span>
             </label>
           </li>
         ))}

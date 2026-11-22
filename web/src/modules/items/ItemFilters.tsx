@@ -180,7 +180,7 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
   const sort = itemFilter(browse).sort ?? (browse.q ? "relevance" : browse.state === "merged-by-us" ? "merged" : "updated");
   const sorts = SORTS.filter(([key]) => (key !== "relevance" || browse.q) && (key !== "merged" || browse.state === "merged-by-us"));
   return <details className="border-b border-line px-3.5 py-2 [&[open]]:pb-3">
-    <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink/55 hover:text-ink">
+    <summary className="flex cursor-pointer list-none flex-wrap items-center gap-x-2 gap-y-1 text-[11.5px] text-ink/60 hover:text-ink">
       <span className="shrink-0">More filters{extras.length > 0 ? ` · ${extras.length}` : ""}</span>
       {detail.length > 0
         ? <span className="min-w-0 break-words text-ink/70">{detail.join(" · ")}</span>
@@ -198,7 +198,7 @@ function MoreFilters({ browse, phase, detail, onPatch, author, onRemove, extras 
       {extras.map((extra) => <li key={`${extra.key}:${extra.rawValue}`} className="inline-flex max-w-full items-center gap-1 rounded-full border border-line-strong px-2 py-0.5 text-[11px] leading-4 text-ink/70">
         <span className="min-w-0 break-words">{extra.label}: {extra.value}</span>
         {!extra.applied && <span className="shrink-0 text-warn">not applied</span>}
-        <button type="button" aria-label={`Remove ${extra.label} ${extra.value} from this link`} onClick={() => onRemove(extra.key, extra.rawValue)} className="shrink-0 px-0.5 text-ink/50 hover:text-ink">×</button>
+        <button type="button" aria-label={`Remove ${extra.label} ${extra.value} from this link`} onClick={() => onRemove(extra.key, extra.rawValue)} className="shrink-0 px-0.5 text-ink/60 hover:text-ink">×</button>
       </li>)}
     </ul>
     </>}

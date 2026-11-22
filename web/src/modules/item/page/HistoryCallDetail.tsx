@@ -52,7 +52,7 @@ function RunRead({ scope, runId }: { scope: string; runId: number }) {
       <Button variant="secondary" size="sm" onClick={q.refetch}>Retry</Button>
     </div>
   );
-  if (q.loading || !q.data) return <p role="status" className="px-4 py-3 text-sm text-ink/55">Loading call details…</p>;
+  if (q.loading || !q.data) return <p role="status" className="px-4 py-3 text-sm text-ink/60">Loading call details…</p>;
   const run = q.data.run;
   const call = {
     model: run.model, provider: run.provider, account: run.accountLabel, state: run.state,

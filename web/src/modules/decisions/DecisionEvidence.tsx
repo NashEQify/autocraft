@@ -11,7 +11,7 @@ import { changeEvidenceOpen, checkStateText, decisionEvidenceModel, evidenceStaf
 // closed disclosure does no projection work at all.
 
 const rowCls = "min-w-0 break-words";
-const headCls = "text-xs font-semibold uppercase tracking-wide text-ink/45";
+const headCls = "text-xs font-semibold uppercase tracking-wide text-ink/60";
 
 function List({ title, items }: { title: string; items: string[] }) {
   if (!items.length) return null;
@@ -34,10 +34,10 @@ function ItemReview({ repo, number, staff }: { repo: string; number: number; sta
   return (
     <div className="min-w-0">
       <h4 className={headCls}>Latest item review</h4>
-      {item.loading && <p className="mt-1 text-sm text-ink/55">Reading the item…</p>}
-      {!item.loading && item.error && <p className="mt-1 text-sm text-ink/55">{EVIDENCE_READ_ERROR}</p>}
+      {item.loading && <p className="mt-1 text-sm text-ink/60">Reading the item…</p>}
+      {!item.loading && item.error && <p className="mt-1 text-sm text-ink/60">{EVIDENCE_READ_ERROR}</p>}
       {rich && !rich.review && (
-        <p className="mt-1 text-sm text-ink/55">No item review recorded yet.</p>
+        <p className="mt-1 text-sm text-ink/60">No item review recorded yet.</p>
       )}
       {rich?.review && (
         <div className="mt-1 space-y-1 text-sm text-ink/80">
@@ -53,7 +53,7 @@ function ItemReview({ repo, number, staff }: { repo: string; number: number; sta
       {rich && (
         <div className="mt-3 min-w-0">
           <h4 className={headCls}>Checks</h4>
-          <p className="mt-1 text-xs text-ink/45">
+          <p className="mt-1 text-xs text-ink/60">
             Checks as last read from GitHub{rich.syncedAt ? ` · synced ${rich.syncedAt}` : " · GitHub sync time unavailable"}
           </p>
           {rich.checks.length > 0 ? (
@@ -61,7 +61,7 @@ function ItemReview({ repo, number, staff }: { repo: string; number: number; sta
               {rich.checks.map((c, i) => <li key={`${c.name}|${i}`} className={rowCls}>{c.name} · {checkStateText(c.state)}</li>)}
             </ul>
           ) : (
-            <p className="mt-1 text-sm text-ink/55">No checks recorded.</p>
+            <p className="mt-1 text-sm text-ink/60">No checks recorded.</p>
           )}
         </div>
       )}
@@ -80,7 +80,7 @@ function EvidenceBody({ decision, staff }: { decision: Decision; staff: boolean 
         <div className="min-w-0">
           <h4 className={headCls}>Summary</h4>
           <p className={`mt-1 text-sm leading-6 text-ink/85 ${rowCls}`}>{model.summary.text}</p>
-          <p className="mt-1 text-xs text-ink/45">Summary by {model.summary.by}, {model.summary.at}</p>
+          <p className="mt-1 text-xs text-ink/60">Summary by {model.summary.by}, {model.summary.at}</p>
         </div>
       )}
       <List title="Context" items={model.context} />
@@ -105,8 +105,8 @@ function EvidenceBody({ decision, staff }: { decision: Decision; staff: boolean 
         <div className="min-w-0">
           <h4 className={headCls}>Provenance</h4>
           <dl className="mt-1 space-y-1 text-sm text-ink/70">
-            {model.asked && <div><dt className="inline text-ink/50">Asked by </dt><dd className="inline">{model.asked.by || "unknown"}, {model.asked.at}</dd></div>}
-            {model.docket && <div><dt className="inline text-ink/50">Docket </dt><dd className="inline break-words">{model.docket}</dd></div>}
+            {model.asked && <div><dt className="inline text-ink/60">Asked by </dt><dd className="inline">{model.asked.by || "unknown"}, {model.asked.at}</dd></div>}
+            {model.docket && <div><dt className="inline text-ink/60">Docket </dt><dd className="inline break-words">{model.docket}</dd></div>}
           </dl>
         </div>
       )}

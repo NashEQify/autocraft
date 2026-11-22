@@ -39,6 +39,6 @@ export function DecisionAnswer({ facts, onReview }: { facts: AnswerFacts; onRevi
     <Button variant={canReview ? "primary" : "secondary"} className="mt-3 max-[860px]:min-h-11" disabled={unavailable} onClick={review}>
       {canReview ? "Review and answer" : "Open"}
     </Button>
-    {settling && <p className="mt-2 text-sm text-ink/55">This decision is being prepared or settled; answering is not available yet.</p>}
+    {settling && <p className="mt-2 text-sm text-ink/60">This decision is being prepared or settled; answering is not available yet.</p>}
   </section>;
 }

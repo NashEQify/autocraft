@@ -49,8 +49,8 @@ export function ItemRow({ facts, open, onToggle, children }: { facts: RowFacts; 
 
 function Section({ title, children }: { title: string; children: ReactNode }) {
   return <section className="min-w-0">
-    <h4 className="text-[13.5px] font-semibold leading-5">{title}</h4>
-    <div className="mt-2 min-w-0 text-[12.5px] leading-[1.5] text-ink/75">{children}</div>
+    <h4 className="text-sm font-semibold">{title}</h4>
+    <div className="mt-2 min-w-0 text-xs leading-5 text-ink/75">{children}</div>
   </section>;
 }
 
@@ -79,31 +79,31 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
   const answer = answerFacts(decision);
   const details = detailFacts(facts, item);
   const checks = checkCells(facts.checks);
-  return <div className="grid min-w-0 gap-[22px] pt-2 min-[1101px]:grid-cols-2">
+  return <div className="grid min-w-0 gap-5 pt-2 min-[1101px]:grid-cols-2">
     <div className="min-w-0 space-y-4">
       <Section title="What the pipeline read">
-        {itemLoading && !item ? <p role="status" className="m-0 text-ink/50">Loading the classifier's reasoning…</p> : null}
+        {itemLoading && !item ? <p role="status" className="m-0 text-ink/60">Loading the classifier's reasoning…</p> : null}
         {itemError ? <p className="m-0 text-bad">The classifier's reasoning could not be read: {itemError}</p> : null}
         {!itemLoading && !itemError && read && read.text ? <>
           <p className="m-0">{read.text}</p>
-          <p className="mb-0 mt-1.5 text-[11.5px] text-ink/50">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
+          <p className="mb-0 mt-1.5 text-2xs text-ink/60">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
         </> : null}
         {!itemLoading && !itemError && read && !read.text ? <>
-          <p className="m-0 text-ink/55">No classifier reason recorded.</p>
-          <p className="mb-0 mt-1.5 text-[11.5px] text-ink/50">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
+          <p className="m-0 text-ink/60">No classifier reason recorded.</p>
+          <p className="mb-0 mt-1.5 text-2xs text-ink/60">{read.classifier} · {eventTime(read.at)}{read.matchedSource ? "" : " · latest record available"}</p>
         </> : null}
-        {!itemLoading && !itemError && !read ? <p className="m-0 text-ink/55">No classifier has run for this item.</p> : null}
+        {!itemLoading && !itemError && !read ? <p className="m-0 text-ink/60">No classifier has run for this item.</p> : null}
       </Section>
       <Section title="Classification">
         {settled ? <>
           <p className="m-0 flex flex-wrap items-center gap-2"><Badge tone={TONE[classificationToken(settled).tone] ?? "neutral"}>{classificationToken(settled).text}</Badge></p>
           <p className="mb-0 mt-1.5 text-ink/65">{classificationDetail(settled, item?.classifications.length ?? 0)}</p>
-          {answer && <p className="mb-0 mt-2 text-[11.5px] leading-5 text-ink/60">
+          {answer && <p className="mb-0 mt-2 text-2xs leading-5 text-ink/60">
             Execution: <Badge tone={TONE[answer.tone] ?? "neutral"}>{answer.state}</Badge>.
             {answer.reason ? <span className="block">{answer.reason}</span> : null}
             {answer.appliedAt ? <span className="block">Applied {when(answer.appliedAt)}</span> : null}
           </p>}
-        </> : itemLoading ? <p role="status" className="m-0 text-ink/50">Loading classification…</p>
+        </> : itemLoading ? <p role="status" className="m-0 text-ink/60">Loading classification…</p>
           : itemError ? <p className="m-0 text-bad">Classification could not be read: {itemError}</p>
             : <p className="m-0 text-ink/65">No classification record · <Link className="text-accent-ink hover:underline" to={fullHref(facts)}>Open the item</Link></p>}
       </Section>
@@ -117,8 +117,8 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
             ? <>{facts.status.phase}{facts.status.waiting ? ` · ${facts.status.waiting}` : ""}{facts.status.next ? ` · next: ${facts.status.next}` : ""} · since {eventTime(facts.status.since)}</>
             : statusWord(facts)}
         </p>
-        {detail && <p className="mb-0 mt-1.5 text-ink/60"><span className="text-ink/45">Now: </span>{detail.bar.headline.text}{detail.bar.headline.next ? ` · next: ${detail.bar.headline.next}` : ""}</p>}
-        {loading && <p role="status" className="mb-0 mt-1.5 text-ink/50">Loading the live status…</p>}
+        {detail && <p className="mb-0 mt-1.5 text-ink/60"><span className="text-ink/60">Now: </span>{detail.bar.headline.text}{detail.bar.headline.next ? ` · next: ${detail.bar.headline.next}` : ""}</p>}
+        {loading && <p role="status" className="mb-0 mt-1.5 text-ink/60">Loading the live status…</p>}
         <ErrorLine error={error} className="mt-2" />
       </Section>
       {facts.checks && <Section title="Merge checks">
@@ -131,13 +131,13 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
         <ul className="m-0 list-none space-y-1 p-0">{facts.closes.map((number) => <li key={number}><ItemRef repo={facts.repo} number={number} kind="issue" title={null} size="sm" /></li>)}</ul>
       </Section>}
       <Section title="Last events">
-        {loading && !detail ? <p role="status" className="m-0 text-ink/50">Loading events…</p> : null}
-        {detail && events.length === 0 ? <p className="m-0 text-ink/55">No events recorded for this item.</p> : null}
+        {loading && !detail ? <p role="status" className="m-0 text-ink/60">Loading events…</p> : null}
+        {detail && events.length === 0 ? <p className="m-0 text-ink/60">No events recorded for this item.</p> : null}
         {events.length > 0 && <ul className="m-0 list-none divide-y divide-line p-0">
           {events.map((event) => <li key={event.id} className="py-2 first:pt-0 last:pb-0">
             <strong className="font-semibold text-ink/85">{event.text}</strong>
-            <span className="text-ink/55"> · <time dateTime={eventDateTime(event.at)} title={eventDateTime(event.at) ? when(event.at) : undefined} aria-label={eventDateTime(event.at) ? when(event.at) : undefined}>{eventDateTime(event.at) ? clock(event.at) : "Time unknown"}</time></span>
-            {!viewer && formatCost(event.costUsd) && <span className="num text-ink/55"> · {formatCost(event.costUsd)}</span>}
+            <span className="text-ink/60"> · <time dateTime={eventDateTime(event.at)} title={eventDateTime(event.at) ? when(event.at) : undefined} aria-label={eventDateTime(event.at) ? when(event.at) : undefined}>{eventDateTime(event.at) ? clock(event.at) : "Time unknown"}</time></span>
+            {!viewer && formatCost(event.costUsd) && <span className="num text-ink/60"> · {formatCost(event.costUsd)}</span>}
           </li>)}
         </ul>}
       </Section>
@@ -152,9 +152,9 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
       </Section>
     </div>
     {details.length > 0 && <section className="min-w-0 min-[1101px]:col-span-2">
-      <h4 className="text-[11.5px] font-semibold uppercase tracking-[.04em] text-ink/60">Details</h4>
-      <dl className="mt-1.5 grid gap-x-6 gap-y-1 text-[11.5px] text-ink/65 min-[1101px]:grid-cols-2">
-        {details.map((fact) => <div key={fact.label} className="flex min-w-0 gap-2"><dt className="shrink-0 text-ink/45">{fact.label}</dt><dd className="m-0 min-w-0 break-words">{fact.value}</dd></div>)}
+      <h4 className="text-2xs font-semibold uppercase tracking-wide text-ink/60">Details</h4>
+      <dl className="mt-1.5 grid gap-x-6 gap-y-1 text-2xs text-ink/65 min-[1101px]:grid-cols-2">
+        {details.map((fact) => <div key={fact.label} className="flex min-w-0 gap-2"><dt className="shrink-0 text-ink/60">{fact.label}</dt><dd className="m-0 min-w-0 break-words">{fact.value}</dd></div>)}
       </dl>
     </section>}
   </div>;
@@ -208,6 +208,6 @@ export function OpenRowDetail({ facts, note }: { facts: RowFacts; note?: string 
       itemError={itemQuery.error?.message}
       decision={decision as Decision | null}
     />
-    {note && <p className="mb-0 mt-3 text-[11px] text-ink/45">{note}</p>}
+    {note && <p className="mb-0 mt-3 text-2xs text-ink/60">{note}</p>}
   </>;
 }

@@ -45,17 +45,17 @@ export function NeedsControls() {
   // Full-width scope rows keep labels left and a natural-width
   // native select at the right capped at 190px. Not a grid filler and not a fixed screenshot width.
   const row = "flex w-full items-center justify-between gap-2.5";
-  const control = "h-[34px] min-w-0 max-w-[190px] px-2 py-1.5 text-[12.5px] max-md:h-11 max-md:text-[12.5px]";
+  const control = "h-9 min-w-0 max-w-48 px-2 py-1.5 text-xs max-md:h-11";
   return <div className="min-w-0">
     <div className="flex flex-wrap items-center justify-between gap-2">
       <label className="inline-flex min-w-0 items-center gap-2 text-xs text-ink/85">
         <span>View</span>
-        <Select aria-label="Decision view" value={view} onChange={(event) => patch({ tab: event.target.value === "open" ? null : event.target.value })} className="h-[34px] w-[114px] text-xs max-md:h-11">
+        <Select aria-label="Decision view" value={view} onChange={(event) => patch({ tab: event.target.value === "open" ? null : event.target.value })} className="h-9 w-28 text-xs max-md:h-11">
           {VIEW_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </Select>
       </label>
       <button type="button" aria-expanded={open} aria-controls="needs-filters-panel" onClick={() => setOpen((was) => !was)}
-        className="inline-flex h-9 shrink-0 items-center justify-center rounded border border-line-strong bg-raised px-3 text-[13px] text-ink/80 hover:bg-ink/[0.06] max-md:h-11">
+        className="inline-flex h-9 shrink-0 items-center justify-center rounded border border-line-strong bg-raised px-3 text-sm text-ink/80 hover:bg-ink/[0.06] max-md:h-11">
         Filters{active ? ` (${active})` : ""}
       </button>
     </div>
@@ -79,20 +79,20 @@ export function NeedsControls() {
       </div>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <button type="button" aria-pressed={scope.all} onClick={() => patch({ all: scope.all ? null : "1" })}
-          className={cn("inline-flex h-[34px] items-center rounded-full border px-3 text-xs max-md:h-11", scope.all ? "border-accent/30 bg-accent/[0.08] text-accent-ink" : "border-line-strong text-ink/80 hover:bg-ink/[0.04]")}>
+          className={cn("inline-flex h-9 items-center rounded-full border px-3 text-xs max-md:h-11", scope.all ? "border-accent/30 bg-accent/[0.08] text-accent-ink" : "border-line-strong text-ink/80 hover:bg-ink/[0.04]")}>
           All questions
         </button>
         {(active > 0 || hasRawScope(scope)) && <button type="button" onClick={() => setFilter(clearScopePatch(), { replace: false })} className="text-xs text-accent-ink hover:underline max-md:min-h-11">
           Clear scope{active ? ` (${active})` : ""}
         </button>}
       </div>
-      <p className="mb-0 mt-2 text-2xs leading-4 text-ink/50">
+      <p className="mb-0 mt-2 text-2xs leading-4 text-ink/60">
         All questions applies to {ALL_SCOPE_VIEWS.map((v) => VIEW_OPTIONS.find((o) => o.value === v)!.label.toLowerCase()).join(" and ")}; the other views ignore it. Age is counted from when the question was asked; above 36500 days is capped.
       </p>
       {chips.length > 0 && <ul aria-label="Scope values from this link" className="m-0 mt-2 flex list-none flex-wrap gap-1.5 p-0">
-        {chips.map((chip) => <li key={`${chip.key}:${chip.value}`} className="inline-flex max-w-full items-center gap-1 rounded-full border border-line-strong px-2 py-0.5 text-[11px] leading-4 text-ink/70">
+        {chips.map((chip) => <li key={`${chip.key}:${chip.value}`} className="inline-flex max-w-full items-center gap-1 rounded-full border border-line-strong px-2 py-0.5 text-2xs text-ink/70">
           <span className="min-w-0 break-words">{chip.label}</span>
-          <button type="button" aria-label={`Remove ${chip.label} from the scope`} onClick={() => remove(chip)} className="shrink-0 px-0.5 text-ink/50 hover:text-ink">×</button>
+          <button type="button" aria-label={`Remove ${chip.label} from the scope`} onClick={() => remove(chip)} className="shrink-0 px-0.5 text-ink/60 hover:text-ink">×</button>
         </li>)}
       </ul>}
     </div>

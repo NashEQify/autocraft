@@ -9,8 +9,8 @@ import { changeDiscussionOpen, discussionModel, DISCUSSION_READ_ERROR } from "./
 // It never writes, adopts, replies, polls or retries; the closed disclosure does no projection and mounts no hook.
 
 const rowCls = "min-w-0 break-words";
-const headCls = "text-xs font-semibold uppercase tracking-wide text-ink/45";
-const metaCls = "text-xs text-ink/45";
+const headCls = "text-xs font-semibold uppercase tracking-wide text-ink/60";
+const metaCls = "text-xs text-ink/60";
 
 /** Private envelope: the full request key is echoed so a mismatched response can never be shown. */
 interface ThreadEnvelope {
@@ -40,7 +40,7 @@ function DiscussionBody({ decision }: { decision: Decision }) {
       <div className="min-w-0">
         <h4 className={headCls}>Opinions ({model.opinions.length})</h4>
         {model.opinions.length === 0 ? (
-          <p className="mt-1 text-sm text-ink/55">No opinions yet.</p>
+          <p className="mt-1 text-sm text-ink/60">No opinions yet.</p>
         ) : (
           <ul className="mt-1 space-y-2">
             {model.opinions.map((o) => (
@@ -59,7 +59,7 @@ function DiscussionBody({ decision }: { decision: Decision }) {
                   </p>
                 )}
                 {o.noteUnavailable ? (
-                  <p className="mt-0.5 text-sm text-ink/50">Text unavailable</p>
+                  <p className="mt-0.5 text-sm text-ink/60">Text unavailable</p>
                 ) : o.note !== null ? (
                   <p className="mt-0.5 whitespace-pre-wrap text-sm leading-6 text-ink/80">{o.note}</p>
                 ) : null}
@@ -71,12 +71,12 @@ function DiscussionBody({ decision }: { decision: Decision }) {
 
       <div className="min-w-0">
         <h4 className={headCls}>Decision comments ({usable ? model.comments.length : "…"})</h4>
-        {q.loading && <p className="mt-1 text-sm text-ink/55">Reading the discussion…</p>}
+        {q.loading && <p className="mt-1 text-sm text-ink/60">Reading the discussion…</p>}
         {/* S1: a completed-but-unusable result (a mismatched request key) is a cache fault, not an empty thread. */}
         {!q.loading && (q.error || (!!envelope && envelope.requestKey !== currentKey)) && (
-          <p className="mt-1 text-sm text-ink/55">{DISCUSSION_READ_ERROR}</p>
+          <p className="mt-1 text-sm text-ink/60">{DISCUSSION_READ_ERROR}</p>
         )}
-        {usable && model.comments.length === 0 && <p className="mt-1 text-sm text-ink/55">No decision comments yet.</p>}
+        {usable && model.comments.length === 0 && <p className="mt-1 text-sm text-ink/60">No decision comments yet.</p>}
         {usable && model.comments.length > 0 && (
           <ul className="mt-1 space-y-2">
             {model.comments.map((c) => (
@@ -87,7 +87,7 @@ function DiscussionBody({ decision }: { decision: Decision }) {
                   <span className={metaCls}>· {c.at}</span>
                 </div>
                 {c.unavailable ? (
-                  <p className="mt-0.5 text-sm text-ink/50">Text unavailable</p>
+                  <p className="mt-0.5 text-sm text-ink/60">Text unavailable</p>
                 ) : (
                   <p className="mt-0.5 whitespace-pre-wrap text-sm leading-6 text-ink/80">{c.body}</p>
                 )}

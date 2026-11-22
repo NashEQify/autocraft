@@ -293,9 +293,9 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
         {header}
         <div className="flex min-h-6 items-center gap-2 text-xs">
           <span className="num shrink-0 whitespace-nowrap font-semibold text-ink">{data?.total ?? "–"} matches</span>
-          <span className="truncate text-ink/50">{summaryText}</span>
+          <span className="truncate text-ink/60">{summaryText}</span>
 
-          {oldest && <span className="ml-auto shrink-0 text-ink/50">oldest {ago(oldest)}</span>}
+          {oldest && <span className="ml-auto shrink-0 text-ink/60">oldest {ago(oldest)}</span>}
         </div>
       </div>
       {/* The persistent band: the tools summary, below the accepted header and above the scroller. */}
@@ -306,7 +306,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
           <CaretRightIcon aria-hidden className={cn("text-xs transition-transform", toolsOpen && "rotate-90")} />
           Decision tools{decision ? ` · ${refText(decision)}` : ""}
         </button>
-        {decision && <span className="truncate text-ink/45">{KIND_LABEL[decision.kind]}</span>}
+        {decision && <span className="truncate text-ink/60">{KIND_LABEL[decision.kind]}</span>}
       </div>
       {loc.justAnswered.map((a) => (
         <AnswerNotice key={a.id} entry={a} className="shrink-0 border-b border-line" />
@@ -347,11 +347,11 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
             </li>;
           })}
         </ul>
-        {pending && !displayList.length && <p className="px-4 py-6 text-sm text-ink/50" role="status">Loading decisions…</p>}
+        {pending && !displayList.length && <p className="px-4 py-6 text-sm text-ink/60" role="status">Loading decisions…</p>}
         {data && !loading && !list.length && !error && <p className="px-4 py-16 text-center text-sm text-ink/60">Nothing waiting.</p>}
         {!data && error && <p className="px-4 py-16 text-center text-sm text-bad">No decisions could be read.</p>}
         {hasMore && data && (
-          <div className="flex items-center justify-between gap-3 px-4 py-3 text-xs text-ink/55">
+          <div className="flex items-center justify-between gap-3 px-4 py-3 text-xs text-ink/60">
             <span className="num">
               {data.decisions.length} of {data.total}
             </span>

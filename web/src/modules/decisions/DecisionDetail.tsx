@@ -48,13 +48,13 @@ export function DecisionDetail(ctx: DetailContext) {
       {d ? <Body d={d} onOpenItem={onOpenItem} answer={ctx.answer} evidence={evidence} discussion={discussion} timeline={timeline} /> : requested === "unavailable" || (requested === "requested" && !loading && !error) ? (
         <Unavailable reason={reason ?? "not-loaded"} raw={raw} loading={loading} error={error} hasRows={hasRows} />
       ) : loading ? (
-        <p role="status" className="text-sm text-ink/55">Loading this decision…</p>
+        <p role="status" className="text-sm text-ink/60">Loading this decision…</p>
       ) : error ? (
         <p role="alert" className="text-sm text-bad">This list could not be read: {error}</p>
       ) : hasRows ? (
-        <p className="text-sm text-ink/55">Select a decision in the queue.</p>
+        <p className="text-sm text-ink/60">Select a decision in the queue.</p>
       ) : (
-        <p className="text-sm text-ink/55">No decisions are waiting here.</p>
+        <p className="text-sm text-ink/60">No decisions are waiting here.</p>
       )}
       {!d && ctx.answer}
     </div>
@@ -69,7 +69,7 @@ function Body({ d, onOpenItem, answer, evidence, discussion, timeline }: { d: De
     ? `on it · ${d.claim.login}${Number.isFinite(Date.parse(d.claim.since)) ? ` · ${compactAge(d.claim.since)}` : ""}`
     : null;
   return <>
-    <p className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
+    <p className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/60">
       <span className="font-mono text-2xs">{refText(d)}</span>
       <span aria-hidden>·</span>
       <span>{KIND_TEXT[d.kind]}</span>
@@ -83,7 +83,7 @@ function Body({ d, onOpenItem, answer, evidence, discussion, timeline }: { d: De
     {facts.length > 0 && <ul className="mt-3 space-y-1 text-sm leading-6 text-ink/80">{facts.map((f, i) => <li key={i} className="break-words">{f}</li>)}</ul>}
     {rec && <p className="mt-3 break-words text-sm text-ink/80"><strong className="font-semibold">{rec.label}</strong>{rec.reason && <> — {rec.reason}</>}</p>}
     {answer}
-    {d.number === null && <p className="mt-2 text-xs text-ink/55">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</p>}
+    {d.number === null && <p className="mt-2 text-xs text-ink/60">{d.repo} · {d.items.length} {d.items.length === 1 ? "item" : "items"}</p>}
     <button type="button" onClick={() => onOpenItem(d.id)} className="mt-4 inline-flex min-h-11 items-center rounded px-1 text-sm text-accent-ink hover:underline">
       Open the item
     </button>
@@ -106,6 +106,6 @@ function Unavailable({ reason, raw, loading, error, hasRows }: { reason: string;
   const why = reason === "duplicate" ? "The link names more than one decision." : reason === "empty" ? "The link names an empty decision." : reason === "malformed" ? "The link's decision value cannot be used." : raw ? `Requested: ${raw}` : "";
   return <>
     <p role="status" className="text-sm text-ink/70">{text}</p>
-    {why && <p className="mt-1 text-xs text-ink/50">{why}</p>}
+    {why && <p className="mt-1 text-xs text-ink/60">{why}</p>}
   </>;
 }
