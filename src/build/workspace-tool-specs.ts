@@ -1,0 +1,180 @@
+// The workspace tools' arguments: one table that gives both the MCP input schemas and the checks the job runs on every
+// call, plus the path rule and the output cuts the tools share.
+import { posix } from "node:path";
+
+export const WORK_ROOT = "/work";
+export const SRC_ROOT = "/work/src";
+
+/** Output a tool returns before it is cut: the first OUTPUT_HEAD bytes and the last OUTPUT_TAIL. */
+export const OUTPUT_CAP = 30 * 1024;
+export const OUTPUT_HEAD = 4 * 1024;
+export const OUTPUT_TAIL = 26 * 1024;
+/** Longest image edge a tool returns; the pod scales down to it. */
+export const IMAGE_EDGE = 1568;
+export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+export const READ_LINE_CHARS = 2000;
+export const FILE_MAX_BYTES = 2 * 1024 * 1024;
+export const GLOB_LIMIT = 500;
+
+type Field =
+  | { type: "string"; description: string; maxBytes: number; enum?: readonly string[] }
+  | { type: "integer"; description: string; min: number; max: number }
+  | { type: "boolean"; description: string };
+type Spec = { description: string; readOnly: boolean; required: readonly string[]; fields: Record<string, Field> };
+
+const PATH_NOTE = "an absolute path below /work, or a path relative to /work/src";
+const path = (what: string): Field => ({ type: "string", description: `${what}: ${PATH_NOTE}.`, maxBytes: 4096 });
+const id: Field = { type: "integer", description: "The id a shell call returned.", min: 1, max: Number.MAX_SAFE_INTEGER };
+
+const SPECS = {
+  shell: {
+    description: "Runs a bash command in the workspace (bash -lc, in /work/src by default). Returns the exit code, the time it took and stdout and stderr merged; past 30 KiB, the first 4 KiB and last 26 KiB with the log path. With background, returns {\"id\"} at once: read it with shell_status, end it with shell_kill. The workspace has no network.",
+    readOnly: false,
+    required: ["command"],
+    fields: {
+      command: { type: "string", description: "The bash command.", maxBytes: 64 * 1024 },
+      cwd: path("Directory to run in"),
+      timeout_sec: { type: "integer", description: "Time limit in seconds (default 120). A background command's limit is the session's remaining shell time.", min: 1, max: 600 },
+      stdin: { type: "string", description: "Text given to the command on stdin.", maxBytes: 1024 * 1024 },
+      background: { type: "boolean", description: "Start the command and return its id without waiting (default false)." },
+    },
+  },
+  shell_status: {
+    description: "The state of a shell call (running, exited with its code, timed out, killed) and the output it wrote since the last shell_status, cut in the middle past 30 KiB.",
+    readOnly: true,
+    required: ["id"],
+    fields: { id, wait_sec: { type: "integer", description: "Wait up to this many seconds for the command to end (default 0).", min: 0, max: 300 } },
+  },
+  shell_kill: {
+    description: "Ends a running shell call: SIGTERM to its process group, SIGKILL 5 seconds later.",
+    readOnly: false,
+    required: ["id"],
+    fields: { id },
+  },
+  read: {
+    description: "Reads a file as numbered lines, each cut at 2000 characters. A PNG, JPEG, GIF or WebP file (up to 10 MiB) comes back as an image scaled to 1568 px on the long edge. Other binary files are refused.",
+    readOnly: true,
+    required: ["path"],
+    fields: {
+      path: path("The file"),
+      offset: { type: "integer", description: "First line to read (default 1).", min: 1, max: Number.MAX_SAFE_INTEGER },
+      limit: { type: "integer", description: "Number of lines (default 2000).", min: 1, max: 2000 },
+    },
+  },
+  write: {
+    description: "Writes a file, creating its parent directories and replacing what was there. Returns the size and sha256.",
+    readOnly: false,
+    required: ["path", "content"],
+    fields: { path: path("The file"), content: { type: "string", description: "The whole new content.", maxBytes: FILE_MAX_BYTES } },
+  },
+  edit: {
+    description: "Replaces an exact string in a file. Refused when old_string is not found, or found more than once without replace_all. Fails if the file changes while the edit runs.",
+    readOnly: false,
+    required: ["path", "old_string", "new_string"],
+    fields: {
+      path: path("The file"),
+      old_string: { type: "string", description: "The exact text to replace.", maxBytes: FILE_MAX_BYTES },
+      new_string: { type: "string", description: "The text to put in its place.", maxBytes: FILE_MAX_BYTES },
+      replace_all: { type: "boolean", description: "Replace every occurrence (default false)." },
+    },
+  },
+  glob: {
+    description: "Lists files whose path matches a glob (ripgrep syntax: matched relative to path, a pattern without / matches at any depth, ** crosses directories), newest first, up to 500. Skips .git and git-ignored files.",
+    readOnly: true,
+    required: ["pattern"],
+    fields: { pattern: { type: "string", description: "The glob, e.g. **/*.rs or src/**/test_*.py.", maxBytes: 4096 }, path: path("Directory to search (default /work/src)") },
+  },
+  grep: {
+    description: "Searches file contents with ripgrep. Skips .git and git-ignored files. Output is cut at 30 KiB.",
+    readOnly: true,
+    required: ["pattern"],
+    fields: {
+      pattern: { type: "string", description: "A ripgrep (Rust regex) pattern.", maxBytes: 4096 },
+      path: path("File or directory to search (default /work/src)"),
+      glob: { type: "string", description: "Only files matching this glob, e.g. *.rs or src/**/*.ts.", maxBytes: 4096 },
+      type: { type: "string", description: "Only files of this ripgrep type, e.g. rust, py, ts.", maxBytes: 64 },
+      output_mode: { type: "string", description: "files_with_matches (default): matching paths, newest first; content: matching lines with numbers; count: matches per file.", maxBytes: 32, enum: ["files_with_matches", "content", "count"] },
+      case_insensitive: { type: "boolean", description: "Ignore case (default false)." },
+      context: { type: "integer", description: "Lines of context around each match, for content (default 0).", min: 0, max: 20 },
+      multiline: { type: "boolean", description: "Let the pattern span lines, with . matching newlines (default false)." },
+      head_limit: { type: "integer", description: "At most this many output lines (default 250).", min: 1, max: 2000 },
+    },
+  },
+} satisfies Record<string, Spec>;
+
+export type WorkspaceToolName = keyof typeof SPECS;
+export const TOOL_NAMES = Object.keys(SPECS) as WorkspaceToolName[];
+export const isToolName = (n: string): n is WorkspaceToolName => Object.hasOwn(SPECS, n);
+
+/** The MCP tool definitions, as tools/list returns them. */
+export const TOOL_DEFINITIONS: readonly unknown[] = TOOL_NAMES.map((name) => {
+  const s: Spec = SPECS[name];
+  const properties = Object.fromEntries(Object.entries(s.fields).map(([k, f]) => [k,
+    f.type === "string" ? { type: "string", description: f.description, ...(f.enum ? { enum: f.enum } : { maxLength: f.maxBytes }) }
+      : f.type === "integer" ? { type: "integer", description: f.description, minimum: f.min, ...(f.max < Number.MAX_SAFE_INTEGER ? { maximum: f.max } : {}) }
+        : { type: "boolean", description: f.description }]));
+  return {
+    name, description: s.description,
+    inputSchema: { type: "object", additionalProperties: false, required: [...s.required], properties },
+    annotations: { readOnlyHint: s.readOnly },
+  };
+});
+
+/** A call's arguments that break the table: the message says which and why. */
+export class ArgError extends Error {}
+
+export type Args = Record<string, string | number | boolean | undefined>;
+
+/** `args` checked against tool `name`'s table row; throws ArgError. */
+export function checkArgs(name: WorkspaceToolName, args: unknown): Args {
+  const s: Spec = SPECS[name];
+  const given: unknown = args ?? {};
+  if (typeof given !== "object" || given === null || Array.isArray(given)) throw new ArgError("the arguments must be an object");
+  const out: Args = {};
+  for (const [k, v] of Object.entries(given)) {
+    const f = s.fields[k];
+    if (!f) throw new ArgError(`${name} takes no argument ${JSON.stringify(k.slice(0, 64))}`);
+    if (v === undefined || v === null) continue;
+    if (f.type === "string") {
+      if (typeof v !== "string") throw new ArgError(`${k} must be a string`);
+      if (Buffer.byteLength(v) > f.maxBytes) throw new ArgError(`${k} is longer than ${f.maxBytes} bytes`);
+      if (f.enum && !f.enum.includes(v)) throw new ArgError(`${k} must be one of ${f.enum.join(", ")}`);
+    } else if (f.type === "integer") {
+      if (typeof v !== "number" || !Number.isInteger(v) || v < f.min || v > f.max) throw new ArgError(`${k} must be an integer from ${f.min}${f.max < Number.MAX_SAFE_INTEGER ? ` to ${f.max}` : " up"}`);
+    } else if (typeof v !== "boolean") throw new ArgError(`${k} must be true or false`);
+    out[k] = v;
+  }
+  for (const k of s.required) if (out[k] === undefined) throw new ArgError(`${name} needs ${k}`);
+  return out;
+}
+
+/** A session path as the absolute, normalised path in the pod; throws ArgError for one outside /work. */
+export function podPath(p: string, field = "path"): string {
+  if (p.includes("\0")) throw new ArgError(`${field} contains a NUL byte`);
+  if (!p) throw new ArgError(`${field} is empty`);
+  const abs = posix.normalize(p.startsWith("/") ? p : posix.join(SRC_ROOT, p)).replace(/(.)\/+$/, "$1");
+  if (abs !== WORK_ROOT && !abs.startsWith(`${WORK_ROOT}/`)) throw new ArgError(`${field} must be below ${WORK_ROOT}: ${PATH_NOTE}`);
+  return abs;
+}
+
+/** `b` cut to its first OUTPUT_HEAD and last OUTPUT_TAIL bytes when longer than `cap`, with the cut noted. */
+export function cutMiddle(b: Buffer, cap = OUTPUT_CAP): Buffer {
+  if (b.length <= cap) return b;
+  return Buffer.concat([b.subarray(0, OUTPUT_HEAD), Buffer.from(`\n[${b.length - OUTPUT_HEAD - OUTPUT_TAIL} bytes cut]\n`), b.subarray(b.length - OUTPUT_TAIL)]);
+}
+
+export type ImageMime = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+
+/** The image type from its signature; null for anything else. Pixels are never decoded. */
+export function imageMime(b: Buffer): ImageMime | null {
+  if (b.length >= 24 && b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) && b.subarray(12, 16).toString("latin1") === "IHDR") return "image/png";
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return "image/jpeg";
+  if (b.length >= 6 && /^GIF8[79]a$/.test(b.subarray(0, 6).toString("latin1"))) return "image/gif";
+  if (b.length >= 12 && b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
+  return null;
+}
+
+/** A PNG's width and height from its IHDR chunk. */
+export const pngSize = (b: Buffer): { w: number; h: number } => ({ w: b.readUInt32BE(16), h: b.readUInt32BE(20) });
+
+export const seconds = (ms: number): string => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
