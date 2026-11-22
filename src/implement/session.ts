@@ -52,8 +52,8 @@ export type CallDeps = {
 };
 export const realCalls: CallDeps = { queue: queueWorkspaceCall, await: async (db, id, o) => await awaitCall(db, id, o) };
 
-/** Why a turn was made: the first session, a session that starts over (after a failed call, or with its harness session lost), the checks' findings, a reply that was not the report (or was lost), or the summary's lint. */
-export type TurnPurpose = "start" | "retry" | "fresh" | "findings" | "report" | "lint";
+/** Why a turn was made: the first session, a session that starts over (after a failed call, or with its harness session lost), the checks' findings, a reply that was not the report (or was lost), the summary's lint, or a revision of our open PR (the review's fixes or red CI). */
+export type TurnPurpose = "start" | "retry" | "fresh" | "findings" | "report" | "lint" | "revise";
 
 /** A screenshot of the report, copied out of the workspace: `file` is under the artifact directory. */
 export type StoredShot = { n: number; what: string; file: string; bytes: number; width: number; height: number };

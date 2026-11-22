@@ -86,7 +86,7 @@ const prNumberOf = (url: string): number => Number(/\/pull\/(\d+)$/.exec(url)![1
 
 /** Forks being looked up or created, per repo: two implementations of one repo must not both create the fork. */
 const forkLocks = new Map<string, Promise<unknown>>();
-function forkOnce<T>(repo: string, work: () => Promise<T>): Promise<T> {
+export function forkOnce<T>(repo: string, work: () => Promise<T>): Promise<T> {
   const run = (forkLocks.get(repo) ?? Promise.resolve()).then(work, work);
   const tail = run.catch(() => {}).finally(() => { if (forkLocks.get(repo) === tail) forkLocks.delete(repo); });
   forkLocks.set(repo, tail);
@@ -94,7 +94,7 @@ function forkOnce<T>(repo: string, work: () => Promise<T>): Promise<T> {
 }
 
 /** The issue's or PR's state on GitHub now (a merged PR is MERGED, not CLOSED); null when the read fails, in which case the mirror's state stands. */
-async function liveState(exec: Exec, repo: string, path: string): Promise<"OPEN" | "CLOSED" | "MERGED" | null> {
+export async function liveState(exec: Exec, repo: string, path: string): Promise<"OPEN" | "CLOSED" | "MERGED" | null> {
   const r = await exec("gh", ["api", `repos/${slugOf(repo)}/${path}`, "--jq", `if .merged == true then "merged" else .state end`]);
   const v = r.code === 0 ? r.stdout.trim().toLowerCase() : "";
   return v === "open" ? "OPEN" : v === "closed" ? "CLOSED" : v === "merged" ? "MERGED" : null;
@@ -112,7 +112,7 @@ async function issueClosedLive(db: Db, d: PrDeps, repo: string, number: number):
  * applies it on `base`, reads the changed Cargo.toml files for compile-time changes, and checks the commit's changes,
  * line count and binary sizes against the checked file list. Returns the commit.
  */
-async function commitDiff(git: Git, root: string, base: string, diff: string, message: (c: Extract<ImplementationCheck, { ok: true }>) => string, who: { name: string; email: string }):
+export async function commitDiff(git: Git, root: string, base: string, diff: string, message: (c: Extract<ImplementationCheck, { ok: true }>) => string, who: { name: string; email: string }):
   Promise<{ ok: true; commit: string; check: Extract<ImplementationCheck, { ok: true }> } | { ok: false; reason: string; problems?: string[] }> {
   const check = validateImplementation(diff, await buildScriptsAt(git, base));
   if (!check.ok) return check;
@@ -178,7 +178,7 @@ async function committedProblems(git: Git, base: string, commit: string): Promis
 }
 
 /** The last push this implementation made to `branch` that is known done: its commit, and the compile-time changes it was flagged for. */
-async function lastPush(db: Db, im: Implementation, branch: string): Promise<{ commit: string; compileTime: CompileTimeChange[] } | null> {
+export async function lastPush(db: Db, im: Implementation, branch: string): Promise<{ commit: string; compileTime: CompileTimeChange[] } | null> {
   const rows = await db.all(db.k.selectFrom("audit").select("details").where("action", "=", "implement-push").where("target", "=", refOf(im)).orderBy("at", "desc"));
   for (const r of rows) {
     let x: { impl?: unknown; branch?: unknown; commit?: unknown; state?: unknown; compileTime?: unknown };
