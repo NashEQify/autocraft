@@ -72,7 +72,7 @@ const wrap = async <T>(f: () => Promise<T | Promise<T>>): Promise<T> => {
 };
 
 function wireParams(s: StepDef, repos: string[]): StepParam[] {
-  return s.params.map((p): StepParam => {
+  return s.params.filter((p) => !p.cliOnly).map((p): StepParam => {
     const base = { name: p.name, label: p.label, help: p.help, required: !!p.required };
     switch (p.kind) {
       case "enum": return { ...base, kind: "enum", options: p.options, default: p.default };
@@ -183,6 +183,9 @@ export async function request(db: Db, req: Req): Promise<Job> {
   if (!step) throw new HttpError(400, "no such step");
   requireOperator(req, step);
   if (step.name === SECURITY_STEP) throw new HttpError(400, "scans are started from the repo page");
+  const given = b.params && typeof b.params === "object" && !Array.isArray(b.params) ? b.params as Record<string, unknown> : {};
+  const cli = step.params.find((p) => p.cliOnly && given[p.name] !== undefined);
+  if (cli) throw new HttpError(400, `${cli.label} is set from the command line only`);
   const j = await wrap(async () => enqueue(db, step.name, b.params, req.user.login));
   await audit(db, req.user.login, "job-request", `job:${j.id}`, { step: j.step, params: j.params });
   return j;

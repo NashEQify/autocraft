@@ -207,6 +207,15 @@ export async function ownLogins(db: Db, _repo: string, slug: string | null = nul
   return out;
 }
 
+/** A login as ownLogins compares it: lowercased, without an `app/` prefix or a `[bot]` suffix. */
+export const plainLogin = (login: string): string => login.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
+
+/** Whether a login is ours on the repo (ownLogins), in any form GitHub or the mirror writes it. */
+export async function ownLoginTest(db: Db, repo: string): Promise<(login: string | null) => boolean> {
+  const own = new Set([...await ownLogins(db, repo)].map(plainLogin));
+  return (login) => login !== null && own.has(plainLogin(login));
+}
+
 /** Every login that is ours on any repo (for views that span repos). */
 export async function allOwnLogins(db: Db, slug: string | null = null): Promise<Set<string>> {
   return await ownLogins(db, "", slug);

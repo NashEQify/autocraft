@@ -7,6 +7,7 @@
 // Nothing is written to GitHub; a stuck attempt still asks its decision.
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { unpackText } from "../agents/runs.ts";
 import { CLI_QUEUE_BY, enqueue, JobError } from "../runner/jobs.ts";
 import { runBuild } from "./build.ts";
 import { parsePlanReply, planMarkdown, PLAN_PROMPT_ID } from "./plan.ts";
@@ -41,14 +42,30 @@ export function planReport(r: PlanReply): string {
   return out.join("\n\n");
 }
 
+/**
+ * The reply of a plan call: the call's raw reply is dropped once it is read (remote/calls.ts), so it comes from the agent
+ * run's stored, scrubbed output, else from the plan round that recorded the call.
+ */
+async function replyOf(db: Db, callId: number, runId: number | null, raw: string | null): Promise<string | null> {
+  if (raw !== null) return raw;
+  if (runId !== null) {
+    const t = await db.get(db.k.selectFrom("agent_run_texts").select("output").where("run_id", "=", runId));
+    const out = unpackText(t?.output);
+    if (out) return out;
+  }
+  const round = await db.get(db.k.selectFrom("main.implementation_rounds").select("result").where("kind", "=", "plan").where("call_id", "=", callId).orderBy("id", "desc").limit(1));
+  return round?.result ?? null;
+}
+
 async function show(db: Db, ref: Ref, callId: number): Promise<void> {
-  const c = await db.get(db.k.selectFrom("remote_calls").select(["prompt_id", "items", "reply", "state"]).where("id", "=", callId));
+  const c = await db.get(db.k.selectFrom("remote_calls").select(["prompt_id", "items", "reply", "state", "run_id"]).where("id", "=", callId));
   if (!c || c.prompt_id !== PLAN_PROMPT_ID || !(JSON.parse(c.items ?? "[]") as Ref[]).some((r) => r.repo === ref.repo && r.number === ref.number)) die(`call ${callId} is not a plan call of ${ref.repo}#${ref.number}`);
-  if (c!.reply === null) die(`call ${callId} has no reply (${c!.state})`);
+  const reply = await replyOf(db, callId, c!.run_id, c!.reply);
+  if (reply === null) die(`call ${callId} has no stored reply (${c!.state})`);
   try {
-    console.log(planReport(parsePlanReply(c!.reply!)));
+    console.log(planReport(parsePlanReply(reply!)));
   } catch (e) {
-    console.log(`the reply does not parse: ${(e as Error).message}\n\n${c!.reply}`);
+    console.log(`the reply does not parse: ${(e as Error).message}\n\n${reply}`);
   }
 }
 

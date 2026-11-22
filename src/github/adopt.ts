@@ -1,8 +1,6 @@
 // Adopting an open PR found by its branch name: only one the pipeline's own account opened, from one of its own head owners, against the given base.
-import { ownLogins } from "./identity.ts";
+import { ownLogins, plainLogin as plain } from "./identity.ts";
 import type { Db } from "../db/index.ts";
-
-const plain = (login: string): string => login.toLowerCase().replace(/^app\//, "").replace(/\[bot\]$/, "");
 
 /** `gh pr list` arguments' `--json` fields and `--jq` filter for the URLs of the PRs the pipeline may adopt. */
 export async function ownPrSelect(db: Db, repo: string, headOwners: string[], base: string): Promise<{ json: string; jq: string }> {
