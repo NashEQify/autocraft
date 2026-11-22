@@ -602,7 +602,7 @@ export class Runner {
   }
 
   /**
-   * Fencing, after the leader lock was lost (src/db/leader.ts): starts nothing more and kills every job's process group at
+   * Fencing, after the leader lease was lost (src/db/leader.ts): starts nothing more and kills every job's process group at
    * once, writing nothing. The new leader's recover() resumes or fails the jobs, as after a crash.
    */
   abandon(): void {

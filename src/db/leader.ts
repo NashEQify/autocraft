@@ -1,50 +1,48 @@
 // Leader election for the roles of which one copy may work at a time: the runner and the periodic chores. On Postgres a
-// copy leads while it holds the role's session-level advisory lock on a connection of its own; another copy waits as a
-// standby, trying for the lock every few seconds, and takes over once the leader's session ends. On SQLite every process
-// of an install runs on one host, where the lock files exclude a second copy, so a process always leads.
+// copy leads while it holds its role's lease, a row of `leader_leases` that it renews every CHECK_MS for LEASE_MS ahead
+// on the server's clock; another copy waits as a standby, reads the lease every few seconds and takes it once it has
+// expired. On SQLite every process of an install runs on one host, where the lock files exclude a second copy, so a
+// process always leads.
 //
-// Fencing. Winning moves the role's epoch (settings `leader:<role>:epoch`) in a write transaction, and the winner fences
-// its writes to that epoch (src/db/fence.ts). Writes run one at a time under the writer lock, and each fenced write checks
-// the epoch after taking it, so a write of the old leader either committed before the new epoch or fails.
+// Fencing. Taking the lease moves the role's epoch in a write transaction, and the winner fences its writes to that
+// epoch (src/db/fence.ts). Writes run one at a time under the writer lock, and each fenced write checks the epoch after
+// taking it, so a write of the old leader either committed before the new epoch or fails.
 //
-// Losing. The leader runs `SELECT 1` on its lock connection every CHECK_MS. When the connection fails, the leader opens
-// another, takes the lock again and reads the epoch under the writer lock: the same epoch means no other copy led
-// meanwhile, and it carries on. A holder of the lock that is one of this copy's own discarded sessions (one the server
-// has not dropped yet) is waited out. `lost` aborts when another session holds the lock or the epoch moved.
+// The lease connection. The leader renews on a connection of its own, outside the pools and the writer lock, so neither
+// busy pools nor a long write transaction delay a renewal. A renewal names the epoch: none renews a lease another copy
+// has taken, and one that changes no row means the epoch moved (`lost` aborts). When the connection fails, the next
+// renewal opens another; an expired lease that no other copy took is simply renewed again.
 //
-// Replicas (AUTOCRAFT_RUNNER_REPLICAS). With two or more, `lost` also aborts when no check has succeeded for LOSS_MS by
-// the wall clock (an event-loop stall counts). LOSS_MS is below the time the server takes to drop a silent client
-// (SERVER_KEEPALIVE in postgres.ts, about 11 seconds), so in a network split the old leader has stopped before another
-// copy can win. With one, no standby waits to take over, so a slow or failed check never stops the leader: it keeps
-// reconnecting and taking the lock again. A copy that does win meanwhile (the new pod of a deploy) moves the epoch, and
-// the old leader stops at its next fenced write or when it takes the lock again.
+// Replicas (AUTOCRAFT_RUNNER_REPLICAS). With two or more, `lost` also aborts when no renewal has succeeded for LOSS_MS
+// by the wall clock (an event-loop stall counts). LOSS_MS is below LEASE_MS, so a leader cut off from the database, or
+// frozen and thawed, has stopped before its lease expires and a standby can win. With one, no standby waits to take
+// over, so a slow or failed renewal never stops the leader: it keeps renewing. A copy that does win meanwhile (the new
+// pod of a deploy) moves the epoch, and the old leader stops at its next renewal or fenced write.
 import { hostname } from "node:os";
 import type * as Pg from "pg";
+import type { Compilable } from "kysely";
 import { envVar } from "../env.ts";
 import type { Db } from "./index.ts";
 import { dbTarget, isPgUrl, loadPg } from "./open.ts";
 import { pgConnectionString, SERVER_KEEPALIVE, setSession, within } from "./postgres.ts";
-import { epochKey, isFenced, type LeaderRole } from "./fence.ts";
+import { isFenced, type LeaderRole } from "./fence.ts";
+import { sql } from "./sql.ts";
 
 /**
- * Exit code of a process that lost its leader lock: an ordinary failure (not a signal), so its supervisor restarts it
+ * Exit code of a process that lost its lease: an ordinary failure (not a signal), so its supervisor restarts it
  * (Kubernetes, Compose, systemd Restart=on-failure) as a standby.
  */
 export const LOST_LEADER_EXIT = 75;
 
-/** Advisory lock keys, one per role ("aclr", "aclp"); below 2^31, so pg_locks shows them as classid 0, objid key. */
-const LOCK_KEYS: Record<LeaderRole, number> = { runner: 0x61636c72, periodic: 0x61636c70 };
-
-/** The granted holder of a role's lock ($1 the key). */
-const HOLDER_SQL = "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = $1 AND objsubid = 1 AND granted";
-
-/** A standby tries for the lock this often. */
+/** A standby reads the lease this often. */
 export const RETRY_MS = 2_000;
-/** The leader checks its lock connection this often. */
+/** The leader renews its lease this often. */
 export const CHECK_MS = 2_000;
-/** Longest time without a successful check before the leader gives up: below the server's drop time of a silent client. */
+/** How far ahead of the server's clock a renewal sets the lease's end: above LOSS_MS with margin. */
+export const LEASE_MS = 10_000;
+/** Longest time without a successful renewal before the leader of two or more replicas gives up: below LEASE_MS. */
 export const LOSS_MS = 8_000;
-/** Longest wait for a lock query of a standby or of a leader taking its lock again. */
+/** Longest wait for a query on the lease connection. */
 const QUERY_MS = 3_000;
 /** Leader and standbys write their status row this often (health checks read it). */
 export const BEAT_MS = 10_000;
@@ -63,10 +61,10 @@ export const leaderKey = (role: LeaderRole): string => `leader:${role}`;
 /** Prefix of the rows standbys of `role` write, one per copy: StandbyStatus as JSON. */
 export const standbyPrefix = (role: LeaderRole): string => `leader:${role}:standby:`;
 
-/** What the server says of a lock connection: its backend, the keepalive settings in effect and the client address it sees. */
-export type ConnInfo = { pid: number; keepalivesIdle: string | null; userTimeout: string | null; clientAddr: string | null };
+/** What the server says of the lease connection: the keepalive settings in effect and the client address it sees. */
+export type ConnInfo = { keepalivesIdle: string | null; userTimeout: string | null; clientAddr: string | null };
 /** `replicas`: the copy's AUTOCRAFT_RUNNER_REPLICAS (absent in rows of older versions). */
-export type LeaderStatus = { holder: string; epoch: number; since: string; at: string; replicas?: number; conn: Omit<ConnInfo, "pid"> };
+export type LeaderStatus = { holder: string; epoch: number; since: string; at: string; replicas?: number; conn: ConnInfo | null };
 export type StandbyStatus = { holder: string; since: string; at: string; replicas?: number };
 
 export type Lease = {
@@ -74,9 +72,9 @@ export type Lease = {
   /** 0 on SQLite, where nothing is fenced. */
   epoch: number;
   holder: string;
-  /** Aborts when the lock is lost; never on SQLite. */
+  /** Aborts when the lease is lost; never on SQLite. */
   lost: AbortSignal;
-  /** Gives the lock up (a clean stop); the next standby takes over within RETRY_MS. */
+  /** Gives the lease up (a clean stop); the next standby takes over within RETRY_MS. */
   release(): Promise<void>;
 };
 
@@ -91,10 +89,13 @@ export type ElectOptions = {
   holder?: string;
   retryMs?: number;
   checkMs?: number;
+  leaseMs?: number;
   lossMs?: number;
   beatMs?: number;
-  /** Copies of this role the install runs; with one, a failed or slow check alone never aborts `lost`. Default runnerReplicas(). */
+  /** Copies of this role the install runs; with one, a failed or slow renewal alone never aborts `lost`. Default runnerReplicas(). */
   replicas?: number;
+  /** Runs after each status write of the leader; a fenced error from it aborts `lost`, other errors are logged. */
+  onBeat?: () => Promise<void>;
 };
 
 const iso = (ms = Date.now()): string => new Date(ms).toISOString();
@@ -114,22 +115,33 @@ async function putSetting(db: Db, key: string, value: string): Promise<void> {
   await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
 }
 
-/** A lock connection: errors and its end go to `onLost`, so a dropped connection never crashes the process. */
-async function lockClient(pg: typeof Pg.default, url: string, role: LeaderRole, log: (l: string) => void, onLost: (c: Pg.Client, why: string) => void): Promise<{ client: Pg.Client; info: ConnInfo }> {
+/** The server's clock in ms since 1970, `plus` ahead. */
+const serverMs = (plus = 0) => sql<number>`CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT) + ${plus}`;
+
+type LeaseConn = { client: Pg.Client; info: ConnInfo; run: <O>(q: Compilable<O>) => Promise<O[]> };
+
+/** The lease connection: errors and its end go to `onLost`, so a dropped connection never crashes the process. */
+async function leaseClient(pg: typeof Pg.default, db: Db, url: string, role: LeaderRole, log: (l: string) => void, onLost: (c: Pg.Client, why: string) => void): Promise<LeaseConn> {
   const c = new pg.Client({
     connectionString: pgConnectionString(url), application_name: `autocraft-leader-${role}`, keepAlive: true, keepAliveInitialDelayMillis: 5_000,
     connectionTimeoutMillis: CONNECT_MS,
   });
   c.on("error", (e) => onLost(c, e.message));
   c.on("end", () => onLost(c, "the connection closed"));
+  const run = async <O>(q: Compilable<O>): Promise<O[]> => {
+    const cq = q.compile();
+    return (await within(c.query(cq.sql, cq.parameters as unknown[]), QUERY_MS, "the lease query")).rows as O[];
+  };
   try {
     await c.connect();
     // A refused setting leaves the server's default; the status row shows what is in effect.
-    await setSession((text) => c.query(text), SERVER_KEEPALIVE, `the ${role} lock connection`, log, QUERY_MS);
-    const r = await within(c.query<{ pid: number; idle: string | null; ut: string | null; addr: string | null }>(
-      "SELECT pg_backend_pid() AS pid, current_setting('tcp_keepalives_idle', true) AS idle, current_setting('tcp_user_timeout', true) AS ut, host(inet_client_addr()) AS addr"), QUERY_MS, "the connection check");
-    const row = r.rows[0]!;
-    return { client: c, info: { pid: Number(row.pid), keepalivesIdle: row.idle, userTimeout: row.ut, clientAddr: row.addr } };
+    await setSession((text) => c.query(text), SERVER_KEEPALIVE, `the ${role} lease connection`, log, QUERY_MS);
+    const [row] = await run(db.k.selectNoFrom([
+      sql<string | null>`current_setting('tcp_keepalives_idle', true)`.as("keepalivesIdle"),
+      sql<string | null>`current_setting('tcp_user_timeout', true)`.as("userTimeout"),
+      sql<string | null>`host(inet_client_addr())`.as("clientAddr"),
+    ]));
+    return { client: c, info: row!, run };
   } catch (e) {
     await c.end().catch(() => undefined);
     throw e;
@@ -148,24 +160,28 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     return o.signal?.aborted ? null : { role, epoch: 0, holder, lost: new AbortController().signal, release: async () => {} };
   }
   const pg = await loadPg();
-  const key = LOCK_KEYS[role];
-  const retryMs = o.retryMs ?? RETRY_MS, checkMs = o.checkMs ?? CHECK_MS, lossMs = o.lossMs ?? LOSS_MS, beatMs = o.beatMs ?? BEAT_MS;
+  const retryMs = o.retryMs ?? RETRY_MS, checkMs = o.checkMs ?? CHECK_MS, leaseMs = o.leaseMs ?? LEASE_MS, lossMs = o.lossMs ?? LOSS_MS, beatMs = o.beatMs ?? BEAT_MS;
   const replicas = o.replicas ?? runnerReplicas();
   const watchdog = replicas >= 2;
   const standbyRow = `${standbyPrefix(role)}${holder}`;
   const waitingSince = iso();
   let onLost: (c: Pg.Client, why: string) => void = () => {};
-  const open = () => lockClient(pg, url, role, log, (c, why) => onLost(c, why));
-  let conn: { client: Pg.Client; info: ConnInfo } | null = null;
+  const open = () => leaseClient(pg, db, url, role, log, (c, why) => onLost(c, why));
+  let conn: LeaseConn | null = null;
   let standbyBeat = 0, announced = false, lastError = "";
+  const k = db.k;
+  const leases = "leader_leases" as const;
 
-  // Standby: try for the lock until it is ours.
+  // Standby: read the lease until it has expired (or there is none), then take it under the writer lock.
   onLost = (c, why) => {
     if (conn?.client !== c) return;
     conn = null;
-    log(`leader: the ${role} lock connection failed while waiting (${why}); opening another`);
+    log(`leader: the ${role} lease connection failed while waiting (${why}); opening another`);
     void c.end().catch(() => undefined);
   };
+  let epoch = 0;
+  /** performance.now() when the winning statement was sent: the lease runs LEASE_MS from no earlier than that. */
+  let wonAt = 0;
   for (;;) {
     if (o.signal?.aborted) {
       await conn?.client.end().catch(() => undefined);
@@ -174,8 +190,22 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     }
     try {
       conn ??= await open();
-      const r = await within(conn.client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [key]), QUERY_MS, "the lock query");
-      if (r.rows[0]?.ok) break;
+      const [cur] = await conn.run(k.selectFrom(leases).select((eb) => [eb(eb.ref("expires_ms"), "<", serverMs()).as("free")]).where("role", "=", role));
+      if (!cur || cur.free) {
+        // The epoch moves in a write transaction, so every write of an earlier holder committed before it or is fenced. It
+        // is at least the server's clock in ms, so it stays above every earlier epoch even when the row was lost or
+        // replaced (a database copy) or an earlier version counted epochs elsewhere.
+        const sent = performance.now();
+        const won = await db.get(k.insertInto(leases).values({ role, holder, epoch: serverMs(), expires_ms: serverMs(leaseMs) })
+          .onConflict((oc) => oc.column("role").doUpdateSet((eb) => ({ holder, epoch: sql<number>`GREATEST(${eb.ref(`${leases}.epoch`)} + 1, ${serverMs()})`, expires_ms: serverMs(leaseMs) }))
+            .where(`${leases}.expires_ms`, "<", serverMs()))
+          .returning("epoch"));
+        if (won) {
+          epoch = Number(won.epoch);
+          wonAt = sent;
+          break;
+        }
+      }
       if (!announced) {
         announced = true;
         log(`leader: another copy leads the ${role}; waiting as a standby`);
@@ -190,7 +220,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
       lastError = "";
     } catch (e) {
       const msg = (e as Error).message;
-      if (msg !== lastError) log(`leader: cannot try the ${role} lock: ${msg}`);
+      if (msg !== lastError) log(`leader: cannot read or take the ${role} lease: ${msg}`);
       lastError = msg;
       const c = conn?.client;
       conn = null;
@@ -199,144 +229,71 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     await pause(retryMs, o.signal);
   }
 
-  let current: { client: Pg.Client; info: ConnInfo } = conn!;
+  let current: LeaseConn | null = conn;
   const ac = new AbortController();
-  let released = false, recovering = false;
-  /** Send time of the last check that succeeded. */
-  let lastOk = Date.now();
+  let released = false;
+  /**
+   * performance.now() when the last successful renewal (or the takeover) was sent: monotonic, and it still counts
+   * event-loop stalls. A late answer cannot stretch the watchdog past the lease, which runs from no earlier than that.
+   */
+  let lastOk = wonAt;
   let check: NodeJS.Timeout | undefined, watch: NodeJS.Timeout | undefined, beat: NodeJS.Timeout | undefined;
   const stopTimers = () => { clearInterval(check); clearInterval(watch); clearInterval(beat); };
+  const drop = (c: LeaseConn | null): void => {
+    if (c && current === c) current = null;
+    void c?.client.end().catch(() => undefined);
+  };
   const lose = (why: string): void => {
     if (released || ac.signal.aborted) return;
     stopTimers();
-    log(`leader: lost the ${role} lock (${why})`);
+    log(`leader: lost the ${role} lease (${why})`);
     ac.abort(new Error(why));
-    void current.client.end().catch(() => undefined);
+    drop(current);
   };
-  const status = (at: string): string => {
-    const { pid: _, ...c } = current.info;
-    return JSON.stringify({ holder, epoch, since, at, replicas, conn: c } satisfies LeaderStatus);
-  };
-
-  /** Gives the lock back (if this session still holds it) and runs the election again. */
-  const again = async (why: string): Promise<Lease | null> => {
-    released = true;
-    log(`leader: ${why}; trying again`);
-    await current.client.query("SELECT pg_advisory_unlock($1)", [key]).catch(() => undefined);
-    await current.client.end().catch(() => undefined);
-    await pause(retryMs, o.signal);
-    return await elect(db, role, { ...o, holder, onStandby: announced ? undefined : o.onStandby });
-  };
-
-  // The epoch moves while this copy holds the lock, so no two copies ever share one.
-  let epoch: number;
   const since = iso();
-  try {
-    const row = await db.prepare("INSERT INTO settings (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(settings.value AS BIGINT) + 1 AS TEXT) RETURNING value")
-      .get(epochKey(role)) as { value: string };
-    epoch = Number(row.value);
-  } catch (e) {
-    // A write that cannot get the writer lock (a lock wait past its limit).
-    return await again(`the ${role} lock was won but its epoch not moved: ${(e as Error).message}`);
-  }
-  // The lock connection may have dropped while the epoch write waited, and another copy won and moved the epoch first.
-  const held = await within(current.client.query<{ held: boolean }>(`SELECT EXISTS (${HOLDER_SQL} AND pid = pg_backend_pid()) AS held`, [key]), QUERY_MS, "the lock confirmation")
-    .then((r) => r.rows[0]?.held === true, () => false);
-  if (!held) return await again(`the ${role} lock was lost while its epoch moved to ${epoch}`);
-  try {
-    await db.prepare("DELETE FROM settings WHERE key = ?").run(standbyRow);
-    await putSetting(db, leaderKey(role), status(since));
-  } catch (e) {
-    return await again(`the ${role} status was not written: ${(e as Error).message}`);
-  }
-  log(`leader: this copy leads the ${role} (epoch ${epoch})`);
+  const status = (at: string): string => JSON.stringify({ holder, epoch, since, at, replicas, conn: current?.info ?? null } satisfies LeaderStatus);
+  const renewal = () => k.updateTable(leases).set({ expires_ms: serverMs(leaseMs) })
+    .where("role", "=", role).where("holder", "=", holder).where("epoch", "=", epoch).returning("epoch");
 
-  /**
-   * Backends of this copy's own lock sessions it has given up on: the first lock connection, and every later one that
-   * failed or timed out (a lock query that timed out here may still have taken the lock on the server).
-   */
-  const ownPids = new Set<number>();
-  const discard = (c: { client: Pg.Client; info: ConnInfo }): void => {
-    ownPids.add(c.info.pid);
-    void c.client.end().catch(() => undefined);
+  onLost = (c, why) => {
+    if (c !== current?.client) return;
+    log(`leader: the ${role} lease connection failed (${why}); renewing on a new one`);
+    drop(current);
   };
-  /** After the lock connection failed: a new connection, the lock again, and the epoch unchanged; otherwise `lost`. */
-  const reacquire = async (why: string): Promise<void> => {
-    if (recovering || released || ac.signal.aborted) return;
-    recovering = true;
-    discard(current);
-    log(`leader: the ${role} lock connection failed (${why}); taking the lock again`);
-    try {
-      // With one replica no other copy waits to take over, so this keeps trying until the lock is back or lost.
-      while (!released && !ac.signal.aborted && (!watchdog || Date.now() - lastOk <= lossMs)) {
-        let next: { client: Pg.Client; info: ConnInfo } | null = null;
-        try {
-          next = await open();
-          const got = (await within(next.client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [key]), QUERY_MS, "the lock query")).rows[0]?.ok;
-          if (!got) {
-            // Held by one of this copy's old sessions (the server has not dropped it yet) or by another copy.
-            const h = await within(next.client.query<{ pid: number }>(HOLDER_SQL, [key]), QUERY_MS, "the lock holder query");
-            const holderPid = h.rows[0]?.pid;
-            discard(next);
-            next = null;
-            if (holderPid !== undefined && !ownPids.has(Number(holderPid))) return lose("another copy holds the lock");
-            await pause(Math.min(retryMs, 500));
-            continue;
-          }
-          // Under the writer lock: a new leader's epoch write has either committed or not begun.
-          const row = await db.write(async () => await db.prepare("SELECT value FROM settings WHERE key = ?").get(epochKey(role)) as { value: string } | undefined);
-          if (row?.value !== String(epoch)) {
-            lose(`another copy led meanwhile (epoch ${row?.value ?? "none"})`);
-            await next.client.end().catch(() => undefined);
-            return;
-          }
-          if (released || ac.signal.aborted) {
-            await next.client.end().catch(() => undefined);
-            return;
-          }
-          current = next;
-          lastOk = Date.now();
-          // This session holds the lock now, so none of the old ones can.
-          ownPids.clear();
-          log(`leader: took the ${role} lock again (epoch ${epoch})`);
-          return;
-        } catch (e) {
-          if (next) discard(next);
-          if (isFenced(e)) return lose("another copy took over");
-          await pause(Math.min(retryMs, 500));
-        }
-      }
-    } finally {
-      recovering = false;
-    }
-  };
-  onLost = (c, why) => { if (c === current.client) void reacquire(why); };
 
-  /** The client whose check has not answered yet: a hung check on a discarded client must not hold up checks on its successor. */
-  let checkingOn: Pg.Client | null = null;
+  /** The renewal that has not answered yet: a hung one must not stack up further renewals. */
+  let renewing = false;
   check = setInterval(() => {
-    if (checkingOn === current.client || recovering) return;
-    const sent = Date.now(), c = current.client;
-    checkingOn = c;
-    void c.query("SELECT 1").then(
-      () => { if (c === current.client) lastOk = Math.max(lastOk, sent); },
-      (e: Error) => { if (c === current.client) void reacquire(e.message); },
-    ).finally(() => { if (checkingOn === c) checkingOn = null; });
+    if (renewing || released || ac.signal.aborted) return;
+    renewing = true;
+    const sent = performance.now();
+    void (async () => {
+      let c: LeaseConn | null = current;
+      try {
+        c = current ??= await within(open(), QUERY_MS + CONNECT_MS, "the lease connection");
+        const rows = await c.run(renewal());
+        if (!rows.length) return lose("another copy took the lease");
+        lastOk = Math.max(lastOk, sent);
+      } catch (e) {
+        if (c === current) drop(c);
+        if (!watchdog) log(`leader: the ${role} lease was not renewed: ${(e as Error).message}`);
+      } finally {
+        renewing = false;
+      }
+    })();
   }, checkMs);
-  // Wall-clock time: after a stall of the event loop this fires late and sees the whole gap.
+  // After a stall of the event loop this fires late and sees the whole gap.
   watch = setInterval(() => {
-    const gap = Date.now() - lastOk;
-    if (gap <= lossMs) return;
-    const why = `no successful check of the lock for ${Math.round(gap / 1000)} s`;
-    // One replica: a check that hangs gets a new connection instead of a loss.
-    if (watchdog) lose(why);
-    else void reacquire(why);
+    const gap = performance.now() - lastOk;
+    if (gap <= lossMs || !watchdog) return;
+    lose(`no successful renewal of the lease for ${Math.round(gap / 1000)} s`);
   }, Math.min(250, checkMs));
   beat = setInterval(() => {
     // Fenced like every write of this process: a refusal means another copy has taken over.
     void (async () => {
       await putSetting(db, leaderKey(role), status(iso()));
       await pruneStandbys(db, role);
+      await o.onBeat?.();
     })().catch((e: unknown) => {
       if (isFenced(e)) lose("another copy took over");
       else log(`leader: status of the ${role} not written: ${(e as Error).message}`);
@@ -346,15 +303,29 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   watch.unref();
   beat.unref();
 
+  // After the timers, and not awaited: a slow write must not hold up the renewals.
+  void (async () => {
+    await db.prepare("DELETE FROM settings WHERE key = ?").run(standbyRow);
+    await putSetting(db, leaderKey(role), status(since));
+  })().catch((e: unknown) => {
+    if (isFenced(e)) lose("another copy took over");
+    else log(`leader: status of the ${role} not written: ${(e as Error).message}`);
+  });
+  log(`leader: this copy leads the ${role} (epoch ${epoch})`);
+
   return {
     role, epoch, holder, lost: ac.signal,
     release: async () => {
       if (released) return;
       released = true;
       stopTimers();
-      if (!ac.signal.aborted) await current.client.query("SELECT pg_advisory_unlock($1)", [key]).catch(() => undefined);
-      await current.client.end().catch(() => undefined);
-      log(`leader: released the ${role} lock`);
+      // Ends the lease now, so a standby takes it at its next read.
+      if (!ac.signal.aborted) {
+        await db.run(k.updateTable(leases).set({ expires_ms: 0 }).where("role", "=", role).where("holder", "=", holder).where("epoch", "=", epoch))
+          .catch((e: unknown) => log(`leader: the ${role} lease was not given up (${(e as Error).message}); it expires on its own`));
+      }
+      drop(current);
+      log(`leader: released the ${role} lease`);
     },
   };
 }

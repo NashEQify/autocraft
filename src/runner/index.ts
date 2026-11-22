@@ -25,7 +25,9 @@ import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
 import { closeDb, openDb, setDbRole } from "../db/open.ts";
 import { elect, LOST_LEADER_EXIT } from "../db/leader.ts";
-import { assertFence, FencedError, setFence } from "../db/fence.ts";
+import { assertFence, FencedError, isFenced, setFence } from "../db/fence.ts";
+import { inClusterApi } from "../build/kube-api.ts";
+import { workerEndpointFromEnv, WorkerEndpointPublisher } from "../build/worker-endpoint.ts";
 import { writeSync } from "node:fs";
 
 const USAGE = `usage: autocraft-server runner serve
@@ -57,7 +59,8 @@ async function serve(): Promise<void> {
   else ac.signal.addEventListener("abort", onStop, { once: true });
 
   // Of several copies on one Postgres database, one leads and the others wait (src/db/leader.ts). A standby answers the
-  // probes on the worker API's address, /readyz with 503, so a Service sends workers only to the leader.
+  // probes on the worker API's address (/healthz 200, /readyz 503); in Kubernetes the worker API's EndpointSlice names
+  // the leader alone.
   let leading = false;
   const state = () => (leading ? "leader" : "standby");
   const workerListen = envVar("WORKER_LISTEN") ?? DEFAULT_WORKER_LISTEN;
@@ -70,8 +73,12 @@ async function serve(): Promise<void> {
         (e: Error) => (console.error(`runner: health listener not started: ${e.message}`), null),
       )
     : null;
+  // In Kubernetes the leader writes its address into the worker API's EndpointSlice (src/build/worker-endpoint.ts), once it
+  // leads and again at every status beat while the slice names anything else.
+  let endpoint: WorkerEndpointPublisher | null = null;
   const lease = await elect(db, "runner", {
     signal: ac.signal,
+    onBeat: async () => await endpoint?.sync(),
     onStandby: () => {
       standbyProbes = startHealthServer(workerListen, async () => false, state).catch((e: Error) => (console.error(`runner: standby probes not started: ${e.message}`), null));
     },
@@ -97,12 +104,12 @@ async function serve(): Promise<void> {
   const fixes = await autoFixConfirmed(db);
   if (fixes) console.log(`runner: started the private fix of ${fixes} confirmed security findings`);
   const runner = new Runner({ db, lockFile: lock, maxJobs: Number(envVar("RUNNER_JOBS")) || DEFAULT_MAX_JOBS });
-  // Fencing: a leader that lost its lock starts nothing more, kills its jobs and exits at once, so its container restarts
+  // Fencing: a leader that lost its lease starts nothing more, kills its jobs and exits at once, so its container restarts
   // as a standby. Its writes already fail (src/db/fence.ts); the new leader resumes the jobs as after a crash. GitHub and
   // Kubernetes calls already in flight finish; the pod launcher checks the fence before each Kubernetes change.
   const fenced = () => {
     runner.abandon();
-    writeSync(2, `runner: lost the leader lock (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
+    writeSync(2, `runner: lost the leader lease (${String((lease.lost.reason as Error | undefined)?.message ?? "")}); jobs killed, exiting\n`);
     process.exit(LOST_LEADER_EXIT);
   };
   if (lease.lost.aborted) fenced();
@@ -116,11 +123,23 @@ async function serve(): Promise<void> {
     (w) => (console.log(`runner: worker API on ${w.url}`), w),
     (e: Error) => (console.error(`runner: worker API not started: ${e.message}`), null),
   );
-  // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
-  startPodLauncher(db, ac.signal, (l) => console.log(l), async () => {
+  const fenceGuard = async () => {
     if (lease.lost.aborted) throw new FencedError("this process no longer leads the runner");
     await assertFence(db);
-  });
+  };
+  try {
+    const ep = workerEndpointFromEnv(workerListen);
+    const api = ep ? inClusterApi() : null;
+    if (ep && !api) console.error("runner: AUTOCRAFT_WORKER_ENDPOINTSLICE is set outside a cluster; the worker API's EndpointSlice is not written");
+    if (ep && api) {
+      endpoint = new WorkerEndpointPublisher(db, api, ep, fenceGuard, (l) => console.log(l));
+      void endpoint.sync().catch((e: unknown) => { if (!isFenced(e)) console.error(`runner: worker API EndpointSlice: ${(e as Error).message}`); });
+    }
+  } catch (e) {
+    console.error(`runner: the worker API's EndpointSlice is not written: ${(e as Error).message}`);
+  }
+  // Starts and follows the build pods of kubernetes environments; outside a cluster they report that they cannot.
+  startPodLauncher(db, ac.signal, (l) => console.log(l), fenceGuard);
   // Optional: counts Discord mentions of tracked items when a bot token file is configured. A failure is logged and never stops the runner.
   try {
     await startDiscord(db, ac.signal, (l) => console.log(l));

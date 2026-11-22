@@ -132,6 +132,10 @@ CREATE TABLE IF NOT EXISTS decision_prepares (decision_id TEXT NOT NULL, at TEXT
 CREATE INDEX IF NOT EXISTS decision_prepares_decision ON decision_prepares(decision_id, at);
 
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+-- The lease of each leader role on Postgres (src/db/leader.ts): `holder` leads while expires_ms (the server's clock, ms
+-- since 1970) lies ahead and renews it every few seconds; a standby takes an expired lease and moves `epoch`, which fences
+-- the writes of every earlier holder (src/db/fence.ts). Unused on SQLite.
+CREATE TABLE IF NOT EXISTS leader_leases (role TEXT PRIMARY KEY, holder TEXT NOT NULL, epoch INTEGER NOT NULL, expires_ms INTEGER NOT NULL);
 -- whitelist rule defaults; editable with `autocraft-server whitelist rule`
 INSERT OR IGNORE INTO settings VALUES ('whitelist_min_merged', '5');
 INSERT OR IGNORE INTO settings VALUES ('whitelist_min_merge_rate', '0.6');

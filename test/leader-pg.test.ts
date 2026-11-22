@@ -1,33 +1,33 @@
-// Leader election on Postgres (src/db/leader.ts): a leader rides out a dropped lock connection, a standby takes over
-// when another session holds the lock, the old leader's writes are fenced, and a transaction left idle by a client that
-// stopped talking no longer holds the writer lock. Runs only against a server (AUTOCRAFT_TEST_PG_URL; scripts/pg-test.sh).
+// Leader election on Postgres (src/db/leader.ts): a leader rides out a dropped lease connection, a frozen leader is
+// replaced once its lease expires and its writes are fenced, and a transaction left idle by a client that stopped
+// talking no longer holds the writer lock. Runs only against a server (AUTOCRAFT_TEST_PG_URL; scripts/pg-test.sh).
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 import { elect, type Lease } from "../src/db/leader.ts";
 import { isFenced, setFence } from "../src/db/fence.ts";
-import { loadPg } from "../src/db/open.ts";
 import type { Db } from "../src/db/index.ts";
 import { needsPg, testDatabase } from "./test-db.ts";
 
-const FAST = { retryMs: 100, checkMs: 100, lossMs: 1_500, beatMs: 200, log: () => {} };
-const SETTINGS = "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)";
-const RUNNER_KEY = 1633905778;
+const FAST = { retryMs: 100, checkMs: 100, leaseMs: 2_000, lossMs: 1_500, beatMs: 200, log: () => {} };
+const SETTINGS = "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE leader_leases (role TEXT PRIMARY KEY, holder TEXT NOT NULL, epoch BIGINT NOT NULL, expires_ms BIGINT NOT NULL)";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const timeout = (ms: number) => new Promise<never>((_, rej) => setTimeout(() => rej(new Error(`not within ${ms} ms`)), ms));
-const holderPid = async (admin: Db): Promise<number | undefined> =>
-  (await admin.prepare(`SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND objid = ${RUNNER_KEY} AND granted`).get() as { pid: number } | undefined)?.pid;
+const leaseBackend = async (admin: Db): Promise<number | undefined> =>
+  (await admin.prepare("SELECT pid FROM pg_stat_activity WHERE application_name = 'autocraft-leader-runner' AND datname = current_database()").get() as { pid: number } | undefined)?.pid;
 
-test("a leader whose lock connection drops takes the lock again and keeps leading", { skip: needsPg }, async () => {
+test("a leader whose lease connection drops renews on a new one and keeps leading", { skip: needsPg }, async () => {
   const t = await testDatabase(SETTINGS);
   try {
     const [db, admin] = [await t.open(), await t.open()];
-    const a = (await elect(db, "runner", { ...FAST, url: t.target, holder: "a" }))!;
-    const before = await holderPid(admin);
+    const a = (await elect(db, "runner", { ...FAST, url: t.target, holder: "a", replicas: 2 }))!;
+    await sleep(300);
+    const before = await leaseBackend(admin);
     await admin.prepare(`SELECT pg_terminate_backend(${before})`).all();
-    await sleep(1_000);
-    const after = await holderPid(admin);
-    assert.ok(after !== undefined && after !== before, "the lock is held again, on a new connection");
-    await sleep(1_000);
+    await sleep(2_500);
+    const after = await leaseBackend(admin);
+    assert.ok(after !== undefined && after !== before, "the lease is renewed on a new connection");
     assert.ok(!a.lost.aborted, "the drop alone is not a loss");
     setFence({ role: "runner", epoch: a.epoch });
     await db.prepare("INSERT INTO settings (key, value) VALUES ('x', 'a')").run();
@@ -38,42 +38,58 @@ test("a leader whose lock connection drops takes the lock again and keeps leadin
   }
 });
 
-test("when another session holds the lock, the old leader stops and its writes are refused; the standby then leads", { skip: needsPg }, async () => {
+// A leader in a process of its own, so the test can freeze it: its connections stay open (the kernel still answers),
+// but it renews nothing. It prints its epoch once it leads and "lost" when it notices the loss. It writes no status
+// during the test, so it is not frozen inside a write transaction (whose writer lock would hold the takeover until the
+// server ends the transaction).
+const FROZEN = `
+import { connectDb } from ${JSON.stringify(new URL("../src/db/open.ts", import.meta.url).href)};
+import { elect } from ${JSON.stringify(new URL("../src/db/leader.ts", import.meta.url).href)};
+const url = process.argv[1];
+const db = await connectDb(url, { role: "dashboard", migrate: false });
+const l = await elect(db, "runner", { ...${JSON.stringify(FAST)}, beatMs: 600000, log: () => {}, url, holder: "frozen", replicas: 2 });
+process.stdout.write(l.epoch + "\\n");
+l.lost.addEventListener("abort", () => process.stdout.write("lost\\n"));
+setInterval(() => {}, 1000);
+`;
+
+test("a leader that stops renewing is replaced once its lease expires; its writes are refused and it stops when it runs again", { skip: needsPg }, async () => {
   const t = await testDatabase(SETTINGS);
   const stop = new AbortController();
-  const pg = await loadPg();
-  const other = new pg.Client({ connectionString: t.target });
+  const child = spawn(process.execPath, ["--no-warnings", "--input-type=module", "-e", FROZEN, t.target], { stdio: ["ignore", "pipe", "inherit"] });
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  const next = async (): Promise<string> => String((await Promise.race([lines.next(), timeout(10_000)])).value);
   try {
-    const [dbA, dbB, admin] = [await t.open(), await t.open(), await t.open()];
-    const a = (await elect(dbA, "runner", { ...FAST, url: t.target, holder: "a" }))!;
+    const epochA = Number(await next());
+    assert.ok(epochA > 0, "the first copy leads");
+    const db = await t.open();
     let standby = false;
     let b: Lease | null = null;
-    const bWon = elect(dbB, "runner", { ...FAST, url: t.target, holder: "b", signal: stop.signal, onStandby: () => (standby = true) }).then((l) => (b = l));
-    await sleep(500);
-    assert.ok(standby && !b, "the second copy waits while the first leads");
+    // The fence is this process's, so B writes no status while the test swaps it.
+    const bWon = elect(db, "runner", { ...FAST, beatMs: 600_000, url: t.target, holder: "b", replicas: 2, signal: stop.signal, onStandby: () => (standby = true) }).then((l) => (b = l));
+    await sleep(1_000);
+    assert.ok(standby && !b, "the second copy waits while the first renews");
 
-    // Another session takes the lock the moment the leader's session ends, before either copy can.
-    await other.connect();
-    const lostAt = new Promise<void>((r) => a.lost.addEventListener("abort", () => r(), { once: true }));
-    await other.query(`SELECT pg_terminate_backend(${await holderPid(admin)})`);
-    await other.query(`SELECT pg_advisory_lock(${RUNNER_KEY})`);
-    await Promise.race([lostAt, timeout(3_000)]);
-    await other.end();
-
-    await Promise.race([bWon, timeout(3_000)]);
+    child.kill("SIGSTOP");
+    await Promise.race([bWon, timeout(5_000)]);
     const leaseB = b as Lease | null;
-    assert.ok(leaseB && leaseB.epoch > a.epoch, "the standby leads under a later epoch");
-    setFence({ role: "runner", epoch: a.epoch });
-    await assert.rejects(dbA.prepare("INSERT INTO settings (key, value) VALUES ('x', 'a')").run(), (e) => isFenced(e));
+    assert.ok(leaseB && leaseB.epoch > epochA, "the standby leads under a later epoch");
+    await sleep(300); // B's first status write, which is not awaited
+    setFence({ role: "runner", epoch: epochA });
+    await assert.rejects(db.prepare("INSERT INTO settings (key, value) VALUES ('x', 'a')").run(), (e) => isFenced(e));
     setFence({ role: "runner", epoch: leaseB.epoch });
-    await dbB.prepare("INSERT INTO settings (key, value) VALUES ('x', 'b')").run();
+    await db.prepare("INSERT INTO settings (key, value) VALUES ('x', 'b')").run();
     setFence(null);
-    assert.equal((await admin.prepare("SELECT value FROM settings WHERE key = 'x'").get() as { value: string }).value, "b");
+
+    child.kill("SIGCONT");
+    assert.equal(await next(), "lost", "the thawed leader notices it no longer leads");
+    await sleep(500);
+    assert.ok(!leaseB.lost.aborted, "and the new leader keeps leading");
     await leaseB.release();
   } finally {
     setFence(null);
     stop.abort();
-    await other.end().catch(() => undefined);
+    child.kill("SIGKILL");
     await t.close();
   }
 });
@@ -96,47 +112,6 @@ test("a write transaction left idle no longer holds the writer lock once the ser
     assert.ok(await stuck instanceof Error, "the idle transaction was ended, not committed");
     assert.equal(await b.prepare("SELECT value FROM settings WHERE key = 'a'").get(), undefined);
   } finally {
-    await t.close();
-  }
-});
-
-test("a copy whose lock is taken while its epoch write waits does not lead until it holds the lock again", { skip: needsPg }, async () => {
-  const t = await testDatabase(SETTINGS);
-  const pg = await loadPg();
-  const other = new pg.Client({ connectionString: t.target });
-  let release = () => {};
-  try {
-    const [db, writer, probe] = [await t.open(), await t.open(), await t.open()];
-    // Holding the writer lock keeps the winner's epoch write waiting.
-    const held = new Promise<void>((r) => (release = r));
-    const writing = writer.write(async () => {
-      await writer.prepare("INSERT INTO settings (key, value) VALUES ('w', '1')").run();
-      await held;
-    });
-    let lease: Lease | null = null;
-    const won = elect(db, "runner", { ...FAST, url: t.target, holder: "a" }).then((l) => (lease = l));
-    let pid: number | undefined;
-    for (let i = 0; i < 50 && pid === undefined; i++) {
-      await sleep(100);
-      pid = await holderPid(probe);
-    }
-    assert.ok(pid !== undefined, "the copy took the lock");
-    await other.connect();
-    await other.query(`SELECT pg_terminate_backend(${pid})`);
-    await other.query(`SELECT pg_advisory_lock(${RUNNER_KEY})`);
-    release();
-    await writing;
-    await sleep(1_000);
-    assert.equal(lease, null, "no lease while another session holds the lock");
-    await other.end();
-    await Promise.race([won, timeout(5_000)]);
-    const l = lease as Lease | null;
-    assert.ok(l, "it leads once the lock is free");
-    assert.ok((await holderPid(probe)) !== undefined, "and holds the lock");
-    await l.release();
-  } finally {
-    release();
-    await other.end().catch(() => undefined);
     await t.close();
   }
 });

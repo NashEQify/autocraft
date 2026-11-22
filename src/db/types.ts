@@ -1144,6 +1144,13 @@ export interface LaneNext {
   at: string;
 }
 
+export interface LeaderLeases {
+  role: string;
+  holder: string;
+  epoch: number;
+  expires_ms: number;
+}
+
 export interface LivenessItems {
   repo: string;
   number: number;
@@ -2363,6 +2370,7 @@ export interface DB {
   job_log_chunks: JobLogChunks;
   jobs: Jobs;
   lane_next: LaneNext;
+  leader_leases: LeaderLeases;
   liveness_items: LivenessItems;
   main_ci: MainCi;
   main_fixes: MainFixes;
@@ -2546,6 +2554,7 @@ export interface DB {
   "main.job_log_chunks": JobLogChunks;
   "main.jobs": Jobs;
   "main.lane_next": LaneNext;
+  "main.leader_leases": LeaderLeases;
   "main.liveness_items": LivenessItems;
   "main.main_ci": MainCi;
   "main.main_fixes": MainFixes;
@@ -2733,6 +2742,7 @@ export const COLUMNS = {
   job_log_chunks: ["job_id", "seq", "start", "next_start", "chunk", "at"],
   jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "lease_skips", "lease_skip_keys"],
   lane_next: ["lane", "total", "items", "at"],
+  leader_leases: ["role", "holder", "epoch", "expires_ms"],
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],
   main_ci: ["repo", "head_sha", "branch", "state", "failing", "checks", "committed_at", "headline", "first_seen_at", "state_changed_at", "updated_at"],
   main_fixes: ["repo", "head_sha", "check", "verdict", "state", "reason", "run_id", "run_url", "excerpt", "decision_id", "issue_number", "pr_number", "pr_url", "created_at", "updated_at", "session", "patch", "files", "lint_task", "lint_round", "lint_state"],
