@@ -2158,6 +2158,8 @@ export interface Conversation {
   pending: boolean;
   /** The viewer may write to Opus here: an operator, or a maintainer with write access to the repo (their messages run on their own Task Runner). */
   canTalk: boolean;
+  /** A maintainer's message waits for Opus and the viewer may withdraw it: an operator, or the maintainer who wrote it. */
+  canWithdraw: boolean;
   /** While a reply is being written: what Opus did last, up to five plain lines, newest last. */
   progress?: string[];
   startedBy: string | null;

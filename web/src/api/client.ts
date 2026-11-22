@@ -184,6 +184,8 @@ export interface Api {
     say(repo: RepoName, number: number, text: string, ask?: boolean): Promise<Conversation>;
     /** Includes (`on`) or excludes a maintainer post for Opus. Removing an include that was already sent is refused. */
     include(repo: RepoName, number: number, source: string, on: boolean): Promise<Conversation>;
+    /** Withdraws the maintainer's message that waits for Opus (Conversation.canWithdraw). */
+    withdraw(repo: RepoName, number: number): Promise<Conversation>;
     /** A proposed card's editable drafts: the comment `text`, the open-issue step's title and body, the fix-up step's instructions. Fields left out stay as they are. */
     editCard(id: number, edit: CardEdit): Promise<ConversationCard>;
     /** `skip`: indexes into `steps` the operator removed; the rest run in order. `note`: kept with the choice (on the decision it settles, in the thread), never posted to GitHub; at most 500 characters. */

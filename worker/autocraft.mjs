@@ -87,6 +87,7 @@ export const ROUTES = {
  * @property {string} requestId
  * @property {boolean} [fastLane]
  * @property {boolean} [ownLane]  the own lane: only calls bound to this user and their follow-ups
+ * @property {boolean} [withOwnLane]  a slot's or the fast lane's claim while an own lane runs beside them
  * @property {number} [wait]  protocol 4: seconds the server may hold the claim open when nothing is queued (0 to 30)
  */
 /** @typedef {{ fiveHour: number, weekly: number }} Reserve  percent of each plan window kept free */
@@ -2912,9 +2913,9 @@ export async function claimRequest(server, token, base, signal) {
  * A lease that comes back with a higher reserve than the one checked, which the usage no longer allows, is released.
  * `fastLane`: the claim comes from the fast-lane slot (Claim.fastLane); `ownLane`: from the own lane (Claim.ownLane). `requestId`:
  * a caller whose last claim failed in transit passes that claim's id again, so the server answers with the lease it may have taken.
- * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @param {boolean} [ownLane] @returns {Promise<ClaimReply | { held: Ready }>}
+ * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @param {boolean} [ownLane] @param {boolean} [withOwnLane] @returns {Promise<ClaimReply | { held: Ready }>}
  */
-async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined, ownLane = false) {
+async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined, ownLane = false, withOwnLane = false) {
   const { server, agentToken } = needLogin(cfg);
   const ready = await checkReady(cfg);
   const cooled = ready.readiness === "cooled-off" && ready.quotaReady === true;
@@ -2923,7 +2924,7 @@ async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), 
   const mac = process.platform === "darwin";
   const n = mac ? slot ?? pickSlot(slotBase()) : undefined;
   const root = n === undefined ? undefined : slotRoot(slotBase(), n);
-  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }), ...(ownLane && { ownLane: true }) };
+  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }), ...(ownLane && { ownLane: true }), ...(withOwnLane && !ownLane && { withOwnLane: true }) };
   /** @type {ClaimReply} */
   let reply;
   try {
@@ -3670,6 +3671,8 @@ async function cmdWork(argv) {
   // which the server counts toward no slot: they run while the slots are busy. Not for a harness that runs one call at a time,
   // nor past the macOS slots. It is not reported as a slot.
   const own = !exclusive.exclusive && !(process.platform === "darwin" && n + (fast ? 1 : 0) >= MAC_MAX_SLOTS);
+  // Whether the own lane runs: the slots then leave the bound calls to it (Claim.withOwnLane). It stops against a server without it.
+  let ownLaneOn = own;
   const ac = new AbortController();
   for (const sig of STOP_SIGNALS) {
     process.on(sig, () => {
@@ -3706,7 +3709,7 @@ async function cmdWork(argv) {
     while (!ac.signal.aborted) {
       if (Date.now() < notBefore) { await pause(notBefore - Date.now()); continue; }
       let r;
-      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane); claimId = newClaimId(); blockedRun = 0; } catch (e) {
+      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane, ownLaneOn); claimId = newClaimId(); blockedRun = 0; } catch (e) {
         if (ac.signal.aborted) break;
         // A claim lost in transit may have leased a call: the next try sends the same id and gets that lease back.
         if (!transient(e)) claimId = newClaimId();
@@ -3733,6 +3736,7 @@ async function cmdWork(argv) {
       if (heldSaid) { console.log("ready again"); heldSaid = ""; }
       // A server older than the own lane ignores the field and offers any call: the lane runs what it got and then stops.
       const ownLaneUnknown = ownLane && r.ownLane !== true;
+      if (ownLaneUnknown) ownLaneOn = false;
       if (ownLaneUnknown && !r.lease) { console.log("the server has no own lane for calls bound to you; that lane stops"); return; }
       if (!r.lease) {
         // The own lane waits quietly: the slots' loops say what the helper is doing.

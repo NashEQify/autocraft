@@ -10,7 +10,7 @@ import { audit } from "../audit.ts";
 import * as kx from "../../db/kx.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
 import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
-import { ConversationError, addMessage, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
+import { ConversationError, addMessage, withdrawTurn, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { isQuiet } from "../../security/quiet.ts";
@@ -138,7 +138,7 @@ export async function choicesView(db: Db, repo: string, n: number): Promise<Deci
 /** The conversation plus the maintainer posts shared with Opus. */
 export type ConversationView = Conversation & { includes: IncludeRow[] };
 
-export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<Omit<ConversationView, "canTalk">> {
+export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<Omit<ConversationView, "canTalk" | "canWithdraw">> {
   // A card left Running by a crash must not show as running until the next restart.
   await sweepRunningCards(db);
   const c = await conversationOf(db, repo, n);
@@ -197,9 +197,11 @@ function needOperator(req: Req): void {
   if (!isOperator(req)) throw new HttpError(403, "only operators share posts with Opus");
 }
 
-/** The conversation as the requester sees it, with whether they may write to Opus. */
+/** The conversation as the requester sees it, with whether they may write to Opus and withdraw the maintainer's message that waits. */
 async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<ConversationView> {
-  return { ...await conversationView(db, repo, n, req.user), canTalk: await canTalk(db, req.user, repo) };
+  const wait = await pendingTurn(db, repo, n);
+  const canWithdraw = wait?.kind === "maintainer" && (isOperator(req) || wait.login.toLowerCase() === req.user.login.toLowerCase());
+  return { ...await conversationView(db, repo, n, req.user), canTalk: await canTalk(db, req.user, repo), canWithdraw };
 }
 
 export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
@@ -232,6 +234,14 @@ export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<C
   const refused = kind === "maintainer" && asking ? await ownAskRefusal(db, req.user.login, repo) : null;
   if (refused) throw new HttpError(409, refused);
   await guardAsync(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
+  return await viewFor(db, req, repo, n);
+}
+
+/** Withdraws the maintainer's message that waits for Opus: an operator, or the maintainer who wrote it, so an item is never held by a message no runner takes. */
+export async function postWithdraw(db: Db, req: Req): Promise<ConversationView> {
+  const { repo, n } = itemOf(req);
+  await needVisible(db, req, repo);
+  await guard(async () => await withdrawTurn(db, repo, n, { login: req.user.login, operator: isOperator(req) }));
   return await viewFor(db, req, repo, n);
 }
 

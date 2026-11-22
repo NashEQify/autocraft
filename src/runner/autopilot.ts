@@ -66,7 +66,7 @@ import { FAST_FLOOR, fastFirst, fastScores } from "../fasttrack.ts";
 import { deleteSetting, rereadSettingsSnapshot, setting, withSettingsSnapshot, writeSetting } from "../settings-read.ts";
 import { inReadSnapshot, planPass, type PlanPass } from "../core/plan-engine.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
-import { leasesHeld } from "../remote/calls.ts";
+import { leaseTurnover } from "../remote/calls.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 
@@ -702,7 +702,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     extra: async (db) => {
       const waiting = await pendingConversations(db, undefined, "maintainer");
       const logins = [...new Set(waiting.map((c) => c.login.toLowerCase()))].sort();
-      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leasesHeld(db, l)}`)).join(",")}`;
+      return `${waiting.map((c) => c.turnId).join(",")}|${(await mapSeq(logins, async (l) => `${l}:${await leaseTurnover(db, l)}`)).join(",")}`;
     },
     detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },

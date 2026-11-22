@@ -16,12 +16,14 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * operators, and maintainers with write access whose messages run on their own Task Runner) write to Opus; maintainers also
  * leave feedback on the open question, above it; viewers get nothing.
  */
-export function Composer({ repo, number, talk, operator, commenter, exists, pending, feedbackOn, choices, opusTurns, flush }: {
+export function Composer({ repo, number, talk, withdrawable, operator, commenter, exists, pending, feedbackOn, choices, opusTurns, flush }: {
   /** The parent has no side padding to cancel: the bar spans it. */
   flush?: boolean;
   repo: RepoName;
   number: number;
   talk: boolean;
+  /** A maintainer's message waits for Opus and the viewer may withdraw it. */
+  withdrawable?: boolean;
   operator: boolean;
   commenter: boolean;
   exists: boolean;
@@ -55,6 +57,17 @@ export function Composer({ repo, number, talk, operator, commenter, exists, pend
       setSending(false);
     }
   };
+  const withdraw = async () => {
+    setSending(true);
+    setError(undefined);
+    try {
+      await api.conversations.withdraw(repo, number);
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setSending(false);
+    }
+  };
   const shell = flush ? "sticky bottom-0 z-10 mt-4 border-t border-line bg-panel px-4 py-2.5 md:px-6" : "sticky bottom-0 z-10 -mx-4 mt-4 border-t border-line bg-panel px-4 py-2.5 md:-mx-6 md:px-6";
   if (talk)
     return (
@@ -80,6 +93,11 @@ export function Composer({ repo, number, talk, operator, commenter, exists, pend
             className="max-h-40 resize-y"
           />
           <div className="flex flex-wrap items-center justify-end gap-2">
+            {withdrawable && (
+              <Button variant="secondary" className="max-md:h-11" disabled={sending} onClick={() => void withdraw()}>
+                Withdraw message
+              </Button>
+            )}
             <Button variant="secondary" className="max-md:h-11" disabled={!draft.trim() || sending} onClick={() => void send(false)}>
               Post without Opus
             </Button>

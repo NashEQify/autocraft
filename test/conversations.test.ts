@@ -21,6 +21,9 @@ import { apiRoutes } from "../src/dash/api/index.ts";
 import * as conv from "../src/dash/api/conversations.ts";
 import { HttpError } from "../src/dash/server/util.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
+import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
+import { createToken } from "../src/dash/mcp/tokens.ts";
+import { allocation } from "../src/agents/call.ts";
 import { setEnabled } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { Db } from "../src/db/index.ts";
@@ -365,7 +368,7 @@ describe("access", () => {
     ]) await assert.rejects(f, (e) => e instanceof HttpError && e.status === 403);
     assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state")))!.state, "proposed");
     const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
-    assert.equal(writes.length, 7);
+    assert.equal(writes.length, 8);
     // Sharing posts is operator-only; messages and the card routes check who may write or settle in the handler (refused for the viewer above).
     assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern), ["/api/conversations/:repo/:n/includes"]);
     // A second message while Opus has not answered the first is refused.
@@ -388,6 +391,37 @@ describe("maintainers talk to Opus", () => {
     const view = await conv.postMessage(db, maint(true, { text: "A note", ask: false }));
     assert.equal(view.canTalk, true);
     assert.deepEqual(view.turns.map((t) => [t.kind, t.login]), [["maintainer", "maint"]]);
+  });
+});
+
+describe("maintainers' messages wait and are withdrawn", () => {
+  test("a maintainer's message no runner of theirs took in time waits again, uncounted; they or an operator withdraw one, another maintainer cannot", async () => {
+    const db = await fresh();
+    await setInferenceMode(db, "user-local", "test");
+    await db.run(db.k.insertInto("access").values({ login: "maint", role: "maintainer" }));
+    const token = (await createToken(db, "maint", "runner", { kind: "runner" })).row.id;
+    await storeStatus(db, token, "maint", parseStatus({ slots: 2, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } }));
+    await addMessage(db, "app", 1, { login: "maint", kind: "maintainer" }, "Is this in scope?");
+    const turn = async () => (await db.get(db.k.selectFrom("conversation_turns").select(["status", "error"]).where("number", "=", 1).where("kind", "=", "maintainer").orderBy("id", "desc").limit(1)))!;
+    let handled = 0;
+    const was = allocation.pollMs;
+    allocation.pollMs = 10;
+    try {
+      assert.equal(await answerPending(db, { kind: "maintainer", ownWaitMs: 50, checkout: async () => null, usageRun: "t", log: quiet, onHandled: () => void handled++ }), 0);
+    } finally {
+      allocation.pollMs = was;
+    }
+    assert.equal((await turn()).status, "pending");
+    assert.equal(handled, 0, "a message given back is no work done");
+    const as = (login: string, role: "maintainer" | "operator"): Req => ({ ...req("viewer", { repo: "app", n: "1" }), user: { login, role, canWrite: async () => true, canRead: async () => true } });
+    assert.equal((await conv.getConversation(db, as("maint", "maintainer"))).canWithdraw, true);
+    await assert.rejects(() => conv.postWithdraw(db, as("someone", "maintainer")), (e) => e instanceof HttpError && e.status === 403);
+    const view = await conv.postWithdraw(db, as("maint", "maintainer"));
+    assert.equal(view.pending, false);
+    assert.match((await turn()).error ?? "", /withdrawn by maint/);
+    await addMessage(db, "app", 1, { login: "maint", kind: "maintainer" }, "And now?");
+    await conv.postWithdraw(db, as("op", "operator"));
+    assert.equal((await turn()).status, "failed");
   });
 });
 

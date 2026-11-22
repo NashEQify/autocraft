@@ -53,7 +53,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
         <Story d={d} flash={flash} conv={conv} />
         <div className="px-4 pb-4 md:px-5">
           <ErrorLine error={conversationError?.message} />
-          {conv && <Composer flush repo={d.repo} number={d.number} talk={conv.canTalk} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} feedbackOn={open.length === 1 ? open[0] : undefined} choices={choices} opusTurns={opusTurns} />}
+          {conv && <Composer flush repo={d.repo} number={d.number} talk={conv.canTalk} withdrawable={conv.canWithdraw} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} feedbackOn={open.length === 1 ? open[0] : undefined} choices={choices} opusTurns={opusTurns} />}
         </div>
       </DisclosurePanel>
     </div>

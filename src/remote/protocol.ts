@@ -84,6 +84,8 @@ export type Claim = {
    * maintainer's own conversation turn) and their follow-ups, which count toward no slot or Max calls at once.
    */
   ownLane?: boolean;
+  /** A claim from a slot or the fast lane of a helper that also runs an own lane: the calls bound to its user are left to that lane. */
+  withOwnLane?: boolean;
   /**
    * Protocol 4 only: how long the server may hold the claim open when nothing is queued for it, in whole seconds (0 to 30).
    * A call queued meanwhile is leased at once; when none comes, the empty reply has `retryAfter: 1`. Absent or 0: answered at once.

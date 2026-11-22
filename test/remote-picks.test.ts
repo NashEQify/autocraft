@@ -10,7 +10,7 @@ import { handleMcp } from "../src/dash/mcp/index.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Req, Role } from "../src/dash/types.ts";
-import { claimCall, dropQueueCache, enqueueCall, withdrawCall, type Caller } from "../src/remote/calls.ts";
+import { claimCall, dropQueueCache, enqueueCall, leaseTurnover, withdrawCall, type Caller } from "../src/remote/calls.ts";
 import { defaultSemanticDeps } from "../src/reference-lint.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
@@ -85,15 +85,27 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("bob"), null, "not another maintainer's, though bob's runner now asks for work");
     await assert.rejects(async () => await pickCall(db, user("bob"), own), /Task Runner of the person who asked/);
     assert.equal(await leased("alice"), own, "alice's runner takes it although she wrote the item");
-    // At her Max calls at once (her one lease is the bound call, which does not count), and then with another call leased.
+    // An older Task Runner (no withOwnLane) took it in a slot, where it counts toward Max calls at once.
     await setUserMaxCalls(db, "alice", 1);
     const other = await q();
-    assert.equal(await leased("alice"), other, "her bound lease counts toward no limit");
-    const second = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "alice" });
-    assert.equal(await leased("alice"), second, "a bound call is taken at the limit too");
-    assert.equal(await leased("alice", { ownLane: true }), null, "the own lane takes only bound calls");
-    const third = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "alice" });
+    assert.equal(await leased("alice"), null, "her slot's bound lease counts toward her limit");
+    const bound = () => q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "alice" });
+    const second = await bound();
+    assert.equal(await leased("alice", { ownLane: true }), second, "the own lane takes a bound call at the limit");
+    await setUserMaxCalls(db, "alice", 2);
+    assert.equal(await leased("alice", { withOwnLane: true }), other, "its lease counted for nothing: room for one more");
+    // A Task Runner with an own lane leaves bound calls to it.
+    await setUserMaxCalls(db, "alice", null);
+    const third = await bound();
+    assert.equal(await leased("alice", { withOwnLane: true }), null, "not in a slot of a Task Runner with an own lane");
     assert.equal(await leased("alice", { ownLane: true }), third);
+    // What the maintainers' lane watches changes with a lease turnover that keeps the count.
+    const before = await leaseTurnover(db, "alice");
+    await db.run(db.k.updateTable("remote_calls").set({ state: "done" }).where("id", "=", third));
+    await new Promise((r) => setTimeout(r, 2));
+    const fourth = await q();
+    assert.equal(await leased("alice", { withOwnLane: true }), fourth);
+    assert.notEqual(await leaseTurnover(db, "alice"), before);
     await setUserMaxCalls(db, "alice", null);
     const next = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], parentId: own });
     assert.equal((await db.get(db.k.selectFrom("remote_calls").select("for_login").where("id", "=", next)))!.for_login?.toLowerCase(), "alice");

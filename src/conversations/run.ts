@@ -37,6 +37,8 @@ export type ConversationParams = {
   semantic?: SemanticDeps;
   /** Whose messages: operators' (the shared model queue) or maintainers' (each on the maintainer's own Task Runner); absent: both. */
   kind?: PersonKind;
+  /** How long a maintainer's first call waits for their runner; absent: OWN_LEASE_WAIT_MS. */
+  ownWaitMs?: number;
 };
 
 /** How long a maintainer's call waits for their own Task Runner to take it; then the message waits for a later job. */
@@ -96,7 +98,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
       // A maintainer's reference check runs on their own Task Runner too.
       const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`, forLogin === undefined ? {} : { forLogin }) : undefined;
       const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
-        model, ...(forLogin !== undefined && { forLogin, firstWaitMs: OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
+        model, ...(forLogin !== undefined && { forLogin, firstWaitMs: p.ownWaitMs ?? OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
         usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
         onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
       });
@@ -121,7 +123,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     } finally {
       if (forLogin !== undefined && !released) p.onHandled?.(++handled);
     }
-  }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined), { first: true });
+  }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined), { first: p.kind !== "maintainer" });
   return answered;
 }
 

@@ -468,6 +468,19 @@ export async function storeReply(db: Db, repo: string, n: number, claim: string,
   });
 }
 
+/**
+ * Withdraws the maintainer's message that waits for Opus, queued or being answered: it ends as failed, naming who withdrew it,
+ * and the item takes messages again; a reply that arrives later is not stored. `by`: an operator, or the maintainer who wrote it.
+ */
+export async function withdrawTurn(db: Db, repo: string, n: number, by: { login: string; operator: boolean }): Promise<void> {
+  await inTx(db, async () => {
+    const wait = await pendingTurn(db, repo, n);
+    if (!wait || wait.kind !== "maintainer") throw new ConversationError(409, "no maintainer's message waits for Opus here");
+    if (!by.operator && wait.login.toLowerCase() !== by.login.toLowerCase()) throw new ConversationError(403, "only an operator, or the person who wrote it, withdraws a message");
+    await settleWait(db, repo, n, wait, "failed", `withdrawn by ${by.login}`);
+  });
+}
+
 /** Gives the claimed message back: it waits, pending, for a later run. */
 export async function releaseTurn(db: Db, repo: string, n: number, claim: string): Promise<boolean> {
   const r = await db.run(db.k.updateTable("conversation_turns").set({ status: "pending", claim: null, claimed_at: null, progress: null })

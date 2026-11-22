@@ -185,7 +185,10 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
       }, 2500);
     };
   const sys = (id: number, min: number, body: string): ConversationTurn => ({ id, kind: "system", login: "system", at: at(min), body, actions: [], notes: [] });
-  const store = new Map<string, Omit<Conversation, "canTalk">>([
+  const store = new Map<string, Omit<Conversation, "canTalk" | "canWithdraw">>([
+    ["photocraft#4127", { repo: "photocraft", number: 4127, exists: true, pending: true, startedBy: "kiri-n", includes: [], turns: [
+      { id: 301, kind: "maintainer", login: "kiri-n", at: at(3), body: "Is the wave filter from #3880 the same one this issue asks for?", actions: [], notes: [], status: "pending" },
+    ] }],
     ["vectorcraft#1402", { repo: "vectorcraft", number: 1402, exists: true, pending: false, startedBy: "opus", includes: [], turns: [
       sys(201, 26, "ochre-fox approved a fix-up, then merge. Instructions: rename the curvature toggle and add the shortcut."),
       sys(202, 14, "Fix-up pushed 9a1f3c5."),
@@ -199,7 +202,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
     [REF, { repo: "designcraft", number: 1484, exists: true, pending: false, startedBy: "opus", turns: seed(), includes: [{ source: "decision-opinion:designcraft#1484:merge/o0", by: "mosswood", at: at(100), sent: false }] }],
   ]);
   let nextId = 100;
-  const open = (repo: string, n: number): Omit<Conversation, "canTalk"> => {
+  const open = (repo: string, n: number): Omit<Conversation, "canTalk" | "canWithdraw"> => {
     const k = `${repo}#${n}`;
     let c = store.get(k);
     if (!c) store.set(k, (c = { repo, number: n, exists: false, pending: false, startedBy: null, includes: [], turns: [] }));
@@ -216,7 +219,12 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
   };
   // The server's rule for talking to Opus: an operator, or a maintainer with write access (their turns run on their own Task Runner).
   const talks = (repo: string) => me.role === "operator" || (me.role === "maintainer" && me.writeRepos.includes(repo));
-  const view = (c: Omit<Conversation, "canTalk">): Conversation => ({ ...c, canTalk: talks(c.repo) });
+  // A maintainer's waiting message is withdrawn by an operator or its writer.
+  const waiting = (c: Omit<Conversation, "canTalk" | "canWithdraw">) => c.turns.find((t) => t.status === "pending" && t.kind === "maintainer");
+  const view = (c: Omit<Conversation, "canTalk" | "canWithdraw">): Conversation => {
+    const w = waiting(c);
+    return { ...c, canTalk: talks(c.repo), canWithdraw: !!w && (me.role === "operator" || w.login === me.login) };
+  };
   // The server's rule for a card: an operator, or a maintainer with the setting on and write access (every mock repo uses the app's identity).
   const settles = (repo: string) => me.role === "operator" || (me.role === "maintainer" && me.maintainerWrites && me.writeRepos.includes(repo));
   const needCard = (k: ConversationCard) => {
@@ -260,6 +268,16 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
           c.turns.push({ id: nextId++, kind: "opus", login: "opus", at: new Date().toISOString(), body: "I read that. The pack and the committed files carry the same patterns, so asking the author to load the pack still holds.", actions: [], notes: [] });
           changed();
         }, 5000);
+        return snap(view(c));
+      },
+      async withdraw(repo, n) {
+        const c = open(repo, n);
+        const w = waiting(c);
+        if (!w) throw new Error("no maintainer's message waits for Opus here");
+        if (me.role !== "operator" && w.login !== me.login) throw new Error("only an operator, or the person who wrote it, withdraws a message");
+        Object.assign(w, { status: "failed", error: `withdrawn by ${me.login}` });
+        c.pending = false;
+        changed();
         return snap(view(c));
       },
       async include(repo, n, source, on) {
