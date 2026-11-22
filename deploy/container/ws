@@ -33,7 +33,10 @@ status_header() {
     _code=$(cat "$CALLS/$_n.exit")
     _end=$(cat "$CALLS/$_n.end" 2>/dev/null || now_ms)
     if [ -e "$CALLS/$_n.killed" ]; then _state=killed
-    elif [ "$_code" = 124 ] || [ "$_code" = 137 ]; then _state=timed-out
+    # 124 and 137 also come from the command itself (its own exit, an OOM kill), so
+    # only a run that lasted its whole limit counts as timed out.
+    elif { [ "$_code" = 124 ] || [ "$_code" = 137 ]; } &&
+      [ $((_end - _start)) -ge $(($(cat "$CALLS/$_n.limit" 2>/dev/null || echo 0) * 1000)) ]; then _state=timed-out
     else _state=exited; fi
   else
     _code=-
@@ -106,6 +109,7 @@ cmd_run() {
   done
   start=$(now_ms)
   (set -C; echo "$start" >"$CALLS/$n.start") 2>/dev/null || die conflict 4 "call $n already used"
+  echo "$t" >"$CALLS/$n.limit"
   head -c $((IN_LIMIT + 1)) >"$CALLS/$n.in"
   if [ "$(wc -c <"$CALLS/$n.in" | tr -d ' ')" -gt "$IN_LIMIT" ]; then
     rm -f "$CALLS/$n.in" "$CALLS/$n.start"
