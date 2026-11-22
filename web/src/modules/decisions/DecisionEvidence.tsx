@@ -30,18 +30,13 @@ function ItemReview({ repo, number, staff }: { repo: string; number: number; sta
   const item = useItemPreview({ repo, number });
   // A background failure can keep matching data while `error` is set: never show a snapshot that is not current.
   const rich = item.loading || item.error ? null : itemEvidenceModel(item.data, staff);
+  if (rich && rich.kind !== "pr") return null;
   return (
     <div className="min-w-0">
       <h4 className={headCls}>Latest item review</h4>
       {item.loading && <p className="mt-1 text-sm text-ink/55">Reading the item…</p>}
       {!item.loading && item.error && <p className="mt-1 text-sm text-ink/55">{EVIDENCE_READ_ERROR}</p>}
-      {rich && rich.kind === "issue" && (
-        <p className="mt-1 text-sm text-ink/55">This item is an issue, so it has no pull-request review or checks.</p>
-      )}
-      {rich && rich.kind === "unknown" && (
-        <p className="mt-1 text-sm text-ink/55">This item&rsquo;s kind could not be read, so no review or checks are shown.</p>
-      )}
-      {rich && rich.kind === "pr" && !rich.review && (
+      {rich && !rich.review && (
         <p className="mt-1 text-sm text-ink/55">No item review recorded yet.</p>
       )}
       {rich?.review && (
@@ -55,7 +50,7 @@ function ItemReview({ repo, number, staff }: { repo: string; number: number; sta
           <List title="Latest item review risks" items={rich.review.risks} />
         </div>
       )}
-      {rich && rich.kind === "pr" && (
+      {rich && (
         <div className="mt-3 min-w-0">
           <h4 className={headCls}>Checks</h4>
           <p className="mt-1 text-xs text-ink/45">
@@ -115,14 +110,7 @@ function EvidenceBody({ decision, staff }: { decision: Decision; staff: boolean 
           </dl>
         </div>
       )}
-      {single ? (
-        <ItemReview repo={single.repo} number={single.number} staff={staff} />
-      ) : (
-        <div className="min-w-0">
-          <h4 className={headCls}>Latest item review</h4>
-          <p className="mt-1 text-sm text-ink/55">This decision covers several items or none, so it has no single item review or checks.</p>
-        </div>
-      )}
+      {single && <ItemReview repo={single.repo} number={single.number} staff={staff} />}
     </div>
   );
 }

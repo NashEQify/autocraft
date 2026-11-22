@@ -43,7 +43,6 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
       {!ds && !decisionError && <p className="text-sm text-ink/50" role="status">Loading questions…</p>}
       <OpenQuestions ds={(ds ?? []).filter((x) => x.answer || open.includes(x))} choices={choices} updating={updating?.decisionId} evidence={<ItemEvidence d={d} />} />
       <HeldAnswers ds={(ds ?? []).filter((x) => !x.dispute && !x.orphaned)} />
-      {ds && open.length === 0 && !decisionError && <p className="text-sm text-ink/60">No open question needs your answer right now.</p>}
       {!updating && suggestions.length > 0 && (
         <section className="space-y-3" aria-label="Suggested follow-up">
           {suggestions.map((a) => <ActionCard key={a.id} a={a} operator={canAct(user, [d.repo])} editInstructions={user.role === "operator"} className="" item={{ repo: d.repo, number: d.number }} />)}

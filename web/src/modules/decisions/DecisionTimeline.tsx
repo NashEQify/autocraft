@@ -7,7 +7,7 @@ import { useUser } from "../../shell/UserContext";
 import { DisclosurePanel } from "../../ui/molecules/DisclosurePanel";
 import {
   changeTimelineOpen, timelineModel, timelineReadState, timelineReference,
-  TIMELINE_EVENT_LIMIT, TIMELINE_READ_ERROR, type TimelineReference,
+  TIMELINE_READ_ERROR, type TimelineReference,
 } from "./timeline";
 
 /** The only timeline observer: mounted only for an open disclosure with a valid own item. */
@@ -50,9 +50,7 @@ function TimelineBody({ decision }: { decision: Decision }) {
   const reference = timelineReference(decision);
   return (
     <div className="min-w-0 space-y-3 px-4 py-4">
-      {reference ? <ItemTimelineRead reference={reference} /> : (
-        <p className="text-sm text-ink/55">This decision has no single item reference, so no item timeline is shown.</p>
-      )}
+      {reference && <ItemTimelineRead reference={reference} />}
     </div>
   );
 }
@@ -65,7 +63,6 @@ function ReaderTimeline({ decision }: { decision: Decision }) {
   return (
     <DisclosurePanel
       title="Item timeline"
-      summary={`Latest recorded item events · up to ${TIMELINE_EVENT_LIMIT}`}
       open={open}
       onOpenChange={(next) => setOpenIds((ids) => changeTimelineOpen(ids, decision.id, next))}
     >

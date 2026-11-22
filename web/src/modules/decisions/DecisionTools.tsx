@@ -66,7 +66,7 @@ export function DecisionTools({ id, d, loaded, user, onPreview, onReview, onClos
     {d.dispute && <p className="mb-0 mt-1.5 break-words text-warn">{d.dispute.by} disputed {d.answeredBy}&rsquo;s answer: {d.dispute.reason}</p>}
     <ExecLine d={d} canRetry={canUndo} />
     {allowBatch && <div className="mt-2.5 border-t border-line pt-2.5">
-      <p className="mb-1.5 text-ink/55">Batch answer · select any loaded decision</p>
+      <p className="mb-1.5 text-ink/55">Batch answer</p>
       <ul className="m-0 flex list-none flex-col gap-0.5 p-0">
         {loaded.map((row) => (
           <li key={row.id}>

@@ -24,16 +24,16 @@ function answerLabel(d: Decision): string {
 /** What the pipeline is doing with this question right now, in words; none of it is an action. */
 function stateNotes(d: Decision): { text: ReactNode; tone: "warn" | "muted" }[] {
   const notes: { text: ReactNode; tone: "warn" | "muted" }[] = [];
-  if (d.preparing) notes.push({ tone: "muted", text: "Opus is preparing new options for this question. The stored recommendation is held back until they arrive." });
+  if (d.preparing) notes.push({ tone: "muted", text: "Opus is preparing new options." });
   if (d.queued) {
     const place = d.queued.place ? ` It is ${d.queued.place} in line.` : "";
     notes.push({ tone: "warn", text: `${d.queued.by} pressed an answer; it waits: ${d.queued.reason}.${place}` });
     if (d.queued.dispute) notes.push({ tone: "warn", text: `${d.queued.dispute.by} disputed that press: ${d.queued.dispute.reason}` });
   }
-  if (d.settling && !d.queued) notes.push({ tone: "warn", text: `${d.settling} is applying their answer; nobody else may answer meanwhile.` });
+  if (d.settling && !d.queued) notes.push({ tone: "warn", text: `${d.settling} is applying their answer.` });
   if (d.snoozed) notes.push({ tone: "muted", text: `Snoozed by ${d.snoozed.by} until new activity on the item.` });
   if (d.dispute) notes.push({ tone: "warn", text: `${d.dispute.by} disputed this answer: ${d.dispute.reason}` });
-  if (d.orphaned) notes.push({ tone: "warn", text: "The answerer can no longer settle this item, so an operator has to reassign it." });
+  if (d.orphaned) notes.push({ tone: "warn", text: "The answerer can no longer settle this item." });
   if (d.answer && d.exec && d.exec.state !== "done") {
     const why = d.exec.reason ? `: ${d.exec.reason}` : "";
     const text =

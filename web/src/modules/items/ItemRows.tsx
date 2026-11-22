@@ -105,7 +105,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
           </p>}
         </> : itemLoading ? <p role="status" className="m-0 text-ink/50">Loading classification…</p>
           : itemError ? <p className="m-0 text-bad">Classification could not be read: {itemError}</p>
-            : <p className="m-0 text-ink/65">This item has no classification record. <Link className="text-accent-ink hover:underline" to={fullHref(facts)}>Open the full task</Link> to see it.</p>}
+            : <p className="m-0 text-ink/65">No classification record · <Link className="text-accent-ink hover:underline" to={fullHref(facts)}>Open the item</Link></p>}
       </Section>
     </div>
     <div className="min-w-0 space-y-4">

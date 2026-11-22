@@ -2,14 +2,12 @@ import { cn } from "../../ui/cn";
 
 /** One labelled native select, as the approved Items toolbar draws it: the name sits inside the
     control, above the value. Props only; the page owns the value and the URL. */
-export function FilterField({ label, value, options, onChange, disabled, disabledHint, className }: {
+export function FilterField({ label, value, options, onChange, disabled, className }: {
   label: string;
   value: string;
   options: [string, string][];
   onChange: (value: string) => void;
   disabled?: boolean;
-  /** Why the field cannot be used now, shown on the disabled select itself. */
-  disabledHint?: string;
   className?: string;
 }) {
   return <label role="group" aria-label={label} className={cn(
@@ -22,7 +20,6 @@ export function FilterField({ label, value, options, onChange, disabled, disable
       aria-label={label}
       value={value}
       disabled={disabled}
-      title={disabled ? disabledHint : undefined}
       onChange={(event) => onChange(event.target.value)}
       className="h-[52px] w-full min-w-0 rounded-md bg-transparent px-2.5 pb-0 pt-[14px] text-[12.5px] leading-5 outline-none disabled:cursor-not-allowed"
     >

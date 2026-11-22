@@ -317,13 +317,13 @@ function multiSelect(applied: string[], base: [string, string][], labelOf: (valu
 /** Exactly what each primary field displays, including the values the endpoint cannot take. */
 export function primarySelects(browse: BrowseState, repos: string[]): { state: SelectState; kind: SelectState; classification: SelectState; repository: SelectState; label: SelectState; flag: SelectState } {
   const phase = browse.phase !== undefined;
-  const state: SelectState = phase ? { value: "phase", options: [["phase", "By phase"]] } : { value: browse.state, options: STATE_OPTIONS };
-  const classification = phase ? { value: "", options: CLASSIFICATIONS } : multiSelect(browse.status, CLASSIFICATIONS, statusLabel);
+  // A phase decides state, classification, label and flag, so those fields show that in words.
+  const byPhase: SelectState = { value: "phase", options: [["phase", "By phase"]] };
+  const state: SelectState = phase ? byPhase : { value: browse.state, options: STATE_OPTIONS };
+  const classification = phase ? byPhase : multiSelect(browse.status, CLASSIFICATIONS, statusLabel);
   const repository = multiSelect(browse.repos, [["", "All repos"], ...repos.map((repo) => [repo, repo] as [string, string])]);
-  const label: SelectState = phase
-    ? { value: "", options: [["", "Any label"], ...LABELS.map((value) => [value, value] as [string, string])] }
-    : { value: browse.labels[0] ?? "", options: [["", "Any label"], ...LABELS.map((value) => [value, value] as [string, string])] };
-  const flag = phase ? { value: "", options: FLAGS } : multiSelect(browse.flags, FLAGS, flagLabel);
+  const label: SelectState = phase ? byPhase : { value: browse.labels[0] ?? "", options: [["", "Any label"], ...LABELS.map((value) => [value, value] as [string, string])] };
+  const flag = phase ? byPhase : multiSelect(browse.flags, FLAGS, flagLabel);
   return {
     state,
     kind: { value: browse.kind ?? "", options: KIND_OPTIONS },

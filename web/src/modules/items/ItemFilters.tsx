@@ -67,11 +67,10 @@ export interface ChromeProps {
   children: ReactNode;
 }
 
-/** Empty result: no rows, a reason, and the one action that changes it. */
+/** Empty result: no rows and the one action that changes it. */
 export function EmptyResults({ onReset }: { onReset: () => void }) {
   return <div className="grid min-h-[230px] place-content-center justify-items-center gap-1 px-4 text-center">
-    <strong className="text-sm">No matching items</strong>
-    <p className="mb-3 mt-0.5 text-xs text-ink/55">Try another search or widen the filters.</p>
+    <strong className="mb-3 text-sm">No matching items</strong>
     <Button onClick={onReset} className="max-md:h-11">Reset filters</Button>
   </div>;
 }
@@ -90,7 +89,6 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
   const hidden = hiddenFilterCount(browse, phone);
   const summary = secondarySummary(browse);
   const detail = appliedDetail(browse);
-  const disabledHint = "Clear the phase to use this filter";
   const phaseOption = (p: ItemPhase) => `${p}${phaseCounts ? ` · ${phaseCounts[p] ?? 0}` : ""}`;
   const selects = primarySelects(browse, repos);
   const extras = compatExtras(browse);
@@ -98,12 +96,12 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
   // 340 px from the same row, and the six-column band clips below 1088 px.
   const columns = phone ? "repeat(2, minmax(0, 1fr))" : width >= SIX_COLUMNS ? "170px 140px minmax(210px,1fr) 160px 170px 160px" : width >= THREE_COLUMNS ? "minmax(130px,1fr) minmax(110px,0.85fr) minmax(200px,1.25fr)" : "repeat(2, minmax(0, 1fr))";
 
-  const stateField = <FilterField label="State" value={selects.state.value} options={selects.state.options} disabled={phase} disabledHint={disabledHint} onChange={(value) => onPatch({ state: value === "open" ? null : value, sort: null })} />;
+  const stateField = <FilterField label="State" value={selects.state.value} options={selects.state.options} disabled={phase} onChange={(value) => onPatch({ state: value === "open" ? null : value, sort: null })} />;
   const typeField = <FilterField label="Type" value={selects.kind.value} options={selects.kind.options} onChange={(value) => onPatch({ kind: value || null })} />;
-  const classificationField = <FilterField label="Classification" className="max-[860px]:col-span-2" value={selects.classification.value} options={selects.classification.options} disabled={phase} disabledHint={disabledHint} onChange={(value) => onPatch({ status: value || null })} />;
+  const classificationField = <FilterField label="Classification" className="max-[860px]:col-span-2" value={selects.classification.value} options={selects.classification.options} disabled={phase} onChange={(value) => onPatch({ status: value || null })} />;
   const repoField = <UnlessProject><FilterField label="Repository" className="max-[860px]:col-span-2" value={selects.repository.value} options={selects.repository.options} onChange={(value) => onPatch({ repo: value || null })} /></UnlessProject>;
-  const labelField = <FilterField label="Type label" value={selects.label.value} options={selects.label.options} disabled={phase} disabledHint={disabledHint} onChange={(value) => onPatch({ label: value || null })} />;
-  const flagField = <FilterField label="Flag" value={selects.flag.value} options={selects.flag.options} disabled={phase} disabledHint={disabledHint} onChange={(value) => onPatch({ flag: value || null })} />;
+  const labelField = <FilterField label="Type label" value={selects.label.value} options={selects.label.options} disabled={phase} onChange={(value) => onPatch({ label: value || null })} />;
+  const flagField = <FilterField label="Flag" value={selects.flag.value} options={selects.flag.options} disabled={phase} onChange={(value) => onPatch({ flag: value || null })} />;
   const phaseField = <FilterField label="Phase" className="max-[860px]:col-span-2 min-[861px]:w-[220px] min-[861px]:flex-none" value={browse.phase ?? "all"} options={[["all", "No phase"], ...PHASES.map((p) => [p, phaseOption(p)] as [string, string])]} onChange={(value) => (value === "all" ? onClearPhase() : onPatch({ phase: value, peek: null }))} />;
 
   return <section aria-label="Item browser" className="min-w-0 overflow-hidden rounded-md border border-line bg-panel">
@@ -156,7 +154,7 @@ export function BrowserChrome({ browse, repos, phone, phaseCounts, onPatch, sear
 function SearchInput({ field }: { field: DraftField }) {
   return <label className="relative flex h-[52px] min-w-0 flex-1 items-center rounded-md border border-line-strong bg-sunken focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/15">
     <MagnifyingGlassIcon aria-hidden className="pointer-events-none absolute left-3 text-ink/40" />
-    <input type="search" aria-label="Search items" placeholder="Search items…" title="All words must match. Use “a phrase”, prefix*, -word or OR. Search titles, descriptions and comments." value={field.value} onChange={(event) => field.onChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); field.onSubmit(); } }} className="h-full w-full min-w-0 rounded-md bg-transparent pl-10 pr-3 text-[13px] leading-5 outline-none placeholder:text-ink/40 max-md:text-[16px]" />
+    <input type="search" aria-label="Search items" placeholder="Search items…" value={field.value} onChange={(event) => field.onChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); field.onSubmit(); } }} className="h-full w-full min-w-0 rounded-md bg-transparent pl-10 pr-3 text-[13px] leading-5 outline-none placeholder:text-ink/40 max-md:text-[16px]" />
   </label>;
 }
 
