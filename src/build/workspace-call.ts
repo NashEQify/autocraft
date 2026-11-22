@@ -1,4 +1,4 @@
-// A remote call whose session works in a workspace: Claude Code with its own tools off and the `workspace` MCP server
+// A remote call whose session works in a workspace: Claude Code with its own tools off and the `work` MCP server
 // (src/build/workspace-relay.ts) beside any other per-lease servers, bound to the workspace so the dashboard routes the
 // session's tool calls to it and the job that waits for the call (awaitCall) serves them.
 import type { ItemRef } from "../../web/src/api/types.ts";

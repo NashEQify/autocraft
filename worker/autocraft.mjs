@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.6";
+export const HELPER_VERSION = "1.3.7";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -224,7 +224,7 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
  * @property {boolean} [exclusive]  one call at a time per helper (the harness refreshes a shared login)
  * @property {boolean} [fileTools]  the run gets the helper's read-only file tools (its own read tool can't be confined)
  * @property {(version: string) => string | null} [unaudited]  why this harness version must not run calls, or null
- * @property {(line: string, servers: string[]) => string | null} [guard]  an output line showing a tool the call may not use: the run is stopped at once
+ * @property {(line: string, servers: string[]) => string | null} [guard]  an output line showing a tool the call may not use, or that one of its MCP servers is missing: the run is stopped at once
  * @property {(o: { token: string, sessionId: string | undefined, servers: string[], keep: boolean }) => { problem: string | null, tools?: SubmitTool[] }} [verify]  after the run, from the harness's own record: a tool the call may not use (or null), and the tool uses
  * @property {(stdout: string, stamps: string[]) => SubmitTool[]} [tools]  the tool uses from the output; `stamps` holds the arrival time of each complete output line
  * @property {(line: string) => string | null} compact  the part of one output line that `parse` and `tools` read, or null: the run keeps only these
@@ -628,6 +628,27 @@ function resolveClaudeBin(cfg) {
   return null;
 }
 
+/** MCP server states of Claude Code's init event under which the server's tools are, or will be, there. */
+const CLAUDE_MCP_UP = new Set(["connected", "pending"]);
+
+/**
+ * A `claude` stream-json init event that lacks one of the call's MCP servers: the reason, or null. Claude Code drops a
+ * server it cannot load (a reserved name, a failed connection) and runs on without its tools, so the run is stopped here
+ * rather than left to answer without them.
+ * @param {string} raw @param {string[]} servers
+ */
+export function claudeMcpProblem(raw, servers) {
+  if (!servers.length || !raw.startsWith('{"type":"system"')) return null;
+  let e;
+  try { e = JSON.parse(raw); } catch { return null; }
+  if (e?.type !== "system" || e.subtype !== "init" || !Array.isArray(e.mcp_servers)) return null;
+  for (const n of servers) {
+    const status = e.mcp_servers.find((/** @type {any} */ m) => m?.name === n)?.status;
+    if (!CLAUDE_MCP_UP.has(status)) return `the harness has no ${n} tools: MCP server ${n} ${typeof status === "string" ? clean(status, 30) : "was not loaded"}`;
+  }
+  return null;
+}
+
 /** @param {string[]} args @param {string} sessionId */
 const claudeResume = (args, sessionId) => [...withoutResume(args), "--resume", sessionId];
 
@@ -667,6 +688,7 @@ const claudeAdapter = {
     return claudeSandbox({ claudeBin: t.bin, oauthToken: t.token, claudeArgs: args, mounts: t.mounts, agentsFile, mcpFile: t.mcpFile || undefined, sessionDir: t.sessionDir });
   },
   parse: parseClaudeOutput,
+  guard: claudeMcpProblem,
   tools: claudeTools,
   compact: claudeCompact,
   resume: (args, sessionId) => claudeResume(args, sessionId),
@@ -1941,7 +1963,7 @@ export function transient(e, signal) {
 }
 
 /** Servers whose tool calls run commands and writes that must not run twice: a request that may have reached the server is not sent again. */
-const ONCE_SERVERS = new Set(["workspace"]);
+const ONCE_SERVERS = new Set(["work"]);
 /** Codes of a connection that was never made, so the request reached nobody. */
 const UNSENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
 

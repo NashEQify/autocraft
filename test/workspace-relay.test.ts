@@ -57,9 +57,9 @@ describe("workspace relay", async () => {
   test("tool calls reach the job's session side by side and their images come back", { timeout: 20_000 }, async () => {
     const s = await session();
     const b = JSON.parse((await db.get(db.k.selectFrom("remote_calls").select("bundle").where("id", "=", s.id)))!.bundle) as TaskBundle;
-    assert.deepEqual(b.mcpServers, ["items", "workspace"]);
+    assert.deepEqual(b.mcpServers, ["items", "work"]);
     const allowed = b.hints.claude!.args[b.hints.claude!.args.indexOf("--allowedTools") + 1];
-    assert.ok(allowed!.split(",").includes("mcp__workspace__*"));
+    assert.ok(allowed!.split(",").includes("mcp__work__*"));
     await assert.rejects(queueWorkspaceCall(db, request(s.ws)), /in use by call/, "a workspace serves one live call at a time");
 
     // Each call waits until both have started: served one after the other, neither would finish.
