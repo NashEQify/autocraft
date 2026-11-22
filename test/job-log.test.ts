@@ -46,3 +46,26 @@ test("a long job log keeps its end within the cap, and the job page reads it wit
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a log chunk with a NUL byte is copied without it, and the next chunk still starts at the right offset", async () => {
+  const dir = mkdtempSync(join(SCRATCH, "job-log-"));
+  const db = await connectDb(join(dir, "jobs.db"));
+  try {
+    const path = join(dir, "job.log");
+    const t = new Date().toISOString();
+    const id = Number((await db.get(db.k.insertInto("jobs").values({ step: "test-echo", params: "{}", requested_by: "boss", requested_at: t, state: "running", started_at: t, log_path: path })
+      .returning("id")))!.id);
+    const copy = await JobLogCopy.open(db, id, path);
+    appendFileSync(path, "a\u0000b\u0007c\td\n");
+    await copyLogs(db, [copy], true);
+    appendFileSync(path, "second\n");
+    await copyLogs(db, [copy], true);
+    const rows = await db.all(db.k.selectFrom("job_log_chunks").select(["chunk", "start", "next_start"]).where("job_id", "=", id).orderBy("seq"));
+    assert.equal(rows[0]!.chunk, "abc\td\n");
+    assert.equal(Number(rows[1]!.start), Number(rows[0]!.next_start));
+    assert.equal(rows[1]!.chunk, "second\n");
+  } finally {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

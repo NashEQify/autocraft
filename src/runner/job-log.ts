@@ -11,6 +11,9 @@ export const JOB_LOG_KEEP_BYTES = 256 * 1024;
 /** Chunks are dropped once the kept text passes the cap by this much, so the DELETE runs once per this many bytes, not per copy. */
 const DROP_SLACK_BYTES = 64 * 1024;
 export const JOB_LOG_FLUSH_MS = 5_000;
+/** Postgres text cannot hold NUL; the other C0 controls (bar tab, newline, carriage return) are terminal noise. */
+// eslint-disable-next-line no-control-regex
+const CONTROLS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g;
 
 /** The bytes of `path` from `from` (an offset, or one computed from the size) to its end; null when the file cannot be read. */
 function readRange(path: string, from: number | ((size: number) => number)): { buf: Buffer; start: number; size: number } | null {
@@ -81,7 +84,7 @@ export class JobLogCopy {
       buf = buf.subarray(0, nl + 1);
     }
     if (!buf.length) return null;
-    return { job_id: this.job, seq: this.#seq + 1, start, next_start: start + buf.length, chunk: scrub(buf.toString("utf8")), at: new Date(nowMs).toISOString() };
+    return { job_id: this.job, seq: this.#seq + 1, start, next_start: start + buf.length, chunk: scrub(buf.toString("utf8").replace(CONTROLS, "")), at: new Date(nowMs).toISOString() };
   }
 
   /** Records a written chunk; the highest seq to drop once the kept text passes the cap, else 0. */
@@ -110,8 +113,24 @@ export function copyLogs(db: Db, copies: JobLogCopy[], final = false): Promise<v
     const nowMs = Date.now();
     const chunks = copies.flatMap((c) => { const n = c.next(final, nowMs); return n ? [{ copy: c, n }] : []; });
     if (!chunks.length) return;
-    await db.run(db.k.insertInto("job_log_chunks").values(chunks.map(({ n }) => n)));
-    const drops = chunks.flatMap(({ copy, n }) => { const upTo = copy.wrote(n); return upTo ? [{ job: copy.job, upTo }] : []; });
+    let stored = chunks;
+    try {
+      await db.run(db.k.insertInto("job_log_chunks").values(chunks.map(({ n }) => n)));
+    } catch (e) {
+      // One bad row must not block the others: write each job's chunk on its own.
+      if (chunks.length < 2) throw e;
+      stored = [];
+      for (const c of chunks) {
+        try {
+          await db.run(db.k.insertInto("job_log_chunks").values(c.n));
+          stored.push(c);
+        } catch (err) {
+          console.error(`job log copy failed for job ${c.copy.job}: ${(err as Error).message}`);
+        }
+      }
+      if (!stored.length) throw e;
+    }
+    const drops = stored.flatMap(({ copy, n }) => { const upTo = copy.wrote(n); return upTo ? [{ job: copy.job, upTo }] : []; });
     if (drops.length) await db.run(db.k.deleteFrom("job_log_chunks").where((eb) => eb.or(drops.map((d) => eb.and([eb("job_id", "=", d.job), eb("seq", "<=", d.upTo)])))));
   });
   queue = run.catch(() => { /* the caller sees the failure; the next copy reads the lines again */ });
