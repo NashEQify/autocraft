@@ -1905,11 +1905,12 @@ export interface QueueWorkRow extends WorkRow {
 
 /**
  * How a PR came into the merge queue: `review` (a take review; the merge rule or a Merge? question decides), `answer` (an operator
- * answered Merge?), `queued` (an operator added it with Queue items), `preapproved` (an operator pre-approved the merge with a fix-up).
+ * answered Merge?), `queued` (an operator added it with Queue items), `preapproved` (an operator pre-approved the merge with a fix-up);
+ * for an issue, `fast` (fast-tracked, with Queue items or the fast-track control).
  * `by` is the operator, null for `review` and for anyone but staff; `at` is when.
  */
 export interface QueueOrigin {
-  how: "review" | "answer" | "queued" | "preapproved";
+  how: "review" | "answer" | "queued" | "preapproved" | "fast";
   by: string | null;
   at: string | null;
 }
@@ -1924,17 +1925,24 @@ export interface QueueMergeRow extends QueueRow {
 /**
  * A PR queued with Queue items or pre-approved that is no merge queue row yet: `fixup` (the operator's fix-up runs first), `review`
  * (waits for a take review at its head), `ci` (reviewed take; becomes a queue row on the next plan).
+ * Or an open fast-tracked issue whose PR is not in the queue: `build` (Fix builds its PR; no open PR closes it yet), `pr` (open PRs close it,
+ * none queued), `next` (no open PR closes it and Fix is not its next step: `next` says what is).
  */
 export interface QueuePendingRow {
   repo: RepoName;
   number: number;
+  kind: "pr" | "issue";
   title: string;
   author: string;
   size: "S" | "M" | "L" | "XL" | null;
-  step: "fixup" | "review" | "ci";
+  step: "fixup" | "review" | "ci" | "build" | "pr" | "next";
   fast: FastPosition | null;
   held: boolean;
   added: QueueOrigin;
+  /** An issue: the open PRs that close it. */
+  prs?: number[];
+  /** An issue: the planner's next step for it, as the reader may see it. */
+  next?: string | null;
 }
 
 /** What a PR waits for before it merges. */
@@ -1987,7 +1995,7 @@ export interface QueuePage {
   nextMerges: NextMerge[];
   /** Merge tab only: batches in flight, with their PRs. */
   batches: QueueBatch[];
-  /** Merge tab only: PRs queued or pre-approved that wait for their fix-up or review before they join the queue. */
+  /** Merge tab only: PRs queued or pre-approved that wait for their fix-up or review before they join the queue, then fast-tracked issues whose PR is not in the queue yet. */
   pending?: QueuePendingRow[];
   /** Rows matching the tab, every page. */
   total: number;
