@@ -71,6 +71,8 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
         .where((ie) => o.number === null ? ie("number", "is", null) : ie("number", "=", o.number)).where("to_oid", "=", o.to).where("action", "=", action))))));
 }
 
+const isTripStage = (s: string): s is TripStage => (TRIP_STAGES as readonly string[]).includes(s);
+
 /**
  * Called with freshly stored checks: settles the pushes whose resulting commit is the PR's head and whose checks are final,
  * expires old unsettled ones, and lets the breaker look at every stage and repo that got a `broke`.
@@ -99,7 +101,8 @@ export async function resolvePushes(db: Db, rows: { repo: string; number: number
       if (outcome === null) continue;
       done.add(p.id);
       settled.push({ id: p.id, number: r.number, after_res: after, outcome });
-      if (outcome === "broke") broke.set(`${p.stage}\n${p.repo}`, { stage: p.stage as TripStage, repo: p.repo });
+      // A push of a retired stage (fixissue) settles but trips nothing.
+      if (outcome === "broke" && isTripStage(p.stage)) broke.set(`${p.stage}\n${p.repo}`, { stage: p.stage, repo: p.repo });
     }
   }
   const old = new Date(Date.parse(at) - EXPIRE_MS).toISOString();
@@ -198,6 +201,7 @@ const evidenceOfPushes = (rows: { repo: string; number: number | null; to_oid: s
  * and with all of them while it is tripped (the repo is stopped already): those do not count towards the instance-wide one.
  */
 export async function evaluatePushBreaker(db: Db, stage: TripStage, repo: string, at = new Date().toISOString()): Promise<void> {
+  if (!isTripStage(stage)) return;
   const last = async (key: string, oneRepo: boolean) => await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid", "at"]).$narrowType<{ outcome: Outcome | null }>()
     .where("stage", "=", stage).$if(oneRepo, (q) => q.where("repo", "=", repo)).where("at", ">", await sinceOf(db, key)).orderBy("id", "desc").limit(BREAKER_WINDOW));
   const key = tripKey(stage, repo);

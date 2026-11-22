@@ -4,7 +4,8 @@ import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import {
   ENDED_STATES, LIVE_STATES,
-  type Implementation, type ImplementationPatch, type ImplementationRound, type ImplementationState, type PlanReply, type RoundKind, type SessionReport,
+  type Implementation, type ImplementationPatch, type ImplementationRound, type ImplementationState, type PlanReply, type QuestionAudience, type QuestionRound,
+  type RoundKind, type SessionReport,
 } from "./types.ts";
 
 type Row = {
@@ -107,28 +108,35 @@ export async function roundsOf(db: Db, implementationId: number): Promise<Implem
     .map((r) => ({ id: Number(r.id), implementationId: Number(r.implementation_id), kind: r.kind as RoundKind, callId: r.call_id === null ? null : Number(r.call_id), result: parse<unknown>(r.result), at: r.at }));
 }
 
-/** Live implementations (LIVE_STATES) per repo, as "repo#number" refs. */
+/** Live implementations (LIVE_STATES) of open issues per repo, as "repo#number" refs. */
 export async function liveByRepo(db: Db): Promise<Map<string, Set<string>>> {
   const out = new Map<string, Set<string>>();
-  for (const r of await db.all(db.k.selectFrom("main.implementations").select(["repo", "number"]).where("state", "in", [...LIVE_STATES]))) {
+  for (const r of await db.all(db.k.selectFrom("main.implementations as m")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "m.repo").onRef("i.number", "=", "m.number").on("i.state", "=", "OPEN"))
+    .select(["m.repo", "m.number"]).where("m.state", "in", [...LIVE_STATES]))) {
     (out.get(r.repo) ?? out.set(r.repo, new Set()).get(r.repo)!).add(`${r.repo}#${r.number}`);
   }
   return out;
 }
 
-/** Per issue ("repo#number"): its current attempt, else its newest ended one, with the time of its latest question round (null: none). */
-export async function latestAttempts(db: Db, repo?: string): Promise<Map<string, Implementation & { questionAt: string | null }>> {
-  const out = new Map<string, Implementation & { questionAt: string | null }>();
+/** An attempt as the planner reads it: with its latest question round (when it is `asked`), or null. */
+export type LatestAttempt = Implementation & { question: { at: string; audience: QuestionAudience | null } | null };
+
+/** Per issue ("repo#number"): its current attempt, else its newest ended one. */
+export async function latestAttempts(db: Db, repo?: string): Promise<Map<string, LatestAttempt>> {
+  const out = new Map<string, LatestAttempt>();
   const rows = (await db.all(select(db).$if(!!repo, (q) => q.where("repo", "=", repo!)).orderBy("attempt").orderBy("id"))).map((r) => ofRow(r as Row));
   for (const r of rows) {
     const k = `${r.repo}#${r.number}`, had = out.get(k);
-    if (!had || ENDED_STATES.has(had.state)) out.set(k, { ...r, questionAt: null });
+    if (!had || ENDED_STATES.has(had.state)) out.set(k, { ...r, question: null });
   }
-  const asked = [...out.values()].filter((r) => r.state === "asked").map((r) => r.id);
-  if (asked.length) {
-    const at = new Map((await db.all(db.k.selectFrom("main.implementation_rounds").select((eb) => ["implementation_id", eb.fn.max("at").as("at")])
-      .where("kind", "=", "question").where("implementation_id", "in", asked).groupBy("implementation_id"))).map((r) => [Number(r.implementation_id), r.at as string]));
-    for (const r of out.values()) r.questionAt = at.get(r.id) ?? null;
+  const asked = new Map([...out.values()].filter((r) => r.state === "asked").map((r) => [r.id, r]));
+  if (asked.size) {
+    for (const q of await db.all(db.k.selectFrom("main.implementation_rounds").select(["implementation_id", "at", "result"])
+      .where("kind", "=", "question").where("implementation_id", "in", [...asked.keys()]).orderBy("id"))) {
+      const audience = parse<Partial<QuestionRound>>(q.result)?.audience;
+      asked.get(Number(q.implementation_id))!.question = { at: q.at, audience: audience === "author" || audience === "maintainer" ? audience : null };
+    }
   }
   return out;
 }

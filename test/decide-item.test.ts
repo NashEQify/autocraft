@@ -19,7 +19,7 @@ const disagree = (o: Over = {}): Over => ({ classification: { status: "disagree"
 const scopeDisagree: Over = { classification: { status: "disagree", label: null, jevLabel: "missing feature", haikuLabel: "small extra", jev: jev({ unsure: true }), haiku: { at: `${T}T09:00:00.000Z`, aloneCurrent: false } } };
 const needsDecision: Over = { classification: { flags: ["needs decision"] }, labels: { existing: ["bugfix", "needs decision"] } };
 type ImplementRow = NonNullable<ReturnType<typeof itemFacts>["implement"]["row"]>;
-const attempt = (state: string, o: Partial<ImplementRow> = {}): ImplementRow => ({ state, attempt: 1, textChanged: false, newCommentAfterQuestion: false, decisionAnswered: false, asked: null, prOpen: false, ...o });
+const attempt = (state: string, o: Partial<ImplementRow> = {}): ImplementRow => ({ state, attempt: 1, textChanged: false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false, ...o });
 /** An issue queued by a settler, in a repo with Implement on. */
 const queued = (o: Over = {}): Over => ({ ...o, implement: { queuedBy: "maint", settles: true, featureOn: true, row: null, liveInRepo: 0, ...(o?.implement ?? {}) } });
 const closed = (o: Partial<{ decisionId: string; kind: "scope" | "close" | "duplicate" | "merge"; security: boolean; action: string | null }> = {}) => ({ decisionId: "d1", kind: "close" as const, security: false, action: null, ...o });
@@ -133,6 +133,8 @@ const rows: Row[] = [
   { name: "our open PR is the wait", facts: queued({ implement: { row: attempt("pr-opened", { prOpen: true }) }, fix: { openPr: { number: 9, closes: true } } }), expect: { state: "classified", actions: [], wait: "open PR #9", next: "Implement: pull request opened" } },
   { name: "an ended attempt is not repeated on the same text", facts: queued({ implement: { row: attempt("failed") } }), expect: { state: "classified", actions: [], wait: "a person to queue the implementation again" } },
   { name: "an ended attempt starts again when the text changed", facts: queued({ implement: { row: attempt("failed", { textChanged: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
+  { name: "an ended attempt starts again when the issue was queued again after it", facts: queued({ implement: { row: attempt("failed", { requeuedAfterEnd: true }) } }), expect: { state: "classified", actions: ["implement"], bucket: "plan" } },
+  { name: "an open PR of a retired fix attempt keeps our assignment", facts: { fix: { attempt: { state: "pr-opened", textChanged: false, headDone: true, baseDone: true }, openPr: { number: 9, closes: true } }, assignment: { login: "bot", assignees: ["bot"], ours: true } }, expect: { state: "classified", actions: [], wait: "open PR #9" } },
   { name: "a running implementation keeps our assignment", facts: queued({ implement: { row: attempt("planned") }, assignment: { login: "bot", assignees: ["bot"], ours: true } }), expect: { state: "classified", actions: ["implement"] } },
   { name: "a question releases our assignment", facts: queued({ implement: { row: attempt("asked", { asked: "author" }) }, assignment: { login: "bot", assignees: ["bot"], ours: true } }), expect: { state: "classified", actions: ["unassign"] } },
 

@@ -20,7 +20,7 @@ test("a draft waits for its scope question and says so", () => {
 });
 
 const queued = (state: string, o: { textChanged?: boolean } = {}) => ({ queuedBy: "op", settles: true, featureOn: true, liveInRepo: 0,
-  row: { state, attempt: 1, textChanged: o.textChanged ?? false, newCommentAfterQuestion: false, decisionAnswered: false, asked: null, prOpen: false } });
+  row: { state, attempt: 1, textChanged: o.textChanged ?? false, newCommentAfterQuestion: false, decisionAnswered: false, requeuedAfterEnd: false, asked: null, prOpen: false } });
 
 test("a stuck or ended implementation waits on a person", () => {
   for (const [s, wait] of [["stuck", "a decision on the stuck implementation"], ["failed", "a person to queue the implementation again"]]) {

@@ -67,6 +67,11 @@ export type ImplementationRound = {
 // ---- the model calls' replies (implement.plan, implement.session) ------------------------------------------------
 
 export type QuestionAudience = "author" | "maintainer";
+/**
+ * The result of a `question` round: whom it asked, and where (the issue comment, or the decision). The planner reads the newest
+ * question round of an `asked` attempt: only answers after it plan again, so every new question needs a round of its own.
+ */
+export type QuestionRound = { audience: QuestionAudience; text: string; commentId?: string; decisionId?: string };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /** The plan call's reply: ready to implement, or the questions that come first. */

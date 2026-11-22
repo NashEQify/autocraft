@@ -25,7 +25,7 @@ export const IMPLEMENT_ENDED_WAIT = "a person to queue the implementation again"
 /**
  * The Implement stage's step for an issue, or the wait that holds it; null when the issue is not queued (no fast_track
  * row by someone who settles on the repo) or another rule says what it waits on (a hold, an open PR that closes or mentions it).
- * A new attempt starts when there is none, or the last one ended and the issue text changed since; it needs the repo's
+ * A new attempt starts when there is none, or the last one ended and the issue text changed or it was queued again since; it needs the repo's
  * Implement feature and room among the repo's live implementations. A question is planned again when its answer may have
  * come: the issue text changed, a person commented after it, or its decision is answered.
  */
@@ -38,7 +38,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "person" as const });
   if (ended) {
     if (fix.openPr !== null) return null;
-    if (row && !row.textChanged) return { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
+    if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
     if (im.featureOn && im.liveInRepo >= MAX_LIVE_PER_REPO) return { wait: `${im.liveInRepo} implementations already running in ${f.repo}`, waitKind: "system" };
     return due("plan");
   }
@@ -136,7 +136,8 @@ export function decideItem(f: ItemFacts): ItemPlan {
   // released when the issue waits on a person (a question, a stuck attempt, a switch), was given up or left the scope.
   if (f.kind === "issue") {
     const row = f.implement.row;
-    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && fix.openPr !== null);
+    // A fix attempt of the retired Fix stage whose PR is open keeps it too, until that stage's code goes.
+    const running = (!!step && "bucket" in step) || (row?.state === "pr-opened" && fix.openPr !== null) || (fix.attempt?.state === "pr-opened" && fix.openPr !== null);
     actions.push(...unassignActions(f.assignment, f.open, !f.inScope || !!f.held || !running));
   }
 

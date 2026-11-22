@@ -97,7 +97,7 @@ function randomItem(x: Rnd): ItemFacts {
       queuedBy: x.pick([null, "maint"]), settles: x.bool(0.8), featureOn: x.bool(0.7), liveInRepo: x.int(3),
       row: x.bool(0.4) ? {
         state: x.pick(["planning", "asked", "planned", "implementing", "pr-opened", "revising", "stuck", "failed", "merged"]), attempt: 1 + x.int(2),
-        textChanged: x.bool(0.3), newCommentAfterQuestion: x.bool(0.3), decisionAnswered: x.bool(0.3), asked: x.pick(["author", "maintainer", null] as const), prOpen: x.bool(),
+        textChanged: x.bool(0.3), newCommentAfterQuestion: x.bool(0.3), decisionAnswered: x.bool(0.3), requeuedAfterEnd: x.bool(0.2), asked: x.pick(["author", "maintainer", null] as const), prOpen: x.bool(),
       } : null,
     },
   } as Parameters<typeof itemFacts>[0]);

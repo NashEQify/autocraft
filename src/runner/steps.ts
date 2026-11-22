@@ -133,7 +133,7 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
   const { implementRefusal } = await import("../implement/gate.ts");
-  return await implementRefusal(db, String(p.repo), Number(p.number));
+  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? "Implement is not built yet";
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -508,9 +508,7 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      const ref = `${ctx.params.repo}#${ctx.params.number}`;
-      ctx.log(`${ref}: ${ctx.params.bucket}: not built yet; nothing was done`);
-      return `${ref}: ${ctx.params.bucket} is not built yet; nothing was done`;
+      return `${ctx.params.repo}#${ctx.params.number}: nothing was done`;
     },
   },
   {

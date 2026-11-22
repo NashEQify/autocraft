@@ -425,11 +425,13 @@ export type ItemFacts = {
       attempt: number;
       /** The issue's title or body changed since the attempt last planned. */
       textChanged: boolean;
-      /** A comment by a person (no bot, not ours) came after the attempt's latest question. */
+      /** An `asked` attempt: a comment by a person (no bot, not ours) came after its newest question. */
       newCommentAfterQuestion: boolean;
-      /** The attempt's decision (its question or stuck decision) is answered. */
+      /** An `asked` attempt's decision was answered after its newest question. */
       decisionAnswered: boolean;
-      /** Who an `asked` attempt waits on: the issue's author (a GitHub comment) or a maintainer (a decision); null in other states. */
+      /** An ended attempt, and the issue was queued again after it ended (its fast_track row is newer). */
+      requeuedAfterEnd: boolean;
+      /** Who an `asked` attempt waits on, from its newest question round: the issue's author (a GitHub comment) or a maintainer (a decision); null in other states. */
       asked: "author" | "maintainer" | null;
       /** The attempt's PR is open. */
       prOpen: boolean;
