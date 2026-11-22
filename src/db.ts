@@ -46,6 +46,7 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["discord_channels", "default_repo", "TEXT"],
   ["discord_channels", "position", "INTEGER"],
   ["discord_channels", "category_id", "TEXT"],
+  ["discord_channels", "panel_message", "TEXT"],
   ["oauth_states", "identity", "TEXT"],
   ["discord_mentions", "signal", "INTEGER NOT NULL DEFAULT 0"],
   ["user_token_revocations", "kind", "TEXT NOT NULL DEFAULT 'grant'"],

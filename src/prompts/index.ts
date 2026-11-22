@@ -1223,12 +1223,12 @@ const DISCORD_ISSUE_QUESTIONS: ClaudePrompt = {
   purpose: "Chooses which follow-up questions to ask someone who is writing a new issue in Discord, from a fixed list, leaving out what the description already answers.",
   models: ["haiku"],
   effort: "medium",
-  placeholders: { form: "A JSON object indented by one space: repo, title and description as the person typed them." },
+  placeholders: { form: "A JSON object indented by one space: repo, title and description as the person typed them, and the kind when they chose one." },
   template: `You help someone write a clear GitHub issue. Below is what they typed. Choose up to three follow-up questions, from this list only, that would help a maintainer act on the issue and that the text does not already answer:
 
 ${FOLLOW_UPS.map((q) => `- ${q.id}: ${q.label}`).join("\n")}
 
-Asking none is a good answer when the text is already complete.
+Asking none is a good answer when the text is already complete. When the form gives the kind the person chose, ask what suits it: for "bug", what reproduces the problem; for "feature", what it would let them do.
 
 ${ISSUE_RULES}
 
@@ -1239,7 +1239,7 @@ Reply with ONLY one JSON object:
 {{form}}
 </form>`,
   output: `One JSON object: {"ask": [<id>, ...]}, possibly empty.`,
-  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON. Only ids of the fixed list are kept, so the model's words never reach the person. A call without a parseable object counts as no answer and the first three questions of the list are asked.`,
+  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON. Only ids of the fixed list are kept, so the model's words never reach the person. A call without a parseable object counts as no answer: a feature request is asked what it would let the person do, anything else the three bug questions.`,
   limits: { perCall: 1, attempts: 1, timeoutSeconds: 120 },
   extra: [{ label: "Run", value: "Outside the pipeline, once for each new-issue form, under a daily dollar cap of its own; no tools; the text is not kept" }],
 };
@@ -1248,17 +1248,17 @@ const DISCORD_ISSUE_DRAFT: ClaudePrompt = {
   id: "discord.issue-draft",
   stage: "Discord",
   runner: "claude",
-  purpose: "Writes a clear issue title and body from the form and the answers to the follow-up questions, and says whether it is a bug report or a feature request. The person files it under their own GitHub account or opens it on GitHub themselves.",
+  purpose: "Writes a clear issue title and body from the form and the answers to the follow-up questions, and says whether it is a bug report or a feature request. The AutoCraft bot files it for the person, or they open it on GitHub themselves.",
   models: ["haiku"],
   effort: "medium",
-  placeholders: { form: "A JSON object indented by one space: repo, title, description and the answers (question and answer pairs)." },
+  placeholders: { form: "A JSON object indented by one space: repo, title, description, the kind when the person chose one, and the answers (question and answer pairs)." },
   template: `You turn what someone typed into a clear GitHub issue for the repo named in the form.
 
 - Title: one line, at most ${ISSUE_TITLE_CHARS} characters, plain words, no prefix.
 - Body: Markdown, at most ${ISSUE_BODY_CHARS} characters, short sections such as "What happens", "Steps to reproduce", "Expected result", "Environment" (only those the text supports).
 - Use only what the person wrote. Do not invent details, versions or causes. Keep their meaning.
 - No @mentions and no links.
-- Kind: "bug" when something does not work as it should, "feature" when the person asks for something new or different.
+- Kind: "bug" when something does not work as it should, "feature" when the person asks for something new or different. When the form gives the kind the person chose, write that kind of issue and reply with it; a feature request has sections such as "What I would like" and "Why".
 
 ${ISSUE_RULES}
 
@@ -1269,7 +1269,7 @@ Reply with ONLY one JSON object:
 {{form}}
 </form>`,
   output: `One JSON object: {"title", "body", "kind"}.`,
-  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON. The kind is "bug" unless the reply says "feature". Title and body are collapsed and cut to the limits, mentions are removed and any link other than an issue or pull request of a public tracked repo is replaced. A call without a usable title and body counts as no answer, and the draft is built from the form itself.`,
+  validation: `${CLAUDE_RESULT} The text from the first "{" to the last "}" is parsed as JSON. The kind the person chose wins; otherwise it is "bug" unless the reply says "feature". Title and body are collapsed and cut to the limits, mentions are removed and any link other than an issue or pull request of a public tracked repo is replaced. A call without a usable title and body counts as no answer, and the draft is built from the form itself.`,
   limits: { perCall: 1, attempts: 1, timeoutSeconds: 120 },
   extra: [{ label: "Run", value: "Outside the pipeline, once for each new-issue draft, under the daily dollar cap of the new-issue helper; no tools; the text is not kept" }],
 };
@@ -1721,8 +1721,8 @@ const VALUES: { [K in ClaudePromptId]: (input: ClaudeInput[K]) => Record<string,
   "discord.signal.haiku": ([a]) => ({ ask: signalState(a!) }),
   "discord.junk.haiku": ([a]) => ({ ask: junkState(a!) }),
   "discord.search": ([p]) => ({ question: untrustedJson({ question: p!.question }), candidates: untrustedJson(p!.candidates.map((c) => ({ ...c, body: c.body.slice(0, PICK_BODY_CHARS) }))) }),
-  "discord.issue-questions": ([f]) => ({ form: untrustedJson({ repo: f!.repo, title: f!.title, description: f!.description }) }),
-  "discord.issue-draft": ([f]) => ({ form: untrustedJson({ repo: f!.repo, title: f!.title, description: f!.description, answers: f!.answers }) }),
+  "discord.issue-questions": ([f]) => ({ form: untrustedJson({ repo: f!.repo, title: f!.title, description: f!.description, ...(f!.kind && { kind: f!.kind }) }) }),
+  "discord.issue-draft": ([f]) => ({ form: untrustedJson({ repo: f!.repo, title: f!.title, description: f!.description, ...(f!.kind && { kind: f!.kind }), answers: f!.answers }) }),
   "areas.suggest": ([s]) => ({ repo: untrustedJson({ repo: s!.repo, areas: s!.areas, items: s!.items.map((i) => ({ ...i, body: i.body.slice(0, AREA_SUGGEST_BODY) })) }) }),
   "decide.prepare": ([d]) => {
     const { repo_dir, reference, group: _g, operator_turns, item, ...rest } = d!;

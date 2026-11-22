@@ -738,6 +738,46 @@ export async function labelReporterIssue(w: Writer, exec: Exec, o: { repo: strin
   }
 }
 
+/** Runs `gh` with the GitHub App's installation token for `repo`; a not-sent failure when the instance is not on the app or no token can be minted. Never the box account. */
+async function asBot(w: Writer, exec: Exec, repo: string, args: string[], input?: string): Promise<ExecResult> {
+  if (await githubIdentity(w.db) !== "app") return { code: 1, stdout: "", stderr: "app identity: the instance writes as the box account, not the GitHub App", sent: false };
+  let env: Record<string, string>;
+  try { env = appChildEnv(await (w.mint ?? installationToken)(ownerOf(repo), repo)); } catch (e) { return failedResult(e); }
+  return exec("gh", args, { ...(input === undefined ? {} : { input }), env, replaceEnv: true });
+}
+
+/**
+ * Opens an issue as the GitHub App for a Discord reporter who chose "Submit for me": audited as `discord-issue-bot`
+ * under identity `app`, with the URL and number but not the text. Throws an IssueError like createIssue.
+ */
+export async function createBotIssue(w: Writer, exec: Exec, o: { repo: string; title: string; body: string }, note: Note): Promise<{ number: number; url: string }> {
+  const body = posted(note, o.body);
+  const title = scrub(o.title);
+  let r: ExecResult;
+  try {
+    r = await recorded(w, "app", "discord-issue-bot", o.repo, {}, () => asBot(w, exec, o.repo, ["issue", "create", "--repo", slugOf(o.repo), "--title", title, "--body-file", "-"], body),
+      (x) => { const m = x.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/); return m ? { url: m[0], number: Number(m[1]) } : {}; },
+      (x) => (x.code === 0 && /https:\/\/github\.com\/\S+\/issues\/\d+/.test(x.stdout) ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`));
+  } catch (e) {
+    throw new IssueError(oneLine(String((e as Error).message ?? e)), true, e instanceof WritePacedError);
+  }
+  const url = r.stdout.match(/https:\/\/github\.com\/\S+\/issues\/(\d+)/);
+  if (r.code !== 0) { const m = oneLine(r.stderr || r.stdout) || `exit code ${r.code}`; throw new IssueError(m, r.sent === false || REFUSED.test(m)); }
+  if (!url) throw new IssueError(oneLine(r.stderr || r.stdout) || "gh printed no issue URL", false);
+  return { number: Number(url[1]), url: url[0] };
+}
+
+/** Adds a label to an issue the GitHub App filed for a Discord reporter; audited as `discord-issue-label` under identity `app`. A refusal is recorded and returned as false, never thrown. */
+export async function labelBotIssue(w: Writer, exec: Exec, o: { repo: string; number: number; label: string }): Promise<boolean> {
+  try {
+    const r = await recorded(w, "app", "discord-issue-label", refOf(o.repo, o.number), { label: o.label },
+      () => asBot(w, exec, o.repo, ["issue", "edit", String(o.number), "--repo", slugOf(o.repo), "--add-label", o.label]), undefined, (x) => (x.code === 0 ? null : oneLine(x.stderr || x.stdout) || `exit code ${x.code}`));
+    return r.code === 0;
+  } catch {
+    return false;
+  }
+}
+
 /** Approves one Actions run that waits for a maintainer's approval (a run from an outside contributor's PR). */
 export async function ghApproveRun(w: Writer, exec: Exec, g: Guarded<"approve-ci">, runId: number, details: Details = {}): Promise<ExecResult> {
   exec = await laneExec(w, g, exec);

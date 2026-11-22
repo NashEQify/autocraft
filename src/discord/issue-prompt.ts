@@ -6,6 +6,7 @@ export const FOLLOW_UPS = [
   { id: "steps", label: "Steps to reproduce", placeholder: "What do you do, in order, to see the problem?" },
   { id: "expected", label: "Expected and actual result", placeholder: "What did you expect, and what happened instead?" },
   { id: "env", label: "Version and platform", placeholder: "App version, operating system, browser or device" },
+  { id: "use", label: "What it would let you do", placeholder: "What are you trying to do, and how would this help?" },
 ] as const;
 export type FollowUpId = (typeof FOLLOW_UPS)[number]["id"];
 
@@ -14,9 +15,12 @@ export const ISSUE_BODY_CHARS = 3000;
 export const ISSUE_FORM_BODY_CHARS = 1500;
 export const ISSUE_ANSWER_CHARS = 500;
 
-/** `ref` is not an item: the call is about a form someone filled in. */
-export type IssueQuestionsInput = { ref: string; repo: string; title: string; description: string };
-export type IssueDraftInput = { ref: string; repo: string; title: string; description: string; answers: { question: string; answer: string }[] };
+/** The follow-up questions asked when the model gives no answer: for a feature request what it is for, else the bug questions. */
+export const fallbackQuestions = (kind: "bug" | "feature" | undefined): FollowUpId[] => (kind === "feature" ? ["use"] : ["steps", "expected", "env"]);
+
+/** `ref` is not an item: the call is about a form someone filled in. `kind`: what the person said they are reporting (the panel's Report a bug or Request a feature), absent when they did not say. */
+export type IssueQuestionsInput = { ref: string; repo: string; title: string; description: string; kind?: "bug" | "feature" };
+export type IssueDraftInput = { ref: string; repo: string; title: string; description: string; kind?: "bug" | "feature"; answers: { question: string; answer: string }[] };
 
 export const SAMPLE_ISSUE_QUESTIONS: IssueQuestionsInput[] = [{
   ref: "discord", repo: "photocraft", title: "WebP export ignores quality", description: "When I export to WebP the quality slider has no effect on the file size.",
