@@ -4,7 +4,6 @@ import { ArrowLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import type { ViewProps } from "../../registry/types";
 import { Markdown } from "../../ui/molecules/Markdown";
 import { cn } from "../../ui/cn";
-import { PageTitle } from "../../shell/PageHeader";
 import { OVERVIEW_INTRO, STAGES, overviewOf, referenceOf, stageBySlug, summaryOf, type Stage } from "./content";
 
 const scrollTo = (id: string) => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -30,14 +29,14 @@ function Toc({ close }: { close?: () => void }) {
   );
 }
 
-function StageHeading({ st }: { st: Stage }) {
+function StageHeading({ st, as: Tag = "h2" }: { st: Stage; as?: "h1" | "h2" }) {
   return (
-    <h2 className="flex items-center gap-2.5 text-xl font-semibold">
+    <Tag className="flex items-center gap-2.5 text-xl font-semibold">
       <span className="grid size-8 shrink-0 place-items-center rounded-md bg-accent/10 text-accent-ink">
         <st.icon className="text-lg" />
       </span>
       {st.title}
-    </h2>
+    </Tag>
   );
 }
 
@@ -78,7 +77,7 @@ function Overview() {
   return (
     <div className="mx-auto flex max-w-5xl gap-10 px-4 py-6 md:px-6">
       <div className="min-w-0 flex-1">
-        <PageTitle title="How it works" />
+        <h1 className="text-2xl font-semibold">How AutoCraft works</h1>
         <Markdown source={OVERVIEW_INTRO} className={cn(PROSE, "mt-2 text-md")} />
         <StagePath />
         <div className="mt-2 divide-y divide-line">
@@ -110,9 +109,8 @@ function StagePage({ st }: { st: Stage }) {
       <Link to="/about" className="inline-flex items-center gap-1.5 text-sm text-accent-ink hover:underline max-md:py-2">
         <ArrowLeftIcon /> How AutoCraft works
       </Link>
-      <PageTitle title="How it works" />
       <div className="mt-3">
-        <StageHeading st={st} />
+        <StageHeading st={st} as="h1" />
       </div>
       <Markdown
         source={summaryOf(st)}

@@ -13,7 +13,6 @@ import { Segmented } from "../../ui/molecules/Segmented";
 import { Stat } from "../../ui/molecules/Stat";
 import { clock, when } from "../../lib/format";
 import { cn } from "../../ui/cn";
-import { PageTitle } from "../../shell/PageHeader";
 import { useIsPhone } from "../../shell/useMedia";
 
 const DAY_RANGES: { value: DownloadsRange; label: string }[] = [
@@ -166,7 +165,7 @@ export function Downloads(_: ViewProps) {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-[1180px] space-y-4 px-4 pb-12 pt-5 md:px-6">
         <div>
-          <PageTitle title="Downloads" />
+          <h1 className="text-xl font-semibold">Downloads</h1>
           <p className="mt-0.5 text-sm text-ink/55">Release downloads, issues, merged pull requests and stars across the tracked apps.</p>
         </div>
         <Controls r={r} range={range} app={app} set={set} />

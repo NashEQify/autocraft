@@ -7,7 +7,6 @@ import type { ViewProps } from "../../registry/types";
 import { Badge } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
 import { cn } from "../../ui/cn";
-import { PageTitle } from "../../shell/PageHeader";
 
 function CopyButton({ text, label = "Copy" }: { text: string; label?: string }) {
   const [done, setDone] = useState(false);
@@ -275,7 +274,7 @@ export function Prompts(_: ViewProps) {
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-4xl px-4 pb-12 pt-5 md:px-6">
         <div className="flex flex-wrap items-baseline gap-x-3">
-          <PageTitle title="Prompts" />
+          <h1 className="text-xl font-semibold">Prompts</h1>
           <span className="text-xs text-ink/55">
             Server commit:{" "}
             {r.commit ? (

@@ -2,7 +2,6 @@ import { Link } from "react-router-dom";
 import type { ViewProps } from "../../registry/types";
 import { useUrlState } from "../../lib/hooks";
 import { Workspace } from "../../shell/Workspace";
-import { PageTitleRegion } from "../../shell/PageHeader";
 import { decisionsView } from "../decisions";
 import { needsTabsHref } from "../decisions/needs-controls";
 import { FeedbackTab } from "./FeedbackTab";
@@ -41,7 +40,7 @@ export function NeedsTabs() {
 /** Keep the Decisions list height bounded; each other tab owns its existing page scroller. */
 export function PhoneBody(props: ViewProps) {
   return <div className="flex h-full min-h-0 flex-col">
-    <div className="min-h-0 flex-1 overflow-hidden"><PageTitleRegion primary><Body {...props} /></PageTitleRegion></div>
+    <div className="min-h-0 flex-1 overflow-hidden"><Body {...props} /></div>
   </div>;
 }
 

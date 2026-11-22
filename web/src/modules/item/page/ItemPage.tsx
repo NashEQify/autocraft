@@ -1,4 +1,4 @@
-// The current question and one history beside GitHub on desktop, stacked on compact screens.
+// The item page: a status line, then "In AutoCraft" beside "On GitHub" (stacked on narrow screens, a segmented control on phones).
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ArrowLeftIcon, ArrowSquareOutIcon, ChatsCircleIcon } from "@phosphor-icons/react";
@@ -9,7 +9,8 @@ import { Pending } from "../../../ui/atoms/Pending";
 import { Badge, type Tone } from "../../../ui/atoms/Badge";
 import { ItemIcon } from "../../../ui/atoms/ItemIcon";
 import { QueueBadge } from "../../../ui/molecules/QueueBadge";
-import { PageTitle } from "../../../shell/PageHeader";
+import { Segmented } from "../../../ui/molecules/Segmented";
+import { useIsPhone } from "../../../shell/useMedia";
 import { useUser } from "../../../shell/UserContext";
 import { AutoCraftSide } from "./AutoCraftSide";
 import { GithubSide } from "./GithubSide";
@@ -33,6 +34,7 @@ export function ItemPageView({ params }: ViewProps) {
   const repo = params.repo!;
   const number = Number(params.number);
   const user = useUser();
+  const phone = useIsPhone();
   // A `since` that still matches returns the last page, so a pushed refresh of an unchanged item costs one small reply.
   const key = `item-page:${repo}#${number}`;
   const last = useRef<{ key: string; page: ItemPageData } | null>(null);
@@ -45,6 +47,8 @@ export function ItemPageView({ params }: ViewProps) {
     return r;
   });
   const [flash, setFlash] = useState<string | null>(null);
+  // The phone shows one side: viewers start on GitHub, everyone else on AutoCraft.
+  const [side, setSide] = useState<Side>(user.role === "viewer" ? "github" : "autocraft");
   const [request, setRequest] = useState<Jump["request"]>(null);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const cancelReveal = useRef<(() => void) | null>(null);
@@ -52,6 +56,7 @@ export function ItemPageView({ params }: ViewProps) {
     timers.current.forEach(clearTimeout);
     cancelReveal.current?.();
     setRequest({ side, anchor: target });
+    setSide(side);
     setFlash(target);
     cancelReveal.current = revealWhenReady(() => document.getElementById(target), { block: target.startsWith("decision-") ? "start" : "center" });
     timers.current = [setTimeout(() => setFlash(null), 2200)];
@@ -59,6 +64,7 @@ export function ItemPageView({ params }: ViewProps) {
   useEffect(() => {
     setFlash(null);
     setRequest(null);
+    setSide(user.role === "viewer" ? "github" : "autocraft");
     return () => { timers.current.forEach(clearTimeout); cancelReveal.current?.(); };
   }, [repo, number, user.login, user.role]);
   // Old decision and activity links reveal their supporting panel once the target exists.
@@ -71,8 +77,10 @@ export function ItemPageView({ params }: ViewProps) {
   useEffect(() => {
     if (!anchor || !dataMatches) return;
     cancelReveal.current?.();
+    const target: Side = anchor.startsWith("gh-") ? "github" : "autocraft";
     setFlash(anchor);
-    setRequest({ side: anchor.startsWith("gh-") ? "github" : "autocraft", anchor });
+    setRequest({ side: target, anchor });
+    setSide(target);
     // A full answer form can be taller than the viewport: reveal its question, not its middle.
     const cancel = revealWhenReady(() => document.getElementById(anchor), { block: anchor.startsWith("decision-") ? "start" : "center" });
     cancelReveal.current = cancel;
@@ -84,16 +92,26 @@ export function ItemPageView({ params }: ViewProps) {
     <JumpContext.Provider value={{ to, request }}>
       <div className="h-full min-h-0 overflow-y-auto" data-task-page data-flash={flash ?? undefined}>
         <div className="w-full pb-12 md:pb-16">
-          <PageTitle title={`${repo}#${number}`} />
           <Header d={data} />
-          <div key={`${user.login}:${user.role}:${repo}#${number}`} className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,11fr)_minmax(0,9fr)]">
-            <section className="min-w-0" aria-label="In AutoCraft">
-              <AutoCraftSide d={data} flash={flash} />
-            </section>
-            <section className="mt-5 min-w-0 border-t border-line bg-bg/40 lg:mt-0 lg:border-l lg:border-t-0" aria-label="On GitHub">
-              <GithubSide d={data} flash={flash} />
-            </section>
-          </div>
+          {phone ? (
+            <div key={`${user.login}:${user.role}:${repo}#${number}`}>
+              <div className="sticky top-0 z-20 mb-4 border-b border-line bg-panel px-4 py-2">
+                <Segmented label="Side" value={side} onChange={setSide} className="[&>button]:h-9 [&>button]:flex-1" options={[{ value: "autocraft", label: "AutoCraft" }, { value: "github", label: "GitHub" }]} />
+              </div>
+              {side === "autocraft"
+                ? <section className="min-w-0" aria-label="In AutoCraft"><AutoCraftSide d={data} flash={flash} /></section>
+                : <section className="min-w-0" aria-label="On GitHub"><GithubSide d={data} flash={flash} /></section>}
+            </div>
+          ) : (
+            <div key={`${user.login}:${user.role}:${repo}#${number}`} className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,11fr)_minmax(0,9fr)]">
+              <section className="min-w-0" aria-label="In AutoCraft">
+                <AutoCraftSide d={data} flash={flash} />
+              </section>
+              <section className="mt-5 min-w-0 border-t border-line bg-bg/40 lg:mt-0 lg:border-l lg:border-t-0" aria-label="On GitHub">
+                <GithubSide d={data} flash={flash} />
+              </section>
+            </div>
+          )}
         </div>
       </div>
     </JumpContext.Provider>
@@ -110,11 +128,11 @@ function Header({ d }: { d: ItemPageData }) {
       </div>
       <div className="mt-1 flex flex-wrap items-start gap-3">
         <div className="min-w-0 basis-full md:basis-0 md:flex-1">
-          <h2 className="break-words text-xl font-semibold leading-7 md:text-2xl md:leading-8">
+          <h1 className="break-words text-xl font-semibold leading-7 md:text-2xl md:leading-8">
             <ItemIcon kind={d.kind} state={d.state} className="mr-2 inline-block align-[-2px]" />
             <span className="code mr-2 text-base font-normal text-ink/55 [overflow-wrap:anywhere] md:text-lg">{d.repo}#{d.number}</span>
             {d.title}
-          </h2>
+          </h1>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink/55">
             <Badge tone={STATE_TONE[d.state]}>{STATE_LABEL[d.state]}</Badge>
             <span>by {d.author}</span>
