@@ -219,7 +219,7 @@ export const PLAN_INPUTS: PlanInput[] = [
     refs: "SELECT ai.repo AS repo, ai.number AS number FROM agent_run_items ai WHERE ai.run_id = r.id",
   },
   {
-    table: "conversation_cards", class: "cross", why: "A queued or running card locks the decision it settles (lockLiveSql), named by the decision's exec_reason.",
+    table: "conversation_cards", class: "cross", why: "A queued or running card locks the decision it settles (lockLiveExpr), named by the decision's exec_reason.",
     columns: ["state", "acted_at"],
     // 'settling' is SETTLING in src/answers/hold.ts.
     refs: "SELECT d.repo AS repo, d.number AS number FROM decisions d WHERE d.exec_state = 'settling' AND d.exec_reason LIKE r.id || ':%'",

@@ -4,7 +4,6 @@
 // permission on it (stored in repo_permissions, refreshed by the server).
 // Every query that spans repos must go through this.
 import type { HiddenRepos } from "../../hidden-sql.ts";
-import type { SQLInputValue } from "node:sqlite";
 import { trackedNames } from "../../repos.ts";
 import { DEFAULT_OWNER, ownerOf } from "../../owners.ts";
 import { HttpError } from "../server/util.ts";
@@ -70,7 +69,7 @@ export async function hiddenRepos(db: Db, req: Req): Promise<HiddenRepos> {
   const known = await knownRepos(db);
   const staff = canSeeInternals(req);
   const hidden = known.filter((r) => !visible.has(r));
-  // The list stays the denylist for text matching; SQL filters use the allow-list attached to it (see excludeHidden).
+  // The list stays the denylist for text matching; SQL filters use the allow-list attached to it (see excludeHiddenExpr).
   // Staff who can see a repo also see its security pseudo repo, so it belongs in the allow-list.
   return Object.assign([...hidden, ...known.filter((r) => !staff || !visible.has(r)).map(securityRepo)], { visible: staff ? [...visibleList, ...visibleList.map(securityRepo)] : visibleList });
 }
@@ -92,17 +91,9 @@ export async function needVisible(db: Db, req: Req, repo: string): Promise<void>
 }
 
 /**
- * SQL that leaves out the hidden repos: `<col> NOT IN (...)`, binding the names
- * into `params` under `<prefix>0`, `<prefix>1`, ... Null when nothing is hidden.
+ * Leaves out the hidden repos, on the repo in `col`; null when nothing is hidden. A list from hiddenRepos carries the repos the
+ * requester may see: rows of any other repo, known or not, are left out.
  */
-export function excludeHidden(col: string, hidden: string[] & { visible?: string[] }, params: Record<string, SQLInputValue>, prefix = "hid"): string | null {
-  // A list from hiddenRepos carries the repos the requester may see: rows of any other repo, known or not, are left out.
-  if (hidden.visible) return hidden.visible.length ? `${col} IN (${hidden.visible.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})` : "0";
-  if (!hidden.length) return null;
-  return `${col} NOT IN (${hidden.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})`;
-}
-
-/** `excludeHidden` as an expression on the repo in `col`; null when nothing is hidden. */
 export function excludeHiddenExpr(db: Db, col: Ex, hidden: string[] & { visible?: string[] }): AliasableExpression<SqlBool> | null {
   if (hidden.visible) return inList(db, col, hidden.visible);
   return hidden.length ? inList(db, col, hidden, "text", true) : null;

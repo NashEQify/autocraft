@@ -8,10 +8,6 @@ import { connectDb } from "../src/db/open.ts";
 import { hiddenTest, hiddenTestExpr, hiddenJsonTest, type HiddenRepos } from "../src/hidden-sql.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
 import { hiddenExpr as statusHiddenExpr, hiddenSql as statusHiddenSql } from "../src/public/status.ts";
-import { hiddenArgs, hiddenExpr as traceHiddenExpr, hiddenSql as traceHiddenSql, RUN_COLUMNS, runColumnsExpr } from "../src/dash/api/trace.ts";
-import { touchesHidden, touchesHiddenExpr } from "../src/agents/runs.ts";
-import { excludeHidden, excludeHiddenExpr } from "../src/dash/api/visible.ts";
-import { withoutHidden, withoutHiddenExpr } from "../src/dash/api/decisions.ts";
 import { latestCteExpr, trackedExpr } from "../src/dash/api/stats.ts";
 import { PHASE_SQL, phaseExpr } from "../src/dash/api/home-types.ts";
 import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/tasks.ts";
@@ -156,10 +152,6 @@ type Case = {
 
 const deny: HiddenRepos = ["ext"];
 const allow = (...visible: string[]): HiddenRepos => Object.assign([] as string[], { visible });
-const named = (fn: (p: Record<string, string>) => string | null): [string, Record<string, Param>] => {
-  const p: Record<string, string> = {};
-  return [fn(p) ?? "1 = 1", p];
-};
 
 function cases(db: Db): Case[] {
   const out: Case[] = [];
@@ -180,26 +172,6 @@ function cases(db: Db): Case[] {
   out.push({ name: "public status hiddenSql", text: [`SELECT i.number AS k FROM main.items i WHERE i.repo = 'app' AND ${statusHiddenSql("i.repo", "i.number", "i.labels")} ORDER BY i.number`],
     expect: ["1", "2", "3", "4", "6", "8"],
     built: (d) => d.k.selectFrom("main.items as i").select("i.number as k").where("i.repo", "=", "app").where((eb) => statusHiddenExpr(d, eb, "i.repo", "i.number", "i.labels")).orderBy("i.number") });
-  for (const [label, h, expect] of [["denied", deny, ["1", "3"]], ["allowed", allow("app"), ["1", "3"]], ["none allowed", allow(), ["3"]], ["no filter", [] as HiddenRepos, ["1", "2", "3"]]] as const) {
-    out.push({ name: `trace hiddenSql, ${label}`, text: [`SELECT r.id AS k FROM agent_runs r WHERE 1 = 1${traceHiddenSql(h)} ORDER BY r.id`, ...hiddenArgs(h)], expect: [...expect],
-      built: (d) => d.k.selectFrom("agent_runs as r").select("r.id as k").where((eb) => traceHiddenExpr(d, eb, h) ?? eb.and([])).orderBy("r.id") });
-  }
-  for (const [label, h, expect] of [["denied", deny, ["1"]], ["none allowed", allow(), []]] as const) {
-    const t = touchesHidden(h);
-    out.push({ name: `touchesHidden, ${label}`, text: [`SELECT r.id AS k FROM agent_runs r WHERE ${t.sql} ORDER BY r.id`, ...t.args], expect: [...expect],
-      built: (d) => d.k.selectFrom("agent_runs as r").select("r.id as k").where((eb) => touchesHiddenExpr(d, eb, h)).orderBy("r.id") });
-  }
-  out.push({ name: "RUN_COLUMNS", text: [`SELECT ${RUN_COLUMNS} FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id ORDER BY r.id`],
-    expect: ["1:Main:2", "2:acc2:0", "3:null:0"], key: (r) => `${r.id}:${r.label}:${r.tools}`,
-    built: (d) => d.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select((eb) => runColumnsExpr(d, eb)).orderBy("r.id") });
-  for (const [label, h, expect] of [["denied", deny, ["app", "lib"]], ["allowed", allow("app"), ["app"]], ["none allowed", allow(), []], ["no filter", [] as HiddenRepos, ["app", "ext", "lib"]]] as const) {
-    out.push({ name: `excludeHidden, ${label}`, text: named((p) => `SELECT DISTINCT repo AS k FROM main.items WHERE ${excludeHidden("repo", h, p) ?? "1 = 1"} ORDER BY repo`), expect: [...expect],
-      built: (d) => d.k.selectFrom("main.items").select("repo as k").distinct().where((eb) => excludeHiddenExpr(d, "repo", h) ?? eb.and([])).orderBy("repo") });
-  }
-  for (const [label, h, expect] of [["denied", deny, ["d1", "d4", "d5"]], ["allowed", allow("app", "lib"), ["d1", "d4", "d5"]], ["one allowed", allow("app"), ["d1", "d5"]], ["none allowed", allow(), ["d5"]]] as const) {
-    out.push({ name: `withoutHidden, ${label}`, text: named((p) => `SELECT id AS k FROM decisions WHERE kind = 'merge' AND ${withoutHidden(db, h, p)} ORDER BY id`), expect: [...expect],
-      built: (d) => d.k.selectFrom("decisions").select("id as k").where("kind", "=", "merge").where((eb) => withoutHiddenExpr(d, eb, h)!).orderBy("id") });
-  }
   for (const repo of [undefined, "app"]) {
     out.push({ name: `latestCte (${repo ?? "every repo"})`,
       expect: repo ? ["app:1"] : ["app:1", "lib:1"],

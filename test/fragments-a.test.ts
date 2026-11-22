@@ -6,12 +6,9 @@ import assert from "node:assert/strict";
 import type { Compilable, Expression, SqlBool } from "kysely";
 import type { Db, NamedParams, Param } from "../src/db/index.ts";
 import type { AnyEb } from "../src/db/kx.ts";
-import { heldOpenExpr, heldOpenSql, lockLiveExpr, lockLiveSql, lockRunningAtExpr, lockRunningAtSql } from "../src/answers/hold.ts";
-import { canSettleExpr, canSettleSql, settledByExpr, settledBySql, settlesAfter, settlesCheckedAtExpr, settlesCheckedAtSql, settlesLoginExpr, settlesLoginSql } from "../src/settlers.ts";
 import { pilotExpr, pilotExprFor, pilotSql, pilotSqlFor } from "../src/pilot.ts";
 import { backlogHeldExpr, backlogHeldSql } from "../src/dupes/held.ts";
 import { openSubjectExpr, openSubjectSql, prepareStateExpr, prepareStateSql } from "../src/decide/prepared.ts";
-import { snoozedExpr, SNOOZED_SQL } from "../src/decisions.ts";
 import { fastScoreExpr, fastScoreSql } from "../src/fasttrack.ts";
 import { settledOn, settledOnExpr, verdictExpr, VERDICT_SQL } from "../src/classify/settled.ts";
 import { quietExprFor, quietSqlFor } from "../src/security/quiet.ts";
@@ -159,23 +156,6 @@ const onItems = (name: string, text: string, twin: (eb: AnyEb) => Expression<Sql
   ...more,
 });
 
-/** Per decisions row `d`: the condition. */
-const onDecisions = (name: string, text: string, twin: (eb: AnyEb) => Expression<SqlBool>, params?: Case["params"]): Case => ({
-  name,
-  text: `SELECT d.id, ${tri(text)} AS v FROM decisions d ORDER BY d.id`,
-  params,
-  built: () => db.k.selectFrom("decisions as d").select((eb) => ["d.id", triExpr(eb, () => twin(eb)).as("v")]).orderBy("d.id"),
-  varies: "v",
-});
-
-/** The same over the decisions table unaliased, as the text version requires. */
-const onDecisionsTable = (name: string, text: string, twin: (eb: AnyEb) => Expression<SqlBool>): Case => ({
-  name,
-  text: `SELECT decisions.id, ${tri(text)} AS v FROM decisions ORDER BY decisions.id`,
-  built: () => db.k.selectFrom("decisions").select((eb) => ["decisions.id", triExpr(eb, () => twin(eb)).as("v")]).orderBy("decisions.id"),
-  varies: "v",
-});
-
 const noPilot: Partial<Case> = {
   prep: async () => void await db.run(db.k.deleteFrom("main.settings").where("key", "=", "pilot_items")),
   undo: async () => void await db.run(db.k.insertInto("main.settings").values({ key: "pilot_items", value: PILOT })),
@@ -193,27 +173,6 @@ const cases = (): Case[] => [
     built: () => db.k.selectFrom("items as i").select((eb) => ["i.repo", "i.number", fastScoreExpr(db, eb, "i.repo", "i.number", "i.number").as("s")]).orderBy("i.repo").orderBy("i.number"),
     varies: "s",
   },
-  onDecisions("settledBySql", settledBySql(db, "d"), (eb) => settledByExpr(db, eb, "d")),
-  onDecisions("lockLiveSql", lockLiveSql("d", NOW), (eb) => lockLiveExpr(db, eb, "d", NOW)),
-  {
-    name: "lockRunningAtSql",
-    text: `SELECT d.id, ${lockRunningAtSql("d")} AS at FROM decisions d ORDER BY d.id`,
-    built: () => db.k.selectFrom("decisions as d").select((eb) => ["d.id", lockRunningAtExpr(db, eb, "d").as("at")]).orderBy("d.id"),
-    varies: "at",
-  },
-  onDecisions("canSettleSql for a maintainer", canSettleSql(db, "mae", "maintainer", "d"), (eb) => canSettleExpr(db, eb, "mae", "maintainer", "d")),
-  onDecisionsTable("canSettleSql for an operator, decisions unaliased", `${canSettleSql(db, "op", "operator")} AND decisions.answer IS NULL`,
-    (eb) => eb.and([canSettleExpr(db, eb, "op", "operator"), eb("decisions.answer", "is", null)])),
-  onDecisions("settlesLoginSql", settlesLoginSql("d.answered_by", "d.repo"), (eb) => settlesLoginExpr(eb, "d.answered_by", "d.repo", NOW.getTime()), settlesAfter(NOW.getTime())),
-  {
-    name: "settlesCheckedAtSql",
-    text: `SELECT d.id, ${settlesCheckedAtSql("d.answered_by", "d.repo")} AS at FROM decisions d ORDER BY d.id`,
-    built: () => db.k.selectFrom("decisions as d").select((eb) => ["d.id", settlesCheckedAtExpr(eb, "d.answered_by", "d.repo").as("at")]).orderBy("d.id"),
-    varies: "at",
-  },
-  onDecisionsTable("heldOpenSql for an operator", heldOpenSql(db, "op", true), (eb) => heldOpenExpr(db, eb, "op", true)),
-  onDecisionsTable("heldOpenSql for a maintainer", heldOpenSql(db, "mae", false), (eb) => heldOpenExpr(db, eb, "mae", false)),
-  onDecisionsTable("SNOOZED_SQL", SNOOZED_SQL, (eb) => snoozedExpr(eb)),
   {
     name: "openSubjectSql",
     text: `SELECT d.id, ${tri(openSubjectSql("d", "i"))} AS v FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number ORDER BY d.id`,
