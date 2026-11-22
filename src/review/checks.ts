@@ -136,8 +136,15 @@ export async function refreshChecks(db: Db, client: Querier, repo: string, numbe
   let unsaved: PrChecks[] = [];
   for (let i = 0; i < list.length; i += CHECKS_PER_QUERY) {
     const chunk = list.slice(i, i + CHECKS_PER_QUERY);
-    const data = await client.query(checksQuery(chunk), { owner: ownerOf(repo), name: repo });
-    const rows = parseChecks(repo, (data as { repository: Record<string, PrNode | null> }).repository);
+    let rows: PrChecks[];
+    try {
+      const data = await client.query(checksQuery(chunk), { owner: ownerOf(repo), name: repo });
+      rows = parseChecks(repo, (data as { repository: Record<string, PrNode | null> }).repository);
+    } catch (e) {
+      // The rows read before a failed query are stored: a chunk that keeps failing loses only its own rows and the ones after it.
+      if (unsaved.length) await saveChecks(db, unsaved).catch((s: unknown) => log(`checks: ${repo}: storing the rows read before the failed query failed: ${String((s as Error).message ?? s)}`));
+      throw e;
+    }
     unsaved.push(...rows);
     all.push(...rows);
     if (unsaved.length >= kx.BATCH_ROWS) { await saveChecks(db, unsaved); unsaved = []; }

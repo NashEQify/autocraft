@@ -27,10 +27,7 @@ export const READS_BEFORE_REQUEST = 5;
  * that still show an unknown state; a known state forgets the PR (and sets aside a Merge? question that was asked about the unknown state).
  */
 export async function noteMergeable(db: Db, rows: PrChecks[], at: string): Promise<void> {
-  // The noted states and the take reviews are read for all rows in one query per batch, and written in multi-row statements.
-  const notes = new Map<string, string | null>();
-  for (const keys of batches(rows.map((r) => keyOf(r.repo, r.number))))
-    for (const n of await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where((eb) => inList(db, eb.ref("key"), keys)))) notes.set(n.key, n.value);
+  // The take reviews and the noted states are read for all rows in one query per batch, and written in multi-row statements.
   const known = (r: PrChecks) => r.mergeable === "MERGEABLE" || r.mergeable === "CONFLICTING";
   const waiting = rows.filter((r) => !known(r) && r.state === "OPEN" && r.overall === "success");
   const taken = new Set<string>();
@@ -41,25 +38,29 @@ export async function noteMergeable(db: Db, rows: PrChecks[], at: string): Promi
       .where((eb) => eb("l.head_oid", "=", eb.selectFrom("opus_reviews as r").select("r.head_oid").whereRef("r.repo", "=", "l.repo").whereRef("r.number", "=", "l.number")
         .where("r.verdict", "is not", null).orderBy("r.at", "desc").orderBy(rowid("opus_reviews", "r"), "desc").limit(1)))))
       taken.add(`${t.repo}#${t.number}@${t.head_oid}`);
-  const sets: { key: string; value: string }[] = [];
-  const dels: string[] = [];
   const withdraw: { repo: string; number: number; head: string }[] = [];
-  for (const r of rows) {
-    const k = keyOf(r.repo, r.number);
-    const cur = notes.has(k) ? { value: notes.get(k)! } : undefined;
-    if (known(r) || r.state !== "OPEN" || r.overall !== "success" || !taken.has(`${r.repo}#${r.number}@${r.head_oid}`)) {
-      if (cur) {
-        dels.push(k);
-        const prev = parse(cur.value);
-        if (prev && known(r)) withdraw.push({ repo: r.repo, number: r.number, head: prev.head });
+  // The notes are read and rewritten in one write transaction, so a concurrent writer of the same PR cannot lose a count.
+  await db.write(async () => {
+    const notes = new Map<string, string | null>();
+    for (const keys of batches(rows.map((r) => keyOf(r.repo, r.number))))
+      for (const n of await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where((eb) => inList(db, eb.ref("key"), keys)))) notes.set(n.key, n.value);
+    const sets: { key: string; value: string }[] = [];
+    const dels: string[] = [];
+    for (const r of rows) {
+      const k = keyOf(r.repo, r.number);
+      const cur = notes.has(k) ? { value: notes.get(k)! } : undefined;
+      if (known(r) || r.state !== "OPEN" || r.overall !== "success" || !taken.has(`${r.repo}#${r.number}@${r.head_oid}`)) {
+        if (cur) {
+          dels.push(k);
+          const prev = parse(cur.value);
+          if (prev && known(r)) withdraw.push({ repo: r.repo, number: r.number, head: prev.head });
+        }
+        continue;
       }
-      continue;
+      const prev = cur ? parse(cur.value) : null;
+      if (!prev || prev.head !== r.head_oid) sets.push({ key: k, value: JSON.stringify({ head: r.head_oid, since: at, reads: 1, rereads: 0, stuck: false } satisfies UnknownState) });
+      else sets.push({ key: k, value: JSON.stringify({ ...prev, reads: prev.reads + 1 } satisfies UnknownState) });
     }
-    const prev = cur ? parse(cur.value) : null;
-    if (!prev || prev.head !== r.head_oid) sets.push({ key: k, value: JSON.stringify({ head: r.head_oid, since: at, reads: 1, rereads: 0, stuck: false } satisfies UnknownState) });
-    else sets.push({ key: k, value: JSON.stringify({ ...prev, reads: prev.reads + 1 } satisfies UnknownState) });
-  }
-  if (sets.length || dels.length) await db.write(async () => {
     for (const values of batches(sets)) await db.run(db.k.insertInto("main.settings").values(values).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     for (const keys of batches(dels)) await db.run(db.k.deleteFrom("main.settings").where((eb) => inList(db, eb.ref("key"), keys)));
   });
@@ -104,20 +105,21 @@ export async function rereadUnknown(db: Db, client: Querier, repo: string, log: 
   for (const nums of batches(noted.map((r) => r.n)))
     for (const o of await db.all(db.k.selectFrom("main.items").select("number").where("repo", "=", repo).where("kind", "=", "pr").where("state", "=", "OPEN").where("number", "in", nums))) open.add(o.number);
   const done: number[] = [], known: number[] = [], gone: string[] = [];
-  const stuck: { key: string; value: string }[] = [];
-  for (const { key, n, s } of noted) {
+  const stuck: { key: string; was: string; value: string }[] = [];
+  for (const { key, value, n, s } of noted) {
     if (!s || !open.has(n)) { gone.push(key); continue; }
     if (s.stuck || s.rereads >= UNKNOWN_REREADS || s.reads < READS_BEFORE_REQUEST) continue;
     let state: string | null;
     try { state = await read(repo, n); } catch (e) { log(`checks: ${repo}#${n}: the REST read failed: ${String((e as Error).message ?? e)}`); continue; }
     done.push(n);
     if (state !== null) { known.push(n); continue; }
-    stuck.push({ key, value: JSON.stringify({ ...s, rereads: s.rereads + 1, stuck: true } satisfies UnknownState) });
+    stuck.push({ key, was: value!, value: JSON.stringify({ ...s, rereads: s.rereads + 1, stuck: true } satisfies UnknownState) });
   }
   // The REST reads run before the write lock is taken.
   if (gone.length || stuck.length) await db.write(async () => {
     for (const keys of batches(gone)) await db.run(db.k.deleteFrom("main.settings").where((eb) => inList(db, eb.ref("key"), keys)));
-    for (const r of stuck) await db.run(db.k.updateTable("main.settings").set({ value: r.value }).where("key", "=", r.key));
+    // A note the checks step rewrote meanwhile (a new head, another read) keeps that newer value.
+    for (const r of stuck) await db.run(db.k.updateTable("main.settings").set({ value: r.value }).where("key", "=", r.key).where("value", "=", r.was));
   });
   if (known.length) await refreshChecks(db, client, repo, known, log);
   if (done.length) log(`checks: ${repo}: requested ${done.length} PR${done.length === 1 ? "" : "s"} with an unknown mergeable state from GitHub (${done.map((n) => `#${n}`).join(", ")})`);

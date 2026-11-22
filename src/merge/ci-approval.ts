@@ -69,33 +69,33 @@ type RunsInput = { repo: string; number: number; head_oid: string; state: string
 export async function recordRuns(db: Db, rows: readonly RunsInput[], at = new Date().toISOString()): Promise<void> {
   const open = rows.filter((c) => c.state === "OPEN");
   if (!open.length) return;
-  const readPrev = (keys: (readonly [string, number])[]) => db.all(db.k.selectFrom("ci_run_approvals").select(kx.cols("ci_run_approvals")).where(kx.refIn(db, "ci_run_approvals", keys)));
-  const prevs = new Map<string, Awaited<ReturnType<typeof readPrev>>[number]>();
-  for (const keys of kx.batches(open.map((c) => [c.repo, c.number] as const)))
-    for (const p of await readPrev(keys)) prevs.set(`${p.repo}#${p.number}`, p);
-  const approvals = new Map<string, boolean>();
-  const approvalOn = async (repo: string): Promise<boolean> => {
-    if (!approvals.has(repo)) approvals.set(repo, await ciApprovalOf(db, repo) !== null);
-    return approvals.get(repo)!;
-  };
-  const puts: { repo: string; number: number; head_oid: string; cross_repo: number; runs: string; approved: string; reread: number; failed: string; checked_at: string; approved_at: string | null }[] = [];
-  for (const c of open) {
-    const prev = prevs.get(`${c.repo}#${c.number}`);
-    const suites = c.suites ?? [];
-    const same = prev?.head_oid === c.head_oid ? prev : undefined;
-    const approved = (JSON.parse(same?.approved ?? "[]") as number[]);
-    const byId = new Map(suites.map((x) => [x.id, x]));
-    const fresh = !!same?.approved_at && Date.now() - Date.parse(same.approved_at) < APPROVED_TTL_MS;
-    // An approved run is settled once its suite completed with something other than the old action_required.
-    const left = approved.filter((id) => fresh && !(byId.get(id)?.status === "COMPLETED" && byId.get(id)?.conclusion !== "ACTION_REQUIRED"));
-    const waiting: WaitingRun[] = suites.filter((x) => x.conclusion === "ACTION_REQUIRED" && !approved.includes(x.id)).map((x) => ({ id: x.id, name: x.name, event: x.event }));
-    if (!prev && !waiting.length) continue;
-    // With the approval off nothing clears a mark the suites do not confirm, so the sync does.
-    const reread = same?.reread && (suites.some((x) => x.conclusion === "ACTION_REQUIRED") || await approvalOn(c.repo)) ? 1 : 0;
-    puts.push({ repo: c.repo, number: c.number, head_oid: c.head_oid, cross_repo: c.cross_repo ? 1 : 0, runs: JSON.stringify(waiting), approved: JSON.stringify(left), reread, failed: same?.failed ?? "{}", checked_at: at, approved_at: same?.approved_at ?? null });
-  }
-  if (!puts.length) return;
+  // The previous rows are read and rewritten in one write transaction, so a concurrent writer cannot slip between them.
   await db.write(async () => {
+    const readPrev = (keys: (readonly [string, number])[]) => db.all(db.k.selectFrom("ci_run_approvals").select(kx.cols("ci_run_approvals")).where(kx.refIn(db, "ci_run_approvals", keys)));
+    const prevs = new Map<string, Awaited<ReturnType<typeof readPrev>>[number]>();
+    for (const keys of kx.batches(open.map((c) => [c.repo, c.number] as const)))
+      for (const p of await readPrev(keys)) prevs.set(`${p.repo}#${p.number}`, p);
+    const approvals = new Map<string, boolean>();
+    const approvalOn = async (repo: string): Promise<boolean> => {
+      if (!approvals.has(repo)) approvals.set(repo, await ciApprovalOf(db, repo) !== null);
+      return approvals.get(repo)!;
+    };
+    const puts: { repo: string; number: number; head_oid: string; cross_repo: number; runs: string; approved: string; reread: number; failed: string; checked_at: string; approved_at: string | null }[] = [];
+    for (const c of open) {
+      const prev = prevs.get(`${c.repo}#${c.number}`);
+      const suites = c.suites ?? [];
+      const same = prev?.head_oid === c.head_oid ? prev : undefined;
+      const approved = (JSON.parse(same?.approved ?? "[]") as number[]);
+      const byId = new Map(suites.map((x) => [x.id, x]));
+      const fresh = !!same?.approved_at && Date.now() - Date.parse(same.approved_at) < APPROVED_TTL_MS;
+      // An approved run is settled once its suite completed with something other than the old action_required.
+      const left = approved.filter((id) => fresh && !(byId.get(id)?.status === "COMPLETED" && byId.get(id)?.conclusion !== "ACTION_REQUIRED"));
+      const waiting: WaitingRun[] = suites.filter((x) => x.conclusion === "ACTION_REQUIRED" && !approved.includes(x.id)).map((x) => ({ id: x.id, name: x.name, event: x.event }));
+      if (!prev && !waiting.length) continue;
+      // With the approval off nothing clears a mark the suites do not confirm, so the sync does.
+      const reread = same?.reread && (suites.some((x) => x.conclusion === "ACTION_REQUIRED") || await approvalOn(c.repo)) ? 1 : 0;
+      puts.push({ repo: c.repo, number: c.number, head_oid: c.head_oid, cross_repo: c.cross_repo ? 1 : 0, runs: JSON.stringify(waiting), approved: JSON.stringify(left), reread, failed: same?.failed ?? "{}", checked_at: at, approved_at: same?.approved_at ?? null });
+    }
     for (const values of kx.batches(puts))
       await db.run(db.k.insertInto("ci_run_approvals").values(values)
         .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"]))));

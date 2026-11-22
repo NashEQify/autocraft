@@ -217,6 +217,17 @@ test("saveChecks of many PRs records waiting runs, settles pushes and follows un
   // GitHub now reports #3 as mergeable: the note goes.
   await saveChecks(db, [{ ...row(3), mergeable: "MERGEABLE" }]);
   assert.equal(await unknownOf(db, "app", 3, "h3"), null);
+  // A failing query still stores the rows the earlier queries read.
+  const { refreshChecks, CHECKS_PER_QUERY } = await import("../src/review/checks.ts");
+  let queries = 0;
+  const failing = { query: async (q: string) => {
+    if (queries++) throw new Error("GitHub is down");
+    const nums = [...q.matchAll(/pullRequest\(number: (\d+)\)/g)].map((m) => Number(m[1]));
+    return { repository: Object.fromEntries(nums.map((n) => [`pr${n}`, { number: n, state: "OPEN", isDraft: false, headRefOid: "new", mergeable: "MERGEABLE", maintainerCanModify: true }])) };
+  } };
+  const many = Array.from({ length: CHECKS_PER_QUERY + 1 }, (_, i) => 101 + i);
+  await assert.rejects(refreshChecks(db, failing as never, "app", many), /GitHub is down/);
+  assert.equal((await db.all(db.k.selectFrom("pr_checks").select("number").where("head_oid", "=", "new"))).length, CHECKS_PER_QUERY);
 });
 
 test("the open-PR references follow an edit of the PR's text, from sync and from any other writer", async () => {
