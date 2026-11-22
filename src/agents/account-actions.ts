@@ -24,10 +24,16 @@ export const ACCOUNT_ACTIONS: Record<string, Action> = {
   refresh: (db, id, _input, by) => refreshNow(db, id, by),
 };
 
-/** A runner refusal with a client status reads as the AccountError the local call would have thrown. */
+/**
+ * The runner's own AccountError answers read as the AccountError the local call would have thrown. Its other refusals
+ * are failures between the two processes and answer 502, so the browser does not take a 401 for a lost sign-in.
+ */
 const asAccountError = (e: unknown): never => {
-  if (e instanceof RunnerError && e.status >= 400 && e.status < 500) throw new AccountError(e.status, e.message);
-  throw e;
+  if (!(e instanceof RunnerError)) throw e;
+  if (e.answered) throw new AccountError(e.status, e.message);
+  if (e.status === 401) throw new AccountError(502, "The dashboard and the runner do not share session_key (or their clocks differ)");
+  if (e.status === 503) throw new AccountError(502, "The runner has no session_key");
+  throw new AccountError(502, `The runner answered ${e.status}: ${e.message}`);
 };
 
 export async function accountAction(db: Db, action: keyof typeof ACCOUNT_ACTIONS, id: unknown, input: unknown, by: string): Promise<ClaudeAccount> {

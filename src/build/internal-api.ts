@@ -62,7 +62,7 @@ export async function handleInternal(db: Db, key: string | null, req: IncomingMe
       if (!action) return send(res, 404, { error: "no such account action" });
       return send(res, 200, await action(db, args.id ?? undefined, args.input ?? undefined, login));
     } catch (e) {
-      if (e instanceof AccountError) return send(res, e.status, { error: e.message });
+      if (e instanceof AccountError) return send(res, e.status, { error: e.message, account: true });
       throw e;
     }
   }

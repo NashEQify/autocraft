@@ -143,3 +143,14 @@ async function waitFor(f: () => Promise<boolean>, ms = 5000): Promise<void> {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+
+test("an internal token works once and not when its expiry is far in the future", async () => {
+  const { verifyInternal } = await import("../src/remote/runner-client.ts");
+  const key = "k".repeat(40);
+  const now = Date.now();
+  const t = signInternal(key, "POST", "/internal/accounts/list", "{}", "op", now);
+  assert.equal(verifyInternal(key, t, "POST", "/internal/accounts/list", "{}", now), "op");
+  assert.equal(verifyInternal(key, t, "POST", "/internal/accounts/list", "{}", now), null, "a replay is refused");
+  const far = signInternal(key, "POST", "/internal/accounts/list", "{}", "op", now + 3_600_000);
+  assert.equal(verifyInternal(key, far, "POST", "/internal/accounts/list", "{}", now), null);
+});

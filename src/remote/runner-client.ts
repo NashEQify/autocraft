@@ -3,7 +3,7 @@
 // request carries a token the dashboard signs with a key derived from the secrets file's session_key, which both
 // processes read: it names the method, the path, a hash of the body and the signed-in login, and lasts a minute. The
 // dashboard has checked the user's access before it asks; the runner checks only the signature and acts as that login.
-import { createHash, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, createHmac, hkdfSync, timingSafeEqual } from "node:crypto";
 
 export const INTERNAL_HEADER = "x-autocraft-internal";
 const TOKEN_TTL_MS = 60_000;
@@ -11,12 +11,15 @@ const TOKEN_TTL_MS = 60_000;
 const keyOf = (sessionKey: string): Buffer => Buffer.from(hkdfSync("sha256", sessionKey, "autocraft", "runner-internal", 32));
 const bodyHash = (body: string): string => createHash("sha256").update(body).digest("base64url");
 
-type Claims = { m: string; p: string; b: string; l: string; e: number };
+type Claims = { m: string; p: string; b: string; l: string; e: number; n?: string };
 
 export function signInternal(sessionKey: string, method: string, path: string, body: string, login: string, nowMs = Date.now()): string {
-  const payload = Buffer.from(JSON.stringify({ m: method, p: path, b: bodyHash(body), l: login, e: nowMs + TOKEN_TTL_MS } satisfies Claims)).toString("base64url");
+  const payload = Buffer.from(JSON.stringify({ m: method, p: path, b: bodyHash(body), l: login, e: nowMs + TOKEN_TTL_MS, n: randomBytes(8).toString("base64url") } satisfies Claims)).toString("base64url");
   return `${payload}.${createHmac("sha256", keyOf(sessionKey)).update(payload).digest("base64url")}`;
 }
+
+/** Signatures accepted so far, by expiry: a token is good for one request, and the runner is one process. */
+const seen = new Map<string, number>();
 
 /** The login a request acts as, when its token is signed with the key, unexpired, and names this method, path and body; else null. */
 export function verifyInternal(sessionKey: string, token: string | undefined, method: string, path: string, body: string, nowMs = Date.now()): string | null {
@@ -27,7 +30,10 @@ export function verifyInternal(sessionKey: string, token: string | undefined, me
   if (got.length !== want.length || !timingSafeEqual(got, want)) return null;
   let c: Claims;
   try { c = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Claims; } catch { return null; }
-  if (c.m !== method || c.p !== path || c.b !== bodyHash(body) || typeof c.l !== "string" || !c.l || !(c.e > nowMs)) return null;
+  if (c.m !== method || c.p !== path || c.b !== bodyHash(body) || typeof c.l !== "string" || !c.l || !(c.e > nowMs) || c.e > nowMs + TOKEN_TTL_MS + 5_000) return null;
+  for (const [k, e] of seen) if (e <= nowMs) seen.delete(k);
+  if (seen.has(sig)) return null;
+  seen.set(sig, c.e);
   return c.l;
 }
 
@@ -42,7 +48,9 @@ export const runnerClient = (): RunnerClient | null => client;
 
 export class RunnerError extends Error {
   status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
+  /** The runner marked this refusal as its own answer to the operation (an AccountError), not a failure of the request itself. */
+  answered: boolean;
+  constructor(status: number, message: string, answered = false) { super(message); this.status = status; this.answered = answered; }
 }
 
 /** One signed request to the runner's /internal/ API as `login`. A refusal the runner explains comes back as RunnerError with its status. */
@@ -55,8 +63,9 @@ export async function callRunner(c: RunnerClient, method: "GET" | "POST", path: 
   });
   if (!res.ok) {
     let msg = `the runner answered ${res.status}`;
-    try { msg = ((await res.json()) as { error?: string }).error ?? msg; } catch { /* not JSON */ }
-    throw new RunnerError(res.status, msg);
+    let answered = false;
+    try { const j = (await res.json()) as { error?: string; account?: boolean }; msg = j.error ?? msg; answered = j.account === true; } catch { /* not JSON */ }
+    throw new RunnerError(res.status, msg, answered);
   }
   return res;
 }
