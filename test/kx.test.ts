@@ -19,7 +19,7 @@ async function small(dialect: Dialect, fn: (db: Db) => Promise<unknown>): Promis
   const t = await testDatabase("", dialect);
   try {
     const db = await t.open();
-    const ci = dialect === "postgres" ? "citext" : "TEXT COLLATE NOCASE";
+    const ci = dialect === "postgres" ? 'citext COLLATE "C"' : "TEXT COLLATE NOCASE";
     if (dialect === "postgres") await db.script("CREATE EXTENSION IF NOT EXISTS citext");
     await db.script(`
       CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, login ${ci}, j TEXT, n INTEGER, m INTEGER);
