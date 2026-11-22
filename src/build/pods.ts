@@ -145,6 +145,8 @@ export const PENDING_LIMIT_MS = 15 * 60_000;
 export const PULL_LIMIT_MS = 3 * 60_000;
 /** A pod still being deleted after this long, or whose node has not reported for this long, is given up. */
 export const STUCK_MS = 5 * 60_000;
+/** Creates of a pod that fail (or whose pod vanishes before it starts) are tried at most this many times. */
+export const CREATE_TRIES = 6;
 /** A pod just created may be missing from a list for a moment. */
 export const LIST_GRACE_MS = 30_000;
 export const PULL_REASONS = new Set(["ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError"]);

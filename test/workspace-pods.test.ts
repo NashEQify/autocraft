@@ -10,7 +10,7 @@ import { createEnv } from "../src/build/envs.ts";
 import type { ExecOptions, ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { IDLE_PARK_MS, PARKED_VOLUME_MS, workspacePass, WorkspaceState } from "../src/build/workspace-launch.ts";
-import { createWorkspace, getWorkspace } from "../src/build/workspaces.ts";
+import { createWorkspace, getCheckpoint, getWorkspace } from "../src/build/workspaces.ts";
 import { WS_POD_PATH } from "../src/build/workspace.ts";
 import { connectDb } from "../src/db/open.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -125,19 +125,27 @@ test("a workspace starts, is seeded, parks when idle and keeps its checkpoint af
   assert.equal(w.node, "node-a");
   assert.ok(kube.untarBytes > 0, "the source went over exec stdin");
 
+  // A call still within its time limit keeps the pod past the idle limit.
+  const iso = (t: number) => new Date(t).toISOString();
+  const call = (await db.get(db.k.insertInto("workspace_calls")
+    .values({ workspace_id: id, n: 99, tool: "shell", state: "running", created_at: iso(clock), started_at: iso(clock), deadline_at: iso(clock + 2 * IDLE_PARK_MS) }).returning("id")))!.id;
   clock += IDLE_PARK_MS + 60_000;
+  await pass();
+  assert.equal((await getWorkspace(db, id))!.state, "ready", "a running call keeps the workspace from parking");
+  await db.run(db.k.updateTable("workspace_calls").set({ state: "done" }).where("id", "=", call));
+
   await pass();
   w = (await getWorkspace(db, id))!;
   assert.equal(w.state, "parked");
   assert.equal(w.pod, null);
   assert.ok(!kube.pods.has(`ws-${id}`), "the parked workspace's pod is deleted");
   assert.ok(kube.pvcs.has(`ws-${id}`), "its volume is kept");
-  assert.deepEqual(Buffer.from(w.checkpoint!), DIFF);
+  assert.deepEqual(Buffer.from((await getCheckpoint(db, id))!), DIFF);
   const run = kube.execs.find((a) => a[1] === "run")!;
   assert.ok(run.includes(POD_COMMIT), "the checkpoint diffs against the pod's base commit");
-  const calls = await db.all(db.k.selectFrom("workspace_calls").select(["tool", "state", "n"]).where("workspace_id", "=", id).orderBy("id"));
-  assert.deepEqual(calls.map((c) => [c.tool, c.state]), [["seed", "done"], ["checkpoint", "done"]]);
-  assert.ok(calls[1]!.n! > 0);
+  const calls = await db.all(db.k.selectFrom("workspace_calls").select(["tool", "state", "n"]).where("workspace_id", "=", id).where("tool", "!=", "shell").orderBy("id"));
+  assert.equal(calls[0]?.tool, "seed");
+  assert.ok(calls.length > 1 && calls.slice(1).every((c) => c.tool === "checkpoint" && c.state === "done" && c.n! > 0), "seeding and checkpoints are recorded");
 
   clock += PARKED_VOLUME_MS + 60_000;
   await pass();
@@ -145,5 +153,5 @@ test("a workspace starts, is seeded, parks when idle and keeps its checkpoint af
   assert.equal(w.state, "parked");
   assert.equal(w.pvc, null);
   assert.ok(!kube.pvcs.has(`ws-${id}`), "the parked volume is deleted after its keep time");
-  assert.ok(w.checkpoint && w.checkpoint.length > 0, "the checkpoint stays");
+  assert.ok((await getCheckpoint(db, id))?.length, "the checkpoint stays");
 });

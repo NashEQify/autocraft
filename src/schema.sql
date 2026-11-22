@@ -1068,6 +1068,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   state TEXT NOT NULL DEFAULT 'requested', -- requested | starting | seeding | ready | parked | ended | failed
   state_at TEXT NOT NULL,             -- when the row entered its state
   pod TEXT,
+  pod_created_at TEXT,                -- the last create of the pod, failed or not
+  create_tries INTEGER NOT NULL DEFAULT 0, -- creates of the pod since it last started
   pvc TEXT,                           -- null once deleted (a parked volume past its keep time)
   node TEXT,                          -- where the volume lives (local-path pins it)
   limits TEXT NOT NULL DEFAULT '{}',  -- JSON WorkspaceLimits
@@ -1094,6 +1096,7 @@ CREATE TABLE IF NOT EXISTS workspace_calls (
   result TEXT,                        -- JSON: the helper's header and the cleaned, capped output
   created_at TEXT NOT NULL,
   started_at TEXT,
+  deadline_at TEXT,                   -- past this a call still marked running no longer keeps the pod from parking
   finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, id);

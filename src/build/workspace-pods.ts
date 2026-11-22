@@ -23,11 +23,11 @@ const labels = (envId: string, id: number) => ({ "app.kubernetes.io/name": WORKS
 const SECURITY = { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ["ALL"] } };
 
 /** What the session's tools expect: a home and caches on the volume, offline cargo, software Vulkan on display :0. */
-export const WORKSPACE_ENV: Record<string, string> = {
+export const workspaceEnv = (arch: KubeSettings["arch"]): Record<string, string> => ({
   HOME: "/work/home", CARGO_HOME: "/work/cargo", CARGO_TARGET_DIR: "/work/target", CARGO_NET_OFFLINE: "true",
   DISPLAY: ":0", XDG_RUNTIME_DIR: "/run/user", XDG_CACHE_HOME: "/tmp/cache",
-  VK_ICD_FILENAMES: "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json", WGPU_BACKEND: "vulkan", LP_NUM_THREADS: "4",
-};
+  VK_ICD_FILENAMES: `/usr/share/vulkan/icd.d/lvp_icd.${arch}.json`, WGPU_BACKEND: "vulkan", LP_NUM_THREADS: "4",
+});
 
 export function workspacePvcSpec(s: KubeSettings, envId: string, id: number) {
   return {
@@ -83,7 +83,7 @@ export function workspacePodSpec(c: WorkspacePodCtx) {
         command: [WS_POD_PATH, "init"],
         // /work, not /work/src: the runtime would create a missing working directory as root, and `ws untar` writes there.
         workingDir: "/work",
-        env: Object.entries(WORKSPACE_ENV).map(([name, value]) => ({ name, value })),
+        env: Object.entries(workspaceEnv(s.arch)).map(([name, value]) => ({ name, value })),
         resources: {
           requests: { cpu: s.workspaceCpuRequest, memory: s.workspaceMemoryRequest, "ephemeral-storage": s.workspaceEphemeralRequest },
           limits: { cpu: s.workspaceCpuLimit, memory: s.workspaceMemoryLimit, "ephemeral-storage": s.workspaceEphemeralLimit },

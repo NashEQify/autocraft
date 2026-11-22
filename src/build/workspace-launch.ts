@@ -11,20 +11,21 @@
 // Stateless between passes apart from what is in flight: after a restart a `seeding` row seeds again (from an empty tree).
 import { spawn } from "node:child_process";
 import type { Db } from "../db/index.ts";
-import { cols } from "../db/kx.ts";
 import { exec, fixupDir, GIT_ENV, gitDirEnv, Git, HARDENING } from "../fixup/git.ts";
 import { ownerOf } from "../owners.ts";
 import { KubeError, type KPod, type KubeApi } from "./kube-api.ts";
 import type { LauncherDeps } from "./launcher.ts";
-import { LIST_GRACE_MS, PENDING_LIMIT_MS, PULL_LIMIT_MS, PULL_REASONS, settingsOf, STUCK_MS, type KubeSettings } from "./pods.ts";
-import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, WS_CONTAINER } from "./workspace-pods.ts";
-import { describeHeader, execInWorkspace, execWs, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
+import { CREATE_TRIES, LIST_GRACE_MS, PENDING_LIMIT_MS, PULL_LIMIT_MS, PULL_REASONS, settingsOf, STUCK_MS, type KubeSettings } from "./pods.ts";
+import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER } from "./workspace-pods.ts";
+import { describeHeader, execInWorkspace, execWs, getWorkspace, limitsOf, LIVE_STATES, moveWorkspace, POD_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WorkspaceStateName, type WsCallResult } from "./workspaces.ts";
 
 export const SEED_LIMIT_MS = 10 * 60_000;
 export const IDLE_PARK_MS = 30 * 60_000;
 export const CHECKPOINT_EVERY_MS = 10 * 60_000;
 /** A parked workspace's volume is deleted after this long; the checkpoint stays, and a resume rebuilds from base plus checkpoint. */
 export const PARKED_VOLUME_MS = 60 * 60_000;
+/** A parked workspace whose volume is gone ends this long after it parked; the checkpoint stays on the row. */
+export const PARKED_END_MS = 24 * 3600_000;
 export const MAX_SOURCE_BYTES = 512 * 1024 ** 2;
 export const MAX_CHECKPOINT_BYTES = 5 * 1024 ** 2;
 /** The toolchain image workspace pods run. */
@@ -32,7 +33,12 @@ export const WORKSPACE_TOOLCHAIN = "rust-stable";
 const CREATE_BACKOFF_MS = 60_000;
 const CHECKPOINT_FILE = "/work/.ws/checkpoint.diff";
 // The diff is cut one byte past the cap, so an oversized one shows as such; head stopping early makes git's status 141.
+// It works on a copy of the index, so the session's index and its lock are never touched.
 const CHECKPOINT_SH = `set -e
+GIT_INDEX_FILE=/work/.ws/ckpt.index
+export GIT_INDEX_FILE
+rm -f "$GIT_INDEX_FILE" "$GIT_INDEX_FILE.lock"
+cp .git/index "$GIT_INDEX_FILE" 2>/dev/null || :
 git add -A -N
 { git diff --binary --no-ext-diff --no-textconv "$1"; echo $? >/work/.ws/checkpoint.rc; } | head -c ${MAX_CHECKPOINT_BYTES + 1} >/work/.ws/checkpoint.tmp
 rc=$(cat /work/.ws/checkpoint.rc)
@@ -73,7 +79,7 @@ export async function workspacePass(d: LauncherDeps, state: WorkspaceState): Pro
 }
 
 const liveRows = async (c: Ctx) =>
-  await c.d.db.all(c.d.db.k.selectFrom("workspaces").select(cols("workspaces")).where("env_id", "=", c.env.id).where("state", "in", LIVE_STATES).orderBy("id"));
+  await c.d.db.all(c.d.db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).where("env_id", "=", c.env.id).where("state", "in", LIVE_STATES).orderBy("id"));
 
 async function envPass(c: Ctx): Promise<void> {
   const { api, s } = c;
@@ -130,33 +136,66 @@ async function fail(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
   if (w.pvc) await c.api.deletePvc(c.s.namespace, w.pvc).catch(() => {});
 }
 
-/** Creates the volume and pod of a requested workspace. False when the environment should wait before the next create. */
-async function start(c: Ctx, w: WorkspaceRow): Promise<boolean> {
+type Images = { appImage: string; toolchainImage: string };
+
+/** The images a workspace pod needs, or why the environment cannot start one. */
+function imagesOf(c: Ctx): Images | string {
   const appImage = c.s.image ?? c.d.defaultImage;
   const toolchainImage = c.s.toolchainImages[WORKSPACE_TOOLCHAIN];
-  const missing = !appImage ? "No AutoCraft image is known for workspace pods: set AUTOCRAFT_IMAGE on the runner or the environment's image"
-    : !toolchainImage ? `The environment has no ${WORKSPACE_TOOLCHAIN} toolchain image for workspace pods` : null;
-  if (missing || !appImage || !toolchainImage) {
-    await fail(c, w, missing!);
+  if (!appImage) return "No AutoCraft image is known for workspace pods: set AUTOCRAFT_IMAGE on the runner or the environment's image";
+  if (!toolchainImage) return `The environment has no ${WORKSPACE_TOOLCHAIN} toolchain image for workspace pods`;
+  return { appImage, toolchainImage };
+}
+
+/** Starts a requested workspace. False when the environment should wait before the next create. */
+async function start(c: Ctx, w: WorkspaceRow): Promise<boolean> {
+  const images = imagesOf(c);
+  if (typeof images === "string") {
+    await fail(c, w, images);
     return true;
   }
   const name = workspaceName(w.id);
-  if (!await moveWorkspace(c.d.db, w.id, ["requested"], "starting", { pod: name, pvc: name, error: null }, c.now())) return true;
-  const exists = (e: unknown) => {
-    // A create that answered with an error may still have made the object; the name is the workspace's own.
-    if (!(e instanceof KubeError && e.status === 409)) throw e;
-  };
+  if (!await moveWorkspace(c.d.db, w.id, ["requested"], "starting", { pod: name, pvc: name, create_tries: 0, error: null }, c.now())) return true;
+  return await create(c, { ...w, state: "starting", pod: name, pvc: name, create_tries: 0 }, images);
+}
+
+/** A pod of the same name is still being deleted: the create is tried again once it is gone. */
+class PodDeleting extends Error {}
+
+/**
+ * Creates the volume and pod of a starting workspace, counting the try. The row keeps its pod and volume names whatever
+ * happens, so the sweep leaves objects a failed create may still have made. False after a failure.
+ */
+async function create(c: Ctx, w: WorkspaceRow, images: Images): Promise<boolean> {
+  const { db } = c.d;
+  const ns = c.s.namespace;
+  const tries = w.create_tries + 1;
+  const at = new Date(c.now()).toISOString();
+  await db.run(db.k.updateTable("workspaces").set({ create_tries: tries, pod_created_at: at, updated_at: at }).where("id", "=", w.id).where("state", "=", "starting"));
+  // A create that answered with an error may still have made the object; the name is the workspace's own.
+  const conflict = (e: unknown) => e instanceof KubeError && e.status === 409;
   try {
-    await c.api.createPvc(c.s.namespace, workspacePvcSpec(c.s, c.env.id, w.id)).catch(exists);
-    await c.api.createPod(c.s.namespace, workspacePodSpec({ s: c.s, envId: c.env.id, id: w.id, appImage, toolchainImage, limits: limitsOf(w) })).catch(exists);
-    c.d.log(`workspace launcher: workspace ${w.id} (${w.repo}@${w.base_sha.slice(0, 8)}) starting on ${c.env.id}`);
+    await c.api.createPvc(ns, workspacePvcSpec(c.s, c.env.id, w.id)).catch((e: unknown) => {
+      if (!conflict(e)) throw e;
+    });
+    await c.api.createPod(ns, workspacePodSpec({ s: c.s, envId: c.env.id, id: w.id, ...images, limits: limitsOf(w) })).catch(async (e: unknown) => {
+      if (!conflict(e)) throw e;
+      const old = (await c.api.listPods(ns, workspaceSelector(w.id))).find((p) => p.metadata.name === w.pod);
+      if (old?.metadata.deletionTimestamp) throw new PodDeleting();
+    });
+    c.d.log(`workspace launcher: workspace ${w.id} (${w.repo}@${w.base_sha.slice(0, 8)}) starting on ${c.env.id}${tries > 1 ? ` (try ${tries})` : ""}`);
     return true;
   } catch (e) {
-    // Quota, rate limits or an API error: back in the queue, with the volume kept for the next try.
+    if (e instanceof PodDeleting) {
+      c.d.log(`workspace launcher: workspace ${w.id}: an earlier pod of the same name is still being deleted; creating again later`);
+      return true;
+    }
+    // Quota, rate limits or an API error: tried again on a later pass, up to CREATE_TRIES.
     const why = `The workspace pod could not be created: ${errText(e)}`;
-    await moveWorkspace(c.d.db, w.id, ["starting"], "requested", { pod: null, error: why.slice(0, 300) }, c.now());
     c.state.backoff.set(c.env.id, c.now() + CREATE_BACKOFF_MS);
-    c.d.log(`workspace launcher: workspace ${w.id}: ${why}`);
+    c.d.log(`workspace launcher: workspace ${w.id}: ${why} (try ${tries} of ${CREATE_TRIES})`);
+    if (tries >= CREATE_TRIES) await fail(c, w, why);
+    else await db.run(db.k.updateTable("workspaces").set({ error: why.slice(0, 300) }).where("id", "=", w.id).where("state", "=", "starting"));
     return false;
   }
 }
@@ -175,14 +214,23 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
       await c.api.deletePvc(c.s.namespace, w.pvc);
       await c.d.db.run(c.d.db.k.updateTable("workspaces").set({ pvc: null, updated_at: new Date(now).toISOString() }).where("id", "=", w.id).where("state", "=", "parked"));
       c.d.log(`workspace launcher: workspace ${w.id}: parked volume deleted after ${PARKED_VOLUME_MS / 60_000} min; the checkpoint stays`);
+    } else if (!w.pvc && age > PARKED_END_MS) {
+      // TODO(W7): end a parked workspace when its item closes, and keep it while the item is open.
+      if (await moveWorkspace(c.d.db, w.id, ["parked"], "ended", {}, now)) c.d.log(`workspace launcher: workspace ${w.id} ended after ${PARKED_END_MS / 3600_000} h parked; the checkpoint stays`);
     }
     return;
   }
   if (!POD_STATES.includes(w.state as WorkspaceStateName)) return;
   const pod = pods.find((p) => p.metadata.name === w.pod);
   if (!pod) {
-    if (w.state === "starting" && age < LIST_GRACE_MS) return;
-    return lost(c, w, "The workspace pod disappeared (deleted, or its node went away)");
+    if (w.state !== "starting") return lost(c, w, "The workspace pod disappeared (deleted, or its node went away)");
+    // Not made, or gone before it started (a failed create, an old pod of the same name deleted meanwhile): create again.
+    if (now - Date.parse(w.pod_created_at ?? w.state_at) < LIST_GRACE_MS) return;
+    if (w.create_tries >= CREATE_TRIES) return fail(c, w, `The workspace pod could not be created in ${CREATE_TRIES} tries${w.error ? `: ${w.error}` : ""}`);
+    const images = imagesOf(c);
+    if (typeof images === "string") return fail(c, w, images);
+    await create(c, w, images);
+    return;
   }
   const deleting = pod.metadata.deletionTimestamp;
   if (deleting) {
@@ -228,12 +276,19 @@ async function advance(c: Ctx, w: WorkspaceRow, pods: KPod[]): Promise<void> {
   }
   // ready
   const lastCall = Math.max(Date.parse(w.state_at), w.last_call_at ? Date.parse(w.last_call_at) : 0);
-  if (now - lastCall > IDLE_PARK_MS) return background(c, w.id, () => park(c, w.id));
+  if (now - lastCall > IDLE_PARK_MS && !await callRunning(c, w.id, now)) return background(c, w.id, () => park(c, w.id));
   const lastCheckpoint = Math.max(Date.parse(w.state_at), w.checkpoint_at ? Date.parse(w.checkpoint_at) : 0, c.state.checkpointTried.get(w.id) ?? 0);
   if (now - lastCheckpoint > CHECKPOINT_EVERY_MS) {
     c.state.checkpointTried.set(w.id, now);
     background(c, w.id, async () => void await checkpoint(c, w.id));
   }
+}
+
+/** Whether a call is running in the workspace within its time limit (plus CALL_GRACE_MS); a row past it no longer holds the pod. */
+async function callRunning(c: Ctx, id: number, now: number): Promise<boolean> {
+  const { db } = c.d;
+  return !!await db.get(db.k.selectFrom("workspace_calls").select(["id"]).where("workspace_id", "=", id).where("state", "=", "running")
+    .where("deadline_at", ">", new Date(now).toISOString()).limit(1));
 }
 
 /** The pod went away. A ready workspace keeps its volume and checkpoint (parked, for a resume); an earlier one failed. */
@@ -284,7 +339,7 @@ const untarCommit = (r: WsCallResult): string | null => (r.header?.kind === "ok"
 
 async function seed(c: Ctx, id: number): Promise<void> {
   const { db } = c.d;
-  const w = await db.get(db.k.selectFrom("workspaces").select(cols("workspaces")).where("id", "=", id));
+  const w = await getWorkspace(db, id);
   if (!w || w.state !== "seeding") return;
   const deadline = Date.parse(w.state_at) + SEED_LIMIT_MS;
   try {

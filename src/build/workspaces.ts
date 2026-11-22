@@ -3,7 +3,6 @@
 // session, and records the call in workspace_calls. Output from the pod is untrusted: it is decoded as UTF-8 with
 // replacement and stripped of control characters before it is stored or printed.
 import type { Db } from "../db/index.ts";
-import { cols } from "../db/kx.ts";
 import { BuildError } from "./envs.ts";
 import { KubeError, type ExecOptions, type ExecResult, type KubeApi } from "./kube-api.ts";
 import { settingsOf } from "./pods.ts";
@@ -21,8 +20,18 @@ export const MAX_CALL_OUTPUT = 64 * 1024;
 const SHA = /^[0-9a-f]{40}$/;
 const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 
-export const getWorkspace = async (db: Db, id: number) => await db.get(db.k.selectFrom("workspaces").select(cols("workspaces")).where("id", "=", id));
+/** Every column but the checkpoint, which only a resume and `workspace show` read. */
+export const WORKSPACE_COLUMNS = [
+  "id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits",
+  "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at",
+] as const;
+export const getWorkspace = async (db: Db, id: number) => await db.get(db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).where("id", "=", id));
 export type WorkspaceRow = NonNullable<Awaited<ReturnType<typeof getWorkspace>>>;
+export const getCheckpoint = async (db: Db, id: number): Promise<Uint8Array | null> =>
+  (await db.get(db.k.selectFrom("workspaces").select(["checkpoint"]).where("id", "=", id)))?.checkpoint ?? null;
+
+/** A running call holds the pod until this long past its own time limit. */
+export const CALL_GRACE_MS = 30_000;
 
 export const limitsOf = (w: { limits: string }): WorkspaceLimits => {
   try {
@@ -98,6 +107,15 @@ export function cleanOutput(b: Uint8Array): string {
 export const describeHeader = (h: WsHeader | null): string =>
   !h ? "no helper header" : h.kind === "error" ? `${h.code}: ${h.message}` : h.kind === "status" ? `${h.state}${h.exit !== null ? ` ${h.exit}` : ""} after ${h.ms} ms` : h.kind === "started" ? `started ${h.n}` : `ok ${h.fields.join(" ")}`;
 
+/** A copy of `v` small enough to store: strings, arrays and nesting cut, so its JSON is always whole. */
+export function capJson(v: unknown, depth = 0): unknown {
+  if (typeof v === "string") return v.length > 2000 ? `${v.slice(0, 2000)}…` : v;
+  if (v === null || typeof v === "number" || typeof v === "boolean") return v;
+  if (depth >= 4 || typeof v !== "object") return null;
+  if (Array.isArray(v)) return v.slice(0, 40).map((x) => capJson(x, depth + 1));
+  return Object.fromEntries(Object.entries(v).slice(0, 40).map(([k, x]) => [k.slice(0, 100), capJson(x, depth + 1)]));
+}
+
 // ---- exec ----------------------------------------------------------------------
 
 /** The namespace and pod of a workspace whose pod is up, after checking that the pod labelled with its id is the one the row names. */
@@ -150,17 +168,22 @@ export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o
     n = Number(r!.next_call) - 1;
   }
   const full = n === null ? [WS_POD_PATH, ...argv] : [WS_POD_PATH, "run", String(n), ...argv.slice(1)];
-  const args = JSON.stringify(o.args ?? { argv: argv.slice(0, 40) }).slice(0, 16_384);
+  const args = JSON.stringify(capJson(o.args ?? { argv }));
+  const deadline = new Date(now() + o.timeoutMs + CALL_GRACE_MS).toISOString();
   let callId = o.row;
   if (callId === undefined) {
-    const r = await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, n, tool: o.tool, args, state: "running", created_at: iso(), started_at: iso() }).returning("id"));
+    const r = await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, n, tool: o.tool, args, state: "running", created_at: iso(), started_at: iso(), deadline_at: deadline }).returning("id"));
     callId = Number(r!.id);
   } else {
-    await db.run(db.k.updateTable("workspace_calls").set({ n, state: "running", started_at: iso() }).where("id", "=", callId).where("workspace_id", "=", id));
+    await db.run(db.k.updateTable("workspace_calls").set({ n, state: "running", started_at: iso(), deadline_at: deadline }).where("id", "=", callId).where("workspace_id", "=", id));
   }
+  const touch = async () => {
+    if (o.touch) await db.run(db.k.updateTable("workspaces").set({ last_call_at: iso(), updated_at: iso() }).where("id", "=", id));
+  };
+  await touch();
   const finish = async (state: "done" | "failed", result: object) => {
     await db.run(db.k.updateTable("workspace_calls").set({ state, result: JSON.stringify(result), finished_at: iso() }).where("id", "=", callId!));
-    if (o.touch) await db.run(db.k.updateTable("workspaces").set({ last_call_at: iso(), updated_at: iso() }).where("id", "=", id));
+    await touch();
   };
   let r: ExecResult;
   try {

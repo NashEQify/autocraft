@@ -11,9 +11,8 @@ import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
-import { cols } from "../db/kx.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
+import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
@@ -293,7 +292,7 @@ async function workspace(args: string[]): Promise<void> {
     console.log(`workspace ${id} requested on ${envId}`);
   } else if (sub === "list") {
     const { opt } = options(rest, ["all"]);
-    let q = db.k.selectFrom("workspaces").select(cols("workspaces")).orderBy("id", "desc").limit(50);
+    let q = db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).orderBy("id", "desc").limit(50);
     if (!opt.has("all")) q = q.where("state", "in", LIVE_STATES);
     for (const w of await db.all(q)) console.log(line(w));
   } else if (sub === "show") {
@@ -301,7 +300,8 @@ async function workspace(args: string[]): Promise<void> {
     console.log(line(w));
     console.log(`base ${w.base_sha}${w.base_commit ? ` (in the pod ${w.base_commit})` : ""}${w.app ? `  app ${safe(w.app)}` : ""}  limits ${w.limits}`);
     console.log(`pod ${w.pod ?? "-"}  volume ${w.pvc ?? "-"}  since ${w.state_at}${w.last_call_at ? `  last call ${w.last_call_at}` : ""}${w.ended_at ? `  ended ${w.ended_at}` : ""}`);
-    console.log(`checkpoint ${w.checkpoint ? `${w.checkpoint.length} bytes at ${w.checkpoint_at}` : "none"}`);
+    const size = (await db.get(db.k.selectFrom("workspaces").select((eb) => eb.fn<number | null>("length", ["checkpoint"]).as("bytes")).where("id", "=", w.id)))?.bytes;
+    console.log(`checkpoint ${size != null ? `${size} bytes at ${w.checkpoint_at}` : "none"}`);
     if (w.error) console.log(`error: ${safe(w.error)}`);
     const calls = await db.all(db.k.selectFrom("workspace_calls").select(["id", "n", "tool", "state", "created_at", "finished_at", "result"]).where("workspace_id", "=", w.id).orderBy("id", "desc").limit(10));
     for (const c of calls.reverse()) {

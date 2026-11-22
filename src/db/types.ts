@@ -2123,6 +2123,7 @@ export interface WorkspaceCalls {
   result: string | null;
   created_at: string;
   started_at: string | null;
+  deadline_at: string | null;
   finished_at: string | null;
 }
 
@@ -2136,6 +2137,8 @@ export interface Workspaces {
   state: Generated<string>;
   state_at: string;
   pod: string | null;
+  pod_created_at: string | null;
+  create_tries: Generated<number>;
   pvc: string | null;
   node: string | null;
   limits: Generated<string>;
@@ -2681,6 +2684,6 @@ export const COLUMNS = {
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
-  workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "finished_at"],
-  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at"],
+  workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at"],
+  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at"],
 } as const;

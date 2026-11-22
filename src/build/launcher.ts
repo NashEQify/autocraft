@@ -12,7 +12,7 @@ import { envVar } from "../env.ts";
 import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
 import { inClusterApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
 import {
-  DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
+  DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   PULL_REASONS, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, toolchainImage, uploadPod, uploadStage,
   type KubeSettings, type PodCtx, type Prepared,
 } from "./pods.ts";
@@ -24,8 +24,7 @@ import { cols } from "../db/kx.ts";
 export const PASS_MS = 5000;
 /** Beyond a deadline Kubernetes should have enforced, the runner gives up on the pod itself. */
 export const DEADLINE_MARGIN_MS = 5 * 60_000;
-/** Failed creates of a stage's pod are retried with backoff (15 s doubling, at most 5 min) up to this many times or this long. */
-export const CREATE_TRIES = 6;
+/** Failed creates of a stage's pod are retried with backoff (15 s doubling, at most 5 min) up to CREATE_TRIES times or this long. */
 export const CREATE_GIVE_UP_MS = 15 * 60_000;
 const ACCESS_EVERY_MS = 60_000;
 const CREATE_BACKOFF_MS = 60_000;
