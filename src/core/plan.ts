@@ -170,6 +170,8 @@ export type PrFacts = {
     mainRed: boolean;
     /** Issue implementations are approved for the repo: the gate of an implementation PR's revisions. */
     fixIssueApproved?: boolean;
+    /** The repo's `implement` build feature is on (src/build/features.ts): the switch of an implementation PR's revisions and of the end of its attempt. */
+    implementOn: boolean;
   };
 
   review: ReviewFacts | null;

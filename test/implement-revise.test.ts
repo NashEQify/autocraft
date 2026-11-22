@@ -1,8 +1,10 @@
 // Our implementation PRs go back to their session: a take-fix review and red CI plan implement{revise} for the PR's issue
-// instead of the fix-up and the CI fix; a conflict still goes to the conflict step, and a head is revised once.
+// instead of the fix-up and the CI fix; a conflict still goes to the conflict step, and a head is revised once. While the repo's
+// Implement feature is off the PR waits on it, and a PR that closed ends its attempt from the PR side.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { decidePr } from "../src/core/decide.ts";
+import { decidePr, implementOffWait } from "../src/core/decide.ts";
+import { loadPrFacts } from "../src/core/facts.ts";
 import { prFacts } from "./world.ts";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -36,9 +38,32 @@ test("an implementation PR's review fixes and red CI go to its session; a confli
   assert.ok(conflict.includes("conflict:merge"), conflict.join());
   assert.ok(!conflict.some((k) => k.startsWith("implement")), conflict.join());
 
-  // A head the session already revised waits for its push, and a revision that is running or stuck plans nothing new.
+  // A head the session already revised waits for its push, a revision that started goes on from the PR (its issue may be
+  // closed or held), and a stuck one plans nothing new.
   assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, revisedHeads: ["h1"] } }).some((k) => /^(fixup|implement)/.test(k)));
-  for (const state of ["revising", "stuck"]) assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, state } }).some((k) => /^(fixup|implement)/.test(k)), state);
+  assert.deepEqual(kinds({ ...takeFix, implementation: { ...ours.implementation, state: "revising", revisedHeads: ["h1"] } }).filter((k) => /^(fixup|implement)/.test(k)), ["implement:revise#7"]);
+  assert.ok(!kinds({ ...takeFix, implementation: { ...ours.implementation, state: "stuck" } }).some((k) => /^(fixup|implement)/.test(k)));
+});
+
+test("an implementation PR waits on the Implement switch while it is off, and on a revision in progress instead of merging", () => {
+  const takeFix = { review: { verdict: "take-fix" as const, fixes: 2 }, fixup: { fixes: 2, attempts: 0, recorded: [] as string[] } };
+  const off = decidePr(prFacts({ ...takeFix, implementation: { issue: 7, state: "pr-opened", revisedHeads: [] }, repoFacts: { implementOn: false } }));
+  assert.ok(!off.actions.some((a) => a.kind === "implement"), JSON.stringify(off.actions));
+  assert.equal(off.wait, implementOffWait("app"));
+  // A ready PR whose session is revising it is not merged meanwhile: it waits on the revision.
+  const revising = decidePr(prFacts({ implementation: { issue: 7, state: "revising", revisedHeads: ["h1"] } }));
+  assert.ok(!revising.eligible && !revising.actions.some((a) => a.kind === "merge"), JSON.stringify(revising.actions));
+  assert.match(revising.wait ?? "", /revision for #7/);
+});
+
+test("a closed, unmerged implementation PR whose issue is closed too still ends its attempt, with Implement off", async () => {
+  const w = await (await (await (await world()).repo()).pr(1)).issue(2);
+  const impl = await startImplementation(w.db, { repo: "app", number: 2, queuedBy: "op", textHash: "t" });
+  await setImplementationState(w.db, impl.id, "pr-opened", { prNumber: 1 });
+  await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "in", [1, 2]));
+  const f = (await loadPrFacts(w.db)).find((x) => x.number === 1);
+  assert.ok(f, "the closed PR of a live implementation is loaded");
+  assert.ok(decidePr(f).actions.some((a) => a.kind === "implement" && a.params?.bucket === "revise" && a.params?.issue === 2));
 });
 
 test("a revision after a base merge keeps main's change, also in the revision after it and with the cache made again", async () => {

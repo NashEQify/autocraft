@@ -40,7 +40,7 @@ function randomPr(x: Rnd): PrFacts {
     needsDecisionFlag: x.bool(0.1), scopeAnswer: x.pick([null, null, null, "take", "small-extra", "close"]),
     inScope: x.bool(0.9), integration: x.bool(0.05), batchPr: x.bool(0.05), heldBacklog: x.bool(0.05), heldDuplicate: x.bool(0.05), mergeHeld: x.bool(0.1),
     authorIsPipeline: x.bool(0.1), pipelineOn: x.bool(0.9),
-    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1) },
+    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1), implementOn: x.bool(0.8) },
     ci: x.pick(["success", "success", "success", "failure", "pending", "none", "unknown"]),
     mergeable: x.pick(["MERGEABLE", "MERGEABLE", "MERGEABLE", "CONFLICTING", "UNKNOWN"]),
     checksHere: x.bool(0.9), checksOpen: x.bool(0.9), pushable: x.bool(0.7), inActiveBatch: x.bool(0.1), mainFix: x.bool(0.05), baseOffDefault: x.bool(0.05), stackedOn: x.bool(0.05) ? 1 : null,
@@ -164,8 +164,10 @@ function checkItem(f: ItemFacts): void {
   if (!f.open) assert.ok(p.actions.every((a) => a.kind === "act" && !a.params?.ask), "action for a closed item other than its close");
   if (!f.pipelineOn) for (const a of p.actions) assert.ok(gates(f, asWant(a), "pipeline"), `${label(a)} passes the gates with the pipeline off`);
   for (const a of writes) if (a.kind === "implement") assert.equal(f.kind, "issue", "implement for a PR");
-  // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on.
-  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && f.implement.featureOn, "implement for an issue not queued by a settler or with Implement off");
+  // Implement runs only for an issue queued by someone who settles on the repo, with the repo's Implement switch on; ending
+  // an attempt whose PR merged or closed is bookkeeping and needs no switch.
+  const ending = f.implement.row?.state === "pr-opened" && !f.implement.row.prOpen;
+  if (p.actions.some((a) => a.kind === "implement")) assert.ok(f.implement.queuedBy !== null && f.implement.settles && (f.implement.featureOn || ending), "implement for an issue not queued by a settler or with Implement off");
 }
 
 test("safety invariants hold on random facts", () => {
