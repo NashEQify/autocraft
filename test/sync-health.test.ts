@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { computeChecks, serveChecks } from "../src/health-checks.ts";
 import { GithubError, reconcileNext, runSync } from "../src/mirror.ts";
-import { reloadOwners } from "../src/owners.ts";
+import { reloadRepoOwners } from "../src/repos.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
 import { excluded } from "../src/db/kx.ts";
@@ -89,7 +89,7 @@ async function recoveryScenarios(): Promise<void> {
     { key: "org_high_water", value: "2026-11-02T10:00:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
   ]));
   await db2.run(db2.k.insertInto("sync_repo_errors").values({ repo: "c", kind: "transient", message: "x", moved_to: "", since: "2026-11-02T08:30:00Z", at: "2026-11-02T10:00:00Z" }));
-  await reloadOwners(db2);
+  await reloadRepoOwners(db2);
   const c2 = {
     spent: 0, remaining: 4000 as number | null,
     async query(query: string, v: Record<string, unknown>) {

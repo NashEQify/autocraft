@@ -2,7 +2,7 @@
 import { audit } from "../dash/audit.ts";
 import { clearAskedStage } from "../decisions.ts";
 import { holdDecisionId, mergeDecisionId, type QueueEntry } from "./queue.ts";
-import { openGroupExpr } from "../core/rules.ts";
+import { openGroupExpr } from "../core/rule-queries.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 

@@ -14,7 +14,8 @@ import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, privateStepExpr } from "../src/build/
 import { MANUAL_ONLY_KEY, manualExpr, manualSql } from "../src/remote/manual-only.ts";
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
-import { OPEN_GROUP_SQL, openGroupExpr, UNSURE_AT_SQL, unsureAtQuery } from "../src/core/rules.ts";
+import { OPEN_GROUP_SQL, UNSURE_AT_SQL } from "../src/core/rules.ts";
+import { openGroupExpr, unsureAtQuery } from "../src/core/rule-queries.ts";
 import { currentHeadExpr } from "../src/verify/results.ts";
 import { ADOPTABLE_CALL, EARLIER_RUN_CALL, KEPT_RUNS, RESUMING_JOBS, adoptableCallExpr, earlierRunCallExpr, keptRunsExpr, resumingJobsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";

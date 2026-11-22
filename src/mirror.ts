@@ -6,7 +6,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { trackedNames } from "./repos.ts";
+import { reloadRepoOwners, trackedNames } from "./repos.ts";
 import { audit } from "./dash/audit.ts";
 import { hashColumns } from "./itemhash.ts";
 import { textRefs } from "./fixissue/candidates.ts";
@@ -15,7 +15,7 @@ import { mentionNames, rememberSlug } from "./github/slugs.ts";
 import { appSlug } from "./github/identity.ts";
 import { envVar } from "./env.ts";
 import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/read.ts";
-import { DEFAULT_OWNER, reloadOwners, ownerOf, slugOf } from "./owners.ts";
+import { DEFAULT_OWNER, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Expression, Insertable } from "kysely";
@@ -770,7 +770,7 @@ async function refreshRepoList(db: Db, client: Querier): Promise<string[]> {
       await failRepo(db, client, r.name, new GithubError(`the name is known under another owner than ${r.owner}`, 0, "NOT_FOUND"));
     }
   }
-  await reloadOwners(db);
+  await reloadRepoOwners(db);
   // A repo the listing shows exists again: its not-found record is stale.
   for (const r of repos) await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", r.name).where("kind", "=", "not-found"));
   await setSetting(db, "repos_refreshed_at", iso(new Date()));

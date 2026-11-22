@@ -32,7 +32,7 @@ export async function trackRepo(db: Db, by: string, input: string): Promise<bool
     throw new RepoError(`${name} is already known under ${known.owner}; repo names are unique across owners.`);
   }
   if (!known) await db.run(db.k.insertInto("main.repos").values({ name, owner }));
-  await reloadOwners(db);
+  await reloadRepoOwners(db);
   const r = await db.run(db.k.insertInto("main.tracked_repos").values({ name, added_by: by, added_at: new Date().toISOString() })
     .onConflict((oc) => oc.doNothing()));
   if (r.changes) {
@@ -205,3 +205,15 @@ export const commands = {
     },
   },
 };
+
+/** reloadOwners() from the `repos` table, after a write to it. */
+export async function reloadRepoOwners(db: Db): Promise<void> {
+  await reloadOwners(() => db.all(db.k.selectFrom("main.repos").select(["name", "owner"])));
+}
+
+/** Every owner with a tracked repo, plus the default one. */
+export async function trackedOwners(db: Db): Promise<string[]> {
+  const rows = await db.all(db.k.selectFrom("main.tracked_repos as t").leftJoin("main.repos as r", "r.name", "t.name")
+    .select((eb) => eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER)).as("owner")).distinct());
+  return [...new Set([DEFAULT_OWNER, ...rows.map((r) => r.owner)])].sort();
+}

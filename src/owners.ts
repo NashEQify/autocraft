@@ -1,8 +1,6 @@
 // Owner (GitHub org or user) of each repo. Repo names are unique across owners, so items keep
 // the bare name as key; the owner is a property of the `repos` row. Repos without a row are storytold's.
 
-import type { Db } from "./db/index.ts";
-
 export type OwnerRow = { name: string; owner: string | null };
 
 export const DEFAULT_OWNER = "storytold";
@@ -23,10 +21,10 @@ export function loadOwners(read: () => OwnerRow[]): void {
   setOwners(read());
 }
 
-/** loadOwners() through the async handle, after a write to `repos`. The cache refreshes later from the connection loaded last. */
-export async function reloadOwners(db: Db): Promise<void> {
+/** loadOwners() with an async `read`, after a write to `repos` (reloadRepoOwners in repos.ts). The cache refreshes later from the reader loaded last. */
+export async function reloadOwners(read: () => Promise<OwnerRow[]>): Promise<void> {
   const mine = ++loads;
-  const rows = await db.all(db.k.selectFrom("main.repos").select(["name", "owner"]));
+  const rows = await read();
   if (mine === loads) setOwners(rows);
 }
 
@@ -57,13 +55,6 @@ export const slugOf = (repo: string): string => `${ownerOf(repo)}/${repo}`;
 export function splitSlug(s: string): { owner: string; name: string } {
   const i = s.indexOf("/");
   return i < 0 ? { owner: DEFAULT_OWNER, name: s } : { owner: s.slice(0, i), name: s.slice(i + 1) };
-}
-
-/** Every owner with a tracked repo, plus the default one. */
-export async function trackedOwners(db: Db): Promise<string[]> {
-  const rows = await db.all(db.k.selectFrom("main.tracked_repos as t").leftJoin("main.repos as r", "r.name", "t.name")
-    .select((eb) => eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER)).as("owner")).distinct());
-  return [...new Set([DEFAULT_OWNER, ...rows.map((r) => r.owner)])].sort();
 }
 
 /** Test hook: forgets the cached owners and the database. */
