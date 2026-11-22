@@ -125,23 +125,16 @@ async function done(db: Db, hidden: string[]): Promise<HomeDone[]> {
     chunk = [];
     return false;
   };
-  // The audit rows are read a page at a time in one snapshot, so the scan still stops early and no row repeats or is skipped.
-  return await db.read(async () => {
-    for (let offset = 0; ; offset += DONE_CHUNK) {
-      const page = await db.all(db.k.selectFrom("audit").select(["at", "action", "target"]).$narrowType<{ action: keyof typeof what }>()
-        .where("action", "in", ["merge", "act-close", "review-post"]).where((eb) => eb(kx.jsonText(db, "details", "$.state"), "=", "done"))
-        .orderBy("at", "desc").orderBy(kx.rowid("audit"), "desc").limit(DONE_CHUNK).offset(offset));
-      for (const a of page) {
-        const m = /^(.+)#(\d+)$/.exec(a.target ?? "");
-        if (!m || isHiddenRepo(hidden, m[1]!)) continue;
-        chunk.push({ at: a.at, action: a.action, repo: m[1]!, number: Number(m[2]) });
-        if (chunk.length === DONE_CHUNK && await flush()) return out;
-      }
-      if (page.length < DONE_CHUNK) break;
-    }
-    await flush();
-    return out;
-  });
+  for (const a of await db.all(db.k.selectFrom("audit").select(["at", "action", "target"]).$narrowType<{ action: keyof typeof what }>()
+    .where("action", "in", ["merge", "act-close", "review-post"]).where((eb) => eb(kx.jsonText(db, "details", "$.state"), "=", "done"))
+    .orderBy("at", "desc"))) {
+    const m = /^(.+)#(\d+)$/.exec(a.target ?? "");
+    if (!m || isHiddenRepo(hidden, m[1]!)) continue;
+    chunk.push({ at: a.at, action: a.action, repo: m[1]!, number: Number(m[2]) });
+    if (chunk.length === DONE_CHUNK && await flush()) return out;
+  }
+  await flush();
+  return out;
 }
 
 async function running(db: Db, hidden: string[]): Promise<string> {
