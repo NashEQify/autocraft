@@ -7,6 +7,7 @@ import { useUser } from "../../shell/UserContext";
 import { Facts, KindTag } from "../decisions/parts";
 import { Refs } from "../decisions/Refs";
 import { AnswerNotice } from "../decisions/AnswerNotice";
+import { resolveSelection } from "./selection";
 import { ChoiceGroup } from "./ChoiceGroup";
 import { canComment } from "../../registry/permissions";
 import { useFolded, useLocal } from "../decisions/state";
@@ -65,7 +66,7 @@ export function OpenQuestions({ ds, choices, updating, evidence }: { ds: Decisio
   const [sel, setSel] = useState<{ token: string; id: string | null }>(() => ({ token, id: link ?? firstId }));
   const requested = sel.token === token ? sel.id : link;
   const shown = (requested ? open.find((d) => d.id === requested) : undefined) ?? open[0];
-  const resolvedId = shown?.id ?? requested;
+  const resolvedId = resolveSelection(requested, shown?.id);
   useEffect(() => {
     if (sel.token !== token || sel.id !== resolvedId) setSel({ token, id: resolvedId });
   }, [sel.token, sel.id, token, resolvedId]);

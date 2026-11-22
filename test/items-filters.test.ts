@@ -2,6 +2,7 @@
 // other URL the list endpoint, and neither receives the other's keys.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { resolveSelection } from "../web/src/modules/item/selection.ts";
 import { itemFilter, parseBrowse, statusFilter } from "../web/src/modules/items/browseState.ts";
 
 const of = (search: string) => parseBrowse(search.startsWith("?") ? search.slice(1) : search);
@@ -34,4 +35,14 @@ test("a classification URL keeps its filters on the list endpoint and never gain
   assert.equal(filter.limit, 100);
   assert.equal(filter.offset, 100);
   assert.equal(Object.hasOwn(filter, "phase"), false);
+});
+
+test("the pinned question survives inserts and answers, comes back on Undo, and keeps a link not loaded yet", () => {
+  // A question inserted ahead of the pinned one does not move the selection.
+  assert.equal(resolveSelection("b", "b"), "b");
+  // Answering the pinned question keeps the selection on it, so Undo reopens it in front.
+  assert.equal(resolveSelection("a", "b"), "a");
+  assert.equal(resolveSelection(null, "b"), "b");
+  // A link to a decision that is not loaded yet is kept.
+  assert.equal(resolveSelection("later", "a"), "later");
 });

@@ -146,7 +146,7 @@ export function ItemExpansion({ facts, detail, loading, error, item, itemLoading
       <Section title="Links">
         {decisionError && <div className="mb-2">
           <ErrorLine error={`The decision could not be read: ${decisionError}`} />
-          {onRetryDecision && <Button type="button" variant="ghost" size="sm" onClick={onRetryDecision}>Retry decision</Button>}
+          {onRetryDecision && <Button type="button" variant="ghost" size="sm" className="max-md:h-11" onClick={onRetryDecision}>Retry decision</Button>}
         </div>}
         <p className="m-0 flex flex-wrap items-center gap-x-3 gap-y-1">
           <Link className="text-accent-ink hover:underline" to={fullHref(facts)}>Full item</Link>
