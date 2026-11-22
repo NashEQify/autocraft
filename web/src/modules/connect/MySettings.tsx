@@ -245,7 +245,7 @@ export function MySettings() {
           ))}
         </div>
         <div className="mt-2 text-sm text-ink/80">Tasks</div>
-        <div role="group" aria-label="My tasks" className="mt-1 rounded-md border border-line p-1 sm:max-w-md">
+        <div role="group" aria-label="Tasks" className="mt-1 rounded-md border border-line p-1 sm:max-w-md">
           <CheckRow checked={tasks.length === allTasks.length} onChange={(on) => saveTasks(on ? allTasks : [])} title="All tasks" />
           <div>
             {data.taskChoices.map((t) => {
