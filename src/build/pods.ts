@@ -18,6 +18,8 @@ export const DEFAULT_SETTINGS: KubeSettings = {
   namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981",
   cpuRequest: "2", cpuLimit: "4", memoryRequest: "4Gi", memoryLimit: "8Gi", ephemeralRequest: "4Gi", ephemeralLimit: "16Gi",
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
+  workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
+  workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi",
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -86,7 +88,13 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         out.workerUrl = v;
         break;
       case "cpuRequest": case "cpuLimit": case "memoryRequest": case "memoryLimit": case "ephemeralRequest": case "ephemeralLimit": case "storage":
+      case "workspaceCpuRequest": case "workspaceCpuLimit": case "workspaceMemoryRequest": case "workspaceMemoryLimit":
+      case "workspaceEphemeralRequest": case "workspaceEphemeralLimit": case "workspaceStorage":
         out[k] = checkQuantity(v, k);
+        break;
+      case "workspaceSlots":
+        if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > 200) throw new BuildError(400, "workspaceSlots must be 0 to 200");
+        out.workspaceSlots = v;
         break;
       case "storageClass":
         if (typeof v !== "string" || !/^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/.test(v)) throw new BuildError(400, "storageClass must be a storage class name");
@@ -112,7 +120,8 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         throw new BuildError(400, `settings.${k} cannot be set`);
     }
   }
-  for (const [req, lim] of [["cpuRequest", "cpuLimit"], ["memoryRequest", "memoryLimit"], ["ephemeralRequest", "ephemeralLimit"]] as const) {
+  for (const [req, lim] of [["cpuRequest", "cpuLimit"], ["memoryRequest", "memoryLimit"], ["ephemeralRequest", "ephemeralLimit"],
+    ["workspaceCpuRequest", "workspaceCpuLimit"], ["workspaceMemoryRequest", "workspaceMemoryLimit"], ["workspaceEphemeralRequest", "workspaceEphemeralLimit"]] as const) {
     if (quantity(out[req]) > quantity(out[lim])) throw new BuildError(400, `${req} must not exceed ${lim}`);
   }
   return out;
@@ -125,6 +134,22 @@ export function kubeCapabilities(s: KubeSettings): Capabilities {
     diskGb: Math.floor(quantity(s.storage) / 1024 ** 3), display: false, gpu: false, toolchains: Object.keys(s.toolchainImages).sort(),
   };
 }
+
+// ---- pod timing (build and workspace pods) -----------------------------------
+
+/** A pod not yet started after this long shows in the environment's health. */
+export const PENDING_WARN_MS = 3 * 60_000;
+/** A pod no node takes within this long is given up. */
+export const PENDING_LIMIT_MS = 15 * 60_000;
+/** An image that cannot be pulled for this long fails the pod. */
+export const PULL_LIMIT_MS = 3 * 60_000;
+/** A pod still being deleted after this long, or whose node has not reported for this long, is given up. */
+export const STUCK_MS = 5 * 60_000;
+/** Creates of a pod that fail (or whose pod vanishes before it starts) are tried at most this many times. */
+export const CREATE_TRIES = 6;
+/** A pod just created may be missing from a list for a moment. */
+export const LIST_GRACE_MS = 30_000;
+export const PULL_REASONS = new Set(["ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError"]);
 
 // ---- stages ------------------------------------------------------------------
 

@@ -12,34 +12,24 @@ import { envVar } from "../env.ts";
 import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
 import { inClusterApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
 import {
-  DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, kubeCapabilities, PACKAGES_CONTAINER, parsePrepared, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK,
-  stepCap, stepContainer, stepPod, taskPod, toolchainImage, uploadPod, uploadStage, type KubeSettings, type PodCtx, type Prepared,
+  DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
+  PULL_REASONS, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, toolchainImage, uploadPod, uploadStage,
+  type KubeSettings, type PodCtx, type Prepared,
 } from "./pods.ts";
+import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
 import { appendLog, claim, finishTask, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
 import { cols } from "../db/kx.ts";
 
 export const PASS_MS = 5000;
-/** A pod not yet started after this long shows in the environment's health. */
-export const PENDING_WARN_MS = 3 * 60_000;
-/** A pod no node takes within this long is given up (the task is lost). */
-export const PENDING_LIMIT_MS = 15 * 60_000;
-/** An image that cannot be pulled for this long fails the pod. */
-export const PULL_LIMIT_MS = 3 * 60_000;
-/** A pod still being deleted after this long, or whose node has not reported for this long, is given up. */
-export const STUCK_MS = 5 * 60_000;
 /** Beyond a deadline Kubernetes should have enforced, the runner gives up on the pod itself. */
 export const DEADLINE_MARGIN_MS = 5 * 60_000;
-/** Failed creates of a stage's pod are retried with backoff (15 s doubling, at most 5 min) up to this many times or this long. */
-export const CREATE_TRIES = 6;
+/** Failed creates of a stage's pod are retried with backoff (15 s doubling, at most 5 min) up to CREATE_TRIES times or this long. */
 export const CREATE_GIVE_UP_MS = 15 * 60_000;
-/** A pod just created may be missing from a list for a moment. */
-const LIST_GRACE_MS = 30_000;
 const ACCESS_EVERY_MS = 60_000;
 const CREATE_BACKOFF_MS = 60_000;
 /** Longest the task, source and upload pods may run. */
 const APP_POD_SEC = 30 * 60;
-const PULL_REASONS = new Set(["ErrImagePull", "ImagePullBackOff", "InvalidImageName", "ErrImageNeverPull", "CreateContainerConfigError", "CreateContainerError"]);
 
 type Run = {
   task_id: number; env_id: string; key_hash: string; pvc: string; stage: number; pod: string | null; pod_created_at: string | null;
@@ -432,16 +422,22 @@ async function finish(c: EnvCtx, run: Run, failed: string | null): Promise<void>
   await removeRun(c, run);
 }
 
-/** Runs passes until `signal` aborts. Started by the runner; a pass with no kubernetes environment reads one table. */
+/** Runs build-task and workspace passes until `signal` aborts. Started by the runner; a pass with no kubernetes environment reads one table. */
 export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string) => void): void {
   const deps: LauncherDeps = { db, api: inClusterApi(), defaultImage: envVar("IMAGE") ?? null, log };
   const state = new LauncherState();
+  const workspaces = new WorkspaceState();
   void (async () => {
     while (!signal.aborted) {
       try {
         await launcherPass(deps, state);
       } catch (e) {
         log(`pod launcher: ${(e as Error).stack ?? e}`);
+      }
+      try {
+        await workspacePass(deps, workspaces);
+      } catch (e) {
+        log(`workspace launcher: ${(e as Error).stack ?? e}`);
       }
       await sleep(PASS_MS, undefined, { signal }).catch(() => {});
     }

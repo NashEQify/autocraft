@@ -1,4 +1,5 @@
-// autocraft-server envs list | add | set | rotate-key, autocraft-server tasks list | show | cancel | enqueue-test
+// autocraft-server envs list | add | set | rotate-key, autocraft-server tasks list | show | cancel | enqueue-test,
+// autocraft-server workspace start | list | show | run | end (the operator's tools for workspace pods)
 // Recorded as `cli`: only someone with a shell on the host can run these. Worker keys go to a
 // file (mode 0600) and are printed only with --print. Text a worker sent is shown with control
 // characters removed, so it cannot drive the terminal.
@@ -10,6 +11,8 @@ import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { inClusterApi } from "./kube-api.ts";
+import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
@@ -18,12 +21,19 @@ const USAGE = `usage: autocraft-server envs list
          POD SETTINGS (kubernetes): --namespace NS  --image REF|runner  --toolchain-image NAME=REF|NAME=none  --worker-url URL
            --cpu-request Q --cpu-limit Q --memory-request Q --memory-limit Q --ephemeral-request Q --ephemeral-limit Q
            --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
+           --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
+           --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
-       autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA`;
+       autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA
+       autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
+       autocraft-server workspace list [--all]
+       autocraft-server workspace show <id>
+       autocraft-server workspace run <id> -- <command...>     (in the runner container: needs pods/exec)
+       autocraft-server workspace end <id>`;
 
 function die(msg: string): never {
   console.error(msg);
@@ -81,6 +91,9 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   namespace: "namespace", image: "image", "worker-url": "workerUrl", "cpu-request": "cpuRequest", "cpu-limit": "cpuLimit", "memory-request": "memoryRequest",
   "memory-limit": "memoryLimit", "ephemeral-request": "ephemeralRequest", "ephemeral-limit": "ephemeralLimit", storage: "storage", "storage-class": "storageClass",
   "deadline-sec": "deadlineSec", "max-step-sec": "maxStepSec", "runtime-class": "runtimeClassName", arch: "arch",
+  "workspace-slots": "workspaceSlots", "workspace-cpu-request": "workspaceCpuRequest", "workspace-cpu-limit": "workspaceCpuLimit",
+  "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
+  "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage",
 };
 
 /** The pod settings given as options, for a kubernetes environment; undefined when none is given. `--toolchain-image` merges into `current`. */
@@ -89,7 +102,7 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    out[key] = key === "deadlineSec" || key === "maxStepSec" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
+    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : (key === "image" && v === "runner") || (key === "runtimeClassName" && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
     const m = /^([^=]+)=(.+)$/.exec(opt.get("toolchain-image")!) ?? die("--toolchain-image takes NAME=REF or NAME=none");
@@ -104,7 +117,9 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
 const settingsLine = (s: KubeSettings): string =>
   `namespace ${s.namespace}, image ${s.image ?? "the runner's own"}, toolchains ${Object.entries(s.toolchainImages).map(([t, i]) => `${t}=${i}`).join(" ") || "none"}, ` +
   `cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit}, ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
-  `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}`;
+  `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
+  `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
+  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage})`;
 
 /** A yes|no option as a boolean; undefined when it is not given. */
 function yesNo(opt: Map<string, string>, name: string): boolean | undefined {
@@ -252,7 +267,70 @@ async function enqueueTest(db: Db, args: string[]): Promise<void> {
   console.log(`task ${id} queued`);
 }
 
+async function workspace(args: string[]): Promise<void> {
+  const [sub, ...rest] = args;
+  const db = await openDb();
+  const idOf = (v: string | undefined): number => {
+    const id = Number(v);
+    return Number.isInteger(id) && id > 0 ? id : die(USAGE);
+  };
+  const line = (w: WorkspaceRow) =>
+    `${String(w.id).padStart(5)} ${w.state.padEnd(9)} ${safe(w.repo).padEnd(16)} ${w.base_sha.slice(0, 8)} ${w.env_id.padEnd(12)} ${(w.node ?? "-").padEnd(14)} ${w.created_at.slice(0, 16)} ${safe(w.owner)}`;
+  if (sub === "start") {
+    const { pos, opt } = options(rest);
+    const [repo, sha] = pos;
+    if (!repo || !sha) die(USAGE);
+    if (!(await trackedNames(db)).includes(repo)) die(`${repo} is not a tracked repo`);
+    let envId = opt.get("env");
+    if (!envId) {
+      const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled);
+      if (k.length !== 1) die(`give --env: ${k.length ? `${k.length} kubernetes environments are enabled` : "no kubernetes environment is enabled"}`);
+      envId = k[0]!.id;
+    }
+    const deadline = opt.has("deadline-sec") ? Number(opt.get("deadline-sec")) : undefined;
+    const id = await run(async () => await createWorkspace(db, { repo, baseSha: sha, envId, app: opt.get("app") ?? null, ...(deadline !== undefined && { limits: { deadlineSec: deadline } }), owner: "cli" }));
+    console.log(`workspace ${id} requested on ${envId}`);
+  } else if (sub === "list") {
+    const { opt } = options(rest, ["all"]);
+    let q = db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).orderBy("id", "desc").limit(50);
+    if (!opt.has("all")) q = q.where("state", "in", LIVE_STATES);
+    for (const w of await db.all(q)) console.log(line(w));
+  } else if (sub === "show") {
+    const w = await getWorkspace(db, idOf(rest[0])) ?? die("no such workspace");
+    console.log(line(w));
+    console.log(`base ${w.base_sha}${w.base_commit ? ` (in the pod ${w.base_commit})` : ""}${w.app ? `  app ${safe(w.app)}` : ""}  limits ${w.limits}`);
+    console.log(`pod ${w.pod ?? "-"}  volume ${w.pvc ?? "-"}  since ${w.state_at}${w.last_call_at ? `  last call ${w.last_call_at}` : ""}${w.ended_at ? `  ended ${w.ended_at}` : ""}`);
+    const size = (await db.get(db.k.selectFrom("workspaces").select((eb) => eb.fn<number | null>("length", ["checkpoint"]).as("bytes")).where("id", "=", w.id)))?.bytes;
+    console.log(`checkpoint ${size != null ? `${size} bytes at ${w.checkpoint_at}` : "none"}`);
+    if (w.error) console.log(`error: ${safe(w.error)}`);
+    const calls = await db.all(db.k.selectFrom("workspace_calls").select(["id", "n", "tool", "state", "created_at", "finished_at", "result"]).where("workspace_id", "=", w.id).orderBy("id", "desc").limit(10));
+    for (const c of calls.reverse()) {
+      let summary = "";
+      try {
+        const r = JSON.parse(c.result ?? "{}") as { header?: WsHeader | null; error?: string };
+        summary = r.error ?? describeHeader(r.header ?? null);
+      } catch { /* not JSON */ }
+      console.log(`  call ${c.id}${c.n !== null ? ` (ws ${c.n})` : ""} ${safe(c.tool)} ${c.state} ${c.created_at.slice(11, 19)}  ${safe(summary)}`);
+    }
+  } else if (sub === "run") {
+    const id = idOf(rest[0]);
+    const sep = rest.indexOf("--");
+    const cmd = sep >= 0 ? rest.slice(sep + 1) : [];
+    if (sep !== 1 || !cmd.length) die(USAGE);
+    const api = inClusterApi() ?? die("this shell is not in the cluster: run it in the runner container, whose service account may exec in workspace pods");
+    const r = await run(async () => await execWs(db, api, id, ["run", "120", "--", ...cmd], { tool: "cli", args: { argv: cmd.slice(0, 40) }, timeoutMs: 130_000, touch: true }));
+    console.log(r.header ? `WS ${describeHeader(r.header)}${r.n !== null ? ` (call ${r.n})` : ""}` : "no helper header");
+    if (r.output) process.stdout.write(r.output.endsWith("\n") ? r.output : `${r.output}\n`);
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.error) console.error(`exec: ${r.error}`);
+  } else if (sub === "end") {
+    const id = idOf(rest[0]);
+    console.log(await endWorkspace(db, id) ? `workspace ${id} ended; the launcher deletes its pod and volume` : `workspace ${id} is not live`);
+  } else die(USAGE);
+}
+
 export const commands = {
   envs: { summary: "build environments: list | add <id> | set <id> | rotate-key <id>", run: async (args: string[]) => await envs(args) },
   tasks: { summary: "build tasks: list | show <id> | cancel <id> | mem | enqueue-test", run: async (args: string[]) => await tasks(args) },
+  workspace: { summary: "workspace pods: start <repo> <sha> | list | show <id> | run <id> -- <cmd> | end <id>", run: async (args: string[]) => await workspace(args) },
 };

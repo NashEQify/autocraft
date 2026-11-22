@@ -1055,6 +1055,51 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   retry_at TEXT,                      -- when the next create is tried
   started_at TEXT NOT NULL
 );
+
+-- A workspace: one session's pod and volume in a kubernetes environment (src/build/workspace-launch.ts). The row
+-- outlives both, so a lost volume can be rebuilt from the base plus the checkpoint.
+CREATE TABLE IF NOT EXISTS workspaces (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo TEXT NOT NULL,
+  base_sha TEXT NOT NULL,             -- the repository commit the source comes from
+  base_commit TEXT,                   -- the commit `ws untar` made of it in the pod; checkpoints diff against it
+  app TEXT,
+  env_id TEXT NOT NULL,
+  state TEXT NOT NULL DEFAULT 'requested', -- requested | starting | seeding | ready | parked | ended | failed
+  state_at TEXT NOT NULL,             -- when the row entered its state
+  pod TEXT,
+  pod_created_at TEXT,                -- the last create of the pod, failed or not
+  create_tries INTEGER NOT NULL DEFAULT 0, -- creates of the pod since it last started
+  pvc TEXT,                           -- null once deleted (a parked volume past its keep time)
+  node TEXT,                          -- where the volume lives (local-path pins it)
+  limits TEXT NOT NULL DEFAULT '{}',  -- JSON WorkspaceLimits
+  checkpoint BLOB,                    -- `git diff --binary` against base_commit, at most 5 MiB
+  checkpoint_at TEXT,
+  last_call_at TEXT,
+  next_call INTEGER NOT NULL DEFAULT 1, -- the next `ws run` call number
+  error TEXT,                         -- why it failed, or the last checkpoint problem
+  owner TEXT,                         -- what asked for it: `cli` or a job id
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE INDEX IF NOT EXISTS workspaces_env ON workspaces(env_id, state);
+
+-- Every exec in a workspace: the session's tool calls and the launcher's own seeding and checkpoints. Text is untrusted.
+CREATE TABLE IF NOT EXISTS workspace_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL,
+  n INTEGER,                          -- the `ws run` call number; null for other helper subcommands
+  tool TEXT NOT NULL,
+  args TEXT NOT NULL DEFAULT '{}',    -- JSON
+  state TEXT NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+  result TEXT,                        -- JSON: the helper's header and the cleaned, capped output
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  deadline_at TEXT,                   -- past this a call still marked running no longer keeps the pod from parking
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, id);
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);
 CREATE INDEX IF NOT EXISTS build_tasks_ended ON build_tasks(ended_at);
 
