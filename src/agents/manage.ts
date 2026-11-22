@@ -119,7 +119,7 @@ export async function signOut(db: Db, id: unknown, by: string): Promise<ClaudeAc
   const a = await dirOf(db, id);
   cancelLogin(a.id);
   await new Promise<void>((resolve) => {
-    execFile(claudeBin(), ["auth", "logout"], { timeout: 30_000, env: childEnv(a.configDir) }, () => resolve());
+    execFile(claudeBin(), ["auth", "logout"], { timeout: 30_000, env: childEnv(a.configDir), windowsHide: true }, () => resolve());
   });
   deleteToken(a.configDir);
   await recordTokenRemoved(db, a.id);
