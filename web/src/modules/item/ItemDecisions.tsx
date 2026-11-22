@@ -63,13 +63,14 @@ export function OpenQuestions({ ds, choices, updating, evidence }: { ds: Decisio
   const link = hashDecision(hash);
   const token = `${navKey}:${hash}`;
   const [sel, setSel] = useState<{ token: string; id: string | null }>(() => ({ token, id: link ?? firstId }));
-  useEffect(() => {
-    if (sel.token !== token || (sel.id === null && firstId !== null)) setSel({ token, id: link ?? firstId });
-  }, [sel.token, sel.id, token, link, firstId]);
-  const notices = loc.justAnswered.filter((a) => ds.some((d) => d.id === a.id));
-  if (!open.length && !notices.length) return null;
   const requested = sel.token === token ? sel.id : link;
   const shown = (requested ? open.find((d) => d.id === requested) : undefined) ?? open[0];
+  const resolvedId = shown?.id ?? requested;
+  useEffect(() => {
+    if (sel.token !== token || sel.id !== resolvedId) setSel({ token, id: resolvedId });
+  }, [sel.token, sel.id, token, resolvedId]);
+  const notices = loc.justAnswered.filter((a) => ds.some((d) => d.id === a.id));
+  if (!open.length && !notices.length) return null;
   const others = open.filter((d) => d !== shown);
   // A card is tall, so a swapped-in question is scrolled to its top rather than left half above the fold.
   const show = (id: string) => {
