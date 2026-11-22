@@ -57,18 +57,22 @@ const CHECKPOINT_FILE = "/work/.ws/checkpoint.diff";
 const RESUME_FILE = "/work/.ws/resume.diff";
 /** Grace past a background command's own limit before the launcher stops counting it as running (the helper's kill -k 5). */
 const BACKGROUND_GRACE_MS = 30_000;
-// The diff is cut one byte past the cap, so an oversized one shows as such; head stopping early makes git's status 141.
-// It works on a copy of the index, so the session's index and its lock are never touched.
-const CHECKPOINT_SH = `set -e
-GIT_INDEX_FILE=/work/.ws/ckpt.index
+/**
+ * The script that writes the workspace's diff against the commit in `$1` to `/work/.ws/<name>.diff`, with its own index copy and
+ * temporary files per name. `flags` go before the commit. The diff is cut one byte past the cap, so an oversized one shows as such;
+ * head stopping early makes git's status 141. It works on a copy of the index, so the session's index and its lock are never touched.
+ */
+export const diffScript = (name: string, flags = ""): string => `set -e
+GIT_INDEX_FILE=/work/.ws/${name}.index
 export GIT_INDEX_FILE
 rm -f "$GIT_INDEX_FILE" "$GIT_INDEX_FILE.lock"
 cp .git/index "$GIT_INDEX_FILE" 2>/dev/null || :
 git add -A -N
-{ git diff --binary --no-ext-diff --no-textconv "$1"; echo $? >/work/.ws/checkpoint.rc; } | head -c ${MAX_CHECKPOINT_BYTES + 1} >/work/.ws/checkpoint.tmp
-rc=$(cat /work/.ws/checkpoint.rc)
-[ "$rc" = 0 ] || [ "$(wc -c </work/.ws/checkpoint.tmp)" -gt ${MAX_CHECKPOINT_BYTES} ] || exit "$rc"
-mv /work/.ws/checkpoint.tmp ${CHECKPOINT_FILE}`;
+{ git diff --binary --no-ext-diff --no-textconv${flags ? ` ${flags}` : ""} "$1"; echo $? >/work/.ws/${name}.rc; } | head -c ${MAX_CHECKPOINT_BYTES + 1} >/work/.ws/${name}.tmp
+rc=$(cat /work/.ws/${name}.rc)
+[ "$rc" = 0 ] || [ "$(wc -c </work/.ws/${name}.tmp)" -gt ${MAX_CHECKPOINT_BYTES} ] || exit "$rc"
+mv /work/.ws/${name}.tmp /work/.ws/${name}.diff`;
+const CHECKPOINT_SH = diffScript("checkpoint");
 
 /** What is in flight between passes. */
 export class WorkspaceState {

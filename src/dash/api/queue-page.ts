@@ -24,6 +24,12 @@ import { readerOf, statusFor, veiledFor, type Reader } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import { flatMapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { audit } from "../audit.ts";
+import { applyAnswer } from "./decisions.ts";
+import { getDecision, optionsOf } from "../../decisions.ts";
+import { decisionId as scopeDecisionId, SCOPE_OPTIONS } from "../../decide/decision.ts";
+import { currentImplementation } from "../../implement/store.ts";
+import { implementRefusal } from "../../implement/gate.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../../db/kx.ts";
 
@@ -342,6 +348,34 @@ async function markFast(db: Db, by: string, repo: string, number: number, w: num
   await guarded(async () => (had === undefined ? await addFastTrack(db, by, ref, w ?? WEIGHT_DEFAULT, via) : w !== null && w > had ? await setFastTrackWeight(db, by, ref, w, via) : null));
 }
 
+/**
+ * Queues an issue: markFast, and on an issue already on the list a new queue time (the planner starts a new implementation
+ * when an ended one was queued again after it ended: issue-facts.ts requeuedAfterEnd). With no implementation under way the
+ * person queueing it becomes its queuer, whose Task Runner runs its model calls.
+ */
+async function queueIssue(db: Db, by: string, repo: string, number: number, w: number | null, via?: string): Promise<void> {
+  const had = await db.get(db.k.selectFrom("main.fast_track").select("added_by").where("repo", "=", repo).where("number", "=", number));
+  await markFast(db, by, repo, number, w, via);
+  if (!had) return;
+  await guarded(async () => {
+    const current = await currentImplementation(db, repo, number);
+    await db.run(db.k.updateTable("main.fast_track").set({ added_at: new Date().toISOString(), ...(current ? {} : { added_by: by }) }).where("repo", "=", repo).where("number", "=", number));
+    await audit(db, by, "fasttrack-requeue", `${repo}#${number}`, { ...(current ? {} : { from: had.added_by }), ...(via ? { via } : {}) });
+  });
+}
+
+/** A queued issue counts as wanted: an open scope decision on it is answered `take` by the person queueing it. Returns a clause for the label. */
+async function takeScope(db: Db, by: string, repo: string, number: number, via?: string): Promise<string> {
+  const d = await getDecision(db, scopeDecisionId({ repo, number }));
+  if (!d || d.answer || !optionsOf(d).some((o) => o.key === SCOPE_OPTIONS.take.key)) return "";
+  try {
+    await applyAnswer(db, d, by, { answer: SCOPE_OPTIONS.take.key, note: "Queued for implementation." }, "queue", via);
+    return `; its scope question is answered ${SCOPE_OPTIONS.take.label}`;
+  } catch (e) {
+    return `; its scope question stays open: ${(e as Error).message}`;
+  }
+}
+
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror), in number order. */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
   return (await openClosingIndex(db, repo)).get(`${repo}#${issue}`) ?? [];
@@ -395,11 +429,15 @@ export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number
   const by = req.user.login;
   const kind = (await db.get(db.k.selectFrom("main.items").select("kind").where("repo", "=", r.repo).where("number", "=", r.number)))?.kind;
   if (kind === "issue") {
-    await markFast(db, by, r.repo, r.number, w, via);
+    await queueIssue(db, by, r.repo, r.number, w, via);
     const prs = await openPrsClosing(db, r.repo, r.number);
+    const scope = await takeScope(db, by, r.repo, r.number, via);
+    if (!prs.length) {
+      const waits = await implementRefusal(db, r.repo, r.number);
+      return { label: `${waits ? `Queued; it is not implemented while ${waits}` : "Queued: AutoCraft plans and implements it"}${scope}${ignored}`, fast: await fastTrackRefs(db, req) };
+    }
     let rest: string;
-    if (!prs.length) rest = "no open PR closes it yet";
-    else if (prs.length > 1) rest = `${prs.map((n) => `#${n}`).join(", ")} close it; queue one of them`;
+    if (prs.length > 1) rest = `${prs.map((n) => `#${n}`).join(", ")} close it; queue one of them`;
     else if (pin && pin(prs[0]!) === null) rest = `#${prs[0]} closes it but was opened or pushed to after your comment, so it was not queued; comment on #${prs[0]} to queue it`;
     else {
       try {
@@ -414,7 +452,7 @@ export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number
         rest = `#${prs[0]} closes it but was not queued: ${(e as Error).message}`;
       }
     }
-    return { label: `Fast-tracked the issue; ${rest}${ignored}`, fast: await fastTrackRefs(db, req) };
+    return { label: `Fast-tracked the issue; ${rest}${scope}${ignored}`, fast: await fastTrackRefs(db, req) };
   }
   let done: { label: string };
   const head = pin ? pin(r.number) : undefined;

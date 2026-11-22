@@ -169,7 +169,12 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
         const closers = allMerge.filter((r) => r.repo === repo && r.closes?.includes(n)).map((r) => r.number);
         if (issueLink || closers.length || allWork.some((w) => w.repo === repo && w.number === n && w.kind === "issue")) {
           mark(item);
-          let rest = "no open PR closes it yet";
+          if (!closers.length) {
+            resort();
+            changed();
+            return { label: `Queued: AutoCraft plans and implements it${ignored}`, fast: [...fast] };
+          }
+          let rest = "";
           if (closers.length > 1) rest = `${closers.map((c) => `#${c}`).join(", ")} close it; queue one of them`;
           else if (closers.length === 1) {
             const pr = `${repo}#${closers[0]}`;

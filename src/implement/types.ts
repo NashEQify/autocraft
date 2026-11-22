@@ -21,7 +21,12 @@ export const MAX_LIVE_PER_REPO = 2;
 export const IMPLEMENT_BUCKETS = ["plan", "build", "revise"] as const;
 export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
 
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question"] as const;
+/**
+ * `guidance`: a person's note for the attempt (a Try again answer's text), read into its plan and session input.
+ * `workspace`: the attempt's workspace was made again; the turns and checks before it belong to the lost one.
+ * `ask-failed`: posting or asking a stored plan's questions failed; the next job tries the write again from the stored plan.
+ */
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance", "workspace", "ask-failed"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
@@ -72,6 +77,8 @@ export type QuestionAudience = "author" | "maintainer";
  * question round of an `asked` attempt: only answers after it plan again, so every new question needs a round of its own.
  */
 export type QuestionRound = { audience: QuestionAudience; text: string; commentId?: string; decisionId?: string };
+/** The result of an `ask-failed` round: what failed, for the plan round whose questions it was writing. */
+export type AskFailedRound = { planRound: number; error: string };
 export type PlanQuestion = { audience: QuestionAudience; text: string; options: { label: string; hint: string }[]; recommended: string | null };
 
 /** The plan call's reply: ready to implement, or the questions that come first. */

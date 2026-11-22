@@ -1,5 +1,7 @@
 // Texts the Fix stage writes on GitHub. No Node imports: the prompt registry shows them on the Prompts page.
-import { dropMarkup, settle } from "../review/public-text.ts";
+import { plainTitle } from "../implement/template.ts";
+
+export { plainTitle };
 
 export const COMMENT_TEMPLATE = "A PR for this is in progress: {{url}}.";
 /** The comment posted once on an issue when the pipeline starts a fix for it. */
@@ -9,17 +11,6 @@ export const PR_TITLE_TEMPLATE = "Fix {{title}}";
 export const PR_BODY_TEMPLATE = "Fixes #{{number}}.\n\n{{change}}\n\n{{test}}\n";
 
 export const commentText = (url: string): string => COMMENT_TEMPLATE.replace("{{url}}", url);
-
-/**
- * The issue title as a line the pipeline may author: no URL, issue reference ("#12", "GH-12", "owner/repo#12") or
- * mention, so a closing keyword in it names nothing and nobody is pinged. A reference reads "issue 12".
- */
-export function plainTitle(title: string): string {
-  return settle(title.replace(/\s+/g, " "), (t) => dropMarkup(t
-    .replace(/<?(?<![A-Za-z0-9])(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>]*>?/gi, "")
-    .replace(/(?<![A-Za-z0-9])GH-(\d+)(?![A-Za-z0-9])/gi, "issue $1")
-    .replace(/(?<![A-Za-z0-9])(?:[\w.-]+\/[\w.-]+)?#(\d+)(?![A-Za-z0-9])/g, "issue $1"))).replace(/\s+/g, " ").trim();
-}
 
 /** The one-sentence line a model gives is not used: the text is built from facts our code knows and the cleaned issue title. */
 export function prTitle(title: string): string {

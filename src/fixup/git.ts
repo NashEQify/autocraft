@@ -46,7 +46,7 @@ export function fixupDir(): string {
 }
 
 /** The empty tree: attributes are read from it, never from a tree in the repository (in a bare repository git may otherwise read HEAD's). */
-const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+export const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /**
  * Options of every git command on a cached clone. The repository is named by GIT_DIR (`gitDirEnv`), so with

@@ -18,7 +18,8 @@ import { mapSeq } from "../async-seq.ts";
 import { jobRunId } from "./resuming.ts";
 import type { Db } from "../db/index.ts";
 
-type Base = { name: string; label: string; help?: string; required?: boolean };
+/** `cliOnly`: set from the command line only; the dashboard's run-step form does not offer it and refuses it. */
+type Base = { name: string; label: string; help?: string; required?: boolean; cliOnly?: boolean };
 export type ParamDef =
   | (Base & { kind: "enum"; options: string[]; default?: string })
   | (Base & { kind: "repo" })                                        // a tracked repo
@@ -130,10 +131,18 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
   return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
 }
 
+/** The `implement` buckets this build carries out. */
+const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build"]);
+
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
   const { implementRefusal } = await import("../implement/gate.ts");
-  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? "Implement is not built yet";
+  const bucket = String(p.bucket ?? "plan");
+  if (!IMPLEMENT_BUILT.has(bucket)) return `Implement's ${bucket} work is not built yet`;
+  // A dry run writes nothing but its workspace and model call, so it may run before the repo's Implement switch is on;
+  // it still needs the repo's approval and a queuer who settles on the repo, whose Task Runner runs the call.
+  if (p.mode === "dry" && bucket !== "plan") return "a dry run only plans";
+  return await implementRefusal(db, String(p.repo), Number(p.number), { dry: p.mode === "dry" });
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -503,12 +512,22 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
       { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
+      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", cliOnly: true, help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
     ],
     check: checkImplement,
     run: async (ctx) => {
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      return `${ctx.params.repo}#${ctx.params.number}: nothing was done`;
+      const repo = String(ctx.params.repo), number = Number(ctx.params.number);
+      if (String(ctx.params.bucket ?? "plan") === "plan") {
+        const { runPlan } = await import("../implement/plan.ts");
+        return await runPlan(ctx, { repo, number, dry: ctx.params.mode === "dry" });
+      }
+      const { runBuild } = await import("../implement/build.ts");
+      ctx.handled(1);
+      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
+      if (r.moved) ctx.acted(1);
+      return r.summary;
     },
   },
   {
@@ -557,7 +576,7 @@ export const STEPS: StepDef[] = [
     description: "An operator's test of a model session in a workspace pod: creates the workspace (or takes a live one), waits for it to be ready, runs one session with the implementation model through the workspace tools, and logs the outcome, cost, tool calls, shell time and the diff stat. Started only with `workspace try` on the command line; nothing goes to GitHub.",
     stage: runStage("workspace-try"),
     requires: "operator",
-    models: [CLAUDE_PROMPTS["fixissue.patch"].models[0]],
+    models: [CLAUDE_PROMPTS["implement.session"].models[0]],
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "session", label: "Session", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the session row `workspace try` created" },

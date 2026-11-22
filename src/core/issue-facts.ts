@@ -5,6 +5,7 @@ import { featureOn } from "../build/features.ts";
 import { latestAttempts, liveByRepo, type LatestAttempt } from "../implement/store.ts";
 import { ENDED_STATES, LIVE_STATES } from "../implement/types.ts";
 import { isBotLogin } from "../review/bots.ts";
+import { ownLoginTest } from "../github/identity.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
@@ -165,7 +166,8 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     .map((a) => [`${a.decision_id}|${a.repo}#${a.number}`, a.state]));
   const waitingExec = new Set((await db.all(db.k.selectFrom("main.decisions").select("id").where("exec_state", "in", ["waiting-token", "waiting-permission"]).where("applied_at", "is", null))).map((r) => r.id));
   const answeredClose = new Map<string, ItemFacts["answeredClose"]>();
-  for (const a of await actionable(db)) {
+  const actionableNow = await actionable(db);
+  for (const a of actionableNow) {
     if (a.kind !== "scope" && a.kind !== "close" && a.kind !== "duplicate" && a.kind !== "merge" && a.kind !== "hold") continue;
     if (a.kind !== "scope" && a.number === null) continue;
     for (const it of a.items) {
@@ -227,18 +229,24 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const liveImpl = await liveByRepo(db);
   const implDecisions = [...new Set([...attempts.values()].flatMap((a) => (a.decisionId ? [a.decisionId] : [])))];
   const answeredAt = new Map(implDecisions.length ? (await db.all(db.k.selectFrom("decisions").select(["id", "answered_at"]).where("id", "in", implDecisions).where("answer", "is not", null))).map((d) => [d.id, d.answered_at ?? ""]) : []);
+  // An answer that waits for its person's sign-in or access, or is disputed, is not work for the plan or build bucket until that clears.
+  const implHeld = new Set(implDecisions.length ? (await db.all(db.k.selectFrom("decisions").select("id").where("id", "in", implDecisions).where("exec_state", "in", ["waiting-token", "waiting-permission", "disputed"]))).map((d) => d.id) : []);
+  // A stuck attempt's answer counts once someone who settles on the repo gave it and it is not Backlog (actionable()), as applyStuckAnswer reads it.
+  const settledIds = new Set(actionableNow.map((a) => a.id));
   // Answers count only when they came after the attempt's newest question (else after it last moved): a re-plan that asks again
   // writes a new question round, so the answers it already read do not plan it again.
   const askedSince = (a: LatestAttempt): string => a.question?.at ?? a.updatedAt;
   const implPrs = [...attempts.values()].flatMap((a) => (a.prNumber !== null ? [[a.repo, a.prNumber] as const] : []));
   const prState = new Map(implPrs.length ? (await db.all(db.k.selectFrom("items as i").select(["i.repo", "i.number", "i.state"]).where(kx.refIn(db, "i", implPrs)))).map((r) => [`${r.repo}#${r.number}`, r.state]) : []);
-  // A person's comment after an asked attempt's question: not a bot's, not the pipeline account's.
-  const pipelineLogin = await setting(db, "pipeline_login");
+  // A person's comment after an asked attempt's question: not a bot's and not ours (the box account or the app's bot, which the mirror stores as a bare slug).
   const commentedAfter = new Set<string>();
+  const ownTests = new Map<string, (login: string | null) => boolean>();
   for (const a of attempts.values()) {
     if (a.state !== "asked") continue;
     const later = await db.all(db.k.selectFrom("comments").select("author").where("repo", "=", a.repo).where("number", "=", a.number).where("created_at", ">", askedSince(a)));
-    if (later.some((c) => c.author !== null && c.author !== pipelineLogin && !isBotLogin(c.author))) commentedAfter.add(`${a.repo}#${a.number}`);
+    if (!later.length) continue;
+    const own = ownTests.get(a.repo) ?? ownTests.set(a.repo, await ownLoginTest(db, a.repo)).get(a.repo)!;
+    if (later.some((c) => c.author !== null && !own(c.author) && !isBotLogin(c.author))) commentedAfter.add(`${a.repo}#${a.number}`);
   }
   const settles = settleMemo();
   // Item text, read only for the rows that need it (an implementation attempt, a missing text hash, a classifier hash to recompute), in one query.
@@ -326,7 +334,8 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
             state: a.state, attempt: a.attempt,
             textChanged: (() => { const b = texts.get(ref)!; return textHash(b.title ?? "", b.body ?? "") !== a.textHash; })(),
             newCommentAfterQuestion: commentedAfter.has(ref),
-            decisionAnswered: a.state === "asked" && a.decisionId !== null && (answeredAt.get(a.decisionId) ?? "") > askedSince(a),
+            decisionAnswered: a.decisionId !== null && !implHeld.has(a.decisionId)
+              && (a.state === "stuck" ? settledIds.has(a.decisionId) : a.state === "asked" && (answeredAt.get(a.decisionId) ?? "") > askedSince(a)),
             asked: a.state === "asked" ? a.question?.audience ?? (a.decisionId !== null ? "maintainer" : "author") : null,
             requeuedAfterEnd: ENDED_STATES.has(a.state) && q !== null && q.at > a.updatedAt,
             prOpen: a.prNumber !== null && (prState.get(`${r.repo}#${a.prNumber}`) ?? "OPEN") === "OPEN",

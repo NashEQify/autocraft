@@ -96,10 +96,24 @@ export async function updateImplementation(db: Db, id: number, patch: Implementa
   await db.run(db.k.updateTable("main.implementations").set({ ...columnsOf(patch), updated_at: at }).where("id", "=", id));
 }
 
+/**
+ * Writes the patch's columns, and moves the row to `to` when it is given, only while the row is in one of `from`. False when
+ * it is not (a cancel or a stuck decision moved it meanwhile): nothing is written then.
+ */
+export async function moveImplementationIf(db: Db, id: number, from: readonly ImplementationState[], to: ImplementationState | null, patch: ImplementationPatch = {}, at = new Date().toISOString()): Promise<boolean> {
+  const r = await db.run(db.k.updateTable("main.implementations").set({ ...columnsOf(patch), ...(to !== null && { state: to }), updated_at: at }).where("id", "=", id).where("state", "in", [...from]));
+  return r.changes === 1;
+}
+
 export async function addRound(db: Db, implementationId: number, kind: RoundKind, o: { callId?: number | null; result?: unknown } = {}, at = new Date().toISOString()): Promise<number> {
   return Number((await db.get(db.k.insertInto("main.implementation_rounds").values({
     implementation_id: implementationId, kind, call_id: o.callId ?? null, result: o.result === undefined ? null : JSON.stringify(o.result), at,
   }).returning("id")))!.id);
+}
+
+/** Replaces a round's result (a turn round settled after it was queued). */
+export async function updateRound(db: Db, id: number, result: unknown): Promise<void> {
+  await db.run(db.k.updateTable("main.implementation_rounds").set({ result: JSON.stringify(result) }).where("id", "=", id));
 }
 
 /** The attempt's rounds, oldest first. */
