@@ -89,7 +89,7 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
         .filter((r) => !seen.has(key(r)) && !!seen.add(key(r)))
         .map((r): QueueMergeRow => ({ ...r, state: inBatch.has(key(r)) ? r.state : r.state === "in-batch" || r.state === "batch-checking" ? "ready" : r.state, fast: pos(r), held: held.has(key(r)), added: originOf(r) }))
         .filter((r) => r.state !== "merged" && inScope(r.repo, r.number));
-      // Queued with Queue items, no take review yet: the first two PRs of the work list that are no queue row; then the first fast-tracked issue, whose PR Fix builds.
+      // Queued with Queue items, no take review yet: the first two PRs of the work list that are no queue row; then the first two fast-tracked issues.
       const queuedKeys = new Set(entries.map(key));
       const pending: QueuePendingRow[] = [
         ...work
@@ -101,9 +101,9 @@ export function createQueueMock(me: User, changed: () => void): Pick<Api, "pipel
           })),
         ...work
           .filter((w) => w.kind === "issue" && w.fast)
-          .slice(0, 1)
+          .slice(0, 2)
           .map((w): QueuePendingRow => ({
-            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: w.next === "Fix" ? "build" : "next", fast: w.fast, held: false,
+            repo: w.repo, number: w.number, kind: "issue", title: w.title, author: "contributor", size: w.size, step: w.next === "Fix" || w.next === "Fix: in progress" ? "build" : "next", fast: w.fast, held: false,
             added: { how: "fast", by: "operator", at: new Date(Date.now() - 1800_000).toISOString() }, prs: [], next: w.next,
           })),
       ];

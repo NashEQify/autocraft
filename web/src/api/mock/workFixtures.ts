@@ -40,8 +40,11 @@ const ROWS: WorkRow[] = (() => {
 })();
 
 const firstReview = ROWS.find((x) => x.repo === "designcraft" && x.next === "Review");
+// Two fast-tracked issues without a PR: one Fix builds, one waiting on a decision.
+const fastIssues = ["Fix", "Decide"].map((n) => ROWS.find((x) => x.repo === "designcraft" && x.kind === "issue" && x.next === n));
 export const FAST_TRACK_SEED: string[] = [
   firstReview && `${firstReview.repo}#${firstReview.number}`,
+  ...fastIssues.map((x) => x && `${x.repo}#${x.number}`),
   ...[QUEUE_ROWS.find((q) => q.repo === "wordcraft" && ["waiting-ci", "ready", "waiting-verify"].includes(q.state)), QUEUE_ROWS.find((q) => q.repo === "designcraft" && ["waiting-verify", "waiting-ci"].includes(q.state))].map((q) => q && `${q.repo}#${q.number}`),
 ].filter((x): x is string => !!x);
 
