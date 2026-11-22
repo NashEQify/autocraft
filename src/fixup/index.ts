@@ -412,19 +412,26 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   let worked = 0, stoppedLogged = false;
   let inflight = 0;
   let wake: (() => void)[] = [];
-  /** Fix-up of one PR: takes its lease and one unit of the limit before its first await, so concurrent items count exactly. */
+  /** Fix-up of one PR: takes one unit of the limit before its first await after the check, then its lease, so concurrent items count exactly. */
   const fixOne = async (c: FixCandidate): Promise<void> => {
     // While the limit is spent but other items are still running, one of them may give its unit back (not worked): wait for it.
     while (worked >= budget && inflight > 0) await new Promise<void>((r) => wake.push(r));
     if (await params.stopping?.()) { if (!stoppedLogged) { stoppedLogged = true; log(`fixup ${repo}: stopping, no new PRs started`); } return; }
     if (worked >= budget) return;
-    if (await pushesUnsettled(db, repo, log)) return;
-    const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
-    if (!release) return;
-    // The item takes its budget before its first await; it is given back below when the item ends without being worked.
+    // The item takes its budget before its next await; it is given back when the item ends without being worked.
     worked++;
     inflight++;
     let counted = false;
+    const giveBack = () => {
+      if (!counted) worked--;
+      inflight--;
+      const w = wake;
+      wake = [];
+      for (const r of w) r();
+    };
+    if (await pushesUnsettled(db, repo, log)) { giveBack(); return; }
+    const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
+    if (!release) { giveBack(); return; }
     const ref = refOf(c);
     let files = [...new Set(c.fixes.map((f) => f.file))];
     const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
@@ -619,11 +626,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
       await release();
-      if (!counted) worked--;
-      inflight--;
-      const w = wake;
-      wake = [];
-      for (const r of w) r();
+      giveBack();
     }
   };
   // Items of one PR run one after the other inside one pool item; PRs run side by side.
