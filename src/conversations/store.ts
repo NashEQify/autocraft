@@ -7,7 +7,7 @@ import { CLAUDE_PROMPTS, untrustedJson } from "../prompts/index.ts";
 import { applicableSteps, cleanComment, openDecision, type NewCard } from "./cards.ts";
 import { choicesJson, storeParsedChoices, type ParsedChoices } from "../decide/choices-parse.ts";
 import { coreSummaries } from "../decide/choices.ts";
-import { ITEM_BODY_LIMIT, ITEM_COMMENT_LIMIT, ITEM_COMMENTS, ITEM_DIFF_LIMIT, MESSAGE_MAX, OPENING_MAX, type TurnKind } from "./types.ts";
+import { ITEM_BODY_LIMIT, ITEM_COMMENT_LIMIT, ITEM_COMMENTS, ITEM_DIFF_LIMIT, MESSAGE_MAX, OPENING_MAX, PERSON_KINDS, type PersonKind, type TurnKind } from "./types.ts";
 import { flatMapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
@@ -41,34 +41,34 @@ export const turnsOf = async (db: Db, repo: string, n: number): Promise<TurnRow[
     .orderBy((eb) => eb("seq", "is", null)).orderBy((eb) => eb(eb.fn.coalesce("status", eb.val("")), "=", "held"))
     .orderBy("seq").orderBy("id"));
 
-/** The operator message that waits for its reply: queued or claimed by a run. */
+/** The person's message that waits for its reply: queued or claimed by a run. */
 export const pendingTurn = async (db: Db, repo: string, n: number): Promise<TurnRow | undefined> =>
   await db.get(turns(db).where("repo", "=", repo).where("number", "=", n)
-    .where("kind", "=", "operator").where("status", "in", ["pending", "answering"]));
+    .where("kind", "in", PERSON_KINDS).where("status", "in", ["pending", "answering"]));
 
 /** A claim older than this is released: a run makes `attempts` calls of at most the prompt timeout each. */
 const STALE_CLAIM_MS = (CLAUDE_PROMPTS["conversation.turn"].limits.timeoutSeconds * CLAUDE_PROMPTS["conversation.turn"].limits.attempts + 60) * 1000;
 
 // ---- blocks ------------------------------------------------------------------
 
-/** Text of operators and Opus must not close or open the frame the prompt puts around turns. */
+/** Text of people and Opus must not close or open the frame the prompt puts around turns. */
 const frameSafe = (t: string): string => t.replace(/<(\/?)(turn|item|actions|choices|cores|untrusted|included|steps)\b/gi, "&lt;$1$2");
 
 export type Included = { login: string; at: string; text: string; /** An agent sent it for the login. */ viaAgent?: boolean };
 
 const attr = (v: string): string => v.replace(/[^\w.:-]/g, "");
 
-/** `included`: maintainers' posts the operator chose to share, carried in this turn once. */
-export function operatorBlock(login: string, text: string, included: Included[] = [], steps?: string[], cores?: unknown[]): string {
+/** A person's turn, framed as from an operator or a maintainer. `included`: maintainers' posts an operator chose to share, carried in an operator's turn once. */
+export function personBlock(from: PersonKind, login: string, text: string, included: Included[] = [], steps?: string[], cores?: unknown[]): string {
   const extra = included.map((i) => `<included from="maintainer" login="${attr(i.login)}" at="${attr(i.at)}"${i.viaAgent ? ' via="agent"' : ""}>\n${frameSafe(i.text)}\n</included>\n`).join("");
-  return `<turn from="operator" login="${attr(login)}">\n${frameSafe(text)}\n${extra}${cores ? `<cores>${JSON.stringify(cores)}</cores>\n` : ""}${steps ? `<steps>${JSON.stringify(steps)}</steps>\n` : ""}</turn>\n`;
+  return `<turn from="${from}" login="${attr(login)}">\n${frameSafe(text)}\n${extra}${cores ? `<cores>${JSON.stringify(cores)}</cores>\n` : ""}${steps ? `<steps>${JSON.stringify(steps)}</steps>\n` : ""}</turn>\n`;
 }
 
 /** The steps list Opus last saw: the newest `<steps>` line of the stored turns, else the item block's. */
 async function seenSteps(db: Db, repo: string, n: number): Promise<string[] | null> {
   const parse = (j: string): string[] | null => { try { const v = JSON.parse(j) as unknown; return Array.isArray(v) ? v.map(String) : null; } catch { return null; } };
   for (const t of [...await turnsOf(db, repo, n)].reverse()) {
-    if (t.kind !== "operator") continue;
+    if (!PERSON_KINDS.includes(t.kind as PersonKind)) continue;
     const m = /\n<steps>(\[[^\n]*\])<\/steps>\n<\/turn>\n$/.exec(t.block);
     if (m) return parse(m[1]!);
   }
@@ -76,11 +76,11 @@ async function seenSteps(db: Db, repo: string, n: number): Promise<string[] | nu
   return m ? parse(m[1]!) : null;
 }
 
-/** The cores Opus last saw for the item's open decision: the newest `<cores>` line of the stored operator turns, else the item block's. Null: none known. */
+/** The cores Opus last saw for the item's open decision: the newest `<cores>` line of the stored people's turns, else the item block's. Null: none known. */
 async function seenCores(db: Db, repo: string, n: number): Promise<unknown[] | null> {
   const parse = (j: string): unknown[] | null => { try { const v = JSON.parse(j) as unknown; return Array.isArray(v) ? v : null; } catch { return null; } };
   for (const t of [...await turnsOf(db, repo, n)].reverse()) {
-    if (t.kind !== "operator") continue;
+    if (!PERSON_KINDS.includes(t.kind as PersonKind)) continue;
     const m = /\n<cores>(\[[^\n]*\])<\/cores>\n(?:<steps>[^\n]*<\/steps>\n)?<\/turn>\n$/.exec(t.block);
     if (m) return parse(m[1]!);
   }
@@ -318,10 +318,13 @@ export async function refreshItem(db: Db, repo: string, n: number, deps?: StoreD
 }
 
 /**
- * An operator's message: creates the conversation when the item has none and queues the message for the Conversation step.
- * With `ask` false the message is only stored (no pending state, no model call); Opus sees it among the turns at the next ask.
+ * A person's message (`by.kind`: an operator's or a maintainer's): creates the conversation when the item has none and queues
+ * the message for the Conversation step, which answers a maintainer's on the maintainer's own Task Runner. With `ask` false the
+ * message is only stored (no pending state, no model call); Opus sees it among the turns at the next ask. The maintainer posts
+ * an operator shared ride in the next asked operator message.
  */
-export async function addOperatorMessage(db: Db, repo: string, n: number, login: string, text: string, deps?: StoreDeps, ask = true): Promise<number> {
+export async function addMessage(db: Db, repo: string, n: number, by: { login: string; kind: PersonKind }, text: string, deps?: StoreDeps, ask = true): Promise<number> {
+  const login = by.login;
   const body = text.trim();
   if (!body) throw new ConversationError(400, "the message is empty");
   if (body.length > MESSAGE_MAX) throw new ConversationError(400, `the message is longer than ${MESSAGE_MAX} characters`);
@@ -329,14 +332,14 @@ export async function addOperatorMessage(db: Db, repo: string, n: number, login:
   if (ask && await pendingTurn(db, repo, n)) throw new ConversationError(409, "Opus has not answered the last message yet");
   await ensureConversation(db, repo, n, login, deps);
   await refreshItem(db, repo, n, deps);
-  const shared = ask ? await unsentIncludes(db, repo, n) : [];
+  const shared = ask && by.kind === "operator" ? await unsentIncludes(db, repo, n) : [];
   try {
     return await inTx(db, async () => {
       const now = await applicableSteps(db, repo, n), seen = await seenSteps(db, repo, n);
       const steps = seen && JSON.stringify(seen) === JSON.stringify(now) ? undefined : now;
       const d = await openDecision(db, repo, n), nowCores = d ? await coreSummaries(db, d) : [], seenC = await seenCores(db, repo, n);
       const cores = JSON.stringify(seenC ?? []) === JSON.stringify(nowCores) ? undefined : nowCores;
-      const id = await appendTurn(db, repo, n, { kind: "operator", login, body, block: operatorBlock(login, body, shared.map((x) => x.post), steps, cores), ...(ask && { status: "pending" }) }, deps);
+      const id = await appendTurn(db, repo, n, { kind: by.kind, login, body, block: personBlock(by.kind, login, body, shared.map((x) => x.post), steps, cores), ...(ask && { status: "pending" }) }, deps);
       for (const x of shared) await db.run(db.k.updateTable("conversation_includes").set({ sent_turn: id }).where("repo", "=", repo).where("number", "=", n).where("source", "=", x.source).where("sent_turn", "is", null));
       return id;
     });
@@ -412,7 +415,7 @@ export async function claimPending(db: Db, repo: string, n: number, deps?: Store
   const stale = new Date(Date.parse(at) - STALE_CLAIM_MS).toISOString();
   return await inTx(db, async () => {
     await db.run(db.k.updateTable("conversation_turns").set({ status: "pending", claim: null, claimed_at: null, progress: null })
-      .where("repo", "=", repo).where("number", "=", n).where("kind", "=", "operator").where("status", "=", "answering").where("claimed_at", "<", stale));
+      .where("repo", "=", repo).where("number", "=", n).where("kind", "in", PERSON_KINDS).where("status", "=", "answering").where("claimed_at", "<", stale));
     // A run that died while answering left system turns held without a seq; the next prompt must include them.
     if (!await db.get(db.k.selectFrom("conversation_turns").select("id").where("repo", "=", repo).where("number", "=", n).where("status", "=", "answering").limit(1))) {
       for (const h of await db.all(db.k.selectFrom("conversation_turns").select("id").where("repo", "=", repo).where("number", "=", n).where("status", "=", "held").orderBy("id")))
@@ -420,7 +423,7 @@ export async function claimPending(db: Db, repo: string, n: number, deps?: Store
     }
     const claim = randomUUID();
     const r = await db.run(db.k.updateTable("conversation_turns").set({ status: "answering", claim, claimed_at: at })
-      .where("repo", "=", repo).where("number", "=", n).where("kind", "=", "operator").where("status", "=", "pending"));
+      .where("repo", "=", repo).where("number", "=", n).where("kind", "in", PERSON_KINDS).where("status", "=", "pending"));
     if (r.changes !== 1) return null;
     return { turn: (await db.get(turns(db).where("claim", "=", claim)))!, claim };
   });
@@ -474,9 +477,9 @@ export async function failTurn(db: Db, repo: string, n: number, claim: string, e
   });
 }
 
-/** Conversations with a message waiting for Opus (queued, or claimed by a run that went stale), oldest message first. */
-export async function pendingConversations(db: Db, deps?: StoreDeps): Promise<{ repo: string; number: number; turnId: number }[]> {
+/** Conversations with a message waiting for Opus (queued, or claimed by a run that went stale), oldest message first, with who wrote it. */
+export async function pendingConversations(db: Db, deps?: StoreDeps): Promise<{ repo: string; number: number; turnId: number; kind: PersonKind; login: string }[]> {
   const stale = new Date(Date.parse(nowOf(deps)) - STALE_CLAIM_MS).toISOString();
-  return await db.all(db.k.selectFrom("conversation_turns").select(["repo", "number", "id as turnId"]).where("kind", "=", "operator")
+  return await db.all(db.k.selectFrom("conversation_turns").select(["repo", "number", "id as turnId", "kind", "login"]).$narrowType<{ kind: PersonKind }>().where("kind", "in", PERSON_KINDS)
     .where((eb) => eb.or([eb("status", "=", "pending"), eb.and([eb("status", "=", "answering"), eb("claimed_at", "<", stale)])])).orderBy("id"));
 }

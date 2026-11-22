@@ -106,6 +106,8 @@ export type NewCall = {
   parentId?: number;
   /** The repo whose reference documentation the call's reference tools search (when its bundle lists REFERENCE_SERVER). */
   referenceRepo?: string;
+  /** Only this user's own Task Runners take the call (a maintainer's conversation turn); a follow-up keeps its parent's. */
+  forLogin?: string;
 };
 
 /** JSON with object keys sorted, so equal values give equal text. */
@@ -172,12 +174,14 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
     const id = await adoptEarlier(db, s.jobId, Date.parse(run.startedAt), c, hash, nowMs);
     if (id !== null) return id;
   }
-  const sticky = c.parentId === undefined ? null : (await db.get(db.k.selectFrom("main.remote_calls").select("user_login").where("id", "=", c.parentId)))?.user_login ?? null;
+  const parent = c.parentId === undefined ? undefined : await db.get(db.k.selectFrom("main.remote_calls").select(["user_login", "for_login"]).where("id", "=", c.parentId));
+  const sticky = parent?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
   const id = Number((await db.get(db.k.insertInto("main.remote_calls").values({
     job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
     bundle: JSON.stringify(c.bundle), bundle_hash: hash, state: "queued", items: JSON.stringify(c.items), repo: q.repo, class: q.cls, level: c.level, since: nowMs, seen_at: nowMs, queued_since: nowMs,
     max_attempts: Math.max(1, c.maxAttempts), timeout_ms: c.bundle.timeoutSeconds * 1000, parent_id: c.parentId ?? null, sticky_login: sticky, reference_repo: c.referenceRepo ?? null, authors,
+    for_login: c.forLogin ?? parent?.for_login ?? null,
   }).returning("id")))!.id);
   if (s.jobId !== null) adopted.add(id);
   dropQueueCache(db);
@@ -374,6 +378,8 @@ export async function authorsOf(db: Db, refs: readonly ItemRef[]): Promise<strin
 /** A queued call as claims read it: the items parsed, the repos it names and its authors. */
 type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_login" | "seen_at"> & {
   refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null;
+  /** The lowercase login whose own Task Runners alone take the call (NewCall.forLogin), or null for the shared pool. */
+  forLogin: string | null;
   /** The lowercase login of the call's pick ("Run on my Task Runner", picks.ts), when it has one, live or not (pickCounts). */
   pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   /** Ends the call's pick; set while it has one. */
@@ -432,7 +438,8 @@ function idleOthers(db: Db, login: string, nowMs: number): (c: Cand) => Promise<
 /**
  * Who may take a call: a maintainer or operator with write permission on every repo of the call (which covers reading a
  * private one); discord.* calls and calls that name no repo go to operators only. An author or co-author of an item a judging
- * prompt judges is passed over only while another helper that could take the call is asking for work (idleOthers).
+ * prompt judges is passed over only while another helper that could take the call is asking for work (idleOthers). A call
+ * bound to a user (NewCall.forLogin) goes to that user alone, author or not.
  */
 async function eligible(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => Promise<boolean>): Promise<boolean> {
   const ok = await mayTake(caller, c, canWrite, othersIdle);
@@ -442,9 +449,11 @@ async function eligible(caller: Caller, c: Cand, canWrite: (repo: string) => Pro
 }
 
 async function mayTake(caller: Caller, c: Cand, canWrite: (repo: string) => Promise<boolean>, othersIdle: (c: Cand) => Promise<boolean>): Promise<boolean> {
+  if (c.forLogin !== null && !sameLogin(c.forLogin, caller.login)) return false;
   if (!roleFits(caller.role, c)) return false;
   for (const repo of c.repos) if (!(await canWrite(repo))) return false;
-  return !(judges(c.prompt_id) && c.authors.has(caller.login.toLowerCase()) && await othersIdle(c));
+  // A call bound to the caller is theirs whatever they authored: nobody else may take it.
+  return c.forLogin !== null || !(judges(c.prompt_id) && c.authors.has(caller.login.toLowerCase()) && await othersIdle(c));
 }
 
 const HARNESSES: HarnessId[] = ["claude", "codex"];
@@ -507,8 +516,8 @@ const runnerRoleRow = (db: Db, tokenId: number, nowMs: number) => db.k.selectFro
 class Taken extends Error {}
 
 /**
- * Leases the call to the caller if it is still queued and no other user's pick counts for it (a Manual only caller: only
- * its own pick or a follow-up); the pick ends with the lease. The agent run starts now, on no account, with the user and
+ * Leases the call to the caller if it is still queued, bound to no other user and no other user's pick counts for it (a
+ * Manual only caller: only its own pick, a call bound to it or a follow-up); the pick ends with the lease. The agent run starts now, on no account, with the user and
  * harness. With `cap`, only while the login holds fewer leases than that (checked in the same transaction, so parallel claims
  * of one user cannot pass it together); "limit" when it holds that many. `live` is asked inside the same transaction, just
  * before the lease is written: "gone" when no one waits for the reply any more, and nothing is written. With `clearIdle`, the
@@ -539,8 +548,9 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
         picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
       })).where("id", "=", id).where("state", "=", "queued")
         .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", caller.login), pickLapsedExpr(db, eb, nowMs)]))
-        // A Manual only caller takes only follow-ups and its own picks.
-        .where((eb) => eb.or([eb.not(manualExpr(db, eb, eb.val(caller.login))), eb("parent_id", "is not", null), eb("picked_by", "=", caller.login)]))
+        // Only the user a call is bound to takes it. A Manual only caller takes only follow-ups, its own picks and calls bound to it.
+        .where((eb) => eb.or([eb("for_login", "is", null), eb("for_login", "=", caller.login)]))
+        .where((eb) => eb.or([eb.not(manualExpr(db, eb, eb.val(caller.login))), eb("parent_id", "is not", null), eb("picked_by", "=", caller.login), eb("for_login", "=", caller.login)]))
         .where((eb) => eb.exists(db.k.selectFrom("main.mcp_tokens as lt").select(eb.lit(1).as("one")).where("lt.id", "=", caller.tokenId).where("lt.kind", "=", "runner").where("lt.expires_at", ">", new Date(nowMs).toISOString())))
         .returning("id"));
       if (!r) throw new Taken();
@@ -561,8 +571,8 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
 export const QUEUE_CACHE_MS = 2_000;
 type QueueCache = { at: number; sig: string; followUps: Cand[]; ordered: Cand[] };
 const queueCaches = new WeakMap<Db, QueueCache>();
-/** The parsed items, repos and authors of each queued call by id: they never change, so a rebuild reads them only for new calls. */
-type Parsed = Pick<Cand, "refs" | "repos" | "authors">;
+/** The parsed items, repos, authors and bound login of each queued call by id: they never change, so a rebuild reads them only for new calls. */
+type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin">;
 const parsedCalls = new WeakMap<Db, Map<number, Parsed>>();
 /** Drops the cached queue order: a call was queued or leased by this process. Other processes' changes show in the signature (count and newest id of the queued calls) or within QUEUE_CACHE_MS. */
 export const dropQueueCache = (db: Db): void => void queueCaches.delete(db);
@@ -605,12 +615,12 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
   const queued = await db.all(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c"))
     .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until",
       (eb) => eb("id", ">", newest).as("inline"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("items")).end().as("items"),
-      (eb) => eb.case().when("id", ">", newest).then(eb.ref("authors")).end().as("authors")])
+      (eb) => eb.case().when("id", ">", newest).then(eb.ref("authors")).end().as("authors"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("for_login")).end().as("for_login")])
     .where("state", "=", literal("queued")).$narrowType<{ tier: Tier }>());
   // The items and authors of older calls not parsed yet (a requeued lease), in one read.
   const fresh = queued.filter((r) => !known.has(Number(r.id)) && !r.inline).map((r) => Number(r.id));
-  const texts = new Map<number, { items: string | null; authors: string | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
-  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
+  const texts = new Map<number, { items: string | null; authors: string | null; for_login: string | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
+  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors", "for_login"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
   const rows = await mapSeq(queued, async (r): Promise<Cand> => {
     const id = Number(r.id);
     let p = known.get(id);
@@ -619,7 +629,7 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
       const refs = JSON.parse(x.items!) as ItemRef[];
       // Calls queued before authors were stored on the row are read now.
       const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
-      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors) };
+      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors), forLogin: x.for_login?.toLowerCase() ?? null };
     }
     seen.set(id, p);
     return {
@@ -658,7 +668,8 @@ const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderRe
  * helper holds first, then the user's own live picks (picks.ts) oldest first, then the model queue's order with gating and
  * long-waiting small calls raised (claimClass) and without other users' live picks, filtered by tiers and repos (claimRepos:
  * every repo a call names must be in the set; picks do not go by it); the queue's order also by the user's tasks
- * (my-tasks.ts) and items (task-items.ts), which picks and follow-ups do not go by. A fast-lane claim gets only what fastLaneFits. A Manual
+ * (my-tasks.ts) and items (task-items.ts), which picks and follow-ups do not go by. Calls bound to the caller (NewCall.forLogin)
+ * come after its follow-ups, like picks; calls bound to another user are not offered. A fast-lane claim gets only what fastLaneFits. A Manual
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
@@ -670,18 +681,20 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
   const fits = (r: Cand): boolean => live(r) && !released(r) && tiers.has(r.tier) && (!repos || r.repos.every((x) => repos.has(x)));
   const sessions = new Set(sessionIds);
   const followUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && fits(r));
+  // Calls bound to the caller (a maintainer's own conversation turn) next, oldest first: like picks, they go by no repo, task or item choice.
+  const bound = q.ordered.filter((r) => r.forLogin === login && live(r) && !released(r) && tiers.has(r.tier) && (!fastLane || fastLaneFits(r)));
   let fresh: Set<string> | null = null;
   // The caller's own picks count for it; whether other pickers can take theirs is read once, when a pick needs it.
   const counts = async (r: Cand): Promise<boolean> => await pickCounts(r, nowMs, async (who) => who === login || (fresh ??= await pickerLogins(db, nowMs)).has(who));
   const mine: Cand[] = [];
   for (const r of q.ordered) {
-    if (r.pickedBy !== login || !await counts(r)) continue;
+    if (r.forLogin !== null || r.pickedBy !== login || !await counts(r)) continue;
     if (released(r) || !roleFits(caller.role, r)) await clearPick(db, r.id);
     else if (live(r) && tiers.has(r.tier) && (!fastLane || fastLaneFits(r))) mine.push(r);
   }
   mine.sort((a, b) => a.pickedAt! - b.pickedAt! || a.id - b.id);
-  if (manual) return [...followUps, ...mine];
-  return [...followUps, ...mine, ...await filterSeq(q.ordered, async (r) => fits(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && await counts(r)) && (!fastLane || fastLaneFits(r)))];
+  if (manual) return [...followUps, ...bound, ...mine];
+  return [...followUps, ...bound, ...mine, ...await filterSeq(q.ordered, async (r) => r.forLogin === null && fits(r) && !skip.has(taskOfStep(r.step)) && itemsFit(items, r) && !(r.pickedBy !== null && await counts(r)) && (!fastLane || fastLaneFits(r)))];
 }
 
 // ---- picks ("Run on my Task Runner", picks.ts) ----------------------------------------

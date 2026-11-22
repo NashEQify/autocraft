@@ -813,7 +813,7 @@ export const STEPS: StepDef[] = [
     name: "conversation",
     priority: 1,
     title: "Answer conversations",
-    description: "Answers each operator message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
+    description: "Answers each operator's or maintainer's message in an item's conversation with one Opus call (a maintainer's on their own Task Runner), with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
     stage: runStage("conversation"),
     requires: "operator",
     models: ["opus"],

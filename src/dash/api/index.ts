@@ -474,7 +474,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     get("/api/items/:repo/:n/trace/event", itemTraceDetail),
     get("/api/items/:repo/:n/decision", dec.forItem),
     get("/api/conversations/:repo/:n", conv.getConversation),
-    { method: "POST", pattern: "/api/conversations/:repo/:n/messages", operator: true, handler: ok(async (db, req) => conv.postMessage(db, req)) },
+    { method: "POST", pattern: "/api/conversations/:repo/:n/messages", handler: ok(async (db, req) => conv.postMessage(db, req)) },
     { method: "POST", pattern: "/api/conversations/:repo/:n/includes", operator: true, handler: ok(async (db, req) => conv.postInclude(db, req)) },
     { method: "POST", pattern: "/api/conversation-cards/:id/edit", handler: ok(conv.editCardText) },
     { method: "POST", pattern: "/api/conversation-cards/:id/do", handler: ok(async (db, req) => conv.doIt(db, req)) },

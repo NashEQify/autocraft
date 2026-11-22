@@ -1,4 +1,5 @@
-// Opus conversations on items. Everyone who may see the repo reads them; only operators write, edit, run and dismiss.
+// Opus conversations on items. Everyone who may see the repo reads them. Operators write to Opus, and so do maintainers with
+// write access to the repo, whose messages run on their own Task Runners; cards are run, edited and dismissed by those who settle.
 import type { CardEdit, Conversation, ConversationCard, ConversationTurn, DecisionChoices } from "../../../web/src/api/types.ts";
 import { buttonLabel, cardEffect, cardLines, decisionStamp, dependsOnCode, headline, isSettling, openDecision, stepLine, validateCard, type CardParams } from "../../conversations/cards.ts";
 import { applyDrafts, choicesById, compose, coresFor, currentChoices, seenJson, type ComposeExtra, type Core } from "../../decide/choices.ts";
@@ -9,7 +10,7 @@ import { audit } from "../audit.ts";
 import * as kx from "../../db/kx.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
 import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
-import { ConversationError, addOperatorMessage, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
+import { ConversationError, addMessage, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { isQuiet } from "../../security/quiet.ts";
@@ -18,8 +19,23 @@ import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle } from "../../settlers.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import { inferenceMode } from "../../remote/mode.ts";
+import { ownTaker } from "../../remote/takers.ts";
 
 const isOperator = (req: Req): boolean => req.user.role === "operator";
+
+/**
+ * Whether the user may write to Opus on an item of `repo`: an operator, or a maintainer with write permission on the repo, read
+ * live as canSettle reads it (src/settlers.ts), while model calls run on users' own Task Runners, since a maintainer's turn runs
+ * on theirs. Talking writes nothing to GitHub, so the app-identity and maintainer-writes conditions of settling do not apply.
+ */
+export async function canTalk(db: Db, user: { role: string; canWrite: (repo: string) => Promise<boolean> }, repo: string): Promise<boolean> {
+  if (user.role === "operator") return true;
+  return user.role === "maintainer" && await inferenceMode(db) === "user-local" && await user.canWrite(repo).catch(() => false);
+}
+
+/** The refusal of a maintainer's message to Opus while none of their Task Runners may take it (src/remote/takers.ts). */
+export const NO_OWN_RUNNER = "Your Task Runner must be connected and ready to ask Opus. You can still post without Opus.";
 
 async function guard<T>(f: () => Promise<T>): Promise<T> {
   try {
@@ -116,7 +132,7 @@ export async function choicesView(db: Db, repo: string, n: number): Promise<Deci
 /** The conversation plus the maintainer posts shared with Opus. */
 export type ConversationView = Conversation & { includes: IncludeRow[] };
 
-export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<ConversationView> {
+export async function conversationView(db: Db, repo: string, n: number, who?: { login: string; role: string }): Promise<Omit<ConversationView, "canTalk">> {
   // A card left Running by a crash must not show as running until the next restart.
   await sweepRunningCards(db);
   const c = await conversationOf(db, repo, n);
@@ -172,13 +188,18 @@ function ask(req: Req): boolean {
 }
 
 function needOperator(req: Req): void {
-  if (!isOperator(req)) throw new HttpError(403, "only operators write in conversations");
+  if (!isOperator(req)) throw new HttpError(403, "only operators share posts with Opus");
+}
+
+/** The conversation as the requester sees it, with whether they may write to Opus. */
+async function viewFor(db: Db, req: Req, repo: string, n: number): Promise<ConversationView> {
+  return { ...await conversationView(db, repo, n, req.user), canTalk: await canTalk(db, req.user, repo) };
 }
 
 export async function getConversation(db: Db, req: Req): Promise<ConversationView> {
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
-  const view = await conversationView(db, repo, n, req.user);
+  const view = await viewFor(db, req, repo, n);
   return !canSeeInternals(req) && await isQuiet(db, repo, n) ? veilConversation(view) : view;
 }
 
@@ -188,12 +209,15 @@ function veilConversation(v: ConversationView): ConversationView {
   return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })), includes: [], choices: null };
 }
 
+/** A message to Opus, or with `ask: false` a post without asking. A maintainer's asked message runs on their own Task Runner, so it is refused while none is ready. */
 export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
-  needOperator(req);
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
-  await guardAsync(() => addOperatorMessage(db, repo, n, req.user.login, text(req), deps, ask(req)));
-  return await conversationView(db, repo, n, req.user);
+  if (!await canTalk(db, req.user, repo)) throw new HttpError(403, "only operators, and maintainers with write access to the repository, write in conversations");
+  const kind = isOperator(req) ? "operator" : "maintainer", asking = ask(req), body = text(req);
+  if (kind === "maintainer" && asking && !await ownTaker(db, req.user.login, { prompt_id: "conversation.turn", repos: [repo] })) throw new HttpError(409, NO_OWN_RUNNER);
+  await guardAsync(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
+  return await viewFor(db, req, repo, n);
 }
 
 /** Shares a maintainer post with Opus (`on`) or stops sharing it; the next asked message carries it. */
@@ -204,7 +228,7 @@ export async function postInclude(db: Db, req: Req, deps?: StoreDeps): Promise<C
   const b = req.json as { source?: unknown; on?: unknown } | null;
   if (!b || typeof b !== "object" || typeof b.source !== "string" || typeof b.on !== "boolean") throw new HttpError(400, "the body must be an object with a source and on (true or false)");
   await guard(async () => await setInclude(db, repo, n, b.source as string, b.on as boolean, req.user.login, deps));
-  return await conversationView(db, repo, n, req.user);
+  return await viewFor(db, req, repo, n);
 }
 
 /** The card, for someone who settles it on every repo it writes to (src/settlers.ts: an operator with write access, or a maintainer under its rule). */

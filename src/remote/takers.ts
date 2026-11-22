@@ -5,10 +5,11 @@
 // no room. takerTest is the one taker rule: pools and the runner's job starts skip work without a taker, the
 // dashboard's minute maintenance runs sweepTakers: a queued call with no taker for NO_TAKER_MS is withdrawn, and pipeline-on
 // repos with no taker are recorded for the remote-no-taker health check. Follow-up turns and calls with a pick that counts
-// keep their own rules (calls.ts awaitCall, picks).
+// keep their own rules (calls.ts awaitCall, picks). A call bound to a user (a maintainer's conversation turn) has a taker only
+// in that user's runners.
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
-import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, runnerTakes, withdrawCall } from "./calls.ts";
+import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { inferenceMode } from "./mode.ts";
 import { claimRepos } from "./my-repos.ts";
@@ -30,7 +31,11 @@ export const NO_TAKER_MS = scaled(10 * 60_000);
  * `step`: the call's step, for the takers' tasks (my-tasks.ts); left out, the question is about repos alone. `someTask`: with no
  * step, only a runner whose user takes at least one task counts (with none ticked a user takes only picks).
  */
-export type TakerCall = { prompt_id: string; repos: readonly string[]; step?: string; someTask?: boolean; /** The call's items; left out, a question asked before they are known (task-items.ts). */ refs?: readonly ItemRef[]; /** Only runners whose user takes some items count. */ filtered?: boolean };
+export type TakerCall = {
+  prompt_id: string; repos: readonly string[]; step?: string; someTask?: boolean; /** The call's items; left out, a question asked before they are known (task-items.ts). */ refs?: readonly ItemRef[]; /** Only runners whose user takes some items count. */ filtered?: boolean;
+  /** A call bound to this user (calls.ts NewCall.forLogin): only their runners count, under the role rules and write permission alone, as for a pick. */
+  forLogin?: string | null;
+};
 
 /**
  * Whether some taker may take a call now, for many questions at one moment (a pool's round, the runner's pass over queued
@@ -93,7 +98,9 @@ async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; 
 async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => boolean> {
   const { runners, canWrite } = await readRunners(db, nowMs);
   if (!runners.length) return () => false;
-  return (c) => runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
+  return (c) => c.forLogin
+    ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
+    : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
 }
 
 /** A key equal for two units exactly when the same users of `logins` take them under their item choices (task-items.ts); "" when none does. */
@@ -134,8 +141,17 @@ export const noTakerReason = (repos: readonly string[], step?: string, items?: r
   return `${NO_TAKER_PREFIX} ${items?.length ? `on its items (My tasks: ${items.map((x) => TASK_ITEMS_TITLE[x]).join(" or ")})` : task !== undefined ? `of the ${TASK_CHOICES.find((t) => t.id === task)?.title ?? task} task (My tasks)` : repos.length ? `on ${repos.join(", ")}` : "that name no repo"}`;
 };
 
-/** Why no taker takes a call `takes` says no to: its repos, else its task, else the item choices of the runners that take the rest. */
-async function whyNoTaker(db: Db, nowMs: number, takes: (c: TakerCall) => Promise<boolean>, c: { prompt_id: string; repos: readonly string[]; step: string }): Promise<string> {
+/** Whether one of `login`'s own Task Runners is a taker for a call bound to them (NewCall.forLogin) on `repos` now. */
+export async function ownTaker(db: Db, login: string, c: { prompt_id: string; repos: readonly string[] }, nowMs: number = Date.now()): Promise<boolean> {
+  return await takerTest(db, nowMs)({ ...c, forLogin: login });
+}
+
+/** The error of a bound call withdrawn because none of its user's Task Runners is ready: its caller skips the work (NoTakerError). */
+export const noOwnRunnerReason = (login: string): string => `${NO_TAKER_PREFIX} for ${login}: none of their Task Runners is connected and ready`;
+
+/** Why no taker takes a call `takes` says no to: its user's runners for a bound call; else its repos, else its task, else the item choices of the runners that take the rest. */
+async function whyNoTaker(db: Db, nowMs: number, takes: (c: TakerCall) => Promise<boolean>, c: { prompt_id: string; repos: readonly string[]; step: string; forLogin?: string | null }): Promise<string> {
+  if (c.forLogin) return noOwnRunnerReason(c.forLogin);
   if (!await takes({ prompt_id: c.prompt_id, repos: c.repos })) return noTakerReason(c.repos);
   if (!await takes({ prompt_id: c.prompt_id, repos: c.repos, step: c.step })) return noTakerReason(c.repos, c.step);
   const { runners, canWrite } = await readRunners(db, nowMs);

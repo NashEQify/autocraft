@@ -1,9 +1,12 @@
-// The Conversation step: answers each operator message that waits for Opus with one sandboxed `claude -p` call
-// (the item's repository and the workspace, read-only) and stores the reply with its action cards.
+// The Conversation step: answers each person's message that waits for Opus with one sandboxed `claude -p` call
+// (the item's repository and the workspace, read-only) and stores the reply with its action cards. An operator's message is a
+// call of the shared model queue; a maintainer's runs only on the maintainer's own Task Runners (a call bound to their login).
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
-import { poolRoom, takersFirst } from "../agents/call.ts";
+import { NoTakerError, poolRoom, takersFirst, type PoolRoom } from "../agents/call.ts";
+import { inferenceMode } from "../remote/mode.ts";
+import { ownTaker } from "../remote/takers.ts";
 import { pool } from "../classify/run.ts";
 import { runModelStep } from "../agents/step.ts";
 import { CONVERSATION } from "../agents/steps.ts";
@@ -34,11 +37,18 @@ export type ConversationParams = {
 
 const now = () => new Date().toISOString();
 
-/** Answers the waiting messages, oldest first. Returns how many got a reply. */
+/** Why a maintainer's message got no reply when their own Task Runner could not take it. */
+const ownRunnerGone = (login: string): string => `${login}'s Task Runner was not connected and ready; send the message again`;
+
+/**
+ * Answers the waiting messages, oldest first. Returns how many got a reply. A maintainer's message is bound to the maintainer's
+ * own Task Runners: it comes first, as their runners are room for it, and fails at once when none of them is ready.
+ */
 export async function answerPending(db: Db, p: ConversationParams): Promise<number> {
   const model = p.model ?? CONVERSATION_PROMPT.models[0]!;
   let todo = await pendingConversations(db);
-  if (p.limit !== undefined) todo = (await takersFirst(db, todo, (c) => [c.repo], (c) => [c], CONVERSATION_PROMPT.id)).slice(0, Math.max(0, p.limit));
+  const ownerOf = (c: (typeof todo)[number]): string | undefined => (c.kind === "maintainer" ? c.login : undefined);
+  if (p.limit !== undefined) todo = [...todo.filter(ownerOf), ...await takersFirst(db, todo.filter((c) => !ownerOf(c)), (c) => [c.repo], (c) => [c], CONVERSATION_PROMPT.id)].slice(0, Math.max(0, p.limit));
   const checkouts = new Map<string, Promise<string | null>>();
   let answered = 0, handled = 0;
   await pool(todo.map((c, k) => async () => {
@@ -52,6 +62,12 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     if (!held) return;
     const { turn: wait, claim } = held;
     p.onHandled?.(++handled);
+    const forLogin = ownerOf(c);
+    if (forLogin !== undefined) {
+      const why = await inferenceMode(db) !== "user-local" ? "a maintainer's message runs only on their own Task Runner, and model calls run on the server's accounts now"
+        : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo] }) ? ownRunnerGone(forLogin) : null;
+      if (why) { await failTurn(db, repo, n, claim, why); return; }
+    }
     const parts = await promptParts(db, repo, n, wait);
     if (!parts) { await failTurn(db, repo, n, claim, "the conversation has no item block; send the message again"); return; }
     if (!checkouts.has(repo)) checkouts.set(repo, p.checkout(repo).catch(() => null));
@@ -66,11 +82,19 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     const bound = await openDecision(db, repo, n), stampThen = bound ? await decisionStamp(db, bound) : null;
     const dir = referenceDir(repo);
     const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`) : undefined;
-    const r = await runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
-      model, checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
+    const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
+      model, ...(forLogin !== undefined && { forLogin }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
       usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
       onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
     });
+    let r: Awaited<typeof step>;
+    try { r = await step; } catch (e) {
+      // The maintainer's runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
+      if (forLogin === undefined || !(e instanceof NoTakerError)) throw e;
+      await shown.flush();
+      await failTurn(db, repo, n, claim, ownRunnerGone(forLogin));
+      return;
+    }
     await shown.flush();
     const parsed = r.ok ? r.value : null;
     if (parsed) {
@@ -79,9 +103,16 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
       await failTurn(db, repo, n, claim, "Opus gave no usable reply; send the message again");
       await jobItem(db, repo, n, "no usable reply to a message", p.log);
     }
-  }), poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), { first: true });
+  }), ownFirst(poolRoom(db, (i) => [todo[i]!.repo], (i) => [todo[i]!], { promptId: CONVERSATION_PROMPT.id }), (i) => ownerOf(todo[i]!) !== undefined), { first: true });
   return answered;
 }
+
+/** The shared queue's room for the operators' messages; a maintainer's own message always has room and a taker, its own runners (checked when it starts). */
+const ownFirst = (shared: PoolRoom, own: (i: number) => boolean): PoolRoom => ({
+  round: () => shared.round(),
+  room: async (i) => (own(i) ? 1 : await shared.room(i)),
+  taker: async (i) => own(i) || await shared.taker(i),
+});
 
 /** PR diffs from the diff cache or GitHub; null when unavailable. */
 export const githubDiff = (db: Db): DiffSource => async (repo, n, head) => {

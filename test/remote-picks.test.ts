@@ -50,9 +50,10 @@ describe("picks and Manual only", async () => {
   const leased = async (login: string, extra: Partial<Claim> = {}, canWrite = yes) => (await claimCall(db, callers[login]!, claim(extra), canWrite)).lease?.id ?? null;
   const user = (login: string, role: Role = "maintainer") => ({ login, role, canWrite: yes, canRead: yes });
   const req = (login: string, role: Role, extra: Partial<Req> = {}) => ({ user: user(login, role), params: {}, ...extra }) as unknown as Req;
-  const q = async (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string } = {}) => {
+  const q = async (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string; forLogin?: string; parentId?: number } = {}) => {
     const tier = opts.tier ?? "top", promptId = opts.promptId ?? "review.opus";
     const id = await enqueueCall(db, { promptId, promptVersion: "1", tier, effort: "medium", askedModel: tier === "top" ? "opus" : "haiku", items: opts.items ?? [{ repo: "photocraft", number: 2 }], level: 0, maxAttempts: 2,
+      ...(opts.forLogin && { forLogin: opts.forLogin }), ...(opts.parentId !== undefined && { parentId: opts.parentId }),
       bundle: { promptId, promptVersion: "1", tier, effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: true, hints: {} } });
     if (opts.ageMs) await db.run(db.k.updateTable("remote_calls").set((eb) => ({ since: eb("since", "-", opts.ageMs!) })).where("id", "=", id));
     return id;
@@ -73,6 +74,18 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("bob", { fastLane: true }), null, "a top-tier review does not fit the fast lane");
     assert.equal(await leased("bob"), third);
     assert.ok(await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "remote-pick").where("login", "=", "bob").where("target", "=", "photocraft#2")));
+    await clear();
+  });
+
+  test("a call bound to a maintainer goes to their own runners alone, on their own item too; its follow-up keeps the binding", async () => {
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 30, kind: "pr", state: "OPEN", title: "x", author: "alice", created_at: "2026-01-01T00:00:00Z" }).onConflict((oc) => oc.doNothing()));
+    const own = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "Alice" });
+    assert.equal(await leased("olga"), null, "not the operator's runner");
+    assert.equal(await leased("bob"), null, "not another maintainer's, though bob's runner now asks for work");
+    await assert.rejects(async () => await pickCall(db, user("bob"), own), /Task Runner of the person who asked/);
+    assert.equal(await leased("alice"), own, "alice's runner takes it although she wrote the item");
+    const next = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], parentId: own });
+    assert.equal((await db.get(db.k.selectFrom("remote_calls").select("for_login").where("id", "=", next)))!.for_login?.toLowerCase(), "alice");
     await clear();
   });
 

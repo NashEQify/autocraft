@@ -134,6 +134,7 @@ function seed(): ConversationTurn[] {
     },
     { id: 5, kind: "system", login: "system", at: at(18), body: 'mosswood ran the card: Add the label needs changes. Label added. Note: hold until the pack check is done', actions: [], notes: [] },
     { id: 7, kind: "system", login: "system", at: at(12), body: 'kiri-n answered "Is ruler snapping for gradient stops in scope?" with "Take": fits the editor roadmap', actions: [], notes: [] },
+    { id: 8, kind: "maintainer", login: "kiri-n", at: at(6), body: "Does the pack cover the nonstandard hyphenation rules this PR adds?", actions: [], notes: [], status: "answered" },
     {
       id: 6,
       kind: "opus",
@@ -184,7 +185,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
       }, 2500);
     };
   const sys = (id: number, min: number, body: string): ConversationTurn => ({ id, kind: "system", login: "system", at: at(min), body, actions: [], notes: [] });
-  const store = new Map<string, Conversation>([
+  const store = new Map<string, Omit<Conversation, "canTalk">>([
     ["vectorcraft#1402", { repo: "vectorcraft", number: 1402, exists: true, pending: false, startedBy: "opus", includes: [], turns: [
       sys(201, 26, "ochre-fox approved a fix-up, then merge. Instructions: rename the curvature toggle and add the shortcut."),
       sys(202, 14, "Fix-up pushed 9a1f3c5."),
@@ -198,7 +199,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
     [REF, { repo: "designcraft", number: 1484, exists: true, pending: false, startedBy: "opus", turns: seed(), includes: [{ source: "decision-opinion:designcraft#1484:merge/o0", by: "mosswood", at: at(100), sent: false }] }],
   ]);
   let nextId = 100;
-  const open = (repo: string, n: number): Conversation => {
+  const open = (repo: string, n: number): Omit<Conversation, "canTalk"> => {
     const k = `${repo}#${n}`;
     let c = store.get(k);
     if (!c) store.set(k, (c = { repo, number: n, exists: false, pending: false, startedBy: null, includes: [], turns: [] }));
@@ -211,8 +212,11 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
     return c;
   };
   const need = () => {
-    if (me.role !== "operator") throw new Error("only operators write in conversations");
+    if (me.role !== "operator") throw new Error("only operators share posts with Opus");
   };
+  // The server's rule for talking to Opus: an operator, or a maintainer with write access (their turns run on their own Task Runner).
+  const talks = (repo: string) => me.role === "operator" || (me.role === "maintainer" && me.writeRepos.includes(repo));
+  const view = (c: Omit<Conversation, "canTalk">): Conversation => ({ ...c, canTalk: talks(c.repo) });
   // The server's rule for a card: an operator, or a maintainer with the setting on and write access (every mock repo uses the app's identity).
   const settles = (repo: string) => me.role === "operator" || (me.role === "maintainer" && me.maintainerWrites && me.writeRepos.includes(repo));
   const needCard = (k: ConversationCard) => {
@@ -230,19 +234,20 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
           const d = derive?.(c.repo, c.number);
           if (d) choices.set(ref, d);
         }
-        return snap({ ...c, choices: choices.get(ref) ?? null, turns: c.turns.map((t) => ({ ...t, actions: t.actions.map((k) => ({ ...k, canSettle: settles(c.repo) })) })) });
+        return snap({ ...view(c), choices: choices.get(ref) ?? null, turns: c.turns.map((t) => ({ ...t, actions: t.actions.map((k) => ({ ...k, canSettle: settles(c.repo) })) })) });
       },
       async say(repo, n, text, ask) {
-        need();
+        if (!talks(repo)) throw new Error("only operators, and maintainers with write access to the repository, write in conversations");
+        const kind = me.role === "operator" ? "operator" : "maintainer";
         const c = open(repo, n);
         if (c.pending) throw new Error("Opus has not answered the last message yet");
         if (ask === false) {
-          c.turns.push({ id: nextId++, kind: "operator", login: me.login, at: new Date().toISOString(), body: text, actions: [], notes: [] });
+          c.turns.push({ id: nextId++, kind, login: me.login, at: new Date().toISOString(), body: text, actions: [], notes: [] });
           Object.assign(c, { exists: true, startedBy: c.startedBy ?? me.login });
           changed();
-          return snap(c);
+          return snap(view(c));
         }
-        const t: ConversationTurn = { id: nextId++, kind: "operator", login: me.login, at: new Date().toISOString(), body: text, actions: [], notes: [], status: "pending" };
+        const t: ConversationTurn = { id: nextId++, kind, login: me.login, at: new Date().toISOString(), body: text, actions: [], notes: [], status: "pending" };
         Object.assign(c, { exists: true, pending: true, startedBy: c.startedBy ?? me.login });
         c.turns.push(t);
         changed();
@@ -255,7 +260,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
           c.turns.push({ id: nextId++, kind: "opus", login: "opus", at: new Date().toISOString(), body: "I read that. The pack and the committed files carry the same patterns, so asking the author to load the pack still holds.", actions: [], notes: [] });
           changed();
         }, 5000);
-        return snap(c);
+        return snap(view(c));
       },
       async include(repo, n, source, on) {
         need();
@@ -267,7 +272,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
           c.includes.splice(i, 1);
         }
         changed();
-        return snap(c);
+        return snap(view(c));
       },
       async cancelPreapproval(repo, number) {
         need();

@@ -12,7 +12,7 @@ import { setApproval as setLabelApproval } from "../src/labels/approval.ts";
 import { setRunner } from "../src/classify/run.ts";
 import { applicableSteps, cleanComment, headline, parseReply } from "../src/conversations/cards.ts";
 import { doCard } from "../src/conversations/act.ts";
-import { addOperatorMessage, ensureConversation, insertTurn, staleOf, turnsOf } from "../src/conversations/store.ts";
+import { addMessage, ensureConversation, insertTurn, staleOf, turnsOf } from "../src/conversations/store.ts";
 import { answerPending } from "../src/conversations/run.ts";
 import { ask, getDecision } from "../src/decisions.ts";
 import { cleanReason } from "../src/act/templates.ts";
@@ -170,7 +170,7 @@ describe("new step kinds", () => {
     assert.ok(st2.includes("fixup with merge") && !st2.includes("transfer") && !st3.includes("fixup with merge"));
     await ensureConversation(db, "app", 3, "op");
     await db.run(db.k.updateTable("items").set({ state: "CLOSED" }).where("repo", "=", "app").where("number", "=", 3));
-    await addOperatorMessage(db, "app", 3, "op", "Reopen it?", undefined, false);
+    await addMessage(db, "app", 3, { login: "op", kind: "operator" }, "Reopen it?", undefined, false);
     assert.ok((await turnsOf(db, "app", 3)).at(-1)!.block.includes("<steps>[") && (await applicableSteps(db, "app", 3)).includes("reopen"));
     const none = await run(db, 2, [R([{ kind: "fixup", instructions: "x", merge: true }, { kind: "request_reviewers", logins: ["someone"] }])]);
     assert.equal(none.cards.length, 0);
@@ -364,8 +364,8 @@ describe("access", () => {
     assert.equal((await db.get(db.k.selectFrom("conversation_cards").select("state")))!.state, "proposed");
     const writes = apiRoutes().filter((r) => r.method === "POST" && /conversation/.test(r.pattern));
     assert.equal(writes.length, 7);
-    // Chat is operator-only; the card routes check who may settle in the handler (refused for the viewer above).
-    assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern).sort(), ["/api/conversations/:repo/:n/includes", "/api/conversations/:repo/:n/messages"]);
+    // Sharing posts is operator-only; messages and the card routes check who may write or settle in the handler (refused for the viewer above).
+    assert.deepEqual(writes.filter((r) => r.operator === true).map((r) => r.pattern), ["/api/conversations/:repo/:n/includes"]);
     // A second message while Opus has not answered the first is refused.
     await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "More" }));
     await assert.rejects(() => conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Again" })), (e) => e instanceof HttpError && e.status === 409);
