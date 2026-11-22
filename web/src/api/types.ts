@@ -988,12 +988,14 @@ export interface DiscordAccount {
 /** A live agent token of any login (operators see all of them). */
 export type AccessToken = McpToken & { login: string };
 export interface GithubAppStatus {
-  /** The app's keys are in the secrets file. */
+  /** The app's keys are stored and readable. */
   configured: boolean;
   /** The instance-wide GitHub identity: the box account, or the GitHub App (writes and dashboard sign-in). */
   identity: "box" | "app";
-  /** False when the server has no secrets file to keep the keys in. */
+  /** False when the server has nowhere to keep the keys. */
   canRegister: boolean;
+  /** Stored keys exist that this process cannot open (sealed with another session_key); registering needs the replace confirmation. */
+  keysUnreadable: boolean;
   defaultName: string;
   /** The session's CSRF token, for the registration form. */
   csrf: string;

@@ -803,6 +803,14 @@ export interface FlowSummary {
   decisions_sig: string | null;
 }
 
+export interface GithubApp {
+  id: Generated<number>;
+  app_id: string | null;
+  slug: string | null;
+  keys_enc: string | null;
+  updated_at: string;
+}
+
 export interface GithubAppStates {
   state: string;
   login: string;
@@ -1042,6 +1050,15 @@ export interface JobItems {
   outcome: string | null;
   at: string;
   ref: string | null;
+}
+
+export interface JobLogChunks {
+  job_id: number;
+  seq: number;
+  start: number;
+  next_start: number;
+  chunk: string;
+  at: string;
 }
 
 export interface Jobs {
@@ -2253,6 +2270,7 @@ export interface DB {
   fix_attempts: FixAttempts;
   fixups: Fixups;
   flow_summary: FlowSummary;
+  github_app: GithubApp;
   github_app_states: GithubAppStates;
   github_commands: GithubCommands;
   github_setup_links: GithubSetupLinks;
@@ -2272,6 +2290,7 @@ export interface DB {
   item_stage: ItemStage;
   items: Items;
   job_items: JobItems;
+  job_log_chunks: JobLogChunks;
   jobs: Jobs;
   lane_next: LaneNext;
   liveness_items: LivenessItems;
@@ -2430,6 +2449,7 @@ export interface DB {
   "main.fix_attempts": FixAttempts;
   "main.fixups": Fixups;
   "main.flow_summary": FlowSummary;
+  "main.github_app": GithubApp;
   "main.github_app_states": GithubAppStates;
   "main.github_commands": GithubCommands;
   "main.github_setup_links": GithubSetupLinks;
@@ -2449,6 +2469,7 @@ export interface DB {
   "main.item_stage": ItemStage;
   "main.items": Items;
   "main.job_items": JobItems;
+  "main.job_log_chunks": JobLogChunks;
   "main.jobs": Jobs;
   "main.lane_next": LaneNext;
   "main.liveness_items": LivenessItems;
@@ -2611,6 +2632,7 @@ export const COLUMNS = {
   fix_attempts: ["repo", "number", "main_sha", "text_hash", "state", "round", "files", "crate", "crate_dir", "patch", "test_patch", "head_task_id", "base_task_id", "retries", "push_tries", "summary", "pr_url", "reason", "created_at", "updated_at", "size", "format_diff"],
   fixups: ["repo", "number", "from_head", "to_head", "state", "reason", "files", "attempt", "created_at", "source", "patch", "lint_task", "lint_round", "lint_state", "carry_decision", "operator_fix", "changes", "session"],
   flow_summary: ["repo", "counts", "counted_at", "stale", "decisions_sig"],
+  github_app: ["id", "app_id", "slug", "keys_enc", "updated_at"],
   github_app_states: ["state", "login", "session_hash", "created_at"],
   github_commands: ["comment_id", "repo", "number", "pr", "command", "weight", "login", "github_id", "created_at", "requested_at", "state", "result", "done_at", "tried_at", "retries", "allowed", "reply", "ref_repo", "ref_number", "ref_branch"],
   github_setup_links: ["id", "org", "created_by", "hash", "created_at", "expires_at", "revoked_at", "used_at", "used_by", "installation_id"],
@@ -2630,6 +2652,7 @@ export const COLUMNS = {
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "text_refs", "author_id"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
+  job_log_chunks: ["job_id", "seq", "start", "next_start", "chunk", "at"],
   jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "lease_skips", "lease_skip_keys"],
   lane_next: ["lane", "total", "items", "at"],
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],

@@ -4,6 +4,7 @@
 // stops jobs whose cancel was requested, runs the autopilot (queues jobs while the
 // pipeline switch is on) and puts jobs that a stop or an earlier runner left
 // unfinished back in the queue to resume (src/runner/resuming.ts).
+import { copyLogs, JobLogCopy, pruneJobLogs } from "./job-log.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
@@ -79,7 +80,7 @@ export type RunnerOptions = {
   graceMs?: number;
 };
 
-type Running = { child: ChildProcess; termAt: number | null; exited: Promise<void>; startedAt: number; deadlineMin: number; logPath: string; /** When the job was told to finish its current item and stop. */ flaggedAt: number | null; noProgressMin: number; /** Why it was told to stop. */ stopMsg: string | null; /** Time in which a user-local call of the job waited for a helper, summed over the checks that saw one waiting. */ remoteWaitMs: number; remoteSeen: { at: number; queued: boolean } | null };
+type Running = { child: ChildProcess; termAt: number | null; exited: Promise<void>; startedAt: number; deadlineMin: number; logPath: string; logCopy: JobLogCopy; /** When the job was told to finish its current item and stop. */ flaggedAt: number | null; noProgressMin: number; /** Why it was told to stop. */ stopMsg: string | null; /** Time in which a user-local call of the job waited for a helper, summed over the checks that saw one waiting. */ remoteWaitMs: number; remoteSeen: { at: number; queued: boolean } | null };
 
 /** The error of a job the runner stopped for running past its step's limit. */
 export const deadlineError = (min: number): string => `stopped: ran past ${min} min`;
@@ -383,6 +384,11 @@ export class Runner {
         this.o.log(`prune jobs: ${(e as Error).message}`);
       }
       try {
+        await pruneJobLogs(this.db, t);
+      } catch (e) {
+        this.o.log(`prune job logs: ${(e as Error).message}`);
+      }
+      try {
         await prunePlanHistory(this.db, JOB_KEEP_MS, t);
       } catch (e) {
         this.o.log(`prune plan history: ${(e as Error).message}`);
@@ -411,6 +417,12 @@ export class Runner {
   }
 
   private async cancels(): Promise<void> {
+    await this.checkRunning();
+    // The new log lines of every running job, in one write (each job at most every JOB_LOG_FLUSH_MS).
+    await copyLogs(this.db, [...this.running.values()].map((r) => r.logCopy)).catch((e: Error) => this.o.log(`job logs not stored: ${e.message}`));
+  }
+
+  private async checkRunning(): Promise<void> {
     for (const [id, r] of this.running) {
       const row = await this.db.get(this.db.k.selectFrom("jobs").select("cancel_requested_at").where("id", "=", id));
       // Time a user-local model call waits for a helper counts like waiting for an account slot: not toward the deadline, and not as a time without progress.
@@ -521,6 +533,8 @@ export class Runner {
   private async start(id: number, stepName: string, steps: Awaited<ReturnType<typeof loadSteps>>): Promise<boolean> {
     const logPath = join(this.o.logs, `job-${id}.log`);
     // The check and the claim are one write transaction, so a command-line run cannot take the step in between.
+    // Read before the claim: nothing may wait between the claim and the spawn.
+    const logCopy = await JobLogCopy.open(this.db, id, logPath);
     const claimed = await this.db.write(async () => await this.blocked(steps, id) ? 0
       : (await this.db.run(this.db.k.updateTable("jobs").set({ state: "running", started_at: now(), log_path: logPath }).where("id", "=", id).where("state", "=", "queued"))).changes);
     if (!claimed) return false;
@@ -546,13 +560,15 @@ export class Runner {
             this.unrecorded.set(id, { code, signal, spawnError });
             this.o.log(`job ${id}: end not recorded: ${(e as Error).message}`);
           })
+          // After the end is recorded (or not): resumeJob and the deadline notes append to the file first.
+          .then(() => copyLogs(this.db, [logCopy], true).catch((e: Error) => this.o.log(`job ${id}: log not stored: ${e.message}`)))
           .finally(() => {
             this.running.delete(id);
             resolve();
           });
       });
     });
-    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
+    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, logCopy, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
     return true;
   }
 

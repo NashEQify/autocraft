@@ -1,7 +1,7 @@
 // "Needs you": feedback people left that nobody has answered, and what the pipeline stopped. Decisions have their own API.
 // Dashboard users' text is shown here and never read by a prompt.
 import type { NeedsFeedbackPage, NeedsFeedbackRow, NeedsFixPage, NeedsPage, NeedsStoppedRow } from "../../../web/src/api/types.ts";
-import { listAccounts } from "../../agents/accounts.ts";
+import { accountListOrNull } from "../../agents/account-actions.ts";
 import { getDecision, reposOf } from "../../decisions.ts";
 import { needingExpr, touchesQuiet, withoutHiddenExpr } from "./decisions.ts";
 import { zeroLimits } from "./limits.ts";
@@ -169,7 +169,7 @@ export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): P
   const updated = new Map((await db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"]))).map((r) => [r.step, r.updated_at]));
   for (const l of await zeroLimits(db))
     out.push({ id: `limit:${l.step}`, kind: "limit", title: l.title, reason: "The daily limit is 0", since: updated.get(l.step) ?? null, resume: { type: "link", to: "/pipeline" } });
-  for (const a of await listAccounts(db))
+  for (const a of await accountListOrNull(db) ?? [])
     if (a.enabled && a.pausedReason) out.push({ id: `account:${a.id}`, kind: "account", title: a.label, reason: blankIfHidden(a.pausedReason, hidden), since: null, resume: { type: "link", to: "/accounts" } });
   // Targets Act stopped after repeated failures, while the answer still stands: an operator retries them from here.
   for (const a of await db.all(db.k.selectFrom("main.actions as a").innerJoin("main.decisions as d", "d.id", "a.decision_id").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number"))

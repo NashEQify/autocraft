@@ -24,6 +24,7 @@ import { buildReferenceIndex } from "../src/reference-search.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { startWorkerServer } from "../src/build/worker-api.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-tools-"));
@@ -157,5 +158,23 @@ describe("per-lease tools of remote calls", async () => {
     assert.deepEqual(seen, [{ input: { patch: "diff", command: "clippy" }, runId }]);
     await submitCall(db, secret, { ok: false, error: "done", durationMs: 1 });
     assert.equal((await waiting).state, "failed");
+  });
+
+  test("with AUTOCRAFT_RUNNER_URL the item tools run on the runner's worker API, which checks the lease again", async () => {
+    const w = await startWorkerServer({ db, listen: "127.0.0.1:0" });
+    const paths: string[] = [];
+    w.server.prependListener("request", (req) => paths.push(req.url ?? ""));
+    process.env.AUTOCRAFT_RUNNER_URL = w.url;
+    try {
+      const r = await tool("tools", "items", "search_items", { query: "wave filter" });
+      assert.equal(r.status, 200);
+      assert.match(r.body.content[0]!.text, /photocraft#7 issue open/);
+      assert.deepEqual(paths, ["/remote/tools/items/search_items"]);
+      const direct = await fetch(`${w.url}/remote/tools/items/search_items`, { method: "POST", headers: { authorization: `Bearer ${leases.get("ended")!.secret}`, "content-type": "application/json" }, body: "{}" });
+      assert.equal(direct.status, 401, "an ended lease");
+    } finally {
+      delete process.env.AUTOCRAFT_RUNNER_URL;
+      await w.close();
+    }
   });
 });

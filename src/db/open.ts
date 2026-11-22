@@ -1,6 +1,7 @@
 // Opens database handles. The only module that loads the kysely and pg packages, with dynamic imports: the build worker
 // runs src/ without node_modules and never opens the app database (test/no-package-imports.test.ts).
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { basename } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { connect, dbPath } from "../db.ts";
@@ -132,9 +133,17 @@ let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
  * `closeDb()` closes it.
  */
 export async function openDb(): Promise<Db> {
-  proc ??= connectDb().then((db) => {
+  proc ??= connectDb().then(async (db) => {
     const close = db.close.bind(db);
     db.close = async () => {};
+    // The GitHub App's keys of this process (job processes, commands, the runner) come from this database.
+    await (await import("../github/app-keys.ts")).openAppKeys(db).catch(async (e: Error) => {
+      // A process without the file never reads the keys by design (a build worker); say so only when a stored app is going unread.
+      const file = envVar("SECRETS_FILE");
+      if (!file || !existsSync(file)) return;
+      const stored = await db.get(db.k.selectFrom("github_app").select("id").where("id", "=", 1).where("keys_enc", "is not", null)).catch(() => undefined);
+      if (stored) console.error(`GitHub App keys not read: ${e.message}`);
+    });
     return { db, close };
   });
   return (await proc).db;

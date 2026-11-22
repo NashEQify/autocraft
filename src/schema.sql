@@ -353,6 +353,16 @@ CREATE TABLE IF NOT EXISTS user_token_revocations (
   attempts INTEGER NOT NULL DEFAULT 0 -- failed sweeps so far
 );
 
+-- The registered GitHub App (src/github/app-keys.ts): at most one row, id 1. keys_enc null: the app was removed, and a
+-- secrets file's app keys are not imported again (they are imported only while no row exists).
+CREATE TABLE IF NOT EXISTS github_app (
+  id INTEGER PRIMARY KEY,
+  app_id TEXT,
+  slug TEXT,
+  keys_enc TEXT,                      -- sealed JSON of the app's keys (TokenBox, aad 'github_app:1')
+  updated_at TEXT NOT NULL
+);
+
 -- The GitHub App user token of a Discord reporter (src/discord/reporter.ts), keyed by the Discord user's keyed hash. Not a
 -- dashboard login: it grants no access, it only lets the bot file an issue as that GitHub account.
 CREATE TABLE IF NOT EXISTS reporter_tokens (
@@ -524,6 +534,18 @@ CREATE TABLE IF NOT EXISTS jobs (
   resumes INTEGER NOT NULL DEFAULT 0  -- times a runner stop or restart put the running job back in the queue (src/runner/resuming.ts)
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
+-- The end of each job's log, copied by the runner from the job's log file in chunks of whole lines (src/runner/job-log.ts),
+-- for a dashboard that does not share the runner's disk. Only the last 256 KiB of a job are kept, for 90 days; pruneJobs also deletes them with the job.
+CREATE TABLE IF NOT EXISTS job_log_chunks (
+  job_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  start INTEGER NOT NULL,             -- byte offset of the chunk in the log file; the first kept chunk's > 0: earlier text was dropped
+  next_start INTEGER NOT NULL,        -- byte offset after the chunk in the log file (the chunk is scrubbed, so its length may differ)
+  chunk TEXT NOT NULL,                -- scrubbed
+  at TEXT NOT NULL,                   -- when it was copied; pruneJobLogs deletes chunks after 90 days
+  PRIMARY KEY (job_id, seq)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS job_log_chunks_at ON job_log_chunks(at);
 CREATE INDEX IF NOT EXISTS jobs_step ON jobs(step, id);
 CREATE INDEX IF NOT EXISTS jobs_step_started ON jobs(step, started_at);
 CREATE INDEX IF NOT EXISTS jobs_user_ended ON jobs(requested_by, ended_at);
