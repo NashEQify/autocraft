@@ -19,7 +19,7 @@ import { cols } from "../../db/kx.ts";
 import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { isQuiet } from "../../security/quiet.ts";
 import { canSeeInternals } from "./staff.ts";
-import { SECURITY_STEP } from "../../security/rules.ts";
+import { SECURITY_PREFIX, SECURITY_STEP } from "../../security/rules.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
 import { setting } from "../../settings-read.ts";
@@ -160,7 +160,7 @@ export const job = async (db: Db, req: Req) => wrap(async () => {
   const hidden = await hiddenRepos(db, req);
   const id = jobId(req);
   const d = await jobDetail(db, id, { hidden, logs: canSeeInternals(req) });
-  const repo = (await jobRow(db, id))?.repo;
+  const repo = jobRepo((await jobRow(db, id))?.repo);
   d.canCancel = req.user.role === "operator" || (!!repo && await mayRunRepo(req.user, repo));
   if (canSeeInternals(req)) return forViewer(req, hidden)(d) as typeof d;
   // An item's outcome reads "failed: <reason>" or carries notes: viewers get the leading state word, and nothing for a quiet pull request.
@@ -186,12 +186,15 @@ export async function request(db: Db, req: Req): Promise<Job> {
   return j;
 }
 
+/** A security job stores its repo as `(security):<repo>`; the permission is on the repo itself. */
+const jobRepo = (r: string | null | undefined): string | null => (r?.startsWith(SECURITY_PREFIX) ? r.slice(SECURITY_PREFIX.length) : r ?? null);
+
 // An operator cancels any job; a maintainer with write access cancels the jobs of that repo. A job without a repo stays operator-only.
 export async function cancel(db: Db, req: Req): Promise<Job> {
   if (req.user.role === "viewer") throw new HttpError(403, "only operators and maintainers cancel pipeline jobs");
   const id = jobId(req);
   const before = await wrap(async () => await getJob(db, id));
-  const repo = (await jobRow(db, id))?.repo;
+  const repo = jobRepo((await jobRow(db, id))?.repo);
   if (req.user.role !== "operator" && !(repo && await mayRunRepo(req.user, repo))) throw new HttpError(403, "only an operator, or a maintainer with write access to the job's repo, cancels it");
   const j = await wrap(async () => await requestCancel(db, id, req.user.login));
   await audit(db, req.user.login, "job-cancel", `job:${id}`, { step: j.step, state: before.state });

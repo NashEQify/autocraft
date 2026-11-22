@@ -27,6 +27,9 @@ async function needRunRepo(req: Req, repo: string): Promise<void> {
   if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, stops scans and decides findings");
 }
 
+/** Finding actions that open or publish a security advisory. */
+export const OPERATOR_ACTIONS: readonly string[] = ["advisory", "publish"];
+
 function body(req: Req): Record<string, unknown> {
   const b = req.json;
   if (b === undefined) return {};
@@ -88,7 +91,10 @@ export async function continueScan(db: Db, req: Req): Promise<ScanView> {
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
   await needRunRepo(req, scan.repo);
-  return await withAct(req, await asHttp(async () => continueScanAs(db, id, req.user.login, body(req).cap)));
+  const cap = body(req).cap;
+  // A maintainer may only continue within the cap the scan was given; no cap or a higher one spends more and stays with operators.
+  if (req.user.role !== "operator" && (typeof cap !== "number" || scan.cap_usd === null || cap > scan.cap_usd)) throw new HttpError(403, "only an operator continues a scan with no cap or a cap above the one it had");
+  return await withAct(req, await asHttp(async () => continueScanAs(db, id, req.user.login, cap)));
 }
 
 export async function finding(db: Db, req: Req): Promise<FindingView> {
@@ -108,6 +114,7 @@ export async function actOnFinding(db: Db, req: Req): Promise<FindingView> {
   await needRunRepo(req, repo);
   const n = number(req.params.n, "finding");
   const b = body(req);
+  if (OPERATOR_ACTIONS.includes(b.action as string) && req.user.role !== "operator") throw new HttpError(403, "only an operator sends a finding the advisory way or publishes it");
   return asHttp(async () => actOnFindingAs(db, repo, n, req.user.login, b));
 }
 

@@ -22,12 +22,12 @@ import { Segmented } from "../../ui/molecules/Segmented";
 const usd = (v: number) => formatCost(v) ?? "$0.00";
 
 /** The spend-cap form of starting and continuing a scan. */
-function CapDialog({ title, submit, initial, above, open, onClose, send }: { title: string; submit: string; initial: number; above: number; open: boolean; onClose: () => void; send: (cap: number | null) => Promise<unknown> }) {
+function CapDialog({ title, submit, initial, above, max, open, onClose, send }: { title: string; submit: string; initial: number; above: number; max?: number; open: boolean; onClose: () => void; send: (cap: number | null) => Promise<unknown> }) {
   const write = useWrite();
   const [mode, setMode] = useState<"amount" | "none">("amount");
   const [amount, setAmount] = useState(String(initial));
   const cap = mode === "none" ? null : Number(amount);
-  const valid = cap === null || (Number.isFinite(cap) && cap > above);
+  const valid = cap === null ? max === undefined : Number.isFinite(cap) && cap > above && (max === undefined || cap <= max);
   return (
     <Dialog open={open} onClose={onClose} title={title}>
       <form
@@ -39,7 +39,7 @@ function CapDialog({ title, submit, initial, above, open, onClose, send }: { tit
       >
         <div className="flex flex-col gap-2">
           <span className="text-sm font-medium" id="cap-label">Spend cap</span>
-          <Segmented label="Spend cap" value={mode} onChange={setMode} options={[{ value: "amount", label: "Amount" }, { value: "none", label: "No cap" }]} />
+          <Segmented label="Spend cap" value={mode} onChange={setMode} options={max === undefined ? [{ value: "amount", label: "Amount" }, { value: "none", label: "No cap" }] : [{ value: "amount", label: "Amount" }]} />
           {mode === "amount" && (
             <label className="flex items-center gap-2 text-sm">
               <span className="text-ink/60">$</span>
@@ -63,15 +63,16 @@ function StartDialog({ repo, open, onClose }: { repo: string; open: boolean; onC
 }
 
 /** Continue a scan that stopped at its cap: prefilled with the estimate of the whole scan, rounded up. */
-function ContinueDialog({ s, open, onClose }: { s: ScanView; open: boolean; onClose: () => void }) {
+function ContinueDialog({ s, max, open, onClose }: { s: ScanView; max?: number; open: boolean; onClose: () => void }) {
   const api = useApi();
-  const initial = Math.ceil(Math.max(s.estimateUsd ?? 0, s.costUsd + 1));
-  return <CapDialog title="Continue scan" submit="Continue scan" initial={initial} above={s.costUsd} open={open} onClose={onClose} send={(cap) => api.security.continueScan(s.id, cap)} />;
+  const initial = max === undefined ? Math.ceil(Math.max(s.estimateUsd ?? 0, s.costUsd + 1)) : max;
+  return <CapDialog title="Continue scan" submit="Continue scan" initial={initial} above={s.costUsd} max={max} open={open} onClose={onClose} send={(cap) => api.security.continueScan(s.id, cap)} />;
 }
 
 export function ScanRow({ s, link }: { s: ScanView; link?: boolean }) {
   const api = useApi();
   const write = useWrite();
+  const operator = useUser().role === "operator";
   const [resume, setResume] = useState(false);
   const active = scanActive(s.state);
   const st = SCAN_STATE[s.state];
@@ -88,10 +89,10 @@ export function ScanRow({ s, link }: { s: ScanView; link?: boolean }) {
             Stop
           </Button>
         )}
-        {s.canAct && s.state === "capped" && (
+        {s.canAct && s.state === "capped" && (operator || (s.capUsd !== null && s.capUsd > s.costUsd)) && (
           <>
             <Button size="md" icon={PlayIcon} onClick={() => setResume(true)} className="ml-auto max-md:h-11">Continue</Button>
-            <ContinueDialog key={s.costUsd} s={s} open={resume} onClose={() => setResume(false)} />
+            <ContinueDialog key={s.costUsd} s={s} max={operator ? undefined : s.capUsd ?? undefined} open={resume} onClose={() => setResume(false)} />
           </>
         )}
       </div>

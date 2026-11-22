@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { labelsApproval } from "../src/dash/api/admin.ts";
 import { cancel } from "../src/dash/api/pipeline.ts";
-import { actOnFinding, startScan } from "../src/dash/api/security.ts";
+import { actOnFinding, continueScan, startScan } from "../src/dash/api/security.ts";
 import type { Req } from "../src/dash/types.ts";
 import { connectDb } from "../src/db/open.ts";
 
@@ -37,6 +37,16 @@ test("a maintainer with write runs their repo's approvals, findings and jobs; ot
   await assert.rejects(dismiss(as("view", "viewer", { action: "reopen" }, { repo: "alpha", n: "1" })), (e: { status: number }) => e.status === 403 || e.status === 404);
   await assert.rejects(dismiss(as("maint", "maintainer", { action: "reopen" }, { repo: "beta", n: "1" })), (e: { status: number }) => e.status === 403 || e.status === 404);
 
+  // Advisory and publish open or publish an advisory: operator only.
+  for (const action of ["advisory", "publish"]) await assert.rejects(dismiss(as("maint", "maintainer", { action }, { repo: "alpha", n: "1" })), { status: 403 });
+
+  // Continuing a capped scan: a maintainer only with a cap, not above the scan's own.
+  await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "alpha", state: "capped", cap_usd: 10, cost_usd: 5, started_by: "op", started_at: at }));
+  const cont = (cap: number | null) => continueScan(db, as("maint", "maintainer", { cap }, { id: "1" }));
+  await assert.rejects(cont(null), { status: 403 });
+  await assert.rejects(cont(20), { status: 403 });
+  assert.notEqual((await cont(8)).state, "capped");
+
   // Starting a scan spends money: operator only.
   await assert.rejects(startScan(db, as("maint", "maintainer", {}, { repo: "alpha" })), { status: 403 });
 
@@ -44,6 +54,8 @@ test("a maintainer with write runs their repo's approvals, findings and jobs; ot
   const own = await job("alpha");
   assert.equal((await cancel(db, as("maint", "maintainer", {}, { id: String(own) }))).id, own);
   await assert.rejects(cancel(db, as("maint", "maintainer", {}, { id: String(await job("beta")) })), { status: 403 });
+  assert.equal((await cancel(db, as("maint", "maintainer", {}, { id: String(await job("(security):alpha")) }))).state, "cancelled");
+  await assert.rejects(cancel(db, as("maint", "maintainer", {}, { id: String(await job("(security):beta")) })), { status: 403 });
   await assert.rejects(cancel(db, as("maint", "maintainer", {}, { id: String(await job(null)) })), { status: 403 });
   await assert.rejects(cancel(db, as("view", "viewer", {}, { id: String(own) })), { status: 403 });
 });
