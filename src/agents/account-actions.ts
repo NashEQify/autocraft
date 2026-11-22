@@ -73,7 +73,7 @@ export async function accountList(db: Db, nowMs: number = Date.now(), sync = tru
     }
   })();
   listMemo.set(sync, { at: Date.now(), list });
-  list.catch(() => listMemo.delete(sync));
+  void list.catch(() => listMemo.delete(sync));
   return await list;
 }
 
