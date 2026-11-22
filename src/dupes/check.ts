@@ -20,14 +20,18 @@ const HAIKU = CLAUDE_PROMPTS["dupes.haiku"];
 
 export type PairKey = { repo: string; a: number; b: number; a_hash: string; b_hash: string; similarity: number };
 
-// Unchecked pairs whose items still have the hashed text and of which at least one is open.
-const unchecked = (db: Db) => db.k.selectFrom("duplicate_pairs as p")
+// Unchecked pairs whose items still have the hashed text and of which at least one is open. The join is a materialized CTE
+// with the scope filter applied to its rows: the item hash matches each pair's hash, which Postgres cannot know, so it
+// expects almost no joined rows and, planned together with the scope filter, scanned items once per pair.
+const unchecked = (db: Db) => db.k.with((cte) => cte("live").materialized(), (qb) => qb.selectFrom("duplicate_pairs as p")
   .innerJoin("items as ia", (j) => j.onRef("ia.repo", "=", "p.repo").onRef("ia.number", "=", "p.a").onRef("ia.embed_hash", "=", "p.a_hash"))
   .innerJoin("items as ib", (j) => j.onRef("ib.repo", "=", "p.repo").onRef("ib.number", "=", "p.b").onRef("ib.embed_hash", "=", "p.b_hash"))
   .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
   .where("p.verdict", "is", null)
   .where((eb) => eb.or([eb("ia.state", "=", "OPEN"), eb("ib.state", "=", "OPEN")]))
-  .where("p.repo", "in", (eb) => eb.selectFrom("tracked_repos").select("name"))
+  .where("p.repo", "in", (eb) => eb.selectFrom("tracked_repos").select("name")))
+  .selectFrom("live as p")
+  .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
   .where((eb) => eb.or([pilotExprFor(db, eb, "p.repo", "p.a"), pilotExprFor(db, eb, "p.repo", "p.b")]));
 
 /** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. A negative limit means all. */
