@@ -12,7 +12,7 @@ mkdirSync(SCRATCH, { recursive: true });
 
 test("the app token path answers without a session and one request serves parallel lookups", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-permission-")), "t.db"));
-  await db.prepare("INSERT INTO repos (name, owner) VALUES ('photocraft', 'acme')").run();
+  await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "acme" }));
   const seen: string[] = [];
   const srv = createServer((req, res) => {
     seen.push(`${req.url} ${req.headers.authorization}`);
@@ -27,8 +27,8 @@ test("the app token path answers without a session and one request serves parall
     assert.deepEqual(all.map((a) => a.kind === "ok" && a.permission), ["maintain", "maintain", "maintain"]);
     await appPermission(db, "alice", "photocraft", deps);
     assert.deepEqual(seen, ["/repos/acme/photocraft/collaborators/Alice/permission Bearer tok"]);
-    const row = await db.prepare("SELECT permission FROM repo_permissions WHERE login = 'Alice' AND repo = 'photocraft'").get() as { permission: string };
-    assert.equal(row.permission, "maintain");
+    const row = await db.get(db.k.selectFrom("repo_permissions").select("permission").where("login", "=", "Alice").where("repo", "=", "photocraft"));
+    assert.equal(row!.permission, "maintain");
     clearPermissionCache();
     assert.equal((await appPermission(db, "bob", "photocraft", { ...deps, mint: async () => { throw new Error("no app"); } })).kind, "unavailable");
   } finally { srv.close(); }
