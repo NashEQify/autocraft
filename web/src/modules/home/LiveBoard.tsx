@@ -1,13 +1,16 @@
 // The Live board at the top of Home: every running and queued unit of the pipeline's work on one time axis. A lane is a job (or a call or
 // build task of its own); its thin bar is the job, the tall bars are its model calls and build steps. Solid: done, pulsing: running now,
 // dashed: the expected rest (median of earlier runs), red line: 90% of earlier runs were done by then. Under the lanes, the latest few
-// finished events of the feed (merges, GitHub writes, answered questions). Above the lanes, who provides the tokens: one card per account
-// with its share of the last hour's tokens; operators press one to pick out its model calls on the lanes.
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
+// finished events of the feed (merges, GitHub writes, answered questions). Staff can switch to the worker view: one row per Task Runner,
+// box account or Jev, with the model calls each ran, coloured by step and marked with their item.
+import { useEffect, useMemo, useReducer, useRef } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "../../api/client";
-import type { LiveAccount, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../api/types";
+import type { LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker } from "../../api/types";
+import { useUrlState } from "../../lib/hooks";
+import { Avatar } from "../../ui/atoms/Avatar";
 import { compact } from "../../ui/molecules/BarList";
+import { Segmented } from "../../ui/molecules/Segmented";
 import { nowMs } from "../../lib/format";
 import { itemPath } from "../../lib/links";
 import { useNow } from "../../lib/useNow";
@@ -65,7 +68,7 @@ function BarTip({ detail, start, end, estimate, now, failed }: { detail?: string
 }
 
 /** One lane's track: the job as a thin bar, its calls and steps as tall ones, and the expected rest of what runs. */
-function Track({ lane, from, to, now, picked }: { lane: LiveLane; from: number; to: number; now: number; picked: string | null }) {
+function Track({ lane, from, to, now }: { lane: LiveLane; from: number; to: number; now: number }) {
   const x = (t: number) => `${((Math.min(Math.max(t, from), to) - from) / (to - from)) * 100}%`;
   const w = (a: number, b: number) => `${(Math.max(0, Math.min(b, to) - Math.max(a, from)) / (to - from)) * 100}%`;
   const start = Date.parse(lane.start);
@@ -94,18 +97,11 @@ function Track({ lane, from, to, now, picked }: { lane: LiveLane; from: number; 
         const s = Date.parse(o.start);
         const e = o.end ? Date.parse(o.end) : now;
         if (e < from) return null;
-        // With an account picked, its calls stand out and everything else steps back.
-        const mine = picked !== null && o.kind === "model" && o.account === picked;
         return (
           <span key={i}>
             <Tooltip title={`${KIND[o.kind].label}: ${o.label}`} content={<BarTip detail={o.detail} start={s} end={o.end ? e : null} estimate={o.estimate} now={now} failed={o.failed} />}>
               <div
-                className={cn(
-                  "absolute top-1 h-3.5 rounded-sm",
-                  o.failed ? "bg-bad" : KIND[o.kind].bg,
-                  picked !== null && !mine ? "opacity-20" : o.end === null ? "animate-pulse" : "opacity-70",
-                  mine && "opacity-100 ring-2 ring-ink",
-                )}
+                className={cn("absolute top-1 h-3.5 rounded-sm", o.failed ? "bg-bad" : KIND[o.kind].bg, o.end === null ? "animate-pulse" : "opacity-70")}
                 style={{ left: x(s), width: w(s, e), minWidth: 3 }}
               />
             </Tooltip>
@@ -191,62 +187,6 @@ function useSteadyLanes(lanes: LiveLane[] | undefined): LiveLane[] {
   }, [lanes, pruned]);
 }
 
-/** One account's card: label, slots in use, its share of the last hour's tokens, calls and 5-hour use. A button for operators. */
-function AccountCard({ a, share, picked, onPick }: { a: LiveAccount; share: number; picked: boolean; onPick: (() => void) | null }) {
-  const busy = a.running > 0;
-  const name = `${a.label}: ${compact(a.tokens)} tokens in ${a.calls} ${a.calls === 1 ? "call" : "calls"}, ${a.running}${a.maxConcurrent !== null ? ` of ${a.maxConcurrent}` : ""} running${a.fiveHourPct !== null ? `, 5-hour use ${Math.round(a.fiveHourPct)}%` : ""}${a.pausedReason ? `, paused: ${a.pausedReason}` : ""}`;
-  const body = (
-    <>
-      <span className="flex items-center gap-1.5">
-        <span className={cn("size-2 shrink-0 rounded-full", busy ? "animate-pulse bg-ok" : "bg-ink/30")} aria-hidden />
-        <span className="truncate text-xs font-medium">{a.label}</span>
-        {a.pausedReason && <span className="shrink-0 rounded bg-warn/15 px-1 text-2xs text-warn">paused</span>}
-        <span className="num ml-auto shrink-0 text-2xs text-ink/55">
-          {a.running}
-          {a.maxConcurrent !== null && `/${a.maxConcurrent}`} running
-        </span>
-      </span>
-      <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-ink/[0.08]" aria-hidden>
-        <span className={cn("block h-full rounded-full", a.provider === "jev" ? "bg-c2" : "bg-accent")} style={{ width: `${Math.round(share * 100)}%` }} />
-      </span>
-      <span className="num mt-1 flex gap-2 text-2xs text-ink/55">
-        <span className="font-medium text-ink/80">{compact(a.tokens)} tokens</span>
-        <span>{a.calls} {a.calls === 1 ? "call" : "calls"}</span>
-        {a.fiveHourPct !== null && <span className={cn("ml-auto", a.pausedReason && "text-warn")}>5h {Math.round(a.fiveHourPct)}%</span>}
-      </span>
-    </>
-  );
-  const cls = "block min-w-[11rem] flex-1 rounded-md border px-2.5 py-1.5 text-left";
-  const tip = a.pausedReason ?? undefined;
-  if (!onPick) return <div className={cn(cls, "border-line")} title={tip} role="group" aria-label={name}>{body}</div>;
-  return (
-    <button type="button" onClick={onPick} aria-pressed={picked} aria-label={name} title={tip}
-      className={cn(cls, "transition-colors hover:bg-ink/[0.04] focus-visible:outline-2 focus-visible:outline-accent-ink", picked ? "border-ink bg-ink/[0.06]" : "border-line")}>
-      {body}
-    </button>
-  );
-}
-
-/** Who provides the tokens: the accounts, busiest first, each with its share of the last hour's tokens. */
-function Accounts({ accounts, picked, onPick }: { accounts: LiveAccount[]; picked: string | null; onPick: ((key: string) => void) | null }) {
-  const total = accounts.reduce((s, a) => s + a.tokens, 0);
-  const shown = [...accounts].sort((x, y) => y.running - x.running || y.tokens - x.tokens);
-  return (
-    <div className="border-b border-line px-3 py-2">
-      <div className="mb-1.5 flex items-baseline gap-2 text-2xs text-ink/55">
-        <span className="font-medium text-ink/75">Tokens from</span>
-        <span className="num">{compact(total)} in the last hour</span>
-        {onPick && <span className="ml-auto max-sm:hidden">{picked ? "Showing that account's model calls; press it again to show all" : "Press an account to pick out its model calls"}</span>}
-      </div>
-      <div className="flex flex-wrap gap-2">
-        {shown.map((a) => (
-          <AccountCard key={a.key} a={a} share={total ? a.tokens / total : 0} picked={picked === a.key} onPick={onPick && (() => onPick(a.key))} />
-        ))}
-      </div>
-    </div>
-  );
-}
-
 const FEED_SHOWN = 5;
 
 /** The latest finished events of the feed; what runs is on the lanes above. */
@@ -267,30 +207,139 @@ function LatestEvents() {
   );
 }
 
+/** Step colours of the worker view, in the order steps first appear; the chart slots and accent pass the colour-vision checks. */
+const STEP_BG = ["bg-accent", "bg-c2", "bg-c4", "bg-c3", "bg-c5", "bg-c1"];
+
+const STATUS: Record<LiveWorker["status"], { dot: string; label: string }> = {
+  online: { dot: "bg-ok", label: "online" },
+  held: { dot: "bg-warn", label: "not taking calls" },
+  offline: { dot: "bg-ink/30", label: "offline" },
+};
+
+/** A worker row's left side: who it is, whose tokens, whether it takes calls and how many it runs. */
+function WorkerInfo({ w }: { w: LiveWorker }) {
+  const sub = w.kind === "runner" ? ["Task Runner", w.login && `@${w.login}`, w.harness] : w.kind === "account" ? ["Box account"] : ["Batch model"];
+  return (
+    <div className="min-w-0">
+      <div className="flex items-center gap-2">
+        {w.login ? <Avatar login={w.login} size={16} /> : <span className={cn("size-2 shrink-0 rounded-full", STATUS[w.status].dot)} aria-hidden />}
+        <span className="truncate text-sm font-medium">{w.name}</span>
+        <span className="num ml-auto shrink-0 text-2xs text-ink/55">
+          {w.busy}
+          {w.slots !== null && ` of ${w.slots}`} busy
+        </span>
+      </div>
+      <div className="mt-0.5 flex min-w-0 items-center gap-1.5 pl-6 text-2xs text-ink/55">
+        {w.login && <span className={cn("size-1.5 shrink-0 rounded-full", STATUS[w.status].dot)} aria-hidden />}
+        <span className="truncate">{[...sub.filter(Boolean), STATUS[w.status].label].join(" · ")}</span>
+      </div>
+      {w.note && <div className={cn("mt-0.5 truncate pl-6 text-2xs", w.status === "held" ? "text-warn" : "text-ink/50")}>{w.note}</div>}
+    </div>
+  );
+}
+
+/** A worker's track: one bar per model call, coloured by step, with its item's number on it; a running call pulses and shows its expected rest. */
+function WorkerTrack({ w, from, to, now, stepBg }: { w: LiveWorker; from: number; to: number; now: number; stepBg: (title: string) => string }) {
+  const x = (t: number) => `${((Math.min(Math.max(t, from), to) - from) / (to - from)) * 100}%`;
+  const wd = (a: number, b: number) => `${(Math.max(0, Math.min(b, to) - Math.max(a, from)) / (to - from)) * 100}%`;
+  return (
+    <div className="relative h-7 rounded bg-ink/[0.04]">
+      {w.calls.map((c) => {
+        const s = Date.parse(c.start);
+        const e = c.end ? Date.parse(c.end) : now;
+        if (e < from) return null;
+        const what = c.item ? `${c.item.repo}#${c.item.number}${c.itemCount > 1 ? ` and ${c.itemCount - 1} more` : ""}` : null;
+        const due = c.estimate && c.end === null ? s + c.estimate.median : null;
+        // The item's number shows on bars wide enough to hold it; a narrower one has it in its name and tip.
+        const roomy = (Math.min(e, to) - Math.max(s, from)) / (to - from) > 0.045;
+        const tag = c.item ? `#${c.item.number}` : null;
+        return (
+          <span key={c.id}>
+            <Tooltip
+              title={`${c.title}${what ? `: ${what}` : ""}`}
+              content={
+                <TipLines
+                  lines={[
+                    c.item?.title,
+                    `${c.model}${c.tokens !== null ? ` · ${compact(c.tokens)} tokens` : ""}`,
+                    <BarTip key="t" start={s} end={c.end ? e : null} estimate={c.estimate} now={now} failed={c.failed} />,
+                  ]}
+                />
+              }
+            >
+              <Link
+                to={`/agents/${c.id}`}
+                aria-label={`${roomy && tag ? `${tag} ` : ""}${c.title}${what ? ` on ${what}` : ""}, ${c.end ? `took ${fmtDur(e - s)}${c.failed ? ", failed" : ""}` : `running for ${fmtDur(now - s)}`}`}
+                className="group absolute top-0.5 flex h-6 items-center overflow-hidden rounded-sm px-0.5 focus-visible:outline-2 focus-visible:outline-accent-ink"
+                style={{ left: x(s), width: wd(s, e), minWidth: 3 }}
+              >
+                {/* Only the fill pulses, so the number keeps its contrast; ink on the panel colour reads on every step colour. */}
+                <span aria-hidden className={cn("absolute inset-0", c.failed ? "bg-bad" : stepBg(c.title), c.end === null ? "animate-pulse" : "opacity-80 group-hover:opacity-100")} />
+                {roomy && tag && <span className="num relative truncate rounded-sm bg-panel px-1 text-2xs font-medium leading-4 text-ink">{tag}</span>}
+              </Link>
+            </Tooltip>
+            {due !== null && due > now && <div aria-hidden className="absolute top-0.5 h-6 rounded-sm border border-dashed border-ink/40" style={{ left: x(now), width: wd(now, due) }} />}
+          </span>
+        );
+      })}
+      <div aria-hidden className="pointer-events-none absolute -top-1 h-9 w-px bg-ink/70" style={{ left: x(now) }} />
+    </div>
+  );
+}
+
+type LiveView = "jobs" | "workers";
+
 /** The Live board: lanes of running, queued and lately ended work over the last hour and what is expected next, then the latest events. */
 export function LiveBoard({ to }: { to: string }) {
   const { data, error } = useQuery("live", (a) => a.live());
+  const { state: url, update: setUrl } = useUrlState();
   useNow(1000);
   const now = nowMs();
   const lanes = useSteadyLanes(data?.lanes);
-  const accounts = data?.accounts ?? [];
-  // Only operators get calls tagged with their account, so only they can pick one out.
-  const canPick = lanes.some((l) => l.ops.some((o) => o.account));
-  const [picked, setPicked] = useState<string | null>(null);
-  const pick = canPick ? (key: string) => setPicked((p) => (p === key ? null : key)) : null;
-  const pickedLabel = accounts.find((a) => a.key === picked)?.label;
+  const workers = data?.workers;
+  const view: LiveView = workers && url.live === "workers" ? "workers" : "jobs";
   const running = lanes.filter((l) => l.state === "running");
   // Axis: the last hour (less when nothing is that old), up to the latest expected end.
-  const starts = lanes.filter((l) => l.state !== "queued").map((l) => Date.parse(l.start));
-  const from = Math.max(now - 60 * 60_000, Math.min(now - 10 * 60_000, ...starts));
   const lateBy = (start: string, e: LiveEstimate | null) => (e ? Date.parse(start) + e.p90 : now);
-  const ends = running.flatMap((l) => [lateBy(l.start, l.estimate), ...l.ops.filter((o) => !o.end).map((o) => lateBy(o.start, o.estimate))]);
+  const calls = view === "workers" ? (workers ?? []).flatMap((w) => w.calls) : [];
+  const starts = view === "workers" ? calls.map((c) => Date.parse(c.start)) : lanes.filter((l) => l.state !== "queued").map((l) => Date.parse(l.start));
+  const ends = view === "workers"
+    ? calls.filter((c) => !c.end).map((c) => lateBy(c.start, c.estimate))
+    : running.flatMap((l) => [lateBy(l.start, l.estimate), ...l.ops.filter((o) => !o.end).map((o) => lateBy(o.start, o.estimate))]);
+  const from = Math.max(now - 60 * 60_000, Math.min(now - 10 * 60_000, ...starts));
   const to2 = Math.min(now + 60 * 60_000, Math.max(now + 5 * 60_000, ...ends) + 60_000);
   const step = to2 - from > 50 * 60_000 ? 15 * 60_000 : 5 * 60_000;
   const ticks: number[] = [];
   // A tick too close to "now" would sit under its label.
   for (let t = Math.ceil(from / step) * step; t < to2; t += step) if (Math.abs(t - now) > (to2 - from) * 0.04) ticks.push(t);
   const pct = (t: number) => `${((t - from) / (to2 - from)) * 100}%`;
+  // Steps get their colour in the order they first appear, so the legend and the bars agree.
+  const steps = [...new Set(calls.map((c) => c.title))];
+  const stepBg = (title: string) => STEP_BG[Math.max(0, steps.indexOf(title)) % STEP_BG.length]!;
+  const switcher = workers && (
+    <Segmented
+      label="Show the Live board"
+      className="ml-auto"
+      value={view}
+      options={[{ value: "jobs", label: "By job" }, { value: "workers", label: "By worker" }]}
+      onChange={(v) => setUrl({ live: v === "workers" ? "workers" : null })}
+    />
+  );
+  const axis = (
+    <>
+      <div className="border-b border-line max-md:hidden" />
+      <div className="relative h-6 border-b border-line max-md:hidden">
+        {ticks.map((t) => (
+          <span key={t} className="num absolute top-1 -translate-x-1/2 text-2xs text-ink/45" style={{ left: pct(t) }}>
+            {clock(t)}
+          </span>
+        ))}
+        <span className="absolute top-1 -translate-x-1/2 text-2xs font-semibold text-ink" style={{ left: pct(now) }}>
+          now
+        </span>
+      </div>
+    </>
+  );
   return (
     <Section
       title={
@@ -307,18 +356,45 @@ export function LiveBoard({ to }: { to: string }) {
       linkLabel="Full feed"
     >
       <ErrorLine error={error?.message} />
-      <span className="sr-only" aria-live="polite">
-        {picked && pickedLabel ? `Showing the model calls of ${pickedLabel}` : ""}
-      </span>
-      {data && lanes.length === 0 && accounts.length > 0 && (
+      {view === "workers" && workers && (
         <div className="overflow-hidden rounded-md border border-line">
-          <Accounts accounts={accounts} picked={null} onPick={null} />
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-ink/[0.03] px-3 py-1.5 text-2xs text-ink/55">
+            {steps.map((s) => (
+              <span key={s} className="inline-flex items-center gap-1.5">
+                <span className={cn("h-2 w-3 rounded-sm", stepBg(s))} aria-hidden />
+                {s}
+              </span>
+            ))}
+            {steps.length === 0 && <span>No model calls in the last hour</span>}
+            {switcher}
+          </div>
+          {workers.length === 0 ? (
+            <p className="px-3 py-3 text-sm text-ink/55">No Task Runner or account is online, and none ran a call in the last hour.</p>
+          ) : (
+            <div className="grid md:grid-cols-[minmax(15rem,22rem)_1fr]">
+              {axis}
+              {workers.map((w) => (
+                <div key={w.key} className={cn("contents", w.status === "offline" && w.busy === 0 && "[&>*]:opacity-60")}>
+                  <div className="px-3 py-2 md:border-b md:border-line">
+                    <WorkerInfo w={w} />
+                  </div>
+                  <div className="flex flex-col justify-center border-b border-line px-3 py-2 max-md:pt-0">
+                    <WorkerTrack w={w} from={from} to={to2} now={now} stepBg={stepBg} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
-      {data && lanes.length === 0 && <p className="border-t border-line py-3 text-sm text-ink/55">Nothing is running or queued.</p>}
-      {lanes.length > 0 && (
+      {view === "jobs" && data && lanes.length === 0 && (
+        <div className="flex items-center gap-2 border-t border-line py-3 text-sm text-ink/55">
+          Nothing is running or queued.
+          {switcher}
+        </div>
+      )}
+      {view === "jobs" && lanes.length > 0 && (
         <div className="overflow-hidden rounded-md border border-line">
-          {accounts.length > 0 && <Accounts accounts={accounts} picked={canPick ? picked : null} onPick={pick} />}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-ink/[0.03] px-3 py-1.5 text-2xs text-ink/55">
             {LEGEND.map((k) => (
               <span key={k} className="inline-flex items-center gap-1.5">
@@ -326,26 +402,17 @@ export function LiveBoard({ to }: { to: string }) {
                 {KIND[k].label}
               </span>
             ))}
+            {switcher}
           </div>
           <div className="grid md:grid-cols-[minmax(15rem,22rem)_1fr]">
-            <div className="border-b border-line max-md:hidden" />
-            <div className="relative h-6 border-b border-line max-md:hidden">
-              {ticks.map((t) => (
-                <span key={t} className="num absolute top-1 -translate-x-1/2 text-2xs text-ink/45" style={{ left: pct(t) }}>
-                  {clock(t)}
-                </span>
-              ))}
-              <span className="absolute top-1 -translate-x-1/2 text-2xs font-semibold text-ink" style={{ left: pct(now) }}>
-                now
-              </span>
-            </div>
+            {axis}
             {lanes.map((l) => (
               <div key={l.key} className={cn("contents", l.state !== "running" && l.state !== "queued" && "[&>*]:opacity-60")}>
                 <div className="px-3 py-2 md:border-b md:border-line">
                   <LaneInfo lane={l} now={now} />
                 </div>
                 <div className="flex flex-col justify-center border-b border-line px-3 py-2 max-md:pt-0">
-                  <Track lane={l} from={from} to={to2} now={now} picked={canPick ? picked : null} />
+                  <Track lane={l} from={from} to={to2} now={now} />
                 </div>
               </div>
             ))}

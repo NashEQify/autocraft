@@ -1,6 +1,6 @@
 // The Now page on fake data: a failing sync, a red main, a paused account, and one feed of running and finished work that grows over time.
 import type { Api } from "../client";
-import type { LiveBoard, Now, NowEntry, NowFeed } from "../types";
+import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveWorker, LiveWorkerCall, Now, NowEntry, NowFeed } from "../types";
 import { NOW } from "./fixtures";
 import { ackedDeadlines, mockSwitch } from "./pipelineMock";
 import { nowMs } from "../../lib/format";
@@ -106,9 +106,9 @@ function liveBoard(now: number): LiveBoard {
     lanes: [
       { key: "job:1", title: "Review pull requests", state: "running", start: t(14), end: null, line: "Reviewing photocraft#9981 (2 of 3)", item: it("photocraft", 9981, "Fix crop handles on rotated layers"), itemCount: 3, repo: "photocraft", detail: "/pipeline/1", estimate: est(18, 31),
         ops: [
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(14), end: t(9), estimate: null, account: "claude:a" },
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(8.5), end: t(3), estimate: null, account: "claude:a" },
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(2.5), end: null, estimate: est(5, 9), account: "claude:a" },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(14), end: t(9), estimate: null },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(8.5), end: t(3), estimate: null },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(2.5), end: null, estimate: est(5, 9) },
         ] },
       { key: "job:2", title: "Verify pull requests", state: "running", start: t(11), end: null, line: "Running the tests of wordcraft#2231", item: it("wordcraft", 2231, "Keep the hyperlink run when exporting the last paragraph"), itemCount: 1, repo: "wordcraft", detail: "/pipeline/2", estimate: est(16, 24),
         ops: [
@@ -118,9 +118,9 @@ function liveBoard(now: number): LiveBoard {
         ] },
       { key: "job:3", title: "Fix-up pull requests", state: "running", start: t(26), end: null, line: "Second round on vectorcraft#1388", item: it("vectorcraft", 1388, "Snap guides ignore locked layers"), itemCount: 1, repo: "vectorcraft", detail: "/pipeline/3", estimate: est(19, 25),
         ops: [
-          { kind: "model", label: "claude-sonnet", detail: "Fix-up on Team B", start: t(26), end: t(17), estimate: null, account: "claude:b" },
+          { kind: "model", label: "claude-sonnet", detail: "Fix-up on main", start: t(26), end: t(17), estimate: null },
           { kind: "lint", label: "lint", detail: "Fix-up check", start: t(17), end: t(15), estimate: null, failed: true },
-          { kind: "model", label: "claude-sonnet", detail: "Fix-up on Team B", start: t(15), end: null, estimate: est(8, 11), account: "claude:b" },
+          { kind: "model", label: "claude-sonnet", detail: "Fix-up on main", start: t(15), end: null, estimate: est(8, 11) },
         ] },
       { key: "task:4", title: "Build task, Build pull requests", state: "running", start: t(3), end: null, line: null, item: it("filmcraft", 3149, "Panel resize handle flickers"), itemCount: 1, repo: "filmcraft", detail: "/envs/4", estimate: null,
         ops: [{ kind: "build", label: "cargo build", detail: "Build pull requests", start: t(3), end: null, estimate: null }] },
@@ -131,14 +131,47 @@ function liveBoard(now: number): LiveBoard {
         ] },
       { key: "job:5", title: "Classify new items", state: "queued", start: t(1), end: null, line: null, item: it("gridcraft", 977, "Range spill: keep neighbouring cells when a formula grows", "issue"), itemCount: 4, repo: "gridcraft", detail: "/pipeline/5", estimate: null, ops: [] },
       { key: "job:6", title: "Ask Merge? decisions", state: "done", start: t(9), end: t(7), line: "Asked Merge? on 1 PR", item: it("designcraft", 1484, "Add Hungarian spellchecking and nonstandard hyphenation"), itemCount: 1, repo: "designcraft", detail: "/pipeline/6", estimate: null,
-        ops: [{ kind: "model", label: "claude-haiku", detail: "Merge? on Team B", start: t(9), end: t(7.5), estimate: null, account: "claude:b" }] },
+        ops: [{ kind: "model", label: "claude-haiku", detail: "Merge? on main", start: t(9), end: t(7.5), estimate: null }] },
       { key: "job:7", title: "Merge pull requests", state: "failed", start: t(6), end: t(5), line: "Refused: required check has not finished", item: it("filmcraft", 1161, "Color grading: keep state after copy and paste"), itemCount: 1, repo: "filmcraft", detail: "/pipeline/7", estimate: null, ops: [] },
     ],
-    accounts: [
-      { key: "claude:a", label: "main", provider: "claude", running: 1, maxConcurrent: 3, fiveHourPct: 46, pausedReason: null, calls: 14, tokens: 3_820_000 },
-      { key: "claude:b", label: "Team B", provider: "claude", running: 1, maxConcurrent: 2, fiveHourPct: 91, pausedReason: "5-hour use 91 % (pauses at 90 %)", calls: 6, tokens: 1_240_000 },
-      { key: "claude:c", label: "Spare", provider: "claude", running: 0, maxConcurrent: 2, fiveHourPct: 3, pausedReason: null, calls: 0, tokens: 0 },
-      { key: "jev", label: "Jev", provider: "jev", running: 0, maxConcurrent: null, fiveHourPct: null, pausedReason: null, calls: 22, tokens: 410_000 },
-    ],
+    workers: workers(t, est, it),
   };
+}
+
+/** The worker view's mock: three people's Task Runners, two box accounts and Jev, with the last hour's calls. */
+function workers(
+  t: (min: number) => string,
+  est: (median: number, p90: number, samples?: number) => LiveEstimate,
+  it: (repo: string, number: number, title: string, kind?: "pr" | "issue") => ItemRef & ItemShown,
+): LiveWorker[] {
+  let id = 900;
+  const call = (title: string, model: string, item: ItemRef & ItemShown | null, start: number, end: number | null, more: Partial<LiveWorkerCall> = {}): LiveWorkerCall =>
+    ({ id: id++, title, model, item, itemCount: 1, start: t(start), end: end === null ? null : t(end), tokens: end === null ? null : Math.round((start - end) * 41_000), estimate: end === null ? est(6, 11) : null, ...more });
+  const crop = it("photocraft", 9981, "Fix crop handles on rotated layers");
+  const link = it("wordcraft", 2231, "Keep the hyperlink run when exporting the last paragraph");
+  const snap = it("vectorcraft", 1388, "Snap guides ignore locked layers");
+  const spill = it("gridcraft", 977, "Range spill: keep neighbouring cells when a formula grows", "issue");
+  const grade = it("filmcraft", 1161, "Color grading: keep state after copy and paste");
+  const spell = it("designcraft", 1484, "Add Hungarian spellchecking and nonstandard hyphenation");
+  return [
+    { key: "runner:11", kind: "runner", name: "studio-mac", login: "mira-k", harness: "claude", status: "online", note: null, busy: 2, slots: 2, calls: [
+      call("Review pull requests", "claude-opus", crop, 52, 41), call("Fix issues", "claude-opus", spill, 40, 19), call("Review pull requests", "claude-opus", link, 18, 10),
+      call("Review pull requests", "claude-opus", crop, 8.5, null), call("Fix-up pull requests", "claude-sonnet", snap, 4, null),
+    ] },
+    { key: "runner:12", kind: "runner", name: "workstation", login: "jonas-p", harness: "codex", status: "online", note: null, busy: 1, slots: 3, calls: [
+      call("Fix issues", "gpt-5", grade, 47, 22), call("Ask Merge? decisions", "gpt-5-mini", spell, 21, 18.5), call("Fix issues", "gpt-5", grade, 14, null, { estimate: est(20, 31) }),
+    ] },
+    { key: "runner:13", kind: "runner", name: "old-laptop", login: "tsela", harness: "claude", status: "held", note: "5-hour use at the reserve the user keeps (80 %)", busy: 0, slots: 1, calls: [
+      call("Review pull requests", "claude-sonnet", snap, 58, 45), call("Review pull requests", "claude-sonnet", link, 44, 33, { failed: true }),
+    ] },
+    { key: "account:a", kind: "account", name: "main", login: null, harness: "claude", status: "online", note: null, busy: 1, slots: 3, calls: [
+      call("Classify new items", "claude-haiku", spill, 35, 33, { itemCount: 4 }), call("Classify new items", "claude-haiku", spill, 12, 11, { itemCount: 6 }), call("Fix-up pull requests", "claude-sonnet", snap, 2.5, null),
+    ] },
+    { key: "account:b", kind: "account", name: "Team B", login: null, harness: "claude", status: "held", note: "5-hour use 91 % (pauses at 90 %)", busy: 0, slots: 2, calls: [
+      call("Fix-up pull requests", "claude-sonnet", snap, 30, 17),
+    ] },
+    { key: "jev", kind: "jev", name: "Jev", login: null, harness: null, status: "online", note: null, busy: 0, slots: null, calls: [
+      call("Classify new items", "Jev", spill, 25, 24.2, { itemCount: 12 }), call("Classify new items", "Jev", spell, 6, 5.4, { itemCount: 9 }),
+    ] },
+  ];
 }

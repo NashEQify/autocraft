@@ -1,10 +1,11 @@
 // The Live board on Home: every running and queued unit of the pipeline's work (jobs, model calls and build tasks of their own, open
 // integration batches) on one time axis, with the model calls and build steps inside it and how long the same work took before. Jobs that
-// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); which
-// account a call ran on is for operators only. Above the lanes, who provides the tokens: each enabled account (as the Agents page shows it to
-// everyone) with its calls and tokens of the last hour.
-import type { ItemRef, ItemShown, LiveAccount, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../../web/src/api/types.ts";
+// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); account
+// labels are for operators only. Staff also get the worker view: one row per Task Runner (a person's own tokens), box account (operators
+// only) and Jev, with the model calls each ran in the last hour.
+import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker, LiveWorkerCall } from "../../../web/src/api/types.ts";
 import { listAccounts } from "../../agents/accounts.ts";
+import { STATUS_FRESH_MS } from "../../remote/helpers.ts";
 import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
 import { touchesHidden } from "../../agents/runs.ts";
 import { filtered, hiddenTest, type HiddenRepos } from "../../hidden-sql.ts";
@@ -70,18 +71,11 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
     (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM build_tasks WHERE repo = ? AND step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, repo, step, SAMPLES)).map((r) => r.ms));
 
   const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
-  type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; account_id: string | null; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
-  const operator = req.user.role === "operator";
-  const callAccount = (c: Call): string | null => (c.provider === "jev" ? "jev" : c.account_id ? `claude:${c.account_id}` : null);
-  const callOp = async (c: Call): Promise<LiveOp> => {
-    const account = operator ? callAccount(c) : null;
-    return {
-      kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && operator ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
-      start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? await callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
-      ...(account ? { account } : {}),
-    };
-  };
-  const callCols = "r.id, r.job_id, r.step, r.model, r.provider, r.account_id, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress";
+  type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
+  const callOp = async (c: Call): Promise<LiveOp> => ({
+    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
+    start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? await callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
+  });
   type Task = { id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; ended_at: string | null; results: string; summary: string | null; current: string | null };
   /** A finished task as one op per step (from its recorded durations); a running one as one op named by the step its log is on. */
   const taskOps = async (t: Task): Promise<LiveOp[]> => {
@@ -124,7 +118,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
     const its = await all<{ repo: string; number: number }>(db, `SELECT repo, number FROM job_items WHERE job_id = ?${notHidden("repo", hidden)} ORDER BY id`, j.id, ...hideArgs(hidden));
     if (ended && its.length === 0 && j.state !== "failed") continue;
     if (ended && ++recent > RECENT_MAX) continue;
-    const calls = await all<Call>(db, `SELECT ${callCols}
+    const calls = await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.job_id = ?${hiddenRuns} ORDER BY r.id`, j.id, ...hideArgs(hidden));
     const tasks = await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.job_id = ?${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, j.id, ...hideArgs(hidden));
     const line = j.state === "running" ? blankIfHidden(j.progress, hidden) : j.state === "failed" ? (staff && j.error ? blankIfHidden(j.error, hidden) : "Failed") : j.state === "done" ? blankIfHidden(j.summary, hidden) : null;
@@ -138,7 +132,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   }
 
   // Calls and build tasks that run without a job.
-  for (const c of await all<Call>(db, `SELECT ${callCols}
+  for (const c of await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.state = 'running' AND r.job_id IS NULL${hiddenRuns} ORDER BY r.id`, ...hideArgs(hidden))) {
     const it = (await all<{ repo: string; number: number }>(db, "SELECT repo, number FROM agent_run_items WHERE run_id = ? ORDER BY repo, number LIMIT 1", c.id))[0];
     const op = await callOp(c);
@@ -166,31 +160,93 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
       item: t.number === null ? null : await item(t.repo, t.number), itemCount: t.number === null ? 0 : 1, repo: t.repo, detail: `/envs/${t.id}`, estimate: ops[0]?.estimate ?? null, ops,
     });
   }
-  return { lanes, accounts: await accountsOf(db, hidden, nowMs) };
+  if (!staff) return { lanes };
+  return { lanes, workers: await workersOf(db, req, hidden, nowMs, item, callEstimate) };
 }
 
-/** Calls and tokens per account count the calls that ended this long ago at most. */
-export const ACCOUNT_WINDOW_MS = 60 * 60_000;
+/** The worker view shows the calls that ran in this last stretch. */
+export const WORKER_WINDOW_MS = 60 * 60_000;
+/** At most this many calls go on the worker view, the newest. */
+const WORKER_CALLS_MAX = 400;
 
 /**
- * Who provides the tokens: each enabled Claude account with its slots in use, 5-hour use, and the calls and tokens that ended in the last hour,
- * then Jev when it ran in that hour. Calls on repos hidden from the reader are left out of the counts.
+ * One row per worker: each Task Runner with a fresh status or a call in the window, each enabled box account (operators only; a disabled
+ * one only with a call in the window) and Jev when it ran. Rows keep a fixed order (runners by owner and name, then accounts, then Jev),
+ * so a row does not move when its work starts or ends. Calls on repos hidden from the reader are left out.
  */
-async function accountsOf(db: Db, hidden: HiddenRepos, nowMs: number): Promise<LiveAccount[]> {
+async function workersOf(
+  db: Db, req: Req, hidden: HiddenRepos, nowMs: number,
+  item: (repo: string, number: number) => Promise<ItemRef & ItemShown>,
+  callEstimate: (step: string, model: string) => Promise<LiveEstimate | null>,
+): Promise<LiveWorker[]> {
+  const operator = req.user.role === "operator";
+  const since = iso(nowMs - WORKER_WINDOW_MS);
   const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
-  type Use = { provider: string; account_id: string | null; running: number; calls: number; tokens: number };
-  const use = await all<Use>(db, `SELECT r.provider, r.account_id,
-      SUM(r.state = 'running') AS running,
-      SUM(r.state <> 'running' AND r.ended_at > ?) AS calls,
-      SUM(CASE WHEN r.state <> 'running' AND r.ended_at > ? THEN COALESCE(r.input_tokens, 0) + COALESCE(r.output_tokens, 0) + COALESCE(r.cache_read_tokens, 0) + COALESCE(r.cache_write_tokens, 0) ELSE 0 END) AS tokens
-    FROM agent_runs r WHERE (r.state = 'running' OR r.ended_at > ?)${hiddenRuns} GROUP BY r.provider, r.account_id`,
-  ...Array<string>(3).fill(iso(nowMs - ACCOUNT_WINDOW_MS)), ...hideArgs(hidden));
-  const byAccount = new Map(use.filter((u) => u.provider !== "jev" && u.account_id).map((u) => [u.account_id!, u]));
-  const out: LiveAccount[] = (await listAccounts(db, nowMs, false)).filter((a) => a.enabled).map((a) => ({
-    key: `claude:${a.id}`, label: a.label, provider: "claude", running: a.running, maxConcurrent: a.maxConcurrent,
-    fiveHourPct: a.usage.fiveHourPct, pausedReason: blankIfHidden(a.pausedReason, hidden) || null, calls: byAccount.get(a.id)?.calls ?? 0, tokens: byAccount.get(a.id)?.tokens ?? 0,
-  }));
-  const jev = use.filter((u) => u.provider === "jev").reduce((s, u) => ({ running: s.running + u.running, calls: s.calls + u.calls, tokens: s.tokens + u.tokens }), { running: 0, calls: 0, tokens: 0 });
-  if (jev.running || jev.calls) out.push({ key: "jev", label: "Jev", provider: "jev", maxConcurrent: null, fiveHourPct: null, pausedReason: null, ...jev });
-  return out;
+  type Run = { id: number; step: string; model: string; provider: string; account_id: string | null; user_login: string | null; started_at: string; ended_at: string | null; state: string;
+    tokens: number | null; n: number; repo: string | null; number: number | null };
+  const runs = (await all<Run>(db, `SELECT r.id, r.step, r.model, r.provider, r.account_id, r.user_login, r.started_at, r.ended_at, r.state,
+      CASE WHEN r.input_tokens IS NULL AND r.output_tokens IS NULL THEN NULL
+        ELSE COALESCE(r.input_tokens, 0) + COALESCE(r.output_tokens, 0) + COALESCE(r.cache_read_tokens, 0) + COALESCE(r.cache_write_tokens, 0) END AS tokens,
+      (SELECT COUNT(*) FROM agent_run_items i WHERE i.run_id = r.id) AS n,
+      (SELECT i.repo FROM agent_run_items i WHERE i.run_id = r.id ORDER BY i.repo, i.number LIMIT 1) AS repo,
+      (SELECT i.number FROM agent_run_items i WHERE i.run_id = r.id ORDER BY i.repo, i.number LIMIT 1) AS number
+    FROM agent_runs r WHERE (r.state = 'running' OR r.ended_at > ?)${hiddenRuns} ORDER BY r.id DESC LIMIT ?`, since, ...hideArgs(hidden), WORKER_CALLS_MAX)).sort((a, b) => a.started_at.localeCompare(b.started_at));
+  // The runner credential that leased each remote call (only the lease's run is linked; an older lease falls back to its owner).
+  const leases = new Map((await all<{ run_id: number; token_id: number }>(db, `SELECT run_id, token_id FROM remote_calls
+      WHERE run_id IS NOT NULL AND token_id IS NOT NULL AND (state = 'leased' OR (state IN ('done', 'failed') AND ended_at > ?))`, nowMs - WORKER_WINDOW_MS)).map((l) => [Number(l.run_id), Number(l.token_id)]));
+
+  const rows = new Map<string, LiveWorker>();
+  const workerOfRun = (r: Run): string | null =>
+    r.provider === "jev" ? "jev"
+      : r.user_login ? (leases.has(r.id) ? `runner:${leases.get(r.id)}` : `login:${r.user_login.toLowerCase()}`)
+      : r.account_id && operator ? `account:${r.account_id}` : null;
+
+  // Task Runners with a fresh status, and every one that ran a call in the window.
+  const tokenIds = [...new Set(leases.values())];
+  type Helper = { id: number; login: string; label: string | null; machine: string | null; readiness: string | null; reason: string | null; harness: string | null; reported_at: number | null; slots: number | null; busy: number | null };
+  const helpers = await all<Helper>(db, `SELECT t.id, t.login, t.label, t.machine, h.readiness, h.reason, h.harness, h.reported_at, h.slots, h.busy
+      FROM mcp_tokens t LEFT JOIN remote_helpers h ON h.token_id = t.id
+    WHERE t.kind = 'runner' AND (h.reported_at > ?${tokenIds.length ? ` OR t.id IN (${tokenIds.map(() => "?").join(", ")})` : ""})`, nowMs - STATUS_FRESH_MS, ...tokenIds);
+  const machineName = (m: string | null): string | null => { try { return m ? (JSON.parse(m) as { hostname?: string }).hostname ?? null : null; } catch { return null; } };
+  for (const h of helpers.sort((a, b) => a.login.localeCompare(b.login) || Number(a.id) - Number(b.id))) {
+    const fresh = h.reported_at !== null && nowMs - Number(h.reported_at) <= STATUS_FRESH_MS;
+    rows.set(`runner:${h.id}`, {
+      key: `runner:${h.id}`, kind: "runner", name: h.label || machineName(h.machine) || "Task Runner", login: h.login, harness: h.harness,
+      status: !fresh ? "offline" : h.readiness === "ready" ? "online" : "held", note: fresh && h.readiness !== "ready" ? blankIfHidden(h.reason, hidden) || h.readiness : null,
+      busy: 0, slots: fresh && h.slots !== null ? Number(h.slots) : null, calls: [],
+    });
+  }
+  for (const r of runs) {
+    if (!r.user_login || leases.has(r.id)) continue;
+    const key = `login:${r.user_login.toLowerCase()}`;
+    if (!rows.has(key)) rows.set(key, { key, kind: "runner", name: "Task Runner", login: r.user_login, harness: null, status: "offline", note: null, busy: 0, slots: null, calls: [] });
+  }
+  if (operator) {
+    const used = new Set(runs.map((r) => r.account_id));
+    for (const a of await listAccounts(db, nowMs, false)) {
+      if (!a.enabled && !used.has(a.id)) continue;
+      rows.set(`account:${a.id}`, {
+        key: `account:${a.id}`, kind: "account", name: a.label, login: null, harness: "claude",
+        status: !a.enabled ? "offline" : a.pausedReason ? "held" : "online", note: a.enabled ? blankIfHidden(a.pausedReason, hidden) || null : "Disabled",
+        busy: 0, slots: a.enabled ? a.maxConcurrent : null, calls: [],
+      });
+    }
+  }
+  if (runs.some((r) => r.provider === "jev")) rows.set("jev", { key: "jev", kind: "jev", name: "Jev", login: null, harness: null, status: "online", note: null, busy: 0, slots: null, calls: [] });
+
+  for (const r of runs) {
+    const key = workerOfRun(r);
+    const row = key ? rows.get(key) : undefined;
+    if (!row) continue;
+    const running = r.state === "running";
+    if (running) row.busy++;
+    const call: LiveWorkerCall = {
+      id: Number(r.id), title: stepTitle(r.step), model: r.provider === "jev" ? "Jev" : r.model,
+      item: r.repo !== null && r.number !== null ? await item(r.repo, Number(r.number)) : null, itemCount: Number(r.n),
+      start: r.started_at, end: r.ended_at, tokens: r.tokens === null ? null : Number(r.tokens),
+      estimate: running ? await callEstimate(r.step, r.model) : null, ...(r.state === "failed" ? { failed: true } : {}),
+    };
+    row.calls.push(call);
+  }
+  return [...rows.values()];
 }
