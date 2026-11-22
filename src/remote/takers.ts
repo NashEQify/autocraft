@@ -11,7 +11,8 @@ import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { NO_TAKER_PREFIX, pickCounts, pickerLogins, queueSnapshot, roleFits, runnerTakes, withdrawCall } from "./calls.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
-import { inferenceMode } from "./mode.ts";
+import { acceptedModels, familyOf, inferenceMode, isTier } from "./mode.ts";
+import type { Tier } from "./protocol.ts";
 import { claimRepos } from "./my-repos.ts";
 import { SKIP_TASKS_KEY, TASK_CHOICES, taskOfStep, userSkips } from "./my-tasks.ts";
 import { CALLER_STALE_MS, roomCanWrite } from "./room.ts";
@@ -33,8 +34,9 @@ export const NO_TAKER_MS = scaled(10 * 60_000);
  */
 export type TakerCall = {
   prompt_id: string; repos: readonly string[]; step?: string; someTask?: boolean; /** The call's items; left out, a question asked before they are known (task-items.ts). */ refs?: readonly ItemRef[]; /** Only runners whose user takes some items count. */ filtered?: boolean;
-  /** A call bound to this user (calls.ts NewCall.forLogin): only their runners count, under the role rules and write permission alone, as for a pick. */
+  /** A call bound to this user (calls.ts NewCall.forLogin): only their runners count, under the role rules and write permission alone, as for a pick, and only those that offer `tier`. */
   forLogin?: string | null;
+  tier?: Tier;
 };
 
 /**
@@ -80,17 +82,21 @@ export async function takerSignature(db: Db, nowMs: number = Date.now()): Promis
   return denied.at ? `${s}|${denied.at}` : s;
 }
 
-type Runner = { login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter };
+type Runner = { login: string; role: string; repos: ReadonlySet<string> | null; skip: ReadonlySet<string>; items: ItemFilter; /** The tiers its models offer (accepted families). */ tiers: ReadonlySet<Tier> };
 
 /** The takers as the taker rule reads them. */
 async function readRunners(db: Db, nowMs: number): Promise<{ runners: Runner[]; canWrite: (login: string, repo: string) => boolean }> {
   const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").innerJoin("main.access as a", "a.login", "t.login")
-    .select(["t.login", "a.role", "t.idle_repos"]).where((eb) => takerExpr(eb, nowMs)));
+    .select(["t.login", "a.role", "t.idle_repos", "h.models"]).where((eb) => takerExpr(eb, nowMs)));
   const canWrite = await roomCanWrite(db, rows.map((r) => r.login), nowMs);
+  const accepted = await acceptedModels(db);
   const runners = await mapSeq(rows, async (h) => {
     let own: string[] | undefined;
     try { own = h.idle_repos ? JSON.parse(h.idle_repos) as string[] : undefined; } catch { /* every repo */ }
-    return { login: h.login, role: h.role, repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login) };
+    let models: Record<string, unknown> = {};
+    try { models = JSON.parse(h.models) as Record<string, unknown>; } catch { /* no models */ }
+    const tiers = new Set(Object.entries(models).flatMap(([t, m]) => (isTier(t) && typeof m === "string" && familyOf(m, accepted[t]) !== null ? [t] : [])));
+    return { login: h.login, role: h.role, repos: await claimRepos(db, h.login, own), skip: await userSkips(db, h.login), items: await itemFilter(db, h.login), tiers };
   });
   return { runners, canWrite };
 }
@@ -99,7 +105,7 @@ async function readTakers(db: Db, nowMs: number): Promise<(c: TakerCall) => bool
   const { runners, canWrite } = await readRunners(db, nowMs);
   if (!runners.length) return () => false;
   return (c) => c.forLogin
-    ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
+    ? runners.some((r) => r.login.toLowerCase() === c.forLogin!.toLowerCase() && (c.tier === undefined || r.tiers.has(c.tier)) && roleFits(r.role, c) && c.repos.every((x) => canWrite(r.login, x)))
     : runners.some((r) => !(c.someTask && r.skip.size >= TASK_CHOICES.length) && !(c.filtered && !r.items) && runnerTakes(r, c, canWrite));
 }
 
@@ -142,7 +148,7 @@ export const noTakerReason = (repos: readonly string[], step?: string, items?: r
 };
 
 /** Whether one of `login`'s own Task Runners is a taker for a call bound to them (NewCall.forLogin) on `repos` now. */
-export async function ownTaker(db: Db, login: string, c: { prompt_id: string; repos: readonly string[] }, nowMs: number = Date.now()): Promise<boolean> {
+export async function ownTaker(db: Db, login: string, c: { prompt_id: string; repos: readonly string[]; tier: Tier }, nowMs: number = Date.now()): Promise<boolean> {
   return await takerTest(db, nowMs)({ ...c, forLogin: login });
 }
 

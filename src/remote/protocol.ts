@@ -80,6 +80,11 @@ export type Claim = {
   /** The claim comes from the helper's fast-lane slot: the server offers it only follow-ups of its sessions, gating calls and small-tier calls. */
   fastLane?: boolean;
   /**
+   * The claim comes from the helper's own lane, beside its slots: the server offers it only calls bound to the helper's user (a
+   * maintainer's own conversation turn) and their follow-ups, which count toward no slot or Max calls at once.
+   */
+  ownLane?: boolean;
+  /**
    * Protocol 4 only: how long the server may hold the claim open when nothing is queued for it, in whole seconds (0 to 30).
    * A call queued meanwhile is leased at once; when none comes, the empty reply has `retryAfter: 1`. Absent or 0: answered at once.
    */

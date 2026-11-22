@@ -441,6 +441,7 @@ export interface DecisionChoices {
   pick: string;
   state: Generated<string>;
   created_at: string;
+  asked_by: string | null;
 }
 
 export interface DecisionClaims {
@@ -2569,7 +2570,7 @@ export const COLUMNS = {
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
   conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress"],
   conversations: ["repo", "number", "item_block", "item_sig", "created_at", "created_by"],
-  decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at"],
+  decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at", "asked_by"],
   decision_claims: ["decision_id", "login", "since", "at"],
   decision_comments: ["id", "decision_id", "login", "at", "body", "via"],
   decision_items: ["repo", "number", "decision_id"],

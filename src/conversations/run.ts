@@ -4,8 +4,10 @@
 import { jobItem } from "../runner/job-items.ts";
 import { referenceDir } from "../reference.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
-import { NoTakerError, poolRoom, takersFirst, type PoolRoom } from "../agents/call.ts";
-import { inferenceMode } from "../remote/mode.ts";
+import { NoTakerError, WaitLimitError, poolRoom, takersFirst, type PoolRoom } from "../agents/call.ts";
+import { inferenceMode, tierOfModel } from "../remote/mode.ts";
+import { scaled } from "../remote/time-scale.ts";
+import type { PersonKind } from "./types.ts";
 import { ownTaker } from "../remote/takers.ts";
 import { pool } from "../classify/run.ts";
 import { runModelStep } from "../agents/step.ts";
@@ -15,7 +17,7 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { defaultSemanticDeps, type SemanticDeps } from "../reference-lint.ts";
 import { sweepRunningCards } from "./act.ts";
 import { decisionStamp, openDecision } from "./cards.ts";
-import { claimPending, failTurn, pendingConversations, promptParts, refreshItem, setTurnProgress, storeReply, type DiffSource } from "./store.ts";
+import { claimPending, failTurn, pendingConversations, promptParts, refreshItem, releaseTurn, setTurnProgress, storeReply, type DiffSource } from "./store.ts";
 import type { Db } from "../db/index.ts";
 
 export const CONVERSATION_PROMPT = CLAUDE_PROMPTS["conversation.turn"];
@@ -33,7 +35,12 @@ export type ConversationParams = {
   log: (line: string) => void;
   /** The Jev and Haiku calls of the semantic reference check; absent: the real ones. */
   semantic?: SemanticDeps;
+  /** Whose messages: operators' (the shared model queue) or maintainers' (each on the maintainer's own Task Runner); absent: both. */
+  kind?: PersonKind;
 };
+
+/** How long a maintainer's call waits for their own Task Runner to take it; then the message waits for a later job. */
+export const OWN_LEASE_WAIT_MS = scaled(2 * 60_000);
 
 const now = () => new Date().toISOString();
 
@@ -41,14 +48,15 @@ const now = () => new Date().toISOString();
 const ownRunnerGone = (login: string): string => `${login}'s Task Runner was not connected and ready; send the message again`;
 
 /**
- * Answers the waiting messages, oldest first. Returns how many got a reply. A maintainer's message is bound to the maintainer's
- * own Task Runners: it comes first, as their runners are room for it, and fails at once when none of them is ready.
+ * Answers the waiting messages (of `p.kind`), oldest first. Returns how many got a reply. A maintainer's message is bound to the
+ * maintainer's own Task Runners, which take it beside their other calls: it fails at once when none of them is ready, and waits
+ * for a later job when none took it within OWN_LEASE_WAIT_MS.
  */
 export async function answerPending(db: Db, p: ConversationParams): Promise<number> {
-  const model = p.model ?? CONVERSATION_PROMPT.models[0]!;
-  let todo = await pendingConversations(db);
+  const model = p.model ?? CONVERSATION_PROMPT.models[0]!, tier = tierOfModel(model);
+  let todo = await pendingConversations(db, undefined, p.kind);
   const ownerOf = (c: (typeof todo)[number]): string | undefined => (c.kind === "maintainer" ? c.login : undefined);
-  if (p.limit !== undefined) todo = [...todo.filter(ownerOf), ...await takersFirst(db, todo.filter((c) => !ownerOf(c)), (c) => [c.repo], (c) => [c], CONVERSATION_PROMPT.id)].slice(0, Math.max(0, p.limit));
+  if (p.limit !== undefined) todo = (await takersFirst(db, todo, (c) => [c.repo], (c) => [c], CONVERSATION_PROMPT.id)).slice(0, Math.max(0, p.limit));
   const checkouts = new Map<string, Promise<string | null>>();
   let answered = 0, handled = 0;
   await pool(todo.map((c, k) => async () => {
@@ -65,7 +73,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     const forLogin = ownerOf(c);
     if (forLogin !== undefined) {
       const why = await inferenceMode(db) !== "user-local" ? "a maintainer's message runs only on their own Task Runner, and model calls run on the server's accounts now"
-        : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo] }) ? ownRunnerGone(forLogin) : null;
+        : !await ownTaker(db, forLogin, { prompt_id: CONVERSATION_PROMPT.id, repos: [repo], tier }) ? ownRunnerGone(forLogin) : null;
       if (why) { await failTurn(db, repo, n, claim, why); return; }
     }
     const parts = await promptParts(db, repo, n, wait);
@@ -81,24 +89,27 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
     };
     const bound = await openDecision(db, repo, n), stampThen = bound ? await decisionStamp(db, bound) : null;
     const dir = referenceDir(repo);
-    const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`) : undefined;
+    // A maintainer's reference check runs on their own Task Runner too.
+    const semantic = dir ? p.semantic ?? defaultSemanticDeps(db, `${repo}#${n}`, forLogin === undefined ? {} : { forLogin }) : undefined;
     const step = runModelStep(db, CONVERSATION, { ref: `${repo}#${n}`, item: parts.item, turns: parts.turns, ...(checkout && { repo_dir: REPO_PATH }) }, {
-      model, ...(forLogin !== undefined && { forLogin }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
+      model, ...(forLogin !== undefined && { forLogin, maxWaitMs: OWN_LEASE_WAIT_MS }), checkout: checkout ?? undefined, reference: checkout ? dir : undefined, onProgress, ctx: { db, repo, n, dir, semantic },
       usage: { run: p.usageRun, agent: `conversation-${String(k).padStart(3, "0")}`, stage: "conversation", items: () => 1 },
       onReply: (reply) => { if (reply.fixTurn) p.log(`conversation: ${repo}#${n}: reply lint: ${reply.problems?.length ? `${reply.problems.length} problems left after the fix turn` : "fixed by one fix turn"}`); },
     });
     let r: Awaited<typeof step>;
     try { r = await step; } catch (e) {
-      // The maintainer's runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
-      if (forLogin === undefined || !(e instanceof NoTakerError)) throw e;
+      if (forLogin === undefined || !(e instanceof NoTakerError || e instanceof WaitLimitError)) throw e;
       await shown.flush();
+      // Their runners took nothing in time: the message waits for a later job, which does not hold this one.
+      if (e instanceof WaitLimitError) { await releaseTurn(db, repo, n, claim); p.log(`conversation: ${repo}#${n}: ${forLogin}'s Task Runner did not take the message in time; it waits for a later run`); return; }
+      // Their runners went away while the call waited (src/remote/takers.ts sweepTakers): only theirs could answer it.
       await failTurn(db, repo, n, claim, ownRunnerGone(forLogin));
       return;
     }
     await shown.flush();
     const parsed = r.ok ? r.value : null;
     if (parsed) {
-      if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, undefined, parts.seen, parsed.choices && parsed.decision ? { decision: parsed.decision, parsed: parsed.choices, source: "conversation", by: model, stampThen } : undefined) !== null) { answered++; await jobItem(db, repo, n, "answered a message", p.log); }
+      if (await storeReply(db, repo, n, claim, parsed.text, parsed.cards, parsed.notes, undefined, parts.seen, parsed.choices && parsed.decision ? { decision: parsed.decision, parsed: parsed.choices, source: "conversation", by: model, stampThen, askedBy: wait.login } : undefined) !== null) { answered++; await jobItem(db, repo, n, "answered a message", p.log); }
     } else {
       await failTurn(db, repo, n, claim, "Opus gave no usable reply; send the message again");
       await jobItem(db, repo, n, "no usable reply to a message", p.log);
@@ -107,7 +118,7 @@ export async function answerPending(db: Db, p: ConversationParams): Promise<numb
   return answered;
 }
 
-/** The shared queue's room for the operators' messages; a maintainer's own message always has room and a taker, its own runners (checked when it starts). */
+/** The shared queue's room for the operators' messages; a maintainer's own message always has room and a taker, its own runners, which take it beside their other calls (checked when it starts). */
 const ownFirst = (shared: PoolRoom, own: (i: number) => boolean): PoolRoom => ({
   round: () => shared.round(),
   room: async (i) => (own(i) ? 1 : await shared.room(i)),
@@ -121,11 +132,15 @@ export const githubDiff = (db: Db): DiffSource => async (repo, n, head) => {
   return r.ok ? r.text : null;
 };
 
-/** The step's body: the item's default checkout (the workspace comes with the prompt) and diffs. Returns the answered count and the usage run id. */
-export async function runConversations(db: Db, p: { limit: number; onHandled?: (n: number) => void; cancelled?: () => Promise<boolean> }, log: (line: string) => void = console.log): Promise<{ answered: number; waiting: number; usageRun: string }> {
+/**
+ * The steps' body: the item's default checkout (the workspace comes with the prompt) and diffs, for the operators' messages
+ * (the conversation step, under its limits) or the maintainers' (conversation-maintainer, on their own Task Runners and outside
+ * those limits). Returns the answered count and the usage run id.
+ */
+export async function runConversations(db: Db, p: { kind: PersonKind; limit?: number; onHandled?: (n: number) => void; cancelled?: () => Promise<boolean> }, log: (line: string) => void = console.log): Promise<{ answered: number; waiting: number; usageRun: string }> {
   await sweepRunningCards(db);
   const usageRun = `conversation-${now().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z")}`;
-  const waiting = (await pendingConversations(db)).length;
+  const waiting = (await pendingConversations(db, undefined, p.kind)).length;
   const answered = await answerPending(db, {
     ...p, usageRun, log, diff: githubDiff(db),
     checkout: (repo) => import("../dupes/compare.ts").then((m) => m.baseCheckout(db, repo)),

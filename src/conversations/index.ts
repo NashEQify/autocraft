@@ -48,7 +48,7 @@ export const commands = {
             const { isEnabled, pauseReason } = await import("../runner/autopilot.ts");
             const why = !await isEnabled(db) ? "the pipeline is off" : await pauseReason(db, "conversation", Date.now(), { backoff: false });
             if (why) console.log(`not answered now: ${why}`);
-            else console.log(`${(await runConversations(db, { limit: 1 })).answered} answered`);
+            else console.log(`${(await runConversations(db, { kind: "operator", limit: 1 })).answered} answered`);
           }
         }
         for (const t of await turnsOf(db, ref.repo, ref.number)) {

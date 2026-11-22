@@ -281,6 +281,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["workspace_calls", "run_id", "INTEGER"],
   // A call only this user's own Task Runners take: a maintainer's conversation turn runs on their own inference.
   ["remote_calls", "for_login", "TEXT COLLATE NOCASE"],
+  // The login whose conversation message the reply that wrote the choices answered.
+  ["decision_choices", "asked_by", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
@@ -297,6 +299,8 @@ export const ADDED_INDEXES = [
   // lease, lease expiry), so none walks the overflow pages of each row's bundle. Those reads name it (INDEXED BY): without
   // statistics the planner takes the (state, ...) indexes, which do not cover them.
   "CREATE INDEX IF NOT EXISTS main.remote_calls_leased ON remote_calls(token_id, claim_id, user_login, heartbeat_at, leased_at, started_at, timeout_ms) WHERE state = 'leased'",
+  // The leases of calls bound to a login (a maintainer's own conversation turn), which count toward no slot or Max calls at once: the reads above subtract them.
+  "CREATE INDEX IF NOT EXISTS main.remote_calls_leased_bound ON remote_calls(user_login, token_id) WHERE state = 'leased' AND for_login IS NOT NULL",
   // One live card per set of choices: a double press cannot run the same choice twice.
   "CREATE UNIQUE INDEX IF NOT EXISTS main.conversation_cards_choice_live ON conversation_cards(choice_id) WHERE choice_id IS NOT NULL AND state IN ('proposed', 'running', 'done')",
   // Records the answerer's role when an answer is written (any writer); cleared with the answerer by an undo.

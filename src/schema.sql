@@ -1636,7 +1636,8 @@ CREATE TABLE IF NOT EXISTS decision_choices (
   added TEXT NOT NULL DEFAULT '[]',   -- JSON: core keys Opus added
   pick TEXT NOT NULL,                 -- JSON {core, reason}
   state TEXT NOT NULL DEFAULT 'current',  -- current | replaced
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  asked_by TEXT                       -- source conversation: the login whose message the reply that wrote it answered
 );
 CREATE INDEX IF NOT EXISTS decision_choices_item ON decision_choices(repo, number, state);
 CREATE INDEX IF NOT EXISTS decision_choices_decision ON decision_choices(decision_id, state);

@@ -689,7 +689,12 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   {
     // Operator messages in conversations; answered whether or not the item's repo is in scope, since an operator started them.
     name: "conversation",
-    detect: async (db) => ((await pendingConversations(db)).length ? [{ step: "conversation", params: {} }] : []),
+    detect: async (db) => ((await pendingConversations(db, undefined, "operator")).length ? [{ step: "conversation", params: {} }] : []),
+  },
+  {
+    // Maintainers' messages, each on the maintainer's own Task Runner: apart from the operators' lane and its daily limit.
+    name: "conversation-maintainer",
+    detect: async (db) => ((await pendingConversations(db, undefined, "maintainer")).length ? [{ step: "conversation-maintainer", params: {} }] : []),
   },
   {
     // Runs GitHub holds for approval on reviewed outside PRs; the checks job records them, the step approves.
@@ -1330,7 +1335,7 @@ export const LANE_KINDS: Record<string, ActionKind[]> = {
 };
 
 /** Lanes whose jobs are not about listed items (counters, collection, operator messages, per-repo scans); every other lane needs a LANE_KINDS entry. */
-export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly"];
+export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "conversation-maintainer", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly"];
 
 export type LaneItem = {
   repo: string; number: number; kind: "pr" | "issue"; action: string; bucket: string | null;

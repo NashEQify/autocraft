@@ -2,7 +2,7 @@
 // a live caller in claim order, why it waits, and the ready Task Runners. Reads only; picks are in picks.ts.
 import type { ItemRef, ModelQueueWhyCode } from "../../web/src/api/types.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
-import { leasedBy, pickerLogins, pickCounts, queueSnapshot, runnerTakes } from "./calls.ts";
+import { boundLeasesOfToken, leasedBy, pickerLogins, pickCounts, queueSnapshot, runnerTakes } from "./calls.ts";
 import { gating } from "./claim-class.ts";
 import { cooloffOf } from "./cooloff.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
@@ -23,7 +23,7 @@ export type ReadyRunner = { login: string; role: string; manual: boolean; tiers:
 export async function readyRunners(db: Db, nowMs: number): Promise<ReadyRunner[]> {
   const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").innerJoin("main.access as a", "a.login", "t.login")
     .select((eb) => ["t.id", "t.login", "a.role", "h.models", eb.fn.coalesce("h.slots", eb.lit(1)).as("slots"), manualExpr(db, eb, "t.login").as("manual"),
-      eb.selectFrom("main.remote_calls as c").select((e) => e.fn.countAll<number>().as("n")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("leased")])
+      eb.selectFrom("main.remote_calls as c").select((e) => e(e.fn.countAll<number>(), "-", boundLeasesOfToken(db, "t.id")).as("n")).where("c.state", "=", "leased").whereRef("c.token_id", "=", "t.id").as("leased")])
     .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.readiness", "=", "ready").where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS)
     .orderBy("t.id"));
   const accepted = await acceptedModels(db);

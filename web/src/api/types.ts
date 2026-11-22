@@ -2120,6 +2120,8 @@ export interface DecisionChoices {
   run?: { cardId: number; state: ConversationCardState; error?: string };
   source: "prepare" | "conversation" | "converted";
   at: string;
+  /** Source conversation: the login whose message to Opus led to this version. */
+  after?: string;
 }
 
 /** Body of `conversations.doChoice`. */

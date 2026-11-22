@@ -20,6 +20,8 @@ import { commentPreview } from "../src/act/index.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
 import * as conv from "../src/dash/api/conversations.ts";
 import { HttpError } from "../src/dash/server/util.ts";
+import { setInferenceMode } from "../src/remote/mode.ts";
+import { setEnabled } from "../src/runner/autopilot.ts";
 import type { Req } from "../src/dash/types.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -369,6 +371,23 @@ describe("access", () => {
     // A second message while Opus has not answered the first is refused.
     await conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "More" }));
     await assert.rejects(() => conv.postMessage(db, req("operator", { repo: "app", n: "1" }, { text: "Again" })), (e) => e instanceof HttpError && e.status === 409);
+  });
+});
+
+describe("maintainers talk to Opus", () => {
+  test("a maintainer asks Opus only with write access, on users' own Task Runners, with the pipeline on and a ready runner of theirs; a post without Opus needs only the first two", async () => {
+    const db = await fresh();
+    const maint = (write: boolean, json: unknown): Req => ({ ...req("viewer", { repo: "app", n: "1" }, json), user: { login: "maint", role: "maintainer", canWrite: async () => write, canRead: async () => true } });
+    const refused = async (r: Req, status: number, re?: RegExp) => await assert.rejects(() => conv.postMessage(db, r), (e) => e instanceof HttpError && e.status === status && (!re || re.test(e.message)));
+    await refused(maint(true, { text: "Hi" }), 403, /write in conversations/);
+    await setInferenceMode(db, "user-local", "test");
+    await refused(maint(false, { text: "Hi" }), 403, /write in conversations/);
+    await refused(maint(true, { text: "Hi" }), 409, /pipeline is off/);
+    await setEnabled(db, true, "test");
+    await refused(maint(true, { text: "Hi" }), 409, /Task Runner must be connected and ready/);
+    const view = await conv.postMessage(db, maint(true, { text: "A note", ask: false }));
+    assert.equal(view.canTalk, true);
+    assert.deepEqual(view.turns.map((t) => [t.kind, t.login]), [["maintainer", "maint"]]);
   });
 });
 

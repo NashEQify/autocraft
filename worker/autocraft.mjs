@@ -86,6 +86,7 @@ export const ROUTES = {
  * @property {string} [root]
  * @property {string} requestId
  * @property {boolean} [fastLane]
+ * @property {boolean} [ownLane]  the own lane: only calls bound to this user and their follow-ups
  * @property {number} [wait]  protocol 4: seconds the server may hold the claim open when nothing is queued (0 to 30)
  */
 /** @typedef {{ fiveHour: number, weekly: number }} Reserve  percent of each plan window kept free */
@@ -2909,11 +2910,11 @@ export async function claimRequest(server, token, base, signal) {
  * Claims one call when the helper is ready (checkReady); otherwise claims nothing and says why (`held`). On macOS the claim
  * names the path root of slot `slot` (a free one when not given), which the lease keeps, and offers only that slot's sessions.
  * A lease that comes back with a higher reserve than the one checked, which the usage no longer allows, is released.
- * `fastLane`: the claim comes from the fast-lane slot (Claim.fastLane). `requestId`: a caller whose last claim failed in
- * transit passes that claim's id again, so the server answers with the lease it may have taken.
- * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @returns {Promise<ClaimReply | { held: Ready }>}
+ * `fastLane`: the claim comes from the fast-lane slot (Claim.fastLane); `ownLane`: from the own lane (Claim.ownLane). `requestId`:
+ * a caller whose last claim failed in transit passes that claim's id again, so the server answers with the lease it may have taken.
+ * @param {Config} cfg @param {number} [slot] @param {boolean} [fastLane] @param {string} [requestId] @param {AbortSignal} [signal] @param {boolean} [ownLane] @returns {Promise<ClaimReply | { held: Ready }>}
  */
-async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined) {
+async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), signal = undefined, ownLane = false) {
   const { server, agentToken } = needLogin(cfg);
   const ready = await checkReady(cfg);
   const cooled = ready.readiness === "cooled-off" && ready.quotaReady === true;
@@ -2922,7 +2923,7 @@ async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), 
   const mac = process.platform === "darwin";
   const n = mac ? slot ?? pickSlot(slotBase()) : undefined;
   const root = n === undefined ? undefined : slotRoot(slotBase(), n);
-  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }) };
+  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...(fastLane && { fastLane: true }), ...(ownLane && { ownLane: true }) };
   /** @type {ClaimReply} */
   let reply;
   try {
@@ -3665,6 +3666,10 @@ async function cmdWork(argv) {
   // One more slot beside the N that takes only short calls and the follow-ups of this helper's sessions, so a lint check or a
   // fix turn never waits for a long run to end. Not for a harness that runs one call at a time, nor past the macOS slots.
   const fast = !exclusive.exclusive && !(process.platform === "darwin" && n >= MAC_MAX_SLOTS);
+  // And one beside them that takes only calls bound to this user (their own conversation turns and those calls' follow-ups),
+  // which the server counts toward no slot: they run while the slots are busy. Not for a harness that runs one call at a time,
+  // nor past the macOS slots. It is not reported as a slot.
+  const own = !exclusive.exclusive && !(process.platform === "darwin" && n + (fast ? 1 : 0) >= MAC_MAX_SLOTS);
   const ac = new AbortController();
   for (const sig of STOP_SIGNALS) {
     process.on(sig, () => {
@@ -3688,20 +3693,20 @@ async function cmdWork(argv) {
     heldSaid = heldLine({ readiness, reason, until });
     console.log(`not claiming: ${heldSaid}; running calls finish`);
   };
-  /** @param {boolean} fastLane */
-  const loop = async (fastLane) => {
+  /** @param {boolean} fastLane @param {boolean} [ownLane] */
+  const loop = async (fastLane, ownLane = false) => {
     // macOS: each loop holds one slot for its lifetime, so its claims name that slot's root and sessions.
     const held = process.platform === "darwin" ? holdSlot(slotBase()) : null;
-    try { await claimLoop(held?.n, fastLane); } finally { held?.release(); }
+    try { await claimLoop(held?.n, fastLane, ownLane); } finally { held?.release(); }
   };
-  /** @param {number | undefined} slot @param {boolean} fastLane */
-  const claimLoop = async (slot, fastLane) => {
+  /** @param {number | undefined} slot @param {boolean} fastLane @param {boolean} ownLane */
+  const claimLoop = async (slot, fastLane, ownLane) => {
     let claimId = newClaimId();
     let blockedRun = 0;
     while (!ac.signal.aborted) {
       if (Date.now() < notBefore) { await pause(notBefore - Date.now()); continue; }
       let r;
-      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal); claimId = newClaimId(); blockedRun = 0; } catch (e) {
+      try { r = await claimOnce(loadConfig(), slot, fastLane, claimId, ac.signal, ownLane); claimId = newClaimId(); blockedRun = 0; } catch (e) {
         if (ac.signal.aborted) break;
         // A claim lost in transit may have leased a call: the next try sends the same id and gets that lease back.
         if (!transient(e)) claimId = newClaimId();
@@ -3727,16 +3732,19 @@ async function cmdWork(argv) {
       }
       if (heldSaid) { console.log("ready again"); heldSaid = ""; }
       if (!r.lease) {
+        // The own lane waits quietly: the slots' loops say what the helper is doing.
+        if (ownLane) { await pause(Math.max(TIME_SCALE, r.retryAfter) * 1000); continue; }
         const say = r.reason ? `no calls for this helper: ${r.reason}${r.until ? ` (until ${new Date(r.until).toLocaleString()})` : ""}` : `no task queued; claiming again in ${r.retryAfter} s`;
         if (idleSaid !== say) { console.log(say); idleSaid = say; }
         await pause(Math.max(TIME_SCALE, r.retryAfter) * 1000);
         continue;
       }
       idleSaid = "";
-      console.log(`lease ${r.lease.id}${fastLane ? " (fast lane)" : ""}: ${r.lease.title}`);
-      capacity.busy++;
+      console.log(`lease ${r.lease.id}${fastLane ? " (fast lane)" : ownLane ? " (own lane)" : ""}: ${r.lease.title}`);
+      const counted = !ownLane;
+      if (counted) capacity.busy++;
       let s;
-      try { s = await runLease(loadConfig(), r.lease.id, { signal: ac.signal, slotHeld: slot !== undefined }); } finally { capacity.busy--; }
+      try { s = await runLease(loadConfig(), r.lease.id, { signal: ac.signal, slotHeld: slot !== undefined }); } finally { if (counted) capacity.busy--; }
       console.log(s.line);
       if (s.hold) hold(s.hold.readiness, s.line, s.hold.ms === null ? null : Date.now() + s.hold.ms);
       else if (s.state === "submitted") {
@@ -3753,7 +3761,7 @@ async function cmdWork(argv) {
       }
     }
   };
-  await Promise.all([...Array.from({ length: n }, () => loop(false)), ...(fast ? [loop(true)] : [])]);
+  await Promise.all([...Array.from({ length: n }, () => loop(false)), ...(fast ? [loop(true)] : []), ...(own ? [loop(false, true)] : [])]);
   return 0;
 }
 

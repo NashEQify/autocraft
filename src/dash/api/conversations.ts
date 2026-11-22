@@ -19,7 +19,13 @@ import { needVisible } from "./visible.ts";
 import { canSettleCached, requireSettle } from "../../settlers.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-import { inferenceMode } from "../../remote/mode.ts";
+import { inferenceMode, tierOfModel } from "../../remote/mode.ts";
+import { CLAUDE_PROMPTS } from "../../prompts/index.ts";
+import { isEnabled, pauseReason } from "../../runner/autopilot.ts";
+
+const CONVERSATION_PROMPT_ID = "conversation.turn";
+/** The step that answers maintainers' messages (src/runner/steps.ts). */
+const MAINTAINER_STEP = "conversation-maintainer";
 import { ownTaker } from "../../remote/takers.ts";
 
 const isOperator = (req: Req): boolean => req.user.role === "operator";
@@ -125,7 +131,7 @@ export async function choicesView(db: Db, repo: string, n: number): Promise<Deci
   return {
     id: row.id, decisionId: d.id, pick, cores: cores.map(strip),
     ...(run && { run: { cardId: run.id, state: run.state as NonNullable<DecisionChoices["run"]>["state"], ...(run.error && { error: run.error }) } }),
-    source: row.source, at: row.createdAt,
+    source: row.source, at: row.createdAt, ...(row.askedBy && { after: row.askedBy }),
   };
 }
 
@@ -209,13 +215,22 @@ function veilConversation(v: ConversationView): ConversationView {
   return { ...rest, turns: v.turns.map((t) => ({ id: t.id, kind: t.kind, login: t.login, at: t.at, body: "", actions: [], notes: [], ...(t.status && { status: t.status }) })), includes: [], choices: null };
 }
 
-/** A message to Opus, or with `ask: false` a post without asking. A maintainer's asked message runs on their own Task Runner, so it is refused while none is ready. */
+/** Why a maintainer's message to Opus would not be answered now, or null: the pipeline is off or draining, its step is paused, or none of their Task Runners is ready. */
+async function ownAskRefusal(db: Db, login: string, repo: string): Promise<string | null> {
+  if (!await isEnabled(db)) return "The pipeline is off, so Opus cannot answer now. You can still post without Opus.";
+  const paused = await pauseReason(db, MAINTAINER_STEP, Date.now(), { backoff: false });
+  if (paused) return `Opus cannot answer now: ${paused}. You can still post without Opus.`;
+  return await ownTaker(db, login, { prompt_id: CONVERSATION_PROMPT_ID, repos: [repo], tier: tierOfModel(CLAUDE_PROMPTS[CONVERSATION_PROMPT_ID].models[0]!) }) ? null : NO_OWN_RUNNER;
+}
+
+/** A message to Opus, or with `ask: false` a post without asking. A maintainer's asked message runs on their own Task Runner, so it is refused while it would not be answered (ownAskRefusal). */
 export async function postMessage(db: Db, req: Req, deps?: StoreDeps): Promise<ConversationView> {
   const { repo, n } = itemOf(req);
   await needVisible(db, req, repo);
   if (!await canTalk(db, req.user, repo)) throw new HttpError(403, "only operators, and maintainers with write access to the repository, write in conversations");
   const kind = isOperator(req) ? "operator" : "maintainer", asking = ask(req), body = text(req);
-  if (kind === "maintainer" && asking && !await ownTaker(db, req.user.login, { prompt_id: "conversation.turn", repos: [repo] })) throw new HttpError(409, NO_OWN_RUNNER);
+  const refused = kind === "maintainer" && asking ? await ownAskRefusal(db, req.user.login, repo) : null;
+  if (refused) throw new HttpError(409, refused);
   await guardAsync(() => addMessage(db, repo, n, { login: req.user.login, kind }, body, deps, asking));
   return await viewFor(db, req, repo, n);
 }

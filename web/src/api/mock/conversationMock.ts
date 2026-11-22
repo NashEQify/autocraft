@@ -169,7 +169,7 @@ function seed(): ConversationTurn[] {
 /** In-memory conversations. Only designcraft#1484 starts with one; an operator's message is answered after a few seconds. */
 export function createConversationMock(me: User, changed: () => void, settle?: (repo: string, number: number, option: string, note: string | null) => void, hooks?: { reprepare?: (decisionId: string) => void }, derive?: (repo: string, number: number) => DecisionChoices | null): Pick<Api, "conversations"> {
   // The open choices by item; a run that settles the question removes them.
-  const choices = new Map<string, DecisionChoices>([[REF, mergeChoices(1)], ["photocraft#4127", scopeChoices(1)], ["gridcraft#977", { ...mergeChoices(1), id: "ch-g1", decisionId: "gridcraft#977:merge", pick: null }], ["gridcraft#1012", holdChoices()]]);
+  const choices = new Map<string, DecisionChoices>([[REF, { ...mergeChoices(1), source: "conversation", after: "kiri-n" }], ["photocraft#4127", scopeChoices(1)], ["gridcraft#977", { ...mergeChoices(1), id: "ch-g1", decisionId: "gridcraft#977:merge", pick: null }], ["gridcraft#1012", holdChoices()]]);
   let epoch = 1;
   const failedOnce = new Set<string>();
   if (hooks)
@@ -256,7 +256,7 @@ export function createConversationMock(me: User, changed: () => void, settle?: (
           c.pending = false;
           // Like the server: Opus's reply carries a new set that replaces the current one.
           const cur = choices.get(`${repo}#${n}`);
-          if (cur) choices.set(`${repo}#${n}`, { ...(cur.decisionId.endsWith(":scope") ? scopeChoices(++epoch) : mergeChoices(++epoch)), pick: cur.pick && { core: cur.pick.core, reason: "Updated for your message." } });
+          if (cur) choices.set(`${repo}#${n}`, { ...(cur.decisionId.endsWith(":scope") ? scopeChoices(++epoch) : mergeChoices(++epoch)), pick: cur.pick && { core: cur.pick.core, reason: "Updated for your message." }, source: "conversation", after: me.login });
           c.turns.push({ id: nextId++, kind: "opus", login: "opus", at: new Date().toISOString(), body: "I read that. The pack and the committed files carry the same patterns, so asking the author to load the pack still holds.", actions: [], notes: [] });
           changed();
         }, 5000);

@@ -162,14 +162,15 @@ export const HAIKU_WAIT_MS = 30_000;
  */
 export const HAIKU_WAIT_REMOTE_MS = 10 * 60_000;
 
-export function defaultSemanticDeps(db: Db, ref: string): SemanticDeps {
+/** `forLogin`: the Haiku check runs only on that user's own Task Runners (a maintainer's conversation turn). */
+export function defaultSemanticDeps(db: Db, ref: string, o: { forLogin?: string } = {}): SemanticDeps {
   return {
     async jev(text) {
       const r = await runModelStep(db, REFERENCE_JEV, { ref, text });
       return r.ok ? r.value : null;
     },
     async haiku(text) {
-      const r = await runModelStep(db, REFERENCE_HAIKU, [{ ref, text }], { maxWaitMs: await inferenceMode(db) === "user-local" ? HAIKU_WAIT_REMOTE_MS : HAIKU_WAIT_MS });
+      const r = await runModelStep(db, REFERENCE_HAIKU, [{ ref, text }], { maxWaitMs: await inferenceMode(db) === "user-local" ? HAIKU_WAIT_REMOTE_MS : HAIKU_WAIT_MS, ...(o.forLogin !== undefined && { forLogin: o.forLogin }) });
       return r.ok ? r.value : null;
     },
     jevUsable: async () => await jevAvailable(db),

@@ -13,15 +13,16 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
  * The thread's one input, stuck to the bottom of the page (above the phone tab bar): those the server lets talk (`talk`:
- * operators, and maintainers with write access whose messages run on their own Task Runner) write to Opus, other maintainers
- * leave feedback on the open question, viewers get nothing.
+ * operators, and maintainers with write access whose messages run on their own Task Runner) write to Opus; maintainers also
+ * leave feedback on the open question, above it; viewers get nothing.
  */
-export function Composer({ repo, number, talk, commenter, exists, pending, feedbackOn, choices, opusTurns, flush }: {
+export function Composer({ repo, number, talk, operator, commenter, exists, pending, feedbackOn, choices, opusTurns, flush }: {
   /** The parent has no side padding to cancel: the bar spans it. */
   flush?: boolean;
   repo: RepoName;
   number: number;
   talk: boolean;
+  operator: boolean;
   commenter: boolean;
   exists: boolean;
   pending: boolean;
@@ -57,6 +58,12 @@ export function Composer({ repo, number, talk, commenter, exists, pending, feedb
   const shell = flush ? "sticky bottom-0 z-10 mt-4 border-t border-line bg-panel px-4 py-2.5 md:px-6" : "sticky bottom-0 z-10 -mx-4 mt-4 border-t border-line bg-panel px-4 py-2.5 md:-mx-6 md:px-6";
   if (talk)
     return (
+      <>
+      {!operator && commenter && feedbackOn && (
+        <div className="mt-4">
+          <FeedbackBox d={feedbackOn} />
+        </div>
+      )}
       <div className={shell}>
         <div className="flex flex-col gap-2">
           {/* The field keeps the bar's full width at every size; the actions wrap under it rather than squeezing it. */}
@@ -83,6 +90,7 @@ export function Composer({ repo, number, talk, commenter, exists, pending, feedb
         </div>
         {error && <p className="mt-1.5 text-xs text-bad">{error}</p>}
       </div>
+      </>
     );
   if (commenter && feedbackOn)
     return (

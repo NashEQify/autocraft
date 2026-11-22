@@ -483,10 +483,11 @@ export function parseClaim(raw: unknown): Claim {
   if (c.root !== undefined && (typeof c.root !== "string" || !validRoot(c.root))) throw new HttpError(400, "root must be an absolute path of plain characters (letters, digits, . _ + @ -) without . or .. components");
   if (typeof c.requestId !== "string" || !/^[A-Za-z0-9_-]{8,64}$/.test(c.requestId)) throw new HttpError(400, "requestId must be 8 to 64 letters, digits, - or _");
   if (c.fastLane !== undefined && typeof c.fastLane !== "boolean") throw new HttpError(400, "fastLane must be a boolean");
+  if (c.ownLane !== undefined && typeof c.ownLane !== "boolean") throw new HttpError(400, "ownLane must be a boolean");
   // Protocol 3 helpers know no wait; a field they might send is not read.
   const wait = protocol >= 4 ? c.wait : undefined;
   if (wait !== undefined && (!Number.isInteger(wait) || (wait as number) < 0 || (wait as number) > 30)) throw new HttpError(400, "wait must be whole seconds from 0 to 30");
-  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }) };
+  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(c.ownLane === true && { ownLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }) };
 }
 
 /** Whether dotted version `v` is older than `min` (numeric parts compared in order; a part that is not a number counts as 0). */
@@ -502,10 +503,19 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
   return `${promptId} on ${refs[0]!.repo}#${refs[0]!.number}${refs.length > 1 ? ` (+${refs.length - 1})` : ""}`;
 }
 
-/** The calls the login's helpers hold leases on now, all helpers together. */
+/**
+ * The calls the login's helpers hold leases on now, all helpers together, that count toward its Max calls at once: a call bound
+ * to the login (its own conversation turn, NewCall.forLogin) does not.
+ */
 export const leasedBy = async (db: Db, login: string): Promise<number> => Number((await db.get(leasedRow(db, login)))!.n);
 
-const leasedRow = (db: Db, login: string) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb.fn.countAll<number>().as("n"))
+/** The leases of calls bound to the login it holds (`login`: an expression of the login), from their own small partial index. */
+export const boundLeases = (db: Db, login: Ex) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_bound", "bl")).select((e) => e.fn.countAll<number>().as("n"))
+  .where("bl.state", "=", literal("leased")).where("bl.for_login", "is not", null).where(ciEqExpr(db, "bl.user_login", login));
+/** The same for the leases of one helper credential (`tokenCol`: the outer query's mcp_tokens id column), for its free slots. */
+export const boundLeasesOfToken = (db: Db, tokenCol: string) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased_bound", "bt")).select((e) => e.fn.countAll<number>().as("n"))
+  .where("bt.state", "=", literal("leased")).where("bt.for_login", "is not", null).where((eb) => eb(eb.ref("bt.token_id"), "=", ref<number>(tokenCol)));
+const leasedRow = (db: Db, login: string) => db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb(eb.fn.countAll<number>(), "-", boundLeases(db, eb.val(login))).as("n"))
   .where((eb) => eb.and([eb("c.state", "=", literal("leased")), ciEqExpr(db, "c.user_login", eb.val(login))]));
 
 /** The role of a live Task Runner credential's user, or null when the credential is gone or expired. */
@@ -669,11 +679,12 @@ const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderRe
  * long-waiting small calls raised (claimClass) and without other users' live picks, filtered by tiers and repos (claimRepos:
  * every repo a call names must be in the set; picks do not go by it); the queue's order also by the user's tasks
  * (my-tasks.ts) and items (task-items.ts), which picks and follow-ups do not go by. Calls bound to the caller (NewCall.forLogin)
- * come after its follow-ups, like picks; calls bound to another user are not offered. A fast-lane claim gets only what fastLaneFits. A Manual
+ * come after its follow-ups, like picks; calls bound to another user are not offered. An own-lane claim (Claim.ownLane) gets
+ * only the calls bound to the caller and their follow-ups. A fast-lane claim gets only what fastLaneFits. A Manual
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
-async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads): Promise<Cand[]> {
+async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, ownLane = false): Promise<Cand[]> {
   const { q, manual, skip, items } = reads ?? await orderReads(db, caller.login, nowMs);
   const login = caller.login.toLowerCase();
   const live = (r: Cand): boolean => r.seen_at >= nowMs - CALLER_STALE_MS;
@@ -683,6 +694,7 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
   const followUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && fits(r));
   // Calls bound to the caller (a maintainer's own conversation turn) next, oldest first: like picks, they go by no repo, task or item choice.
   const bound = q.ordered.filter((r) => r.forLogin === login && live(r) && !released(r) && tiers.has(r.tier) && (!fastLane || fastLaneFits(r)));
+  if (ownLane) return [...followUps.filter((r) => r.forLogin === login), ...bound];
   let fresh: Set<string> | null = null;
   // The caller's own picks count for it; whether other pickers can take theirs is read once, when a pick needs it.
   const counts = async (r: Cand): Promise<boolean> => await pickCounts(r, nowMs, async (who) => who === login || (fresh ??= await pickerLogins(db, nowMs)).has(who));
@@ -709,7 +721,7 @@ const pickerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs)
 function pickerExpr(db: Db, eb: Eb, login: Ex, nowMs: number): AliasableExpression<SqlBool> {
   const [expires, fresh, now] = pickerArgs(nowMs);
   const max = eb.cast<number>(eb.case().when("ps.key", "=", MAX_CALLS_KEY).then(eb.ref("ps.value")).end(), "bigint");
-  const leased = db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "pl")).select((e) => e.fn.countAll<number>().as("n"))
+  const leased = db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "pl")).select((e) => e(e.fn.countAll<number>(), "-", boundLeases(db, login)).as("n"))
     .where("pl.state", "=", literal("leased")).where(ciEqExpr(db, "pl.user_login", login));
   return eb.and([
     eb.exists(db.k.selectFrom("main.remote_helpers as ph").innerJoin("main.mcp_tokens as pt", "pt.id", "ph.token_id").select(eb.lit(1).as("one"))
@@ -919,14 +931,14 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     await firstReads.catch(() => {});
     dropQueueCache(db);
   }
-  const fast = claim.fastLane === true;
+  const fast = claim.fastLane === true, own = claim.ownLane === true;
   // What the latest full try took, for a quick try's look at the queue.
   let tiers = new Set<Tier>(), repos: ReadonlySet<string> | null = null;
   // The user's reserve as the latest full try read it, and when.
   let last: { at: number; reserve: Reserve } | null = null;
   const attempt: ClaimTry = async (now, { quick, live }) => {
     // A quick try with nothing to take changes nothing; the full tries, at least every RETRY_MS, check the credential as well.
-    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast)).length) return null;
+    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, undefined, own)).length) return null;
     const x = (now === nowMs && pending ? await pending : null) ?? await tryReads(db, caller, claim.repos, now);
     pending = null;
     last = { at: now, reserve: x.reserve };
@@ -942,13 +954,14 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     const max = x.max;
     const full = max !== null && x.leased >= max;
     let limited = full;
-    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order)) {
-      // Only follow-ups of the helper's own sessions carry a parent here (claimOrder).
-      if (full && r.parent_id === null) continue;
+    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order, own)) {
+      // Only follow-ups of the helper's own sessions carry a parent here (claimOrder). A call bound to the caller (its own
+      // conversation turn) is no call at once: it is taken at the limit too, and with no limit of its own.
+      if (full && r.parent_id === null && r.forLogin === null) continue;
       if (!(await eligible(caller, r, can, others))) continue;
       // The client left, or shutdown answered the claim: nothing is leased to nobody.
       // A credential the try read as busy needs no busy mark.
-      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null ? null : r.parent_id !== null ? max + 1 : max, live, !fast && x.idle);
+      const lease = await leaseCall(db, Number(r.id), caller, claim, claim.tiers[r.tier]!, Date.now(), max === null || r.forLogin !== null ? null : r.parent_id !== null ? max + 1 : max, live, !fast && !own && x.idle);
       if (lease === "gone") return null;
       if (lease === "limit") {
         limited = true;
@@ -964,8 +977,8 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   return {
     attempt,
     // An idle helper, with what it takes (the user's picks narrowed by the helper's list): an author's claim gives way to it
-    // (idleOthers). The fast lane says nothing about the helper's other slots.
-    idle: async (now) => { if (!fast) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: now, idle_tiers: JSON.stringify([...tiers]), idle_repos: repos ? JSON.stringify([...repos]) : null }).where("id", "=", caller.tokenId)); },
+    // (idleOthers). The fast lane and the own lane say nothing about the helper's other slots.
+    idle: async (now) => { if (!fast && !own) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: now, idle_tiers: JSON.stringify([...tiers]), idle_repos: repos ? JSON.stringify([...repos]) : null }).where("id", "=", caller.tokenId)); },
     empty: async (now, held) => ({ lease: null, retryAfter: held ? scaledS(1) : CLAIM_RETRY_S, reserve: last?.at === now ? last.reserve : await userReserve(db, caller.login) }),
   };
 }

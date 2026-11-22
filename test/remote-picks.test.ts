@@ -10,7 +10,8 @@ import { handleMcp } from "../src/dash/mcp/index.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Req, Role } from "../src/dash/types.ts";
-import { claimCall, dropQueueCache, enqueueCall, type Caller } from "../src/remote/calls.ts";
+import { claimCall, dropQueueCache, enqueueCall, withdrawCall, type Caller } from "../src/remote/calls.ts";
+import { defaultSemanticDeps } from "../src/reference-lint.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
 import { setUserMaxCalls } from "../src/remote/max-calls.ts";
@@ -22,7 +23,7 @@ import { remoteRoom } from "../src/remote/room.ts";
 import { setUserRepos } from "../src/remote/my-repos.ts";
 import { takerTest } from "../src/remote/takers.ts";
 import { addFastTrack } from "../src/fasttrack.ts";
-import { poolRoom, repoBatches } from "../src/agents/call.ts";
+import { allocation, poolRoom, repoBatches } from "../src/agents/call.ts";
 import { pool } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -84,8 +85,40 @@ describe("picks and Manual only", async () => {
     assert.equal(await leased("bob"), null, "not another maintainer's, though bob's runner now asks for work");
     await assert.rejects(async () => await pickCall(db, user("bob"), own), /Task Runner of the person who asked/);
     assert.equal(await leased("alice"), own, "alice's runner takes it although she wrote the item");
+    // At her Max calls at once (her one lease is the bound call, which does not count), and then with another call leased.
+    await setUserMaxCalls(db, "alice", 1);
+    const other = await q();
+    assert.equal(await leased("alice"), other, "her bound lease counts toward no limit");
+    const second = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "alice" });
+    assert.equal(await leased("alice"), second, "a bound call is taken at the limit too");
+    assert.equal(await leased("alice", { ownLane: true }), null, "the own lane takes only bound calls");
+    const third = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], forLogin: "alice" });
+    assert.equal(await leased("alice", { ownLane: true }), third);
+    await setUserMaxCalls(db, "alice", null);
     const next = await q({ promptId: "conversation.turn", items: [{ repo: "photocraft", number: 30 }], parentId: own });
     assert.equal((await db.get(db.k.selectFrom("remote_calls").select("for_login").where("id", "=", next)))!.for_login?.toLowerCase(), "alice");
+    // A maintainer's reference check (lint.reference.haiku) is bound to them as well.
+    const was = allocation.pollMs;
+    allocation.pollMs = 10;
+    try {
+      const check = defaultSemanticDeps(db, "photocraft#30", { forLogin: "alice" }).haiku("See the manual.");
+      let row: { id: number; for_login: string | null } | undefined;
+      for (let i = 0; i < 200 && !row; i++) {
+        row = await db.get(db.k.selectFrom("remote_calls").select(["id", "for_login"]).where("prompt_id", "=", "lint.reference.haiku").where("state", "=", "queued"));
+        if (!row) await new Promise((r) => setTimeout(r, 5));
+      }
+      assert.equal(row?.for_login, "alice");
+      // Each attempt queues the check again; withdrawn, it counts as no answer.
+      let done = false;
+      void check.finally(() => { done = true; });
+      while (!done) {
+        for (const r of await db.all(db.k.selectFrom("remote_calls").select("id").where("prompt_id", "=", "lint.reference.haiku").where("state", "=", "queued"))) await withdrawCall(db, r.id, "test");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      assert.equal(await check, null);
+    } finally {
+      allocation.pollMs = was;
+    }
     await clear();
   });
 

@@ -223,7 +223,7 @@ export async function ensureConversation(db: Db, repo: string, n: number, by: st
 // ---- turns -------------------------------------------------------------------
 
 /** Validated choices an Opus turn carries; stored with the turn (a prepare replaces the decision's choices, a conversation turn merges into them). */
-export type TurnChoices = { decision: DecisionRow; parsed: ParsedChoices; source: "prepare" | "conversation"; by?: string; stampThen?: string | null };
+export type TurnChoices = { decision: DecisionRow; parsed: ParsedChoices; source: "prepare" | "conversation"; by?: string; stampThen?: string | null; /** The login whose message the reply answered. */ askedBy?: string };
 
 type NewTurn = { kind: TurnKind; login: string; body: string; block: string; status?: string | null; notes?: string[]; cards?: NewCard[]; choices?: TurnChoices };
 
@@ -249,7 +249,7 @@ async function insertRow(db: Db, repo: string, n: number, t: NewTurn, seq: numbe
     await db.run(db.k.insertInto("conversation_cards")
       .values({ turn_id: id, repo, number: n, kind: c.params.kind, params: JSON.stringify(c.params), text: c.text, description: c.description, seen }));
   }
-  if (t.choices) await storeParsedChoices(db, t.choices.decision, t.choices.parsed, { turnId: id, seen, source: t.choices.source, by: t.choices.by, stampThen: t.choices.stampThen });
+  if (t.choices) await storeParsedChoices(db, t.choices.decision, t.choices.parsed, { turnId: id, seen, source: t.choices.source, by: t.choices.by, stampThen: t.choices.stampThen, ...(t.choices.askedBy && { askedBy: t.choices.askedBy }) });
   return id;
 }
 
@@ -468,6 +468,13 @@ export async function storeReply(db: Db, repo: string, n: number, claim: string,
   });
 }
 
+/** Gives the claimed message back: it waits, pending, for a later run. */
+export async function releaseTurn(db: Db, repo: string, n: number, claim: string): Promise<boolean> {
+  const r = await db.run(db.k.updateTable("conversation_turns").set({ status: "pending", claim: null, claimed_at: null, progress: null })
+    .where("repo", "=", repo).where("number", "=", n).where("status", "=", "answering").where("claim", "=", claim));
+  return Number(r.changes) === 1;
+}
+
 export async function failTurn(db: Db, repo: string, n: number, claim: string, error: string): Promise<boolean> {
   return await inTx(db, async () => {
     const wait = await claimed(db, repo, n, claim);
@@ -478,8 +485,8 @@ export async function failTurn(db: Db, repo: string, n: number, claim: string, e
 }
 
 /** Conversations with a message waiting for Opus (queued, or claimed by a run that went stale), oldest message first, with who wrote it. */
-export async function pendingConversations(db: Db, deps?: StoreDeps): Promise<{ repo: string; number: number; turnId: number; kind: PersonKind; login: string }[]> {
+export async function pendingConversations(db: Db, deps?: StoreDeps, kind?: PersonKind): Promise<{ repo: string; number: number; turnId: number; kind: PersonKind; login: string }[]> {
   const stale = new Date(Date.parse(nowOf(deps)) - STALE_CLAIM_MS).toISOString();
-  return await db.all(db.k.selectFrom("conversation_turns").select(["repo", "number", "id as turnId", "kind", "login"]).$narrowType<{ kind: PersonKind }>().where("kind", "in", PERSON_KINDS)
+  return await db.all(db.k.selectFrom("conversation_turns").select(["repo", "number", "id as turnId", "kind", "login"]).$narrowType<{ kind: PersonKind }>().where("kind", "in", kind ? [kind] : PERSON_KINDS)
     .where((eb) => eb.or([eb("status", "=", "pending"), eb.and([eb("status", "=", "answering"), eb("claimed_at", "<", stale)])])).orderBy("id"));
 }
