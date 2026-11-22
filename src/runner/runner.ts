@@ -327,7 +327,8 @@ export class Runner {
 
   /**
    * The pre-approval pass, when what it reads changed since the last one (read before it runs, so its own moves make the next tick run it
-   * again) or a time it was told about has come. A pass that throws runs again on the next tick.
+   * again) or a time it was told about has come, also one told after the pass ended (a permission read's answer). A pass that throws runs
+   * again on the next tick.
    */
   private async preapprovals(): Promise<void> {
     const t = Date.now();
@@ -335,9 +336,9 @@ export class Runner {
     const m = this.preapprovalMark;
     if (m && m.sig === sig && t < m.wakeAt) return;
     this.preapprovalMark = null;
-    let wakeAt = Infinity;
-    await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < wakeAt) wakeAt = at; });
-    this.preapprovalMark = { sig, wakeAt };
+    const next = { sig, wakeAt: Infinity };
+    await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < next.wakeAt) next.wakeAt = at; });
+    this.preapprovalMark = next;
   }
 
   private updateAt = 0;

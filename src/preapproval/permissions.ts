@@ -57,7 +57,8 @@ async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: strin
  * and returns the `settleKey`s whose write permission still counts past PERM_READ_TTL: those with no newer answer yet, because the read is
  * under way or failed (it is made again on the next pass), up to HOLD_MAX after GitHub last confirmed it. A fresh answer that is not write
  * ends it; a role or setting change ends it as before. Only a write permission is kept: a stale non-write row is not read again.
- * `wake` is told when a write permission reaches REFRESH_AFTER, and the pass's own time while one is held: the next pass reads it again.
+ * `wake` is told when a write permission reaches REFRESH_AFTER and a held one HOLD_MAX, and, after the pass, when a read started here ends:
+ * its answer (or failure, read again on the next pass) is the next pass's input.
  */
 export async function refreshSettlers(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}, wake: (at: number) => void = () => {}): Promise<Set<string>> {
   const held = new Set<string>();
@@ -72,7 +73,7 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
     if (!row || !WRITE_PERMISSIONS.has(row.permission) || !(age >= REFRESH_AFTER && age < HOLD_MAX)) continue;
     const k = settleKey(login, repo);
     held.add(k);
-    wake(now);
+    wake(Date.parse(row.checked_at) + HOLD_MAX);
     const fail = (why: string) => {
       // Read again on every pass while GitHub fails: the log gets each new reason once.
       if (lastFailure.get(k) !== why) log(`permission of ${login} on ${repo}: ${why}`);
@@ -81,7 +82,7 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
     read(db, login, repo).then(
       (r) => (r.kind === "error" ? fail(r.why) : r.kind === "unavailable" ? fail("the GitHub App cannot read it (no installation token, or GitHub answered 404)") : void lastFailure.delete(k)),
       (e) => fail((e as Error).message),
-    );
+    ).finally(() => wake(Date.now()));
   }
   return held;
 }
