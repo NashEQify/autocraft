@@ -84,7 +84,7 @@ async function standings(db: Db, authors: AuthorRef[]): Promise<Map<string, Stan
     .where("kind", "=", "pr").where("author", "is not", null).$if(!all, (q) => q.where(kx.inList(db, "author", logins))).groupBy(["author", "author_id"]))) {
     (rows.get(r.login) ?? rows.set(r.login, []).get(r.login)!).push(r);
   }
-  const over = new Map((await db.all(db.k.selectFrom("whitelist_overrides").select(["login", "status", "github_id"]).$if(!all, (q) => q.where(kx.inList(db, kx.nocase(db, "login"), logins, "citext")))))
+  const over = new Map((await db.all(db.k.selectFrom("whitelist_overrides").select(["login", "status", "github_id"]).$if(!all, (q) => q.where((eb) => kx.inList(db, eb.fn("lower", ["login"]), logins.map((l) => l.toLowerCase()))))))
     .map((r) => [r.login.toLowerCase(), r]));
   const bound = new Map((await db.all(db.k.selectFrom("author_ids").select(["login", "id"]).$if(!all, (q) => q.where(kx.inList(db, "login", logins))))).map((r) => [r.login, r.id]));
   for (const a of authors) {

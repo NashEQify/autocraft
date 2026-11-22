@@ -136,6 +136,13 @@ both("ciEq, nocase and like compare as SQLite's NOCASE, bytewise by code point; 
   return out;
 });
 
+both("nocase sorts ASCII-folded by code point, not in the database's collation: `_` before letters", async (db) => {
+  const e = kx.jsonEach(db, kx.json(["b", "B", "a", "_x"]), "e");
+  const out = (await db.all(k(db).selectFrom(e).select("e.value").orderBy(kx.nocase(db, "e.value")).orderBy(kx.bytewise(db, "e.value")))).map((r) => r.value);
+  assert.deepEqual(out, ["_x", "a", "B", "b"]);
+  return out;
+});
+
 both("NULL order, IS DISTINCT FROM, scalar greatest/least and ordered group concat", async (db) => {
   const ids = (rows: { id: number }[]) => rows.map((r) => r.id);
   const out = [
