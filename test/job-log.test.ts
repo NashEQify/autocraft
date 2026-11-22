@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
-import { JOB_LOG_KEEP_BYTES, JobLogCopy } from "../src/runner/job-log.ts";
+import { copyLogs, JOB_LOG_KEEP_BYTES, JOB_LOG_KEEP_MS, JobLogCopy, pruneJobLogs } from "../src/runner/job-log.ts";
 import { jobDetail } from "../src/runner/jobs.ts";
 
 test("a long job log keeps its end within the cap, and the job page reads it without the file", async () => {
@@ -22,10 +22,10 @@ test("a long job log keeps its end within the cap, and the job page reads it wit
     let n = 0;
     for (let batch = 0; batch < 20; batch++) {
       for (let i = 0; i < 30; i++) appendFileSync(path, line(n++));
-      await copy.flush(true);
+      await copyLogs(db, [copy], true);
     }
     appendFileSync(path, "the last line, unfinished");
-    await copy.flush(true);
+    await copyLogs(db, [copy], true);
 
     const chunks = await db.all(db.k.selectFrom("job_log_chunks").select("chunk").where("job_id", "=", id));
     const stored = chunks.reduce((a, c) => a + Buffer.byteLength(c.chunk), 0);
@@ -38,6 +38,9 @@ test("a long job log keeps its end within the cap, and the job page reads it wit
     assert.ok(j.log!.includes(`line ${n - 1} `));
     assert.match(j.log!, /^line \d+ /, "the shown text starts at a whole line");
     assert.equal(j.logTruncated, true);
+    // Stored chunks go after 90 days, while the job row stays.
+    assert.equal(await pruneJobLogs(db, Date.now()), 0);
+    assert.equal(await pruneJobLogs(db, Date.now() + JOB_LOG_KEEP_MS + 60_000), chunks.length);
   } finally {
     await db.close();
     rmSync(dir, { recursive: true, force: true });
