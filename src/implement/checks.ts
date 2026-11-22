@@ -7,6 +7,7 @@ import { assertFence } from "../db/fence.ts";
 import { guardedApi, inClusterApi } from "../build/kube-api.ts";
 import { describeHeader, execHelper, execWs } from "../build/workspaces.ts";
 import { SRC_ROOT, WORK_ROOT } from "../build/workspace-tool-specs.ts";
+import { DIFF_FLAGS } from "./diff.ts";
 import { findingsOf, patchLines, type Finding } from "../prepush/index.ts";
 import { classifyTests, testFindings } from "../prepush/tests.ts";
 import type { Crate } from "../verify/types.ts";
@@ -71,6 +72,7 @@ mkdir -p "$out" || exit 90
 git -c core.hooksPath=/dev/null add -A -N >"$out/add.err" 2>&1 || exit 91
 git -c core.quotePath=false diff --no-ext-diff --no-textconv --no-color --no-renames -U0 "$base" >"$out/diff.txt" 2>"$out/diff.err" || exit 92
 cargo metadata --offline --no-deps --format-version 1 >"$out/meta.json" 2>"$out/meta.err"; echo $? >"$out/meta.exit"
+git -c core.quotePath=false diff --binary --no-ext-diff --no-textconv ${DIFF_FLAGS} "$base" 2>/dev/null | sha256sum | cut -d' ' -f1 >"$out/full.sha"
 exit 0`;
 
 /** $1 the output directory, $2 the number of files, then the changed .rs files, then the affected crates. */
@@ -101,8 +103,8 @@ const TEXT_MAX = 4 * 1024 * 1024;
 const RENDERED_CAP = 2000;
 const FINDINGS_MAX = 50;
 
-/** Cargo could not resolve or fetch a dependency offline: the change needs something the workspace does not hold (W9 seeds them). */
-export const NEEDS_DEPENDENCY = /no matching package named|failed to (?:download|load source for dependency|get `[^`]+` as a dependency)|but --offline was specified|unable to update registry|failed to select a version for the requirement/i;
+/** Cargo could not resolve or fetch a dependency offline: the change needs something the workspace does not hold (W9 seeds them). Only lines cargo prints itself count, not text inside a test's output. */
+export const NEEDS_DEPENDENCY = /^(?:error: )?(?:no matching package named|failed to (?:download|load source for dependency|get `[^`]+` as a dependency)|failed to select a version for the requirement|unable to update registry)|^error: .*but --offline was specified/im;
 
 // ---- reading the output --------------------------------------------------------------------------------------------
 
@@ -148,6 +150,8 @@ export function affectedCrates(paths: string[], crates: Crate[]): string[] {
     for (const c of crates) if ((c.dir === "." || path === c.dir || path.startsWith(`${c.dir}/`)) && (!best || c.dir.length > best.dir.length)) best = c;
     if (best && !(best.dir === "." && !path.includes("/"))) names.add(best.name);
   }
+  // The workspace's root manifest or lockfile changes every crate's build.
+  if (paths.some((p) => p === "Cargo.toml" || p === "Cargo.lock")) for (const c of crates) names.add(c.name);
   return [...names].sort();
 }
 
@@ -176,7 +180,7 @@ export function fmtFindings(text: string, changed: ReadonlySet<string>): Session
 
 const asFinding = (check: SessionFinding["check"], f: Finding): SessionFinding => ({ check, file: f.file, line: f.line, message: f.message, rendered: f.rendered });
 
-export type CheckPart = { ran: boolean; exit: number | null; findings: number; note?: string };
+export type CheckPart = { ran: boolean; exit: number | null; findings: number; note?: string; /** The check gave no verdict (timed out, killed, did not run). */ noVerdict?: boolean };
 
 /** One round of checks, stored as the result of a `checks` round. */
 export type CheckRound = {
@@ -188,8 +192,12 @@ export type CheckRound = {
   fmt: CheckPart; clippy: CheckPart; tests: CheckPart;
   /** What goes back to the session: format, clippy and test findings, the first FINDINGS_MAX. */
   findings: SessionFinding[];
-  /** Why a check gave no verdict (it timed out, could not run, a flaky test): recorded, never sent back. */
+  /** Why a check gave no verdict or passed only on a rerun: recorded, never sent back. */
   notes: string[];
+  /** The checks that gave no verdict; the round is not clean while there are any. */
+  noVerdict: string[];
+  /** Hash of the whole workspace diff (the PR step's format) the checks ran on. */
+  diffHash: string;
   /** Cargo could not resolve a dependency offline. */
   needsDependency: boolean;
   clean: boolean;
@@ -219,13 +227,20 @@ export async function runChecks(pod: Pod, o: { dir: string; base: string; round:
   const crates = affectedCrates(ch.paths, ch.crates);
   const notes: string[] = [];
   let needsDependency = NEEDS_DEPENDENCY.test(ch.metaError);
-  if (ch.metaError && !needsDependency && rs.length) notes.push(`cargo metadata failed: ${cap(ch.metaError).split("\n")[0]}`);
+  const noVerdict: string[] = [];
+  const findings: SessionFinding[] = [];
+  const manifests = ch.paths.filter((p) => /(?:^|\/)Cargo\.(?:toml|lock)$/.test(p));
+  if (ch.metaError && !needsDependency && (rs.length || manifests.length)) {
+    findings.push({ check: "clippy", file: manifests[0] ?? rs[0]!, line: 0, message: "cargo metadata failed, so the crates cannot be checked", rendered: cap(ch.metaError) });
+  }
   const part = (ran: boolean): CheckPart => ({ ran, exit: null, findings: 0 });
   const fmt = part(rs.length > 0), clippy = part(crates.length > 0), tests = part(crates.length > 0);
-  const findings: SessionFinding[] = [];
   if (fmt.ran || clippy.ran) {
     const r = await pod.run("implement-checks", CHECKS_SCRIPT, [o.dir, String(rs.length), ...rs, ...crates], CHECKS_LIMIT_SEC);
-    if (r.state !== "exited") notes.push(`the checks ${r.state} before they finished`);
+    if (r.state !== "exited" || r.exit !== 0) {
+      notes.push(`the checks ${r.state} before they finished`);
+      noVerdict.push("the checks script did not finish");
+    }
   }
   if (fmt.ran) {
     fmt.exit = await exitOf(pod, `${o.dir}/fmt.exit`);
@@ -233,7 +248,14 @@ export async function runChecks(pod: Pod, o: { dir: string; base: string; round:
     const f = fmtFindings(text, new Set(rs));
     fmt.findings = f.length;
     findings.push(...f);
-    if (fmt.exit !== 0 && fmt.exit !== 1 && !f.length) notes.push(fmt.note = `cargo fmt could not run (exit ${fmt.exit ?? "none"}): ${cap(text).split("\n")[0] ?? ""}`);
+    // Exit 1 is a format result only with rustfmt's diff blocks (or a parse error it located); anything else did not run.
+    const verdict = fmt.exit === 0 || (fmt.exit === 1 && (/^Diff in /m.test(text) || f.length > 0));
+    if (!verdict && !f.length) {
+      fmt.noVerdict = true;
+      const why = `cargo fmt gave no verdict (exit ${fmt.exit ?? "none"}): ${cap(text).split("\n")[0] ?? ""}`;
+      notes.push(fmt.note = why);
+      noVerdict.push(why);
+    }
   }
   if (clippy.ran) {
     clippy.exit = await exitOf(pod, `${o.dir}/clippy.exit`);
@@ -243,10 +265,16 @@ export async function runChecks(pod: Pod, o: { dir: string; base: string; round:
       clippy.note = "a dependency is not available offline";
     } else if (clippy.exit === 124) {
       notes.push(clippy.note = "clippy timed out");
+      clippy.noVerdict = true;
+      noVerdict.push("clippy timed out");
     } else {
       const f = findingsOf(await textOf(pod, `${o.dir}/clippy.json`, JSON_MAX), err, ch.diff).map((x) => asFinding("clippy", x));
       clippy.findings = f.length;
       findings.push(...f);
+      if (clippy.exit === null || clippy.exit === 137) {
+        clippy.noVerdict = true;
+        noVerdict.push(clippy.note = clippy.exit === 137 ? "clippy was killed (out of memory)" : "clippy did not run");
+      }
     }
   }
   if (tests.ran && !needsDependency) {
@@ -259,18 +287,25 @@ export async function runChecks(pod: Pod, o: { dir: string; base: string; round:
       const f = testFindings(c).map((x) => asFinding("test", x));
       tests.findings = f.length;
       findings.push(...f);
-    } else if (c.kind === "inconclusive") notes.push(tests.note = c.note);
+    } else if (c.kind === "inconclusive") {
+      notes.push(tests.note = c.note);
+      // A test that failed and then passed on rerun is a clean round with a note.
+      if (!c.note.startsWith("flaky:")) {
+        tests.noVerdict = true;
+        noVerdict.push(c.note);
+      }
+    }
   }
   const kept = findings.slice(0, FINDINGS_MAX);
   return {
-    round: o.round, base: o.base, diffStat: statOf(ch.diff), files: rs, crates, fmt, clippy, tests, findings: kept, notes, needsDependency,
-    clean: !kept.length && !needsDependency,
+    round: o.round, base: o.base, diffStat: statOf(ch.diff), files: rs, crates, fmt, clippy, tests, findings: kept, notes, noVerdict, diffHash: (await textOf(pod, `${o.dir}/full.sha`, 128)).trim(), needsDependency,
+    clean: !kept.length && !needsDependency && !noVerdict.length,
   };
 }
 
 /** The round's checks as the PR body lists them (CheckLine in the PR step's template). */
 export function checkLines(c: CheckRound): { name: string; ok: boolean; detail?: string | null }[] {
-  const line = (name: string, p: CheckPart, skipped: string) => ({ name, ok: p.ran && p.findings === 0 && !p.note, detail: p.ran ? p.note ?? null : skipped });
+  const line = (name: string, p: CheckPart, skipped: string) => ({ name, ok: p.ran && p.findings === 0 && !p.noVerdict, detail: p.ran ? p.note ?? null : skipped });
   const crates = c.crates.length ? ` (${c.crates.join(", ")})` : "";
   return [
     line("cargo fmt --check", c.fmt, "no Rust file changed"),

@@ -7,6 +7,7 @@
 // for that call instead of making another; the reply is in the round as soon as it is read; the next turn, the lint turn,
 // the checks and their outcome follow from the rounds after the latest `workspace` round, so a restart at any await
 // neither starts a second session in the workspace nor repeats a settled turn or checks.
+import { createHash } from "node:crypto";
 import type { Db } from "../db/index.ts";
 import { createWorkspace, getWorkspace, LIVE_STATES, resumeWorkspace, type WorkspaceStateName } from "../build/workspaces.ts";
 import { READY_LIMIT_MS } from "../build/workspace-launch.ts";
@@ -58,7 +59,7 @@ export type BuildRun = {
 
 /** `checks`: the last checks round; a draft may have none, or failing ones. */
 export type OpenPr = (run: BuildRun, impl: Implementation, o: { draft: boolean; checks: CheckRound | null }) =>
-  Promise<{ ok: true; url: string } | { ok: false; reason: string; retry: boolean; problems?: string[] }>;
+  Promise<{ ok: true; url: string } | { ok: false; reason: string; retry: boolean; problems?: string[]; recheck?: boolean }>;
 
 export type BuildDeps = {
   calls: CallDeps;
@@ -86,6 +87,10 @@ async function attemptDiff(db: Db, impl: Implementation) {
 const realOpenPr: OpenPr = async (run, impl, o) => {
   const d = await attemptDiff(run.db, impl);
   if (!d.ok) return { ok: false, reason: d.reason, retry: true };
+  // The change being pushed must be the one the last clean checks ran on.
+  if (!o.draft && o.checks && createHash("sha256").update(Buffer.from(d.diff)).digest("hex") !== o.checks.diffHash) {
+    return { ok: false, reason: "the workspace changed after the last clean checks", retry: false, recheck: true };
+  }
   const r = await openImplementationPr(run.db, {
     implementation: { ...impl, baseSha: d.base }, diff: d.diff, model: SESSION_MODEL, checks: o.checks ? checkLines(o.checks) : [], by: run.by ?? "pipeline", draft: o.draft,
   }, { ...defaultPrDeps(), log: run.log });
@@ -277,30 +282,34 @@ async function checksPhase(run: BuildRun, impl: Implementation, ws: { base: stri
   const all = await roundsOf(db, impl.id);
   const rounds = epochOf(all);
   const lastTurn = turnsOf(rounds).at(-1);
-  // Checks a restart cut off after they were stored count once: their round is the turn's result.
-  const stored = rounds.filter((r) => r.kind === "checks" && (!lastTurn || r.id > lastTurn.id)).at(-1);
-  let c: CheckRound, round: number;
-  if (stored) {
-    c = stored.result as CheckRound;
-    round = checksOf(all).length;
-    run.log(`${ref(impl)}: checks round ${round} of this turn ran before a restart; its result stands`);
-  } else {
-    round = checksOf(all).length + 1;
+  // Checks a restart cut off after they were stored count once: their rounds are the turn's result.
+  const since = rounds.filter((r) => r.kind === "checks" && (!lastTurn || r.id > lastTurn.id)).map((r) => r.result as CheckRound);
+  const noVerdict = (x: CheckRound) => !x.findings.length && !x.needsDependency && (x.noVerdict ?? []).length > 0;
+  let c = since.at(-1);
+  let round = checksOf(all).length;
+  if (c) run.log(`${ref(impl)}: checks round ${round} of this turn ran before a restart; its result stands`);
+  // A check with no verdict is not a pass: the checks run once more, and a second round without a verdict ends the attempt.
+  while (!c || (noVerdict(c) && since.length < 2)) {
+    if (c) run.log(`${ref(impl)}: checks round ${round} gave no verdict (${(c.noVerdict ?? []).join("; ")}); running them again`);
+    round++;
     await run.progress(`${ref(impl)}: checks, round ${round}`);
-    c = await runChecks(pod, { dir: roundDir(impl.id, round), base: ws.base, round });
+    const r = await runChecks(pod, { dir: roundDir(impl.id, round), base: ws.base, round });
     await db.write(async () => {
-      await addRound(db, impl.id, "checks", { result: c });
-      await updateImplementation(db, impl.id, { diffStat: c.diffStat });
+      await addRound(db, impl.id, "checks", { result: r });
+      await updateImplementation(db, impl.id, { diffStat: r.diffStat });
     });
+    since.push(r);
+    c = r;
     run.log(`${ref(impl)}: checks round ${round}: ${c.diffStat}; ${c.findings.length} findings${c.notes.length ? `; ${c.notes.join("; ")}` : ""}`);
   }
+  if (noVerdict(c)) throw new Stuck("checks-no-verdict", (c.noVerdict ?? []).join("; "));
   if (c.needsDependency) throw new Stuck("needs-dependency", "cargo could not resolve a dependency offline");
   if (c.clean) {
     if (c.diffStat === "no changes") throw new Stuck("no-change", "");
     await setImplementationState(db, impl.id, "opening");
     return { impl: (await implementationById(db, impl.id))!, line: `checks clean (${c.diffStat})` };
   }
-  const failing = [...checksOf(rounds), ...(stored ? [] : [c])].filter((x) => !x.clean).length;
+  const failing = checksOf(epochOf(await roundsOf(db, impl.id))).filter((x) => !x.clean && !(x.noVerdict ?? []).length).length;
   if (failing > FOLLOW_UP_ROUNDS) throw new Stuck("checks-failing", `${c.findings.length} findings, first: ${c.findings[0]?.message ?? ""}`);
   await setImplementationState(db, impl.id, "fixing");
   return { impl: (await implementationById(db, impl.id))!, line: `checks round ${round}: ${c.findings.length} findings; a follow-up turn is next` };
@@ -318,6 +327,10 @@ async function openingPhase(run: BuildRun, deps: BuildDeps, impl: Implementation
   if (!draft && !checks?.clean) throw new Stuck("checks-failing", "the attempt reached the PR step without clean checks");
   const r = await deps.openPr(run, impl, { draft, checks });
   if (r.ok) return `PR ${r.url}`;
+  if (r.recheck) {
+    await setImplementationState(db, impl.id, "checking");
+    return `${r.reason}; the checks run again`;
+  }
   if (r.problems?.length) {
     // One turn to undo what the diff check refused (D7); a second refusal is stuck.
     if (rounds.some(isDiffRefusal)) throw new Stuck("diff-refused", r.problems.slice(0, 3).join("; "));
