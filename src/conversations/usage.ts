@@ -10,13 +10,15 @@ export async function actUsedToday(db: Db, ms: number = Date.now()): Promise<num
   const reset = await setting(db, "limit_reset_at:act");
   const since = reset && reset > day ? reset : day;
   const actions = Object.keys(GITHUB_ACTIONS);
-  const jobs = (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("items"), eb.lit(0)).as("n"))
-    .where("step", "=", "act").where("started_at", ">=", since)))!.n;
-  const cards = (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("at", ">=", since)
-    .where((eb) => kx.like(db, "details", eb.val('%"source":"conversation"%')))
-    .where((eb) => kx.like(db, "details", eb.val('%"state":"done"%')))
-    .where(kx.inList(db, "action", actions))))!.n;
-  return jobs + cards;
+  // Both counts in one statement.
+  const r = (await db.get(db.k.selectNoFrom((eb) => [
+    eb.selectFrom("jobs").select((e) => e.fn.coalesce(e.fn.sum<number>("items"), e.lit(0)).as("n")).where("step", "=", "act").where("started_at", ">=", since).as("jobs"),
+    eb.selectFrom("audit").select((e) => e.fn.countAll<number>().as("n")).where("at", ">=", since)
+      .where((e) => kx.like(db, "details", e.val('%"source":"conversation"%')))
+      .where((e) => kx.like(db, "details", e.val('%"state":"done"%')))
+      .where(kx.inList(db, "action", actions)).as("cards"),
+  ]).$narrowType<{ jobs: number; cards: number }>()))!;
+  return r.jobs + r.cards;
 }
 
 /** The Act step's daily limit, or null when it has none. */

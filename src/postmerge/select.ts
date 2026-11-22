@@ -104,6 +104,7 @@ export async function pendingDefects(db: Db, repo?: string, now = Date.now()): P
     .$if(repo !== undefined, (q) => q.where("r.repo", "=", repo!)).where("r.error", "is", null).where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))
     .orderBy("r.at").orderBy("r.number"));
   const out: PendingDefect[] = [];
+  if (!rows.length) return out;
   const quiet = await quietFixPrs(db, repo);
   // The follow-ups of each PR and the Fix PR links of follow-up issues, read once (followupsOf and fixesFollowup per PR).
   const followups = new Map<string, Followup[]>();

@@ -11,7 +11,7 @@ import { isQueueState } from "./plan.ts";
 import { statusOf, type ItemStatus } from "./item-status.ts";
 import { loadPlanSet, type PlanSet, type PlanSetOptions } from "./plan-set.ts";
 import type { Db } from "../db/index.ts";
-import { excluded } from "../db/kx.ts";
+import { excluded, tupleIn } from "../db/kx.ts";
 
 /** The merge-queue fields of a PR whose Plan is in a queue state: what the Queue page and the flow counts show besides the Plan's own state, reasons and note. */
 export type QueueView = {
@@ -121,6 +121,10 @@ export function planRows(plans: PlanSet, plannedAt: string = new Date().toISOStr
   return rows;
 }
 
+/** Rows per multi-row insert: well under the bound-parameter limits of both engines at a dozen columns a row. */
+const BATCH_ROWS = 1000;
+const batches = <T>(rows: readonly T[]): T[][] => Array.from({ length: Math.ceil(rows.length / BATCH_ROWS) }, (_, i) => rows.slice(i * BATCH_ROWS, (i + 1) * BATCH_ROWS));
+
 const sig = (r: PlanRow): string => JSON.stringify([r.kind, r.head, r.state, r.item_state, r.actions, r.wait, r.reasons, r.note, r.view]);
 
 type Stored = { sig: string; status: ItemStatus | undefined; state: string; wait: string | null; head: string | null };
@@ -175,20 +179,21 @@ export async function writePlanCache(db: Db, plans: PlanSet, plannedAt: string =
       stored = await readStored(db);
       ({ changed, gone } = diff(stored));
     }
-    for (const r of changed) {
+    const history = changed.flatMap((r) => {
       const old = stored.get(`${r.repo}#${r.number}`);
-      if (!old || old.state !== r.state || old.wait !== r.wait) await db.run(db.k.insertInto("main.plan_history").values({ repo: r.repo, number: r.number, head: r.head, old_state: old?.state ?? null, new_state: r.state, old_wait: old?.wait ?? null, wait: r.wait, reasons: r.reasons, at: plannedAt }));
-    }
-    for (const r of changed) {
-      await db.run(db.k.insertInto("main.item_plans").values({ repo: r.repo, number: r.number, kind: r.kind, head: r.head, state: r.state, item_state: r.item_state, actions: r.actions, wait: r.wait, reasons: r.reasons, note: r.note, view: r.view, planned_at: plannedAt })
+      return !old || old.state !== r.state || old.wait !== r.wait ? [{ repo: r.repo, number: r.number, head: r.head, old_state: old?.state ?? null, new_state: r.state, old_wait: old?.wait ?? null, wait: r.wait, reasons: r.reasons, at: plannedAt }] : [];
+    });
+    // A row for each exit, so the item's return does not read as a first plan.
+    const exits = gone.map((k) => {
+      const i = k.lastIndexOf("#"), old = stored.get(k)!;
+      return { repo: k.slice(0, i), number: Number(k.slice(i + 1)), head: old.head, old_state: old.state, new_state: "gone", old_wait: old.wait, wait: null, reasons: "[]", at: plannedAt };
+    });
+    for (const rows of batches([...history, ...exits])) await db.run(db.k.insertInto("main.plan_history").values(rows));
+    for (const rows of batches(changed)) {
+      await db.run(db.k.insertInto("main.item_plans").values(rows.map((r) => ({ repo: r.repo, number: r.number, kind: r.kind, head: r.head, state: r.state, item_state: r.item_state, actions: r.actions, wait: r.wait, reasons: r.reasons, note: r.note, view: r.view, planned_at: plannedAt })))
         .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["kind", "head", "state", "item_state", "actions", "wait", "reasons", "note", "view", "planned_at"]))));
     }
-    for (const k of gone) {
-      const i = k.lastIndexOf("#"), repo = k.slice(0, i), number = Number(k.slice(i + 1)), old = stored.get(k)!;
-      // A row for the exit, so the item's return does not read as a first plan.
-      await db.run(db.k.insertInto("main.plan_history").values({ repo, number, head: old.head, old_state: old.state, new_state: "gone", old_wait: old.wait, wait: null, reasons: "[]", at: plannedAt }));
-      await db.run(db.k.deleteFrom("main.item_plans").where("repo", "=", repo).where("number", "=", number));
-    }
+    if (exits.length) await db.run(db.k.deleteFrom("main.item_plans").where(tupleIn(db, ["repo", "number"], exits.map((e) => [e.repo, e.number]), ["text", "bigint"])));
     // Read under the write lock: no other write can land between the rows this transaction diffed against (or wrote) and the counter.
     return await planRev(db);
   });

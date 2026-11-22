@@ -204,8 +204,8 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   const lintFixup = await keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.source", "f.lint_task"])
     .where("f.state", "=", "linting").where((eb) => eb(eb.fn.coalesce("f.source", eb.val("")), "!=", "operator")).where((eb) => narrow(eb, "f")).orderBy(rowid("fixups", "f")));
   // An operator's fix-up works the current head, with or without a review there, so its stored patch is read at the head before the review is.
-  const lintOperator = (repo: string, number: number, head: string) => db.all(db.k.selectFrom("fixups").select("lint_task").where("repo", "=", repo).where("number", "=", number).where("from_head", "=", head)
-    .where("state", "=", "linting").where("source", "=", "operator").orderBy(rowid("fixups")));
+  const lintOperator = await keyed(db.k.selectFrom("fixups as f").select((eb) => [keyOf(eb, "f", "from_head").as("k"), "f.lint_task"])
+    .where("f.state", "=", "linting").where("f.source", "=", "operator").where((eb) => narrow(eb, "f")).orderBy(rowid("fixups", "f")));
   const taskEnded = async (id: number | null): Promise<boolean> => { const t = id != null ? await getTask(db, id) : null; return !t || TERMINAL.includes(t.state); };
   const lintCifix = await keyed(db.k.selectFrom("ci_fixes as c").select((eb) => [keyOf(eb, "c", "head").as("k"), "c.lint_task"]).where("c.state", "=", "linting").where((eb) => narrow(eb, "c")).orderBy(rowid("ci_fixes", "c")));
   const carryRows = await keyed(db.k.selectFrom("dupe_carries as c")
@@ -271,7 +271,6 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     const asked = decisionAnswers.has(id), answer = decisionAnswers.get(id) ?? null;
     return { asked, open: asked && answer === null, answer, otherOpen: otherOpen.has(ref) };
   };
-  const statement = { get: (id: number) => db.get(db.k.selectFrom("owner_statements").select(["id", "repo", "number", "text"]).where("id", "=", id)) };
   // OPEN_QUESTION_SQL for every PR.
   const openQuestion = await keyed(db.k.selectFrom("decisions as d").select((eb) => keyOf(eb, "d").as("k")).distinct().where("d.kind", "=", "merge").where("d.answer", "is", null)
     .where((eb) => eb.not(like(db, "d.id", eb.val("%~replaced-%")))).where((eb) => narrow(eb, "d")));
@@ -287,6 +286,16 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
   // Pre-merge reviews at the head of each PR's latest review (r_head), the only ones the loop reads.
   const premergeKeys = rows.filter((r) => r.r_head).map((r) => `${r.repo}#${r.number}@${r.r_head}`);
   const premerge = await premergeRows(db, (eb) => eb.and([narrow(eb, "p"), inList(db, keyOf(eb, "p", "head_oid"), premergeKeys)]));
+  // The owner statements the reviews' and pre-merge reviews' conflicts name, in one read.
+  const statementIds = new Set<number>();
+  for (const r of rows) {
+    if (!r.r_head || !r.r_verdict || !r.r_at) continue;
+    for (const v of [safeJson(r.r_conflicts), safeJson(premerge.get(`${r.repo}#${r.number}@${r.r_head}`)?.conflicts ?? null)]) {
+      if (Array.isArray(v)) for (const h of v as { id?: unknown }[]) if (typeof h?.id === "number") statementIds.add(h.id);
+    }
+  }
+  const statements = new Map(statementIds.size ? (await db.all(db.k.selectFrom("owner_statements").select(["id", "repo", "number", "text"]).where(inList(db, "id", [...statementIds], "bigint")))).map((x) => [x.id, x]) : []);
+  const statement = { get: async (id: number) => statements.get(id) };
   // Only formal reviews with an author: changesRequestedBy() reads no others.
   const reviewRows = await keyed(db.k.selectFrom("comments as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number").on("i.kind", "=", "pr").on("i.state", "=", "OPEN"))
     .select((eb) => [keyOf(eb, "c").as("k"), "c.author", "c.author_association as association", "c.review_state as state", "c.created_at as at"])
@@ -377,7 +386,7 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
     // A fix-up request holds the PR's merge only while the planner can work it: same head, pushable, approved, not conflicting, not a draft, tries left.
     if (base.operator?.fix && !base.heldBacklog && !base.draft && base.mergeable !== "CONFLICTING" && base.pushable && base.repoFacts.pushApproved && await operatorTriesLeft(db, r.repo, r.number)) base.operator.hold = true;
     if (ow && r.state === "OPEN" && head) {
-      for (const x of await lintOperator(r.repo, r.number, head)) base.lint.push({ step: "fixup", source: "operator", ended: await taskEnded(x.lint_task) });
+      for (const x of lintOperator.get(`${ref}@${head}`) ?? []) base.lint.push({ step: "fixup", source: "operator", ended: await taskEnded(x.lint_task) });
       if (base.lint.length) base.inFlight = true;
     }
     if (r.state === "OPEN" && !base.heldBacklog) {

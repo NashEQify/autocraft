@@ -143,8 +143,9 @@ export async function refreshLiveness(db: Db, nowMs: number = Date.now(), force 
   const res = await computeLiveness(db, nowMs);
   await db.write(async () => {
     await db.run(db.k.deleteFrom("main.liveness_items"));
-    for (const i of res.items) {
-      await db.run(db.k.insertInto("main.liveness_items").values({ repo: i.repo, number: i.number, kind: i.kind, verdict: i.verdict, cause: i.cause, state: i.state, wait: i.wait, phase: i.phase, since: i.since, checked_at: res.checkedAt }));
+    // Rows per insert: well under the bound-parameter limits of both engines at ten columns a row.
+    for (let at = 0; at < res.items.length; at += 1000) {
+      await db.run(db.k.insertInto("main.liveness_items").values(res.items.slice(at, at + 1000).map((i) => ({ repo: i.repo, number: i.number, kind: i.kind, verdict: i.verdict, cause: i.cause, state: i.state, wait: i.wait, phase: i.phase, since: i.since, checked_at: res.checkedAt }))));
     }
     await writeSetting(db, "liveness_at", res.checkedAt);
     await writeSetting(db, "liveness_open", String(res.open));

@@ -16,9 +16,10 @@ import { listAccess } from "./access.ts";
 import { audit } from "./dash/audit.ts";
 import { allOwnLogins } from "./github/identity.ts";
 import type { OutsideHoldInfo } from "./core/plan.ts";
-import { sinceOf, trip, tripRow } from "./push-outcomes.ts";
-import { isWhitelisted } from "./whitelist.ts";
+import { trip, tripRow } from "./push-outcomes.ts";
+import { isWhitelisted, tierKey, whitelistedOf } from "./whitelist.ts";
 import { pipelineRepos } from "./pilot.ts";
+import { hasSetting, settingRows } from "./settings-read.ts";
 import { isBotLogin } from "./review/bots.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
@@ -41,8 +42,7 @@ export class OutsideError extends Error {
 }
 
 export async function outsideLimits(db: Db): Promise<OutsideLimits> {
-  const rows = await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where("key", "in", [KEYS.prsPerDay, KEYS.issuesPerDay, KEYS.surgePerHour]));
-  const m = new Map(rows.map((r) => [r.key, Number(r.value)]));
+  const m = new Map([...await settingRows(db, [KEYS.prsPerDay, KEYS.issuesPerDay, KEYS.surgePerHour])].map(([k, v]) => [k, Number(v)]));
   const get = (k: string, d: number): number => { const v = m.get(k); return v !== undefined && Number.isInteger(v) && v >= 0 ? v : d; };
   return { prsPerDay: get(KEYS.prsPerDay, DEFAULT_LIMITS.prsPerDay), issuesPerDay: get(KEYS.issuesPerDay, DEFAULT_LIMITS.issuesPerDay), surgePerHour: get(KEYS.surgePerHour, DEFAULT_LIMITS.surgePerHour) };
 }
@@ -76,7 +76,7 @@ const isBotAuthor = (r: { author: string; author_type: string | null }): boolean
 
 /** Once, on the first run: items that already have pipeline work (a decision, review, classification, stage row, fix-up, ...) count as admitted, so nothing in flight is held on deploy. */
 async function backfillAdmitted(db: Db, since: string, now: number): Promise<void> {
-  if (await db.get(db.k.selectFrom("main.settings").select("key").where("key", "=", "outside_admitted_backfill"))) return;
+  if (await hasSetting(db, "outside_admitted_backfill")) return;
   await db.run(db.k.insertInto("main.outside_admitted").columns(["repo", "number", "at"]).expression((eb) => eb.selectFrom("items as i")
     .select(["i.repo", "i.number", eb.val(new Date(now).toISOString()).as("at")])
     .where("i.created_at", ">=", since)
@@ -121,9 +121,11 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
   const holds: Hold[] = [];
   let wakeAt: number | null = null;
   const released = new Set((await db.all(db.k.selectFrom("main.outside_released").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
+  // The breaker's row, read once: only trip() below writes it, and a trip starts the refresh again.
+  const surge = await tripRow(db, OUTSIDE_SURGE);
   if (enabled) {
     const dayAgo = now - DAY_MS;
-    const tripped = lim.surgePerHour > 0 ? await tripRow(db, OUTSIDE_SURGE) : undefined;
+    const tripped = lim.surgePerHour > 0 ? surge : undefined;
     const surgeFrom = tripped?.active ? Date.parse(tripped.tripped_at) - HOUR_MS : null;
     // While the breaker is tripped its holds last until it is resumed, however old the items are.
     const from = Math.min(dayAgo, surgeFrom ?? dayAgo);
@@ -160,7 +162,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
 
     // Surge: outside-author items of the last hour since the last resume.
     if (lim.surgePerHour > 0 && !tripped?.active) {
-      const since = Math.max(now - HOUR_MS, Date.parse(await sinceOf(db, OUTSIDE_SURGE)) || 0);
+      const since = Math.max(now - HOUR_MS, Date.parse(surge?.cleared_at ?? "") || 0);
       const recent = cheap.filter((r) => Date.parse(r.created_at) > since);
       // The whitelist is read only when the cheap count already passes the threshold.
       const real = recent.length > lim.surgePerHour ? await filterSeq(recent, async (r) => !await whitelisted(r)) : [];
@@ -177,14 +179,21 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
       const k = `${r.author.toLowerCase()}|${r.author_id ?? ""}|${r.kind}`;
       (groups.get(k) ?? groups.set(k, []).get(k)!).push(r);
     }
-    for (const rs of groups.values()) {
+    const checked = [...groups.values()].map((rs) => {
       rs.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.number - b.number);
       const kind = rs[0]!.kind === "pr" ? "pr" as const : "issue" as const;
       const limit = kind === "pr" ? lim.prsPerDay : lim.issuesPerDay;
       const win = rs.filter((r) => Date.parse(r.created_at) >= dayAgo);
-      const overLimit = limit > 0 && win.length > limit;
-      const inSurge = surgeFrom !== null && rs.some((r) => Date.parse(r.created_at) >= surgeFrom);
-      if (!overLimit && !inSurge) continue;
+      return { rs, kind, limit, win, overLimit: limit > 0 && win.length > limit, inSurge: surgeFrom !== null && rs.some((r) => Date.parse(r.created_at) >= surgeFrom) };
+    }).filter((g) => g.overLimit || g.inSurge);
+    // The whitelist of the authors to check, in one read.
+    const unread = new Map<string, Row>();
+    for (const { rs } of checked) { const k = `${rs[0]!.author.toLowerCase()}|${rs[0]!.author_id ?? ""}`; if (!memo.has(k) && !unread.has(k)) unread.set(k, rs[0]!); }
+    if (unread.size) {
+      const ok = await whitelistedOf(db, [...unread.values()].map((r) => ({ login: r.author, id: r.author_id })));
+      for (const [k, r] of unread) memo.set(k, ok.get(tierKey({ login: r.author, id: r.author_id }))!);
+    }
+    for (const { rs, kind, limit, win, overLimit } of checked) {
       if (await whitelisted(rs[0]!)) continue;
       // An admitted item (planned without a hold once, or with pipeline work already) is never held again.
       const free = (r: Row) => r.state !== "OPEN" || released.has(`${r.repo}#${r.number}`) || admitted.has(`${r.repo}#${r.number}`);
@@ -209,7 +218,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
       for (const h of holds) await db.run(db.k.insertInto("main.outside_holds").values({ repo: h.repo, number: h.number, author: h.author, kind: h.kind, reason: h.reason }));
     });
   }
-  return { holds, tripped: !!(await tripRow(db, OUTSIDE_SURGE))?.active, wakeAt };
+  return { holds, tripped: !!surge?.active, wakeAt };
 }
 
 /** The wait text of a held item (the registered wait "author over daily limit", and the surge variant). */

@@ -43,9 +43,10 @@ const formerQuiet = (db: Db) => db.k.selectFrom("main.security_quiet_prs as qp")
 
 /** Quiet pull requests as `repo#number`. */
 export async function quietFixPrs(db: Db, repo?: string): Promise<Set<string>> {
-  const rows = await db.all(quietFindings(db).select(["repo", "fix_pr as n"]).$narrowType<{ n: number }>().$if(!!repo, (q) => q.where("repo", "=", repo!)));
-  const former = await db.all(formerQuiet(db).select(["qp.repo", "qp.pr as n"]).$if(!!repo, (q) => q.where("qp.repo", "=", repo!)));
-  return new Set([...rows, ...former].map((r) => `${r.repo}#${r.n}`));
+  // Both kinds in one statement.
+  const rows = await db.all(quietFindings(db).select(["repo", "fix_pr as n"]).$narrowType<{ n: number }>().$if(!!repo, (q) => q.where("repo", "=", repo!))
+    .unionAll(formerQuiet(db).select(["qp.repo", "qp.pr as n"]).$if(!!repo, (q) => q.where("qp.repo", "=", repo!))));
+  return new Set(rows.map((r) => `${r.repo}#${r.n}`));
 }
 
 /** True when `repo#number` is a quiet pull request. */
