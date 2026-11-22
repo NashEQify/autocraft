@@ -63,11 +63,11 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   // One committed display snapshot, never query receipts, cursors or selection authority.
   // Changing reader capabilities or repository context clears it before it can render.
   const displayOwner = JSON.stringify([user, project, filter.repo ?? []]);
-  const previousRows = useRef<{ owner: string; rows: Decision[] } | null>(null);
+  const previousRows = useRef<{ owner: string; rows: Decision[]; total: number } | null>(null);
   if (previousRows.current?.owner !== displayOwner) previousRows.current = null;
   useLayoutEffect(() => {
     if (failed) previousRows.current = null;
-    else if (data && !loading) previousRows.current = { owner: displayOwner, rows: data.decisions };
+    else if (data && !loading) previousRows.current = { owner: displayOwner, rows: data.decisions, total: data.total };
   }, [displayOwner, data, loading, failed]);
   const pending = !data && !failed;
   const showPrevious = pending && previousRows.current?.owner === displayOwner && previousRows.current.rows.length > 0;
@@ -78,10 +78,9 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
   const summaryRef = useRef<HTMLButtonElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const latest = useRef(controlled);
-  latest.current = controlled;   // the handle and READY always read the CURRENT controlled context
-  // it once mounted, so an unmounted queue is never asked for state (the parent keeps the snapshot).
-  // The surface's latest controlled props: the handle must capture the CURRENT scope/cursor, never the
-  // mount-time closure.
+  // The handle reads the latest controlled props, never the mount-time closure. It is created once and
+  // detaches with the queue, so the parent keeps the last snapshot of an unmounted queue.
+  latest.current = controlled;
   const handle = useRef<QueueHandle>(null as unknown as QueueHandle);
   if (!handle.current) {
     handle.current = {
@@ -292,7 +291,7 @@ export function InboxList({ user, phone, query, header, controlled }: ViewProps 
       <div className="flex shrink-0 flex-col gap-2.5 border-b border-line px-3.5 py-3.5">
         {header}
         <div className="flex min-h-6 items-center gap-2 text-xs">
-          <span className="num shrink-0 whitespace-nowrap font-semibold text-ink">{data?.total ?? "–"} matches</span>
+          {(data || showPrevious) && <span className="num shrink-0 whitespace-nowrap font-semibold text-ink">{data ? data.total : previousRows.current!.total} matches</span>}
           <span className="truncate text-ink/60">{summaryText}</span>
 
           {oldest && <span className="ml-auto shrink-0 text-ink/60">oldest {ago(oldest)}</span>}

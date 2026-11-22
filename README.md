@@ -46,7 +46,7 @@ See [Trust boundary](docs/pipeline.md#trust-boundary).
 
 ### Dashboard browsing
 
-The dashboard keeps project homes, the Live board and the project-scoped navigation picker. Items uses one filterable browser with read-only inline details; Needs you keeps its queue beside a focused question, answer controls and expandable Evidence, Discussion and the latest four supplied item events. That excerpt is not a full cross-decision history. Merge queue keeps its table, Queue items, weighted fast track, Recently merged and Steps. See [the UI design](docs/ui-design.md) for layouts and scope behavior.
+Items is one filterable list; a row's details open inline under it. Needs you shows the decision queue beside the selected decision, with its Evidence, Discussion and item timeline. The item page shows the AutoCraft side and the GitHub side. [The UI design](docs/ui-design.md) describes the layouts and filters.
 
 ## Setup
 

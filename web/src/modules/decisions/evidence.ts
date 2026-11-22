@@ -9,12 +9,6 @@ import type { Classification, Decision, ItemPageData, OpusReviewEntry } from "..
 /** The most OPEN Decision identities one reader's mounted Evidence owner can remember. */
 export { DISCLOSURE_OPEN_LIMIT as EVIDENCE_OPEN_LIMIT, changeDisclosureOpen as changeEvidenceOpen } from "../../ui/disclosureState.ts";
 
-/**
- * Immutable transition for the OPEN-id set: never mutates `ids`, never stores an empty id, keeps the SAME reference
- * for a redundant open (insertion age is not refreshed) and for closing an id that is not open, and evicts the
- * OLDEST open id when an open would exceed `EVIDENCE_OPEN_LIMIT`.
- */
-
 /** What the selected decision itself contributes, all of it already in the DTO the list loaded. */
 export interface DecisionEvidenceModel {
   id: string;
