@@ -41,18 +41,19 @@ export const askIssueModel: IssueAsk = (async (db: Db, id: "discord.issue-questi
   (await askClaude(id, "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS }))?.text ?? null) as IssueAsk;
 
 export async function issueCapUsd(db: Db): Promise<number> {
-  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(ISSUE_CAP_KEY) as { value: string } | undefined)?.value);
+  const v = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", ISSUE_CAP_KEY)))?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_ISSUE_CAP_USD;
 }
 
 export async function issueSpentTodayUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = ? AND started_at >= ?").get(ISSUE_STEP, day) as { c: number }).c);
+  return Number((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("cost_usd"), eb.lit(0)).as("c")).where("step", "=", ISSUE_STEP).where("started_at", ">=", day)))!.c);
 }
 
 /** The prompt and reply of an issue call hold what the person typed: finished calls lose their texts; `all` (at startup) removes every row. */
 export async function dropIssueTexts(db: Db, all = false): Promise<void> {
-  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = ?${all ? "" : " AND state <> 'running'"})`).run(ISSUE_STEP);
+  await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", ISSUE_STEP)
+    .$if(!all, (q) => q.where("state", "<>", "running"))));
 }
 
 type Session = {
@@ -152,8 +153,8 @@ export class IssueNew {
   async #apps(preselect: string | null): Promise<{ name: string; label: string }[]> {
     const { db } = this.#d;
     const names = new Set(await publicRepoNames(db));
-    const rows = await db.prepare(`SELECT r.name AS name, COALESCE(a.name, r.name) AS label, COALESCE(r.open_issues, 0) AS open
-      FROM repos r JOIN tracked_repos t ON t.name = r.name LEFT JOIN release_apps a ON a.repo = r.name`).all() as { name: string; label: string; open: number }[];
+    const rows = await db.all(db.k.selectFrom("repos as r").innerJoin("tracked_repos as t", "t.name", "r.name").leftJoin("release_apps as a", "a.repo", "r.name")
+      .select((eb) => ["r.name as name", eb.fn.coalesce("a.name", "r.name").as("label"), eb.fn.coalesce("r.open_issues", eb.lit(0)).as("open")]));
     const mine = rows.filter((r) => names.has(r.name)).sort((x, y) => Number(y.name === preselect) - Number(x.name === preselect) || y.open - x.open || x.name.localeCompare(y.name));
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
   }

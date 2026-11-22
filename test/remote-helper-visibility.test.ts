@@ -25,8 +25,9 @@ test("a helper's last error and busy count are listed, and a starved tier warns"
   const [h] = await listHelpers(db, "alice", now);
   assert.deepEqual([h!.slots, h!.busy, h!.lastError?.text], [4, 2, "/api/remote/heartbeat: HTTP 502"]);
 
-  const queue = async (tier: string, waitedMs: number) => await db.prepare(`INSERT INTO remote_calls (step, stage, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, since, seen_at, queued_since, max_attempts, timeout_ms)
-    VALUES ('review', 1, 'p', '1', ?, 'high', 'opus', '{}', 'queued', ?, ?, ?, 3, 600000)`).run(tier, now - waitedMs, now, now - waitedMs);
+  const queue = async (tier: string, waitedMs: number) => await db.run(db.k.insertInto("remote_calls").values({
+    step: "review", stage: 1, prompt_id: "p", prompt_version: "1", tier, effort: "high", asked_model: "opus", bundle: "{}", state: "queued",
+    since: now - waitedMs, seen_at: now, queued_since: now - waitedMs, max_attempts: 3, timeout_ms: 600000 }));
   await queue("small", THRESHOLDS.remoteTierWaitMs.small - 60_000);
   await queue("top", THRESHOLDS.remoteTierWaitMs.top - 60_000);
   assert.equal((await computeChecks(db, now)).some((c) => c.id.startsWith("remote-starved-")), false);

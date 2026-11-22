@@ -78,11 +78,11 @@ export async function edit(db: Db, req: Req): Promise<RepoAreas> {
 
 export async function acceptProposalApi(db: Db, req: Req): Promise<RepoAreas> {
   const by = operatorOf(req), id = Number(req.params.id);
-  const repo = (await db.prepare("SELECT repo FROM area_proposals WHERE id = ?").get(id) as { repo: string } | undefined)?.repo;
+  const repo = (await db.get(db.k.selectFrom("area_proposals").select("repo").where("id", "=", id)))?.repo;
   if (!repo) throw new HttpError(404, "no such proposal");
   await needVisible(db, req, repo);
   const b = req.json && typeof req.json === "object" && !Array.isArray(req.json) ? (req.json as Record<string, unknown>) : {};
-  const kind = (await db.prepare("SELECT kind FROM area_proposals WHERE id = ?").get(id) as { kind: string }).kind;
+  const kind = (await db.get(db.k.selectFrom("area_proposals").select("kind").where("id", "=", id)))!.kind;
   const version = await wrap(async () => kind === "suggest"
     ? await decideSuggestion(db, id, by, names(b.accept), names(b.ignore))
     : await acceptProposal(db, id, by, b.areas === undefined ? undefined : listOf(b.areas)));
@@ -93,7 +93,7 @@ export async function acceptProposalApi(db: Db, req: Req): Promise<RepoAreas> {
 
 export async function dismiss(db: Db, req: Req): Promise<{ ok: true }> {
   const by = operatorOf(req), id = Number(req.params.id);
-  const repo = (await db.prepare("SELECT repo FROM area_proposals WHERE id = ?").get(id) as { repo: string } | undefined)?.repo;
+  const repo = (await db.get(db.k.selectFrom("area_proposals").select("repo").where("id", "=", id)))?.repo;
   if (!repo) throw new HttpError(404, "no such proposal");
   await needVisible(db, req, repo);
   await wrap(async () => await dismissProposal(db, id, by));

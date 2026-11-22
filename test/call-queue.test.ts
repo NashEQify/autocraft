@@ -21,7 +21,7 @@ async function fresh(name: string) {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(SCRATCH, `call-queue-${name}-${process.pid}.db`));
   await useTestAccount(db);
-  await db.prepare("UPDATE claude_accounts SET max_concurrent = 1 WHERE id = 't'").run();
+  await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 1 }).where("id", "=", "t"));
   return db;
 }
 
@@ -35,7 +35,7 @@ test("a security waiter takes a freed slot before an older class 0 waiter, and a
   ctx(2);
   const high = startClaudeRun(db, claude, quiet).then((r) => (order.push("high"), r));
   // A stale eligible class 2 waiter that nobody polls.
-  await db.prepare("INSERT INTO model_waits (provider, class, step, since, seen_at, eligible) VALUES ('claude', 2, 'x', 1, ?, 1)").run(Date.now() - 120_000);
+  await db.run(db.k.insertInto("model_waits").values({ provider: "claude", class: 2, step: "x", since: 1, seen_at: Date.now() - 120_000, eligible: 1 }));
   await tick(20);
   await finishRun(db, first.runId, { state: "done" });
   const t0 = Date.now();
@@ -45,5 +45,5 @@ test("a security waiter takes a freed slot before an older class 0 waiter, and a
   await finishRun(db, h.runId, { state: "done" });
   await low;
   assert.deepEqual(order, ["high", "low"]);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM model_waits WHERE seen_at > ?").get(Date.now() - 60_000) as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("model_waits").select((eb) => eb.fn.countAll<number>().as("n")).where("seen_at", ">", Date.now() - 60_000)))!.n, 0);
 });

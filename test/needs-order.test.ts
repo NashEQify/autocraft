@@ -15,18 +15,17 @@ test("the open list runs by priority level, unclaimed before claimed, then age, 
   const now = Date.now();
   const at = (h: number) => new Date(now - h * 3600_000).toISOString();
   for (const repo of ["alpha", "beta"]) {
-    await db.prepare("INSERT INTO tracked_repos (name) VALUES (?)").run(repo);
-    await db.prepare("INSERT INTO repos (name, visibility) VALUES (?, 'public')").run(repo);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: repo }));
+    await db.run(db.k.insertInto("repos").values({ name: repo, visibility: "public" }));
   }
-  const ask = db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at) VALUES (?, 'other', ?, ?, 'Q?', '[]', ?)");
   // alpha#1 is the oldest and claimed by someone else; alpha#2 and alpha#3 share its level; alpha#4 is a P0 and the newest; beta#5 is the maintainer's no-go.
   const rows: [string, string, number, number][] = [["d1", "alpha", 1, 50], ["d2", "alpha", 2, 40], ["d3", "alpha", 3, 30], ["d4", "alpha", 4, 1], ["d5", "beta", 5, 45]];
   for (const [id, repo, n, h] of rows) {
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title) VALUES (?, ?, 'issue', 'OPEN', ?)").run(repo, n, `Title ${n}`);
-    await ask.run(id, repo, n, at(h));
+    await db.run(db.k.insertInto("items").values({ repo, number: n, kind: "issue", state: "OPEN", title: `Title ${n}` }));
+    await db.run(db.k.insertInto("decisions").values({ id, kind: "other", repo, number: n, question: "Q?", options: "[]", asked_at: at(h) }));
   }
-  await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('alpha', 4, 40123, '{}', ?)").run(at(0));
-  await db.prepare("INSERT INTO decision_claims (decision_id, login, since, at) VALUES ('d1', 'other', ?, ?)").run(at(0), at(0));
+  await db.run(db.k.insertInto("item_rank").values({ repo: "alpha", number: 4, score: 40123, breakdown: "{}", computed_at: at(0) }));
+  await db.run(db.k.insertInto("decision_claims").values({ decision_id: "d1", login: "other", since: at(0), at: at(0) }));
 
   const page = async (req: Req) => {
     const ids: string[] = [];
@@ -44,9 +43,9 @@ test("the open list runs by priority level, unclaimed before claimed, then age, 
   assert.equal((await listDecisions(db, as("op", "operator"))).decisions.find((d) => d.id === "d1")!.claim?.login, "other");
 
   // A maintainer settles on alpha only: write permission there, and the app acts for them.
-  await db.prepare("INSERT INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
-  await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'alpha', 'write', ?)").run(new Date().toISOString());
+  await db.run(db.k.insertInto("access").values({ login: "maint", role: "maintainer" }));
+  await db.run(db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]));
+  await db.run(db.k.insertInto("repo_permissions").values({ login: "maint", repo: "alpha", permission: "write", checked_at: new Date().toISOString() }));
   assert.deepEqual(await page(as("maint", "maintainer")), ["d4", "d2", "d3", "d1"]);
   assert.deepEqual(await page(as("maint", "maintainer", { all: "1" })), ["d4", "d5", "d2", "d3", "d1"], "the toggle shows everything");
   assert.equal((await needs(db, as("maint", "maintainer"))).counts.decisions, 4, "the badge counts the same list");

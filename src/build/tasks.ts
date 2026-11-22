@@ -3,10 +3,9 @@
 // data; nothing here executes it, renders it or puts it in a prompt.
 import { createHash } from "node:crypto";
 import { currentJobId } from "../agents/call.ts";
-import type { SQLInputValue } from "node:sqlite";
 import type { ItemShown, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, Requires, SandboxEnv, TaskArtifact, TaskBatch, TaskFilter, TaskPage, TaskResult, TaskState, TaskStep } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
-import { excludeHidden } from "../dash/api/visible.ts";
+import { excludeHiddenExpr } from "../dash/api/visible.ts";
 import { shownLookup } from "../dash/api/shown.ts";
 import { removeArtifacts } from "./artifacts.ts";
 import { BuildError, slotsOf } from "./envs.ts";
@@ -16,7 +15,9 @@ import { fastTask } from "../fasttrack.ts";
 import { featureOn } from "./features.ts";
 import { slugOf } from "../owners.ts";
 import { mapSeq } from "../async-seq.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import { cols, inList, ref, type Eb, type Ex } from "../db/kx.ts";
 
 export const LOST_AFTER_MS = 2 * 60_000;
 /** A task is claimed at most this often: the first time and one requeue after a lost worker. */
@@ -138,13 +139,14 @@ export async function createTask(db: Db, t: NewTask): Promise<number> {
   const plan = parsePlan(t.plan);
   const patch = t.patch === undefined ? null : parsePatch(t.patch);
   const warm = t.warm === undefined ? null : parseWarm(t.warm);
-  const queued = (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE state = 'queued'").get() as { n: number }).n;
+  const queued = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "queued")))!.n;
   if (queued >= MAX_QUEUED) throw new BuildError(429, `${MAX_QUEUED} tasks are already queued`);
-  const r = await db.prepare(`INSERT INTO build_tasks (job_id, step, repo, number, head_sha, base_sha, requires, priority, plan, state, queued_at, patch, warm_key, warm_role)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`)
-    .run(t.jobId ?? currentJobId(), t.step, t.repo, t.number ?? null, t.headSha, t.baseSha ?? null, JSON.stringify(requires), priority, JSON.stringify(plan), nowIso(),
-      patch, warm?.key ?? null, warm?.role ?? null);
-  return Number(r.lastInsertRowid);
+  const r = await db.get(db.k.insertInto("build_tasks").values({
+    job_id: t.jobId ?? currentJobId(), step: t.step, repo: t.repo, number: t.number ?? null, head_sha: t.headSha, base_sha: t.baseSha ?? null,
+    requires: JSON.stringify(requires), priority, plan: JSON.stringify(plan), state: "queued", queued_at: nowIso(),
+    patch, warm_key: warm?.key ?? null, warm_role: warm?.role ?? null,
+  }).returning("id"));
+  return r!.id;
 }
 
 /** Whether an environment with these capabilities can run a task with these requirements. */
@@ -169,7 +171,7 @@ export type ClaimResult = { tasks: ClaimedTask[]; cancel: number[] };
  */
 export async function cancelIds(db: Db, envId: string): Promise<number[]> {
   const since = new Date(Date.now() - LOST_AFTER_MS).toISOString();
-  return (await db.prepare("SELECT id FROM build_tasks WHERE env_id = ? AND cancel_requested_at > ? ORDER BY id").all(envId, since) as { id: number }[]).map((r) => r.id);
+  return (await db.all(db.k.selectFrom("build_tasks").select("id").where("env_id", "=", envId).where("cancel_requested_at", ">", since).orderBy("id"))).map((r) => r.id);
 }
 
 /** The task builds code from a PR: its head, or an integration branch of PRs. */
@@ -183,18 +185,16 @@ const runsPrCode = (t: { step: string; number: number | null }): boolean => t.st
 export async function claim(db: Db, envId: string, free: number, nowMs: number = Date.now()): Promise<ClaimResult> {
   await reapLost(db, nowMs);
   const tasks = await db.write(async () => {
-    const env = await db.prepare("SELECT * FROM build_envs WHERE id = ?").get(envId) as
-      { enabled: number; kind: string; slots: number; reported_slots: number | null; capabilities: string | null; paused_reason: string | null; confidential: number } | undefined;
+    const env = await db.get(db.k.selectFrom("build_envs").select(["enabled", "kind", "slots", "reported_slots", "capabilities", "paused_reason", "confidential"]).where("id", "=", envId));
     const caps = env?.capabilities ? json<Capabilities | null>(env.capabilities, null) : null;
     const out: ClaimedTask[] = [];
     if (env && env.enabled === 1 && caps && !env.paused_reason && !await draining(db, env.kind) && Number.isInteger(free) && free > 0) {
-      const running = (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE env_id = ? AND state IN ('claimed', 'running')").get(envId) as { n: number }).n;
+      const running = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("env_id", "=", envId).where("state", "in", ["claimed", "running"])))!.n;
       const room = Math.min(free, slotsOf(env) - running);
       if (room > 0) {
-        const queued = await db.prepare("SELECT * FROM build_tasks WHERE state = 'queued' ORDER BY priority DESC, id LIMIT 500").all() as TaskRow[];
+        const queued = await db.all(db.k.selectFrom("build_tasks").select(cols("build_tasks")).$narrowType<{ state: TaskState }>().where("state", "=", "queued").orderBy("priority", "desc").orderBy("id").limit(500));
         const scope = await baseScopeRepos(db);
         const at = new Date(nowMs).toISOString();
-        const take = db.prepare("UPDATE build_tasks SET state = 'claimed', env_id = ?, attempts = attempts + 1, claimed_at = ?, heartbeat_at = ? WHERE id = ? AND state = 'queued'");
         for (const t of queued) {
           if (out.length >= room) break;
           if (!satisfies(caps, json<Requires>(t.requires, {}))) continue;
@@ -210,7 +210,8 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
           if (t.step === "screenshot" && !await featureOn(db, "screenshots", t.repo)) continue;
           // Operator smoke tests and the security fix's builds (an operator's request, under the finding's real repo) run anywhere; pipeline builds only for repos in scope, or for fast-tracked items of any repo.
           if (t.step !== "smoke-test" && t.step !== "fix-check" && !scope.has(t.repo) && !await fastTask(db, t)) continue;
-          await take.run(envId, at, at, t.id);
+          await db.run(db.k.updateTable("build_tasks").set((eb) => ({ state: "claimed", env_id: envId, attempts: eb("attempts", "+", 1), claimed_at: at, heartbeat_at: at }))
+            .where("id", "=", t.id).where("state", "=", "queued"));
           out.push({
             id: t.id, repo: t.repo, headSha: t.head_sha, baseSha: t.base_sha, requires: json<Requires>(t.requires, {}), plan: json<TaskStep[]>(t.plan, []),
             sourceUrl: `https://codeload.github.com/${slugOf(t.repo)}/tar.gz/${t.head_sha}`,
@@ -229,7 +230,8 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
 export async function reapLost(db: Db, nowMs: number = Date.now()): Promise<number> {
   const cutoff = new Date(nowMs - LOST_AFTER_MS).toISOString();
   // The pod launcher owns the tasks it runs in pods (launcher.ts) and loses them by their pods' state.
-  const stale = await db.prepare("SELECT id FROM build_tasks WHERE state IN ('claimed', 'running') AND heartbeat_at < ? AND id NOT IN (SELECT task_id FROM build_pod_runs)").all(cutoff) as { id: number }[];
+  const stale = await db.all(db.k.selectFrom("build_tasks").select("id").where("state", "in", ["claimed", "running"]).where("heartbeat_at", "<", cutoff)
+    .where((eb) => eb("id", "not in", eb.selectFrom("build_pod_runs").select("task_id"))).orderBy("id"));
   for (const t of stale) await loseTask(db, t.id, "The worker stopped answering twice (no heartbeat for 2 minutes).", "Cancelled; the worker stopped answering.", nowMs);
   return stale.length;
 }
@@ -239,30 +241,31 @@ export async function reapLost(db: Db, nowMs: number = Date.now()): Promise<numb
  * else failed with `reason` (or cancelled with `cancelled`). Its artifacts go; a requeued task also loses its log.
  */
 export async function loseTask(db: Db, id: number, reason: string, cancelled = "Cancelled; the worker stopped answering.", nowMs: number = Date.now()): Promise<void> {
-  const t = await db.prepare("SELECT attempts, cancel_requested_at FROM build_tasks WHERE id = ? AND state IN ('claimed', 'running')").get(id) as
-    { attempts: number; cancel_requested_at: string | null } | undefined;
+  const t = await db.get(db.k.selectFrom("build_tasks").select(["attempts", "cancel_requested_at"]).where("id", "=", id).where("state", "in", ["claimed", "running"]));
   if (!t) return;
   await removeArtifacts(db, [id]);
   if (!t.cancel_requested_at && t.attempts < MAX_ATTEMPTS) {
-    await db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
-    await db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, claimed_at = NULL, started_at = NULL, heartbeat_at = NULL, results = '[]',
-      log_bytes = 0, summary = NULL WHERE id = ? AND state IN ('claimed', 'running')`).run(id);
+    await db.run(db.k.deleteFrom("build_task_logs").where("task_id", "=", id));
+    await db.run(db.k.updateTable("build_tasks").set({ state: "queued", env_id: null, claimed_at: null, started_at: null, heartbeat_at: null, results: "[]", log_bytes: 0, summary: null })
+      .where("id", "=", id).where("state", "in", ["claimed", "running"]));
   } else {
-    await db.prepare("UPDATE build_tasks SET state = ?, ended_at = ?, summary = ? WHERE id = ? AND state IN ('claimed', 'running')")
-      .run(t.cancel_requested_at ? "cancelled" : "failed", new Date(nowMs).toISOString(), t.cancel_requested_at ? cancelled : reason, id);
+    await db.run(db.k.updateTable("build_tasks").set({ state: t.cancel_requested_at ? "cancelled" : "failed", ended_at: new Date(nowMs).toISOString(), summary: t.cancel_requested_at ? cancelled : reason })
+      .where("id", "=", id).where("state", "in", ["claimed", "running"]));
   }
 }
 
 /** Undoes a claim whose task never started (its first pod could not be created): queued again, the claim not counted. */
 export async function releaseClaim(db: Db, envId: string, id: number): Promise<void> {
-  await db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
-  await db.prepare(`UPDATE build_tasks SET state = 'queued', env_id = NULL, attempts = MAX(0, attempts - 1), claimed_at = NULL, started_at = NULL, heartbeat_at = NULL,
-    results = '[]', log_bytes = 0, summary = NULL WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')`).run(id, envId);
+  await db.run(db.k.deleteFrom("build_task_logs").where("task_id", "=", id));
+  await db.run(db.k.updateTable("build_tasks").set((eb) => ({
+    state: "queued", env_id: null, attempts: eb.case().when(eb("attempts", "-", eb.lit(1)), ">", eb.lit(0)).then(eb("attempts", "-", eb.lit(1))).else(eb.lit(0)).end(),
+    claimed_at: null, started_at: null, heartbeat_at: null, results: "[]", log_bytes: 0, summary: null,
+  })).where("id", "=", id).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]));
 }
 
 /** Keeps a task alive while its pods run (they send no heartbeats of their own). */
 export async function touchTask(db: Db, envId: string, id: number): Promise<void> {
-  await db.prepare("UPDATE build_tasks SET heartbeat_at = ? WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')").run(nowIso(), id, envId);
+  await db.run(db.k.updateTable("build_tasks").set({ heartbeat_at: nowIso() }).where("id", "=", id).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]));
 }
 
 /** What a build pod's API containers need of their task: the source to fetch, the patch, and each step's name and artifact patterns. */
@@ -279,7 +282,7 @@ export async function podTask(db: Db, envId: string, id: number): Promise<PodTas
 
 /** The task row when it is running on this environment, else a 409. */
 async function mine(db: Db, envId: string, id: number): Promise<TaskRow> {
-  const t = await db.prepare("SELECT * FROM build_tasks WHERE id = ?").get(id) as TaskRow | undefined;
+  const t = await db.get(db.k.selectFrom("build_tasks").select(cols("build_tasks")).$narrowType<{ state: TaskState }>().where("id", "=", id));
   if (!t) throw new BuildError(404, "no such task");
   if (t.env_id !== envId || (t.state !== "claimed" && t.state !== "running")) throw new BuildError(409, "this task is not running on this environment");
   return t;
@@ -290,16 +293,17 @@ export const ownedTask = mine;
 export async function startTask(db: Db, envId: string, id: number): Promise<{ cancel: number[] }> {
   const t = await mine(db, envId, id);
   const at = nowIso();
-  const r = await db.prepare("UPDATE build_tasks SET state = 'running', started_at = COALESCE(started_at, ?), heartbeat_at = ? WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')").run(at, at, t.id, envId);
+  const r = await db.run(db.k.updateTable("build_tasks").set((eb) => ({ state: "running", started_at: eb.fn.coalesce("started_at", eb.val(at)), heartbeat_at: at }))
+    .where("id", "=", t.id).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]));
   if (r.changes !== 1) throw new BuildError(409, "this task is not running on this environment");
   return { cancel: await cancelIds(db, envId) };
 }
 
 export async function heartbeat(db: Db, envId: string, id: number): Promise<{ cancel: number[] }> {
-  const prior = await db.prepare("SELECT state, env_id FROM build_tasks WHERE id = ?").get(id) as { state: TaskState; env_id: string | null } | undefined;
+  const prior = await db.get(db.k.selectFrom("build_tasks").select(["state", "env_id"]).$narrowType<{ state: TaskState }>().where("id", "=", id));
   if (prior?.env_id === envId && prior.state === "cancelled") return { cancel: await cancelIds(db, envId) };
   const t = await mine(db, envId, id);
-  await db.prepare("UPDATE build_tasks SET heartbeat_at = ? WHERE id = ?").run(nowIso(), t.id);
+  await db.run(db.k.updateTable("build_tasks").set({ heartbeat_at: nowIso() }).where("id", "=", t.id));
   return { cancel: await cancelIds(db, envId) };
 }
 
@@ -314,7 +318,8 @@ export async function appendLog(db: Db, envId: string, id: number, step: unknown
   if (bytes > MAX_CHUNK_BYTES) throw new BuildError(413, "a log chunk is at most 64 KB");
   const name = cleanLine(step, 64) ?? "";
   // The bytes are reserved first by one conditional update and its changed-row count, so concurrent appends cannot pass the cap together.
-  const claim = await db.prepare("UPDATE build_tasks SET log_bytes = log_bytes + ?, heartbeat_at = ? WHERE id = ? AND log_bytes < ? RETURNING log_bytes").get(bytes, nowIso(), id, MAX_LOG_BYTES) as { log_bytes: number } | undefined;
+  const claim = await db.get(db.k.updateTable("build_tasks").set((eb) => ({ log_bytes: eb("log_bytes", "+", bytes), heartbeat_at: nowIso() }))
+    .where("id", "=", id).where("log_bytes", "<", MAX_LOG_BYTES).returning("log_bytes"));
   if (!claim) return { truncated: true };
   let text = chunk;
   let truncated = false;
@@ -322,10 +327,10 @@ export async function appendLog(db: Db, envId: string, id: number, step: unknown
     const before = claim.log_bytes - bytes;
     text = `${Buffer.from(chunk).subarray(0, MAX_LOG_BYTES - before).toString("utf8")}\n[log truncated at 20 MB]\n`;
     truncated = true;
-    await db.prepare("UPDATE build_tasks SET log_bytes = ? WHERE id = ? AND log_bytes > ?").run(MAX_LOG_BYTES, id, MAX_LOG_BYTES);
+    await db.run(db.k.updateTable("build_tasks").set({ log_bytes: MAX_LOG_BYTES }).where("id", "=", id).where("log_bytes", ">", MAX_LOG_BYTES));
   }
-  const seq = (await db.prepare("SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM build_task_logs WHERE task_id = ?").get(id) as { n: number }).n;
-  await db.prepare("INSERT INTO build_task_logs (task_id, seq, step, chunk) VALUES (?, ?, ?, ?)").run(id, seq, name, text);
+  const seq = ((await db.get(db.k.selectFrom("build_task_logs").select((eb) => eb.fn.max<number | null>("seq").as("m")).where("task_id", "=", id)))!.m ?? 0) + 1;
+  await db.run(db.k.insertInto("build_task_logs").values({ task_id: id, seq, step: name, chunk: text }));
   return { truncated };
 }
 
@@ -368,7 +373,7 @@ export function parseSandboxEnv(v: unknown): SandboxEnv | null {
 /** The worker's last word: done when every step exited 0, cancelled when an operator asked, else failed. */
 export async function finishTask(db: Db, envId: string, id: number, body: unknown): Promise<{ state: TaskState }> {
   // A retried finish (the answer was lost) gets the state the first one set.
-  const prior = await db.prepare("SELECT state, env_id FROM build_tasks WHERE id = ?").get(id) as { state: TaskState; env_id: string | null } | undefined;
+  const prior = await db.get(db.k.selectFrom("build_tasks").select(["state", "env_id"]).$narrowType<{ state: TaskState }>().where("id", "=", id));
   if (prior && prior.env_id === envId && TERMINAL.includes(prior.state)) return { state: prior.state };
   const t = await mine(db, envId, id);
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new BuildError(400, "the body must be a JSON object");
@@ -378,11 +383,11 @@ export async function finishTask(db: Db, envId: string, id: number, body: unknow
   const sandbox = parseSandboxEnv(o.environment);
   const ok = results.length > 0 && results.every((r) => r.exitCode === 0 && !r.timedOut);
   const state: TaskState = t.cancel_requested_at ? "cancelled" : ok ? "done" : "failed";
-  const r = await db.prepare("UPDATE build_tasks SET state = ?, ended_at = ?, results = ?, summary = ?, sandbox_env = ? WHERE id = ? AND env_id = ? AND state IN ('claimed', 'running')")
-    .run(state, nowIso(), JSON.stringify(results), summary, sandbox ? JSON.stringify(sandbox) : null, id, envId);
+  const r = await db.run(db.k.updateTable("build_tasks").set({ state, ended_at: nowIso(), results: JSON.stringify(results), summary, sandbox_env: sandbox ? JSON.stringify(sandbox) : null })
+    .where("id", "=", id).where("env_id", "=", envId).where("state", "in", ["claimed", "running"]));
   if (r.changes !== 1) {
     // An operator cancelled it between the read and the write: the cancel stands.
-    const now = await db.prepare("SELECT state FROM build_tasks WHERE id = ?").get(id) as { state: TaskState } | undefined;
+    const now = await db.get(db.k.selectFrom("build_tasks").select("state").$narrowType<{ state: TaskState }>().where("id", "=", id));
     if (now && TERMINAL.includes(now.state)) return { state: now.state };
     throw new BuildError(409, "this task is not running on this environment");
   }
@@ -392,7 +397,7 @@ export async function finishTask(db: Db, envId: string, id: number, body: unknow
 /** Cancels a task at once. An active one stays listed in its worker's claim and heartbeat responses for two minutes, so the worker kills it. */
 export async function cancelTask(db: Db, id: unknown, by: string): Promise<BuildTask> {
   const n = typeof id === "number" ? id : Number(id);
-  const t = Number.isInteger(n) ? (await db.prepare("SELECT * FROM build_tasks WHERE id = ?").get(n) as TaskRow | undefined) : undefined;
+  const t = Number.isInteger(n) ? (await db.get(db.k.selectFrom("build_tasks").select(cols("build_tasks")).$narrowType<{ state: TaskState }>().where("id", "=", n))) : undefined;
   if (!t) throw new BuildError(404, "no such task");
   const at = nowIso();
   // The update names the state it saw, so the audit row records the state it really changed. A worker claiming the task in another
@@ -400,11 +405,12 @@ export async function cancelTask(db: Db, id: unknown, by: string): Promise<Build
   let was = t.state;
   for (let tries = 0; ; tries++) {
     if (TERMINAL.includes(was)) throw new BuildError(409, `the task is already ${was}`);
-    const r = await db.prepare(`UPDATE build_tasks SET state = 'cancelled', ended_at = ?, cancel_requested_at = ?,
-        summary = CASE state WHEN 'queued' THEN 'Cancelled before it started.' ELSE 'Cancelled by an operator.' END
-      WHERE id = ? AND state = ?`).run(at, at, t.id, was);
+    const r = await db.run(db.k.updateTable("build_tasks").set((eb) => ({
+      state: "cancelled", ended_at: at, cancel_requested_at: at,
+      summary: eb.case("state").when("queued").then("Cancelled before it started.").else("Cancelled by an operator.").end(),
+    })).where("id", "=", t.id).where("state", "=", was));
     if (r.changes === 1) break;
-    const now = await db.prepare("SELECT state FROM build_tasks WHERE id = ?").get(t.id) as { state: TaskState } | undefined;
+    const now = await db.get(db.k.selectFrom("build_tasks").select("state").$narrowType<{ state: TaskState }>().where("id", "=", t.id));
     was = now?.state ?? was;
     if (tries >= 5) throw new BuildError(409, `the task is already ${was}`);
   }
@@ -414,13 +420,13 @@ export async function cancelTask(db: Db, id: unknown, by: string): Promise<Build
 
 // ---- reading -----------------------------------------------------------------
 
-const SELECT = "SELECT t.*, e.label AS env_label, r.default_branch AS default_branch FROM build_tasks t LEFT JOIN build_envs e ON e.id = t.env_id LEFT JOIN repos r ON r.name = t.repo";
+const selectTasks = (db: Db) => db.k.selectFrom("build_tasks as t").leftJoin("build_envs as e", "e.id", "t.env_id").leftJoin("repos as r", "r.name", "t.repo")
+  .select([...cols("build_tasks", "t"), "e.label as env_label", "r.default_branch as default_branch"]).$narrowType<{ state: TaskState }>();
 
 async function artifactsOf(db: Db, ids: number[]): Promise<Map<number, TaskArtifact[]>> {
   const out = new Map<number, TaskArtifact[]>();
   if (!ids.length) return out;
-  const rows = await db.prepare(`SELECT task_id, name, bytes, content_type FROM build_artifacts WHERE task_id IN (${ids.map(() => "?").join(",")}) ORDER BY name`).all(...ids) as
-    { task_id: number; name: string; bytes: number; content_type: string }[];
+  const rows = await db.all(db.k.selectFrom("build_artifacts").select(["task_id", "name", "bytes", "content_type"]).where(inList(db, "task_id", ids, "bigint")).orderBy("name"));
   for (const r of rows) (out.get(r.task_id) ?? out.set(r.task_id, []).get(r.task_id)!).push({ name: r.name, bytes: r.bytes, contentType: r.content_type });
   return out;
 }
@@ -429,14 +435,13 @@ async function artifactsOf(db: Db, ids: number[]): Promise<Map<number, TaskArtif
 async function batchesOf(db: Db, ids: number[], shown: (repo: string, number: number) => Promise<ItemShown>): Promise<Map<number, TaskBatch>> {
   const out = new Map<number, TaskBatch>();
   if (!ids.length) return out;
-  const rows = await db.prepare(`SELECT * FROM main.merge_batches WHERE task_id IN (${ids.map(() => "?").join(",")})`).all(...ids) as
-    { id: number; task_id: number; repo?: string; branch: string; commit_sha: string; base_sha: string; fork?: string | null }[];
-  const members = db.prepare("SELECT number FROM main.merge_batch_prs WHERE batch_id = ? ORDER BY position");
+  const rows = await db.all(db.k.selectFrom("main.merge_batches").select(["id", "task_id", "repo", "branch", "commit_sha", "base_sha", "fork"]).$narrowType<{ task_id: number }>()
+    .where(inList(db, "task_id", ids, "bigint")));
   for (const b of rows) {
-    const prs = (await members.all(b.id) as { number: number }[]).map((m) => m.number);
+    const prs = (await db.all(db.k.selectFrom("main.merge_batch_prs").select("number").where("batch_id", "=", b.id).orderBy("position"))).map((m) => m.number);
     out.set(b.task_id, {
-      id: b.id, branch: b.branch, fork: b.fork ?? null, commitSha: b.commit_sha, baseSha: b.base_sha,
-      prs, shown: await mapSeq(prs, async (n) => await shown(b.repo ?? "", n)),
+      id: b.id, branch: b.branch, fork: b.fork, commitSha: b.commit_sha, baseSha: b.base_sha,
+      prs, shown: await mapSeq(prs, async (n) => await shown(b.repo, n)),
     });
   }
   return out;
@@ -460,17 +465,17 @@ async function toTask(r: TaskRow, artifacts: TaskArtifact[], batch: TaskBatch | 
 }
 
 export async function getTask(db: Db, id: number): Promise<BuildTask | null> {
-  const r = await db.prepare(`${SELECT} WHERE t.id = ?`).get(id) as TaskRow | undefined;
+  const r = await db.get(selectTasks(db).where("t.id", "=", id));
   const shown = shownLookup(db);
   return r ? await toTask(r, (await artifactsOf(db, [r.id])).get(r.id) ?? [], (await batchesOf(db, [r.id], shown)).get(r.id) ?? null, shown, await confidentialReadyAt(db) === null) : null;
 }
 
 /** The last bytes of the log, from whole chunks. */
 export async function logTail(db: Db, id: number): Promise<{ text: string; bytes: number; truncated: boolean }> {
-  const t = await db.prepare("SELECT log_bytes FROM build_tasks WHERE id = ?").get(id) as { log_bytes: number } | undefined;
+  const t = await db.get(db.k.selectFrom("build_tasks").select("log_bytes").where("id", "=", id));
   const parts: string[] = [];
   let size = 0;
-  for await (const c of db.prepare("SELECT chunk FROM build_task_logs WHERE task_id = ? ORDER BY seq DESC").iterate(id) as AsyncIterable<{ chunk: string }>) {
+  for (const c of await db.all(db.k.selectFrom("build_task_logs").select("chunk").where("task_id", "=", id).orderBy("seq", "desc"))) {
     parts.push(c.chunk);
     size += Buffer.byteLength(c.chunk);
     if (size >= LOG_TAIL_BYTES) break;
@@ -484,7 +489,7 @@ export async function getTaskDetail(db: Db, id: number): Promise<BuildTaskDetail
   const t = await getTask(db, id);
   if (!t) return null;
   const l = await logTail(db, id);
-  const p = await db.prepare("SELECT patch FROM build_tasks WHERE id = ?").get(id) as { patch: string | null } | undefined;
+  const p = await db.get(db.k.selectFrom("build_tasks").select("patch").where("id", "=", id));
   return { ...t, logTail: l.text, logBytes: l.bytes, logTruncated: l.truncated, patch: p?.patch ?? null };
 }
 
@@ -503,7 +508,7 @@ export const CONFIDENTIAL_WAIT = "Waiting for a confidential build environment."
  * after its flag (or the environment) was turned on; null while none has called since.
  */
 export async function confidentialReadyAt(db: Db): Promise<number | null> {
-  const r = await db.prepare("SELECT MIN(confidential_online_at) AS at FROM build_envs WHERE enabled = 1 AND confidential = 1").get() as { at: string | null };
+  const r = (await db.get(db.k.selectFrom("build_envs").select((eb) => eb.fn.min<string | null>("confidential_online_at").as("at")).where("enabled", "=", 1).where("confidential", "=", 1)))!;
   return r.at ? Date.parse(r.at) : null;
 }
 
@@ -516,25 +521,27 @@ export async function privateClockStart(db: Db, queuedAt: string): Promise<numbe
 /** SQL for the steps hidden from viewers, for `step NOT IN (...)`. */
 export const PRIVATE_STEPS_SQL = PRIVATE_STEPS.map((x) => `'${x}'`).join(", ");
 
+/** `step IN (PRIVATE_STEPS_SQL)` as an expression on the step in `col`; `eb.not(...)` for NOT IN. */
+export const privateStepExpr = (eb: Eb, col: Ex = "step"): AliasableExpression<SqlBool> => eb(ref(col), "in", PRIVATE_STEPS);
+
 /** Newest first, keyset-paged by id. `hidden` repos are left out, and the security fix's tasks unless `staff`. */
 export async function listTasks(db: Db, f: TaskFilter, hidden: string[] = [], staff = true): Promise<TaskPage> {
-  const where: string[] = staff ? [] : [`t.step NOT IN (${PRIVATE_STEPS_SQL})`];
-  const params: Record<string, SQLInputValue> = {};
-  const hide = excludeHidden("t.repo", hidden, params);
-  if (hide) where.push(hide);
+  let q = selectTasks(db);
+  if (!staff) q = q.where((eb) => eb.not(privateStepExpr(eb, "t.step")));
+  const hide = excludeHiddenExpr(db, "t.repo", hidden);
+  if (hide) q = q.where(hide);
   if (f.state !== undefined) {
     if (!FILTER_STATES.includes(f.state)) throw new BuildError(400, "unknown state");
-    if (f.state === "active") where.push("t.state IN ('queued', 'claimed', 'running')");
-    else (where.push("t.state = :state"), (params.state = f.state));
+    q = f.state === "active" ? q.where("t.state", "in", ["queued", "claimed", "running"]) : q.where("t.state", "=", f.state);
   }
-  if (f.env) (where.push("t.env_id = :env"), (params.env = f.env));
-  if (f.repo) (where.push("t.repo = :repo"), (params.repo = f.repo));
+  if (f.env) q = q.where("t.env_id", "=", f.env);
+  if (f.repo) q = q.where("t.repo", "=", f.repo);
   if (f.cursor !== undefined) {
     if (!CURSOR_RE.test(f.cursor)) throw new BuildError(400, "bad cursor");
-    (where.push("t.id < :cursor"), (params.cursor = Number(f.cursor)));
+    q = q.where("t.id", "<", Number(f.cursor));
   }
   const limit = Math.min(Math.max(f.limit ?? 50, 1), 200);
-  const rows = await db.prepare(`${SELECT}${where.length ? ` WHERE ${where.join(" AND ")}` : ""} ORDER BY t.id DESC LIMIT ${limit + 1}`).all(params) as TaskRow[];
+  const rows = await db.all(q.orderBy("t.id", "desc").limit(limit + 1));
   const page = rows.slice(0, limit);
   const arts = await artifactsOf(db, page.map((r) => r.id));
   const shown = shownLookup(db);
@@ -546,11 +553,15 @@ export async function listTasks(db: Db, f: TaskFilter, hidden: string[] = [], st
 export type { BuildSummary };
 /** Queued and running tasks and the slots left, over all enabled environments (the flowchart's Verify node). */
 export async function summary(db: Db, hidden: string[] = [], staff = true): Promise<BuildSummary> {
-  const params: Record<string, SQLInputValue> = {};
-  const hide = excludeHidden("repo", hidden, params);
-  const c = await db.prepare(`SELECT COALESCE(SUM(state = 'queued'), 0) AS queued, COALESCE(SUM(state IN ('claimed', 'running')), 0) AS running FROM build_tasks WHERE state IN ('queued', 'claimed', 'running')${staff ? "" : ` AND step NOT IN (${PRIVATE_STEPS_SQL})`}${hide ? ` AND ${hide}` : ""}`).get(params) as { queued: number; running: number };
-  const all = await db.prepare("SELECT * FROM build_envs WHERE enabled = 1 AND last_seen_at > ?").all(new Date(Date.now() - 60_000).toISOString()) as { slots: number; reported_slots: number | null; id: string }[];
-  const used = await db.prepare("SELECT env_id AS id, COUNT(*) AS n FROM build_tasks WHERE state IN ('claimed', 'running') GROUP BY env_id").all() as { id: string; n: number }[];
+  const hide = excludeHiddenExpr(db, "repo", hidden);
+  const c = (await db.get(db.k.selectFrom("build_tasks").select((eb) => [
+    eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("state", "=", "queued").then(eb.lit(1)).else(eb.lit(0)).end()), eb.lit(0)).as("queued"),
+    eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("state", "in", ["claimed", "running"]).then(eb.lit(1)).else(eb.lit(0)).end()), eb.lit(0)).as("running"),
+  ]).where("state", "in", ["queued", "claimed", "running"])
+    .$if(!staff, (q) => q.where((eb) => eb.not(privateStepExpr(eb))))
+    .$if(!!hide, (q) => q.where(hide!))))!;
+  const all = await db.all(db.k.selectFrom("build_envs").select(["slots", "reported_slots", "id"]).where("enabled", "=", 1).where("last_seen_at", ">", new Date(Date.now() - 60_000).toISOString()));
+  const used = await db.all(db.k.selectFrom("build_tasks").select((eb) => ["env_id as id", eb.fn.countAll<number>().as("n")]).where("state", "in", ["claimed", "running"]).groupBy("env_id"));
   const byEnv = new Map(used.map((u) => [u.id, u.n]));
   const slots = all.reduce((s, e) => s + slotsOf(e), 0);
   const inUse = all.reduce((s, e) => s + Math.min(byEnv.get(e.id) ?? 0, slotsOf(e)), 0);
@@ -561,19 +572,21 @@ export async function summary(db: Db, hidden: string[] = [], staff = true): Prom
 export async function pruneTasks(db: Db, nowMs: number = Date.now()): Promise<number> {
   const artifactsBefore = new Date(nowMs - ARTIFACT_KEEP_MS).toISOString();
   for (;;) {
-    const ids = (await db.prepare("SELECT id FROM build_tasks WHERE ended_at IS NOT NULL AND ended_at < ? AND artifact_bytes > 0 AND state IN ('done', 'failed', 'cancelled', 'lost') ORDER BY ended_at LIMIT 200").all(artifactsBefore) as { id: number }[]).map((r) => r.id);
+    const ids = (await db.all(db.k.selectFrom("build_tasks").select("id").where("ended_at", "is not", null).where("ended_at", "<", artifactsBefore).where("artifact_bytes", ">", 0)
+      .where("state", "in", TERMINAL).orderBy("ended_at").limit(200))).map((r) => r.id);
     if (!ids.length) break;
     await removeArtifacts(db, ids);
   }
   const before = new Date(nowMs - KEEP_MS).toISOString();
   let n = 0;
   for (;;) {
-    const ids = (await db.prepare("SELECT id FROM build_tasks WHERE ended_at IS NOT NULL AND ended_at < ? AND state IN ('done', 'failed', 'cancelled', 'lost') ORDER BY ended_at LIMIT 200").all(before) as { id: number }[]).map((r) => r.id);
+    const ids = (await db.all(db.k.selectFrom("build_tasks").select("id").where("ended_at", "is not", null).where("ended_at", "<", before)
+      .where("state", "in", TERMINAL).orderBy("ended_at").limit(200))).map((r) => r.id);
     if (!ids.length) return n;
     await removeArtifacts(db, ids);
     for (const id of ids) {
-      await db.prepare("DELETE FROM build_task_logs WHERE task_id = ?").run(id);
-      await db.prepare("DELETE FROM build_tasks WHERE id = ?").run(id);
+      await db.run(db.k.deleteFrom("build_task_logs").where("task_id", "=", id));
+      await db.run(db.k.deleteFrom("build_tasks").where("id", "=", id));
     }
     n += ids.length;
   }
@@ -584,7 +597,7 @@ export type MemRow = { repo: string; step: string; steps: number; medianBytes: n
 /** Peak memory per repo and step name over tasks that ended in the last `days` days; steps without a measurement are skipped. */
 export async function memorySummary(db: Db, days: number): Promise<MemRow[]> {
   const since = new Date(Date.now() - days * 86400_000).toISOString();
-  const rows = await db.prepare("SELECT repo, results FROM build_tasks WHERE ended_at >= ? AND results != '[]'").all(since) as { repo: string; results: string }[];
+  const rows = await db.all(db.k.selectFrom("build_tasks").select(["repo", "results"]).where("ended_at", ">=", since).where("results", "!=", "[]"));
   const groups = new Map<string, { repo: string; step: string; peaks: number[]; oom: number }>();
   for (const row of rows) {
     for (const r of json<TaskResult[]>(row.results, [])) {

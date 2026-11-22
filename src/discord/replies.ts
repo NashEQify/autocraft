@@ -6,12 +6,10 @@ import type { Db } from "../db/index.ts";
 
 /** Deletes the replies whose ping or quoted message is one of `ids`. Returns how many rows were removed. */
 export async function deleteRepliesOf(db: Db, keys: DiscordKeys, rest: DiscordRest, ids: string[], log: (line: string) => void): Promise<number> {
-  const find = db.prepare("SELECT ping_hash, sealed FROM discord_replies WHERE ping_hash = ? OR quoted_hash = ?");
-  const del = db.prepare("DELETE FROM discord_replies WHERE ping_hash = ?");
   let n = 0;
   for (const id of ids) {
     const h = keys.hash("message", id);
-    for (const r of await find.all(h, h) as { ping_hash: string; sealed: string }[]) {
+    for (const r of await db.all(db.k.selectFrom("discord_replies").select(["ping_hash", "sealed"]).where((eb) => eb.or([eb("ping_hash", "=", h), eb("quoted_hash", "=", h)])))) {
       const ref = keys.open(r.sealed, r.ping_hash);
       try {
         if (ref) await rest.deleteMessage(ref.channelId, ref.messageId);
@@ -19,7 +17,7 @@ export async function deleteRepliesOf(db: Db, keys: DiscordKeys, rest: DiscordRe
         log(`discord: deleting a reply failed: ${(e as Error).message}`);
         continue;
       }
-      n += Number((await del.run(r.ping_hash)).changes);
+      n += Number((await db.run(db.k.deleteFrom("discord_replies").where("ping_hash", "=", r.ping_hash))).changes);
     }
   }
   return n;

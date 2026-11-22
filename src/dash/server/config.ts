@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomToken } from "./crypto.ts";
-import { dbPath } from "../../db.ts";
+import { dbTarget } from "../../db/open.ts";
 import { defaultImageCacheDir } from "./images.ts";
 import { envVar } from "../../env.ts";
 
@@ -43,11 +43,19 @@ export function followAppSecrets(secrets: Secrets, file: string): void {
   });
 }
 
+function configuredDb(env: NodeJS.ProcessEnv): string {
+  try {
+    return dbTarget(env);
+  } catch (e) {
+    throw new ConfigError((e as Error).message);
+  }
+}
+
 export type Config = {
   host: string;
   port: number;
   baseUrl: string | null;          // null only with dev auth, where every URL the server builds is relative
-  dbPath: string;
+  dbTarget: string;                // a SQLite path or a postgres:// URL (dbTarget())
   webDist: string;                 // the frontend's build output (web/dist)
   devAuth: boolean;
   devPermsFile: string | null;
@@ -252,7 +260,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!/^[0-9]$/.test(trustRaw)) throw new ConfigError("AUTOCRAFT_TRUST_PROXY must be the number of trusted proxies in front of the server, 0 to 9");
   return {
     host, port, baseUrl, devAuth, secrets, secretsFile,
-    dbPath: envVar("DB", env) ?? dbPath(),
+    dbTarget: configuredDb(env),
     webDist: webDistEnv ? resolve(webDistEnv) : DEFAULT_WEB_DIST,
     devPermsFile: devAuth ? (envVar("DEV_PERMS", env) ?? null) : null,
     devTokenTtlMs: devAuth && envVar("DEV_TOKEN_TTL", env) ? Number(envVar("DEV_TOKEN_TTL", env)) * 1000 || null : null,

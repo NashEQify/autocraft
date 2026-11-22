@@ -1,13 +1,12 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, scope decision, labels.
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
-import { refIn, refPairs } from "./ref-filter.ts";
 import { settleMemo, settledBy } from "../settlers.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
 import { activeTrips } from "../push-outcomes.ts";
-import { notOwnIntegrationSql, groupHeldSql, backlogHeldSql } from "../dupes/held.ts";
-import { FAST_FLOOR, fastScoreSql } from "../fasttrack.ts";
+import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/held.ts";
+import { FAST_FLOOR, fastScoreExpr } from "../fasttrack.ts";
 import { latestRun, needsDecisionOf, refereeClosed, securityOf, settle, topOf, SURE, type Referee } from "../classify/settled.ts";
 import { JEV_FLAG_NO, JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "../classify/parse.ts";
 import { answersToApply, groupsToAsk } from "../dupes/decide.ts";
@@ -22,15 +21,16 @@ import { fixIssueApprovalOf } from "../fixissue/approval.ts";
 import { issuesWithOpenPrAll, type OpenPr, notRustKey, textHash } from "../fixissue/candidates.ts";
 import { headOf, scopeAnswers, unsettledScope } from "../review/candidates.ts";
 import { approvalOf as labelsApprovalOf } from "../labels/approval.ts";
-import { pilotSql } from "../pilot.ts";
+import { pilotExpr } from "../pilot.ts";
 import { holdMap } from "../outside.ts";
-import { RUNNING_STALE_MS, lockLiveSql, lockRunningAtSql } from "../answers/hold.ts";
-import { DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP, isPreparing, prepareStateSql, utcDayStart, type PrepareColumns } from "../decide/prepared.ts";
+import { RUNNING_STALE_MS, lockLiveExpr, lockRunningAtExpr } from "../answers/hold.ts";
+import { DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP, isPreparing, prepareStateExpr, utcDayStart } from "../decide/prepared.ts";
 import { nextUtcMidnight } from "../review/discussion.ts";
 import type { ItemFacts } from "./plan.ts";
 import { setting, hasSetting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type { ItemFacts } from "./plan.ts";
 
@@ -46,35 +46,30 @@ export type ItemLoadOptions = {
   run?: string | null;
 };
 
-type Row = {
-  repo: string; number: number; kind: "pr" | "issue"; state: string; author: string | null; assignees: string | null; is_draft: number | null; updated_at: string | null; labels: string | null;
-  embed_hash: string | null; /** Null unless computed under the current scheme. */ class_hash: string | null; score: number | null;
-  in_pilot: number; not_integration: number; held_backlog: number; held_dup: number;
-  pr_hash: string | null; e_hash: string | null; scan_hash: string | null; stage: string | null; impact: string | null;
-  a_state: string | null; a_pr: string | null; a_hash: string | null; a_head: string | null; a_base: string | null; h_state: string | null; b_state: string | null;
-};
-
 // The stored hashes that follow the item's text hash are read as '' when they equal it (asText() restores them), so the common case sends no copy.
-const sameAsText = (col: string): string => `CASE WHEN ${col} = i.embed_hash THEN '' ELSE ${col} END`;
+const sameAsText = (eb: kx.AnyEb, col: string) => eb.case().when(eb.ref(col), "=", eb.ref("i.embed_hash")).then(eb.val("")).else(eb.ref(col)).end();
 const asText = (h: string | null, text: string | null): string | null => (h === "" ? text : h);
 
-const SELECT = `SELECT i.repo, i.number, i.kind, i.state, i.author, i.assignees, i.is_draft, i.updated_at, i.labels, i.embed_hash,
-    CASE WHEN i.class_scheme = '${SCHEME_ID}' THEN i.class_hash END AS class_hash,
-    ${fastScoreSql("i.repo", "i.number", "r.score")} AS score,
-    ${pilotSql("i")} AS in_pilot, ${notOwnIntegrationSql("i")} AS not_integration, ${backlogHeldSql("i")} AS held_backlog,
-    (EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = i.repo AND dh.number = i.number AND (dh.answer IS NULL OR dh.answer = 'close'))
-      OR ${groupHeldSql("i")}) AS held_dup,
-    ${sameAsText("p.text_hash")} AS pr_hash, p.impact, ${sameAsText("e.hash")} AS e_hash, ${sameAsText("s.hash")} AS scan_hash, st.stage,
-    fa.state AS a_state, fa.pr_url AS a_pr, fa.text_hash AS a_hash, fa.head_task_id AS a_head, fa.base_task_id AS a_base, ht.state AS h_state, bt.state AS b_state
-  FROM items i JOIN tracked_repos t ON t.name = i.repo
-  LEFT JOIN item_rank r ON r.repo = i.repo AND r.number = i.number
-  LEFT JOIN item_priority p ON p.repo = i.repo AND p.number = i.number
-  LEFT JOIN item_embeddings e ON e.repo = i.repo AND e.number = i.number AND e.model = :model
-  LEFT JOIN duplicate_scans s ON s.repo = i.repo AND s.number = i.number
-  LEFT JOIN item_stage st ON st.repo = i.repo AND st.number = i.number
-  LEFT JOIN fix_attempts fa ON fa.repo = i.repo AND fa.number = i.number
-  LEFT JOIN build_tasks ht ON ht.id = fa.head_task_id LEFT JOIN build_tasks bt ON bt.id = fa.base_task_id
-  WHERE (i.state = 'OPEN' OR ${refIn("i", ":closing")})`;
+const itemRows = (db: Db, model: string) => db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
+  .leftJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+  .leftJoin("item_priority as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+  .leftJoin("item_embeddings as e", (j) => j.onRef("e.repo", "=", "i.repo").onRef("e.number", "=", "i.number").on("e.model", "=", model))
+  .leftJoin("duplicate_scans as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
+  .leftJoin("item_stage as st", (j) => j.onRef("st.repo", "=", "i.repo").onRef("st.number", "=", "i.number"))
+  .leftJoin("fix_attempts as fa", (j) => j.onRef("fa.repo", "=", "i.repo").onRef("fa.number", "=", "i.number"))
+  .leftJoin("build_tasks as ht", "ht.id", "fa.head_task_id").leftJoin("build_tasks as bt", "bt.id", "fa.base_task_id")
+  .select((eb) => ["i.repo", "i.number", "i.kind", "i.state", "i.author", "i.assignees", "i.is_draft", "i.updated_at", "i.labels", "i.embed_hash",
+    eb.case().when("i.class_scheme", "=", SCHEME_ID).then(eb.ref("i.class_hash")).end().as("class_hash"),
+    fastScoreExpr(db, eb, "i.repo", "i.number", "r.score").as("score"),
+    pilotExpr(db, eb, "i").as("in_pilot"), notOwnIntegrationExpr(db, eb, "i").as("not_integration"), backlogHeldExpr(db, eb, "i").as("held_backlog"),
+    eb.or([
+      eb.exists(kx.schemaEb(eb).selectFrom("decisions as dh").select(eb.lit(1).as("one")).where("dh.kind", "=", "duplicate").where(eb.not(kx.like(db, "dh.id", eb.val("%:dupegroup:%"))))
+        .where("dh.repo", "=", eb.ref("i.repo")).where("dh.number", "=", eb.ref("i.number")).where((w) => w.or([w("dh.answer", "is", null), w("dh.answer", "=", "close")]))),
+      groupHeldExpr(db, eb, "i"),
+    ]).as("held_dup"),
+    sameAsText(eb, "p.text_hash").as("pr_hash"), "p.impact", sameAsText(eb, "e.hash").as("e_hash"), sameAsText(eb, "s.hash").as("scan_hash"), "st.stage",
+    "fa.state as a_state", "fa.pr_url as a_pr", "fa.text_hash as a_hash", "fa.head_task_id as a_head", "fa.base_task_id as a_base", "ht.state as h_state", "bt.state as b_state"])
+  .$narrowType<{ kind: "pr" | "issue" }>();
 
 /** `asked_by` of the decisions a security scan asks (act/index.ts SECURITY_ASKER). */
 const SECURITY_ASKER = "security-scan";
@@ -86,7 +81,7 @@ const flagsOf = (s: string | null): string[] => { const f = json<unknown>(s, [])
 const refsOf = (d: { repo: string | null; number: number | null; items: string | null }): string[] =>
   d.number !== null ? [`${d.repo}#${d.number}`] : json<{ repo: string; number: number }[]>(d.items, []).map((r) => `${r.repo}#${r.number}`);
 
-type Cls = { classifier: string; at: string; type_label: string; flags: string | null; probs: string | null; input_hash: string | null };
+type Cls = { classifier: string; at: string; type_label: string | null; flags: string | null; probs: string | null; input_hash: string | null };
 
 /** Facts of every open item (issue or PR) of the tracked repos, for the database, repo or refs given. */
 export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise<ItemFacts[]> {
@@ -106,13 +101,16 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const unsettled = await unsettledScope(db);
   const latestScope = new Map<string, { answer: string | null; byOperator: boolean }>(), securityIds = new Set<string>();
   // Kind and head of every item an open decision is about.
-  const heads = new Map((await db.prepare(`SELECT DISTINCT i.repo || '#' || i.number AS k, i.kind, i.head_oid FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
-    WHERE d.answer IS NULL`).all() as { k: string; kind: string; head_oid: string | null }[]).map((r) => [r.k, r]));
+  const heads = new Map((await db.all(db.k.selectFrom("decisions as d").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+    .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", kx.exprOf(eb, "i.number")).as("k"), "i.kind", "i.head_oid"]).distinct().where("d.answer", "is", null)))
+    .map((r) => [r.k, r]));
   const openScope = new Set<string>(), covered = new Set<string>(), recommend = new Map<string, { failures: number; failedAt: string | null }>();
   // Only the decisions the loop reads: open ones, scope and backlog answers, and security asks.
-  for (const d of await db.prepare(`SELECT id, kind, repo, number, items, answer, answered_by, asked_by, prepared_at, prepared_head, prepare_failed_head, recommend_failures, recommend_failed_at, prepared_discussion, prepare_requested_at, ${prepareStateSql("decisions")}, ${lockLiveSql("decisions", new Date(now))} AS locked, ${lockRunningAtSql("decisions")} AS lock_at FROM decisions
-    WHERE answer IS NULL OR kind = 'scope' OR answer = 'backlog' OR asked_by = '${SECURITY_ASKER}' ORDER BY asked_at, id`).all(utcDayStart(now)) as
-    (PrepareColumns & { locked: number; lock_at: string | null; id: string; kind: string; answered_by: string | null; asked_by: string | null; repo: string | null; number: number | null; items: string | null; answer: string | null })[]) {
+  for (const d of await db.all(db.k.selectFrom("decisions").select((eb) => ["id", "kind", "repo", "number", "items", "answer", "answered_by", "asked_by", "prepared_at", "prepared_head", "prepare_failed_head", "recommend_failures", "recommend_failed_at", "prepared_discussion", "prepare_requested_at",
+      ...prepareStateExpr(db, eb, "decisions", utcDayStart(now)), lockLiveExpr(db, eb, "decisions", new Date(now)).as("locked"), lockRunningAtExpr(db, eb, "decisions").as("lock_at")])
+    .$narrowType<{ review_queued: 0 | 1 }>()
+    .where((eb) => eb.or([eb("answer", "is", null), eb("kind", "=", "scope"), eb("answer", "=", "backlog"), eb("asked_by", "=", SECURITY_ASKER)]))
+    .orderBy("asked_at").orderBy("id"))) {
     const dupegroup = d.id.includes(":dupegroup:");
     if (d.kind === "scope" && d.number !== null && !(d.answer === "withdrawn" && d.answered_by === "pipeline")) latestScope.set(`${d.repo}#${d.number}`, { answer: d.answer, byOperator: await settledBy(db, d, memo) });
     if (d.asked_by === SECURITY_ASKER) securityIds.add(d.id);
@@ -124,11 +122,12 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
       const k = `${d.repo}#${d.number}`;
       const it = heads.get(k);
       const h = it?.kind === "pr" ? it.head_oid : null;
+      const preparing = isPreparing({ ...d, prepares_today: d.prepares_today ?? undefined }, h);
       // A decision whose press is running or queued is locked and not prepared.
-      if (isPreparing(d, h) && d.locked && d.lock_at) refresh.soon(k, Date.parse(d.lock_at) + RUNNING_STALE_MS);
+      if (preparing && d.locked && d.lock_at) refresh.soon(k, Date.parse(d.lock_at) + RUNNING_STALE_MS);
       // The day's automatic prepares count towards caps that end at UTC midnight.
       if ((d.prepares_today ?? 0) >= Math.min(DISCUSSION_PREPARES_PER_DAY, PREPARE_DAILY_CAP)) refresh.soon(k, nextUtcMidnight(now));
-      if (isPreparing(d, h) && !d.locked) {
+      if (preparing && !d.locked) {
         const failures = (d.prepare_failed_head ?? null) === h ? d.recommend_failures ?? 0 : 0;
         if (failures < (recommend.get(k)?.failures ?? Infinity)) recommend.set(k, { failures, failedAt: failures ? d.recommend_failed_at : null });
       }
@@ -139,7 +138,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     const lapsed = d.kind === "scope" && d.answer !== null && refsOf(d).every((r) => unsettled.has(r));
     if ((d.answer === null || d.kind === "scope" || d.answer === "backlog") && (!dupegroup || d.answer === null) && !withdrawn && !lapsed) for (const r of refsOf(d)) covered.add(r);
   }
-  const labeled = new Map((await db.prepare("SELECT repo, number, note FROM stages WHERE stage = 'labeled' ORDER BY at, rowid").all() as { repo: string; number: number; note: string | null }[])
+  const labeled = new Map((await db.all(db.k.selectFrom("stages").select(["repo", "number", "note"]).where("stage", "=", "labeled").orderBy("at").orderBy(kx.rowid("stages"))))
     .map((s) => [`${s.repo}#${s.number}`, s.note]));
   const own = await ownFixPrs(db, opts.repo);
   const assigned = await assignmentsOf(db, opts.repo);
@@ -157,9 +156,9 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const approved = new Map<string, boolean>();
   const labelsApproved = async (repo: string) => approved.get(repo) ?? (approved.set(repo, await labelsApprovalOf(db, repo) !== null), approved.get(repo)!);
   // Act: answers an operator gave that close an item (decisions.ts actionable, as act/index.ts targetsOf reads them).
-  const actionState = new Map((await db.prepare("SELECT decision_id, repo, number, state FROM actions WHERE kind = ?").all(ACT_KIND) as { decision_id: string; repo: string; number: number; state: string }[])
+  const actionState = new Map((await db.all(db.k.selectFrom("actions").select(["decision_id", "repo", "number", "state"]).where("kind", "=", ACT_KIND)))
     .map((a) => [`${a.decision_id}|${a.repo}#${a.number}`, a.state]));
-  const waitingExec = new Set((await db.prepare("SELECT id FROM main.decisions WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL").all() as { id: string }[]).map((r) => r.id));
+  const waitingExec = new Set((await db.all(db.k.selectFrom("main.decisions").select("id").where("exec_state", "in", ["waiting-token", "waiting-permission"]).where("applied_at", "is", null))).map((r) => r.id));
   const answeredClose = new Map<string, ItemFacts["answeredClose"]>();
   for (const a of await actionable(db)) {
     if (a.kind !== "scope" && a.kind !== "close" && a.kind !== "duplicate" && a.kind !== "merge" && a.kind !== "hold") continue;
@@ -179,28 +178,29 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   }
   // A closed item stays in the facts while an answered close of it is not applied: the Act step records it as already closed.
   const closing = [...answeredClose].filter(([, t]) => t.some((x) => x.action === null || x.action === "failed")).map(([ref]) => ref);
-  const params: Record<string, string> = { model, closing: refPairs(closing) };
-  let where = "";
-  if (opts.repo) { where += " AND i.repo = :repo"; params.repo = opts.repo; }
-  if (opts.refs) { where += ` AND ${refIn("i")}`; params.refs = refPairs(opts.refs); }
-  const rows = await db.prepare(`${SELECT}${where} ORDER BY i.repo, i.number`).all(params) as Row[];
+  const rows = await db.all(itemRows(db, model).where((eb) => eb.or([eb("i.state", "=", "OPEN"), kx.refIn(db, "i", closing)]))
+    .$if(!!opts.repo, (q) => q.where("i.repo", "=", opts.repo!)).$if(!!opts.refs, (q) => q.where(kx.refIn(db, "i", opts.refs!)))
+    .orderBy("i.repo").orderBy("i.number"));
   // The run's verdicts of the items loaded. Jev's per-type probabilities are left out: only its top, security and needs_decision values are read.
   const byItem = new Map<string, Cls[]>();
   if (run) {
-    for (const c of await db.prepare(`SELECT c.repo, c.number, c.classifier, c.at, c.type_label, c.flags,
-        CASE WHEN c.classifier = 'jev' AND json_valid(c.probs) THEN json_remove(c.probs, '$.type') ELSE c.probs END AS probs, c.input_hash
-      FROM classifications c WHERE c.run_id = :run AND ${refIn("c", ":loaded")}`).all({ run, loaded: JSON.stringify(rows.map((r) => [r.repo, r.number])) }) as (Cls & { repo: string; number: number })[]) {
+    for (const c of await db.all(db.k.selectFrom("classifications as c").select((eb) => ["c.repo", "c.number", "c.classifier", "c.at", "c.type_label", "c.flags",
+        eb.case().when(eb.and([eb("c.classifier", "=", "jev"), kx.jsonValid(db, "c.probs")])).then(kx.jsonRemoveKey(db, "c.probs", "type")).else(eb.ref("c.probs")).end().as("probs"), "c.input_hash"])
+      .where("c.run_id", "=", run).where(kx.refIn(db, "c", rows.map((r) => [r.repo, r.number] as const))))) {
       const k = `${c.repo}#${c.number}`;
       (byItem.get(k) ?? byItem.set(k, []).get(k)!).push(c);
     }
   }
   const closeReview = new Map<string, NonNullable<ItemFacts["closeReview"]>>();
-  for (const r of await db.prepare(`SELECT r.repo, r.number, r.head_oid, i.head_oid AS i_head, i.updated_at, c.head_oid AS c_head, c.fetched_at AS c_at,
-      EXISTS (SELECT 1 FROM decisions d WHERE d.id = r.repo || '#' || r.number || ':close@' || r.head_oid) AS asked
-    FROM final_reviews r JOIN items i ON i.repo = r.repo AND i.number = r.number AND i.kind = 'pr' AND i.state = 'OPEN'
-    LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
-    WHERE r.verdict = 'close' AND r.head_oid = (SELECT r2.head_oid FROM opus_reviews r2 WHERE r2.repo = r.repo AND r2.number = r.number AND r2.verdict IS NOT NULL ORDER BY r2.at DESC, r2.rowid DESC LIMIT 1)`).all() as
-    { repo: string; number: number; head_oid: string; i_head: string | null; updated_at: string | null; c_head: string | null; c_at: string | null; asked: number }[])
+  for (const r of await db.all(db.k.selectFrom("final_reviews as r").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number").on("i.kind", "=", "pr").on("i.state", "=", "OPEN"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "r.repo").onRef("c.number", "=", "r.number"))
+    .select((eb) => ["r.repo", "r.number", "r.head_oid", "i.head_oid as i_head", "i.updated_at", "c.head_oid as c_head", "c.fetched_at as c_at",
+      eb.exists(eb.selectFrom("decisions as d").select(eb.lit(1).as("one"))
+        .where("d.id", "=", eb(eb(eb(eb(eb.ref("r.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "r.number")), "||", eb.val(":close@")), "||", eb.ref("r.head_oid")))).as("asked")])
+    .$narrowType<{ repo: string; number: number; head_oid: string }>()
+    .where("r.verdict", "=", "close")
+    .where("r.head_oid", "=", (eb) => eb.selectFrom("opus_reviews as r2").select("r2.head_oid").whereRef("r2.repo", "=", "r.repo").whereRef("r2.number", "=", "r.number").where("r2.verdict", "is not", null)
+      .orderBy("r2.at", "desc").orderBy(kx.rowid("opus_reviews", "r2"), "desc").limit(1))))
     closeReview.set(`${r.repo}#${r.number}`, { head: r.head_oid, atHead: headOf({ head_oid: r.i_head, updated_at: r.updated_at, c_head: r.c_head, c_at: r.c_at }) === r.head_oid, asked: !!r.asked });
   const repoMemo = new Map<string, { comment: boolean; fix: boolean; pub: boolean; notRust: boolean; openPrs: Map<number, OpenPr> }>();
   // Public repos and open PRs, read once for every repo on first use.
@@ -208,7 +208,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
   const repoOf = async (repo: string) => {
     let m = repoMemo.get(repo);
     if (!m) {
-      const t = (tables ??= { pub: new Set((await db.prepare("SELECT name FROM repos WHERE visibility = 'public'").all() as { name: string }[]).map((x) => x.name)), openPrs: await issuesWithOpenPrAll(db) });
+      const t = (tables ??= { pub: new Set((await db.all(db.k.selectFrom("repos").select("name").where("visibility", "=", "public"))).map((x) => x.name)), openPrs: await issuesWithOpenPrAll(db) });
       m = { comment: await commentApprovalOf(db, repo) !== null, fix: await fixIssueApprovalOf(db, repo) !== null, pub: t.pub.has(repo),
         notRust: await hasSetting(db, notRustKey(repo)), openPrs: t.openPrs(repo) };
       repoMemo.set(repo, m);
@@ -216,16 +216,16 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     return m;
   };
   // Item text, read only for the rows that need it (a skipped Fix attempt, a missing text hash, a classifier hash to recompute), in one query.
-  type Text = { repo: string; number: number; kind: string; title: string | null; body: string | null; additions: number | null; deletions: number | null; changed_files: number | null; author_association: string | null };
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
   const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
-  const texts = new Map(needText.length ? (await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, i.body, i.additions, i.deletions, i.changed_files, i.author_association
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`).all(JSON.stringify(needText.map((r) => [r.repo, r.number]))) as Text[]).map((t) => [`${t.repo}#${t.number}`, t]) : []);
-  const mirrored = db.prepare("SELECT 1 FROM items WHERE repo = ? AND number = ? AND kind = 'pr'");
+  const texts = new Map(needText.length ? (await db.all(db.k.selectFrom(kx.refPairs(db, needText.map((r) => [r.repo, r.number] as const), "j"))
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "j.repo").onRef("i.number", "=", "j.number"))
+    .select(["i.repo", "i.number", "i.kind", "i.title", "i.body", "i.additions", "i.deletions", "i.changed_files", "i.author_association"]))).map((t) => [`${t.repo}#${t.number}`, t]) : []);
+  const mirrored = (repo: string, number: number) => db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("kind", "=", "pr"));
   // The fix PR we just opened counts as open until a sync mirrors it: the mirror's open-PR list doesn't have it yet.
   const ownPrUnmirrored = async (state: string | null, url: string | null): Promise<OpenPr | null> => {
     const m = state === "pr-opened" ? /\/([^/]+)\/pull\/(\d+)$/.exec(url ?? "") : null;
-    return m && !await mirrored.get(m[1]!, Number(m[2])) ? { number: Number(m[2]), closes: true } : null;
+    return m && !await mirrored(m[1]!, Number(m[2])) ? { number: Number(m[2]), closes: true } : null;
   };
 
   return await mapSeq(rows, async (r): Promise<ItemFacts> => {
@@ -239,11 +239,11 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     let referee: Referee | null = null;
     if (s && j && h && s.at >= j.at && s.at >= h.at) {
       const p = json<{ sure?: unknown; final?: unknown; opusFailures?: unknown; opusFailedAt?: unknown } | null>(s.probs, null);
-      if (typeof p?.sure === "boolean") referee = { label: s.type_label, sure: p.sure, reason: "", ...(p.final === true && { final: true }), ...(typeof p.opusFailures === "number" && { failures: p.opusFailures }), ...(typeof p.opusFailedAt === "string" && { failedAt: p.opusFailedAt }) };
+      if (typeof p?.sure === "boolean" && s.type_label !== null) referee = { label: s.type_label, sure: p.sure, reason: "", ...(p.final === true && { final: true }), ...(typeof p.opusFailures === "number" && { failures: p.opusFailures }), ...(typeof p.opusFailedAt === "string" && { failedAt: p.opusFailedAt }) };
     }
     const settled = settle(
-      j ? { label: j.type_label, flags: flagsOf(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
-      h ? { label: h.type_label, flags: flagsOf(h.flags) } : null,
+      j && j.type_label !== null ? { label: j.type_label, flags: flagsOf(j.flags), top: topOf(j.probs), nd: needsDecisionOf(j.probs), sec: securityOf(j.probs) } : null,
+      h && h.type_label !== null ? { label: h.type_label, flags: flagsOf(h.flags) } : null,
       referee,
     );
     // The classifier's input hash: stored on the row, recomputed when it was made under another scheme.

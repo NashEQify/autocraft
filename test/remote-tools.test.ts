@@ -49,8 +49,8 @@ describe("per-lease tools of remote calls", async () => {
     referenceOptions.embedder = fake;
     await setInferenceMode(db, "user-local", "test");
     const now = new Date().toISOString();
-    await db.prepare("INSERT INTO repos (name, owner, visibility) VALUES ('photocraft', 'storytold', 'public')").run();
-    await db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at) VALUES ('photocraft', 7, 'issue', 'OPEN', 'Wave filter crashes', 'b', 'alice', ?, ?)").run(now, now);
+    await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold", visibility: "public" }));
+    await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 7, kind: "issue", state: "OPEN", title: "Wave filter crashes", body: "b", author: "alice", created_at: now, updated_at: now }));
     writeSnapshot(dbFile);
     const ref = join(dir, "reference", "photocraft");
     mkdirSync(ref, { recursive: true });
@@ -134,7 +134,8 @@ describe("per-lease tools of remote calls", async () => {
       assert.ok(served <= PASSAGES_PER_LEASE);
     }
     assert.equal(served, PASSAGES_PER_LEASE);
-    const rows = await db.prepare("SELECT COUNT(*) AS n, MIN(user_login) AS login, MIN(repo) AS repo FROM remote_passages WHERE call_id = ?").get(leases.get("tools")!.id) as { n: number; login: string; repo: string };
+    const rows = (await db.get(db.k.selectFrom("remote_passages").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<string | null>("user_login").as("login"), eb.fn.min<string | null>("repo").as("repo")])
+      .where("call_id", "=", leases.get("tools")!.id)))!;
     assert.deepEqual({ ...rows }, { n: PASSAGES_PER_LEASE, login: "bob", repo: "photocraft" });
   });
 
@@ -142,7 +143,7 @@ describe("per-lease tools of remote calls", async () => {
     const rs = await Promise.all(Array.from({ length: 20 }, () => tool("race", "reference", "reference_search", { query: "layer", limit: 8 })));
     const served = rs.reduce((n, r) => n + (r.body.isError ? 0 : r.body.content[0]!.text.match(/^passage \d+:/gm)!.length), 0);
     assert.ok(served <= PASSAGES_PER_LEASE);
-    const rows = await db.prepare("SELECT COUNT(*) AS n FROM remote_passages WHERE call_id = ?").get(leases.get("race")!.id) as { n: number };
+    const rows = (await db.get(db.k.selectFrom("remote_passages").select((eb) => eb.fn.countAll<number>().as("n")).where("call_id", "=", leases.get("race")!.id)))!;
     assert.equal(Number(rows.n), served);
   });
 
@@ -152,7 +153,7 @@ describe("per-lease tools of remote calls", async () => {
     const waiting = awaitCall(db, id, { check: { run: async (input, runId) => { seen.push({ input, runId }); return { text: "clippy: 0 findings on the patch's lines, no compile errors" }; } } });
     const r = await tool("build", "build", "check", { patch: "diff", command: "clippy" });
     assert.deepEqual(r.body, { content: [{ type: "text", text: "clippy: 0 findings on the patch's lines, no compile errors" }] });
-    const runId = (await db.prepare("SELECT run_id FROM remote_calls WHERE id = ?").get(id) as { run_id: number }).run_id;
+    const runId = (await db.get(db.k.selectFrom("remote_calls").select("run_id").where("id", "=", id)))!.run_id!;
     assert.deepEqual(seen, [{ input: { patch: "diff", command: "clippy" }, runId }]);
     await submitCall(db, secret, { ok: false, error: "done", durationMs: 1 });
     assert.equal((await waiting).state, "failed");

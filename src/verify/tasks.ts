@@ -42,21 +42,22 @@ export async function queueTasks(db: Db, plan: Planned, c: { repo: string; numbe
  * none in the last 24 hours. Returns the task id, or null when nothing was queued.
  */
 export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
-  const same = await db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND head_sha = ? AND warm_role = 'build'").get(repo, mainSha);
+  const same = await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("head_sha", "=", mainSha).where("warm_role", "=", "build"));
   if (same) return null;
   const since = new Date(nowMs - WARM_EVERY_MS).toISOString();
-  if (await db.prepare("SELECT 1 FROM build_tasks WHERE repo = ? AND warm_role = 'build' AND queued_at > ?").get(repo, since)) return null;
+  if (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("warm_role", "=", "build").where("queued_at", ">", since))) return null;
   return await createTask(db, {
     step: "verify", repo, headSha: mainSha, baseSha: mainSha, requires: { ...REQUIRES, toolchains: [...REQUIRES.toolchains] }, priority: WARM_PRIORITY,
     plan: rustPlan({ cargoArgs: ["--workspace"], test: false }), warm: { key: warmKeyOf(repo), role: "build" },
   });
 }
 
-type CloneRow = { step: string; repo: string; number: number | null; head_sha: string; base_sha: string | null; requires: string; priority: number; plan: string; patch: string | null; warm_key: string | null; warm_role: "use" | "build" | null };
-
 /** Queues a new task with the same step, commits, requirements, plan, patch and warm role as task `id`. */
 export async function cloneTask(db: Db, id: number): Promise<number> {
-  const r = await db.prepare("SELECT * FROM build_tasks WHERE id = ?").get(id) as CloneRow | undefined;
+  const r = await db.get(db.k.selectFrom("build_tasks").select(["step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "patch", "warm_key", "warm_role"])
+    .$narrowType<{ warm_role: "use" | "build" | null }>().where("id", "=", id));
   if (!r) throw new Error(`no task ${id}`);
   return await createTask(db, {
     step: r.step, repo: r.repo, number: r.number, headSha: r.head_sha, baseSha: r.base_sha, requires: JSON.parse(r.requires), priority: r.priority,

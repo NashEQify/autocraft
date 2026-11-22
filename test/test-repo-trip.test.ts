@@ -6,10 +6,10 @@ import { connectDb } from "../src/db/open.ts";
 
 test("a test repo's post-merge defect trips its own merge breaker, not the pipeline's", async () => {
   const db = await connectDb(":memory:");
-  const merged = db.prepare("INSERT INTO merges (repo, number, head_oid, run_id, at, path, method, outcome) VALUES (?, 1, 'h', 'm', '2026-01-01T00:00:00Z', 'operator', 'squash', 'merged')");
-  await merged.run("sandbox");
-  await merged.run("real");
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('test_repo:sandbox', '1')").run();
+  const merged = async (repo: string) => await db.run(db.k.insertInto("merges").values({ repo, number: 1, head_oid: "h", run_id: "m", at: "2026-01-01T00:00:00Z", path: "operator", method: "squash", outcome: "merged" }));
+  await merged("sandbox");
+  await merged("real");
+  await db.run(db.k.insertInto("settings").values({ key: "test_repo:sandbox", value: "1" }));
   await mergeDefect(db, "sandbox", 1, 1, "2026-01-01T00:10:00Z");
   assert.deepEqual(Object.keys(await activeTrips(db)), ["merge:sandbox"]);
   await resumeStage(db, "merge:sandbox", "op");

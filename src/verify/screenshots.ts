@@ -11,12 +11,13 @@ import { absolute } from "../build/artifacts.ts";
 import { BuildError } from "../build/envs.ts";
 import { TERMINAL, getTask } from "../build/tasks.ts";
 import { holdMerge, ControlError } from "../merge/controls.ts";
-import { pilotSqlFor } from "../pilot.ts";
-import { backlogHeldSql } from "../dupes/held.ts";
+import { pilotExprFor } from "../pilot.ts";
+import { backlogHeldExpr } from "../dupes/held.ts";
+import * as kx from "../db/kx.ts";
 import { leaseItem } from "../runner/leases.ts";
 import { scrub } from "../runner/scrub.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
-import { CURRENT_HEAD_SQL, cancelOpen, oneLine, outcomeOf } from "./results.ts";
+import { currentHeadExpr, cancelOpen, oneLine, outcomeOf } from "./results.ts";
 import { featureOn } from "../build/features.ts";
 import { runModelStep } from "../agents/step.ts";
 import { VERIFY_COMPARE, VERIFY_SCREENSHOT } from "../agents/steps.ts";
@@ -53,10 +54,11 @@ const refOf = (c: { repo: string; number: number }): string => `${c.repo}#${c.nu
 /** The state of a screenshot run for a head: its row is the record that the head was handled. */
 export async function insertRun(db: Db, c: { repo: string; number: number; head_oid: string }, r: { state: string; reason: string | null; baseSha?: string | null; plan?: unknown; headTask?: number | null; baseTask?: number | null }): Promise<void> {
   const at = nowIso();
-  await db.prepare(`INSERT OR IGNORE INTO screenshot_runs (repo, number, head_sha, base_sha, state, reason, plan, head_task_id, base_task_id, created_at, finished_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(c.repo, c.number, c.head_oid, r.baseSha ?? null, r.state, r.reason, r.plan === undefined ? null : JSON.stringify(r.plan), r.headTask ?? null, r.baseTask ?? null, at,
-      r.state === "planned" ? null : at);
+  await db.run(db.k.insertInto("screenshot_runs").values({
+    repo: c.repo, number: c.number, head_sha: c.head_oid, base_sha: r.baseSha ?? null, state: r.state, reason: r.reason,
+    plan: r.plan === undefined ? null : JSON.stringify(r.plan), head_task_id: r.headTask ?? null, base_task_id: r.baseTask ?? null, created_at: at,
+    finished_at: r.state === "planned" ? null : at,
+  }).onConflict((oc) => oc.doNothing()));
 }
 
 async function stage(db: Db, c: Cand, name: "screenshot-planned" | "screenshot-skipped", note: string, log: (line: string) => void): Promise<void> {
@@ -74,7 +76,8 @@ export async function maybeScreenshot(db: Db, c: Cand, deps: Env, log: (line: st
   if (!await featureOn(db, "screenshots", c.repo)) return false;
   const config = await getConfig(db, c.repo);
   if (!config) return false;
-  if (await db.prepare("SELECT 1 FROM screenshot_runs WHERE repo = ? AND number = ? AND head_sha = ?").get(c.repo, c.number, c.head_oid)) return false;
+  if (await db.get(db.k.selectFrom("screenshot_runs").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", c.repo).where("number", "=", c.number).where("head_sha", "=", c.head_oid))) return false;
   const ref = refOf(c);
   const d = await cachedDiff(db, c.repo, c.number, c.head_oid, deps.fetchDiff);
   if (!d.ok) { log(`  ${ref}: screenshots: no diff: ${d.error}`); return false; }
@@ -131,7 +134,6 @@ type Run = {
   head_task_id: number | null; base_task_id: number | null; item_state: string | null; item_head: string | null;
   title: string | null; body: string | null;
 };
-const TERMINAL_SQL = TERMINAL.map((x) => `'${x}'`).join(", ");
 const SHOT_RE = /^s\d+\.png$/;
 export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 export const MAX_IMAGE_SIDE = 8192;
@@ -154,17 +156,26 @@ async function validImageHash(file: string): Promise<string | null> {
 
 /** Whether a run in flight has work: its tasks ended or started, its PR moved or closed, or the repo's switch went off. */
 export async function screenshotsDue(db: Db): Promise<boolean> {
-  if (await db.prepare(`SELECT 1 FROM screenshot_runs r
-    LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number
-    LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
-    LEFT JOIN build_tasks h ON h.id = r.head_task_id
-    LEFT JOIN build_tasks b ON b.id = r.base_task_id
-    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")} AND (
-      i.state IS NOT 'OPEN' OR (${CURRENT_HEAD_SQL}) IS NOT r.head_sha
-      OR (h.state IN (${TERMINAL_SQL}) AND (b.id IS NULL OR b.state IN (${TERMINAL_SQL})))
-      OR (r.state = 'planned' AND (h.state IN ('claimed', 'running') OR b.state IN ('claimed', 'running'))))
-    LIMIT 1`).get()) return true;
-  const repos = await db.prepare(`SELECT DISTINCT r.repo FROM screenshot_runs r WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")}`).all() as { repo: string }[];
+  if (await db.get(db.k.selectFrom("screenshot_runs as r")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "r.repo").onRef("c.number", "=", "r.number"))
+    .leftJoin("build_tasks as h", "h.id", "r.head_task_id")
+    .leftJoin("build_tasks as b", "b.id", "r.base_task_id")
+    .select((eb) => eb.lit(1).as("one"))
+    .where("r.state", "in", ["planned", "running"])
+    .where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))
+    .where((eb) => eb.not(backlogHeldExpr(db, eb, "r")))
+    .where((eb) => eb.or([
+      eb("i.state", "is distinct from", "OPEN"),
+      eb(currentHeadExpr(eb), "is distinct from", eb.ref("r.head_sha")),
+      eb.and([eb("h.state", "in", TERMINAL), eb.or([eb("b.id", "is", null), eb("b.state", "in", TERMINAL)])]),
+      eb.and([eb("r.state", "=", "planned"), eb.or([eb("h.state", "in", ["claimed", "running"]), eb("b.state", "in", ["claimed", "running"])])]),
+    ]))
+    .limit(1))) return true;
+  const repos = await db.all(db.k.selectFrom("screenshot_runs as r").select("r.repo").distinct()
+    .where("r.state", "in", ["planned", "running"])
+    .where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))
+    .where((eb) => eb.not(backlogHeldExpr(db, eb, "r"))));
   return await someSeq(repos, async (r) => !await featureOn(db, "screenshots", r.repo));
 }
 
@@ -183,10 +194,14 @@ async function compareWithModel(db: Db, input: ScreenshotCompareInput, ctx: { re
  * regression holds the merge, and only while the head is still the run's head; any error holds nothing.
  */
 export async function collectScreenshots(db: Db, deps: Pick<CollectDeps, "screenshots">, log: (line: string) => void, runId: string, stopping?: () => Promise<boolean>): Promise<number> {
-  const rows = await db.prepare(`SELECT r.*, i.state AS item_state, ${CURRENT_HEAD_SQL} AS item_head, i.title AS title, i.body AS body FROM screenshot_runs r
-    LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number
-    LEFT JOIN pr_checks c ON c.repo = r.repo AND c.number = r.number
-    WHERE r.state IN ('planned', 'running') AND ${pilotSqlFor("r.repo", "r.number")} AND NOT ${backlogHeldSql("r")} ORDER BY r.created_at, r.number`).all() as Run[];
+  const rows: Run[] = await db.all(db.k.selectFrom("screenshot_runs as r")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "r.repo").onRef("c.number", "=", "r.number"))
+    .select((eb) => [...kx.cols("screenshot_runs", "r"), "i.state as item_state", currentHeadExpr(eb).as("item_head"), "i.title as title", "i.body as body"])
+    .where("r.state", "in", ["planned", "running"])
+    .where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))
+    .where((eb) => eb.not(backlogHeldExpr(db, eb, "r")))
+    .orderBy("r.created_at").orderBy("r.number"));
   let changed = 0;
   for (const r of rows) {
     if (await stopping?.()) break;
@@ -201,9 +216,9 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
   const ref = `${r.repo}#${r.number}`, sha7 = r.head_sha.slice(0, 7);
   const at = (): string => new Date().toISOString();
   const finish = async (state: string, f: { reason?: string | null; verdict?: string; clear?: boolean; comparison?: string; model?: string } = {}): Promise<boolean> =>
-    Number((await db.prepare(`UPDATE screenshot_runs SET state = ?, reason = COALESCE(?, reason), verdict = ?, clear = ?, comparison = ?, model = ?, finished_at = ?
-      WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('planned', 'running')`)
-      .run(state, f.reason ?? null, f.verdict ?? null, f.clear === undefined ? null : f.clear ? 1 : 0, f.comparison ?? null, f.model ?? null, at(), r.repo, r.number, r.head_sha)).changes) > 0;
+    Number((await db.run(db.k.updateTable("screenshot_runs")
+      .set({ state, ...(f.reason == null ? {} : { reason: f.reason }), verdict: f.verdict ?? null, clear: f.clear === undefined ? null : f.clear ? 1 : 0, comparison: f.comparison ?? null, model: f.model ?? null, finished_at: at() })
+      .where("repo", "=", r.repo).where("number", "=", r.number).where("head_sha", "=", r.head_sha).where("state", "in", ["planned", "running"]))).changes) > 0;
   // The only stage row a screenshot run writes is `hold`; its other outcomes are read from screenshot_runs.
   const row = async (stageName: string, note: string): Promise<void> => { await jobItem(db, r.repo, r.number, `${stageName}: ${note} at ${sha7}`, log); };
   const ids = [r.head_task_id, r.base_task_id];
@@ -222,7 +237,8 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
   if (!head || !base) { const w = "the build task is gone"; if (await finish("error", { reason: w })) { await row("screenshot-error", w); return true; } return false; }
   if (![head, base].every((t) => TERMINAL.includes(t.state))) {
     if (r.state === "planned" && [head, base].some((t) => t.state === "claimed" || t.state === "running")) {
-      await db.prepare("UPDATE screenshot_runs SET state = 'running' WHERE repo = ? AND number = ? AND head_sha = ? AND state = 'planned'").run(r.repo, r.number, r.head_sha);
+      await db.run(db.k.updateTable("screenshot_runs").set({ state: "running" })
+        .where("repo", "=", r.repo).where("number", "=", r.number).where("head_sha", "=", r.head_sha).where("state", "=", "planned"));
       return true;
     }
     return false;
@@ -237,11 +253,13 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
   // A lost task or a build-environment error says nothing about the change: the pair is queued again once, as Verify does.
   const outcomes = [["head", head, outcomeOf(head)], ["base", base, outcomeOf(base)]] as const;
   if (outcomes.some(([, t, o]) => o.kind === "error" && t.state !== "cancelled")) {
-    const tries = (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE step = ? AND repo = ? AND number = ? AND head_sha = ? AND warm_role = 'use'").get(SCREENSHOT_STEP, r.repo, r.number, r.head_sha) as { n: number }).n;
+    const tries = (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n"))
+      .where("step", "=", SCREENSHOT_STEP).where("repo", "=", r.repo).where("number", "=", r.number).where("head_sha", "=", r.head_sha).where("warm_role", "=", "use")))!.n;
     if (tries <= 1) {
       try {
         const [h, b] = await mapSeq([head.id, base.id], async (id) => await cloneTask(db, id)) as [number, number];
-        await db.prepare("UPDATE screenshot_runs SET head_task_id = ?, base_task_id = ?, state = 'planned' WHERE repo = ? AND number = ? AND head_sha = ?").run(h, b, r.repo, r.number, r.head_sha);
+        await db.run(db.k.updateTable("screenshot_runs").set({ head_task_id: h, base_task_id: b, state: "planned" })
+          .where("repo", "=", r.repo).where("number", "=", r.number).where("head_sha", "=", r.head_sha));
         await jobItem(db, r.repo, r.number, "screenshot render failed in the build environment; queued the tasks again", log);
         return true;
       } catch (e) { if (!(e instanceof BuildError)) throw e; }
@@ -252,7 +270,7 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
     if (o.kind === "error") return await fail(`${role}: ${o.reason}`);
   }
 
-  const shotsOf = async (id: number): Promise<Map<string, string>> => new Map((await db.prepare("SELECT name, file FROM build_artifacts WHERE task_id = ? ORDER BY name").all(id) as { name: string; file: string }[])
+  const shotsOf = async (id: number): Promise<Map<string, string>> => new Map((await db.all(db.k.selectFrom("build_artifacts").select(["name", "file"]).where("task_id", "=", id).orderBy("name")))
     .filter((a) => SHOT_RE.test(a.name)).map((a) => [a.name, a.file]));
   const before = await shotsOf(base.id), after = await shotsOf(head.id);
   const names = [...after.keys()].sort((a, b) => Number(a.slice(1, -4)) - Number(b.slice(1, -4)));
@@ -276,7 +294,8 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
   }
 
   const script: ShotStep[] = (() => { try { return (JSON.parse(r.plan ?? "{}") as { steps?: ShotStep[] }).steps ?? []; } catch { return []; } })();
-  const rev = await db.prepare("SELECT verdict, reason FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(r.repo, r.number, r.head_sha) as { verdict: string; reason: string | null } | undefined;
+  const rev = await db.get(db.k.selectFrom("opus_reviews").select(["verdict", "reason"]).$narrowType<{ verdict: string }>()
+    .where("repo", "=", r.repo).where("number", "=", r.number).where("head_oid", "=", r.head_sha).where("verdict", "is not", null));
   const input: ScreenshotCompareInput = {
     ref, title: r.title ?? "", body: r.body ?? "", script, review: rev ? { verdict: rev.verdict, reason: rev.reason ?? "" } : null,
     shots: names.map((name) => ({ name, before: `before/${name}`, after: `after/${name}` })),
@@ -299,12 +318,14 @@ async function collectOne(db: Db, r: Run, deps: Pick<CollectDeps, "screenshots">
 
   if (verdict === "regression" && clear) {
     // The head may have moved, or the switch gone off, while the model looked: hold only the head that was compared, and only while the feature is on.
-    const now = await db.prepare(`SELECT i.state AS s, ${CURRENT_HEAD_SQL} AS h FROM items i LEFT JOIN pr_checks c ON c.repo = i.repo AND c.number = i.number WHERE i.repo = ? AND i.number = ?`).get(r.repo, r.number) as { s: string; h: string | null } | undefined;
+    const now = await db.get(db.k.selectFrom("items as i").leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "i.repo").onRef("c.number", "=", "i.number"))
+      .select((eb) => ["i.state as s", currentHeadExpr(eb).as("h")]).where("i.repo", "=", r.repo).where("i.number", "=", r.number));
     if (await featureOn(db, "screenshots", r.repo) && now?.s === "OPEN" && now.h === r.head_sha) {
       try {
         if (await holdMerge(db, "screenshots", r.repo, r.number, { head: r.head_sha, summary })) {
-          await db.prepare("UPDATE screenshot_runs SET held = 1 WHERE repo = ? AND number = ? AND head_sha = ?").run(r.repo, r.number, r.head_sha);
-          await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'hold', ?, 'verify', ?)").run(r.repo, r.number, at(), `screenshots show a regression: ${summary}`.slice(0, 300));
+          await db.run(db.k.updateTable("screenshot_runs").set({ held: 1 })
+            .where("repo", "=", r.repo).where("number", "=", r.number).where("head_sha", "=", r.head_sha));
+          await db.run(db.k.insertInto("main.stages").values({ repo: r.repo, number: r.number, stage: "hold", at: at(), actor: "verify", note: `screenshots show a regression: ${summary}`.slice(0, 300) }));
           await row("screenshot-regression", summary);
           return true;
         }

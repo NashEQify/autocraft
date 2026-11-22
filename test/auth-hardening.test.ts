@@ -77,7 +77,7 @@ describe("dev auth guard", () => {
 describe("GitHub id binding", () => {
   test("the first sign-in stores the id; a different id is refused and audited", async () => {
     assert.equal((await signIn("alice")).status, 303);
-    const stored = (await db.prepare("SELECT github_id FROM access WHERE login = 'alice'").get() as { github_id: number }).github_id;
+    const stored = (await db.get(db.k.selectFrom("access").select("github_id").where("login", "=", "alice")))!.github_id;
     assert.equal(stored, provider.ids.get("alice"));
     assert.equal((await signIn("alice")).status, 303);
     provider.ids.set("alice", stored + 1);
@@ -101,10 +101,10 @@ describe("session lifetime", () => {
     const viewer = await sid("alice"), op = await sid("boss");
     assert.ok(await loadSession(db, viewer));
     assert.ok(await loadSession(db, op));
-    await db.prepare("UPDATE sessions SET created_at = ?").run(ago(OPERATOR_SESSION_MAX + 1000));
+    await db.run(db.k.updateTable("sessions").set({ created_at: ago(OPERATOR_SESSION_MAX + 1000) }));
     assert.ok(await loadSession(db, viewer), "a viewer's session outlives the operator limit");
     assert.equal(await loadSession(db, op), null);
-    await db.prepare("UPDATE sessions SET created_at = ?").run(ago(SESSION_MAX + 1000));
+    await db.run(db.k.updateTable("sessions").set({ created_at: ago(SESSION_MAX + 1000) }));
     assert.equal(await loadSession(db, viewer), null);
   });
 });

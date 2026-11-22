@@ -19,6 +19,7 @@ import { ImageProxy } from "../src/dash/server/images.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { like } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "visibility-test-"));
@@ -42,16 +43,19 @@ const OPTS = [{ key: "a", label: "A" }, { key: "b", label: "B" }];
 
 before(async () => {
   const now = new Date().toISOString();
-  await db.script("DELETE FROM tracked_repos; INSERT INTO tracked_repos (name, pipeline) VALUES ('open-app', 1), ('vault', 1)");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('open-app', 'public'), ('vault', 'internal')");
-  const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, body, head_oid, author, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)");
-  const review = db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, verdict, reason, sure, mode) VALUES (?, ?, ?, 'r', ?, 'take', 'ok', 1, 'full')");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "open-app", pipeline: 1 }, { name: "vault", pipeline: 1 }]));
+  await db.run(db.k.insertInto("repos").values([{ name: "open-app", visibility: "public" }, { name: "vault", visibility: "internal" }]));
+  const item = (repo: string, number: number, kind: string, state: string, title: string, body: string, head_oid: string | null, author: string, created_at: string, updated_at: string) =>
+    db.run(db.k.insertInto("items").values({ repo, number, kind, state, title, body, head_oid, author, created_at, updated_at }));
+  const review = (repo: string, number: number, head_oid: string, at: string) =>
+    db.run(db.k.insertInto("opus_reviews").values({ repo, number, head_oid, run_id: "r", at, verdict: "take", reason: "ok", sure: 1, mode: "full" }));
   for (const repo of ["open-app", "vault"]) {
-    await item.run(repo, 1, "pr", "OPEN", `Wave filter in ${repo}`, "body", `h-${repo}`, "alice", now, now);
-    await review.run(repo, 1, `h-${repo}`, now);
+    await item(repo, 1, "pr", "OPEN", `Wave filter in ${repo}`, "body", `h-${repo}`, "alice", now, now);
+    await review(repo, 1, `h-${repo}`, now);
   }
-  await db.prepare("UPDATE items SET body = ? WHERE repo = 'vault'").run(`![a](${VAULT_IMG}) ![b](${BOTH_IMG})`);
-  await db.prepare("UPDATE items SET body = ? WHERE repo = 'open-app'").run(`![b](${BOTH_IMG})`);
+  await db.run(db.k.updateTable("items").set({ body: `![a](${VAULT_IMG}) ![b](${BOTH_IMG})` }).where("repo", "=", "vault"));
+  await db.run(db.k.updateTable("items").set({ body: `![b](${BOTH_IMG})` }).where("repo", "=", "open-app"));
   await ask(db, ["open-app", "vault"].map((repo) => ({
     id: `${repo}#1:scope`, kind: "scope", repo, number: 1, question: "A or B?", options: OPTS, recommended: "a", summary: "s",
   })));
@@ -142,9 +146,8 @@ describe("repo visibility", () => {
   });
 
   test("the Security list and the finding page are staff only", async () => {
-    await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (900, 'open-app', 'done', 'boss', '2026-01-01T00:00:00Z')").run();
-    await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, created_at, updated_at)
-      VALUES ('open-app', 1, 900, 'a', 't', 'high', 0, 'new', '[]', 'r', 'i', 'fp1', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`).run();
+    await db.run(db.k.insertInto("security_scans").values({ id: 900, repo: "open-app", state: "done", started_by: "boss", started_at: "2026-01-01T00:00:00Z" }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 1, scan_id: 900, area: "a", title: "t", severity: "high", urgent: 0, state: "new", refs: "[]", reach: "r", impact: "i", fingerprint: "fp1", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
     for (const login of ["reader", "outsider"]) {
       const c = await signedIn(login);
       assert.equal(await c.status("/api/security/findings"), 404, login);
@@ -171,7 +174,7 @@ describe("repo visibility", () => {
 
 
   test("operators and maintainers see prompts and answer notes; viewers do not; access stays operator-only", async () => {
-    await db.prepare("UPDATE main.decisions SET answer = 'a', answer_note = 'private note', answered_by = 'boss', answered_at = ? WHERE id = 'vault#1:scope'").run(new Date().toISOString());
+    await db.run(db.k.updateTable("main.decisions").set({ answer: "a", answer_note: "private note", answered_by: "boss", answered_at: new Date().toISOString() }).where("id", "=", "vault#1:scope"));
     const note = async (login: string) => (await (await signedIn(login)).get<DecisionOne>("/api/decisions/vault%231%3Ascope")).answerNote;
     for (const login of ["reader", "maint", "boss"]) {
       const c = await signedIn(login);
@@ -206,13 +209,13 @@ describe("repo visibility", () => {
     const reader = await signedIn("reader");
     for (const path of ["/api/repos/all", "/api/audit"]) assert.equal(await reader.status(path), 403, path);
     await db.prepare("DELETE FROM audit WHERE target IN ('someone', 'vault', 'account:a') AND login = 'boss' AND action IN ('access-add', 'repo-track', 'account-change')").run();
-    await db.prepare("UPDATE main.decisions SET answer = NULL, answer_note = NULL, answered_by = NULL, answered_at = NULL WHERE id = 'vault#1:scope'").run();
+    await db.run(db.k.updateTable("main.decisions").set({ answer: null, answer_note: null, answered_by: null, answered_at: null }).where("id", "=", "vault#1:scope"));
   });
 
   test("the item page gives viewers verdicts without review text, and answers since with unchanged", async () => {
     const now = new Date().toISOString();
-    await db.prepare(`INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, summary, risks, fixes, claims, trigger)
-      VALUES ('open-app', 1, 'h-open-app', ?, 'opus', 'full', 'take-fix', 1, 'quotes the patch', 'summary of the patch', '["a risk"]', '["fix one"]', '[{"claim":"it leaks","evidence":"src/a.ts:4"}]', 'operator')`).run(now);
+    await db.run(db.k.insertInto("opus_review_history").values({ repo: "open-app", number: 1, head_oid: "h-open-app", at: now, model: "opus", mode: "full", verdict: "take-fix", sure: 1, reason: "quotes the patch", summary: "summary of the patch",
+      risks: '["a risk"]', fixes: '["fix one"]', claims: '[{"claim":"it leaks","evidence":"src/a.ts:4"}]', trigger: "operator" }));
     const page = async (login: string) => (await signedIn(login)).get<ItemPageData>("/api/items/open-app/1/page");
     for (const login of ["reader", "maint", "boss"]) {
       const latest = (await page(login)).reviews.latest!;
@@ -227,28 +230,28 @@ describe("repo visibility", () => {
     const c = await signedIn("reader");
     const first = await page("reader");
     assert.deepEqual(await c.get(`/api/items/open-app/1/page?since=${first.stamp}`), { unchanged: true, stamp: first.stamp });
-    await db.prepare("DELETE FROM opus_review_history WHERE repo = 'open-app'").run();
+    await db.run(db.k.deleteFrom("opus_review_history").where("repo", "=", "open-app"));
   });
 
   test("viewers get build tasks, jobs and patch reviews without log and patch bodies", async () => {
     const now = new Date().toISOString();
     const logFile = join(dir, "job.log");
     writeFileSync(logFile, "job log line\n");
-    const job = await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, log_path, repo) VALUES ('classify', '{}', 'cli', ?, 'done', ?, 'open-app')").run(now, logFile);
-    const task = await db.prepare("INSERT INTO build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at, patch, log_bytes) VALUES ('verify', 'open-app', 1, 'h', '{}', '[]', 'done', ?, 'diff --git a/x b/x', 9)").run(now);
-    await db.prepare("INSERT INTO build_task_logs (task_id, seq, step, chunk) VALUES (?, 0, 'test', 'task log line')").run(task.lastInsertRowid);
+    const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", log_path: logFile, repo: "open-app" }).returning("id")))!.id;
+    const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo: "open-app", number: 1, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: now, patch: "diff --git a/x b/x", log_bytes: 9 }).returning("id")))!.id;
+    await db.run(db.k.insertInto("build_task_logs").values({ task_id: task, seq: 0, step: "test", chunk: "task log line" }));
     await db.prepare("INSERT INTO patch_checks (kind, repo, number, subject, patch_hash, verdict, reasons, problems, model, created_at) VALUES ('fixup', 'open-app', 1, 's', 'p', 'reject', 'the patch drops the guard', '[\"drops the guard\"]', 'opus', ?)").run(now);
     for (const login of ["reader", "maint"]) {
       const c = await signedIn(login);
       const staff = login === "maint";
-      const t = await c.get<BuildTaskDetail>(`/api/tasks/${task.lastInsertRowid}`);
+      const t = await c.get<BuildTaskDetail>(`/api/tasks/${task}`);
       assert.equal(t.logTail, staff ? "task log line" : null, login);
       assert.equal(t.patch, staff ? "diff --git a/x b/x" : null, login);
-      assert.equal((await c.get<JobDetail>(`/api/pipeline/jobs/${job.lastInsertRowid}`)).log, staff ? "job log line\n" : null, login);
+      assert.equal((await c.get<JobDetail>(`/api/pipeline/jobs/${job}`)).log, staff ? "job log line\n" : null, login);
       const [check] = (await c.get<Item>("/api/items/open-app/1")).patchChecks ?? [];
       assert.equal(check?.reasons, staff ? "the patch drops the guard" : "", login);
       assert.deepEqual(check?.problems, staff ? ["drops the guard"] : [], login);
-      assert.equal(await c.status(`/api/tasks/${task.lastInsertRowid}/artifacts/none`), staff ? 404 : 403, login);
+      assert.equal(await c.status(`/api/tasks/${task}/artifacts/none`), staff ? 404 : 403, login);
     }
     await db.prepare("DELETE FROM patch_checks").run();
   });
@@ -287,13 +290,13 @@ describe("repo visibility", () => {
   test("rows of an untracked repo and of a private repo the user cannot read are operator-only", async () => {
     const now = new Date().toISOString();
     const rows = async (repo: string) => {
-      const job = await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, repo) VALUES ('classify', '{}', 'cli', ?, 'done', ?)").run(now, repo);
-      const task = await db.prepare("INSERT INTO build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at, patch, log_bytes) VALUES ('verify', ?, 7, 'h', '{}', '[]', 'done', ?, 'diff', 0)").run(repo, now);
+      const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", repo }).returning("id")))!.id;
+      const task = (await db.get(db.k.insertInto("build_tasks").values({ step: "verify", repo, number: 7, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: now, patch: "diff", log_bytes: 0 }).returning("id")))!.id;
       const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo, number: 7 }], prompt: `prompt for ${repo}` });
       await finishRun(db, run, { state: "done", output: `output for ${repo}` });
-      return { job: Number(job.lastInsertRowid), task: Number(task.lastInsertRowid), run };
+      return { job, task, run };
     };
-    await db.prepare("INSERT OR IGNORE INTO ever_tracked_repos (name) VALUES ('gone-app')").run();
+    await db.run(db.k.insertInto("ever_tracked_repos").values({ name: "gone-app" }).onConflict((oc) => oc.doNothing()));
     const gone = await rows("gone-app"), vault = await rows("vault");
     const paths = (r: { job: number; task: number; run: number }) => [`/api/pipeline/jobs/${r.job}`, `/api/tasks/${r.task}`, `/api/agents/${r.run}`];
     const boss = await signedIn("boss");
@@ -314,9 +317,9 @@ describe("repo visibility", () => {
 
   test("viewers read only the item page's fields of a trace event and no reasons in its list; staff read all", async () => {
     const now = new Date().toISOString();
-    await db.prepare(`INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, claims)
-      VALUES ('open-app', 1, 'h-open-app', ?, 'opus', 'full', 'take-fix', 1, 'secret reason', '["secret risk"]', '["secret fix"]', '[{"claim":"secret claim","evidence":"a.ts:1"}]')`).run(now);
-    await db.prepare("INSERT INTO fixups (repo, number, from_head, state, reason, files, attempt, created_at) VALUES ('open-app', 1, 'h-open-app', 'failed', 'secret fixup reason', '[\"a.ts\"]', 1, ?)").run(now);
+    await db.run(db.k.insertInto("opus_review_history").values({ repo: "open-app", number: 1, head_oid: "h-open-app", at: now, model: "opus", mode: "full", verdict: "take-fix", sure: 1, reason: "secret reason",
+      risks: '["secret risk"]', fixes: '["secret fix"]', claims: '[{"claim":"secret claim","evidence":"a.ts:1"}]' }));
+    await db.run(db.k.insertInto("fixups").values({ repo: "open-app", number: 1, from_head: "h-open-app", state: "failed", reason: "secret fixup reason", files: '["a.ts"]', attempt: 1, created_at: now }));
     type Trace = { events: { id: string; kind: string; summary: string }[] };
     type Detail = { fields: Record<string, unknown> };
     for (const login of ["reader", "maint"]) {
@@ -331,16 +334,15 @@ describe("repo visibility", () => {
       assert.equal(fix.summary.includes("secret fixup reason"), staff, login);
       assert.equal("reason" in (await c.get<Detail>(`/api/items/open-app/1/trace/event?id=${encodeURIComponent(fix.id)}`)).fields, staff, login);
     }
-    await db.prepare("DELETE FROM opus_review_history WHERE repo = 'open-app'").run();
-    await db.prepare("DELETE FROM fixups WHERE repo = 'open-app'").run();
+    await db.run(db.k.deleteFrom("opus_review_history").where("repo", "=", "open-app"));
+    await db.run(db.k.deleteFrom("fixups").where("repo", "=", "open-app"));
   });
 
   test("a quiet pull request's conversation has no model text for viewers; an ordinary item's is unchanged", async () => {
     const now = new Date().toISOString();
-    await db.prepare("INSERT INTO main.items (repo, number, kind, state, title, body, head_oid, author, created_at, updated_at) VALUES ('open-app', 2, 'pr', 'OPEN', 'Fix', 'b', 'h2', 'autocraft', ?, ?)").run(now, now);
-    await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (901, 'open-app', 'done', 'boss', ?)").run(now);
-    await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_pr, created_at, updated_at)
-      VALUES ('open-app', 901, 901, 'a', 't', 'high', 0, 'landing', '[]', 'r', 'i', 'fp901', 2, ?, ?)`).run(now, now);
+    await db.run(db.k.insertInto("main.items").values({ repo: "open-app", number: 2, kind: "pr", state: "OPEN", title: "Fix", body: "b", head_oid: "h2", author: "autocraft", created_at: now, updated_at: now }));
+    await db.run(db.k.insertInto("security_scans").values({ id: 901, repo: "open-app", state: "done", started_by: "boss", started_at: now }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 901, scan_id: 901, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp901", fix_pr: 2, created_at: now, updated_at: now }));
     for (const n of [1, 2]) {
       await db.prepare("INSERT INTO main.conversations (repo, number, item_block, item_sig, created_at, created_by) VALUES ('open-app', ?, 'b', 's', ?, 'boss')").run(n, now);
       await db.prepare("INSERT INTO main.conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('open-app', ?, 'opus', 'opus', ?, 'the Opus analysis', 'blk', NULL, 1)").run(n, now);
@@ -353,14 +355,15 @@ describe("repo visibility", () => {
     assert.equal(quiet.turns[0]!.body, "");
     assert.equal(quiet.choices, null);
     assert.equal((await maint.get<Conv>("/api/conversations/open-app/2")).turns[0]!.body, "the Opus analysis");
-    await db.script("DELETE FROM main.conversation_turns; DELETE FROM main.conversations; DELETE FROM security_findings WHERE number = 901");
+    await db.script("DELETE FROM main.conversation_turns; DELETE FROM main.conversations");
+    await db.run(db.k.deleteFrom("security_findings").where("number", "=", 901));
   });
 
   test("an ever-tracked repo stays hidden when only its work rows remain; hidden names match whole names in free text", async () => {
-    await db.prepare("INSERT OR IGNORE INTO ever_tracked_repos (name) VALUES ('ghost-app')").run();
+    await db.run(db.k.insertInto("ever_tracked_repos").values({ name: "ghost-app" }).onConflict((oc) => oc.doNothing()));
     const run = await insertRun(db, { jobId: null, step: "classify", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "m", accountId: null, items: [{ repo: "ghost-app", number: 3 }], prompt: "p" });
     await finishRun(db, run, { state: "done", output: "o" });
-    await db.prepare("DELETE FROM main.repos WHERE name = 'ghost-app'").run();
+    await db.run(db.k.deleteFrom("main.repos").where("name", "=", "ghost-app"));
     assert.equal(await (await signedIn("boss")).status(`/api/agents/${run}`), 200);
     assert.equal(await (await signedIn("reader")).status(`/api/agents/${run}`), 404);
     const hidden = ["vault", "(security):vault"];
@@ -372,15 +375,14 @@ describe("repo visibility", () => {
 
   test("stage notes, job outcomes and the activity feed carry no reason text for viewers, on ordinary and quiet items", async () => {
     const now = new Date().toISOString();
-    await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (902, 'open-app', 'done', 'boss', ?)").run(now);
-    await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_pr, created_at, updated_at)
-      VALUES ('open-app', 902, 902, 'a', 't', 'high', 0, 'landing', '[]', 'r', 'i', 'fp902', 2, ?, ?)`).run(now, now);
-    const job = await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, repo) VALUES ('classify', '{}', 'cli', ?, 'done', 'open-app')").run(now);
+    await db.run(db.k.insertInto("security_scans").values({ id: 902, repo: "open-app", state: "done", started_by: "boss", started_at: now }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "open-app", number: 902, scan_id: 902, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp902", fix_pr: 2, created_at: now, updated_at: now }));
+    const job = (await db.get(db.k.insertInto("jobs").values({ step: "classify", params: "{}", requested_by: "cli", requested_at: now, state: "done", repo: "open-app" }).returning("id")))!;
     for (const n of [1, 2]) {
-      await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES ('open-app', ?, 'hold', ?, 'review', 'SECRET stage note')").run(n, now);
-      await db.prepare("INSERT INTO main.job_items (job_id, repo, number, outcome, at) VALUES (?, 'open-app', ?, 'failed: SECRET job reason', ?)").run(job.lastInsertRowid, n, now);
-      await db.prepare("INSERT INTO main.fixups (repo, number, from_head, state, reason, files, attempt, created_at) VALUES ('open-app', ?, 'h', 'failed', 'SECRET fixup reason', '[]', 1, ?)").run(n, now);
-      await db.prepare("INSERT INTO main.decisions (id, kind, repo, number, question, options, asked_at, asked_by, answer, answered_at, answer_note) VALUES (?, 'scope', 'open-app', ?, 'q', '[]', ?, 'decide', 'withdrawn', ?, 'SECRET withdrawal')").run(`wd${n}`, n, now, now);
+      await db.run(db.k.insertInto("main.stages").values({ repo: "open-app", number: n, stage: "hold", at: now, actor: "review", note: "SECRET stage note" }));
+      await db.run(db.k.insertInto("main.job_items").values({ job_id: job.id, repo: "open-app", number: n, outcome: "failed: SECRET job reason", at: now }));
+      await db.run(db.k.insertInto("main.fixups").values({ repo: "open-app", number: n, from_head: "h", state: "failed", reason: "SECRET fixup reason", files: "[]", attempt: 1, created_at: now }));
+      await db.run(db.k.insertInto("main.decisions").values({ id: `wd${n}`, kind: "scope", repo: "open-app", number: n, question: "q", options: "[]", asked_at: now, asked_by: "decide", answer: "withdrawn", answered_at: now, answer_note: "SECRET withdrawal" }));
     }
     for (const login of ["reader", "maint"]) {
       const c = await signedIn(login);
@@ -388,7 +390,7 @@ describe("repo visibility", () => {
       for (const n of [1, 2]) {
         const stages = (await c.get<Item>(`/api/items/open-app/${n}`)).stages;
         assert.deepEqual(stages.map((x) => x.note === "SECRET stage note"), [staff], `${login} ${n} stage note`);
-        const outcome = (await c.get<JobDetail>(`/api/pipeline/jobs/${job.lastInsertRowid}`)).items.find((i) => i.number === n)!.outcome;
+        const outcome = (await c.get<JobDetail>(`/api/pipeline/jobs/${job.id}`)).items.find((i) => i.number === n)!.outcome;
         assert.equal(outcome, staff ? "failed: SECRET job reason" : n === 2 ? null : "failed", `${login} ${n} job outcome`);
       }
       const feed = JSON.stringify(await c.get<unknown>("/api/activity?limit=500&kinds=github,plan,job,model-call,check,review,decision,write,step,conversation"));
@@ -398,13 +400,17 @@ describe("repo visibility", () => {
         assert.equal(trace.includes(text), staff, `${login} trace ${text}`);
       }
     }
-    await db.script("DELETE FROM main.stages; DELETE FROM main.job_items; DELETE FROM main.fixups; DELETE FROM main.decisions WHERE id LIKE 'wd%'; DELETE FROM main.security_findings WHERE number = 902");
+    await db.run(db.k.deleteFrom("main.stages"));
+    await db.run(db.k.deleteFrom("main.job_items"));
+    await db.run(db.k.deleteFrom("main.fixups"));
+    await db.run(db.k.deleteFrom("main.decisions").where((eb) => like(db, "id", eb.val("wd%"))));
+    await db.run(db.k.deleteFrom("main.security_findings").where("number", "=", 902));
   });
 
   test("a build task for a repo that was never tracked is hidden from viewers", async () => {
-    const task = await db.prepare("INSERT INTO main.build_tasks (step, repo, number, head_sha, requires, plan, state, queued_at) VALUES ('smoke', 'ghost-repo', NULL, 'h', '{}', '[]', 'done', ?)").run(new Date().toISOString());
-    assert.equal(await (await signedIn("reader")).status(`/api/tasks/${task.lastInsertRowid}`), 404);
-    assert.equal(await (await signedIn("boss")).status(`/api/tasks/${task.lastInsertRowid}`), 200);
+    const task = (await db.get(db.k.insertInto("main.build_tasks").values({ step: "smoke", repo: "ghost-repo", number: null, head_sha: "h", requires: "{}", plan: "[]", state: "done", queued_at: new Date().toISOString() }).returning("id")))!.id;
+    assert.equal(await (await signedIn("reader")).status(`/api/tasks/${task}`), 404);
+    assert.equal(await (await signedIn("boss")).status(`/api/tasks/${task}`), 200);
   });
 
 });

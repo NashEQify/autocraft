@@ -9,10 +9,9 @@ import type { Level } from "../priority/score.ts";
 import { isSize, rankOf, sizeOfLines, type RankBreakdown, type RankInput, type Size } from "./score.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
+import { excluded } from "../db/kx.ts";
 
 const now = () => new Date().toISOString();
-
-type ItemRow = { repo: string; number: number; kind: string; lines: number | null; level: Level | null; reach: number | null; fix_size: string | null };
 
 /** Size of an item: the fix triage's estimate for an issue, the changed lines for a PR. */
 export function sizeOfItem(kind: string, lines: number | null, fixSize: string | null): Pick<RankInput, "size" | "sizeSource"> {
@@ -23,17 +22,17 @@ export function sizeOfItem(kind: string, lines: number | null, fixSize: string |
 /** Recomputes the rank of every open item in a tracked repo. Returns the number of rows written. */
 export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ items: number; changed: number; removed: number }> {
   const settled = settledLookup(db, await latestRun(db));
-  const rows = await db.prepare(`SELECT i.repo, i.number, i.kind,
-      CASE WHEN i.kind = 'pr' AND (i.additions IS NOT NULL OR i.deletions IS NOT NULL) THEN COALESCE(i.additions, 0) + COALESCE(i.deletions, 0) END AS lines,
-      p.impact AS level, p.score AS reach, f.size AS fix_size
-    FROM items i JOIN tracked_repos t ON t.name = i.repo
-    LEFT JOIN item_priority p ON p.repo = i.repo AND p.number = i.number
-    LEFT JOIN fix_attempts f ON f.repo = i.repo AND f.number = i.number
-    WHERE i.state = 'OPEN'`).all() as unknown as ItemRow[];
-  const old = new Map((await db.prepare("SELECT repo, number, score, breakdown FROM item_rank").all() as { repo: string; number: number; score: number; breakdown: string }[])
+  const rows = await db.all(db.k.selectFrom("items as i").innerJoin("tracked_repos as t", "t.name", "i.repo")
+    .leftJoin("item_priority as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .leftJoin("fix_attempts as f", (j) => j.onRef("f.repo", "=", "i.repo").onRef("f.number", "=", "i.number"))
+    .select((eb) => ["i.repo", "i.number", "i.kind",
+      eb.case().when(eb.and([eb("i.kind", "=", "pr"), eb.or([eb("i.additions", "is not", null), eb("i.deletions", "is not", null)])]))
+        .then(eb(eb.fn.coalesce("i.additions", eb.lit(0)), "+", eb.fn.coalesce("i.deletions", eb.lit(0)))).end().as("lines"),
+      "p.impact as level", "p.score as reach", "f.size as fix_size"])
+    .where("i.state", "=", "OPEN")
+    .$narrowType<{ level: Level | null }>());
+  const old = new Map((await db.all(db.k.selectFrom("item_rank").select(["repo", "number", "score", "breakdown"])))
     .map((r) => [`${r.repo}#${r.number}`, r]));
-  const put = db.prepare(`INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET score = excluded.score, breakdown = excluded.breakdown, computed_at = excluded.computed_at`);
   const at = new Date(nowMs).toISOString();
   const keep = new Set<string>();
   const puts: [string, number, number, string][] = [];
@@ -48,10 +47,12 @@ export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ ite
   }
   const dels = [...old].filter(([k]) => !keep.has(k)).map(([, r]) => r);
   return await db.write(async () => {
-    const del = db.prepare("DELETE FROM item_rank WHERE repo = ? AND number = ?");
     const write = async (): Promise<void> => {
-      for (const [repo, number, score, json] of puts) await put.run(repo, number, score, json, at);
-      for (const r of dels) await del.run(r.repo, r.number);
+      for (const [repo, number, score, json] of puts) {
+        await db.run(db.k.insertInto("item_rank").values({ repo, number, score, breakdown: json, computed_at: at })
+          .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["score", "breakdown", "computed_at"]))));
+      }
+      for (const r of dels) await db.run(db.k.deleteFrom("item_rank").where("repo", "=", r.repo).where("number", "=", r.number));
     };
     // Many changed rows (a first ranking, a new formula): one full-pass mark instead of a log row per item.
     if (puts.length + dels.length >= BULK_ROWS) await bulkWrites(db, "rank", write); else await write();
@@ -64,7 +65,7 @@ export async function runRank(db: Db, nowMs: number = Date.now()): Promise<{ ite
 export type RankRow = { repo: string; number: number; score: number; breakdown: RankBreakdown; computedAt: string };
 
 export async function rankOfItem(db: Db, repo: string, number: number): Promise<RankRow | null> {
-  const r = await db.prepare("SELECT score, breakdown, computed_at FROM item_rank WHERE repo = ? AND number = ?").get(repo, number) as { score: number; breakdown: string; computed_at: string } | undefined;
+  const r = await db.get(db.k.selectFrom("item_rank").select(["score", "breakdown", "computed_at"]).where("repo", "=", repo).where("number", "=", number));
   return r ? { repo, number, score: r.score, breakdown: JSON.parse(r.breakdown) as RankBreakdown, computedAt: r.computed_at } : null;
 }
 

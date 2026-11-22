@@ -7,6 +7,7 @@ import { after, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "review-migration-"));
@@ -14,7 +15,7 @@ after(() => rmSync(dir, { recursive: true, force: true }));
 
 const exists = async (db: Db, name: string) => !!await db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
 
-test("the first-pass review's leftovers are removed once and never come back", async () => {
+test("the first-pass review's leftovers are removed once and never come back", { skip: sqliteOnly("reads sqlite_master") }, async () => {
   const path = join(dir, "m.db");
   const db = await connectDb(path);
   assert.equal(await exists(db, "reviews"), false, "a new database has no reviews table");

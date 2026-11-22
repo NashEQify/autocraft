@@ -10,7 +10,8 @@ import { addLogin } from "../src/access.ts";
 import { laneForDecision } from "../src/github/user-lane.ts";
 import { queuedOperatorFix, operatorWork } from "../src/preapproval/state.ts";
 import { scopeAnswers, unsettledScope } from "../src/review/candidates.ts";
-import { settledBySql } from "../src/settlers.ts";
+import { settledByExpr } from "../src/settlers.ts";
+import { excluded } from "../src/db/kx.ts";
 import { actionable, ask } from "../src/decisions.ts";
 import { scopeToTracked } from "../src/repos.ts";
 import { apiRoutes } from "../src/dash/api/index.ts";
@@ -19,6 +20,7 @@ import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 const MARKER = "OPINION-MARKER-k3v";
 const LIMIT = 8;
@@ -37,17 +39,19 @@ const P1 = "photocraft#1:scope", P2 = "photocraft#2:scope", F3 = "filmcraft#3:sc
 
 before(async () => {
   const now = new Date().toISOString();
-  const ins = db.prepare("INSERT INTO items (repo, number, kind, state, title, body, author, created_at, updated_at, closing_issues) VALUES (?,?,?,?,?,?,?,?,?,?)");
-  await ins.run("photocraft", 1, "pr", "OPEN", "Add wave filter", "<script>x</script> body", "alice", now, now, "[5]");
-  await ins.run("photocraft", 2, "pr", "OPEN", "Add ripple filter", "b", "bob", now, now, null);
-  await ins.run("filmcraft", 3, "pr", "OPEN", "Fix audio drift", "c", "carol", now, now, null);
-  await ins.run("photocraft", 4, "issue", "OPEN", "Crash on save", "d", "dave", now, now, null);
-  await ins.run("photocraft", 5, "issue", "OPEN", "Wave filter missing", "e", "erin", now, now, null);
-  await ins.run("untracked-repo", 6, "pr", "OPEN", "Add wave filter elsewhere", "f", "frank", now, now, null);
-  await db.prepare("UPDATE items SET additions = 40, deletions = 3, changed_files = 7 WHERE repo = 'photocraft' AND number = 1").run();
-  await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 1, 'c1', 'comment', 'alice', ?, 'looks good')").run(now);
+  const ins = (repo: string, number: number, kind: string, state: string, title: string, body: string, author: string, created_at: string, updated_at: string, closing_issues: string | null) =>
+    db.run(db.k.insertInto("items").values({ repo, number, kind, state, title, body, author, created_at, updated_at, closing_issues }));
+  await ins("photocraft", 1, "pr", "OPEN", "Add wave filter", "<script>x</script> body", "alice", now, now, "[5]");
+  await ins("photocraft", 2, "pr", "OPEN", "Add ripple filter", "b", "bob", now, now, null);
+  await ins("filmcraft", 3, "pr", "OPEN", "Fix audio drift", "c", "carol", now, now, null);
+  await ins("photocraft", 4, "issue", "OPEN", "Crash on save", "d", "dave", now, now, null);
+  await ins("photocraft", 5, "issue", "OPEN", "Wave filter missing", "e", "erin", now, now, null);
+  await ins("untracked-repo", 6, "pr", "OPEN", "Add wave filter elsewhere", "f", "frank", now, now, null);
+  await db.run(db.k.updateTable("items").set({ additions: 40, deletions: 3, changed_files: 7 }).where("repo", "=", "photocraft").where("number", "=", 1));
+  await db.run(db.k.insertInto("comments").values({ repo: "photocraft", number: 1, id: "c1", kind: "comment", author: "alice", created_at: now, body: "looks good" }));
   await db.prepare("INSERT INTO classifications (repo, number, classifier, run_id, at, type_label, want, reason) VALUES ('photocraft', 1, 'haiku', 'r1', ?, 'small extra', 'yes', 'adds a filter')").run(now);
-  await db.script("INSERT OR REPLACE INTO repos (name, visibility) VALUES ('photocraft', 'public'), ('filmcraft', 'public')");
+  await db.run(db.k.insertInto("repos").values([{ name: "photocraft", visibility: "public" }, { name: "filmcraft", visibility: "public" }])
+    .onConflict((oc) => oc.column("name").doUpdateSet(excluded(["visibility"]))));
   await ask(db, [P1, P2, F3, P4].map((id) => {
     const [repo, rest] = id.split("#");
     return { id, kind: id.endsWith("close") ? "close" : "scope", repo, number: Number(rest!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "Adds a filter." };
@@ -118,7 +122,7 @@ async function signedIn(login: string): Promise<Client> {
 const actionableIds = async () => (await actionable(db)).map((d) => d.id);
 
 const auditCount = async (action: string, login: string) =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = ? AND login = ?").get(action, login) as { n: number }).n;
+  (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", action).where("login", "=", login)))!.n;
 
 describe("api", () => {
   test("without a session every endpoint answers 401 JSON", async () => {
@@ -150,18 +154,19 @@ describe("api", () => {
     await mrg.run("filmcraft", 3, mins(1), "rule", "refused");
     const by = await boss.get<{ rows: { number: number; mergedHow: string | null }[] }>("/api/items?state=merged-by-us");
     assert.deepEqual(by.rows.map((r) => [r.number, r.mergedHow]), [[2, "operator"], [1, "rule"]]);
-    await db.prepare("UPDATE main.items SET head_oid = 'h1' WHERE repo = 'photocraft' AND number = 1").run();
-    await db.prepare(`INSERT INTO verifications (repo, number, head_sha, kind, reason, plan, state, summary, created_at)
-      VALUES ('photocraft', 1, 'h1', 'tests', 'why', '{"kind":"tests","crates":["codecs"],"tests":["png::"]}', 'failed', 'test failed', '2026-01-01T00:00:00Z')`).run();
-    await db.prepare("INSERT INTO fixups (repo, number, from_head, state, reason, files, attempt, created_at) VALUES ('photocraft', 1, 'h0', 'refused', 'no', '[\"a.rs\"]', 1, '2026-01-01T00:00:00Z')").run();
-    await db.prepare("INSERT INTO actions (decision_id, repo, number, kind, state, comment_url, created_at) VALUES ('d1', 'photocraft', 1, 'comment-close', 'done', 'https://x/c', '2026-01-01T00:00:00Z')").run();
+    await db.run(db.k.updateTable("main.items").set({ head_oid: "h1" }).where("repo", "=", "photocraft").where("number", "=", 1));
+    await db.run(db.k.insertInto("verifications").values({
+      repo: "photocraft", number: 1, head_sha: "h1", kind: "tests", reason: "why", plan: '{"kind":"tests","crates":["codecs"],"tests":["png::"]}', state: "failed", summary: "test failed", created_at: "2026-01-01T00:00:00Z",
+    }));
+    await db.run(db.k.insertInto("fixups").values({ repo: "photocraft", number: 1, from_head: "h0", state: "refused", reason: "no", files: '["a.rs"]', attempt: 1, created_at: "2026-01-01T00:00:00Z" }));
+    await db.run(db.k.insertInto("actions").values({ decision_id: "d1", repo: "photocraft", number: 1, kind: "comment-close", state: "done", comment_url: "https://x/c", created_at: "2026-01-01T00:00:00Z" }));
     const worked = await boss.get<Item>("/api/items/photocraft/1");
     assert.deepEqual([worked.verification?.state, worked.verification?.current, worked.verification?.plan], ["failed", true, { crates: ["codecs"], tests: ["png::"], testLines: null }]);
     assert.deepEqual([worked.fixups[0]?.files, worked.fixups[0]?.state, worked.actions[0]?.commentUrl], [["a.rs"], "refused", "https://x/c"]);
     assert.deepEqual(worked.premerge, []);
     const finding = { severity: "defect", file: "a.rs", line: 3, title: "t", scenario: "s", fix: { file: "a.rs", change: "c" } };
-    await db.prepare("INSERT INTO premerge_reviews (repo, number, head_oid, at, model, findings, searched, tries) VALUES ('photocraft', 1, 'h0', '2026-01-01T00:00:00Z', 'm', ?, 'looked', 0)").run(JSON.stringify([finding]));
-    await db.prepare("INSERT INTO premerge_reviews (repo, number, head_oid, at, error, tries) VALUES ('photocraft', 1, 'h1', '2026-01-02T00:00:00Z', 'no JSON', 2)").run();
+    await db.run(db.k.insertInto("premerge_reviews").values({ repo: "photocraft", number: 1, head_oid: "h0", at: "2026-01-01T00:00:00Z", model: "m", findings: JSON.stringify([finding]), searched: "looked", tries: 0 }));
+    await db.run(db.k.insertInto("premerge_reviews").values({ repo: "photocraft", number: 1, head_oid: "h1", at: "2026-01-02T00:00:00Z", error: "no JSON", tries: 2 }));
     const pre = (await boss.get<Item>("/api/items/photocraft/1")).premerge!;
     assert.deepEqual(pre.map((r) => [r.head, r.error, r.tries, r.findings.length]), [["h1", "no JSON", 2, 0], ["h0", null, 0, 1]]);
     assert.deepEqual(pre[1]!.findings[0], finding);
@@ -183,7 +188,7 @@ describe("api", () => {
 
   test("the decisions list narrows to one item: its own decisions and the duplicate groups that list it", async () => {
     const boss = await signedIn("boss");
-    await db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, detail, base_role, base_target, head) VALUES ('photocraft:dupegroup:4', 'photocraft', 5, 'issue', 'close', 4, NULL, 'close', 4, NULL)").run();
+    await db.run(db.k.insertInto("dupe_group_items").values({ decision_id: "photocraft:dupegroup:4", repo: "photocraft", number: 5, kind: "issue", role: "close", target: 4, detail: null, base_role: "close", base_target: 4, head: null }));
     const ids = async (n: number) => (await boss.get<DecisionList>(`/api/decisions?repo=photocraft&number=${n}`)).decisions.map((d) => d.id).sort();
     assert.deepEqual(await ids(1), [P1]);
     assert.deepEqual(await ids(5), ["photocraft:dupegroup:4"]);
@@ -198,7 +203,7 @@ describe("api", () => {
       await c.post(dpath(P1, "/answer"), { answer: "small" }, 403);
       await c.post(dpath(P1, "/undo"), undefined, 403);
     }
-    const audits = async () => (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE login = 'viewer1'").get() as { n: number }).n;
+    const audits = async () => (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "viewer1")))!.n;
     const before = await audits();
     await viewer.post(dpath(P1, "/feedback"), { option: "plugin", text: `viewer ${MARKER}` }, 403);
     await viewer.post(dpath(P1, "/feedback"), { text: `viewer ${MARKER}` }, 403);
@@ -207,7 +212,7 @@ describe("api", () => {
     assert.equal(await audits(), before);
     assert.equal((await maint.get<Decision>(dpath(P1))).opinions.some((o) => o.login === "viewer1"), false);
     assert.equal((await maint.get<DecisionComment[]>(dpath(P1, "/thread"))).length, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM decision_claims WHERE login = 'viewer1'").get() as { n: number }).n, 0);
+    assert.equal((await db.get(db.k.selectFrom("decision_claims").select((eb) => eb.fn.countAll<number>().as("n")).where("login", "=", "viewer1")))!.n, 0);
 
     const d1 = await pal.post<Decision>(dpath(P1, "/feedback"), { option: "plugin", text: `pal ${MARKER}` });
     const pOp = d1.opinions.find((o) => o.login === "pal")!;
@@ -255,8 +260,8 @@ describe("api", () => {
   });
 
   test("a maintainer settles only with maintainer_writes on, the app identity on the repo and write access; undo only their own", async () => {
-    const setting = async (on: boolean) => on ? await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1')").run() : await db.prepare("DELETE FROM settings WHERE key = 'maintainer_writes'").run();
-    const identity = async (app: boolean) => app ? await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('github_identity', 'app')").run() : await db.prepare("DELETE FROM settings WHERE key = 'github_identity'").run();
+    const setting = async (on: boolean) => on ? await db.run(db.k.insertInto("settings").values({ key: "maintainer_writes", value: "1" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"])))) : await db.run(db.k.deleteFrom("settings").where("key", "=", "maintainer_writes"));
+    const identity = async (app: boolean) => app ? await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"])))) : await db.run(db.k.deleteFrom("settings").where("key", "=", "github_identity"));
     const X1 = "photocraft#7:scope", X2 = "photocraft#8:scope";
     await ask(db, [X1, X2].map((id) => ({ id, kind: "scope" as const, repo: "photocraft", number: Number(id.split("#")[1]!.split(":")[0]), question: "Small extra or plugin?", options: OPTS, recommended: "small", summary: "s" })));
     const maint = await signedIn("maint"), pal = await signedIn("pal"), boss = await signedIn("boss");
@@ -274,13 +279,14 @@ describe("api", () => {
       assert.equal(d.answeredBy, "maint");
       assert.equal(await auditCount("answer", "maint"), 1);
       assert.ok((await actionableIds()).includes(X1));
-      assert.ok(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql("d")}`).get(X1));
+      assert.ok(await db.get(db.k.selectFrom("decisions as d").select((eb) => eb.lit(1).as("one")).where("d.id", "=", X1).where((eb) => settledByExpr(db, eb, "d"))));
       await identity(false);
       assert.ok(!(await actionableIds()).includes(X1), "an answer on a repo that left the app identity stops counting");
-      assert.equal(await db.prepare(`SELECT 1 FROM decisions d WHERE d.id = ? AND ${settledBySql("d")}`).get(X1), undefined, "nor at the SQL sites other than actionable()");
+      assert.equal(await db.get(db.k.selectFrom("decisions as d").select((eb) => eb.lit(1).as("one")).where("d.id", "=", X1).where((eb) => settledByExpr(db, eb, "d"))), undefined, "nor at the SQL sites other than actionable()");
       // Work and answers the maintainer started count only while the conditions hold; a flip to legacy stops them everywhere.
-      await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'photocraft', 'write', ?)").run(new Date().toISOString());
-      await db.prepare("INSERT INTO operator_fixups (repo, number, from_head, instructions, by, at) VALUES ('photocraft', 7, 'h1', 'fix it', 'maint', ?)").run(new Date().toISOString());
+      await db.run(db.k.insertInto("repo_permissions").values({ login: "maint", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() })
+        .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(kx.excluded(["permission", "checked_at"]))));
+      await db.run(db.k.insertInto("operator_fixups").values({ repo: "photocraft", number: 7, from_head: "h1", instructions: "fix it", by: "maint", at: new Date().toISOString() }));
       await identity(true);
       assert.ok(await queuedOperatorFix(db, "photocraft", 7, "h1"));
       assert.equal((await scopeAnswers(db)).get("photocraft#7"), "small");
@@ -320,15 +326,15 @@ describe("api", () => {
     assert.ok(!(await ids("open")).includes(P2));
     assert.deepEqual(await ids("snoozed"), [P2]);
     // Feedback after the snooze wakes it.
-    await db.prepare("INSERT INTO decision_comments (id, decision_id, login, at, body) VALUES ('wake1', ?, 'maint', ?, 'More news')").run(P2, new Date(Date.now() + 60_000).toISOString());
+    await db.run(db.k.insertInto("decision_comments").values({ id: "wake1", decision_id: P2, login: "maint", at: new Date(Date.now() + 60_000).toISOString(), body: "More news" }));
     assert.equal((await boss.get<Decision>(dpath(P2))).snoozed, null);
     assert.ok((await ids("open")).includes(P2));
     assert.deepEqual(await ids("snoozed"), []);
     // A force-push wakes it too (the earlier comment is removed so it does not wake the new snooze).
-    await db.prepare("DELETE FROM decision_comments WHERE id = 'wake1'").run();
+    await db.run(db.k.deleteFrom("decision_comments").where("id", "=", "wake1"));
     await boss.post(dpath(P2, "/snooze"), { on: true });
     assert.deepEqual(await ids("snoozed"), [P2]);
-    const d2 = await db.prepare("SELECT repo, number FROM decisions WHERE id = ?").get(P2) as { repo: string; number: number };
+    const d2 = (await db.get(db.k.selectFrom("decisions").select(["repo", "number"]).where("id", "=", P2)))!;
     await db.prepare("INSERT INTO item_activity (repo, number, id, kind, at) VALUES (?, ?, 'fp1', 'force-push', ?)").run(d2.repo, d2.number, new Date(Date.now() + 120_000).toISOString());
     assert.deepEqual(await ids("snoozed"), []);
   });
@@ -336,28 +342,28 @@ describe("api", () => {
   test("a group decision's answer must carry the hash of the shown comments, and an answer Act wrote for can't be undone", async () => {
     const boss = await signedIn("boss");
     const id = "photocraft:dupegroup:4";
-    await db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES (?, 'photocraft', 'model')").run(id);
-    await db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES (?, 'accept', 5, 'close', 'Closing as a duplicate of #4.')").run(id);
+    await db.run(db.k.insertInto("dupe_groups").values({ decision_id: id, repo: "photocraft", source: "model" }));
+    await db.run(db.k.insertInto("dupe_group_texts").values({ decision_id: id, option: "accept", number: 5, step: "close", text: "Closing as a duplicate of #4." }));
     const shown = await boss.get<Decision>(dpath(id));
     const ot = shown.optionTexts.find((o) => o.option === "accept")!;
     assert.equal(ot.texts[0]!.text, "Closing as a duplicate of #4.");
     await boss.post(dpath(id, "/answer"), { answer: "accept" }, 409);
     await boss.post(dpath(id, "/answer"), { answer: "accept", textsHash: "stale" }, 409);
     // The comments changed after the page was loaded.
-    await db.prepare("UPDATE dupe_group_texts SET text = 'Closing as a duplicate of #4.\nParts to carry over to #4: x.' WHERE decision_id = ?").run(id);
+    await db.run(db.k.updateTable("dupe_group_texts").set({ text: "Closing as a duplicate of #4.\nParts to carry over to #4: x." }).where("decision_id", "=", id));
     await boss.post(dpath(id, "/answer"), { answer: "accept", textsHash: ot.hash }, 409);
     const fresh = (await boss.get<Decision>(dpath(id))).optionTexts[0]!;
     // Adopting an opinion approves the same texts, so it needs the same hash.
-    await db.prepare("INSERT INTO decision_opinions (id, decision_id, login, option, note, at, permission) VALUES ('op1', ?, 'maint', 'accept', NULL, 'now', 'write')").run(id);
+    await db.run(db.k.insertInto("decision_opinions").values({ id: "op1", decision_id: id, login: "maint", option: "accept", note: null, at: "now", permission: "write" }));
     await boss.post(dpath(id, "/adopt"), { opinionId: "op1" }, 409);
     await boss.post(dpath(id, "/adopt"), { opinionId: "op1", textsHash: ot.hash }, 409);
     assert.equal((await boss.post<Decision>(dpath(id, "/adopt"), { opinionId: "op1", textsHash: fresh.hash })).answer, "accept");
     await boss.post<Decision>(dpath(id, "/undo"));
     assert.equal((await boss.post<Decision>(dpath(id, "/answer"), { answer: "accept", textsHash: fresh.hash })).answer, "accept");
-    await db.prepare("INSERT INTO dupe_group_posts (decision_id, number, step, url, at) VALUES (?, 5, 'comment', 'https://x/c', 'now')").run(id);
+    await db.run(db.k.insertInto("dupe_group_posts").values({ decision_id: id, number: 5, step: "comment", url: "https://x/c", at: "now" }));
     await boss.post(dpath(id, "/undo"), undefined, 409);
-    await db.prepare("UPDATE main.decisions SET applied_at = 'now' WHERE id = ?").run(id);
-    await db.prepare("DELETE FROM decision_opinions WHERE id = 'op1'").run();
+    await db.run(db.k.updateTable("main.decisions").set({ applied_at: "now" }).where("id", "=", id));
+    await db.run(db.k.deleteFrom("decision_opinions").where("id", "=", "op1"));
   });
 
   test("adopt records the operator's answer and credits the opinion; opinions close once answered", async () => {
@@ -394,5 +400,5 @@ describe("api", () => {
 });
 
 async function getAnswer(id: string): Promise<string | null> {
-  return (await db.prepare("SELECT answer FROM main.decisions WHERE id = ?").get(id) as { answer: string | null }).answer;
+  return (await db.get(db.k.selectFrom("main.decisions").select("answer").where("id", "=", id)))!.answer;
 }

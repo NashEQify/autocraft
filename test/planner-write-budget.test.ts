@@ -12,9 +12,10 @@ test("labels-apply waits while the repo's write budget is used up", async () => 
   const lanes = LANES.filter((l) => l.name === "labels");
   assert.deepEqual((await detectAutopilot(w.db, { lanes })).proposals.map((p) => p.step), ["labels-apply"]);
 
-  const add = w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'pipeline', 'comment', 'app#2', ?)");
   const now = Date.now();
-  for (let i = 0; i < 60; i++) await add.run(new Date(now - 30_000 + i * 100).toISOString(), JSON.stringify({ identity: "legacy", paceOwner: "", state: "done" }));
+  for (let i = 0; i < 60; i++) await w.db.run(w.db.k.insertInto("audit").values({
+    at: new Date(now - 30_000 + i * 100).toISOString(), login: "pipeline", action: "comment", target: "app#2", details: JSON.stringify({ identity: "legacy", paceOwner: "", state: "done" }),
+  }));
   const held = await detectAutopilot(w.db, { lanes });
   assert.deepEqual(held.proposals, []);
   assert.match(held.status?.["labels-apply"] ?? "", /write budget for app is used up until/);

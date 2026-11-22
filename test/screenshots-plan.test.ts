@@ -10,6 +10,7 @@ import { runVerify, type VerifyDeps } from "../src/verify/index.ts";
 import { SCRATCH } from "./scratch.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "shots-plan-"));
@@ -83,13 +84,11 @@ async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   process.env.AUTOCRAFT_DIFF_CACHE = mkdtempSync(join(dir, "diffs-"));   // the diff cache is keyed by head, so each case has its own
   planCalls = 0;
-  await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
-    VALUES ('app', 7, 'pr', 'OPEN', 'Show size', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(HEAD);
-  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', 'take', 'ok', '[]', 1, 'full')`).run(HEAD);
-  await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
-    VALUES ('app', 7, ?, 'OPEN', 0, 'success', '[]', 'MERGEABLE', 1, '${T0}')`).run(HEAD);
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Show size", author: "someone", additions: 5, deletions: 0, head_oid: HEAD, created_at: T0, updated_at: T0 }));
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: HEAD, run_id: "rv", at: T0, model: "m", verdict: "take", reason: "ok", fixes: "[]", sure: 1, mode: "full" }));
+  await db.run(db.k.insertInto("pr_checks").values({ repo: "app", number: 7, head_oid: HEAD, state: "OPEN", is_draft: 0, overall: "success", checks: "[]", mergeable: "MERGEABLE", maintainer_can_modify: 1, fetched_at: T0 }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await putConfig(db, "op", "app", ARGS);
   return db;
 }
@@ -99,7 +98,9 @@ const deps = (diff: string): VerifyDeps => ({
   baseOf: async () => BASE, mainHead: async () => null, model: "sonnet",
   screenshots: { plan: async () => { planCalls++; return parseScreenshotReply(ok([{ cmd: "snap", args: { size: "1440x900" } }]), "app#7", ARGS); } },
 });
-const rows = async (db: Db, sql: string) => await db.prepare(sql).all();
+const tasks = async (db: Db) => await db.all(db.k.selectFrom("build_tasks").select("id"));
+const runs = async (db: Db) => await db.all(db.k.selectFrom("screenshot_runs").select("repo"));
+const shotStages = async (db: Db) => await db.all(db.k.selectFrom("stages").select("stage").where((eb) => kx.like(db, "stage", eb.val("screenshot%"))));
 
 describe("runVerify with screenshots", () => {
   test("switch off (also global on, repo off): no task, no run row, no planner call, verification saved as today", async () => {
@@ -108,11 +109,11 @@ describe("runVerify with screenshots", () => {
       if (on) await setFeature(db, "screenshots", true, "op");
       const s = await runVerify(db, { repo: "app" }, () => {}, deps(UI_DIFF));
       assert.equal(s.candidates, 1);
-      assert.equal((await rows(db, "SELECT 1 FROM build_tasks")).length, 0);
-      assert.equal((await rows(db, "SELECT 1 FROM screenshot_runs")).length, 0);
+      assert.equal((await tasks(db)).length, 0);
+      assert.equal((await runs(db)).length, 0);
       assert.equal(planCalls, 0);
-      assert.equal((await rows(db, "SELECT 1 FROM stages WHERE stage LIKE 'screenshot%'")).length, 0);
-      await db.prepare("DELETE FROM verifications").run();
+      assert.equal((await shotStages(db)).length, 0);
+      await db.run(db.k.deleteFrom("verifications"));
     }
     assert.deepEqual(await queueScreenshotTasks(db, [{ cmd: "snap", args: { size: "1440x900" } }], ARGS, { repo: "app", number: 7, head: HEAD, base: BASE }), []);
     const v = await runVerify(db, { repo: "app" }, () => {}, deps(UI_DIFF));
@@ -126,16 +127,16 @@ describe("runVerify with screenshots", () => {
     const other = "diff --git a/docs/readme.md b/docs/readme.md\n--- a/docs/readme.md\n+++ b/docs/readme.md\n@@ -1,1 +1,2 @@\n a\n+b\n";
     await runVerify(db, { repo: "app" }, () => {}, deps(other));
     assert.equal(planCalls, 0);
-    assert.equal((await rows(db, "SELECT 1 FROM screenshot_runs")).length, 0);
-    await db.prepare("DELETE FROM verifications").run();
+    assert.equal((await runs(db)).length, 0);
+    await db.run(db.k.deleteFrom("verifications"));
     process.env.AUTOCRAFT_DIFF_CACHE = mkdtempSync(join(dir, "diffs-"));
     await runVerify(db, { repo: "app" }, () => {}, deps(UI_DIFF));
     assert.equal(planCalls, 1);
-    const run = await db.prepare("SELECT state, head_task_id, base_task_id FROM screenshot_runs WHERE repo = 'app' AND number = 7 AND head_sha = ?").get(HEAD) as { state: string; head_task_id: number; base_task_id: number };
+    const run = (await db.get(db.k.selectFrom("screenshot_runs").select(["state", "head_task_id", "base_task_id"]).where("repo", "=", "app").where("number", "=", 7).where("head_sha", "=", HEAD)))!;
     assert.equal(run.state, "planned");
-    assert.equal((await rows(db, "SELECT 1 FROM build_tasks WHERE requires LIKE '%\"display\":true%'")).length, 2);
-    const v = await db.prepare("SELECT kind, state FROM verifications WHERE repo = 'app' AND number = 7").all();
+    assert.equal((await db.all(db.k.selectFrom("build_tasks").select("id").where((eb) => kx.like(db, "requires", eb.val('%"display":true%'))))).length, 2);
+    const v = await db.all(db.k.selectFrom("verifications").select(["kind", "state"]).where("repo", "=", "app").where("number", "=", 7));
     assert.deepEqual(v.map((r) => ({ ...r })), [{ kind: "ci-enough", state: "ci-enough" }]);
-    assert.equal((await rows(db, "SELECT 1 FROM stages WHERE stage LIKE 'screenshot%'")).length, 0);
+    assert.equal((await shotStages(db)).length, 0);
   });
 });

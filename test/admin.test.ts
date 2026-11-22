@@ -27,11 +27,12 @@ let base = "";
 let close: () => Promise<void>;
 
 before(async () => {
-  const ins = db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, updated_at, merged_at) VALUES (?,?,?,?,?,?,?,?,?)");
+  const ins = (repo: string, number: number, kind: string, state: string, title: string, author: string, created_at: string, updated_at: string, merged_at: string | null) =>
+    db.run(db.k.insertInto("items").values({ repo, number, kind, state, title, author, created_at, updated_at, merged_at }));
   let n = 0;
   const prs = async (author: string, merged: number, closed: number, open = 0) => {
     for (const [state, k] of [["MERGED", merged], ["CLOSED", closed], ["OPEN", open]] as const) {
-      for (let i = 0; i < k; i++) await ins.run("photocraft", ++n, "pr", state, "t", author, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", state === "MERGED" ? "2026-10-02T00:00:00Z" : null);
+      for (let i = 0; i < k; i++) await ins("photocraft", ++n, "pr", state, "t", author, "2026-10-01T00:00:00Z", "2026-10-01T00:00:00Z", state === "MERGED" ? "2026-10-02T00:00:00Z" : null);
     }
   };
   await prs("veteran", 10, 1);
@@ -39,7 +40,7 @@ before(async () => {
   await prs("newbie", 1, 3);
   // Each login's history is bound to the account the lookup below gives it.
   for (const l of ["veteran", "steady", "newbie"]) await db.prepare("INSERT INTO author_ids (login, id) VALUES (?, ?)").run(l, 5000 + l.length);
-  await db.prepare("INSERT INTO repos (name, visibility, open_prs, open_issues) VALUES ('photocraft', 'public', 2, 0), ('not-yet', 'public', 5, 7)").run();
+  await db.run(db.k.insertInto("repos").values([{ name: "photocraft", visibility: "public", open_prs: 2, open_issues: 0 }, { name: "not-yet", visibility: "public", open_prs: 5, open_issues: 7 }]));
   await addLogin(db, "cli", "boss", "operator", null);
   await addLogin(db, "cli", "viewer1", "viewer", null);
   await addLogin(db, "cli", "maint", "maintainer", null);

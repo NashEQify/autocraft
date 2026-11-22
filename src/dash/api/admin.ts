@@ -34,6 +34,8 @@ import { PilotError, setPilot } from "../../pilot.ts";
 import { canSeeInternals } from "./staff.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
+import type { Expression, SqlBool } from "kysely";
 
 const NOTE_MAX = 300;
 const ACCESS_NOTE_MAX = 500;
@@ -137,7 +139,7 @@ export function clearContributorCache(db: Db): void {
   contributorCache.delete(db);
 }
 async function cachedContributors(db: Db, repo: string | undefined): Promise<Row[]> {
-  const hw = (await db.prepare("SELECT value FROM main.settings WHERE key = 'org_high_water'").get() as { value: string } | undefined)?.value ?? null;
+  const hw = (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "org_high_water")))?.value ?? null;
   const byRepo = contributorCache.get(db) ?? new Map<string, { at: number; hw: string | null; rows: Row[] }>();
   contributorCache.set(db, byRepo);
   const key = repo ?? "";
@@ -236,7 +238,7 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
   if (status !== "allow" && status !== "deny" && status !== null) throw new HttpError(400, "status must be allow, deny or null");
   if (!OVERRIDE_LOGIN.test(login)) throw new HttpError(400, `not a GitHub login: ${login}`);
   // Without a note field the override keeps the note it has.
-  const kept = async () => (await db.prepare("SELECT note FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").get(login) as { note: string | null } | undefined)?.note ?? null;
+  const kept = async () => (await db.get(db.k.selectFrom("whitelist_overrides").select("note").where((eb) => kx.ciEq(db, "login", eb.val(login)))))?.note ?? null;
   const note = status === null ? null : b.note === undefined ? await kept() : text(b.note, NOTE_MAX, "note");
   // An allow belongs to the account that holds the login now; a deny holds for any account, so it does not wait for GitHub.
   let id: number | null = null;
@@ -453,10 +455,10 @@ export async function track(db: Db, req: Req, on: boolean): Promise<TrackedRepo[
 export async function accessOverview(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const nowMs = Date.now();
-  const sessions = (await db.prepare(`SELECT s.rowid AS id, s.login, s.csrf, s.created_at, s.last_seen, s.expires_at, s.user_agent, a.role
-    FROM sessions s JOIN access a ON a.login = s.login
-    WHERE s.expires_at > ? ORDER BY s.last_seen DESC`).all(new Date(nowMs).toISOString()) as
-    { id: number; login: string; csrf: string; created_at: string; last_seen: string; expires_at: string; user_agent: string | null; role: Role }[])
+  const sessions = (await db.all(db.k.selectFrom("sessions as s").innerJoin("access as a", "a.login", "s.login")
+    .select([kx.rowid("sessions", "s").as("id"), "s.login", "s.csrf", "s.created_at", "s.last_seen", "s.expires_at", "s.user_agent", "a.role"])
+    .$narrowType<{ role: Role }>()
+    .where("s.expires_at", ">", new Date(nowMs).toISOString()).orderBy("s.last_seen", "desc")))
     .filter((s) => nowMs < sessionEndsAt(s.created_at, s.role));
   const perLogin = new Map<string, number>();
   for (const s of sessions) perLogin.set(s.login.toLowerCase(), (perLogin.get(s.login.toLowerCase()) ?? 0) + 1);
@@ -521,8 +523,7 @@ export async function revokeSession(db: Db, req: Req): Promise<AccessOverview> {
   requireOperator(req, "manage access");
   const id = body(req).id;
   if (!Number.isInteger(id)) throw new HttpError(400, "id must be a session id");
-  const s = await db.prepare("DELETE FROM sessions WHERE rowid = ? RETURNING id_hash, login, created_at, token_enc").get(id as number) as
-    { id_hash: string; login: string; created_at: string; token_enc: string | null } | undefined;
+  const s = await db.get(db.k.deleteFrom("sessions").where(kx.rowid("sessions"), "=", id as number).returning(["id_hash", "login", "created_at", "token_enc"]));
   if (!s) throw new HttpError(404, "that session has already ended");
   // Revoking a session cuts off the login's agent tokens too: they act with that login's permissions.
   const mcpTokens = await endTokens(db, s.login);
@@ -553,30 +554,23 @@ export async function auditLog(db: Db, req: Req): Promise<AuditPage> {
   if (action && !actions.includes(action)) throw new HttpError(400, "unknown action");
   const limit = int(q.get("limit"), AUDIT_PAGE, 1, 500, "limit");
   const offset = int(q.get("offset"), 0, 0, 1e9, "offset");
-  const where: string[] = [];
-  const args: string[] = [];
-  if (login) {
-    where.push("(login = ? COLLATE NOCASE OR target = ? COLLATE NOCASE)");
-    args.push(login, login);
-  }
-  if (action) {
-    where.push("action = ?");
-    args.push(action);
-  }
-  if (!operator) {
-    where.push(`action IN (${actions.map(() => "?").join(", ")})`);
-    args.push(...actions);
-  }
-  if (!operator) {
-    // Security rows name their repo first in the target (`<repo>:scan:<id>`, `<repo>:finding:<n>`); a maintainer sees those of repos they can see.
-    const visible = await visibleRepos(db, req);
-    where.push(`(action NOT LIKE 'security-%' OR CASE WHEN instr(target, ':') > 0 THEN substr(target, 1, instr(target, ':') - 1) ELSE target END IN (${["", ...visible].map(() => "?").join(", ")}))`);
-    args.push("", ...visible);
-  }
-  const w = where.length ? `WHERE ${where.join(" AND ")}` : "";
-  const total = Number((await db.prepare(`SELECT COUNT(*) AS n FROM audit ${w}`).get(...args) as { n: number }).n);
-  const rows = await db.prepare(`SELECT at, login, action, target, details FROM audit ${w} ORDER BY at DESC, rowid DESC LIMIT ? OFFSET ?`)
-    .all(...args, limit, offset) as { at: string; login: string; action: string; target: string | null; details: string | null }[];
+  // Security rows name their repo first in the target (`<repo>:scan:<id>`, `<repo>:finding:<n>`); a maintainer sees those of repos they can see.
+  const visible = operator ? [] : await visibleRepos(db, req);
+  const filter = (eb: kx.Eb) => {
+    const c: Expression<SqlBool>[] = [];
+    if (login) c.push(eb.or([kx.ciEq(db, "login", eb.val(login)), kx.ciEq(db, "target", eb.val(login))]));
+    if (action) c.push(eb("action", "=", action));
+    if (!operator) {
+      c.push(kx.inList(db, "action", actions));
+      const colon = eb.fn<number>("instr", ["target", eb.val(":")]);
+      const repoOf = eb.case().when(colon, ">", 0).then(eb.fn<string>("substr", ["target", eb.lit(1), eb(colon, "-", eb.lit(1))])).else(eb.ref("target")).end();
+      c.push(eb.or([eb.not(kx.like(db, "action", eb.val("security-%"))), kx.inList(db, repoOf, ["", ...visible])]));
+    }
+    return eb.and(c);
+  };
+  const total = (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where(filter)))!.n;
+  const rows = await db.all(db.k.selectFrom("audit").select(["at", "login", "action", "target", "details"]).where(filter)
+    .orderBy("at", "desc").orderBy(kx.rowid("audit"), "desc").limit(limit).offset(offset));
   const entries: AuditEntry[] = rows.map((r) => {
     let details: Record<string, unknown> | null = null;
     try {

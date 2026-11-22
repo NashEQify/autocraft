@@ -19,7 +19,7 @@ test("a write to flow_summary leaves the planner's input unchanged", async () =>
   const fp = async () => await fingerprintOf(w.db, { topics: INPUT_TOPICS }, "prioritize", {}, await readSeqs(w.db));
   const before = await fp();
   const flow = (await readSeqs(w.db)).flow;
-  await w.db.prepare("INSERT INTO flow_summary (repo, counts, counted_at, stale, decisions_sig) VALUES ('app', '{}', 'now', 0, '')").run();
+  await w.db.run(w.db.k.insertInto("flow_summary").values({ repo: "app", counts: "{}", counted_at: "now", stale: 0, decisions_sig: "" }));
   assert.notEqual((await readSeqs(w.db)).flow, flow, "the flow topic moved");
   assert.equal(await fp(), before);
 });

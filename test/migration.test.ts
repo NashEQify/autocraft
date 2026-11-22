@@ -8,10 +8,11 @@ import { test } from "node:test";
 import { tmpdir } from "./world-db.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const cols = async (db: Db, table: string): Promise<string[]> => (await db.prepare(`PRAGMA main.table_info(${table})`).all() as { name: string }[]).map((c) => c.name);
 
-test("the first release's database migrates in place and keeps its rows", async () => {
+test("the first release's database migrates in place and keeps its rows", { skip: sqliteOnly("migrates a first-release SQLite file") }, async () => {
   const path = join(tmpdir("migration"), "old.db");
   const old = new DatabaseSync(path);
   old.exec(readFileSync(new URL("./fixtures/oldest-schema.sql", import.meta.url), "utf8"));

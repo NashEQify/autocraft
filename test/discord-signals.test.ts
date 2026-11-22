@@ -11,6 +11,7 @@ import { statusList } from "../src/dash/api/items.ts";
 import type { Req } from "../src/dash/types.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-signals-"));
@@ -36,14 +37,14 @@ async function send(type: string, m: object): Promise<void> {
   await signals.idle();
 }
 const asked = async (n: number) => await signalCountOf(db, "photocraft", n);
+const signalled = () => db.k.selectFrom("discord_mentions").select((eb) => eb.fn.countAll<number>().as("n")).where("signal", "=", 1);
 
 describe("attention signals", () => {
   before(async () => {
-    await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')").run();
-    await db.prepare("INSERT OR IGNORE INTO repos (name, owner) VALUES ('photocraft', 'storytold')").run();
-    await db.prepare("INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, watched) VALUES ('c1', 'g1', 'Guild', 'dev', 1)").run();
-    const add = db.prepare("INSERT INTO items (repo, number, kind, state, title, updated_at) VALUES ('photocraft', ?, 'issue', 'OPEN', ?, '2026-01-01')");
-    for (const n of [1, 2, 3, 4]) await add.run(n, `Item ${n}`);
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("repos").values({ name: "photocraft", owner: "storytold" }).onConflict((oc) => oc.doNothing()));
+    await db.run(db.k.insertInto("discord_channels").values({ channel_id: "c1", guild_id: "g1", guild_name: "Guild", name: "dev", watched: 1 }));
+    for (const n of [1, 2, 3, 4]) await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: n, kind: "issue", state: "OPEN", title: `Item ${n}`, updated_at: "2026-01-01" }));
   });
 
   test("Jev decides from 0.8 up and below 0.3; Haiku decides in between and when Jev is off", async () => {
@@ -81,7 +82,7 @@ describe("attention signals", () => {
     await send("MESSAGE_DELETE", { id: "m1", channel_id: "c1" });
     assert.equal(await asked(1), 0);
     assert.equal((await signalLinks(db, keys, "photocraft", 1)).length, 0);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM agent_run_texts").get())!.n, 0);
+    assert.equal((await db.get(db.k.selectFrom("agent_run_texts").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   });
 
   test("the Items filter returns every mentioned item, asked about or not", async () => {
@@ -98,11 +99,11 @@ describe("attention signals", () => {
     const slow: Judge = { jev: async () => { peak = Math.max(peak, ++live); await new Promise((r) => setTimeout(r, 10)); live--; return 0.9; }, haiku: async () => true };
     const s = new Signals({ db, keys, log: () => {}, judge: slow, now: () => now });
     const from = (id: string, user: string, content: string) => ({ ...msg(id, content), author: { id: user } });
-    await db.prepare("UPDATE discord_mentions SET signal = 0").run();
+    await db.run(db.k.updateTable("discord_mentions").set({ signal: 0 }));
     const run = async (m: ReturnType<typeof from>) => { await handleDispatch(db, keys, "MESSAGE_CREATE", m); await s.dispatch("MESSAGE_CREATE", m); };
     for (let i = 0; i < 12; i++) await run(from(`a${i}`, "u9", "review photocraft#1 please"));
     await s.idle();
-    const rows = await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE signal = 1").get() as { n: number };
+    const rows = (await db.get(signalled()))!;
     assert.equal(rows.n, 10, "10 per author per minute; the other two stay plain mentions");
     assert.ok(peak <= 2, `peak concurrent calls ${peak}`);
     // Messages that name nothing, or too many items, use up no limit.
@@ -111,21 +112,21 @@ describe("attention signals", () => {
     for (let i = 0; i < 40; i++) await run(from(`x${i}`, "u7", "photocraft#1 photocraft#2 photocraft#3 photocraft#4 photocraft#5 photocraft#6"));
     await run(from("b0", "u9", "review photocraft#1"));
     await s.idle();
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE signal = 1").get() as { n: number }).n, 11, "the window slides");
+    assert.equal((await db.get(signalled()))!.n, 11, "the window slides");
     await run(from("c0", "u8", "photocraft#1 photocraft#2 photocraft#3 photocraft#4 photocraft#5 photocraft#6 review"));
     await s.idle();
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE signal = 1").get() as { n: number }).n, 11, "six items: not checked");
+    assert.equal((await db.get(signalled()))!.n, 11, "six items: not checked");
   });
 
   test("a daily cap of 0 makes no Jev or Haiku call", async () => {
-    await db.prepare("INSERT INTO settings (key, value) VALUES (?, '0') ON CONFLICT(key) DO UPDATE SET value = '0'").run(SIGNAL_CAP_KEY);
+    await db.run(db.k.insertInto("settings").values({ key: SIGNAL_CAP_KEY, value: "0" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     try {
       const jev = calls.jev, haiku = calls.haiku;
       jevP = 0.9; await send("MESSAGE_CREATE", msg("cap1", "please review photocraft#3"));
       assert.equal(calls.jev, jev);
       assert.equal(calls.haiku, haiku);
     } finally {
-      await db.prepare("DELETE FROM settings WHERE key = ?").run(SIGNAL_CAP_KEY);
+      await db.run(db.k.deleteFrom("settings").where("key", "=", SIGNAL_CAP_KEY));
     }
   });
 });

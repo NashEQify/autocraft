@@ -24,7 +24,8 @@ async function estimate(db: Db, promptId: string, nowMs: number): Promise<number
   if (!m) estimates.set(db, (m = new Map()));
   const hit = m.get(promptId);
   if (hit && nowMs - hit.at < ESTIMATE_TTL_MS) return hit.usd;
-  const xs = (await db.prepare("SELECT cost_usd FROM main.agent_runs WHERE prompt_id = ? AND state = 'done' AND cost_usd IS NOT NULL ORDER BY id DESC LIMIT ?").all(promptId, ESTIMATE_RUNS) as { cost_usd: number }[])
+  const xs = (await db.all(db.k.selectFrom("main.agent_runs").select("cost_usd").where("prompt_id", "=", promptId).where("state", "=", "done").where("cost_usd", "is not", null)
+    .$narrowType<{ cost_usd: number }>().orderBy("id", "desc").limit(ESTIMATE_RUNS)))
     .map((r) => Number(r.cost_usd)).sort((a, b) => a - b);
   const usd = xs.length ? xs[Math.floor(xs.length / 2)]! : null;
   m.set(promptId, { at: nowMs, usd });

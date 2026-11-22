@@ -4,9 +4,9 @@
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { describe, test } from "node:test";
-import { writeSnapshot } from "../src/itemtools/snapshot.ts";
+import type { DatabaseSync } from "node:sqlite";
+import { after, describe, test } from "node:test";
+import { buildSnapshot } from "../src/itemtools/snapshot.ts";
 import { callTool, frame, openDb } from "../src/itemtools/server/tools.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
@@ -16,6 +16,9 @@ const dir = mkdtempSync(join(SCRATCH, "itemtools-safety-"));
 const mirrorFile = join(dir, "mirror.db");
 const snap = join(dir, "snap", "items.db");
 const cfg = { db: snap, diffs: null };
+// The snapshot is refreshed as the app does it: from the SQLite file AUTOCRAFT_DB names, or from the Postgres handle
+// that connectDb gives under the Postgres suite.
+process.env.AUTOCRAFT_DB = mirrorFile;
 
 const src = await connectDb(mirrorFile);
 for (const r of ["open", "later"]) await src.prepare("INSERT INTO repos (name, visibility) VALUES (?, 'public')").run(r);
@@ -26,25 +29,24 @@ await item.run("later", 1, "Soon private", "about glitter");
 await item.run("hidden", 1, "Hidden", "never");
 await src.prepare("INSERT INTO comments (repo, number, id, kind, author, body, review_state) VALUES ('open', 1, 'r1', 'review', 'a', 'draft thoughts', 'PENDING')").run();
 await src.prepare("INSERT INTO comments (repo, number, id, kind, author, body, review_state) VALUES ('open', 1, 'r2', 'review', 'a', 'final thoughts', 'APPROVED')").run();
-await src.close();
+after(() => src.close());
 
 const ids = (db: DatabaseSync, table: string) => (db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
 
 describe("snapshot safety", () => {
-  test("a pending review is not copied", () => {
-    writeSnapshot(mirrorFile, snap);
+  test("a pending review is not copied", async () => {
+    await buildSnapshot(src, snap);
     const db = openDb(snap);
     assert.equal(ids(db, "comments WHERE id = 'r1'"), 0);
     assert.equal(ids(db, "comments WHERE id = 'r2'"), 1);
     db.close();
   });
 
-  test("a repository turning private is removed by a refresh with nothing else changed", () => {
-    const m = new DatabaseSync(mirrorFile);
-    m.prepare("UPDATE repos SET visibility = 'private' WHERE name = 'later'").run();
-    m.close();
-    const r = writeSnapshot(mirrorFile, snap);
-    assert.equal(r.rebuilt, false);
+  test("a repository turning private is removed by a refresh with nothing else changed", async () => {
+    await src.run(src.k.updateTable("repos").set({ visibility: "private" }).where("name", "=", "later"));
+    const r = await buildSnapshot(src, snap);
+    // The SQLite path updates the file in place, so the removal is the refresh's own; the Postgres path rebuilds it.
+    if (src.dialect === "sqlite") assert.equal(r.rebuilt, false);
     const db = openDb(snap);
     assert.equal(ids(db, "items WHERE repo = 'later'"), 0);
     assert.equal(callTool(db, cfg, "search_items", { query: "glitter" }).text, "No matches.");

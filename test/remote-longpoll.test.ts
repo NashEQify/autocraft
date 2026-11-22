@@ -38,7 +38,7 @@ describe("long-polling claims", async () => {
     await addLogin(db, "cli", login, "maintainer", null);
     const t = await createToken(db, login, "runner", { kind: "runner" });
     tokens[login] = { token: t.token, id: t.row.id };
-    await db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?)").run(login, new Date().toISOString());
+    await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, 'photocraft', 'write', ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(login, new Date().toISOString());
   }
   const config = loadConfig({ AUTOCRAFT_DEV_AUTH: "1", AUTOCRAFT_LISTEN: "127.0.0.1:0", AUTOCRAFT_DB: file, AUTOCRAFT_DEV_PERMS: perms });
   const limiter = new RateLimiter(60, 3600_000);

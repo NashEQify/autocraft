@@ -56,19 +56,21 @@ export const modelJudge: Judge = {
 };
 
 export async function signalCapUsd(db: Db): Promise<number> {
-  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(SIGNAL_CAP_KEY) as { value: string } | undefined)?.value);
+  const v = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", SIGNAL_CAP_KEY)))?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_SIGNAL_CAP_USD;
 }
 
 /** What today's (UTC) signal calls cost, from the agent runs. */
 export async function signalSpentUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-signal' AND started_at >= ?").get(day) as { c: number }).c);
+  return Number((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("cost_usd"), eb.lit(0)).as("c"))
+    .where("step", "=", "discord-signal").where("started_at", ">=", day)))!.c);
 }
 
 /** The prompt and reply of a signal call hold the message. Rows of finished calls are removed; `all` (at startup, when no call can be running) removes every row. */
 export async function dropSignalTexts(db: Db, all = false): Promise<void> {
-  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-signal'${all ? "" : " AND state <> 'running'"})`).run();
+  await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", "discord-signal")
+    .$if(!all, (q) => q.where("state", "<>", "running"))));
 }
 
 export type SignalDeps = { db: Db; keys: DiscordKeys; log: (line: string) => void; judge?: Judge; now?: () => number };
@@ -134,16 +136,14 @@ export class Signals {
 
   async #check(hash: string, text: string, refs: ItemKey[]): Promise<void> {
     const { db } = this.#d;
-    const title = db.prepare("SELECT title FROM main.items WHERE repo = ? AND number = ?");
-    const rows = db.prepare("SELECT 1 FROM discord_mentions WHERE msg_hash = ? AND repo = ? AND number = ?");
-    const set = db.prepare("UPDATE discord_mentions SET signal = ? WHERE msg_hash = ? AND repo = ? AND number = ?");
     for (const r of refs) {
-      const it = await title.get(r.repo, r.number) as { title: string | null } | undefined;
+      const it = await db.get(db.k.selectFrom("main.items").select("title").where("repo", "=", r.repo).where("number", "=", r.number));
       // No row: the message was deleted, or the item is not named any more.
-      if (!it || !await rows.get(hash, r.repo, r.number)) continue;
+      if (!it || !await db.get(db.k.selectFrom("discord_mentions").select((eb) => eb.lit(1).as("one"))
+        .where("msg_hash", "=", hash).where("repo", "=", r.repo).where("number", "=", r.number))) continue;
       const v = await this.#asks({ ref: `${r.repo}#${r.number}`, title: it.title ?? "", text });
       // A delete during the call removed the row, so this changes nothing then.
-      if (v !== null) await set.run(v ? 1 : 0, hash, r.repo, r.number);
+      if (v !== null) await db.run(db.k.updateTable("discord_mentions").set({ signal: v ? 1 : 0 }).where("msg_hash", "=", hash).where("repo", "=", r.repo).where("number", "=", r.number));
     }
   }
 
@@ -179,7 +179,7 @@ const open = (url: { guildId: string; channelId: string; messageId: string }): s
 /** Messages that asked for attention on an item, newest first. Empty when the key is missing or a row does not open. */
 export async function signalLinks(db: Db, keys: DiscordKeys | null, repo: string, number: number): Promise<DiscordLink[]> {
   if (!keys) return [];
-  const rows = await db.prepare("SELECT msg_hash, sealed FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").all(repo, number) as { msg_hash: string; sealed: string }[];
+  const rows = await db.all(db.k.selectFrom("discord_mentions").select(["msg_hash", "sealed"]).where("repo", "=", repo).where("number", "=", number).where("signal", "=", 1).orderBy("msg_hash"));
   return rows.flatMap((r) => {
     const v = keys.open(r.sealed, r.msg_hash);
     return v ? [{ url: open(v), at: v.at }] : [];
@@ -187,4 +187,4 @@ export async function signalLinks(db: Db, keys: DiscordKeys | null, repo: string
 }
 
 export const signalCountOf = async (db: Db, repo: string, number: number): Promise<number> =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE repo = ? AND number = ? AND signal = 1").get(repo, number) as { n: number }).n;
+  (await db.get(db.k.selectFrom("discord_mentions").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", repo).where("number", "=", number).where("signal", "=", 1)))!.n;

@@ -3,6 +3,7 @@ import { FORMAT_REASONS, safePath } from "./patch.ts";
 import type { ConflictCandidate } from "./conflict-state.ts";
 import { FIXUP_MAX_ATTEMPTS } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Fix-up tries per PR (pushed, failed, refused or rejected) before the step leaves it to a person. */
 export const MAX_ATTEMPTS = FIXUP_MAX_ATTEMPTS;
@@ -51,9 +52,9 @@ const ATTEMPT_STATES: FixupState[] = ["pushing", "pushed", "failed", "refused", 
 
 /** Refusals for a wrong hunk header count (fixed by recounting since) are not tries. Pre-merge rounds have their own budget. */
 export async function attemptsOf(db: Db, repo: string, number: number): Promise<number> {
-  return (await db.prepare(`SELECT COUNT(*) AS n FROM fixups WHERE repo = ? AND number = ? AND source IS NULL AND state IN (${ATTEMPT_STATES.map(() => "?").join(",")})
-      AND NOT (state = 'refused' AND (${FORMAT_REASONS.map(() => "COALESCE(reason, '') LIKE ?").join(" OR ")}))`)
-    .get(repo, number, ...ATTEMPT_STATES, ...FORMAT_REASONS.map((r) => `${r}%`)) as { n: number }).n;
+  return (await db.get(db.k.selectFrom("fixups").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("repo", "=", repo).where("number", "=", number).where("source", "is", null).where("state", "in", ATTEMPT_STATES)
+    .where((eb) => eb.not(eb.and([eb("state", "=", "refused"), eb.or(FORMAT_REASONS.map((r) => kx.like(db, eb.fn.coalesce("reason", eb.val("")), eb.val(`${r}%`))))])))))!.n;
 }
 
 /** attemptsOf() from the PR's fixups rows. `LIKE 'reason%'` ignores ASCII case. */

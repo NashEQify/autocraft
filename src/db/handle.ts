@@ -1,7 +1,7 @@
 // The Db handle over one backend engine: transaction routing through AsyncLocalStorage, the statement API and the
 // observers. Backend specifics (dialect, drivers, BEGIN forms, statement execution) live in the engine.
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Compilable, DatabaseConnection, Kysely, Transaction, TransactionBuilder } from "kysely";
+import type { Compilable, DatabaseConnection, Kysely, TransactionBuilder } from "kysely";
 import type { DatabaseSync } from "node:sqlite";
 import type { DB, Db, DbEvent, Dialect, NamedParams, Param, Row, RunResult, Statement, WriteOptions } from "./index.ts";
 
@@ -15,7 +15,10 @@ export interface Tx {
   lockTimeoutMs?: number;
   /** The connection the transaction runs on, recorded by the engine's driver at BEGIN. */
   conn?: DatabaseConnection;
-  trx?: Transaction<DB>;
+  /** The transaction's Kysely (a Transaction<DB> typed as its base class, assigned through `unknown`: checking the subclass against the base over the full DB type is too large for the checker). */
+  trx?: Kysely<DB>;
+  /** Savepoints taken by `attempt`, for unique names. */
+  savepoints?: number;
 }
 
 /** What a handle gives its engine. */
@@ -34,6 +37,8 @@ export interface Engine {
   /** Runs one raw statement: on `tx`'s connection when given, otherwise on a connection of its own. */
   exec(op: Op, text: string, args: Args, tx: Tx | undefined): Promise<Row | Row[] | RunResult | undefined>;
   script(text: string, tx: Tx | undefined): Promise<void>;
+  /** An engine whose statements see tracked repos only (src/db/scoped.ts): this one with its views, or a new one. */
+  scope(): Promise<Engine>;
   /** The transaction settings for `mode` (the driver turns them into its BEGIN). */
   configure(b: TransactionBuilder<DB>, mode: Tx["mode"]): TransactionBuilder<DB>;
   close(): Promise<void>;
@@ -61,13 +66,25 @@ export function callSite(e: Error): string {
   return "";
 }
 
+/**
+ * A write result without an insert id: Postgres has no lastInsertRowid. Reading it throws, so code that relies on it fails
+ * where it reads it instead of using 0 as a key; such statements add RETURNING.
+ */
+export function withoutInsertId(changes: number): RunResult {
+  return Object.defineProperty({ changes }, "lastInsertRowid", {
+    get(): never {
+      throw new Error("lastInsertRowid is not available on Postgres: add RETURNING to the statement and read the row");
+    },
+  }) as RunResult;
+}
+
 /** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
 const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
-  readonly #engine: Engine;
+  #engine: Engine;
   readonly #als = new AsyncLocalStorage<Tx>();
   readonly #observers = new Set<(e: DbEvent) => void>();
   readonly #warned = new Set<string>();
@@ -114,7 +131,8 @@ export class Handle implements Db {
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
     const r = await this.k.executeQuery(q.compile());
-    return { changes: Number(r.numAffectedRows ?? 0n), lastInsertRowid: Number(r.insertId ?? 0n) };
+    const changes = Number(r.numAffectedRows ?? 0n);
+    return this.dialect === "postgres" ? withoutInsertId(changes) : { changes, lastInsertRowid: Number(r.insertId ?? 0n) };
   }
 
   prepare(text: string): Statement {
@@ -130,8 +148,35 @@ export class Handle implements Db {
     } as Statement;
   }
 
-  inTransaction(): boolean {
-    return this.#current() !== undefined;
+  async attempt<T>(fn: () => Promise<T>): Promise<T> {
+    const tx = this.#current();
+    if (this.dialect !== "postgres" || !tx) return await fn();
+    tx.savepoints = (tx.savepoints ?? 0) + 1;
+    const name = `attempt_${tx.savepoints}`;
+    await this.#engine.script(`SAVEPOINT ${name}`, tx);
+    let r: T;
+    try {
+      r = await fn();
+    } catch (e) {
+      await this.#engine.script(`ROLLBACK TO SAVEPOINT ${name}; RELEASE SAVEPOINT ${name}`, tx);
+      throw e;
+    }
+    await this.#engine.script(`RELEASE SAVEPOINT ${name}`, tx);
+    return r;
+  }
+
+  inTransaction(mode?: Tx["mode"]): boolean {
+    const tx = this.#current();
+    return tx !== undefined && (mode === undefined || tx.mode === mode);
+  }
+
+  async scope(): Promise<void> {
+    if (this.#als.getStore()) throw new Error("db.scope inside a transaction");
+    const next = await this.#engine.scope();
+    if (next === this.#engine) return;
+    const old = this.#engine;
+    this.#engine = next;
+    await old.close();
   }
 
   script(text: string): Promise<void> {
@@ -158,7 +203,7 @@ export class Handle implements Db {
     try {
       return await this.#als.run(tx, () =>
         this.#engine.configure(this.#engine.kysely.transaction(), mode).execute(async (trx) => {
-          tx.trx = trx;
+          tx.trx = trx as unknown as Kysely<DB>;
           tx.state = "open";
           lockedAt = performance.now();
           try {

@@ -6,8 +6,9 @@
 // make it stale, but a decision binds each PR member to the head the comparison read.
 import { createHash } from "node:crypto";
 import { canonInfoAll, pickCanonical } from "./canonical.ts";
-import { inPilot, pilotSql } from "../pilot.ts";
-import { backlogHeldSql } from "./held.ts";
+import { inPilot, pilotExpr } from "../pilot.ts";
+import { backlogHeldExpr } from "./held.ts";
+import { cols, excluded, inList, jsonEach, jsonText, like, refIn } from "../db/kx.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import { mapSeq, someSeq } from "../async-seq.ts";
@@ -16,10 +17,13 @@ type Edge = { repo: string; a: number; b: number; similarity: number; jev_p: num
 
 /** Duplicate pairs whose items still have the checked text. */
 export async function duplicateEdges(db: Db, repo?: string): Promise<Edge[]> {
-  return await db.prepare(`SELECT p.repo, p.a, p.b, p.similarity, p.jev_p, p.haiku FROM duplicate_pairs p
-    JOIN items ia ON ia.repo = p.repo AND ia.number = p.a AND ia.embed_hash = p.a_hash
-    JOIN items ib ON ib.repo = p.repo AND ib.number = p.b AND ib.embed_hash = p.b_hash
-    WHERE p.verdict = 'duplicate' AND p.by_operator = 0 ${repo ? "AND p.repo = ?" : ""} ORDER BY p.repo, p.a, p.b`).all(...(repo ? [repo] : [])) as Edge[];
+  return await db.all(db.k.selectFrom("duplicate_pairs as p")
+    .innerJoin("items as ia", (j) => j.onRef("ia.repo", "=", "p.repo").onRef("ia.number", "=", "p.a").onRef("ia.embed_hash", "=", "p.a_hash"))
+    .innerJoin("items as ib", (j) => j.onRef("ib.repo", "=", "p.repo").onRef("ib.number", "=", "p.b").onRef("ib.embed_hash", "=", "p.b_hash"))
+    .select(["p.repo", "p.a", "p.b", "p.similarity", "p.jev_p", "p.haiku"])
+    .where("p.verdict", "=", "duplicate").where("p.by_operator", "=", 0)
+    .$if(!!repo, (q) => q.where("p.repo", "=", repo!))
+    .orderBy("p.repo").orderBy("p.a").orderBy("p.b"));
 }
 
 export type Group = { repo: string; canonical: number; why: string; members: number[]; edges: Edge[] };
@@ -78,25 +82,23 @@ export async function kindSetsOf(db: Db, g: Group): Promise<KindSet[]> {
   return (await kindSetsLoader(db, [g]))(g);
 }
 
-type MemberRow = Member & { k?: string; state_reason?: string | null; in_pilot?: number; held_backlog?: number };
 /** kindSetsOf() for the given groups, with their members' rows read once; `inPilot` and `backlogHeld` answer for the members the same way. */
 export async function kindSetsLoader(db: Db, groups: Group[]): Promise<((g: Group) => KindSet[]) & { inPilot: (repo: string, number: number) => Promise<boolean>; backlogHeld: (repo: string, number: number) => boolean }> {
   const rows = new Map<string, { m: Member; reason: string | null; pilot: boolean; backlog: boolean }>();
-  for (const r of await db.prepare(`SELECT i.number, i.kind, i.state, i.title, i.head_oid, i.embed_hash, i.comments_count, i.additions, i.deletions, i.closing_issues,
-      i.repo || '#' || i.number AS k, i.state_reason, ${pilotSql("i")} AS in_pilot, ${backlogHeldSql("i")} AS held_backlog
-    FROM json_each(?) j JOIN items i ON i.repo = j.value ->> 0 AND i.number = j.value ->> 1`)
-    .all(JSON.stringify(groups.flatMap((g) => g.members.map((n) => [g.repo, n])))) as MemberRow[]) {
-    const k = r.k!, reason = r.state_reason ?? null, pilot = !!r.in_pilot, backlog = !!r.held_backlog;
-    delete r.k;
-    delete r.state_reason;
-    delete r.in_pilot;
-    delete r.held_backlog;
-    rows.set(k, { m: r, reason, pilot, backlog });
+  for (const { k, state_reason, in_pilot, held_backlog, ...m } of await db.all(db.k.selectFrom("items as i")
+    .select(["i.number", "i.kind", "i.state", "i.title", "i.head_oid", "i.embed_hash", "i.comments_count", "i.additions", "i.deletions", "i.closing_issues"])
+    .$narrowType<{ kind: Kind }>()
+    .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", eb.cast<string>("i.number", "text")).as("k"), "i.state_reason", pilotExpr(db, eb, "i").as("in_pilot"), backlogHeldExpr(db, eb, "i").as("held_backlog")])
+    .where(refIn(db, "i", groups.flatMap((g) => g.members.map((n): [string, number] => [g.repo, n])))))) {
+    rows.set(k, { m, reason: state_reason ?? null, pilot: !!in_pilot, backlog: !!held_backlog });
   }
   // Left out: a rejected (closed, unmerged) PR; an item already closed as a duplicate, or whose pair decision is answered close (the act step closes it).
-  const gone = new Set((await db.prepare(`SELECT repo || '#' || number AS k FROM decisions WHERE kind = 'duplicate' AND id LIKE '%:duplicate@%' AND answer = 'close'`).all() as { k: string }[]).map((r) => r.k));
+  const gone = new Set((await db.all(db.k.selectFrom("decisions").select((eb) => eb(eb("repo", "||", eb.val("#")), "||", eb.cast<string>("number", "text")).as("k"))
+    .where("kind", "=", "duplicate").where((eb) => like(db, "id", eb.val("%:duplicate@%"))).where("answer", "=", "close"))).map((r) => r.k));
   // A member our own group Act closed can never become a kept item later.
-  const closedByUs = new Set((await db.prepare("SELECT g.repo || '#' || p.number AS k FROM dupe_group_posts p JOIN dupe_groups g ON g.decision_id = p.decision_id WHERE p.step = 'close' AND p.url IS NOT NULL").all() as { k: string }[]).map((r) => r.k));
+  const closedByUs = new Set((await db.all(db.k.selectFrom("dupe_group_posts as p").innerJoin("dupe_groups as g", "g.decision_id", "p.decision_id")
+    .select((eb) => eb(eb("g.repo", "||", eb.val("#")), "||", eb.cast<string>("p.number", "text")).as("k"))
+    .where("p.step", "=", "close").where("p.url", "is not", null))).map((r) => r.k));
   const setsOf = (g: Group): KindSet[] => {
     const members = g.members.flatMap((n): Member[] => {
       const ref = `${g.repo}#${n}`, r = rows.get(ref);
@@ -133,15 +135,17 @@ export type ComparisonResult = {
 };
 
 type ComparisonRow = Omit<StoredComparison, "members" | "result"> & { members: string; result: string | null };
+type ComparisonKinds = { kind: Kind; source: StoredComparison["source"] };
 
 export async function storedComparison(db: Db, repo: string, key: string): Promise<StoredComparison | null> {
-  const r = await db.prepare("SELECT * FROM dupe_comparisons WHERE repo = ? AND key = ?").get(repo, key) as ComparisonRow | undefined;
+  const r = await db.get(db.k.selectFrom("dupe_comparisons").select(cols("dupe_comparisons")).$narrowType<ComparisonKinds>().where("repo", "=", repo).where("key", "=", key));
   return r ? parseComparison(r) : null;
 }
 
 /** storedComparison() for the sets of the repo (every repo without one), from one reading of the table. */
 export async function storedComparisons(db: Db, repo?: string): Promise<(repo: string, key: string) => Promise<StoredComparison | null>> {
-  const rows = new Map((await db.prepare(`SELECT * FROM dupe_comparisons${repo !== undefined ? " WHERE repo = ?" : ""}`).all(...(repo !== undefined ? [repo] : [])) as ComparisonRow[]).map((r) => [`${r.repo}\n${r.key}`, r]));
+  const rows = new Map((await db.all(db.k.selectFrom("dupe_comparisons").select(cols("dupe_comparisons")).$narrowType<ComparisonKinds>()
+    .$if(repo !== undefined, (q) => q.where("repo", "=", repo!)))).map((r) => [`${r.repo}\n${r.key}`, r]));
   return async (r, key) => { const row = rows.get(`${r}\n${key}`); return row ? parseComparison(row) : null; };
 }
 
@@ -157,14 +161,16 @@ export async function saveComparison(db: Db, c: StoredComparison, set?: KindSet)
   if (c.kind === "pr" && set) {
     for (const m of set.members) { const z = sizeOf(m); if (z !== null) sizes[m.number] = z; if (m.head_oid) heads[m.number] = m.head_oid; }
   } else if (c.kind === "pr") {
-    const get = db.prepare("SELECT additions, deletions, head_oid FROM items WHERE repo = ? AND number = ?");
     for (const n of c.members) {
-      const m = (await get.get(c.repo, n) as { additions: number | null; deletions: number | null; head_oid: string | null } | undefined) ?? { additions: null, deletions: null, head_oid: null };
+      const m = (await db.get(db.k.selectFrom("items").select(["additions", "deletions", "head_oid"]).where("repo", "=", c.repo).where("number", "=", n))) ?? { additions: null, deletions: null, head_oid: null };
       const z = sizeOf(m); if (z !== null) sizes[n] = z; if (m.head_oid) heads[n] = m.head_oid;
     }
   }
-  await db.prepare(`INSERT OR REPLACE INTO dupe_comparisons (repo, key, kind, members, hash, kept, source, model, reason, result, error, attempts, at, summary, why, sizes, heads)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(c.repo, c.key, c.kind, JSON.stringify(c.members), c.hash, c.kept, c.source, c.model, c.reason, c.result ? JSON.stringify(c.result) : null, c.error, c.attempts, c.at, c.summary ?? null, c.why ?? null, c.kind === "pr" ? JSON.stringify(sizes) : null, c.kind === "pr" ? JSON.stringify(heads) : null);
+  await db.run(db.k.insertInto("dupe_comparisons").values({
+    repo: c.repo, key: c.key, kind: c.kind, members: JSON.stringify(c.members), hash: c.hash, kept: c.kept, source: c.source, model: c.model, reason: c.reason,
+    result: c.result ? JSON.stringify(c.result) : null, error: c.error, attempts: c.attempts, at: c.at, summary: c.summary ?? null, why: c.why ?? null,
+    sizes: c.kind === "pr" ? JSON.stringify(sizes) : null, heads: c.kind === "pr" ? JSON.stringify(heads) : null,
+  }).onConflict((oc) => oc.columns(["repo", "key"]).doUpdateSet(excluded(["kind", "members", "hash", "kept", "source", "model", "reason", "result", "error", "attempts", "at", "summary", "why", "sizes", "heads"]))));
 }
 
 /** True when a PR member's diff size differs by more than 20% from the size stored at compare time. */
@@ -184,8 +190,10 @@ function diffMoved(c: StoredComparison, members: Member[]): boolean {
  * heads (stored before heads were kept), so nothing binds the PR to code a comparison saw; null when the comparison read no head of it.
  */
 export async function comparedHead(db: Db, repo: string, n: number): Promise<string | null | undefined> {
-  const r = await db.prepare(`SELECT heads, json_extract(heads, '$."' || :n || '"') AS head FROM dupe_comparisons
-    WHERE repo = :repo AND kind = 'pr' AND EXISTS (SELECT 1 FROM json_each(members) WHERE value = :n) ORDER BY at DESC LIMIT 1`).get({ repo, n }) as { heads: string | null; head: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("dupe_comparisons").select(["heads", jsonText(db, "heads", `$."${n}"`).as("head")])
+    .where("repo", "=", repo).where("kind", "=", "pr")
+    .where((eb) => eb.exists(eb.selectFrom(jsonEach(db, "dupe_comparisons.members", "je", "bigint")).select(eb.lit(1).as("one")).where("je.value", "=", n)))
+    .orderBy("at", "desc").limit(1));
   return !r || r.heads == null ? undefined : r.head ?? null;
 }
 
@@ -204,7 +212,7 @@ const dropKey = (s: { repo: string; key: string }) => `dupe_drop:${s.repo}:${s.k
 
 /** Remembers that the set changed on GitHub since the sync, so it is not tried again for a while. */
 export async function rememberDrop(db: Db, s: KindSet, at: string): Promise<void> {
-  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(dropKey(s), `${s.hash}|${at}`);
+  await db.run(db.k.insertInto("settings").values({ key: dropKey(s), value: `${s.hash}|${at}` }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
 }
 
 /** When the set's current snapshot was last dropped (ms), or null. */
@@ -223,9 +231,8 @@ async function recentlyDropped(db: Db, s: KindSet, nowMs: number): Promise<boole
 /** A stored rule result is tried again after 15 minutes, three times at most, while no decision of the group is answered. */
 async function retryable(db: Db, c: StoredComparison, nowMs: number): Promise<boolean> {
   if (c.source !== "rule" || c.attempts >= RULE_ATTEMPTS || nowMs - Date.parse(c.at) < RULE_RETRY_MS) return false;
-  const placeholders = c.members.map(() => "?").join(",");
-  return !await db.prepare(`SELECT 1 FROM dupe_group_items gi JOIN decisions d ON d.id = gi.decision_id
-    WHERE gi.repo = ? AND gi.number IN (${placeholders}) AND d.answer IS NOT NULL AND d.answer <> 'superseded' LIMIT 1`).get(c.repo, ...c.members);
+  return !await db.get(db.k.selectFrom("dupe_group_items as gi").innerJoin("decisions as d", "d.id", "gi.decision_id").select((eb) => eb.lit(1).as("one"))
+    .where("gi.repo", "=", c.repo).where(inList(db, "gi.number", c.members, "bigint")).where("d.answer", "is not", null).where("d.answer", "<>", "superseded").limit(1));
 }
 
 /**

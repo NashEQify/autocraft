@@ -1,11 +1,12 @@
 // CI and merge state of PR heads: one GraphQL query per chunk of PRs, stored in pr_checks.
 import { ownerOf } from "../owners.ts";
-import { KEEP_KNOWN_MERGEABLE, type Querier } from "../mirror.ts";
-import { pilotSql } from "../pilot.ts";
+import { keepKnownMergeableExpr, type Querier } from "../mirror.ts";
+import { pilotExpr } from "../pilot.ts";
 import { resolvePushes } from "../push-outcomes.ts";
 import { overallAt, recordRuns, type Suite } from "../merge/ci-approval.ts";
 import { noteMergeable } from "../merge/mergeable.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** PRs per query: 100 check contexts each keeps a query well under GitHub's node limit. */
 export const CHECKS_PER_QUERY = 40;
@@ -105,12 +106,14 @@ export function parseChecks(repo: string, repository: Record<string, PrNode | nu
 }
 
 export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISOString()): Promise<void> {
-  const ins = db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET head_oid = excluded.head_oid, state = excluded.state, is_draft = excluded.is_draft, overall = excluded.overall,
-      checks = excluded.checks, mergeable = ${KEEP_KNOWN_MERGEABLE("pr_checks")}, maintainer_can_modify = excluded.maintainer_can_modify, fetched_at = excluded.fetched_at`);
   for (const r of rows)
-    await ins.run(r.repo, r.number, r.head_oid, r.state, r.is_draft ? 1 : 0, r.overall, JSON.stringify(r.checks), r.mergeable, r.maintainer_can_modify ? 1 : 0, at);
+    await db.run(db.k.insertInto("pr_checks").values({
+      repo: r.repo, number: r.number, head_oid: r.head_oid, state: r.state, is_draft: r.is_draft ? 1 : 0, overall: r.overall, checks: JSON.stringify(r.checks),
+      mergeable: r.mergeable, maintainer_can_modify: r.maintainer_can_modify ? 1 : 0, fetched_at: at,
+    }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet((eb) => ({
+      ...kx.excluded(["head_oid", "state", "is_draft", "overall", "checks", "maintainer_can_modify", "fetched_at"])(eb),
+      mergeable: keepKnownMergeableExpr(eb, "pr_checks"),
+    }))));
   for (const r of rows) await recordRuns(db, r, at);
   await resolvePushes(db, rows, at);
   await noteMergeable(db, rows, at);
@@ -118,7 +121,8 @@ export async function saveChecks(db: Db, rows: PrChecks[], at = new Date().toISO
 
 /** Fetches and stores the checks of the given PRs (all open PRs of the repo when none are given). */
 export async function refreshChecks(db: Db, client: Querier, repo: string, numbers?: number[], log: (line: string) => void = () => {}): Promise<PrChecks[]> {
-  const list = numbers ?? (await db.prepare(`SELECT number FROM items i WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND ${pilotSql("i")} ORDER BY number`).all(repo) as { number: number }[]).map((r) => r.number);
+  const list = numbers ?? (await db.all(db.k.selectFrom("items as i").select("i.number").where("i.repo", "=", repo).where("i.kind", "=", "pr").where("i.state", "=", "OPEN")
+    .where((eb) => pilotExpr(db, eb, "i")).orderBy("i.number"))).map((r) => r.number);
   const all: PrChecks[] = [];
   for (let i = 0; i < list.length; i += CHECKS_PER_QUERY) {
     const chunk = list.slice(i, i + CHECKS_PER_QUERY);
@@ -132,7 +136,7 @@ export async function refreshChecks(db: Db, client: Querier, repo: string, numbe
 }
 
 /** The stored checks of a PR; `overall` reads "pending" while workflow runs wait for approval at that head (see overallAt). */
-export async function checksOf(db: Db, repo: string, number: number): Promise<{ head_oid: string; overall: Overall; mergeable: string | null; maintainer_can_modify: number } | undefined> {
-  const r = await db.prepare("SELECT head_oid, overall, mergeable, maintainer_can_modify FROM pr_checks WHERE repo = ? AND number = ?").get(repo, number) as { head_oid: string; overall: Overall; mergeable: string | null; maintainer_can_modify: number } | undefined;
+export async function checksOf(db: Db, repo: string, number: number): Promise<{ head_oid: string; overall: Overall; mergeable: string | null; maintainer_can_modify: number | null } | undefined> {
+  const r = await db.get(db.k.selectFrom("pr_checks").select(["head_oid", "overall", "mergeable", "maintainer_can_modify"]).$narrowType<{ overall: Overall }>().where("repo", "=", repo).where("number", "=", number));
   return r && { ...r, overall: await overallAt(db, repo, number, r.head_oid, r.overall) as Overall };
 }

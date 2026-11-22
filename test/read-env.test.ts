@@ -4,15 +4,16 @@ import { test } from "node:test";
 import { ownerOfArgs, ownerOfVariables, readEnv, readEnvFor } from "../src/github/read.ts";
 import type { Db } from "../src/db/index.ts";
 import { dbFor } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const dbWith = async (identity?: string): Promise<Db> => {
   const db = await dbFor(new DatabaseSync(":memory:"));
-  await db.script("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)");
-  if (identity) await db.prepare("INSERT INTO settings VALUES ('github_identity', ?)").run(identity);
+  await db.run(db.k.schema.createTable("settings").addColumn("key", "text", (c) => c.primaryKey()).addColumn("value", "text"));
+  if (identity) await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: identity }));
   return db;
 };
 
-test("reads inherit under box and carry only the installation token under app", async () => {
+test("reads inherit under box and carry only the installation token under app", { skip: sqliteOnly("raw DatabaseSync handle (convert to testDb)") }, async () => {
   process.env.GH_TOKEN = "box-account-token";
   const minted: string[] = [];
   const mint = async (owner: string) => { minted.push(owner); return "ghs_install"; };

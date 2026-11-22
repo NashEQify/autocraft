@@ -12,15 +12,15 @@ export class OffThread {
   private readonly pending = new Map<number, Pending>();
   private next = 1;
 
-  private readonly dbFile: string;
+  private readonly dbTarget: string;
 
-  constructor(dbFile: string) {
-    this.dbFile = dbFile;
+  constructor(dbTarget: string) {
+    this.dbTarget = dbTarget;
   }
 
   private spawn(): Worker {
     if (this.worker) return this.worker;
-    const w = new Worker(new URL("./worker.ts", import.meta.url), { workerData: { dbFile: this.dbFile } });
+    const w = new Worker(new URL("./worker.ts", import.meta.url), { workerData: { dbTarget: this.dbTarget } });
     const fail = (e: Error) => {
       if (this.worker === w) this.worker = null;
       for (const p of this.pending.values()) p.reject(e);

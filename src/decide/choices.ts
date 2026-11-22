@@ -12,6 +12,7 @@ import {
 } from "./choices-types.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Most cores Opus may add on top of the offered ones. */
 export { MAX_ADDED_CORES };
@@ -69,7 +70,7 @@ export function withIds(extras: ChoicesBlockExtra[]): StoredExtra[] {
 }
 
 const itemOf = async (db: Db, repo: string, n: number): Promise<{ kind: string } | undefined> =>
-  await db.prepare("SELECT kind FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string } | undefined;
+  await db.get(db.k.selectFrom("items").select("kind").where("repo", "=", repo).where("number", "=", n));
 
 /** The GitHub writes an option makes when it is the answer. */
 function optionWrites(kind: Kind, key: string): ActionTag[] {
@@ -114,7 +115,7 @@ export function autocraftLine(p: ParsedCoreKey, kind: string, itemKind: string):
 }
 
 const labelsOf = async (db: Db, repo: string, n: number): Promise<string[]> => {
-  try { return JSON.parse((await db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?").get(repo, n) as { labels: string | null } | undefined)?.labels ?? "[]") as string[]; } catch { return []; }
+  try { return JSON.parse((await db.get(db.k.selectFrom("items").select("labels").where("repo", "=", repo).where("number", "=", n)))?.labels ?? "[]") as string[]; } catch { return []; }
 };
 
 const mk = async (db: Db, d: DecisionRow, key: CoreKey, label: string, o: { writes: ActionTag[]; base: ExtraKind[]; applicable: Set<string>; closing?: boolean }): Promise<Core> => {
@@ -291,12 +292,13 @@ export const seenJson = (s: ChoicesRow["seen"]): string => JSON.stringify({ head
 
 /** The decision's current choices, or undefined. */
 export async function currentChoices(db: Db, decisionId: string): Promise<ChoicesRow | undefined> {
-  const r = await db.prepare("SELECT * FROM main.decision_choices WHERE decision_id = ? AND state = 'current' ORDER BY created_at DESC, rowid DESC LIMIT 1").get(decisionId) as Raw | undefined;
+  const r = await db.get(db.k.selectFrom("main.decision_choices").select(kx.cols("main.decision_choices")).where("decision_id", "=", decisionId).where("state", "=", "current")
+    .orderBy("created_at", "desc").orderBy(kx.rowid("main.decision_choices"), "desc").limit(1));
   return r && rowOf(r);
 }
 
 export async function choicesById(db: Db, id: string): Promise<ChoicesRow | undefined> {
-  const r = await db.prepare("SELECT * FROM main.decision_choices WHERE id = ?").get(id) as Raw | undefined;
+  const r = await db.get(db.k.selectFrom("main.decision_choices").select(kx.cols("main.decision_choices")).where("id", "=", id));
   return r && rowOf(r);
 }
 
@@ -307,19 +309,20 @@ export async function choicesById(db: Db, id: string): Promise<ChoicesRow | unde
 export async function writeChoices(db: Db, row: Omit<ChoicesRow, "id" | "state" | "createdAt">, o: { by?: string | null; now?: Date } = {}): Promise<ChoicesRow> {
   const id = randomUUID(), at = (o.now ?? new Date()).toISOString();
   await db.write(async () => {
-    await db.prepare("UPDATE main.decision_choices SET state = 'replaced' WHERE decision_id = ? AND state = 'current'").run(row.decisionId);
-    await db.prepare(`INSERT INTO main.decision_choices (id, decision_id, repo, number, turn_id, stamp, seen, source, drafts, added, pick, state, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'current', ?)`)
-      .run(id, row.decisionId, row.repo, row.number, row.turnId, row.stamp, seenJson(row.seen), row.source, JSON.stringify(row.drafts), JSON.stringify(row.added), JSON.stringify(row.pick), at);
+    await db.run(db.k.updateTable("main.decision_choices").set({ state: "replaced" }).where("decision_id", "=", row.decisionId).where("state", "=", "current"));
+    await db.run(db.k.insertInto("main.decision_choices").values({
+      id, decision_id: row.decisionId, repo: row.repo, number: row.number, turn_id: row.turnId, stamp: row.stamp, seen: seenJson(row.seen), source: row.source,
+      drafts: JSON.stringify(row.drafts), added: JSON.stringify(row.added), pick: JSON.stringify(row.pick), state: "current", created_at: at,
+    }));
     const opt = row.pick.core ? parseCoreKey(row.pick.core) : null;
     // Backlog is an option of every decision, so a Later pick is the recommendation "backlog".
     const recommended = opt?.type === "option" ? opt.option : opt?.type === "backlog" ? "backlog" : null;
     if (recommended !== null) {
-      await db.prepare(`UPDATE main.decisions SET recommended = ?, recommended_reason = ?${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
-        .run(...[recommended, row.pick.reason, ...(o.by !== undefined ? [o.by] : []), row.decisionId] as (string | null)[]);
+      await db.run(db.k.updateTable("main.decisions").set({ recommended, recommended_reason: row.pick.reason, ...(o.by !== undefined && { recommended_by: o.by }) })
+        .where("id", "=", row.decisionId).where("answer", "is", null));
     } else {
-      await db.prepare(`UPDATE main.decisions SET recommended = NULL, recommended_reason = NULL${o.by !== undefined ? ", recommended_by = ?" : ""} WHERE id = ? AND answer IS NULL`)
-        .run(...[...(o.by !== undefined ? [o.by] : []), row.decisionId] as (string | null)[]);
+      await db.run(db.k.updateTable("main.decisions").set({ recommended: null, recommended_reason: null, ...(o.by !== undefined && { recommended_by: o.by }) })
+        .where("id", "=", row.decisionId).where("answer", "is", null));
     }
   });
   return (await choicesById(db, id))!;
@@ -344,13 +347,15 @@ export interface ChoicesUpdate {
 /** Writes a new current row: the current one with the update's drops, replaced drafts, added cores and pick. Returns the row and why an added core was left out. */
 export async function mergeChoices(db: Db, decisionId: string, u: ChoicesUpdate, o: { by?: string | null; now?: Date } = {}): Promise<{ row: ChoicesRow; notes: string[] }> {
   const cur = await currentChoices(db, decisionId);
-  const d = await db.prepare("SELECT repo, number FROM main.decisions WHERE id = ?").get(decisionId) as { repo: string; number: number } | undefined;
+  const d = await db.get(db.k.selectFrom("main.decisions").select(["repo", "number"]).where("id", "=", decisionId));
   if (!d) throw new Error(`no decision ${decisionId}`);
+  if (d.repo === null || d.number === null) throw new Error(`decision ${decisionId} has no item`);
+  const { repo, number } = d;
   const drafts: ChoicesRow["drafts"] = { ...(cur?.drafts ?? {}) };
   let added = [...(cur?.added ?? [])];
   // The cap counts the stored added cores that still apply to the item, as the parser does.
   const dec = await getDecision(db, decisionId);
-  const applicable = dec ? new Set(await applicableSteps(db, d.repo, d.number)) : null;
+  const applicable = dec ? new Set(await applicableSteps(db, repo, number)) : null;
   const live = async (ks: CoreKey[]): Promise<number> => (dec && applicable ? (await filterSeq(ks, async (k) => await addedCore(db, dec, k, applicable))).length : ks.length);
   const notes: string[] = [];
   for (const k of u.drop ?? []) {
@@ -365,6 +370,6 @@ export async function mergeChoices(db: Db, decisionId: string, u: ChoicesUpdate,
     }
     drafts[a.key] = { ...(a.draft.params && { params: a.draft.params }), extras: withIds(a.draft.extras) };
   }
-  const row = await writeChoices(db, { decisionId, repo: d.repo, number: d.number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
+  const row = await writeChoices(db, { decisionId, repo, number, turnId: u.turnId, stamp: u.stamp, seen: u.seen, source: "conversation", drafts, added, pick: u.pick }, o);
   return { row, notes };
 }

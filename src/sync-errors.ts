@@ -22,18 +22,21 @@ export async function recordRepoFailure(db: Db, repo: string, e: unknown, movedT
   const kind = classifyFailure(e);
   const message = String((e as Error)?.message ?? e).slice(0, 300);
   const at = iso(now);
-  await db.prepare(`INSERT INTO sync_repo_errors (repo, kind, message, moved_to, since, at) VALUES (?,?,?,?,?,?)
-    ON CONFLICT(repo) DO UPDATE SET kind = excluded.kind, message = excluded.message, moved_to = excluded.moved_to, at = excluded.at,
-      since = CASE WHEN sync_repo_errors.kind = excluded.kind THEN sync_repo_errors.since ELSE excluded.since END`).run(repo, kind, message, movedTo, at, at);
+  await db.run(db.k.insertInto("sync_repo_errors").values({ repo, kind, message, moved_to: movedTo, since: at, at })
+    .onConflict((oc) => oc.column("repo").doUpdateSet((eb) => ({
+      kind: eb.ref("excluded.kind"), message: eb.ref("excluded.message"), moved_to: eb.ref("excluded.moved_to"), at: eb.ref("excluded.at"),
+      since: eb.case().when("sync_repo_errors.kind", "=", eb.ref("excluded.kind")).then(eb.ref("sync_repo_errors.since")).else(eb.ref("excluded.since")).end(),
+    }))));
   return kind;
 }
 
 export async function clearRepoFailure(db: Db, repo: string): Promise<void> {
-  await db.prepare("DELETE FROM sync_repo_errors WHERE repo = ?").run(repo);
+  await db.run(db.k.deleteFrom("sync_repo_errors").where("repo", "=", repo));
 }
 
 /** Errors of repos that are still tracked. */
 export async function repoErrors(db: Db): Promise<RepoError[]> {
-  return (await db.prepare(`SELECT e.repo, e.kind, e.message, e.moved_to AS movedTo, e.since, e.at FROM sync_repo_errors e
-    JOIN tracked_repos t ON t.name = e.repo ORDER BY e.since, e.repo`).all()) as RepoError[];
+  return await db.all(db.k.selectFrom("sync_repo_errors as e").innerJoin("tracked_repos as t", "t.name", "e.repo")
+    .select(["e.repo", "e.kind", "e.message", "e.moved_to as movedTo", "e.since", "e.at"]).$narrowType<{ kind: RepoErrorKind }>()
+    .orderBy("e.since").orderBy("e.repo"));
 }

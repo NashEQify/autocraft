@@ -45,7 +45,7 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
         ...(await githubAppStatus(db, config, deps)),
         csrf: r.csrf,
         // Whether the signed-in operator has let the app act as them (their user token is stored and still good).
-        authorized: config.secrets.app ? !!await db.prepare("SELECT 1 FROM user_tokens WHERE login = ? AND status = 'ok'").get(r.user.login) : null,
+        authorized: config.secrets.app ? !!await db.get(db.k.selectFrom("user_tokens").select("login").where("login", "=", r.user.login).where("status", "=", "ok")) : null,
       },
     }),
   }, {
@@ -63,9 +63,9 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
         return { status: 500, json: { error: `The file holding the app's keys could not be updated (${errorCode(e)}).` } };
       }
       config.secrets.app = null;
-      await db.prepare("DELETE FROM github_app_states").run();
+      await db.run(db.k.deleteFrom("github_app_states"));
       // The stored user tokens belong to the removed app.
-      await db.prepare("DELETE FROM user_tokens").run();
+      await db.run(db.k.deleteFrom("user_tokens"));
       await audit(db, r.user.login, "github-app-remove", app.slug, { slug: app.slug, owner: app.owner?.login ?? null });
       return { json: { settingsUrl: settingsUrl(app.slug, app.owner) } };
     },
@@ -128,8 +128,8 @@ export async function startRegistration(db: Db, config: Config, req: IncomingMes
     return refuse(nonce, 409, `The secrets file cannot be updated (${errorCode(e)}), so the app's keys could not be kept.`);
   }
   const state = randomToken(24);
-  await db.prepare("DELETE FROM github_app_states WHERE created_at <= ?").run(new Date(Date.now() - STATE_TTL_MS).toISOString());
-  await db.prepare("INSERT INTO github_app_states (state, login, session_hash, created_at) VALUES (?, ?, ?, ?)").run(state, session.login, session.idHash, new Date().toISOString());
+  await db.run(db.k.deleteFrom("github_app_states").where("created_at", "<=", new Date(Date.now() - STATE_TTL_MS).toISOString()));
+  await db.run(db.k.insertInto("github_app_states").values({ state, login: session.login, session_hash: session.idHash, created_at: new Date().toISOString() }));
   const manifest = JSON.stringify(appManifest(name, publicBase(config, req)));
   const body = `<p class="muted">Sending the app's manifest to GitHub. Confirm the app there.</p>
 <form id="f" method="post" action="${esc(registrationUrl(state, org))}"><input type="hidden" name="manifest" value="${esc(manifest)}"><button>Continue to GitHub</button></form>
@@ -154,7 +154,7 @@ export async function finishRegistration(db: Db, config: Config, deps: AppDeps, 
   const state = url.searchParams.get("state") ?? "", code = url.searchParams.get("code") ?? "";
   const stale = "This registration link is unknown, used or expired. Start again from the GitHub App page.";
   // The session and login are checked before the state row is consumed, so another session cannot burn it.
-  const found = await db.prepare("SELECT login, session_hash, created_at FROM github_app_states WHERE state = ?").get(state) as { login: string; session_hash: string; created_at: string } | undefined;
+  const found = await db.get(db.k.selectFrom("github_app_states").select(["login", "session_hash", "created_at"]).where("state", "=", state));
   if (!found || !code || found.login !== session.login || found.session_hash !== session.idHash || Date.now() - Date.parse(found.created_at) > STATE_TTL_MS) return refuse(nonce, 400, stale);
   return await convertAndStore(db, config, deps, code, state, nonce, { login: session.login, back: "/admin/github-app", backLabel: "GitHub App", redirect: "/admin/github-app" }, stale);
 }
@@ -178,7 +178,7 @@ export async function convertAndStore(db: Db, config: Config, deps: AppDeps, cod
     console.error(`github-app registration: secrets file not writable (${errorCode(e)})`);
     return refuseTo(409, `The app exists on GitHub, but the secrets file cannot be updated (${errorCode(e)}). Fix the file and reload this page within an hour.`);
   }
-  if ((await db.prepare("DELETE FROM github_app_states WHERE state = ?").run(state)).changes !== 1) return refuseTo(400, stale);
+  if ((await db.run(db.k.deleteFrom("github_app_states").where("state", "=", state))).changes !== 1) return refuseTo(400, stale);
   converting.add(config);
   try {
     let converted: Awaited<ReturnType<typeof convertManifest>>;

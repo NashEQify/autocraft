@@ -22,11 +22,10 @@ export async function unavailableCandidates(db: Db, repo: string | undefined, ru
 }
 
 async function candidatesIn(db: Db, bucket: "plan" | "unavailable", repo: string | undefined, run: string | null | undefined): Promise<{ c: VerifyCandidate; reason: string | null }[]> {
-  const review = db.prepare("SELECT verdict, reason, risks, fixes FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ?");
-  const text = db.prepare("SELECT title, body FROM items WHERE repo = ? AND number = ?");
   return await mapSeq((await planned(db, "verify", { bucket, ...(repo ? { repo } : {}), ...(run !== undefined ? { run } : {}) })), async ({ facts: f, action }) => {
-    const r = await review.get(f.repo, f.number, action.head!) as { verdict: string; reason: string | null; risks: string | null; fixes: string | null } | undefined;
-    const t = await text.get(f.repo, f.number) as { title: string | null; body: string | null } | undefined;
+    const r = await db.get(db.k.selectFrom("final_reviews").select(["verdict", "reason", "risks", "fixes"])
+      .where("repo", "=", f.repo).where("number", "=", f.number).where("head_oid", "=", action.head!));
+    const t = await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", f.repo).where("number", "=", f.number));
     const info: ReviewInfo = { verdict: r?.verdict ?? "take", reason: r?.reason ?? "", risks: list<string>(r?.risks ?? null), fixes: list<{ file: string; change: string }>(r?.fixes ?? null) };
     return { c: { repo: f.repo, number: f.number, title: t?.title ?? "", body: t?.body ?? "", head_oid: action.head!, label: f.label, review: info }, reason: f.verifyUnavailable };
   });

@@ -5,9 +5,9 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, createWriteStream, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { audit } from "./dash/audit.ts";
-import { dbPath } from "./db.ts";
+import { dataDir } from "./db.ts";
 import { isTracked } from "./repos.ts";
 import { buildReferenceIndex, referenceSearch } from "./reference-search.ts";
 import { isInstructionPath } from "./sandbox/instruction-paths.ts";
@@ -22,7 +22,7 @@ const REPO_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
 const SEGMENT = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 const EXTENSION = /\.(txt|md|pdf|png|jpe?g|gif|webp|svg)$/;
 
-export const referenceRoot = (): string => join(dirname(dbPath()), "reference");
+export const referenceRoot = (): string => join(dataDir(), "reference");
 
 /** The host folder to mount for a repo, or undefined when none was imported. */
 export function referenceDir(repo: string): string | undefined {
@@ -157,7 +157,7 @@ export const commands = {
           await buildReferenceIndex(rest[0]!, {}, "stat");
           for (const p of await referenceSearch(rest[0]!, rest.slice(1).join(" "), 5)) console.log(`#${p.id} ${p.title} (${p.page})\n${p.text}\n`);
         } else if (sub === "import" && rest[0] && rest.every((a, i) => i === 0 || a === "--replace")) {
-          const tmp = mkdtempSync(join(dirname(dbPath()), ".reference-tar-"));
+          const tmp = mkdtempSync(join(dataDir(), ".reference-tar-"));
           try {
             const file = join(tmp, "in.tar");
             await saveStdin(file);

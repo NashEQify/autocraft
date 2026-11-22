@@ -5,6 +5,7 @@ import { isAbsolute } from "node:path";
 import { CHECK_MAX_WALL_MS } from "../core/rules.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** How long after its last use a kept session is resumed: the prompt cache window. */
 export const RESUME_WINDOW_MS = 60 * 60_000;
@@ -91,17 +92,18 @@ export async function sweepSessions(db: Db, now: Date): Promise<number> {
   // A store that a row still waiting on its lint references stays, even when a sibling row (same head) left that state.
   const live = new Set<string>();
   for (const t of SESSION_TABLES) {
-    for (const r of await db.prepare(`SELECT session FROM ${t} WHERE session IS NOT NULL AND state = '${WAITING[t]}'`).all() as { session: string }[]) {
+    for (const r of await db.all(db.k.selectFrom(t).select("session").where("session", "is not", null).where("state", "=", WAITING[t]).$narrowType<{ session: string }>())) {
       for (const s of Object.values(parseSessions(r.session))) if (now.getTime() - Date.parse(s.at) <= RESUME_WINDOW_MS + LONGEST_CALL_MS) live.add(s.dir);
     }
   }
   for (const t of SESSION_TABLES) {
-    const rows = await db.prepare(`SELECT rowid AS id, state, session FROM ${t} WHERE session IS NOT NULL`).all() as { id: number; state: string; session: string }[];
+    const rows = await db.all(db.k.selectFrom(t).select([kx.rowid(t).as("id"), "state", "session"]).where("session", "is not", null)
+      .orderBy(kx.rowid(t)).$narrowType<{ session: string }>());
     for (const r of rows) {
       const all = Object.values(parseSessions(r.session));
       if (all.length && r.state === WAITING[t] && all.every((s) => live.has(s.dir))) continue;
       for (const s of all) if (!live.has(s.dir)) remove(s.dir);
-      await db.prepare(`UPDATE ${t} SET session = NULL WHERE rowid = ?`).run(r.id);
+      await db.run(db.k.updateTable(t).set({ session: null }).where(kx.rowid(t), "=", r.id));
       n++;
     }
   }

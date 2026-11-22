@@ -9,7 +9,7 @@ import { DUPES_HAIKU, DUPES_JEV } from "../agents/steps.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { pickCanonical } from "./canonical.ts";
 import { pairRef, settlePair, type DupePair, type PairVerdict } from "./pair.ts";
-import { pilotSqlFor } from "../pilot.ts";
+import { pilotExprFor } from "../pilot.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
 
@@ -21,27 +21,32 @@ const HAIKU = CLAUDE_PROMPTS["dupes.haiku"];
 export type PairKey = { repo: string; a: number; b: number; a_hash: string; b_hash: string; similarity: number };
 
 // Unchecked pairs whose items still have the hashed text and of which at least one is open.
-const UNCHECKED = `SELECT p.repo, p.a, p.b, p.a_hash, p.b_hash, p.similarity FROM duplicate_pairs p
-    JOIN items ia ON ia.repo = p.repo AND ia.number = p.a AND ia.embed_hash = p.a_hash
-    JOIN items ib ON ib.repo = p.repo AND ib.number = p.b AND ib.embed_hash = p.b_hash
-    WHERE p.verdict IS NULL AND (ia.state = 'OPEN' OR ib.state = 'OPEN') AND p.repo IN (SELECT name FROM tracked_repos)
-      AND (${pilotSqlFor("p.repo", "p.a")} OR ${pilotSqlFor("p.repo", "p.b")})`;
+const unchecked = (db: Db) => db.k.selectFrom("duplicate_pairs as p")
+  .innerJoin("items as ia", (j) => j.onRef("ia.repo", "=", "p.repo").onRef("ia.number", "=", "p.a").onRef("ia.embed_hash", "=", "p.a_hash"))
+  .innerJoin("items as ib", (j) => j.onRef("ib.repo", "=", "p.repo").onRef("ib.number", "=", "p.b").onRef("ib.embed_hash", "=", "p.b_hash"))
+  .select(["p.repo", "p.a", "p.b", "p.a_hash", "p.b_hash", "p.similarity"])
+  .where("p.verdict", "is", null)
+  .where((eb) => eb.or([eb("ia.state", "=", "OPEN"), eb("ib.state", "=", "OPEN")]))
+  .where("p.repo", "in", (eb) => eb.selectFrom("tracked_repos").select("name"))
+  .where((eb) => eb.or([pilotExprFor(db, eb, "p.repo", "p.a"), pilotExprFor(db, eb, "p.repo", "p.b")]));
 
-/** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. */
+/** Unchecked pairs whose items still have the hashed text and of which at least one is open, most similar first. A negative limit means all. */
 export async function uncheckedPairs(db: Db, limit: number): Promise<PairKey[]> {
-  return await db.prepare(`${UNCHECKED} ORDER BY p.similarity DESC, p.repo, p.a, p.b LIMIT ?`).all(limit) as PairKey[];
+  return await db.all(unchecked(db).orderBy("p.similarity", "desc").orderBy("p.repo").orderBy("p.a").orderBy("p.b").$if(limit >= 0, (q) => q.limit(limit)));
 }
 
 /** The number of unchecked pairs (uncheckedPairs) each item is in, keyed by `repo#number`. */
 export async function uncheckedPairCounts(db: Db): Promise<Map<string, number>> {
-  const rows = await db.prepare(`WITH u AS (${UNCHECKED}) SELECT repo || '#' || number AS k, COUNT(*) AS n FROM (SELECT repo, a AS number FROM u UNION ALL SELECT repo, b FROM u) GROUP BY repo, number`).all() as { k: string; n: number }[];
-  return new Map(rows.map((r) => [r.k, r.n]));
+  const rows = await db.all(db.k.with("u", () => unchecked(db))
+    .selectFrom((eb) => eb.selectFrom("u").select(["repo", "a as number"]).unionAll(eb.selectFrom("u").select(["repo", "b as number"])).as("m"))
+    .select((eb) => ["m.repo", "m.number", eb.fn.countAll<number>().as("n")]).groupBy(["m.repo", "m.number"]));
+  return new Map(rows.map((r) => [`${r.repo}#${r.number}`, r.n]));
 }
 
 export async function pairInput(db: Db, k: PairKey): Promise<DupePair> {
-  const get = db.prepare("SELECT number, kind, state, title, body FROM items WHERE repo = ? AND number = ?");
   const item = async (n: number) => {
-    const r = await get.get(k.repo, n) as { number: number; kind: "pr" | "issue"; state: string; title: string | null; body: string | null };
+    const r = (await db.get(db.k.selectFrom("items").select(["number", "kind", "state", "title", "body"]).where("repo", "=", k.repo).where("number", "=", n)
+      .$narrowType<{ kind: "pr" | "issue" }>()))!;
     return { number: r.number, kind: r.kind, state: r.state, title: r.title ?? "", body: r.body ?? "" };
   };
   return { ref: pairRef(k.repo, k.a, k.b), repo: k.repo, a: await item(k.a), b: await item(k.b) };
@@ -75,8 +80,8 @@ export type CheckCounts = { checked: number; jev: number; haiku: number; haikuAl
 
 async function store(db: Db, k: PairKey, jev: number | null, haiku: PairVerdict | null, verdict: PairVerdict, at: string): Promise<void> {
   const canonical = verdict === "duplicate" ? (await pickCanonical(db, k.repo, [k.a, k.b])).number : null;
-  await db.prepare(`UPDATE duplicate_pairs SET jev_p = ?, haiku = ?, verdict = ?, canonical = ?, checked_at = ?
-    WHERE repo = ? AND a = ? AND b = ? AND a_hash = ? AND b_hash = ?`).run(jev, haiku, verdict, canonical, at, k.repo, k.a, k.b, k.a_hash, k.b_hash);
+  await db.run(db.k.updateTable("duplicate_pairs").set({ jev_p: jev, haiku, verdict, canonical, checked_at: at })
+    .where("repo", "=", k.repo).where("a", "=", k.a).where("b", "=", k.b).where("a_hash", "=", k.a_hash).where("b_hash", "=", k.b_hash));
 }
 
 /**

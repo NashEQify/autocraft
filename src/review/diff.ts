@@ -14,6 +14,7 @@ import { lockfileNeedsWhole } from "../core/lockfiles.ts";
 import { sensitiveReasons } from "../core/sensitive.ts";
 import { BULK_ROWS, bulkWrites } from "../core/plan-changes.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 // gh picks its account from the working directory, so it runs in this repo.
 const REPO_DIR = fileURLToPath(new URL("../..", import.meta.url));
@@ -191,7 +192,7 @@ export async function cachedDiff(db: Db, repo: string, number: number, head: str
       const text = readFileSync(file, "utf8");
       const extras = cachedDiffExtras(repo, number, head);
       // A diff cached before its facts were stored (or whose facts a rule change dropped) gets them on its next read.
-      if (!await db.prepare("SELECT 1 FROM diff_facts WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head)) await recordDiffFacts(db, repo, number, head);
+      if (!await db.get(db.k.selectFrom("diff_facts").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head))) await recordDiffFacts(db, repo, number, head);
       // An entry whose extras the rule still waits for is read again only by the re-read (see `rereadDiff`).
       if (!opts.reread) return { ok: true, text, ...(stored !== undefined ? { base: stored } : {}), ...(extras ? { extras } : {}) };
     }
@@ -326,14 +327,15 @@ export function diffFactsOfCache(repo: string, number: number, head: string): Di
   };
 }
 
-const putFacts = (db: Db) => db.prepare(`INSERT INTO diff_facts (repo, number, head_oid, reasons, lines, pending, last_read) VALUES (?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT (repo, number, head_oid) DO UPDATE SET reasons = excluded.reasons, lines = excluded.lines, pending = excluded.pending, last_read = excluded.last_read
-  WHERE reasons IS NOT excluded.reasons OR lines IS NOT excluded.lines OR pending IS NOT excluded.pending OR last_read IS NOT excluded.last_read`);
-const dropFacts = (db: Db) => db.prepare("DELETE FROM diff_facts WHERE repo = ? AND number = ? AND head_oid = ?");
-
 async function writeFacts(db: Db, repo: string, number: number, head: string, f: DiffFacts | null): Promise<void> {
-  if (f) await putFacts(db).run(repo, number, head, JSON.stringify(f.reasons), f.lines, f.pending ? 1 : 0, f.lastRead);
-  else await dropFacts(db).run(repo, number, head);
+  if (f) {
+    await db.run(db.k.insertInto("diff_facts").values({ repo, number, head_oid: head, reasons: JSON.stringify(f.reasons), lines: f.lines, pending: f.pending ? 1 : 0, last_read: f.lastRead })
+      .onConflict((oc) => oc.columns(["repo", "number", "head_oid"]).doUpdateSet(kx.excluded(["reasons", "lines", "pending", "last_read"]))
+        .where((eb) => eb.or([
+          eb("diff_facts.reasons", "is distinct from", eb.ref("excluded.reasons")), eb("diff_facts.lines", "is distinct from", eb.ref("excluded.lines")),
+          eb("diff_facts.pending", "is distinct from", eb.ref("excluded.pending")), eb("diff_facts.last_read", "is distinct from", eb.ref("excluded.last_read")),
+        ]))));
+  } else await db.run(db.k.deleteFrom("diff_facts").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head));
 }
 
 /**
@@ -372,16 +374,18 @@ const factsMarker = () => join(diffCacheDir(), "facts-built");
 export async function buildDiffFacts(db: Db): Promise<number | null> {
   const rules = diffFactsRules();
   const marker = (() => { try { return readFileSync(factsMarker(), "utf8"); } catch { return null; } })();
-  if (marker === rules && (await db.prepare("SELECT value FROM settings WHERE key = ?").get(DIFF_FACTS_KEY) as { value: string } | undefined)?.value === rules) return null;
+  if (marker === rules && (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", DIFF_FACTS_KEY)))?.value === rules) return null;
   let n = 0;
   await db.write(async () => {
-    const heads = await db.prepare(`SELECT r.repo, r.number, r.head_oid FROM opus_reviews r WHERE r.verdict IS NOT NULL AND r.rowid = (
-        SELECT x.rowid FROM opus_reviews x WHERE x.repo = r.repo AND x.number = r.number AND x.verdict IS NOT NULL ORDER BY x.at DESC, x.rowid DESC LIMIT 1)
-      UNION SELECT repo, number, head_oid FROM diff_facts`).all() as { repo: string; number: number; head_oid: string }[];
+    const heads = await db.all(db.k.selectFrom("opus_reviews as r").select(["r.repo", "r.number", "r.head_oid"]).where("r.verdict", "is not", null)
+      .where((eb) => eb(kx.rowid("opus_reviews", "r"), "=", eb.selectFrom("opus_reviews as x").select(kx.rowid("opus_reviews", "x").as("rid"))
+        .whereRef("x.repo", "=", "r.repo").whereRef("x.number", "=", "r.number").where("x.verdict", "is not", null)
+        .orderBy("x.at", "desc").orderBy(kx.rowid("opus_reviews", "x"), "desc").limit(1)))
+      .union(db.k.selectFrom("diff_facts").select(["repo", "number", "head_oid"])));
     const write = async (): Promise<void> => { for (const h of heads) await writeFacts(db, h.repo, h.number, h.head_oid, diffFactsOfCache(h.repo, h.number, h.head_oid)); };
     if (heads.length >= BULK_ROWS) await bulkWrites(db, "diff-facts", write); else await write();
     n = heads.length;
-    await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(DIFF_FACTS_KEY, rules);
+    await db.run(db.k.insertInto("settings").values({ key: DIFF_FACTS_KEY, value: rules }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   });
   mkdirSync(diffCacheDir(), { recursive: true });
   writeFileSync(factsMarker(), rules);

@@ -15,6 +15,7 @@ import { SCRATCH } from "./scratch.ts";
 import { validating } from "./gql.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "fixup-test-"));
@@ -34,13 +35,10 @@ type Opts = { canModify?: boolean; approved?: boolean; mergeable?: string; verdi
 /** One take-fix PR (#7) at `head`. */
 async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
-  await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, created_at, updated_at)
-    VALUES ('app', 7, 'pr', 'OPEN', 'Fix a thing', 'someone', 5, 0, ?, '${T0}', '${T0}')`).run(head);
-  await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv', '${T0}', 'm', ?, 'nearly right', ?, 1, 'full')`)
-    .run(o.reviewHead ?? head, o.verdict ?? "take-fix", FIXES);
-  await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
-    VALUES ('app', 7, ?, 'OPEN', 0, 'success', '[]', ?, ?, '${T1}')`).run(head, o.mergeable ?? "MERGEABLE", o.canModify === false ? 0 : 1);
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1) ON CONFLICT DO NOTHING").run(T0);
+  await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
+  await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: o.reviewHead ?? head, run_id: "rv", at: T0, model: "m", verdict: o.verdict ?? "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
+  await db.run(db.k.insertInto("pr_checks").values({ repo: "app", number: 7, head_oid: head, state: "OPEN", is_draft: 0, overall: "success", checks: "[]", mergeable: o.mergeable ?? "MERGEABLE", maintainer_can_modify: o.canModify === false ? 0 : 1, fetched_at: T1 }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   if (o.approved !== false) await setPushApproval(db, "op", "app", true);
   return db;
 }
@@ -161,7 +159,7 @@ function world(opts: { check?: string | null; reply?: string | null; moveBranch?
 }
 
 const spreadDiff = (path: string) => `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n` + Array.from({ length: 24 }, (_, i) => 1 + i * 250).map((n) => `@@ -${n} +${n} @@\n-x\n+fn f${n}() {}\n`).join("");
-const rows = async (db: Db, sql: string) => (await db.prepare(sql).all() as Record<string, unknown>[]).map((r) => ({ ...r }));
+const fixupRows = async (db: Db, from?: string) => await db.all(db.k.selectFrom("fixups").select(["state", "reason"]).$if(!!from, (q) => q.where("from_head", "=", from!)).orderBy(kx.rowid("fixups")));
 
 describe("fixup step", () => {
 
@@ -188,7 +186,7 @@ describe("fixup step", () => {
     const db1 = await fresh(held.head);
     await runFixup(db1, { repo: "app", dryRun: false }, () => {}, held.deps);
     assert.equal(held.asked.length, 0);
-    assert.equal((await rows(db1, "SELECT state FROM fixups"))[0]!.state, "too-large");
+    assert.equal((await fixupRows(db1))[0]!.state, "too-large");
 
     const w = world({ lib, diff: spreadDiff("src/lib.rs") });
     w.deps.checkout = async () => "/checkout";
@@ -207,7 +205,7 @@ describe("fixup step", () => {
       const w = world({ lib, diff, reply: patch(start) });
       const db = await fresh(w.head);
       const s = await runFixup(db, { repo: "app", dryRun: false }, () => {}, w.deps);
-      return { s, reason: String(((await rows(db, "SELECT reason FROM fixups"))[0] ?? {}).reason), log: w.log };
+      return { s, reason: String((await fixupRows(db))[0]?.reason), log: w.log };
     };
 
 
@@ -254,14 +252,16 @@ describe("a second ask on a PR we already asked", () => {
     const db = await fresh(w.head, { canModify: false });
     await setCommentApproval(db, "op", "app", true);
     await runFixup(db, { repo: "app", dryRun: false }, () => {}, w.deps);
-    assert.equal((await rows(db, "SELECT state FROM fixups"))[0]!.state, "asked");
-    await db.prepare("UPDATE audit SET details = json_set(details, '$.url', 'https://github.com/o/app/pull/7#issuecomment-55') WHERE action = 'fixup-comment'").run();
-    if (push === "ours") {
-      await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES (?, 'cifix', 'cifix-push', 'app#7', ?)").run(T1, JSON.stringify({ state: "done", from: w.head, to: H2 }));
+    assert.equal((await fixupRows(db))[0]!.state, "asked");
+    for (const r of await db.all(db.k.selectFrom("audit").select([kx.rowid("audit").as("id"), "details"]).where("action", "=", "fixup-comment"))) {
+      await db.run(db.k.updateTable("audit").set({ details: JSON.stringify({ ...JSON.parse(r.details!), url: "https://github.com/o/app/pull/7#issuecomment-55" }) }).where(kx.rowid("audit"), "=", r.id));
     }
-    await db.prepare("UPDATE items SET head_oid = ? WHERE repo = 'app'").run(H2);
-    await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 7, ?, 'rv2', ?, 'm', 'take-fix', 'nearly right', ?, 1, 'full')").run(H2, T1, JSON.stringify([{ file: "src/lib.rs", change: "rename a to c" }]));
-    await db.prepare("UPDATE pr_checks SET head_oid = ? WHERE repo = 'app' AND number = 7").run(H2);
+    if (push === "ours") {
+      await db.run(db.k.insertInto("audit").values({ at: T1, login: "cifix", action: "cifix-push", target: "app#7", details: JSON.stringify({ state: "done", from: w.head, to: H2 }) }));
+    }
+    await db.run(db.k.updateTable("items").set({ head_oid: H2 }).where("repo", "=", "app"));
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: H2, run_id: "rv2", at: T1, model: "m", verdict: "take-fix", reason: "nearly right", fixes: JSON.stringify([{ file: "src/lib.rs", change: "rename a to c" }]), sure: 1, mode: "full" }));
+    await db.run(db.k.updateTable("pr_checks").set({ head_oid: H2 }).where("repo", "=", "app").where("number", "=", 7));
     const q = w.deps.querier;
     w.deps.querier = { ...q, query: async (s: string, v?: Record<string, unknown>) => { const r = await q.query(s, v as Record<string, unknown>) as { repository?: { pullRequest?: { headRefOid: string } } }; if (r.repository?.pullRequest) r.repository.pullRequest.headRefOid = H2; return r; } } as typeof q;
     const calls: string[] = [];
@@ -275,7 +275,7 @@ describe("a second ask on a PR we already asked", () => {
     const { calls, db } = await twice("ours");
     assert.equal(calls.length, 1);
     assert.match(calls[0]!, /^edit .*issues\/comments\/55/);
-    assert.equal((await rows(db, "SELECT state FROM fixups WHERE from_head = '" + H2 + "'"))[0]!.state, "asked");
+    assert.equal((await fixupRows(db, H2))[0]!.state, "asked");
   });
 
   test("no push of ours in between: a new comment", async () => {

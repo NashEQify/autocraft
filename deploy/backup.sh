@@ -3,11 +3,18 @@
 #   deploy/backup.sh [PREFIX [KEEP]]     defaults: daily 7
 # Writes $AUTOCRAFT_BACKUP_DIR/PREFIX-<UTC timestamp>.db.zst (gzip without zstd),
 # then deletes all but the newest KEEP files of that prefix. The database is
-# $AUTOCRAFT_DB; backups default to <database dir>/backups.
+# $AUTOCRAFT_DB, else mirror.db in $AUTOCRAFT_DATA_DIR; backups default to <database dir>/backups.
+# SQLite only: with AUTOCRAFT_DB_URL (Postgres) the database provider keeps the backups, and this exits 3 without one.
 set -euo pipefail
 prefix="${1:-daily}"
 keep="${2:-7}"
+if [ -n "${AUTOCRAFT_DB_URL:-${CRAFT_AUTO_DB_URL:-}}" ]; then
+	echo "backup skipped: AUTOCRAFT_DB_URL names a Postgres database, whose backups are the database provider's; this script snapshots SQLite only" >&2
+	exit 3
+fi
 db="${AUTOCRAFT_DB:-${CRAFT_AUTO_DB:-}}"
+data_dir="${AUTOCRAFT_DATA_DIR:-${CRAFT_AUTO_DATA_DIR:-}}"
+[ -n "$db" ] || [ -z "$data_dir" ] || db="$data_dir/mirror.db"
 [ -n "$db" ] || { echo "AUTOCRAFT_DB is not set" >&2; exit 1; }
 dir="${AUTOCRAFT_BACKUP_DIR:-$(dirname "$db")/backups}"
 umask 077

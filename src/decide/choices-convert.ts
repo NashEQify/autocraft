@@ -7,6 +7,7 @@ import { applyDrafts, coresFor, MAX_ADDED_CORES, withIds, writeChoices } from ".
 import { coreKey, type ChoicesBlockExtra, type ChoicesRow, type CoreKey, type StoredDraft } from "./choices-types.ts";
 import { forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** A proposed card as the mapper reads it. */
 export interface DraftCard { params: CardParams; text: string | null }
@@ -130,16 +131,18 @@ export interface ConvertResult {
 class DryRun extends Error {}
 
 export async function convertOpenDecisions(db: Db, o: { dryRun?: boolean } = {}): Promise<ConvertResult> {
-  const open = await db.prepare(`SELECT * FROM main.decisions WHERE answer IS NULL AND number IS NOT NULL AND repo IS NOT NULL AND id NOT LIKE '%:dupegroup:%'
-    AND NOT EXISTS (SELECT 1 FROM main.decision_choices c WHERE c.decision_id = decisions.id AND c.state = 'current')`).all() as unknown as DecisionRow[];
+  const open = await db.all(db.k.selectFrom("main.decisions as d").select(kx.cols("main.decisions", "d")).$narrowType<{ kind: DecisionRow["kind"] }>()
+    .where("d.answer", "is", null).where("d.number", "is not", null).where("d.repo", "is not", null)
+    .where((eb) => eb.not(kx.like(db, "d.id", eb.val("%:dupegroup:%"))))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("main.decision_choices as c").select(eb.lit(1).as("one")).whereRef("c.decision_id", "=", "d.id").where("c.state", "=", "current")))));
   let converted = 0, skipped = 0, stale = 0, unconverted = 0;
   const notes: string[] = [];
   try {
     await db.write(async () => {
       for (const d of open) {
         if ((await openDecision(db, d.repo!, d.number!))?.id !== d.id) { skipped++; continue; }
-        const turn = await db.prepare("SELECT id FROM main.conversation_turns WHERE repo = ? AND number = ? AND kind = 'opus' ORDER BY id DESC LIMIT 1").get(d.repo, d.number) as { id: number } | undefined;
-        const rows = turn ? await db.prepare("SELECT id, params, text, seen FROM main.conversation_cards WHERE turn_id = ? AND state = 'proposed' ORDER BY id").all(turn.id) as unknown as CardRow[] : [];
+        const turn = await db.get(db.k.selectFrom("main.conversation_turns").select("id").where("repo", "=", d.repo!).where("number", "=", d.number!).where("kind", "=", "opus").orderBy("id", "desc").limit(1));
+        const rows = turn ? await db.all(db.k.selectFrom("main.conversation_cards").select(["id", "params", "text", "seen"]).where("turn_id", "=", turn.id).where("state", "=", "proposed").orderBy("id")) : [];
         const cards: DraftCard[] = [];
         const kept: CardRow[] = [];
         const stampNow = await decisionStamp(db, d);
@@ -165,8 +168,8 @@ export async function convertOpenDecisions(db: Db, o: { dryRun?: boolean } = {})
           drafts: Object.fromEntries([...Object.entries(m.cores), ...m.add.map((a) => [a.key, a.draft] as const)].map(([k, v]) => [k, { ...(v.params && { params: v.params }), extras: withIds(v.extras) }])),
           added: m.add.map((a) => a.key), pick,
         });
-        const mark = db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'");
-        for (const i of m.used) await mark.run(kept[i]!.id);
+        const mark = (id: number) => db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("id", "=", id).where("state", "=", "proposed"));
+        for (const i of m.used) await mark(kept[i]!.id);
         // A settling card that maps to no core would show next to the new answer list; it is replaced and counted.
         await forEachSeq(cards, async (c, i) => {
           const p = c.params;
@@ -174,7 +177,7 @@ export async function convertOpenDecisions(db: Db, o: { dryRun?: boolean } = {})
           if (m.used.includes(i) || !settling) return;
           unconverted++;
           notes.push(`${d.id}: replaced a card that settles the decision and matches none of its choices`);
-          await mark.run(kept[i]!.id);
+          await mark(kept[i]!.id);
         });
       }
       // A dry run rolls back what it wrote.
@@ -188,8 +191,8 @@ export async function convertOpenDecisions(db: Db, o: { dryRun?: boolean } = {})
 
 /** Runs the conversion once per database (settings key `choices_converted`). */
 export async function convertOpenDecisionsOnce(db: Db): Promise<ConvertResult | null> {
-  if (await db.prepare("SELECT 1 FROM main.settings WHERE key = 'choices_converted'").get()) return null;
+  if (await db.get(db.k.selectFrom("main.settings").select((eb) => eb.lit(1).as("one")).where("key", "=", "choices_converted"))) return null;
   const r = await convertOpenDecisions(db);
-  await db.script("INSERT INTO main.settings (key, value) VALUES ('choices_converted', '1') ON CONFLICT (key) DO NOTHING");
+  await db.run(db.k.insertInto("main.settings").values({ key: "choices_converted", value: "1" }).onConflict((oc) => oc.column("key").doNothing()));
   return r;
 }

@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { diffCacheDir } from "../review/diff.ts";
-import { snapshotFile, writeSnapshot } from "./snapshot.ts";
+import { buildSnapshot, snapshotFile } from "./snapshot.ts";
 import { openDb, TOOLS } from "./server/tools.ts";
 import { handle } from "./server/mcp.ts";
 
@@ -55,8 +55,8 @@ export function itemTools(): { mounts: Mount[]; mcpServers: Record<string, McpSe
   return { mounts, mcpServers: { [ITEM_SERVER]: { command: "/usr/bin/node", args: ["--no-warnings", `${APP_PATH}/main.ts`], env } } };
 }
 
-function snapshot(): void {
-  const r = writeSnapshot();
+async function snapshot(): Promise<void> {
+  const r = await buildSnapshot();
   console.log(`${snapshotFile()}: ${r.items} items, ${r.comments} comments, ${r.bytes} bytes${r.rebuilt ? " (rebuilt)" : ""}, changed ${JSON.stringify(r.changed)}`);
 }
 

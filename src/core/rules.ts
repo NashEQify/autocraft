@@ -1,4 +1,5 @@
-// Constants and pure helpers of the merge rule, shared by the old modules (which re-export them) and by decide.ts. No imports.
+// Constants and pure helpers of the merge rule, shared by the old modules (which re-export them) and by decide.ts. No imports,
+// so the web client can use them; their query forms are in rule-queries.ts.
 
 /** Type labels whose PRs may merge without asking. */
 export const RULE_LABELS = ["bugfix", "infra"];
@@ -112,7 +113,7 @@ export function unsentAsk(ats: readonly string[], nowMs: number): { until: numbe
   return until > nowMs ? { until } : null;
 }
 
-// ---- merge decisions and their SQL (no imports) ----
+// ---- merge decisions and their SQL ----
 
 /** The PR has an unanswered Merge? question at any head. */
 export const OPEN_QUESTION_SQL = "SELECT 1 FROM decisions WHERE repo = ? AND number = ? AND kind = 'merge' AND answer IS NULL AND id NOT LIKE '%~replaced-%' LIMIT 1";

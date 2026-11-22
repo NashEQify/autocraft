@@ -12,6 +12,7 @@ import type { Git } from "../fixup/git.ts";
 import { artifactText, changedRsFiles, lintPlan, lintSteps, readLint } from "../prepush/index.ts";
 import { rustPlan } from "../worker/rust.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export const CHECK_COMMANDS = ["fmt", "clippy", "check", "test"] as const;
 export type CheckCommand = (typeof CHECK_COMMANDS)[number];
@@ -85,12 +86,19 @@ const firstLines = (text: string, n: number): string => {
  * does not stretch the history. A successful run is exit code 0 for cargo; fmt and clippy count whenever they gave a result.
  */
 export async function checkLimitMs(db: Db, repo: string, i: Pick<CheckInput, "command" | "crate" | "test_name">): Promise<number> {
-  const ok = i.command === "check" || i.command === "test" ? "m.outcome = 'exit 0'" : "m.outcome NOT LIKE 'failed%' AND m.outcome NOT LIKE 'refused%' AND m.outcome NOT LIKE 'cancelled%' AND m.outcome NOT LIKE 'stopped%' AND m.outcome <> 'out of time'";
-  const rows = await db.prepare(`SELECT (julianday(t.ended_at) - julianday(COALESCE(t.started_at, t.claimed_at))) * 86400000 AS ms
-    FROM model_checks m JOIN build_tasks t ON t.id = m.task_id
-    WHERE m.repo = ? AND m.command = ? AND (m.crate IS NULL) = ? AND (m.test_name IS NULL) = ? AND ${ok}
-      AND t.state = 'done' AND t.ended_at IS NOT NULL AND COALESCE(t.started_at, t.claimed_at) IS NOT NULL
-    ORDER BY m.id DESC LIMIT ?`).all(repo, i.command, i.crate === undefined ? 1 : 0, i.test_name === undefined ? 1 : 0, CHECK_HISTORY_RUNS) as { ms: number }[];
+  const rows = await db.all(db.k.selectFrom("model_checks as m").innerJoin("build_tasks as t", "t.id", "m.task_id")
+    .select((eb) => eb(eb(eb.fn<number>("julianday", ["t.ended_at"]), "-", eb.fn<number>("julianday", [eb.fn("coalesce", ["t.started_at", "t.claimed_at"])])), "*", 86400000).as("ms"))
+    .where("m.repo", "=", repo).where("m.command", "=", i.command)
+    .where("m.crate", i.crate === undefined ? "is" : "is not", null)
+    .where("m.test_name", i.test_name === undefined ? "is" : "is not", null)
+    .where((eb) => i.command === "check" || i.command === "test" ? eb("m.outcome", "=", "exit 0") : eb.and([
+      eb.not(kx.like(db, "m.outcome", eb.val("failed%"))), eb.not(kx.like(db, "m.outcome", eb.val("refused%"))),
+      eb.not(kx.like(db, "m.outcome", eb.val("cancelled%"))), eb.not(kx.like(db, "m.outcome", eb.val("stopped%"))),
+      eb("m.outcome", "<>", "out of time"),
+    ]))
+    .where("t.state", "=", "done").where("t.ended_at", "is not", null)
+    .where((eb) => eb.or([eb("t.started_at", "is not", null), eb("t.claimed_at", "is not", null)]))
+    .orderBy("m.id", "desc").limit(CHECK_HISTORY_RUNS));
   if (rows.length < CHECK_HISTORY_MIN) return CHECK_LIMIT_MAX_MS;
   const ms = rows.map((r) => r.ms).sort((a, b) => a - b);
   const median = ms.length % 2 ? ms[(ms.length - 1) / 2]! : (ms[ms.length / 2 - 1]! + ms[ms.length / 2]!) / 2;
@@ -195,9 +203,10 @@ export class CheckTool {
     this.calls++;
     const started = Date.now();
     const perCheck = this.checkLimitMs?.(i.command) ?? await checkLimitMs(t.db, t.recordRepo ?? t.repo, i);
-    const row = Number((await t.db.prepare("INSERT INTO model_checks (run_id, step, repo, number, head, command, crate, test_name, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(runId, t.step, t.recordRepo ?? t.repo, t.number, t.head, i.command, i.crate ?? null, i.test_name ?? null, new Date().toISOString())).lastInsertRowid);
-    const end = async (outcome: string, taskId: number | null) => await t.db.prepare("UPDATE model_checks SET outcome = ?, task_id = ?, ended_at = ? WHERE id = ?").run(outcome.slice(0, 200), taskId, new Date().toISOString(), row);
+    const row = (await t.db.get(t.db.k.insertInto("model_checks")
+      .values({ run_id: runId, step: t.step, repo: t.recordRepo ?? t.repo, number: t.number, head: t.head, command: i.command, crate: i.crate ?? null, test_name: i.test_name ?? null, started_at: new Date().toISOString() })
+      .returning("id")))!.id;
+    const end = async (outcome: string, taskId: number | null) => await t.db.run(t.db.k.updateTable("model_checks").set({ outcome: outcome.slice(0, 200), task_id: taskId, ended_at: new Date().toISOString() }).where("id", "=", row));
     let taskId: number | null = null;
     try {
       taskId = await createTask(t.db, {

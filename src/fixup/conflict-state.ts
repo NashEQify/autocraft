@@ -1,6 +1,7 @@
 // The conflict step's candidate shape, tries and per-head bucket (the PRs come from their Plans, fixup/select.ts).
 import { BASE_NAME, CONFLICT_MAX_MERGES_PER_PR_PER_DAY, conflictNote as coreConflictNote, unsentAsk } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Base branch names the merge accepts as a fetch ref. */
 export { BASE_NAME };
@@ -26,7 +27,7 @@ export type ConflictRow = { from_head: string | null; state: string; created_at:
 
 /** The PR's conflict_merges rows, oldest first. */
 export async function conflictRows(db: Db, repo: string, number: number): Promise<ConflictRow[]> {
-  return await db.prepare("SELECT from_head, state, created_at FROM conflict_merges WHERE repo = ? AND number = ? ORDER BY rowid").all(repo, number) as ConflictRow[];
+  return await db.all(db.k.selectFrom("conflict_merges").select(["from_head", "state", "created_at"]).where("repo", "=", repo).where("number", "=", number).orderBy(kx.rowid("conflict_merges")));
 }
 
 /** conflictTries() from the PR's rows. */

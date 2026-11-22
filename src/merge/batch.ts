@@ -127,7 +127,9 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
   const myBatches = async (): Promise<BatchRow[]> => await filterSeq((await activeBatches(db, repo)), mine);
   mkdirSync(d.root, { recursive: true });
   const git = new BatchGit(d.exec, d.root, repo);
-  const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)");
+  const stage = async (repo: string, number: number, stage: string, at: string, actor: string, note: string): Promise<void> => {
+    await db.run(db.k.insertInto("main.stages").values({ repo, number, stage, at, actor, note }));
+  };
   let landed = 0;
   /** PRs this run may still start or land under the stage's daily limit. */
   const left = () => (params.limit === undefined ? Infinity : params.limit - landed);
@@ -161,7 +163,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     for (const m of members) {
       const e = q.find((x) => x.number === m.number && x.head === m.head);
       if (e?.path !== "operator" || !e.decisionId) continue;
-      const login = (await db.prepare("SELECT answered_by FROM main.decisions WHERE id = ? AND answer = 'merge'").get(e.decisionId) as { answered_by: string | null } | undefined)?.answered_by;
+      const login = (await db.get(db.k.selectFrom("main.decisions").select("answered_by").where("id", "=", e.decisionId).where("answer", "=", "merge")))?.answered_by;
       if (!login) continue;
       const v = await settlesLive(db, login, repo, d.permission);
       if (v === "unknown") unsure = true;
@@ -286,7 +288,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       const m = members[0]!;
       const summary = why;
       await updateBatch(db, b.id, at(), { state: "failed", summary: oneLine(summary, 400) });
-      await stage.run(repo, m.number, "hold", at(), ACTOR, `batch failed at ${short(m.head_oid)}: ${oneLine(summary, 200)}`);
+      await stage(repo, m.number, "hold", at(), ACTOR, `batch failed at ${short(m.head_oid)}: ${oneLine(summary, 200)}`);
       await audit(db, ACTOR, "batch-hold", refOf(m.number), { run: runId, batch: b.branch, summary: oneLine(summary, 200) });
       s.failed.push(m.number);
       log(`  ${b.branch}: ${refOf(m.number)} failed alone; on hold: ${oneLine(summary, 120)}`);
@@ -359,7 +361,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
 
   /** The gate checks that failed on the default branch at `sha`, from the main CI poll; null when that head was not polled. */
   async function redOnMainAt(sha: string): Promise<Set<string> | null> {
-    const row = await db.prepare("SELECT failing FROM main.main_ci WHERE repo = ? AND head_sha = ?").get(repo, sha) as { failing: string } | undefined;
+    const row = await db.get(db.k.selectFrom("main.main_ci").select("failing").where("repo", "=", repo).where("head_sha", "=", sha));
     if (!row) return null;
     try {
       return new Set((JSON.parse(row.failing) as { name?: string }[]).map((f) => f.name ?? "").filter(Boolean));
@@ -506,14 +508,13 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     await updateBatch(db, b.id, at(), { state: "merged", summary: null, ...(mergeSha ? { merge_sha: mergeSha } : {}) });
     for (const m of members) {
       const e = q.find((x) => x.number === m.number);
-      await db.prepare("INSERT INTO merges (repo, number, head_oid, run_id, at, path, method, outcome, reason, ci, mergeable) VALUES (?, ?, ?, ?, ?, ?, 'merge', 'merged', NULL, ?, ?)")
-        .run(repo, m.number, m.head_oid, runId, at(), e?.path ?? "rule", e?.ci ?? "success", e?.mergeable ?? "MERGEABLE");
-      await stage.run(repo, m.number, "merged", at(), ACTOR, `merge in ${b.branch} at ${short(m.head_oid)}`);
+      await db.run(db.k.insertInto("merges").values({ repo, number: m.number, head_oid: m.head_oid, run_id: runId, at: at(), path: e?.path ?? "rule", method: "merge", outcome: "merged", reason: null, ci: e?.ci ?? "success", mergeable: e?.mergeable ?? "MERGEABLE" }));
+      await stage(repo, m.number, "merged", at(), ACTOR, `merge in ${b.branch} at ${short(m.head_oid)}`);
       await jobItem(db, repo, m.number, `merged in batch ${b.branch}`, log);
       await markMerged(db, repo, m.number, at());
       await closeMergedQuestions(db, repo, m.number, at());
       await audit(db, ACTOR, "merge", refOf(m.number), { run: runId, head: m.head_oid, method: "merge", batch: b.branch });
-      if (e?.path === "operator" && e.decisionId) await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at(), e.decisionId);
+      if (e?.path === "operator" && e.decisionId) await db.run(db.k.updateTable("main.decisions").set({ applied_at: at() }).where("id", "=", e.decisionId).where("applied_at", "is", null));
       s.merged.push(m.number);
     }
     await growBatchSize(db, repo);
@@ -539,7 +540,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (ch.state === "CLOSED") {
       // Our own closes mark the batch first, so a closed active batch was closed by a person: hold its PRs for their current heads.
       await updateBatch(db, b.id, at(), { state: "failed", summary: CLOSED_BY_PERSON });
-      for (const m of members) await stage.run(repo, m.number, "hold", at(), ACTOR, `the batch PR ${b.branch} was closed; held at ${short(m.head_oid)}`);
+      for (const m of members) await stage(repo, m.number, "hold", at(), ACTOR, `the batch PR ${b.branch} was closed; held at ${short(m.head_oid)}`);
       s.failed.push(...members.map((m) => m.number));
       log(`  ${b.branch}: the batch PR was closed; its PRs are held until they change`);
       return;
@@ -554,7 +555,7 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
     if (members.length > left()) { log(`  ${b.branch}: ${members.length} PRs exceed the ${Math.max(left(), 0)} left of the daily limit; waits`); s.waiting.push(b.branch); return; }
     if (ci !== "success" || ch.mergeable !== "MERGEABLE") {
       // A fork's runs wait for a maintainer's approval; the ci-approve step does it where the repo allows, and the note says so until the runs started.
-      const waiting = await db.prepare("SELECT runs, reread FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, b.pr_number!, b.commit_sha) as { runs: string; reread: number } | undefined;
+      const waiting = await db.get(db.k.selectFrom("ci_run_approvals").select(["runs", "reread"]).where("repo", "=", repo).where("number", "=", b.pr_number!).where("head_oid", "=", b.commit_sha));
       const note = waiting && (JSON.parse(waiting.runs).length || waiting.reread) ? RUNS_WAIT_NOTE : null;
       if ((b.summary ?? null) !== note) await updateBatch(db, b.id, at(), { summary: note });
       s.waiting.push(b.branch);
@@ -572,14 +573,14 @@ export async function runBatches(db: Db, params: BatchParams, log: (line: string
       // Rebuilding would only open a new PR around the review: the batch fails and its PRs wait for a new head.
       await updateBatch(db, b.id, at(), { state: "failed", summary: BLOCKED_BY_REVIEW });
       await closePr(b, `Closing: ${own.blocked}. The PRs in it are held until they change.`);
-      for (const m of members) await stage.run(repo, m.number, "hold", at(), ACTOR, `the batch PR ${b.branch} has changes requested; held at ${short(m.head_oid)}`);
+      for (const m of members) await stage(repo, m.number, "hold", at(), ACTOR, `the batch PR ${b.branch} has changes requested; held at ${short(m.head_oid)}`);
       s.failed.push(...members.map((m) => m.number));
       log(`  ${b.branch}: ${own.blocked}; its PRs are held until they change`);
       return;
     }
     for (const m of members) {
       // A member retargeted or reviewed again against another base since the batch was built: what lands is no longer what its review read.
-      const mirrored = (await db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, m.number) as { base_ref: string | null } | undefined)?.base_ref ?? branch;
+      const mirrored = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", m.number)))?.base_ref ?? branch;
       const baseWhy = mirrored !== branch ? `its base branch is ${mirrored}, not ${branch}` : await baseRefusal(db, repo, m.head_oid, m.number, branch);
       if (baseWhy) return supersede(b, members.filter((x) => x !== m), `${refOf(m.number)} left the batch: ${baseWhy}`);
       const gate = await liveGateChecked(db, d.querier, repo, m.number, m.head_oid, log);

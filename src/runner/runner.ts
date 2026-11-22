@@ -7,8 +7,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
-import { dbPath } from "../db.ts";
+import { join } from "node:path";
+import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
 import { advancePreapprovals } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
 import { recordUsageSamples } from "../agents/accounts.ts";
@@ -17,7 +17,7 @@ import { failRunning, pruneRuns } from "../agents/runs.ts";
 import { pruneTasks, reapLost } from "../build/tasks.ts";
 import { pruneBench } from "../nightly/index.ts";
 import { prunePlanHistory } from "../core/plan-cache.ts";
-import { COMMAND_WORK_SQL, drainCommands, pruneCommands } from "../github/commands.ts";
+import { commandWorkExpr, drainCommands, pruneCommands } from "../github/commands.ts";
 import { checkPendingUpdate } from "../build/worker-update.ts";
 import { endJob, JOB_KEEP_MS, now, pruneJobs, resumeJob, RUNNER_STOPPED } from "./jobs.ts";
 import { advanceSecurityFixes, autoFixConfirmed } from "../security/actions.ts";
@@ -34,12 +34,13 @@ import { jobRemoteQueue, REMOTE_WAIT_CAP_MS, withdrawJobCalls } from "../remote/
 import { exclusive } from "../async-seq.ts";
 import { refreshReadIdentity } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded, jsonNum } from "../db/kx.ts";
 
 export const logsDir = (): string => envVar("RUNNER_LOGS") ?? join(homedir(), ".cache/autocraft-logs/jobs");
 
 export function runnerLockPath(): string {
   const dir = envVar("LOCK_DIR") ?? join(homedir(), ".cache/autocraft-logs");
-  return join(dir, `runner-${basename(dbPath())}.lock`);
+  return join(dir, `runner-${dbLockName()}.lock`);
 }
 
 export const HEARTBEAT_KEY = "runner_heartbeat";
@@ -56,8 +57,8 @@ export const DEFAULT_MAX_JOBS = 32;
 
 export type RunnerOptions = {
   db: Db;
-  /** Database file the children open; default AUTOCRAFT_DB or the default path. */
-  dbFile?: string;
+  /** Database the children and worker threads open (a SQLite path or a postgres:// URL); default `dbTarget()`. */
+  dbTarget?: string;
   logs?: string;
   /** Most job processes running at once. */
   maxJobs?: number;
@@ -65,7 +66,7 @@ export type RunnerOptions = {
   killAfterMs?: number;
   lockFile?: string;
   log?: (line: string) => void;
-  /** The planner's detection pass (default: a worker thread on its own connection to `dbFile`). Tests pass a fake. */
+  /** The planner's detection pass (default: a worker thread on its own connection to `dbTarget`). Tests pass a fake. */
   detect?: (nowMs: number) => Promise<Detected>;
   /** The flowchart summary refresh (default: a worker thread). */
   refreshFlow?: () => Promise<unknown>;
@@ -130,12 +131,12 @@ export class Runner {
   constructor(opts: RunnerOptions) {
     this.db = opts.db;
     this.o = {
-      dbFile: opts.dbFile ?? dbPath(), logs: opts.logs ?? logsDir(), maxJobs: opts.maxJobs ?? DEFAULT_MAX_JOBS, killAfterMs: opts.killAfterMs ?? 10_000,
+      dbTarget: opts.dbTarget ?? dbTarget(), logs: opts.logs ?? logsDir(), maxJobs: opts.maxJobs ?? DEFAULT_MAX_JOBS, killAfterMs: opts.killAfterMs ?? 10_000,
       lockFile: opts.lockFile ?? null, log: opts.log ?? ((l) => console.log(l)),
     };
     mkdirSync(this.o.logs, { recursive: true });
-    this.planThread = new OffThread(this.o.dbFile);
-    this.flowThread = new OffThread(this.o.dbFile);
+    this.planThread = new OffThread(this.o.dbTarget);
+    this.flowThread = new OffThread(this.o.dbTarget);
     this.detect = opts.detect ?? ((t) => this.planThread.plan(t));
     this.maxMin = opts.maxMin ?? stepDeadlineMin;
     this.graceMs = opts.graceMs ?? 600_000;
@@ -149,7 +150,7 @@ export class Runner {
    * resuming jobs stay; other calls of jobs, model-queue waits and work leases of the gone runner end.
    */
   async recover(): Promise<number> {
-    const rows = await this.db.prepare("SELECT id, pid, cancel_requested_at FROM jobs WHERE state = 'running'").all() as { id: number; pid: number | null; cancel_requested_at: string | null }[];
+    const rows = await this.db.all(this.db.k.selectFrom("jobs").select(["id", "pid", "cancel_requested_at"]).where("state", "=", "running"));
     for (const r of rows) {
       if (this.running.has(r.id)) continue;
       if (r.pid && isJobProcess(r.pid, r.id)) {
@@ -162,25 +163,26 @@ export class Runner {
         this.o.log(`job ${r.id}: left running by an earlier runner, queued to resume`);
         continue;
       }
-      await this.db.prepare("UPDATE jobs SET state = ?, ended_at = ?, pid = NULL, error = COALESCE(error, ?) WHERE id = ? AND state = 'running'")
-        .run(cancelled ? "cancelled" : "failed", now(), cancelled ? null : RUNNER_STOPPED, r.id);
+      await this.db.run(this.db.k.updateTable("jobs")
+        .set((eb) => ({ state: cancelled ? "cancelled" : "failed", ended_at: now(), pid: null, error: cancelled ? eb.ref("error") : eb.fn.coalesce("error", eb.val(RUNNER_STOPPED)) }))
+        .where("id", "=", r.id).where("state", "=", "running"));
       // Replies an earlier run of the job left unread are not kept (as in endJob).
-      await this.db.prepare("UPDATE main.remote_calls SET reply = NULL WHERE job_id = ? AND state = 'done' AND reply IS NOT NULL").run(r.id);
+      await this.db.run(this.db.k.updateTable("main.remote_calls").set({ reply: null }).where("job_id", "=", r.id).where("state", "=", "done").where("reply", "is not", null));
       this.o.log(`job ${r.id}: left running by an earlier runner, marked ${cancelled ? "cancelled" : "failed"}`);
     }
     // Model calls of a runner that is gone no longer hold an account slot.
     const orphans = await failRunning(this.db, "The runner stopped during this call.");
     if (orphans) this.o.log(`${orphans} agent runs left running by an earlier runner, marked failed`);
-    await this.db.prepare("DELETE FROM model_waits").run();
+    await this.db.run(this.db.k.deleteFrom("model_waits"));
     await withdrawJobCalls(this.db, "The runner stopped during this call.");
-    await this.db.prepare("DELETE FROM work_leases").run();
+    await this.db.run(this.db.k.deleteFrom("work_leases"));
     return rows.length;
   }
 
   /** One pass: heartbeat, cancels, autopilot, new jobs. */
   async tick(): Promise<void> {
     const t = now();
-    await this.db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(HEARTBEAT_KEY, t);
+    await this.db.run(this.db.k.insertInto("settings").values({ key: HEARTBEAT_KEY, value: t }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
     if (this.o.lockFile) {
       try {
         utimesSync(this.o.lockFile, new Date(), new Date());
@@ -218,10 +220,10 @@ export class Runner {
   private async webhookTick(): Promise<void> {
     if (this.webhooking || Date.now() - this.webhookAt < WEBHOOK_DRAIN_MS) return;
     this.webhookAt = Date.now();
-    const commands = !!await this.db.prepare(`SELECT 1 FROM main.github_commands WHERE ${COMMAND_WORK_SQL} LIMIT 1`).get();
+    const commands = !!await this.db.get(this.db.k.selectFrom("main.github_commands").select((eb) => eb.lit(1).as("one")).where((eb) => commandWorkExpr(eb)).limit(1));
     // Autorepins whose pull request was merged or closed, or whose lockfile task ended (src/repin).
     const repins = !this.repinning && await anyRepinDue(this.db);
-    if (!commands && !repins && !await this.db.prepare("SELECT 1 FROM main.sync_requests LIMIT 1").get()) return;
+    if (!commands && !repins && !await this.db.get(this.db.k.selectFrom("main.sync_requests").select((eb) => eb.lit(1).as("one")).limit(1))) return;
     this.webhooking = (async () => {
       const { lockHeld, lockPath, fullLockPath, Client, SYNC_RESERVE } = await import("../mirror.ts");
       if (lockHeld(lockPath()) || lockHeld(fullLockPath())) return;
@@ -251,7 +253,7 @@ export class Runner {
    * Below the reserve nothing is read until the limit resets; the sync's reading is newer than ours when it is the later one.
    */
   private async seedRate(c: import("../mirror.ts").Client): Promise<import("../mirror.ts").Client> {
-    const get = async (k: string): Promise<string | undefined> => (await this.db.prepare("SELECT value FROM main.settings WHERE key = ?").get(k) as { value: string } | undefined)?.value;
+    const get = async (k: string): Promise<string | undefined> => (await this.db.get(this.db.k.selectFrom("main.settings").select("value").where("key", "=", k)))?.value ?? undefined;
     const seen = Number(await get("sync_rate_remaining"));
     const reset = Date.parse(await get("sync_rate_reset_at") ?? "");
     if (Number.isFinite(seen) && Number.isFinite(reset) && reset > Date.now()) {
@@ -391,7 +393,7 @@ export class Runner {
 
   private async cancels(): Promise<void> {
     for (const [id, r] of this.running) {
-      const row = await this.db.prepare("SELECT cancel_requested_at FROM jobs WHERE id = ?").get(id) as { cancel_requested_at: string | null } | undefined;
+      const row = await this.db.get(this.db.k.selectFrom("jobs").select("cancel_requested_at").where("id", "=", id));
       // Time a user-local model call waits for a helper counts like waiting for an account slot: not toward the deadline, and not as a time without progress.
       const nowMs = Date.now();
       const remote = await jobRemoteQueue(this.db, id);
@@ -410,7 +412,7 @@ export class Runner {
       if ((late || idle) && !cancel && r.flaggedAt === null && r.termAt === null) {
         r.flaggedAt = Date.now();
         const msg = r.stopMsg = idle && !late ? noProgressError(r.noProgressMin) : deadlineError(r.deadlineMin);
-        await this.db.prepare("UPDATE jobs SET error = ? WHERE id = ? AND state = 'running'").run(msg, id);
+        await this.db.run(this.db.k.updateTable("jobs").set({ error: msg }).where("id", "=", id).where("state", "=", "running"));
         try { appendFileSync(r.logPath, `${now()} ${msg}; the job may finish its current item, and is stopped ${Math.round(this.graceMs / 60_000)} min from now\n`); } catch { /* the log is gone */ }
         this.o.log(`job ${id}: ${msg}; finishing its current item`);
       }
@@ -443,7 +445,7 @@ export class Runner {
    */
   private async startJobs(): Promise<void> {
     const steps = await loadSteps();
-    const queued = (await this.db.prepare("SELECT id, step, params, requested_by, repo FROM jobs WHERE state = 'queued' ORDER BY id").all() as { id: number; step: string; params: string; requested_by: string; repo: string | null }[])
+    const queued = (await this.db.all(this.db.k.selectFrom("jobs").select(["id", "step", "params", "requested_by", "repo"]).where("state", "=", "queued").orderBy("id")))
       .sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
     const on = await isEnabled(this.db), draining = await isDraining(this.db);
@@ -456,7 +458,7 @@ export class Runner {
       if (this.running.size >= this.o.maxJobs) return;
       const step = steps.get(q.step);
       if (!step) {
-        await this.db.prepare("UPDATE jobs SET state = 'failed', ended_at = ?, error = ? WHERE id = ? AND state = 'queued'").run(now(), "This step does not exist in this build.", q.id);
+        await this.db.run(this.db.k.updateTable("jobs").set({ state: "failed", ended_at: now(), error: "This step does not exist in this build." }).where("id", "=", q.id).where("state", "=", "queued"));
         continue;
       }
       if (await this.blocked(steps, q.id)) continue;
@@ -468,7 +470,7 @@ export class Runner {
       const key = `${q.step}\n${q.repo ?? ""}`;
       const roomOf = async (): Promise<number> => byRepo.get(key) ?? await pass.room(cls, q.repo ? [q.repo] : undefined, q.step) - started;
       if (claude && q.repo && !await pass.taker([q.repo], q.step)) continue;
-      if (claude && !await this.db.prepare("SELECT 1 FROM jobs WHERE step = ? AND state = 'running' LIMIT 1").get(step.name)) {
+      if (claude && !await this.db.get(this.db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", step.name).where("state", "=", "running").limit(1))) {
         // Nothing of the step runs: it starts anyway, and takes a slot of the room.
       } else if (claude) {
         byRepo.set(key, await roomOf());
@@ -484,14 +486,14 @@ export class Runner {
 
   /** Why the queued job cannot start: a running job (of this runner or a command-line run) of the same step and repo, a full step, or a held mutex. */
   private async blocked(steps: Awaited<ReturnType<typeof loadSteps>>, id: number): Promise<string | null> {
-    const r = await this.db.prepare("SELECT step, repo, json_extract(params, '$.number') AS number FROM jobs WHERE id = ?").get(id) as { step: string; repo: string | null; number: number | null } | undefined;
+    const r = await this.db.get(this.db.k.selectFrom("jobs").select(["step", "repo", jsonNum(this.db, "params", "$.number").as("number")]).where("id", "=", id));
     return r ? await jobBlock(this.db, steps, r, { states: ["running"], mutex: true }) : "gone";
   }
 
   /** The job's `limit` param (its items), when it has one. */
   private async limitOf(id: number): Promise<number | undefined> {
     try {
-      const p = JSON.parse((await this.db.prepare("SELECT params FROM jobs WHERE id = ?").get(id) as { params: string }).params) as { limit?: unknown };
+      const p = JSON.parse((await this.db.get(this.db.k.selectFrom("jobs").select("params").where("id", "=", id)))!.params) as { limit?: unknown };
       return typeof p.limit === "number" ? p.limit : undefined;
     } catch { return undefined; }
   }
@@ -500,7 +502,7 @@ export class Runner {
     const logPath = join(this.o.logs, `job-${id}.log`);
     // The check and the claim are one write transaction, so a command-line run cannot take the step in between.
     const claimed = await this.db.write(async () => await this.blocked(steps, id) ? 0
-      : (await this.db.prepare("UPDATE jobs SET state = 'running', started_at = ?, log_path = ? WHERE id = ? AND state = 'queued'").run(now(), logPath, id)).changes);
+      : (await this.db.run(this.db.k.updateTable("jobs").set({ state: "running", started_at: now(), log_path: logPath }).where("id", "=", id).where("state", "=", "queued"))).changes);
     if (!claimed) return false;
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
@@ -508,12 +510,12 @@ export class Runner {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
         detached: true,
         stdio: ["ignore", fd, fd],
-        env: { ...process.env, AUTOCRAFT_DB: this.o.dbFile },
+        env: dbEnv(this.o.dbTarget),
       });
     } finally {
       closeSync(fd);
     }
-    await this.db.prepare("UPDATE jobs SET pid = ? WHERE id = ?").run(child.pid ?? null, id);
+    await this.db.run(this.db.k.updateTable("jobs").set({ pid: child.pid ?? null }).where("id", "=", id));
     this.o.log(`job ${id}: started (pid ${child.pid})`);
     let spawnError: string | null = null;
     child.on("error", (e) => (spawnError = e.message));

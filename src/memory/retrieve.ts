@@ -1,7 +1,7 @@
 // The owner statements a review of a PR gets: the closest ones to the PR's embedding, from the PR's own repo.
 import type { OwnerStatement } from "../review/opus-parse.ts";
 import { STATEMENT_PROMPT_CHARS } from "../review/opus-parse.ts";
-import { quietSqlFor } from "../security/quiet.ts";
+import { quietExprFor } from "../security/quiet.ts";
 import type { Db } from "../db/index.ts";
 
 /** How many statements a review sees. */
@@ -21,13 +21,14 @@ const asFloats = (b: Uint8Array): Float32Array => new Float32Array(b.buffer.slic
  * operators' words reach a review only for the repo they were said about, and a quiet PR stays unnamed until its advisory.
  */
 export async function relatedStatements(db: Db, repo: string, number: number): Promise<OwnerStatement[]> {
-  const pr = await db.prepare("SELECT model, vec FROM item_embeddings WHERE repo = ? AND number = ?").get(repo, number) as { model: string; vec: Uint8Array } | undefined;
+  const pr = await db.get(db.k.selectFrom("item_embeddings").select(["model", "vec"]).where("repo", "=", repo).where("number", "=", number));
   if (!pr) return [];
   const q = asFloats(pr.vec);
-  const rows = await db.prepare(`SELECT id, source_kind, repo, number, item_title, text, at, embedding FROM owner_statements
-    WHERE model = ? AND embedding IS NOT NULL AND repo = ? AND number IS NOT ?
-      AND NOT (number IS NOT NULL AND ${quietSqlFor("owner_statements.repo", "owner_statements.number")})`).all(pr.model, repo, number) as
-    { id: number; source_kind: string; repo: string; number: number | null; item_title: string; text: string; at: string; embedding: Uint8Array }[];
+  const rows = await db.all(db.k.selectFrom("owner_statements")
+    .select(["id", "source_kind", "repo", "number", "item_title", "text", "at", "embedding"])
+    .where("model", "=", pr.model).where("embedding", "is not", null).where("repo", "=", repo).where("number", "is distinct from", number)
+    .where((eb) => eb.not(eb.and([eb("number", "is not", null), quietExprFor(db, eb, "owner_statements.repo", "owner_statements.number")])))
+    .$narrowType<{ embedding: Uint8Array }>());
   const hits: (OwnerStatement & { score: number })[] = [];
   for (const r of rows) {
     const v = asFloats(r.embedding);

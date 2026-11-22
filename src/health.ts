@@ -6,7 +6,7 @@ import type { Db } from "./db/index.ts";
 /** True when the database answers a trivial query. */
 export async function dbReady(db: Db): Promise<boolean> {
   try {
-    await db.prepare("SELECT 1").get();
+    await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("one")));
     return true;
   } catch {
     return false;

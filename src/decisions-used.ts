@@ -17,13 +17,13 @@ import type { Db } from "./db/index.ts";
 
 const ACTOR = "pipeline";
 
-type ItemRow = { kind: string; state: string; labels: string | null };
-
 /** Marks the actionable answers the pipeline has used as applied; returns how many. */
 export async function applyUsedAnswers(db: Db, at: string = new Date().toISOString()): Promise<number> {
-  const item = db.prepare("SELECT kind, state, labels FROM items WHERE repo = ? AND number = ?");
-  const reviewed = db.prepare("SELECT 1 FROM final_reviews WHERE repo = ? AND number = ? AND at >= ?");
-  const attempted = db.prepare("SELECT 1 FROM fix_attempts WHERE repo = ? AND number = ?");
+  const item = async (repo: string, number: number) => await db.get(db.k.selectFrom("items").select(["kind", "state", "labels"]).where("repo", "=", repo).where("number", "=", number));
+  const reviewed = async (repo: string, number: number, since: string) => await db.get(db.k.selectFrom("final_reviews").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("number", "=", number).where("at", ">=", since).limit(1));
+  const attempted = async (repo: string, number: number) => await db.get(db.k.selectFrom("fix_attempts").select((eb) => eb.lit(1).as("one"))
+    .where("repo", "=", repo).where("number", "=", number));
   let n = 0;
   for (const a of await actionable(db)) {
     if (a.kind !== "scope" && a.kind !== "close" && a.kind !== "hold") continue;
@@ -34,15 +34,15 @@ export async function applyUsedAnswers(db: Db, at: string = new Date().toISOStri
       if (a.kind === "hold") return answer === "wait";
       if (a.kind === "close") return answer === "hold" || answer === "keep";
       if (answer === "need-info") return true;
-      const row = await item.get(it.repo, it.number) as ItemRow | undefined;
+      const row = await item(it.repo, it.number);
       if (!row || row.state !== "OPEN") return true;
       if (answer === "plugin") return labelsOf(row.labels).some((l) => sameLabel(l, PLUGIN_LABEL));
       if (answer !== "take" && answer !== "small-extra") return false;
-      if (row.kind === "pr") return !!await reviewed.get(it.repo, it.number, d.answered_at ?? "");
-      return !!await attempted.get(it.repo, it.number) || (await settledOf(db, it.repo, it.number)).label !== "bugfix";
+      if (row.kind === "pr") return !!await reviewed(it.repo, it.number, d.answered_at ?? "");
+      return !!await attempted(it.repo, it.number) || (await settledOf(db, it.repo, it.number)).label !== "bugfix";
     });
     if (!used) continue;
-    await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+    await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "=", a.id).where("applied_at", "is", null));
     await audit(db, ACTOR, "answer-used", a.id, { answer: a.answer });
     n++;
   }

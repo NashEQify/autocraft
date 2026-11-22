@@ -39,7 +39,7 @@ function printFinding(f: Finding): void {
 
 export async function runLint(db: Db, a: { repo: string; number: number; patch: string | null; tests?: boolean }): Promise<number> {
   const ref = `${a.repo}#${a.number}`;
-  const item = await db.prepare("SELECT head_oid, state FROM items WHERE repo = ? AND number = ? AND kind = 'pr'").get(a.repo, a.number) as { head_oid: string | null; state: string } | undefined;
+  const item = await db.get(db.k.selectFrom("items").select(["head_oid", "state"]).where("repo", "=", a.repo).where("number", "=", a.number).where("kind", "=", "pr"));
   if (!item?.head_oid) throw new Error(`${ref} is not a PR in the database`);
   const head = item.head_oid;
   const patch = a.patch ? readFileSync(a.patch, "utf8") : undefined;

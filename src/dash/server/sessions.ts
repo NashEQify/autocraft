@@ -3,6 +3,7 @@ import { randomToken, sha256hex, type TokenBox } from "./crypto.ts";
 import { shareRefresh } from "./user-tokens.ts";
 import { REPO_NAME, WRITE_PERMISSIONS, type Provider, type Tokens } from "./provider.ts";
 import type { Db } from "../../db/index.ts";
+import { excluded, rowid } from "../../db/kx.ts";
 
 const DAY = 86_400_000;
 export const SESSION_TTL = 14 * DAY;
@@ -41,10 +42,10 @@ export async function createSession(db: Db, box: TokenBox, login: string, tokens
   const id = randomToken(32);
   const idHash = sha256hex(id);
   const now = new Date();
-  await db.prepare(`INSERT INTO sessions (id_hash, login, csrf, token_enc, created_at, last_seen, expires_at, user_agent)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(idHash, login, randomToken(32), sealTokens(box, tokens, idHash), now.toISOString(), now.toISOString(),
-      new Date(now.getTime() + SESSION_TTL).toISOString(), (userAgent ?? "").slice(0, 300) || null);
+  await db.run(db.k.insertInto("sessions").values({
+    id_hash: idHash, login, csrf: randomToken(32), token_enc: sealTokens(box, tokens, idHash), created_at: now.toISOString(),
+    last_seen: now.toISOString(), expires_at: new Date(now.getTime() + SESSION_TTL).toISOString(), user_agent: (userAgent ?? "").slice(0, 300) || null,
+  }));
   return id;
 }
 
@@ -56,33 +57,35 @@ export const sessionEndsAt = (createdAt: string, role: Role): number => Date.par
 export async function loadSession(db: Db, id: string | undefined): Promise<Session | null> {
   if (!id || id.length > 100) return null;
   const idHash = sha256hex(id);
-  const row = await db.prepare(`SELECT s.rowid, s.login, s.csrf, s.token_enc, s.last_seen, s.created_at, a.role
-                          FROM sessions s JOIN access a ON a.login = s.login
-                          WHERE s.id_hash = ? AND s.expires_at > ?`)
-    .get(idHash, new Date().toISOString()) as
-    { rowid: number; login: string; csrf: string; token_enc: string | null; last_seen: string; created_at: string; role: Role } | undefined;
+  const row = await db.get(db.k.selectFrom("sessions as s").innerJoin("access as a", "a.login", "s.login")
+    .select([rowid("sessions", "s").as("rowid"), "s.login", "s.csrf", "s.token_enc", "s.last_seen", "s.created_at", "a.role"])
+    .where("s.id_hash", "=", idHash).where("s.expires_at", ">", new Date().toISOString())
+    .$narrowType<{ role: Role }>());
   if (!row) return null;
   const now = Date.now();
   const endsAt = sessionEndsAt(row.created_at, row.role);
   if (!(now < endsAt)) {
-    await db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idHash);
+    await db.run(db.k.deleteFrom("sessions").where("id_hash", "=", idHash));
     return null;
   }
   if (now - Date.parse(row.last_seen) > TOUCH_EVERY) {
-    await db.prepare("UPDATE sessions SET last_seen = ?, expires_at = ? WHERE id_hash = ?")
-      .run(new Date(now).toISOString(), new Date(Math.min(now + SESSION_TTL, endsAt)).toISOString(), idHash);
+    await db.run(db.k.updateTable("sessions")
+      .set({ last_seen: new Date(now).toISOString(), expires_at: new Date(Math.min(now + SESSION_TTL, endsAt)).toISOString() })
+      .where("id_hash", "=", idHash));
   }
   return { rowid: Number(row.rowid), idHash, login: row.login, role: row.role, csrf: row.csrf, tokenEnc: row.token_enc };
 }
 
 export async function deleteSession(db: Db, id: string): Promise<void> {
-  await db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(sha256hex(id));
+  await db.run(db.k.deleteFrom("sessions").where("id_hash", "=", sha256hex(id)));
 }
 
 export async function pruneExpired(db: Db): Promise<void> {
   const now = new Date();
-  await db.prepare("DELETE FROM sessions WHERE expires_at <= ? OR created_at <= ?").run(now.toISOString(), new Date(now.getTime() - SESSION_MAX).toISOString());
-  await db.prepare("DELETE FROM oauth_states WHERE created_at <= ?").run(new Date(now.getTime() - 600_000).toISOString());
+  await db.run(db.k.deleteFrom("sessions").where((eb) => eb.or([
+    eb("expires_at", "<=", now.toISOString()), eb("created_at", "<=", new Date(now.getTime() - SESSION_MAX).toISOString()),
+  ])));
+  await db.run(db.k.deleteFrom("oauth_states").where("created_at", "<=", new Date(now.getTime() - 600_000).toISOString()));
 }
 
 // One refresh per session at a time: GitHub refresh tokens are single use, so
@@ -93,7 +96,7 @@ const EXPIRY_MARGIN = 60_000;
 // Returns a usable access token: null when the session can no longer get one
 // (and has been ended), undefined after a transient failure.
 async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: string, mirror: boolean, rejected?: string): Promise<string | null | undefined> {
-  const row = await db.prepare("SELECT token_enc, login FROM sessions WHERE id_hash = ?").get(idHash) as { token_enc: string | null; login: string } | undefined;
+  const row = await db.get(db.k.selectFrom("sessions").select(["token_enc", "login"]).where("id_hash", "=", idHash));
   if (!row) return null;
   const t = openTokens(box, row.token_enc, idHash);
   if (!t) return null;
@@ -103,7 +106,7 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
   if (!p) {
     p = (async () => {
       const end = async () => {
-        await db.prepare("DELETE FROM sessions WHERE id_hash = ?").run(idHash);
+        await db.run(db.k.deleteFrom("sessions").where("id_hash", "=", idHash));
         return null;
       };
       if (!t.refresh || (t.refreshExpiresAt !== null && t.refreshExpiresAt <= Date.now())) return await end();
@@ -117,7 +120,7 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
       if (!next) {
         // The vault (another process) may have used this single-use refresh token first and stored the new pair here.
         for (let i = 0; i < 4; i++) {
-          const again = await db.prepare("SELECT token_enc FROM sessions WHERE id_hash = ?").get(idHash) as { token_enc: string | null } | undefined;
+          const again = await db.get(db.k.selectFrom("sessions").select("token_enc").where("id_hash", "=", idHash));
           const shared = again ? openTokens(box, again.token_enc, idHash) : null;
           if (shared && shared.refresh !== t.refresh) return shared.access;
           if (!mirror) break;
@@ -125,7 +128,7 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
         }
         return await end();
       }
-      await db.prepare("UPDATE sessions SET token_enc = ? WHERE id_hash = ?").run(sealTokens(box, next, idHash), idHash);
+      await db.run(db.k.updateTable("sessions").set({ token_enc: sealTokens(box, next, idHash) }).where("id_hash", "=", idHash));
       // The old refresh token is dead now, so every other copy of it (user_tokens, sessions of the same sign-in) takes the new pair.
       if (mirror) await shareRefresh(db, box, row.login, t.refresh, next);
       return next.access;
@@ -142,12 +145,13 @@ async function accessToken(db: Db, box: TokenBox, provider: Provider, idHash: st
  * unless public, and a pick is shown as `none`.
  */
 export async function userForLogin(db: Db, box: TokenBox, provider: Provider, login: string, role: Role, forWrite: boolean): Promise<User> {
-  const s = (await db.prepare(`SELECT rowid, id_hash, login, csrf, token_enc, created_at FROM sessions WHERE login = ? AND expires_at > ? AND token_enc IS NOT NULL
-    ORDER BY created_at DESC`).all(login, new Date().toISOString()) as { rowid: number; id_hash: string; login: string; csrf: string; token_enc: string; created_at: string }[])
+  const s = (await db.all(db.k.selectFrom("sessions").select([rowid("sessions").as("rowid"), "id_hash", "login", "csrf", "token_enc", "created_at"])
+    .where("login", "=", login).where("expires_at", ">", new Date().toISOString()).where("token_enc", "is not", null)
+    .$narrowType<{ token_enc: string }>().orderBy("created_at", "desc")))
     .find((x) => Date.now() < sessionEndsAt(x.created_at, role));
   if (s) return makeUser(db, box, provider, { rowid: Number(s.rowid), idHash: s.id_hash, login: s.login, role, csrf: s.csrf, tokenEnc: s.token_enc }, forWrite);
   const cached = async (repo: string): Promise<string | null> => {
-    const row = await db.prepare("SELECT permission, checked_at FROM repo_permissions WHERE login = ? AND repo = ?").get(login, repo) as { permission: string; checked_at: string } | undefined;
+    const row = await db.get(db.k.selectFrom("repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
     return row && Date.now() - Date.parse(row.checked_at) < (forWrite ? PERM_WRITE_TTL : PERM_READ_TTL) ? row.permission : null;
   };
   return {
@@ -160,7 +164,7 @@ export async function userForLogin(db: Db, box: TokenBox, provider: Provider, lo
 
 /** Whether `login` had write permission on `repo` at its last successful check, made less than `maxAgeMs` ago. */
 export async function cachedWrite(db: Db, login: string, repo: string, maxAgeMs: number): Promise<boolean> {
-  const row = await db.prepare("SELECT permission, checked_at FROM repo_permissions WHERE login = ? AND repo = ?").get(login, repo) as { permission: string; checked_at: string } | undefined;
+  const row = await db.get(db.k.selectFrom("repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
   return !!row && WRITE_PERMISSIONS.has(row.permission) && Date.now() - Date.parse(row.checked_at) < maxAgeMs;
 }
 
@@ -177,8 +181,7 @@ export function makeUser(db: Db, box: TokenBox, provider: Provider, s: Session, 
   const check = async (repo: string): Promise<string | null> => {
     if (!REPO_NAME.test(repo)) return fail(repo, `${repo} is not a repo name`);
     const maxAge = forWrite ? PERM_WRITE_TTL : PERM_READ_TTL;
-    const cached = await db.prepare("SELECT permission, checked_at FROM repo_permissions WHERE login = ? AND repo = ?")
-      .get(s.login, repo) as { permission: string; checked_at: string } | undefined;
+    const cached = await db.get(db.k.selectFrom("repo_permissions").select(["permission", "checked_at"]).where("login", "=", s.login).where("repo", "=", repo));
     if (cached && Date.now() - Date.parse(cached.checked_at) < maxAge) return cached.permission;
     let permission: string | undefined;
     try {
@@ -197,9 +200,8 @@ export function makeUser(db: Db, box: TokenBox, provider: Provider, s: Session, 
       return fail(repo, `GitHub permission check failed: ${(e as Error).message}`);
     }
     failed.delete(repo);
-    await db.prepare(`INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)
-                ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at`)
-      .run(s.login, repo, permission, new Date().toISOString());
+    await db.run(db.k.insertInto("repo_permissions").values({ login: s.login, repo, permission, checked_at: new Date().toISOString() })
+      .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
     return permission;
   };
   const permission = (repo: string): Promise<string | null> => {

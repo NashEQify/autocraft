@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const { connect } = await import("../src/db.ts");
 const { batchSizeOf } = await import("../src/merge/batch-store.ts");
@@ -14,17 +15,17 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "ci-first-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test("queued tests verifications become ci-enough where the repo has CI, and small batch sizes are raised", async () => {
+test("queued tests verifications become ci-enough where the repo has CI, and small batch sizes are raised", { skip: sqliteOnly("SQLite data migration in src/db.ts migrate(); Postgres starts from schema.pg.sql and a copy of a migrated SQLite database") }, async () => {
   const path = join(dir, "m.db");
   const db = await connectDb(path);
   const at = "2026-01-01T00:00:00Z";
   const check = db.prepare("INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, fetched_at) VALUES (?, 1, 'h', 'OPEN', 0, ?, '[]', ?)");
   await check.run("withci", "success", at);
   await check.run("noci", "none", at);
-  const task = db.prepare("INSERT INTO build_tasks (step, repo, head_sha, requires, plan, state, queued_at) VALUES ('verify', ?, 'h', '{}', '[]', 'queued', ?)");
+  const task = db.prepare("INSERT INTO build_tasks (step, repo, head_sha, requires, plan, state, queued_at) VALUES ('verify', ?, 'h', '{}', '[]', 'queued', ?) RETURNING id");
   const ver = db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, head_task_id, created_at) VALUES (?, ?, 'h', ?, 'r', ?, ?, ?)");
   const ids = new Map<string, number>();
-  for (const repo of ["withci", "noci"]) ids.set(repo, Number((await task.run(repo, at)).lastInsertRowid));
+  for (const repo of ["withci", "noci"]) ids.set(repo, Number((await task.get(repo, at) as { id: number }).id));
   await ver.run("withci", 1, "tests", "planned", ids.get("withci")!, at);
   await ver.run("withci", 2, "regression", "planned", null, at);
   await ver.run("noci", 1, "tests", "planned", ids.get("noci")!, at);

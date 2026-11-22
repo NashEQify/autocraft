@@ -20,7 +20,7 @@ test("memory summary: median, max and OOM count per repo and step; old results a
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "build-mem-")), "m.db"));
   const add = async (repo: string, results: unknown[]) =>
-    await db.prepare("INSERT INTO build_tasks (step, repo, head_sha, requires, plan, state, queued_at, ended_at, results) VALUES ('verify', ?, ?, '{}', '[]', 'done', ?, ?, ?)").run(repo, "a".repeat(40), new Date().toISOString(), new Date().toISOString(), JSON.stringify(results));
+    await db.run(db.k.insertInto("build_tasks").values({ step: "verify", repo, head_sha: "a".repeat(40), requires: "{}", plan: "[]", state: "done", queued_at: new Date().toISOString(), ended_at: new Date().toISOString(), results: JSON.stringify(results) }));
   await add("app", [{ step: "build", ...R, peakMemBytes: 2e9 }, { step: "test", ...R }]);
   await add("app", [{ step: "build", ...R, peakMemBytes: 6e9, oomKilled: true }]);
   await add("app", [{ step: "build", ...R, peakMemBytes: 4e9 }]);

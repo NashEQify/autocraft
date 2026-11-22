@@ -24,6 +24,7 @@ import { CLI_BY, type By } from "../core/gates.ts";
 import { guard, guardRepo, liveOf } from "../core/guard.ts";
 import { unsentAsk } from "../core/rules.ts";
 import { ghAskComment, ghComment, ghEditComment, pushBranch, type Note, type Writer } from "../github/write.ts";
+import { rowid } from "../db/kx.ts";
 import { Client, type Querier } from "../mirror.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { isQuiet } from "../security/quiet.ts";
@@ -144,23 +145,32 @@ export type PrNode = {
  * (conflicting, closed, a draft, head moved) is not selected again until the checks data changes.
  */
 async function storedMergeable(db: Db, repo: string, number: number, head: string): Promise<string | null> {
-  const r = await db.prepare("SELECT (SELECT mergeable FROM pr_checks WHERE repo = ?1 AND number = ?2 AND head_oid = ?3) AS c, (SELECT mergeable FROM main.items WHERE repo = ?1 AND number = ?2 AND head_oid = ?3) AS i").get(repo, number, head) as { c: string | null; i: string | null };
+  const r = (await db.get(db.k.selectNoFrom((eb) => [
+    eb.selectFrom("pr_checks").select("mergeable").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).as("c"),
+    eb.selectFrom("main.items").select("mergeable").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).as("i"),
+  ])))!;
   return r.c === "CONFLICTING" || r.i === "CONFLICTING" ? "CONFLICTING" : r.c ?? r.i;
 }
 
 export async function noteLive(db: Db, repo: string, number: number, pr: PrNode | null | undefined, at: string): Promise<void> {
   if (!pr) return;
   // The planner reads the mirrored value when the checks row is missing or at another head: a conflict seen live must reach it, or the PR keeps planning as a fix-up.
-  if (pr.mergeable === "CONFLICTING" || pr.mergeable === "MERGEABLE") await db.prepare("UPDATE main.items SET mergeable = ? WHERE repo = ? AND number = ? AND kind = 'pr' AND head_oid = ?").run(pr.mergeable, repo, number, pr.headRefOid);
-  const row = await db.prepare("SELECT head_oid FROM pr_checks WHERE repo = ? AND number = ?").get(repo, number) as { head_oid: string } | undefined;
+  if (pr.mergeable === "CONFLICTING" || pr.mergeable === "MERGEABLE") await db.run(db.k.updateTable("main.items").set({ mergeable: pr.mergeable }).where("repo", "=", repo).where("number", "=", number).where("kind", "=", "pr").where("head_oid", "=", pr.headRefOid));
+  const row = await db.get(db.k.selectFrom("pr_checks").select("head_oid").where("repo", "=", repo).where("number", "=", number));
   if (!row) return;
   if (row.head_oid === pr.headRefOid) {
-    await db.prepare("UPDATE pr_checks SET state = ?, is_draft = ?, mergeable = CASE WHEN ? IN ('CONFLICTING','MERGEABLE') THEN ? ELSE coalesce(nullif(mergeable, 'UNKNOWN'), ?) END, maintainer_can_modify = ?, fetched_at = ? WHERE repo = ? AND number = ?")
-      .run(pr.state, pr.isDraft ? 1 : 0, pr.mergeable, pr.mergeable, pr.mergeable, pr.maintainerCanModify ? 1 : 0, at, repo, number);
+    const known = pr.mergeable === "CONFLICTING" || pr.mergeable === "MERGEABLE";
+    await db.run(db.k.updateTable("pr_checks").set((eb) => ({
+      state: pr.state, is_draft: pr.isDraft ? 1 : 0,
+      mergeable: known ? pr.mergeable : eb.fn.coalesce(eb.fn<string | null>("nullif", ["mergeable", eb.val("UNKNOWN")]), eb.val(pr.mergeable)),
+      maintainer_can_modify: pr.maintainerCanModify ? 1 : 0, fetched_at: at,
+    })).where("repo", "=", repo).where("number", "=", number));
   } else {
     // The old head's checks say nothing about the new one: pending until the checks sync reads them.
-    await db.prepare("UPDATE pr_checks SET head_oid = ?, state = ?, is_draft = ?, overall = 'pending', checks = '[]', mergeable = ?, maintainer_can_modify = ?, fetched_at = ? WHERE repo = ? AND number = ?")
-      .run(pr.headRefOid, pr.state, pr.isDraft ? 1 : 0, pr.mergeable, pr.maintainerCanModify ? 1 : 0, at, repo, number);
+    await db.run(db.k.updateTable("pr_checks").set({
+      head_oid: pr.headRefOid, state: pr.state, is_draft: pr.isDraft ? 1 : 0, overall: "pending", checks: "[]", mergeable: pr.mergeable,
+      maintainer_can_modify: pr.maintainerCanModify ? 1 : 0, fetched_at: at,
+    }).where("repo", "=", repo).where("number", "=", number));
   }
 }
 
@@ -185,35 +195,40 @@ class Recorder {
   /** Written before the push: the commit about to be pushed, so a crash between the push and its record leaves the head in the push chain. */
   async pushing(c: FixCandidate, commit: string, files: string[]): Promise<void> {
     // A stored patch's row (any source) is the record of the push; a carry-over also keeps its own.
-    if (c.lint) await this.db.prepare("UPDATE fixups SET state = 'pushing', to_head = ?, files = ? WHERE rowid = ?").run(commit, JSON.stringify(files), c.lint.rowid);
+    if (c.lint) await this.db.run(this.db.k.updateTable("fixups").set({ state: "pushing", to_head: commit, files: JSON.stringify(files) }).where(rowid("fixups"), "=", c.lint.rowid));
     if (c.carry) {
-      await this.db.prepare("UPDATE dupe_carries SET to_head = ?, from_head = ?, updated_at = ? WHERE decision_id = ? AND number = ?").run(commit, c.head, this.at(), c.carry.decisionId, c.number);
+      await this.db.run(this.db.k.updateTable("dupe_carries").set({ to_head: commit, from_head: c.head, updated_at: this.at() }).where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
       return;
     }
     if (c.lint) return;
-    await this.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, reason, files, attempt, created_at, source, operator_fix) VALUES (?, ?, ?, ?, 'pushing', NULL, ?, ?, ?, ?, ?)")
-      .run(c.repo, c.number, c.head, commit, JSON.stringify(files), c.attempt, this.at(), c.source ?? null, c.operator?.id ?? null);
+    await this.db.run(this.db.k.insertInto("fixups").values({
+      repo: c.repo, number: c.number, from_head: c.head, to_head: commit, state: "pushing", reason: null, files: JSON.stringify(files), attempt: c.attempt,
+      created_at: this.at(), source: c.source ?? null, operator_fix: c.operator?.id ?? null,
+    }));
   }
 
   /** The model patch waits for its lint task: a first row, or the same row with the next round's patch and task. */
   async linting(c: FixCandidate, patch: string, files: string[], task: number, lintState: "pending" | "requeued", round: number, session: string | null, changes: string[] = []): Promise<void> {
     const list = changes.length ? JSON.stringify(changes) : null;
     if (c.lint) {
-      await this.db.prepare("UPDATE fixups SET patch = ?, files = ?, lint_task = ?, lint_round = ?, lint_state = ?, session = ?, changes = ? WHERE rowid = ?").run(patch, JSON.stringify(files), task, round, lintState, session, list, c.lint.rowid);
+      await this.db.run(this.db.k.updateTable("fixups").set({ patch, files: JSON.stringify(files), lint_task: task, lint_round: round, lint_state: lintState, session, changes: list }).where(rowid("fixups"), "=", c.lint.rowid));
       return;
     }
-    await this.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, reason, files, attempt, created_at, source, patch, lint_task, lint_round, lint_state, carry_decision, session, operator_fix, changes) VALUES (?, ?, ?, NULL, 'linting', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(c.repo, c.number, c.head, JSON.stringify(files), c.attempt, this.at(), c.carry ? "carry" : c.source ?? null, patch, task, round, lintState, c.carry?.decisionId ?? null, session, c.operator?.id ?? null, list);
+    await this.db.run(this.db.k.insertInto("fixups").values({
+      repo: c.repo, number: c.number, from_head: c.head, to_head: null, state: "linting", reason: null, files: JSON.stringify(files), attempt: c.attempt,
+      created_at: this.at(), source: c.carry ? "carry" : c.source ?? null, patch, lint_task: task, lint_round: round, lint_state: lintState,
+      carry_decision: c.carry?.decisionId ?? null, session, operator_fix: c.operator?.id ?? null, changes: list,
+    }));
   }
 
   /** Stored patches whose Plan no longer lists the push (head moved, a Hold or Close answer, approval revoked) are dropped. */
   async dropUnlisted(repo: string, listed: FixCandidate[]): Promise<void> {
     const keep = new Set(listed.map((c) => c.lint!.rowid));
-    const rows = await this.db.prepare("SELECT rowid AS id, lint_task FROM fixups WHERE repo = ? AND state = 'linting'").all(repo) as { id: number; lint_task: number | null }[];
+    const rows = await this.db.all(this.db.k.selectFrom("fixups").select([rowid("fixups").as("id"), "lint_task"]).where("repo", "=", repo).where("state", "=", "linting"));
     for (const r of rows) {
       const t = r.lint_task != null ? await getTask(this.db, r.lint_task) : null;
       if (t && !TERMINAL.includes(t.state)) continue;
-      if (!keep.has(r.id)) await this.db.prepare("UPDATE fixups SET state = 'superseded', reason = 'the plan no longer lists the push of the stored patch', patch = NULL WHERE rowid = ?").run(r.id);
+      if (!keep.has(r.id)) await this.db.run(this.db.k.updateTable("fixups").set({ state: "superseded", reason: "the plan no longer lists the push of the stored patch", patch: null }).where(rowid("fixups"), "=", r.id));
     }
   }
 
@@ -224,38 +239,46 @@ class Recorder {
       // A carry-over keeps its own record; the PR's take-fix tries and stage are not touched.
       if (state === "comment-unsent") {
         // Not a try: nothing reached GitHub. Its fixups row times the backoff (src/core/facts.ts); past the last one the carry-over is held.
-        const ats = (await this.db.prepare("SELECT created_at FROM fixups WHERE repo = ? AND number = ? AND source = 'carry' AND carry_decision = ? AND state = 'comment-unsent'")
-          .all(c.repo, c.number, c.carry.decisionId) as { created_at: string }[]).map((x) => x.created_at);
-        await this.db.prepare("INSERT INTO fixups (repo, number, from_head, state, reason, files, attempt, created_at, source, carry_decision) VALUES (?, ?, ?, 'comment-unsent', ?, '[]', ?, ?, 'carry', ?)")
-          .run(c.repo, c.number, c.head, reason, c.attempt, at, c.carry.decisionId);
+        const ats = (await this.db.all(this.db.k.selectFrom("fixups").select("created_at")
+          .where("repo", "=", c.repo).where("number", "=", c.number).where("source", "=", "carry").where("carry_decision", "=", c.carry.decisionId).where("state", "=", "comment-unsent"))).map((x) => x.created_at);
+        await this.db.run(this.db.k.insertInto("fixups").values({
+          repo: c.repo, number: c.number, from_head: c.head, state: "comment-unsent", reason, files: "[]", attempt: c.attempt, created_at: at, source: "carry", carry_decision: c.carry.decisionId,
+        }));
         const final = unsentAsk([...ats, at], Date.parse(at)) === "final";
-        await this.db.prepare("UPDATE dupe_carries SET state = ?, outcome = ?, updated_at = ? WHERE decision_id = ? AND number = ?")
-          .run(final ? "held" : "queued", `${state}: ${reason}`, at, c.carry.decisionId, c.number);
+        await this.db.run(this.db.k.updateTable("dupe_carries").set({ state: final ? "held" : "queued", outcome: `${state}: ${reason}`, updated_at: at })
+          .where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
         return;
       }
       const ended = state === "pushed" || state === "asked" || state === "cannot-push" || state === "too-large" || state === "push-denied" || state === "comment-failed";
       const tried = !ended;
       const next = ended || c.attempt >= MAX_ATTEMPTS ? (state === "pushed" || state === "asked" ? "done" : "held") : "queued";
-      await this.db.prepare("UPDATE dupe_carries SET state = ?, attempts = attempts + ?, outcome = ?, to_head = ?, from_head = ?, updated_at = ? WHERE decision_id = ? AND number = ?")
-        .run(next, tried || state === "pushed" ? 1 : 0, reason ? `${state}: ${reason}` : state, toHead, toHead ? c.head : null, at, c.carry.decisionId, c.number);
+      await this.db.run(this.db.k.updateTable("dupe_carries").set((eb) => ({
+        state: next, attempts: eb("attempts", "+", tried || state === "pushed" ? 1 : 0), outcome: reason ? `${state}: ${reason}` : state,
+        to_head: toHead, from_head: toHead ? c.head : null, updated_at: at,
+      })).where("decision_id", "=", c.carry.decisionId).where("number", "=", c.number));
       // The stored patch's row, if the carry-over went through the lint check, ends with it.
-      if (c.lint) await this.db.prepare("UPDATE fixups SET state = ?, reason = ?, files = ?, to_head = ?, patch = NULL WHERE rowid = ?").run(state, reason, JSON.stringify(files), toHead, c.lint.rowid);
+      if (c.lint) await this.db.run(this.db.k.updateTable("fixups").set({ state, reason, files: JSON.stringify(files), to_head: toHead, patch: null }).where(rowid("fixups"), "=", c.lint.rowid));
       return;
     }
     // The candidate's own row: its stored patch, else the open row of its source (and of its operator request).
-    const open = (c.lint ? { id: c.lint.rowid } : await this.db.prepare("SELECT rowid AS id FROM fixups WHERE repo = ? AND number = ? AND from_head = ? AND state IN ('pushing', 'linting') AND COALESCE(source, 'review') = ? AND operator_fix IS ? ORDER BY rowid DESC")
-      .get(c.repo, c.number, c.head, c.source ?? "review", c.operator?.id ?? null)) as { id: number } | undefined;
+    const operatorId = c.operator?.id ?? null;
+    const open = c.lint ? { id: c.lint.rowid } : await this.db.get(this.db.k.selectFrom("fixups").select(rowid("fixups").as("id"))
+      .where("repo", "=", c.repo).where("number", "=", c.number).where("from_head", "=", c.head).where("state", "in", ["pushing", "linting"])
+      .where((eb) => eb(eb.fn.coalesce("source", eb.val("review")), "=", c.source ?? "review"))
+      .where((eb) => (operatorId === null ? eb("operator_fix", "is", null) : eb("operator_fix", "=", operatorId)))
+      .orderBy(rowid("fixups"), "desc").limit(1));
     if (open) {
-      await this.db.prepare("UPDATE fixups SET state = ?, reason = ?, files = ?, to_head = ? WHERE rowid = ?").run(state, reason, JSON.stringify(files), toHead, open.id);
+      await this.db.run(this.db.k.updateTable("fixups").set({ state, reason, files: JSON.stringify(files), to_head: toHead }).where(rowid("fixups"), "=", open.id));
     } else {
-      await this.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, reason, files, attempt, created_at, source, operator_fix) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-        .run(c.repo, c.number, c.head, toHead, state, reason, JSON.stringify(files), c.attempt, at, c.source ?? null, c.operator?.id ?? null);
+      await this.db.run(this.db.k.insertInto("fixups").values({
+        repo: c.repo, number: c.number, from_head: c.head, to_head: toHead, state, reason, files: JSON.stringify(files), attempt: c.attempt, created_at: at,
+        source: c.source ?? null, operator_fix: c.operator?.id ?? null,
+      }));
     }
     const hold = state === "cannot-push" || state === "too-large" || state === "push-denied";
     const note = state === "pushed" ? `fix-up pushed at ${short(c.head)}: ${files.join(", ")}${reason ? `; ${reason}` : ""}`
       : state === "asked" ? `asked the contributor for changes at ${short(c.head)}: ${files.join(", ")}` : `fix-up ${state} at ${short(c.head)}: ${reason}`;
-    await this.db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(c.repo, c.number, hold ? "hold" : "take", at, ACTOR, hold ? reason : note);
+    await this.db.run(this.db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: hold ? "hold" : "take", at, actor: ACTOR, note: hold ? reason : note }));
   }
 }
 
@@ -389,19 +412,32 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
   let worked = 0, stoppedLogged = false;
   let inflight = 0;
   let wake: (() => void)[] = [];
-  /** Fix-up of one PR: takes its lease and one unit of the limit before its first await, so concurrent items count exactly. */
+  /** Fix-up of one PR: takes one unit of the limit before its first await after the check, then its lease, so concurrent items count exactly. */
   const fixOne = async (c: FixCandidate): Promise<void> => {
     // While the limit is spent but other items are still running, one of them may give its unit back (not worked): wait for it.
     while (worked >= budget && inflight > 0) await new Promise<void>((r) => wake.push(r));
     if (await params.stopping?.()) { if (!stoppedLogged) { stoppedLogged = true; log(`fixup ${repo}: stopping, no new PRs started`); } return; }
     if (worked >= budget) return;
-    if (await pushesUnsettled(db, repo, log)) return;
-    const release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
-    if (!release) return;
-    // The item takes its budget before its first await; it is given back below when the item ends without being worked.
+    // The item takes its budget before its next await; it is given back when the item ends without being worked.
     worked++;
     inflight++;
     let counted = false;
+    const giveBack = () => {
+      if (!counted) worked--;
+      inflight--;
+      const w = wake;
+      wake = [];
+      for (const r of w) r();
+    };
+    // Every exit before the lease is held, a throw included, gives the unit back here; after it, the finally below does.
+    let release: (() => Promise<void>) | null = null;
+    try {
+      if (await pushesUnsettled(db, repo, log)) return;
+      release = await leaseItem(db, `pr:${repo}#${c.number}`, log);
+    } finally {
+      if (!release) giveBack();
+    }
+    if (!release) return;
     const ref = refOf(c);
     let files = [...new Set(c.fixes.map((f) => f.file))];
     const fail = async (state: "failed" | "refused" | "rejected", raw: string) => {
@@ -595,12 +631,7 @@ async function runFixupWith(db: Db, params: FixupParams, log: (line: string) => 
       if (isHalt(e)) throw e;
       await fail("failed", oneLine(String((e as Error).message ?? e)));
     } finally {
-      await release();
-      if (!counted) worked--;
-      inflight--;
-      const w = wake;
-      wake = [];
-      for (const r of w) r();
+      try { await release(); } finally { giveBack(); }
     }
   };
   // Items of one PR run one after the other inside one pool item; PRs run side by side.
@@ -647,10 +678,10 @@ async function carryWork(db: Db, c: FixCandidate, fetchDiff: DiffFetcher): Promi
 }
 
 async function oneTitle(db: Db, c: FixCandidate): Promise<string> {
-  return ((await db.prepare("SELECT title FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { title: string | null } | undefined)?.title ?? "").slice(0, 300);
+  return ((await db.get(db.k.selectFrom("items").select("title").where("repo", "=", c.repo).where("number", "=", c.number)))?.title ?? "").slice(0, 300);
 }
 
-const OWN_PUSHES = "'fixup-push', 'cifix-push', 'conflict-push', 'fixissue-push', 'batch-push'";
+const OWN_PUSHES = ["fixup-push", "cifix-push", "conflict-push", "fixissue-push", "batch-push"];
 
 /**
  * Our last ask comment on the PR when every commit since the head it was made at is an AutoCraft push (the recorded
@@ -659,17 +690,17 @@ const OWN_PUSHES = "'fixup-push', 'cifix-push', 'conflict-push', 'fixissue-push'
  */
 export async function earlierAsk(db: Db, repo: string, number: number, head: string): Promise<{ id: string; text: string } | null> {
   const target = `${repo}#${number}`;
-  type Row = { action: string; details: string };
-  const done = async (sql: string): Promise<{ action: string; d: { state?: string; url?: string; text?: string; comment?: string; head?: string; from?: string; to?: string } }[]> =>
-    (await db.prepare(sql).all(target) as Row[]).map((r) => ({ action: r.action, d: JSON.parse(r.details) })).filter((r) => r.d.state === "done");
-  const asked = new Set((await db.prepare("SELECT from_head FROM fixups WHERE repo = ? AND number = ? AND state = 'asked'").all(repo, number) as { from_head: string }[]).map((r) => r.from_head));
+  const done = async (actions: string[]): Promise<{ action: string; d: { state?: string; url?: string; text?: string; comment?: string; head?: string; from?: string; to?: string } }[]> =>
+    (await db.all(db.k.selectFrom("audit").select(["action", "details"]).where("target", "=", target).where("action", "in", actions).orderBy(rowid("audit"), "desc")))
+      .map((r) => ({ action: r.action, d: JSON.parse(r.details ?? "null") })).filter((r) => r.d.state === "done");
+  const asked = new Set((await db.all(db.k.selectFrom("fixups").select("from_head").where("repo", "=", repo).where("number", "=", number).where("state", "=", "asked"))).map((r) => r.from_head));
   if (!asked.size) return null;
-  const comments = await done("SELECT action, details FROM audit WHERE target = ? AND action IN ('fixup-comment', 'fixup-comment-edit') ORDER BY rowid DESC");
+  const comments = await done(["fixup-comment", "fixup-comment-edit"]);
   const post = comments.find((r) => r.action === "fixup-comment" && r.d.head && asked.has(r.d.head) && /#issuecomment-\d+$/.test(r.d.url ?? ""));
   if (!post) return null;
   const id = /#issuecomment-(\d+)$/.exec(post.d.url!)![1]!;
   const edit = comments.find((r) => r.action === "fixup-comment-edit" && r.d.comment === id);
-  const pushes = await done(`SELECT action, details FROM audit WHERE target = ? AND action IN (${OWN_PUSHES}) ORDER BY rowid DESC`);
+  const pushes = await done(OWN_PUSHES);
   let cur = head;
   for (let i = 0; cur !== post.d.head && i <= pushes.length; i++) {
     const p = pushes.find((r) => r.d.to === cur && r.d.from);
@@ -687,15 +718,16 @@ export type RepostResult = { status: "unchanged" | "dry-run" | "edited" | "faile
  * head the ask was made on. Does nothing when the text equals the one last recorded for that comment.
  */
 export async function repostAsk(db: Db, repo: string, number: number, apply: boolean, run: Exec = exec): Promise<RepostResult> {
-  const state = await db.prepare("SELECT state, from_head FROM fixups WHERE repo = ? AND number = ? AND source IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1").get(repo, number) as { state: string; from_head: string } | undefined;
+  const state = await db.get(db.k.selectFrom("fixups").select(["state", "from_head"]).where("repo", "=", repo).where("number", "=", number).where("source", "is", null)
+    .orderBy("created_at", "desc").orderBy(rowid("fixups"), "desc").limit(1));
   if (state?.state !== "asked") throw new Error(`${repo}#${number} is not in the asked state`);
-  const rows = await db.prepare("SELECT action, details FROM audit WHERE target = ? AND action IN ('fixup-comment', 'fixup-comment-edit') ORDER BY rowid DESC").all(`${repo}#${number}`) as { action: string; details: string }[];
-  const ds = rows.map((r) => ({ action: r.action, d: JSON.parse(r.details) as { state?: string; url?: string; text?: string; comment?: string } })).filter((r) => r.d.state === "done");
+  const rows = await db.all(db.k.selectFrom("audit").select(["action", "details"]).where("target", "=", `${repo}#${number}`).where("action", "in", ["fixup-comment", "fixup-comment-edit"]).orderBy(rowid("audit"), "desc"));
+  const ds = rows.map((r) => ({ action: r.action, d: JSON.parse(r.details ?? "null") as { state?: string; url?: string; text?: string; comment?: string } })).filter((r) => r.d.state === "done");
   const last = ds[0];
   const url = ds.find((r) => r.action === "fixup-comment" && r.d.url)?.d.url;
   const id = /#issuecomment-(\d+)$/.exec(url ?? "")?.[1];
   if (!last || !id) throw new Error(`no recorded ask comment for ${repo}#${number}`);
-  const review = await db.prepare("SELECT fixes, model FROM final_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict = 'take-fix'").get(repo, number, state.from_head) as { fixes: string | null; model: string | null } | undefined;
+  const review = await db.get(db.k.selectFrom("final_reviews").select(["fixes", "model"]).where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", state.from_head).where("verdict", "=", "take-fix"));
   const fixes = parseFixes(review?.fixes ?? null);
   if (!fixes.length) throw new Error(`no fix list for ${repo}#${number} at ${state.from_head.slice(0, 7)}`);
   const old = last.d.text ?? "";
@@ -751,7 +783,7 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
       const db = await openDb();
-      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
       for (const r of repos) {
         const a = await pushApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);

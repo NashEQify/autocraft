@@ -18,11 +18,11 @@ import { PICK_MINUTES_KEY, pickMinutes, setPickMinutes } from "../remote/picks.t
 import { ParallelError, setStepParallel, stepParallelSetting } from "./concurrency.ts";
 import { DEFAULT_MAX_JOBS, Runner, runnerLockPath } from "./runner.ts";
 import { loadSteps } from "./steps.ts";
-import { dropPlanChanges } from "../core/plan-changes.ts";
+import { dropPlanChanges } from "../db/sqlite-backfill.ts";
 import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
-import { openDb } from "../db/open.ts";
+import { openDb, setDbRole } from "../db/open.ts";
 
 const USAGE = `usage: autocraft-server runner serve
        autocraft-server runner steps
@@ -39,6 +39,7 @@ async function serve(): Promise<void> {
   const lock = runnerLockPath();
   const release = acquireLock(lock);
   if (!release) die("another runner is running on this database");
+  setDbRole("runner");
   const db = await openDb();
   await scopeToTracked(db);
   // Once per database: open decisions' proposed cards become choices. Here rather than in db.ts migrations, which cannot import the decision modules.
@@ -172,10 +173,10 @@ async function planLog(args: string[]): Promise<void> {
   const db = await openDb();
   if (args[0] === "status") {
     console.log(JSON.stringify({
-      logged: (await db.prepare("SELECT count(*) AS n FROM main.item_changes").get() as { n: number }).n,
-      passes: await db.prepare("SELECT kind, passes, refs, ms, max_ms, last_at FROM main.plan_pass_stats ORDER BY kind").all(),
-      fullCauses: await db.prepare("SELECT source, n FROM main.plan_full_causes ORDER BY n DESC LIMIT 10").all(),
-      shadowDiffs: (await db.prepare("SELECT count(*) AS n FROM main.plan_shadow_diffs").get() as { n: number }).n,
+      logged: (await db.get(db.k.selectFrom("main.item_changes").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
+      passes: await db.all(db.k.selectFrom("main.plan_pass_stats").select(["kind", "passes", "refs", "ms", "max_ms", "last_at"]).orderBy("kind")),
+      fullCauses: await db.all(db.k.selectFrom("main.plan_full_causes").select(["source", "n"]).orderBy("n", "desc").limit(10)),
+      shadowDiffs: (await db.get(db.k.selectFrom("main.plan_shadow_diffs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n,
     }, null, 2));
     return;
   }

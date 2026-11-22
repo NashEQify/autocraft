@@ -63,7 +63,7 @@ test("a formatter diff folds in only when every file it writes is the patched fi
 test("a security fix waits, with a warning, until a confidential environment has reported; that environment takes no PR code", async () => {
   const db = await connectDb(":memory:");
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", pipeline: 1 }));
   const caps = { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: false, gpu: false, toolchains: ["rust-stable"] };
   for (const id of ["plain", "vault"]) {
     await createEnv(db, { id, label: id, kind: "remote", slots: 4 }, "op");
@@ -77,10 +77,9 @@ test("a security fix waits, with a warning, until a confidential environment has
   assert.equal((await getTask(db, fix))!.summary, "Waiting for a confidential build environment.");
   assert.deepEqual((await claim(db, "vault", 4)).tasks.map((x) => x.id), [pr, batch]);
   // The fix itself waits before its model call; the job ends at once.
-  await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, created_at, updated_at)
-    VALUES ('app', 1, 1, 'a', 't', 'high', 'fixing', '[]', 'r', 'i', 'f', '2026-01-01', '2026-01-01')`).run();
+  await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 1, scan_id: 1, area: "a", title: "t", severity: "high", state: "fixing", refs: "[]", reach: "r", impact: "i", fingerprint: "f", created_at: "2026-01-01", updated_at: "2026-01-01" }));
   assert.match(await runFix(db, "app", 1, { log: () => {} } as unknown as FixDeps), /waiting for a confidential build environment/);
-  assert.equal((await db.prepare("SELECT note FROM security_findings WHERE number = 1").get() as { note: string }).note, "Waiting for a confidential build environment.");
+  assert.equal((await db.get(db.k.selectFrom("security_findings").select("note").where("number", "=", 1)))!.note, "Waiting for a confidential build environment.");
   const warn = async () => (await computeChecks(db)).find((c) => c.id === "confidential-env")!;
   assert.equal((await warn()).state, "warn");
   assert.equal((await warn()).text, "1 security fix and 1 security build task are waiting for a confidential build environment");
@@ -94,9 +93,9 @@ test("a security fix waits, with a warning, until a confidential environment has
   assert.ok(start !== null && await privateClockStart(db, "2026-01-01T00:00:00Z") === start);
   assert.equal((await warn()).state, "ok");
   assert.equal(await advanceSecurityFixes(db, false), 0, "a fix the pipeline started waits for the switch");
-  await db.prepare("UPDATE security_findings SET decided_by = 'boss'").run();
+  await db.run(db.k.updateTable("security_findings").set({ decided_by: "boss" }));
   assert.equal(await advanceSecurityFixes(db, false), 1);
-  await db.prepare("UPDATE build_tasks SET state = 'queued', env_id = NULL WHERE id IN (?, ?)").run(pr, batch);
+  await db.run(db.k.updateTable("build_tasks").set({ state: "queued", env_id: null }).where("id", "in", [pr, batch]));
   assert.equal((await getTask(db, fix))!.summary, null);
   assert.deepEqual((await claim(db, "plain", 4)).tasks.map((x) => x.id), [pr, batch]);
   assert.deepEqual((await claim(db, "vault", 4)).tasks.map((x) => x.id), [fix]);

@@ -8,6 +8,7 @@ import { isTier } from "./mode.ts";
 import { scaled } from "./time-scale.ts";
 import { READINESS, STATUS_EVERY_S, type HarnessId, type HelperInfo, type HelperStatus, type Machine, type Readiness, type Reserve, type Tier, type UsageReading, type UsageWindow } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 /** A status this old no longer counts: one report interval and a minute of slack. */
 export const STATUS_FRESH_MS = scaled((STATUS_EVERY_S + 60) * 1000);
@@ -79,26 +80,32 @@ export function parseStatus(raw: unknown): HelperStatus {
  * credentials go with the dashboard's minute maintenance (pruneRemote).
  */
 export async function storeStatus(db: Db, tokenId: number, login: string, s: HelperStatus, nowMs: number = Date.now()): Promise<void> {
-  await db.prepare(`INSERT INTO main.remote_helpers (token_id, login, readiness, until, reason, harness, models, reserve, usage, reported_at, slots, busy, last_error, helper_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (token_id) DO UPDATE SET login = excluded.login, readiness = excluded.readiness, until = excluded.until, reason = excluded.reason, harness = excluded.harness,
-      models = excluded.models, reserve = excluded.reserve, usage = excluded.usage, reported_at = excluded.reported_at,
-      slots = excluded.slots, busy = excluded.busy, last_error = excluded.last_error, helper_version = COALESCE(excluded.helper_version, remote_helpers.helper_version)`)
-    .run(tokenId, login, s.readiness, s.until ?? null, s.reason ?? null, s.harness, JSON.stringify(s.models), JSON.stringify(s.reserve), s.usage ? JSON.stringify(s.usage) : null, nowMs, s.slots, s.busy, s.lastError ? JSON.stringify(s.lastError) : null, s.helperVersion ?? null);
-  if (s.machine) await db.prepare("UPDATE main.mcp_tokens SET machine = ? WHERE id = ? AND machine IS NOT ?").run(JSON.stringify(s.machine), tokenId, JSON.stringify(s.machine));
+  await db.run(db.k.insertInto("main.remote_helpers")
+    .values({
+      token_id: tokenId, login, readiness: s.readiness, until: s.until ?? null, reason: s.reason ?? null, harness: s.harness, models: JSON.stringify(s.models),
+      reserve: JSON.stringify(s.reserve), usage: s.usage ? JSON.stringify(s.usage) : null, reported_at: nowMs, slots: s.slots, busy: s.busy,
+      last_error: s.lastError ? JSON.stringify(s.lastError) : null, helper_version: s.helperVersion ?? null,
+    })
+    .onConflict((oc) => oc.column("token_id").doUpdateSet((eb) => ({
+      ...excluded(["login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error"])(eb),
+      helper_version: eb.fn.coalesce("excluded.helper_version", "main.remote_helpers.helper_version"),
+    }))));
+  if (s.machine) await db.run(db.k.updateTable("main.mcp_tokens").set({ machine: JSON.stringify(s.machine) }).where("id", "=", tokenId).where("machine", "is distinct from", JSON.stringify(s.machine)));
 }
 
 /** Whether the login has a Task Runner whose last status is fresh (the MCP Connector then offers the task tools). */
 export async function hasFreshRunner(db: Db, login: string, nowMs: number = Date.now()): Promise<boolean> {
-  return await db.prepare(`SELECT 1 FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
-    WHERE t.login = ? AND t.kind = 'runner' AND t.expires_at > ? AND h.reported_at >= ? LIMIT 1`).get(login, new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) !== undefined;
+  return await db.get(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id").select((eb) => eb.lit(1).as("one"))
+    .where("t.login", "=", login).where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS).limit(1)) !== undefined;
 }
 
 /** The login's helpers: every live Task Runner credential, with its last status. */
 export async function listHelpers(db: Db, login: string, nowMs: number = Date.now()): Promise<HelperInfo[]> {
-  const rows = await db.prepare(`SELECT t.id, t.label, t.last_used_at, h.readiness, h.until, h.reason, h.harness, h.models, h.reserve, h.usage, h.reported_at, h.slots, h.busy, h.last_error
-      FROM main.mcp_tokens t LEFT JOIN main.remote_helpers h ON h.token_id = t.id
-    WHERE t.login = ? AND t.kind = 'runner' AND t.expires_at > ? ORDER BY t.created_at DESC, t.id DESC`).all(login, new Date(nowMs).toISOString()) as
-    { id: number; label: string | null; last_used_at: string | null; readiness: Readiness | null; until: string | null; reason: string | null; harness: HarnessId | null; models: string | null; reserve: string | null; usage: string | null; reported_at: number | null; slots: number | null; busy: number | null; last_error: string | null }[];
+  const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").leftJoin("main.remote_helpers as h", "h.token_id", "t.id")
+    .select(["t.id", "t.label", "t.last_used_at", "h.readiness", "h.until", "h.reason", "h.harness", "h.models", "h.reserve", "h.usage", "h.reported_at", "h.slots", "h.busy", "h.last_error"])
+    .$narrowType<{ readiness: Readiness | null; harness: HarnessId | null }>()
+    .where("t.login", "=", login).where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString())
+    .orderBy("t.created_at", "desc").orderBy("t.id", "desc"));
   const cooloff = await cooloffOf(db, login, nowMs);
   return rows.map((r) => {
     const reported = r.reported_at === null ? null : Number(r.reported_at);

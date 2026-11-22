@@ -12,9 +12,9 @@ import { T0, world } from "./world-db.ts";
 test("pairs of a repo no Task Runner takes are neither sent to Jev nor counted as handled", async () => {
   const w = await (await (await (await world()).repo()).issue(1, { title: "crash on open" })).issue(2, { title: "crashes when opening" });
   await fillEmbedHashes(w.db);
-  const hash = async (n: number) => (await w.db.prepare("SELECT embed_hash FROM items WHERE repo = 'app' AND number = ?").get(n) as { embed_hash: string }).embed_hash;
+  const hash = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("embed_hash").where("repo", "=", "app").where("number", "=", n)))!.embed_hash!;
   const key: PairKey = { repo: "app", a: 1, b: 2, a_hash: await hash(1), b_hash: await hash(2), similarity: 0.9 };
-  await w.db.prepare("INSERT INTO duplicate_pairs (repo, a, b, a_hash, b_hash, similarity, created_at) VALUES ('app', 1, 2, ?, ?, 0.9, ?)").run(key.a_hash, key.b_hash, T0);
+  await w.db.run(w.db.k.insertInto("duplicate_pairs").values({ repo: "app", a: 1, b: 2, a_hash: key.a_hash, b_hash: key.b_hash, similarity: 0.9, created_at: T0 }));
   const index = { embedder: { id: "m" }, ready: async () => {} } as unknown as VectorIndex;
   const lines: string[] = [];
   await runDupes(w.db, { dryRun: true }, (l) => lines.push(l), { index, check: {} as never });

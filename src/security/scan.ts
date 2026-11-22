@@ -15,6 +15,8 @@ import {
 } from "./rules.ts";
 import { forEachSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
+import type { NotNull } from "kysely";
 
 /** One model call. `text` is null when the call gave no answer; `cost` is what it cost whatever the outcome, null when unknown. */
 /** `runId` is the first agent run the call made (shown on the scan page); absent when it made none. */
@@ -127,14 +129,14 @@ export const earlierFinding = (known: Known[], c: Pick<Candidate, "title" | "cat
  * stored under an older rule are linked too.
  */
 export async function linkRepeatedFindings(db: Db): Promise<number> {
-  const rows = await db.prepare("SELECT repo, number, state, fingerprint, title, refs, category FROM security_findings ORDER BY repo, number").all() as (KnownRow & { repo: string })[];
-  const link = db.prepare("UPDATE security_findings SET state = 'duplicate', duplicate_of = ?, updated_at = ? WHERE repo = ? AND number = ? AND state = 'new'");
+  const rows = await db.all(db.k.selectFrom("security_findings").select(["repo", "number", "state", "fingerprint", "title", "refs", "category"]).orderBy("repo").orderBy("number"));
   let linked = 0, repo = "", known: Known[] = [];
   for (const r of rows) {
     if (r.repo !== repo) { repo = r.repo; known = []; }
     const k = knownOf(r);
     const earlier = r.state === "new" && k.sink ? earlierFinding(known, { title: r.title, category: r.category ?? "", refs: k.refs as Candidate["refs"] }) : undefined;
-    if (earlier && (await link.run(earlier.number, now(), r.repo, r.number)).changes) {
+    if (earlier && (await db.run(db.k.updateTable("security_findings").set({ state: "duplicate", duplicate_of: earlier.number, updated_at: now() })
+      .where("repo", "=", r.repo).where("number", "=", r.number).where("state", "=", "new"))).changes) {
       await audit(db, "pipeline", "security-finding-duplicate", findingKey(r.repo, r.number), { duplicateOf: earlier.number });
       k.state = "duplicate";
       linked++;
@@ -159,11 +161,12 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
   if (!ACTIVE_STATES.includes(scan.state)) return `scan ${scanId} already ${scan.state}`;
   const { repo, cap_usd: cap } = scan;
   const stopped = async (): Promise<boolean> => await deps.cancelled() || (await scanRow(db, scanId))?.state === "stopped";
-  const setState = async (state: "modeling" | "scanning" | "verifying"): Promise<void> => void await db.prepare(`UPDATE security_scans SET state = ? WHERE id = ? AND state IN (${ACTIVE_STATES.map((s) => `'${s}'`).join(", ")})`).run(state, scanId);
+  const setState = async (state: "modeling" | "scanning" | "verifying"): Promise<void> => void await db.run(db.k.updateTable("security_scans").set({ state }).where("id", "=", scanId).where("state", "in", ACTIVE_STATES));
   const progress = (line: string): void => { deps.progress?.(line); deps.log(line); };
   const cost = async (): Promise<number> => (await scanRow(db, scanId))!.cost_usd;
   // The calls of an earlier run of this scan (a continued scan) feed the estimates like the calls of this run.
-  const earlier = async (kind: string): Promise<number[]> => (await db.prepare("SELECT cost_usd FROM security_calls WHERE scan_id = ? AND kind = ? AND ok = 1 AND cost_usd IS NOT NULL ORDER BY id").all(scanId, kind) as { cost_usd: number }[]).map((r) => r.cost_usd);
+  const earlier = async (kind: string): Promise<number[]> => (await db.all(db.k.selectFrom("security_calls").select("cost_usd").$narrowType<{ cost_usd: NotNull }>()
+    .where("scan_id", "=", scanId).where("kind", "=", kind).where("ok", "=", 1).where("cost_usd", "is not", null).orderBy("id"))).map((r) => r.cost_usd);
   const areaCalls: number[] = await earlier("area"), verifyCalls: number[] = await earlier("verify");
   let areaGuess = areaGuessUsd(0);
 
@@ -173,15 +176,15 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
     for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
       if (await stopped()) throw new Stopped();
       if (cap !== null && await cost() + expected > cap) throw new Capped();
-      const id = Number((await db.prepare("INSERT INTO security_calls (scan_id, kind, area_idx, finding_number, started_at) VALUES (?, ?, ?, ?, ?)").run(scanId, kind, meta.area ?? null, meta.finding ?? null, now())).lastInsertRowid);
+      const id = (await db.get(db.k.insertInto("security_calls").values({ scan_id: scanId, kind, area_idx: meta.area ?? null, finding_number: meta.finding ?? null, started_at: now() }).returning("id")))!.id;
       let reply: Reply | null = null;
       try { reply = await run(); } catch (e) { deps.log(`${kind} call failed: ${(e as Error).message}`.slice(0, 300)); }
       // A call that answered without a reported cost counts as the expected cost; one that failed counts what it reported.
       const c = reply ? reply.cost ?? (reply.text !== null ? expected : 0) : 0;
       const value = reply?.text != null ? readReply(reply.text) : null;
-      await db.prepare("UPDATE security_calls SET ended_at = ?, ok = ?, cost_usd = ?, agent_run_id = ? WHERE id = ?").run(now(), value === null ? 0 : 1, reply ? c : null, reply?.runId ?? null, id);
-      await db.prepare("UPDATE security_scans SET cost_usd = cost_usd + ? WHERE id = ?").run(c, scanId);
-      if (meta.bill !== undefined) await db.prepare("UPDATE security_areas SET cost_usd = cost_usd + ? WHERE scan_id = ? AND idx = ?").run(c, scanId, meta.bill);
+      await db.run(db.k.updateTable("security_calls").set({ ended_at: now(), ok: value === null ? 0 : 1, cost_usd: reply ? c : null, agent_run_id: reply?.runId ?? null }).where("id", "=", id));
+      await db.run(db.k.updateTable("security_scans").set((eb) => ({ cost_usd: eb("cost_usd", "+", c) })).where("id", "=", scanId));
+      if (meta.bill !== undefined) await db.run(db.k.updateTable("security_areas").set((eb) => ({ cost_usd: eb("cost_usd", "+", c) })).where("scan_id", "=", scanId).where("idx", "=", meta.bill));
       spent += c;
       if (value !== null) return { value, cost: spent };
     }
@@ -198,12 +201,12 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
     const co = await deps.checkout(repo, scan.commit_sha ?? undefined);
     if (!co) return await fail("The repository could not be checked out for a read-only scan.");
     if (scan.commit_sha && co.sha !== scan.commit_sha) return await fail(`The checkout is at ${co.sha.slice(0, 7)}, not the scan's pinned commit ${scan.commit_sha.slice(0, 7)}.`);
-    await db.prepare("UPDATE security_scans SET commit_sha = ? WHERE id = ?").run(co.sha, scanId);
+    await db.run(db.k.updateTable("security_scans").set({ commit_sha: co.sha }).where("id", "=", scanId));
     const base = { repo: securityRepo(repo), number: scanId, project: repo, commit: co.sha } as const;
 
     // A continued scan keeps its threat model and areas; only the areas still pending are scanned.
     const kept = scan.threat_model ? parse<{ summary: string; entryPoints: ThreatModel["entryPoints"] }>(scan.threat_model) : null;
-    const keptAreas = kept ? (await db.prepare("SELECT idx, name, paths, entry_points, risk, why, state FROM security_areas WHERE scan_id = ? ORDER BY idx").all(scanId) as { idx: number; name: string; paths: string; entry_points: string; risk: number; why: string; state: string }[]) : [];
+    const keptAreas = kept ? await db.all(db.k.selectFrom("security_areas").select(["idx", "name", "paths", "entry_points", "risk", "why", "state"]).where("scan_id", "=", scanId).orderBy("idx")) : [];
     const resumed = !!kept && keptAreas.length > 0;
     let summaryText: string, entryPoints: ThreatModel["entryPoints"];
     const areas: ThreatArea[] = [];
@@ -213,7 +216,7 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
       summaryText = kept!.summary;
       entryPoints = kept!.entryPoints;
       for (const a of keptAreas) {
-        areas.push({ name: a.name, paths: parse<string[]>(a.paths), entryPoints: parse<string[]>(a.entry_points), risk: a.risk, why: a.why });
+        areas.push({ name: a.name, paths: parse<string[]>(a.paths), entryPoints: parse<string[]>(a.entry_points), risk: a.risk, why: a.why ?? "" });
         sizes.push(pathsBytes(co.dir, parse<string[]>(a.paths)) ?? 0);
         if (a.state !== "pending") doneIdx.add(a.idx);
       }
@@ -233,20 +236,19 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
         sizes.push(bytes);
       }
       if (!areas.length) return await fail("The threat model named no area that exists in the checkout.");
-      const insArea = db.prepare("INSERT INTO security_areas (scan_id, idx, name, paths, entry_points, risk, why) VALUES (?, ?, ?, ?, ?, ?, ?)");
-      await forEachSeq(areas, async (a, i) => await insArea.run(scanId, i, a.name, JSON.stringify(a.paths), JSON.stringify(a.entryPoints), a.risk, a.why));
+      await forEachSeq(areas, async (a, i) => void await db.run(db.k.insertInto("security_areas")
+        .values({ scan_id: scanId, idx: i, name: a.name, paths: JSON.stringify(a.paths), entry_points: JSON.stringify(a.entryPoints), risk: a.risk, why: a.why })));
       const total = sizes.map(areaGuessUsd).reduce((x, y) => x + y, 0);
-      await db.prepare("UPDATE security_scans SET areas_total = ?, estimate_usd = ?, threat_model = ? WHERE id = ?")
-        .run(areas.length, await cost() + total, JSON.stringify({ summary: summaryText, entryPoints }), scanId);
+      await db.run(db.k.updateTable("security_scans")
+        .set({ areas_total: areas.length, estimate_usd: await cost() + total, threat_model: JSON.stringify({ summary: summaryText, entryPoints }) }).where("id", "=", scanId));
     }
     const guesses = sizes.map(areaGuessUsd);
 
-    const known: Known[] = (await db.prepare("SELECT number, state, fingerprint, title, refs, category FROM security_findings WHERE repo = ?").all(repo) as KnownRow[]).map(knownOf);
-    const insFinding = db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, category, reach, impact, fingerprint, created_at, updated_at, duplicate_of)
-      VALUES (?, (SELECT COALESCE(MAX(number), 0) + 1 FROM security_findings WHERE repo = ?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING number`);
+    const known: Known[] = (await db.all(db.k.selectFrom("security_findings").select(["number", "state", "fingerprint", "title", "refs", "category"]).where("repo", "=", repo).orderBy("number"))).map(knownOf);
 
     const unverifiedOf = async (area: string): Promise<{ number: number; c: Candidate }[]> =>
-      (await db.prepare("SELECT * FROM security_findings WHERE scan_id = ? AND area = ? AND state = 'unverified' ORDER BY number").all(scanId, area) as { number: number; title: string; severity: Candidate["severity"]; urgent: number; category: string | null; refs: string; reach: string; impact: string }[])
+      (await db.all(db.k.selectFrom("security_findings").select(kx.cols("security_findings")).$narrowType<{ severity: Candidate["severity"] }>()
+        .where("scan_id", "=", scanId).where("area", "=", area).where("state", "=", "unverified").orderBy("number")))
         .map((r) => ({ number: r.number, c: { title: r.title, severity: r.severity, urgent: r.urgent === 1, category: r.category ?? "", refs: parse<Candidate["refs"]>(r.refs), reach: r.reach, impact: r.impact } }));
 
     // ---- areas ----
@@ -261,10 +263,10 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
       };
       // An area the cap stopped during verification has its findings already; only the unchecked ones are verified.
       const leftover = resumed ? await unverifiedOf(area.name) : [];
-      const hasFindings = resumed && !!await db.prepare("SELECT 1 FROM security_findings WHERE scan_id = ? AND area = ?").get(scanId, area.name);
+      const hasFindings = resumed && !!await db.get(db.k.selectFrom("security_findings").select((eb) => eb.lit(1).as("one")).where("scan_id", "=", scanId).where("area", "=", area.name).limit(1));
       const found = hasFindings ? { value: [] as Candidate[], cost: 0 } : await call<Candidate[]>("area", areaGuess, { area: idx, bill: idx }, () => deps.ask("security.area", input), parseCandidates);
       if (!found) {
-        await db.prepare("UPDATE security_areas SET state = 'failed' WHERE scan_id = ? AND idx = ?").run(scanId, idx);
+        await db.run(db.k.updateTable("security_areas").set({ state: "failed" }).where("scan_id", "=", scanId).where("idx", "=", idx));
         deps.log(`area ${area.name}: no readable answer`);
       } else {
         if (!hasFindings) areaCalls.push(found.cost);
@@ -277,7 +279,11 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
           const earlier = earlierFinding(known, cand);
           const at = now();
           // A repeat is kept as a hidden row that points at the earlier finding, which shows it in its timeline.
-          const row = await insFinding.get(repo, repo, scanId, area.name, cand.title, cand.severity, cand.urgent ? 1 : 0, earlier ? "duplicate" : "unverified", JSON.stringify(cand.refs), cand.category, cand.reach, cand.impact, fingerprintOf(cand), at, at, earlier?.number ?? null) as { number: number };
+          const row = (await db.get(db.k.insertInto("security_findings").values((eb) => ({
+            repo, number: eb.selectFrom("security_findings").select((s) => s(s.fn.coalesce(s.fn.max("number"), s.lit(0)), "+", s.lit(1)).as("n")).where("repo", "=", repo),
+            scan_id: scanId, area: area.name, title: cand.title, severity: cand.severity, urgent: cand.urgent ? 1 : 0, state: earlier ? "duplicate" : "unverified",
+            refs: JSON.stringify(cand.refs), category: cand.category, reach: cand.reach, impact: cand.impact, fingerprint: fingerprintOf(cand), created_at: at, updated_at: at, duplicate_of: earlier?.number ?? null,
+          })).returning("number")))!;
           known.push({ number: row.number, state: earlier ? "duplicate" : "unverified", fingerprint: fingerprintOf(cand), sink: cand.refs[0]!, refs: cand.refs, title: cand.title, category: cand.category ?? null });
           if (!earlier) fresh.push({ number: row.number, c: cand });
         }
@@ -289,13 +295,13 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
           const checked = await call("verify", mean(verifyCalls) ?? VERIFY_GUESS_USD, { finding: f.number, bill: idx }, () => deps.ask("security.verify", vin), parseVerdict);
           if (!checked) {
             const v: FindingVerification = { kind: "reasoning", result: "Not verified: the verify call gave no readable answer.", notes: "", score: null, proposedTest: null };
-            await db.prepare("UPDATE security_findings SET state = 'new', verification = ?, updated_at = ? WHERE repo = ? AND number = ?").run(JSON.stringify(v), now(), repo, f.number);
+            await db.run(db.k.updateTable("security_findings").set({ state: "new", verification: JSON.stringify(v), updated_at: now() }).where("repo", "=", repo).where("number", "=", f.number));
             continue;
           }
           verifyCalls.push(checked.cost);
           const verdict = checked.value;
           const v: FindingVerification = { kind: "reasoning", result: verdict.result, notes: verdict.notes, score: verdict.score, proposedTest: verdict.proposedTest };
-          await db.prepare("UPDATE security_findings SET state = ?, verification = ?, updated_at = ? WHERE repo = ? AND number = ?").run(survives(verdict) ? "new" : "disproved", JSON.stringify(v), now(), repo, f.number);
+          await db.run(db.k.updateTable("security_findings").set({ state: survives(verdict) ? "new" : "disproved", verification: JSON.stringify(v), updated_at: now() }).where("repo", "=", repo).where("number", "=", f.number));
           if (survives(verdict)) {
             // The test row is written before `confirmed`, so the automatic fix sees it and waits for the result.
             if (verdict.proposedTest?.trim() && deps.writeTest && deps.crates && await featureOn(db, "scan-tests")) {
@@ -310,13 +316,13 @@ export async function runScan(db: Db, scanId: number, deps: ScanDeps): Promise<s
           }
         }
       }
-      await db.prepare("UPDATE security_areas SET state = CASE state WHEN 'failed' THEN 'failed' ELSE 'done' END WHERE scan_id = ? AND idx = ?").run(scanId, idx);
+      await db.run(db.k.updateTable("security_areas").set((eb) => ({ state: eb.case().when("state", "=", "failed").then("failed").else("done").end() })).where("scan_id", "=", scanId).where("idx", "=", idx));
       const left = guesses.slice(idx + 1);
-      const avg = (await db.prepare("SELECT AVG(cost_usd) AS a FROM security_areas WHERE scan_id = ? AND state != 'pending'").get(scanId) as { a: number }).a;
-      await db.prepare("UPDATE security_scans SET areas_done = ?, estimate_usd = ? WHERE id = ?").run(idx + 1, await cost() + left.length * avg, scanId);
+      const avg = (await db.get(db.k.selectFrom("security_areas").select((eb) => eb.fn.avg<number>("cost_usd").as("a")).where("scan_id", "=", scanId).where("state", "!=", "pending")))!.a;
+      await db.run(db.k.updateTable("security_scans").set({ areas_done: idx + 1, estimate_usd: await cost() + left.length * avg }).where("id", "=", scanId));
     }
     await finishScan(db, scanId, "done");
-    return `${repo}: scan ${scanId} done: ${areas.length} areas, ${(await db.prepare("SELECT COUNT(*) AS n FROM security_findings WHERE scan_id = ? AND state = 'new'").get(scanId) as { n: number }).n} findings, $${(await cost()).toFixed(2)}`;
+    return `${repo}: scan ${scanId} done: ${areas.length} areas, ${(await db.get(db.k.selectFrom("security_findings").select((eb) => eb.fn.countAll<number>().as("n")).where("scan_id", "=", scanId).where("state", "=", "new")))!.n} findings, $${(await cost()).toFixed(2)}`;
   } catch (e) {
     if (e instanceof Capped) {
       await finishScan(db, scanId, "capped");

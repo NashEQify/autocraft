@@ -3,6 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, test } from "node:test";
 import { setFeature } from "../src/build/features.ts";
+import { like } from "../src/db/kx.ts";
 import { runBatches, type BatchDeps } from "../src/merge/batch.ts";
 import { world, type World } from "./world-db.ts";
 
@@ -26,7 +27,7 @@ async function setup(prs: number[], on: boolean) {
   return { w, deps, calls, setPatch: (p: string) => { patch = p; } };
 }
 const run = (t: Awaited<ReturnType<typeof setup>>) => runBatches(t.w.db, { repo: "app" }, quiet, t.deps);
-const batches = async (w: World) => await w.rows("SELECT id, state, build_state, build_tries, task_id, parent_id, pr_number FROM merge_batches ORDER BY id");
+const batches = async (w: World) => await w.db.all(w.db.k.selectFrom("merge_batches").select(["id", "state", "build_state", "build_tries", "task_id", "parent_id", "pr_number"]).orderBy("id"));
 const tasks = async (w: World) => await w.rows("SELECT id, step, state FROM build_tasks ORDER BY id");
 
 /** Ends a task the way a worker would: every plan step passed, or the named step failed (earlier ones passed), or no step ran. */
@@ -86,14 +87,14 @@ describe("batch-build", () => {
   test("a red tree splits the batch, each half is built before it opens; a single PR is held", async () => {
     const t = await setup([1, 2, 3, 4], true);
     await run(t);
-    await t.w.db.prepare("UPDATE merge_batches SET build_tries = 2").run();
+    await t.w.db.run(t.w.db.k.updateTable("merge_batches").set({ build_tries: 2 }));
     await finish(t.w, 1, { failAt: "test" });
     const s = await run(t);
     assert.equal(s.split.length, 1);
     const rows = await batches(t.w);
     assert.deepEqual(rows.map((b) => [b.state, b.parent_id]), [["split", null], ["checking", 1], ["checking", 1]]);
     assert.deepEqual(rows.slice(1).map((b) => b.build_state), ["pending", "pending"]);
-    assert.equal((await t.w.rows("SELECT COUNT(*) AS n FROM merge_batch_prs WHERE batch_id = 2"))[0]!.n, 2);
+    assert.equal((await t.w.db.get(t.w.db.k.selectFrom("merge_batch_prs").select((eb) => eb.fn.countAll<number>().as("n")).where("batch_id", "=", 2)))!.n, 2);
     assert.equal((await tasks(t.w)).length, 3);
     assert.equal(t.w.gh.writesOf("pr").length, 0);
     t.w.close();
@@ -103,7 +104,7 @@ describe("batch-build", () => {
     await finish(one.w, 1, { failAt: "build" });
     await run(one);
     assert.deepEqual((await batches(one.w)).map((b) => [b.state, b.build_state]), [["failed", "failed"]]);
-    assert.match((await one.w.rows("SELECT note FROM stages WHERE stage = 'hold' AND number = 1"))[0]!.note as string, /combined tree failed at build/);
+    assert.match((await one.w.db.get(one.w.db.k.selectFrom("stages").select("note").where("stage", "=", "hold").where("number", "=", 1)))!.note!, /combined tree failed at build/);
     assert.equal(one.w.gh.writesOf("pr").length, 0);
   });
 
@@ -117,7 +118,7 @@ describe("batch-build", () => {
     await finish(t.w, 2, "env");
     assert.equal((await run(t)).waiting.length, 1);
     assert.equal((await batches(t.w))[0]!.task_id, 2, "waits out the retry delay");
-    await t.w.db.prepare("UPDATE merge_batches SET updated_at = '2025-01-01T00:00:00Z'").run();
+    await t.w.db.run(t.w.db.k.updateTable("merge_batches").set({ updated_at: "2025-01-01T00:00:00Z" }));
     await run(t);
     assert.deepEqual((await batches(t.w)).map((b) => [b.state, b.build_state, b.build_tries, b.task_id]), [["checking", "pending", 3, 3]]);
     assert.equal(t.w.gh.writesOf("pr").length, 0);
@@ -135,14 +136,14 @@ describe("a maintainer's Merge answer in a batch", () => {
     // Outside the merge rule (a new author), so #3 merges on its Merge answer.
     await (await (await (await (await w.pr(3, { author: "newcomer" })).review(3)).verified(3)).premerge(3, "clean")).answer(3, "merge");
     await run(t);
-    const members = async () => (await w.rows("SELECT b.state, m.number FROM merge_batch_prs m JOIN merge_batches b ON b.id = m.batch_id ORDER BY b.id, m.number")).map((r) => `${r.state}:${r.number}`);
+    const members = async () => (await w.db.all(w.db.k.selectFrom("merge_batch_prs as m").innerJoin("merge_batches as b", "b.id", "m.batch_id").select(["b.state", "m.number"]).orderBy("b.id").orderBy("m.number"))).map((r) => `${r.state}:${r.number}`);
     assert.deepEqual(await members(), ["open:1", "open:2", "open:3"]);
     // The answer is a maintainer's, under maintainer writes and the app identity, with a write permission past its cache time.
-    await w.db.prepare("UPDATE decisions SET answered_by = 'maint' WHERE id LIKE 'app#3:merge@%'").run();
+    await w.db.run(w.db.k.updateTable("decisions").set({ answered_by: "maint" }).where((eb) => like(w.db, "id", eb.val("app#3:merge@%"))));
     await w.db.prepare("INSERT OR IGNORE INTO access (login, role) VALUES ('maint', 'maintainer')").run();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
+    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
     const perm = async (permission: string, at: string) =>
-      await w.db.prepare("INSERT OR REPLACE INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?)").run(permission, at);
+      await w.db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('maint', 'app', ?, ?) ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at").run(permission, at);
     await perm("write", new Date(Date.now() - 11 * 60_000).toISOString());
     const reads: string[] = [];
     t.deps.permission = async (_db, login) => { reads.push(login); await perm("read", new Date().toISOString()); return { kind: "ok", permission: "read" }; };
@@ -150,7 +151,7 @@ describe("a maintainer's Merge answer in a batch", () => {
     assert.deepEqual(reads, ["maint"]);
     assert.deepEqual(s.merged, []);
     assert.equal((await w.rows("SELECT 1 FROM merge_holds WHERE repo = 'app' AND number = 3")).length, 1);
-    assert.match(String((await w.rows("SELECT summary FROM merge_batches WHERE id = 1"))[0]!.summary), /app#3 left the batch: maint no longer settles decisions on app/);
+    assert.match(String((await w.db.get(w.db.k.selectFrom("merge_batches").select("summary").where("id", "=", 1)))!.summary), /app#3 left the batch: maint no longer settles decisions on app/);
     assert.ok(!(await members()).some((m) => !m.startsWith("superseded") && m.endsWith(":3")), (await members()).join());
   });
 });

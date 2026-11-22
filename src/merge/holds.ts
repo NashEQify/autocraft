@@ -4,9 +4,9 @@ import type { Db } from "../db/index.ts";
 
 /** Held PRs as `repo#number`, optionally of one repo. */
 export async function mergeHolds(db: Db, repo?: string): Promise<Set<string>> {
-  const rows = await db.prepare(`SELECT repo, number FROM main.merge_holds ${repo ? "WHERE repo = ?" : ""}`).all(...(repo ? [repo] : [])) as { repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"]).$if(!!repo, (q) => q.where("repo", "=", repo!)));
   return new Set(rows.map((r) => `${r.repo}#${r.number}`));
 }
 
 export const mergeHeld = async (db: Db, repo: string, number: number): Promise<boolean> =>
-  await db.prepare("SELECT 1 FROM main.merge_holds WHERE repo = ? AND number = ?").get(repo, number) !== undefined;
+  await db.get(db.k.selectFrom("main.merge_holds").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number)) !== undefined;

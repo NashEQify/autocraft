@@ -8,6 +8,7 @@ import { CODE_TTL_MS, createLinkCode, forgetLink, loginOf, redeemLinkCode } from
 import { publicStats, publicStatus } from "../src/public/status.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { cols } from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "discord-links-"));
@@ -34,7 +35,7 @@ describe("link codes", () => {
     assert.equal(await redeemLinkCode(db, keys, first, "77"), null);
     assert.equal(await redeemLinkCode(db, keys, second, "77", Date.now() + CODE_TTL_MS + 1000), null);
     assert.equal(await loginOf(db, keys, "77"), null);
-    const stored = JSON.stringify([await db.prepare("SELECT * FROM discord_links").all(), await db.prepare("SELECT * FROM discord_link_codes").all()]);
+    const stored = JSON.stringify([await db.all(db.k.selectFrom("discord_links").select(cols("discord_links"))), await db.all(db.k.selectFrom("discord_link_codes").select(cols("discord_link_codes")))]);
     assert.ok(!stored.includes("1234") && !stored.includes(code) && !stored.includes(second), "neither the Discord user id nor a code is stored");
     assert.equal(await forgetLink(db, keys, "1234"), 1);
     assert.equal(await loginOf(db, keys, "1234"), null);
@@ -42,21 +43,21 @@ describe("link codes", () => {
 });
 
 describe("public status", async () => {
-  const item = db.prepare("INSERT INTO items (repo, number, kind, state, title, url, created_at, labels) VALUES (?, ?, 'pr', 'OPEN', ?, ?, '2026-11-01T00:00:00Z', '[]')");
-  const plan = db.prepare("INSERT INTO item_plans (repo, number, kind, state, actions, reasons, view, planned_at) VALUES (?, ?, 'pr', ?, '[]', '[]', ?, 'x')");
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('openrepo', 'PUBLIC'), ('secret', 'PRIVATE')").run();
-  await db.prepare("INSERT INTO tracked_repos (name) VALUES ('openrepo'), ('secret')").run();
+  const item = (repo: string, number: number, title: string, url: string) => db.run(db.k.insertInto("items").values({ repo, number, kind: "pr", state: "OPEN", title, url, created_at: "2026-11-01T00:00:00Z", labels: "[]" }));
+  const plan = (repo: string, number: number, state: string, view: string) => db.run(db.k.insertInto("item_plans").values({ repo, number, kind: "pr", state, actions: "[]", reasons: "[]", view, planned_at: "x" }));
+  await db.run(db.k.insertInto("repos").values([{ name: "openrepo", visibility: "PUBLIC" }, { name: "secret", visibility: "PRIVATE" }]));
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "openrepo" }, { name: "secret" }]));
   const queued = JSON.stringify({ gh: "OPEN", queue: { held: false } });
-  await item.run("openrepo", 1, "First", "https://github.com/o/openrepo/pull/1");
-  await item.run("openrepo", 2, "Second", "https://github.com/o/openrepo/pull/2");
-  await item.run("openrepo", 3, "Fix", "https://github.com/o/openrepo/pull/3");
-  await item.run("secret", 1, "Hidden", "https://github.com/o/secret/pull/1");
-  await plan.run("openrepo", 1, "ready", queued);
-  await plan.run("openrepo", 2, "ready", queued);
-  await plan.run("openrepo", 3, "ready", queued);
-  await plan.run("secret", 1, "ready", queued);
-  await db.prepare("INSERT INTO item_rank (repo, number, score, breakdown, computed_at) VALUES ('openrepo', 2, 90, '{}', 'x'), ('openrepo', 1, 10, '{}', 'x')").run();
-  await db.prepare("INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, created_at, updated_at, fix_pr) VALUES ('openrepo', 1, 1, 'a', 't', 'high', 'landing', '[]', 'r', 'i', 'f', 'x', 'x', 3)").run();
+  await item("openrepo", 1, "First", "https://github.com/o/openrepo/pull/1");
+  await item("openrepo", 2, "Second", "https://github.com/o/openrepo/pull/2");
+  await item("openrepo", 3, "Fix", "https://github.com/o/openrepo/pull/3");
+  await item("secret", 1, "Hidden", "https://github.com/o/secret/pull/1");
+  await plan("openrepo", 1, "ready", queued);
+  await plan("openrepo", 2, "ready", queued);
+  await plan("openrepo", 3, "ready", queued);
+  await plan("secret", 1, "ready", queued);
+  await db.run(db.k.insertInto("item_rank").values([{ repo: "openrepo", number: 2, score: 90, breakdown: "{}", computed_at: "x" }, { repo: "openrepo", number: 1, score: 10, breakdown: "{}", computed_at: "x" }]));
+  await db.run(db.k.insertInto("security_findings").values({ repo: "openrepo", number: 1, scan_id: 1, area: "a", title: "t", severity: "high", state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "f", created_at: "x", updated_at: "x", fix_pr: 3 }));
 
   test("queue position follows rank; security-fix PRs and private repos are hidden", async () => {
     const s = (await publicStatus(db, "openrepo", 1))!;
@@ -71,7 +72,7 @@ describe("public status", async () => {
     assert.equal(st.queueLength, 2);
     assert.equal(st.openPrs, 2);
     // The Queue page's order: a fast-tracked PR goes first whatever its rank.
-    await db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('openrepo', 1, 'x', 'x')").run();
+    await db.run(db.k.insertInto("fast_track").values({ repo: "openrepo", number: 1, added_by: "x", added_at: "x" }));
     assert.deepEqual((await publicStatus(db, "openrepo", 1))!.queue, { position: 1, of: 2 });
   });
 });

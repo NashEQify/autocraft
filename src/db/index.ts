@@ -3,8 +3,10 @@
  * module that loads the `kysely` and `pg` packages (with a dynamic import, so the build worker runs without them).
  *
  * How callers get a handle:
- * - `await openDb()`: the process's handle on the configured database (`AUTOCRAFT_DB`), memoized; `closeDb()` at exit.
- * - `await connectDb(path, { busyTimeoutMs })`: a handle of its own (tests, the dashboard's second handle, worker threads).
+ * - `await openDb()`: the process's handle on the configured database, memoized; `closeDb()` at exit. The database is
+ *   `AUTOCRAFT_DB_URL` (a postgres:// URL) or else `AUTOCRAFT_DB` (a SQLite file); see `dbTarget()`.
+ * - `await connectDb(target, { busyTimeoutMs, role })`: a handle of its own (tests, the dashboard's second handle, worker
+ *   threads). `target` is a SQLite path or a postgres:// URL.
  * - `await dbFor(sync)`: the handle over a `DatabaseSync` that `connect()` (src/db.ts) returned, memoized per connection.
  *   Code that still holds a `DatabaseSync` reaches the async API this way while the rest of the call graph is converted.
  *
@@ -28,10 +30,12 @@ import type { DatabaseSync, SQLInputValue, SQLOutputValue } from "node:sqlite";
 
 export type Dialect = "sqlite" | "postgres";
 
-/**
- * The table types Kysely queries are checked against. Loose until generated types from the migrated schema replace it.
- */
-export type DB = Record<string, Record<string, unknown>>;
+/** What a process (or worker thread) uses its handle for; on Postgres it sets the connection pool size. */
+export type DbRole = "dashboard" | "dashboard-remote" | "runner" | "planner" | "periodic" | "cli";
+
+/** The table types Kysely queries are checked against, generated from the migrated schema (scripts/gen-db-types.ts). */
+export type { DB } from "./types.ts";
+import type { DB } from "./types.ts";
 
 export type Value = SQLOutputValue;
 export type Row = Record<string, Value>;
@@ -92,8 +96,22 @@ export interface Db {
    * inside a read snapshot it throws. Never retries itself.
    */
   write<T>(fn: () => Promise<T>, opts?: WriteOptions): Promise<T>;
-  /** Whether a transaction is open in the current async context. */
-  inTransaction(): boolean;
+  /**
+   * Runs `fn` so that a statement error inside it leaves the open transaction usable: on Postgres, where a failed
+   * statement aborts the whole transaction, `fn` runs under a savepoint that is rolled back when it throws; on SQLite, and
+   * outside a transaction, it is a plain call. The error still reaches the caller, which catches it and carries on.
+   * Attempts in one transaction run one at a time, like its statements.
+   */
+  attempt<T>(fn: () => Promise<T>): Promise<T>;
+  /** Whether a transaction is open in the current async context; with `mode`, one of that kind (a read snapshot or a write). */
+  inTransaction(mode?: "read" | "write"): boolean;
+  /**
+   * Makes this handle see tracked repos only: views filtered to tracked_repos shadow the mirror and work tables
+   * (src/db/scoped.ts), and writes to those tables name them with `main.`. On SQLite they are TEMP views on the
+   * connection; on Postgres the handle moves to connections whose search path puts the views first. Call it right after
+   * opening, outside any transaction.
+   */
+  scope(): Promise<void>;
   /** Runs several statements with no parameters (schema scripts, PRAGMAs). */
   script(text: string): Promise<void>;
   /** Calls `fn` for every round trip and write-lock release; returns the function that stops it. */

@@ -1,6 +1,7 @@
 // What AutoCraft is doing about a red default branch, in words for the Main CI page. Read-only.
 import { mainFixApprovals } from "./approval.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Shown first when a head has rows in several states: what needs a person comes before what is running. */
 const ORDER = ["fix-failed", "needs-fix", "linting", "asked", "pr-opened", "rerun-requested", "issue-opened", "declined", "nothing-to-do", "rerun-passed"] as const;
@@ -27,8 +28,8 @@ export async function autocraftText(db: Db, repo: string, headSha: string, state
 export async function autocraftTexts(db: Db, heads: { repo: string; headSha: string; state: string }[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   if (!heads.length) return out;
-  const rows = await db.prepare("SELECT repo, head_sha, state, pr_number FROM main_fixes WHERE (repo, head_sha) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))")
-    .all(JSON.stringify(heads.map((h) => [h.repo, h.headSha]))) as { repo: string; head_sha: string; state: string; pr_number: number | null }[];
+  const rows = await db.all(db.k.selectFrom("main_fixes").select(["repo", "head_sha", "state", "pr_number"])
+    .where(kx.tupleIn(db, ["repo", "head_sha"], heads.map((h) => [h.repo, h.headSha]), ["text", "text"])));
   const fixes = new Map<string, typeof rows>();
   for (const r of rows) (fixes.get(`${r.repo}\0${r.head_sha}`) ?? fixes.set(`${r.repo}\0${r.head_sha}`, []).get(`${r.repo}\0${r.head_sha}`)!).push(r);
   const first = (k: string) => { const states = new Set((fixes.get(k) ?? []).map((r) => r.state)); return ORDER.find((s) => states.has(s)); };

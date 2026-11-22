@@ -7,7 +7,7 @@ import { askClaude } from "../classify/run.ts";
 import type { Embedder } from "../embed/model.ts";
 import type { VectorIndex } from "../embed/vectors.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
-import { hiddenSql, isPublicRepo, publicRepoNames } from "../public/status.ts";
+import { hiddenExpr, isPublicRepo, publicRepoNames } from "../public/status.ts";
 import { PICK_CANDIDATES, PICK_MAX, parsePicks, type PickInput } from "./pick.ts";
 import type { Db } from "../db/index.ts";
 
@@ -50,19 +50,21 @@ export type SearchDeps = {
 const oneLine = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 export async function dailyCapUsd(db: Db): Promise<number> {
-  const v = Number((await db.prepare("SELECT value FROM settings WHERE key = ?").get(DAILY_CAP_KEY) as { value: string } | undefined)?.value);
+  const v = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", DAILY_CAP_KEY)))?.value);
   return Number.isFinite(v) && v >= 0 ? v : DEFAULT_DAILY_CAP_USD;
 }
 
 /** What today's (UTC) search calls cost, from the agent runs. */
 export async function spentTodayUsd(db: Db, now: number): Promise<number> {
   const day = new Date(now).toISOString().slice(0, 10);
-  return Number((await db.prepare("SELECT COALESCE(SUM(cost_usd), 0) AS c FROM agent_runs WHERE step = 'discord-search' AND started_at >= ?").get(day) as { c: number }).c);
+  return Number((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("cost_usd"), eb.lit(0)).as("c"))
+    .where("step", "=", "discord-search").where("started_at", ">=", day)))!.c);
 }
 
 /** The prompt and reply of a search call hold the question. After a call, the rows of finished calls are removed; `all` (at startup, when no call can be running) removes every row. */
 export async function dropTexts(db: Db, all = false): Promise<void> {
-  await db.prepare(`DELETE FROM agent_run_texts WHERE run_id IN (SELECT id FROM agent_runs WHERE step = 'discord-search'${all ? "" : " AND state <> 'running'"})`).run();
+  await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "in", (eb) => eb.selectFrom("agent_runs").select("id").where("step", "=", "discord-search")
+    .$if(!all, (q) => q.where("state", "<>", "running"))));
 }
 
 const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -114,16 +116,18 @@ export class Search {
     const [vec] = await embedder.embed([text], "query");
     if (!vec) return [];
     await index.ready(db);
-    const get = db.prepare(`SELECT i.title, i.body, i.state, i.state_reason, i.closed_at, i.updated_at, i.comments_count, i.reactions_count,
-        COALESCE(i.url, 'https://github.com/' || COALESCE(r.owner, '${DEFAULT_OWNER}') || '/' || i.repo || '/issues/' || i.number) AS url
-      FROM main.items i JOIN main.repos r ON r.name = i.repo WHERE i.repo = ? AND i.number = ? AND i.kind = 'issue' AND NOT ${hiddenSql("i.repo", "i.number", "i.labels")}`);
     const isPublic = new Map<string, boolean>();
     const now = (this.#d.now ?? Date.now)();
     const out: Candidate[] = [];
     for (const h of await index.nearest(db, vec, SCAN, undefined, only)) {
       if (!isPublic.has(h.repo)) isPublic.set(h.repo, await isPublicRepo(db, h.repo));
       if (!isPublic.get(h.repo)) continue;
-      const r = await get.get(h.repo, h.number) as { title: string | null; body: string | null; state: string; state_reason: string | null; closed_at: string | null; updated_at: string | null; comments_count: number | null; reactions_count: number | null; url: string } | undefined;
+      const r = await db.get(db.k.selectFrom("main.items as i").innerJoin("main.repos as r", "r.name", "i.repo")
+        .select((eb) => ["i.title", "i.body", "i.state", "i.state_reason", "i.closed_at", "i.updated_at", "i.comments_count", "i.reactions_count",
+          eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.val("/issues/")),
+            "||", eb.cast<string>("i.number", "text"))).as("url")])
+        .where("i.repo", "=", h.repo).where("i.number", "=", h.number).where("i.kind", "=", "issue")
+        .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels"))));
       if (!r) continue;
       const open = r.state === "OPEN";
       if (!open && !(r.state === "CLOSED" && r.state_reason === "COMPLETED" && now - Date.parse(r.closed_at ?? "") <= CLOSED_WINDOW_MS)) continue;

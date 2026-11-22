@@ -182,7 +182,7 @@ test("a task whose pod disappears is requeued once, then failed", async () => {
   clock += 60_000;
   await pass();
   // Requeued, and claimed again in the same pass.
-  assert.equal((await db.prepare("SELECT attempts FROM build_tasks WHERE id = ?").get(id) as { attempts: number }).attempts, 2);
+  assert.equal((await db.get(db.k.selectFrom("build_tasks").select("attempts").where("id", "=", id)))!.attempts, 2);
   kube.pods.delete(kube.only(id).metadata.name);
   clock += 60_000;
   await pass();
@@ -193,8 +193,8 @@ test("a task whose pod disappears is requeued once, then failed", async () => {
   assert.equal(kube.pvcs.size, 0);
 });
 
-const queued = async (id: number) => await db.prepare("SELECT state, attempts FROM build_tasks WHERE id = ?").get(id) as { state: string; attempts: number };
-const runOf = async (id: number) => await db.prepare("SELECT stage, pod FROM build_pod_runs WHERE task_id = ?").get(id) as { stage: number; pod: string | null } | undefined;
+const queued = async (id: number) => (await db.get(db.k.selectFrom("build_tasks").select(["state", "attempts"]).where("id", "=", id)))!;
+const runOf = async (id: number) => await db.get(db.k.selectFrom("build_pod_runs").select(["stage", "pod"]).where("task_id", "=", id));
 const simple = async () => await createTask(db, { step: "verify", repo: "open-app", headSha: SHA, requires: { os: "linux", toolchains: ["rust-stable"] }, plan: [{ name: "t", cmd: ["true"], network: "none", timeoutSec: 60 }] });
 const SOURCE_OK = JSON.stringify({ ok: true, env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null });
 
@@ -209,7 +209,7 @@ test("claims that cannot start go back to the queue without using an attempt", a
   await pass();
   assert.equal((await queued(a)).state, "running");
   assert.equal((await queued(b)).state, "running");
-  await db.script(`UPDATE build_tasks SET state = 'cancelled' WHERE id IN (${a}, ${b})`);
+  await db.run(db.k.updateTable("build_tasks").set({ state: "cancelled" }).where("id", "in", [a, b]));
   await pass();
   assert.equal(kube.pods.size, 0);
 });

@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { dbReady, serveHealth } from "../src/health.ts";
-import { dbFor } from "../src/db/open.ts";
+import { testDb } from "./test-db.ts";
 
 test("healthz answers while the process is up; readyz follows the database", async () => {
-  const db = await dbFor(new DatabaseSync(":memory:"));
+  const db = await testDb();
   const server = createServer(async (req, res) => {
     if (!await serveHealth(req, res, async () => await dbReady(db))) res.writeHead(404).end();
   });

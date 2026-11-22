@@ -21,7 +21,7 @@ const oneLine = (s: string, max = 300): string => s.replace(/\s+/g, " ").trim().
 
 /** The last part of the failing step's log of a finished task, for the next round's prompt. */
 export async function failureTail(db: Db, taskId: number, step: string): Promise<string> {
-  const rows = await db.prepare("SELECT chunk FROM build_task_logs WHERE task_id = ? AND step = ? ORDER BY seq DESC LIMIT 40").all(taskId, step) as { chunk: string }[];
+  const rows = await db.all(db.k.selectFrom("build_task_logs").select("chunk").where("task_id", "=", taskId).where("step", "=", step).orderBy("seq", "desc").limit(40));
   return rows.reverse().map((r) => r.chunk).join("").slice(-2500);
 }
 

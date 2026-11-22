@@ -1,9 +1,9 @@
 // Which labels each open item should get. Reads the mirror and classifications only.
-import { backlogHeldSql, notOwnIntegrationSql } from "../dupes/held.ts";
+import { backlogHeldExpr, notOwnIntegrationExpr } from "../dupes/held.ts";
 import { forRun, settleRows, type ClsRow } from "./settled.ts";
 import { scopeAnswers } from "../review/candidates.ts";
 import { isTypeLabel, sameLabel } from "./set.ts";
-import { pilotSql } from "../pilot.ts";
+import { pilotExpr } from "../pilot.ts";
 import { quietFixPrs } from "../core/facts.ts";
 import type { Db } from "../db/index.ts";
 
@@ -18,11 +18,14 @@ export type PlanRow = {
 export type PlanCounts = { toAdd: number; already: number; unsettled: number; conflicts: number };
 
 export async function planLabels(db: Db, repo: string, runId?: string): Promise<PlanRow[]> {
-  const items = await db.prepare(`SELECT number, kind, url, labels FROM main.items i WHERE repo = ? AND state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND ${pilotSql("i")} AND NOT ${backlogHeldSql("i")} ORDER BY number`).all(repo) as
-    { number: number; kind: string; url: string | null; labels: string | null }[];
+  const items = await db.all(db.k.selectFrom("main.items as i").select(["i.number", "i.kind", "i.url", "i.labels"])
+    .where("i.repo", "=", repo).where("i.state", "=", "OPEN")
+    .where((eb) => notOwnIntegrationExpr(db, eb, "i")).where((eb) => pilotExpr(db, eb, "i")).where((eb) => eb.not(backlogHeldExpr(db, eb, "i")))
+    .orderBy("i.number"));
   const byItem = new Map<number, ClsRow[]>();
-  const cls = await db.prepare(`SELECT number, classifier, run_id, at, type_label, flags, probs, input_hash FROM main.classifications WHERE repo = ?
-    ${runId ? "AND run_id = ?" : ""} ORDER BY at DESC`).all(...(runId ? [repo, runId] : [repo])) as (ClsRow & { number: number })[];
+  const cls: (ClsRow & { number: number })[] = await db.all(db.k.selectFrom("main.classifications")
+    .select(["number", "classifier", "run_id", "at", "type_label", "flags", "probs", "input_hash"]).where("repo", "=", repo)
+    .$if(!!runId, (q) => q.where("run_id", "=", runId!)).orderBy("at", "desc"));
   for (const c of cls) (byItem.get(c.number) ?? byItem.set(c.number, []).get(c.number)!).push(c);
 
   const answers = await scopeAnswers(db, true);

@@ -26,6 +26,8 @@ import { runMerge } from "../src/merge/index.ts";
 import { prepareOpusInput, type OpusDeps } from "../src/review/opus.ts";
 import { runPremerge, type PremergeDeps } from "../src/premerge/review.ts";
 import { CHECK, T1, tmpdir, world, type World } from "./world-db.ts";
+import { excluded } from "../src/db/kx.ts";
+import * as kx from "../src/db/kx.ts";
 
 process.env.AUTOCRAFT_DIFF_CACHE = join(tmpdir("diffs"), "cache");
 
@@ -37,7 +39,7 @@ afterEach(() => current?.close());
 const DIFF = "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,1 +1,1 @@\n-let a = 1;\n+let a = 2;\n";
 const premergeDeps: PremergeDeps = { fetchDiff: async () => ({ ok: true, text: DIFF }), model: "opus", maxChars: 120_000 };
 const premergeReply = (n: number) => JSON.stringify({ ref: `app#${n}`, findings: [], searched: "callers" });
-const merged = async (w: World) => await w.rows("SELECT number, head_oid, outcome FROM merges ORDER BY number");
+const merged = async (w: World) => await w.db.all(w.db.k.selectFrom("merges").select(["number", "head_oid", "outcome"]).orderBy("number"));
 
 describe("PR journeys", () => {
   test("a whitelisted bugfix PR goes from review to merge, and the merge gets the reviewed head", async () => {
@@ -135,16 +137,16 @@ describe("PR journeys", () => {
   test("the batch PR's runs are approved at the batch tip when its members are fast-tracked in a repo whose pipeline is off", async () => {
     const w = await (await (await (await (await (await (await (await (await fresh()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2)).review(2)).verified(2)).premerge(2, "clean");
     await runBatches(w.db, { repo: "app" }, quiet, w.gh.batchDeps());
-    const tip = (await w.db.prepare("SELECT commit_sha AS c FROM merge_batches WHERE pr_number = 900").get() as { c: string }).c;
-    await w.db.prepare("INSERT INTO ci_run_approvals (repo, number, head_oid, runs, approved, reread, failed, checked_at) VALUES ('app', 900, ?, '[]', '[]', 1, '{}', ?)").run(tip, "2026-01-02T00:00:00Z");
-    await w.db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot') ON CONFLICT (key) DO UPDATE SET value = excluded.value").run();
-    await w.db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, created_at, updated_at)
-      VALUES ('app', 900, 'pr', 'OPEN', 'batch', 'bot', 1, 0, 'mirror-lag', 'batch', ?, ?)`).run("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z");
+    const tip = (await w.db.get(w.db.k.selectFrom("merge_batches").select("commit_sha as c").where("pr_number", "=", 900)))!.c;
+    await w.db.run(w.db.k.insertInto("ci_run_approvals").values({ repo: "app", number: 900, head_oid: tip, runs: "[]", approved: "[]", reread: 1, failed: "{}", checked_at: "2026-01-02T00:00:00Z" }));
+    await w.db.run(w.db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+    await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 900, kind: "pr", state: "OPEN", title: "batch", author: "bot", additions: 1, deletions: 0,
+      head_oid: "mirror-lag", head_ref: "batch", created_at: "2026-01-01T00:00:00Z", updated_at: "2026-01-01T00:00:00Z" }));
     const plan = async () => await w.prPlan(900);
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }).where("name", "=", "app"));
     assert.equal((await plan()).state, "out-of-scope");
-    for (const n of [1, 2]) await w.db.prepare("INSERT INTO fast_track (repo, number, added_by, added_at) VALUES ('app', ?, 'op', ?)").run(n, "2026-01-02T00:00:00Z");
+    for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("fast_track").values({ repo: "app", number: n, added_by: "op", added_at: "2026-01-02T00:00:00Z" }));
     assert.deepEqual((await plan()).actions.map((a) => [a.kind, a.head]), [["approve-ci", tip]]);
   });
 
@@ -164,7 +166,7 @@ describe("PR journeys", () => {
     const first = await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
     assert.deepEqual(first.pushed, []);
     assert.deepEqual(git.pushes, []);
-    assert.deepEqual(await w.rows("SELECT state, lint_round, lint_state FROM fixups"), [{ state: "linting", lint_round: 1, lint_state: "pending" }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round", "lint_state"])), [{ state: "linting", lint_round: 1, lint_state: "pending" }]);
     assert.deepEqual((await w.prPlan(1)).actions, []);
     const t1 = (await w.rows("SELECT id, state FROM build_tasks"))[0] as { id: number; state: string };
     assert.equal(t1.state, "queued");
@@ -176,7 +178,7 @@ describe("PR journeys", () => {
     assert.deepEqual(second.pushed, []);
     assert.equal(asked.length, 2);
     assert.match(asked[1]!.previous!.findings[0]!, /needless at line 1/);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM fixups"), [{ state: "linting", lint_round: 2 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round"])), [{ state: "linting", lint_round: 2 }]);
 
     // Round 2 is clean; rustfmt wants `{}`: one push whose commit has the format change.
     const t2 = ((await w.rows("SELECT id FROM build_tasks ORDER BY id DESC LIMIT 1"))[0] as { id: number }).id;
@@ -187,7 +189,7 @@ describe("PR journeys", () => {
     const pushed = git.branchHead();
     assert.deepEqual(git.pushes, [{ lease: git.head, to: pushed }]);
     assert.equal(sh(git.fork, "show", `${pushed}:src/lib.rs`), "fn b() {}\nfn main() { b(); }");
-    assert.deepEqual(await w.rows("SELECT state, from_head, to_head FROM fixups"), [{ state: "pushed", from_head: git.head, to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "from_head", "to_head"])), [{ state: "pushed", from_head: git.head, to_head: pushed }]);
     assert.equal(w.gh.writesOf("comment").length, 1);
 
     // Sync sees the new head; it is reviewed, verified and pre-merge reviewed like any head.
@@ -217,7 +219,7 @@ describe("lint findings resume the patch session", () => {
       return n === 1 ? git.patch : edit;
     };
     await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
-    const stored = async () => JSON.parse(((await w.rows("SELECT session FROM fixups"))[0] as { session: string }).session) as Record<string, { id: string; dir: string }>;
+    const stored = async () => JSON.parse((await w.db.get(w.db.k.selectFrom("fixups").select("session")))!.session!) as Record<string, { id: string; dir: string }>;
     assert.equal((await stored())[""]!.id, "s1");
     await endLint(w, ((await w.rows("SELECT id FROM build_tasks"))[0] as { id: number }).id, { diagnostics: [{ line: 1 }] });
     clock += minutes * 60_000;
@@ -248,7 +250,7 @@ describe("conflict resolution lint", () => {
   const setup = async () => {
     const git = gitWorld(1, undefined, true);
     const w = await (await (await (await fresh()).pr(1, { head: git.head, mergeable: "CONFLICTING" })).review(1, { verdict: "take" })).verified(1);
-    await w.db.prepare("UPDATE items SET base_ref = 'main' WHERE repo = 'app' AND number = 1").run();
+    await w.db.run(w.db.k.updateTable("items").set({ base_ref: "main" }).where("repo", "=", "app").where("number", "=", 1));
     const deps = git.deps(w);
     const asked: { previous?: { findings: string[] } }[] = [];
     const answers = ["// both\nfn main() { a(); b(); }\n", "// both\nfn main() { a(); a(); }\n"];
@@ -262,20 +264,20 @@ describe("conflict resolution lint", () => {
     const { git, w, deps, asked } = await setup();
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket]), [["conflict", "merge"]]);
     assert.deepEqual((await run(w, deps)).pushed, []);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM conflict_merges"), [{ state: "linting", lint_round: 1 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "lint_round"])), [{ state: "linting", lint_round: 1 }]);
     await endLint(w, await lastTask(w), { diagnostics: [{ line: 2 }] });
     assert.deepEqual((await w.prPlan(1)).actions.map((a) => [a.kind, a.params?.bucket]), [["lint", "conflict"]]);
 
     assert.deepEqual((await run(w, deps)).pushed, []);
     assert.equal(asked.length, 2);
     assert.match(asked[1]!.previous!.findings[0]!, /needless at line 2/);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM conflict_merges"), [{ state: "linting", lint_round: 2 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "lint_round"])), [{ state: "linting", lint_round: 2 }]);
 
     await endLint(w, await lastTask(w));
     assert.deepEqual((await run(w, deps)).pushed, ["app#1"]);
     const pushed = git.branchHead();
     assert.equal(sh(git.fork, "show", `${pushed}:src/lib.rs`), "fn a() {}\n// both\nfn main() { a(); a(); }");
-    assert.deepEqual(await w.rows("SELECT state, to_head FROM conflict_merges"), [{ state: "merged", to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("conflict_merges").select(["state", "to_head"])), [{ state: "merged", to_head: pushed }]);
   });
 
   test("findings after the second lint round fail the try with the reason", async () => {
@@ -288,9 +290,9 @@ describe("conflict resolution lint", () => {
     assert.deepEqual(s.pushed, []);
     assert.equal(asked.length, 2);
     assert.deepEqual(git.pushes, []);
-    const row = (await w.rows("SELECT state, reason FROM conflict_merges"))[0] as { state: string; reason: string };
+    const row = (await w.db.get(w.db.k.selectFrom("conflict_merges").select(["state", "reason"])))!;
     assert.equal(row.state, "rejected");
-    assert.match(row.reason, /clippy findings remain after 2 rounds: needless/);
+    assert.match(row.reason!, /clippy findings remain after 2 rounds: needless/);
   });
 });
 
@@ -340,7 +342,7 @@ describe("patch model build tool", () => {
     const second = await runFixup(w.db, { repo: "app", dryRun: false }, quiet, deps);
     assert.deepEqual(second.pushed, ["app#1"]);
     assert.equal(asked, 1);
-    assert.deepEqual(await w.rows("SELECT state, lint_round FROM fixups"), [{ state: "pushed", lint_round: 1 }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("fixups").select(["state", "lint_round"])), [{ state: "pushed", lint_round: 1 }]);
   });
 });
 
@@ -381,8 +383,8 @@ describe("issue journey", () => {
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.equal(inputs.length, 2);
     assert.ok(!inputs[0]!.includes("<previous>") && inputs[1]!.includes("<previous>") && inputs[1]!.includes("is not one of the offered choices"));
-    assert.deepEqual(await w.rows("SELECT state, json_extract(pick, '$.core') AS core FROM decision_choices"), [{ state: "current", core: "o:take" }]);
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'app:scope:7' AND recommended = 'take'")).length, 1);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(["state", kx.jsonText(w.db, "pick", "$.core").as("core")])), [{ state: "current", core: "o:take" }]);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "=", "take"))).length, 1);
   });
 
   test("a pick whose core was dropped is asked again once; a pick still without a core is stored as no pick", async () => {
@@ -397,32 +399,32 @@ describe("issue journey", () => {
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.equal(inputs.length, 2);
     assert.ok(inputs[1]!.includes('your pick "x:review"'));
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'app:scope:7' AND recommended IS NULL")).length, 1);
-    assert.deepEqual(await w.rows("SELECT json_extract(pick, '$.core') AS core FROM decision_choices WHERE state = 'current'"), [{ core: null }]);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "app:scope:7").where("recommended", "is", null))).length, 1);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("decision_choices").select(kx.jsonText(w.db, "pick", "$.core").as("core")).where("state", "=", "current")), [{ core: null }]);
   });
 
   test("a duplicate group whose kept item is closed is prepared while a member it would close is open", async () => {
     const w = await (await (await fresh()).issue(7)).issue(8);
     await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-    await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', 8, 'issue', 'close', 7, 'close', 7)").run();
-    await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 7").run();
+    await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:7", repo: "app", number: 8, kind: "issue", role: "close", target: 7, base_role: "close", base_target: 7 }));
+    await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 7));
     assert.deepEqual(await prepareIds(w.db), ["app:dupegroup:7"]);
     assert.equal(await preparing(w.db, (await getDecision(w.db, "app:dupegroup:7"))!), true);
     await w.models(() => `Both issues report the same crash when opening an empty file, and #7 already has the fix, so #8 can be closed as its duplicate.${choices({ pick: { core: "o:accept", reason: "same report." } })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
     assert.deepEqual(await prepareIds(w.db), []);
-    await w.db.prepare("UPDATE decisions SET prepared_at = NULL").run();
-    await w.db.prepare("UPDATE items SET state = 'CLOSED' WHERE number = 8").run();
+    await w.db.run(w.db.k.updateTable("decisions").set({ prepared_at: null }));
+    await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED" }).where("number", "=", 8));
     assert.deepEqual(await prepareIds(w.db), []);
   });
 
   test("an accepted duplicate group lists an act action for the member it closes until the Act step has closed it", async () => {
     const w = await (await (await fresh()).issue(7)).issue(8);
     await ask(w.db, [{ id: "app:dupegroup:7", kind: "duplicate", repo: "app", number: 7, question: "Keep #7 and close #8?", options: [{ key: "accept", label: "Use this answer" }, { key: "distinct", label: "Not duplicates" }] }]);
-    await w.db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES ('app:dupegroup:7', 'app', 'model')").run();
+    await w.db.run(w.db.k.insertInto("dupe_groups").values({ decision_id: "app:dupegroup:7", repo: "app", source: "model" }));
     for (const [n, role, target] of [[7, "keep", null], [8, "close", 7]] as const)
-      await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, base_role, base_target) VALUES ('app:dupegroup:7', 'app', ?, 'issue', ?, ?, ?, ?)").run(n, role, target, role, target);
-    await w.db.prepare("INSERT INTO dupe_group_texts (decision_id, option, number, step, text) VALUES ('app:dupegroup:7', 'accept', 8, 'close', 'Duplicate of #7.')").run();
+      await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: "app:dupegroup:7", repo: "app", number: n, kind: "issue", role, target, base_role: role, base_target: target }));
+    await w.db.run(w.db.k.insertInto("dupe_group_texts").values({ decision_id: "app:dupegroup:7", option: "accept", number: 8, step: "close", text: "Duplicate of #7." }));
     await w.answerDecision("app:dupegroup:7", "accept");
     const acts = async () => (await w.plan()).items.filter((i) => i.plan.actions.some((a) => a.kind === "act")).map((i) => i.facts.number);
     assert.deepEqual(await acts(), []);
@@ -438,41 +440,42 @@ describe("issue journey", () => {
     const r = await runDecide(w.db, {}, quiet);
     assert.equal(r.asked, 1);
     assert.equal(r.prepared, 0);
-    const [d] = await w.rows("SELECT id, prepared_at, recommend_failures FROM decisions WHERE kind = 'scope'");
+    const [d] = await w.db.all(w.db.k.selectFrom("decisions").select(["id", "prepared_at", "recommend_failures"]).where("kind", "=", "scope"));
     assert.equal(d!.prepared_at, null);
     assert.equal(d!.recommend_failures, 1);
     // Within the hour nothing is due; after it the prepare runs again.
     assert.equal((await prepareIds(w.db)).length, 0);
     // A repo with its pipeline off is neither due nor shown as preparing.
-    await w.db.prepare("UPDATE decisions SET recommend_failures = NULL, recommend_failed_at = NULL").run();
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failures: null, recommend_failed_at: null }));
     assert.equal((await prepareIds(w.db)).length, 1);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), true);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 0").run();
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 0 }));
     assert.equal((await prepareIds(w.db)).length, 0);
     assert.equal(await preparing(w.db, (await getDecision(w.db, String(d!.id)))!), false);
-    await w.db.prepare("UPDATE tracked_repos SET pipeline = 1").run();
-    await w.db.prepare("UPDATE decisions SET recommend_failures = 1").run();
-    await w.db.prepare("UPDATE decisions SET recommend_failed_at = ?").run(new Date(Date.now() - 2 * 3_600_000).toISOString());
+    await w.db.run(w.db.k.updateTable("tracked_repos").set({ pipeline: 1 }));
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failures: 1 }));
+    await w.db.run(w.db.k.updateTable("decisions").set({ recommend_failed_at: new Date(Date.now() - 2 * 3_600_000).toISOString() }));
     await w.models(() => `It reports a panic on an empty slice. The reference app has no such case, so a fix is wanted.${choices({ pick: { core: "o:take", reason: "The reference app has this case." }, cores: [{ core: "o:take", extras: [] }] })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
-    const [p] = await w.rows("SELECT recommended, recommended_reason, recommended_by, summary, prepared_at FROM decisions WHERE kind = 'scope'");
+    const [p] = await w.db.all(w.db.k.selectFrom("decisions").select(["recommended", "recommended_reason", "recommended_by", "summary", "prepared_at"]).where("kind", "=", "scope"));
     assert.equal(p!.recommended, "take");
     assert.match(String(p!.summary), /panic on an empty slice/);
     assert.ok(p!.prepared_at);
-    assert.equal((await w.rows("SELECT 1 FROM conversation_turns WHERE number = 5 AND kind = 'opus'")).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("conversation_turns").select((eb) => eb.lit(1).as("one")).where("number", "=", 5).where("kind", "=", "opus"))).length, 1);
     // The review-text refresh leaves a prepared decision alone.
-    await w.db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, mode, verdict, sure, reason, summary, model, at) VALUES ('app', 5, 'h', 'final', 'take', 1, 'r', 'review text', 'opus', ?)").run(new Date().toISOString());
-    await w.db.prepare("UPDATE decisions SET kind = 'merge', facts = ? WHERE kind = 'scope'").run(JSON.stringify(["head: h"]));
+    await w.db.run(w.db.k.insertInto("opus_reviews").values({ repo: "app", number: 5, head_oid: "h", mode: "final", verdict: "take", sure: 1, reason: "r", summary: "review text", model: "opus", at: new Date().toISOString() }));
+    await w.db.run(w.db.k.updateTable("decisions").set({ kind: "merge", facts: JSON.stringify(["head: h"]) }).where("kind", "=", "scope"));
     await fillReviewSummaries(w.db, new Date().toISOString());
-    const [q] = await w.rows("SELECT summary, recommended FROM decisions WHERE number = 5");
+    const [q] = await w.db.all(w.db.k.selectFrom("decisions").select(["summary", "recommended"]).where("number", "=", 5));
     assert.match(String(q!.summary), /panic on an empty slice/);
     assert.equal(q!.recommended, "take");
     // An older open decision of the same item is prepared with summary and pick only: no second turn replaces the first one's cards.
-    await w.db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, asked_by) SELECT 'older', 'other', repo, number, 'Older?', options, '2000-01-01T00:00:00Z', asked_by FROM decisions WHERE number = 5").run();
+    const base = (await w.db.get(w.db.k.selectFrom("decisions").select(["repo", "number", "options", "asked_by"]).where("number", "=", 5)))!;
+    await w.db.run(w.db.k.insertInto("decisions").values({ id: "older", kind: "other", repo: base.repo, number: base.number, question: "Older?", options: base.options, asked_at: "2000-01-01T00:00:00Z", asked_by: base.asked_by }));
     await w.models(() => `The older question concerns the same panic on an empty slice and the answer is the same.${choices({ pick: { core: "o:take", reason: "still wanted." } })}`);
     assert.equal((await runDecide(w.db, {}, quiet)).prepared, 1);
-    assert.equal((await w.rows("SELECT 1 FROM conversation_turns WHERE number = 5 AND kind = 'opus'")).length, 1);
-    assert.equal((await w.rows("SELECT 1 FROM decisions WHERE id = 'older' AND prepared_at IS NOT NULL AND recommended = 'take'")).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("conversation_turns").select((eb) => eb.lit(1).as("one")).where("number", "=", 5).where("kind", "=", "opus"))).length, 1);
+    assert.equal((await w.db.all(w.db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("id", "=", "older").where("prepared_at", "is not", null).where("recommended", "=", "take"))).length, 1);
   });
 
   test("a classified issue gets a scope decision; once an operator says take, a fix is built, checked and opened as a PR", async () => {
@@ -531,14 +534,14 @@ describe("CI fix journey", () => {
 
     const s0 = await runCifix(w.db, { repo: "app", dryRun: false }, quiet, git.cifixDeps(w));
     assert.deepEqual(s0.pushed, []);
-    assert.deepEqual(await w.rows("SELECT state FROM ci_fixes"), [{ state: "linting" }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("ci_fixes").select("state")), [{ state: "linting" }]);
     await endLint(w, ((await w.rows("SELECT id FROM build_tasks"))[0] as { id: number }).id);
     const s = await runCifix(w.db, { repo: "app", dryRun: false }, quiet, git.cifixDeps(w));
     assert.deepEqual(s.pushed, ["app#1"]);
     const pushed = git.branchHead();
     assert.notEqual(pushed, git.head);
     assert.deepEqual(git.pushes, [{ lease: git.head, to: pushed }]);
-    assert.deepEqual(await w.rows("SELECT kind, state, head, to_head FROM ci_fixes"), [{ kind: "code", state: "pushed", head: git.head, to_head: pushed }]);
+    assert.deepEqual(await w.db.all(w.db.k.selectFrom("ci_fixes").select(["kind", "state", "head", "to_head"])), [{ kind: "code", state: "pushed", head: git.head, to_head: pushed }]);
     assert.equal(w.gh.writesOf("merge").length, 0);
   });
 });
@@ -599,7 +602,7 @@ async function putLint(w: World, id: number, o: { format?: string; diagnostics?:
 
 async function endLint(w: World, id: number, o: Parameters<typeof putLint>[2] = {}): Promise<void> {
   await putLint(w, id, o);
-  await w.db.prepare("UPDATE build_tasks SET state = 'done', results = '[]', ended_at = ? WHERE id = ?").run(T1, id);
+  await w.db.run(w.db.k.updateTable("build_tasks").set({ state: "done", results: "[]", ended_at: T1 }).where("id", "=", id));
 }
 
 /** The sandbox finished a build task: every step passed, or the test step failed. */
@@ -611,7 +614,7 @@ async function endTask(w: World, id: number, end: "pass" | "fail-test"): Promise
     results.push({ step: s.name, exitCode: bad ? 101 : 0, durationMs: 1, timedOut: false });
     if (bad) break;
   }
-  await w.db.prepare("UPDATE build_tasks SET state = ?, results = ?, ended_at = ? WHERE id = ?").run(end === "pass" ? "done" : "failed", JSON.stringify(results), T1, id);
+  await w.db.run(w.db.k.updateTable("build_tasks").set({ state: end === "pass" ? "done" : "failed", results: JSON.stringify(results), ended_at: T1 }).where("id", "=", id));
 }
 
 const sh = (cwd: string, ...args: string[]): string => {

@@ -3,7 +3,6 @@
 // Also decides when a PR's review is stale because someone else wrote on it after them.
 // All text here is written by outsiders and is passed on as untrusted data.
 import { createHash } from "node:crypto";
-import type { StatementSync } from "node:sqlite";
 import { audit } from "../dash/audit.ts";
 import { isBotCommand, isBotLogin } from "./bots.ts";
 import { BLOCKED_EXPIRES_MS, blockersLoader, storedBlockedBy } from "./blockers.ts";
@@ -16,6 +15,7 @@ import { pipelineMe, setPipelineLogin } from "../github/pipeline-account.ts";
 import { allOwnLogins, ownLogins } from "../github/identity.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Setting that holds the pipeline account's login (also read by src/merge/queue.ts). */
 const LOGIN_KEY = "pipeline_login";
@@ -96,20 +96,38 @@ export function discussionHash(xs: { id: string; body: string | null }[]): strin
 /** What a review read: when, and a hash of the counted entries. */
 export type Snapshot = { seen: string; hash: string | null };
 
-/** The `:own` parameter of NOT_OURS. With no login known, '' stands in, so authorless rows stay out as before. */
-const ownJson = (own: Set<string>): string => JSON.stringify(own.size ? [...own] : [""]);
+/** The logins notOurs excludes. With no login known, '' stands in, so authorless rows stay out as before. */
+const ownList = (own: Set<string>): string[] => (own.size ? [...own] : [""]);
 
-/** SQL for "written by someone other than us" (`c` is the comments table alias): not our logins, not our review post, and not a comment the pipeline wrote (its audited text) under an operator's own login. */
-const NOT_OURS = `COALESCE(c.author, '') NOT IN (SELECT value FROM json_each(:own))
-  AND c.id NOT IN (SELECT review_id FROM review_posts WHERE repo = c.repo AND number = c.number)
-  AND NOT EXISTS (SELECT 1 FROM main.audit au WHERE au.target = c.repo || '#' || c.number AND c.body IS NOT NULL AND json_extract(au.details, '$.text') = c.body)`;
+/** Condition for "written by someone other than us" (`c` is the comments table alias): not our logins, not our review post, and not a comment the pipeline wrote (its audited text) under an operator's own login. */
+const notOurs = (db: Db, eb: kx.Eb, own: Set<string>) => eb.and([
+  kx.inList(db, eb.fn.coalesce("c.author", eb.val("")), ownList(own), "text", true),
+  eb("c.id", "not in", eb.selectFrom("review_posts as rp").select("rp.review_id").whereRef("rp.repo", "=", "c.repo").whereRef("rp.number", "=", "c.number")),
+  eb.not(eb.exists(eb.selectFrom("main.audit as au").select(eb.lit(1).as("one")).where((a) => a.and([
+    a("au.target", "=", a(a(a.ref("c.repo"), "||", a.val("#")), "||", kx.exprOf(a, "c.number"))),
+    a("c.body", "is not", null),
+    a(kx.jsonText(db, "au.details", "$.text"), "=", a.ref("c.body")),
+  ])))),
+]);
 
-type MirrorRow = { id: string; kind: string; author: string | null; created_at: string | null; body: string | null; review_state: string | null; counted: number | null; maint: number };
-const mirrorRows = async (db: Db, repo: string, number: number): Promise<MirrorRow[]> =>
-  await db.prepare(`SELECT c.id, c.kind, c.author, c.created_at, c.body, c.review_state, c.counted,
-      (c.author_association IN ('OWNER', 'MEMBER', 'COLLABORATOR') OR EXISTS (SELECT 1 FROM main.access a WHERE lower(a.login) = lower(c.author) AND a.role IN ('operator', 'maintainer')))
-        AND COALESCE(c.author, '') <> COALESCE((SELECT i.author FROM items i WHERE i.repo = c.repo AND i.number = c.number), '') AS maint FROM comments c
-    WHERE c.repo = :repo AND c.number = :number AND ${NOT_OURS} ORDER BY c.created_at`).all({ repo, number, own: ownJson(await ownLogins(db, repo)) }) as MirrorRow[];
+type MirrorRow = { id: string; kind: string | null; author: string | null; created_at: string | null; body: string | null; review_state: string | null; counted: number | null; maint: number };
+const mirrorRows = async (db: Db, repo: string, number: number): Promise<MirrorRow[]> => {
+  const own = await ownLogins(db, repo);
+  return await db.all(db.k.selectFrom("comments as c")
+    .select((eb) => ["c.id", "c.kind", "c.author", "c.created_at", "c.body", "c.review_state", "c.counted",
+      eb.case().when(eb.and([
+        eb.or([
+          eb("c.author_association", "in", MAINTAINER_ASSOCIATIONS),
+          eb.exists(eb.selectFrom("main.access as a").select(eb.lit(1).as("one"))
+            .where((e) => e(e.fn<string>("lower", [e.ref("a.login")]), "=", e.fn<string>("lower", [e.ref("c.author")])))
+            .where("a.role", "in", ["operator", "maintainer"])),
+        ]),
+        eb(eb.fn.coalesce("c.author", eb.val("")), "<>", eb.fn.coalesce(eb.selectFrom("items as i").select("i.author").whereRef("i.repo", "=", "c.repo").whereRef("i.number", "=", "c.number"), eb.val(""))),
+      ])).then(1).else(0).end().as("maint")])
+    .where("c.repo", "=", repo).where("c.number", "=", number)
+    .where((eb) => notOurs(db, eb, own))
+    .orderBy("c.created_at", (o) => o.asc().nullsFirst()).orderBy(kx.rowid("comments", "c")));
+};
 
 /** Comments and review bodies from the mirror: the fallback for a call that has no GitHub connection. */
 async function mirrorDiscussion(db: Db, repo: string, number: number): Promise<{ entries: DiscussionEntry[]; hash: string; maint: Set<number> }> {
@@ -161,13 +179,13 @@ export async function liveDiscussion(q: Querier, db: Db, repo: string, number: n
   const pr = res?.repository?.pullRequest;
   if (!pr) throw new Error(`${repo}#${number} not found on GitHub`);
   const own = await ownLogins(db, repo);
-  const posted = new Set((await db.prepare("SELECT review_id FROM review_posts WHERE repo = ? AND number = ?").all(repo, number) as { review_id: string }[]).map((r) => r.review_id));
+  const posted = new Set((await db.all(db.k.selectFrom("review_posts").select("review_id").where("repo", "=", repo).where("number", "=", number))).map((r) => r.review_id));
   const mine = (a: Author | undefined, id?: string) => (!!a?.login && own.has(a.login)) || (!!id && posted.has(id));
   const prAuthor: string | null = pr.author?.login ?? null;
   const entries: DiscussionEntry[] = [];
   const counted: { id: string; body: string | null }[] = [];
   let newest: string | null = null, newestMaint: string | null = null;
-  const dash = new Set((await db.prepare("SELECT login FROM main.access WHERE role IN ('operator', 'maintainer')").all() as { login: string }[]).map((r) => r.login.toLowerCase()));
+  const dash = new Set((await db.all(db.k.selectFrom("main.access").select("login").where("role", "in", ["operator", "maintainer"]))).map((r) => r.login.toLowerCase()));
   const isMaint = (login: string | null | undefined, assoc: string | undefined) => MAINTAINER_ASSOCIATIONS.includes(assoc ?? "") || (!!login && dash.has(login.toLowerCase()));
   // The PR author's own words never rank as a maintainer's, whatever their association.
   const otherMaint = (login: string | null | undefined, assoc: string | undefined) => isMaint(login, assoc) && login !== prAuthor;
@@ -273,7 +291,7 @@ const stateMemo = new WeakMap<Db, Map<string, { sig: string; state: DiscussionSt
 
 /** Newest counted comment or review by someone else, and the hash of those, per PR "repo#n" from the mirror (issues are left out). Callers must not modify the result. */
 export async function discussionState(db: Db, repo?: string): Promise<DiscussionState> {
-  const seqs = await db.prepare("SELECT topic, seq FROM change_seq WHERE topic IN ('items', 'reviews') ORDER BY topic").all() as { topic: string; seq: number }[];
+  const seqs = await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]).where("topic", "in", ["items", "reviews"]).orderBy("topic"));
   const sig = JSON.stringify([seqs, [...await allOwnLogins(db)]]);
   const memo = stateMemo.get(db) ?? new Map<string, { sig: string; state: DiscussionState }>();
   stateMemo.set(db, memo);
@@ -286,18 +304,27 @@ export async function discussionState(db: Db, repo?: string): Promise<Discussion
 }
 
 async function computeDiscussionState(db: Db, repo?: string): Promise<DiscussionState> {
-  const own = ownJson(repo ? await ownLogins(db, repo) : await allOwnLogins(db));
-  const rows = await db.prepare(`SELECT c.repo, c.number, COALESCE(MAX(c.created_at), '') AS newest,
-      COALESCE(MAX(CASE WHEN c.author_association IN (${MAINTAINER_ASSOCIATIONS.map((a) => `'${a}'`).join(", ")})
-        OR EXISTS (SELECT 1 FROM main.access a WHERE a.login = c.author AND a.role IN ('operator', 'maintainer')) THEN c.created_at END), '') AS maint
-    FROM comments c WHERE (:repo IS NULL OR c.repo = :repo) AND c.counted = 1 AND ${NOT_OURS}
-      AND NOT EXISTS (SELECT 1 FROM main.items i WHERE i.repo = c.repo AND i.number = c.number AND i.kind = 'issue') GROUP BY c.repo, c.number`).all({ repo: repo ?? null, own }) as { repo: string; number: number; newest: string; maint: string }[];
+  const own = repo ? await ownLogins(db, repo) : await allOwnLogins(db);
+  const rows = await db.all(db.k.selectFrom("comments as c")
+    .select((eb) => ["c.repo", "c.number",
+      eb.fn.coalesce(eb.fn.max<string | null>("c.created_at"), eb.val("")).as("newest"),
+      eb.fn.coalesce(eb.fn.max<string | null>(eb.case().when(eb.or([
+        eb("c.author_association", "in", MAINTAINER_ASSOCIATIONS),
+        eb.exists(eb.selectFrom("main.access as a").select(eb.lit(1).as("one")).whereRef("a.login", "=", "c.author").where("a.role", "in", ["operator", "maintainer"])),
+      ])).then(eb.ref("c.created_at")).end()), eb.val("")).as("maint")])
+    .$if(repo !== undefined, (q) => q.where("c.repo", "=", repo!))
+    .where("c.counted", "=", 1)
+    .where((eb) => notOurs(db, eb, own))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("main.items as i").select(eb.lit(1).as("one")).whereRef("i.repo", "=", "c.repo").whereRef("i.number", "=", "c.number").where("i.kind", "=", "issue"))))
+    .groupBy(["c.repo", "c.number"]));
   // The hash needs the comment text; callers ask for it only after a newer entry than a review's snapshot, so it is read on first use (primeHashes reads many in one query).
   const known = new Map<string, string>();
   const texts = async (keys: { repo: string; number: number }[]): Promise<Map<string, { id: string; body: string | null }[]>> => {
     const by = new Map<string, { id: string; body: string | null }[]>(keys.map((k) => [`${k.repo}#${k.number}`, []]));
-    for (const c of await db.prepare(`SELECT c.repo, c.number, c.id, c.body FROM json_each(:keys) j JOIN comments c ON c.repo = j.value ->> 0 AND c.number = j.value ->> 1
-      WHERE c.counted = 1 AND ${NOT_OURS}`).all({ keys: JSON.stringify(keys.map((k) => [k.repo, k.number])), own }) as { repo: string; number: number; id: string; body: string | null }[])
+    for (const c of await db.all(db.k.selectFrom("comments as c")
+      .innerJoin(kx.refPairs(db, keys.map((k) => [k.repo, k.number] as const), "j"), (j) => j.onRef("c.repo", "=", "j.repo").onRef("c.number", "=", "j.number"))
+      .select(["c.repo", "c.number", "c.id", "c.body"])
+      .where("c.counted", "=", 1).where((eb) => notOurs(db, eb, own))))
       by.get(`${c.repo}#${c.number}`)?.push(c);
     return by;
   };
@@ -359,14 +386,15 @@ export async function markedStaleSince(db: Db, repo: string, number: number, sin
 
 /** markedStaleSince() for every PR, with the marks read in one query. */
 export async function staleMarksSince(db: Db): Promise<(repo: string, number: number, since: string) => boolean> {
-  const marks = new Map((await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE ?").all(`${STALE_KEY}%`) as { key: string; value: string }[]).map((m) => [m.key, m.value]));
+  const marks = new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where((eb) => kx.like(db, "key", eb.val(`${STALE_KEY}%`))))).map((m) => [m.key, m.value]));
   return (repo, number, since) => { const v = marks.get(staleKey(repo, number)); return !!v && v > since; };
 }
 
 /** Counts a same-head re-review against the PR's daily cap and forgets earlier days. */
 export async function countRerun(db: Db, repo: string, number: number): Promise<void> {
-  await db.prepare("DELETE FROM main.settings WHERE key LIKE ? AND key <> ?").run(`${RERUN_KEY}${repo}#${number}:%`, rerunKey(repo, number));
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1").run(rerunKey(repo, number), "1");
+  await db.run(db.k.deleteFrom("main.settings").where((eb) => kx.like(db, "key", eb.val(`${RERUN_KEY}${repo}#${number}:%`))).where("key", "<>", rerunKey(repo, number)));
+  await db.run(db.k.insertInto("main.settings").values({ key: rerunKey(repo, number), value: "1" })
+    .onConflict((oc) => oc.column("key").doUpdateSet((eb) => ({ value: eb.cast<string>(eb(eb.cast<number>("main.settings.value", "bigint"), "+", eb.lit(1)), "text") }))));
 }
 
 type ReviewedRow = { repo: string; number: number; head_oid: string; at: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null; rebased: number | null };
@@ -375,17 +403,23 @@ type ReviewedRow = { repo: string; number: number; head_oid: string; at: string;
 const reviewedMemo = new WeakMap<Db, Map<string, { sig: string; rows: ReviewedRow[] }>>();
 
 async function reviewedRows(db: Db, repo?: string): Promise<ReviewedRow[]> {
-  const seqs = await db.prepare("SELECT topic, seq FROM change_seq WHERE topic IN ('items', 'reviews', 'repos') ORDER BY topic").all() as { topic: string; seq: number }[];
+  const seqs = await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]).where("topic", "in", ["items", "reviews", "repos"]).orderBy("topic"));
   const sig = JSON.stringify(seqs);
   const memo = reviewedMemo.get(db) ?? new Map<string, { sig: string; rows: ReviewedRow[] }>();
   reviewedMemo.set(db, memo);
   const hit = memo.get(repo ?? "");
   if (hit && hit.sig === sig && seqs.length === 3) return hit.rows;
-  const rows = await db.prepare(`SELECT r.repo, r.number, r.head_oid, r.at, r.seen_at, r.disc_hash, r.blocked_by,
-      i.base_ref IS NOT NULL AND COALESCE(r.base_ref, p.default_branch) IS NOT NULL AND i.base_ref <> COALESCE(r.base_ref, p.default_branch) AS rebased
-    FROM opus_reviews r LEFT JOIN items i ON i.repo = r.repo AND i.number = r.number LEFT JOIN repos p ON p.name = r.repo
-    WHERE r.verdict IS NOT NULL AND (:repo IS NULL OR r.repo = :repo)`)
-    .all({ repo: repo ?? null }) as ReviewedRow[];
+  const rows = await db.all(db.k.selectFrom("opus_reviews as r")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
+    .leftJoin("repos as p", "p.name", "r.repo")
+    .select((eb) => ["r.repo", "r.number", "r.head_oid", "r.at", "r.seen_at", "r.disc_hash", "r.blocked_by",
+      eb.case().when(eb.and([
+        eb("i.base_ref", "is not", null),
+        eb(eb.fn.coalesce("r.base_ref", "p.default_branch"), "is not", null),
+        eb("i.base_ref", "<>", eb.fn.coalesce("r.base_ref", "p.default_branch")),
+      ])).then(1).else(0).end().as("rebased")])
+    .where("r.verdict", "is not", null)
+    .$if(repo !== undefined, (q) => q.where("r.repo", "=", repo!)));
   memo.set(repo ?? "", { sig, rows });
   return rows;
 }
@@ -403,7 +437,7 @@ export async function staleReviews(db: Db, repo?: string, respectCap = false, op
   const rows = await reviewedRows(db, repo);
   const state = await discussionState(db, repo);
   await primeHashes(state, rows.filter((r) => maintNewer(state.get(`${r.repo}#${r.number}`), r.seen_at ?? r.at)).map((r) => `${r.repo}#${r.number}`));
-  const marks = new Map((await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE ?").all(`${STALE_KEY}%`) as { key: string; value: string }[]).map((m) => [m.key.slice(STALE_KEY.length), m.value]));
+  const marks = new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where((eb) => kx.like(db, "key", eb.val(`${STALE_KEY}%`))))).map((m) => [m.key.slice(STALE_KEY.length), m.value]));
   const out = new Set<string>();
   const todays = new Map<string, number>();
   const capped = async (r: { repo: string; number: number }) => {
@@ -446,16 +480,17 @@ export async function ensurePipelineLogin(db: Db, _q: Querier, run?: Exec): Prom
 export async function liveGate(db: Db, q: Querier, repo: string, number: number, head: string): Promise<{ moved: boolean; blocked: string | null }> {
   const live = await liveDiscussion(q, db, repo, number);
   const blocked = await recordGate(db, repo, number, live.formal, live.reviewDecision);
-  const snap = await db.prepare("SELECT COALESCE(seen_at, at) AS seen, disc_hash AS hash FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL").get(repo, number, head) as { seen: string; hash: string | null } | undefined;
+  const snap = await db.get(db.k.selectFrom("opus_reviews").select((eb) => [eb.fn.coalesce("seen_at", "at").as("seen"), "disc_hash as hash"])
+    .where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head).where("verdict", "is not", null));
   if (!snap || !live.newestMaint || !changedSince({ newest: live.newestMaint, hash: live.snap.hash! }, snap.seen, snap.hash)) return { moved: false, blocked };
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(staleKey(repo, number), new Date().toISOString());
+  await db.run(db.k.insertInto("main.settings").values({ key: staleKey(repo, number), value: new Date().toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   return { moved: true, blocked };
 }
 
 /** Operator request: its review counts as older than now, so Opus reviews it again. */
 export async function markReviewsStale(db: Db, by: string, repo: string, number: number): Promise<void> {
   const at = new Date().toISOString();
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(staleKey(repo, number), at);
+  await db.run(db.k.insertInto("main.settings").values({ key: staleKey(repo, number), value: at }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   await audit(db, by, "review-again", `${repo}#${number}`, { stale: true });
 }
 

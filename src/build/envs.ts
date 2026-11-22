@@ -6,6 +6,7 @@ import type { BuildEnv, Capabilities, EnvCreate, EnvInput, EnvKind } from "../..
 import { audit } from "../dash/audit.ts";
 import { parseSettings, settingsOf } from "./pods.ts";
 import type { Db } from "../db/index.ts";
+import { cols } from "../db/kx.ts";
 
 export class BuildError extends Error {
   status: number;
@@ -53,10 +54,10 @@ export async function authenticate(db: Db, key: string): Promise<{ id: string; t
   const m = /^cwk_([a-z0-9-]{3,32})_[A-Za-z0-9_-]{20,100}$/.exec(key);
   const p = m ? null : /^cwp_(\d{1,15})_[A-Za-z0-9_-]{20,100}$/.exec(key);
   const row = m
-    ? (await db.prepare("SELECT id, key_hash FROM build_envs WHERE id = ? AND kind != 'kubernetes'").get(m[1]!) as { id: string; key_hash: string } | undefined)
+    ? await db.get(db.k.selectFrom("build_envs").select(["id", "key_hash"]).where("id", "=", m[1]!).where("kind", "!=", "kubernetes"))
     : p
-      ? (await db.prepare("SELECT r.env_id AS id, r.key_hash, r.task_id FROM build_pod_runs r JOIN build_envs e ON e.id = r.env_id WHERE r.task_id = ? AND e.kind = 'kubernetes'").get(Number(p[1])) as
-        { id: string; key_hash: string; task_id: number } | undefined)
+      ? await db.get(db.k.selectFrom("build_pod_runs as r").innerJoin("build_envs as e", "e.id", "r.env_id")
+        .select(["r.env_id as id", "r.key_hash", "r.task_id"]).where("r.task_id", "=", Number(p[1])).where("e.kind", "=", "kubernetes"))
       : undefined;
   const a = Buffer.from(hashKey(key), "hex");
   const b = Buffer.from(row?.key_hash ?? DUMMY_HASH, "hex");
@@ -73,8 +74,9 @@ function parseCaps(s: string | null): Capabilities | null {
   }
 }
 
-async function runningCounts(db: Db): Promise<Map<string, number>> {
-  const rows = await db.prepare("SELECT env_id AS id, COUNT(*) AS n FROM build_tasks WHERE state IN ('claimed', 'running') GROUP BY env_id").all() as { id: string; n: number }[];
+async function runningCounts(db: Db): Promise<Map<string | null, number>> {
+  const rows = await db.all(db.k.selectFrom("build_tasks").select((eb) => ["env_id as id", eb.fn.countAll<number>().as("n")])
+    .where("state", "in", ["claimed", "running"]).groupBy("env_id"));
   return new Map(rows.map((r) => [r.id, r.n]));
 }
 
@@ -93,7 +95,7 @@ function toEnv(r: Row, running: number, nowMs: number): BuildEnv {
 /** Every environment, in the order they were registered. */
 export async function listEnvs(db: Db, nowMs: number = Date.now()): Promise<BuildEnv[]> {
   const counts = await runningCounts(db);
-  return (await db.prepare("SELECT * FROM build_envs ORDER BY created_at, id").all() as Row[]).map((r) => toEnv(r, counts.get(r.id) ?? 0, nowMs));
+  return (await db.all(db.k.selectFrom("build_envs").select(cols("build_envs")).$narrowType<{ kind: EnvKind }>().orderBy("created_at").orderBy("id"))).map((r) => toEnv(r, counts.get(r.id) ?? 0, nowMs));
 }
 
 export async function getEnv(db: Db, id: string, nowMs: number = Date.now()): Promise<BuildEnv | null> {
@@ -142,8 +144,10 @@ export async function createEnv(db: Db, input: unknown, by: string): Promise<{ e
   const key = newKey(id);
   const at = new Date().toISOString();
   try {
-    await db.prepare("INSERT INTO build_envs (id, label, kind, slots, confidential, confidential_since, key_hash, created_at, updated_by, updated_at, settings) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .run(id, label, o.kind as EnvKind, slots, confidential ? 1 : 0, confidential ? at : null, kube ? UNUSABLE_HASH : hashKey(key), at, by, at, settings);
+    await db.run(db.k.insertInto("build_envs").values({
+      id, label, kind: o.kind as EnvKind, slots, confidential: confidential ? 1 : 0, confidential_since: confidential ? at : null,
+      key_hash: kube ? UNUSABLE_HASH : hashKey(key), created_at: at, updated_by: by, updated_at: at, settings,
+    }));
   } catch (e) {
     if (/UNIQUE|constraint/i.test((e as Error).message)) throw new BuildError(409, `environment ${id} exists`);
     throw e;
@@ -156,11 +160,11 @@ export async function updateEnv(db: Db, id: unknown, input: unknown, by: string)
   const o = object(input);
   const bad = Object.keys(o).find((k) => !["label", "enabled", "slots", "confidential", "settings"].includes(k));
   if (bad) throw new BuildError(400, `${bad} cannot be set`);
-  const before = typeof id === "string" ? (await db.prepare("SELECT * FROM build_envs WHERE id = ?").get(id) as Row | undefined) : undefined;
+  const before = typeof id === "string" ? (await db.get(db.k.selectFrom("build_envs").select(cols("build_envs")).$narrowType<{ kind: EnvKind }>().where("id", "=", id))) : undefined;
   if (!before) throw new BuildError(404, "no such environment");
   if (o.settings !== undefined && before.kind !== "kubernetes") throw new BuildError(400, "settings are only for kubernetes environments");
   const settings = o.settings !== undefined ? JSON.stringify(parseSettings(o.settings, settingsOf(before.settings))) : before.settings;
-  if (settings !== before.settings && settingsOf(settings).namespace !== settingsOf(before.settings).namespace && await db.prepare("SELECT 1 FROM build_pod_runs WHERE env_id = ?").get(before.id)) {
+  if (settings !== before.settings && settingsOf(settings).namespace !== settingsOf(before.settings).namespace && await db.get(db.k.selectFrom("build_pod_runs").select((eb) => eb.lit(1).as("one")).where("env_id", "=", before.id).limit(1))) {
     throw new BuildError(409, "the namespace cannot change while tasks run in it; disable the environment and wait for them to finish");
   }
   const next = {
@@ -171,11 +175,12 @@ export async function updateEnv(db: Db, id: unknown, input: unknown, by: string)
   };
   if (o.enabled !== undefined) next.enabled = checkFlag(o.enabled, "enabled");
   const at = new Date().toISOString();
-  await db.prepare("UPDATE build_envs SET label = ?, enabled = ?, slots = ?, confidential = ?, settings = ?, updated_by = ?, updated_at = ? WHERE id = ?")
-    .run(next.label, next.enabled ? 1 : 0, next.slots, next.confidential ? 1 : 0, settings, by, at, before.id);
+  await db.run(db.k.updateTable("build_envs")
+    .set({ label: next.label, enabled: next.enabled ? 1 : 0, slots: next.slots, confidential: next.confidential ? 1 : 0, settings, updated_by: by, updated_at: at })
+    .where("id", "=", before.id));
   // The private tasks' build limit starts at the worker's first call after the flag, or the environment, is turned on.
-  if (!next.confidential) await db.prepare("UPDATE build_envs SET confidential_since = NULL, confidential_online_at = NULL WHERE id = ?").run(before.id);
-  else if (before.confidential !== 1 || (next.enabled && before.enabled !== 1)) await db.prepare("UPDATE build_envs SET confidential_since = ?, confidential_online_at = NULL WHERE id = ?").run(at, before.id);
+  if (!next.confidential) await db.run(db.k.updateTable("build_envs").set({ confidential_since: null, confidential_online_at: null }).where("id", "=", before.id));
+  else if (before.confidential !== 1 || (next.enabled && before.enabled !== 1)) await db.run(db.k.updateTable("build_envs").set({ confidential_since: at, confidential_online_at: null }).where("id", "=", before.id));
   await audit(db, by, "env-change", `env:${before.id}`, {
     ...(next.label !== before.label && { label: next.label, was: before.label }),
     ...(next.enabled !== (before.enabled === 1) && { enabled: next.enabled }),
@@ -188,11 +193,11 @@ export async function updateEnv(db: Db, id: unknown, input: unknown, by: string)
 
 /** A new key; the old one stops working at once. */
 export async function rotateKey(db: Db, id: unknown, by: string): Promise<{ key: string }> {
-  const row = typeof id === "string" ? (await db.prepare("SELECT kind FROM build_envs WHERE id = ?").get(id) as { kind: EnvKind } | undefined) : undefined;
+  const row = typeof id === "string" ? (await db.get(db.k.selectFrom("build_envs").select("kind").$narrowType<{ kind: EnvKind }>().where("id", "=", id))) : undefined;
   if (!row) throw new BuildError(404, "no such environment");
   if (row.kind === "kubernetes") throw new BuildError(400, "a kubernetes environment has no key: each task's pods get a one-time key");
   const key = newKey(id as string);
-  await db.prepare("UPDATE build_envs SET key_hash = ?, updated_by = ?, updated_at = ? WHERE id = ?").run(hashKey(key), by, new Date().toISOString(), id as string);
+  await db.run(db.k.updateTable("build_envs").set({ key_hash: hashKey(key), updated_by: by, updated_at: new Date().toISOString() }).where("id", "=", id as string));
   await audit(db, by, "env-rotate-key", `env:${id}`);
   return { key };
 }
@@ -222,15 +227,16 @@ export function parseCapabilities(v: unknown): Capabilities {
 
 /** A flagged, enabled environment's first worker call since the flag was turned on. */
 async function markOnline(db: Db, id: string, at: string): Promise<void> {
-  await db.prepare("UPDATE build_envs SET confidential_online_at = ? WHERE id = ? AND confidential = 1 AND enabled = 1 AND confidential_online_at IS NULL").run(at, id);
+  await db.run(db.k.updateTable("build_envs").set({ confidential_online_at: at })
+    .where("id", "=", id).where("confidential", "=", 1).where("enabled", "=", 1).where("confidential_online_at", "is", null));
 }
 
 /** Records a call from the worker: the heartbeat and, when given, its paused reason. */
 export async function touch(db: Db, id: string, paused?: string | null): Promise<void> {
   const at = new Date().toISOString();
   await markOnline(db, id, at);
-  if (paused === undefined) await db.prepare("UPDATE build_envs SET last_seen_at = ? WHERE id = ?").run(at, id);
-  else await db.prepare("UPDATE build_envs SET last_seen_at = ?, paused_reason = ? WHERE id = ?").run(at, paused, id);
+  if (paused === undefined) await db.run(db.k.updateTable("build_envs").set({ last_seen_at: at }).where("id", "=", id));
+  else await db.run(db.k.updateTable("build_envs").set({ last_seen_at: at, paused_reason: paused }).where("id", "=", id));
 }
 
 /** The worker's first call: stores what it can do, capped by the operator's slot count. */
@@ -240,10 +246,10 @@ export async function hello(db: Db, id: string, body: unknown): Promise<{ envId:
   const version = typeof o.version === "string" && o.version.length <= 40 && /^[\w.+-]+$/.test(o.version) ? o.version : null;
   if (typeof o.slots !== "number" || !Number.isInteger(o.slots) || o.slots < 0 || o.slots > 1024) throw new BuildError(400, "slots must be a whole number");
   const at = new Date().toISOString();
-  await db.prepare("UPDATE build_envs SET capabilities = ?, reported_slots = ?, version = ?, last_seen_at = ?, paused_reason = NULL WHERE id = ?")
-    .run(JSON.stringify(caps), o.slots, version, at, id);
+  await db.run(db.k.updateTable("build_envs")
+    .set({ capabilities: JSON.stringify(caps), reported_slots: o.slots, version, last_seen_at: at, paused_reason: null }).where("id", "=", id));
   await markOnline(db, id, at);
-  const r = await db.prepare("SELECT * FROM build_envs WHERE id = ?").get(id) as Row;
+  const r = (await db.get(db.k.selectFrom("build_envs").select(cols("build_envs")).$narrowType<{ kind: EnvKind }>().where("id", "=", id)))!;
   return { envId: id, label: r.label, slots: slotsOf(r) };
 }
 
@@ -256,21 +262,21 @@ export type EnvHealth = { state: "warn" | "fail"; text: string; since: string };
 export async function kubeReport(db: Db, id: string, caps: Capabilities, slots: number, health: Omit<EnvHealth, "since"> | null | undefined, reachable: boolean): Promise<void> {
   const at = new Date().toISOString();
   if (health === undefined) {
-    await db.prepare("UPDATE build_envs SET capabilities = ?, reported_slots = ? WHERE id = ?").run(JSON.stringify(caps), slots, id);
+    await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), reported_slots: slots }).where("id", "=", id));
     if (reachable) await touchSeen(db, id, at);
     return;
   }
-  const prior = await db.prepare("SELECT health FROM build_envs WHERE id = ?").get(id) as { health: string | null } | undefined;
+  const prior = await db.get(db.k.selectFrom("build_envs").select("health").where("id", "=", id));
   let old: EnvHealth | null = null;
   try {
     old = prior?.health ? (JSON.parse(prior.health) as EnvHealth) : null;
   } catch { /* rewritten below */ }
   const next = health ? JSON.stringify({ ...health, since: old && old.text === health.text && old.state === health.state ? old.since : at }) : null;
-  await db.prepare("UPDATE build_envs SET capabilities = ?, reported_slots = ?, health = ?, health_at = ? WHERE id = ?").run(JSON.stringify(caps), slots, next, at, id);
+  await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), reported_slots: slots, health: next, health_at: at }).where("id", "=", id));
   if (reachable) await touchSeen(db, id, at);
 }
 
 async function touchSeen(db: Db, id: string, at: string): Promise<void> {
   await markOnline(db, id, at);
-  await db.prepare("UPDATE build_envs SET last_seen_at = ? WHERE id = ?").run(at, id);
+  await db.run(db.k.updateTable("build_envs").set({ last_seen_at: at }).where("id", "=", id));
 }

@@ -8,8 +8,7 @@ import type { Req } from "../types.ts";
 import { visibleRepos } from "./visible.ts";
 import { readerOf, veiledFor } from "./reader.ts";
 import type { Db } from "../../db/index.ts";
-
-type Row = { repo: string; number: number; kind: string; title: string | null; score: number; breakdown: string; next: string | null; label: string | null; item_state: string | null };
+import * as kx from "../../db/kx.ts";
 
 export async function work(db: Db, req: Req): Promise<WorkList> {
   const repo = req.query.get("repo") || undefined;
@@ -21,12 +20,12 @@ export async function work(db: Db, req: Req): Promise<WorkList> {
   if (kind && kind !== "pr" && kind !== "issue") throw new HttpError(400, "kind must be pr or issue");
   const repos = repo ? [repo] : visible;
   if (!repos.length) return { rows: [], total: 0, next: null };
-  const where = `i.state = 'OPEN' AND i.repo IN (${repos.map(() => "?").join(",")})${kind ? " AND i.kind = ?" : ""}`;
-  const args = [...repos, ...(kind ? [kind] : [])];
-  const total = (await db.prepare(`SELECT COUNT(*) AS n FROM items i JOIN item_rank r ON r.repo = i.repo AND r.number = i.number WHERE ${where}`).get(...args) as { n: number }).n;
-  const rows = await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, r.score, r.breakdown, json_extract(p.view, '$.next') AS next, json_extract(p.view, '$.label') AS label, p.item_state
-    FROM items i JOIN item_rank r ON r.repo = i.repo AND r.number = i.number LEFT JOIN item_plans p ON p.repo = i.repo AND p.number = i.number
-    WHERE ${where} ORDER BY r.score DESC, i.repo, i.number LIMIT ? OFFSET ?`).all(...args, limit, offset) as Row[];
+  const filtered = () => db.k.selectFrom("items as i").innerJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+    .where("i.state", "=", "OPEN").where("i.repo", "in", repos).$if(!!kind, (q) => q.where("i.kind", "=", kind!));
+  const total = (await db.get(filtered().select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
+  const rows = await db.all(filtered().leftJoin("item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select((eb) => ["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
+    .orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number").limit(limit).offset(offset));
   const reader = await readerOf(db, req);
   const out: WorkRow[] = rows.map((r) => {
     const bd = JSON.parse(r.breakdown) as RankBreakdown;

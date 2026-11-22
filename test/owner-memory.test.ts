@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { collectStatements, commentDatabaseId, embedStatements } from "../src/memory/statements.ts";
 import { relatedStatements } from "../src/memory/retrieve.ts";
 import { toBlob } from "../src/embed/store.ts";
+import { excluded } from "../src/db/kx.ts";
 import { withNote } from "../src/github/note.ts";
 import { parseOpusReply, parseStatementConflicts } from "../src/review/opus-parse.ts";
 import { parsePremerge } from "../src/premerge/parse.ts";
@@ -27,12 +28,12 @@ const fake: Embedder = {
 const vec = async (t: string) => toBlob((await fake.embed([t], "item"))[0]!);
 
 async function comment(w: Awaited<ReturnType<typeof world>>, id: string, repo: string, number: number, author: string, body: string): Promise<void> {
-  await w.db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES (?, ?, ?, 'comment', ?, '2026-03-01T00:00:00Z', ?)").run(repo, number, id, author, body);
+  await w.db.run(w.db.k.insertInto("comments").values({ repo, number, id, kind: "comment", author, created_at: "2026-03-01T00:00:00Z", body }));
 }
 
 test("statements come from operators' own words only, and a related one reaches the review of a similar PR of its repo", async () => {
   const w = await (await (await world()).repo()).pr(1);
-  await w.db.prepare("INSERT INTO access (login, role) VALUES ('boss', 'operator'), ('guest', 'maintainer')").run();
+  await w.db.run(w.db.k.insertInto("access").values([{ login: "boss", role: "operator" }, { login: "guest", role: "maintainer" }]));
   await comment(w, "c1", "craft-libs", 5, "boss", "Vendored hyphenation code and dictionaries belong in the shared library, not in the app.");
   await comment(w, "c2", "craft-libs", 6, "boss", withNote({ by: "operator", model: null }, "Hyphenation dictionary posted by the pipeline for the operator."));
   await comment(w, "c3", "craft-libs", 7, "guest", "Hyphenation dictionary vendoring is fine with me, as far as I can tell.");
@@ -41,20 +42,21 @@ test("statements come from operators' own words only, and a related one reaches 
   const node = (id: number) => `IC_${Buffer.concat([Buffer.from([0x93, 0x00, 0xce, 0, 0, 0, 7, 0xce]), Buffer.from(new Uint8Array(new Uint32Array([id]).buffer).reverse())]).toString("base64url")}`;
   assert.equal(commentDatabaseId(node(4321987)), "4321987");
   await comment(w, node(4321987), "craft-libs", 11, "boss", "Hyphenation dictionary vendoring is a library matter, see the other thread.");
-  await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('t', 'comment-stage', 'act-comment', 'craft-libs#11', ?)").run(JSON.stringify({ url: "https://github.com/o/craft-libs/issues/11#issuecomment-4321987", state: "done" }));
+  await w.db.run(w.db.k.insertInto("audit").values({ at: "t", login: "comment-stage", action: "act-comment", target: "craft-libs#11", details: JSON.stringify({ url: "https://github.com/o/craft-libs/issues/11#issuecomment-4321987", state: "done" }) }));
   await comment(w, "PRR_x", "craft-libs", 12, "boss", "Hyphenation review text posted by the pipeline without a note line.");
-  await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('t', 'review', 'review-post', 'craft-libs#12', ?)").run(JSON.stringify({ review: "PRR_x", state: "done" }));
-  await w.db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, answer, answer_note, answered_by, answered_at) VALUES ('d1', 'close', 'app', 9, 'q', '[]', '2026-03-02T00:00:00Z', 'close', 'No new dependency for canvas export.', 'boss', '2026-03-02T00:00:00Z')").run();
-  await w.db.prepare("INSERT INTO conversation_turns (repo, number, kind, login, at, body, block, status, seq) VALUES ('app', 10, 'operator', 'boss', '2026-03-03T00:00:00Z', 'Keep language data out of the app crates.', 'b', 'answered', 1)").run();
+  await w.db.run(w.db.k.insertInto("audit").values({ at: "t", login: "review", action: "review-post", target: "craft-libs#12", details: JSON.stringify({ review: "PRR_x", state: "done" }) }));
+  await w.db.run(w.db.k.insertInto("decisions").values({ id: "d1", kind: "close", repo: "app", number: 9, question: "q", options: "[]", asked_at: "2026-03-02T00:00:00Z", answer: "close", answer_note: "No new dependency for canvas export.", answered_by: "boss", answered_at: "2026-03-02T00:00:00Z" }));
+  await w.db.run(w.db.k.insertInto("conversation_turns").values({ repo: "app", number: 10, kind: "operator", login: "boss", at: "2026-03-03T00:00:00Z", body: "Keep language data out of the app crates.", block: "b", status: "answered", seq: 1 }));
 
   assert.equal(await collectStatements(w.db), 3);
   assert.equal(await collectStatements(w.db), 0);
-  const kinds = (await w.db.prepare("SELECT source_kind FROM owner_statements ORDER BY id").all()).map((r) => (r as { source_kind: string }).source_kind).sort();
+  const kinds = (await w.db.all(w.db.k.selectFrom("owner_statements").select("source_kind").orderBy("id"))).map((r) => r.source_kind).sort();
   assert.deepEqual(kinds, ["comment", "conversation", "decision-note"]);
 
   await embedStatements(w.db, fake);
   const pr = await vec("Add Danish hyphenation dictionary to the app");
-  await w.db.prepare("INSERT OR REPLACE INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('craft-libs', 20, 'fake', 'h', ?, 't'), ('app', 1, 'fake', 'h', ?, 't')").run(pr, pr);
+  await w.db.run(w.db.k.insertInto("item_embeddings").values([{ repo: "craft-libs", number: 20, model: "fake", hash: "h", vec: pr, at: "t" }, { repo: "app", number: 1, model: "fake", hash: "h", vec: pr, at: "t" }])
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["model", "hash", "vec", "at"]))));
   const got = await relatedStatements(w.db, "craft-libs", 20);
   assert.deepEqual(got.map((s) => s.where), ["craft-libs#5"]);
   assert.equal(got[0]!.kind, "comment");
@@ -62,7 +64,8 @@ test("statements come from operators' own words only, and a related one reaches 
   assert.deepEqual(await relatedStatements(w.db, "app", 1), []);
 
   // Statements on the PR itself are skipped.
-  await w.db.prepare("INSERT OR REPLACE INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('craft-libs', 5, 'fake', 'h', ?, 't')").run(await vec("hyphenation dictionary"));
+  await w.db.run(w.db.k.insertInto("item_embeddings").values({ repo: "craft-libs", number: 5, model: "fake", hash: "h", vec: await vec("hyphenation dictionary"), at: "t" })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["model", "hash", "vec", "at"]))));
   assert.deepEqual(await relatedStatements(w.db, "craft-libs", 5), []);
 });
 
@@ -79,12 +82,12 @@ test("a reply's conflicts keep known ids once and drop the rest", () => {
 
 test("facts list the statements that the Opus or the pre-merge review at the head named", async () => {
   const w = await (await (await (await (await world()).repo()).pr(1)).review(1)).premerge(1, "clean");
-  const put = w.db.prepare("INSERT INTO owner_statements (source_kind, source_id, repo, number, item_title, author, text, at) VALUES ('comment', ?, 'craft-libs', 5, 't', 'boss', ?, 'a')");
-  const a = Number((await put.run("c1", "Dictionaries belong in the library.")).lastInsertRowid), b = Number((await put.run("c2", "No new crates.")).lastInsertRowid);
+  const put = async (id: string, text: string) => (await w.db.get(w.db.k.insertInto("owner_statements").values({ source_kind: "comment", source_id: id, repo: "craft-libs", number: 5, item_title: "t", author: "boss", text, at: "a" }).returning("id")))!.id;
+  const a = await put("c1", "Dictionaries belong in the library."), b = await put("c2", "No new crates.");
   const named = async () => (await loadPrFacts(w.db, { refs: ["app#1"] })).find((f) => f.number === 1)!.statementConflicts;
   assert.deepEqual(await named(), []);
-  await w.db.prepare("UPDATE opus_reviews SET conflicts = ?").run(JSON.stringify([{ id: a, reason: "adds a table" }, { id: 999, reason: "gone" }]));
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ conflicts: JSON.stringify([{ id: a, reason: "adds a table" }, { id: 999, reason: "gone" }]) }));
   assert.deepEqual(await named(), [{ id: a, where: "craft-libs#5", text: "Dictionaries belong in the library.", reason: "adds a table" }]);
-  await w.db.prepare("UPDATE premerge_reviews SET conflicts = ?").run(JSON.stringify([{ id: b, reason: "adds a crate" }]));
+  await w.db.run(w.db.k.updateTable("premerge_reviews").set({ conflicts: JSON.stringify([{ id: b, reason: "adds a crate" }]) }));
   assert.deepEqual((await named()).map((d) => d.id), [a, b]);
 });

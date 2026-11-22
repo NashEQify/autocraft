@@ -21,22 +21,22 @@ mkdirSync(SCRATCH, { recursive: true });
 test("a call whose only taker went stale is withdrawn, its caller skips it, and the health check names the repo", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "remote-no-taker-")), "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('photocraft', 1) ON CONFLICT (name) DO UPDATE SET pipeline = 1").run();
-  await db.prepare("INSERT INTO access (login, role) VALUES ('dave', 'maintainer')").run();
-  await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('dave', 'photocraft', 'write', ?)").run(new Date().toISOString());
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft", pipeline: 1 }).onConflict((oc) => oc.column("name").doUpdateSet({ pipeline: 1 })));
+  await db.run(db.k.insertInto("access").values({ login: "dave", role: "maintainer" }));
+  await db.run(db.k.insertInto("repo_permissions").values({ login: "dave", repo: "photocraft", permission: "write", checked_at: new Date().toISOString() }));
   const t0 = Date.now();
   const token = (await createToken(db, "dave", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, token, "dave", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }), t0);
   const id = await enqueueCall(db, { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", askedModel: "opus", items: [{ repo: "photocraft", number: 7 }], level: 0, maxAttempts: 1,
     bundle: { promptId: "review.opus", promptVersion: "1", tier: "top", effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: false, hints: {} } }, t0);
   // The caller keeps polling: its stamp follows the test clock.
-  const sweep = async (at: number): Promise<number> => { await db.prepare("UPDATE remote_calls SET seen_at = ? WHERE id = ?").run(at, id); return await sweepTakers(db, at); };
+  const sweep = async (at: number): Promise<number> => { await db.run(db.k.updateTable("remote_calls").set({ seen_at: at }).where("id", "=", id)); return await sweepTakers(db, at); };
   const noTaker = async (at: number) => (await computeChecks(db, at)).find((c) => c.id === "remote-no-taker")!;
 
   // Manual only: dave may still pick the call, so his runner is a taker.
   await setManualOnly(db, "dave", true);
   assert.equal(await sweep(t0), 0);
-  assert.equal((await db.prepare("SELECT no_taker_since AS s FROM remote_calls WHERE id = ?").get(id) as { s: number | null }).s, null, "dave's runner takes it");
+  assert.equal((await db.get(db.k.selectFrom("remote_calls").select("no_taker_since as s").where("id", "=", id)))!.s, null, "dave's runner takes it");
 
   // Dave's laptop sleeps: his status goes stale.
   const t1 = t0 + STATUS_FRESH_MS + 1000;
@@ -45,7 +45,7 @@ test("a call whose only taker went stale is withdrawn, its caller skips it, and 
   assert.equal(await sweep(t1 + NO_TAKER_MS - 1000), 0);
   const t2 = t1 + NO_TAKER_MS;
   assert.equal(await sweep(t2), 1);
-  const row = await db.prepare("SELECT state, error FROM remote_calls WHERE id = ?").get(id) as { state: string; error: string };
+  const row = (await db.get(db.k.selectFrom("remote_calls").select(["state", "error"]).where("id", "=", id)))!;
   assert.deepEqual({ ...row }, { state: "failed", error: "no Task Runner can take calls on photocraft" });
   const check = await noTaker(t2);
   assert.equal(check.state, "warn");

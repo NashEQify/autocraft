@@ -2,7 +2,7 @@
 // one Sonnet call that suggests new areas from a sample of the items without an area. Both only store a
 // proposal; the operator accepts it (store.ts).
 import { add, askClaude, saveUsage, type Usage } from "../classify/run.ts";
-import { notOwnIntegrationSql } from "../dupes/held.ts";
+import { notOwnIntegrationExpr } from "../dupes/held.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { REPO_PATH } from "../sandbox/command.ts";
 import { parseProposal, parseSuggestion } from "./parse.ts";
@@ -27,8 +27,9 @@ const zero = (): Usage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, c
 /** One Opus call for the repo's list. Returns the stored proposal's id, or null when the model gave no usable list. */
 export async function proposeAreas(db: Db, repo: string, p: ProposeParams): Promise<number | null> {
   const model = p.model ?? PROPOSE.models[0]!, start = now();
-  const titles = (await db.prepare(`SELECT COALESCE(i.title, '') AS title FROM items i WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")}
-    ORDER BY i.updated_at DESC LIMIT ?`).all(repo, PROPOSE_TITLES) as { title: string }[]).map((r) => r.title);
+  const titles = (await db.all(db.k.selectFrom("items as i").select((eb) => eb.fn.coalesce("i.title", eb.val("")).as("title"))
+    .where("i.repo", "=", repo).where("i.state", "=", "OPEN").where((eb) => notOwnIntegrationExpr(db, eb, "i"))
+    .orderBy("i.updated_at", (o) => o.desc().nullsLast()).limit(PROPOSE_TITLES))).map((r) => r.title);
   const checkout = await p.checkout(repo).catch(() => null);
   const input: AreaProposeInput = { ref: repo, repo, titles, current: (await currentList(db, repo))?.areas ?? [] };
   if (checkout) input.repo_dir = REPO_PATH;
@@ -53,10 +54,13 @@ export async function suggestAreas(db: Db, repo: string, p: Omit<ProposeParams, 
   const list = await currentList(db, repo);
   if (!list) throw new Error(`${repo} has no area list; propose one first`);
   const model = p.model ?? SUGGEST.models[0]!, start = now();
-  const items = (await db.prepare(`SELECT i.repo || '#' || i.number AS ref, COALESCE(i.title, '') AS title, COALESCE(i.body, '') AS body FROM items i
-    LEFT JOIN item_areas a ON a.repo = i.repo AND a.number = i.number
-    WHERE i.repo = ? AND i.state = 'OPEN' AND ${notOwnIntegrationSql("i")} AND a.area IS NULL AND a.source <> 'operator' AND a.list_version = ?
-    ORDER BY i.updated_at DESC LIMIT ?`).all(repo, list.version, SUGGEST_ITEMS) as { ref: string; title: string; body: string }[]);
+  const items = await db.all(db.k.selectFrom("items as i")
+    .leftJoin("item_areas as a", (j) => j.onRef("a.repo", "=", "i.repo").onRef("a.number", "=", "i.number"))
+    .select((eb) => [eb(eb("i.repo", "||", eb.val("#")), "||", eb.cast<string>("i.number", "text")).as("ref"),
+      eb.fn.coalesce("i.title", eb.val("")).as("title"), eb.fn.coalesce("i.body", eb.val("")).as("body")])
+    .where("i.repo", "=", repo).where("i.state", "=", "OPEN").where((eb) => notOwnIntegrationExpr(db, eb, "i"))
+    .where("a.area", "is", null).where("a.source", "<>", "operator").where("a.list_version", "=", list.version)
+    .orderBy("i.updated_at", (o) => o.desc().nullsLast()).limit(SUGGEST_ITEMS));
   if (!items.length) return null;
   let usage = zero();
   let areas = null;

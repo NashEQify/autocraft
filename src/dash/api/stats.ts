@@ -1,25 +1,24 @@
 // Shared queries for the Progress, Repo and Run and cost pages.
-import { latestRun, settledTable } from "../../classify/settled.ts";
+import { latestRun, settledOnExpr, settledTable } from "../../classify/settled.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import { indexedBy, like, ref, type Eb, type Ex } from "../../db/kx.ts";
 
-// Latest stage per item, from the item_stage table the stages trigger maintains.
-export const LATEST_SQL = `latest AS (SELECT repo, number, stage, reviewed FROM main.item_stage %W)`;
-
-export const latestCte = (repo?: string): string => LATEST_SQL.replace("%W", repo ? "WHERE repo = :repo" : "");
+/**
+ * Latest stage per item, from the item_stage table the stages trigger maintains, as a WITH clause to build the query on:
+ * `latestCteExpr(db, repo).selectFrom("latest")...`.
+ */
+export const latestCteExpr = (db: Db, repo?: string) =>
+  db.k.with("latest", (qc) => qc.selectFrom("main.item_stage").select(["repo", "number", "stage", "reviewed"]).$if(!!repo, (q) => q.where("repo", "=", repo!)));
 
 // When tracking began: set by connect() (src/db.ts) on first use.
 export async function trackingStart(db: Db): Promise<string> {
-  const r = await db.prepare("SELECT value FROM main.settings WHERE key = 'tracking_started_at'").get() as { value: string } | undefined;
+  const r = await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "tracking_started_at"));
   return r?.value ?? new Date().toISOString();
 }
 
-// Closed items by date: main.items with its index named, because through the
-// scoping view the planner walks the repo index instead of the closed_at range.
-export const CLOSED_ITEMS = "main.items AS i INDEXED BY items_closed";
-export const CREATED_ITEMS = "main.items AS i INDEXED BY items_created";
-export const TRACKED = "repo IN (SELECT name FROM main.tracked_repos)";
-
-const p = (repo?: string, extra: Record<string, string | number> = {}): Record<string, string | number> => (repo ? { repo, ...extra } : extra);
+/** The repo in `col` is a tracked repo. */
+export const trackedExpr = (db: Db, eb: Eb, col: Ex = "repo"): AliasableExpression<SqlBool> => eb(ref(col), "in", db.k.selectFrom("main.tracked_repos").select("name"));
 
 export type FunnelRow = {
   repo: string; open: number; classified: number; second_opinion: number; disagreement: number; reviewed: number;
@@ -28,40 +27,49 @@ export type FunnelRow = {
 
 // "classified" counts settled type labels (src/classify/settled.ts) in the latest run.
 export async function funnelByRepo(db: Db, repo?: string): Promise<FunnelRow[]> {
-  return await db.read(async () => {
-    await settledTable(db, await latestRun(db));
-    return (await db.prepare(`WITH ${latestCte(repo)}
-      SELECT i.repo, COUNT(*) AS open,
-        SUM(st.status = 'settled') AS classified, SUM(st.status = 'waiting') AS second_opinion, SUM(st.status = 'disagree') AS disagreement,
-        SUM(COALESCE(l.reviewed, 0)
-         OR EXISTS (SELECT 1 FROM main.classifications c WHERE c.repo = i.repo AND c.number = i.number AND c.classifier = 'sonnet')) AS reviewed,
-        SUM(l.stage IN ('take', 'verified') OR (l.stage LIKE 'verify-%' AND l.stage <> 'verify-failed')) AS take, SUM(l.stage = 'hold') AS hold, SUM(l.stage = 'close') AS close,
-        SUM(l.stage = 'needs-decision') AS needs_decision, SUM(l.stage = 'batched') AS batched
-      FROM items i LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
-      LEFT JOIN temp.item_settled st ON st.repo = i.repo AND st.number = i.number
-      WHERE i.state = 'OPEN' ${repo ? "AND i.repo = :repo" : ""}
-      GROUP BY i.repo`).all(p(repo))).map((r) => ({
-        ...r, classified: r.classified ?? 0, second_opinion: r.second_opinion ?? 0, disagreement: r.disagreement ?? 0,
-        take: r.take ?? 0, hold: r.hold ?? 0, close: r.close ?? 0, needs_decision: r.needs_decision ?? 0, batched: r.batched ?? 0,
-      })) as FunnelRow[];
-  });
+  const run = await latestRun(db);
+  await settledTable(db, run);
+  return db.all(latestCteExpr(db, repo).selectFrom("items as i")
+    .leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
+    .leftJoin("item_settled as st", (j) => j.on((eb) => settledOnExpr(eb, run, "st")))
+    .select((eb) => {
+      const count = (cond: Expression<SqlBool>) => eb.fn.sum<number>(eb.case().when(cond).then(eb.lit(1)).else(eb.lit(0)).end());
+      return [
+        "i.repo", eb.fn.countAll<number>().as("open"),
+        count(eb("st.status", "=", "settled")).as("classified"), count(eb("st.status", "=", "waiting")).as("second_opinion"), count(eb("st.status", "=", "disagree")).as("disagreement"),
+        count(eb.or([
+          eb(eb.fn.coalesce("l.reviewed", eb.lit(0)), "=", 1),
+          eb.exists(eb.selectFrom("main.classifications as c").select(eb.lit(1).as("one")).whereRef("c.repo", "=", "i.repo").whereRef("c.number", "=", "i.number").where("c.classifier", "=", "sonnet")),
+        ])).as("reviewed"),
+        count(eb.or([eb("l.stage", "in", ["take", "verified"]), eb.and([like(db, "l.stage", eb.val("verify-%")), eb("l.stage", "<>", "verify-failed")])])).as("take"),
+        count(eb("l.stage", "=", "hold")).as("hold"), count(eb("l.stage", "=", "close")).as("close"),
+        count(eb("l.stage", "=", "needs-decision")).as("needs_decision"), count(eb("l.stage", "=", "batched")).as("batched"),
+      ];
+    })
+    .where("i.state", "=", "OPEN").$if(!!repo, (q) => q.where("i.repo", "=", repo!))
+    .groupBy("i.repo"));
 }
 
 export type DoneRow = { repo: string; merged_pipeline: number; closed_pipeline: number; closed_others: number; total: number };
 
 // Done since tracking began. Merged PRs carry closed_at too, so one range covers both.
 export async function doneByRepo(db: Db, start: string, repo?: string): Promise<DoneRow[]> {
-  return (await db.prepare(`WITH ${latestCte(repo)}, d AS (
-      SELECT i.repo, i.state, l.stage FROM ${CLOSED_ITEMS} LEFT JOIN latest l ON l.repo = i.repo AND l.number = i.number
-      WHERE i.closed_at >= :start AND i.state <> 'OPEN' AND i.${TRACKED} ${repo ? "AND i.repo = :repo" : ""})
-    SELECT repo,
-      SUM(state = 'MERGED' AND stage = 'merged') AS merged_pipeline,
-      SUM(state = 'CLOSED' AND stage IN ('closed', 'fixed-by-us')) AS closed_pipeline,
-      COUNT(*) AS total
-    FROM d GROUP BY repo`).all(p(repo, { start }))).map((r) => {
-      const x = r as Omit<DoneRow, "closed_others">;
-      return { ...x, closed_others: x.total - x.merged_pipeline - x.closed_pipeline };
-    });
+  return (await db.all(latestCteExpr(db, repo)
+    .with("d", (qb) => qb.selectFrom(indexedBy(db, "main.items", "items_closed", "i")).leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
+      .select(["i.repo", "i.state", "l.stage"])
+      .where("i.closed_at", ">=", start).where("i.state", "<>", "OPEN").where((eb) => trackedExpr(db, eb, "i.repo"))
+      .$if(!!repo, (q) => q.where("i.repo", "=", repo!)))
+    .selectFrom("d")
+    .select((eb) => {
+      const count = (cond: Expression<SqlBool>) => eb.fn.sum<number>(eb.case().when(cond).then(eb.lit(1)).else(eb.lit(0)).end());
+      return [
+        "repo",
+        count(eb.and([eb("state", "=", "MERGED"), eb("stage", "=", "merged")])).as("merged_pipeline"),
+        count(eb.and([eb("state", "=", "CLOSED"), eb("stage", "in", ["closed", "fixed-by-us"])])).as("closed_pipeline"),
+        eb.fn.countAll<number>().as("total"),
+      ];
+    })
+    .groupBy("repo"))).map((x) => ({ ...x, closed_others: x.total - x.merged_pipeline - x.closed_pipeline }));
 }
 
 // Open items per repo per day since tracking began, rebuilt backwards from the
@@ -74,9 +82,16 @@ export async function trend(db: Db, start: string, openNow: Map<string, number>,
     days.push(d);
     if (d >= today || days.length > 365) break;
   }
-  const r = repo ? "AND repo = :repo" : "";
-  const created = await db.prepare(`SELECT repo, substr(created_at, 1, 10) AS d, COUNT(*) AS n FROM ${CREATED_ITEMS} WHERE created_at >= :start AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
-  const closed = await db.prepare(`SELECT repo, substr(closed_at, 1, 10) AS d, COUNT(*) AS n FROM ${CLOSED_ITEMS} WHERE closed_at >= :start AND state <> 'OPEN' AND ${TRACKED} ${r} GROUP BY repo, d`).all(p(repo, { start })) as { repo: string; d: string; n: number }[];
+  const day = (eb: Eb, col: string) => eb.fn<string>("substr", [col, eb.lit(1), eb.lit(10)]);
+  // Over every repo the date indexes read only the range; the planner would rather walk the repo index.
+  const created = await db.all(db.k.selectFrom(indexedBy(db, "main.items", "items_created", "i"))
+    .select((eb) => ["repo", day(eb, "created_at").as("d"), eb.fn.countAll<number>().as("n")])
+    .where("created_at", ">=", start).where((eb) => trackedExpr(db, eb)).$if(!!repo, (q) => q.where("repo", "=", repo!))
+    .groupBy((eb) => ["repo", day(eb, "created_at")]).orderBy("repo").orderBy("d"));
+  const closed = await db.all(db.k.selectFrom(indexedBy(db, "main.items", "items_closed", "i"))
+    .select((eb) => ["repo", day(eb, "closed_at").as("d"), eb.fn.countAll<number>().as("n")])
+    .where("closed_at", ">=", start).where("state", "<>", "OPEN").where((eb) => trackedExpr(db, eb)).$if(!!repo, (q) => q.where("repo", "=", repo!))
+    .groupBy((eb) => ["repo", day(eb, "closed_at")]).orderBy("repo").orderBy("d"));
   const delta = new Map<string, Map<string, number>>();
   const add = (repo: string, d: string, n: number) => {
     if (!delta.has(repo)) delta.set(repo, new Map());

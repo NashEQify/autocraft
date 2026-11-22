@@ -15,12 +15,13 @@ import { setInferenceMode } from "../src/remote/mode.ts";
 import { ROUTES } from "../src/remote/protocol.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "remote-busy-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
 
-test("a helper route answers 503 with Retry-After while the database is locked, and 200 once it is free", async () => {
+test("a helper route answers 503 with Retry-After while the database is locked, and 200 once it is free", { skip: sqliteOnly("SQLite's write lock and busy timeout; Postgres takes row locks and has no database-wide write lock") }, async () => {
   const file = join(dir, "t.db"), perms = join(dir, "perms.json");
   writeFileSync(perms, "{}");
   const db = await connectDb(file), remoteDb = await connectDb(file, { busyTimeoutMs: 100 }), other = await connectDb(file);

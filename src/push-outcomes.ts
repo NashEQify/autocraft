@@ -8,6 +8,8 @@ import {
 } from "./core/push-outcome.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import * as kx from "./db/kx.ts";
+import type { NotNull } from "kysely";
 
 /** Unresolved pushes older than this get the outcome `unknown` (the head moved on, or the checks never ran). */
 const EXPIRE_MS = 3 * 24 * 3_600_000;
@@ -24,13 +26,15 @@ const UNSETTLED_WINDOW_MS = 2 * 3_600_000;
  * have settled before). Items that find it true are not worked and nothing is counted, so the step ends idle.
  */
 export async function pushesUnsettled(db: Db, repo: string, log: (line: string) => void, now = new Date()): Promise<boolean> {
-  const rows = await db.prepare(`SELECT p.to_oid AS oid, c.checks AS checks FROM push_outcomes p
-    JOIN items i ON i.repo = p.repo AND i.number = p.number AND i.state = 'OPEN' AND i.head_oid = p.to_oid
-    LEFT JOIN pr_checks c ON c.repo = p.repo AND c.number = p.number AND c.head_oid = p.to_oid
-    WHERE p.repo = ? AND p.outcome IS NULL AND p.number IS NOT NULL AND p.at >= ?`).all(repo, new Date(now.getTime() - UNSETTLED_WINDOW_MS).toISOString()) as { oid: string; checks: string | null }[];
+  const rows = await db.all(db.k.selectFrom("push_outcomes as p")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number").on("i.state", "=", "OPEN").onRef("i.head_oid", "=", "p.to_oid"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "p.repo").onRef("c.number", "=", "p.number").onRef("c.head_oid", "=", "p.to_oid"))
+    .select(["p.to_oid as oid", "c.checks as checks"])
+    .where("p.repo", "=", repo).where("p.outcome", "is", null).where("p.number", "is not", null)
+    .where("p.at", ">=", new Date(now.getTime() - UNSETTLED_WINDOW_MS).toISOString()));
   if (rows.length < UNSETTLED_PUSHES_MAX) return false;
   const optional = await optionalChecks(db, repo);
-  const known = async () => !!await db.prepare("SELECT 1 FROM push_outcomes WHERE repo = ? AND after_res IN ('green', 'red') LIMIT 1").get(repo);
+  const known = async () => !!await db.get(db.k.selectFrom("push_outcomes").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("after_res", "in", ["green", "red"]).limit(1));
   const waiting = (await filterSeq(rows, async (r) => { const res = requiredResult(parse(r.checks), optional); return res === "pending" || (res === "none" && await known()); })).length;
   if (waiting < UNSETTLED_PUSHES_MAX) return false;
   log(`  ${repo}: waiting: ${waiting} earlier pushes have no CI result yet`);
@@ -51,17 +55,20 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
   if (!stage) return;
   let before: Required | "unknown" = "unknown";
   if (!o.from) {
-    const m = (o.base ? await db.prepare("SELECT state FROM main_ci WHERE repo = ? AND head_sha = ?").get(o.repo, o.base) : undefined)
-      ?? await db.prepare("SELECT state FROM main_ci WHERE repo = ? ORDER BY committed_at DESC, first_seen_at DESC LIMIT 1").get(o.repo) as { state: string } | undefined;
+    const m = (o.base ? await db.get(db.k.selectFrom("main_ci").select("state").where("repo", "=", o.repo).where("head_sha", "=", o.base)) : undefined)
+      ?? await db.get(db.k.selectFrom("main_ci").select("state").where("repo", "=", o.repo)
+        .orderBy("committed_at", (ob) => ob.desc().nullsLast()).orderBy("first_seen_at", "desc").limit(1));
     before = m?.state === "green" || m?.state === "optional" ? "green" : m?.state === "red" ? "red" : "unknown";
   }
   else if (o.number !== null) {
-    const row = await db.prepare("SELECT head_oid, checks FROM pr_checks WHERE repo = ? AND number = ?").get(o.repo, o.number) as { head_oid: string; checks: string } | undefined;
+    const row = await db.get(db.k.selectFrom("pr_checks").select(["head_oid", "checks"]).where("repo", "=", o.repo).where("number", "=", o.number));
     if (row && row.head_oid === o.from) before = requiredResult(parse(row.checks), await optionalChecks(db, o.repo));
   }
-  await db.prepare(`INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) SELECT ?, ?, ?, ?, ?, ?, ?, ?
-    WHERE NOT EXISTS (SELECT 1 FROM push_outcomes WHERE repo = ? AND number IS ? AND to_oid = ? AND action = ?)`)
-    .run(at, stage, action, o.repo, o.number, o.from, o.to, before, o.repo, o.number, o.to, action);
+  await db.run(db.k.insertInto("push_outcomes").columns(["at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res"])
+    .expression(db.k.selectNoFrom((eb) => [eb.val(at).as("at"), eb.val(stage).as("stage"), eb.val(action).as("action"), eb.val(o.repo).as("repo"), eb.val(o.number).as("number"),
+      eb.val(o.from).as("from_oid"), eb.val(o.to).as("to_oid"), eb.val(before).as("before_res")])
+      .where((eb) => eb.not(eb.exists(eb.selectFrom("push_outcomes").select(eb.lit(1).as("one")).where("repo", "=", o.repo)
+        .where((ie) => o.number === null ? ie("number", "is", null) : ie("number", "=", o.number)).where("to_oid", "=", o.to).where("action", "=", action))))));
 }
 
 /**
@@ -69,44 +76,52 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
  * expires old unsettled ones, and lets the breaker look at every stage that got a `broke`.
  */
 export async function resolvePushes(db: Db, rows: { repo: string; number: number; head_oid: string; checks: CheckRow }[], at = new Date().toISOString()): Promise<void> {
-  const find = db.prepare("SELECT id, stage, before_res FROM push_outcomes WHERE repo = ? AND to_oid = ? AND outcome IS NULL AND (number = ? OR number IS NULL)");
-  const set = db.prepare("UPDATE push_outcomes SET number = ?, after_res = ?, outcome = ?, resolved_at = ? WHERE id = ?");
   const broke = new Set<string>();
   for (const r of rows) {
-    const open = await find.all(r.repo, r.head_oid, r.number) as { id: number; stage: string; before_res: string }[];
+    const open = await db.all(db.k.selectFrom("push_outcomes").select(["id", "stage", "before_res"])
+      .where("repo", "=", r.repo).where("to_oid", "=", r.head_oid).where("outcome", "is", null)
+      .where((eb) => eb.or([eb("number", "=", r.number), eb("number", "is", null)])));
     if (!open.length) continue;
     const after = requiredResult(r.checks, await optionalChecks(db, r.repo));
     for (const p of open) {
       const outcome = classifyPush(p.before_res as Required | "unknown", after);
       if (outcome === null) continue;
-      await set.run(r.number, after, outcome, at, p.id);
+      await db.run(db.k.updateTable("push_outcomes").set({ number: r.number, after_res: after, outcome, resolved_at: at }).where("id", "=", p.id));
       if (outcome === "broke") broke.add(p.stage);
     }
   }
   // A push whose PR is closed or merged, or whose head moved past the pushed commit (the mirror may still show the head before the push), will not get a result of its own.
-  await db.prepare(`UPDATE push_outcomes SET outcome = 'unknown', resolved_at = ? WHERE outcome IS NULL AND number IS NOT NULL AND EXISTS
-    (SELECT 1 FROM items i WHERE i.repo = push_outcomes.repo AND i.number = push_outcomes.number AND (i.state <> 'OPEN' OR (i.head_oid IS NOT NULL AND i.head_oid <> push_outcomes.to_oid AND i.head_oid IS NOT push_outcomes.from_oid)))`).run(at);
+  await db.run(db.k.updateTable("push_outcomes").set({ outcome: "unknown", resolved_at: at }).where("outcome", "is", null).where("number", "is not", null)
+    .where((eb) => eb.exists(eb.selectFrom("items as i").select(eb.lit(1).as("one"))
+      .whereRef("i.repo", "=", "push_outcomes.repo").whereRef("i.number", "=", "push_outcomes.number")
+      .where((ie) => ie.or([ie("i.state", "<>", "OPEN"), ie.and([
+        ie("i.head_oid", "is not", null),
+        ie("i.head_oid", "<>", ie.ref("push_outcomes.to_oid")),
+        ie("i.head_oid", "is distinct from", ie.ref("push_outcomes.from_oid")),
+      ])])))));
   const old = new Date(Date.parse(at) - EXPIRE_MS).toISOString();
-  if (await db.prepare("SELECT 1 FROM push_outcomes WHERE outcome IS NULL AND at < ? LIMIT 1").get(old))
-    await db.prepare("UPDATE push_outcomes SET outcome = 'unknown', resolved_at = ? WHERE outcome IS NULL AND at < ?").run(at, old);
+  if (await db.get(db.k.selectFrom("push_outcomes").select((eb) => eb.lit(1).as("one")).where("outcome", "is", null).where("at", "<", old).limit(1)))
+    await db.run(db.k.updateTable("push_outcomes").set({ outcome: "unknown", resolved_at: at }).where("outcome", "is", null).where("at", "<", old));
   for (const s of broke) await evaluatePushBreaker(db, s as TripStage, at);
 }
 
 /** The head the PR is at when our push to it broke a required check and nothing was pushed since, or null. */
 export async function brokeHeads(db: Db, repo?: string): Promise<Map<string, string>> {
-  const rows = await db.prepare(`SELECT repo, number, to_oid FROM push_outcomes WHERE outcome = 'broke' AND number IS NOT NULL ${repo ? "AND repo = ?" : ""} ORDER BY id`).all(...(repo ? [repo] : [])) as { repo: string; number: number; to_oid: string }[];
+  const rows = await db.all(db.k.selectFrom("push_outcomes").select(["repo", "number", "to_oid"]).$narrowType<{ number: NotNull }>()
+    .where("outcome", "=", "broke").where("number", "is not", null)
+    .$if(!!repo, (q) => q.where("repo", "=", repo!)).orderBy("id"));
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, r.to_oid]));
 }
 
 // ---- circuit breaker --------------------------------------------------------------------------------------
 
 export type TripRow = { stage: string; active: number; reason: string; evidence: string; tripped_at: string; cleared_at: string | null; cleared_by: string | null };
-export const tripRow = async (db: Db, stage: string): Promise<TripRow | undefined> => await db.prepare("SELECT * FROM stage_trips WHERE stage = ?").get(stage) as TripRow | undefined;
+export const tripRow = async (db: Db, stage: string): Promise<TripRow | undefined> => await db.get(db.k.selectFrom("stage_trips").select(kx.cols("stage_trips")).where("stage", "=", stage));
 
 /** Stages that are tripped now, with the reason. */
 export async function activeTrips(db: Db): Promise<Partial<Record<TripStage, string>>> {
   const out: Partial<Record<TripStage, string>> = {};
-  for (const r of await db.prepare("SELECT stage, reason FROM stage_trips WHERE active = 1").all() as { stage: string; reason: string }[]) out[r.stage as TripStage] = r.reason;
+  for (const r of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason"]).where("active", "=", 1))) out[r.stage as TripStage] = r.reason;
   return out;
 }
 
@@ -128,14 +143,13 @@ export async function tripEvidence(db: Db, stage: string): Promise<string[]> {
  * that repo only, so a test repo's deliberate defects never stop the whole pipeline.
  */
 const mergeKey = async (db: Db, repo: string): Promise<string> =>
-  await db.prepare("SELECT 1 FROM main.settings WHERE key = ?").get(`test_repo:${repo}`) ? `merge:${repo}` : "merge";
+  await db.get(db.k.selectFrom("main.settings").select("key").where("key", "=", `test_repo:${repo}`)) ? `merge:${repo}` : "merge";
 
 export async function trip(db: Db, stage: string, reason: string, evidence: string[], at: string): Promise<void> {
   const r = await tripRow(db, stage);
   if (r?.active) return;
-  await db.prepare(`INSERT INTO stage_trips (stage, active, reason, evidence, tripped_at) VALUES (?, 1, ?, ?, ?)
-    ON CONFLICT (stage) DO UPDATE SET active = 1, reason = excluded.reason, evidence = excluded.evidence, tripped_at = excluded.tripped_at`)
-    .run(stage, reason, JSON.stringify(evidence), at);
+  await db.run(db.k.insertInto("stage_trips").values({ stage, active: 1, reason, evidence: JSON.stringify(evidence), tripped_at: at })
+    .onConflict((oc) => oc.column("stage").doUpdateSet((eb) => ({ active: 1, reason: eb.ref("excluded.reason"), evidence: eb.ref("excluded.evidence"), tripped_at: eb.ref("excluded.tripped_at") }))));
   await audit(db, "pipeline", "stage-trip", stage, { reason, evidence });
 }
 
@@ -144,14 +158,15 @@ export const sinceOf = async (db: Db, stage: string): Promise<string> => (await 
 /** Trips a push stage when BREAKER_BROKE of its last BREAKER_WINDOW pushes since the last resume broke a required check. */
 export async function evaluatePushBreaker(db: Db, stage: TripStage, at = new Date().toISOString()): Promise<void> {
   if ((await tripRow(db, stage))?.active) return;
-  const rows = await db.prepare("SELECT outcome, repo, number, to_oid FROM push_outcomes WHERE stage = ? AND at > ? ORDER BY id DESC LIMIT 10").all(stage, await sinceOf(db, stage)) as { outcome: Outcome | null; repo: string; number: number | null; to_oid: string }[];
+  const rows = await db.all(db.k.selectFrom("push_outcomes").select(["outcome", "repo", "number", "to_oid"]).$narrowType<{ outcome: Outcome | null }>()
+    .where("stage", "=", stage).where("at", ">", await sinceOf(db, stage)).orderBy("id", "desc").limit(10));
   if (!breakerTripped(rows.map((r) => r.outcome))) return;
   const bad = rows.filter((r) => r.outcome === "broke");
   await trip(db, stage, `${bad.length} of the last ${rows.length} ${stage} pushes broke a required check`, bad.map((r) => `${r.repo}#${r.number}@${r.to_oid.slice(0, 8)}`), at);
 }
 
 const weMerged = async (db: Db, repo: string, number: number): Promise<{ at: string } | undefined> =>
-  await db.prepare("SELECT at FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged' ORDER BY at DESC LIMIT 1").get(repo, number) as { at: string } | undefined;
+  await db.get(db.k.selectFrom("merges").select("at").where("repo", "=", repo).where("number", "=", number).where("outcome", "=", "merged").orderBy("at", "desc").limit(1));
 
 /** The default branch of `repo` is red and its culprit is PR `number` (main CI): trips the merge path when we merged that PR after the last resume. */
 export async function mainRedAfterMerge(db: Db, repo: string, number: number, sha: string, at = new Date().toISOString()): Promise<void> {
@@ -179,6 +194,6 @@ export async function resumeStage(db: Db, stage: string, by: string): Promise<vo
   const r = await tripRow(db, stage);
   if (!r?.active) throw new TripError(`${stage} is not paused by the circuit breaker`);
   const at = new Date().toISOString();
-  await db.prepare("UPDATE stage_trips SET active = 0, cleared_at = ?, cleared_by = ? WHERE stage = ?").run(at, by, stage);
+  await db.run(db.k.updateTable("stage_trips").set({ active: 0, cleared_at: at, cleared_by: by }).where("stage", "=", stage));
   await audit(db, by, "stage-resume", stage, { reason: r.reason });
 }

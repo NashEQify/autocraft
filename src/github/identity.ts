@@ -13,6 +13,7 @@ import { AppError, call, GITHUB_API } from "./app.ts";
 import { AppNotInstalledError, installationToken, readAppSecrets, RepoNotInInstallationError } from "./install-token.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 import { noteReadIdentity } from "./read.ts";
 
 export type Identity = "app" | `user:${string}`;
@@ -33,16 +34,15 @@ export async function setGithubIdentity(db: Db, by: string, value: unknown): Pro
   const was = await githubIdentity(db);
   if (was === value) return false;
   await db.write(async () => {
-  if (value === "box") await db.prepare("DELETE FROM main.settings WHERE key = ?").run(KEY);
-  else await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(KEY, value);
+  if (value === "box") await db.run(db.k.deleteFrom("main.settings").where("key", "=", KEY));
+  else await db.run(db.k.insertInto("main.settings").values({ key: KEY, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, by, "github-identity", value, { identity: value, was });
   // Sessions' own tokens belong to whichever identity created them; the grant revocation below covers app sessions.
-  await db.prepare("DELETE FROM sessions").run();
+  await db.run(db.k.deleteFrom("sessions"));
   // The stored user tokens belong to the mode being left: queue their revocation at GitHub (the vault's sweep).
-  const stored = await db.prepare("DELETE FROM user_tokens RETURNING login, token_enc").all() as { login: string; token_enc: string }[];
-  const queue = db.prepare("INSERT INTO user_token_revocations (login, token_enc, queued_at, kind) VALUES (?, ?, ?, 'grant')");
+  const stored = await db.all(db.k.deleteFrom("user_tokens").returning(["login", "token_enc"]));
   const at = new Date().toISOString();
-  for (const t of stored) await queue.run(t.login, t.token_enc, at);
+  for (const t of stored) await db.run(db.k.insertInto("user_token_revocations").values({ login: t.login, token_enc: t.token_enc, queued_at: at, kind: "grant" }));
   });
   noteReadIdentity(value === "app");
   return true;
@@ -57,7 +57,7 @@ export const actsAsPerson = (kind: WriteKind): boolean => kind === "merge" || ki
 /** The person who answered `decisionId`, or the app (no decision, not answered yet): who a merge or close for it is made as. */
 export async function identityOfDecision(db: Db, decisionId: string | undefined): Promise<Identity> {
   if (decisionId === undefined) return "app";
-  const row = await db.prepare("SELECT answered_by FROM decisions WHERE id = ? AND answer IS NOT NULL").get(decisionId) as { answered_by: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("decisions").select("answered_by").where("id", "=", decisionId).where("answer", "is not", null));
   return row?.answered_by ? `user:${row.answered_by}` : "app";
 }
 
@@ -88,7 +88,7 @@ export async function appCoverage(owner: string, repo: string, mint: (owner: str
 
 /** Tracked repos by coverage; `unconfirmed` are those GitHub could not answer for. */
 export async function trackedCoverage(db: Db, mint?: (owner: string, repo: string) => Promise<string>): Promise<{ uncovered: string[]; unconfirmed: string[] }> {
-  const names = (await db.prepare("SELECT name FROM main.tracked_repos ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name);
+  const names = (await db.all(db.k.selectFrom("main.tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
   const uncovered: string[] = [], unconfirmed: string[] = [];
   for (const n of names) {
     const c = await appCoverage(ownerOf(n), n, mint);

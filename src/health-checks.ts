@@ -16,8 +16,8 @@ import { inferenceMode, type InferenceMode } from "./remote/mode.ts";
 import { CALLER_STALE_MS } from "./remote/room.ts";
 import { NO_TAKER_MS } from "./remote/takers.ts";
 import { STATUS_FRESH_MS } from "./remote/helpers.ts";
-import { manualSql } from "./remote/manual-only.ts";
-import { confidentialReadyAt, PRIVATE_STEPS_SQL } from "./build/tasks.ts";
+import { manualExpr } from "./remote/manual-only.ts";
+import { confidentialReadyAt, privateStepExpr } from "./build/tasks.ts";
 import { flatMapSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
 
@@ -72,10 +72,9 @@ export type CheckCtx = { db: Db; nowMs: number; probe?: boolean; /** The inferen
 const ok = (id: string, to: string, extra: Partial<Check> = {}): Check => ({ id, state: "ok", text: "", brief: "", since: null, to, ...extra });
 const minutes = (ms: number): string => (ms < 90 * 60_000 ? `${Math.max(1, Math.round(ms / 60_000))} min` : `${Math.round(ms / 3_600_000)} h`);
 const clip = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-const all = async <T>(db: Db, sql: string, ...args: (string | number)[]): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
 
 async function runnerCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
-  const hb = (await db.prepare("SELECT value FROM settings WHERE key = 'runner_heartbeat'").get() as { value: string } | undefined)?.value ?? null;
+  const hb = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "runner_heartbeat")))?.value ?? null;
   const beat = hb ? Date.parse(hb) : NaN;
   if (!Number.isNaN(beat) && nowMs - beat <= THRESHOLDS.runnerStaleMs) return [ok("runner", "/pipeline")];
   const text = Number.isNaN(beat) ? "The runner has not reported" : `The runner has not reported for ${minutes(nowMs - beat)}`;
@@ -83,7 +82,7 @@ async function runnerCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
 }
 
 type Env = { id: string; label: string; kind: string; last_seen_at: string | null; created_at: string; health: string | null; health_at: string | null };
-const enabledEnvs = async (db: Db): Promise<Env[]> => await all<Env>(db, "SELECT id, label, kind, last_seen_at, created_at, health, health_at FROM build_envs WHERE enabled = 1 ORDER BY id");
+const enabledEnvs = async (db: Db): Promise<Env[]> => await db.all(db.k.selectFrom("build_envs").select(["id", "label", "kind", "last_seen_at", "created_at", "health", "health_at"]).where("enabled", "=", 1).orderBy("id"));
 const seenRecently = (e: Env, nowMs: number): boolean => e.last_seen_at !== null && nowMs - Date.parse(e.last_seen_at) <= THRESHOLDS.workerStaleMs;
 
 /** A kubernetes environment: the runner's pod launcher reports for it each pass (src/build/launcher.ts). */
@@ -118,8 +117,10 @@ async function workerChecks({ db, nowMs }: CheckCtx): Promise<Check[]> {
 async function queueCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
   const cutoff = new Date(nowMs - THRESHOLDS.taskQueuedMs).toISOString();
   // Private tasks that no confidential environment can take are the confidential-env check's.
-  const private_ = await confidentialReadyAt(db) === null ? ` AND step NOT IN (${PRIVATE_STEPS_SQL})` : "";
-  const r = await db.prepare(`SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM build_tasks WHERE state = 'queued' AND queued_at < ?${private_}`).get(cutoff) as { n: number; oldest: string | null };
+  const noConfidential = await confidentialReadyAt(db) === null;
+  const r = (await db.get(db.k.selectFrom("build_tasks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<string | null>("queued_at").as("oldest")])
+    .where("state", "=", "queued").where("queued_at", "<", cutoff)
+    .$if(noConfidential, (q) => q.where((eb) => eb.not(privateStepExpr(eb))))))!;
   if (!r.n) return [ok("build-queue", "/envs")];
   // Workers that are up but busy leave tasks waiting: that is slow, not broken.
   const anyUp = (await enabledEnvs(db)).some((e) => seenRecently(e, nowMs));
@@ -130,8 +131,10 @@ async function queueCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
 /** Security fixes and scan tests wait, with no other sign, until a confidential build environment has reported. */
 async function confidentialCheck({ db }: CheckCtx): Promise<Check[]> {
   if (await confidentialReadyAt(db) !== null) return [ok("confidential-env", "/envs")];
-  const t = await db.prepare(`SELECT COUNT(*) AS n, MIN(queued_at) AS oldest FROM build_tasks WHERE state = 'queued' AND step IN (${PRIVATE_STEPS_SQL})`).get() as { n: number; oldest: string | null };
-  const f = await db.prepare("SELECT COUNT(*) AS n, MIN(env_wait_at) AS oldest FROM security_findings WHERE state = 'fixing' AND env_wait_at IS NOT NULL").get() as { n: number; oldest: string | null };
+  const t = (await db.get(db.k.selectFrom("build_tasks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<string | null>("queued_at").as("oldest")])
+    .where("state", "=", "queued").where((eb) => privateStepExpr(eb))))!;
+  const f = (await db.get(db.k.selectFrom("security_findings").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<string | null>("env_wait_at").as("oldest")])
+    .where("state", "=", "fixing").where("env_wait_at", "is not", null)))!;
   if (!t.n && !f.n) return [ok("confidential-env", "/envs")];
   const parts = [f.n ? `${f.n} security fix${f.n === 1 ? "" : "es"}` : "", t.n ? `${t.n} security build task${t.n === 1 ? "" : "s"}` : ""].filter(Boolean);
   const text = `${parts.join(" and ")} ${t.n + f.n === 1 ? "is" : "are"} waiting for a confidential build environment`;
@@ -140,7 +143,7 @@ async function confidentialCheck({ db }: CheckCtx): Promise<Check[]> {
 }
 
 async function syncCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
-  const runs = (await all<{ started_at: string; ended_at: string | null; error: string | null }>(db, "SELECT started_at, ended_at, error FROM sync_runs ORDER BY started_at DESC LIMIT 20"))
+  const runs = (await db.all(db.k.selectFrom("sync_runs").select(["started_at", "ended_at", "error"]).orderBy("started_at", "desc").limit(20)))
     .filter((r) => r.ended_at !== null || r.error !== null);
   const streak = runs.findIndex((r) => r.error === null);
   const failing = streak === -1 ? runs.length : streak;
@@ -186,7 +189,7 @@ async function accountsCheck({ db, nowMs, probe }: CheckCtx): Promise<Check[]> {
 }
 
 async function rateCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
-  const get = async (k: string) => (await db.prepare("SELECT value FROM settings WHERE key = ?").get(k) as { value: string } | undefined)?.value ?? null;
+  const get = async (k: string) => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", k)))?.value ?? null;
   const left = Number(await get("sync_rate_remaining"));
   const reset = Date.parse(await get("sync_rate_reset_at") ?? "");
   // A reading from before the last reset says nothing about the new hour.
@@ -234,8 +237,8 @@ async function appIdentityChecks({ db, probe }: CheckCtx): Promise<Check[]> {
 
 /** The last pass that binds contributors' account ids failed: the earlier PRs of the logins it did not bind count toward no tier until a pass succeeds. */
 async function authorIdsCheck({ db }: CheckCtx): Promise<Check[]> {
-  const err = (await db.prepare("SELECT value FROM settings WHERE key = 'author_ids_error'").get() as { value: string } | undefined)?.value;
-  const passed = (await db.prepare("SELECT value FROM settings WHERE key = 'author_ids_backfilled'").get() as { value: string } | undefined)?.value;
+  const err = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "author_ids_error")))?.value;
+  const passed = (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "author_ids_backfilled")))?.value;
   // A pass that succeeded after the error supersedes it.
   if (!err || (passed && passed >= (err.split(" ")[0] ?? ""))) return [ok("author-ids", "/contributors")];
   const n = (await unboundLogins(db)).length;
@@ -248,9 +251,9 @@ async function authorIdsCheck({ db }: CheckCtx): Promise<Check[]> {
 
 /** The outside-author surge breaker (src/outside.ts) while it is tripped; an operator resumes it on the Pipeline page. */
 async function outsideSurgeCheck({ db }: CheckCtx): Promise<Check[]> {
-  const t = await db.prepare("SELECT reason, tripped_at FROM stage_trips WHERE stage = 'outside-surge' AND active = 1").get() as { reason: string; tripped_at: string } | undefined;
+  const t = await db.get(db.k.selectFrom("stage_trips").select(["reason", "tripped_at"]).where("stage", "=", "outside-surge").where("active", "=", 1));
   if (!t) return [ok("outside-surge", "/pipeline")];
-  const held = (await db.prepare("SELECT COUNT(*) AS n FROM main.outside_holds WHERE reason = 'surge'").get() as { n: number }).n;
+  const held = (await db.get(db.k.selectFrom("main.outside_holds").select((eb) => eb.fn.countAll<number>().as("n")).where("reason", "=", "surge")))!.n;
   return [{ id: "outside-surge", state: "warn", text: `New items from outside authors are held: ${t.reason}`, brief: "New items from outside authors are held", since: t.tripped_at, count: held, to: "/pipeline" }];
 }
 
@@ -259,8 +262,9 @@ async function remoteCallsCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]>
   if ((mode ?? await inferenceMode(db)) !== "user-local") return [];
   const cutoff = nowMs - THRESHOLDS.remoteQueuedMs;
   // Calls whose caller stopped polling are about to be withdrawn and do not count as waiting.
-  const q = await db.prepare("SELECT COUNT(*) AS n, MIN(queued_since) AS oldest FROM main.remote_calls WHERE state = 'queued' AND queued_since < ? AND seen_at >= ?").get(cutoff, nowMs - CALLER_STALE_MS) as { n: number; oldest: number | null };
-  const last = (await db.prepare("SELECT MAX(leased_at) AS at FROM main.remote_calls").get() as { at: number | null }).at;
+  const q = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<number | null>("queued_since").as("oldest")])
+    .where("state", "=", "queued").where("queued_since", "<", cutoff).where("seen_at", ">=", nowMs - CALLER_STALE_MS)))!;
+  const last = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.fn.max<number | null>("leased_at").as("at"))))!.at;
   if (!q.n || (last !== null && last >= cutoff)) return [ok("remote-calls", "/pipeline")];
   const text = `${q.n} model call${q.n === 1 ? " has" : "s have"} waited over ${minutes(THRESHOLDS.remoteQueuedMs)} for a user's helper, and no helper has claimed a call in that time`;
   return [{ id: "remote-calls", state: "warn", text, brief: "Model calls are waiting and no helper is claiming them", since: new Date(q.oldest ?? cutoff).toISOString(), count: q.n, to: "/pipeline" }];
@@ -272,12 +276,16 @@ async function remoteCallsCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]>
  */
 async function remoteStarvedCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]> {
   if ((mode ?? await inferenceMode(db)) !== "user-local") return [];
-  const ready = (await db.prepare(`SELECT COUNT(*) AS n FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id WHERE t.kind = 'runner' AND h.readiness = 'ready' AND h.reported_at >= ? AND NOT ${manualSql("t.login")}`).get(nowMs - STATUS_FRESH_MS) as { n: number }).n;
+  const ready = (await db.get(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id")
+    .select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("t.kind", "=", "runner").where("h.readiness", "=", "ready").where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS)
+    .where((eb) => eb.not(manualExpr(db, eb, "t.login")))))!.n;
   if (!ready) return [ok("remote-starved", "/pipeline")];
   const out: Check[] = [];
   for (const tier of ["top", "mid", "small"] as const) {
     const limit = THRESHOLDS.remoteTierWaitMs[tier];
-    const q = await db.prepare("SELECT COUNT(*) AS n, MIN(queued_since) AS oldest FROM main.remote_calls WHERE state = 'queued' AND tier = ? AND queued_since < ? AND seen_at >= ?").get(tier, nowMs - limit, nowMs - CALLER_STALE_MS) as { n: number; oldest: number | null };
+    const q = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<number | null>("queued_since").as("oldest")])
+      .where("state", "=", "queued").where("tier", "=", tier).where("queued_since", "<", nowMs - limit).where("seen_at", ">=", nowMs - CALLER_STALE_MS)))!;
     if (!q.n || q.oldest === null) continue;
     out.push({ id: `remote-starved-${tier}`, state: "warn", count: q.n, since: new Date(q.oldest).toISOString(), to: "/pipeline",
       text: `The oldest queued ${tier}-tier model call has waited ${minutes(nowMs - q.oldest)} (limit ${minutes(limit)}) while ${ready} helper${ready === 1 ? " is" : "s are"} ready`,
@@ -289,10 +297,13 @@ async function remoteStarvedCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[
 /** User-local mode: calls have waited past remoteQueuedMs while every fresh, ready Task Runner is Manual only: they wait for a person to pick them. */
 async function remoteManualCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]> {
   if ((mode ?? await inferenceMode(db)) !== "user-local") return [];
-  const r = await db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(${manualSql("t.login")}), 0) AS manual FROM main.mcp_tokens t JOIN main.remote_helpers h ON h.token_id = t.id
-    WHERE t.kind = 'runner' AND t.expires_at > ? AND h.readiness = 'ready' AND h.reported_at >= ?`).get(new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as { n: number; manual: number };
+  const r = (await db.get(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.remote_helpers as h", "h.token_id", "t.id")
+    .select((eb) => [eb.fn.countAll<number>().as("n"),
+      eb.fn.coalesce(eb.fn.sum<number>(eb.case().when(manualExpr(db, eb, "t.login")).then(1).else(0).end()), eb.lit(0)).as("manual")])
+    .where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.readiness", "=", "ready").where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS)))!;
   if (!r.n || Number(r.manual) < Number(r.n)) return [ok("remote-manual", "/model-queue")];
-  const q = await db.prepare("SELECT COUNT(*) AS n, MIN(queued_since) AS oldest FROM main.remote_calls WHERE state = 'queued' AND queued_since < ? AND seen_at >= ?").get(nowMs - THRESHOLDS.remoteQueuedMs, nowMs - CALLER_STALE_MS) as { n: number; oldest: number | null };
+  const q = (await db.get(db.k.selectFrom("main.remote_calls").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.min<number | null>("queued_since").as("oldest")])
+    .where("state", "=", "queued").where("queued_since", "<", nowMs - THRESHOLDS.remoteQueuedMs).where("seen_at", ">=", nowMs - CALLER_STALE_MS)))!;
   if (!q.n || q.oldest === null) return [ok("remote-manual", "/model-queue")];
   return [{ id: "remote-manual", state: "warn", count: q.n, since: new Date(q.oldest).toISOString(), to: "/model-queue",
     text: `${q.n} model call${q.n === 1 ? " has" : "s have"} waited over ${minutes(THRESHOLDS.remoteQueuedMs)} while every ready Task Runner is Manual only`,
@@ -306,7 +317,9 @@ async function remoteManualCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]
  */
 async function remoteNoTakerCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]> {
   if ((mode ?? await inferenceMode(db)) !== "user-local") return [];
-  const rows = await db.prepare("SELECT n.repo, n.since FROM main.remote_no_taker n JOIN main.tracked_repos r ON r.name = n.repo AND r.pipeline = 1 WHERE n.since <= ? ORDER BY n.repo").all(nowMs - NO_TAKER_MS) as { repo: string; since: number }[];
+  const rows = await db.all(db.k.selectFrom("main.remote_no_taker as n")
+    .innerJoin("main.tracked_repos as r", (j) => j.onRef("r.name", "=", "n.repo").on("r.pipeline", "=", 1))
+    .select(["n.repo", "n.since"]).where("n.since", "<=", nowMs - NO_TAKER_MS).orderBy("n.repo"));
   if (!rows.length) return [ok("remote-no-taker", "/model-queue")];
   const n = rows.length;
   return [{ id: "remote-no-taker", state: "warn", count: n, since: new Date(Math.min(...rows.map((r) => Number(r.since)))).toISOString(), to: "/model-queue",
