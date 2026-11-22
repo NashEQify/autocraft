@@ -5,13 +5,15 @@ import type { NeedsPage, NeedsStoppedRow, Progress } from "../../../web/src/api/
 import { decisionPath, itemPath } from "../../../web/src/lib/links.ts";
 import { optionsOf, type DecisionRow } from "../../decisions.ts";
 import type { Req } from "../types.ts";
-import { needingSql, withoutHidden } from "./decisions.ts";
+import { needingExpr, withoutHiddenExpr } from "./decisions.ts";
 import { healthOf } from "./now.ts";
 import { needs as needsPage } from "./needs.ts";
 import { canSeeInternals } from "./staff.ts";
-import { excludeHidden, hiddenRepos } from "./visible.ts";
-import { ITEM_PHASES, PHASE_SQL, type Home, type HomeDone, type HomeNeed, type HomeProblem, type ItemPhase, type NeedKind } from "./home-types.ts";
+import { excludeHiddenExpr, hiddenRepos } from "./visible.ts";
+import { ITEM_PHASES, phaseExpr, type Home, type HomeDone, type HomeNeed, type HomeProblem, type ItemPhase, type NeedKind } from "./home-types.ts";
+import type { NotNull } from "kysely";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
 
 const OLDEST = 5;
 const DONE = 10;
@@ -22,14 +24,21 @@ type Deps = { progress: (hidden: string[]) => Promise<Progress> };
 const itemKindOf = (k: string | undefined): "pr" | "issue" | null => (k === undefined ? null : k === "pr" ? "pr" : "issue");
 
 async function phases(db: Db, hidden: string[]): Promise<Record<ItemPhase, number>> {
-  const p: Record<string, string> = {};
-  const hide = excludeHidden("i.repo", hidden, p);
+  const hide = excludeHiddenExpr(db, "i.repo", hidden);
   const out = Object.fromEntries(ITEM_PHASES.map((x) => [x, 0])) as Record<ItemPhase, number>;
-  for (const r of await db.prepare(`SELECT ${PHASE_SQL} AS phase, COUNT(*) AS n FROM items i LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number${hide ? ` WHERE ${hide}` : ""} GROUP BY 1`).all(p) as { phase: ItemPhase; n: number }[])
+  for (const r of await db.all(db.k.selectFrom("items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select((eb) => [phaseExpr(db, eb).as("phase"), eb.fn.countAll<number>().as("n")])
+    .$if(!!hide, (q) => q.where(hide!)).groupBy("phase")))
     if (r.phase in out) out[r.phase] += r.n;
   // Home's Merged and Closed tiles are today's (UTC), not every item ever closed.
   const day = new Date().toISOString().slice(0, 10);
-  const t = await db.prepare(`SELECT SUM(i.merged_at >= :day) AS merged, SUM(i.merged_at IS NULL AND i.closed_at >= :day) AS closed FROM items i WHERE (i.merged_at >= :day OR i.closed_at >= :day)${hide ? ` AND ${hide}` : ""}`).get({ ...p, day }) as { merged: number | null; closed: number | null };
+  const t = (await db.get(db.k.selectFrom("items as i")
+    .select((eb) => [
+      eb.fn.sum<number | null>(eb.case().when("i.merged_at", ">=", day).then(eb.lit(1)).else(eb.lit(0)).end()).as("merged"),
+      eb.fn.sum<number | null>(eb.case().when(eb.and([eb("i.merged_at", "is", null), eb("i.closed_at", ">=", day)])).then(eb.lit(1)).else(eb.lit(0)).end()).as("closed"),
+    ])
+    .where((eb) => eb.or([eb("i.merged_at", ">=", day), eb("i.closed_at", ">=", day)]))
+    .$if(!!hide, (q) => q.where(hide!))))!;
   out.Merged = t.merged ?? 0;
   out.Closed = t.closed ?? 0;
   return out;
@@ -37,11 +46,13 @@ async function phases(db: Db, hidden: string[]): Promise<Record<ItemPhase, numbe
 
 /** `total` is the nav badge's number: decisions, unanswered feedback and stopped items. `oldest` lists decisions and, for staff, high or critical findings still new (not in the total). */
 async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page: NeedsPage): Promise<Home["needs"]> {
-  const params: Record<string, string> = {};
-  const hide = withoutHidden(db, hidden, params);
-  const where = `${needingSql(db, req)}${hide ? ` AND ${hide}` : ""}`;
+  const where = (eb: kx.Eb) => {
+    const hide = withoutHiddenExpr(db, eb, hidden);
+    const needing = needingExpr(db, eb, req);
+    return hide ? eb.and([needing, hide]) : needing;
+  };
   const byKind: Partial<Record<NeedKind, number>> = {};
-  for (const r of await db.prepare(`SELECT kind, COUNT(*) AS n FROM decisions WHERE ${where} GROUP BY kind`).all(params) as { kind: NeedKind; n: number }[]) byKind[r.kind] = r.n;
+  for (const r of await db.all(db.k.selectFrom("decisions").select(["kind", (eb) => eb.fn.countAll<number>().as("n")]).$narrowType<{ kind: NeedKind }>().where(where).groupBy("kind"))) byKind[r.kind] = r.n;
   // The Needs page's own counts, so the total is the nav badge's number for this user.
   const { counts } = page;
   const total = counts.decisions + counts.feedback + counts.stopped;
@@ -49,7 +60,7 @@ async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page
   if (counts.stopped) byKind.stopped = counts.stopped;
   if (!staff) return { total, byKind, oldest: [] };
 
-  const oldest = await db.prepare(`SELECT * FROM decisions WHERE ${where} ORDER BY asked_at, id LIMIT ${OLDEST}`).all(params) as DecisionRow[];
+  const oldest = await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).$narrowType<{ kind: DecisionRow["kind"] }>().where(where).orderBy("asked_at").orderBy("id").limit(OLDEST));
   const items = await itemsByRef(db, oldest.flatMap((d) => (d.number !== null && d.repo ? [[d.repo, d.number] as [string, number]] : [])));
   const asked: HomeNeed[] = oldest.map((d) => {
     const it = d.number !== null && d.repo ? items.get(`${d.repo}#${d.number}`) : undefined;
@@ -60,11 +71,10 @@ async function needs(db: Db, req: Req, hidden: HiddenRepos, staff: boolean, page
     };
   });
 
-  const fp: Record<string, string> = {};
-  const fhide = excludeHidden("repo", hidden, fp);
-  const fwhere = `state = 'new' AND severity IN ('high', 'critical')${fhide ? ` AND ${fhide}` : ""}`;
-  const fc = (await db.prepare(`SELECT COUNT(*) AS n FROM security_findings WHERE ${fwhere}`).get(fp) as { n: number }).n;
-  const found: HomeNeed[] = (await db.prepare(`SELECT repo, number, title, created_at FROM security_findings WHERE ${fwhere} ORDER BY created_at, number LIMIT ${OLDEST}`).all(fp) as { repo: string; number: number; title: string; created_at: string }[])
+  const fhide = excludeHiddenExpr(db, "repo", hidden);
+  const findings = () => db.k.selectFrom("security_findings").where("state", "=", "new").where("severity", "in", ["high", "critical"]).$if(!!fhide, (q) => q.where(fhide!));
+  const fc = (await db.get(findings().select((eb) => eb.fn.countAll<number>().as("n"))))!.n;
+  const found: HomeNeed[] = (await db.all(findings().select(["repo", "number", "title", "created_at"]).orderBy("created_at").orderBy("number").limit(OLDEST)))
     .map((f) => ({ id: `finding:${f.repo}:${f.number}`, kind: "security" as const, repo: f.repo, number: f.number, title: f.title, recommendation: null, askedAt: f.created_at, itemKind: null, to: `/security/${f.repo}/${f.number}` }));
   if (fc) byKind.security = fc;
   return { total, byKind, oldest: [...asked, ...found].sort((a, b) => a.askedAt.localeCompare(b.askedAt)).slice(0, OLDEST) };
@@ -78,14 +88,14 @@ async function problems(db: Db, hidden: string[], staff: boolean, stops: NeedsSt
   for (const p of (await healthOf(db, hidden, staff, Date.now())).problems)
     if (!seen.has(p.id)) out.push({ kind: p.area === "deadline" ? "stuck" : "health", title: p.text, detail: "", to: p.to });
   if (staff) {
-    const fp: Record<string, string> = {};
-    const fhide = excludeHidden("repo", hidden, fp);
-    for (const f of await db.prepare(`SELECT repo, number, fix_attempts, last_failure FROM security_findings WHERE state = 'new' AND last_failure IS NOT NULL${fhide ? ` AND ${fhide}` : ""} ORDER BY updated_at DESC`).all(fp) as { repo: string; number: number; fix_attempts: number; last_failure: string }[])
+    const fhide = excludeHiddenExpr(db, "repo", hidden);
+    for (const f of await db.all(db.k.selectFrom("security_findings").select(["repo", "number", "fix_attempts", "last_failure"]).$narrowType<{ last_failure: NotNull }>()
+      .where("state", "=", "new").where("last_failure", "is not", null).$if(!!fhide, (q) => q.where(fhide!)).orderBy("updated_at", "desc")))
       out.push({ kind: "gave-up", title: `${f.repo} finding ${f.number}: fix gave up after ${f.fix_attempts} round${f.fix_attempts === 1 ? "" : "s"}`, detail: f.last_failure, to: `/security/${f.repo}/${f.number}` });
-    const ip: Record<string, string> = {};
-    const ihide = excludeHidden("i.repo", hidden, ip);
-    for (const r of await db.prepare(`SELECT p.repo, p.number, i.title FROM item_plans p JOIN items i ON i.repo = p.repo AND i.number = p.number
-      WHERE i.state = 'OPEN' AND json_extract(p.view, '$.cifix') = 'cifix-failed'${ihide ? ` AND ${ihide}` : ""} ORDER BY p.planned_at DESC LIMIT 20`).all(ip) as { repo: string; number: number; title: string | null }[])
+    const ihide = excludeHiddenExpr(db, "i.repo", hidden);
+    for (const r of await db.all(db.k.selectFrom("item_plans as p").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+      .select(["p.repo", "p.number", "i.title"]).where("i.state", "=", "OPEN").where((eb) => eb(kx.jsonText(db, "p.view", "$.cifix"), "=", "cifix-failed"))
+      .$if(!!ihide, (q) => q.where(ihide!)).orderBy("p.planned_at", "desc").limit(20)))
       out.push({ kind: "gave-up", title: `${r.repo}#${r.number}: CI fix gave up`, detail: r.title ?? "", to: itemPath(r.repo, r.number) });
   }
   return out;
@@ -94,7 +104,7 @@ async function problems(db: Db, hidden: string[], staff: boolean, stops: NeedsSt
 /** Title and kind of items by `repo#number`, in one read. */
 async function itemsByRef(db: Db, refs: [string, number][]): Promise<Map<string, { title: string | null; kind: string }>> {
   if (!refs.length) return new Map();
-  const rows = await db.prepare("SELECT repo, number, title, kind FROM items WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))").all(JSON.stringify(refs)) as { repo: string; number: number; title: string | null; kind: string }[];
+  const rows = await db.all(db.k.selectFrom("items").select(["repo", "number", "title", "kind"]).where(kx.refIn(db, "items", refs)));
   return new Map(rows.map((r) => [`${r.repo}#${r.number}`, r]));
 }
 
@@ -115,7 +125,9 @@ async function done(db: Db, hidden: string[]): Promise<HomeDone[]> {
     chunk = [];
     return false;
   };
-  for await (const a of db.prepare(`SELECT at, action, target FROM audit WHERE action IN ('merge', 'act-close', 'review-post') AND json_extract(details, '$.state') = 'done' ORDER BY at DESC`).iterate() as AsyncIterable<{ at: string; action: keyof typeof what; target: string | null }>) {
+  for (const a of await db.all(db.k.selectFrom("audit").select(["at", "action", "target"]).$narrowType<{ action: keyof typeof what }>()
+    .where("action", "in", ["merge", "act-close", "review-post"]).where((eb) => eb(kx.jsonText(db, "details", "$.state"), "=", "done"))
+    .orderBy("at", "desc"))) {
     const m = /^(.+)#(\d+)$/.exec(a.target ?? "");
     if (!m || isHiddenRepo(hidden, m[1]!)) continue;
     chunk.push({ at: a.at, action: a.action, repo: m[1]!, number: Number(m[2]) });
@@ -126,28 +138,32 @@ async function done(db: Db, hidden: string[]): Promise<HomeDone[]> {
 }
 
 async function running(db: Db, hidden: string[]): Promise<string> {
-  const p: Record<string, string> = {};
-  const hide = excludeHidden("repo", hidden, p);
-  const jobs = (await db.prepare(`SELECT COUNT(*) AS n FROM jobs WHERE state = 'running'${hide ? ` AND (repo IS NULL OR ${hide})` : ""}`).get(p) as { n: number }).n;
-  const bp: Record<string, string> = {};
-  const bhide = excludeHidden("repo", hidden, bp);
-  const batches = (await db.prepare(`SELECT id FROM merge_batches WHERE state = 'checking'${bhide ? ` AND ${bhide}` : ""} ORDER BY id`).all(bp) as { id: number }[]).map((b) => `#${b.id}`);
+  const hide = excludeHiddenExpr(db, "repo", hidden);
+  const jobs = (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "running")
+    .$if(!!hide, (q) => q.where((eb) => eb.or([eb("repo", "is", null), hide!])))))!.n;
+  const bhide = excludeHiddenExpr(db, "repo", hidden);
+  const batches = (await db.all(db.k.selectFrom("merge_batches").select("id").where("state", "=", "checking").$if(!!bhide, (q) => q.where(bhide!)).orderBy("id"))).map((b) => `#${b.id}`);
   const parts = [jobs ? `${jobs} job${jobs === 1 ? "" : "s"} running` : "", batches.length ? `batch${batches.length === 1 ? "" : "es"} ${batches.join(", ")} checking` : ""].filter(Boolean);
   return parts.length ? parts.join(", ") : "Nothing running";
 }
 
 async function spendToday(db: Db, hidden: string[]): Promise<number> {
-  const p: Record<string, string> = { day: new Date().toISOString().slice(0, 10) };
-  const hide = excludeHidden("repo", hidden, p);
-  return (await db.prepare(`SELECT COALESCE(SUM(cost_usd), 0) AS s FROM token_usage WHERE substr(COALESCE(ended_at, started_at), 1, 10) = :day${hide ? ` AND (repo IS NULL OR ${hide})` : ""}`).get(p) as { s: number }).s;
+  const day = new Date().toISOString().slice(0, 10);
+  const hide = excludeHiddenExpr(db, "repo", hidden);
+  return (await db.get(db.k.selectFrom("token_usage").select((eb) => eb.fn.coalesce(eb.fn.sum<number>("cost_usd"), eb.lit(0)).as("s"))
+    .where((eb) => eb(eb.fn<string>("substr", [eb.fn.coalesce("ended_at", "started_at"), eb.lit(1), eb.lit(10)]), "=", day))
+    .$if(!!hide, (q) => q.where((eb) => eb.or([eb("repo", "is", null), hide!])))))!.s;
 }
 
 /** Share of the PRs merged since `since` that AutoCraft merged itself or carried in a merged batch. */
 async function byAutoCraftPct(db: Db, hidden: string[], since: string): Promise<number> {
-  const p: Record<string, string> = { since };
-  const hide = excludeHidden("i.repo", hidden, p);
-  const r = await db.prepare(`SELECT COUNT(*) AS n, SUM(EXISTS (SELECT 1 FROM main.merges m WHERE m.repo = i.repo AND m.number = i.number AND m.outcome = 'merged')) AS ours
-    FROM items i WHERE i.kind = 'pr' AND i.merged_at >= :since${hide ? ` AND ${hide}` : ""}`).get(p) as { n: number; ours: number | null };
+  const hide = excludeHiddenExpr(db, "i.repo", hidden);
+  const r = (await db.get(db.k.selectFrom("items as i")
+    .select((eb) => [
+      eb.fn.countAll<number>().as("n"),
+      eb.fn.sum<number | null>(eb.case().when(eb.exists(eb.selectFrom("main.merges as m").select(eb.lit(1).as("one")).whereRef("m.repo", "=", "i.repo").whereRef("m.number", "=", "i.number").where("m.outcome", "=", "merged"))).then(eb.lit(1)).else(eb.lit(0)).end()).as("ours"),
+    ])
+    .where("i.kind", "=", "pr").where("i.merged_at", ">=", since).$if(!!hide, (q) => q.where(hide!))))!;
   return r.n ? Math.round(((r.ours ?? 0) / r.n) * 100) : 0;
 }
 
