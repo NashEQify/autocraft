@@ -59,7 +59,7 @@ async function serve(): Promise<void> {
   // A failure to listen (port in use) must not stop the pipeline; workers just cannot connect.
   // The session key signs the dashboard's requests for the runner's files (build artifacts, Claude accounts).
   let internalKey: string | null = null;
-  try { internalKey = readSecrets(envVar("SECRETS_FILE")).sessionKey; } catch (e) { console.error(`runner: dashboard requests are refused: ${(e as Error).message}`); }
+  try { internalKey = readSecrets(envVar("SECRETS_FILE")).sessionKey; } catch { /* logged at the first dashboard request, when a split install makes it matter */ }
   const workers = await startWorkerServer({ db, internalKey, log: (l) => console.log(l) }).then(
     (w) => (console.log(`runner: worker API on ${w.url}`), w),
     (e: Error) => (console.error(`runner: worker API not started: ${e.message}`), null),

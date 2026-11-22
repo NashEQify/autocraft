@@ -29,9 +29,14 @@ async function bodyOf(req: IncomingMessage): Promise<string | null> {
   return Buffer.concat(parts).toString("utf8");
 }
 
+let refusalLogged = false;
+
 /** Handles one /internal/ request; `key` is the runner's session_key, null when it has none. */
 export async function handleInternal(db: Db, key: string | null, req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
-  if (!key) return send(res, 503, { error: "the runner has no secrets file, so it takes no dashboard requests" });
+  if (!key) {
+    if (!refusalLogged) { refusalLogged = true; console.error("runner: dashboard requests are refused: the runner has no session_key"); }
+    return send(res, 503, { error: "the runner has no secrets file, so it takes no dashboard requests" });
+  }
   const method = req.method ?? "GET";
   const body = await bodyOf(req);
   if (body === null) return send(res, 413, { error: "request too large" });
