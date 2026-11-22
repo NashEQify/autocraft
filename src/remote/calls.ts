@@ -22,7 +22,7 @@ import { ACCEPTED_PROTOCOLS, CLAIM_ID_TTL_S, HEARTBEAT_S, PREPARE_MAX_S, ROUTES,
 import { claimRepos, claimReposOf, reposOf, REPOS_KEY } from "./my-repos.ts";
 import { SKIP_TASKS_KEY, skipsOf, taskOfStep, userSkips } from "./my-tasks.ts";
 import { itemFilter, itemFilterOf, itemsFit, TASK_ITEMS_KEY, taskItemsOf, type ItemFilter } from "./task-items.ts";
-import { INTERACTIVE_PROMPTS, interactive, userInteractiveSlots } from "./interactive-slots.ts";
+import { INTERACTIVE_HELPER, INTERACTIVE_PROMPTS, interactive, userInteractiveSlots } from "./interactive-slots.ts";
 import { MAX_CALLS_KEY, MAX_CALLS_MAX, maxCallsOf, userMaxCalls } from "./max-calls.ts";
 import { claimClass, gating } from "./claim-class.ts";
 import { holdMs, Ticket, type ClaimTry, type ClaimWaits, type EmptyReply } from "./claim-wait.ts";
@@ -66,6 +66,8 @@ export const CALLER_GONE_MS = scaled(5 * 60_000);
 export const CLAIM_RETRY_S = scaledS(15);
 /** The oldest helper version that may run a lease. */
 export const REQUIRED_HELPER = "1.2.0";
+/** Where interactive calls go (claimOrder): only to the interactive lane, to no claim (the claim's pipeline slots), or, for a helper older than INTERACTIVE_HELPER that has no such lane, to any claim. */
+type InteractiveMode = "lane" | "off" | "legacy";
 /** Where a claim's bound calls go (claimOrder). */
 type BoundCalls = "only" | "with" | "without";
 /** A call this login released is not offered to it again for this long (its helper could not run it). */
@@ -734,9 +736,9 @@ const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderRe
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
-async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with", interactiveLane = false): Promise<Cand[]> {
+async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with", lane: InteractiveMode = "off"): Promise<Cand[]> {
   const all = await claimOrderAll(db, caller, tiers, repos, sessionIds, nowMs, fastLane, reads, bound);
-  return all.filter((r) => interactive(r) === interactiveLane);
+  return lane === "legacy" ? all : all.filter((r) => interactive(r) === (lane === "lane"));
 }
 async function claimOrderAll(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repos: ReadonlySet<string> | null, sessionIds: readonly number[], nowMs: number, fastLane = false, reads?: OrderReads, bound: BoundCalls = "with"): Promise<Cand[]> {
   const { q, manual, skip, items } = reads ?? await orderReads(db, caller.login, nowMs);
@@ -873,7 +875,7 @@ export function claimCall(db: Db, caller: Caller, claim: Claim, canWrite: (repo:
   const ms = hold && claim.protocol >= 4 ? holdMs(claim.wait) : 0;
   const ticket = hold && ms > 0 ? new Ticket(hold.signal) : undefined;
   // An own-lane claim's reply says the lane was honoured: a server without it ignores the field and would offer any call.
-  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o).then((r): ClaimReply => (claim.ownLane ? { ...r, ownLane: true } : r));
+  const reply = claimNew(db, caller, claim, canWrite, nowMs, hold && ticket ? { ...hold, ms, ticket } : undefined, o).then(async (r): Promise<ClaimReply> => (claim.interactiveLane ? { ...r, interactiveSlots: await userInteractiveSlots(db, caller.login, caller.role) } : claim.ownLane ? { ...r, ownLane: true } : r));
   claimReplies.set(key, { at: nowMs, reply, ticket });
   reply.catch(() => { if (claimReplies.get(key)?.reply === reply) claimReplies.delete(key); });
   // Every request for a held claim left before its reply: a retry with the same id claims afresh. A lease already given stays
@@ -989,6 +991,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     dropQueueCache(db);
   }
   const fast = claim.fastLane === true, own = claim.ownLane === true, lane = claim.interactiveLane === true;
+  const mode: InteractiveMode = lane ? "lane" : olderVersion(claim.helperVersion, INTERACTIVE_HELPER) ? "legacy" : "off";
   const bound: BoundCalls = own ? "only" : claim.withOwnLane === true ? "without" : "with";
   // What the latest full try took, for a quick try's look at the queue.
   let tiers = new Set<Tier>(), repos: ReadonlySet<string> | null = null;
@@ -996,7 +999,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   let last: { at: number; reserve: Reserve } | null = null;
   const attempt: ClaimTry = async (now, { quick, live }) => {
     // A quick try with nothing to take changes nothing; the full tries, at least every RETRY_MS, check the credential as well.
-    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, undefined, bound, lane)).length) return null;
+    if (quick && !(await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, undefined, bound, mode)).length) return null;
     const x = (now === nowMs && pending ? await pending : null) ?? await tryReads(db, caller, claim.repos, now);
     pending = null;
     last = { at: now, reserve: x.reserve };
@@ -1015,7 +1018,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
     if (lane && !slots) return { lease: null, retryAfter: CLAIM_RETRY_S, reason: "your Interactive slots are 0 (Connect page, My settings)", reserve: x.reserve };
     const full = !lane && max !== null && x.leased >= max;
     let limited = full && !own;
-    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order, bound, lane)) {
+    for (const r of await claimOrder(db, caller, tiers, repos, claim.sessions ?? [], now, fast, x.order, bound, mode)) {
       // Only follow-ups of the helper's own sessions carry a parent here (claimOrder). The own lane's calls count toward no
       // calls at once: it takes them at the limit too, with no limit of its own. An older helper runs them in a slot, as any call.
       if (full && r.parent_id === null && !own) continue;

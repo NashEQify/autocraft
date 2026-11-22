@@ -9,6 +9,8 @@ export const INTERACTIVE_SLOTS_KEY = "interactive_slots";
 export const INTERACTIVE_SLOTS_MAX = 4;
 /** Prompt id prefixes of calls a person waits for; each is withdrawn after a few seconds without a taker, so it takes only a free interactive slot. */
 export const INTERACTIVE_PROMPTS: readonly string[] = ["discord."];
+/** The first helper version that runs the interactive lane; older ones are offered interactive calls in their ordinary claims. */
+export const INTERACTIVE_HELPER = "1.4.0";
 export const interactive = (r: { prompt_id: string }): boolean => INTERACTIVE_PROMPTS.some((p) => r.prompt_id.startsWith(p));
 
 /** The slots of a stored value (undefined: no row): the role's default, 1 for an operator and 0 for others. */

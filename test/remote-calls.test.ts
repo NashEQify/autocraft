@@ -389,6 +389,10 @@ describe("user-local remote calls", async () => {
     assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease, null, "one interactive slot, held");
     await userSettings.setSettings(db, req("opera", "operator", { interactiveSlots: 2 }));
     assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease?.id, next, "a second slot takes the next one");
+    await userSettings.setSettings(db, req("opera", "operator", { maxCalls: null }));
+    await db.run(db.k.updateTable("remote_calls").set({ state: "failed" }).where("state", "=", "queued"));
+    const old = await q("discord.search");
+    assert.equal((await claimCall(db, op, both({ helperVersion: "1.3.9" }), canWrite)).lease?.id, old, "a helper older than the lane is offered it in an ordinary claim");
     const other = await q("lint.reference.haiku");
     assert.equal((await claimCall(db, op, both({ interactiveLane: true }), canWrite)).lease, null, "the interactive slot never takes a pipeline call");
     assert.ok(other);
