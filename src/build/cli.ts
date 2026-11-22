@@ -249,7 +249,7 @@ async function tasks(args: string[]): Promise<void> {
 
 /**
  * A smoke-test task: system facts with no network, then the cargo version. `--build` instead fetches the crates and builds
- * the workspace's tests (`cargo test --no-run`) in the rust-stable toolchain, as the pipeline's builds do.
+ * the workspace's tests (`cargo test --no-run`) in the rust-stable toolchain with the CI gate of that commit, as the pipeline's builds do.
  */
 async function enqueueTest(db: Db, args: string[]): Promise<void> {
   const { opt } = options(args, ["build"]);
@@ -263,7 +263,8 @@ async function enqueueTest(db: Db, args: string[]): Promise<void> {
   if (vis?.toLowerCase() !== "public") die(`${repo} is not public; workers fetch source anonymously`);
   const build = opt.has("build");
   const id = await run(async () => await createTask(db, {
-    step: "smoke-test", repo, headSha: sha, requires: { os: os as "linux" | "macos" | "windows", ...(build ? { toolchains: ["rust-stable"] } : {}) },
+    // A build reads the CI gate at the commit itself, so it gets the gate's env and compile cache as CI's run of that commit.
+    step: "smoke-test", repo, headSha: sha, ...(build ? { baseSha: sha } : {}), requires: { os: os as "linux" | "macos" | "windows", ...(build ? { toolchains: ["rust-stable"] } : {}) },
     plan: build
       ? [
           { name: "fetch deps", cmd: ["sh", "-c", FETCH_SCRIPT], network: "fetch", timeoutSec: 900 },
