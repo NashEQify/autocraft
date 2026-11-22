@@ -1,6 +1,6 @@
 // The Now page on fake data: a failing sync, a red main, a paused account, and one feed of running and finished work that grows over time.
 import type { Api } from "../client";
-import type { LiveBoard, Now, NowEntry, NowFeed } from "../types";
+import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveWorker, LiveWorkerCall, Now, NowEntry, NowFeed } from "../types";
 import { NOW } from "./fixtures";
 import { ackedDeadlines, mockSwitch } from "./pipelineMock";
 import { nowMs } from "../../lib/format";
@@ -134,5 +134,44 @@ function liveBoard(now: number): LiveBoard {
         ops: [{ kind: "model", label: "claude-haiku", detail: "Merge? on main", start: t(9), end: t(7.5), estimate: null }] },
       { key: "job:7", title: "Merge pull requests", state: "failed", start: t(6), end: t(5), line: "Refused: required check has not finished", item: it("filmcraft", 1161, "Color grading: keep state after copy and paste"), itemCount: 1, repo: "filmcraft", detail: "/pipeline/7", estimate: null, ops: [] },
     ],
+    workers: workers(t, est, it),
   };
+}
+
+/** The worker view's mock: three people's Task Runners, two box accounts and Jev, with the last hour's calls. */
+function workers(
+  t: (min: number) => string,
+  est: (median: number, p90: number, samples?: number) => LiveEstimate,
+  it: (repo: string, number: number, title: string, kind?: "pr" | "issue") => ItemRef & ItemShown,
+): LiveWorker[] {
+  let id = 900;
+  const call = (title: string, model: string, item: ItemRef & ItemShown | null, start: number, end: number | null, more: Partial<LiveWorkerCall> = {}): LiveWorkerCall =>
+    ({ id: id++, title, model, item, itemCount: 1, start: t(start), end: end === null ? null : t(end), tokens: end === null ? null : Math.round((start - end) * 41_000), estimate: end === null ? est(6, 11) : null, ...more });
+  const crop = it("photocraft", 9981, "Fix crop handles on rotated layers");
+  const link = it("wordcraft", 2231, "Keep the hyperlink run when exporting the last paragraph");
+  const snap = it("vectorcraft", 1388, "Snap guides ignore locked layers");
+  const spill = it("gridcraft", 977, "Range spill: keep neighbouring cells when a formula grows", "issue");
+  const grade = it("filmcraft", 1161, "Color grading: keep state after copy and paste");
+  const spell = it("designcraft", 1484, "Add Hungarian spellchecking and nonstandard hyphenation");
+  return [
+    { key: "runner:11", kind: "runner", name: "studio-mac", login: "mira-k", harness: "claude", status: "online", note: null, busy: 2, slots: 2, calls: [
+      call("Review pull requests", "claude-opus", crop, 52, 41), call("Fix issues", "claude-opus", spill, 40, 19), call("Review pull requests", "claude-opus", link, 18, 10),
+      call("Review pull requests", "claude-opus", crop, 8.5, null), call("Fix-up pull requests", "claude-sonnet", snap, 4, null),
+    ] },
+    { key: "runner:12", kind: "runner", name: "workstation", login: "jonas-p", harness: "codex", status: "online", note: null, busy: 1, slots: 3, calls: [
+      call("Fix issues", "gpt-5", grade, 47, 22), call("Ask Merge? decisions", "gpt-5-mini", spell, 21, 18.5), call("Fix issues", "gpt-5", grade, 14, null, { estimate: est(20, 31) }),
+    ] },
+    { key: "runner:13", kind: "runner", name: "old-laptop", login: "tsela", harness: "claude", status: "held", note: "5-hour use at the reserve the user keeps (80 %)", busy: 0, slots: 1, calls: [
+      call("Review pull requests", "claude-sonnet", snap, 58, 45), call("Review pull requests", "claude-sonnet", link, 44, 33, { failed: true }),
+    ] },
+    { key: "account:a", kind: "account", name: "main", login: null, harness: "claude", status: "online", note: null, busy: 1, slots: 3, calls: [
+      call("Classify new items", "claude-haiku", spill, 35, 33, { itemCount: 4 }), call("Classify new items", "claude-haiku", spill, 12, 11, { itemCount: 6 }), call("Fix-up pull requests", "claude-sonnet", snap, 2.5, null),
+    ] },
+    { key: "account:b", kind: "account", name: "Team B", login: null, harness: "claude", status: "held", note: "5-hour use 91 % (pauses at 90 %)", busy: 0, slots: 2, calls: [
+      call("Fix-up pull requests", "claude-sonnet", snap, 30, 17),
+    ] },
+    { key: "jev", kind: "jev", name: "Jev", login: null, harness: null, status: "online", note: null, busy: 0, slots: null, calls: [
+      call("Classify new items", "Jev", spill, 25, 24.2, { itemCount: 12 }), call("Classify new items", "Jev", spell, 6, 5.4, { itemCount: 9 }),
+    ] },
+  ];
 }

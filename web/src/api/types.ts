@@ -2418,8 +2418,49 @@ export interface LiveLane {
   estimate: LiveEstimate | null;
   ops: LiveOp[];
 }
-/** `GET /api/live`: running and queued work and what ended in the last minutes, for the Live timeline on Home. */
-export interface LiveBoard { lanes: LiveLane[] }
+/** One model call on a worker's row of the Live board. */
+export interface LiveWorkerCall {
+  /** The agent run; its page is `/agents/<id>`. */
+  id: number;
+  /** The step's title, e.g. "Review pull requests". */
+  title: string;
+  model: string;
+  item: (ItemRef & ItemShown) | null;
+  itemCount: number;
+  start: string;
+  /** Null while it runs. */
+  end: string | null;
+  failed?: boolean;
+  /** Input, output and cache tokens of a finished call; null while it runs or when not recorded. */
+  tokens: number | null;
+  /** For a running call: how long the same step and model took before. */
+  estimate: LiveEstimate | null;
+}
+/**
+ * Who does the model calls, one row each on the Live board's worker view: a person's Task Runner (with their own tokens), one of the
+ * box's Claude accounts, or Jev. Runners go to operators and maintainers, box accounts to operators only, as the call pages show them.
+ */
+export interface LiveWorker {
+  /** "runner:<token id>", "login:<login>" (a runner no longer known), "account:<id>" or "jev". */
+  key: string;
+  kind: "runner" | "account" | "jev";
+  /** The runner's label or machine name, the account's label, or "Jev". */
+  name: string;
+  /** A runner's owner. */
+  login: string | null;
+  /** A runner's harness ("claude", "codex"). */
+  harness: string | null;
+  /** online: takes calls; held: online but not taking any (`note` says why); offline: no fresh status, or a disabled account. */
+  status: "online" | "held" | "offline";
+  note: string | null;
+  /** Calls running now, against `slots` (null when not known). */
+  busy: number;
+  slots: number | null;
+  /** The calls that ran in the board's last hour, oldest first. */
+  calls: LiveWorkerCall[];
+}
+/** `GET /api/live`: running and queued work and what ended in the last minutes, for the Live timeline on Home. `workers` only for staff. */
+export interface LiveBoard { lanes: LiveLane[]; workers?: LiveWorker[] }
 
 export type Now = { health: NowHealth; /** Titles of housekeeping jobs that are running, shown as one line. */ alsoRunning: string[] } & NowFeed;
 
