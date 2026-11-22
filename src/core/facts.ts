@@ -11,6 +11,7 @@ import { notOwnIntegrationExpr, groupHeldExpr, backlogHeldExpr } from "../dupes/
 import { conflictAskRetryAtOf, conflictBucketOf } from "../fixup/conflict-state.ts";
 import { pushApprovalOf } from "../fixup/approval.ts";
 import { fixIssueApprovalOf } from "../implement/approval.ts";
+import { featureOn } from "../build/features.ts";
 import { ENDED_STATES, type ImplementationState } from "../implement/types.ts";
 import { authorWritesOf } from "../fixup/author-permission.ts";
 import { longLivedAll, pushable, sameRepo, type LongLived } from "../fixup/pushable.ts";
@@ -109,7 +110,10 @@ const selectRows = (db: Db) => db.k.selectFrom("items as i")
   .$narrowType<{ state: "OPEN" | "MERGED" | "CLOSED" }>()
   .where("i.kind", "=", "pr")
   .where((eb) => eb.or([eb("i.state", "=", "OPEN"), eb.and([eb("i.state", "=", "MERGED"), eb("l.verdict", "in", ["take", "take-fix"])]),
-    eb.exists(eb.selectFrom("merges as mm").select(eb.lit(1).as("one")).whereRef("mm.repo", "=", "i.repo").whereRef("mm.number", "=", "i.number").where("mm.outcome", "=", "merged"))]));
+    eb.exists(eb.selectFrom("merges as mm").select(eb.lit(1).as("one")).whereRef("mm.repo", "=", "i.repo").whereRef("mm.number", "=", "i.number").where("mm.outcome", "=", "merged")),
+    // A PR of a live implementation, merged or closed: its attempt still has to end with it (decidePr).
+    eb.exists(eb.selectFrom("main.implementations as im").select(eb.lit(1).as("one")).whereRef("im.repo", "=", "i.repo").whereRef("im.pr_number", "=", "i.number")
+      .where("im.state", "not in", [...ENDED_STATES]))]));
 
 /** The statements named by the given stored `conflicts` values (JSON [{id, reason}]), one entry per id with the first reason; unknown ids and unreadable values count for nothing. */
 async function statementConflicts(find: { get(id: number): Promise<unknown> }, stored: unknown[]): Promise<PrFacts["statementConflicts"]> {
@@ -262,7 +266,8 @@ export async function loadPrFacts(db: Db, opts: LoadOptions = {}): Promise<PrFac
       const t = await repoTables(), row = t.repos.get(repo);
       m = {
         f: { mergeApproved: !!await mergeApprovalOf(db, repo), pushApproved: await pushApprovalOf(db, repo) !== null, commentApproved: await commentApprovalOf(db, repo) !== null, ciApproved: await ciApprovalOf(db, repo) !== null,
-          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo), fixIssueApproved: await fixIssueApprovalOf(db, repo) !== null },
+          noCi: t.noCi.has(repo), mainRed: mainRed.has(repo), fixIssueApproved: await fixIssueApprovalOf(db, repo) !== null,
+          implementOn: await featureOn(db, "implement", repo) },
         pub: row?.visibility === "public",
         longLived: t.longLived(repo),
         defaultBranch: row?.default_branch ?? null,

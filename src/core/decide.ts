@@ -160,6 +160,9 @@ const declinedBy = (f: PrFacts): boolean => f.decision.answer !== null && f.deci
 export const ownImplementation = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
   f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
 
+/** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. */
+export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
+
 /** Red CI at the PR's current head: at the reviewed head, our own push that broke it, or the review gate's red CI at a new head. */
 const redAtHead = (f: PrFacts): boolean =>
   (!!f.review && f.review.head === f.head && f.ci === "failure") || !!f.brokeByUs || !!f.gateRed || (f.reviewHold?.kind === "ci" && f.reviewHold.red === true);
@@ -400,8 +403,14 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // Actions that do not depend on the PR's place in the queue.
   const extra: Action[] = [];
   const im = ownImplementation(f);
-  // An implementation whose PR merged or closed ends with it: its revise work records that and ends the workspace.
-  if (im && f.ghState !== "OPEN") extra.push(act("implement", null, { bucket: "revise", issue: im.issue }));
+  // The session's next step on the PR: the revision due at the head, a revision that has started (also when its issue was
+  // closed or held, where the issue plans nothing), or, once the PR merged or closed, the end of the attempt (the revise
+  // work records it and ends the workspace). All of them run as implement jobs, so while the repo's Implement feature is
+  // off the PR plans none and waits on the switch.
+  const implDue = !!im && (!open || im.state === "revising" || !!reviseOf(f));
+  const implOff = implDue && !f.repoFacts.implementOn ? person(implementOffWait(f.repo)) : null;
+  const implementAct = implDue && !implOff ? act("implement", open ? f.head : null, { bucket: "revise", issue: im!.issue }) : null;
+  if (implementAct && !open) extra.push(implementAct);
   const pm = f.postmerge;
   if (pm && pm.mergedAt >= pm.since) {
     const retryAfter = new Date(f.now - RETRY_AFTER_MS).toISOString();
@@ -446,9 +455,10 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   else if (!reviewable) state = "scope";
   else state = r ? "review-stale" : "not-reviewed";
 
-  if (!open && !inQueue) return plan("closed", { actions: extra });
+  const offWait = implOff && !extra.length ? { wait: implOff.text, waitKind: implOff.kind } : {};
+  if (!open && !inQueue) return plan("closed", { actions: extra, ...offWait });
   // A merged PR has only its post-merge review to do.
-  if (merged) return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, eligible: eligible(f, e) } : {}), actions: extra });
+  if (merged) return plan(state, { ...(e ? { path: e.path, reasons: e.reasons, note: e.note, eligible: eligible(f, e) } : {}), actions: extra, ...offWait });
 
   // Review: no review at the head, or one made stale (a PR at its re-review cap waits).
   // A head whose earlier review carries over our checked fix-up is carried, not reviewed.
@@ -493,7 +503,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   }
 
   // An implementation PR goes back to its session for the review's fixes and red CI, after a conflict is merged away.
-  if (reviseOf(f)) actions.push(act("implement", f.head, { bucket: "revise", issue: im!.issue }));
+  if (implementAct && open) actions.push(implementAct);
 
   const cf = cifixOf(f);
   if (cf && cf !== "other") {
@@ -565,9 +575,9 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
     : hq.answer === "close" ? system("the close answer to be carried out")
     : f.operator?.hold ? null : person("a person: the Hold question was settled but nothing is pending");
   // An implementation PR whose session revises it, or whose revision is stuck: that is what it waits on, whatever the queue state.
-  const implWait: Wait | null = im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
+  const implWait: Wait | null = implOff ?? (im?.state === "revising" ? system(`the implementation session's revision for #${im.issue}`)
     : im?.state === "stuck" ? person(`a decision on the stuck implementation of #${im.issue}`)
-    : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null;
+    : im && open && !!f.head && im.revisedHeads.includes(f.head) && redAtHead(f) ? person("a person: CI is red at the head and has nothing for the implementation session to fix") : null);
   const wait: Wait | null = main ? null : implWait ?? (e ? (f.mergeHeld && e.state !== "merged" ? person("merge held by an operator") : stuckWait(f) ?? (e.state === "needs-fix-up" ? fixupWait(f, fx, actions) : queueWait(e.state))) : null);
   // A review hold names what the pre-approved merge itself waits for, so it comes before the generic pre-approval wait.
   // A PR the review never takes up still names what it waits on: its scope answer, or a label that gets no review.

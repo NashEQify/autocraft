@@ -40,7 +40,7 @@ function randomPr(x: Rnd): PrFacts {
     needsDecisionFlag: x.bool(0.1), scopeAnswer: x.pick([null, null, null, "take", "small-extra", "close"]),
     inScope: x.bool(0.9), integration: x.bool(0.05), batchPr: x.bool(0.05), heldBacklog: x.bool(0.05), heldDuplicate: x.bool(0.05), mergeHeld: x.bool(0.1),
     authorIsPipeline: x.bool(0.1), pipelineOn: x.bool(0.9),
-    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1) },
+    repoFacts: { mergeApproved: x.bool(0.9), pushApproved: x.bool(0.8), commentApproved: x.bool(0.8), ciApproved: x.bool(0.8), noCi: x.bool(0.15), mainRed: x.bool(0.1), implementOn: x.bool(0.8) },
     ci: x.pick(["success", "success", "success", "failure", "pending", "none", "unknown"]),
     mergeable: x.pick(["MERGEABLE", "MERGEABLE", "MERGEABLE", "CONFLICTING", "UNKNOWN"]),
     checksHere: x.bool(0.9), checksOpen: x.bool(0.9), pushable: x.bool(0.7), inActiveBatch: x.bool(0.1), mainFix: x.bool(0.05), baseOffDefault: x.bool(0.05), stackedOn: x.bool(0.05) ? 1 : null,
