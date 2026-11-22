@@ -65,7 +65,8 @@ test("a leader that stops renewing is replaced once its lease expires; its write
     const db = await t.open();
     let standby = false;
     let b: Lease | null = null;
-    const bWon = elect(db, "runner", { ...FAST, url: t.target, holder: "b", replicas: 2, signal: stop.signal, onStandby: () => (standby = true) }).then((l) => (b = l));
+    // The fence is this process's, so B writes no status while the test swaps it.
+    const bWon = elect(db, "runner", { ...FAST, beatMs: 600_000, url: t.target, holder: "b", replicas: 2, signal: stop.signal, onStandby: () => (standby = true) }).then((l) => (b = l));
     await sleep(1_000);
     assert.ok(standby && !b, "the second copy waits while the first renews");
 
@@ -73,6 +74,7 @@ test("a leader that stops renewing is replaced once its lease expires; its write
     await Promise.race([bWon, timeout(5_000)]);
     const leaseB = b as Lease | null;
     assert.ok(leaseB && leaseB.epoch > epochA, "the standby leads under a later epoch");
+    await sleep(300); // B's first status write, which is not awaited
     setFence({ role: "runner", epoch: epochA });
     await assert.rejects(db.prepare("INSERT INTO settings (key, value) VALUES ('x', 'a')").run(), (e) => isFenced(e));
     setFence({ role: "runner", epoch: leaseB.epoch });

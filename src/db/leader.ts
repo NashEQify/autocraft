@@ -180,6 +180,8 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     void c.end().catch(() => undefined);
   };
   let epoch = 0;
+  /** performance.now() when the winning statement was sent: the lease runs LEASE_MS from no earlier than that. */
+  let wonAt = 0;
   for (;;) {
     if (o.signal?.aborted) {
       await conn?.client.end().catch(() => undefined);
@@ -190,13 +192,17 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
       conn ??= await open();
       const [cur] = await conn.run(k.selectFrom(leases).select((eb) => [eb(eb.ref("expires_ms"), "<", serverMs()).as("free")]).where("role", "=", role));
       if (!cur || cur.free) {
-        // The epoch moves in a write transaction, so every write of an earlier holder committed before it or is fenced.
-        const won = await db.get(k.insertInto(leases).values({ role, holder, epoch: 1, expires_ms: serverMs(leaseMs) })
-          .onConflict((oc) => oc.column("role").doUpdateSet((eb) => ({ holder, epoch: sql<number>`${eb.ref(`${leases}.epoch`)} + 1`, expires_ms: serverMs(leaseMs) }))
+        // The epoch moves in a write transaction, so every write of an earlier holder committed before it or is fenced. It
+        // is at least the server's clock in ms, so it stays above every earlier epoch even when the row was lost or
+        // replaced (a database copy) or an earlier version counted epochs elsewhere.
+        const sent = performance.now();
+        const won = await db.get(k.insertInto(leases).values({ role, holder, epoch: serverMs(), expires_ms: serverMs(leaseMs) })
+          .onConflict((oc) => oc.column("role").doUpdateSet((eb) => ({ holder, epoch: sql<number>`GREATEST(${eb.ref(`${leases}.epoch`)} + 1, ${serverMs()})`, expires_ms: serverMs(leaseMs) }))
             .where(`${leases}.expires_ms`, "<", serverMs()))
           .returning("epoch"));
         if (won) {
           epoch = Number(won.epoch);
+          wonAt = sent;
           break;
         }
       }
@@ -226,8 +232,11 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   let current: LeaseConn | null = conn;
   const ac = new AbortController();
   let released = false;
-  /** Send time of the last renewal that succeeded; the lease was taken just now. */
-  let lastOk = Date.now();
+  /**
+   * performance.now() when the last successful renewal (or the takeover) was sent: monotonic, and it still counts
+   * event-loop stalls. A late answer cannot stretch the watchdog past the lease, which runs from no earlier than that.
+   */
+  let lastOk = wonAt;
   let check: NodeJS.Timeout | undefined, watch: NodeJS.Timeout | undefined, beat: NodeJS.Timeout | undefined;
   const stopTimers = () => { clearInterval(check); clearInterval(watch); clearInterval(beat); };
   const drop = (c: LeaseConn | null): void => {
@@ -246,14 +255,6 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   const renewal = () => k.updateTable(leases).set({ expires_ms: serverMs(leaseMs) })
     .where("role", "=", role).where("holder", "=", holder).where("epoch", "=", epoch).returning("epoch");
 
-  try {
-    await db.prepare("DELETE FROM settings WHERE key = ?").run(standbyRow);
-    await putSetting(db, leaderKey(role), status(since));
-  } catch (e) {
-    log(`leader: status of the ${role} not written: ${(e as Error).message}`);
-  }
-  log(`leader: this copy leads the ${role} (epoch ${epoch})`);
-
   onLost = (c, why) => {
     if (c !== current?.client) return;
     log(`leader: the ${role} lease connection failed (${why}); renewing on a new one`);
@@ -265,7 +266,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   check = setInterval(() => {
     if (renewing || released || ac.signal.aborted) return;
     renewing = true;
-    const sent = Date.now();
+    const sent = performance.now();
     void (async () => {
       let c: LeaseConn | null = current;
       try {
@@ -281,9 +282,9 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
       }
     })();
   }, checkMs);
-  // Wall-clock time: after a stall of the event loop this fires late and sees the whole gap.
+  // After a stall of the event loop this fires late and sees the whole gap.
   watch = setInterval(() => {
-    const gap = Date.now() - lastOk;
+    const gap = performance.now() - lastOk;
     if (gap <= lossMs || !watchdog) return;
     lose(`no successful renewal of the lease for ${Math.round(gap / 1000)} s`);
   }, Math.min(250, checkMs));
@@ -301,6 +302,16 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   check.unref();
   watch.unref();
   beat.unref();
+
+  // After the timers, and not awaited: a slow write must not hold up the renewals.
+  void (async () => {
+    await db.prepare("DELETE FROM settings WHERE key = ?").run(standbyRow);
+    await putSetting(db, leaderKey(role), status(since));
+  })().catch((e: unknown) => {
+    if (isFenced(e)) lose("another copy took over");
+    else log(`leader: status of the ${role} not written: ${(e as Error).message}`);
+  });
+  log(`leader: this copy leads the ${role} (epoch ${epoch})`);
 
   return {
     role, epoch, holder, lost: ac.signal,
