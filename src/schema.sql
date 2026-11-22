@@ -534,6 +534,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   resumes INTEGER NOT NULL DEFAULT 0  -- times a runner stop or restart put the running job back in the queue (src/runner/resuming.ts)
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
+-- The end of each job's log, copied by the runner from the job's log file in chunks of whole lines (src/runner/job-log.ts),
+-- for a dashboard that does not share the runner's disk. Only the last 256 KiB of a job are kept; pruneJobs deletes them with the job.
+CREATE TABLE IF NOT EXISTS job_log_chunks (
+  job_id INTEGER NOT NULL,
+  seq INTEGER NOT NULL,
+  start INTEGER NOT NULL,             -- byte offset of the chunk in the log file; the first kept chunk's > 0: earlier text was dropped
+  chunk TEXT NOT NULL,
+  PRIMARY KEY (job_id, seq)
+) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS jobs_step ON jobs(step, id);
 CREATE INDEX IF NOT EXISTS jobs_step_started ON jobs(step, started_at);
 CREATE INDEX IF NOT EXISTS jobs_user_ended ON jobs(requested_by, ended_at);

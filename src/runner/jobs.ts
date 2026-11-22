@@ -168,6 +168,7 @@ export async function pruneJobs(db: Db, nowMs: number = Date.now()): Promise<num
         }
       }
       await db.run(db.k.deleteFrom("job_items").where("job_id", "=", r.id));
+      await db.run(db.k.deleteFrom("job_log_chunks").where("job_id", "=", r.id));
       await db.run(db.k.deleteFrom("jobs").where("id", "=", r.id));
       n++;
     }
@@ -183,16 +184,26 @@ import type { Db } from "../db/index.ts";
 import type { DB } from "../db/types.ts";
 import type { SelectQueryBuilder } from "kysely";
 import { cols, like } from "../db/kx.ts";
+import { storedLogTail } from "./job-log.ts";
 
 export const LOG_TAIL_BYTES = 48 * 1024;
 
-export function logTail(path: string | null, bytes = LOG_TAIL_BYTES): { log: string; logTruncated: boolean } {
-  if (!path) return { log: "", logTruncated: false };
+/** The end of a job's log: from its log file when this process can read it (it shares the runner's disk), else as the runner stored it. */
+export async function jobLogTail(db: Db, id: number, path: string | null, bytes = LOG_TAIL_BYTES): Promise<{ log: string; logTruncated: boolean }> {
+  const local = logTail(path, bytes);
+  if (local) return local;
+  const stored = await storedLogTail(db, id, bytes);
+  return stored ? { log: scrub(stored.log), logTruncated: stored.logTruncated } : { log: "", logTruncated: false };
+}
+
+/** The end of a log file; null when there is none to read here. */
+export function logTail(path: string | null, bytes = LOG_TAIL_BYTES): { log: string; logTruncated: boolean } | null {
+  if (!path) return null;
   let fd: number;
   try {
     fd = openSync(path, "r");
   } catch {
-    return { log: "", logTruncated: false };
+    return null;
   }
   try {
     const size = fstatSync(fd).size;
@@ -220,7 +231,7 @@ export async function jobDetail(db: Db, id: number, view: { hidden?: HiddenRepos
   const items = await mapSeq((await db.all(db.k.selectFrom("job_items").select(["repo", "number", "outcome", "ref"]).where("job_id", "=", id).orderBy("id")))
     .filter((i) => !isHiddenRepo(hidden, i.repo)), async (i) => ({ repo: i.repo, number: i.number, ...await shown(i.repo, i.number), outcome: i.outcome, decision: i.ref }));
   if (view.logs === false) return { ...(await toJobs(db, [r]))[0]!, items, log: null, logTruncated: false };
-  const tail = logTail(r.log_path);
+  const tail = await jobLogTail(db, id, r.log_path);
   return { ...(await toJobs(db, [r]))[0]!, items, ...tail, log: tail.log && hidden.length ? tail.log.split("\n").filter((l) => !l || blankIfHidden(l, hidden)).join("\n") : tail.log };
 }
 

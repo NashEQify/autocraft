@@ -4,6 +4,7 @@
 // stops jobs whose cancel was requested, runs the autopilot (queues jobs while the
 // pipeline switch is on) and puts jobs that a stop or an earlier runner left
 // unfinished back in the queue to resume (src/runner/resuming.ts).
+import { JobLogCopy } from "./job-log.ts";
 import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
@@ -79,7 +80,7 @@ export type RunnerOptions = {
   graceMs?: number;
 };
 
-type Running = { child: ChildProcess; termAt: number | null; exited: Promise<void>; startedAt: number; deadlineMin: number; logPath: string; /** When the job was told to finish its current item and stop. */ flaggedAt: number | null; noProgressMin: number; /** Why it was told to stop. */ stopMsg: string | null; /** Time in which a user-local call of the job waited for a helper, summed over the checks that saw one waiting. */ remoteWaitMs: number; remoteSeen: { at: number; queued: boolean } | null };
+type Running = { child: ChildProcess; termAt: number | null; exited: Promise<void>; startedAt: number; deadlineMin: number; logPath: string; logCopy: JobLogCopy; /** When the job was told to finish its current item and stop. */ flaggedAt: number | null; noProgressMin: number; /** Why it was told to stop. */ stopMsg: string | null; /** Time in which a user-local call of the job waited for a helper, summed over the checks that saw one waiting. */ remoteWaitMs: number; remoteSeen: { at: number; queued: boolean } | null };
 
 /** The error of a job the runner stopped for running past its step's limit. */
 export const deadlineError = (min: number): string => `stopped: ran past ${min} min`;
@@ -425,6 +426,7 @@ export class Runner {
       // Progress is a new line in the job's log (the job's own output: progress lines, check-tool notes, results); reading its mtime costs one stat.
       let lastLine = Math.max(r.startedAt, waiting ? nowMs : remote.lastLeaseAt ?? 0);
       try { lastLine = Math.max(lastLine, statSync(r.logPath).mtimeMs); } catch { /* no log yet */ }
+      await r.logCopy.flush().catch((e: Error) => this.o.log(`job ${id}: log not stored: ${e.message}`));
       const idle = r.flaggedAt === null && Date.now() - lastLine >= r.noProgressMin * 60_000;
       // Past its deadline a job is first asked to stop: the failure is recorded, which the job reads at its item boundaries (ctx.cancelled)
       // and finishes the writes of its current item. Only after the grace does the process get the signals a cancel gets.
@@ -525,6 +527,7 @@ export class Runner {
       : (await this.db.run(this.db.k.updateTable("jobs").set({ state: "running", started_at: now(), log_path: logPath }).where("id", "=", id).where("state", "=", "queued"))).changes);
     if (!claimed) return false;
     const fd = openSync(logPath, "a");
+    const logCopy = await JobLogCopy.open(this.db, id, logPath);
     let child: ChildProcess;
     try {
       child = spawn(process.execPath, [CLI, "runner", "exec", String(id)], {
@@ -542,6 +545,7 @@ export class Runner {
     const exited = new Promise<void>((resolve) => {
       child.on("close", (code, signal) => {
         void this.finish(id, code, signal, spawnError)
+          .then(() => logCopy.flush(true).catch((e: Error) => this.o.log(`job ${id}: log not stored: ${e.message}`)))
           .catch((e) => {
             this.unrecorded.set(id, { code, signal, spawnError });
             this.o.log(`job ${id}: end not recorded: ${(e as Error).message}`);
@@ -552,7 +556,7 @@ export class Runner {
           });
       });
     });
-    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
+    this.running.set(id, { child, termAt: null, exited, startedAt: Date.now(), deadlineMin: this.maxMin(stepName, await this.limitOf(id)), logPath, logCopy, flaggedAt: null, noProgressMin: this.noProgressMin(stepName), stopMsg: null, remoteWaitMs: 0, remoteSeen: null });
     return true;
   }
 

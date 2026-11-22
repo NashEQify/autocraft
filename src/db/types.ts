@@ -1051,6 +1051,13 @@ export interface JobItems {
   ref: string | null;
 }
 
+export interface JobLogChunks {
+  job_id: number;
+  seq: number;
+  start: number;
+  chunk: string;
+}
+
 export interface Jobs {
   id: Generated<number>;
   step: string;
@@ -2272,6 +2279,7 @@ export interface DB {
   item_stage: ItemStage;
   items: Items;
   job_items: JobItems;
+  job_log_chunks: JobLogChunks;
   jobs: Jobs;
   lane_next: LaneNext;
   liveness_items: LivenessItems;
@@ -2450,6 +2458,7 @@ export interface DB {
   "main.item_stage": ItemStage;
   "main.items": Items;
   "main.job_items": JobItems;
+  "main.job_log_chunks": JobLogChunks;
   "main.jobs": Jobs;
   "main.lane_next": LaneNext;
   "main.liveness_items": LivenessItems;
@@ -2632,6 +2641,7 @@ export const COLUMNS = {
   item_stage: ["repo", "number", "stage", "at", "reviewed"],
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "text_refs", "author_id"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
+  job_log_chunks: ["job_id", "seq", "start", "chunk"],
   jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "lease_skips", "lease_skip_keys"],
   lane_next: ["lane", "total", "items", "at"],
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],

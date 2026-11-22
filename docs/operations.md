@@ -523,7 +523,7 @@ It reads the same variables as the CLI (`AUTOCRAFT_DB` and the rest), plus:
 
 | Variable | Meaning |
 |---|---|
-| `AUTOCRAFT_RUNNER_LOGS` | Directory of the per-job log files. Default `~/.cache/autocraft-logs/jobs`. The dashboard reads each job's log from the path recorded in its row, so it must run as a user who can read this directory. |
+| `AUTOCRAFT_RUNNER_LOGS` | Directory of the per-job log files. Default `~/.cache/autocraft-logs/jobs`. The runner also copies the last 256 KiB of each job's log into the database (`job_log_chunks`, every 5 seconds while the job runs and once at its end). The dashboard reads a job's log from the path recorded in its row when it can, and otherwise from the database, so a dashboard on another disk shows logs up to 5 seconds behind. |
 | `AUTOCRAFT_RUNNER_JOBS` | Most jobs running at once. Default 32. A job whose step calls Claude also waits for a free account slot before it starts. Jobs of one step run together only for different repos, within the `step_parallel` setting (`autocraft-server pipeline parallel [N|none]`, default 1). |
 | `AUTOCRAFT_RUNNER_POLL_MS` | Poll interval. Default 2000. |
 | `AUTOCRAFT_CALL_IDLE_MIN` | Minutes a Claude call may produce no output (no assistant text, tool use, tool result or progress line) before its process group is stopped (SIGTERM, then SIGKILL after 10 s) and the call fails with `no output for <n> min; stopped`. Default 15. Time spent inside a pending build-tool call (it waits on a worker, up to 45 minutes in all) does not count. |
@@ -845,7 +845,7 @@ Every path is set by an environment variable. When a variable is unset, the code
 
 ### Logs
 
-The dashboard, the runner, sync and backup write to stdout and stderr. The runner also writes one file per job under `AUTOCRAFT_RUNNER_LOGS`.
+The dashboard, the runner, sync and backup write to stdout and stderr. The runner also writes one file per job under `AUTOCRAFT_RUNNER_LOGS`, and keeps the end of each in the database.
 
 ### Health endpoints
 
