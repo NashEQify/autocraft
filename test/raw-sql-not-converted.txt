@@ -86,25 +86,16 @@ src/dash/api/activity.ts
 
 
 
-src/dash/api/queue.ts
 
-src/dash/api/runners.ts
 
-src/dash/api/security-page.ts
 
-src/dash/api/shown.ts
 
-src/dash/api/similar.ts
 
-src/dash/api/stats.ts
 
-src/dash/api/stuck.ts
 
 src/dash/api/trace.ts
 
-src/dash/api/visible.ts
 
-src/dash/api/work.ts
 
 
 
