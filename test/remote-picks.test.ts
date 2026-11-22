@@ -10,7 +10,7 @@ import { handleMcp } from "../src/dash/mcp/index.ts";
 import * as userSettings from "../src/dash/api/user-settings.ts";
 import { createToken } from "../src/dash/mcp/tokens.ts";
 import type { Req, Role } from "../src/dash/types.ts";
-import { claimCall, dropQueueCache, enqueueCall, leaseTurnover, withdrawCall, type Caller } from "../src/remote/calls.ts";
+import { claimCall, dropQueueCache, enqueueCall, leasedBy, leaseTurnover, withdrawCall, type Caller } from "../src/remote/calls.ts";
 import { defaultSemanticDeps } from "../src/reference-lint.ts";
 import { parseStatus, STATUS_FRESH_MS, storeStatus } from "../src/remote/helpers.ts";
 import { RateLimiter } from "../src/dash/server/util.ts";
@@ -51,10 +51,10 @@ describe("picks and Manual only", async () => {
   const leased = async (login: string, extra: Partial<Claim> = {}, canWrite = yes) => (await claimCall(db, callers[login]!, claim(extra), canWrite)).lease?.id ?? null;
   const user = (login: string, role: Role = "maintainer") => ({ login, role, canWrite: yes, canRead: yes });
   const req = (login: string, role: Role, extra: Partial<Req> = {}) => ({ user: user(login, role), params: {}, ...extra }) as unknown as Req;
-  const q = async (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string; forLogin?: string; parentId?: number } = {}) => {
+  const q = async (opts: { tier?: Tier; ageMs?: number; items?: { repo: string; number: number }[]; promptId?: string; forLogin?: string; boundSlot?: boolean; parentId?: number } = {}) => {
     const tier = opts.tier ?? "top", promptId = opts.promptId ?? "review.opus";
     const id = await enqueueCall(db, { promptId, promptVersion: "1", tier, effort: "medium", askedModel: tier === "top" ? "opus" : "haiku", items: opts.items ?? [{ repo: "photocraft", number: 2 }], level: 0, maxAttempts: 2,
-      ...(opts.forLogin && { forLogin: opts.forLogin }), ...(opts.parentId !== undefined && { parentId: opts.parentId }),
+      ...(opts.forLogin && { forLogin: opts.forLogin }), ...(opts.boundSlot && { boundSlot: true }), ...(opts.parentId !== undefined && { parentId: opts.parentId }),
       bundle: { promptId, promptVersion: "1", tier, effort: "medium", timeoutSeconds: 60, maxTurns: null, stdin: "x", system: null, mounts: [], mcpServers: [], keepSession: true, hints: {} } });
     if (opts.ageMs) await db.run(db.k.updateTable("remote_calls").set((eb) => ({ since: eb("since", "-", opts.ageMs!) })).where("id", "=", id));
     return id;
@@ -131,6 +131,16 @@ describe("picks and Manual only", async () => {
     } finally {
       allocation.pollMs = was;
     }
+    await clear();
+  });
+
+  test("a bound call that runs in a slot skips the own lane, takes one of its user's slots and counts toward their limit", async () => {
+    const id = await q({ forLogin: "alice", boundSlot: true });
+    assert.equal(await leased("alice", { ownLane: true }), null, "not in alice's own lane");
+    for (const extra of [{}, { ownLane: true }, { withOwnLane: true }]) assert.equal(await leased("bob", extra), null, "never on another user's runner");
+    const before = await leasedBy(db, "alice");
+    assert.equal(await leased("alice", { withOwnLane: true }), id, "in a slot of alice's runner that has an own lane");
+    assert.ok(await leasedBy(db, "alice") > before, "the lease counts toward her calls at once");
     await clear();
   });
 

@@ -291,6 +291,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["remote_calls", "for_login", "TEXT COLLATE NOCASE"],
   // 1 while the lease runs on the Task Runner's own lane (Claim.ownLane), beside its slots.
   ["remote_calls", "own_lane", "INTEGER NOT NULL DEFAULT 0"],
+  // 1 for a bound call that runs in one of its user's Task Runner slots, never in the own lane (NewCall.boundSlot).
+  ["remote_calls", "bound_slot", "INTEGER NOT NULL DEFAULT 0"],
   // The login whose conversation message the reply that wrote the choices answered.
   ["decision_choices", "asked_by", "TEXT"],
 ];

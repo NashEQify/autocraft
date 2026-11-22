@@ -912,6 +912,7 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   sticky_login TEXT COLLATE NOCASE,   -- a follow-up turn: only this user's helper holds the session
   for_login TEXT COLLATE NOCASE,      -- the call runs on this user's own Task Runners only (a maintainer's conversation turn); follow-ups keep it
   own_lane INTEGER NOT NULL DEFAULT 0, -- 1 while leased on the Task Runner's own lane (Claim.ownLane): counts toward no slot or Max calls at once
+  bound_slot INTEGER NOT NULL DEFAULT 0, -- 1: a call bound to for_login that runs in one of that user's Task Runner slots (counts toward Max calls at once), never in the own lane
   released_by TEXT COLLATE NOCASE, released_at INTEGER, -- the last helper that gave the lease back: not offered that login again for a while
   progress TEXT,                      -- the helper's last progress line
   reply TEXT, usage TEXT, turns INTEGER, session_id TEXT, duration_ms INTEGER,
