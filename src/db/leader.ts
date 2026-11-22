@@ -7,17 +7,23 @@
 // its writes to that epoch (src/db/fence.ts). Writes run one at a time under the writer lock, and each fenced write checks
 // the epoch after taking it, so a write of the old leader either committed before the new epoch or fails.
 //
-// Losing. The leader runs `SELECT 1` on its lock connection every CHECK_MS. A slow check is not a loss. When the
-// connection fails, the leader opens another, takes the lock again and reads the epoch under the writer lock: the same
-// epoch means no other copy led meanwhile, and it carries on. `lost` aborts when another copy holds the lock or moved the
-// epoch, or when no check has succeeded for LOSS_MS by the wall clock (an event-loop stall counts). LOSS_MS is below the
-// time the server takes to drop a silent client (SERVER_KEEPALIVE in postgres.ts, about 11 seconds), so in a network
-// split the old leader has stopped before another copy can win.
+// Losing. The leader runs `SELECT 1` on its lock connection every CHECK_MS. When the connection fails, the leader opens
+// another, takes the lock again and reads the epoch under the writer lock: the same epoch means no other copy led
+// meanwhile, and it carries on. A holder of the lock that is one of this copy's own discarded sessions (one the server
+// has not dropped yet) is waited out. `lost` aborts when another session holds the lock or the epoch moved.
+//
+// Replicas (AUTOCRAFT_RUNNER_REPLICAS). With two or more, `lost` also aborts when no check has succeeded for LOSS_MS by
+// the wall clock (an event-loop stall counts). LOSS_MS is below the time the server takes to drop a silent client
+// (SERVER_KEEPALIVE in postgres.ts, about 11 seconds), so in a network split the old leader has stopped before another
+// copy can win. With one, no standby waits to take over, so a slow or failed check never stops the leader: it keeps
+// reconnecting and taking the lock again. A copy that does win meanwhile (the new pod of a deploy) moves the epoch, and
+// the old leader stops at its next fenced write or when it takes the lock again.
 import { hostname } from "node:os";
 import type * as Pg from "pg";
+import { envVar } from "../env.ts";
 import type { Db } from "./index.ts";
 import { dbTarget, isPgUrl, loadPg } from "./open.ts";
-import { pgConnectionString, SERVER_KEEPALIVE } from "./postgres.ts";
+import { pgConnectionString, SERVER_KEEPALIVE, setSession, within } from "./postgres.ts";
 import { epochKey, isFenced, type LeaderRole } from "./fence.ts";
 
 /**
@@ -28,6 +34,9 @@ export const LOST_LEADER_EXIT = 75;
 
 /** Advisory lock keys, one per role ("aclr", "aclp"); below 2^31, so pg_locks shows them as classid 0, objid key. */
 const LOCK_KEYS: Record<LeaderRole, number> = { runner: 0x61636c72, periodic: 0x61636c70 };
+
+/** The granted holder of a role's lock ($1 the key). */
+const HOLDER_SQL = "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = $1 AND objsubid = 1 AND granted";
 
 /** A standby tries for the lock this often. */
 export const RETRY_MS = 2_000;
@@ -42,6 +51,12 @@ export const BEAT_MS = 10_000;
 /** Standby rows not written for this long are removed by the leader. */
 const STANDBY_KEEP_MS = 10 * 60_000;
 const CONNECT_MS = 5_000;
+
+/** Copies of the runner and periodic containers the install runs (AUTOCRAFT_RUNNER_REPLICAS, default 1). */
+export function runnerReplicas(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(envVar("RUNNER_REPLICAS", env));
+  return Number.isInteger(n) && n >= 1 ? n : 1;
+}
 
 /** Settings row the leader of `role` writes every BEAT_MS: LeaderStatus as JSON. */
 export const leaderKey = (role: LeaderRole): string => `leader:${role}`;
@@ -77,6 +92,8 @@ export type ElectOptions = {
   checkMs?: number;
   lossMs?: number;
   beatMs?: number;
+  /** Copies of this role the install runs; with one, a failed or slow check alone never aborts `lost`. Default runnerReplicas(). */
+  replicas?: number;
 };
 
 const iso = (ms = Date.now()): string => new Date(ms).toISOString();
@@ -92,19 +109,9 @@ const pause = (ms: number, signal?: AbortSignal): Promise<void> => new Promise((
   signal?.addEventListener("abort", done, { once: true });
 });
 
-/** `p`, or a rejection after `ms`. */
-function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  let t: NodeJS.Timeout | undefined;
-  return Promise.race([p, new Promise<never>((_, reject) => { t = setTimeout(() => reject(new Error(`${what} took over ${ms} ms`)), ms); })])
-    .finally(() => clearTimeout(t));
-}
-
 async function putSetting(db: Db, key: string, value: string): Promise<void> {
   await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
 }
-
-/** Settings the server refused on a lock connection, logged once each. */
-const refusedLogged = new Set<string>();
 
 /** A lock connection: errors and its end go to `onLost`, so a dropped connection never crashes the process. */
 async function lockClient(pg: typeof Pg.default, url: string, role: LeaderRole, log: (l: string) => void, onLost: (c: Pg.Client, why: string) => void): Promise<{ client: Pg.Client; info: ConnInfo }> {
@@ -117,12 +124,7 @@ async function lockClient(pg: typeof Pg.default, url: string, role: LeaderRole, 
   try {
     await c.connect();
     // A refused setting leaves the server's default; the status row shows what is in effect.
-    for (const [k, v] of Object.entries(SERVER_KEEPALIVE)) {
-      await within(c.query(`SET ${k} = ${v}`), QUERY_MS, `SET ${k}`).catch((e: Error) => {
-        if (!refusedLogged.has(k)) log(`leader: the server refused ${k} = ${v} on the ${role} lock connection: ${e.message}`);
-        refusedLogged.add(k);
-      });
-    }
+    await setSession((text) => c.query(text), SERVER_KEEPALIVE, `the ${role} lock connection`, log, QUERY_MS);
     const r = await within(c.query<{ pid: number; idle: string | null; ut: string | null; addr: string | null }>(
       "SELECT pg_backend_pid() AS pid, current_setting('tcp_keepalives_idle', true) AS idle, current_setting('tcp_user_timeout', true) AS ut, host(inet_client_addr()) AS addr"), QUERY_MS, "the connection check");
     const row = r.rows[0]!;
@@ -147,6 +149,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   const pg = await loadPg();
   const key = LOCK_KEYS[role];
   const retryMs = o.retryMs ?? RETRY_MS, checkMs = o.checkMs ?? CHECK_MS, lossMs = o.lossMs ?? LOSS_MS, beatMs = o.beatMs ?? BEAT_MS;
+  const watchdog = (o.replicas ?? runnerReplicas()) >= 2;
   const standbyRow = `${standbyPrefix(role)}${holder}`;
   const waitingSince = iso();
   let onLost: (c: Pg.Client, why: string) => void = () => {};
@@ -211,6 +214,16 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     return JSON.stringify({ holder, epoch, since, at, conn: c } satisfies LeaderStatus);
   };
 
+  /** Gives the lock back (if this session still holds it) and runs the election again. */
+  const again = async (why: string): Promise<Lease | null> => {
+    released = true;
+    log(`leader: ${why}; trying again`);
+    await current.client.query("SELECT pg_advisory_unlock($1)", [key]).catch(() => undefined);
+    await current.client.end().catch(() => undefined);
+    await pause(retryMs, o.signal);
+    return await elect(db, role, { ...o, holder, onStandby: announced ? undefined : o.onStandby });
+  };
+
   // The epoch moves while this copy holds the lock, so no two copies ever share one.
   let epoch: number;
   const since = iso();
@@ -218,39 +231,51 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
     const row = await db.prepare("INSERT INTO settings (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = CAST(CAST(settings.value AS BIGINT) + 1 AS TEXT) RETURNING value")
       .get(epochKey(role)) as { value: string };
     epoch = Number(row.value);
+  } catch (e) {
+    // A write that cannot get the writer lock (a lock wait past its limit).
+    return await again(`the ${role} lock was won but its epoch not moved: ${(e as Error).message}`);
+  }
+  // The lock connection may have dropped while the epoch write waited, and another copy won and moved the epoch first.
+  const held = await within(current.client.query<{ held: boolean }>(`SELECT EXISTS (${HOLDER_SQL} AND pid = pg_backend_pid()) AS held`, [key]), QUERY_MS, "the lock confirmation")
+    .then((r) => r.rows[0]?.held === true, () => false);
+  if (!held) return await again(`the ${role} lock was lost while its epoch moved to ${epoch}`);
+  try {
     await db.prepare("DELETE FROM settings WHERE key = ?").run(standbyRow);
     await putSetting(db, leaderKey(role), status(since));
   } catch (e) {
-    // A write that cannot get the writer lock (a lock wait past its limit): give the lock back and try again.
-    released = true;
-    log(`leader: the ${role} lock was won but its epoch not moved: ${(e as Error).message}; trying again`);
-    await current.client.query("SELECT pg_advisory_unlock($1)", [key]).catch(() => undefined);
-    await current.client.end().catch(() => undefined);
-    await pause(retryMs, o.signal);
-    return await elect(db, role, { ...o, holder, onStandby: announced ? undefined : o.onStandby });
+    return await again(`the ${role} status was not written: ${(e as Error).message}`);
   }
   log(`leader: this copy leads the ${role} (epoch ${epoch})`);
 
+  /**
+   * Backends of this copy's own lock sessions it has given up on: the first lock connection, and every later one that
+   * failed or timed out (a lock query that timed out here may still have taken the lock on the server).
+   */
+  const ownPids = new Set<number>();
+  const discard = (c: { client: Pg.Client; info: ConnInfo }): void => {
+    ownPids.add(c.info.pid);
+    void c.client.end().catch(() => undefined);
+  };
   /** After the lock connection failed: a new connection, the lock again, and the epoch unchanged; otherwise `lost`. */
   const reacquire = async (why: string): Promise<void> => {
     if (recovering || released || ac.signal.aborted) return;
     recovering = true;
-    const oldPid = current.info.pid;
-    void current.client.end().catch(() => undefined);
+    discard(current);
     log(`leader: the ${role} lock connection failed (${why}); taking the lock again`);
     try {
-      while (!released && !ac.signal.aborted && Date.now() - lastOk <= lossMs) {
+      // With one replica no other copy waits to take over, so this keeps trying until the lock is back or lost.
+      while (!released && !ac.signal.aborted && (!watchdog || Date.now() - lastOk <= lossMs)) {
         let next: { client: Pg.Client; info: ConnInfo } | null = null;
         try {
           next = await open();
           const got = (await within(next.client.query<{ ok: boolean }>("SELECT pg_try_advisory_lock($1) AS ok", [key]), QUERY_MS, "the lock query")).rows[0]?.ok;
           if (!got) {
-            // Held by the old session (the server has not dropped it yet) or by another copy.
-            const h = await within(next.client.query<{ pid: number }>("SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = 0 AND objid = $1 AND objsubid = 1 AND granted", [key]), QUERY_MS, "the lock holder query");
+            // Held by one of this copy's old sessions (the server has not dropped it yet) or by another copy.
+            const h = await within(next.client.query<{ pid: number }>(HOLDER_SQL, [key]), QUERY_MS, "the lock holder query");
             const holderPid = h.rows[0]?.pid;
-            await next.client.end().catch(() => undefined);
+            discard(next);
             next = null;
-            if (holderPid !== undefined && Number(holderPid) !== oldPid) return lose("another copy holds the lock");
+            if (holderPid !== undefined && !ownPids.has(Number(holderPid))) return lose("another copy holds the lock");
             await pause(Math.min(retryMs, 500));
             continue;
           }
@@ -267,10 +292,12 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
           }
           current = next;
           lastOk = Date.now();
+          // This session holds the lock now, so none of the old ones can.
+          ownPids.clear();
           log(`leader: took the ${role} lock again (epoch ${epoch})`);
           return;
         } catch (e) {
-          await next?.client.end().catch(() => undefined);
+          if (next) discard(next);
           if (isFenced(e)) return lose("another copy took over");
           await pause(Math.min(retryMs, 500));
         }
@@ -293,7 +320,12 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   }, checkMs);
   // Wall-clock time: after a stall of the event loop this fires late and sees the whole gap.
   watch = setInterval(() => {
-    if (Date.now() - lastOk > lossMs) lose(`no successful check of the lock for ${Math.round((Date.now() - lastOk) / 1000)} s`);
+    const gap = Date.now() - lastOk;
+    if (gap <= lossMs) return;
+    const why = `no successful check of the lock for ${Math.round(gap / 1000)} s`;
+    // One replica: a check that hangs gets a new connection instead of a loss.
+    if (watchdog) lose(why);
+    else void reacquire(why);
   }, Math.min(250, checkMs));
   beat = setInterval(() => {
     // Fenced like every write of this process: a refusal means another copy has taken over.

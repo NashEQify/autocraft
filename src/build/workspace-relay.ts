@@ -7,7 +7,8 @@ import { createHash } from "node:crypto";
 import { allocation } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
 import { scaled } from "../remote/time-scale.ts";
-import { inClusterApi } from "./kube-api.ts";
+import { assertFence } from "../db/fence.ts";
+import { guardedApi, inClusterApi } from "./kube-api.ts";
 import { WorkspaceSession, type ToolImage, type WorkspaceToolResult } from "./workspace-tools.ts";
 import { capJson, LIVE_STATES } from "./workspaces.ts";
 
@@ -139,7 +140,8 @@ export function jobSession(db: Db, workspaceId: number): ToolSession {
   let s = m.get(workspaceId);
   if (!s) {
     const api = inClusterApi();
-    s = api ? new WorkspaceSession(db, api, workspaceId) : { call: async () => refusal("this runner is not in the cluster, so it cannot reach the workspace") };
+    // A job inherits its runner's fence (AUTOCRAFT_FENCE): once another copy leads, its commands no longer reach the pod.
+    s = api ? new WorkspaceSession(db, guardedApi(api, () => assertFence(db)), workspaceId) : { call: async () => refusal("this runner is not in the cluster, so it cannot reach the workspace") };
     m.set(workspaceId, s);
   }
   return s;

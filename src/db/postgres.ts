@@ -1,4 +1,5 @@
-// The Postgres engine: Kysely's PostgresDialect on a pg.Pool. No session state: settings a transaction needs are SET LOCAL,
+// The Postgres engine: Kysely's PostgresDialect on a pg.Pool. No session state beyond the fixed settings every connection
+// SETs once when it opens (setSession): settings a transaction needs are SET LOCAL,
 // locks are transaction-scoped advisory locks, statements are unnamed (no server-side prepared statements). LISTEN runs
 // only on a handle's one dedicated listening connection (pgListener), never on the pool.
 // Values come back in node:sqlite's shapes (see `types`), so a query returns the same rows on both backends.
@@ -41,6 +42,36 @@ export interface PgOptions {
   scope?: string;
   /** How long a transaction may sit idle before the server ends its session; 0 for no limit. Default 60 s. */
   idleInTransactionMs?: number;
+}
+
+/** A query that got no answer within its limit (`within`). */
+export class QueryTimeout extends Error {}
+
+/** `p`, or a QueryTimeout after `ms`. */
+export function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  let t: NodeJS.Timeout | undefined;
+  return Promise.race([p, new Promise<never>((_, reject) => { t = setTimeout(() => reject(new QueryTimeout(`${what} took over ${ms} ms`)), ms); })])
+    .finally(() => clearTimeout(t));
+}
+
+/** Settings already logged as refused or unanswered, by `where` and name: each is logged once per process. */
+const settingsLogged = new Set<string>();
+
+/**
+ * Sends one SET per setting on a connection, in order, and resolves once all have answered. Session SETs rather than
+ * startup parameters: a server or proxy that does not accept one refuses that statement alone, where a startup
+ * parameter it does not accept would refuse the connection. A refused or unanswered setting keeps the server's default.
+ */
+export async function setSession(query: (text: string) => Promise<unknown>, settings: Record<string, number>, where: string, log: (line: string) => void, timeoutMs?: number): Promise<void> {
+  for (const [k, v] of Object.entries(settings)) {
+    const sent = query(`SET ${k} = ${Math.floor(v)}`);
+    await (timeoutMs ? within(sent, timeoutMs, `SET ${k}`) : sent).catch((e: Error) => {
+      const id = `${where}\0${k}`;
+      if (settingsLogged.has(id)) return;
+      settingsLogged.add(id);
+      log(e instanceof QueryTimeout ? `db: SET ${k} = ${v} on ${where} timed out after ${timeoutMs} ms` : `db: the server refused ${k} = ${v} on ${where}: ${e.message}`);
+    });
+  }
 }
 
 /** `url` with `-c name=value` startup options added after any options it has. */
@@ -135,14 +166,13 @@ function schemaPlugin(k: typeof K, mainSchema: string | undefined): K.KyselyPlug
 /** An engine on the Postgres database at `url`. `k` and `pg` are the modules src/db/open.ts loaded. */
 export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, opts: PgOptions, ctx: EngineContext): Engine {
   const pool = new pg.Pool({
-    connectionString: pgConnectionString(withStartupOptions(opts.scope ? scopedUrl(url, opts.scope) : url, SERVER_KEEPALIVE)),
+    connectionString: pgConnectionString(opts.scope ? scopedUrl(url, opts.scope) : url),
     max: POOL_MAX[opts.role],
     keepAlive: true,
     allowExitOnIdle: true,
     application_name: `autocraft-${opts.role}`,
     // A startup parameter of every connection, so it also bounds statements outside transactions; no SET is sent.
     statement_timeout: opts.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS,
-    idle_in_transaction_session_timeout: opts.idleInTransactionMs ?? DEFAULT_IDLE_IN_TRANSACTION_MS,
     types: typesFor(pg),
   });
   // An idle connection that fails (server restart, network) is dropped by the pool; without a listener it would crash the process.
@@ -154,6 +184,15 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     client.on("error", () => {});
   });
   const raw = (text: string, values?: unknown[]) => k.CompiledQuery.raw(text, values);
+  const sessionSettings = { ...SERVER_KEEPALIVE, idle_in_transaction_session_timeout: opts.idleInTransactionMs ?? DEFAULT_IDLE_IN_TRANSACTION_MS };
+  /**
+   * The driver awaits this once per new pool client before the client's first statement (pg's own `connect` event cannot
+   * wait), so every statement runs with the session settings in effect.
+   */
+  const prepareConnection = async (conn: K.DatabaseConnection): Promise<void> => {
+    await setSession((text) => conn.executeQuery(raw(text)), sessionSettings, "pool connections", (l) => console.warn(l));
+    lockWrites(conn);
+  };
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
   // A fenced process (src/db/fence.ts) checks its epoch after the writer lock: the check sees every write committed before it.
   const beginWrite = (tx: Tx | undefined) => `BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = ${lockTimeout(tx)}; SELECT pg_advisory_xact_lock(${WRITER_LOCK})${fenceSql()}`;
@@ -165,7 +204,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
    * lock, so it waits for an open write transaction as on SQLite, where a count-then-write inside db.write would otherwise
    * race with it. Reads outside a transaction take no lock.
    */
-  const lockWrites = async (conn: K.DatabaseConnection): Promise<void> => {
+  const lockWrites = (conn: K.DatabaseConnection): void => {
     const run = conn.executeQuery.bind(conn);
     conn.executeQuery = async <R>(q: K.CompiledQuery): Promise<K.QueryResult<R>> => {
       if (inTransaction.has(conn) || !writesRows(q.sql)) return await run<R>(q);
@@ -211,7 +250,7 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
 
   class Dialect extends k.PostgresDialect {
     override createDriver(): K.Driver {
-      return new Driver({ pool, onCreateConnection: lockWrites });
+      return new Driver({ pool, onCreateConnection: prepareConnection });
     }
   }
 

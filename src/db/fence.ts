@@ -54,10 +54,13 @@ export class FencedError extends Error {
   readonly code = FENCED_CODE;
 }
 
-/** Throws a FencedError when this process's fence no longer holds: for actions outside the database (Kubernetes calls). */
+/**
+ * Throws a FencedError when this process's fence no longer holds: for actions outside the database (Kubernetes calls).
+ * Does nothing without a fence or on SQLite, where nothing is fenced.
+ */
 export async function assertFence(db: Db): Promise<void> {
   const f = currentFence();
-  if (!f) return;
+  if (!f || db.dialect !== "postgres") return;
   const r = await db.prepare("SELECT value FROM settings WHERE key = ?").get(epochKey(f.role)) as { value: string } | undefined;
   if (r?.value !== String(f.epoch)) throw new FencedError(`this process no longer leads the ${f.role}: another copy took over`);
 }

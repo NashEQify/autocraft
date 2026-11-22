@@ -99,3 +99,44 @@ test("a write transaction left idle no longer holds the writer lock once the ser
     await t.close();
   }
 });
+
+test("a copy whose lock is taken while its epoch write waits does not lead until it holds the lock again", { skip: needsPg }, async () => {
+  const t = await testDatabase(SETTINGS);
+  const pg = await loadPg();
+  const other = new pg.Client({ connectionString: t.target });
+  let release = () => {};
+  try {
+    const [db, writer, probe] = [await t.open(), await t.open(), await t.open()];
+    // Holding the writer lock keeps the winner's epoch write waiting.
+    const held = new Promise<void>((r) => (release = r));
+    const writing = writer.write(async () => {
+      await writer.prepare("INSERT INTO settings (key, value) VALUES ('w', '1')").run();
+      await held;
+    });
+    let lease: Lease | null = null;
+    const won = elect(db, "runner", { ...FAST, url: t.target, holder: "a" }).then((l) => (lease = l));
+    let pid: number | undefined;
+    for (let i = 0; i < 50 && pid === undefined; i++) {
+      await sleep(100);
+      pid = await holderPid(probe);
+    }
+    assert.ok(pid !== undefined, "the copy took the lock");
+    await other.connect();
+    await other.query(`SELECT pg_terminate_backend(${pid})`);
+    await other.query(`SELECT pg_advisory_lock(${RUNNER_KEY})`);
+    release();
+    await writing;
+    await sleep(1_000);
+    assert.equal(lease, null, "no lease while another session holds the lock");
+    await other.end();
+    await Promise.race([won, timeout(5_000)]);
+    const l = lease as Lease | null;
+    assert.ok(l, "it leads once the lock is free");
+    assert.ok((await holderPid(probe)) !== undefined, "and holds the lock");
+    await l.release();
+  } finally {
+    release();
+    await other.end().catch(() => undefined);
+    await t.close();
+  }
+});
