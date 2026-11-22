@@ -16,7 +16,7 @@ import {
   PULL_REASONS, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, toolchainImage, uploadPod, uploadStage,
   WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type WarmPod,
 } from "./pods.ts";
-import { gcDue, markGc } from "./warm-queue.ts";
+import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
 import { appendLog, claim, finishTask, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
@@ -162,6 +162,15 @@ const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build
 /** Whether group `index` is a warm producer's build pod: the last group of a warm task, offline, on a warm writer. */
 const isWarmGroup = (c: EnvCtx, t: TaskRow, groups: Group[], index: number): boolean =>
   t.step === WARM_STEP && c.s.warmWriter && index === groups.length - 1 && groups[index]!.network === "none";
+/** The size of the version a publish reports in its termination message (JSON with `bytes`); 0 when it says none. */
+function publishedBytes(message: string | undefined): number {
+  try {
+    const n = (JSON.parse(message ?? "") as { bytes?: unknown }).bytes;
+    return typeof n === "number" ? n : 0;
+  } catch {
+    return 0;
+  }
+}
 /** The summary in a phase's termination message (JSON with `summary`, or plain text). */
 function reported(message: string | undefined): string {
   try {
@@ -358,20 +367,27 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       else if (term!.exitCode !== 0) failed = pod.status?.reason === "Evicted" ? `${step.name} failed: ${pod.status.message ?? "evicted"}`.slice(0, 300) : `${step.name} failed (exit ${term!.exitCode})`;
       if (failed) break;
     }
-    // A failed gc leaves the published version as it is: the task still succeeds, and the next warm pod runs the gc.
+    // A failed gc leaves the published version as it is: the task still succeeds, and a later warm pod runs the gc (the
+    // lease taken at the pod's creation is released, so it is due again in a few hours).
     let gcFailed = false;
-    if (warm && !failed) {
-      const pub = statusOf(pod, WARM_PUBLISH_CONTAINER)?.state?.terminated;
-      if (pub) {
-        await podLog(c, run, WARM_PUBLISH_CONTAINER, "warm publish");
-        results.push({ step: "warm publish", exitCode: pub.exitCode, durationMs: runMs(pub), timedOut: false });
-        if (pub.exitCode !== 0) failed = `warm publish failed${reported(pub.message) ? `: ${reported(pub.message)}` : ` (exit ${pub.exitCode})`}`.slice(0, 300);
-      }
+    if (warm) {
       const gc = statusOf(pod, WARM_GC_CONTAINER)?.state?.terminated;
-      if (gc && !failed) {
-        await podLog(c, run, WARM_GC_CONTAINER, "warm gc");
-        if (gc.exitCode === 0) await markGc(db, c.now());
-        else gcFailed = true;
+      if (!failed) {
+        const pub = statusOf(pod, WARM_PUBLISH_CONTAINER)?.state?.terminated;
+        if (pub) {
+          await podLog(c, run, WARM_PUBLISH_CONTAINER, "warm publish");
+          results.push({ step: "warm publish", exitCode: pub.exitCode, durationMs: runMs(pub), timedOut: false });
+          if (pub.exitCode !== 0) failed = `warm publish failed${reported(pub.message) ? `: ${reported(pub.message)}` : ` (exit ${pub.exitCode})`}`.slice(0, 300);
+          else await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+        } else if (pod.status?.phase !== "Failed") {
+          // The pod ended with every step run and no publish status: nothing was published.
+          failed = "the warm publish did not run";
+        }
+        if (gc && !failed) await podLog(c, run, WARM_GC_CONTAINER, "warm gc");
+      }
+      if (statusOf(pod, WARM_GC_CONTAINER) && !(gc && gc.exitCode === 0 && !failed)) {
+        await releaseGc(db, c.now());
+        gcFailed = !!gc && gc.exitCode !== 0 && !failed;
       }
     }
     if (!failed && !gcFailed && pod.status?.phase === "Failed") return lose(c, run, podFailure(pod));
@@ -411,6 +427,7 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
   if (left < 60) return finish(c, run, run.failed ?? `the task passed its deadline of ${c.s.deadlineSec} s`);
   let spec: (ctx: PodCtx) => object;
   let deadline: number | undefined;
+  let gcTaken = false;
   if (stage === STAGE_SOURCE) spec = (ctx) => sourcePod(ctx, c.image!);
   else if (stage >= FIRST_GROUP && stage < FIRST_GROUP + groups.length) {
     const index = stage - FIRST_GROUP;
@@ -419,10 +436,12 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     if (!kept) return lose(c, run, "The build pod run lost its source report");
     if (g.network === "mirror" && !c.s.crateMirror) return finish(c, run, run.failed ?? "a step needs the crate mirror, and this environment has none");
     let warm: WarmPod | undefined;
+    gcTaken = false;
     if (t.step === WARM_STEP && index === groups.length - 1) {
       if (!isWarmGroup(c, t, groups, index)) return finish(c, run, run.failed ?? "a warm build needs a warm writer environment and an offline last step");
       const key = warmKeyOf(t.repo);
-      warm = { key, gc: await gcDue(db, c.now()), recheck: await c.d.warmRecheck?.(key).catch(() => []) ?? [] };
+      gcTaken = await takeGc(db, c.now());
+      warm = { key, gc: gcTaken, bytes: await warmBytes(db, key), recheck: await c.d.warmRecheck?.(key).catch(() => []) ?? [] };
     }
     // The steps' limits, a minute each to copy the source, and two minutes to start the pod and measure its volume.
     deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120) + (warm ? WARM_PHASES_SEC : 0);
@@ -436,6 +455,7 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     await createPod(c, run, stage, spec, deadline);
     await db.run(db.k.updateTable("build_pod_runs").set({ create_tries: 0, failing_since: null, retry_at: null }).where("task_id", "=", run.task_id));
   } catch (e) {
+    if (gcTaken) await releaseGc(db, c.now());
     const now = c.now();
     const tries = run.create_tries + 1;
     const since = run.failing_since ?? new Date(now).toISOString();

@@ -43,6 +43,12 @@ export const limitsOf = (w: { limits: string }): WorkspaceLimits => {
   }
 };
 
+/** Throws when `envId` is a warm writer environment: it holds the warm store's write credential, which a workspace must never see. */
+export async function refuseWarmWriter(db: Db, envId: string): Promise<void> {
+  const env = await db.get(db.k.selectFrom("build_envs").select(["kind", "settings"]).where("id", "=", envId));
+  if (env?.kind === "kubernetes" && settingsOf(env.settings).warmWriter) throw new BuildError(400, `${envId} is a warm writer environment and takes no workspaces`);
+}
+
 export type WorkspaceRequest = { repo: string; baseSha: string; envId: string; app?: string | null; limits?: Partial<WorkspaceLimits>; owner: string | null };
 
 /** Records a `requested` workspace; the launcher creates its volume and pod when the environment has a free slot. */
@@ -51,6 +57,7 @@ export async function createWorkspace(db: Db, r: WorkspaceRequest, now = Date.no
   if (!SHA.test(r.baseSha)) throw new BuildError(400, "the base must be a full 40-character commit sha");
   const env = await db.get(db.k.selectFrom("build_envs").select(["kind"]).where("id", "=", r.envId));
   if (env?.kind !== "kubernetes") throw new BuildError(400, `${r.envId} is not a kubernetes environment`);
+  await refuseWarmWriter(db, r.envId);
   const deadlineSec = r.limits?.deadlineSec ?? DEFAULT_WORKSPACE_DEADLINE_SEC;
   if (!Number.isInteger(deadlineSec) || deadlineSec < 300 || deadlineSec > 24 * 3600) throw new BuildError(400, "deadlineSec must be 300 to 86400");
   const at = new Date(now).toISOString();

@@ -44,7 +44,7 @@ type TaskRow = {
   requires: string; priority: number; plan: string; state: TaskState; env_id: string | null; attempts: number;
   queued_at: string; claimed_at: string | null; started_at: string | null; ended_at: string | null; heartbeat_at: string | null;
   cancel_requested_at: string | null; results: string; summary: string | null; log_bytes: number; artifact_bytes: number;
-  patch?: string | null; warm_key?: string | null; warm_role?: string | null; sandbox_env?: string | null;
+  patch?: string | null; warm_key?: string | null; warm_role?: string | null; sandbox_env?: string | null; warm_image?: string | null;
   env_label?: string | null; default_branch?: string | null;
 };
 
@@ -63,6 +63,8 @@ export type NewTask = {
   patch?: string;
   /** Tasks of one repo share a build cache under `key`: `build` fills it, `use` reads it. */
   warm?: Warm;
+  /** A warm producer task: the toolchain image it was queued with. */
+  warmImage?: string;
 };
 
 export type Warm = { key: string; role: "use" | "build" };
@@ -148,7 +150,7 @@ export async function createTask(db: Db, t: NewTask): Promise<number> {
   const r = await db.get(db.k.insertInto("build_tasks").values({
     job_id: t.jobId ?? currentJobId(), step: t.step, repo: t.repo, number: t.number ?? null, head_sha: t.headSha, base_sha: t.baseSha ?? null,
     requires: JSON.stringify(requires), priority, plan: JSON.stringify(plan), state: "queued", queued_at: nowIso(),
-    patch, warm_key: warm?.key ?? null, warm_role: warm?.role ?? null,
+    patch, warm_key: warm?.key ?? null, warm_role: warm?.role ?? null, warm_image: t.warmImage ?? null,
   }).returning("id"));
   return r!.id;
 }

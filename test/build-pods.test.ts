@@ -10,9 +10,10 @@ import { after, test } from "node:test";
 import { authenticate, createEnv, kubeReport } from "../src/build/envs.ts";
 import type { ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
-import { DEFAULT_SETTINGS, groupsOf, kubeCapabilities, parseSettings, stepPod, type Prepared } from "../src/build/pods.ts";
+import { DEFAULT_SETTINGS, groupsOf, kubeCapabilities, parseSettings, quantity, stepPod, type Prepared } from "../src/build/pods.ts";
 import { claim, createTask, getTask } from "../src/build/tasks.ts";
 import { queueWarm } from "../src/build/warm-queue.ts";
+import { createWorkspace } from "../src/build/workspaces.ts";
 import { warmPlan } from "../src/worker/rust.ts";
 import { startWorkerServer } from "../src/build/worker-api.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -318,7 +319,7 @@ test("a warm producer's pods: the mirror for the fetch, then restore, build with
   assert.ok(mounts(fetchStep).some((m) => m.mountPath === "/etc/craft-mirror"));
   assert.ok(all(fetchPod).every((c) => !secretsOf(c).length), "no credentials while dependencies are fetched");
 
-  const build = stepPod(ctx, "rust-stable:test", "autocraft:test", plan, buildGroup!, gate, false, "open-app", { key: "k", gc: true }) as unknown as Pod;
+  const build = stepPod(ctx, "rust-stable:test", "autocraft:test", plan, buildGroup!, gate, false, "open-app", { key: "k", gc: true, bytes: 2 * 1024 ** 3 }) as unknown as Pod;
   assert.equal(build.metadata.labels!["craft.build/network"], "none");
   assert.equal(build.metadata.labels!["craft.build/cache"], "write");
   const names = all(build).map((c) => c.name);
@@ -327,7 +328,8 @@ test("a warm producer's pods: the mirror for the fetch, then restore, build with
   const byName = Object.fromEntries(all(build).map((c) => [c.name, c]));
   for (const c of all(build)) {
     assert.deepEqual(secretsOf(c).length > 0, ["step-1", "warm-publish", "warm-gc"].includes(c.name), `writer credentials on ${c.name}`);
-    assert.equal(mounts(c).some((m) => m.name === "warm-signing"), ["warm-restore", "warm-publish", "warm-gc"].includes(c.name), `signing key on ${c.name}`);
+    assert.equal(mounts(c).some((m) => m.name === "warm-signing"), c.name === "warm-publish", `private signing key on ${c.name}`);
+    assert.equal(mounts(c).some((m) => m.name === "warm-verify"), ["warm-restore", "warm-gc"].includes(c.name), `public key on ${c.name}`);
   }
   const step = byName["step-1"]!, env = envOf(step);
   assert.equal(env.SCCACHE_WEBDAV_ENDPOINT, "http://cache.test:8081");
@@ -337,6 +339,31 @@ test("a warm producer's pods: the mirror for the fetch, then restore, build with
   for (const c of [step, byName["warm-restore"]!, byName["warm-publish"]!]) assert.ok(mounts(c).some((m) => m.name === "warm-target" && m.mountPath === target), `${c.name} sees the build's target dir`);
   assert.equal(build.spec.volumes.find((v: { name: string }) => v.name === "warm-target").emptyDir.medium, "Memory");
   assert.equal(envOf(byName["warm-publish"]!).AUTOCRAFT_WARM_TARGET, target, "published at the path the build used");
+});
+
+test("a warm producer's memory limit grows with the expected warm bytes; a large or unknown version puts the target on the volume", () => {
+  const plan = warmPlan({ mirror: true });
+  const gate: Prepared = { env: {}, mounts: [], packages: [], craftFontsRef: null, craftI18nRev: null, cacheVersion: "v2", warmCommand: null };
+  const buildGroup = groupsOf(plan)[1]!;
+  const ctx = { s: WARM, envId: "warm", taskId: 1, stage: 2, name: "p", pvc: "v", deadlineSec: 600 };
+  const podOf = (bytes?: number) => stepPod(ctx, "rust-stable:test", "autocraft:test", plan, buildGroup, gate, false, "open-app", { key: "k", gc: false, ...(bytes !== undefined && { bytes }) }) as unknown as Pod;
+  const memOf = (p: Pod) => Number((p.spec.containers.concat(p.spec.initContainers ?? []).find((c: Record<string, any>) => c.name === "step-1") as Record<string, any>).resources.limits.memory);
+  const inMemory = (p: Pod) => p.spec.volumes.some((v: { name: string; emptyDir?: { medium?: string } }) => v.name === "warm-target" && v.emptyDir?.medium === "Memory");
+  const GiB = 1024 ** 3;
+  const small = podOf(2 * GiB), smaller = podOf(1 * GiB);
+  assert.ok(inMemory(small));
+  assert.ok(memOf(small) > memOf(smaller) && memOf(smaller) >= quantity(WARM.memoryLimit) + 1.2 * GiB, "the limit adds the warm bytes");
+  for (const p of [podOf(), podOf(40 * GiB)]) {
+    assert.ok(!inMemory(p), "no version known, or a large one: the target is on the volume");
+    assert.equal(p.spec.containers.concat(p.spec.initContainers ?? []).find((c: Record<string, any>) => c.name === "step-1")!.resources.limits.memory, WARM.memoryLimit);
+    assert.ok(!p.spec.volumes.some((v: { name: string }) => v.name === "warm-target"));
+  }
+});
+
+test("a workspace is refused on a warm writer environment", async () => {
+  const d = await connectDb(":memory:");
+  await createEnv(d, { id: "warm", label: "Warm", kind: "kubernetes", slots: 1, settings: WARM }, "op");
+  await assert.rejects(createWorkspace(d, { repo: "app", baseSha: "a".repeat(40), envId: "warm", owner: null }), /warm writer/);
 });
 
 test("a warm writer takes only warm builds, at the newest default-branch head; no other environment takes them", async () => {

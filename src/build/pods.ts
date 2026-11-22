@@ -303,16 +303,32 @@ export const MIRROR_CA_CONFIGMAP = "craft-mirror-ca";
 const MIRROR_CA = "/etc/craft-mirror/ca.crt";
 const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA };
 const SIGNING_KEY = "/keys/signing/private.pem";
+/** ConfigMap in the build namespace with the public half of the signing key (`public.pem`): restore and gc verify with it, so only the publish holds the private key. */
+export const WARM_VERIFY_CONFIGMAP = "warm-verify-key";
+const VERIFY_KEY = "/keys/verify/public.pem";
 const RUSTC_FILE = "/meta/rustc.txt";
 const BAD_BLOBS_FILE = "/meta/bad-blobs";
 const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
-function resources(s: KubeSettings) {
+/** `extraMemory` bytes are added to the memory request and limit (the in-memory warm target). */
+function resources(s: KubeSettings, extraMemory = 0) {
+  const memory = (q: string) => (extraMemory ? String(Math.ceil(quantity(q) + extraMemory)) : q);
   return {
-    requests: { cpu: s.cpuRequest, memory: s.memoryRequest, "ephemeral-storage": s.ephemeralRequest },
-    limits: { cpu: s.cpuLimit, memory: s.memoryLimit, "ephemeral-storage": s.ephemeralLimit },
+    requests: { cpu: s.cpuRequest, memory: memory(s.memoryRequest), "ephemeral-storage": s.ephemeralRequest },
+    limits: { cpu: s.cpuLimit, memory: memory(s.memoryLimit), "ephemeral-storage": s.ephemeralLimit },
   };
+}
+
+/** A warm target in memory takes this share more than the version's size: the build adds to what the restore put there. */
+export const WARM_MEMORY_FACTOR = 1.2;
+/** Above this much expected target (the same threshold as for consumers) the producer's target lives on the volume. */
+export const WARM_MEMORY_MAX_BYTES = 32 * 1024 ** 3;
+/** The memory a producer's pod adds for an in-memory target, or null when the target goes on the volume: no published version is known yet (the first build), or it is large. */
+export function warmMemory(warm: WarmPod): number | null {
+  if (!warm.bytes || warm.bytes <= 0) return null;
+  const bytes = Math.ceil(warm.bytes * WARM_MEMORY_FACTOR);
+  return bytes > WARM_MEMORY_MAX_BYTES ? null : bytes;
 }
 
 function container(s: KubeSettings, name: string, image: string, extra: Record<string, unknown>) {
@@ -403,6 +419,8 @@ const writerEnv = (secret: string, user: string, password: string) => [
 /** What a warm producer's offline pod adds (warmWriter environments, step `warm` tasks): the key, the toolchain image, and whether the store's gc runs after the publish. */
 export type WarmPod = {
   key: string; gc: boolean;
+  /** Size of the key's last published version (src/build/warm-queue.ts warmBytes); absent before the first publish. */
+  bytes?: number | null;
   /** Blob sha256s consumers failed on (warm-sync's status): the publish fetches and repairs them. */
   recheck?: string[];
 };
@@ -419,8 +437,8 @@ export const MAX_RECHECK = 200;
  * With `warm` (an offline group of a warm producer): `warm-restore` fills a memory-backed target dir at the checkout with the
  * key's newest warm version, the steps build at the CI paths and write the compile cache, and `warm-publish` (then, when
  * due, `warm-gc`) publishes the target and CARGO_HOME. The pod carries `craft.build/cache=write`. Only the steps, the
- * publish and the gc get the writer credentials; only the AutoCraft-image containers mount the signing key (the restore
- * and the gc verify with its public half, so the producer needs no separate verify key).
+ * publish and the gc get the writer credentials; only the publish mounts the signing key. The restore and the gc mount the
+ * public key from the `warm-verify-key` ConfigMap.
  */
 export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string, warm?: WarmPod) {
   const offline = group.network === "none";
@@ -434,11 +452,16 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   const target = writing ? `${checkout}/target` : null;
   const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
   if (mirror) volumes.push({ name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } });
+  // In memory when the version's size is known and moderate (the build containers' memory limit grows by it); else on the task's volume.
+  const extraMemory = writing ? warmMemory(warm!) : null;
+  const targetVolume = extraMemory !== null
+    ? { name: "warm-target" }
+    : { name: "work", subPath: "target" };
   if (writing) {
     volumes.push(
-      // The pod's memory limit covers the target as well as the build.
-      { name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: c.s.memoryLimit } },
+      ...(extraMemory !== null ? [{ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(Math.ceil(quantity(c.s.memoryLimit) + extraMemory)) } }] : []),
       { name: "warm-meta", emptyDir: { sizeLimit: "1Mi" } }, { name: "warm-tmp", emptyDir: { sizeLimit: "2Gi" } },
+      { name: "warm-verify", configMap: { name: WARM_VERIFY_CONFIGMAP, items: [{ key: "public.pem", path: "public.pem" }] } },
       { name: "warm-signing", secret: { secretName: c.s.signingSecret, items: [{ key: "private.pem", path: "private.pem" }], defaultMode: 0o440 } },
     );
   }
@@ -454,7 +477,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
       ...(ci ? [{ name: `src-${i}`, mountPath: checkout }] : []),
       { name: `tmp-${i}`, mountPath: "/tmp" },
       ...(step.bare ? [] : [
-        target ? { name: "warm-target", mountPath: target } : { name: "work", mountPath: ci ? `${checkout}/target` : "/target", subPath: "target" },
+        target ? { ...targetVolume, mountPath: target } : { name: "work", mountPath: ci ? `${checkout}/target` : "/target", subPath: "target" },
         { name: "work", mountPath: "/cache", subPath: "cache" },
       ]),
       ...(writing ? [{ name: "warm-meta", mountPath: "/meta" }] : []),
@@ -473,6 +496,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
       workingDir: ci ? checkout : "/src",
       env: [...envList(env), ...(writing && cached(step) ? writerEnv(c.s.writerSecret!, "SCCACHE_WEBDAV_USERNAME", "SCCACHE_WEBDAV_PASSWORD") : [])],
       volumeMounts: mounts,
+      ...(extraMemory ? { resources: resources(c.s, extraMemory) } : {}),
     });
   });
   const disk = container(c.s, DISK_CONTAINER, appImage, {
@@ -488,32 +512,34 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
     const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
     return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
   }
-  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, gateEnv, cacheVersion ?? null);
+  const w = warmPhases(c, appImage, warm!, target!, checkout!, image, gateEnv, cacheVersion ?? null, targetVolume, extraMemory);
   const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
   return pod(c, group.network, volumes, [disk, ...check, w.restore, ...init], last, { "craft.build/cache": "write" }, spec);
 }
 
 /** The AutoCraft-image containers of a warm producer's pod (`worker pod warm-restore|warm-publish|warm-gc`, src/worker/pod.ts). */
-function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, gateEnv: Record<string, string>, cacheVersion: string | null) {
+function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, checkout: string, image: string, gateEnv: Record<string, string>, cacheVersion: string | null, targetVolume: { name: string; subPath?: string }, extraMemory: number | null) {
   const v = (o: Record<string, string>) => envList({ HOME: "/tmp", ...Object.fromEntries(Object.entries(o).map(([k, x]) => [`AUTOCRAFT_WARM_${k}`, x])) });
   const signing = { name: "warm-signing", mountPath: "/keys/signing", readOnly: true };
+  const verify = { name: "warm-verify", mountPath: "/keys/verify", readOnly: true };
   const tmp = { name: "warm-tmp", mountPath: "/tmp" };
   // What the tree was built with besides the image and the paths: the env every build step shares.
   const envHash = createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
   const writer = writerEnv(c.s.writerSecret!, "AUTOCRAFT_WARM_STORE_USER", "AUTOCRAFT_WARM_STORE_PASSWORD");
-  const phase = (name: string, env: object[], mounts: object[]) => container(c.s, name, appImage, { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });
+  const phase = (name: string, env: object[], mounts: object[], extraMemory: number | null = null) =>
+    container(c.s, name, appImage, { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp], ...(extraMemory ? { resources: resources(c.s, extraMemory) } : {}) });
   return {
-    restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: SIGNING_KEY, IMAGE: image, BAD_BLOBS_FILE }),
-      [{ name: "warm-target", mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, signing]),
+    restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: VERIFY_KEY, IMAGE: image, BAD_BLOBS_FILE }),
+      [{ ...targetVolume, mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, verify], extraMemory),
     publish: phase(WARM_PUBLISH_CONTAINER, [
       ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE,
         ...(warm.recheck?.length ? { RECHECK: warm.recheck.filter((x) => /^[0-9a-f]{64}$/.test(x)).slice(0, MAX_RECHECK).join(",") } : {}) }),
       ...writer,
     ], [
       { name: "work", mountPath: "/work", readOnly: true }, { name: "work", mountPath: "/cache", subPath: "cache", readOnly: true },
-      { name: "warm-target", mountPath: target, readOnly: true }, { name: "warm-meta", mountPath: "/meta", readOnly: true }, signing,
+      { ...targetVolume, mountPath: target, readOnly: true }, { name: "warm-meta", mountPath: "/meta", readOnly: true }, signing,
     ]),
-    gc: phase(WARM_GC_CONTAINER, [...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, VERIFY_KEYS: SIGNING_KEY }), ...writer], [signing]),
+    gc: phase(WARM_GC_CONTAINER, [...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, VERIFY_KEYS: VERIFY_KEY }), ...writer], [verify]),
   };
 }
 

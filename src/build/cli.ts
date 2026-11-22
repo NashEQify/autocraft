@@ -309,7 +309,7 @@ async function workspace(args: string[]): Promise<void> {
   const envOf = async (opt: Map<string, string>): Promise<string> => {
     const given = opt.get("env");
     if (given) return given;
-    const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled);
+    const k = (await listEnvs(db)).filter((e) => e.kind === "kubernetes" && e.enabled && !e.settings?.warmWriter);
     if (k.length !== 1) die(`give --env: ${k.length ? `${k.length} kubernetes environments are enabled` : "no kubernetes environment is enabled"}`);
     return k[0]!.id;
   };

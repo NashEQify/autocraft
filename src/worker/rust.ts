@@ -70,7 +70,7 @@ export function rustPlan(o: RustPlanOptions = {}): TaskStep[] {
  * Offline: the pod sets CARGO_NET_OFFLINE, since a warm-command does not say --offline.
  */
 export const WARM_BUILD_SCRIPT = [
-  'if [ -n "${AUTOCRAFT_WARM_COMMAND:-}" ]; then echo "warm build: the CI gate\'s warm-command"; exec bash -c "$AUTOCRAFT_WARM_COMMAND"; fi',
+  'if [ -n "${AUTOCRAFT_WARM_COMMAND:-}" ]; then echo "warm build: the CI gate\'s warm-command"; exec bash --noprofile --norc -eo pipefail -c "$AUTOCRAFT_WARM_COMMAND"; fi',
   "cargo test --workspace --no-run --locked || exit $?",
   "exec cargo build --workspace --all-targets --locked",
 ].join("\n");

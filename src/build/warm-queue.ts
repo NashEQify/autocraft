@@ -5,7 +5,7 @@
 // - At claim the queued task takes the newest head, so merges that land while it waits share one build (warmClaim).
 // - Builds of one repo start at least warm_min_interval_minutes apart (default 15): a burst of merges coalesces into one
 //   publish. A head whose warm build failed is not built again; the next head is.
-// - The warm store's gc runs in the producer pod at most once a day (gcDue, markGc).
+// - The warm store's gc runs in the producer pod at most once a day (takeGc, releaseGc).
 import type { TaskStep } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { baseScopeRepos } from "../pilot.ts";
@@ -40,20 +40,23 @@ export async function setWarmMinInterval(db: Db, input: string, by: string): Pro
   return n;
 }
 
-/** The current default-branch head of `repo`: the newest head the main-CI poll stored (the order of src/mainci/classify.ts). */
+/**
+ * The current default-branch head of `repo`: the head the latest main-CI poll saw. Every poll refreshes `updated_at` of the
+ * head it reads, so this stays right after the branch is force-pushed back to a commit older than one stored earlier.
+ */
 export async function mainHead(db: Db, repo: string): Promise<string | null> {
   const r = await db.get(db.k.selectFrom("main_ci").select("head_sha").where("repo", "=", repo)
-    .orderBy((eb) => eb.fn.coalesce("committed_at", "first_seen_at"), "desc").orderBy("first_seen_at", "desc").limit(1));
+    .orderBy("updated_at", "desc").orderBy("first_seen_at", "desc").limit(1));
   return r?.head_sha ?? null;
 }
 
 const warmTasks = (db: Db, repo: string) => db.k.selectFrom("build_tasks").where("repo", "=", repo).where("step", "=", WARM_STEP);
 
-/** A warm build at `head` with `image` already ended (done or failed); one that failed before its environment was known counts too. */
+/** A warm build at `head` with `image` already ended (done or failed); one that failed before its environment was known counts for the image it was queued with. */
 async function attempted(db: Db, repo: string, head: string, image: string): Promise<boolean> {
-  const rows = await db.all(warmTasks(db, repo).select("sandbox_env").where("head_sha", "=", head).where("state", "in", ["done", "failed"]));
+  const rows = await db.all(warmTasks(db, repo).select(["sandbox_env", "warm_image"]).where("head_sha", "=", head).where("state", "in", ["done", "failed"]));
   return rows.some((r) => {
-    if (!r.sandbox_env) return true;
+    if (!r.sandbox_env) return !r.warm_image || r.warm_image === image;
     try {
       return (JSON.parse(r.sandbox_env) as { image?: string }).image === image;
     } catch {
@@ -73,7 +76,7 @@ export async function queueWarm(db: Db, repo: string, s: KubeSettings): Promise<
   try {
     return await createTask(db, {
       step: WARM_STEP, repo, headSha: head, baseSha: head, requires: { os: "linux", toolchains: [...TOOLCHAINS] }, priority: WARM_PRIORITY,
-      plan: warmPlan({ mirror: !!s.crateMirror }), warm: { key: warmKeyOf(repo), role: "build" },
+      plan: warmPlan({ mirror: !!s.crateMirror }), warm: { key: warmKeyOf(repo), role: "build" }, warmImage: image,
     });
   } catch (e) {
     if (e instanceof BuildError) return null;
@@ -111,10 +114,31 @@ export async function warmClaim(db: Db, repo: string, s: KubeSettings, nowMs: nu
   return { head, plan: warmPlan({ mirror: !!s.crateMirror }) };
 }
 
-/** Whether the next warm pod should run the warm store's gc. */
-export async function gcDue(db: Db, nowMs: number): Promise<boolean> {
-  const at = Date.parse((await setting(db, WARM_GC_KEY)) ?? "");
-  return !(nowMs - at < WARM_GC_EVERY_MS);
+/** A failed gc is tried again this long after it was taken. */
+export const WARM_GC_RETRY_MS = 3 * 3600_000;
+
+/**
+ * Takes the day's gc for one warm pod: true when none ran or was taken in the last day. The time is written in the same
+ * statement that decides, so pods created in one pass do not all run gc.
+ */
+export async function takeGc(db: Db, nowMs: number): Promise<boolean> {
+  const cur = await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", WARM_GC_KEY));
+  const at = new Date(nowMs).toISOString();
+  if (!cur) return (await db.run(db.k.insertInto("main.settings").values({ key: WARM_GC_KEY, value: at }).onConflict((oc) => oc.column("key").doNothing()))).changes > 0;
+  if (nowMs - Date.parse(cur.value ?? "") < WARM_GC_EVERY_MS) return false;
+  return (await db.run(db.k.updateTable("main.settings").set({ value: at }).where("key", "=", WARM_GC_KEY).where("value", "=", cur.value))).changes > 0;
 }
 
-export const markGc = async (db: Db, nowMs: number): Promise<void> => await writeSetting(db, WARM_GC_KEY, new Date(nowMs).toISOString());
+/** A gc that failed: the day's gc is due again after WARM_GC_RETRY_MS. */
+export const releaseGc = async (db: Db, nowMs: number): Promise<void> =>
+  await writeSetting(db, WARM_GC_KEY, new Date(nowMs - WARM_GC_EVERY_MS + WARM_GC_RETRY_MS).toISOString());
+
+/** Bytes of a key's newest published version, from its last publish: what the next build's target is expected to hold. */
+const bytesKey = (key: string) => `warm_bytes:${key}`;
+export async function warmBytes(db: Db, key: string): Promise<number | null> {
+  const n = Number(await setting(db, bytesKey(key)));
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+export const recordWarmBytes = async (db: Db, key: string, bytes: number): Promise<void> => {
+  if (Number.isSafeInteger(bytes) && bytes > 0) await writeSetting(db, bytesKey(key), String(bytes));
+};
