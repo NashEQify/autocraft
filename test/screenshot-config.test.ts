@@ -51,7 +51,7 @@ test("put, get and delete are audited; a bad config is not stored; arguments are
   assert.equal((await getConfig(db, "app"))?.updatedBy, c.updatedBy);
   assert.equal(await deleteConfig(db, "op", "app"), true);
   assert.equal(await getConfig(db, "app"), null);
-  assert.equal((await db.prepare("SELECT count(*) AS n FROM audit WHERE action = 'screenshot-config'").get() as { n: number }).n, 2);
+  assert.equal((await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", "screenshot-config")))!.n, 2);
   assert.equal(paramValueError({ enum: ["a"] }, "a"), null);
   assert.notEqual(paramValueError({ chars: "a-z-", min: 1, max: 5 }, "-x"), null);
   assert.equal(paramValueError({ chars: "a-z-", min: 1, max: 5 }, "ab-c"), null);

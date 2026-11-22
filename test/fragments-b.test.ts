@@ -20,9 +20,13 @@ import { pickLapsedArgs, pickLapsedExpr, pickLapsedSql } from "../src/remote/cal
 import { MAX_CALLS_KEY } from "../src/remote/max-calls.ts";
 import { COMMAND_WORK_SQL, commandWorkExpr } from "../src/github/commands.ts";
 import { OPEN_GROUP_SQL, openGroupExpr, UNSURE_AT_SQL, unsureAtQuery } from "../src/core/rules.ts";
-import { CURRENT_HEAD_SQL, currentHeadExpr } from "../src/verify/results.ts";
+import { currentHeadExpr } from "../src/verify/results.ts";
 import { ADOPTABLE_CALL, EARLIER_RUN_CALL, KEPT_RUNS, RESUMING_JOBS, adoptableCallExpr, earlierRunCallExpr, keptRunsExpr, resumingJobsExpr } from "../src/runner/resuming.ts";
 import { tmpdir } from "./world-db.ts";
+
+/** The text version of `currentHeadExpr`, kept here as the reference the twin is checked against. */
+const CURRENT_HEAD_SQL = `CASE WHEN c.head_oid IS NOT NULL AND c.fetched_at IS NOT NULL AND (i.updated_at IS NULL OR c.fetched_at > i.updated_at)
+  THEN c.head_oid ELSE COALESCE(i.head_oid, c.head_oid) END`;
 
 const T = "2026-01-01T00:00:00.000Z", LATER = "2026-01-03T00:00:00.000Z", FAR = "2099-01-01T00:00:00.000Z";
 const NOW = Date.parse("2026-01-02T00:00:00.000Z");

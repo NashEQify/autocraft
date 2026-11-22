@@ -310,11 +310,8 @@ src/sql-cache.ts
 
 src/sync-errors.ts
 
-src/verify/index.ts
 
-src/verify/results.ts
 
-src/verify/screenshot-config.ts
 
 
 

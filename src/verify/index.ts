@@ -29,6 +29,7 @@ import { maybeScreenshot, type ScreenshotDeps } from "./screenshots.ts";
 import { regressionName, type Crate, type VerifyPlanInput } from "./types.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { slugOf } from "../owners.ts";
+import { excluded } from "../db/kx.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 
@@ -83,13 +84,17 @@ type Saved = { kind: string; reason: string; plan: unknown; model: string | null
 /** Stores the verification of a PR head and its stages row. */
 export async function saveVerification(db: Db, c: { repo: string; number: number; head_oid: string }, v: Saved): Promise<void> {
   const at = now();
-  await db.prepare(`INSERT OR REPLACE INTO verifications (repo, number, head_sha, base_sha, kind, reason, plan, model, head_task_id, base_task_id, state, summary, created_at, finished_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(c.repo, c.number, c.head_oid, v.baseSha, v.kind, v.reason, v.plan === null ? null : JSON.stringify(v.plan), v.model, v.headTask, v.baseTask, v.state, v.summary, at,
-      v.state === "ci-enough" || v.state === "error" || v.state === "unavailable" ? at : null);
+  // Every column is written: a new verification of a head clears the note of the earlier one.
+  const row = {
+    repo: c.repo, number: c.number, head_sha: c.head_oid, base_sha: v.baseSha, kind: v.kind, reason: v.reason, plan: v.plan === null ? null : JSON.stringify(v.plan),
+    model: v.model, head_task_id: v.headTask, base_task_id: v.baseTask, state: v.state, summary: v.summary, note: null, created_at: at,
+    finished_at: v.state === "ci-enough" || v.state === "error" || v.state === "unavailable" ? at : null,
+  };
+  await db.run(db.k.insertInto("verifications").values(row)
+    .onConflict((oc) => oc.columns(["repo", "number", "head_sha"]).doUpdateSet(excluded(["base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"]))));
   const stage = v.state === "planned" ? "verify-planned" : v.state === "ci-enough" ? "verify-ci-enough" : v.state === "unavailable" ? "verify-unavailable" : "verify-error";
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)")
-    .run(c.repo, c.number, stage, at, "verify", `${v.kind} at ${c.head_oid.slice(0, 7)}: ${v.summary ?? v.reason}`.slice(0, 300));
+  await db.run(db.k.insertInto("main.stages")
+    .values({ repo: c.repo, number: c.number, stage, at, actor: "verify", note: `${v.kind} at ${c.head_oid.slice(0, 7)}: ${v.summary ?? v.reason}`.slice(0, 300) }));
   await jobItem(db, c.repo, c.number, `${stage}: ${v.kind} at ${c.head_oid.slice(0, 7)}`, () => {});   // the caller logs the outcome itself
 }
 
@@ -123,7 +128,7 @@ export async function runVerify(db: Db, params: VerifyParams, log: (line: string
     summary.handled++;
     params.onHandled?.(summary.handled);
   }
-  const branch = (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
+  const branch = (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
   let queued = false;
   const ci = !await repoHasNoCi(db, repo);
 
