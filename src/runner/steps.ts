@@ -131,13 +131,17 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
 }
 
 /** The `implement` buckets this build carries out. */
-const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["build"]);
+const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["plan", "build"]);
 
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
-  const { implementRefusal } = await import("../implement/gate.ts");
+  const { implementRefusal, queuerOf } = await import("../implement/gate.ts");
   const bucket = String(p.bucket ?? "plan");
-  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? (IMPLEMENT_BUILT.has(bucket) ? null : `Implement ${bucket} is not built yet`);
+  if (!IMPLEMENT_BUILT.has(bucket)) return `Implement's ${bucket} work is not built yet`;
+  // A dry run writes nothing but its workspace and model call: it needs only the queuer whose Task Runner runs the call.
+  if (p.mode === "dry" && bucket !== "plan") return "a dry run only plans";
+  if (p.mode === "dry") return await queuerOf(db, String(p.repo), Number(p.number)) ? null : `${p.repo}#${p.number} is not queued`;
+  return await implementRefusal(db, String(p.repo), Number(p.number));
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -507,14 +511,20 @@ export const STEPS: StepDef[] = [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "number", label: "Issue", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the queued issue" },
       { name: "bucket", label: "Work", kind: "enum", options: [...IMPLEMENT_BUCKETS], default: "plan", help: "plan, build from the stored plan, or revise our PR" },
+      { name: "mode", label: "Mode", kind: "enum", options: ["normal", "dry"], default: "normal", help: "dry: plan only, storing and posting nothing (`implement run --plan-only --no-post`)" },
     ],
     check: checkImplement,
     run: async (ctx) => {
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
+      const repo = String(ctx.params.repo), number = Number(ctx.params.number);
+      if (String(ctx.params.bucket ?? "plan") === "plan") {
+        const { runPlan } = await import("../implement/plan.ts");
+        return await runPlan(ctx, { repo, number, dry: ctx.params.mode === "dry" });
+      }
       const { runBuild } = await import("../implement/build.ts");
       ctx.handled(1);
-      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt) }, String(ctx.params.repo), Number(ctx.params.number));
+      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt) }, repo, number);
       if (r.moved) ctx.acted(1);
       return r.summary;
     },
