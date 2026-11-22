@@ -7,8 +7,10 @@
 //   disk    (first in every step pod) fails the pod when the task's volume holds more than the environment's size,
 //           which a local-path volume does not enforce itself
 //   warm-restore  fills empty target / CARGO_HOME dirs from the warm store's newest signed version; a store or content
-//                 failure is a cold start (logged, dirs emptied again, bad blob in `badBlobs`, exit 0)
-//   warm-publish  publishes the target and CARGO_HOME dirs as a new version of the key
+//                 failure is a cold start (logged, dirs emptied again, bad blob in `badBlobs`, exit 0); then records the
+//                 build's start for the publish's trim
+//   warm-publish  publishes the target, less the units the build did not use (src/warm/trim.ts), and CARGO_HOME dirs
+//                 as a new version of the key
 //   warm-gc       deletes old manifests and unreferenced blobs from the warm store
 // Warm phases read AUTOCRAFT_WARM_* (warmOptions below). The store layout is in src/warm/store-client.ts.
 import type { KeyObject } from "node:crypto";
@@ -17,6 +19,7 @@ import { isAbsolute, join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
 import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, type Roots } from "../warm/manifest.ts";
 import { WarmStore } from "../warm/store-client.ts";
+import { markBuildStart, readBuildStart, trimTarget } from "../warm/trim.ts";
 import { checkServiceUrl } from "./config.ts";
 import { WorkerApi } from "./client.ts";
 import { gateInputs } from "./environment.ts";
@@ -220,7 +223,22 @@ function warmOptions(env: NodeJS.ProcessEnv, e: PodEnv) {
   };
 }
 
+/** Restores the target, then records the build's start for the publish's trim (src/warm/trim.ts). */
 async function warmRestorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> {
+  const rc = await restorePhase(e, env);
+  const w = warmOptions(env, e);
+  const target = w.roots().target, file = w.v("STAMP_FILE");
+  if (rc === 0 && target && file) {
+    try {
+      if (!markBuildStart(target, file).atime) e.log("warm restore: reads do not update atimes on the target's file system; the publish trims nothing");
+    } catch (err) {
+      e.log(`warm restore: could not record the build start (${(err as Error).message}); the publish trims nothing`);
+    }
+  }
+  return rc;
+}
+
+async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> {
   const w = warmOptions(env, e);
   const key = w.key();
   const roots = w.roots();
@@ -280,12 +298,20 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
   const rustcFile = w.v("RUSTC_FILE");
   const rustc = rustcFile && existsSync(rustcFile) ? readFileSync(rustcFile, "utf8").trim().slice(0, 4096) : null;
   if (!rustc) e.log("warm publish: no rustc -vV output; the manifest records none");
+  // Before the walk, which reads every file and so moves the atimes the trim reads.
+  const start = readBuildStart(w.v("STAMP_FILE"));
+  const trim = start?.atime ? trimTarget(roots.target, start) : null;
+  if (!trim) e.log(`warm publish: ${start ? "reads do not update atimes on the target's file system" : "no build start recorded"}; nothing trimmed`);
   const s = await w.store(true).publish({
     key: w.key(), repo: w.v("REPO") ?? task!.repo, commit: w.v("COMMIT") ?? task!.headSha,
     image: w.v("IMAGE") ?? null, rustc, envHash: w.v("ENV_HASH") ?? null, checkout: w.v("CHECKOUT") ?? null,
-    source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), signKey: w.signKey(), log: e.log,
+    source: { target: roots.target, cargoHome: roots.cargo }, exclude: w.exclude(), omit: new Set(trim?.paths.map((p) => `target/${p}`)), signKey: w.signKey(), log: e.log,
     recheck: [...new Set([...w.list("RECHECK"), ...badBlobsOf(w.v("BAD_BLOBS_FILE"))])].filter((x) => /^[0-9a-f]{64}$/.test(x)), minBlobAgeMs: w.count("GC_MIN_AGE_HOURS", 24) * 3600_000,
   });
+  if (trim) {
+    const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
+    e.log(`warm trim: ${trim.units} stale units left out, ${gb(s.bytes + trim.bytes)} GB -> ${gb(s.bytes)} GB`);
+  }
   writeFileSync(e.message, JSON.stringify({ ok: true, commit: s.latest.commit, files: s.files, bytes: s.bytes, blobs: s.blobs, uploaded: s.uploaded, uploadedBytes: s.uploadedBytes, repaired: s.repaired }));
   return 0;
 }

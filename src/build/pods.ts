@@ -333,6 +333,8 @@ export const WARM_VERIFY_CONFIGMAP = "warm-verify-key";
 const VERIFY_KEY = "/keys/verify/public.pem";
 const RUSTC_FILE = "/meta/rustc.txt";
 const BAD_BLOBS_FILE = "/meta/bad-blobs";
+/** The build start warm-restore records for the publish's trim (src/warm/trim.ts). */
+const STAMP_FILE = "/meta/build-start.json";
 export const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
@@ -608,10 +610,10 @@ function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, 
   const phase = (name: string, env: object[], mounts: object[], extraMemory: number | null = null) =>
     container(name, appImage, stepResources(c.s, c.memory, extraMemory ?? 0), { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });
   return {
-    restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: VERIFY_KEY, IMAGE: image, BAD_BLOBS_FILE }),
+    restore: phase(WARM_RESTORE_CONTAINER, v({ STORE_URL: c.s.sccacheUrl!, KEY: warm.key, TARGET: target, VERIFY_KEYS: VERIFY_KEY, IMAGE: image, BAD_BLOBS_FILE, STAMP_FILE }),
       [{ ...targetVolume, mountPath: target }, { name: "warm-meta", mountPath: "/meta" }, verify], extraMemory),
     publish: phase(WARM_PUBLISH_CONTAINER, [
-      ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE,
+      ...v({ STORE_WRITE_URL: c.s.cacheWriteUrl!, KEY: warm.key, SIGNING_KEY, TARGET: target, CARGO_HOME: "/cache/cargo", CHECKOUT: checkout, IMAGE: image, ENV_HASH: envHash, RUSTC_FILE, BAD_BLOBS_FILE, STAMP_FILE,
         ...(warm.recheck?.length ? { RECHECK: warm.recheck.filter((x) => /^[0-9a-f]{64}$/.test(x)).slice(0, MAX_RECHECK).join(",") } : {}) }),
       ...writer,
     ], [
