@@ -7,9 +7,16 @@
 import type { Db } from "../db/index.ts";
 import { createWorkspace, getWorkspace, LIVE_STATES, resumeWorkspace, type WorkspaceStateName } from "../build/workspaces.ts";
 import { READY_LIMIT_MS } from "../build/workspace-launch.ts";
-import { roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
-import { awaitTurn, findingsMessage, lintedReport, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, renderSession, retryStdin, sessionInput, type CallDeps, type TurnPurpose, type TurnRound } from "./session.ts";
-import { applyStuckAnswer, markStuck, noDiffCheck, opensAsDraft, type DiffCheck, type StuckCause } from "./stuck.ts";
+import { guardedApi, inClusterApi, type KubeApi } from "../build/kube-api.ts";
+import type { By } from "../core/gates.ts";
+import { assertFence } from "../db/fence.ts";
+import { fixupDir, Git, exec as realExec } from "../fixup/git.ts";
+import { buildScriptsAt } from "../fixup/patch.ts";
+import { validateImplementation, workspaceDiff } from "./diff.ts";
+import { defaultPrDeps, openImplementationPr } from "./pr.ts";
+import { checkLines, roundDir, runChecks, workspacePod, type CheckRound, type Pod } from "./checks.ts";
+import { awaitTurn, findingsMessage, lintedReport, needsDependency, queueTurn, realCalls, REPORT_MESSAGE, renderSession, retryStdin, SESSION_MODEL, sessionInput, type CallDeps, type TurnPurpose, type TurnRound } from "./session.ts";
+import { applyStuckAnswer, markStuck, opensAsDraft, type DiffCheck, type StuckCause } from "./stuck.ts";
 import { addRound, currentImplementation, implementationById, roundsOf, setImplementationState, updateImplementation } from "./store.ts";
 import { BUILD_STATES, type Implementation, type ImplementationRound } from "./types.ts";
 
@@ -37,9 +44,12 @@ export type BuildRun = {
   startedMs: number;
   /** Stop at `opening`: nothing goes to GitHub (the CLI's --no-pr). */
   noPr?: boolean;
+  /** The job's actor, for the PR step's guard; default the pipeline. */
+  by?: By;
 };
 
-export type OpenPr = (run: BuildRun, impl: Implementation, o: { draft: boolean; checks: CheckRound }) =>
+/** `checks`: the last checks round; a draft may have none, or failing ones. */
+export type OpenPr = (run: BuildRun, impl: Implementation, o: { draft: boolean; checks: CheckRound | null }) =>
   Promise<{ ok: true; url: string } | { ok: false; reason: string; retry: boolean; problems?: string[] }>;
 
 export type BuildDeps = {
@@ -51,7 +61,43 @@ export type BuildDeps = {
   openPr?: OpenPr;
 };
 
-export const defaultBuildDeps = (): BuildDeps => ({ calls: realCalls, pod: workspacePod, diffCheck: noDiffCheck });
+/** The cluster API to the workspaces, fenced like the checks' pod. */
+function workspaceApi(db: Db): KubeApi {
+  const cluster = inClusterApi();
+  if (!cluster) throw new Error("this runner is not in the cluster, so it cannot reach the workspace");
+  return guardedApi(cluster, () => assertFence(db));
+}
+
+/** The attempt's change as the PR step reads it: the workspace diff against its base commit. */
+async function attemptDiff(db: Db, impl: Implementation) {
+  if (impl.workspaceId === null) return { ok: false as const, reason: "the attempt has no workspace" };
+  return await workspaceDiff(db, workspaceApi(db), impl.workspaceId);
+}
+
+/** The PR step: the workspace diff, applied and opened by pr.ts with this round's check list. */
+const realOpenPr: OpenPr = async (run, impl, o) => {
+  const d = await attemptDiff(run.db, impl);
+  if (!d.ok) return { ok: false, reason: d.reason, retry: true };
+  const r = await openImplementationPr(run.db, {
+    implementation: { ...impl, baseSha: d.base }, diff: d.diff, model: SESSION_MODEL, checks: o.checks ? checkLines(o.checks) : [], by: run.by ?? "pipeline", draft: o.draft,
+  }, { ...defaultPrDeps(), log: run.log });
+  return r.ok ? { ok: true, url: r.url } : r;
+};
+
+/** Whether the workspace diff passes the PR step's diff check, against the build scripts of the base when the cache has it. */
+const realDiffCheck: DiffCheck = async (db, impl) => {
+  try {
+    const d = await attemptDiff(db, impl);
+    if (!d.ok) return { ok: false, reason: d.reason };
+    const scripts = await buildScriptsAt(new Git(realExec, fixupDir(), impl.repo), d.base);
+    const c = validateImplementation(d.diff, scripts);
+    return c.ok ? { ok: true } : { ok: false, reason: c.reason };
+  } catch (e) {
+    return { ok: false, reason: (e as Error).message };
+  }
+};
+
+export const defaultBuildDeps = (): BuildDeps => ({ calls: realCalls, pod: workspacePod, diffCheck: realDiffCheck, openPr: realOpenPr });
 
 const ref = (i: Implementation): string => `${i.repo}#${i.number}`;
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -189,11 +235,12 @@ async function turnPhase(run: BuildRun, deps: BuildDeps, impl: Implementation, w
       if (purpose === "report") throw new Stuck("no-report", r.parseError ?? "no report");
       continue;
     }
+    // A blocked report is linted too: Open as draft PR puts its summary in the PR body.
+    const linted = await lintedReport(db, deps.calls, { impl, workspaceId: ws.wsId, callId, report: r.report, log: run.log });
     if (r.report.status === "blocked") {
-      await updateImplementation(db, impl.id, { report: r.report });
+      await updateImplementation(db, impl.id, { report: linted.report, sessionCallId: linted.callId });
       throw needsDependency(r.report) ? new Stuck("needs-dependency", r.report.blocked_reason ?? "") : new Stuck("blocked", r.report.blocked_reason ?? "");
     }
-    const linted = await lintedReport(db, deps.calls, { impl, workspaceId: ws.wsId, callId, report: r.report, log: run.log });
     await setImplementationState(db, impl.id, "checking", { report: linted.report, sessionCallId: linted.callId });
     return (await implementationById(db, impl.id))!;
   }
@@ -229,9 +276,11 @@ async function openingPhase(run: BuildRun, deps: BuildDeps, impl: Implementation
   if (run.noPr) return "ready for its PR; not opened (--no-pr)";
   if (!deps.openPr) return "ready for its PR; opening it is not available, so it waits";
   const rounds = await roundsOf(db, impl.id);
-  const checks = checksOf(rounds).at(-1);
-  if (!checks?.clean) throw new Stuck("checks-failing", "the attempt reached the PR step without clean checks");
-  const r = await deps.openPr(run, impl, { draft: await opensAsDraft(db, impl), checks });
+  const checks = checksOf(rounds).at(-1) ?? null;
+  // A draft is the stuck decision's answer: it opens the change as it is, whatever the checks found.
+  const draft = await opensAsDraft(db, impl);
+  if (!draft && !checks?.clean) throw new Stuck("checks-failing", "the attempt reached the PR step without clean checks");
+  const r = await deps.openPr(run, impl, { draft, checks });
   if (r.ok) return `PR ${r.url}`;
   if (r.problems?.length) {
     // One turn to undo what the diff check refused (D7); a second refusal is stuck.
@@ -274,13 +323,14 @@ async function buildUnit(run: BuildRun, repo: string, number: number, deps: Buil
     }
     if (!BUILD_STATES.has(impl.state)) return `${ref(impl)}: ${impl.state}; nothing to build`;
     if (!impl.plan) throw new Stuck("plan-unparseable", "the attempt has no stored plan");
-    if (impl.state === "opening") return `${ref(impl)}: ${await openingPhase(run, deps, impl)}`;
+    // The PR step reads the change out of the workspace, so it waits for the workspace like a turn does.
     const ws = await readyWorkspace(run, impl);
     if (ws.fresh && impl.state !== "planned") {
       run.log(`${ref(impl)}: the new workspace holds none of the earlier changes; the session starts over from the plan`);
       await setImplementationState(db, impl.id, "planned", { sessionCallId: null });
     }
     impl = (await implementationById(db, impl.id))!;
+    if (impl.state === "opening") return `${ref(impl)}: ${await openingPhase(run, deps, impl)}`;
     const pod = deps.pod(db, ws.wsId, run.cancelled);
     if (impl.state !== "checking") {
       impl = await turnPhase(run, deps, impl, ws, pod);

@@ -32,6 +32,7 @@ import {
 } from "./plan-types.ts";
 import { askedSoFar, askQuestions, IMPLEMENT_ASKER, isLimitDecision, LIMIT_CLOSE, LIMIT_CLOSE_COMMENT, LIMIT_IMPLEMENT, type QuestionDeps } from "./questions.ts";
 import { addRound, currentImplementation, roundsOf, setImplementationState, startImplementation, updateImplementation } from "./store.ts";
+import { attemptGuidance, markStuck, STUCK_CAUSES, type StuckCause } from "./stuck.ts";
 import type { Implementation, PlanQuestion, PlanReply } from "./types.ts";
 import { mainHeadOf, readyWorkspace, resetTree, runBoundCall, WorkspaceUnavailable, type CallResult } from "./workspace.ts";
 
@@ -136,8 +137,11 @@ export function planMarkdown(r: PlanReply): string {
 
 const cut = (s: string | null | undefined, n: number): string => (s ?? "").slice(0, n);
 
-/** The issue, its comments (bots and the pipeline left out), the thread's guidance by operators and write-maintainers, and the earlier questions. */
-export async function planInput(db: Db, o: { repo: string; number: number; sha: string; asked: PlanAsked[]; assume: boolean }): Promise<PlanInput> {
+/**
+ * The issue, its comments (bots and the pipeline left out), the thread's guidance by operators and write-maintainers and
+ * the attempt's Try again notes, and the earlier questions.
+ */
+export async function planInput(db: Db, o: { repo: string; number: number; sha: string; asked: PlanAsked[]; assume: boolean; implementationId: number | null }): Promise<PlanInput> {
   const it = await db.get(db.k.selectFrom("items").select(["title", "body", "author", "labels"]).where("repo", "=", o.repo).where("number", "=", o.number));
   if (!it) throw new Error(`${o.repo}#${o.number} is not in the mirror`);
   const pipeline = await setting(db, "pipeline_login");
@@ -154,6 +158,10 @@ export async function planInput(db: Db, o: { repo: string; number: number; sha: 
     // A maintainer's message counts while they settle on the repo (write access where the app acts for them).
     if (t.kind === "maintainer" && !await settlesNow(db, t.login, [o.repo], memo)) continue;
     guidance.push({ from: t.kind as PlanGuidance["from"], login: t.login, at: t.at, text: cut(t.body, PLAN_GUIDANCE_CHARS) });
+  }
+  if (o.implementationId !== null) {
+    for (const g of await attemptGuidance(db, o.implementationId)) guidance.push({ from: "try-again", login: g.by ?? "", at: g.at, text: cut(g.text, PLAN_GUIDANCE_CHARS) });
+    guidance.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
   }
   return { ref: `${o.repo}#${o.number}`, repo: o.repo, sha: o.sha, issue, guidance: guidance.slice(-PLAN_GUIDANCE_MAX), asked: o.asked, assume: o.assume };
 }
@@ -181,7 +189,7 @@ export async function recordPlan(db: Db, impl: Implementation, r: { callId: numb
 export type PlanOptions = { repo: string; number: number; /** Nothing is written but the workspace and the call: no implementation row, no GitHub write, no decision. */ dry: boolean };
 
 /** What one plan call and its follow-up turn came to. */
-type Planned = { callId: number; reply: PlanReply } | { callId: number | null; error: string };
+type Planned = { callId: number; reply: PlanReply } | { callId: number | null; error: string; cause: StuckCause };
 
 /** Runs the plan call, with one follow-up turn on an unusable reply or a flagged author question. */
 async function callPlan(ctx: StepContext, o: { repo: string; number: number; sha: string; workspaceId: number; forLogin: string; input: PlanInput }): Promise<Planned> {
@@ -196,7 +204,7 @@ async function callPlan(ctx: StepContext, o: { repo: string; number: number; sha
   const turn = async (stdin: string, parentId?: number): Promise<CallResult> => await runBoundCall(ctx, { ...base, stdin, ...(parentId !== undefined && { parentId }) });
   let r = await turn(parts.stdin);
   for (let followUp = 0; ; followUp++) {
-    if (r.outcome.state !== "done") return { callId: r.callId, error: r.outcome.state === "failed" ? `the plan call failed: ${r.outcome.error.replace(/\s+/g, " ").slice(0, 200)}` : "the plan call was not taken" };
+    if (r.outcome.state !== "done") return { callId: r.callId, cause: "plan-failed", error: r.outcome.state === "failed" ? r.outcome.error.replace(/\s+/g, " ").slice(0, 200) : "the call was not taken" };
     let problem: string;
     try {
       const reply = parsePlanReply(r.outcome.text, o.input.assume);
@@ -206,14 +214,14 @@ async function callPlan(ctx: StepContext, o: { repo: string; number: number; sha
         // Still flagged after the follow-up: a flagged author question goes to the maintainers instead of being posted;
         // flagged plan text would reach the PR body, so the attempt stops.
         const fields = flagged.map((p) => p.field);
-        if (fields.some((f) => !f.startsWith("questions["))) return { callId: r.callId, error: `the plan text still mentions or quotes the reference documentation (${[...new Set(fields)].join(", ")})` };
+        if (fields.some((f) => !f.startsWith("questions["))) return { callId: r.callId, cause: "plan-flagged", error: [...new Set(fields)].join(", ") };
         const bad = new Set(flagged.map((p) => p.text));
         ctx.log(`${o.repo}#${o.number}: ${bad.size} author question(s) still flagged by the reference lint; asking the maintainers instead`);
         return { callId: r.callId, reply: { ...reply, questions: reply.questions.map((q) => (q.audience === "author" && bad.has(q.text) ? { ...q, audience: "maintainer" as const } : q)) } };
       }
       problem = `${fixTurnMessage(flagged)}\n\nReply again with ONLY the whole JSON object.`;
     } catch (e) {
-      if (followUp > 0) return { callId: r.callId, error: `the plan reply was unusable twice: ${(e as Error).message}` };
+      if (followUp > 0) return { callId: r.callId, cause: "plan-unparseable", error: (e as Error).message };
       problem = `Your reply could not be used: ${(e as Error).message}. Reply again with ONLY the whole JSON object as the instructions describe.`;
     }
     ctx.log(`${o.repo}#${o.number}: follow-up turn on plan call ${r.callId}`);
@@ -249,10 +257,10 @@ async function closeOnAnswer(ctx: StepContext, impl: Implementation): Promise<st
   return `${ref}: closed on the answer to ${d.id}`;
 }
 
-/** Leaves the attempt stuck with a reason; the stuck decision is asked by the stuck step. */
-async function stuck(db: Db, impl: Implementation, reason: string): Promise<string> {
-  await setImplementationState(db, impl.id, "stuck", { reason: reason.slice(0, 300) });
-  return `${impl.repo}#${impl.number}: stuck: ${reason}`;
+/** Makes the attempt stuck and asks its decision (stuck.ts). */
+async function stuck(db: Db, impl: Implementation, cause: StuckCause, detail: string): Promise<string> {
+  const id = await markStuck(db, impl, cause, detail);
+  return `${impl.repo}#${impl.number}: stuck (${cause}: ${detail}); decision ${id}`;
 }
 
 /** The `implement` job's plan bucket. Returns the one-line summary. */
@@ -293,13 +301,13 @@ export async function runPlan(ctx: StepContext, o: PlanOptions): Promise<string>
       },
     });
   } catch (e) {
-    if (e instanceof WorkspaceUnavailable && impl) return await stuck(db, impl, e.message);
+    if (e instanceof WorkspaceUnavailable && impl) return await stuck(db, impl, "workspace-lost", e.message);
     throw e;
   }
   await ctx.progress(`${ref}: plan call in workspace ${wsId}`);
   ctx.handled(1);
 
-  const input = await planInput(db, { repo: o.repo, number: o.number, sha, asked: impl ? await askedSoFar(db, impl) : [], assume });
+  const input = await planInput(db, { repo: o.repo, number: o.number, sha, asked: impl ? await askedSoFar(db, impl) : [], assume, implementationId: impl?.id ?? null });
   let planned: Planned;
   try {
     planned = await callPlan(ctx, { repo: o.repo, number: o.number, sha, workspaceId: wsId, forLogin, input });
@@ -310,13 +318,13 @@ export async function runPlan(ctx: StepContext, o: PlanOptions): Promise<string>
   if (reset) ctx.log(`${ref}: the tree of workspace ${wsId} was not reset: ${reset}`);
 
   if (o.dry) {
-    if ("error" in planned) throw new Error(`${ref}: ${planned.error}`);
+    if ("error" in planned) throw new Error(`${ref}: ${STUCK_CAUSES[planned.cause]}: ${planned.error}`);
     const r = planned.reply;
     return `${ref}: plan call ${planned.callId}: ${r.ready ? "ready" : `${r.questions.length} question(s) (${[...new Set(r.questions.map((q) => q.audience))].join(", ")})`}, size ${r.size}; \`implement show ${ref} --call ${planned.callId}\` prints it`;
   }
   impl = impl!;
-  if ("error" in planned) return await stuck(db, impl, planned.error);
-  if (reset) return await stuck(db, impl, `the workspace tree could not be reset after the plan: ${reset}`);
+  if ("error" in planned) return await stuck(db, impl, planned.cause, planned.error);
+  if (reset) return await stuck(db, impl, "reset-failed", reset);
 
   const g = await guardItem(db, { repo: o.repo, number: o.number }, { kind: "implement", bucket: "plan" }, byOfJob(ctx.job.requestedBy));
   const state = await recordPlan(db, impl, planned, {

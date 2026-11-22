@@ -17,6 +17,9 @@ const ACTOR = "implement";
 /** Why an implementation got stuck, and the line the decision and the row's reason start with. */
 export const STUCK_CAUSES = {
   "plan-unparseable": "The plan call's reply could not be read, twice",
+  "plan-failed": "The plan call failed",
+  "plan-flagged": "The plan still mentions or quotes the reference documentation",
+  "reset-failed": "The workspace tree could not be reset after the plan",
   "session-failed": "The implementation session failed twice",
   "no-report": "The session did not reply with its report",
   blocked: "The session could not finish",
@@ -110,12 +113,20 @@ export async function tripIfStuckInARow(db: Db, repo: string, at = new Date().to
   return true;
 }
 
+/** A Try again note for the attempt: who answered, when, and the text. */
+export type AttemptGuidance = { by: string | null; at: string; text: string };
+
+/** The guidance people gave the attempt (Try again notes) with who gave it, oldest first. */
+export async function attemptGuidance(db: Db, implementationId: number): Promise<AttemptGuidance[]> {
+  return (await roundsOf(db, implementationId)).filter((r) => r.kind === "guidance").flatMap((r) => {
+    const g = r.result as { text?: unknown; by?: unknown } | null;
+    return typeof g?.text === "string" && g.text.trim() ? [{ by: typeof g.by === "string" ? g.by : null, at: r.at, text: g.text.trim() }] : [];
+  });
+}
+
 /** The guidance people gave the attempt (Try again notes), oldest first. */
 export async function guidanceOf(db: Db, implementationId: number): Promise<string[]> {
-  return (await roundsOf(db, implementationId)).filter((r) => r.kind === "guidance").flatMap((r) => {
-    const t = (r.result as { text?: unknown } | null)?.text;
-    return typeof t === "string" && t.trim() ? [t.trim()] : [];
-  });
+  return (await attemptGuidance(db, implementationId)).map((g) => g.text);
 }
 
 /** The PR step opens the attempt's PR as a draft: its stuck decision was answered Open as draft PR. */

@@ -30,7 +30,8 @@ export type PlanIssue = {
 };
 
 /** A person's word on the issue: an operator's or a write-maintainer's message in its thread, or an answer to one of our questions. */
-export type PlanGuidance = { from: "operator" | "maintainer"; login: string; at: string; text: string };
+/** `try-again`: the note a person who settles on the repo gave with Try again on the earlier attempt's stuck decision. */
+export type PlanGuidance = { from: "operator" | "maintainer" | "try-again"; login: string; at: string; text: string };
 
 /** A question an earlier plan round asked, with its answer when a person gave one. */
 export type PlanAsked = { audience: QuestionAudience; text: string; at: string; answer: string | null };

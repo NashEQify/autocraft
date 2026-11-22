@@ -705,6 +705,7 @@ const CHECK_VALIDATION = `${CLAUDE_RESULT} The reply must be exactly one JSON va
 const IMPLEMENT_SESSION: ClaudePrompt = {
   id: "implement.session",
   codeReply: true,
+  lint: true,
   stage: "Fix",
   runner: "claude",
   purpose: "Implements a queued issue from its stored plan in a workspace: reproduces the bug or the missing behaviour, writes the smallest change that meets the acceptance criteria with its tests, runs the formatter, clippy and the affected tests, drives the app for UI changes, and replies with a JSON report. AutoCraft then runs its own checks and sends what they find back to the same session.",
@@ -737,7 +738,7 @@ When you are done, or cannot go on, reply with ONLY a JSON object, no Markdown a
 {{task}}
 </task>`,
   output: "One JSON object: the session's report (status, summary, changes, tests_run, shots, deviations, blocked_reason).",
-  validation: `${CLAUDE_RESULT} The text must be one JSON object with only the keys of the report, status done or blocked, a summary of at most ${REPORT_TEXT_MAX} characters, lists of at most ${REPORT_LIST_MAX} entries and at most ${REPORT_SHOTS_MAX} shots. A reply that is not the report gets one follow-up turn that asks for it. The report counts for nothing as proof: AutoCraft runs the formatter, clippy on the changed lines and the affected crates' tests itself, and sends their findings back to the same session, three rounds at most.`,
+  validation: `${CLAUDE_RESULT} The text must be one JSON object with only the keys of the report, status done or blocked, a summary of at most ${REPORT_TEXT_MAX} characters, lists of at most ${REPORT_LIST_MAX} entries and at most ${REPORT_SHOTS_MAX} shots. A reply that is not the report gets one follow-up turn that asks for it. The report counts for nothing as proof: AutoCraft runs the formatter, clippy on the changed lines and the affected crates' tests itself, and sends their findings back to the same session, three rounds at most. Lint problems: the summary, which the PR body carries, is checked like the plan's public texts (lint.reference.jev, lint.reference.haiku); problems get one fix turn in the same session that returns the summary, and a summary still flagged is replaced by a fixed line.`,
   limits: { perCall: 1, attempts: 2, timeoutSeconds: SESSION_CALL.timeoutSeconds },
 };
 
@@ -1616,7 +1617,7 @@ const IMPLEMENT_PLAN: ClaudePrompt = {
   placeholders: {
     task: "A JSON object indented by one space: ref, repo, sha (the default branch head checked out in the workspace) and assume (true when a maintainer chose to go on with the stated assumptions).",
     issue: `The issue as a JSON object indented by one space: number, title, body (first ${PLAN_BODY_CHARS} characters), author, labels and comments (author, at, body; at most ${PLAN_COMMENTS_MAX}, each cut to ${PLAN_COMMENT_CHARS} characters), comments of bots and of the pipeline left out.`,
-    guidance: `A JSON object indented by one space: guidance (messages of operators and of maintainers with write access in the item's thread, and their answers to our questions; at most ${PLAN_GUIDANCE_MAX}, each cut to ${PLAN_GUIDANCE_CHARS} characters) and asked (the questions earlier rounds asked, with the answer when a maintainer gave one).`,
+    guidance: `A JSON object indented by one space: guidance (messages of operators and of maintainers with write access in the item's thread, their answers to our questions, and from try-again the note given with Try again after an earlier attempt got stuck; at most ${PLAN_GUIDANCE_MAX}, each cut to ${PLAN_GUIDANCE_CHARS} characters) and asked (the questions earlier rounds asked, with the answer when a maintainer gave one).`,
   },
   session: { tools: "The workspace tools (shell, shell_status, shell_kill, read, write, edit, glob, grep, app_start, screenshot, app_stop) on the issue's repository at the default branch head in a workspace pod with no network; the item tools; the reference tools when the repository has reference documentation", maxTurns: PLAN_MAX_TURNS },
   template: `You plan the implementation of one GitHub issue of a storytold craft app, an open-source reimplementation of a reference application. You work in a workspace: a checkout of the repository at the default branch head in /work/src, in a container with no network access. The task names the repository, the commit and the issue.

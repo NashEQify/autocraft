@@ -524,7 +524,7 @@ export const STEPS: StepDef[] = [
       }
       const { runBuild } = await import("../implement/build.ts");
       ctx.handled(1);
-      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt) }, repo, number);
+      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt), by: byOfJob(ctx.job.requestedBy) }, repo, number);
       if (r.moved) ctx.acted(1);
       return r.summary;
     },
