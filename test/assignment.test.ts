@@ -85,8 +85,8 @@ test("a stage assigns once; a person who removed us is final", async () => {
 
 test("the unassign step releases what the planner says and only our own assignment", async () => {
   const w = await (await (await (await (await (await (await (await (await (await world()).repo()).pr(1)).review(1)).verified(1)).premerge(1, "clean")).pr(2)).review(2)).verified(2)).premerge(2, "clean");
-  const mark = async (n: number, who: string[]) => await w.db.prepare("UPDATE items SET assignees = ? WHERE repo = 'app' AND number = ?").run(JSON.stringify(who), n);
-  for (const n of [1, 2]) await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-11-04T00:00:00Z', 'assign', 'assign', ?, '{\"assignee\":\"pipeline-bot\"}')").run(`app#${n}`);
+  const mark = async (n: number, who: string[]) => await w.db.run(w.db.k.updateTable("items").set({ assignees: JSON.stringify(who) }).where("repo", "=", "app").where("number", "=", n));
+  for (const n of [1, 2]) await w.db.run(w.db.k.insertInto("audit").values({ at: "2026-11-04T00:00:00Z", login: "assign", action: "assign", target: `app#${n}`, details: '{"assignee":"pipeline-bot"}' }));
   await mark(1, ["pipeline-bot"]);
   await mark(2, ["pipeline-bot", "alice"]);
   w.gh.live(1, { assignees: ["pipeline-bot"] });
@@ -100,21 +100,21 @@ test("the unassign step releases what the planner says and only our own assignme
 test("a push keeps the assignment while the new head's review is due; a stage assigns again after our own unassign", async () => {
   const w = await (await (await (await (await (await world()).repo()).pr(1, { head: "old" })).review(1, { head: "old" })).pr(2, { head: "theirs" })).review(2, { head: "old" });
   for (const n of [1, 2]) {
-    await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-11-04T00:00:00Z', 'assign', 'assign', ?, '{\"assignee\":\"pipeline-bot\"}')").run(`app#${n}`);
-    await w.db.prepare("UPDATE items SET assignees = ? WHERE repo = 'app' AND number = ?").run(JSON.stringify(["pipeline-bot"]), n);
+    await w.db.run(w.db.k.insertInto("audit").values({ at: "2026-11-04T00:00:00Z", login: "assign", action: "assign", target: `app#${n}`, details: '{"assignee":"pipeline-bot"}' }));
+    await w.db.run(w.db.k.updateTable("items").set({ assignees: JSON.stringify(["pipeline-bot"]) }).where("repo", "=", "app").where("number", "=", n));
     w.gh.live(n, { assignees: ["pipeline-bot"] });
   }
   // The mirror still shows the head our push left, and a comment of ours made its review stale.
-  await w.db.prepare("INSERT INTO settings (key, value) VALUES ('review_stale:app#1', '2999-01-01T00:00:00Z'), ('review_stale:app#2', '2999-01-01T00:00:00Z')").run();
-  await w.db.prepare("INSERT INTO push_outcomes (at, stage, action, repo, number, from_oid, to_oid, before_res) VALUES ('2026-11-04T00:01:00Z', 'fixup', 'fixup-push', 'app', 1, 'old', 'new', 'unknown')").run();
+  await w.db.run(w.db.k.insertInto("settings").values([{ key: "review_stale:app#1", value: "2999-01-01T00:00:00Z" }, { key: "review_stale:app#2", value: "2999-01-01T00:00:00Z" }]));
+  await w.db.run(w.db.k.insertInto("push_outcomes").values({ at: "2026-11-04T00:01:00Z", stage: "fixup", action: "fixup-push", repo: "app", number: 1, from_oid: "old", to_oid: "new", before_res: "unknown" }));
   const r = await runUnassign(w.db, { repo: "app", by: "pipeline", runId: "t", querier: w.gh.querier, exec: asPipelineBot });
   assert.deepEqual(r.unassigned, [], "neither our push nor the contributor's releases while the new head's review is due");
 
   const g = await guardRepo(w.db, "app", "push", "pipeline");
   assert.ok(!("refused" in g));
   // Our own earlier unassign of #2 (as a give-up would leave it).
-  await w.db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-11-04T00:02:00Z', 'unassign', 'unassign', 'app#2', '{\"assignee\":\"pipeline-bot\",\"state\":\"done\"}')").run();
-  await w.db.prepare("UPDATE items SET assignees = '[]' WHERE repo = 'app' AND number = 2").run();
+  await w.db.run(w.db.k.insertInto("audit").values({ at: "2026-11-04T00:02:00Z", login: "unassign", action: "unassign", target: "app#2", details: '{"assignee":"pipeline-bot","state":"done"}' }));
+  await w.db.run(w.db.k.updateTable("items").set({ assignees: "[]" }).where("repo", "=", "app").where("number", "=", 2));
   w.gh.live(2, { assignees: [] });
   const claim = () => claimForWork({ db: w.db, login: "t" }, g as never, w.gh.querier, "app", 2, "pr", { id: "U1", login: "pipeline-bot" }, { run: "t" });
   assert.equal(await claim(), true, "assigns again after our own unassign");

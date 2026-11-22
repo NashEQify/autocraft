@@ -60,7 +60,7 @@ async function retried<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 const settingOf = (db: Db): Promise<string | undefined> =>
-  retried(async () => (await db.prepare("SELECT value FROM main.settings WHERE key = 'github_identity'").get() as { value: string } | undefined)?.value);
+  retried(async () => (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", "github_identity")))?.value ?? undefined);
 
 /** The identity setting as this process holds it, with the `settings` change counter it was read at (null: unknown). */
 let held: { app: boolean; seq: number | null } | null = null;
@@ -73,7 +73,7 @@ let generation = 0;
  */
 export async function refreshReadIdentity(db: Db, seq?: number): Promise<void> {
   const gen = generation;
-  const at = seq ?? (await retried(async () => await db.prepare("SELECT seq FROM main.change_seq WHERE topic = 'settings'").get() as { seq: number } | undefined))?.seq ?? null;
+  const at = seq ?? (await retried(async () => await db.get(db.k.selectFrom("main.change_seq").select("seq").where("topic", "=", "settings"))))?.seq ?? null;
   if (at !== null && held?.seq === at) return;
   const app = await settingOf(db) === "app";
   // A switch noted while this pass awaited is newer than its reading.
@@ -107,7 +107,7 @@ export async function readsUseApp(db?: Db): Promise<boolean> {
 export async function trackedOwner(db?: Db): Promise<string> {
   const d = db ?? await sharedDb();
   try {
-    const q = async () => await d?.prepare("SELECT r.owner FROM main.tracked_repos t JOIN main.repos r ON r.name = t.name WHERE r.owner IS NOT NULL ORDER BY t.added_at").all() as { owner: string }[] | undefined;
+    const q = async () => d ? await d.all(d.k.selectFrom("main.tracked_repos as t").innerJoin("main.repos as r", "r.name", "t.name").select("r.owner").where("r.owner", "is not", null).orderBy("t.added_at", (o) => o.asc().nullsFirst())) : undefined;
     const rows = db || !d ? await q() : await d.read(q);
     const owners = (rows ?? []).map((r) => r.owner).filter((o) => OWNER.test(o));
     if (owners.some((o) => o.toLowerCase() === DEFAULT_OWNER)) return DEFAULT_OWNER;
