@@ -12,7 +12,7 @@ import { plainSchema, SCOPED_SCHEMA } from "./scoped.ts";
 /** Connections per process role: the database allows 100 direct connections, shared by every process of the instance. */
 export const POOL_MAX: Record<DbRole, number> = { dashboard: 8, "dashboard-remote": 4, runner: 4, planner: 2, periodic: 2, cli: 1 };
 
-/** Key of the one writer lock every write transaction takes, so writes run one at a time as on SQLite. */
+/** Key of the one writer lock every write takes (a write transaction, or a write statement outside one), so writes run one at a time as on SQLite. */
 const WRITER_LOCK = 0x61637772; // "acwr"
 
 const DEFAULT_LOCK_TIMEOUT_MS = 30_000;
@@ -70,6 +70,15 @@ function typesFor(pg: typeof Pg.default): Pg.CustomTypesConfig {
   };
 }
 
+const STATEMENT_HEAD = /^\s*(?:(?:--[^\n]*\n|\/\*[\s\S]*?\*\/)\s*)*(\w+)/;
+
+/** Whether a statement writes rows: INSERT, UPDATE, DELETE or MERGE, also inside WITH (a WITH that only mentions one of the words is taken as a write too). */
+export function writesRows(text: string): boolean {
+  const head = STATEMENT_HEAD.exec(text)?.[1]?.toLowerCase();
+  if (head === "with") return /\b(?:insert|update|delete|merge)\b/i.test(text);
+  return head === "insert" || head === "update" || head === "delete" || head === "merge";
+}
+
 /** Emits a query event for every round trip on `client` while someone observes. */
 function observeClient(client: Pg.PoolClient, ctx: EngineContext): void {
   const query = client.query.bind(client) as (...a: unknown[]) => unknown;
@@ -124,6 +133,30 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
   pool.on("connect", (client) => observeClient(client, ctx));
   const raw = (text: string, values?: unknown[]) => k.CompiledQuery.raw(text, values);
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
+  const beginWrite = (tx: Tx | undefined) => `BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = ${lockTimeout(tx)}; SELECT pg_advisory_xact_lock(${WRITER_LOCK})`;
+  /** Connections between their BEGIN and its COMMIT or ROLLBACK. */
+  const inTransaction = new WeakSet<K.DatabaseConnection>();
+
+  /**
+   * Every statement on `conn` passes here. Outside a transaction, a write runs as a transaction of its own under the writer
+   * lock, so it waits for an open write transaction as on SQLite, where a count-then-write inside db.write would otherwise
+   * race with it. Reads outside a transaction take no lock.
+   */
+  const lockWrites = async (conn: K.DatabaseConnection): Promise<void> => {
+    const run = conn.executeQuery.bind(conn);
+    conn.executeQuery = async <R>(q: K.CompiledQuery): Promise<K.QueryResult<R>> => {
+      if (inTransaction.has(conn) || !writesRows(q.sql)) return await run<R>(q);
+      try {
+        await run(raw(beginWrite(undefined)));
+        const r = await run<R>(q);
+        await run(raw("COMMIT"));
+        return r;
+      } catch (e) {
+        await run(raw("ROLLBACK")).catch(() => undefined);
+        throw e;
+      }
+    };
+  };
 
   class Driver extends k.PostgresDriver {
     // One round trip opens the transaction: BEGIN, its settings and, for a write, the writer lock. A write runs READ
@@ -132,22 +165,30 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
     override async beginTransaction(conn: K.DatabaseConnection, settings: K.TransactionSettings): Promise<void> {
       const tx = ctx.tx();
       if (tx) tx.conn = conn;
-      const text = settings.accessMode === "read only"
-        ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"
-        : `BEGIN ISOLATION LEVEL READ COMMITTED; SET LOCAL lock_timeout = ${lockTimeout(tx)}; SELECT pg_advisory_xact_lock(${WRITER_LOCK})`;
+      inTransaction.add(conn);
+      const text = settings.accessMode === "read only" ? "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY" : beginWrite(tx);
       try {
         await conn.executeQuery(raw(text));
       } catch (e) {
         // Kysely rolls back only a transaction that began; a failed lock wait leaves this one open on the connection.
         await super.rollbackTransaction(conn as Parameters<K.PostgresDriver["rollbackTransaction"]>[0]).catch(() => undefined);
+        inTransaction.delete(conn);
         throw e;
       }
+    }
+
+    override async commitTransaction(conn: K.DatabaseConnection): Promise<void> {
+      try { await super.commitTransaction(conn); } finally { inTransaction.delete(conn); }
+    }
+
+    override async rollbackTransaction(conn: K.DatabaseConnection): Promise<void> {
+      try { await super.rollbackTransaction(conn as Parameters<K.PostgresDriver["rollbackTransaction"]>[0]); } finally { inTransaction.delete(conn); }
     }
   }
 
   class Dialect extends k.PostgresDialect {
     override createDriver(): K.Driver {
-      return new Driver({ pool });
+      return new Driver({ pool, onCreateConnection: lockWrites });
     }
   }
 
