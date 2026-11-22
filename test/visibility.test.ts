@@ -215,8 +215,8 @@ describe("repo visibility", () => {
 
   test("the item page gives viewers verdicts without review text, and answers since with unchanged", async () => {
     const now = new Date().toISOString();
-    await db.prepare(`INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, summary, risks, fixes, claims, trigger)
-      VALUES ('open-app', 1, 'h-open-app', ?, 'opus', 'full', 'take-fix', 1, 'quotes the patch', 'summary of the patch', '["a risk"]', '["fix one"]', '[{"claim":"it leaks","evidence":"src/a.ts:4"}]', 'operator')`).run(now);
+    await db.run(db.k.insertInto("opus_review_history").values({ repo: "open-app", number: 1, head_oid: "h-open-app", at: now, model: "opus", mode: "full", verdict: "take-fix", sure: 1, reason: "quotes the patch", summary: "summary of the patch",
+      risks: '["a risk"]', fixes: '["fix one"]', claims: '[{"claim":"it leaks","evidence":"src/a.ts:4"}]', trigger: "operator" }));
     const page = async (login: string) => (await signedIn(login)).get<ItemPageData>("/api/items/open-app/1/page");
     for (const login of ["reader", "maint", "boss"]) {
       const latest = (await page(login)).reviews.latest!;
@@ -231,7 +231,7 @@ describe("repo visibility", () => {
     const c = await signedIn("reader");
     const first = await page("reader");
     assert.deepEqual(await c.get(`/api/items/open-app/1/page?since=${first.stamp}`), { unchanged: true, stamp: first.stamp });
-    await db.prepare("DELETE FROM opus_review_history WHERE repo = 'open-app'").run();
+    await db.run(db.k.deleteFrom("opus_review_history").where("repo", "=", "open-app"));
   });
 
   test("viewers get build tasks, jobs and patch reviews without log and patch bodies", async () => {
@@ -318,8 +318,8 @@ describe("repo visibility", () => {
 
   test("viewers read only the item page's fields of a trace event and no reasons in its list; staff read all", async () => {
     const now = new Date().toISOString();
-    await db.prepare(`INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, claims)
-      VALUES ('open-app', 1, 'h-open-app', ?, 'opus', 'full', 'take-fix', 1, 'secret reason', '["secret risk"]', '["secret fix"]', '[{"claim":"secret claim","evidence":"a.ts:1"}]')`).run(now);
+    await db.run(db.k.insertInto("opus_review_history").values({ repo: "open-app", number: 1, head_oid: "h-open-app", at: now, model: "opus", mode: "full", verdict: "take-fix", sure: 1, reason: "secret reason",
+      risks: '["secret risk"]', fixes: '["secret fix"]', claims: '[{"claim":"secret claim","evidence":"a.ts:1"}]' }));
     await db.run(db.k.insertInto("fixups").values({ repo: "open-app", number: 1, from_head: "h-open-app", state: "failed", reason: "secret fixup reason", files: '["a.ts"]', attempt: 1, created_at: now }));
     type Trace = { events: { id: string; kind: string; summary: string }[] };
     type Detail = { fields: Record<string, unknown> };
@@ -335,7 +335,7 @@ describe("repo visibility", () => {
       assert.equal(fix.summary.includes("secret fixup reason"), staff, login);
       assert.equal("reason" in (await c.get<Detail>(`/api/items/open-app/1/trace/event?id=${encodeURIComponent(fix.id)}`)).fields, staff, login);
     }
-    await db.prepare("DELETE FROM opus_review_history WHERE repo = 'open-app'").run();
+    await db.run(db.k.deleteFrom("opus_review_history").where("repo", "=", "open-app"));
     await db.run(db.k.deleteFrom("fixups").where("repo", "=", "open-app"));
   });
 
