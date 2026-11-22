@@ -31,6 +31,7 @@ export function gateEnvAllowed(repo: string, name: string): boolean {
   return prefix.length >= 3 && !TOOL_PREFIX.test(prefix) && name.startsWith(`${prefix}_`) && /^[A-Z0-9_]+$/.test(name);
 }
 export const MAX_PACKAGES = 100;
+export const MAX_WARM_COMMAND = 2000;
 const MAX_YAML_BYTES = 256 * 1024;
 
 type Entry = { value: string; body: number };
@@ -135,6 +136,8 @@ export type GateEnv = {
   env: Record<string, string>;
   /** The gate's `cache-version`, which names its sccache store (`sccache/<version>`); null when it is not a plain name. */
   cacheVersion: string | null;
+  /** The gate's `warm-command` (a bash command that builds what the gate builds); null when it is empty or too long. Only the warm producer runs it. */
+  warmCommand: string | null;
   /** Env lines that were left out, for the task log. */
   dropped: string[];
 };
@@ -166,9 +169,12 @@ export function gateEnv(call: GateCall, defaults: Record<string, string>, repo: 
     env[name] = value;
   }
   const cacheVersion = input("cache-version").trim();
+  const warm = input("warm-command").trim();
+  if (warm.length > MAX_WARM_COMMAND || warm.includes("\0")) dropped.push("warm-command");
   return {
     gateRef: call.ref, packages, craftFontsRef: fonts || null, requireFonts: input("require-craft-fonts").trim() !== "false", env, dropped,
     cacheVersion: CACHE_VERSION.test(cacheVersion) ? cacheVersion : null,
+    warmCommand: warm && warm.length <= MAX_WARM_COMMAND && !warm.includes("\0") ? warm : null,
   };
 }
 

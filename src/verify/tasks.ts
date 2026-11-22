@@ -39,9 +39,12 @@ export async function queueTasks(db: Db, plan: Planned, c: { repo: string; numbe
 
 /**
  * Queues a build-only task for the default branch head when the repo has no warm build for it yet and
- * none in the last 24 hours. Returns the task id, or null when nothing was queued.
+ * none in the last 24 hours. Returns the task id, or null when nothing was queued. These builds fill a worker's own warm
+ * dirs (src/worker/warm.ts), so none is queued without an enabled worker environment: build pods start from the warm
+ * store, which the warm producer fills (src/build/warm-queue.ts).
  */
 export async function queueWarmBuild(db: Db, repo: string, mainSha: string, nowMs: number = Date.now()): Promise<number | null> {
+  if (!await db.get(db.k.selectFrom("build_envs").select("id").where("kind", "!=", "kubernetes").where("enabled", "=", 1).limit(1))) return null;
   const same = await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.lit(1).as("one"))
     .where("repo", "=", repo).where("head_sha", "=", mainSha).where("warm_role", "=", "build"));
   if (same) return null;

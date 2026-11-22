@@ -15,10 +15,11 @@ import { WarmStatus } from "./warm-status.ts";
 import {
   DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   PULL_REASONS, pvcSpec, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, toolchainImage, uploadPod, uploadStage,
-  type KubeSettings, type PodCtx, type Prepared,
+  WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type WarmPod,
 } from "./pods.ts";
+import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
-import { appendLog, claim, finishTask, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask } from "./tasks.ts";
+import { appendLog, claim, finishTask, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
 import { cols } from "../db/kx.ts";
 
@@ -31,13 +32,15 @@ const ACCESS_EVERY_MS = 60_000;
 const CREATE_BACKOFF_MS = 60_000;
 /** Longest the task, source and upload pods may run. */
 const APP_POD_SEC = 30 * 60;
+/** What a warm producer's pod adds to its deadline: the restore, the publish and the store's gc. */
+const WARM_PHASES_SEC = 30 * 60;
 
 type Run = {
   task_id: number; env_id: string; key_hash: string; pvc: string; stage: number; pod: string | null; pod_created_at: string | null;
   prepared: string | null; results: string; failed: string | null; ran: number; logged: string; create_tries: number; failing_since: string | null;
   retry_at: string | null; started_at: string;
 };
-type TaskRow = { id: number; state: string; env_id: string | null; repo: string; plan: string; requires: string; log_bytes: number };
+type TaskRow = { id: number; step: string; state: string; env_id: string | null; repo: string; plan: string; requires: string; log_bytes: number };
 type EnvRow = { id: string; enabled: number; slots: number; settings: string | null };
 type Kept = Prepared & { image: string };
 
@@ -51,6 +54,8 @@ export type LauncherDeps = {
   defaultImage: string | null;
   log: (line: string) => void;
   now?: () => number;
+  /** Blobs of a warm key that consumers reported bad, which the producer's next publish repairs; the nodes' warm-sync status when unset. */
+  warmRecheck?: (key: string) => Promise<string[]>;
 };
 
 /** Caches between passes: the access review, a pause after a task could not be started, when a pod's node stopped reporting, and the nodes' warm status. */
@@ -163,7 +168,28 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   await report(health, true);
 }
 
-const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build_tasks").select(["id", "state", "env_id", "repo", "plan", "requires", "log_bytes"]).where("id", "=", id));
+const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build_tasks").select(["id", "step", "state", "env_id", "repo", "plan", "requires", "log_bytes"]).where("id", "=", id));
+/** Whether group `index` is a warm producer's build pod: the last group of a warm task, offline, on a warm writer. */
+const isWarmGroup = (c: EnvCtx, t: TaskRow, groups: Group[], index: number): boolean =>
+  t.step === WARM_STEP && c.s.warmWriter && index === groups.length - 1 && groups[index]!.network === "none";
+/** The size of the version a publish reports in its termination message (JSON with `bytes`); 0 when it says none. */
+function publishedBytes(message: string | undefined): number {
+  try {
+    const n = (JSON.parse(message ?? "") as { bytes?: unknown }).bytes;
+    return typeof n === "number" ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+/** The summary in a phase's termination message (JSON with `summary`, or plain text). */
+function reported(message: string | undefined): string {
+  try {
+    const o = JSON.parse(message ?? "") as { summary?: unknown };
+    if (o && typeof o.summary === "string") return clean(o.summary);
+  } catch { /* plain text */ }
+  return clean(message);
+}
+const runMs = (term: { startedAt?: string; finishedAt?: string }): number => Math.max(0, Date.parse(term.finishedAt ?? "") - Date.parse(term.startedAt ?? "")) || 0;
 const overdue = (c: EnvCtx, run: Run): boolean => c.now() > Date.parse(run.started_at) + c.s.deadlineSec * 1000 + DEADLINE_MARGIN_MS;
 const overdueText = (c: EnvCtx) => `The task passed its deadline of ${c.s.deadlineSec} s and its pod did not stop`;
 
@@ -318,15 +344,18 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
   }
   if (run.stage >= FIRST_GROUP && run.stage < up) {
     const g = groups[run.stage - FIRST_GROUP]!;
+    const warm = isWarmGroup(c, t, groups, run.stage - FIRST_GROUP);
     const results = json<TaskResult[]>(run.results, []);
     let failed: string | null = null;
     let ran = run.ran;
-    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"]] as const) {
+    for (const [name, fallback] of [[DISK_CONTAINER, "the task's volume is over its size"], [PACKAGES_CONTAINER, "the toolchain image lacks packages the CI gate installs"], [WARM_RESTORE_CONTAINER, "the warm restore failed"]] as const) {
       const term = statusOf(pod, name)?.state?.terminated;
       if (!term || failed) continue;
+      // The restore's output says which version the build starts from, or why it starts cold.
+      if (name === WARM_RESTORE_CONTAINER) await podLog(c, run, name, "warm restore");
       if (term.exitCode !== 0) {
-        await podLog(c, run, name, "environment");
-        failed = clean(term.message) || fallback;
+        if (name !== WARM_RESTORE_CONTAINER) await podLog(c, run, name, "environment");
+        failed = (name === WARM_RESTORE_CONTAINER ? reported(term.message) : clean(term.message)) || fallback;
       }
     }
     for (const i of failed ? [] : g.steps) {
@@ -348,7 +377,30 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       else if (term!.exitCode !== 0) failed = pod.status?.reason === "Evicted" ? `${step.name} failed: ${pod.status.message ?? "evicted"}`.slice(0, 300) : `${step.name} failed (exit ${term!.exitCode})`;
       if (failed) break;
     }
-    if (!failed && pod.status?.phase === "Failed") return lose(c, run, podFailure(pod));
+    // A failed gc leaves the published version as it is: the task still succeeds, and a later warm pod runs the gc (the
+    // lease taken at the pod's creation is released, so it is due again in a few hours).
+    let gcFailed = false;
+    if (warm) {
+      const gc = statusOf(pod, WARM_GC_CONTAINER)?.state?.terminated;
+      if (!failed) {
+        const pub = statusOf(pod, WARM_PUBLISH_CONTAINER)?.state?.terminated;
+        if (pub) {
+          await podLog(c, run, WARM_PUBLISH_CONTAINER, "warm publish");
+          results.push({ step: "warm publish", exitCode: pub.exitCode, durationMs: runMs(pub), timedOut: false });
+          if (pub.exitCode !== 0) failed = `warm publish failed${reported(pub.message) ? `: ${reported(pub.message)}` : ` (exit ${pub.exitCode})`}`.slice(0, 300);
+          else await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+        } else if (pod.status?.phase !== "Failed") {
+          // The pod ended with every step run and no publish status: nothing was published.
+          failed = "the warm publish did not run";
+        }
+        if (gc && !failed) await podLog(c, run, WARM_GC_CONTAINER, "warm gc");
+      }
+      if (statusOf(pod, WARM_GC_CONTAINER) && !(gc && gc.exitCode === 0 && !failed)) {
+        await releaseGc(db, c.now());
+        gcFailed = !!gc && gc.exitCode !== 0 && !failed;
+      }
+    }
+    if (!failed && !gcFailed && pod.status?.phase === "Failed") return lose(c, run, podFailure(pod));
     await db.run(db.k.updateTable("build_pod_runs").set({ results: JSON.stringify(results), ran, failed }).where("task_id", "=", run.task_id));
     Object.assign(run, { results: JSON.stringify(results), ran, failed });
     const nextGroup = run.stage - FIRST_GROUP + 1;
@@ -385,15 +437,25 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
   if (left < 60) return finish(c, run, run.failed ?? `the task passed its deadline of ${c.s.deadlineSec} s`);
   let spec: (ctx: PodCtx) => object;
   let deadline: number | undefined;
+  let gcTaken = false;
   if (stage === STAGE_SOURCE) spec = (ctx) => sourcePod(ctx, c.image!);
   else if (stage >= FIRST_GROUP && stage < FIRST_GROUP + groups.length) {
     const index = stage - FIRST_GROUP;
     const g = groups[index]!;
     const kept = json<Kept | null>(run.prepared, null);
     if (!kept) return lose(c, run, "The build pod run lost its source report");
+    if (g.network === "mirror" && !c.s.crateMirror) return finish(c, run, run.failed ?? "a step needs the crate mirror, and this environment has none");
+    let warm: WarmPod | undefined;
+    gcTaken = false;
+    if (t.step === WARM_STEP && index === groups.length - 1) {
+      if (!isWarmGroup(c, t, groups, index)) return finish(c, run, run.failed ?? "a warm build needs a warm writer environment and an offline last step");
+      const key = warmKeyOf(t.repo);
+      gcTaken = await takeGc(db, c.now());
+      warm = { key, gc: gcTaken, bytes: await warmBytes(db, key), recheck: c.d.warmRecheck ? await c.d.warmRecheck(key).catch(() => []) : c.state.warm?.badBlobsFor(key) ?? [] };
+    }
     // The steps' limits, a minute each to copy the source, and two minutes to start the pod and measure its volume.
-    deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120);
-    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0, t.repo);
+    deadline = g.steps.reduce((n, i) => n + stepCap(c.s, plan[i]!) + 60, 120) + (warm ? WARM_PHASES_SEC : 0);
+    spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0, t.repo, warm);
   } else if (stage === uploadStage(plan)) {
     const key = newPodKey(run.task_id);
     await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(key) }).where("task_id", "=", run.task_id));
@@ -403,6 +465,7 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     await createPod(c, run, stage, spec, deadline);
     await db.run(db.k.updateTable("build_pod_runs").set({ create_tries: 0, failing_since: null, retry_at: null }).where("task_id", "=", run.task_id));
   } catch (e) {
+    if (gcTaken) await releaseGc(db, c.now());
     const now = c.now();
     const tries = run.create_tries + 1;
     const since = run.failing_since ?? new Date(now).toISOString();

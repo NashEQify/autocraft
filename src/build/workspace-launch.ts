@@ -120,8 +120,10 @@ export async function workspacePass(d: LauncherDeps, state: WorkspaceState): Pro
   if (!api) return;
   const envs = await d.db.all(d.db.k.selectFrom("build_envs").select(["id", "enabled", "settings"]).where("kind", "=", "kubernetes").orderBy("id"));
   for (const env of envs) {
+    const s = settingsOf(env.settings);
+    if (s.warmWriter) continue;
     try {
-      await envPass({ d, state, api, env, s: settingsOf(env.settings), now: d.now ?? Date.now });
+      await envPass({ d, state, api, env, s, now: d.now ?? Date.now });
     } catch (e) {
       d.log(`workspace launcher: ${env.id}: ${(e as Error).stack ?? e}`);
     }

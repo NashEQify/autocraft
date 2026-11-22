@@ -18,7 +18,7 @@ import { guardedApi, inClusterApi } from "./kube-api.ts";
 import { queueWorkspaceCall } from "./workspace-call.ts";
 import { READY_LIMIT_MS, SEED_LIMIT_MS } from "./workspace-launch.ts";
 import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
-import { cleanOutput, createWorkspace, endWorkspace, execWs, getWorkspace, LIVE_STATES, resumeWorkspace, type WorkspaceStateName } from "./workspaces.ts";
+import { cleanOutput, createWorkspace, endWorkspace, execWs, getWorkspace, LIVE_STATES, refuseWarmWriter, resumeWorkspace, type WorkspaceStateName } from "./workspaces.ts";
 
 export const TRY_STEP = "workspace-try";
 export const TRY_PROMPT_ID = "workspace.try";
@@ -84,6 +84,7 @@ export async function requestTrySession(db: Db, r: TryRequest): Promise<number> 
     if (w.repo !== r.repo || w.base_sha !== r.baseSha) throw new BuildError(409, `workspace ${w.id} holds ${w.repo} at ${w.base_sha.slice(0, 8)}, not ${r.repo} at ${r.baseSha.slice(0, 8)}`);
     envId = w.env_id;
   }
+  if (envId) await refuseWarmWriter(db, envId);
   const at = iso();
   const row = await db.get(db.k.insertInto("workspace_sessions").values({
     kind: "try", repo: r.repo, base_sha: r.baseSha, item: r.item, prompt: r.prompt, env_id: envId, keep: r.keep ? 1 : 0, deadline_sec: deadline,

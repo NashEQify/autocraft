@@ -174,6 +174,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["ci_fixes", "lint_round", "INTEGER"],
   ["ci_fixes", "lint_state", "TEXT"],
   ["build_tasks", "sandbox_env", "TEXT"],
+  // The toolchain image a warm task was queued with (src/build/warm-queue.ts): a failed task counts as attempted for that image only.
+  ["build_tasks", "warm_image", "TEXT"],
   ["decisions", "recommended_reason", "TEXT"],
   ["decisions", "recommend_failures", "INTEGER"],
   ["decisions", "recommend_failed_at", "TEXT"],

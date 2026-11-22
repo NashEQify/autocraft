@@ -1814,13 +1814,26 @@ export type KubeSettings = {
   workspaceStorage: string;
   /** Read-only WebDAV endpoint of the CI runners' compile cache (sccache) that offline Rust steps read; null: no cache. */
   sccacheUrl: string | null;
+  /**
+   * The warm producer: the environment builds only default-branch heads (step `warm` tasks), writes the compile cache and
+   * publishes the warm store. Needs cacheWriteUrl, writerSecret, signingSecret and sccacheUrl.
+   */
+  warmWriter: boolean;
+  /** Read-write WebDAV endpoint of the compile cache and warm store (warm producer only). */
+  cacheWriteUrl: string | null;
+  /** Secret in the namespace with `username` and `password` for cacheWriteUrl. */
+  writerSecret: string | null;
+  /** Secret in the namespace with the warm store's signing key, `private.pem`. */
+  signingSecret: string | null;
+  /** ClusterIP of the crate mirror; `mirror` steps reach crates.io and GitHub only through it. null: no mirror. */
+  crateMirror: string | null;
 };
 export type EnvInput = { label?: string; enabled?: boolean; slots?: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type EnvCreate = { id: string; label: string; kind: EnvKind; slots: number; confidential?: boolean; settings?: Partial<KubeSettings> };
 export type TaskStep = {
   name: string;                         // "fetch deps", "build", "test", "screenshot"
   cmd: string[];                        // argv, run inside the container
-  network: "fetch" | "none";            // "fetch": registry/GitHub egress allowed; "none": no network
+  network: "fetch" | "none" | "mirror"; // "fetch": registry/GitHub egress allowed; "none": no network; "mirror": crates.io and GitHub through the crate mirror only
   timeoutSec: number;
   artifacts?: string[];                 // globs under /out to return
   bare?: boolean;                       // run without the /target and /cache mounts
