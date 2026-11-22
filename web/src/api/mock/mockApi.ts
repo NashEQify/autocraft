@@ -387,7 +387,7 @@ export function createMockApi(): Api {
     ...createPipelineMock(me, changed),
     ...createAgentsMock(me, changed),
     ...createTraceMock(),
-    ...createNowMock(changed),
+    ...createNowMock(changed, () => MOCK_USERS[mockRole()].role),
     ...createActivityMock(),
     ...createBuildMock(me, changed),
     ...createNightlyMock(me, changed),
