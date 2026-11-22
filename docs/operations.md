@@ -485,7 +485,7 @@ The planner's room is the free slots of the Task Runners whose last status is `r
 
 ### Per-call tools
 
-A call's bundle lists the servers it may use: `items` (search and read the synced items), `reference` (the repo's reference documentation, where one exists), `build` (the `check` build tool) and `workspace` (the tools of a session's workspace pod). Each is served only while the call's lease is live and only to a call whose bundle lists it.
+A call's bundle lists the servers it may use: `items` (search and read the synced items), `reference` (the repo's reference documentation, where one exists), `build` (the `check` build tool) and `work` (the tools of a session's workspace pod; Claude Code reserves the name `workspace`). Each is served only while the call's lease is live and only to a call whose bundle lists it.
 
 - **HTTP routes.** `POST /api/remote/tool/<server>/<tool>` with the lease secret as bearer token and the tool's arguments as JSON body. The reply is an MCP `tools/call` result: a text entry, then any images (`{"type": "image", "data": <base64>, "mimeType": ...}`, protocol 5). A long call (`check`, workspace tools) sends whitespace before the JSON while it runs. `autocraft tool` prints the text and a line counting the images it cannot show.
 - **MCP.** `POST /mcp/task/<server>` is a Streamable HTTP MCP server with only that server's tools. Claude gets it through the bundle's MCP config. Codex gets it through its configuration. An agent can use `autocraft mcp` or `autocraft tool` instead.

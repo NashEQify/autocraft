@@ -1,4 +1,4 @@
-// The `workspace` MCP server's tools. A session's tool call is a queued workspace_calls row; the job that owns the
+// The `work` MCP server's tools. A session's tool call is a queued workspace_calls row; the job that owns the
 // workspace runs it here, in the pod through `ws`, and writes the result to the row. The dashboard only relays
 // (src/build/workspace-relay.ts).
 //
@@ -15,7 +15,8 @@ import {
 } from "./workspace-tool-specs.ts";
 import { CALL_GRACE_MS, cleanOutput, execHelper, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
 
-export const WORKSPACE_SERVER = "workspace";
+/** The MCP server of a workspace session's tools. Claude Code reserves the name `workspace` and drops a server so named. */
+export const WORKSPACE_SERVER = "work";
 
 /** One image of a tool result: base64 PNG, JPEG, GIF or WebP, already scaled in the pod. */
 export type ToolImage = { data: string; mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp" };

@@ -16,7 +16,7 @@ import { inClusterApi } from "./kube-api.ts";
 import { PENDING_LIMIT_MS } from "./pods.ts";
 import { queueWorkspaceCall } from "./workspace-call.ts";
 import { SEED_LIMIT_MS } from "./workspace-launch.ts";
-import { OWN_CALLS } from "./workspace-tools.ts";
+import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
 import { cleanOutput, createWorkspace, endWorkspace, execWs, getWorkspace, LIVE_STATES, type WorkspaceStateName } from "./workspaces.ts";
 
 export const TRY_STEP = "workspace-try";
@@ -43,7 +43,9 @@ const IMPLEMENT = CLAUDE_PROMPTS["fixissue.patch"];
 
 const SYSTEM = `You work in a workspace: a checkout of {{repo}} at commit {{sha}} in /work/src, in a container with no network access. The task is for {{repo}}#{{item}}.
 
-Your only tools are the mcp__workspace__* tools: shell (bash, run in /work/src), shell_status and shell_kill (for commands started with background), read, write, edit, glob and grep. Paths are absolute below /work, or relative to /work/src. Nothing outside the workspace can be reached, so do not try to fetch or install anything.
+Your only tools are the mcp__${WORKSPACE_SERVER}__* tools: shell (bash, run in /work/src), shell_status and shell_kill (for commands started with background), read, write, edit, glob and grep. Paths are absolute below /work, or relative to /work/src. Nothing outside the workspace can be reached, so do not try to fetch or install anything.
+
+These tools are the only way to see or change the code: call them as tools, never write a tool call or its result as text. If you have none of them, or they all fail, say so in one line and stop.
 
 Do the task the user gives you. Finish with a short summary of what you changed and why, and what you ran to check it.`;
 const SYSTEM_VERSION = createHash("sha256").update(SYSTEM).digest("hex").slice(0, 10);
