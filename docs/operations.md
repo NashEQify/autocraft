@@ -1076,16 +1076,23 @@ It terminates TLS for four names and picks the certificate by SNI; a client that
 
 | Name | Serves |
 |---|---|
-| `index.crates.io` | Sparse index files and `config.json`, pulled through and cached 60 s. When upstream fails (5xx, timeout, unreachable), a copy up to 7 days old is served; older or never fetched: 502. Upstream 404 is passed on and drops the cached copy. ETag/If-None-Match with the client; the mirror revalidates upstream with its own conditional request. |
+| `index.crates.io` | Sparse index files and `config.json`, pulled through and cached 60 s. When upstream fails (5xx, timeout, unreachable), a copy up to 7 days old is served; older or never fetched: 502. Upstream 404 is passed on, drops the cached copy and is remembered for the same 60 s. ETag/If-None-Match with the client; the mirror revalidates upstream with its own conditional request. |
 | `static.crates.io` | `/crates/<name>/<version>/download` and `/crates/<name>/<name>-<version>.crate`. A miss looks up the version's `cksum` in the upstream index over real TLS (never the cache), downloads the file and keeps it only if its sha256 matches; otherwise 502 and nothing stored. Stored files are never replaced. |
 | `github.com` | Git smart HTTP for allowlisted repos only: `GET <owner>/<repo>[.git]/info/refs?service=git-upload-pack` and `POST …/git-upload-pack`, answered by `git upload-pack --stateless-rpc` from a bare mirror (protocol v0 and v2). Everything else, including receive-pack, is 404. |
 | `api.github.com` | Always 404. Cargo asks it whether a git dependency moved; a 404 makes cargo fetch instead. |
 
-Only GET and HEAD are accepted, plus that one POST. No client header reaches upstream (`Git-Protocol` only selects the local upload-pack protocol). Limits: index responses 32 MiB, `.crate` downloads 100 MiB, git request bodies 16 MiB (also after gzip), git responses 4 GiB.
+Only GET and HEAD are accepted, plus that one POST. No client header reaches upstream (`Git-Protocol` only selects the local upload-pack protocol). For the POST, the repo, content type and encoding are checked before the body is read.
 
-**Storage** (`<data dir>/`): `index/` (LRU by last read, cap 2 GiB), `crates/` (LRU by last read, cap 50 GiB; a read sets the file's mtime at most hourly, so the order survives restarts), `git/<owner>/<repo>.git` (bare mirrors of `refs/heads/*` and `refs/tags/*`, HEAD following upstream's default branch). Every allowlisted repo is fetched (`git fetch --prune`) at start and every 2 minutes, and on `info/refs` when its last fetch is older than 30 s; a failed fetch keeps serving the mirror as it is. `git gc` runs weekly per repo. The allowlist is reread on each 2-minute pass; a repo removed from it is 404 from then on and its mirror is deleted. Repos must be public: the mirror fetches without credentials.
+Limits:
 
-**Logs**: one JSON line per request on stdout (`event: "request"`, host, method, path without the query, status, ms, `cache: hit|miss|revalidated|stale`, bytes), plus `upstream-error`, `checksum-mismatch`, `git-fetch`, `git-gc`, `git-error`. No client addresses or headers are logged.
+- Sizes: index responses 32 MiB, `.crate` downloads 100 MiB, git request bodies 16 MiB (also after gzip), git responses 4 GiB.
+- Clients: 1,024 connections, 100 streams per HTTP/2 connection, 10 s for the TLS handshake, 10 s for HTTP/1.1 headers and 60 s for the whole request, 30 s for a POST body, 120 s idle.
+- Busy: 32 upstream requests (index refreshes and crate downloads) and 8 git processes serving clients at once; past that a request gets 503 with `Retry-After`, except that an index file with a copy under 7 days old is served from it. An upload-pack that produces no output for 60 s (the client stopped reading) is killed.
+- Disk: no crate download starts while the data volume has less than 2 GiB free (`disk-low` in the log, 503); a full disk is logged as `disk-full`, and an index file that cannot be stored is still served.
+
+**Storage** (`<data dir>/`): `index/` (LRU by last read, cap 2 GiB), `crates/` (LRU by last read, cap 50 GiB; a read sets the file's mtime at most hourly, so the order survives restarts), `git/<owner>/<repo>.git` (bare mirrors of `refs/heads/*` and `refs/tags/*`, HEAD following upstream's default branch). Every allowlisted repo is fetched (`git fetch --prune`) at start and every 2 minutes, and on `info/refs` when its last fetch is older than 30 s; a failed fetch counts as an attempt, so for the next 30 s requests are served from the mirror as it is without trying upstream again. An `info/refs` request waits at most 15 s for a fetch when a mirror already exists, then serves it. `git gc` runs weekly per repo. The allowlist is reread on each 2-minute pass; a repo removed from it is 404 from then on and its mirror is deleted. When the file cannot be read, the previous list stays in force and nothing is deleted. Repos must be public: the mirror fetches without credentials.
+
+**Logs**: one JSON line per request on stdout (`event: "request"`, host, method, path without the query, status, ms, `cache: hit|miss|revalidated|stale`, bytes), plus `upstream-error`, `checksum-mismatch`, `disk-low`, `disk-full`, `store-error`, `git-fetch`, `git-gc`, `git-error`, `git-allowlist-error`. No client addresses or headers are logged.
 
 **Config** (flag, then variable, then default):
 

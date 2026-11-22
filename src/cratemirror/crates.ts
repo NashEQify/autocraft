@@ -1,9 +1,9 @@
 // crates.io pull-through: the sparse index (short-lived cache, served stale while upstream fails)
 // and `.crate` downloads (kept only when their sha256 equals the upstream index's cksum).
 import { createHash } from "node:crypto";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { CRATES_IO_INDEX, CrateVerifier, MAX_CRATE_BYTES, indexPath } from "../worker/cache.ts";
-import { LruDir, TooLarge, downloadTo, readCapped, type Log } from "./store.ts";
+import { LruDir, Slots, TooLarge, diskFull, downloadTo, readCapped, type Log } from "./store.ts";
 
 export const STATIC_CRATES_IO = "https://static.crates.io";
 const USER_AGENT = "autocraft-crate-mirror";
@@ -34,13 +34,17 @@ export function downloadTarget(path: string): { name: string; version: string } 
 
 export type IndexAnswer =
   | { status: 200; body: Buffer; etag: string; source: "hit" | "miss" | "revalidated" | "stale" }
-  | { status: 404 | 502 };
+  | { status: 404; source?: "negative" }
+  | { status: 502 | 503 };
 
 type IndexMeta = { fetched: number; etag?: string; lastModified?: string; tag: string };
 
-export type UpstreamOpts = { fetch?: typeof fetch; log: Log; now?: () => number };
+/** `slots` bounds upstream requests at once, shared by the index cache and the crate store. */
+export type UpstreamOpts = { fetch?: typeof fetch; log: Log; now?: () => number; slots: Slots };
 
-/** Sparse index files cached for `ttlMs`; while upstream fails, a copy up to `staleMs` old is served. */
+const NEGATIVE_MAX = 50_000;
+
+/** Sparse index files cached for `ttlMs`; while upstream fails, a copy up to `staleMs` old is served. Upstream 404s are remembered for `ttlMs` too. */
 export class IndexCache {
   #dir: LruDir;
   #upstream: string;
@@ -50,7 +54,9 @@ export class IndexCache {
   #fetch: typeof fetch;
   #log: Log;
   #now: () => number;
+  #slots: Slots;
   #inflight = new Map<string, Promise<IndexAnswer>>();
+  #notFound = new Map<string, number>();
 
   constructor(o: UpstreamOpts & { dir: string; capBytes: number; upstream?: string; ttlMs?: number; staleMs?: number; maxBytes?: number }) {
     this.#dir = new LruDir(o.dir, o.capBytes);
@@ -61,6 +67,7 @@ export class IndexCache {
     this.#fetch = o.fetch ?? fetch;
     this.#log = o.log;
     this.#now = o.now ?? Date.now;
+    this.#slots = o.slots;
   }
 
   get bytes(): number { return this.#dir.bytes; }
@@ -77,24 +84,43 @@ export class IndexCache {
     }
   }
 
-  #write(rel: string, meta: IndexMeta, body: Buffer): void {
+  /** Stores the entry; a failed write is logged and the answer is still served. */
+  #write(path: string, rel: string, meta: IndexMeta, body: Buffer): void {
     const tmp = this.#dir.tmp(rel);
-    const data = Buffer.concat([Buffer.from(`${JSON.stringify(meta)}\n`), body]);
-    writeFileSync(tmp, data, { flag: "wx" });
-    this.#dir.admit(rel, tmp, data.length);
+    try {
+      const data = Buffer.concat([Buffer.from(`${JSON.stringify(meta)}\n`), body]);
+      writeFileSync(tmp, data, { flag: "wx" });
+      this.#dir.admit(rel, tmp, data.length);
+    } catch (e) {
+      rmSync(tmp, { force: true });
+      this.#log(diskFull(e) ? "disk-full" : "store-error", { host: "index.crates.io", path, error: (e as Error).message });
+    }
+  }
+
+  #staleAnswer(rel: string, cached: { meta: IndexMeta; body: Buffer } | undefined): IndexAnswer | undefined {
+    if (!cached || this.#now() - cached.meta.fetched >= this.#stale) return undefined;
+    this.#dir.touch(rel);
+    return { status: 200, body: cached.body, etag: cached.meta.tag, source: "stale" };
   }
 
   /** `path` must have passed indexName(). */
   get(path: string): Promise<IndexAnswer> {
     const rel = `files${path}`;
     const cached = this.#read(rel);
-    if (cached && this.#now() - cached.meta.fetched < this.#ttl) {
+    const now = this.#now();
+    if (cached && now - cached.meta.fetched < this.#ttl) {
       this.#dir.touch(rel);
       return Promise.resolve({ status: 200, body: cached.body, etag: cached.meta.tag, source: "hit" });
     }
+    if (!cached && (this.#notFound.get(path) ?? 0) > now) return Promise.resolve({ status: 404, source: "negative" });
     let p = this.#inflight.get(rel);
     if (!p) {
-      p = this.#refresh(path, rel, cached).finally(() => this.#inflight.delete(rel));
+      const release = this.#slots.take();
+      if (!release) return Promise.resolve(this.#staleAnswer(rel, cached) ?? { status: 503 });
+      p = this.#refresh(path, rel, cached).finally(() => {
+        release();
+        this.#inflight.delete(rel);
+      });
       this.#inflight.set(rel, p);
     }
     return p;
@@ -109,18 +135,22 @@ export class IndexCache {
       const res = await this.#fetch(`${this.#upstream}${path}`, { headers, redirect: "error", signal: AbortSignal.timeout(30_000) });
       if (res.status === 304 && cached) {
         await res.body?.cancel();
-        this.#write(rel, { ...cached.meta, fetched: this.#now() }, cached.body);
+        this.#write(path, rel, { ...cached.meta, fetched: this.#now() }, cached.body);
         return { status: 200, body: cached.body, etag: cached.meta.tag, source: "revalidated" };
       }
       if (res.status === 200) {
         const body = await readCapped(res, this.#max);
         const tag = `"${createHash("sha256").update(body).digest("hex").slice(0, 32)}"`;
-        this.#write(rel, { fetched: this.#now(), etag: res.headers.get("etag") ?? undefined, lastModified: res.headers.get("last-modified") ?? undefined, tag }, body);
+        this.#notFound.delete(path);
+        this.#write(path, rel, { fetched: this.#now(), etag: res.headers.get("etag") ?? undefined, lastModified: res.headers.get("last-modified") ?? undefined, tag }, body);
         return { status: 200, body, etag: tag, source: "miss" };
       }
       await res.body?.cancel();
       if (res.status === 404 || res.status === 410 || res.status === 451) {
         this.#dir.remove(rel);
+        if (this.#notFound.size >= NEGATIVE_MAX) this.#notFound.delete(this.#notFound.keys().next().value!);
+        this.#notFound.delete(path);
+        this.#notFound.set(path, this.#now() + this.#ttl);
         return { status: 404 };
       }
       error = `upstream HTTP ${res.status}`;
@@ -128,15 +158,11 @@ export class IndexCache {
       error = e instanceof TooLarge ? e.message : `upstream ${(e as Error).name === "TimeoutError" ? "timeout" : "unreachable"}: ${(e as Error).message}`;
     }
     this.#log("upstream-error", { host: "index.crates.io", path, error });
-    if (cached && this.#now() - cached.meta.fetched < this.#stale) {
-      this.#dir.touch(rel);
-      return { status: 200, body: cached.body, etag: cached.meta.tag, source: "stale" };
-    }
-    return { status: 502 };
+    return this.#staleAnswer(rel, cached) ?? { status: 502 };
   }
 }
 
-export type CrateAnswer = { status: 200; path: string; size: number; source: "hit" | "miss" } | { status: 404 | 502 };
+export type CrateAnswer = { status: 200; path: string; source: "hit" | "miss" } | { status: 404 | 502 | 503 };
 
 /** Immutable `.crate` files, admitted only when their sha256 equals the cksum in the upstream index. */
 export class CrateStore {
@@ -144,32 +170,56 @@ export class CrateStore {
   #index: string;
   #static: string;
   #max: number;
+  #minFree: number;
   #fetch: typeof fetch;
   #log: Log;
+  #slots: Slots;
   #inflight = new Map<string, Promise<CrateAnswer>>();
 
-  constructor(o: UpstreamOpts & { dir: string; capBytes: number; indexUpstream?: string; staticUpstream?: string; maxBytes?: number }) {
+  constructor(o: UpstreamOpts & { dir: string; capBytes: number; indexUpstream?: string; staticUpstream?: string; maxBytes?: number; minFreeBytes?: number }) {
     this.#dir = new LruDir(o.dir, o.capBytes);
     this.#index = o.indexUpstream ?? CRATES_IO_INDEX;
     this.#static = o.staticUpstream ?? STATIC_CRATES_IO;
     this.#max = o.maxBytes ?? MAX_CRATE_BYTES;
+    this.#minFree = o.minFreeBytes ?? 2 * 1024 ** 3;
     this.#fetch = o.fetch ?? fetch;
     this.#log = o.log;
+    this.#slots = o.slots;
   }
 
   get bytes(): number { return this.#dir.bytes; }
   get count(): number { return this.#dir.count; }
 
-  get(name: string, version: string): Promise<CrateAnswer> {
+  #rel(name: string, version: string): string {
     const lower = name.toLowerCase();
-    const rel = `${indexPath(lower)}/${lower}-${version}.crate`;
+    return `${indexPath(lower)}/${lower}-${version}.crate`;
+  }
+
+  /** Forgets a stored file that vanished from disk. */
+  forget(name: string, version: string): void { this.#dir.remove(this.#rel(name, version)); }
+
+  get(name: string, version: string): Promise<CrateAnswer> {
+    const rel = this.#rel(name, version);
     if (this.#dir.has(rel)) {
       this.#dir.touch(rel);
-      return Promise.resolve({ status: 200, path: this.#dir.path(rel), size: this.#dir.size(rel), source: "hit" });
+      return Promise.resolve({ status: 200, path: this.#dir.path(rel), source: "hit" });
     }
     let p = this.#inflight.get(rel);
     if (!p) {
-      p = this.#download(name, version, rel).finally(() => this.#inflight.delete(rel));
+      const path = `/crates/${name}/${version}/download`;
+      // Temp files of downloads in flight are not under the cap, so misses stop while the disk is nearly full.
+      let free = Infinity;
+      try { const st = statfsSync(this.#dir.root); free = st.bavail * st.bsize; } catch { /* unknown: let the write decide */ }
+      if (free < this.#minFree) {
+        this.#log("disk-low", { host: "static.crates.io", path, free });
+        return Promise.resolve({ status: 503 });
+      }
+      const release = this.#slots.take();
+      if (!release) return Promise.resolve({ status: 503 });
+      p = this.#download(name, version, rel).finally(() => {
+        release();
+        this.#inflight.delete(rel);
+      });
       this.#inflight.set(rel, p);
     }
     return p;
@@ -200,19 +250,15 @@ export class CrateStore {
       const got = await downloadTo(res, tmp, this.#max);
       if (got.sha256 !== want) {
         this.#log("checksum-mismatch", { host: "static.crates.io", path, bytes: got.size });
-        unlinkQuiet(tmp);
+        rmSync(tmp, { force: true });
         return { status: 502 };
       }
       this.#dir.admit(rel, tmp, got.size);
-      return { status: 200, path: this.#dir.path(rel), size: got.size, source: "miss" };
+      return { status: 200, path: this.#dir.path(rel), source: "miss" };
     } catch (e) {
-      unlinkQuiet(tmp);
-      this.#log("upstream-error", { host: "static.crates.io", path, error: (e as Error).message });
+      rmSync(tmp, { force: true });
+      this.#log(diskFull(e) ? "disk-full" : "upstream-error", { host: "static.crates.io", path, error: (e as Error).message });
       return { status: 502 };
     }
   }
-}
-
-function unlinkQuiet(path: string): void {
-  rmSync(path, { force: true });
 }

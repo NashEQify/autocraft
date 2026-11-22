@@ -12,6 +12,26 @@ export const jsonLog: Log = (event, fields) => console.log(JSON.stringify({ ts: 
 
 export class TooLarge extends Error {}
 
+/** A fixed number of slots, taken without waiting: a full set means the caller answers 503. */
+export class Slots {
+  #free: number;
+  constructor(n: number) { this.#free = n; }
+  /** A release function, or undefined when every slot is taken. */
+  take(): (() => void) | undefined {
+    if (this.#free <= 0) return undefined;
+    this.#free--;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#free++;
+    };
+  }
+}
+
+/** True for a write that failed because the disk is full. */
+export const diskFull = (e: unknown): boolean => (e as NodeJS.ErrnoException)?.code === "ENOSPC";
+
 /** The response body, or TooLarge once it passes `max` bytes. */
 export async function readCapped(res: Response, max: number): Promise<Buffer> {
   if (Number(res.headers.get("content-length") ?? 0) > max) {

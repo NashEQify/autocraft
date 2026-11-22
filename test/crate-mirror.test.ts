@@ -3,11 +3,11 @@ import assert from "node:assert/strict";
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, X509Certificate } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { request } from "node:https";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { TLSSocket } from "node:tls";
+import { connect, type TLSSocket } from "node:tls";
 import { MIRROR_HOSTS, startMirror, type Mirror } from "../src/cratemirror/server.ts";
 
 const hasTools = spawnSync("openssl", ["version"]).status === 0 && spawnSync("git", ["--version"]).status === 0;
@@ -51,6 +51,7 @@ let clock = Date.now();
 let mirror: Mirror;
 let dataDir: string;
 let upstreamGit: string;
+const allowFile = join(root, "allow.txt");
 
 function get(host: string, path: string, o: { method?: string; headers?: Record<string, string> } = {}): Promise<{ status: number; body: Buffer; cert: X509Certificate | undefined }> {
   return new Promise((resolve, reject) => {
@@ -88,8 +89,9 @@ before(async () => {
     mkdirSync(join(upstreamGit, "storytold"), { recursive: true });
     git(root, "clone", "--quiet", "--bare", work, join(upstreamGit, "storytold", `${repo}.git`));
   }
+  writeFileSync(allowFile, "# test\nstorytold/craft-libs\n");
   mirror = await startMirror(
-    { listen: "127.0.0.1:0", dataDir, tlsDir, gitRepos: "storytold/craft-libs", crateCapBytes: crateBody("1.0.0").length * 2.5, indexCapBytes: 1024 * 1024 },
+    { listen: "127.0.0.1:0", dataDir, tlsDir, gitAllowlistFile: allowFile, crateCapBytes: crateBody("1.0.0").length * 2.5, indexCapBytes: 1024 * 1024 },
     { log: process.env.MIRROR_TEST_LOG ? undefined : () => undefined, fetch: fakeFetch, indexUpstream: "https://idx.test", staticUpstream: "https://static.test", gitUpstream: upstreamGit, crateMaxBytes: 1024, now: () => clock },
   );
 });
@@ -105,6 +107,12 @@ test("the server name picks the certificate; an unknown name gets none", { skip:
     assert.ok(r.cert?.subject.includes(`CN=${host}`), `${host}: ${r.cert?.subject}`);
   }
   await assert.rejects(get("example.com", "/"));
+  await assert.rejects(new Promise((resolve, reject) => {
+    // An IP address as host: the client sends no server name at all.
+    const s = connect({ host: "127.0.0.1", port: mirror.port, ca: readFileSync(join(tlsDir, "ca.pem")), rejectUnauthorized: false }, () => { s.end(); resolve(undefined); });
+    s.on("error", reject);
+  }));
+  assert.equal((await get("static.crates.io", "/crates/demo/1.0.0/download", { headers: { host: "github.com" } })).status, 421);
   assert.equal((await get("api.github.com", "/repos/storytold/craft-libs/commits/main")).status, 404);
 });
 
@@ -124,6 +132,10 @@ test("index files are cached briefly and served stale while upstream fails", { s
   assert.equal((await get("index.crates.io", "/de/mo/demo")).status, 502, "too old to serve stale");
   indexMode = "ok";
   assert.equal((await get("index.crates.io", "/../etc/passwd")).status, 404);
+  const n = calls.length;
+  assert.equal((await get("index.crates.io", "/3/n/nop")).status, 404);
+  assert.equal((await get("index.crates.io", "/3/n/nop")).status, 404);
+  assert.equal(calls.length - n, 1, "upstream 404 remembered for the TTL");
 });
 
 test("a crate whose checksum differs from the index is refused and not stored", { skip: !hasTools }, async () => {
@@ -160,4 +172,18 @@ test("git serves allowlisted repos to a real client and 404s the rest", { skip: 
   assert.equal((await get("github.com", "/storytold/craft-libs/info/refs?service=git-receive-pack")).status, 404);
   assert.equal((await get("github.com", "/storytold/craft-libs/git-receive-pack", { method: "POST" })).status, 404);
   assert.equal((await get("github.com", "/storytold/craft-libs")).status, 404);
+});
+
+test("an unreadable allowlist keeps the previous list and deletes no mirror", { skip: !hasTools }, async () => {
+  const mirrorDir = join(dataDir, "git", "storytold", "craft-libs.git");
+  assert.equal((await get("github.com", "/storytold/craft-libs/info/refs?service=git-upload-pack")).status, 200);
+  renameSync(allowFile, `${allowFile}.away`);
+  await mirror.git.sync();
+  assert.ok(existsSync(mirrorDir));
+  assert.equal((await get("github.com", "/storytold/craft-libs/info/refs?service=git-upload-pack")).status, 200);
+
+  writeFileSync(allowFile, "storytold/other\n");
+  await mirror.git.sync();
+  assert.ok(!existsSync(mirrorDir), "a readable list without the repo removes its mirror");
+  assert.equal((await get("github.com", "/storytold/craft-libs/info/refs?service=git-upload-pack")).status, 404);
 });

@@ -4,13 +4,17 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
-import type { Log } from "./store.ts";
+import type { Log, Slots } from "./store.ts";
 
 export const GITHUB = "https://github.com";
 const SEG = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$/;
 const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
 const MAX_ADVERTISE_BYTES = 64 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 10 * 60_000;
+// upload-pack sends keepalives every 5 s while it computes a pack, so silence this long means the client stopped reading.
+const STALL_MS = 60_000;
+// How long an info/refs request waits for a fetch when a mirror already exists; after that it serves the mirror as it is.
+const FETCH_WAIT_MS = 15_000;
 
 /** "owner/repo" in lower case, from a list entry ("storytold/craft-libs", "https://github.com/storytold/craft-libs.git"), or undefined. */
 export function normalizeRepo(entry: string): string | undefined {
@@ -20,8 +24,8 @@ export function normalizeRepo(entry: string): string | undefined {
   return `${owner}/${repo}`.toLowerCase();
 }
 
-/** Repos from a list file (one per line, `#` comments) and an inline list (comma or whitespace separated). */
-export function readAllowlist(file: string | undefined, inline: string | undefined, log: Log): Set<string> {
+/** Repos from a list file (one per line, `#` comments) and an inline list (comma or whitespace separated); undefined when the file cannot be read. */
+export function readAllowlist(file: string | undefined, inline: string | undefined, log: Log): Set<string> | undefined {
   const out = new Set<string>();
   const add = (text: string, from: string): void => {
     for (const raw of text.split(/[\s,]+/)) {
@@ -37,6 +41,7 @@ export function readAllowlist(file: string | undefined, inline: string | undefin
       add(readFileSync(file, "utf8").split("\n").map((l) => l.replace(/#.*/, "")).join("\n"), "file");
     } catch (e) {
       log("git-allowlist-error", { error: (e as Error).message });
+      return undefined;
     }
   }
   return out;
@@ -54,7 +59,10 @@ type RunResult = { code: number | null; stdout: Buffer; stderr: string };
 
 export type GitOpts = {
   dir: string;
-  allowlist: () => Set<string>;
+  /** Undefined when the list cannot be read: the previous one stays in force. */
+  allowlist: () => Set<string> | undefined;
+  /** Bounds git processes serving clients at once. */
+  slots: Slots;
   log: Log;
   upstream?: string;
   fetchEveryMs?: number;
@@ -65,12 +73,13 @@ export type GitOpts = {
 
 export type GitAnswer =
   | { status: 200; contentType: string; body: Buffer }
-  | { status: 200; contentType: string; stream: NodeJS.ReadableStream; done: Promise<void> }
-  | { status: 400 | 404 | 413 | 415 | 502 };
+  | { status: 200; contentType: string; stream: NodeJS.ReadableStream; done: Promise<void>; kill: () => void }
+  | { status: 400 | 404 | 408 | 413 | 415 | 502 | 503 };
 
 export class GitMirrors {
   #dir: string;
-  #allowlist: () => Set<string>;
+  #allowlist: () => Set<string> | undefined;
+  #slots: Slots;
   #allowed = new Set<string>();
   #log: Log;
   #upstream: string;
@@ -86,6 +95,7 @@ export class GitMirrors {
   constructor(o: GitOpts) {
     this.#dir = o.dir;
     this.#allowlist = o.allowlist;
+    this.#slots = o.slots;
     this.#log = o.log;
     this.#upstream = o.upstream ?? GITHUB;
     this.#fetchEvery = o.fetchEveryMs ?? 2 * 60_000;
@@ -93,7 +103,7 @@ export class GitMirrors {
     this.#gcEvery = o.gcEveryMs ?? 7 * 24 * 3600_000;
     this.#maxResponse = o.maxResponseBytes ?? 4 * 1024 ** 3;
     mkdirSync(this.#dir, { recursive: true });
-    this.#allowed = this.#allowlist();
+    this.#allowed = this.#allowlist() ?? new Set();
   }
 
   get repos(): number { return this.#allowed.size; }
@@ -114,13 +124,16 @@ export class GitMirrors {
   /** Rereads the allowlist, fetches every listed repo, gc's those due and deletes mirrors no longer listed. */
   sync(): Promise<void> {
     this.#syncing ??= (async () => {
-      this.#allowed = this.#allowlist();
+      const next = this.#allowlist();
+      if (next) this.#allowed = next;
       for (const repo of this.#allowed) {
         try {
           await this.#ensure(repo, 0);
           await this.#gcIfDue(repo);
         } catch { /* logged by #ensure */ }
       }
+      // Without a readable list nothing is known to be removed.
+      if (!next) return;
       for (const owner of readdirSync(this.#dir, { withFileTypes: true })) {
         if (!owner.isDirectory()) continue;
         for (const name of readdirSync(join(this.#dir, owner.name))) {
@@ -200,6 +213,8 @@ export class GitMirrors {
       this.#lastFetch.set(repo, Date.now());
       this.#log("git-fetch", { repo, ms: Date.now() - started, created: fresh || undefined });
     } catch (e) {
+      // The attempt counts as the last fetch, so requests in the next `freshMs` serve the mirror without trying again.
+      this.#lastFetch.set(repo, Date.now());
       this.#log("upstream-error", { host: "github.com", repo, error: (e as Error).message });
       if (fresh) {
         rmSync(dir, { recursive: true, force: true });
@@ -217,11 +232,19 @@ export class GitMirrors {
     this.#log("git-gc", { repo });
   }
 
-  /** Allowed, mirrored and fetched within `freshMs`, or why not. */
+  /** Allowed and mirrored, fetched first when the last fetch is older than `freshMs`; or why not. */
   async #ready(repo: string, fetchIfOld: boolean): Promise<404 | 502 | undefined> {
     if (!this.#allowed.has(repo)) return 404;
+    const fetching = this.#ensure(repo, fetchIfOld ? this.#fresh : Infinity);
+    if (existsSync(this.#path(repo))) {
+      // A mirror exists: wait a little for fresh refs, then serve it as it is while the fetch goes on.
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([fetching.catch(() => undefined), new Promise<void>((r) => { timer = setTimeout(r, FETCH_WAIT_MS); })]);
+      clearTimeout(timer);
+      return undefined;
+    }
     try {
-      await this.#ensure(repo, fetchIfOld ? this.#fresh : Infinity);
+      await fetching;
     } catch {
       return 502;
     }
@@ -238,7 +261,14 @@ export class GitMirrors {
     if (query.get("service") !== "git-upload-pack") return { status: 404 };
     const bad = await this.#ready(repo, true);
     if (bad) return { status: bad };
-    const r = await this.#run(["-c", "uploadpack.allowReachableSHA1InWant=true", "upload-pack", "--strict", "--stateless-rpc", "--advertise-refs", this.#path(repo)], { protocol: gitProtocol });
+    const release = this.#slots.take();
+    if (!release) return { status: 503 };
+    let r: RunResult;
+    try {
+      r = await this.#run(["-c", "uploadpack.allowReachableSHA1InWant=true", "upload-pack", "--strict", "--stateless-rpc", "--advertise-refs", this.#path(repo)], { protocol: gitProtocol });
+    } finally {
+      release();
+    }
     if (r.code !== 0) {
       this.#log("git-error", { repo, error: r.stderr.split("\n").pop() });
       return { status: 502 };
@@ -248,39 +278,60 @@ export class GitMirrors {
     return { status: 200, contentType: "application/x-git-upload-pack-advertisement", body: Buffer.concat([head, r.stdout]) };
   }
 
-  /** POST git-upload-pack with the client's request body (already read, at most MAX_REQUEST_BYTES). */
-  async uploadPack(repo: string, contentType: string | undefined, encoding: string | undefined, raw: Buffer, gitProtocol: string | undefined): Promise<GitAnswer> {
+  /**
+   * POST git-upload-pack. The repo, content type and encoding are checked before `readBody` reads
+   * the client's body (at most MAX_REQUEST_BYTES, else 413; 408 when it arrives too slowly).
+   */
+  async uploadPack(repo: string, contentType: string | undefined, encoding: string | undefined, readBody: () => Promise<Buffer | 408 | 413>, gitProtocol: string | undefined): Promise<GitAnswer> {
+    if (!this.#allowed.has(repo)) return { status: 404 };
     if (contentType !== "application/x-git-upload-pack-request") return { status: 415 };
-    const bad = await this.#ready(repo, false);
-    if (bad) return { status: bad };
+    if (encoding !== undefined && encoding !== "gzip" && encoding !== "identity") return { status: 415 };
+    const raw = await readBody();
+    if (typeof raw === "number") return { status: raw };
     let input: Buffer;
     try {
       input = encoding === "gzip" ? gunzipSync(raw, { maxOutputLength: MAX_REQUEST_BYTES }) : raw;
     } catch {
       return { status: encoding === "gzip" ? 413 : 400 };
     }
-    if (encoding && encoding !== "gzip" && encoding !== "identity") return { status: 415 };
+    const bad = await this.#ready(repo, false);
+    if (bad) return { status: bad };
+    const release = this.#slots.take();
+    if (!release) return { status: 503 };
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: this.#dir, LANG: "C", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" };
     if (gitProtocol) env.GIT_PROTOCOL = gitProtocol;
     const child = spawn("git", ["-c", "uploadpack.allowReachableSHA1InWant=true", "upload-pack", "--strict", "--stateless-rpc", this.#path(repo)], { env, stdio: ["pipe", "pipe", "pipe"], timeout: GIT_TIMEOUT_MS });
     let err = "";
     let bytes = 0;
+    // No output for STALL_MS: the client stopped reading (the pipe is paused) or git hangs. Either way the process goes.
+    let stall: NodeJS.Timeout | undefined;
+    const arm = (): void => {
+      clearTimeout(stall);
+      stall = setTimeout(() => {
+        this.#log("git-error", { repo, error: `no progress for ${STALL_MS / 1000} s` });
+        child.kill("SIGKILL");
+      }, STALL_MS);
+    };
+    arm();
     child.stderr.on("data", (c: Buffer) => { if (err.length < 4000) err += c.toString(); });
     child.stdout.on("data", (c: Buffer) => {
+      arm();
       bytes += c.length;
       if (bytes > this.#maxResponse) {
         this.#log("git-error", { repo, error: `response larger than ${this.#maxResponse} bytes` });
-        child.kill();
+        child.kill("SIGKILL");
       }
     });
     child.stdin.on("error", () => undefined);
     child.stdin.end(input);
     const done = new Promise<void>((resolve) => child.on("close", (code) => {
+      clearTimeout(stall);
+      release();
       if (code !== 0) this.#log("git-error", { repo, error: err.trim().split("\n").pop() ?? `exit ${code}` });
       resolve();
     }));
     child.on("error", (e) => this.#log("git-error", { repo, error: e.message }));
-    return { status: 200, contentType: "application/x-git-upload-pack-result", stream: child.stdout, done };
+    return { status: 200, contentType: "application/x-git-upload-pack-result", stream: child.stdout, done, kill: () => child.kill("SIGKILL") };
   }
 }
 

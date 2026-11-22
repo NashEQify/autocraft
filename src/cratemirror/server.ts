@@ -2,7 +2,8 @@
 // (index.crates.io, static.crates.io, github.com) and reach this server through host aliases and a
 // private CA, so cargo's registry and git checkout paths stay the same as with direct access.
 // See docs/operations.md, "Crate mirror".
-import { createReadStream, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { createSecureServer, type Http2SecureServer, type Http2ServerRequest, type Http2ServerResponse } from "node:http2";
 import type { IncomingHttpHeaders, IncomingMessage } from "node:http";
 import { join } from "node:path";
@@ -12,11 +13,18 @@ import { envVar } from "../env.ts";
 import { startHealthServer } from "../health.ts";
 import { CrateStore, IndexCache, downloadTarget, indexName } from "./crates.ts";
 import { GitMirrors, MAX_GIT_REQUEST_BYTES, gitRoute, readAllowlist } from "./git.ts";
-import { jsonLog, type Log } from "./store.ts";
+import { Slots, jsonLog, type Log } from "./store.ts";
 
 export const MIRROR_HOSTS = ["index.crates.io", "static.crates.io", "github.com", "api.github.com"] as const;
 const GiB = 1024 ** 3;
 const CERT_RELOAD_MS = 5 * 60_000;
+// Limits for clients. Build pods open a handful of connections each; these bound what a broken or hostile one can hold.
+const MAX_CONNECTIONS = 1024;
+const MAX_STREAMS = 100;
+const IDLE_MS = 120_000;
+const BODY_MS = 30_000;
+const UPSTREAM_SLOTS = 32;
+const GIT_SLOTS = 8;
 
 export type MirrorConfig = {
   /** host:port of the TLS listener. */
@@ -42,6 +50,7 @@ export type MirrorDeps = {
   indexTtlMs?: number;
   indexMaxBytes?: number;
   crateMaxBytes?: number;
+  minFreeBytes?: number;
   now?: () => number;
 };
 
@@ -87,15 +96,33 @@ function send(res: Res, method: string, status: number, body: Buffer | string = 
   else res.end(buf);
 }
 
-async function readBody(req: Req, max: number): Promise<Buffer | undefined> {
+/** The request body, 413 past `max` bytes, 408 when it has not arrived within BODY_MS. */
+async function readBody(req: Req, max: number): Promise<Buffer | 408 | 413> {
   const chunks: Buffer[] = [];
   let n = 0;
-  for await (const c of req) {
-    n += c.length;
-    if (n > max) return undefined;
-    chunks.push(c);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    req.destroy();
+  }, BODY_MS);
+  try {
+    for await (const c of req) {
+      n += c.length;
+      if (n > max) return 413;
+      chunks.push(c);
+    }
+  } catch (e) {
+    if (timedOut) return 408;
+    throw e;
+  } finally {
+    clearTimeout(timer);
   }
-  return Buffer.concat(chunks, n);
+  return timedOut ? 408 : Buffer.concat(chunks, n);
+}
+
+function failed(res: Res, method: string, status: number): void {
+  const text: Record<number, string> = { 404: "not found\n", 502: "upstream unavailable\n", 503: "busy\n" };
+  send(res, method, status, text[status] ?? "", status === 503 ? { "retry-after": 5 } : {});
 }
 
 export type Mirror = { port: number; healthUrl?: string; git: GitMirrors; close: () => Promise<void> };
@@ -116,9 +143,10 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
   }, CERT_RELOAD_MS);
   reload.unref();
 
-  const index = new IndexCache({ dir: join(cfg.dataDir, "index"), capBytes: cfg.indexCapBytes, upstream: deps.indexUpstream, ttlMs: deps.indexTtlMs, maxBytes: deps.indexMaxBytes, fetch: deps.fetch, log, now: deps.now });
-  const crates = new CrateStore({ dir: join(cfg.dataDir, "crates"), capBytes: cfg.crateCapBytes, indexUpstream: deps.indexUpstream, staticUpstream: deps.staticUpstream, maxBytes: deps.crateMaxBytes, fetch: deps.fetch, log });
-  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log), log });
+  const slots = new Slots(UPSTREAM_SLOTS);
+  const index = new IndexCache({ dir: join(cfg.dataDir, "index"), capBytes: cfg.indexCapBytes, upstream: deps.indexUpstream, ttlMs: deps.indexTtlMs, maxBytes: deps.indexMaxBytes, fetch: deps.fetch, log, now: deps.now, slots });
+  const crates = new CrateStore({ dir: join(cfg.dataDir, "crates"), capBytes: cfg.crateCapBytes, indexUpstream: deps.indexUpstream, staticUpstream: deps.staticUpstream, maxBytes: deps.crateMaxBytes, minFreeBytes: deps.minFreeBytes, fetch: deps.fetch, log, slots });
+  const git = new GitMirrors({ dir: join(cfg.dataDir, "git"), upstream: deps.gitUpstream, allowlist: () => readAllowlist(cfg.gitAllowlistFile, cfg.gitRepos, log), slots: new Slots(GIT_SLOTS), log });
 
   async function handle(req: Req, res: Res): Promise<void> {
     const started = Date.now();
@@ -149,8 +177,8 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
       }
       const a = await index.get(path);
       if (a.status !== 200) {
-        send(res, method, a.status, a.status === 404 ? "not found\n" : "upstream unavailable\n");
-        return done(a.status);
+        failed(res, method, a.status);
+        return done(a.status, a.status === 404 && a.source ? { cache: a.source } : {});
       }
       const headers = { etag: a.etag, "cache-control": "max-age=0", "content-type": name === "config.json" ? "application/json" : "text/plain; charset=utf-8" };
       if (req.headers["if-none-match"] === a.etag) {
@@ -168,15 +196,29 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
         send(res, method, 404, "not found\n");
         return done(404);
       }
-      const a = await crates.get(t.name, t.version);
-      if (a.status !== 200) {
-        send(res, method, a.status, a.status === 404 ? "not found\n" : "upstream unavailable\n");
-        return done(a.status);
+      // The file is opened before the answer starts, so an eviction in between costs a refetch, not a broken response.
+      let a = await crates.get(t.name, t.version);
+      let fh: FileHandle | undefined;
+      for (let i = 0; i < 2 && a.status === 200 && !fh; i++) {
+        try {
+          fh = await open(a.path, "r");
+        } catch {
+          crates.forget(t.name, t.version);
+          a = await crates.get(t.name, t.version);
+        }
       }
-      res.writeHead(200, { ...SECURITY_HEADERS, "content-type": "application/gzip", "content-length": a.size, "cache-control": "public, max-age=31536000, immutable" });
-      if (method === "HEAD") res.end();
-      else await pipeline(createReadStream(a.path), res);
-      return done(200, { cache: a.source, bytes: a.size });
+      if (a.status !== 200 || !fh) {
+        const status = a.status === 200 ? 503 : a.status;
+        failed(res, method, status);
+        return done(status);
+      }
+      const size = (await fh.stat()).size;
+      res.writeHead(200, { ...SECURITY_HEADERS, "content-type": "application/gzip", "content-length": size, "cache-control": "public, max-age=31536000, immutable" });
+      if (method === "HEAD") {
+        await fh.close();
+        res.end();
+      } else await pipeline(fh.createReadStream(), res);
+      return done(200, { cache: a.source, bytes: size });
     }
 
     if (host === "github.com") {
@@ -190,16 +232,11 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
       let a;
       if (route.endpoint === "info/refs") a = await git.advertise(route.repo, url.searchParams, protocol);
       else {
-        const body = await readBody(req, MAX_GIT_REQUEST_BYTES);
-        if (!body) {
-          send(res, method, 413);
-          return done(413);
-        }
         const enc = req.headers["content-encoding"];
-        a = await git.uploadPack(route.repo, req.headers["content-type"], typeof enc === "string" ? enc : undefined, body, protocol);
+        a = await git.uploadPack(route.repo, req.headers["content-type"], typeof enc === "string" ? enc : undefined, () => readBody(req, MAX_GIT_REQUEST_BYTES), protocol);
       }
       if (a.status !== 200) {
-        send(res, method, a.status, a.status === 404 ? "not found\n" : "");
+        failed(res, method, a.status);
         return done(a.status);
       }
       const headers = { ...SECURITY_HEADERS, "content-type": a.contentType, "cache-control": "no-cache" };
@@ -208,7 +245,12 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
         return done(200, { bytes: a.body.length });
       }
       res.writeHead(200, headers);
-      await pipeline(a.stream, res);
+      try {
+        await pipeline(a.stream, res);
+      } catch (e) {
+        a.kill();
+        throw e;
+      }
       await a.done;
       return done(200);
     }
@@ -221,6 +263,8 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
   const server: Http2SecureServer = createSecureServer({
     allowHTTP1: true,
     minVersion: "TLSv1.2",
+    handshakeTimeout: 10_000,
+    settings: { maxConcurrentStreams: MAX_STREAMS },
     // No default certificate: a client that sends no known server name fails the handshake.
     SNICallback: (name, cb) => {
       const ctx = tls.contexts.get(name.toLowerCase());
@@ -234,6 +278,13 @@ export async function startMirror(cfg: MirrorConfig, deps: MirrorDeps = {}): Pro
       else res.destroy?.();
     });
   });
+  server.maxConnections = MAX_CONNECTIONS;
+  // HTTP/1.1 clients (allowHTTP1): time to send the headers and the whole request.
+  // Node's HTTP/1.1 fallback reads these from the server; @types/node lists them only on http.Server.
+  Object.assign(server, { headersTimeout: 10_000, requestTimeout: 60_000, connectionsCheckingInterval: 5_000 });
+  // Idle HTTP/2 sessions and HTTP/1.1 sockets are closed.
+  server.setTimeout(IDLE_MS);
+  server.on("timeout", (s?: { destroy?: () => void }) => s?.destroy?.());
   const sockets = new Set<TLSSocket>();
   server.on("secureConnection", (sock: TLSSocket) => {
     sockets.add(sock);
