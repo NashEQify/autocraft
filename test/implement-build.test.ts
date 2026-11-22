@@ -1,12 +1,14 @@
 // The build of an implementation: AutoCraft's own check findings go back to the same session as a follow-up and a clean
 // round makes it ready for its PR; findings that survive three follow-ups make it stuck with a decision, whose Try again
-// starts a new attempt with the answer's note as guidance.
+// starts a new attempt with the answer's note as guidance. A restart at any await picks up from the rounds without a second
+// session in the workspace.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Outcome } from "../src/remote/calls.ts";
 import type { WorkspaceCallRequest } from "../src/build/workspace-call.ts";
 import { runBuild, type BuildDeps, type BuildRun } from "../src/implement/build.ts";
 import type { Pod } from "../src/implement/checks.ts";
+import { LOST_REPLY_MESSAGE } from "../src/implement/session.ts";
 import { implementDecisionId, STUCK_OPTIONS } from "../src/implement/stuck.ts";
 import { currentImplementation, implementationById, roundsOf, setImplementationState, startImplementation } from "../src/implement/store.ts";
 import type { PlanReply, SessionReport } from "../src/implement/types.ts";
@@ -62,6 +64,21 @@ async function setup() {
   return { db, impl, deps, run, queued, clippyFails };
 }
 
+/** The fakes with a remote_calls row per queued call, as the real queue makes. */
+function withCallRows(s: Awaited<ReturnType<typeof setup>>) {
+  const queue = s.deps.calls.queue;
+  s.deps.calls.queue = async (db, r) => {
+    const id = await queue(db, r), now = Date.now();
+    await db.run(db.k.insertInto("main.remote_calls").values({
+      id, step: "implement", stage: 0, prompt_id: r.promptId, prompt_version: r.promptVersion, tier: r.tier, effort: r.effort, asked_model: r.model, bundle: "{}",
+      state: "queued", since: now, seen_at: now, max_attempts: 2, timeout_ms: 1000, parent_id: r.parentId ?? null,
+    } as never));
+    return id;
+  };
+}
+
+const RESTART = "the runner restarted";
+
 test("check findings go back to the same session as a follow-up, and a clean round leaves the attempt ready for its PR", async () => {
   const s = await setup();
   s.clippyFails.rounds.add(1);
@@ -98,4 +115,38 @@ test("findings that survive three follow-ups make the attempt stuck, and Try aga
   assert.notEqual(next.id, s.impl.id);
   assert.equal(next.state, "planning");
   assert.deepEqual((await roundsOf(s.db, next.id)).map((r) => [r.kind, (r.result as { text?: string }).text]), [["guidance", "Keep the old signature."]]);
+});
+
+test("a restart after a turn's reply was read asks the same session for the report again instead of starting over", async () => {
+  const s = await setup();
+  withCallRows(s);
+  const normal = s.deps.calls.await;
+  s.deps.calls.await = async (db, id) => {
+    // The reply is read (and dropped from the call) and the runner stops before the round is written.
+    await db.run(db.k.updateTable("main.remote_calls").set({ state: "done", reply: null, consumed_at: Date.now() }).where("id", "=", id));
+    throw new Error(RESTART);
+  };
+  await assert.rejects(runBuild(s.run, "app", 7, s.deps), new RegExp(RESTART));
+  s.deps.calls.await = normal;
+  await runBuild(s.run, "app", 7, s.deps);
+  assert.equal(s.queued.length, 2);
+  assert.equal(s.queued[1]!.parentId, 1001, "the second turn goes on the first turn's session");
+  assert.equal(s.queued[1]!.stdin, LOST_REPLY_MESSAGE, "the second turn asks for the report, not the task again");
+  assert.equal((await implementationById(s.db, s.impl.id))!.state, "opening");
+});
+
+test("a restart after the turn's report and before the checks runs the checks on that report, with no new session", async () => {
+  const s = await setup();
+  let crashed = false;
+  s.run.log = (line) => {
+    if (!crashed && /^turn \d+ \(start\): done/.test(line)) {
+      crashed = true;
+      throw new Error(RESTART);
+    }
+  };
+  await assert.rejects(runBuild(s.run, "app", 7, s.deps), new RegExp(RESTART));
+  await runBuild(s.run, "app", 7, s.deps);
+  assert.equal(s.queued.length, 1, "no second session in the workspace");
+  assert.equal((await implementationById(s.db, s.impl.id))!.state, "opening");
+  assert.deepEqual((await roundsOf(s.db, s.impl.id)).map((r) => r.kind), ["session", "checks"]);
 });
