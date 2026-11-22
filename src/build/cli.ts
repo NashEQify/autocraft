@@ -10,7 +10,7 @@ import { trackedNames } from "../repos.ts";
 import { warmLineText } from "./warm-status.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
-import { clearBuildSize, gib, listBuildSizes, setBuildSize } from "./sizing.ts";
+import { clearBuildSize, gib, listBuildSizes, setBuildSize, setWarmTarget } from "./sizing.ts";
 import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -39,7 +39,7 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
-       autocraft-server tasks sizes list | set <repo> --memory Q [--limit Q] | clear <repo>   (step pod memory per repo)
+       autocraft-server tasks sizes list | set <repo> [--memory Q [--limit Q]] [--warm-target tmpfs|pvc|none] | clear <repo>   (step pod memory and warm target per repo)
        autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA [--build]
        autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
        autocraft-server workspace list [--all]
@@ -242,12 +242,19 @@ async function sizes(db: Db, args: string[]): Promise<void> {
   if (sub === "list") {
     const rows = await listBuildSizes(db);
     if (!rows.length) console.log("no repo has its own size: step pods get their environment's memory");
-    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
+    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} warm ${r.warmTarget.padEnd(6)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
   } else if (sub === "set") {
     const memory = bytes("memory");
-    if (!pos[0] || memory === null) die(USAGE);
-    const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
-    console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
+    const warm = opt.get("warm-target");
+    if (!pos[0] || (memory === null && warm === undefined)) die(USAGE);
+    if (memory !== null) {
+      const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
+      console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
+    }
+    if (warm !== undefined) {
+      await run(async () => await setWarmTarget(db, pos[0]!, warm, "cli"));
+      console.log(`${safe(pos[0]!)}: warm target ${safe(warm)}`);
+    }
   } else if (sub === "clear") {
     if (!pos[0]) die(USAGE);
     console.log(await clearBuildSize(db, pos[0], "cli") ? `${safe(pos[0])}: step pods get their environment's memory` : `${safe(pos[0])} had no size of its own`);

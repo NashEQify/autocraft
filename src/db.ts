@@ -308,6 +308,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["build_pod_runs", "reserved_mem_bytes", "INTEGER"],
   ["build_pod_runs", "disruptions", "INTEGER NOT NULL DEFAULT 0"],
   ["build_pod_runs", "replaces", "INTEGER NOT NULL DEFAULT 0"],
+  // Where a repository's build pods put a warm target from their node (src/build/warm-mount.ts).
+  ["build_sizes", "warm_target", "TEXT NOT NULL DEFAULT 'none'"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

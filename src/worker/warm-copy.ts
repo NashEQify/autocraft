@@ -1,0 +1,196 @@
+// The pod side of a build pod that starts warm (src/build/warm-mount.ts builds its spec):
+//   changedSince   in the source pod: the checkout's files whose content differs from the warm commit's tree, written to
+//                  the task's volume (CHANGED_FILE)
+//   warmCopyPhase  `worker pod warm-copy`, before the steps of an offline step pod: verifies the node's warm version,
+//                  copies its target and CARGO_HOME, and sets the checkout's mtimes
+// cargo decides freshness by mtime: a source file older than the dep-info of the unit that read it counts as unchanged.
+// So every checkout file is set to OLD_MTIME (before any warm build), and only the files that changed since the warm
+// commit are set to now. Without that list every file is set to now: correct, but every workspace crate rebuilds.
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, lstatSync, lutimesSync, mkdirSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { slugOf } from "../owners.ts";
+import { CHANGED_FILE, COPY_MARK_FILE } from "../build/warm-mount.ts";
+import { clearDir, decodeManifest, loadEd25519, parseLatest, verifyLatest } from "../warm/manifest.ts";
+
+/** 2001-01-01, as CI's restore-mtimes step uses: older than any warm build. */
+export const OLD_MTIME_SEC = 978307200;
+/** Above this many changed files every file counts as changed. */
+export const MAX_CHANGED = 5000;
+const COMMIT = /^[0-9a-f]{40}$/;
+
+type Log = (s: string) => void;
+export type Changed = { commit: string; files: string[] | null };
+
+/** sha256 of `dir`/Cargo.lock, or null when there is none. */
+export function cargoLockOf(dir: string): string | null {
+  try {
+    return createHash("sha256").update(readFileSync(join(dir, "Cargo.lock"))).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/** Regular files and symlinks under `root`, as paths relative to it. */
+function walk(root: string): string[] {
+  const out: string[] = [];
+  const go = (rel: string) => {
+    for (const n of readdirSync(join(root, rel))) {
+      const p = rel ? `${rel}/${n}` : n;
+      const st = lstatSync(join(root, p));
+      if (st.isDirectory()) go(p);
+      else if (st.isFile() || st.isSymbolicLink()) out.push(p);
+    }
+  };
+  go("");
+  return out;
+}
+
+/** git's blob id of a file (or a symlink's target), as `git ls-tree` prints it. */
+function blobId(abs: string): string {
+  const st = lstatSync(abs);
+  const body = st.isSymbolicLink() ? Buffer.from(readlinkSync(abs)) : readFileSync(abs);
+  return createHash("sha1").update(`blob ${body.length}\0`).update(body).digest("hex");
+}
+
+function git(args: string[], cwd: string, maxBuffer = 8 * 1024 * 1024): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, {
+      cwd, timeout: 180_000, maxBuffer, encoding: "utf8",
+      env: { PATH: process.env.PATH ?? "", HOME: cwd, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+    }, (err, stdout, stderr) => (err ? reject(new Error(`git ${args[0]}: ${(stderr || err.message).trim().split("\n").pop()}`)) : resolve(stdout)));
+  });
+}
+
+/**
+ * The files of `src` (the checkout as built: head plus patch) whose content is not the warm commit's, from a tree-only
+ * fetch of that commit into `scratch`. Files deleted since then need no entry: cargo rebuilds a unit whose dep-info names a
+ * missing file. null files: more than MAX_CHANGED.
+ */
+export async function changedSince(repo: string, commit: string, src: string, scratch: string): Promise<Changed> {
+  if (!COMMIT.test(commit)) throw new Error("the warm commit is not a commit id");
+  const dir = join(scratch, "warm-git");
+  mkdirSync(dir, { recursive: true });
+  await git(["init", "-q"], dir);
+  await git(["fetch", "-q", "--depth=1", "--filter=blob:none", "--no-tags", `https://github.com/${slugOf(repo)}.git`, commit], dir);
+  const tree = new Map<string, string>();
+  for (const rec of (await git(["ls-tree", "-r", "-z", "--full-tree", commit], dir, 256 * 1024 * 1024)).split("\0")) {
+    const m = /^\d+ blob ([0-9a-f]{40})\t(.+)$/s.exec(rec);
+    if (m) tree.set(m[2]!, m[1]!);
+  }
+  const files = walk(src).filter((p) => tree.get(p) !== blobId(join(src, p)));
+  return { commit, files: files.length > MAX_CHANGED ? null : files };
+}
+
+/** In the source pod: writes the changed list for `commit`, or logs why there is none (warm-copy then touches every file). */
+export async function writeChanged(work: string, repo: string, commit: string, log: Log): Promise<void> {
+  try {
+    const c = await changedSince(repo, commit, join(work, "src"), join(work, "scratch"));
+    writeFileSync(join(work, CHANGED_FILE), JSON.stringify(c));
+    log(`warm: ${c.files ? `${c.files.length} files differ` : `more than ${MAX_CHANGED} files differ`} from ${commit.slice(0, 12)}`);
+  } catch (e) {
+    log(`warm: no list of files changed since ${commit.slice(0, 12)} (${(e as Error).message}); a warm start rebuilds every workspace crate`);
+  }
+}
+
+/** Sets the checkout's mtimes for a build on `commit`'s warm target; returns what it did. */
+export function setMtimes(work: string, commit: string): string {
+  const src = join(work, "src");
+  let changed: Changed | null = null;
+  try {
+    const c = JSON.parse(readFileSync(join(work, CHANGED_FILE), "utf8")) as Changed;
+    if (c.commit === commit && (c.files === null || (Array.isArray(c.files) && c.files.every((f) => typeof f === "string")))) changed = c;
+  } catch {
+    // No list: every file counts as changed.
+  }
+  const now = Date.now() / 1000;
+  const all = walk(src);
+  if (!changed?.files) {
+    for (const p of all) lutimesSync(join(src, p), now, now);
+    return changed ? `more than ${MAX_CHANGED} files changed since ${commit.slice(0, 12)}: every source file counts as changed` : `no list of files changed since ${commit.slice(0, 12)}: every source file counts as changed`;
+  }
+  const touch = new Set(changed.files);
+  for (const p of all) lutimesSync(join(src, p), touch.has(p) ? now : OLD_MTIME_SEC, touch.has(p) ? now : OLD_MTIME_SEC);
+  return `${touch.size} source files changed since ${commit.slice(0, 12)}`;
+}
+
+function cp(from: string, to: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile("cp", ["-a", "--", `${from}/.`, `${to}/`], { timeout: 30 * 60_000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) =>
+      err ? reject(new Error(`cp: ${(stderr || err.message).trim().split("\n").slice(-2).join(" ")}`)) : resolve());
+  });
+}
+
+const isEmpty = (d: string) => !existsSync(d) || readdirSync(d).length === 0;
+
+/**
+ * AUTOCRAFT_WARM_* of warm-copy: KEY, COMMIT (the version the runner chose), SOURCE (the key's dir on the node), VERIFY_KEYS,
+ * TARGET, CARGO_HOME, CHECKOUT, IMAGE, ENV_HASH, MODE (tmpfs | pvc), SAME_LOCK (1: the version's Cargo.lock must be the
+ * checkout's). A version that does not verify or match is a cold start (exit 0); a missing setting fails the pod.
+ */
+export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: Log): Promise<number> {
+  const need = (n: string) => env[`AUTOCRAFT_WARM_${n}`] || (() => {
+    throw new Error(`AUTOCRAFT_WARM_${n} is required`);
+  })();
+  const key = need("KEY"), commit = need("COMMIT"), target = need("TARGET"), cargoHome = need("CARGO_HOME");
+  const cur = join(need("SOURCE"), "current");
+  const mark = join(work, COPY_MARK_FILE);
+  const keyFiles = need("VERIFY_KEYS").split(",").map((f) => f.trim()).filter(Boolean);
+  // A volume-backed target that a finished copy (or an earlier step pod) filled is kept; a half-done copy is redone.
+  if (!isEmpty(target)) {
+    const state = existsSync(mark) ? (JSON.parse(readFileSync(mark, "utf8")) as { state?: string }).state : undefined;
+    if (state !== "copying") {
+      log(`warm copy: the target already holds ${state === "done" ? "the warm copy" : "a build"}; kept`);
+      return 0;
+    }
+    clearDir(target);
+  }
+  const cold = (why: string) => {
+    if (!isEmpty(target)) clearDir(target);
+    log(`warm copy: ${why}; cold start`);
+    return 0;
+  };
+  const at = `${key}@${commit.slice(0, 12)}`;
+  let keys;
+  try {
+    keys = keyFiles.map((f) => loadEd25519(readFileSync(f), "public"));
+  } catch (e) {
+    return cold(`no verify key (${(e as Error).message})`);
+  }
+  let l, header;
+  try {
+    l = parseLatest(key, readFileSync(join(cur, "latest.json"), "utf8"));
+    if (!l) return cold(`the node's version of ${key} has no valid signed record`);
+    if (!verifyLatest(l, keys)) return cold(`the node's version of ${key} is not signed by a known key`);
+    if (l.commit !== commit) return cold(`the node holds ${key}@${l.commit.slice(0, 12)}, not ${commit.slice(0, 12)}`);
+    const buf = readFileSync(join(cur, "manifest.zst"));
+    if (createHash("sha256").update(buf).digest("hex") !== l.sha256) return cold(`the manifest of ${at} does not match its signed record`);
+    header = decodeManifest(buf).header;
+  } catch (e) {
+    return cold(`the node's version of ${key} cannot be read (${(e as Error).message})`);
+  }
+  if (header.commit !== commit || header.key !== key) return cold(`the manifest of ${at} names another version`);
+  if (header.checkout !== need("CHECKOUT") || header.targetDir !== target || header.cargoHome !== cargoHome) return cold(`${at} was built at other paths`);
+  if (header.image !== need("IMAGE")) return cold(`${at} was built with ${header.image ?? "an unrecorded image"}`);
+  if (header.envHash !== need("ENV_HASH")) return cold(`${at} was built with another CI env`);
+  if (env.AUTOCRAFT_WARM_SAME_LOCK === "1") {
+    const lock = cargoLockOf(join(work, "src"));
+    if (!header.cargoLock || header.cargoLock !== lock) return cold(`${at} was built from another Cargo.lock`);
+  }
+  const volume = need("MODE") === "pvc";
+  const t0 = performance.now();
+  try {
+    if (volume) writeFileSync(mark, JSON.stringify({ state: "copying", commit }));
+    mkdirSync(cargoHome, { recursive: true });
+    await cp(join(cur, "target"), target);
+    await cp(join(cur, "cargo"), cargoHome);
+  } catch (e) {
+    return cold(`copying ${at} failed (${(e as Error).message})`);
+  }
+  const secs = (performance.now() - t0) / 1000;
+  const mtimes = setMtimes(work, commit);
+  if (volume) writeFileSync(mark, JSON.stringify({ state: "done", commit }));
+  log(`warm copy ${(header.bytes / 1e9).toFixed(1)} GB in ${secs.toFixed(1)} s: ${at} into ${volume ? "the task's volume" : "memory"}; ${mtimes}`);
+  return 0;
+}
