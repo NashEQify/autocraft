@@ -801,7 +801,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         // The permission reader's session read runs with the claim's first reads, which also read the mode: in the server mode the claim takes nothing.
         let errors: Map<string, string> | null = null;
         const perm = claimPermission(caller.login, caller.role).then((p) => (errors = p.errors, p));
-        perm.catch(() => {});
+        void perm.catch(() => {});
         const canWrite = async (repo: string): Promise<boolean> => await (await perm).canWrite(repo);
         const out = await remote.claimCall(db, caller, claim, canWrite, Date.now(), { waits: claimWaits, signal: gone.signal, blocked: () => (errors?.size ?? 0) > 0 }, { userLocalOnly: true });
         // Calls passed over because GitHub could not confirm the permission: the helper logs why it gets nothing.

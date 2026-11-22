@@ -196,7 +196,7 @@ const detectOf = (db: Db, ctx: PlanCtx, lane: Pick<Lane, "name" | "detect">): Pr
     const m = ctx.detected;
     m.set(lane.name, (c = lane.detect(db, ctx)));
     // A detect that failed is run again by the next caller.
-    c.catch(() => { if (m.get(lane.name) === c) m.delete(lane.name); });
+    void c.catch(() => { if (m.get(lane.name) === c) m.delete(lane.name); });
   }
   return c;
 };

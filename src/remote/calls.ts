@@ -595,7 +595,7 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
   let newest = -1;
   for (const id of known.keys()) if (id > newest) newest = id;
   const running = runningCounts(db, nowMs);
-  running.catch(() => {});
+  void running.catch(() => {});
   const queued = await db.all(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c"))
     .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until",
       (eb) => eb("id", ">", newest).as("inline"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("items")).end().as("items"),
@@ -884,7 +884,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   // The rest of the first full try's reads run with the expiry's; when the orphan or the expiry wrote, they are read again.
   const firstReads = row.then((r) => (served(r) ? tryReadsOf(db, caller, claim.repos, nowMs, r) : null));
   // Awaited by the first try when used; a failure of reads that are not used is not left unhandled.
-  firstReads.catch(() => {});
+  void firstReads.catch(() => {});
   const [first, expiry] = await Promise.all([row, readExpiry(db, nowMs, undefined, row.then((r) => r.alive!))]);
   // In the server mode no call is queued for helpers: nothing to take for a while.
   if (!served(first)) return { reply: { lease: null, retryAfter: 300, reserve: first.reserve } };

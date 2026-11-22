@@ -59,7 +59,7 @@ function passReads(db: Db, plans: PlanSet, run: string | null | undefined): Prom
   if (!r) {
     const o = { ...(run !== undefined ? { run } : {}), plans };
     passFixReads.set(plans, (r = (async () => await fixReads(db, await planned(db, "conflict", o), await planned(db, "fixup", o)))()));
-    r.catch(() => { if (passFixReads.get(plans) === r) passFixReads.delete(plans); });
+    void r.catch(() => { if (passFixReads.get(plans) === r) passFixReads.delete(plans); });
   }
   return r;
 }
