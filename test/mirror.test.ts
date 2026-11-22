@@ -50,14 +50,17 @@ function fakeClient(nodes: unknown[], issueCount = nodes.length, failAfter = Inf
 async function scratch() {
   const dir = mkdtempSync(join(SCRATCH, "fastsync-"));
   const db = await connectDb(join(dir, "m.db"));
-  await db.script("DELETE FROM tracked_repos");
-  await db.script("INSERT INTO tracked_repos VALUES ('a','t','x', 1),('b','t','x', 1)");
-  await db.script("INSERT INTO repos (name, synced_at, high_water, reconciled_at) VALUES ('a','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z'),('b','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z','2026-11-02T09:00:00Z')");
-  await db.script("INSERT INTO settings VALUES ('org_high_water','2026-11-02T09:30:00Z'),('repos_refreshed_at','2999-01-01T00:00:00Z'),('search_catchup_at','2999-01-01T00:00:00Z')");
+  await db.run(db.k.deleteFrom("tracked_repos"));
+  await db.run(db.k.insertInto("tracked_repos").values(["a", "b"].map((name) => ({ name, added_by: "t", added_at: "x", pipeline: 1 }))));
+  const seen = "2026-11-02T09:00:00Z";
+  await db.run(db.k.insertInto("repos").values(["a", "b"].map((name) => ({ name, synced_at: seen, high_water: seen, reconciled_at: seen }))));
+  await db.run(db.k.insertInto("settings").values([
+    { key: "org_high_water", value: "2026-11-02T09:30:00Z" }, { key: "repos_refreshed_at", value: "2999-01-01T00:00:00Z" }, { key: "search_catchup_at", value: "2999-01-01T00:00:00Z" },
+  ]));
   return { dir, db };
 }
 const opts = { only: [], all: false, full: false, perRepo: false };
-const hw = async (db: Db) => (await db.prepare("SELECT value FROM settings WHERE key='org_high_water'").get() as { value: string }).value;
+const hw = async (db: Db) => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", "org_high_water")))!.value;
 
 
 test("search mode writes tracked results, ignores untracked, advances the high water", async () => {
@@ -67,10 +70,10 @@ test("search mode writes tracked results, ignores untracked, advances the high w
   assert.deepEqual(r, { mode: "search", items: 2 });
   assert.equal(c.calls.length, 1);
   assert.match(String(c.calls[0].variables.q), /updated:2026-11-02T09:20:00Z\.\.2026-11-02T10:05:00Z/);
-  const rows = await db.prepare("SELECT repo, number, detail_level FROM items ORDER BY number").all();
+  const rows = await db.all(db.k.selectFrom("items").select(["repo", "number", "detail_level"]).orderBy("number"));
   assert.deepEqual(rows.map((x) => ({ ...x })), [{ repo: "a", number: 1, detail_level: "full" }, { repo: "b", number: 3, detail_level: "light" }]);
   assert.equal(await hw(db), "2026-11-02T10:00:00Z", "the high water is the newest updatedAt, not the start time");
-  const at = (await db.prepare("SELECT name, synced_at FROM repos ORDER BY name").all()).map((x) => ({ ...x }));
+  const at = (await db.all(db.k.selectFrom("repos").select(["name", "synced_at"]).orderBy("name"))).map((x) => ({ ...x }));
   assert.deepEqual(at, [{ name: "a", synced_at: "2026-11-02T10:05:00Z" }, { name: "b", synced_at: "2026-11-02T10:05:00Z" }], "every tracked repo counts as synced");
 });
 
@@ -100,7 +103,7 @@ test("a window with more than 1,000 matches is split into slices; nothing falls 
   const r = await runSync(db, c, opts, new Date("2026-11-02T10:30:00Z"));
   assert.equal(r.mode, "search");
   assert.equal(r.items, 2500);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM items").get())!.n, 2500);
+  assert.equal((await db.get(db.k.selectFrom("items").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 2500);
   assert.ok(c.queries.every((q) => q.includes("search(")), "no per-repo query");
   const leaves = c.windows.filter((w) => w.matches <= 1000);
   assert.ok(leaves.length >= 3, "split until each slice fits");
@@ -115,21 +118,21 @@ test("sync stores the text hashes the planner compares", async () => {
   const { db } = await scratch();
   const n = { ...node("a", 1), title: "Crash on open", body: "<!-- t -->See [docs](http://x.y) now\n```\ncode\n```" };
   await runSync(db, fakeClient([n]), opts, new Date("2026-11-02T10:05:00Z"));
-  const row = await db.prepare("SELECT * FROM items WHERE number=1").get() as Record<string, string>;
+  const row = (await db.get(db.k.selectFrom("items").select(["embed_hash", "class_hash"]).where("number", "=", 1)))!;
   assert.equal(row.embed_hash, textHash(itemText(n.title, n.body)));
   assert.equal(row.class_hash, inputHash({ repo: "a", number: 1, kind: "issue", title: n.title, body: n.body, lines_changed: null, files_changed: null, author_association: "NONE" }));
   const { pending } = await import("../src/embed/store.ts");
   assert.equal((await pending(db, "m")).length, 1);
-  await db.script(`INSERT INTO item_embeddings (repo, number, model, hash, vec, at) VALUES ('a', 1, 'm', '${row.embed_hash}', x'00', 'x')`);
+  await db.run(db.k.insertInto("item_embeddings").values({ repo: "a", number: 1, model: "m", hash: row.embed_hash!, vec: new Uint8Array([0]), at: "x" }));
   assert.equal((await pending(db, "m")).length, 0);
   assert.equal((await pending(db, "other")).length, 1);
-  await db.prepare("UPDATE items SET embed_hash = NULL WHERE number = 1").run(); // legacy row: planning reads the hash from the text and writes nothing
+  await db.run(db.k.updateTable("items").set({ embed_hash: null }).where("number", "=", 1)); // legacy row: planning reads the hash from the text and writes nothing
   assert.equal((await pending(db, "m")).length, 0);
-  assert.equal((await db.prepare("SELECT embed_hash FROM items WHERE number = 1").get())!.embed_hash, null);
+  assert.equal((await db.get(db.k.selectFrom("items").select("embed_hash").where("number", "=", 1)))!.embed_hash, null);
   const { fillEmbedHashes } = await import("../src/itemhash.ts");
   assert.equal(await fillEmbedHashes(db), 1); // the embed and dupes jobs fill it
-  assert.equal((await db.prepare("SELECT embed_hash FROM items WHERE number = 1").get())!.embed_hash, row.embed_hash);
-  await db.prepare("UPDATE items SET body = 'new text' WHERE number = 1").run(); // an edit outside sync clears the hashes
+  assert.equal((await db.get(db.k.selectFrom("items").select("embed_hash").where("number", "=", 1)))!.embed_hash, row.embed_hash);
+  await db.run(db.k.updateTable("items").set({ body: "new text" }).where("number", "=", 1)); // an edit outside sync clears the hashes
   assert.equal((await pending(db, "m")).length, 1);
 });
 
@@ -172,7 +175,7 @@ import { connectDb } from "../src/db/open.ts";
 test("saveChecks keeps a known mergeable at the same head and replaces it at a new head", async () => {
   const db = await connectDb(join(mkdtempSync(join(tmpdir(), "mergeable-")), "t.db"));
   const save = async (head: string, mergeable: string) => await saveChecks(db, [{ repo: "app", number: 7, head_oid: head, state: "OPEN", is_draft: false, overall: "success", checks: [], mergeable, maintainer_can_modify: true }]);
-  const stored = async () => (await db.prepare("SELECT mergeable FROM pr_checks WHERE repo='app' AND number=7").get() as { mergeable: string }).mergeable;
+  const stored = async () => (await db.get(db.k.selectFrom("pr_checks").select("mergeable").where("repo", "=", "app").where("number", "=", 7)))!.mergeable;
   await save("h1", "CONFLICTING");
   await save("h1", "UNKNOWN");
   assert.equal(await stored(), "CONFLICTING");
@@ -200,7 +203,7 @@ test("the open-PR references follow an edit of the PR's text, from sync and from
   await writeItemNode(db, "a", pr("No references"));
   assert.equal((await issuesWithOpenPr(db, "a")).has(5), false);
   // Stored by sync, so the next edit must clear it.
-  assert.notEqual((await db.prepare("SELECT text_refs FROM items WHERE repo = 'a' AND number = 7").get() as { text_refs: string | null }).text_refs, null);
-  await db.prepare("UPDATE items SET body = 'Closes #6' WHERE repo = 'a' AND number = 7").run();
+  assert.notEqual((await db.get(db.k.selectFrom("items").select("text_refs").where("repo", "=", "a").where("number", "=", 7)))!.text_refs, null);
+  await db.run(db.k.updateTable("items").set({ body: "Closes #6" }).where("repo", "=", "a").where("number", "=", 7));
   assert.deepEqual((await issuesWithOpenPr(db, "a")).get(6), { number: 7, closes: true });
 });

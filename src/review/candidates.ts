@@ -1,7 +1,9 @@
 // The head commit of a PR as best known, the scope answers per item.
-import { settledBySql } from "../settlers.ts";
+import type { Expression, NotNull, SqlBool } from "kysely";
+import { settledByExpr } from "../settlers.ts";
 import { KEEP_IN_CORE, REVIEW_LABELS, sizeOf, type Size } from "../core/rules.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 export { REVIEW_LABELS, sizeOf, type Size };
 
 
@@ -21,13 +23,13 @@ export function headOf(r: { head_oid: string | null; updated_at: string | null; 
   return r.head_oid ?? r.c_head;
 }
 
-const MAINTAINER_ANSWER = "answered_by IN (SELECT login FROM main.access WHERE role = 'maintainer')";
+const maintainerAnswer = (eb: kx.AnyEb) => eb("decisions.answered_by", "in", kx.schemaEb(eb).selectFrom("main.access").select("login").where("role", "=", "maintainer"));
 
-async function scopeRows(db: Db, extra: string): Promise<Map<string, string>> {
+async function scopeRows(db: Db, extra: (eb: kx.AnyEb) => Expression<SqlBool>): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  const rows = await db.prepare(`SELECT repo, number, items, answer, exceptions FROM decisions
-    WHERE kind = 'scope' AND answer IS NOT NULL AND NOT (answer = 'withdrawn' AND answered_by = 'pipeline') ${extra} ORDER BY answered_at DESC`).all() as
-    { repo: string | null; number: number | null; items: string | null; answer: string; exceptions: string | null }[];
+  const rows = await db.all(db.k.selectFrom("decisions").select(["repo", "number", "items", "answer", "exceptions"]).$narrowType<{ answer: NotNull }>()
+    .where("kind", "=", "scope").where("answer", "is not", null).where((eb) => eb.not(eb.and([eb("answer", "=", "withdrawn"), eb("answered_by", "=", "pipeline")])))
+    .where(extra).orderBy("answered_at", (o) => o.desc().nullsLast()));
   for (const r of rows) {
     if (r.number !== null) {
       const k = `${r.repo}#${r.number}`;
@@ -49,12 +51,13 @@ async function scopeRows(db: Db, extra: string): Promise<Map<string, string>> {
  */
 export async function scopeAnswers(db: Db, operatorsOnly = false): Promise<Map<string, string>> {
   // A disputed answer does not count until it is kept.
-  return await scopeRows(db, `AND decisions.exec_state IS NOT 'disputed' ${operatorsOnly ? `AND ${settledBySql("decisions")}` : `AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")})`}`);
+  return await scopeRows(db, (eb) => eb.and([eb("decisions.exec_state", "is distinct from", "disputed"),
+    operatorsOnly ? settledByExpr(db, eb, "decisions") : eb.not(eb.and([maintainerAnswer(eb), eb.not(settledByExpr(db, eb, "decisions"))]))]));
 }
 
 /** Items whose latest scope answer is a maintainer's that no longer counts: the item waits for a decision again instead of being reviewed on it. */
 export async function unsettledScope(db: Db): Promise<Set<string>> {
-  return new Set((await scopeRows(db, `AND ${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}`)).keys());
+  return new Set((await scopeRows(db, (eb) => eb.and([maintainerAnswer(eb), eb.not(settledByExpr(db, eb, "decisions"))]))).keys());
 }
 
 /**
@@ -65,9 +68,9 @@ export async function settledScope(db: Db, repo: string, number: number): Promis
   const ref = `${repo}#${number}`;
   const answer = (await scopeAnswers(db)).get(ref);
   if (!answer || !KEEP_IN_CORE.includes(answer)) return null;
-  const rows = await db.prepare(`SELECT answered_by, answer_note, repo, number, items FROM decisions
-    WHERE kind = 'scope' AND answer = ? AND answered_by IS NOT NULL AND answered_by <> 'pipeline' AND NOT (${MAINTAINER_ANSWER} AND NOT ${settledBySql("decisions")}) ORDER BY answered_at DESC`).all(answer) as
-    { answered_by: string; answer_note: string | null; repo: string | null; number: number | null; items: string | null }[];
+  const rows = await db.all(db.k.selectFrom("decisions").select(["answered_by", "answer_note", "repo", "number", "items"]).$narrowType<{ answered_by: NotNull }>()
+    .where("kind", "=", "scope").where("answer", "=", answer).where("answered_by", "is not", null).where("answered_by", "<>", "pipeline")
+    .where((eb) => eb.not(eb.and([maintainerAnswer(eb), eb.not(settledByExpr(db, eb, "decisions"))]))).orderBy("answered_at", (o) => o.desc().nullsLast()));
   const r = rows.find((x) => (x.number !== null ? x.repo === repo && x.number === number : parseRefs(x.items).some((i) => i.repo === repo && i.number === number)));
   if (!r) return null;
   const note = r.answer_note?.replace(/\s+/g, " ").trim().slice(0, 500) || null;
@@ -77,5 +80,6 @@ export async function settledScope(db: Db, repo: string, number: number): Promis
 /** A tracked issue "repo#n" whose open decision is a scope question (a PR is a code dependency, never only a question). */
 export async function isScopeQuestion(db: Db, ref: string): Promise<boolean> {
   const [repo, n] = ref.split("#");
-  return !!await db.prepare("SELECT 1 FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number AND i.kind = 'issue' WHERE d.repo = ? AND d.number = ? AND d.kind = 'scope' AND d.answer IS NULL LIMIT 1").get(repo!, Number(n));
+  return !!await db.get(db.k.selectFrom("decisions as d").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number").on("i.kind", "=", "issue"))
+    .select((eb) => eb.lit(1).as("one")).where("d.repo", "=", repo!).where("d.number", "=", Number(n)).where("d.kind", "=", "scope").where("d.answer", "is", null).limit(1));
 }

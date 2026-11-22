@@ -8,6 +8,7 @@ import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { appPermission, type AppPermission } from "../remote/permission.ts";
 import { maintainersSettle, settleKey, settlesNow } from "../settlers.ts";
 import type { Db } from "../db/index.ts";
+import { rowid } from "../db/kx.ts";
 
 /** A write permission older than this is read again, so it stays younger than PERM_READ_TTL while GitHub answers. About one read per login and repo per TTL. */
 export const REFRESH_AFTER = PERM_READ_TTL - 2 * 60_000;
@@ -22,26 +23,31 @@ export type RefreshDeps = {
 };
 
 const answeredMerge = async (db: Db, repo: string, number: number, head: string): Promise<string | null> =>
-  (await db.prepare("SELECT answered_by FROM main.decisions WHERE id = ? AND answer = 'merge'").get(mergeDecisionId(repo, number, head)) as { answered_by: string | null } | undefined)?.answered_by ?? null;
+  (await db.get(db.k.selectFrom("main.decisions").select("answered_by").where("id", "=", mergeDecisionId(repo, number, head)).where("answer", "=", "merge")))?.answered_by ?? null;
 
 /** The maintainer logins the pipeline acts for, with the repo: makers of active pre-approvals and queued fix-up requests, and who answered the Merge a queued pre-approval rests on or that has yet to carry across a base merge. */
 async function pipelineMaintainers(db: Db): Promise<{ login: string; repo: string }[]> {
-  const maintainers = new Set((await db.prepare("SELECT login FROM main.access WHERE role = 'maintainer'").all() as { login: string }[]).map((r) => r.login));
+  const maintainers = new Set((await db.all(db.k.selectFrom("main.access").select("login").where("role", "=", "maintainer"))).map((r) => r.login));
   if (!maintainers.size) return [];
   const pairs = new Map<string, { login: string; repo: string }>();
   const add = (login: string | null, repo: string) => {
     if (login && maintainers.has(login)) pairs.set(settleKey(login, repo), { login, repo });
   };
-  const active = await db.prepare("SELECT repo, number, state, head, by FROM preapprovals WHERE state IN ('fixup', 'review', 'ci', 'queued') AND repo IN (SELECT name FROM main.tracked_repos)").all() as { repo: string; number: number; state: string; head: string | null; by: string }[];
+  const active = await db.all(db.k.selectFrom("preapprovals").select(["repo", "number", "state", "head", "by"]).where("state", "in", ["fixup", "review", "ci", "queued"])
+    .where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")).orderBy("repo").orderBy("number").orderBy("id"));
   for (const p of active) {
     add(p.by, p.repo);
     if (p.state === "queued" && p.head) add(await answeredMerge(db, p.repo, p.number, p.head), p.repo);
   }
-  for (const o of await db.prepare("SELECT by, repo FROM operator_fixups WHERE state = 'queued'").all() as { by: string; repo: string }[]) add(o.by, o.repo);
+  for (const o of await db.all(db.k.selectFrom("operator_fixups").select(["by", "repo"]).where("state", "=", "queued").orderBy("id"))) add(o.by, o.repo);
   // A Merge answer that carries across the pipeline's own base merge (carryAnswers) and has not carried yet.
-  const carries = await db.prepare(`SELECT m.repo, m.number, m.from_head FROM conflict_merges m JOIN main.items i ON i.repo = m.repo AND i.number = m.number
-    WHERE m.state = 'merged' AND m.own_diff = 'same' AND i.state = 'OPEN' AND i.head_oid = m.to_head AND m.repo IN (SELECT name FROM main.tracked_repos)
-      AND NOT EXISTS (SELECT 1 FROM preapprovals p WHERE p.repo = m.repo AND p.number = m.number AND p.head = m.to_head)`).all() as { repo: string; number: number; from_head: string }[];
+  const carries = await db.all(db.k.selectFrom("conflict_merges as m")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "m.repo").onRef("i.number", "=", "m.number"))
+    .select(["m.repo", "m.number", "m.from_head"])
+    .where("m.state", "=", "merged").where("m.own_diff", "=", "same").where("i.state", "=", "OPEN").whereRef("i.head_oid", "=", "m.to_head")
+    .where("m.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("preapprovals as p").select(eb.lit(1).as("one")).whereRef("p.repo", "=", "m.repo").whereRef("p.number", "=", "m.number").whereRef("p.head", "=", "m.to_head"))))
+    .orderBy("m.repo").orderBy("m.number").orderBy("m.created_at").orderBy(rowid("conflict_merges", "m")));
   for (const x of carries) add(await answeredMerge(db, x.repo, x.number, x.from_head), x.repo);
   return [...pairs.values()];
 }
@@ -58,7 +64,7 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
   const read = deps.permission ?? ((d, login, repo) => appPermission(d, login, repo));
   const now = Date.now();
   for (const { login, repo } of await pipelineMaintainers(db)) {
-    const row = await db.prepare("SELECT permission, checked_at FROM main.repo_permissions WHERE login = ? AND repo = ?").get(login, repo) as { permission: string; checked_at: string } | undefined;
+    const row = await db.get(db.k.selectFrom("main.repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
     const age = row ? now - Date.parse(row.checked_at) : NaN;
     // Past HOLD_MAX (or an unreadable time) the row is not held and the pre-approval ends: a read started now would come too late for this pass.
     if (!row || !WRITE_PERMISSIONS.has(row.permission) || !(age >= REFRESH_AFTER && age < HOLD_MAX)) continue;
@@ -84,10 +90,10 @@ export async function refreshSettlers(db: Db, log: (line: string) => void = () =
  * younger than HOLD_MAX: the caller waits. Past that, or on a fresh non-write answer, "no".
  */
 export async function settlesLive(db: Db, login: string, repo: string, read: RefreshDeps["permission"] = (d, l, r) => appPermission(d, l, r)): Promise<"yes" | "no" | "unknown"> {
-  const role = (await db.prepare("SELECT role FROM main.access WHERE login = ?").get(login) as { role: string } | undefined)?.role;
+  const role = (await db.get(db.k.selectFrom("main.access").select("role").where("login", "=", login)))?.role;
   if (role !== "maintainer" || !await maintainersSettle(db)) return await settlesNow(db, login, [repo]) ? "yes" : "no";
   const age = async (): Promise<number> => {
-    const row = await db.prepare("SELECT permission, checked_at FROM main.repo_permissions WHERE login = ? AND repo = ?").get(login, repo) as { permission: string; checked_at: string } | undefined;
+    const row = await db.get(db.k.selectFrom("main.repo_permissions").select(["permission", "checked_at"]).where("login", "=", login).where("repo", "=", repo));
     return row && WRITE_PERMISSIONS.has(row.permission) ? Date.now() - Date.parse(row.checked_at) : NaN;
   };
   const before = await age();

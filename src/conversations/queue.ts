@@ -9,6 +9,8 @@ import { RUNNING_STALE_MS } from "../answers/hold.ts";
 import { actBlockedReason } from "../runner/autopilot.ts";
 import { filterSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
+import type { NotNull } from "kysely";
 
 /** What a queued card needs to run later as the press would have run: the presser's choices at the time. */
 export type QueueArgs = { skip?: number[]; note?: string; noteStaysOut?: boolean; role?: string };
@@ -34,12 +36,16 @@ export function cardWriteCount(params: CardParams, text: string | null): number 
 
 /** The writes of cards that run now and have not made them yet: counted as used, so two presses at once cannot both take the last room. */
 async function runningReserve(db: Db, ms: number): Promise<number> {
-  const rows = await db.prepare("SELECT id, params, text, acted_at FROM main.conversation_cards WHERE state = 'running' AND acted_at > ?").all(new Date(ms - RUNNING_STALE_MS).toISOString()) as { id: number; params: string; text: string | null; acted_at: string }[];
+  const rows = await db.all(db.k.selectFrom("main.conversation_cards").select(["id", "params", "text", "acted_at"]).$narrowType<{ acted_at: NotNull }>()
+    .where("state", "=", "running").where("acted_at", ">", new Date(ms - RUNNING_STALE_MS).toISOString()));
+  const valid = (eb: kx.AnyEb) => eb.case().when(kx.jsonValid(db, "details")).then(eb.ref("details")).end();
   let n = 0;
   for (const r of rows) {
     let need = 0;
     try { need = cardWriteCount(JSON.parse(r.params) as CardParams, r.text); } catch { continue; }
-    const written = (await db.prepare(`SELECT COUNT(*) AS n FROM main.audit WHERE json_valid(details) AND json_extract(details, '$.source') = 'conversation' AND json_extract(details, '$.card') = ? AND json_extract(details, '$.state') = 'done' AND at >= ?`).get(r.id, r.acted_at) as { n: number }).n;
+    const written = (await db.get(db.k.selectFrom("main.audit").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => eb.and([
+      eb(kx.jsonText(db, valid(eb), "$.source"), "=", "conversation"), eb(kx.jsonNum(db, valid(eb), "$.card"), "=", r.id),
+      eb(kx.jsonText(db, valid(eb), "$.state"), "=", "done"), eb("at", ">=", r.acted_at)]))))!.n;
     n += Math.max(0, need - written);
   }
   return n;
@@ -73,9 +79,12 @@ export async function queuedCards(db: Db, o: { all?: boolean } = {}): Promise<Qu
 }
 
 async function queuedRows(db: Db): Promise<QueuedRow[]> {
-  return await db.prepare(`SELECT c.id, c.repo, c.number, COALESCE(c.queued_at, '') AS queued_at, c.acted_by, c.dispute_by, c.dispute_reason, c.dispute_at
-    FROM main.conversation_cards c LEFT JOIN main.item_rank r ON r.repo = c.repo AND r.number = c.number
-    WHERE c.state = 'queued' ORDER BY COALESCE(CAST(r.score / 10000 AS INTEGER), 2) DESC, c.queued_at, c.id`).all() as QueuedRow[];
+  return await db.all(db.k.selectFrom("main.conversation_cards as c")
+    .leftJoin("main.item_rank as r", (j) => j.onRef("r.repo", "=", "c.repo").onRef("r.number", "=", "c.number"))
+    .select((eb) => ["c.id", "c.repo", "c.number", eb.fn.coalesce("c.queued_at", eb.val("")).as("queued_at"), "c.acted_by", "c.dispute_by", "c.dispute_reason", "c.dispute_at"])
+    .where("c.state", "=", "queued")
+    .orderBy((eb) => eb.fn.coalesce(eb.cast<number>(eb("r.score", "/", eb.lit(10000)), "bigint"), eb.lit(2)), "desc")
+    .orderBy("c.queued_at", (o) => o.asc().nullsFirst()).orderBy("c.id"));
 }
 
 /** Places (from 1) of the queued cards that will run: a disputed press has none. Read once per request. */
@@ -98,19 +107,20 @@ export const queuedAhead = async (db: Db, except?: number): Promise<boolean> =>
 
 /** Records a dispute of a queued press. False when the card is not queued, is the disputer's own, or is already disputed. */
 export async function disputeCard(db: Db, id: number, by: string, reason: string, at: string): Promise<boolean> {
-  return Number((await db.prepare(`UPDATE main.conversation_cards SET dispute_by = ?, dispute_reason = ?, dispute_at = ?
-    WHERE id = ? AND state = 'queued' AND dispute_by IS NULL AND acted_by <> ? COLLATE NOCASE`).run(by, reason, at, id, by)).changes) === 1;
+  return Number((await db.run(db.k.updateTable("main.conversation_cards").set({ dispute_by: by, dispute_reason: reason, dispute_at: at })
+    .where("id", "=", id).where("state", "=", "queued").where("dispute_by", "is", null).where((eb) => eb.not(kx.ciEq(db, "acted_by", eb.val(by)))))).changes) === 1;
 }
 
 export async function keepCard(db: Db, id: number): Promise<boolean> {
-  return Number((await db.prepare("UPDATE main.conversation_cards SET dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'queued' AND dispute_by IS NOT NULL").run(id)).changes) === 1;
+  return Number((await db.run(db.k.updateTable("main.conversation_cards").set({ dispute_by: null, dispute_reason: null, dispute_at: null })
+    .where("id", "=", id).where("state", "=", "queued").where("dispute_by", "is not", null))).changes) === 1;
 }
 
 /** The first undisputed queued card and what it needs, for the planner: it proposes the drain only when the head fits. */
 export async function queueHead(db: Db): Promise<{ repo: string; fits: boolean } | null> {
   const head = (await queuedCards(db)).find((r) => !r.dispute_by);
   if (!head) return null;
-  const c = await db.prepare("SELECT params, text, queue_args FROM main.conversation_cards WHERE id = ?").get(head.id) as { params: string; text: string | null; queue_args: string | null };
+  const c = (await db.get(db.k.selectFrom("main.conversation_cards").select(["params", "text", "queue_args"]).where("id", "=", head.id)))!;
   try { return { repo: head.repo, fits: await actRoom(db, needOf(c)) }; } catch { return { repo: head.repo, fits: true }; }
 }
 

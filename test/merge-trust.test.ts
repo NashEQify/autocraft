@@ -10,9 +10,10 @@ const kindsOf = async (w: World, n: number) => (await w.prPlan(n)).actions.map((
 
 test("a Merge answer carries across a base merge that left the diff unchanged, not across a CI fix or a changed-diff merge", async () => {
   const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(1)).review(1, { verdict: "take" })).answer(1, "merge")).pr(2)).review(2, { verdict: "take" })).answer(2, "merge")).pr(3)).review(3, { verdict: "take" })).answer(3, "merge"));
-  const merge = "INSERT INTO conflict_merges (repo, number, from_head, to_head, state, attempt, created_at, own_diff) VALUES ('app', ?, ?, ?, 'merged', 1, ?, ?)";
-  await w.db.prepare(merge).run(1, "sha1", "sha1m", T0, "same");
-  await w.db.prepare(merge).run(2, "sha2", "sha2m", T0, "changed");
+  const merge = (number: number, from_head: string, to_head: string, own_diff: string) =>
+    w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number, from_head, to_head, state: "merged", attempt: 1, created_at: T0, own_diff }));
+  await merge(1, "sha1", "sha1m", "same");
+  await merge(2, "sha2", "sha2m", "changed");
   await w.db.prepare("INSERT INTO ci_fixes (repo, number, head, to_head, kind, state, attempt, created_at) VALUES ('app', 3, 'sha3', 'sha3c', 'code', 'pushed', 1, ?)").run(T0);
   await (await (await w.synced(1, "sha1m")).synced(2, "sha2m")).synced(3, "sha3c");
   await advancePreapprovals(w.db);
@@ -23,12 +24,12 @@ test("a Merge answer carries across a base merge that left the diff unchanged, n
 
 test("code carried from a closed duplicate by an author who is not whitelisted needs a Merge answer at the head", async () => {
   const w = (current = await (await (await (await (await (await (await (await (await (await (await world()).repo()).pr(5)).review(5, { verdict: "take" })).verified(5)).premerge(5, "clean")).pr(6)).pr(7, { author: "regular" })).review(7, { verdict: "take" })).verified(7)).premerge(7, "clean"));
-  await w.db.prepare("UPDATE items SET state = 'CLOSED', author = ? WHERE number = 6").run("stranger");
-  await w.db.prepare("INSERT INTO items (repo, number, kind, state, title, author, author_id, created_at, updated_at) VALUES ('app', 8, 'pr', 'CLOSED', 'PR 8', 'regular', ?, ?, ?)").run(REGULAR_ID, T0, T0);
+  await w.db.run(w.db.k.updateTable("items").set({ state: "CLOSED", author: "stranger" }).where("number", "=", 6));
+  await w.db.run(w.db.k.insertInto("items").values({ repo: "app", number: 8, kind: "pr", state: "CLOSED", title: "PR 8", author: "regular", author_id: REGULAR_ID, created_at: T0, updated_at: T0 }));
   const carry = async (kept: number, closed: number) => {
     const id = `app:dupegroup:${kept}`;
-    await w.db.prepare("INSERT INTO dupe_carries (decision_id, repo, number, state, outcome, updated_at) VALUES (?, 'app', ?, 'done', 'pushed', ?)").run(id, kept, T0);
-    await w.db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, detail, base_role) VALUES (?, 'app', ?, 'pr', 'close', ?, 'close')").run(id, closed, JSON.stringify({ carry: ["the null check"] }));
+    await w.db.run(w.db.k.insertInto("dupe_carries").values({ decision_id: id, repo: "app", number: kept, state: "done", outcome: "pushed", updated_at: T0 }));
+    await w.db.run(w.db.k.insertInto("dupe_group_items").values({ decision_id: id, repo: "app", number: closed, kind: "pr", role: "close", detail: JSON.stringify({ carry: ["the null check"] }), base_role: "close" }));
   };
   await carry(5, 6);
   await carry(7, 8);

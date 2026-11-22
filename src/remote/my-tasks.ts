@@ -6,6 +6,7 @@ import { audit } from "../dash/audit.ts";
 import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { STAGES, stageOfStep } from "../stages/registry.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const SKIP_TASKS_KEY = "skip_tasks";
 /** The task of a call whose step belongs to no stage that makes model calls (security scans, Discord, and a step not known). */
@@ -43,7 +44,7 @@ export function taskOfStep(step: string): string {
 
 /** The tasks the user unticked; empty when they take every task. Ids no longer offered are dropped. */
 export async function userSkips(db: Db, login: string): Promise<Set<string>> {
-  const row = await db.prepare("SELECT value FROM main.user_settings WHERE login = ? AND key = ?").get(login, SKIP_TASKS_KEY) as { value: string } | undefined;
+  const row = await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", SKIP_TASKS_KEY));
   if (!row) return new Set();
   try {
     const v = JSON.parse(row.value) as unknown;
@@ -72,9 +73,9 @@ export async function setUserTasks(db: Db, login: string, tasks: readonly string
   const was = await userTasks(db, login);
   const on = new Set(tasks);
   const skip = TASK_CHOICES.map((t) => t.id).filter((id) => !on.has(id));
-  if (!skip.length) await db.prepare("DELETE FROM main.user_settings WHERE login = ? AND key = ?").run(login, SKIP_TASKS_KEY);
-  else await db.prepare("INSERT INTO main.user_settings (login, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-    .run(login, SKIP_TASKS_KEY, JSON.stringify(skip), new Date().toISOString());
+  if (!skip.length) await db.run(db.k.deleteFrom("main.user_settings").where("login", "=", login).where("key", "=", SKIP_TASKS_KEY));
+  else await db.run(db.k.insertInto("main.user_settings").values({ login, key: SKIP_TASKS_KEY, value: JSON.stringify(skip), updated_at: new Date().toISOString() })
+    .onConflict((oc) => oc.columns(["login", "key"]).doUpdateSet(excluded(["value", "updated_at"]))));
   const now = await userTasks(db, login);
   if (was.join("\n") !== now.join("\n")) await audit(db, login, "my-tasks", login, { tasks: now, was });
   return now;

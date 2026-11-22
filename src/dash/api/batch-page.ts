@@ -12,8 +12,7 @@ import { needVisible } from "./visible.ts";
 import { ownerOf } from "../../owners.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
-
-type AuditRow = { rowid: number; at: string; login: string; action: string; target: string | null; details: string | null };
+import * as kx from "../../db/kx.ts";
 
 const detailOf = (s: string | null): Record<string, unknown> => {
   try {
@@ -28,7 +27,7 @@ const CHECK_STATES = new Set(["success", "failure", "pending", "skipped"]);
 
 async function ciOf(db: Db, repo: string, prNumber: number | null): Promise<BatchCi | null> {
   if (prNumber === null) return null;
-  const r = await db.prepare("SELECT overall, checks, fetched_at FROM main.pr_checks WHERE repo = ? AND number = ?").get(repo, prNumber) as { overall: string; checks: string; fetched_at: string } | undefined;
+  const r = await db.get(db.k.selectFrom("main.pr_checks").select(["overall", "checks", "fetched_at"]).where("repo", "=", repo).where("number", "=", prNumber));
   if (!r) return null;
   let list: unknown = [];
   try { list = JSON.parse(r.checks); } catch { /* malformed: no checks */ }
@@ -49,16 +48,16 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
   const prRef = (n: number) => `${b.repo}#${n}`;
   const memberRows = await membersOf(db, id);
   const nums = memberRows.map((m) => m.number);
-  const marks = (xs: unknown[]) => xs.map(() => "?").join(",");
 
   // Audit rows about the batch itself (target `repo:branch`), its members (target `repo#n`, details.batch the branch) and its PR.
-  const audit = await db.prepare(
-    `SELECT rowid, at, login, action, target, details FROM main.audit
-      WHERE (target = ? AND action IN ('batch-start', 'batch-build-skip', 'batch-push', 'batch-pr', 'batch-stop', 'batch-rerun', 'batch-end-too-late', 'batch-merged-after-end'))
-         OR (action IN ('batch-remove', 'batch-hold', 'batch-blame') AND json_extract(details, '$.batch') = ? AND target IN (${marks(nums)}))
-         ${b.pr_number === null ? "" : "OR (target = ? AND action IN ('ci-run-approve', 'ci-rerun'))"}
-      ORDER BY at, rowid`,
-  ).all(ref, b.branch, ...nums.map(prRef), ...(b.pr_number === null ? [] : [prRef(b.pr_number)])) as AuditRow[];
+  const audit = await db.all(db.k.selectFrom("main.audit")
+    .select([kx.rowid("main.audit").as("rowid"), "at", "login", "action", "target", "details"])
+    .where((eb) => eb.or([
+      eb.and([eb("target", "=", ref), eb("action", "in", ['batch-start', 'batch-build-skip', 'batch-push', 'batch-pr', 'batch-stop', 'batch-rerun', 'batch-end-too-late', 'batch-merged-after-end'])]),
+      eb.and([eb("action", "in", ['batch-remove', 'batch-hold', 'batch-blame']), eb(kx.jsonText(db, "details", "$.batch"), "=", b.branch), kx.inList(db, "target", nums.map(prRef))]),
+      ...(b.pr_number === null ? [] : [eb.and([eb("target", "=", prRef(b.pr_number)), eb("action", "in", ['ci-run-approve', 'ci-rerun'])])]),
+    ]))
+    .orderBy("at").orderBy(kx.rowid("main.audit")));
 
   let buildSkipped: string | null = null;
   const left = new Map<number, { state: BatchMemberState; reason: string }>();
@@ -68,12 +67,11 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
 
   ev({ id: "opened", at: b.created_at, kind: "opened", summary: `Opened with ${plural(nums.length, "PR")} on the default branch at ${b.base_sha.slice(0, 7)}` });
   if (b.parent_id !== null) {
-    const parent = await db.prepare("SELECT state FROM main.merge_batches WHERE id = ?").get(b.parent_id) as { state: string } | undefined;
+    const parent = await db.get(db.k.selectFrom("main.merge_batches").select("state").where("id", "=", b.parent_id));
     ev({ id: "parent", at: b.created_at, kind: "opened", summary: parent?.state === "split" ? `Half of batch #${b.parent_id}, which failed` : `Rebuilt from batch #${b.parent_id}`, batchId: b.parent_id });
   }
 
-  const task = b.task_id === null ? undefined : await db.prepare("SELECT state, queued_at, started_at, ended_at, summary FROM main.build_tasks WHERE id = ?").get(b.task_id) as
-    { state: string; queued_at: string; started_at: string | null; ended_at: string | null; summary: string | null } | undefined;
+  const task = b.task_id === null ? undefined : await db.get(db.k.selectFrom("main.build_tasks").select(["state", "queued_at", "started_at", "ended_at", "summary"]).where("id", "=", b.task_id));
   if (task && b.task_id !== null) {
     ev({ id: "task-queued", at: task.queued_at, kind: "task", summary: "Sandbox build and test queued", taskId: b.task_id });
     if (task.started_at) ev({ id: "task-started", at: task.started_at, kind: "task", summary: "Sandbox build and test started", taskId: b.task_id });
@@ -123,7 +121,7 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
   // A batch that was stopped has every member held: the audit's stop row says so, and each member is shown as removed.
   if (audit.some((a) => a.action === "batch-stop")) for (const n of nums) if (!left.has(n)) left.set(n, { state: "removed", reason: "batch stopped by an operator" });
 
-  const children = await db.prepare("SELECT id, created_at FROM main.merge_batches WHERE parent_id = ? ORDER BY id").all(id) as { id: number; created_at: string }[];
+  const children = await db.all(db.k.selectFrom("main.merge_batches").select(["id", "created_at"]).where("parent_id", "=", id).orderBy("id"));
   for (const c of children) {
     ev({ id: `child:${c.id}`, at: c.created_at, kind: state === "split" ? "split" : "superseded", summary: state === "split" ? `Split: batch #${c.id} retries a half` : `Rebuilt as batch #${c.id}`, batchId: c.id });
   }
@@ -135,9 +133,8 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
   }
   events.sort((x, y) => (x.at < y.at ? -1 : x.at > y.at ? 1 : 0));
 
-  const shown = db.prepare("SELECT title, state FROM main.items WHERE repo = ? AND number = ?");
   const members: BatchMemberDetail[] = await mapSeq(memberRows, async (m) => {
-    const it = await shown.get(b.repo, m.number) as { title: string | null; state: string } | undefined;
+    const it = await db.get(db.k.selectFrom("main.items").select(["title", "state"]).where("repo", "=", b.repo).where("number", "=", m.number));
     const l = left.get(m.number);
     const st: BatchMemberState = l?.state ?? (state === "merged" ? "merged" : "in");
     return { repo: b.repo, number: m.number, title: it?.title ?? null, itemState: it ? itemState(it.state) : null, headOid: m.head_oid, state: st, reason: l?.reason ?? null };
@@ -152,7 +149,7 @@ export async function batchDetail(db: Db, id: number, staff: boolean): Promise<B
 
 export async function batchOne(db: Db, req: Req): Promise<BatchDetail> {
   const id = Number(req.params.id);
-  const row = Number.isInteger(id) ? (await db.prepare("SELECT repo FROM main.merge_batches WHERE id = ?").get(id) as { repo: string } | undefined) : undefined;
+  const row = Number.isInteger(id) ? (await db.get(db.k.selectFrom("main.merge_batches").select("repo").where("id", "=", id))) : undefined;
   if (!row) throw new HttpError(404, `no batch ${req.params.id}`);
   await needVisible(db, req, row.repo);
   return await batchDetail(db, id, canSeeInternals(req));

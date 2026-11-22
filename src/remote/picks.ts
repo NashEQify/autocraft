@@ -2,13 +2,13 @@
 // Runners. Their runners take their picks before the queue's order; other users' runners pass a call over while its pick
 // counts (calls.ts claimOrder, leaseCall). A pick counts until its time is up (setting remote_pick_minutes, 0: no time
 // limit), while one of the picker's runners is fresh and the picker is neither cooling off nor at their Max calls at once
-// (calls.ts pickerSql); it ends with a lease, a requeue, an unpick, or at a claim that finds
+// (calls.ts pickerExpr); it ends with a lease, a requeue, an unpick, or at a claim that finds
 // the call released by or no longer open to the picker. Registered as a wait in src/stages/registry.ts.
 import type { ItemRef } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { HttpError } from "../dash/server/util.ts";
 import type { Role } from "../dash/types.ts";
-import { authorsOf, clearPick, dropQueueCache, pickerLogins, judges, pickCounts, pickLapsedArgs, pickLapsedSql, roleFits } from "./calls.ts";
+import { authorsOf, clearPick, dropQueueCache, pickerLogins, judges, pickCounts, pickLapsedExpr, roleFits } from "./calls.ts";
 import { cooloffOf } from "./cooloff.ts";
 import { STATUS_FRESH_MS } from "./helpers.ts";
 import { acceptedModels, familyOf, inferenceMode, isTier } from "./mode.ts";
@@ -17,6 +17,7 @@ import { CALLER_STALE_MS } from "./room.ts";
 import { scaled } from "./time-scale.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 /** Setting: minutes a pick counts; 0 means until it ends otherwise. */
 export const PICK_MINUTES_KEY = "remote_pick_minutes";
@@ -35,7 +36,7 @@ export async function setPickMinutes(db: Db, input: unknown, by: string): Promis
   const n = typeof input === "number" ? input : typeof input === "string" && /^[0-9]+$/.test(input) ? Number(input) : NaN;
   if (!Number.isInteger(n) || n < 0 || n > PICK_MINUTES_MAX) throw new Error(`the minutes a pick counts must be a whole number from 0 (no limit) to ${PICK_MINUTES_MAX}`);
   const was = await pickMinutes(db);
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(PICK_MINUTES_KEY, String(n));
+  await db.run(db.k.insertInto("main.settings").values({ key: PICK_MINUTES_KEY, value: String(n) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   if (n !== was) await audit(db, by, "remote-pick-minutes", "pipeline", { minutes: n, was });
   return n;
 }
@@ -53,8 +54,9 @@ export type PickerState = { canPick: boolean; why: string | null; tiers: Readonl
 
 /** The user's fresh Task Runners together: the tiers their models cover (accepted families) and their slots without the fast lane. */
 async function freshRunnersOf(db: Db, login: string, nowMs: number): Promise<{ tiers: Set<Tier>; slots: number; count: number }> {
-  const rows = await db.prepare(`SELECT h.models, COALESCE(h.slots, 1) AS slots FROM main.remote_helpers h JOIN main.mcp_tokens t ON t.id = h.token_id
-    WHERE h.login = ? AND t.kind = 'runner' AND t.expires_at > ? AND h.reported_at >= ?`).all(login, new Date(nowMs).toISOString(), nowMs - STATUS_FRESH_MS) as { models: string; slots: number }[];
+  const rows = await db.all(db.k.selectFrom("main.remote_helpers as h").innerJoin("main.mcp_tokens as t", "t.id", "h.token_id")
+    .select((eb) => ["h.models", eb.fn.coalesce("h.slots", eb.lit(1)).as("slots")])
+    .where("h.login", "=", login).where("t.kind", "=", "runner").where("t.expires_at", ">", new Date(nowMs).toISOString()).where("h.reported_at", ">=", nowMs - STATUS_FRESH_MS));
   const accepted = await acceptedModels(db);
   const tiers = new Set<Tier>();
   let slots = 0;
@@ -70,7 +72,8 @@ async function freshRunnersOf(db: Db, login: string, nowMs: number): Promise<{ t
 
 /** The user's live picks: a picker's own picks count while their time is not up (canPick needs a fresh runner). */
 const livePicks = async (db: Db, login: string, nowMs: number, except = -1): Promise<number> =>
-  Number((await db.prepare("SELECT COUNT(*) AS n FROM main.remote_calls WHERE state = 'queued' AND picked_by = ? AND (pick_until IS NULL OR pick_until >= ?) AND id <> ?").get(login, nowMs, except) as { n: number }).n);
+  Number((await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "queued").where("picked_by", "=", login)
+    .where((eb) => eb.or([eb("pick_until", "is", null), eb("pick_until", ">=", nowMs)])).where("id", "<>", except)))!.n);
 
 export async function pickerState(db: Db, user: Pick<Picker, "login" | "role">, nowMs: number): Promise<PickerState> {
   const none = (why: string): PickerState => ({ canPick: false, why, tiers: new Set(), picks: 0, pickMax: 0 });
@@ -109,10 +112,8 @@ export async function pickRefusal(state: PickerState, user: Picker, c: PickCall,
   return null;
 }
 
-type CallRow = { id: number; state: string; tier: Tier; prompt_id: string; parent_id: number | null; items: string; repo: string | null; authors: string | null; seen_at: number; picked_by: string | null; pick_until: number | null };
-
 async function readCall(db: Db, id: number): Promise<(PickCall & { state: string; refs: ItemRef[] }) | null> {
-  const r = await db.prepare("SELECT id, state, tier, prompt_id, parent_id, items, repo, authors, seen_at, picked_by, pick_until FROM main.remote_calls WHERE id = ?").get(id) as CallRow | undefined;
+  const r = await db.get(db.k.selectFrom("main.remote_calls").select(["id", "state", "tier", "prompt_id", "parent_id", "items", "repo", "authors", "seen_at", "picked_by", "pick_until"]).$narrowType<{ tier: Tier }>().where("id", "=", id));
   if (!r) return null;
   const refs = JSON.parse(r.items) as ItemRef[];
   const authors = r.authors !== null ? JSON.parse(r.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
@@ -138,9 +139,9 @@ export async function pickCall(db: Db, user: Picker, id: number, nowMs: number =
   const changed = await db.write(async () => {
     // Parallel picks of one user cannot pass the most picks together.
     if (await livePicks(db, user.login, nowMs, id) >= state.pickMax) throw new HttpError(409, `you hold ${state.pickMax} picks, your most`);
-    return Number((await db.prepare(`UPDATE main.remote_calls SET picked_by = ?, picked_at = ?, pick_until = ?
-      WHERE id = ? AND state = 'queued' AND parent_id IS NULL AND (picked_by IS NULL OR picked_by = ? OR ${pickLapsedSql})`)
-      .run(user.login, nowMs, cap === null ? null : nowMs + cap, id, user.login, ...pickLapsedArgs(nowMs))).changes);
+    return Number((await db.run(db.k.updateTable("main.remote_calls").set({ picked_by: user.login, picked_at: nowMs, pick_until: cap === null ? null : nowMs + cap })
+      .where("id", "=", id).where("state", "=", "queued").where("parent_id", "is", null)
+      .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", user.login), pickLapsedExpr(db, eb, nowMs)])))).changes);
   });
   if (changed !== 1) throw new HttpError(409, "another user picked it, or it is no longer queued");
   dropQueueCache(db);

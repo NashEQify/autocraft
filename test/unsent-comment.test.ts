@@ -14,6 +14,7 @@ import type { FixupDeps, FixupSummary } from "../src/fixup/index.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "unsent-comment-"));
@@ -26,18 +27,17 @@ test("a conflict ask whose token mint failed is asked again after the backoff, n
   try {
     const db = await connectDb(join(dir, "t.db"));
     const iso = (ms: number) => new Date(ms).toISOString();
-    await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(iso(T0 - 60 * MIN));
+    await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: iso(T0 - 60 * MIN), pipeline: 1 }));
     await setCommentApproval(db, "op", "app", true);
     await setGithubIdentity(db, "op", "app");
     // A contributor's PR from a fork we can't push to, taken by the review, that conflicts with main.
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, head_repo, base_ref, maintainer_can_modify, mergeable, created_at, updated_at)
-      VALUES ('app', 1, 'pr', 'OPEN', 'Fix a thing', 'someone', 5, 0, ?, 'fix', 'contrib/app', 'main', 0, 'CONFLICTING', ?, ?)`).run(HEAD, iso(T0 - 60 * MIN), iso(T0 - 60 * MIN));
-    await db.prepare("INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', 1, ?, 'rv', ?, 'm', 'take', 'right', '[]', 1, 'full')").run(HEAD, iso(T0 - 30 * MIN));
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: 1, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: HEAD, head_ref: "fix", head_repo: "contrib/app", base_ref: "main", maintainer_can_modify: 0, mergeable: "CONFLICTING", created_at: iso(T0 - 60 * MIN), updated_at: iso(T0 - 60 * MIN) }));
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 1, head_oid: HEAD, run_id: "rv", at: iso(T0 - 30 * MIN), model: "m", verdict: "take", reason: "right", fixes: "[]", sure: 1, mode: "full" }));
 
-    await db.prepare("INSERT INTO verifications (repo, number, head_sha, kind, reason, state, created_at) VALUES ('app', 1, ?, 'ci-enough', 'upstream CI', 'ci-enough', ?)").run(HEAD, iso(T0 - 20 * MIN));
+    await db.run(db.k.insertInto("verifications").values({ repo: "app", number: 1, head_sha: HEAD, kind: "ci-enough", reason: "upstream CI", state: "ci-enough", created_at: iso(T0 - 20 * MIN) }));
     const plan = async () => decidePr((await loadPrFacts(db, { now: Date.now() })).find((f) => f.number === 1)!);
     const plannedAsk = async () => (await plan()).actions.some((a) => a.kind === "conflict" && a.params?.bucket === "ask");
-    const rows = async () => (await db.prepare("SELECT state FROM conflict_merges WHERE repo = 'app' AND number = 1 ORDER BY rowid").all() as { state: string }[]).map((r) => r.state);
+    const rows = async () => (await db.all(db.k.selectFrom("conflict_merges").select("state").where("repo", "=", "app").where("number", "=", 1).orderBy(kx.rowid("conflict_merges")))).map((r) => r.state);
 
     let mintFails = true;
     let sent = 0;

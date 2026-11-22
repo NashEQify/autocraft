@@ -3,9 +3,10 @@
 import { CARRIED } from "./carry.ts";
 import { parsePublic, storedClaims, type PublicReview } from "./opus-parse.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 type Row = { head_oid: string; at: string; model: string | null; mode: string | null; base_head: string | null; verdict: string; sure: number | null; public_review: string | null; claims: string | null };
-const COLS = "head_oid, at, model, mode, base_head, verdict, sure, public_review, claims";
+const COLS = ["head_oid", "at", "model", "mode", "base_head", "verdict", "sure", "public_review", "claims"] as const;
 const MAX_STEPS = 20;
 
 export type PostSource = {
@@ -34,18 +35,21 @@ const safeJson = (s: string): unknown => {
 
 /** The review to post at `head`, or null when the head has none. */
 export async function postSource(db: Db, repo: string, number: number, head: string): Promise<PostSource | null> {
-  const get = db.prepare(`SELECT ${COLS} FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ? AND verdict IS NOT NULL ORDER BY at DESC, rowid DESC LIMIT 1`);
-  return await sourceFrom(async (h) => await get.get(repo, number, h) as Row | undefined, head);
+  const get = (h: string) => db.get(db.k.selectFrom("opus_reviews").select(COLS).$narrowType<{ verdict: string }>()
+    .where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", h).where("verdict", "is not", null)
+    .orderBy("at", "desc").orderBy(kx.rowid("opus_reviews"), "desc").limit(1));
+  return await sourceFrom(get, head);
 }
 
 /** postSource() for the given PRs ("repo#number"), with their reviews read once. */
 export async function postSourcesOf(db: Db, refs: readonly string[]): Promise<(repo: string, number: number, head: string) => Promise<PostSource | null>> {
   const rows = new Map<string, Row>();
-  const pairs = refs.map((r) => [r.slice(0, r.lastIndexOf("#")), Number(r.slice(r.lastIndexOf("#") + 1))]);
-  if (pairs.length) {
-    for (const r of await db.prepare(`SELECT o.repo || '#' || o.number || '@' || o.head_oid AS k, ${COLS.split(", ").map((c) => `o.${c}`).join(", ")} FROM json_each(?) j
-      JOIN opus_reviews o ON o.repo = j.value ->> 0 AND o.number = j.value ->> 1 WHERE o.verdict IS NOT NULL ORDER BY o.at DESC, o.rowid DESC`).all(JSON.stringify(pairs)) as (Row & { k: string })[]) {
-      const { k, ...row } = r;
+  if (refs.length) {
+    for (const r of await db.all(db.k.selectFrom(kx.refPairs(db, refs, "j")).innerJoin("opus_reviews as o", (jn) => jn.onRef("o.repo", "=", "j.repo").onRef("o.number", "=", "j.number"))
+      .select(["o.repo", "o.number", ...COLS.map((c) => `o.${c}` as const)]).$narrowType<{ verdict: string }>().where("o.verdict", "is not", null)
+      .orderBy("o.at", "desc").orderBy(kx.rowid("opus_reviews", "o"), "desc"))) {
+      const { repo, number, ...row } = r;
+      const k = `${repo}#${number}@${row.head_oid}`;
       if (!rows.has(k)) rows.set(k, row);
     }
   }

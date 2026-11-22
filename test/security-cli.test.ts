@@ -10,7 +10,7 @@ import { connectDb } from "../src/db/open.ts";
 
 test("the session refuses a repo that is not a test repo and a login that is not an operator", async () => {
   const db = await connectDb(join(SCRATCH, "cli.db"));
-  await db.prepare("INSERT OR IGNORE INTO main.tracked_repos (name, added_by, added_at) VALUES ('repo1', 'cli', 'x')").run();
+  await db.run(db.k.insertInto("main.tracked_repos").values({ name: "repo1", added_by: "cli", added_at: "x" }).onConflict((oc) => oc.doNothing()));
   await addLogin(db, "cli", "op1", "operator", null);
   await addLogin(db, "cli", "view1", "viewer", null);
   await assert.rejects(async () => await requireSessionOperator(db, "repo1", "op1"), /not marked as a test repo/);

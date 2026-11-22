@@ -52,17 +52,15 @@ const now = () => new Date().toISOString();
 
 /** Items with their GitHub labels and first non-bot comments, for the summary prompt. */
 export async function loadSummaryItems(db: Db, refs: { repo: string; number: number }[]): Promise<Item[]> {
-  const labels = db.prepare("SELECT labels FROM items WHERE repo = ? AND number = ?");
-  const comments = db.prepare(`SELECT author, body FROM comments WHERE repo = ? AND number = ? AND COALESCE(TRIM(body), '') <> ''
-    ORDER BY created_at LIMIT 100`);
   // The mirror stores bot logins without `[bot]`: drop our own logins and known bots by name.
   const own = await ownLogins(db, "");
   return await mapSeq((await loadItems(db, refs)), async (i) => {
     let l: unknown = [];
-    try { l = JSON.parse((await labels.get(i.repo, i.number) as { labels: string | null }).labels ?? "[]"); } catch { /* none */ }
+    try { l = JSON.parse((await db.get(db.k.selectFrom("items").select("labels").where("repo", "=", i.repo).where("number", "=", i.number)))!.labels ?? "[]"); } catch { /* none */ }
     return {
       ...i, labels: Array.isArray(l) ? l.filter((x): x is string => typeof x === "string") : [],
-      comments: (await comments.all(i.repo, i.number) as { author: string | null; body: string }[]).filter((x) => !x.author || (!own.has(x.author) && !isBotLogin(x.author))).slice(0, 3),
+      comments: (await db.all(db.k.selectFrom("comments").select(["author", "body"]).$narrowType<{ body: string }>().where("repo", "=", i.repo).where("number", "=", i.number)
+        .where((eb) => eb(eb.fn.coalesce(eb.fn("trim", ["body"]), eb.val("")), "<>", "")).orderBy("created_at", (o) => o.asc().nullsFirst()).limit(100))).filter((x) => !x.author || (!own.has(x.author) && !isBotLogin(x.author))).slice(0, 3),
     };
   });
 }
@@ -100,19 +98,18 @@ export async function runDecide(db: Db, params: DecideParams = {}, log: Log = co
   let sent = 0;
   // New decisions are asked first, without a model call; the prepare step below gives them (and every other open decision) its summary, pick and drafts.
   const at = now();
-  const stage = db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'needs-decision', ?, 'decide', ?)");
   const lapsed = await unsettledScope(db);
   for (const c of picked) {
     const q = await buildDecision(db, c);
     // A maintainer's answer that no longer counts is set aside, so a fresh question takes its id.
     if (lapsed.has(`${c.repo}#${c.number}`)) await setAsideLapsedScope(db, q.id, at);
     await ask(db, [{ ...q, asked_at: at }]);
-    await stage.run(c.repo, c.number, at, `scope decision ${q.id}`);
+    await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "needs-decision", at, actor: "decide", note: `scope decision ${q.id}` }));
     count(result.byRepo, c.repo).asked++;
     await jobItem(db, c.repo, c.number, "asked a scope decision", log, q.id);
   }
   const due = await prepareIds(db, params.repos);
-  const rowOf = due.length > total ? new Map((await db.prepare("SELECT id, repo, number FROM decisions").all() as { id: string; repo: string | null; number: number | null }[]).map((r) => [r.id, r])) : new Map<string, { repo: string | null; number: number | null }>();
+  const rowOf = due.length > total ? new Map((await db.all(db.k.selectFrom("decisions").select(["id", "repo", "number"]))).map((r) => [r.id, r])) : new Map<string, { repo: string | null; number: number | null }>();
   const ids = (due.length > total ? await takersFirst(db, due, (id) => { const r = rowOf.get(id)?.repo; return r ? [r] : undefined; }, (id) => decisionRefs(rowOf.get(id)), "decide.prepare") : due).slice(0, total);
   if (ids.length) {
     result.usageRun = usageRun;

@@ -12,6 +12,7 @@ import { ownerOf } from "../owners.ts";
 import { isHiddenRepo, type HiddenRepos } from "../hidden-sql.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 import { openDb } from "../db/open.ts";
 
 /** Branch prefix of the PRs AutoCraft opens to fix a red main; the merge queue does not hold them while main is red. */
@@ -78,19 +79,21 @@ export function parseHeads(repos: string[], data: Record<string, RepoNode | unde
 export async function saveHead(db: Db, h: Head, at: string): Promise<MainCiState> {
   const state = classify(h.checks, await optionalChecks(db, h.repo));
   const failing = JSON.stringify(h.checks.filter((c) => c.state === "failure").map((c) => ({ name: c.name, url: c.url })));
-  await db.prepare(`INSERT INTO main_ci (repo, head_sha, branch, state, failing, checks, committed_at, headline, first_seen_at, state_changed_at, updated_at)
-    VALUES (:repo, :sha, :branch, :state, :failing, :checks, :committed, :headline, :at, :at, :at)
-    ON CONFLICT (repo, head_sha) DO UPDATE SET branch = excluded.branch, state = excluded.state, failing = excluded.failing, checks = excluded.checks,
-      committed_at = excluded.committed_at, headline = excluded.headline, updated_at = excluded.updated_at,
-      state_changed_at = CASE WHEN main_ci.state = excluded.state THEN main_ci.state_changed_at ELSE excluded.updated_at END`)
-    .run({ repo: h.repo, sha: h.sha, branch: h.branch, state, failing, checks: JSON.stringify(h.checks), committed: h.committedAt, headline: h.headline, at });
-  await db.prepare(`DELETE FROM main_ci WHERE repo = ? AND head_sha NOT IN (SELECT head_sha FROM main_ci WHERE repo = ? ORDER BY COALESCE(committed_at, first_seen_at) DESC, first_seen_at DESC LIMIT ${KEEP_HEADS})`).run(h.repo, h.repo);
+  await db.run(db.k.insertInto("main_ci")
+    .values({ repo: h.repo, head_sha: h.sha, branch: h.branch, state, failing, checks: JSON.stringify(h.checks), committed_at: h.committedAt, headline: h.headline, first_seen_at: at, state_changed_at: at, updated_at: at })
+    .onConflict((oc) => oc.columns(["repo", "head_sha"]).doUpdateSet((eb) => ({
+      branch: eb.ref("excluded.branch"), state: eb.ref("excluded.state"), failing: eb.ref("excluded.failing"), checks: eb.ref("excluded.checks"),
+      committed_at: eb.ref("excluded.committed_at"), headline: eb.ref("excluded.headline"), updated_at: eb.ref("excluded.updated_at"),
+      state_changed_at: eb.case().when("main_ci.state", "=", eb.ref("excluded.state")).then(eb.ref("main_ci.state_changed_at")).else(eb.ref("excluded.updated_at")).end(),
+    }))));
+  await db.run(db.k.deleteFrom("main_ci").where("repo", "=", h.repo).where((eb) => eb("head_sha", "not in", eb.selectFrom("main_ci").select("head_sha").where("repo", "=", h.repo)
+    .orderBy(eb.fn.coalesce("committed_at", "first_seen_at"), "desc").orderBy("first_seen_at", "desc").limit(KEEP_HEADS))));
   return state;
 }
 
 /** Reads the default-branch heads of the synced repos (or of `only`) and stores them. */
 export async function pollMainCi(db: Db, client: Querier, only?: string, log: (line: string) => void = () => {}): Promise<{ repos: number; heads: number }> {
-  const synced = new Set((await db.prepare("SELECT name FROM repos WHERE synced_at IS NOT NULL").all() as { name: string }[]).map((r) => r.name));
+  const synced = new Set((await db.all(db.k.selectFrom("repos").select("name").where("synced_at", "is not", null))).map((r) => r.name));
   const repos = (await trackedNames(db)).filter((r) => synced.has(r) && (!only || r === only));
   let heads = 0;
   for (let i = 0; i < repos.length; i += REPOS_PER_QUERY) {
@@ -104,7 +107,7 @@ export async function pollMainCi(db: Db, client: Querier, only?: string, log: (l
   }
   // A red head whose culprit is a PR we merged stops the merge path.
   for (const r of await mainCiRepos(db)) if (r.state === "red" && r.culprit?.pr) await mainRedAfterMerge(db, r.repo, r.culprit.pr, r.culprit.sha);
-  if (!only) await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(KEY_POLLED_AT, new Date().toISOString());
+  if (!only) await db.run(db.k.insertInto("settings").values({ key: KEY_POLLED_AT, value: new Date().toISOString() }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   log(`main-ci: ${heads} heads of ${repos.length} repos`);
   return { repos: repos.length, heads };
 }
@@ -129,7 +132,8 @@ type Stored = { repo: string; head_sha: string; branch: string; state: MainCiSta
 /** One entry per repo with stored heads, red first, then by name. `hidden` repos are left out. */
 export async function mainCiRepos(db: Db, hidden: HiddenRepos = []): Promise<MainCiRepoRow[]> {
   const by = new Map<string, Stored[]>();
-  for (const r of await db.prepare("SELECT repo, head_sha, branch, state, failing, committed_at, headline, first_seen_at, state_changed_at, updated_at FROM main_ci").all() as Stored[]) {
+  for (const r of await db.all(db.k.selectFrom("main_ci").select(["repo", "head_sha", "branch", "state", "failing", "committed_at", "headline", "first_seen_at", "state_changed_at", "updated_at"])
+    .$narrowType<{ state: MainCiState }>())) {
     if (isHiddenRepo(hidden, r.repo)) continue;
     (by.get(r.repo) ?? by.set(r.repo, []).get(r.repo)!).push(r);
   }

@@ -37,16 +37,15 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
   const T0 = "2026-01-01T00:00:00Z";
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "discord-alerts-")), "t.db"));
   await useTestAccount(db);
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
-  const item = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, head_oid, created_at, updated_at, labels) VALUES ('app', ?, 'pr', 'OPEN', ?, 'Body', 'someone', 'sha', '${T0}', '${T0}', '[]')`);
-  for (const n of [2, 3, 4, 5]) await item.run(n, `PR ${n}`);
-  for (const [login, role] of [["op", "operator"], ["mia", "maintainer"], ["vi", "viewer"]]) await db.prepare("INSERT INTO access (login, role) VALUES (?, ?)").run(login, role);
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
+  for (const n of [2, 3, 4, 5]) await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: `PR ${n}`, body: "Body", author: "someone", head_oid: "sha", created_at: T0, updated_at: T0, labels: "[]" }));
+  for (const [login, role] of [["op", "operator"], ["mia", "maintainer"], ["vi", "viewer"]]) await db.run(db.k.insertInto("access").values({ login, role }));
   // Mia may settle while maintainer writes are on, the app acts for her on the repo and her write permission is fresh.
   await setMaintainerWrites(db, true);
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('github_identity', 'app')").run();
+  await db.run(db.k.insertInto("settings").values({ key: "github_identity", value: "app" }));
   // The permission was read by a dashboard visit over a day ago: the alert pass reads it again from GitHub, once.
-  await db.prepare("INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES ('mia', 'app', 'write', ?)").run(new Date(Date.now() - 30 * 3_600_000).toISOString());
+  await db.run(db.k.insertInto("repo_permissions").values({ login: "mia", repo: "app", permission: "write", checked_at: new Date(Date.now() - 30 * 3_600_000).toISOString() }));
   const reads: string[] = [];
 
   const keys = new DiscordKeys("k".repeat(40));
@@ -82,7 +81,7 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
   await alerts.sync();
   assert.deepEqual(rest.sent.map((m) => m.channelId).sort(), ["dm-1", "dm-2"]);
   assert.deepEqual(reads, ["mia@app"]);
-  assert.ok(Date.now() - Date.parse((await db.prepare("SELECT checked_at FROM repo_permissions WHERE login = 'mia'").get() as { checked_at: string }).checked_at) < 60_000);
+  assert.ok(Date.now() - Date.parse((await db.get(db.k.selectFrom("repo_permissions").select("checked_at").where("login", "=", "mia")))!.checked_at) < 60_000);
   const comps = (m: { components?: unknown[] }) => (m.components as { components: { custom_id?: string; url?: string }[] }[]).flatMap((r) => r.components);
   assert.deepEqual(comps(rest.sent[0]!.body).map((c) => c.url), ["https://ac.example/items/app/2#decision-app%232%3Amerge"]);
 
@@ -120,7 +119,7 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
   assert.equal(last.channelId, "dm-1");
   assert.deepEqual(last.body.components, []);
   assert.match(last.body.content ?? "", /Answered by op: Hold/);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_alert_msgs").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_alert_msgs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
 
   // Over the hourly limit the new questions come as one summary message.
   const limited = mk(1);
@@ -138,6 +137,6 @@ test("alerts: opt-in, a new decision reaches only people who may settle it, a pr
 
   // Off: the account's rows are gone.
   assert.match(await alertsCmd("1", "off"), /off/);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM discord_alerts WHERE user_hash = ?").get(keys.hash("author", "1")) as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("discord_alerts").select((eb) => eb.fn.countAll<number>().as("n")).where("user_hash", "=", keys.hash("author", "1"))))!.n, 0);
   assert.deepEqual(logs, []);
 });

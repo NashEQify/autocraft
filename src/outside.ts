@@ -11,7 +11,7 @@
 //
 // The planner calls refreshOutsideHolds() once per pass; it rewrites outside_holds. pilotSqlFor (src/pilot.ts) leaves a held item
 // out of scope, so every stage that reads candidates through the pilot condition skips it. Sync, Embed and Rank do not use it.
-import { filtered, hiddenTest, type HiddenRepos } from "./hidden-sql.ts";
+import { filtered, hiddenTestExpr, type HiddenRepos } from "./hidden-sql.ts";
 import { listAccess } from "./access.ts";
 import { audit } from "./dash/audit.ts";
 import { allOwnLogins } from "./github/identity.ts";
@@ -22,6 +22,7 @@ import { pipelineRepos } from "./pilot.ts";
 import { isBotLogin } from "./review/bots.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import { ciEq, excluded } from "./db/kx.ts";
 
 export const OUTSIDE_SURGE = "outside-surge";
 export const KEYS = { prsPerDay: "outside_prs_per_day", issuesPerDay: "outside_issues_per_day", surgePerHour: "outside_surge_per_hour" } as const;
@@ -40,7 +41,7 @@ export class OutsideError extends Error {
 }
 
 export async function outsideLimits(db: Db): Promise<OutsideLimits> {
-  const rows = await db.prepare("SELECT key, value FROM main.settings WHERE key IN (?, ?, ?)").all(KEYS.prsPerDay, KEYS.issuesPerDay, KEYS.surgePerHour) as { key: string; value: string }[];
+  const rows = await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where("key", "in", [KEYS.prsPerDay, KEYS.issuesPerDay, KEYS.surgePerHour]));
   const m = new Map(rows.map((r) => [r.key, Number(r.value)]));
   const get = (k: string, d: number): number => { const v = m.get(k); return v !== undefined && Number.isInteger(v) && v >= 0 ? v : d; };
   return { prsPerDay: get(KEYS.prsPerDay, DEFAULT_LIMITS.prsPerDay), issuesPerDay: get(KEYS.issuesPerDay, DEFAULT_LIMITS.issuesPerDay), surgePerHour: get(KEYS.surgePerHour, DEFAULT_LIMITS.surgePerHour) };
@@ -57,8 +58,9 @@ export async function setOutsideLimits(db: Db, by: string, input: unknown): Prom
     if (typeof v !== "number" || !Number.isInteger(v) || v < 0 || v > MAX) throw new OutsideError(`${k} must be a whole number from 0 to ${MAX}`);
     next[k] = v;
   }
-  const set = db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
-  for (const k of Object.keys(KEYS) as (keyof OutsideLimits)[]) await set.run(KEYS[k], String(next[k]));
+  for (const k of Object.keys(KEYS) as (keyof OutsideLimits)[]) {
+    await db.run(db.k.insertInto("main.settings").values({ key: KEYS[k], value: String(next[k]) }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+  }
   if (JSON.stringify(was) !== JSON.stringify(next)) await audit(db, by, "abuse-limits", "pipeline", { ...next, was });
   return next;
 }
@@ -74,10 +76,22 @@ const isBotAuthor = (r: { author: string; author_type: string | null }): boolean
 
 /** Once, on the first run: items that already have pipeline work (a decision, review, classification, stage row, fix-up, ...) count as admitted, so nothing in flight is held on deploy. */
 async function backfillAdmitted(db: Db, since: string, now: number): Promise<void> {
-  if (await db.prepare("SELECT 1 FROM main.settings WHERE key = 'outside_admitted_backfill'").get()) return;
-  const has = ["decisions", "opus_reviews", "classifications", "fixups", "ci_fixes", "fix_attempts", "verifications", "pr_builds", "stages"].map((t) => `EXISTS (SELECT 1 FROM main.${t} x WHERE x.repo = i.repo AND x.number = i.number)`).join(" OR ");
-  await db.prepare(`INSERT OR IGNORE INTO main.outside_admitted (repo, number, at) SELECT i.repo, i.number, ? FROM items i WHERE i.created_at >= ? AND (${has})`).run(new Date(now).toISOString(), since);
-  await db.prepare("INSERT OR IGNORE INTO main.settings (key, value) VALUES ('outside_admitted_backfill', '1')").run();
+  if (await db.get(db.k.selectFrom("main.settings").select("key").where("key", "=", "outside_admitted_backfill"))) return;
+  await db.run(db.k.insertInto("main.outside_admitted").columns(["repo", "number", "at"]).expression((eb) => eb.selectFrom("items as i")
+    .select(["i.repo", "i.number", eb.val(new Date(now).toISOString()).as("at")])
+    .where("i.created_at", ">=", since)
+    .where((w) => w.or([
+      w.exists(w.selectFrom("main.decisions as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.opus_reviews as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.classifications as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.fixups as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.ci_fixes as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.fix_attempts as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.verifications as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.pr_builds as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+      w.exists(w.selectFrom("main.stages as x").select(w.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number")),
+    ]))).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("main.settings").values({ key: "outside_admitted_backfill", value: "1" }).onConflict((oc) => oc.doNothing()));
 }
 
 /** Whether a PR or issue row is by an outside author: not a collaborator by association, not a bot, not an operator, maintainer or own pipeline login. `inside` may be passed when many rows are judged. */
@@ -106,7 +120,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
   const enabled = lim.prsPerDay > 0 || lim.issuesPerDay > 0 || lim.surgePerHour > 0;
   const holds: Hold[] = [];
   let wakeAt: number | null = null;
-  const released = new Set((await db.prepare("SELECT repo, number FROM main.outside_released").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+  const released = new Set((await db.all(db.k.selectFrom("main.outside_released").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
   if (enabled) {
     const dayAgo = now - DAY_MS;
     const tripped = lim.surgePerHour > 0 ? await tripRow(db, OUTSIDE_SURGE) : undefined;
@@ -115,19 +129,24 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
     const from = Math.min(dayAgo, surgeFrom ?? dayAgo);
     // Only items in scope for model work count: repos with the pipeline on, and not fast-tracked.
     const scope = await pipelineRepos(db);
-    const fast = new Set((await db.prepare("SELECT repo, number FROM main.fast_track").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+    const fast = new Set((await db.all(db.k.selectFrom("main.fast_track").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
     // A post-merge follow-up issue is opened by the pipeline from a review of a merged PR: it counts as an item of that PR's author.
-    const rows = (await db.prepare(`SELECT i.repo, i.number, i.kind, i.state, i.created_at,
-        COALESCE(p.author, i.author) AS author,
-        CASE WHEN p.author IS NULL THEN i.author_id ELSE p.author_id END AS author_id,
-        CASE WHEN p.author IS NULL THEN i.author_association ELSE p.author_association END AS author_association,
-        CASE WHEN p.author IS NULL THEN i.author_type ELSE p.author_type END AS author_type
-      FROM items i LEFT JOIN items p ON i.kind = 'issue' AND p.repo = i.repo
-        AND p.number = (SELECT f.number FROM main.postmerge_followups f WHERE f.repo = i.repo AND f.issue_number = i.number LIMIT 1)
-      WHERE i.created_at >= ? AND i.author IS NOT NULL`)
-      .all(new Date(from).toISOString()) as Row[]).filter((r) => scope.has(r.repo) && !fast.has(`${r.repo}#${r.number}`));
+    const rows = (await db.all(db.k.selectFrom("items as i")
+      .leftJoin("items as p", (j) => j.on("i.kind", "=", "issue").onRef("p.repo", "=", "i.repo").on((eb) => eb("p.number", "=", eb.selectFrom("main.postmerge_followups as f").select("f.number").whereRef("f.repo", "=", "i.repo").whereRef("f.issue_number", "=", "i.number").limit(1))))
+      .select((eb) => [
+        "i.repo", "i.number", "i.kind", "i.state", "i.created_at",
+        eb.fn.coalesce("p.author", "i.author").as("author"),
+        eb.case().when("p.author", "is", null).then(eb.ref("i.author_id")).else(eb.ref("p.author_id")).end().as("author_id"),
+        eb.case().when("p.author", "is", null).then(eb.ref("i.author_association")).else(eb.ref("p.author_association")).end().as("author_association"),
+        eb.case().when("p.author", "is", null).then(eb.ref("i.author_type")).else(eb.ref("p.author_type")).end().as("author_type"),
+      ])
+      .$narrowType<{ created_at: string; author: string }>()
+      .where("i.created_at", ">=", new Date(from).toISOString()).where("i.author", "is not", null)))
+      // Sorted here: an ORDER BY makes SQLite walk every item in key order instead of the recent ones by created_at.
+      .sort((a, b) => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : a.number - b.number))
+      .filter((r) => scope.has(r.repo) && !fast.has(`${r.repo}#${r.number}`));
     await backfillAdmitted(db, new Date(from).toISOString(), now);
-    const admitted = new Set((await db.prepare("SELECT repo, number FROM main.outside_admitted").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+    const admitted = new Set((await db.all(db.k.selectFrom("main.outside_admitted").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
     const inside = await insiders(db);
     const memo = new Map<string, boolean>();
     // Whitelisting belongs to the author's account, not to the login string.
@@ -178,18 +197,16 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
     }
     // Admit what is in scope and not held.
     const held = new Set(holds.map((h) => `${h.repo}#${h.number}`));
-    const admit = db.prepare("INSERT OR IGNORE INTO main.outside_admitted (repo, number, at) VALUES (?, ?, ?)");
     const at = new Date(now).toISOString();
-    for (const r of cheap) if (!held.has(`${r.repo}#${r.number}`) && !admitted.has(`${r.repo}#${r.number}`)) await admit.run(r.repo, r.number, at);
+    for (const r of cheap) if (!held.has(`${r.repo}#${r.number}`) && !admitted.has(`${r.repo}#${r.number}`)) await db.run(db.k.insertInto("main.outside_admitted").values({ repo: r.repo, number: r.number, at }).onConflict((oc) => oc.doNothing()));
   }
-  const have = await db.prepare("SELECT repo, number, author, kind, reason FROM main.outside_holds").all() as Hold[];
+  const have = await db.all(db.k.selectFrom("main.outside_holds").select(["repo", "number", "author", "kind", "reason"]).$narrowType<{ kind: Hold["kind"]; reason: Hold["reason"] }>());
   const key = (h: Hold) => `${h.repo}#${h.number}|${h.author}|${h.kind}|${h.reason}`;
   const want = new Set(holds.map(key));
   if (have.length !== holds.length || have.some((h) => !want.has(key(h)))) {
     await db.write(async () => {
-      await db.script("DELETE FROM main.outside_holds");
-      const ins = db.prepare("INSERT INTO main.outside_holds (repo, number, author, kind, reason) VALUES (?, ?, ?, ?, ?)");
-      for (const h of holds) await ins.run(h.repo, h.number, h.author, h.kind, h.reason);
+      await db.run(db.k.deleteFrom("main.outside_holds"));
+      for (const h of holds) await db.run(db.k.insertInto("main.outside_holds").values({ repo: h.repo, number: h.number, author: h.author, kind: h.kind, reason: h.reason }));
     });
   }
   return { holds, tripped: !!(await tripRow(db, OUTSIDE_SURGE))?.active, wakeAt };
@@ -202,7 +219,7 @@ export function holdWait(h: Pick<OutsideHoldInfo, "reason" | "kind" | "limit">):
 
 /** The holds as `repo#number` to their reason. */
 export async function holdMap(db: Db): Promise<Map<string, OutsideHoldInfo>> {
-  const rows = await db.prepare("SELECT repo, number, author, kind, reason FROM main.outside_holds").all() as Hold[];
+  const rows = await db.all(db.k.selectFrom("main.outside_holds").select(["repo", "number", "author", "kind", "reason"]).$narrowType<{ kind: Hold["kind"]; reason: Hold["reason"] }>());
   if (!rows.length) return new Map();
   const lim = await outsideLimits(db);
   return new Map(rows.map((h) => [`${h.repo}#${h.number}`, { reason: h.reason, author: h.author, kind: h.kind, limit: h.kind === "pr" ? lim.prsPerDay : lim.issuesPerDay }]));
@@ -210,22 +227,21 @@ export async function holdMap(db: Db): Promise<Map<string, OutsideHoldInfo>> {
 
 /** An operator exempts one held item from both holds. */
 export async function releaseOutside(db: Db, by: string, repo: string, number: number): Promise<void> {
-  const h = await db.prepare("SELECT author FROM main.outside_holds WHERE repo = ? AND number = ?").get(repo, number) as { author: string } | undefined;
+  const h = await db.get(db.k.selectFrom("main.outside_holds").select("author").where("repo", "=", repo).where("number", "=", number));
   if (!h) throw new OutsideError(`${repo}#${number} is not held for its author`, 409);
   const at = new Date().toISOString();
-  await db.prepare("INSERT OR IGNORE INTO main.outside_released (repo, number, by, at) VALUES (?, ?, ?, ?)").run(repo, number, by, at);
-  await db.prepare("DELETE FROM main.outside_holds WHERE repo = ? AND number = ?").run(repo, number);
+  await db.run(db.k.insertInto("main.outside_released").values({ repo, number, by, at }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.deleteFrom("main.outside_holds").where("repo", "=", repo).where("number", "=", number));
   await audit(db, by, "outside-release", `${repo}#${number}`, { author: h.author });
 }
 
 /** An operator exempts every item now held for one author. Returns how many. */
 export async function releaseAuthor(db: Db, by: string, author: string): Promise<number> {
-  const rows = await db.prepare("SELECT repo, number FROM main.outside_holds WHERE author = ? COLLATE NOCASE").all(author) as { repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("main.outside_holds").select(["repo", "number"]).where((eb) => ciEq(db, "author", eb.val(author))));
   if (!rows.length) throw new OutsideError(`nothing is held for ${author}`, 409);
   const at = new Date().toISOString();
-  const ins = db.prepare("INSERT OR IGNORE INTO main.outside_released (repo, number, by, at) VALUES (?, ?, ?, ?)");
-  for (const r of rows) await ins.run(r.repo, r.number, by, at);
-  await db.prepare("DELETE FROM main.outside_holds WHERE author = ? COLLATE NOCASE").run(author);
+  for (const r of rows) await db.run(db.k.insertInto("main.outside_released").values({ repo: r.repo, number: r.number, by, at }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.deleteFrom("main.outside_holds").where((eb) => ciEq(db, "author", eb.val(author))));
   await audit(db, by, "outside-release-author", author, { items: rows.length });
   return rows.length;
 }
@@ -233,9 +249,11 @@ export async function releaseAuthor(db: Db, by: string, author: string): Promise
 export type OutsideState = OutsideLimits & { heldByLimit: number; heldBySurge: number; authors: number; tripped: { reason: string; since: string } | null };
 
 export async function outsideState(db: Db, hidden: HiddenRepos = []): Promise<OutsideState> {
-  const h = hiddenTest("repo", hidden);
-  const hide = filtered(hidden) ? ` WHERE NOT (${h.sql})` : "";
-  const c = await db.prepare(`SELECT SUM(reason = 'limit') AS l, SUM(reason = 'surge') AS s, COUNT(DISTINCT author) AS a FROM main.outside_holds${hide}`).get(...(filtered(hidden) ? h.args : [])) as { l: number | null; s: number | null; a: number };
+  const c = (await db.get(db.k.selectFrom("main.outside_holds").select((eb) => [
+    eb.fn.sum<number | null>(eb.case().when("reason", "=", "limit").then(1).else(0).end()).as("l"),
+    eb.fn.sum<number | null>(eb.case().when("reason", "=", "surge").then(1).else(0).end()).as("s"),
+    eb.fn.count<number>("author").distinct().as("a"),
+  ]).$if(filtered(hidden), (q) => q.where((eb) => eb.not(hiddenTestExpr(db, "repo", hidden))))))!;
   const t = await tripRow(db, OUTSIDE_SURGE);
   return { ...await outsideLimits(db), heldByLimit: c.l ?? 0, heldBySurge: c.s ?? 0, authors: c.a, tripped: t?.active ? { reason: t.reason, since: t.tripped_at } : null };
 }

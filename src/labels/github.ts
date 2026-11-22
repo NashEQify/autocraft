@@ -101,7 +101,7 @@ export async function applyLabels(db: Db, client: Querier, repo: string, o: Appl
     const live = (r: Todo) => ids.get(r.number);
     const gone = chunk.filter((r) => live(r)?.id && live(r)!.state && live(r)!.state !== "OPEN");
     for (const r of gone) {
-      await db.prepare("UPDATE main.items SET state = ? WHERE repo = ? AND number = ? AND state = 'OPEN'").run(live(r)!.state, repo, r.number);
+      await db.run(db.k.updateTable("main.items").set({ state: live(r)!.state! }).where("repo", "=", repo).where("number", "=", r.number).where("state", "=", "OPEN"));
       log(`${repo}#${r.number}: skipped, now ${live(r)!.state} on GitHub`);
     }
     res.skipped += gone.length;
@@ -130,8 +130,7 @@ export async function applyLabels(db: Db, client: Querier, repo: string, o: Appl
       const at = new Date().toISOString();
       await db.write(async () => {
       for (const r of ok) {
-        await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, 'labels', ?)")
-          .run(repo, r.number, at, `added: ${r.add.join(", ")}`);
+        await db.run(db.k.insertInto("main.stages").values({ repo, number: r.number, stage: "labeled", at, actor: "labels", note: `added: ${r.add.join(", ")}` }));
       }
       });
       for (const r of ok) await jobItem(db, repo, r.number, `labelled ${r.add.join(", ")}`, log);

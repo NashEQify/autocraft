@@ -31,12 +31,13 @@ const T0 = "2026-01-01T00:00:00Z";
 
 async function fresh(): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "choices-test-")), "t.db"));
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("repos").values({ name: "app", visibility: "public" }));
   await useTestAccount(db);
-  const item = db.prepare(`INSERT INTO items (repo, number, kind, state, title, body, author, head_oid, created_at, updated_at, labels) VALUES ('app', ?, ?, 'OPEN', ?, 'Body', 'someone', ?, '${T0}', '${T0}', '[]')`);
-  await item.run(1, "issue", "Issue 1", null);
-  await item.run(2, "pr", "PR 2", "sha2");
+  const item = async (number: number, kind: string, title: string, head_oid: string | null) =>
+    await db.run(db.k.insertInto("items").values({ repo: "app", number, kind, state: "OPEN", title, body: "Body", author: "someone", head_oid, created_at: T0, updated_at: T0, labels: "[]" }));
+  await item(1, "issue", "Issue 1", null);
+  await item(2, "pr", "PR 2", "sha2");
   await ask(db, [
     { id: "app#1:scope", kind: "scope", repo: "app", number: 1, question: "Scope?", options: [{ key: "take", label: "Wanted" }, { key: "close", label: "Out of scope" }] },
     { id: "app#2:merge", kind: "merge", repo: "app", number: 2, question: "Merge?", options: [{ key: "merge", label: "Merge" }, { key: "hold", label: "Hold" }] },
@@ -60,7 +61,7 @@ describe("decision choices", () => {
       drafts: { [coreKey.option("merge")]: { extras: [{ id: "open_issue", kind: "open_issue", on: true, repo: "app", title: "Follow up", body: "Check the edge case." }] } },
       added: [], pick: { core: coreKey.option("merge"), reason: "Looks right." },
     });
-    assert.equal((await db.prepare("SELECT recommended FROM decisions WHERE id = ?").get(d.id) as { recommended: string }).recommended, "merge");
+    assert.equal((await db.get(db.k.selectFrom("decisions").select("recommended").where("id", "=", d.id)))!.recommended, "merge");
     const view = (await choicesView(db, "app", 2))!;
     const merge = view.cores.find((c) => c.key === "o:merge")!;
     assert.deepEqual(merge.writes, ["merge"]);
@@ -70,8 +71,8 @@ describe("decision choices", () => {
     assert.ok("card" in composed);
     const v = await validateCard(db, "app", 2, composed.card);
     assert.ok("card" in v, "note" in v ? v.note : "");
-    const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 2, 'resolution', ?, NULL, ?)")
-      .run(JSON.stringify(v.card.params), v.card.description)).lastInsertRowid);
+    const id = Number((await db.get(db.k.insertInto("conversation_cards")
+      .values({ turn_id: 0, repo: "app", number: 2, kind: "resolution", params: JSON.stringify(v.card.params), text: null, description: v.card.description }).returning("id")))!.id);
     const querier = { query: async () => ({}) };
     const exec = async () => ({ code: 0, stdout: "https://github.com/storytold/app/issues/7\n", stderr: "" });
     const { card } = await doCard(db, id, "op", { querier: querier as never, exec: exec as never });
@@ -126,7 +127,7 @@ describe("decision choices", () => {
     assert.ok(row.drafts["o:hold"]);
     assert.equal(row.added.length, 3);
     assert.equal(notes.length, 1);
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM decision_choices WHERE state = 'current'").get())!.n, 1);
+    assert.equal((await db.get(db.k.selectFrom("decision_choices").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "current")))!.n, 1);
   });
 
   const block = (o: unknown) => `Summary text.\n\`\`\`choices\n${JSON.stringify(o)}\n\`\`\``;
@@ -170,7 +171,7 @@ describe("decision choices", () => {
     assert.deepEqual(row.pick, { core: "o:merge", reason: "Same as the reference app." });
     assert.equal(row.drafts["o:merge"]!.extras[0]!.on, true);
     assert.ok(row.turnId);
-    const rec = await db.prepare("SELECT recommended, recommended_reason, recommended_by FROM decisions WHERE id = ?").get(d.id) as Record<string, string>;
+    const rec = (await db.get(db.k.selectFrom("decisions").select(["recommended", "recommended_reason", "recommended_by"]).where("id", "=", d.id)))!;
     assert.deepEqual({ ...rec }, { recommended: "merge", recommended_reason: "Same as the reference app.", recommended_by: "opus" });
     // A single decision without a block is no valid reply; one that only takes a pick may come without.
     assert.equal(await parsePrepareReply(db, { repo: "app", n: 2, d, single: true }, text), null);
@@ -203,7 +204,7 @@ describe("decision choices", () => {
     const [a, b] = await Promise.all([doChoice(db, who("operator", row.id, hold), deps), doChoice(db, who("operator", row.id, hold), deps)]);
     assert.equal(a.id, b.id);
     assert.equal(a.state, "done");
-    assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM conversation_cards WHERE choice_id = ?").get(row.id))!.n, 1);
+    assert.equal((await db.get(db.k.selectFrom("conversation_cards").select((eb) => eb.fn.countAll<number>().as("n")).where("choice_id", "=", row.id)))!.n, 1);
   });
 
   test("a scope question on a PR the classifier did not label for review: Fix up, then merge keeps the PR in core first and queues the fix-up", async () => {
@@ -225,8 +226,8 @@ describe("decision choices", () => {
       assert.deepEqual({ ...await settleOf([{ id: "label:small extra", kind: "label", label: "small extra" }]), v: 0 }, { v: 0, kind: "answer", option: "small-extra", steps: "label,fixup" });
       const plain = await settleOf([]);
       assert.deepEqual([plain.kind, plain.option, plain.steps], ["answer", "take", "fixup"]);
-      const id = Number((await db.prepare("INSERT INTO conversation_cards (turn_id, repo, number, kind, params, text, description) VALUES (0, 'app', 5, 'resolution', ?, NULL, ?)")
-        .run(JSON.stringify(plain.v.card.params), plain.v.card.description)).lastInsertRowid);
+      const id = Number((await db.get(db.k.insertInto("conversation_cards")
+        .values({ turn_id: 0, repo: "app", number: 5, kind: "resolution", params: JSON.stringify(plain.v.card.params), text: null, description: plain.v.card.description }).returning("id")))!.id);
       const { card } = await doCard(db, id, OPERATOR, { querier: { query: async () => ({}) } as never, exec: (async () => ({ code: 0, stdout: "", stderr: "" })) as never });
       assert.equal(card.state, "done", card.error ?? "");
       assert.equal((await getDecision(db, "app#5:scope"))!.answer, "take");

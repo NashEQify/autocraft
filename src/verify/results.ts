@@ -12,12 +12,14 @@ import { CLAUDE_PROMPTS } from "../prompts/index.ts";
 import { scrub } from "../runner/scrub.ts";
 import { cloneTask } from "./tasks.ts";
 import { MAX_SUMMARY_WORDS, SUMMARY_LOG_BYTES, type VerifySummaryInput } from "./types.ts";
-import { pilotSqlFor } from "../pilot.ts";
-import { backlogHeldSql } from "../dupes/held.ts";
+import { pilotExprFor } from "../pilot.ts";
+import { backlogHeldExpr } from "../dupes/held.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { collectScreenshots, screenshotsDue, type ScreenshotDeps } from "./screenshots.ts";
 import { mapSeq } from "../async-seq.ts";
+import type { AliasableExpression } from "kysely";
 import type { Db } from "../db/index.ts";
+import { cols, type Eb } from "../db/kx.ts";
 
 const PROMPT = CLAUDE_PROMPTS["verify.summary"];
 const ACTOR = "verify";
@@ -27,8 +29,10 @@ const FETCH = "fetch deps";
 export const MAX_RETRIES = 1;
 export const NOT_FAILING_REASON = "regression test passes on base";
 /** The PR's current head, as src/review/candidates.ts headOf picks it: the checks table's when fetched after the mirror last saw the PR change. */
-export const CURRENT_HEAD_SQL = `CASE WHEN c.head_oid IS NOT NULL AND c.fetched_at IS NOT NULL AND (i.updated_at IS NULL OR c.fetched_at > i.updated_at)
-  THEN c.head_oid ELSE COALESCE(i.head_oid, c.head_oid) END`;
+/** The PR's current head as an expression on `i` (items) and `c` (pr_checks, left joined). */
+export const currentHeadExpr = (eb: Eb): AliasableExpression<string | null> => eb.case()
+  .when(eb.and([eb("c.head_oid", "is not", null), eb("c.fetched_at", "is not", null), eb.or([eb("i.updated_at", "is", null), eb("c.fetched_at", ">", eb.ref("i.updated_at"))])]))
+  .then(eb.ref("c.head_oid")).else(eb.fn.coalesce("i.head_oid", "c.head_oid")).end();
 const ERROR_LIMIT = 200;
 
 export const VERIFICATION_STATES = ["planned", "running", "passed", "failed", "error", "ci-enough", "stale", "unavailable"] as const;
@@ -72,39 +76,43 @@ async function viewOf(db: Db, r: Row): Promise<VerificationView> {
 
 /** The verification of one PR head, or null. */
 export async function verificationOf(db: Db, repo: string, number: number, headSha: string): Promise<VerificationView | null> {
-  const r = await db.prepare("SELECT * FROM verifications WHERE repo = ? AND number = ? AND head_sha = ?").get(repo, number, headSha) as Row | undefined;
+  const r = await db.get(db.k.selectFrom("verifications").select(cols("verifications")).$narrowType<{ state: VerificationState }>()
+    .where("repo", "=", repo).where("number", "=", number).where("head_sha", "=", headSha));
   return r ? await viewOf(db, r) : null;
 }
 
 /** Verifications in the given states (all when none), newest first. */
 export async function listVerifications(db: Db, o: { states?: VerificationState[]; repo?: string; limit?: number } = {}): Promise<VerificationView[]> {
-  const where: string[] = [], args: (string | number)[] = [];
-  if (o.states?.length) { where.push(`state IN (${o.states.map(() => "?").join(",")})`); args.push(...o.states); }
-  if (o.repo) { where.push("repo = ?"); args.push(o.repo); }
-  const rows = await db.prepare(`SELECT * FROM verifications ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC, number DESC LIMIT ?`)
-    .all(...args, Math.min(o.limit ?? 100, 1000)) as Row[];
+  const rows = await db.all(db.k.selectFrom("verifications").select(cols("verifications")).$narrowType<{ state: VerificationState }>()
+    .$if(!!o.states?.length, (q) => q.where("state", "in", o.states!))
+    .$if(!!o.repo, (q) => q.where("repo", "=", o.repo!))
+    .orderBy("created_at", "desc").orderBy("number", "desc").limit(Math.min(o.limit ?? 100, 1000)));
   return await mapSeq(rows, async (r) => await viewOf(db, r));
 }
 
 // ---- when to run -------------------------------------------------------------
-
-const TERMINAL_SQL = TERMINAL.map((s) => `'${s}'`).join(", ");
 
 /**
  * Whether a collection run has work: a pending verification whose PR head moved or closed, whose tasks are all
  * finished, or that is still `planned` while a task has started. One query on the state index.
  */
 export async function collectDue(db: Db): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM verifications v
-    LEFT JOIN items i ON i.repo = v.repo AND i.number = v.number
-    LEFT JOIN pr_checks c ON c.repo = v.repo AND c.number = v.number
-    LEFT JOIN build_tasks h ON h.id = v.head_task_id
-    LEFT JOIN build_tasks b ON b.id = v.base_task_id
-    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor("v.repo", "v.number")} AND NOT ${backlogHeldSql("v")} AND (
-      i.state IS NOT 'OPEN' OR (${CURRENT_HEAD_SQL}) IS NOT v.head_sha
-      OR (h.state IN (${TERMINAL_SQL}) AND (b.id IS NULL OR b.state IN (${TERMINAL_SQL})))
-      OR (v.state = 'planned' AND (h.state IN ('claimed', 'running') OR b.state IN ('claimed', 'running'))))
-    LIMIT 1`).get() || await screenshotsDue(db);
+  return !!await db.get(db.k.selectFrom("verifications as v")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "v.repo").onRef("i.number", "=", "v.number"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number"))
+    .leftJoin("build_tasks as h", "h.id", "v.head_task_id")
+    .leftJoin("build_tasks as b", "b.id", "v.base_task_id")
+    .select((eb) => eb.lit(1).as("one"))
+    .where("v.state", "in", ["planned", "running"])
+    .where((eb) => pilotExprFor(db, eb, "v.repo", "v.number"))
+    .where((eb) => eb.not(backlogHeldExpr(db, eb, "v")))
+    .where((eb) => eb.or([
+      eb("i.state", "is distinct from", "OPEN"),
+      eb(currentHeadExpr(eb), "is distinct from", eb.ref("v.head_sha")),
+      eb.and([eb("h.state", "in", TERMINAL), eb.or([eb("b.id", "is", null), eb("b.state", "in", TERMINAL)])]),
+      eb.and([eb("v.state", "=", "planned"), eb.or([eb("h.state", "in", ["claimed", "running"]), eb("b.state", "in", ["claimed", "running"])])]),
+    ]))
+    .limit(1)) || await screenshotsDue(db);
 }
 
 // ---- judging tasks -----------------------------------------------------------
@@ -164,7 +172,7 @@ const now = (): string => new Date().toISOString();
 const cut = (s: string): string => s.trim().split(/\s+/).slice(0, MAX_SUMMARY_WORDS).join(" ");
 
 async function stageRow(db: Db, v: Row, stage: string, at: string, note: string): Promise<void> {
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)").run(v.repo, v.number, stage, at, ACTOR, note.slice(0, 300));
+  await db.run(db.k.insertInto("main.stages").values({ repo: v.repo, number: v.number, stage, at, actor: ACTOR, note: note.slice(0, 300) }));
   if (stage !== "hold") await jobItem(db, v.repo, v.number, note, () => {});   // the caller logs the outcome itself
 }
 
@@ -172,7 +180,8 @@ async function stageRow(db: Db, v: Row, stage: string, at: string, note: string)
 async function stepLog(db: Db, id: number, step: string): Promise<string> {
   const parts: string[] = [];
   let size = 0;
-  for await (const c of db.prepare("SELECT chunk FROM build_task_logs WHERE task_id = ? AND step = ? ORDER BY seq DESC").iterate(id, step) as AsyncIterable<{ chunk: string }>) {
+  const rows = await db.all(db.k.selectFrom("build_task_logs").select("chunk").where("task_id", "=", id).where("step", "=", step).orderBy("seq", "desc"));
+  for (const c of rows) {
     parts.push(c.chunk);
     size += Buffer.byteLength(c.chunk);
     if (size >= SUMMARY_LOG_BYTES) break;
@@ -208,16 +217,22 @@ export async function cancelOpen(db: Db, ids: (number | null)[]): Promise<void> 
 
 /** Head tasks created for this head: the first plus one per retry. */
 const retriesOf = async (db: Db, v: Row): Promise<number> =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM build_tasks WHERE step = 'verify' AND repo = ? AND number = ? AND head_sha = ? AND warm_role = 'use'").get(v.repo, v.number, v.head_sha) as { n: number }).n - 1;
+  (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("step", "=", "verify").where("repo", "=", v.repo).where("number", "=", v.number).where("head_sha", "=", v.head_sha).where("warm_role", "=", "use")))!.n - 1;
 
 export async function runCollect(db: Db, params: { dryRun?: boolean; /** True when no new item should start (cancel, deadline, pipeline off). */ stopping?: () => Promise<boolean> } = {}, log: (line: string) => void = console.log, deps?: CollectDeps): Promise<CollectSummary> {
   const d: CollectDeps = deps ?? { model: PROMPT.models[0]!, mainHead: (await import("./index.ts")).defaultDeps().mainHead };
   const runId = `verify-collect-${now().replace(/[-:]/g, "").slice(0, 15)}`;
   const s: CollectSummary = { runId, looked: 0, passed: 0, failed: 0, errors: 0, retried: 0, stale: 0, running: 0, warmCancelled: 0, shots: 0, changed: 0 };
-  const rows = await db.prepare(`SELECT v.*, i.state AS item_state, ${CURRENT_HEAD_SQL} AS item_head FROM verifications v
-    LEFT JOIN items i ON i.repo = v.repo AND i.number = v.number
-    LEFT JOIN pr_checks c ON c.repo = v.repo AND c.number = v.number
-    WHERE v.state IN ('planned', 'running') AND ${pilotSqlFor("v.repo", "v.number")} AND NOT ${backlogHeldSql("v")} ORDER BY v.created_at, v.number`).all() as (Row & { item_state: string | null; item_head: string | null })[];
+  const rows = await db.all(db.k.selectFrom("verifications as v")
+    .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "v.repo").onRef("i.number", "=", "v.number"))
+    .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number"))
+    .select((eb) => [...cols("verifications", "v"), "i.state as item_state", currentHeadExpr(eb).as("item_head")])
+    .$narrowType<{ state: VerificationState }>()
+    .where("v.state", "in", ["planned", "running"])
+    .where((eb) => pilotExprFor(db, eb, "v.repo", "v.number"))
+    .where((eb) => eb.not(backlogHeldExpr(db, eb, "v")))
+    .orderBy("v.created_at").orderBy("v.number"));
   s.looked = rows.length;
   if (params.dryRun) { log(`verify-collect: ${rows.length} pending; dry run`); return s; }
 
@@ -236,8 +251,8 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
       if (await stopped()) return;
       const ref = `${v.repo}#${v.number}`;
       const finish = async (state: string, summary: string | null, note: string | null): Promise<boolean> => {
-        const r = await db.prepare("UPDATE verifications SET state = ?, summary = ?, note = ?, finished_at = ? WHERE repo = ? AND number = ? AND head_sha = ? AND state IN ('planned', 'running')")
-          .run(state, summary, note, now(), v.repo, v.number, v.head_sha);
+        const r = await db.run(db.k.updateTable("verifications").set({ state, summary, note, finished_at: now() })
+          .where("repo", "=", v.repo).where("number", "=", v.number).where("head_sha", "=", v.head_sha).where("state", "in", ["planned", "running"]));
         const changed = Number(r.changes) > 0;
         if (changed && (state === "failed" || state === "error")) await setAsideAnswerBeforeFailure(db, v.repo, v.number, v.head_sha, now());
         return changed;
@@ -258,7 +273,8 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
       }
       if (tasks.some((t) => !TERMINAL.includes(t.state))) {
         if (v.state === "planned" && tasks.some((t) => t.state === "claimed" || t.state === "running")) {
-          await db.prepare("UPDATE verifications SET state = 'running' WHERE repo = ? AND number = ? AND head_sha = ? AND state = 'planned'").run(v.repo, v.number, v.head_sha);
+          await db.run(db.k.updateTable("verifications").set({ state: "running" })
+            .where("repo", "=", v.repo).where("number", "=", v.number).where("head_sha", "=", v.head_sha).where("state", "=", "planned"));
           s.running++; s.changed++;
         }
         return;
@@ -271,7 +287,8 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
       if (verdict.state === "error" && await retriesOf(db, v) < MAX_RETRIES) {
         try {
           const ids = await mapSeq([v.head_task_id, v.base_task_id], async (id) => (id === null ? null : await cloneTask(db, id)));
-          await db.prepare("UPDATE verifications SET head_task_id = ?, base_task_id = ?, state = 'planned' WHERE repo = ? AND number = ? AND head_sha = ?").run(ids[0], ids[1], v.repo, v.number, v.head_sha);
+          await db.run(db.k.updateTable("verifications").set({ head_task_id: ids[0] ?? null, base_task_id: ids[1] ?? null, state: "planned" })
+            .where("repo", "=", v.repo).where("number", "=", v.number).where("head_sha", "=", v.head_sha));
           s.retried++; s.changed++;
           await jobItem(db, v.repo, v.number, `${verdict.reason}; queued the tasks again`, log);
           return;
@@ -318,8 +335,8 @@ export async function runCollect(db: Db, params: { dryRun?: boolean; /** True wh
 /** Cancels queued warm builds whose branch head is no longer the commit they would build. */
 async function cancelMovedWarmBuilds(db: Db, d: CollectDeps, log: (line: string) => void): Promise<number> {
   if (!d.mainHead) return 0;
-  const queued = await db.prepare(`SELECT t.id, t.repo, t.head_sha, r.default_branch FROM build_tasks t LEFT JOIN repos r ON r.name = t.repo
-    WHERE t.warm_role = 'build' AND t.state = 'queued'`).all() as { id: number; repo: string; head_sha: string; default_branch: string | null }[];
+  const queued = await db.all(db.k.selectFrom("build_tasks as t").leftJoin("repos as r", "r.name", "t.repo")
+    .select(["t.id", "t.repo", "t.head_sha", "r.default_branch"]).where("t.warm_role", "=", "build").where("t.state", "=", "queued").orderBy("t.id"));
   let n = 0;
   for (const t of queued) {
     const main = await d.mainHead(t.repo, t.default_branch ?? "main");

@@ -5,11 +5,11 @@ import type { Db } from "../db/index.ts";
 
 /** The base branch the review of this head read its diff against; null when none was recorded. */
 export async function reviewedBaseOf(db: Db, repo: string, number: number, head: string): Promise<string | null> {
-  return (await db.prepare("SELECT base_ref FROM opus_reviews WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { base_ref: string | null } | undefined)?.base_ref ?? null;
+  return (await db.get(db.k.selectFrom("opus_reviews").select("base_ref").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head)))?.base_ref ?? null;
 }
 
 export async function defaultBranchOf(db: Db, repo: string): Promise<string | null> {
-  return (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? null;
+  return (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? null;
 }
 
 /**
@@ -35,8 +35,8 @@ export async function mergeInAllowed(db: Db, repo: string, number: number, head:
  */
 export async function recordLiveBase(db: Db, repo: string, number: number, head: string, liveBase: string, o: { by?: string; keepDiff?: boolean } = {}): Promise<void> {
   if (!o.keepDiff) await dropCachedDiff(db, repo, number, head);
-  const was = (await db.prepare("SELECT base_ref FROM items WHERE repo = ? AND number = ?").get(repo, number) as { base_ref: string | null } | undefined)?.base_ref ?? null;
+  const was = (await db.get(db.k.selectFrom("items").select("base_ref").where("repo", "=", repo).where("number", "=", number)))?.base_ref ?? null;
   if (was === liveBase) return;
-  await db.prepare("UPDATE main.items SET base_ref = ? WHERE repo = ? AND number = ?").run(liveBase, repo, number);
+  await db.run(db.k.updateTable("main.items").set({ base_ref: liveBase }).where("repo", "=", repo).where("number", "=", number));
   await audit(db, o.by ?? "merge", "base-changed", `${repo}#${number}`, { head, from: was, base: liveBase });
 }

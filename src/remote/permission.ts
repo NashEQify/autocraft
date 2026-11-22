@@ -4,6 +4,7 @@ import { AppError, call, GITHUB_API } from "../github/app.ts";
 import { installationToken } from "../github/install-token.ts";
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const APP_PERMISSION_TTL = 60_000;
 
@@ -41,7 +42,7 @@ export function appPermission(db: Db, login: string, repo: string, deps: Permiss
 }
 
 async function lookup(db: Db, login: string, repo: string, deps: PermissionDeps): Promise<AppPermission> {
-  const row = await db.prepare("SELECT owner FROM main.repos WHERE name = ?").get(repo) as { owner: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("main.repos").select("owner").where("name", "=", repo));
   if (!row?.owner) return { kind: "unavailable" };
   let token: string;
   try {
@@ -53,9 +54,8 @@ async function lookup(db: Db, login: string, repo: string, deps: PermissionDeps)
     const r = await call(deps.apiBase ?? GITHUB_API, `/repos/${encodeURIComponent(row.owner)}/${encodeURIComponent(repo)}/collaborators/${encodeURIComponent(login)}/permission`, token) as { permission?: unknown; role_name?: unknown };
     const role = typeof r.role_name === "string" ? r.role_name : "";
     const permission = WRITE_PERMISSIONS.has(role) ? role : typeof r.permission === "string" ? r.permission : "none";
-    await db.prepare(`INSERT INTO repo_permissions (login, repo, permission, checked_at) VALUES (?, ?, ?, ?)
-                ON CONFLICT (login, repo) DO UPDATE SET permission = excluded.permission, checked_at = excluded.checked_at`)
-      .run(login, repo, permission, new Date().toISOString());
+    await db.run(db.k.insertInto("repo_permissions").values({ login, repo, permission, checked_at: new Date().toISOString() })
+      .onConflict((oc) => oc.columns(["login", "repo"]).doUpdateSet(excluded(["permission", "checked_at"]))));
     return { kind: "ok", permission };
   } catch (e) {
     // A 404 does not prove the user lacks access: the installation may not see the repo, or the login may have been renamed.

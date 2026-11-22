@@ -1,6 +1,9 @@
 // Agent runs: one row per model call made through the prompt registry. Written
 // by the callers in src/classify/run.ts, read by the API.
-import { filtered, hiddenTest, type HiddenRepos } from "../hidden-sql.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
+import { filtered, hiddenTestExpr, type HiddenRepos } from "../hidden-sql.ts";
+import type { Eb } from "../db/kx.ts";
+import * as kx from "../db/kx.ts";
 import { gunzipSync, gzipSync } from "node:zlib";
 import type { AgentRun, AgentRunDetail, AgentRunFilter, AgentRunPage, AgentRunState, AgentRunTool, ItemRef, ItemShown, RateBucket, Rates } from "../../web/src/api/types.ts";
 
@@ -35,7 +38,7 @@ export const unpackText = (v: unknown): string | null => (typeof v === "string" 
 import { shownLookup } from "../dash/api/shown.ts";
 import { scrub } from "../runner/scrub.ts";
 import { mapSeq } from "../async-seq.ts";
-import { KEPT_RUNS } from "../runner/resuming.ts";
+import { keptRunsExpr } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
 
 const now = (): string => new Date().toISOString();
@@ -54,37 +57,37 @@ export const packPrompt = (prompt: string): Uint8Array => packText(scrub(prompt.
 /** Inserts the running row, its item refs and its prompt text. Does not open a transaction. */
 export async function insertRun(db: Db, s: RunStart): Promise<number> {
   const refs = s.items.slice(0, MAX_ITEM_REFS);
-  const id = Number((await db.prepare(`INSERT INTO agent_runs (job_id, step, stage, prompt_id, prompt_version, provider, model, account_id, items, item_count, state, started_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?)`)
-    .run(s.jobId, s.step, s.stage, s.promptId, s.promptVersion, s.provider, s.model, s.accountId, JSON.stringify(refs), s.items.length, now())).lastInsertRowid);
-  const ins = db.prepare("INSERT OR IGNORE INTO agent_run_items (run_id, repo, number) VALUES (?, ?, ?)");
-  for (const r of s.items) await ins.run(id, r.repo, r.number);
-  await db.prepare("INSERT INTO agent_run_texts (run_id, prompt) VALUES (?, ?)").run(id, typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt);
+  const id = Number((await db.get(db.k.insertInto("agent_runs").values({
+    job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: s.promptId, prompt_version: s.promptVersion, provider: s.provider, model: s.model,
+    account_id: s.accountId, items: JSON.stringify(refs), item_count: s.items.length, state: "running", started_at: now(),
+  }).returning("id")))!.id);
+  for (const r of s.items) await db.run(db.k.insertInto("agent_run_items").values({ run_id: id, repo: r.repo, number: r.number }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.insertInto("agent_run_texts").values({ run_id: id, prompt: typeof s.prompt === "string" ? packPrompt(s.prompt) : s.prompt }));
   return id;
 }
 
 export async function finishRun(db: Db, id: number, e: RunEnd): Promise<void> {
   const t = e.tokens;
-  await db.prepare(`UPDATE agent_runs SET state = ?, ended_at = ?, input_tokens = ?, output_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, cost_usd = ?, summary = ?, error = ?, progress = NULL
-    WHERE id = ? AND state = 'running'`)
-    .run(e.state, now(), t?.input ?? null, t?.output ?? null, t?.cacheRead ?? null, t?.cacheWrite ?? null, e.costUsd ?? null, e.summary ?? null, e.error ? e.error.slice(0, ERROR_MAX) : null, id);
-  if (e.output) await db.prepare("UPDATE agent_run_texts SET output = ? WHERE run_id = ?").run(packText(scrub(e.output.slice(0, TEXT_MAX))), id);
+  await db.run(db.k.updateTable("agent_runs").set({
+    state: e.state, ended_at: now(), input_tokens: t?.input ?? null, output_tokens: t?.output ?? null, cache_read_tokens: t?.cacheRead ?? null,
+    cache_write_tokens: t?.cacheWrite ?? null, cost_usd: e.costUsd ?? null, summary: e.summary ?? null, error: e.error ? e.error.slice(0, ERROR_MAX) : null, progress: null,
+  }).where("id", "=", id).where("state", "=", "running"));
+  if (e.output) await db.run(db.k.updateTable("agent_run_texts").set({ output: packText(scrub(e.output.slice(0, TEXT_MAX))) }).where("run_id", "=", id));
   setImmediate(runEnded); // after the caller's own follow-up claim, which gets the freed slot first
 }
 
 /** The latest progress line of a running call (src/classify/progress.ts). */
 export async function setRunProgress(db: Db, id: number, line: string): Promise<void> {
-  await db.prepare("UPDATE agent_runs SET progress = ? WHERE id = ? AND state = 'running'").run(line, id);
+  await db.run(db.k.updateTable("agent_runs").set({ progress: line }).where("id", "=", id).where("state", "=", "running"));
 }
 
 /**
  * Marks running rows as failed: all of them, or those of one job. Used when the process that made the calls is gone. The
- * runs of remote calls that a resuming job may adopt stay running (KEPT_RUNS): a Task Runner may still answer them.
+ * runs of remote calls that a resuming job may adopt stay running (keptRunsExpr): a Task Runner may still answer them.
  */
 export async function failRunning(db: Db, reason: string, jobId?: number): Promise<number> {
-  const r = jobId === undefined
-    ? await db.prepare(`UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND id NOT IN (${KEPT_RUNS})`).run(now(), reason, reason)
-    : await db.prepare(`UPDATE agent_runs SET state = 'failed', ended_at = ?, error = ?, summary = ? WHERE state = 'running' AND job_id = ? AND id NOT IN (${KEPT_RUNS})`).run(now(), reason, reason, jobId);
+  const r = await db.run(db.k.updateTable("agent_runs").set({ state: "failed", ended_at: now(), error: reason, summary: reason }).where("state", "=", "running")
+    .$if(jobId !== undefined, (q) => q.where("job_id", "=", jobId!)).where("id", "not in", keptRunsExpr(db)));
   return Number(r.changes);
 }
 
@@ -97,7 +100,7 @@ type RunRow = {
   user_login: string | null; harness: string | null; reported_model: string | null;
 };
 
-const SELECT = "SELECT r.*, a.label AS account_label FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id";
+const RUN_COLS = [...kx.cols("agent_runs", "r"), "a.label as account_label"] as const;
 
 function refs(s: string): ItemRef[] {
   try {
@@ -143,58 +146,58 @@ export async function listRuns(db: Db, f: AgentRunFilter, hidden: HiddenRepos = 
   if (f.cursor !== undefined && !CURSOR_RE.test(f.cursor)) throw new RunQueryError(400, "bad cursor");
   if (f.limit !== undefined && (!Number.isInteger(f.limit) || f.limit < 1 || f.limit > AGENT_PAGE_MAX)) throw new RunQueryError(400, `limit must be a whole number from 1 to ${AGENT_PAGE_MAX}`);
   const limit = f.limit ?? AGENT_PAGE_DEFAULT;
-  const where: string[] = [];
-  const args: (string | number)[] = [];
-  if (f.cursor) { where.push("r.id < ?"); args.push(Number(f.cursor)); }
-  if (f.state && f.state !== "recent") where.push(`r.state = '${f.state}'`);   // validated above; a literal lets the planner use the state index
-  if (f.step) { where.push("r.step = ?"); args.push(f.step); }
-  if (f.account) { where.push("r.account_id = ?"); args.push(f.account); }
-  if (filtered(hidden)) { const t = touchesHidden(hidden); where.push(t.sql); args.push(...t.args); }
-  let sql: string;
-  if (f.repo) {
+  const cursorCol = f.repo ? "i.run_id" : "r.id";
+  const conds = (eb: Eb) => {
+    const c = [];
+    if (f.cursor) c.push(eb(cursorCol, "<", Number(f.cursor)));
+    if (f.state && f.state !== "recent") c.push(eb("r.state", "=", f.state));   // validated above
+    if (f.step) c.push(eb("r.step", "=", f.step));
+    if (f.account) c.push(eb("r.account_id", "=", f.account));
+    if (filtered(hidden)) c.push(touchesHiddenExpr(db, eb, hidden));
+    return eb.and(c);
+  };
+  const rows: RunRow[] = f.repo
     // Driven by the (repo, run_id, number) index, newest run first, one row per run (the run's lowest number in the repo): no sort, stops at the limit.
-    where.unshift("i.repo = ?", "i.number = (SELECT MIN(number) FROM agent_run_items j WHERE j.run_id = i.run_id AND j.repo = i.repo)");
-    args.unshift(f.repo);
-    sql = `SELECT r.*, a.label AS account_label FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id LEFT JOIN claude_accounts a ON a.id = r.account_id
-      WHERE ${where.join(" AND ").replace("r.id < ?", "i.run_id < ?")} ORDER BY i.run_id DESC LIMIT ?`;
-  } else {
-    sql = `${SELECT} ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY r.id DESC LIMIT ?`;
-  }
-  const rows = await db.prepare(sql).all(...args, limit + 1) as RunRow[];
+    ? await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS)
+      .where("i.repo", "=", f.repo)
+      .where((eb) => eb("i.number", "=", eb.selectFrom("agent_run_items as j").select((e) => e.fn.min("j.number").as("n")).whereRef("j.run_id", "=", "i.run_id").whereRef("j.repo", "=", "i.repo")))
+      .where(conds).orderBy("i.run_id", "desc").limit(limit + 1).$narrowType<{ state: AgentRunState }>())
+    : await db.all(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where(conds).orderBy("r.id", "desc").limit(limit + 1).$narrowType<{ state: AgentRunState }>());
   const shown = shownLookup(db);
   const page = rows.slice(0, limit);
   return { runs: await mapSeq(page, async (x) => await toRun(x, shown, staff)), nextCursor: rows.length > limit ? String(page[page.length - 1]!.id) : null };
 }
 
 /**
- * SQL (with its `?` arguments) true when the run `r` may be shown under a repo filter: it is bound to an item and has no item in a
+ * True when the run `r` may be shown under a repo filter: it is bound to an item and has no item in a
  * hidden repo. A run recorded without items is about no repo the filter can test, so only operators (no filter) see it.
  */
-export const touchesHidden = (hidden: HiddenRepos): { sql: string; args: string[] } => {
-  const h = hiddenTest("x.repo", hidden);
-  return { sql: `EXISTS (SELECT 1 FROM agent_run_items y WHERE y.run_id = r.id) AND NOT EXISTS (SELECT 1 FROM agent_run_items x WHERE x.run_id = r.id AND ${h.sql})`, args: h.args };
-};
+export const touchesHiddenExpr = (db: Db, eb: Eb, hidden: HiddenRepos): AliasableExpression<SqlBool> => eb.and([
+  eb.exists(db.k.selectFrom("agent_run_items as y").select(eb.lit(1).as("one")).where("y.run_id", "=", eb.ref("r.id"))),
+  eb.not(eb.exists(db.k.selectFrom("agent_run_items as x").select(eb.lit(1).as("one")).where("x.run_id", "=", eb.ref("r.id")).where(hiddenTestExpr(db, "x.repo", hidden)))),
+]);
 
 /** A run that touches a hidden repo is not found; prompt and output text go only to `texts` viewers (operators). */
 export async function getRun(db: Db, id: unknown, view: { hidden?: HiddenRepos; texts?: boolean } = { texts: true }): Promise<AgentRunDetail> {
   if (typeof id !== "number" || !Number.isInteger(id) || id < 1) throw new RunQueryError(400, "not a run id");
-  const r = await db.prepare(`${SELECT} WHERE r.id = ?`).get(id) as RunRow | undefined;
+  const r = await db.get(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").select(RUN_COLS).where("r.id", "=", id).$narrowType<{ state: AgentRunState }>());
   if (!r) throw new RunQueryError(404, `no agent run ${id}`);
-  if (view.hidden && filtered(view.hidden) && !await db.prepare(`SELECT 1 FROM agent_runs r WHERE r.id = ? AND ${touchesHidden(view.hidden).sql}`).get(id, ...touchesHidden(view.hidden).args)) {
+  const hidden = view.hidden;
+  if (hidden && filtered(hidden) && !await db.get(db.k.selectFrom("agent_runs as r").select((eb) => eb.lit(1).as("one")).where("r.id", "=", id).where((eb) => touchesHiddenExpr(db, eb, hidden)))) {
     throw new RunQueryError(404, `no agent run ${id}`);
   }
   const tools = await runTools(db, id);
   // Tool arguments carry file paths and patch text: like the prompt, for operators only.
   if (!view.texts) return { ...await toRun(r, shownLookup(db), false), prompt: null, output: null, error: r.error ? "failed" : null, tools: tools.map((t) => ({ ...t, args: null })), textsHidden: true };
-  const t = await db.prepare("SELECT prompt, output FROM agent_run_texts WHERE run_id = ?").get(id) as { prompt: unknown; output: unknown } | undefined;
+  const t = await db.get(db.k.selectFrom("agent_run_texts").select(["prompt", "output"]).where("run_id", "=", id));
   return { ...await toRun(r, shownLookup(db), view.texts === true), prompt: unpackText(t?.prompt), output: unpackText(t?.output), error: r.error, tools };
 }
 
 /** The tool uses of a run in order; a check-tool use carries its model_checks row. */
 export async function runTools(db: Db, runId: number): Promise<AgentRunTool[]> {
-  const rows = await db.prepare(`SELECT t.seq, t.tool, t.args, t.result_bytes, t.is_error, t.started_at, t.ended_at, t.check_id, c.command, c.crate, c.test_name, c.outcome
-    FROM agent_run_tools t LEFT JOIN model_checks c ON c.id = t.check_id WHERE t.run_id = ? ORDER BY t.seq`).all(runId) as
-    { seq: number; tool: string; args: string; result_bytes: number | null; is_error: number; started_at: string | null; ended_at: string | null; check_id: number | null; command: string | null; crate: string | null; test_name: string | null; outcome: string | null }[];
+  const rows = await db.all(db.k.selectFrom("agent_run_tools as t").leftJoin("model_checks as c", "c.id", "t.check_id")
+    .select(["t.seq", "t.tool", "t.args", "t.result_bytes", "t.is_error", "t.started_at", "t.ended_at", "t.check_id", "c.command", "c.crate", "c.test_name", "c.outcome"])
+    .where("t.run_id", "=", runId).orderBy("t.seq"));
   return rows.map((r) => ({
     seq: r.seq, tool: r.tool, args: r.args, resultBytes: r.result_bytes, isError: r.is_error === 1, startedAt: r.started_at, endedAt: r.ended_at,
     check: r.check_id === null ? null : { id: r.check_id, command: r.command ?? "", crate: r.crate, testName: r.test_name, outcome: r.outcome },
@@ -205,9 +208,11 @@ export async function runTools(db: Db, runId: number): Promise<AgentRunTool[]> {
 export async function accountLabelsByJob(db: Db, jobIds: number[]): Promise<Map<number, string[]>> {
   const out = new Map<number, string[]>();
   if (!jobIds.length) return out;
-  const marks = jobIds.map(() => "?").join(",");
-  const rows = await db.prepare(`SELECT DISTINCT r.job_id AS job, COALESCE(a.label, r.account_id) AS label FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id
-    WHERE r.job_id IN (${marks}) AND r.account_id IS NOT NULL ORDER BY 1, 2`).all(...jobIds) as { job: number; label: string }[];
+  const rows = await db.all(db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id").distinct()
+    .select((eb) => ["r.job_id as job", eb.fn.coalesce("a.label", "r.account_id").as("label")])
+    .where(kx.inList(db, "r.job_id", jobIds, "bigint")).where("r.account_id", "is not", null)
+    .orderBy("job").orderBy("label")
+    .$narrowType<{ job: number; label: string }>());
   for (const r of rows) out.set(r.job, [...(out.get(r.job) ?? []), r.label]);
   return out;
 }
@@ -221,24 +226,30 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
   const end = Math.floor(nowMs / step) * step + step;
   const start = end - n * step;
   const from = new Date(start).toISOString();
-  const fmt = hourly ? "%Y-%m-%dT%H:00:00.000Z" : "%Y-%m-%dT00:00:00.000Z";
+  // The hour or day an ISO time falls in: its leading characters, completed to the bucket's start time by `bucketKey`.
+  const prefix = hourly ? 13 : 10;
+  const bucketOf = (eb: Eb, col: string) => eb.fn<string>("substr", [eb.ref(col), eb.lit(1), eb.lit(prefix)]).as("bucket");
+  const bucketKey = (b: string) => hourly ? `${b}:00:00.000Z` : `${b}T00:00:00.000Z`;
   const keys = Array.from({ length: n }, (_, i) => new Date(start + i * step).toISOString());
 
-  const jobHide = hiddenTest("repo", hidden), runHide = touchesHidden(hidden);
   const empty = () => new Map<string, RateBucket>(keys.map((t) => [t, { t, items: 0, runs: 0, failed: 0 }]));
   const byStep = new Map<string, Map<string, RateBucket>>();
   const bucketsOf = (s: string) => byStep.get(s) ?? (byStep.set(s, empty()), byStep.get(s)!);
 
-  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COALESCE(SUM(items), 0) AS items FROM jobs
-    WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND (repo IS NULL OR NOT (${jobHide.sql}))` : ""} GROUP BY step, t`)
-    .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? jobHide.args : [])) as { step: string; t: string; items: number }[]) {
-    const b = bucketsOf(r.step).get(r.t);
+  const to = new Date(end).toISOString();
+  for (const r of await db.all(db.k.selectFrom("jobs").select((eb) => ["step", bucketOf(eb, "started_at"), eb.fn.coalesce(eb.fn.sum<number>("items"), eb.lit(0)).as("items")])
+    .where("started_at", ">=", from).where("started_at", "<", to)
+    .$if(filtered(hidden), (q) => q.where((eb) => eb.or([eb("repo", "is", null), eb.not(hiddenTestExpr(db, "repo", hidden))])))
+    .groupBy("step").groupBy("bucket"))) {
+    const b = bucketsOf(r.step).get(bucketKey(r.bucket));
     if (b) b.items = r.items;
   }
-  for (const r of await db.prepare(`SELECT step, strftime('${fmt}', started_at) AS t, COUNT(*) AS runs, COALESCE(SUM(state = 'failed'), 0) AS failed FROM agent_runs r
-    WHERE started_at >= ? AND started_at < ?${filtered(hidden) ? ` AND ${runHide.sql}` : ""} GROUP BY step, t`)
-    .all(from, new Date(end).toISOString(), ...(filtered(hidden) ? runHide.args : [])) as { step: string; t: string; runs: number; failed: number }[]) {
-    const b = bucketsOf(r.step).get(r.t);
+  for (const r of await db.all(db.k.selectFrom("agent_runs as r").select((eb) => ["r.step", bucketOf(eb, "r.started_at"), eb.fn.countAll<number>().as("runs"),
+    eb.fn.coalesce(eb.fn.sum<number>(eb.case().when("r.state", "=", "failed").then(1).else(0).end()), eb.lit(0)).as("failed")])
+    .where("r.started_at", ">=", from).where("r.started_at", "<", to)
+    .$if(filtered(hidden), (q) => q.where((eb) => touchesHiddenExpr(db, eb, hidden)))
+    .groupBy("r.step").groupBy("bucket"))) {
+    const b = bucketsOf(r.step).get(bucketKey(r.bucket));
     if (b) { b.runs = r.runs; b.failed = r.failed; }
   }
   // Loaded here: steps.ts imports modules that import the model-call code, which imports this file.
@@ -247,10 +258,11 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
   const stages = names.map((s) => ({ step: s, title: steps.get(s)?.title ?? s, buckets: [...bucketsOf(s).values()] }))
     .sort((a, b) => (steps.get(a.step)?.stage ?? 99) - (steps.get(b.step)?.stage ?? 99) || a.step.localeCompare(b.step));
 
-  const accounts = await mapSeq((await db.prepare("SELECT id, label FROM claude_accounts WHERE enabled = 1 ORDER BY id").all() as { id: string; label: string }[]), async (a) => ({
+  const accounts = await mapSeq(await db.all(db.k.selectFrom("claude_accounts").select(["id", "label"]).where("enabled", "=", 1).orderBy("id")), async (a) => ({
     id: a.id, label: a.label,
-    samples: (await db.prepare(`SELECT strftime('${fmt}', t) AS t, MAX(five_hour_pct) AS fiveHourPct, MAX(weekly_pct) AS weeklyPct FROM account_usage_samples
-      WHERE account_id = ? AND t >= ? GROUP BY 1 ORDER BY 1`).all(a.id, from) as { t: string; fiveHourPct: number | null; weeklyPct: number | null }[]),
+    samples: (await db.all(db.k.selectFrom("account_usage_samples").select((eb) => [bucketOf(eb, "t"), eb.fn.max("five_hour_pct").as("fiveHourPct"), eb.fn.max("weekly_pct").as("weeklyPct")])
+      .where("account_id", "=", a.id).where("t", ">=", from).groupBy("bucket").orderBy("bucket")))
+      .map((x) => ({ t: bucketKey(x.bucket), fiveHourPct: x.fiveHourPct, weeklyPct: x.weeklyPct })),
   }));
   return { window, bucket: hourly ? "hour" : "day", stages, accounts };
 }
@@ -259,11 +271,12 @@ export async function rates(db: Db, window: unknown, nowMs: number = Date.now(),
 
 /** Drops prompt and output text and tool uses with their runs after RUN_KEEP_MS (ten years). Cutoffs are by id, found through the started_at index. */
 export async function pruneRuns(db: Db, nowMs: number = Date.now()): Promise<{ texts: number; runs: number }> {
-  const maxBefore = async (ms: number): Promise<number> => (await db.prepare("SELECT COALESCE(MAX(id), 0) AS id FROM agent_runs WHERE started_at < ?").get(new Date(nowMs - ms).toISOString()) as { id: number }).id;
-  const texts = Number((await db.prepare("DELETE FROM agent_run_texts WHERE run_id <= ?").run(await maxBefore(TEXT_KEEP_MS))).changes);
+  const maxBefore = async (ms: number): Promise<number> => (await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.coalesce(eb.fn.max("id"), eb.lit(0)).as("id"))
+    .where("started_at", "<", new Date(nowMs - ms).toISOString())))!.id;
+  const texts = Number((await db.run(db.k.deleteFrom("agent_run_texts").where("run_id", "<=", await maxBefore(TEXT_KEEP_MS)))).changes);
   const old = await maxBefore(RUN_KEEP_MS);
-  await db.prepare("DELETE FROM agent_run_tools WHERE run_id <= ?").run(old);
-  await db.prepare("DELETE FROM agent_run_items WHERE run_id <= ?").run(old);
-  const runs = Number((await db.prepare("DELETE FROM agent_runs WHERE id <= ?").run(old)).changes);
+  await db.run(db.k.deleteFrom("agent_run_tools").where("run_id", "<=", old));
+  await db.run(db.k.deleteFrom("agent_run_items").where("run_id", "<=", old));
+  const runs = Number((await db.run(db.k.deleteFrom("agent_runs").where("id", "<=", old))).changes);
   return { texts, runs };
 }

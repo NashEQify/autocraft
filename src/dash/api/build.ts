@@ -8,7 +8,7 @@ import { readFileSync } from "node:fs";
 import type { BuildEnv, BuildFeatureState, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, TaskFilter, TaskPage, TaskState } from "../../../web/src/api/types.ts";
 import { absolute } from "../../build/artifacts.ts";
 import { BuildError, createEnv, listEnvs, rotateKey, updateEnv } from "../../build/envs.ts";
-import { PRIVATE_STEPS, PRIVATE_STEPS_SQL, cancelTask, getTaskDetail, listTasks, summary } from "../../build/tasks.ts";
+import { PRIVATE_STEPS, cancelTask, getTaskDetail, listTasks, summary } from "../../build/tasks.ts";
 import { BUILD_FEATURES, REPO_SCOPED, featureStates, isFeature, setFeature } from "../../build/features.ts";
 import { ScreenshotConfigError, deleteConfig, listConfigs, putConfig } from "../../verify/screenshot-config.ts";
 import { audit } from "../audit.ts";
@@ -75,7 +75,7 @@ export const cancel = async (db: Db, req: Req): Promise<BuildTask> => wrap(async
 export const buildSummary = async (db: Db, req: Req): Promise<BuildSummary> => await summary(db, await hiddenRepos(db, req), canSeeInternals(req));
 
 async function featuresOf(db: Db, req: Req): Promise<BuildFeatures> {
-  const tracked = new Set((await db.prepare("SELECT name FROM main.tracked_repos").all() as { name: string }[]).map((r) => r.name));
+  const tracked = new Set((await db.all(db.k.selectFrom("main.tracked_repos").select("name"))).map((r) => r.name));
   const repos = (await visibleRepos(db, req)).filter((r) => tracked.has(r)).sort();
   const shown = new Set(repos);
   const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], repos: s.repos.filter((r) => shown.has(r)) }));
@@ -92,7 +92,7 @@ export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
 export const postFeature = async (db: Db, req: Req): Promise<BuildFeatures> => {
   const b = (req.json ?? {}) as { feature?: unknown; on?: unknown; repo?: unknown; scope?: unknown; perDay?: unknown };
   if (!isFeature(b.feature)) throw new HttpError(400, `feature must be one of ${BUILD_FEATURES.join(", ")}`);
-  const tracked = async (r: string): Promise<boolean> => !!(await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(r));
+  const tracked = async (r: string): Promise<boolean> => !!(await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", r)));
   // Every field is checked before anything is written.
   if (b.scope !== undefined || b.perDay !== undefined) {
     if (b.feature !== "pr-builds") throw new HttpError(400, "only pr-builds has a scope and a daily cap");
@@ -120,7 +120,7 @@ async function screenshotSetups(db: Db, req: Req): Promise<ScreenshotSetups> {
 }
 
 async function trackedRepo(db: Db, repo: string): Promise<string> {
-  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new HttpError(400, "repo must be a tracked repo");
+  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", repo))) throw new HttpError(400, "repo must be a tracked repo");
   return repo;
 }
 
@@ -150,7 +150,7 @@ export async function artifact(db: Db, req: Req): Promise<Res> {
     if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers download artifacts");
     const t = await visibleTask(db, req);
     const a = t.artifacts.find((x) => x.name === req.params.name);
-    const row = a && (await db.prepare("SELECT file FROM build_artifacts WHERE task_id = ? AND name = ?").get(t.id, a.name) as { file: string } | undefined);
+    const row = a && (await db.get(db.k.selectFrom("build_artifacts").select("file").where("task_id", "=", t.id).where("name", "=", a.name)));
     const path = row && absolute(row.file);
     if (!a || !path) throw new HttpError(404, "no such artifact");
     let data: Buffer;

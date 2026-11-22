@@ -1,17 +1,27 @@
 // A review made again at the same head commit replaces the one a "Merge this PR?" decision was asked from.
 import { audit } from "../dash/audit.ts";
 import { clearAskedStage } from "../decisions.ts";
-import { holdDecisionId, mergeDecisionId, OPEN_GROUP_SQL, type QueueEntry } from "./queue.ts";
+import { holdDecisionId, mergeDecisionId, type QueueEntry } from "./queue.ts";
+import { openGroupExpr } from "../core/rule-queries.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Answer value of a question the pipeline set aside; no operator wrote it, so no later step acts on it. */
 export const WITHDRAWN = "withdrawn";
 
 /** Renames a decision and what hangs on its id, freeing the id for a new question. */
 async function renameDecision(db: Db, id: string, to: string): Promise<void> {
-  for (const t of ["decisions", "decision_opinions", "decision_comments", "decision_claims"]) {
-    await db.prepare(`UPDATE ${t} SET ${t === "decisions" ? "id" : "decision_id"} = ? WHERE ${t === "decisions" ? "id" : "decision_id"} = ?`).run(to, id);
-  }
+  await db.run(db.k.updateTable("main.decisions").set({ id: to }).where("id", "=", id));
+  await db.run(db.k.updateTable("decision_opinions").set({ decision_id: to }).where("decision_id", "=", id));
+  await db.run(db.k.updateTable("decision_comments").set({ decision_id: to }).where("decision_id", "=", id));
+  await db.run(db.k.updateTable("decision_claims").set({ decision_id: to }).where("decision_id", "=", id));
+}
+
+/** Answers the still-open decision `id` "withdrawn" by the pipeline, applied at once, with `note`. */
+async function closeWithdrawn(db: Db, at: string, note: string, id: string): Promise<void> {
+  await db.run(db.k.updateTable("main.decisions")
+    .set({ answer: WITHDRAWN, answered_by: "pipeline", answered_at: at, applied_at: at, answer_note: note, adopted_opinion: null })
+    .where("id", "=", id).where("answer", "is", null));
 }
 
 /**
@@ -30,17 +40,20 @@ export async function withdrawHoldQuestion(db: Db, repo: string, number: number,
 }
 
 async function setAside(db: Db, id: string, repo: string, number: number, head: string, at: string, why: string, stands: (answer: string) => boolean): Promise<boolean> {
-  const row = await db.prepare("SELECT answer, applied_at FROM decisions WHERE id = ?").get(id) as { answer: string | null; applied_at: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("decisions").select(["answer", "applied_at"]).where("id", "=", id));
   // An answer that waits for Act and does not depend on the review still stands: the new review doesn't change it.
   if (!row || (row.answer !== null && stands(row.answer) && !row.applied_at)) return false;
   const old = `${id}~replaced-${at}`;
   return await db.write(async () => {
     await renameDecision(db, id, old);
     if (row.answer === null) {
-      await db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'pipeline', answered_at = ?, applied_at = ?, answer_note = ? WHERE id = ?").run(WITHDRAWN, at, at, why, old);
+      await db.run(db.k.updateTable("main.decisions")
+        .set({ answer: WITHDRAWN, answered_by: "pipeline", answered_at: at, applied_at: at, answer_note: why }).where("id", "=", old));
       await audit(db, "pipeline", "merge-question-withdrawn", old, { repo, number, head });
     } else if (!row.applied_at) {
-      await db.prepare("UPDATE main.decisions SET applied_at = ?, answer_note = COALESCE(answer_note || ' — ', '') || ? WHERE id = ?").run(at, `${why}; the answer was not applied`, old);
+      await db.run(db.k.updateTable("main.decisions")
+        .set((eb) => ({ applied_at: at, answer_note: eb(eb.fn.coalesce(eb("answer_note", "||", eb.val(" — ")), eb.val("")), "||", eb.val(`${why}; the answer was not applied`)) }))
+        .where("id", "=", old));
       await audit(db, "pipeline", "merge-answer-superseded", old, { repo, number, head, answer: row.answer });
     }
     return true;
@@ -56,7 +69,7 @@ export async function withdrawBlockedQuestions(db: Db, queue: QueueEntry[], at: 
   for (const e of queue) {
     // A block seen only in the mirror may be wrong (the association is relative to the viewer): wait for a live read.
     if (e.state !== "changes-requested" || !e.blockedLive || !e.decisionId) continue;
-    const row = await db.prepare("SELECT answer, applied_at FROM decisions WHERE id = ?").get(e.decisionId) as { answer: string | null; applied_at: string | null } | undefined;
+    const row = await db.get(db.k.selectFrom("decisions").select(["answer", "applied_at"]).where("id", "=", e.decisionId));
     if (!row || (row.answer !== null && (row.answer !== "merge" || row.applied_at))) continue;
     if (await withdrawMergeQuestion(db, e.repo, e.number, e.head, at)) n++;
   }
@@ -71,11 +84,16 @@ export const IN_GROUP_NOTE = "set aside while the PR is in a duplicate group";
  * group decision, so an item has one current decision. The PR that stays open is asked again after the group is answered.
  */
 export async function withdrawGroupedQuestions(db: Db, at: string, repo?: string): Promise<number> {
-  const rows = await db.prepare(`SELECT DISTINCT m.repo, m.number, m.id FROM decisions m
-    JOIN dupe_group_items gi ON gi.repo = m.repo AND gi.number = m.number
-    JOIN decisions g ON g.id = gi.decision_id AND gi.role <> 'stay'
-    WHERE ${OPEN_GROUP_SQL} AND m.kind = 'merge' AND m.id NOT LIKE '%~replaced-%' AND (m.answer IS NULL OR (m.answer = 'merge' AND m.applied_at IS NULL))
-    ${repo ? "AND m.repo = ?" : ""}`).all(...(repo ? [repo] : [])) as { repo: string; number: number; id: string }[];
+  const rows = await db.all(db.k.selectFrom("decisions as m").distinct()
+    .innerJoin("dupe_group_items as gi", (j) => j.onRef("gi.repo", "=", "m.repo").onRef("gi.number", "=", "m.number"))
+    .innerJoin("decisions as g", (j) => j.onRef("g.id", "=", "gi.decision_id").on("gi.role", "<>", "stay"))
+    .select(["m.repo", "m.number", "m.id"])
+    .where((eb) => eb.and([
+      openGroupExpr(db, eb), eb("m.kind", "=", "merge"), eb.not(kx.like(db, "m.id", eb.val("%~replaced-%"))),
+      eb.or([eb("m.answer", "is", null), eb.and([eb("m.answer", "=", "merge"), eb("m.applied_at", "is", null)])]),
+    ]))
+    .$if(!!repo, (q) => q.where("m.repo", "=", repo!))
+    .$narrowType<{ repo: string; number: number }>());
   let n = 0;
   for (const r of rows) {
     const head = r.id.slice(r.id.indexOf(":merge@") + ":merge@".length);
@@ -86,14 +104,18 @@ export async function withdrawGroupedQuestions(db: Db, at: string, repo?: string
 
 /** Closes the PR's open Merge? questions at every head once it merged, whatever path merged it. */
 export async function closeMergedQuestions(db: Db, repo: string, number: number, at: string): Promise<void> {
-  await db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'pipeline', answered_at = ?, applied_at = ?, answer_note = 'the PR merged' WHERE kind = 'merge' AND repo = ? AND number = ? AND answer IS NULL")
-    .run(WITHDRAWN, at, at, repo, number);
+  await db.run(db.k.updateTable("main.decisions")
+    .set({ answer: WITHDRAWN, answered_by: "pipeline", answered_at: at, applied_at: at, answer_note: "the PR merged" })
+    .where("kind", "=", "merge").where("repo", "=", repo).where("number", "=", number).where("answer", "is", null));
 }
 
 /** Sets aside the PR's unanswered Merge? questions at heads other than the one just asked about. */
 export async function withdrawOtherHeadQuestions(db: Db, repo: string, number: number, keepHead: string, at: string): Promise<void> {
   const prefix = `${repo}#${number}:merge@`;
-  const rows = await db.prepare("SELECT id FROM decisions WHERE repo = ? AND number = ? AND kind = 'merge' AND answer IS NULL AND substr(id, 1, ?) = ? AND id NOT LIKE '%~replaced-%'").all(repo, number, prefix.length, prefix) as { id: string }[];
+  const rows = await db.all(db.k.selectFrom("decisions").select("id")
+    .where("repo", "=", repo).where("number", "=", number).where("kind", "=", "merge").where("answer", "is", null)
+    .where((eb) => eb(eb.fn<string>("substr", ["id", eb.val(1), eb.val(prefix.length)]), "=", prefix))
+    .where((eb) => eb.not(kx.like(db, "id", eb.val("%~replaced-%")))));
   for (const r of rows) {
     const head = r.id.slice(prefix.length);
     if (head !== keepHead) await withdrawMergeQuestion(db, repo, number, head, at, "superseded by a question at a newer head");
@@ -109,12 +131,16 @@ const LAPSED_NOTE = "the maintainer's answer no longer counts";
  * Returns false when there is no answered row.
  */
 export async function setAsideLapsedScope(db: Db, id: string, at: string): Promise<boolean> {
-  const row = await db.prepare("SELECT repo, number, answer FROM decisions WHERE id = ? AND kind = 'scope' AND answer IS NOT NULL").get(id) as { repo: string; number: number; answer: string } | undefined;
+  const row = await db.get(db.k.selectFrom("decisions").select(["repo", "number", "answer"])
+    .where("id", "=", id).where("kind", "=", "scope").where("answer", "is not", null)
+    .$narrowType<{ answer: string }>());
   if (!row) return false;
   const old = `${id}~lapsed-${at}`;
   await db.write(async () => {
     await renameDecision(db, id, old);
-    await db.prepare("UPDATE main.decisions SET applied_at = COALESCE(applied_at, ?), answer_note = COALESCE(answer_note || ' — ', '') || ? WHERE id = ?").run(at, LAPSED_NOTE, old);
+    await db.run(db.k.updateTable("main.decisions")
+      .set((eb) => ({ applied_at: eb.fn.coalesce("applied_at", eb.val(at)), answer_note: eb(eb.fn.coalesce(eb("answer_note", "||", eb.val(" — ")), eb.val("")), "||", eb.val(LAPSED_NOTE)) }))
+      .where("id", "=", old));
     await audit(db, "pipeline", "scope-answer-lapsed", old, { repo: row.repo, number: row.number, answer: row.answer });
   });
   return true;
@@ -131,17 +157,24 @@ const HEAD_MOVED_NOTE = "the pull request changed since";
  * and Act read only the current head's id, so an answer to the old one has no effect. Answered decisions are not touched.
  */
 async function setAsideOldHeadQuestions(db: Db, at: string, repo?: string): Promise<number> {
-  const rows = await db.prepare(`SELECT d.id, d.kind, d.repo, d.number FROM decisions d JOIN items i ON i.repo = d.repo AND i.number = d.number
-    WHERE d.answer IS NULL AND d.kind IN ('merge', 'close', 'hold') AND d.id NOT LIKE '%~replaced-%' AND i.kind = 'pr' AND i.head_oid IS NOT NULL
-      AND d.id <> d.repo || '#' || d.number || ':' || d.kind || '@' || i.head_oid AND d.id LIKE d.repo || '#' || d.number || ':' || d.kind || '@%' ${repo ? "AND d.repo = ?" : ""}`)
-    .all(...(repo ? [repo] : [])) as { id: string; kind: string; repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("decisions as d")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+    .select(["d.id", "d.kind", "d.repo", "d.number"])
+    .where((eb) => {
+      const idOf = (tail: string) => eb(eb(eb(eb(eb.ref("d.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "d.number")), "||", eb.val(":")), "||", eb("d.kind", "||", eb.val(tail)));
+      return eb.and([
+        eb("d.answer", "is", null), eb("d.kind", "in", ["merge", "close", "hold"]), eb.not(kx.like(db, "d.id", eb.val("%~replaced-%"))),
+        eb("i.kind", "=", "pr"), eb("i.head_oid", "is not", null),
+        eb("d.id", "<>", eb(idOf("@"), "||", eb.ref("i.head_oid"))), kx.like(db, "d.id", idOf("@%")),
+      ]);
+    })
+    .$if(!!repo, (q) => q.where("d.repo", "=", repo!)));
   if (!rows.length) return 0;
-  const close = db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'pipeline', answered_at = ?, applied_at = ?, answer_note = ?, adopted_opinion = NULL WHERE id = ? AND answer IS NULL");
   await db.write(async () => {
     for (const r of rows) {
       const old = `${r.id}~replaced-${at}`;
       await renameDecision(db, r.id, old);
-      await close.run(WITHDRAWN, at, at, HEAD_MOVED_NOTE, old);
+      await closeWithdrawn(db, at, HEAD_MOVED_NOTE, old);
       await audit(db, "pipeline", "decision-withdrawn", old, { repo: r.repo, number: r.number, kind: r.kind, why: HEAD_MOVED_NOTE });
     }
   });
@@ -156,9 +189,12 @@ async function setAsideOldHeadQuestions(db: Db, at: string, repo?: string): Prom
  */
 export async function setAsideSupersededQuestions(db: Db, at: string, repo?: string): Promise<number> {
   const stale = await setAsideOldHeadQuestions(db, at, repo);
-  const rows = await db.prepare(`SELECT id, kind, repo, number FROM decisions WHERE answer IS NULL AND number IS NOT NULL
-    AND kind IN ('scope', 'merge', 'close', 'hold') AND id NOT LIKE '%:dupegroup:%' AND id NOT LIKE '%~replaced-%' ${repo ? "AND repo = ?" : ""}
-    ORDER BY asked_at DESC, rowid DESC`).all(...(repo ? [repo] : [])) as { id: string; kind: string; repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("decisions").select(["id", "kind", "repo", "number"])
+    .where("answer", "is", null).where("number", "is not", null).where("kind", "in", ["scope", "merge", "close", "hold"])
+    .where((eb) => eb.and([eb.not(kx.like(db, "id", eb.val("%:dupegroup:%"))), eb.not(kx.like(db, "id", eb.val("%~replaced-%")))]))
+    .$if(!!repo, (q) => q.where("repo", "=", repo!))
+    .orderBy("asked_at", "desc").orderBy(kx.rowid("decisions"), "desc")
+    .$narrowType<{ number: number }>());
   const seen = new Set<string>();
   const aside: { r: (typeof rows)[number]; why: string }[] = [];
   for (const r of rows) {
@@ -167,21 +203,18 @@ export async function setAsideSupersededQuestions(db: Db, at: string, repo?: str
     else seen.add(k);
   }
   if (!aside.length) return stale;
-  const close = db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'pipeline', answered_at = ?, applied_at = ?, answer_note = ?, adopted_opinion = NULL WHERE id = ? AND answer IS NULL");
   await db.write(async () => {
     for (const { r, why } of aside) {
       const old = `${r.id}~replaced-${at}`;
       await renameDecision(db, r.id, old);
-      await close.run(WITHDRAWN, at, at, why, old);
+      await closeWithdrawn(db, at, why, old);
       await audit(db, "pipeline", "decision-withdrawn", old, { repo: r.repo, number: r.number, kind: r.kind, why });
     }
   });
   return stale + aside.length;
 }
 
-type OpenRow = { id: string; kind: string; repo: string | null; number: number | null; state: string | null; itemKind: string | null };
-
-const closedWhy = (r: OpenRow): string => r.state === "MERGED" ? "the pull request was merged" : `the ${r.itemKind === "pr" ? "pull request" : "issue"} was closed on GitHub`;
+const closedWhy = (r: { state: string; itemKind: string }): string => r.state === "MERGED" ? "the pull request was merged" : `the ${r.itemKind === "pr" ? "pull request" : "issue"} was closed on GitHub`;
 
 /**
  * Withdraws the open scope, merge, close and (single-item) duplicate questions of items that are closed or merged in the
@@ -191,28 +224,36 @@ const closedWhy = (r: OpenRow): string => r.state === "MERGED" ? "the pull reque
  * the stages row Decide wrote, so the item counts as never asked. Idempotent: it writes only when something is left to withdraw.
  */
 export async function withdrawClosedQuestions(db: Db, at: string): Promise<number> {
-  const single = await db.prepare(`SELECT d.id, d.kind, d.repo, d.number, i.state, i.kind AS itemKind FROM decisions d
-    JOIN items i ON i.repo = d.repo AND i.number = d.number
-    WHERE d.answer IS NULL AND d.number IS NOT NULL AND d.kind IN ('scope', 'close', 'merge', 'hold', 'duplicate') AND d.id NOT LIKE '%:dupegroup:%' AND d.id NOT LIKE '%~replaced-%'
-      AND i.state IN ('CLOSED', 'MERGED')`).all() as OpenRow[];
-  const groups = await db.prepare(`SELECT d.id, d.kind, d.repo, d.number FROM decisions d
-    WHERE d.answer IS NULL AND d.kind = 'duplicate' AND d.id LIKE '%:dupegroup:%' AND d.id NOT LIKE '%~replaced-%'
-      AND (SELECT COUNT(*) FROM dupe_group_items gi JOIN items i ON i.repo = gi.repo AND i.number = gi.number WHERE gi.decision_id = d.id AND i.state = 'OPEN') < 2`).all() as OpenRow[];
+  const single = await db.all(db.k.selectFrom("decisions as d")
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "d.repo").onRef("i.number", "=", "d.number"))
+    .select(["d.id", "d.kind", "d.repo", "d.number", "i.state", "i.kind as itemKind"])
+    .where("d.answer", "is", null).where("d.number", "is not", null).where("d.kind", "in", ["scope", "close", "merge", "hold", "duplicate"])
+    .where((eb) => eb.and([eb.not(kx.like(db, "d.id", eb.val("%:dupegroup:%"))), eb.not(kx.like(db, "d.id", eb.val("%~replaced-%")))]))
+    .where("i.state", "in", ["CLOSED", "MERGED"])
+    .$narrowType<{ number: number }>());
+  const groups = await db.all(db.k.selectFrom("decisions as d").select(["d.id", "d.kind", "d.repo", "d.number"])
+    .where("d.answer", "is", null).where("d.kind", "=", "duplicate")
+    .where((eb) => eb.and([
+      kx.like(db, "d.id", eb.val("%:dupegroup:%")), eb.not(kx.like(db, "d.id", eb.val("%~replaced-%"))),
+      eb(eb.selectFrom("dupe_group_items as gi")
+        .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "gi.repo").onRef("i.number", "=", "gi.number"))
+        .select(eb.fn.countAll<number>().as("n"))
+        .whereRef("gi.decision_id", "=", "d.id").where("i.state", "=", "OPEN"), "<", 2),
+    ])));
   if (!single.length && !groups.length) return 0;
   const clear = clearAskedStage(db);
-  const close = db.prepare("UPDATE main.decisions SET answer = ?, answered_by = 'pipeline', answered_at = ?, applied_at = ?, answer_note = ?, adopted_opinion = NULL WHERE id = ? AND answer IS NULL");
   await db.write(async () => {
     for (const r of single) {
       const old = `${r.id}~replaced-${at}`;
       await renameDecision(db, r.id, old);
       const why = closedWhy(r);
-      await close.run(WITHDRAWN, at, at, why, old);
-      if (r.kind === "scope") await clear(r.repo!, r.number!, r.id);
+      await closeWithdrawn(db, at, why, old);
+      if (r.kind === "scope") await clear(r.repo!, r.number, r.id);
       await audit(db, "pipeline", "decision-withdrawn", old, { repo: r.repo, number: r.number, kind: r.kind, why });
     }
     for (const r of groups) {
       const why = "the duplicate group has one open item left";
-      await close.run(WITHDRAWN, at, at, why, r.id);
+      await closeWithdrawn(db, at, why, r.id);
       await audit(db, "pipeline", "decision-withdrawn", r.id, { kind: r.kind, why });
     }
   });

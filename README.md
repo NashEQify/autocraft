@@ -98,6 +98,7 @@ To sign in through a GitHub App instead, register it from the dashboard's GitHub
 | `AUTOCRAFT_BASE_URL` | Public origin of the dashboard, no path |
 | `AUTOCRAFT_LISTEN` | `host:port`, default `127.0.0.1:8993` |
 | `AUTOCRAFT_DB` | Database path |
+| `AUTOCRAFT_DB_URL` | A `postgres://` URL, to use Postgres instead of the SQLite file |
 | `AUTOCRAFT_SECRETS_FILE` | The secrets file above |
 | `AUTOCRAFT_GITHUB_APP_NAME` | App name suggested on the registration form, default `AutoCraft` |
 | `AUTOCRAFT_WEB_DIST` | Built frontend, default `web/dist` |

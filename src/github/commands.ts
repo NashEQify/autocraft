@@ -37,7 +37,9 @@ import { appSlug } from "./identity.ts";
 import { installationToken } from "./install-token.ts";
 import { ghComment, WritePacedError } from "./write.ts";
 import { filterSeq, someSeq } from "../async-seq.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 /** Comments read for a command: GitHub caps a body at 65536 characters. */
 const BODY_MAX = 65_536;
@@ -141,15 +143,16 @@ export async function queueCommand(db: Db, repo: string, event: string, payload:
   if (!cmd) return false;
   const ref = cmd.command === "autorepin" ? cmd.ref : null;
   const branch = cmd.command === "autorepin" ? cmd.branch : null;
-  const r = await db.prepare(`INSERT OR IGNORE INTO main.github_commands (comment_id, repo, number, pr, command, weight, ref_repo, ref_number, ref_branch, login, github_id, created_at, requested_at, state)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued')`)
-    .run(commentId, repo, number, issue.pull_request ? 1 : 0, cmd.command, cmd.command === "merge-queue" ? cmd.weight : null,
-      ref ? refText(ref) : null, ref ? ref.number : null, branch, login, githubId, new Date(created).toISOString(), now.toISOString());
+  const r = await db.run(db.k.insertInto("main.github_commands").values({
+    comment_id: commentId, repo, number, pr: issue.pull_request ? 1 : 0, command: cmd.command, weight: cmd.command === "merge-queue" ? cmd.weight : null,
+    ref_repo: ref ? refText(ref) : null, ref_number: ref ? ref.number : null, ref_branch: branch, login, github_id: githubId,
+    created_at: new Date(created).toISOString(), requested_at: now.toISOString(), state: "queued",
+  }).onConflict((oc) => oc.doNothing()));
   return r.changes > 0;
 }
 
 type Row = { comment_id: number; repo: string; number: number; pr: number; command: string; weight: number | null; ref_repo: string | null; ref_number: number | null; ref_branch: string | null; login: string; github_id: number; created_at: string; requested_at: string; state: string; result: string | null; retries: number; allowed: number | null; reply: string | null };
-const COLS = "comment_id, repo, number, pr, command, weight, ref_repo, ref_number, ref_branch, login, github_id, created_at, requested_at, state, result, retries, allowed, reply";
+const COLS = ["comment_id", "repo", "number", "pr", "command", "weight", "ref_repo", "ref_number", "ref_branch", "login", "github_id", "created_at", "requested_at", "state", "result", "retries", "allowed", "reply"] as const;
 
 /**
  * What carries out a queued merge-queue command: the Queue page's queueAdd, as the commenter. `canWrite`: GitHub's answer for `repo`,
@@ -258,8 +261,9 @@ export async function prSince(q: Querier, repo: string, number: number, since: s
 
 /** Settles a command. `reply`: the app answers in the thread; `allowed`: the commenter may queue there, so the answer needs no comment approval. */
 async function settle(db: Db, r: Row, state: "done" | "refused" | "ignored" | "expired", result: string | null, at: Date, o: { reply?: boolean; allowed?: boolean } = {}): Promise<void> {
-  await db.prepare("UPDATE main.github_commands SET state = ?, result = ?, done_at = ?, reply = ?, allowed = ? WHERE comment_id = ?")
-    .run(state, result, at.toISOString(), o.reply ? null : "none", o.allowed ? 1 : 0, r.comment_id);
+  await db.run(db.k.updateTable("main.github_commands")
+    .set({ state, result, done_at: at.toISOString(), reply: o.reply ? null : "none", allowed: o.allowed ? 1 : 0 })
+    .where("comment_id", "=", r.comment_id));
   await audit(db, state === "ignored" || state === "expired" ? AUDIT_LOGIN : r.login, "github-command", refOf(r), { comment: r.comment_id, command: r.command, by: r.login, state, ...(result ? { result } : {}) });
 }
 
@@ -270,7 +274,7 @@ const quietFor = async (db: Db, r: Row, qp: QueuePage): Promise<boolean> =>
 /** The access row of `login` while it is bound to the GitHub id `github_id`; a login never bound counts as unknown. */
 export async function boundAccess(db: Db, r: { login: string; github_id: number }): Promise<NonNullable<Awaited<ReturnType<typeof getAccess>>> | null> {
   const access = await getAccess(db, r.login);
-  const bound = (await db.prepare("SELECT github_id FROM main.access WHERE login = ?").get(r.login) as { github_id: number | null } | undefined)?.github_id ?? null;
+  const bound = (await db.get(db.k.selectFrom("main.access").select("github_id").where("login", "=", r.login)))?.github_id ?? null;
   return access && bound !== null && Number(bound) === r.github_id ? access : null;
 }
 
@@ -419,18 +423,18 @@ async function refuse(db: Db, r: Row, now: Date, role: Role, canWrite: boolean, 
  * at most once a minute (tried_at), so the command does not wait for a poll that may never read it again.
  */
 async function waitsForRead(db: Db, r: Row, now: Date, qp: QueuePage): Promise<boolean> {
-  const readAt = db.prepare("SELECT synced_at FROM main.item_reads WHERE repo = ? AND number = ?");
   const stale = await filterSeq([r.number, ...(r.pr ? [] : await qp.openPrsClosing(db, r.repo, r.number))], async (n) => {
-    const read = (await readAt.get(r.repo, n) as { synced_at: string } | undefined)?.synced_at;
+    const read = (await db.get(db.k.selectFrom("main.item_reads").select("synced_at").where("repo", "=", r.repo).where("number", "=", n)))?.synced_at;
     return !read || Date.parse(read) <= Date.parse(r.requested_at);
   });
   if (!stale.length) return false;
-  const ask = await filterSeq(stale, async (n) => !await db.prepare("SELECT 1 FROM main.sync_requests WHERE repo = ? AND number = ?").get(r.repo, n));
+  const ask = await filterSeq(stale, async (n) => !await db.get(db.k.selectFrom("main.sync_requests").select((eb) => eb.lit(1).as("one")).where("repo", "=", r.repo).where("number", "=", n)));
   for (const n of ask) {
-    await db.prepare("INSERT INTO main.sync_requests (repo, number, event, requested_at) VALUES (?, ?, 'issue_comment', ?) ON CONFLICT (repo, number) DO NOTHING")
-      .run(r.repo, n, now.toISOString().replace(/\.\d+Z$/, "Z"));
+    await db.run(db.k.insertInto("main.sync_requests")
+      .values({ repo: r.repo, number: n, event: "issue_comment", requested_at: now.toISOString().replace(/\.\d+Z$/, "Z") })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doNothing()));
   }
-  if (ask.length) await db.prepare("UPDATE main.github_commands SET tried_at = ? WHERE comment_id = ?").run(now.toISOString(), r.comment_id);
+  if (ask.length) await db.run(db.k.updateTable("main.github_commands").set({ tried_at: now.toISOString() }).where("comment_id", "=", r.comment_id));
   return true;
 }
 
@@ -460,12 +464,14 @@ async function answer(db: Db, r: Row, deps: CommandDeps): Promise<"posted" | "fa
       reply = "failed";
     }
   }
-  await db.prepare("UPDATE main.github_commands SET reply = ? WHERE comment_id = ?").run(reply, r.comment_id);
+  await db.run(db.k.updateTable("main.github_commands").set({ reply }).where("comment_id", "=", r.comment_id));
   return reply;
 }
 
 /** SQL condition: rows a drain has work for, queued commands and settled ones whose answer is still to post (index github_commands_state). */
 export const COMMAND_WORK_SQL = "(state = 'queued' OR (state <> 'queued' AND reply IS NULL))";
+/** `COMMAND_WORK_SQL` as an expression on github_commands. */
+export const commandWorkExpr = (eb: kx.Eb): AliasableExpression<SqlBool> => eb.or([eb("state", "=", "queued"), eb.and([eb("state", "<>", "queued"), eb("reply", "is", null)])]);
 
 /**
  * Carries out the queued commands, oldest first, and posts their answers. Run after the webhook's re-reads, so the item is in the
@@ -477,10 +483,15 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
   // Every waiting row is read (an hour's commands at most): rows that wait for a re-read or a retry are passed over without
   // a GitHub call, so they never keep a newer command out. `limit` bounds the rows that call GitHub in one drain. Rows never tried
   // come first, oldest first, then retries by their last try, so due retries cannot fill the limit drain after drain either.
-  const rows = await db.prepare(`SELECT ${COLS} FROM main.github_commands
-    WHERE (state = 'queued' AND (tried_at IS NULL OR tried_at <= ?)) OR (state <> 'queued' AND reply IS NULL)
-    ORDER BY tried_at IS NOT NULL, COALESCE(tried_at, requested_at)`)
-    .all(new Date(t0.getTime() - RETRY_MS).toISOString()) as Row[];
+  const retryBefore = new Date(t0.getTime() - RETRY_MS).toISOString();
+  const rows: Row[] = await db.all(db.k.selectFrom("main.github_commands").select(COLS)
+    .where((eb) => eb.or([
+      eb.and([eb("state", "=", "queued"), eb.or([eb("tried_at", "is", null), eb("tried_at", "<=", retryBefore)])]),
+      eb.and([eb("state", "<>", "queued"), eb("reply", "is", null)]),
+    ]))
+    .orderBy((eb) => eb("tried_at", "is not", null))
+    .orderBy((eb) => eb.fn.coalesce("tried_at", "requested_at"))
+    .orderBy(kx.rowid("main.github_commands")));
   const qp = await import("../dash/api/queue-page.ts");
   let settled = 0, calls = 0;
   for (const r0 of rows) {
@@ -498,12 +509,12 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
         if (out === "wait") continue;
         if (out === "retry") {
           // GitHub could not be read: retried after RETRY_MS; the expiry still counts from requested_at.
-          await db.prepare("UPDATE main.github_commands SET tried_at = ?, retries = retries + 1 WHERE comment_id = ?").run(clock().toISOString(), r.comment_id);
+          await db.run(db.k.updateTable("main.github_commands").set((eb) => ({ tried_at: clock().toISOString(), retries: eb("retries", "+", 1) })).where("comment_id", "=", r.comment_id));
           continue;
         }
       }
       settled++;
-      r = await db.prepare(`SELECT ${COLS} FROM main.github_commands WHERE comment_id = ?`).get(r.comment_id) as Row;
+      r = (await db.get(db.k.selectFrom("main.github_commands").select(COLS).where("comment_id", "=", r.comment_id)))!;
       if (r.state === "queued" || r.reply !== null) continue;
     } else calls++;
     if ((await answer(db, r, deps)) === "paced") break;
@@ -513,5 +524,5 @@ export async function drainCommands(db: Db, deps: CommandDeps): Promise<number> 
 
 /** Deletes settled commands older than KEEP_MS. */
 export async function pruneCommands(db: Db, nowMs: number = Date.now()): Promise<number> {
-  return Number((await db.prepare("DELETE FROM main.github_commands WHERE state <> 'queued' AND done_at < ?").run(new Date(nowMs - KEEP_MS).toISOString())).changes);
+  return Number((await db.run(db.k.deleteFrom("main.github_commands").where("state", "<>", "queued").where("done_at", "<", new Date(nowMs - KEEP_MS).toISOString()))).changes);
 }

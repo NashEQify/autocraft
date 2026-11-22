@@ -12,12 +12,12 @@ import { T0, world, type World } from "./world-db.ts";
 
 let current: World | null = null;
 afterEach(() => current?.close());
-const answerOf = async (w: World, n: number, head: string) => await w.rows("SELECT answer FROM decisions WHERE id = ?", mergeDecisionId("app", n, head));
+const answerOf = async (w: World, n: number, head: string) => await w.db.all(w.db.k.selectFrom("decisions").select("answer").where("id", "=", mergeDecisionId("app", n, head)));
 
 test("a retarget makes the review stale like a push, and the re-review against the new base voids the old base's answer and pre-merge review", async () => {
   const w = (current = await (await (await (await (await (await world()).repo()).pr(1)).review(1)).answer(1, "merge")).premerge(1, "clean"));
-  await w.db.prepare("UPDATE items SET base_ref = 'release' WHERE number = 1").run();
-  await w.db.prepare("UPDATE opus_reviews SET base_ref = 'release' WHERE number = 1").run();
+  await w.db.run(w.db.k.updateTable("items").set({ base_ref: "release" }).where("number", "=", 1));
+  await w.db.run(w.db.k.updateTable("opus_reviews").set({ base_ref: "release" }).where("number", "=", 1));
   assert.equal((await staleReviews(w.db, "app")).size, 0);
 
   // The PR author retargets to the default branch; a live read before the merge records it.
@@ -25,7 +25,7 @@ test("a retarget makes the review stale like a push, and the re-review against t
   assert.ok((await staleReviews(w.db, "app")).has("app#1@sha1"));
   assert.equal(await markedStaleSince(w.db, "app", 1, ""), false);
   const today = new Date().toISOString();
-  for (let i = 0; i < 3; i++) await w.db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('app', 1, 'sha1', ?, 'm', 'full', 'take', 1, 'r')").run(today);
+  for (let i = 0; i < 3; i++) await w.db.run(w.db.k.insertInto("opus_review_history").values({ repo: "app", number: 1, head_oid: "sha1", at: today, model: "m", mode: "full", verdict: "take", sure: 1, reason: "r" }));
   assert.equal((await reviewHold(w.db, "app", 1, "sha1"))?.kind, "cap");
 
   await saveOpus(w.db, "rv2", { repo: "app", number: 1, head_oid: "sha1" }, {
@@ -40,7 +40,7 @@ test("a retarget makes the review stale like a push, and the re-review against t
 
 test("a Merge answer carried across a clean base merge ends when the review there asks for fixes", async () => {
   const w = (current = await (await (await (await (await world()).repo()).pr(30)).review(30, { verdict: "take" })).answer(30, "merge"));
-  await w.db.prepare("INSERT INTO conflict_merges (repo, number, from_head, to_head, state, attempt, created_at, own_diff) VALUES ('app', 30, 'sha30', 'sha30m', 'merged', 1, ?, 'same')").run(T0);
+  await w.db.run(w.db.k.insertInto("conflict_merges").values({ repo: "app", number: 30, from_head: "sha30", to_head: "sha30m", state: "merged", attempt: 1, created_at: T0, own_diff: "same" }));
   await w.synced(30, "sha30m");
   await advancePreapprovals(w.db);
   assert.equal((await preapprovalOf(w.db, "app", 30))?.state, "review");
@@ -51,7 +51,7 @@ test("a Merge answer carried across a clean base merge ends when the review ther
   assert.deepEqual(await answerOf(w, 30, "sha30m"), [{ answer: null }]);
 
   // The review's fix-up pushes model-written code: nothing answers Merge there in the operator's name.
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at) VALUES ('app', 30, 'sha30m', 'sha30f', 'pushed', 1, ?)").run(T0);
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 30, from_head: "sha30m", to_head: "sha30f", state: "pushed", attempt: 1, created_at: T0 }));
   await (await w.synced(30, "sha30f")).review(30, { head: "sha30f" });
   for (let i = 0; i < 3; i++) await advancePreapprovals(w.db);
   assert.equal((await w.rows("SELECT 1 FROM preapprovals WHERE number = 30 AND state NOT IN ('asked', 'cancelled')")).length, 0);

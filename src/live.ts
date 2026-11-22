@@ -175,21 +175,21 @@ export function watchedColumns(table: string, columns: Map<string, string[]> | u
 export function columnsOf(db: DatabaseSync): Map<string, string[]> {
   const out = new Map<string, string[]>();
   for (const { name } of db.prepare("SELECT name FROM main.sqlite_master WHERE type = 'table'").all() as { name: string }[]) {
-    out.set(name, (db.prepare(`SELECT name FROM pragma_table_info('${name}', 'main')`).all() as { name: string }[]).map((c) => c.name));
+    out.set(name, (db.prepare(`PRAGMA main.table_info('${name}')`).all() as { name: string }[]).map((c) => c.name));
   }
   return out;
 }
 
+/** One live trigger: an AFTER `op` on `table` that bumps `topic` when `cond` (SQLite syntax, `new`/`old` rows) holds. */
+export type LiveTrigger = { name: string; topic: string; table: string; op: "INSERT" | "UPDATE" | "DELETE"; cond: string };
+
 /**
- * DDL for the marker table, its rows and the triggers. Idempotent: triggers are rebuilt. With `db`, an
- * UPDATE trigger fires only when a watched column changed, so a rewrite of identical values bumps nothing.
+ * The topics' triggers. With `columns`, an UPDATE trigger fires only when a watched column changed. Two sources that make the
+ * same name are one trigger, the later one, as SQLite keeps it (DROP and CREATE again): `access` and `github` both name
+ * live_audit_i and live_audit_u, `outside` and `jobs` live_stage_trips_*.
  */
-export function liveSql(db?: DatabaseSync): string {
-  const columns = db ? columnsOf(db) : undefined;
-  const out = [
-    "CREATE TABLE IF NOT EXISTS main.change_seq (topic TEXT PRIMARY KEY, seq INTEGER NOT NULL, at TEXT) WITHOUT ROWID;",
-    ...TOPICS.map((t) => `INSERT OR IGNORE INTO main.change_seq (topic, seq, at) VALUES ('${t}', 0, NULL);`),
-  ];
+export function liveTriggers(columns?: Map<string, string[]>): LiveTrigger[] {
+  const out = new Map<string, LiveTrigger>();
   for (const [topic, sources] of Object.entries(TOPIC_TABLES)) {
     for (const { table, ops = ALL_OPS, when } of sources) {
       for (const op of ops) {
@@ -201,13 +201,30 @@ export function liveSql(db?: DatabaseSync): string {
           const watched = watchedColumns(table, columns);
           if (watched?.length) cond = watched.map((c) => `old."${c}" IS NOT new."${c}"`).join(" OR ");
         }
-        // Unqualified change_seq: a trigger body may not name a schema.
-        out.push(`DROP TRIGGER IF EXISTS main.${name};`);
-        out.push(`CREATE TRIGGER main.${name} AFTER ${op} ON ${table} ${cond ? `WHEN ${cond}` : ""} BEGIN
-          UPDATE change_seq SET seq = seq + 1 WHERE topic = '${topic}';
-        END;`);
+        out.delete(name);
+        out.set(name, { name, topic, table, op, cond });
       }
     }
+  }
+  return [...out.values()];
+}
+
+/** The marker table's DDL (SQLite; src/db/pg-triggers.ts translates it). */
+export const CHANGE_SEQ_TABLE = "CREATE TABLE IF NOT EXISTS main.change_seq (topic TEXT PRIMARY KEY, seq INTEGER NOT NULL, at TEXT) WITHOUT ROWID;";
+
+/**
+ * DDL for the marker table, its rows and the triggers. Idempotent: triggers are rebuilt. With `db`, an
+ * UPDATE trigger fires only when a watched column changed, so a rewrite of identical values bumps nothing.
+ * Postgres gets the same topics from src/db/pg-triggers.ts.
+ */
+export function liveSql(db?: DatabaseSync): string {
+  const out = [CHANGE_SEQ_TABLE, ...TOPICS.map((t) => `INSERT OR IGNORE INTO main.change_seq (topic, seq, at) VALUES ('${t}', 0, NULL);`)];
+  for (const { name, topic, table, op, cond } of liveTriggers(db ? columnsOf(db) : undefined)) {
+    // Unqualified change_seq: a trigger body may not name a schema.
+    out.push(`DROP TRIGGER IF EXISTS main.${name};`);
+    out.push(`CREATE TRIGGER main.${name} AFTER ${op} ON ${table} ${cond ? `WHEN ${cond}` : ""} BEGIN
+          UPDATE change_seq SET seq = seq + 1 WHERE topic = '${topic}';
+        END;`);
   }
   return out.join("\n");
 }
@@ -215,6 +232,6 @@ export function liveSql(db?: DatabaseSync): string {
 /** The current counter of every topic. */
 export async function readSeqs(db: Db): Promise<Record<string, number>> {
   const out: Record<string, number> = {};
-  for (const r of await db.prepare("SELECT topic, seq FROM change_seq").all() as { topic: string; seq: number }[]) out[r.topic] = r.seq;
+  for (const r of await db.all(db.k.selectFrom("change_seq").select(["topic", "seq"]))) out[r.topic] = r.seq;
   return out;
 }

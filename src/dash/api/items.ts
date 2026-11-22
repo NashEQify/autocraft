@@ -1,191 +1,156 @@
 // The Items browser (`GET /api/items`) and the top-bar search (`GET /api/search`),
-// both over the full-text tables items_fts and comments_fts (src/schema.sql).
+// both over the full-text search of items and comments (src/db/search.ts).
 import { canSeeInternals } from "./staff.ts";
-import type { SQLInputValue } from "node:sqlite";
+import type { AliasableExpression, Compilable, Expression, JoinBuilder, OrderByItemBuilder, SelectQueryBuilder, SqlBool } from "kysely";
 import type {
   ItemChecks, ItemPeek, ItemList, ItemListRow, ItemSort, SearchHit, SettledStatus, Snippet, Stage,
 } from "../../../web/src/api/types.ts";
-import { quietFixPrs, quietSqlFor } from "../../security/quiet.ts";
-import { fromRow, unflagged, latestRun, settledTable, type SettledRow } from "../../classify/settled.ts";
+import { quietFixPrs, quietExprFor } from "../../security/quiet.ts";
+import { fromRow, unflagged, latestRun, settledOnExpr, settledTable, type SettledRow } from "../../classify/settled.ts";
 import { LABELS } from "../../classify/rules.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
 import { itemState } from "./decisions.ts";
 import { flowMembers } from "./flow.ts";
 import { queueSlots } from "../../rank/position.ts";
-import { excludeHidden, hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
+import { excludeHiddenExpr, hiddenRepos, needVisible, visibleRepos } from "./visible.ts";
 import { readerOf, statusFor, type Reader } from "./reader.ts";
 import { toRow } from "./queue.ts";
 import { prBuildView } from "../../prbuild/view.ts";
 import type { PlanView } from "../../core/plan-cache.ts";
 import type { CachedEntry } from "../../core/plan-read.ts";
 import { statusFromItem } from "../../core/item-status.ts";
-import { ITEM_PHASES, PHASE_SQL, type ItemPhase, type ItemStatus, type ItemStatusList, type ItemStatusRow } from "./home-types.ts";
+import { ITEM_PHASES, phaseExpr, type ItemPhase, type ItemStatus, type ItemStatusList, type ItemStatusRow } from "./home-types.ts";
 import { mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
+import { parseSearch, type Search } from "../../db/search.ts";
 
-const HAS_WORD = /[\p{L}\p{N}]/u;
-const quote = (s: string) => `"${s.replace(/"/g, "")}"`;
+// A condition of a query that names the items as `i`, built where its expression builder is at hand.
+type Cond = (eb: kx.AnyEb) => Expression<SqlBool>;
+type Q = SelectQueryBuilder<any, any, any>;
 
-/**
- * Turns what a person types into an FTS5 query, or null when nothing is left
- * to search for. Words must all match; "quoted text" is a phrase; a trailing *
- * matches a prefix; -word excludes; OR between terms means either. Every term
- * is quoted, so FTS5 syntax characters in the input are never operators.
- * `prefixLast` makes the last word a prefix (for search-as-you-type).
- */
-export function ftsQuery(input: string, prefixLast = false): string | null {
-  const pos: string[] = [];
-  const neg: string[] = [];
-  const re = /(-?)"([^"]*)"?|(\S+)/g;
-  const raw = input.slice(0, 300);
-  for (let m = re.exec(raw); m; m = re.exec(raw)) {
-    if (m[2] !== undefined) {
-      if (HAS_WORD.test(m[2])) (m[1] ? neg : pos).push(quote(m[2]));
-      continue;
-    }
-    let w = m[3]!;
-    if (w === "OR") {
-      if (pos.length && pos[pos.length - 1] !== "OR") pos.push("OR");
-      continue;
-    }
-    const isNeg = w.startsWith("-") && w.length > 1;
-    if (isNeg) w = w.slice(1);
-    const atEnd = m.index + m[0].length === raw.length && !/\s$/.test(raw);
-    // a prefix of one or two letters would expand to most of the index
-    const prefix = w.endsWith("*") || (prefixLast && atEnd && !isNeg && w.length >= 3);
-    w = w.replace(/\*+$/, "");
-    if (!HAS_WORD.test(w)) continue;
-    (isNeg ? neg : pos).push(quote(w) + (prefix ? "*" : ""));
-    if (pos.length + neg.length >= 16) break;
-  }
-  while (pos[pos.length - 1] === "OR") pos.pop();
-  if (!pos.length) return null;
-  return [`(${pos.join(" ")})`, ...neg.map((n) => `NOT ${n}`)].join(" ");
-}
+const restrict = <QB extends Q>(q: QB, conds: readonly Cond[]): QB => conds.reduce((acc, c) => acc.where(c) as QB, q);
 
-// Items matching the query bound as :q in their title, body or any comment.
-const HIT_IDS = `hits AS (
-  SELECT rowid AS rid FROM items_fts WHERE items_fts MATCH :q
-  UNION
-  SELECT it.rowid FROM comments_fts
-    JOIN main.comments c ON c.rowid = comments_fts.rowid
-    JOIN main.items it ON it.repo = c.repo AND it.number = c.number
-  WHERE comments_fts MATCH :q)`;
+// Rowids of the items matching the query in their title, body or any comment.
+const hitRids = (db: Db, fts: Search) => db.k.selectFrom(kx.itemHits(db, fts, {}, "h")).select("h.rid")
+  .union(db.k.selectFrom(kx.commentHits(db, fts, {}, "c"))
+    .innerJoin("main.items as it", (j) => j.onRef("it.repo", "=", "c.repo").onRef("it.number", "=", "c.number"))
+    .select(kx.rowid("main.items", "it").as("rid")));
 
-// The same with the best bm25 score (lower is better): a title match weighs most,
+// The same with the best score (lower is better): a title match weighs most,
 // a comment match half as much as one in the body.
-const HITS_SCORED = `hits AS (
-  SELECT rid, MIN(score) AS score FROM (
-    SELECT rowid AS rid, bm25(items_fts, 10.0, 1.0) AS score FROM items_fts WHERE items_fts MATCH :q
-    UNION ALL
-    SELECT it.rowid, bm25(comments_fts) * 0.5 FROM comments_fts
-      JOIN main.comments c ON c.rowid = comments_fts.rowid
-      JOIN main.items it ON it.repo = c.repo AND it.number = c.number
-    WHERE comments_fts MATCH :q)
-  GROUP BY rid)`;
+const hitsScored = (db: Db, fts: Search) => db.k.selectFrom(
+  db.k.selectFrom(kx.itemHits(db, fts, { score: true }, "h")).select(["h.rid", "h.score"])
+    .unionAll(db.k.selectFrom(kx.commentHits(db, fts, { score: true, weight: 0.5 }, "c"))
+      .innerJoin("main.items as it", (j) => j.onRef("it.repo", "=", "c.repo").onRef("it.number", "=", "c.number"))
+      .select([kx.rowid("main.items", "it").as("rid"), "c.score"]))
+    .as("m"))
+  .select(["m.rid", (eb) => eb.fn.min<number>("m.score").as("score")]).groupBy("m.rid");
+
+const textCond = (db: Db, fts: Search): Cond => (eb) => eb(kx.rowid("items", "i"), "in", hitRids(db, fts));
 
 const STATUSES: SettledStatus[] = ["settled", "waiting", "disagree", "unclassified"];
 const STATES: Record<string, string> = { open: "OPEN", closed: "CLOSED", merged: "MERGED" };
 const SORTS: ItemSort[] = ["relevance", "updated", "created", "number", "merged", "discord"];
 const BY_US = "merged-by-us";
 // The newest merge AutoCraft made of the item (merges_item), else the time GitHub recorded for a batch member.
-const MERGED_AT = "COALESCE((SELECT MAX(m.at) FROM main.merges m WHERE m.repo = i.repo AND m.number = i.number AND m.outcome = 'merged'), i.merged_at)";
-const IN_MERGED_BATCH = "EXISTS (SELECT 1 FROM main.merge_batch_prs bp JOIN main.merge_batches bb ON bb.id = bp.batch_id WHERE bp.number = i.number AND bb.repo = i.repo AND bb.state = 'merged')";
+const mergedAtOf = (db: Db, eb: kx.AnyEb): AliasableExpression<string | null> => eb.fn.coalesce(
+  db.k.selectFrom("main.merges as m").select((e) => e.fn.max<string | null>("m.at").as("at"))
+    .where("m.repo", "=", kx.ref<string>("i.repo")).where("m.number", "=", kx.ref<number>("i.number")).where("m.outcome", "=", "merged"),
+  eb.ref("i.merged_at"));
+const mergedByUs = (db: Db, eb: kx.AnyEb): Expression<SqlBool> => eb.exists(db.k.selectFrom("main.merges as m").select(eb.lit(1).as("one"))
+  .where("m.repo", "=", kx.ref<string>("i.repo")).where("m.number", "=", kx.ref<number>("i.number")).where("m.outcome", "=", "merged"));
+const inMergedBatch = (db: Db, eb: kx.AnyEb): Expression<SqlBool> => eb.exists(db.k.selectFrom("main.merge_batch_prs as bp")
+  .innerJoin("main.merge_batches as bb", "bb.id", "bp.batch_id").select(eb.lit(1).as("one"))
+  .where("bp.number", "=", kx.ref<number>("i.number")).where("bb.repo", "=", kx.ref<string>("i.repo")).where("bb.state", "=", "merged"));
+const mentioned = (db: Db, eb: kx.AnyEb): Expression<SqlBool> => eb.exists(db.k.selectFrom("main.discord_mentions as d").select(eb.lit(1).as("one"))
+  .where("d.repo", "=", kx.ref<string>("i.repo")).where("d.number", "=", kx.ref<number>("i.number")));
 const FLAGS = ["security", "needs decision"];
 
 const list = (req: Req, key: string): string[] =>
   req.query.getAll(key).flatMap((v) => v.split(",")).map((s) => s.trim()).filter(Boolean);
 
-type Built = { where: string[]; statusWhere: string | null; statuses: SettledStatus[]; params: Record<string, SQLInputValue>; text: boolean };
+type Built = { where: Cond[]; statusWhere: Cond | null; statuses: SettledStatus[]; fts: Search | null; byState: boolean };
 
 async function build(db: Db, req: Req, hidden: string[]): Promise<Built & { sort: ItemSort; desc: boolean; run: string | null }> {
   const q = req.query;
   const mode = q.get("mode") ?? "text";
   if (mode !== "text") throw new HttpError(400, "mode must be text");
   const run = q.get("run") || await latestRun(db);
-  const params: Record<string, SQLInputValue> = {};
-  const where: string[] = [];
-  const fts = ftsQuery(q.get("q") ?? "");
-  if (fts) params.q = fts;
-  const hide = excludeHidden("i.repo", hidden, params);
-  if (hide) where.push(hide);
+  const where: Cond[] = [];
+  const fts = parseSearch(q.get("q") ?? "");
+  const hide = excludeHiddenExpr(db, "i.repo", hidden);
+  if (hide) where.push(() => hide);
   const repos = list(req, "repo");
-  if (repos.length) {
-    where.push(`i.repo IN (${repos.map((_, k) => `:repo${k}`).join(",")})`);
-    repos.forEach((r, k) => (params[`repo${k}`] = r));
-  }
+  if (repos.length) where.push(() => kx.inList(db, "i.repo", repos));
   const kind = q.get("kind");
   if (kind) {
     if (kind !== "pr" && kind !== "issue") throw new HttpError(400, "kind must be pr or issue");
-    where.push("i.kind = :kind");
-    params.kind = kind;
+    where.push((eb) => eb("i.kind", "=", kind));
   }
   const state = q.get("state") ?? "open";
+  let byState = false;
   if (state === BY_US) {
-    where.push(`i.kind = 'pr'`, `(EXISTS (SELECT 1 FROM main.merges m WHERE m.repo = i.repo AND m.number = i.number AND m.outcome = 'merged') OR ${IN_MERGED_BATCH})`);
+    where.push((eb) => eb("i.kind", "=", "pr"), (eb) => eb.or([mergedByUs(db, eb), inMergedBatch(db, eb)]));
   } else if (state !== "all") {
     if (!STATES[state]) throw new HttpError(400, "state must be open, closed, merged, merged-by-us or all");
-    where.push("i.state = :state");
-    params.state = STATES[state]!;
+    where.push((eb) => eb("i.state", "=", STATES[state]!));
+    byState = true;
   }
   const label = q.get("label");
   if (label) {
     if (!(LABELS as readonly string[]).includes(label)) throw new HttpError(400, "unknown label");
-    where.push("s.label = :label");
-    params.label = label;
+    where.push((eb) => eb("s.label", "=", label));
   }
   list(req, "flag").forEach((f) => {
     if (!FLAGS.includes(f)) throw new HttpError(400, "flag must be security or needs decision");
-    where.push(f === "security" ? "s.security = 1 AND NOT " + quietSqlFor("i.repo", "i.number") : "s.needs_decision = 1");
+    where.push(f === "security" ? (eb) => eb.and([eb("s.security", "=", 1), eb.not(quietExprFor(db, eb, "i.repo", "i.number"))]) : (eb) => eb("s.needs_decision", "=", 1));
   });
   const author = q.get("author")?.trim();
-  if (author) {
-    where.push("i.author = :author COLLATE NOCASE");  // index items_author_nocase
-    params.author = author;
-  }
+  if (author) where.push((eb) => kx.ciEq(db, "i.author", eb.val(author)));
   const since = q.get("since");
   if (since) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(since)) throw new HttpError(400, "since must be YYYY-MM-DD");
-    where.push("i.updated_at >= :since");
-    params.since = since;
+    where.push((eb) => eb("i.updated_at", ">=", since));
   }
-  if (q.get("discord") === "1") where.push("EXISTS (SELECT 1 FROM main.discord_mentions d WHERE d.repo = i.repo AND d.number = i.number)");
+  if (q.get("discord") === "1") where.push((eb) => mentioned(db, eb));
   const flow = q.get("flow");
   if (flow) {
     const refs = await flowMembers(db, flow);
     if (!refs) throw new HttpError(400, "flow must name a flowchart branch with its own items");
-    await db.script("CREATE TEMP TABLE IF NOT EXISTS flow_pick (repo TEXT NOT NULL, number INTEGER NOT NULL, PRIMARY KEY (repo, number))");
-    await db.script("DELETE FROM temp.flow_pick");
-    const ins = db.prepare("INSERT OR IGNORE INTO temp.flow_pick VALUES (?, ?)");
-    for (const r of refs) {
-      const k = r.lastIndexOf("#");
-      await ins.run(r.slice(0, k), Number(r.slice(k + 1)));
-    }
-    where.push("EXISTS (SELECT 1 FROM temp.flow_pick f WHERE f.repo = i.repo AND f.number = i.number)");
+    where.push(() => kx.refIn(db, "i", refs));
   }
-  let statusWhere: string | null = null;
+  let statusWhere: Cond | null = null;
   const st = new Set(list(req, "status").flatMap((s) => (s === "unsettled" ? ["waiting", "disagree"] : [s])));
   if (st.size) {
     for (const s of st) if (!STATUSES.includes(s as SettledStatus)) throw new HttpError(400, "status must be settled, waiting, disagree, unsettled or unclassified");
-    const named = [...st].filter((s) => s !== "unclassified").map((s) => `'${s}'`);
-    const parts = [...(named.length ? [`s.status IN (${named.join(",")})`] : []), ...(st.has("unclassified") ? ["s.status IS NULL"] : [])];
-    statusWhere = `(${parts.join(" OR ")})`;
+    const named = [...st].filter((s) => s !== "unclassified");
+    statusWhere = (eb) => eb.or([...(named.length ? [eb("s.status", "in", named)] : []), ...(st.has("unclassified") ? [eb("s.status", "is", null)] : [])]);
   }
   const sortQ = q.get("sort") as ItemSort | null;
   if (sortQ && !SORTS.includes(sortQ)) throw new HttpError(400, "sort must be relevance, updated, created, number, merged or discord");
   let sort: ItemSort = sortQ ?? (fts ? "relevance" : state === BY_US ? "merged" : "updated");
   if (sort === "relevance" && !fts) sort = "updated";
   const desc = q.get("desc") !== "0";
-  // Last, after every parameter check: nothing is filled for a request that fails.
+  // Last, after every parameter check (a no-op inside listItems' read, which refreshes the run first).
   await settledTable(db, run);
-  return { where, statusWhere, statuses: [...st] as SettledStatus[], params, text: !!fts, sort, desc, run };
+  return { where, statusWhere, statuses: [...st] as SettledStatus[], fts, byState, sort, desc, run };
 }
 
-const ORDER: Record<ItemSort, string> = {
-  relevance: "h.score", updated: "i.updated_at", created: "i.created_at", number: "i.number", merged: MERGED_AT,
-  discord: "(SELECT COUNT(*) FROM main.discord_mentions d WHERE d.repo = i.repo AND d.number = i.number)",
-};
+// The sort term, then the ties by repo and newest number. A nullable term keeps SQLite's NULL order: first ascending, last descending.
+function pageOrder<QB extends Q>(db: Db, q: QB, sort: ItemSort, desc: boolean): QB {
+  const nulls = (o: OrderByItemBuilder) => (desc ? o.desc().nullsLast() : o.asc().nullsFirst());
+  let r: Q = q;
+  if (sort === "relevance") r = r.orderBy("h.score", desc ? "asc" : "desc");  // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
+  else if (sort === "updated") r = r.orderBy("i.updated_at", nulls);
+  else if (sort === "created") r = r.orderBy("i.created_at", nulls);
+  else if (sort === "number") r = r.orderBy("i.number", desc ? "desc" : "asc");
+  else if (sort === "merged") r = r.orderBy((eb: kx.AnyEb) => mergedAtOf(db, eb), nulls);
+  else r = r.orderBy((eb: kx.AnyEb) => eb.selectFrom("main.discord_mentions as d").select((e) => e.fn.countAll<number>().as("n"))
+    .where("d.repo", "=", kx.ref<string>("i.repo")).where("d.number", "=", kx.ref<number>("i.number")), desc ? "desc" : "asc");
+  return r.orderBy("i.repo").orderBy("i.number", "desc") as QB;
+}
 
 type Row = SettledRow & {
   rid: number; repo: string; number: number; kind: string; state: string; title: string | null; author: string | null;
@@ -194,29 +159,24 @@ type Row = SettledRow & {
 
 const OPEN = "\u0002", CLOSE = "\u0003";
 
-async function snippets(db: Db, fts: string, rows: Row[]): Promise<Map<number, Snippet>> {
+async function snippets(db: Db, fts: Search, rows: Row[]): Promise<Map<number, Snippet>> {
   const out = new Map<number, Snippet>();
   if (!rows.length) return out;
-  const ids = rows.map((r) => r.rid);
-  const inList = ids.map(() => "?").join(",");
-  const sn = (t: string, col: number) => `snippet(${t}, ${col}, '${OPEN}', '${CLOSE}', '…', 24)`;
-  const own = await db.prepare(`SELECT rowid AS rid, ${sn("items_fts", 0)} AS t, ${sn("items_fts", 1)} AS b
-    FROM items_fts WHERE items_fts MATCH ? AND rowid IN (${inList})`).all(fts, ...ids) as { rid: number; t: string | null; b: string | null }[];
+  const marks = { open: OPEN, close: CLOSE, words: 24 };
+  const own = await db.all(db.k.selectFrom(kx.itemHits(db, fts, { snippets: marks }, "h"))
+    .select(["h.rid", "h.title_snippet", "h.body_snippet"]).where(kx.inList(db, "h.rid", rows.map((r) => r.rid), "bigint")));
   for (const r of own) {
-    if (r.b?.includes(OPEN)) out.set(r.rid, { field: "body", author: null, text: r.b });
-    else if (r.t?.includes(OPEN)) out.set(r.rid, { field: "title", author: null, text: r.t });
+    if (r.body_snippet?.includes(OPEN)) out.set(r.rid, { field: "body", author: null, text: r.body_snippet });
+    else if (r.title_snippet?.includes(OPEN)) out.set(r.rid, { field: "title", author: null, text: r.title_snippet });
   }
   const rest = rows.filter((r) => !out.has(r.rid));
   if (!rest.length) return out;
-  const pairs = rest.map(() => "(?, ?)").join(",");
-  const cm = await db.prepare(`SELECT c.repo, c.number, c.author, ${sn("comments_fts", 0)} AS t FROM comments_fts
-    JOIN main.comments c ON c.rowid = comments_fts.rowid
-    WHERE comments_fts MATCH ? AND (c.repo, c.number) IN (VALUES ${pairs}) ORDER BY rank`)
-    .all(fts, ...rest.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; author: string | null; t: string }[];
+  const cm = await db.all(db.k.selectFrom(kx.commentHits(db, fts, { score: true, snippet: marks }, "c"))
+    .select(["c.repo", "c.number", "c.author", "c.snippet"]).where(kx.refIn(db, "c", rest.map((r) => [r.repo, r.number] as const))).orderBy("c.score"));
   const byRef = new Map(rest.map((r) => [`${r.repo}#${r.number}`, r.rid]));
   for (const c of cm) {
     const rid = byRef.get(`${c.repo}#${c.number}`);
-    if (rid !== undefined && !out.has(rid)) out.set(rid, { field: "comment", author: c.author, text: c.t });
+    if (rid !== undefined && !out.has(rid)) out.set(rid, { field: "comment", author: c.author, text: c.snippet ?? "" });
   }
   return out;
 }
@@ -227,19 +187,24 @@ const COUNTS_TTL = 45_000;
 const COUNTS_MAX = 100;
 const countsCache = new WeakMap<Db, { sig: string; at: number; byKey: Map<string, Record<SettledStatus, number>> }>();
 
-async function statusCounts(db: Db, b: Built & { run: string | null }, sql: string, flow: string | null): Promise<Record<SettledStatus, number>> {
-  const sig = JSON.stringify(await db.prepare(`SELECT (SELECT value FROM main.settings WHERE key = 'org_high_water') AS hw,
-      (SELECT MAX(rowid) FROM main.classifications) AS cl, (SELECT group_concat(name) FROM main.tracked_repos) AS tr, (SELECT seq FROM main.change_seq WHERE topic = 'discord') AS dm`).get());
+async function statusCounts(db: Db, b: Built & { run: string | null }, query: Compilable<{ status: string | null; n: number }>, flow: string | null): Promise<Record<SettledStatus, number>> {
+  const sig = JSON.stringify(await db.get(db.k.selectNoFrom((eb) => [
+    eb.selectFrom("main.settings").select("value").where("key", "=", "org_high_water").as("hw"),
+    eb.selectFrom("main.classifications").select((e) => e.fn.max<number | null>(kx.rowid("main.classifications")).as("m")).as("cl"),
+    eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("g")).as("tr"),
+    eb.selectFrom("main.change_seq").select("seq").where("topic", "=", "discord").as("dm"),
+  ])));
   const now = Date.now();
   let c = countsCache.get(db);
   if (!c || c.sig !== sig || now - c.at >= COUNTS_TTL) {
     c = { sig, at: now, byKey: new Map() };
     countsCache.set(db, c);
   }
-  const key = JSON.stringify([sql, b.params, b.run, flow]);
+  const compiled = query.compile();
+  const key = JSON.stringify([compiled.sql, compiled.parameters, b.run, flow]);
   const hit = c.byKey.get(key);
   if (hit) return { ...hit };
-  const counts = await db.prepare(sql).all(b.params) as { status: string | null; n: number }[];
+  const counts = await db.all(query);
   const byStatus = Object.fromEntries(STATUSES.map((s) => [s, 0])) as Record<SettledStatus, number>;
   for (const r of counts) byStatus[(r.status ?? "unclassified") as SettledStatus] += r.n;
   if (c.byKey.size >= COUNTS_MAX) c.byKey.clear();
@@ -249,45 +214,49 @@ async function statusCounts(db: Db, b: Built & { run: string | null }, sql: stri
 
 export async function listItems(db: Db, req: Req): Promise<ItemList> {
   const hidden = await hiddenRepos(db, req);
-  // build() fills the connection's temp tables (item_settled, flow_pick) that the counts and the page read, so all of
-  // it runs in one snapshot.
+  // The counts and the page join item_settled inside the read below, where it is not refreshed: the run's rows, and for
+  // a flow filter the current run's (the flowchart counts in it), are brought up to date first.
+  const latest = await latestRun(db);
+  const run = req.query.get("run") || latest;
+  await settledTable(db, run);
+  if (req.query.get("flow") && run !== latest) await settledTable(db, latest);
+  // All of it runs in one snapshot.
   const { b, total, byStatus, rows } = await db.read(async () => {
     const b = await build(db, req, hidden);
     const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
     const offset = Math.max(0, Number(req.query.get("offset")) || 0);
-    const from = (scored: boolean) => (b.text
-      ? `WITH ${scored ? HITS_SCORED : HIT_IDS} SELECT %COLS FROM hits h JOIN items i ON i.rowid = h.rid`
-      : "SELECT %COLS FROM items i") + " LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number";
-    const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
+    const settledJoin = (j: JoinBuilder<any, any>) => j.on((eb: kx.AnyEb) => settledOnExpr(eb, b.run, "s"));
+    const text = b.fts ? [textCond(db, b.fts)] : [];
 
     // Counts per status under every filter but the status one; the total follows from them.
-    const byStatus = await statusCounts(db, b, from(false).replace("%COLS", "s.status, COUNT(*) AS n") + whereSql(b.where) + " GROUP BY 1", req.query.get("flow"));
+    const byStatus = await statusCounts(db, b, restrict(db.k.selectFrom("items as i").leftJoin("item_settled as s", settledJoin)
+      .select(["s.status", (eb) => eb.fn.countAll<number>().as("n")]).groupBy("s.status"), [...b.where, ...text]), req.query.get("flow"));
     const total = (b.statuses.length ? b.statuses : STATUSES).reduce((a, s) => a + byStatus[s], 0);
 
     // The page as rowids first, so only its rows are read in full.
     const where = [...b.where, ...(b.statusWhere ? [b.statusWhere] : [])];
-    // bm25 is lower for better matches, so "most relevant first" sorts it ascending.
-    const order = b.sort === "relevance" ? `h.score ${b.desc ? "ASC" : "DESC"}` : `${ORDER[b.sort]} ${b.desc ? "DESC" : "ASC"}`;
-    // Newest first within a state: main.items with its index named, because through the
-    // scoping view the planner walks the repo index and sorts every open item.
-    const byUpdated = !b.text && b.sort === "updated" && b.params.state !== undefined;
-    const pageFrom = byUpdated
-      ? from(false).replace("FROM items i", "FROM main.items AS i INDEXED BY items_state_updated")
-      : from(b.sort === "relevance");
-    const pageWhere = byUpdated ? [...where, "i.repo IN (SELECT name FROM main.tracked_repos)"] : where;
-    const ids = (await db.prepare(pageFrom.replace("%COLS", "i.rowid AS rid") + whereSql(pageWhere) +
-      ` ORDER BY ${order}, i.repo, i.number DESC LIMIT :limit OFFSET :offset`).all({ ...b.params, limit, offset }) as { rid: number }[]).map((r) => r.rid);
-    const byId = new Map((ids.length ? await db.prepare(`SELECT i.rowid AS rid, i.repo, i.number, i.kind, i.state, i.title, i.author,
-        i.created_at, i.updated_at, i.comments_count, s.status, s.label, s.source, s.top, s.jev_label, s.haiku_label, s.flags,
-        s.referee_label, s.referee_sure, s.referee_reason, ${MERGED_AT} AS merged_by_us_at
-      FROM items i LEFT JOIN temp.item_settled s ON s.repo = i.repo AND s.number = i.number WHERE i.rowid IN (${ids.map(() => "?").join(",")})`).all(...ids) as Row[] : [])
-      .map((r) => [r.rid, r]));
+    // Newest first within a state: main.items with its index named, because through the scoping view the planner walks the repo index and sorts every open item.
+    const byUpdated = !b.fts && b.sort === "updated" && b.byState;
+    const rid = kx.rowid("items", "i").as("rid");
+    const idsQuery: Compilable<{ rid: number }> = b.fts && b.sort === "relevance"
+      ? pageOrder(db, restrict(db.k.selectFrom(hitsScored(db, b.fts).as("h")).innerJoin("items as i", (j) => j.on(kx.rowid("items", "i"), "=", (eb) => eb.ref("h.rid")))
+        .leftJoin("item_settled as s", settledJoin).select(rid), where), b.sort, b.desc).limit(limit).offset(offset)
+      : byUpdated
+        ? pageOrder(db, restrict(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_state_updated", "i")).leftJoin("item_settled as s", settledJoin).select(rid)
+          .where("i.repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name")), where), b.sort, b.desc).limit(limit).offset(offset)
+        : pageOrder(db, restrict(db.k.selectFrom("items as i").leftJoin("item_settled as s", settledJoin).select(rid), [...where, ...text]), b.sort, b.desc).limit(limit).offset(offset);
+    const ids = (await db.all(idsQuery)).map((r) => r.rid);
+    const byId = new Map((ids.length ? await db.all(db.k.selectFrom("items as i").leftJoin("item_settled as s", settledJoin)
+      .select([rid, "i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.created_at", "i.updated_at", "i.comments_count", "s.status", "s.label", "s.source", "s.top",
+        "s.jev_label", "s.haiku_label", "s.flags", "s.referee_label", "s.referee_sure", "s.referee_reason", (eb) => mergedAtOf(db, eb).as("merged_by_us_at")])
+      .where(kx.inList(db, kx.rowid("items", "i"), ids, "bigint"))) : [])
+      .map((r): [number, Row] => [r.rid, r]));
     const rows = ids.map((id) => byId.get(id)).filter((r): r is Row => !!r);
     return { b, total, byStatus, rows };
   });
 
   const stages = await stagesOf(db, rows);
-  const snips = b.text ? await snippets(db, b.params.q as string, rows) : new Map<number, Snippet>();
+  const snips = b.fts ? await snippets(db, b.fts, rows) : new Map<number, Snippet>();
   const how = await mergedHow(db, rows);
   const mentions = await discordCounts(db, rows);
   const quiet = await quietFixPrs(db);
@@ -308,9 +277,8 @@ export async function listItems(db: Db, req: Req): Promise<ItemList> {
 async function discordCounts(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (!rows.length) return out;
-  const pairs = rows.map(() => "(?, ?)").join(",");
-  for (const m of await db.prepare(`SELECT repo, number, COUNT(*) AS n FROM main.discord_mentions WHERE (repo, number) IN (VALUES ${pairs}) GROUP BY repo, number`)
-    .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; n: number }[]) out.set(`${m.repo}#${m.number}`, m.n);
+  for (const m of await db.all(db.k.selectFrom("main.discord_mentions as d").select(["d.repo", "d.number", (eb) => eb.fn.countAll<number>().as("n")])
+    .where(kx.refIn(db, "d", rows.map((r) => [r.repo, r.number] as const))).groupBy(["d.repo", "d.number"]))) out.set(`${m.repo}#${m.number}`, m.n);
   return out;
 }
 
@@ -319,12 +287,12 @@ async function mergedHow(db: Db, rows: { repo: string; number: number; kind: str
   const out = new Map<string, "rule" | "operator" | "batch">();
   const prs = rows.filter((r) => r.kind === "pr");
   if (!prs.length) return out;
-  const pairs = prs.map(() => "(?, ?)").join(",");
-  const args = prs.flatMap((r) => [r.repo, r.number]);
-  for (const m of await db.prepare(`SELECT repo, number, path FROM main.merges WHERE outcome = 'merged' AND (repo, number) IN (VALUES ${pairs}) ORDER BY at`).all(...args) as { repo: string; number: number; path: string }[])
+  const refs = prs.map((r) => [r.repo, r.number] as const);
+  for (const m of await db.all(db.k.selectFrom("main.merges as m").select(["m.repo", "m.number", "m.path"]).where("m.outcome", "=", "merged").where(kx.refIn(db, "m", refs)).orderBy("m.at")))
     out.set(`${m.repo}#${m.number}`, m.path === "operator" ? "operator" : "rule");
-  for (const b of await db.prepare(`SELECT DISTINCT bb.repo, bp.number FROM main.merge_batch_prs bp JOIN main.merge_batches bb ON bb.id = bp.batch_id
-    WHERE bb.state = 'merged' AND (bb.repo, bp.number) IN (VALUES ${pairs})`).all(...args) as { repo: string; number: number }[])
+  for (const b of await db.all(db.k.selectFrom("main.merge_batch_prs as bp").innerJoin("main.merge_batches as bb", "bb.id", "bp.batch_id")
+    .innerJoin(kx.refPairs(db, refs, "rp"), (j) => j.onRef("rp.repo", "=", "bb.repo").onRef("rp.number", "=", "bp.number"))
+    .select(["bb.repo", "bp.number"]).distinct().where("bb.state", "=", "merged")))
     if (!out.has(`${b.repo}#${b.number}`)) out.set(`${b.repo}#${b.number}`, "batch");
   return out;
 }
@@ -333,9 +301,7 @@ async function mergedHow(db: Db, rows: { repo: string; number: number; kind: str
 async function stagesOf(db: Db, rows: { repo: string; number: number }[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   if (!rows.length) return out;
-  const pairs = rows.map(() => "(?, ?)").join(",");
-  const got = await db.prepare(`SELECT repo, number, stage FROM main.item_stage WHERE (repo, number) IN (VALUES ${pairs})`)
-    .all(...rows.flatMap((r) => [r.repo, r.number])) as { repo: string; number: number; stage: string }[];
+  const got = await db.all(db.k.selectFrom("main.item_stage as st").select(["st.repo", "st.number", "st.stage"]).where(kx.refIn(db, "st", rows.map((r) => [r.repo, r.number] as const))));
   for (const g of got) out.set(`${g.repo}#${g.number}`, g.stage);
   return out;
 }
@@ -351,41 +317,40 @@ export async function quickSearch(db: Db, req: Req): Promise<SearchHit[]> {
   if (!q) return [];
   const ref = /^([A-Za-z0-9._-]+)?#(\d{1,9})$/.exec(q) ?? /^()(\d{1,9})$/.exec(q);
   const hidden = await hiddenRepos(db, req);
-  const hp: Record<string, SQLInputValue> = {};
-  const hide = excludeHidden("repo", hidden, hp);
+  const hide = excludeHiddenExpr(db, "repo", hidden);
   let rows: Hit[];
   if (ref) {
-    const where = ["CAST(number AS TEXT) LIKE :num"];
-    const params: Record<string, SQLInputValue> = { num: `${ref[2]}%`, ...hp };
-    if (hide) where.push(hide);
-    if (ref[1]) {
-      where.push("repo LIKE :repo ESCAPE '\\'");
-      params.repo = `${likeEscape(ref[1])}%`;
-    }
-    rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM items WHERE ${where.join(" AND ")}
-      ORDER BY length(CAST(number AS TEXT)), repo, number LIMIT 20`).all(params) as Hit[];
+    const where: Cond[] = [(eb) => kx.like(db, eb.cast<string>("number", "text"), eb.val(`${ref[2]}%`))];
+    if (hide) where.push(() => hide);
+    if (ref[1]) where.push((eb) => kx.like(db, "repo", eb.val(`${likeEscape(ref[1]!)}%`), "\\"));
+    rows = await db.all(restrict(db.k.selectFrom("items").select(["repo", "number", "kind", "title", "author", "state"]), where)
+      .orderBy((eb) => eb.fn<number>("length", [eb.cast<string>("number", "text")])).orderBy("repo").orderBy("number").limit(20));
   } else {
     rows = [];
     // A single word may be a login: that author's latest items first.
     if (/^[A-Za-z0-9-]{2,39}$/.test(q)) {
       // main.items with the index named: through the scoping view the planner picks the repo index.
-      rows = await db.prepare(`SELECT repo, number, kind, title, author, state FROM main.items INDEXED BY items_author_nocase
-        WHERE author LIKE :p AND repo IN (SELECT name FROM main.tracked_repos)${hide ? ` AND ${hide}` : ""}
-        ORDER BY state <> 'OPEN', updated_at DESC LIMIT 5`).all({ p: `${q}%`, ...hp }) as Hit[];
+      rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_author_nocase", "a")).select(["repo", "number", "kind", "title", "author", "state"])
+        .where((eb) => kx.like(db, "author", eb.val(`${q}%`))).where("repo", "in", (eb) => eb.selectFrom("main.tracked_repos").select("name"))
+        .$if(!!hide, (qb) => qb.where(hide!))
+        .orderBy((eb) => eb("state", "<>", "OPEN")).orderBy("updated_at", (o) => o.desc().nullsLast()).limit(5));
     }
-    const fts = ftsQuery(q, true);
+    const fts = parseSearch(q, true);
     if (!fts) return rows.map(hitOf);
     const have = new Set(rows.map((r) => `${r.repo}#${r.number}`));
     // The newest 100 matches by title, then by body when titles give too few, open ones first.
-    // Ordered by rowid, which FTS5 stops early on; ranking every match is too slow for common words.
-    const look = db.prepare(`WITH hits AS (SELECT rowid AS rid FROM items_fts WHERE items_fts MATCH :q ORDER BY rowid DESC LIMIT 100)
-      SELECT i.repo, i.number, i.kind, i.title, i.author, i.state
-      FROM hits h JOIN items i ON i.rowid = h.rid${hide ? ` WHERE ${hide.replace("repo", "i.repo")}` : ""}
-      ORDER BY i.state <> 'OPEN', i.updated_at DESC LIMIT 20`);
-    let text = await look.all({ q: `title : ${fts}`, ...hp }) as Hit[];
+    // Ordered by rowid, where the search can stop early; ranking every match is too slow for common words.
+    const hideItems = excludeHiddenExpr(db, "i.repo", hidden);
+    const look = (titleOnly: boolean) => db.all(db.k
+      .with("hits", (qb) => qb.selectFrom(kx.itemHits(db, fts, { titleOnly }, "x")).select("x.rid").orderBy("x.rid", "desc").limit(100))
+      .selectFrom("hits as h").innerJoin("items as i", (j) => j.on(kx.rowid("items", "i"), "=", (eb) => eb.ref("h.rid")))
+      .select(["i.repo", "i.number", "i.kind", "i.title", "i.author", "i.state"])
+      .$if(!!hideItems, (qb) => qb.where(hideItems!))
+      .orderBy((eb) => eb("i.state", "<>", "OPEN")).orderBy("i.updated_at", (o) => o.desc().nullsLast()).limit(20));
+    let text: Hit[] = await look(true);
     if (text.length < 20) {
       const seenT = new Set(text.map((r) => `${r.repo}#${r.number}`));
-      text = [...text, ...(await look.all({ q: fts, ...hp }) as Hit[]).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
+      text = [...text, ...(await look(false)).filter((r) => !seenT.has(`${r.repo}#${r.number}`))];
     }
     rows = [...rows, ...text.filter((r) => !have.has(`${r.repo}#${r.number}`))].slice(0, 20);
   }
@@ -411,8 +376,6 @@ async function checksOf(db: Db, r: StatusRowRaw, view: PlanView | undefined, rea
   return { verdict: q.verdict, ci: q.ci, mergeable: q.mergeable, verify: q.verify, size: q.size, prBuild: await prBuildView(db, r.repo, r.number, q.head, internals) };
 }
 
-const DISCORD_SQL = "EXISTS (SELECT 1 FROM main.discord_mentions d WHERE d.repo = i.repo AND d.number = i.number)";
-
 /** `GET /api/items/status`: every item with its status line, newest update first. Filters: q, repo, kind (as /api/items), phase, discord=1 (mentioned in a watched Discord channel, asked about or not), cursor, limit. `byPhase` and `total` count every match except the phase filter. */
 export async function statusList(db: Db, req: Req): Promise<ItemStatusList> {
   const phase = req.query.get("phase");
@@ -425,34 +388,29 @@ export async function statusList(db: Db, req: Req): Promise<ItemStatusList> {
   const b = await build(db, { ...req, query: only }, reader.hidden);
   const internals = canSeeInternals(req);
   const limit = Math.min(100, Math.max(1, Number(req.query.get("limit")) || 50));
-  const from = (cols: string) => (b.text ? `WITH ${HIT_IDS} SELECT ${cols} FROM hits h JOIN items i ON i.rowid = h.rid` : `SELECT ${cols} FROM items i`) +
-    " LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number";
-  const whereSql = (w: string[]) => (w.length ? ` WHERE ${w.join(" AND ")}` : "");
+  const items = () => db.k.selectFrom("items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"));
   // Items mentioned on Discord (display only; src/discord/store.ts).
-  const base = req.query.get("discord") === "1" ? [...b.where, DISCORD_SQL] : b.where;
+  const base: Cond[] = [...b.where, ...(b.fts ? [textCond(db, b.fts)] : []), ...(req.query.get("discord") === "1" ? [(eb: kx.AnyEb) => mentioned(db, eb)] : [])];
 
   const byPhase = Object.fromEntries(ITEM_PHASES.map((x) => [x, 0])) as Record<ItemPhase, number>;
-  for (const r of await db.prepare(from(`${PHASE_SQL} AS phase, COUNT(*) AS n`) + whereSql(base) + " GROUP BY 1").all(b.params) as { phase: ItemPhase; n: number }[])
+  for (const r of await db.all(restrict(items().select([(eb) => phaseExpr(db, eb).as("phase"), (eb) => eb.fn.countAll<number>().as("n")]).groupBy("phase"), base)))
     if (r.phase in byPhase) byPhase[r.phase] += r.n;
   const total = ITEM_PHASES.reduce((a, x) => a + byPhase[x], 0);
 
   const where = [...base];
-  const params: Record<string, SQLInputValue> = { ...b.params, limit: limit + 1 };
-  if (phase) {
-    where.push(`${PHASE_SQL} = :phase`);
-    params.phase = phase;
-  }
+  if (phase) where.push((eb) => eb(phaseExpr(db, eb), "=", phase as ItemPhase));
   const cursor = req.query.get("cursor");
   if (cursor) {
     const m = /^(.*)\|(.+)\|(\d+)$/.exec(cursor);
     if (!m) throw new HttpError(400, "bad cursor");
-    where.push("(COALESCE(i.updated_at, '') < :cu OR (COALESCE(i.updated_at, '') = :cu AND (i.repo > :cr OR (i.repo = :cr AND i.number < :cn))))");
-    params.cu = m[1]!;
-    params.cr = m[2]!;
-    params.cn = Number(m[3]);
+    const [cu, cr, cn] = [m[1]!, m[2]!, Number(m[3])];
+    where.push((eb) => {
+      const updated = eb.fn.coalesce("i.updated_at", eb.val(""));
+      return eb.or([eb(updated, "<", cu), eb.and([eb(updated, "=", cu), eb.or([eb("i.repo", ">", cr), eb.and([eb("i.repo", "=", cr), eb("i.number", "<", cn)])])])]);
+    });
   }
-  const got = await db.prepare(from("i.repo, i.number, i.kind, i.state, i.title, i.author, i.updated_at, i.merged_at, i.closed_at, p.view, p.state AS plan_state, p.reasons, i.closing_issues") + whereSql(where) +
-    " ORDER BY COALESCE(i.updated_at, '') DESC, i.repo, i.number DESC LIMIT :limit").all(params) as StatusRowRaw[];
+  const got = await db.all(restrict(items().select(["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.updated_at", "i.merged_at", "i.closed_at", "p.view", "p.state as plan_state", "p.reasons", "i.closing_issues"]), where)
+    .orderBy((eb) => eb.fn.coalesce("i.updated_at", eb.val("")), "desc").orderBy("i.repo").orderBy("i.number", "desc").limit(limit + 1));
   const page = got.slice(0, limit);
   const last = page[page.length - 1];
   return {
@@ -477,9 +435,9 @@ export async function peek(db: Db, req: Req): Promise<ItemPeek> {
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   await needVisible(db, req, repo);
-  const r = await db.prepare(`SELECT i.repo, i.number, i.kind, i.state, i.title, i.author, i.labels, i.created_at, i.updated_at, i.merged_at, i.closed_at, i.closing_issues, p.view
-    FROM items i LEFT JOIN main.item_plans p ON p.repo = i.repo AND p.number = i.number WHERE i.repo = ? AND i.number = ?`).get(repo, n) as
-    (Omit<StatusRowRaw, "plan_state" | "reasons"> & { labels: string | null; created_at: string | null }) | undefined;
+  const r = await db.get(db.k.selectFrom("items as i").leftJoin("main.item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select(["i.repo", "i.number", "i.kind", "i.state", "i.title", "i.author", "i.labels", "i.created_at", "i.updated_at", "i.merged_at", "i.closed_at", "i.closing_issues", "p.view"])
+    .where("i.repo", "=", repo).where("i.number", "=", n));
   if (!r) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
   const reader = await readerOf(db, req);
   let status: ItemStatus | undefined;

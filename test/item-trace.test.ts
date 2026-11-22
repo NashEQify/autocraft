@@ -8,6 +8,7 @@ import type { Req } from "../src/dash/types.ts";
 import type { ItemTrace } from "../web/src/api/types.ts";
 import type { Db } from "../src/db/index.ts";
 import { connectDb } from "../src/db/open.ts";
+import { rowid } from "../src/db/kx.ts";
 
 const req = (n: number, query: Record<string, string> = {}, extra: Record<string, string> = {}): Req => ({
   method: "GET", path: "", params: { repo: "photocraft", n: String(n) }, query: new URLSearchParams({ ...query, ...extra }), form: new URLSearchParams(), user: { login: "op", role: "operator", canWrite: async () => true, canRead: async () => true },
@@ -18,17 +19,17 @@ const full = async (db: Db, q: Record<string, string> = {}) => (await trace(db, 
 test("the trace lists every source of an item oldest first, with heads, a cursor and a since check", async () => {
   const db = await connectDb(":memory:");
   const H1 = "a".repeat(40), H2 = "b".repeat(40);
-  await db.prepare("INSERT INTO items (repo, number, kind, state, author, created_at, head_oid, assignees) VALUES ('photocraft', 7, 'pr', 'OPEN', 'dev', '2026-01-01T00:00:00Z', ?, '[\"bot\"]')").run(H2);
-  await db.prepare("INSERT INTO settings (key, value) VALUES ('pipeline_login', 'bot')").run();
-  await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body, commit_oid) VALUES ('photocraft', 7, 'c1', 'comment', 'dev', '2026-01-01T01:00:00Z', 'please look', NULL)").run();
-  await db.prepare("INSERT INTO plan_history (repo, number, head, old_state, new_state, wait, reasons, at) VALUES ('photocraft', 7, ?, 'reviewing', 'verifying', 'CI', '[]', '2026-01-01T02:00:00Z')").run(H1);
+  await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 7, kind: "pr", state: "OPEN", author: "dev", created_at: "2026-01-01T00:00:00Z", head_oid: H2, assignees: '["bot"]' }));
+  await db.run(db.k.insertInto("settings").values({ key: "pipeline_login", value: "bot" }));
+  await db.run(db.k.insertInto("comments").values({ repo: "photocraft", number: 7, id: "c1", kind: "comment", author: "dev", created_at: "2026-01-01T01:00:00Z", body: "please look", commit_oid: null }));
+  await db.run(db.k.insertInto("plan_history").values({ repo: "photocraft", number: 7, head: H1, old_state: "reviewing", new_state: "verifying", wait: "CI", reasons: "[]", at: "2026-01-01T02:00:00Z" }));
   const run = await insertRun(db, { jobId: null, step: "opus-review", stage: 5, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: null, items: [{ repo: "photocraft", number: 7 }], prompt: "secret prompt" });
-  await db.prepare("UPDATE agent_runs SET started_at = '2026-01-01T03:00:00Z'").run();
+  await db.run(db.k.updateTable("agent_runs").set({ started_at: "2026-01-01T03:00:00Z" }));
   await saveTools(db, run, [{ type: "assistant", message: { content: [{ type: "tool_use", id: "a", name: "Read", input: { file_path: "x" } }] } }]);
   await finishRun(db, run, { state: "done", output: "o", costUsd: 0.5 });
-  await db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 7, ?, '2026-01-01T04:00:00Z', 'opus', 'full', 'hold', 1, 'why')").run(H1);
-  await db.prepare("INSERT INTO opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason) VALUES ('photocraft', 7, ?, '2026-01-01T05:00:00Z', 'opus', 'delta', 'take', 1, 'fine')").run(H2);
-  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-01T06:00:00Z', 'bot', 'review-post', 'photocraft#7', ?)").run(JSON.stringify({ head: H2, state: "done", text: "long posted text" }));
+  await db.run(db.k.insertInto("opus_review_history").values({ repo: "photocraft", number: 7, head_oid: H1, at: "2026-01-01T04:00:00Z", model: "opus", mode: "full", verdict: "hold", sure: 1, reason: "why" }));
+  await db.run(db.k.insertInto("opus_review_history").values({ repo: "photocraft", number: 7, head_oid: H2, at: "2026-01-01T05:00:00Z", model: "opus", mode: "delta", verdict: "take", sure: 1, reason: "fine" }));
+  await db.run(db.k.insertInto("audit").values({ at: "2026-01-01T06:00:00Z", login: "bot", action: "review-post", target: "photocraft#7", details: JSON.stringify({ head: H2, state: "done", text: "long posted text" }) }));
 
   const asked: unknown[] = [];
   const client = {
@@ -50,7 +51,7 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
   const t = await full(db);
   assert.deepEqual(t.events.map((e) => e.id.replace(/:\d+$/, "")), ["gh:opened", `commit:${H1}`, "activity:L1", "comment:c1", "plan", "run", "review:opus", "review:opus", "audit"]);
   assert.deepEqual(t.events.filter((e) => e.id.startsWith("activity") || e.id.startsWith("commit")).map((e) => e.summary), ["Pushed commit aaaaaaa", "Added label bug"]);
-  assert.deepEqual((await db.prepare("SELECT path FROM pr_files WHERE repo = 'photocraft' AND number = 7 AND head = ?").all(H2)).map((r) => r.path), ["src/a.rs"]);
+  assert.deepEqual((await db.all(db.k.selectFrom("pr_files").select("path").where("repo", "=", "photocraft").where("number", "=", 7).where("head", "=", H2))).map((r) => r.path), ["src/a.rs"]);
   assert.deepEqual(t.events.slice(-5).map((e) => e.head), [H1, H1, H1, H2, H2], "a model call takes the head current at its time");
   const call = t.events.find((e) => e.kind === "model-call")!;
   assert.equal(call.call?.toolCalls, 1);
@@ -70,10 +71,10 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
   assert.deepEqual((await full(db, { kinds: "write,decision" })).events.map((e) => e.kind), ["write"]);
   assert.ok((await full(db, { autocraftOnly: "1" })).events.every((e) => e.actor.type !== "person"));
   assert.deepEqual(await trace(db, req(7, { since: t.stamp })), { unchanged: true, stamp: t.stamp });
-  await db.prepare("INSERT INTO comments (repo, number, id, kind, author, created_at, body) VALUES ('photocraft', 7, 'c2', 'comment', 'dev', '2026-01-02T00:00:00Z', 'x')").run();
+  await db.run(db.k.insertInto("comments").values({ repo: "photocraft", number: 7, id: "c2", kind: "comment", author: "dev", created_at: "2026-01-02T00:00:00Z", body: "x" }));
   assert.notEqual((await trace(db, req(7, { since: t.stamp }))).stamp, t.stamp);
 
-  const d = await traceDetail(db, req(7, { id: `review:opus:${(await db.prepare("SELECT rowid FROM opus_review_history WHERE verdict = 'hold'").get() as { rowid: number }).rowid}` }));
+  const d = await traceDetail(db, req(7, { id: `review:opus:${(await db.get(db.k.selectFrom("opus_review_history").select(rowid("opus_review_history").as("rowid")).where("verdict", "=", "hold")))!.rowid}` }));
   assert.equal(d.fields.reason, "why");
   const w = await traceDetail(db, req(7, { id: t.events[t.events.length - 1]!.id }));
   assert.equal(w.fields.textLength, 16);
@@ -81,12 +82,14 @@ test("the trace lists every source of an item oldest first, with heads, a cursor
 
 test("a viewer gets no staff-only post-merge fields and only the GitHub writes of the audit", async () => {
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT INTO items (repo, number, kind, state, created_at) VALUES ('photocraft', 7, 'pr', 'MERGED', '2026-01-01T00:00:00Z')").run();
-  await db.prepare("INSERT INTO postmerge_reviews (repo, number, merge_sha, at, model, findings) VALUES ('photocraft', 7, ?, '2026-01-02T00:00:00Z', 'opus', ?)")
-    .run("c".repeat(40), JSON.stringify([{ severity: "major", title: "t", body: "b", missed_by: "review", missed_why: "secret reason" }]));
-  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-02T01:00:00Z', 'bot', 'review-post', 'photocraft#7', '{\"state\":\"done\",\"text\":\"posted\"}')").run();
-  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-02T02:00:00Z', 'someone', 'answer', 'photocraft#7', '{}')").run();
-  await db.prepare("INSERT INTO audit (at, login, action, target, details) VALUES ('2026-01-02T03:00:00Z', 'admin', 'access-add', 'photocraft#7', '{}')").run();
+  await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: 7, kind: "pr", state: "MERGED", created_at: "2026-01-01T00:00:00Z" }));
+  await db.run(db.k.insertInto("postmerge_reviews").values({ repo: "photocraft", number: 7, merge_sha: "c".repeat(40), at: "2026-01-02T00:00:00Z", model: "opus",
+    findings: JSON.stringify([{ severity: "major", title: "t", body: "b", missed_by: "review", missed_why: "secret reason" }]) }));
+  await db.run(db.k.insertInto("audit").values([
+    { at: "2026-01-02T01:00:00Z", login: "bot", action: "review-post", target: "photocraft#7", details: '{"state":"done","text":"posted"}' },
+    { at: "2026-01-02T02:00:00Z", login: "someone", action: "answer", target: "photocraft#7", details: "{}" },
+    { at: "2026-01-02T03:00:00Z", login: "admin", action: "access-add", target: "photocraft#7", details: "{}" },
+  ]));
   const as = (role: "viewer" | "maintainer" | "operator"): Req => ({ ...req(7, { id: `review:postmerge:${"c".repeat(40)}` }), user: { login: "u", role, canWrite: async () => true, canRead: async () => true } });
   const writesOf = async (role: "viewer" | "maintainer" | "operator") => ((await trace(db, { ...as(role), query: new URLSearchParams({ kinds: "write" }) })) as ItemTrace).events;
   assert.equal(((await traceDetail(db, as("viewer"))).fields.findings as Record<string, unknown>[])[0]!.missed_why, undefined);
@@ -95,13 +98,11 @@ test("a viewer gets no staff-only post-merge fields and only the GitHub writes o
   assert.deepEqual(v.map((e) => [e.summary, e.actor.name]), [["Posted review", "AutoCraft"]]);
   assert.equal((await writesOf("maintainer")).length, 2, "a maintainer also sees the dashboard answer, not the operator-only access change");
   assert.equal((await writesOf("operator")).length, 3);
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, question, options, asked_at) VALUES ('b1', 'merge', NULL, NULL, ?, 'Merge the batch?', '[]', '2026-01-03T00:00:00Z')")
-    .run(JSON.stringify([{ repo: "photocraft", number: 7 }]));
+  await db.run(db.k.insertInto("decisions").values({ id: "b1", kind: "merge", repo: null, number: null, items: JSON.stringify([{ repo: "photocraft", number: 7 }]), question: "Merge the batch?", options: "[]", asked_at: "2026-01-03T00:00:00Z" }));
   assert.deepEqual(((await trace(db, req(7, { kinds: "decision" }))) as ItemTrace).events.map((e) => e.summary), ["Asked: Merge the batch?"], "a batch decision is found through decision_items");
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, question, options, asked_at) VALUES ('b2', 'merge', NULL, NULL, ?, 'Hidden batch?', '[]', '2026-01-04T00:00:00Z')")
-    .run(JSON.stringify([{ repo: "photocraft", number: 7 }, { repo: "pdfcraft", number: 1 }]));
+  await db.run(db.k.insertInto("decisions").values({ id: "b2", kind: "merge", repo: null, number: null, items: JSON.stringify([{ repo: "photocraft", number: 7 }, { repo: "pdfcraft", number: 1 }]), question: "Hidden batch?", options: "[]", asked_at: "2026-01-04T00:00:00Z" }));
   const viewer = { ...req(7, { kinds: "decision" }), user: { login: "u", role: "viewer" as const, canWrite: async () => true, canRead: async (r: string) => r !== "pdfcraft" } };
-  await db.prepare("INSERT INTO repos (name, visibility) VALUES ('pdfcraft', 'private') ON CONFLICT (name) DO UPDATE SET visibility = 'private'").run();
+  await db.run(db.k.insertInto("repos").values({ name: "pdfcraft", visibility: "private" }).onConflict((oc) => oc.column("name").doUpdateSet({ visibility: "private" })));
   assert.deepEqual(((await trace(db, viewer)) as ItemTrace).events.map((e) => e.summary), ["Asked: Merge the batch?"], "a batch touching a repo hidden from the viewer is left out");
   assert.equal(((await trace(db, req(7, { kinds: "decision" }))) as ItemTrace).events.length, 2, "an operator sees both");
   const f = (await trace(db, { ...as("viewer"), query: new URLSearchParams({ kinds: "review" }) })) as ItemTrace;
@@ -110,13 +111,15 @@ test("a viewer gets no staff-only post-merge fields and only the GitHub writes o
 
 test("the activity pass skips a missing item, retries a failed one later and goes on to the others", async () => {
   const db = await connectDb(":memory:");
-  for (const n of [1, 2, 3])
-    await db.prepare("INSERT INTO items (repo, number, kind, state, author, created_at, updated_at, head_oid) VALUES ('photocraft', ?, 'issue', 'OPEN', 'dev', '2026-01-01T00:00:00Z', ?, NULL)").run(n, `2026-01-0${n}T00:00:00Z`);
+  await db.run(db.k.insertInto("items").values([1, 2, 3].map((n) => ({
+    repo: "photocraft", number: n, kind: "issue", state: "OPEN", author: "dev", created_at: "2026-01-01T00:00:00Z", updated_at: `2026-01-0${n}T00:00:00Z`, head_oid: null,
+  }))));
   const asked: number[] = [];
+  let fails = true;
   const client = { spent: 0, remaining: 5000, async query(_q: string, v: { number: number }) {
     asked.push(v.number);
     if (v.number === 3) return { repository: { issueOrPullRequest: null } };
-    if (v.number === 2) throw new Error("boom");
+    if (v.number === 2 && fails) throw new Error("boom");
     return { repository: { issueOrPullRequest: { __typename: "Issue", issueTimeline: { nodes: [] } } } };
   } };
   const now = new Date("2026-01-10T00:00:00Z");
@@ -124,22 +127,26 @@ test("the activity pass skips a missing item, retries a failed one later and goe
   assert.deepEqual(asked, [3, 2, 1]);
   asked.length = 0;
   assert.equal(await syncActivity(db, client, now), 0, "a missing item and a failed one wait");
+  fails = false;
   assert.equal(await syncActivity(db, client, new Date(now.getTime() + 2 * 3_600_000)), 1);
   assert.deepEqual(asked, [2]);
+  const state = await db.get(db.k.selectFrom("activity_sync").select(["error", "retry_at"]).where("repo", "=", "photocraft").where("number", "=", 2));
+  assert.deepEqual(state, { error: null, retry_at: null }, "a successful read clears the earlier failure");
 });
 
 test("decision_items follows a decision that changes or goes away", async () => {
   const db = await connectDb(":memory:");
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, items, question, options, asked_at) VALUES ('d', 'merge', 'photocraft', NULL, NULL, 'q', '[]', '2026-01-01T00:00:00Z')").run();
-  const n = async () => (await db.prepare("SELECT COUNT(*) AS c FROM decision_items").get() as { c: number }).c;
-  await db.prepare("UPDATE decisions SET number = NULL, items = ? WHERE id = 'd'").run(JSON.stringify([{ repo: "photocraft", number: 1 }]));
+  await db.run(db.k.insertInto("decisions").values({ id: "d", kind: "merge", repo: "photocraft", number: null, items: null, question: "q", options: "[]", asked_at: "2026-01-01T00:00:00Z" }));
+  const n = async () => (await db.get(db.k.selectFrom("decision_items").select((eb) => eb.fn.countAll<number>().as("c"))))!.c;
+  const setDecision = async (set: { number?: number | null; items?: string | null }) => { await db.run(db.k.updateTable("decisions").set(set).where("id", "=", "d")); };
+  await setDecision({ number: null, items: JSON.stringify([{ repo: "photocraft", number: 1 }]) });
   assert.equal(await n(), 1);
-  await db.prepare("UPDATE decisions SET number = 5 WHERE id = 'd'").run();
+  await setDecision({ number: 5 });
   assert.equal(await n(), 0, "a decision with its own number names no batch items");
-  await db.prepare("UPDATE decisions SET number = NULL WHERE id = 'd'").run();
-  await db.prepare("UPDATE decisions SET items = 'not json' WHERE id = 'd'").run();
+  await setDecision({ number: null });
+  await setDecision({ items: "not json" });
   assert.equal(await n(), 0);
-  await db.prepare("UPDATE decisions SET items = ? WHERE id = 'd'").run(JSON.stringify([{ repo: "photocraft", number: 2 }]));
-  await db.prepare("DELETE FROM decisions WHERE id = 'd'").run();
+  await setDecision({ items: JSON.stringify([{ repo: "photocraft", number: 2 }]) });
+  await db.run(db.k.deleteFrom("decisions").where("id", "=", "d"));
   assert.equal(await n(), 0);
 });

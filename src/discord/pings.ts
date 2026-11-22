@@ -9,6 +9,7 @@ import type { DiscordRest } from "./rest.ts";
 import { QUESTION_CHARS, type Search } from "./search.ts";
 import { isWatched } from "./store.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 type Mentionable = { id: string };
 export type PingMessage = {
@@ -90,7 +91,7 @@ export class Pings {
   async #ping(m: PingMessage): Promise<void> {
     const { db, keys, rest, search } = this.#d;
     const pingHash = keys.hash("message", m.id);
-    if (this.#inflight.has(pingHash) || await db.prepare("SELECT 1 FROM discord_replies WHERE ping_hash = ?").get(pingHash)) return;
+    if (this.#inflight.has(pingHash) || await db.get(db.k.selectFrom("discord_replies").select("ping_hash").where("ping_hash", "=", pingHash))) return;
     const quotedId = m.message_reference?.message_id;
     const question = (quotedId ? strip(m.referenced_message?.content ?? "") : "") || strip(m.content ?? "");
     if (!question) return;
@@ -108,7 +109,8 @@ export class Pings {
         ...(r.components.length && { components: r.components }),
       });
       const sealed = keys.seal({ guildId: m.guild_id ?? "", channelId: m.channel_id, messageId: sent.id, at: new Date().toISOString() }, pingHash);
-      await db.prepare("INSERT OR REPLACE INTO discord_replies (ping_hash, quoted_hash, channel_hash, sealed) VALUES (?, ?, ?, ?)").run(pingHash, quoted, keys.hash("channel", m.channel_id), sealed);
+      await db.run(db.k.insertInto("discord_replies").values({ ping_hash: pingHash, quoted_hash: quoted, channel_hash: keys.hash("channel", m.channel_id), sealed })
+        .onConflict((oc) => oc.column("ping_hash").doUpdateSet(excluded(["quoted_hash", "channel_hash", "sealed"]))));
       // Deleted while the reply was being sent.
       if (this.#deletedMeanwhile.has(pingHash) || (quoted && this.#deletedMeanwhile.has(quoted))) await this.#deleted([m.id, ...(quotedId ? [quotedId] : [])]);
     } finally {

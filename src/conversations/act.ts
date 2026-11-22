@@ -26,6 +26,7 @@ import { ConversationError, insertTurn, staleOf, systemBlock, type StoreDeps } f
 import { COMMENT_MAX, INSTRUCTIONS_MAX, ISSUE_TITLE_MAX, NOTE_MAX, type CloseReason } from "./types.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type CardRow = {
   seen: string | null;
@@ -41,7 +42,7 @@ export type CardRow = {
 export type ActDeps = StoreDeps & { querier?: Querier; /** Runs `gh` for the open_issue step. */ exec?: Exec; canWrite?: (repo: string) => Promise<boolean>; /** Indexes into a resolution's steps the operator removed. */ skip?: number[]; /** The user lane's token source and transports; default: the secrets file's app. */ lane?: LaneDeps; /** The note with the choice. */ note?: string; /** The presser's role, named in the conversation block (default operator). */ role?: string; /** The presser is not an operator: the note is stored and shown but never put in the model's block. */ noteStaysOut?: boolean; /** Set by the Act step's drain: run the queued card as its presser pressed it. */ drain?: boolean; /** Called once the press has claimed the card (running or queued). */ claimed?: () => void };
 
 export const cardOf = async (db: Db, id: number): Promise<CardRow | undefined> =>
-  await db.prepare("SELECT * FROM conversation_cards WHERE id = ?").get(id) as CardRow | undefined;
+  await db.get(db.k.selectFrom("conversation_cards").select(kx.cols("conversation_cards")).where("id", "=", id));
 
 async function need(db: Db, id: number): Promise<CardRow> {
   const c = await cardOf(db, id);
@@ -98,7 +99,7 @@ export async function editCard(db: Db, id: number, by: string, edit: CardEdit, d
     params = JSON.stringify({ ...p, steps });
   }
   const at = (deps?.now?.() ?? new Date()).toISOString();
-  const r = await db.prepare("UPDATE conversation_cards SET text = ?, params = ?, edited_by = ?, edited_at = ? WHERE id = ? AND state = 'proposed'").run(text, params, by, at, id);
+  const r = await db.run(db.k.updateTable("conversation_cards").set({ text, params, edited_by: by, edited_at: at }).where("id", "=", id).where("state", "=", "proposed"));
   if (r.changes !== 1) throw new ConversationError(409, `the card is already ${c.state}`);
   await audit(db, by, "conversation-card-edit", ref(c.repo, c.number), { card: id });
   return await need(db, id);
@@ -109,7 +110,7 @@ export async function dismissCard(db: Db, id: number, by: string, deps?: StoreDe
   const c = await need(db, id);
   const at = (deps?.now?.() ?? new Date()).toISOString();
   await db.write(async () => {
-    const r = await db.prepare("UPDATE conversation_cards SET state = 'dismissed', acted_by = ?, acted_at = ? WHERE id = ? AND state IN ('proposed', 'queued')").run(by, at, id);
+    const r = await db.run(db.k.updateTable("conversation_cards").set({ state: "dismissed", acted_by: by, acted_at: at }).where("id", "=", id).where("state", "in", ["proposed", "queued"]));
     if (r.changes !== 1) throw new ConversationError(409, `the card is already ${c.state}`);
     const settles = c.state === "queued" ? settledDecisionOf(JSON.parse(c.params) as CardParams) : undefined;
     if (settles) await releaseSettling(db, settles, id);
@@ -132,11 +133,12 @@ async function answerDecision(db: Db, c: CardRow, decisionId: string | undefined
     if (!d || d.answer !== null || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
     const o = optionsOf(d).find((x) => x.key === key);
     if (!o) throw new Error(`"${key}" is not an option of the decision`);
-    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL,
-      public_text = COALESCE(?, public_text)
-      WHERE id = ? AND answer IS NULL`).run(key, note ?? null, by, at, publicReason ?? null, d.id);
+    const r = await db.run(db.k.updateTable("main.decisions").set((eb) => ({
+      answer: key, answer_note: note ?? null, exceptions: null, answered_by: by, answered_at: at, adopted_opinion: null, snoozed_by: null, snoozed_at: null, exec_state: null, exec_reason: null,
+      public_text: eb.fn.coalesce(eb.val(publicReason ?? null), "public_text"),
+    })).where("id", "=", d.id).where("answer", "is", null));
     if (r.changes !== 1) throw new Error("the decision changed");
-    await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
+    await db.run(db.k.deleteFrom("main.decision_claims").where("decision_id", "=", d.id));
     await replaceProposedCards(db, d.repo, d.number, d.id);
     await audit(db, by, "answer", d.id, { answer: key, source: "conversation", card: c.id });
     return { d, o };
@@ -151,10 +153,11 @@ async function resolveDecision(db: Db, c: CardRow, decisionId: string | undefine
   return await db.write(async () => {
     const d = await getDecision(db, decisionId);
     if (!d || d.answer !== null || d.repo !== c.repo || d.number !== c.number || (stamp !== undefined && await decisionStamp(db, d) !== stamp)) throw new Error("the decision changed");
-    const r = await db.prepare(`UPDATE main.decisions SET answer = ?, answer_note = ?, exceptions = NULL, answered_by = ?, answered_at = ?, applied_at = ?, adopted_opinion = NULL, snoozed_by = NULL, snoozed_at = NULL, exec_state = NULL, exec_reason = NULL
-      WHERE id = ? AND answer IS NULL`).run(HANDLED.key, summary, by, at, at, d.id);
+    const r = await db.run(db.k.updateTable("main.decisions").set({
+      answer: HANDLED.key, answer_note: summary, exceptions: null, answered_by: by, answered_at: at, applied_at: at, adopted_opinion: null, snoozed_by: null, snoozed_at: null, exec_state: null, exec_reason: null,
+    }).where("id", "=", d.id).where("answer", "is", null));
     if (r.changes !== 1) throw new Error("the decision changed");
-    await db.prepare("DELETE FROM main.decision_claims WHERE decision_id = ?").run(d.id);
+    await db.run(db.k.deleteFrom("main.decision_claims").where("decision_id", "=", d.id));
     await replaceProposedCards(db, d.repo, d.number, d.id);
     await audit(db, by, "answer", d.id, { answer: HANDLED.key, source: "conversation", card: c.id });
     return { result: "Decision closed as handled in the conversation", url: null };
@@ -200,7 +203,7 @@ async function addLabel({ db, c, by, q, at, w, source, unlabeling }: Ctx, label:
   if (!id) throw new Error(`the label "${label}" does not exist on ${c.repo}`);
   const done = await addLabels(w, q, c.repo, [{ number: c.number, id: live.id, labelIds: [id], names: [label], g }], undefined, source);
   if (!done.includes(c.number)) throw new Error("GitHub did not add the label");
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'labeled', ?, ?, ?)").run(c.repo, c.number, at, by, `added: ${label}`);
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "labeled", at, actor: by, note: `added: ${label}` }));
   return { result: `Label "${label}" added`, url: null };
 }
 
@@ -214,13 +217,14 @@ async function closeThe({ db, c, by, q, at, w, source }: Ctx, p: { reason: Close
   const url = text ? await commentOn(w, g, q, "act-comment", item, CARD_NOTE, text, source) : "";
   await closeItem(w, g, q, { ...item, pr: live.type === "PullRequest" }, { ...source, head: live.head }, p.reason === "completed" ? "COMPLETED" : "NOT_PLANNED");
   const how = live.type === "PullRequest" ? "" : p.reason === "completed" ? " as completed" : " as not planned";
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed${how} from a conversation`);
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "closed", at, actor: by, note: `closed${how} from a conversation` }));
   return { how, url };
 }
 
 /** The item is closed or moved: its open decisions (but `except`) are settled now, not at the next sync's withdrawal. `what` is the phrase after "Closed" or the whole summary when it starts with "Moved". */
 async function settleOthers(db: Db, c: CardRow, how: string, by: string, at: string, except?: string): Promise<void> {
-  const open = await db.prepare("SELECT id FROM decisions WHERE repo = ? AND number = ? AND answer IS NULL AND id NOT LIKE '%:dupegroup:%'").all(c.repo, c.number) as { id: string }[];
+  const open = await db.all(db.k.selectFrom("decisions").select("id").where("repo", "=", c.repo).where("number", "=", c.number).where("answer", "is", null)
+    .where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%")))));
   for (const d of open) {
     if (d.id === except) continue;
     try { await resolveDecision(db, c, d.id, undefined, how.startsWith("Moved") ? `${how} in the conversation` : `Closed${how} in the conversation`, by, at); } catch { /* answered meanwhile; the next sync withdraws what is left */ }
@@ -237,12 +241,13 @@ async function closeDuplicate({ db, c, by, q, at, w, source }: Ctx, of: number):
   if (!orig) throw new Error(`GitHub returned no ${ref(c.repo, of)}`);
   const url = await commentOn(w, g, q, "act-comment", { repo: c.repo, number: c.number, id: live.id }, CARD_NOTE, duplicateComment({ repo: c.repo, original: ref(c.repo, of), closed: orig.state !== "OPEN" }), source);
   // Recorded like Act's close: saved after the comment so the failed close shows what was posted.
-  const action = async (state: string, reason: string | null) => await db.prepare(`INSERT INTO main.actions (decision_id, repo, number, kind, state, comment_url, reason, created_at) VALUES (?, ?, ?, 'comment-close', ?, ?, ?, ?)
-    ON CONFLICT (decision_id, repo, number, kind) DO UPDATE SET state = excluded.state, reason = excluded.reason, created_at = excluded.created_at`).run(`conversation-card:${c.id}`, c.repo, c.number, state, url || null, reason, at);
+  const action = async (state: string, reason: string | null) => await db.run(db.k.insertInto("main.actions")
+    .values({ decision_id: `conversation-card:${c.id}`, repo: c.repo, number: c.number, kind: "comment-close", state, comment_url: url || null, reason, created_at: at })
+    .onConflict((oc) => oc.columns(["decision_id", "repo", "number", "kind"]).doUpdateSet(kx.excluded(["state", "reason", "created_at"]))));
   await action("failed", "comment posted; close not done yet");
   await closeItem(w, g, q, { repo: c.repo, number: c.number, id: live.id, pr: live.type === "PullRequest" }, { ...source, head: live.head });
   await action("done", null);
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, 'closed', ?, ?, ?)").run(c.repo, c.number, at, by, `closed as a duplicate of ${ref(c.repo, of)} from a conversation`);
+  await db.run(db.k.insertInto("main.stages").values({ repo: c.repo, number: c.number, stage: "closed", at, actor: by, note: `closed as a duplicate of ${ref(c.repo, of)} from a conversation` }));
   return { url };
 }
 
@@ -302,10 +307,10 @@ async function unlabel(ctx: Ctx, label: string): Promise<Outcome> {
   if (!id) throw new Error(`the label "${label}" does not exist on ${c.repo}`);
   await removeLabel(w, g, q, { repo: c.repo, number: c.number, id: live.id }, { id, name: label }, source);
   // The mirror catches up at the next sync; later steps of this card read it now.
-  const row = await db.prepare("SELECT labels FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { labels: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("main.items").select("labels").where("repo", "=", c.repo).where("number", "=", c.number));
   try {
     const have = JSON.parse(row?.labels ?? "[]") as unknown[];
-    await db.prepare("UPDATE main.items SET labels = ? WHERE repo = ? AND number = ?").run(JSON.stringify(have.filter((x) => String(x).toLowerCase() !== label.toLowerCase())), c.repo, c.number);
+    await db.run(db.k.updateTable("main.items").set({ labels: JSON.stringify(have.filter((x) => String(x).toLowerCase() !== label.toLowerCase())) }).where("repo", "=", c.repo).where("number", "=", c.number));
   } catch { /* unreadable labels stay for the sync to rewrite */ }
   return { result: `Label "${label}" removed`, url: null };
 }
@@ -355,7 +360,7 @@ async function assign(ctx: Ctx, login: string): Promise<Outcome> {
   const { db, c, by, q, w, source } = ctx;
   const g = await actGrant(db, c.repo, by);
   const live = await liveOpen(q, c.repo, c.number);
-  const author = (await db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
+  const author = (await db.get(db.k.selectFrom("items").select("author").where("repo", "=", c.repo).where("number", "=", c.number)))?.author ?? null;
   if (author?.toLowerCase() !== login.toLowerCase()) await needLiveWrite(q, c.repo, login);
   await assignTo(w, g, q, { repo: c.repo, number: c.number, id: live.id }, await userOf(q, login), source);
   return { result: `Assigned ${login}`, url: null };
@@ -366,7 +371,7 @@ async function askReviewers(ctx: Ctx, logins: string[]): Promise<Outcome> {
   const g = await actGrant(db, c.repo, by);
   const live = await liveOpen(q, c.repo, c.number);
   if (live.type !== "PullRequest") throw new Error("reviewers can be requested on a PR only");
-  const author = (await db.prepare("SELECT author FROM items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { author: string | null } | undefined)?.author ?? null;
+  const author = (await db.get(db.k.selectFrom("items").select("author").where("repo", "=", c.repo).where("number", "=", c.number)))?.author ?? null;
   const users: { id: string; login: string }[] = [];
   for (const l of logins) {
     if (author?.toLowerCase() === l.toLowerCase()) throw new Error(`${l} is the PR's author`);
@@ -586,9 +591,12 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
         if (block) throw new Error(`The daily GitHub write limit leaves no room and ${block}, so this cannot wait in line`);
       }
       const claim = wait
-        ? await db.prepare("UPDATE conversation_cards SET state = 'queued', acted_by = ?, acted_at = ?, queued_at = ?, queue_args = ?, error = NULL, dispute_by = NULL, dispute_reason = NULL, dispute_at = NULL WHERE id = ? AND state = 'proposed'")
-          .run(by, at, at, JSON.stringify({ ...(deps.skip?.length && { skip: deps.skip }), ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) } satisfies QueueArgs), id)
-        : await db.prepare("UPDATE conversation_cards SET state = 'running', acted_by = ?, acted_at = ? WHERE id = ? AND state = ? AND dispute_by IS NULL").run(by, at, id, from);
+        ? await db.run(db.k.updateTable("conversation_cards").set({
+          state: "queued", acted_by: by, acted_at: at, queued_at: at,
+          queue_args: JSON.stringify({ ...(deps.skip?.length && { skip: deps.skip }), ...(note && { note }), ...(deps.noteStaysOut && { noteStaysOut: true }), ...(deps.role && { role: deps.role }) } satisfies QueueArgs),
+          error: null, dispute_by: null, dispute_reason: null, dispute_at: null,
+        }).where("id", "=", id).where("state", "=", "proposed"))
+        : await db.run(db.k.updateTable("conversation_cards").set({ state: "running", acted_by: by, acted_at: at }).where("id", "=", id).where("state", "=", from).where("dispute_by", "is", null));
       if (claim.changes !== 1) return "lost";
       // Checked inside the transaction that starts the run, so an answer written a moment ago is seen.
       const refusal = writing ? await pendingAnswerRefusal(db, c.repo, c.number, by) : null;
@@ -620,13 +628,12 @@ export async function doCard(db: Db, id: number, by: string, deps: ActDeps = {})
   if (settles) await releaseSettling(db, settles, id);
   if (out && skipped.length) out = { ...out, result: `${out.result} (skipped: ${skipped.join("; ")})` };
   const end = (deps.now?.() ?? new Date()).toISOString();
-  await db.prepare("UPDATE conversation_cards SET state = ?, result = ?, result_url = ?, error = ?, acted_at = ? WHERE id = ?")
-    .run(out ? "done" : "failed", out?.result ?? null, out?.url ?? null, error, end, id);
+  await db.run(db.k.updateTable("conversation_cards").set({ state: out ? "done" : "failed", result: out?.result ?? null, result_url: out?.url ?? null, error, acted_at: end }).where("id", "=", id));
   await audit(db, by, "conversation-card", ref(c.repo, c.number), { card: id, kind: c.kind, state: out ? "done" : "failed", error: error ?? undefined, ...(skipped.length && { skipped }), ...(note && { note: true }) });
   const who = deps.role ?? "operator";
   const sentence = out ? `The ${who} ${by} ran the proposed action: ${c.description}. Result: ${out.result}.` : `The ${who} ${by} tried the proposed action: ${c.description}${skipped.length ? ` (without: ${skipped.join("; ")})` : ""}. It failed: ${error}.`;
   // Only text that was posted, and only text no non-operator wrote, goes into the model's block.
-  const editedByOperator = !c.edited_by || !!await db.prepare("SELECT 1 FROM access WHERE login = ? AND role = 'operator'").get(c.edited_by);
+  const editedByOperator = !c.edited_by || !!await db.get(db.k.selectFrom("access").select("login").where("login", "=", c.edited_by).where("role", "=", "operator"));
   const posted_text = !(out || posted) || !editedByOperator ? undefined : params.kind === "comment" ? c.text ?? params.text : (params.kind === "close" || (params.kind === "resolution" && params.steps.some((x) => x.kind === "comment") && (out || posted))) && c.text ? c.text : undefined;
   const modelNote = deps.noteStaysOut ? undefined : note;
   const data = posted_text !== undefined || modelNote ? { ...(posted_text !== undefined && { posted_text }), ...(modelNote && { operator_note: modelNote }) } : undefined;
@@ -643,7 +650,7 @@ async function failQueued(db: Db, c: CardRow, error: string, deps: StoreDeps): P
   let settles: string | undefined;
   try { settles = settledDecisionOf(JSON.parse(c.params) as CardParams); } catch { /* a card with unreadable parameters settles nothing */ }
   const failed = await db.write(async () => {
-    const r = await db.prepare("UPDATE conversation_cards SET state = 'failed', error = ?, acted_at = ? WHERE id = ? AND state = 'queued'").run(error, at, c.id);
+    const r = await db.run(db.k.updateTable("conversation_cards").set({ state: "failed", error, acted_at: at }).where("id", "=", c.id).where("state", "=", "queued"));
     if (r.changes === 1 && settles) await releaseSettling(db, settles, c.id);
     return r.changes === 1;
   });
@@ -679,7 +686,7 @@ export async function drainQueuedCards(db: Db, deps: ActDeps = {}, o: { writes?:
     const block = await actBlockedReason(db, c.repo);
     if (block) { await failQueued(db, c, `Act cannot run for ${c.repo} now: ${block}`, deps); continue; }
     if (!await actRoom(db, need, nowMs) || (o.writes !== undefined && used + need > o.writes)) break;
-    const item = await db.prepare("SELECT state FROM main.items WHERE repo = ? AND number = ?").get(c.repo, c.number) as { state: string } | undefined;
+    const item = await db.get(db.k.selectFrom("main.items").select("state").where("repo", "=", c.repo).where("number", "=", c.number));
     if (item && item.state !== "OPEN") { await failQueued(db, c, `the item is already ${item.state.toLowerCase()}`, deps); continue; }
     try {
       const r = await doCard(db, c.id, c.acted_by, { ...deps, drain: true, skip: args.skip, note: args.note, noteStaysOut: args.noteStaysOut, role: args.role, canWrite: undefined });
@@ -711,7 +718,7 @@ const writesItem = (p: CardParams): boolean =>
 export { RUNNING_STALE_MS };
 export async function sweepRunningCards(db: Db, deps?: StoreDeps): Promise<number> {
   const cutoff = new Date((deps?.now?.() ?? new Date()).getTime() - RUNNING_STALE_MS).toISOString();
-  const n = (await db.prepare("UPDATE conversation_cards SET state = 'failed', error = 'outcome unknown; see the GitHub activity page' WHERE state = 'running' AND acted_at < ?").run(cutoff)).changes as number;
+  const n = (await db.run(db.k.updateTable("conversation_cards").set({ state: "failed", error: "outcome unknown; see the GitHub activity page" }).where("state", "=", "running").where("acted_at", "<", cutoff))).changes;
   await sweepSettling(db);
   return n;
 }

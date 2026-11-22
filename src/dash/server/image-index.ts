@@ -5,10 +5,11 @@
 // changed and the last build is at least `minIntervalMs` old.
 import { allowedImage } from "./images.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
 
 const URL_RE = /https:\/\/[^\s<>"'`)\]]+/g;
 // Cheap row filter so the scan reads only bodies that can hold a proxied image.
-const MAY_HAVE_IMAGE = "(body LIKE '%githubusercontent.com%' OR body LIKE '%user-attachments%')";
+const mayHaveImage = (db: Db, eb: kx.Eb) => eb.or([kx.like(db, "t.body", eb.val("%githubusercontent.com%")), kx.like(db, "t.body", eb.val("%user-attachments%"))]);
 
 /** Allowed image hrefs found in `text`. */
 export function imageUrlsIn(text: string): string[] {
@@ -36,11 +37,14 @@ export class ImageIndex {
   }
 
   async #signature(): Promise<string> {
-    const r = await this.#db.prepare(`SELECT
-      (SELECT value FROM main.settings WHERE key = 'org_high_water') AS hw,
-      (SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at), '') FROM main.items) AS it,
-      (SELECT COUNT(*) FROM main.comments) AS cm,
-      (SELECT group_concat(name) FROM main.tracked_repos) AS tr`).get();
+    const db = this.#db;
+    const r = await db.get(db.k.selectNoFrom((eb) => [
+      eb.selectFrom("main.settings").select("value").where("key", "=", "org_high_water").as("hw"),
+      eb.selectFrom("main.items").select((e) => e.fn.countAll<number>().as("n")).as("itemCount"),
+      eb.selectFrom("main.items").select((e) => e.fn.max<string | null>("updated_at").as("m")).as("itemUpdated"),
+      eb.selectFrom("main.comments").select((e) => e.fn.countAll<number>().as("n")).as("cm"),
+      eb.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("g")).as("tr"),
+    ]));
     return JSON.stringify(r);
   }
 
@@ -61,11 +65,11 @@ export class ImageIndex {
         else if (!repos.includes(repo)) repos.push(repo);
       }
     };
-    for (const table of ["items", "comments"]) {
-      const rows = this.#db.prepare(`SELECT t.repo AS repo, t.body AS body FROM main.${table} t
-        JOIN main.tracked_repos r ON r.name = t.repo WHERE ${MAY_HAVE_IMAGE.replaceAll("body", "t.body")}`);
-      for await (const row of rows.iterate() as AsyncIterable<{ repo: string; body: string | null }>) add(row.repo, row.body);
-    }
+    const db = this.#db;
+    for (const row of await db.all(db.k.selectFrom("main.items as t").innerJoin("main.tracked_repos as r", "r.name", "t.repo")
+      .select(["t.repo", "t.body"]).where((eb) => mayHaveImage(db, eb)))) add(row.repo, row.body);
+    for (const row of await db.all(db.k.selectFrom("main.comments as t").innerJoin("main.tracked_repos as r", "r.name", "t.repo")
+      .select(["t.repo", "t.body"]).where((eb) => mayHaveImage(db, eb)))) add(row.repo, row.body);
     this.#built = { sig, at: now, urls };
     return urls;
   }

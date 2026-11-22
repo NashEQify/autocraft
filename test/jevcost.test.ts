@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { askJev, runJev, saveUsage, setRunner } from "../src/classify/run.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { sqliteOnly } from "./test-db.ts";
 
 const answers = {
   type: { choice: "performance", confidence: 0.8, probabilities: { performance: 0.8, bugfix: 0.2 } },
@@ -12,7 +13,7 @@ const answers = {
 };
 const fresh = async () => await connectDb(join(mkdtempSync(join(SCRATCH, "jevcost-")), "t.db"));
 const cost = async (db: Awaited<ReturnType<typeof fresh>>, agent: string) =>
-  (await db.prepare("SELECT cost_usd AS c FROM token_usage WHERE agent = ?").get(agent) as { c: number | null }).c;
+  (await db.get(db.k.selectFrom("token_usage").select("cost_usd as c").where("agent", "=", agent)))!.c;
 
 test("a Jev call is priced by its input tokens", async () => {
   const db = await fresh();
@@ -24,7 +25,7 @@ test("a Jev call is priced by its input tokens", async () => {
   assert.ok(Math.abs((await cost(db, "jev-a#1"))! - 0.042) < 1e-9);
 });
 
-test("the migration prices unpriced Jev rows and leaves other models alone", async () => {
+test("the migration prices unpriced Jev rows and leaves other models alone", { skip: sqliteOnly("SQLite data migration in src/db.ts migrate(); Postgres starts from schema.pg.sql and a copy of a migrated SQLite database") }, async () => {
   const dir = mkdtempSync(join(SCRATCH, "jevcost-"));
   const path = join(dir, "t.db");
   const db = await connectDb(path);
@@ -44,8 +45,8 @@ test("priority and dupes Jev calls are saved under their own stage", async () =>
     const item = { repo: "a", number: 1, kind: "pr" as const, title: "t", body: "b", lines_changed: 1, files_changed: 1, author_association: null };
     await askJev("priority.jev", item, db);
   } finally { restore(); }
-  const row = await db.prepare("SELECT stage, model, cost_usd AS c FROM token_usage").get() as { stage: string; model: string; c: number };
+  const row = (await db.get(db.k.selectFrom("token_usage").select(["stage", "model", "cost_usd as c"])))!;
   assert.equal(row.stage, "priority");
   assert.equal(row.model, "jev-latest");
-  assert.ok(Math.abs(row.c - 0.021) < 1e-9);
+  assert.ok(Math.abs(row.c! - 0.021) < 1e-9);
 });

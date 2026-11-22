@@ -2,9 +2,12 @@
 // is open or was answered "close as duplicate", or any decision about them was
 // answered Backlog. An answer of "not a duplicate"
 // or "keep both" releases them. No Node imports besides the type and the app-slug lookup.
-import { pilotSql } from "../pilot.ts";
+import { pilotExpr } from "../pilot.ts";
 import { appSlug } from "../github/identity.ts";
 import type { Db } from "../db/index.ts";
+import { jsonEach, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 
 /** The fact line that names the original; the act step reads it. */
 export const DUP_FACT = "duplicate of ";
@@ -23,49 +26,83 @@ export const keptOf = (answer: string): number | null => {
 /** The id of the group decision whose lowest member is `lowest`. */
 export const groupId = (repo: string, lowest: number): string => `${repo}:dupegroup:${lowest}`;
 
-/** SQL condition, true when the item `alias` is a member a group decision closes and the group is still open or was answered other than "not duplicates". */
-export const groupHeldSql = (alias: string): string =>
-  `EXISTS (SELECT 1 FROM dupe_group_items gi JOIN decisions dg ON dg.id = gi.decision_id WHERE gi.repo = ${alias}.repo AND gi.number = ${alias}.number
-    AND gi.role = 'close' AND dg.kind = 'duplicate' AND (dg.answer IS NULL OR dg.answer = 'accept' OR dg.answer LIKE 'keep:%'))`;
-
 /** SQL condition, true when the item `alias` is named by a decision answered Backlog: the decision's own item, an item of a batch, or a member of a duplicate group. */
-export const backlogHeldSql = (alias: string): string =>
+export const backlogHeldSql = (db: Db, alias: string): string =>
   `EXISTS (SELECT 1 FROM decisions db WHERE db.answer = 'backlog' AND (
     (db.repo = ${alias}.repo AND db.number = ${alias}.number)
-    OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(db.items) THEN db.items ELSE '[]' END) bj
-      WHERE json_extract(bj.value, '$.repo') = ${alias}.repo AND json_extract(bj.value, '$.number') = ${alias}.number)
+    OR EXISTS (SELECT 1 FROM ${jsonEach(db, `CASE WHEN ${jsonValid(db, "db.items")} THEN db.items ELSE '[]' END`, "bj")}
+      WHERE ${jsonText(db, "bj.value", "$.repo")} = ${alias}.repo AND ${jsonNum(db, "bj.value", "$.number")} = ${alias}.number)
     OR EXISTS (SELECT 1 FROM dupe_group_items bg WHERE bg.decision_id = db.id AND bg.repo = ${alias}.repo AND bg.number = ${alias}.number)))`;
 
-/** Live app slug as a JSON list; the persisted `app_slugs` setting covers slugs that are unreadable now or were replaced. */
-const liveSlugJson = (): string => JSON.stringify([appSlug()].filter(Boolean)).replaceAll("'", "''");
+// Conditions for queries built with `db.k`; `alias` names the items row in the caller's query.
 
-/** SQL condition, true when the item `alias` (a row of items) is not an integration batch PR the pipeline opened itself (see src/merge/batch.ts). Such PRs only carry reviewed PRs and never enter the pipeline as contributor PRs. */
-export const notOwnIntegrationSql = (alias: string): string =>
-  `NOT EXISTS (SELECT 1 FROM main.merge_batches mb WHERE mb.repo = ${alias}.repo AND mb.pr_number = ${alias}.number
-    AND (${alias}.author = (SELECT value FROM main.settings WHERE key = 'pipeline_login')
-      OR EXISTS (SELECT 1 FROM (SELECT value AS slug FROM json_each('${liveSlugJson()}')
-          UNION SELECT value FROM json_each(CASE WHEN json_valid((SELECT value FROM main.settings WHERE key = 'app_slugs')) THEN (SELECT value FROM main.settings WHERE key = 'app_slugs') ELSE '[]' END))
-        WHERE ${alias}.author IN (slug, slug || '[bot]')))) `;
+/** Condition, true when the item `alias` is a member a group decision closes and the group is still open or was answered other than "not duplicates". */
+export function groupHeldExpr(db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> {
+  return eb.exists(kx.schemaEb(eb).selectFrom("dupe_group_items as gi").innerJoin("decisions as dg", "dg.id", "gi.decision_id").select(eb.lit(1).as("one"))
+    .where("gi.repo", "=", eb.ref(`${alias}.repo`)).where("gi.number", "=", eb.ref(`${alias}.number`)).where("gi.role", "=", "close").where("dg.kind", "=", "duplicate")
+    .where((w) => w.or([w("dg.answer", "is", null), w("dg.answer", "=", "accept"), kx.like(db, "dg.answer", w.val("keep:%"))])));
+}
 
-/** SQL condition, true when the item `alias` (a row of items) is not held by a duplicate decision, is not one of our integration PRs and is in the pilot (when one is set). For WHERE clauses of candidate queries. */
-export const notHeldSql = (alias: string): string =>
-  `${notOwnIntegrationSql(alias)} AND ${pilotSql(alias)} AND NOT EXISTS (SELECT 1 FROM decisions dh WHERE dh.kind = 'duplicate' AND dh.id NOT LIKE '%:dupegroup:%' AND dh.repo = ${alias}.repo AND dh.number = ${alias}.number AND (dh.answer IS NULL OR dh.answer = 'close')) AND NOT ${groupHeldSql(alias)} AND NOT ${backlogHeldSql(alias)}`;
+/** Condition, true when the item `alias` is named by a decision answered Backlog: the decision's own item, an item of a batch, or a member of a duplicate group. */
+export function backlogHeldExpr(db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), repo = eb.ref(`${alias}.repo`), number = eb.ref(`${alias}.number`);
+  const items = eb.case().when(kx.jsonValid(db, "db.items")).then(eb.ref("db.items")).else(eb.val("[]")).end();
+  return eb.exists(t.selectFrom("decisions as db").select(eb.lit(1).as("one")).where("db.answer", "=", "backlog").where((w) => w.or([
+    w.and([w("db.repo", "=", repo), w("db.number", "=", number)]),
+    w.exists(t.selectFrom(kx.jsonEach(db, items, "bj")).select(eb.lit(1).as("one"))
+      .where(kx.jsonText(db, "bj.value", "$.repo"), "=", repo).where(kx.jsonNum(db, "bj.value", "$.number"), "=", number)),
+    w.exists(t.selectFrom("dupe_group_items as bg").select(eb.lit(1).as("one")).where("bg.decision_id", "=", eb.ref("db.id")).where("bg.repo", "=", repo).where("bg.number", "=", number)),
+  ])));
+}
+
+/** Condition, true when the item `alias` (a row of items) is not an integration batch PR the pipeline opened itself (see src/merge/batch.ts). Such PRs only carry reviewed PRs and never enter the pipeline as contributor PRs. */
+export function notOwnIntegrationExpr(db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> {
+  const t = kx.schemaEb(eb), author = eb.ref(`${alias}.author`);
+  const appSlugs = t.selectFrom("main.settings").select("value").where("key", "=", "app_slugs");
+  const stored = eb.case().when(kx.jsonValid(db, appSlugs)).then(appSlugs).else(eb.val("[]")).end();
+  const slugs = t.selectFrom(kx.jsonEach(db, kx.json([appSlug()].filter(Boolean)), "ls")).select("ls.value as slug")
+    .union(t.selectFrom(kx.jsonEach(db, stored, "ps")).select("ps.value as slug")).as("slugs");
+  return eb.not(eb.exists(t.selectFrom("main.merge_batches as mb").select(eb.lit(1).as("one"))
+    .where("mb.repo", "=", eb.ref(`${alias}.repo`)).where("mb.pr_number", "=", eb.ref(`${alias}.number`))
+    .where((w) => w.or([
+      w(author, "=", t.selectFrom("main.settings").select("value").where("key", "=", "pipeline_login")),
+      w.exists(t.selectFrom(slugs).select(eb.lit(1).as("one")).where((v) => v.or([v(author, "=", v.ref("slugs.slug")), v(author, "=", eb(eb.ref("slugs.slug"), "||", eb.val("[bot]")))]))),
+    ]))));
+}
+
+/** Condition, true when the item `alias` (a row of items) is not held by a duplicate decision, is not one of our integration PRs and is in the pilot (when one is set). For WHERE clauses of candidate queries. */
+export function notHeldExpr(db: Db, eb: kx.AnyEb, alias: string): AliasableExpression<SqlBool> {
+  return eb.and([
+    notOwnIntegrationExpr(db, eb, alias),
+    pilotExpr(db, eb, alias),
+    eb.not(eb.exists(kx.schemaEb(eb).selectFrom("decisions as dh").select(eb.lit(1).as("one")).where("dh.kind", "=", "duplicate")
+      .where((w) => w.not(kx.like(db, "dh.id", w.val("%:dupegroup:%")))).where("dh.repo", "=", eb.ref(`${alias}.repo`)).where("dh.number", "=", eb.ref(`${alias}.number`))
+      .where((w) => w.or([w("dh.answer", "is", null), w("dh.answer", "=", "close")])))),
+    eb.not(groupHeldExpr(db, eb, alias)),
+    eb.not(backlogHeldExpr(db, eb, alias)),
+  ]);
+}
 
 /** True when a Backlog answer holds the item. */
 export async function backlogHeld(db: Db, repo: string, number: number): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND ${backlogHeldSql("i")}`).get(repo, number);
+  return !!await db.get(db.k.selectFrom("items as i").select((eb) => eb.lit(1).as("one")).where("i.repo", "=", repo).where("i.number", "=", number)
+    .where((eb) => backlogHeldExpr(db, eb, "i")));
 }
 
 export async function duplicateHeld(db: Db, repo: string, number: number): Promise<boolean> {
-  return !!await db.prepare(`SELECT 1 FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND number = ? AND (answer IS NULL OR answer = 'close')`).get(repo, number)
-    || !!await db.prepare(`SELECT 1 FROM items i WHERE i.repo = ? AND i.number = ? AND (${groupHeldSql("i")} OR ${backlogHeldSql("i")})`).get(repo, number);
+  return !!await db.get(db.k.selectFrom("decisions").select((eb) => eb.lit(1).as("one")).where("kind", "=", "duplicate").where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%"))))
+      .where("repo", "=", repo).where("number", "=", number).where((eb) => eb.or([eb("answer", "is", null), eb("answer", "=", "close")])).limit(1))
+    || !!await db.get(db.k.selectFrom("items as i").select((eb) => eb.lit(1).as("one")).where("i.repo", "=", repo).where("i.number", "=", number)
+      .where((eb) => eb.or([groupHeldExpr(db, eb, "i"), backlogHeldExpr(db, eb, "i")])));
 }
 
 /** Open duplicates pointing at the canonical item: items held by a decision that names it as the original. */
 export async function duplicateCount(db: Db, repo: string, canonical: number): Promise<number> {
-  const pairs = (await db.prepare(`SELECT COUNT(*) AS n FROM decisions WHERE kind = 'duplicate' AND id NOT LIKE '%:dupegroup:%' AND repo = ? AND (answer IS NULL OR answer = 'close')
-    AND EXISTS (SELECT 1 FROM json_each(facts) WHERE value = ?)`).get(repo, `${DUP_FACT}${repo}#${canonical}`) as { n: number }).n;
-  const groups = (await db.prepare(`SELECT COUNT(*) AS n FROM dupe_group_items gi JOIN decisions dg ON dg.id = gi.decision_id
-    WHERE gi.repo = ? AND gi.target = ? AND gi.role = 'close' AND (dg.answer IS NULL OR dg.answer = 'accept' OR dg.answer LIKE 'keep:%')`).get(repo, canonical) as { n: number }).n;
+  const pairs = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where("kind", "=", "duplicate")
+    .where((eb) => eb.not(kx.like(db, "id", eb.val("%:dupegroup:%")))).where("repo", "=", repo).where((eb) => eb.or([eb("answer", "is", null), eb("answer", "=", "close")]))
+    .where((eb) => eb.exists(eb.selectFrom(kx.jsonEach(db, "decisions.facts", "fj")).select(eb.lit(1).as("one")).where("fj.value", "=", `${DUP_FACT}${repo}#${canonical}`)))))!.n;
+  const groups = (await db.get(db.k.selectFrom("dupe_group_items as gi").innerJoin("decisions as dg", "dg.id", "gi.decision_id").select((eb) => eb.fn.countAll<number>().as("n"))
+    .where("gi.repo", "=", repo).where("gi.target", "=", canonical).where("gi.role", "=", "close")
+    .where((eb) => eb.or([eb("dg.answer", "is", null), eb("dg.answer", "=", "accept"), kx.like(db, "dg.answer", eb.val("keep:%"))]))))!.n;
   return pairs + groups;
 }

@@ -9,6 +9,7 @@ import { targetKeys } from "../act/order.ts";
 import { commentApprovalOf } from "../act/approval.ts";
 import { sortSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { inList, jsonBool, jsonText, like } from "../db/kx.ts";
 
 /** Next step text → queued stage and the Queue tab that lists it. Steps not listed here are not queued. */
 const QUEUED: Record<string, Pick<QueueSlot, "stage" | "tab">> = {
@@ -60,10 +61,12 @@ export function orderStages(items: { repo: string; number: number; score: number
 
 /** Orders the pipeline's open ranked items by stage, from the Plan cache: the next-step text of each item in scope, and the batch states of the PRs. */
 export async function computeStages(db: Db): Promise<Stages> {
-  const held = new Set((await db.prepare("SELECT repo, number FROM main.merge_holds").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
-  const rows = await db.prepare(`SELECT p.repo, p.number, p.state, json_extract(p.view, '$.next') AS next FROM main.item_plans p
-    JOIN main.items i ON i.repo = p.repo AND i.number = p.number AND i.state = 'OPEN' JOIN main.item_rank r ON r.repo = p.repo AND r.number = p.number
-    WHERE json_extract(p.view, '$.scope') = 1`).all() as { repo: string; number: number; state: string; next: string | null }[];
+  const held = new Set((await db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
+  const rows = await db.all(db.k.selectFrom("main.item_plans as p")
+    .innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number").on("i.state", "=", "OPEN"))
+    .innerJoin("main.item_rank as r", (j) => j.onRef("r.repo", "=", "p.repo").onRef("r.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "p.state", jsonText(db, "p.view", "$.next").as("next")])
+    .where((eb) => eb(jsonBool(db, "p.view", "$.scope"), "=", 1)));
   const score = scoreLookup(db);
   const out: { repo: string; number: number; score: number; next: string }[] = [];
   for (const r of rows) {
@@ -83,7 +86,8 @@ const EPOCH_CAP = 1e10;
 
 /** Items with an answered close the Act step has not carried out yet, in the step's order. Repos not approved for commenting and disputed answers have no place. */
 async function actEntries(db: Db): Promise<Entry[]> {
-  const rows = await db.prepare(`SELECT repo, number, actions FROM main.item_plans WHERE actions LIKE '%"kind":"act"%'`).all() as { repo: string; number: number; actions: string | null }[];
+  const rows = await db.all(db.k.selectFrom("main.item_plans").select(["repo", "number", "actions"])
+    .where((eb) => like(db, "actions", eb.val('%"kind":"act"%'))));
   const targets: { decisionId: string; repo: string; number: number }[] = [];
   const approved = new Map<string, boolean>();
   for (const r of rows) {
@@ -96,7 +100,7 @@ async function actEntries(db: Db): Promise<Entry[]> {
   }
   if (!targets.length) return [];
   const keys = await targetKeys(db, targets);
-  const disputed = new Set((await db.prepare("SELECT id FROM main.decisions WHERE exec_state = 'disputed' AND id IN (SELECT value FROM json_each(?))").all(JSON.stringify(targets.map((t) => t.decisionId))) as { id: string }[]).map((x) => x.id));
+  const disputed = new Set((await db.all(db.k.selectFrom("main.decisions").select("id").where("exec_state", "=", "disputed").where(inList(db, "id", targets.map((t) => t.decisionId))))).map((x) => x.id));
   return targets.filter((t) => !disputed.has(t.decisionId)).map((t) => {
     const k = keys.get(t.decisionId);
     const sec = k?.at ? Date.parse(k.at) / 1000 : 0;
@@ -108,7 +112,10 @@ const cache = new WeakMap<Db, { sig: string; stages: Stages }>();
 
 // Recomputed when the Plan cache, the work rank, fast track or merge holds change (the `plans` and `steps` topics).
 async function stages(db: Db): Promise<Stages> {
-  const sig = JSON.stringify(await db.prepare("SELECT (SELECT seq FROM change_seq WHERE topic = 'steps') AS s, (SELECT seq FROM change_seq WHERE topic = 'plans') AS p").get() ?? null);
+  const sig = JSON.stringify(await db.get(db.k.selectNoFrom((eb) => [
+    eb.selectFrom("change_seq").select("seq").where("topic", "=", "steps").as("s"),
+    eb.selectFrom("change_seq").select("seq").where("topic", "=", "plans").as("p"),
+  ])) ?? null);
   const hit = cache.get(db);
   if (hit && hit.sig === sig) return hit.stages;
   const fresh = await computeStages(db);

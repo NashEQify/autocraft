@@ -15,7 +15,8 @@ const release = (id: number, tag: string, published: string, assets: ReturnType<
   ({ id, tag_name: tag, name: `PhotoCraft ${tag}`, draft: false, prerelease: false, published_at: published, assets });
 const setup = async () => {
   const db = await connectDb(":memory:");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('photocraft', 'public'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('photocraft')");
+  await db.run(db.k.insertInto("repos").values({ name: "photocraft", visibility: "public" }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "photocraft" }).onConflict((oc) => oc.doNothing()));
   let data: RepoReleases = { stars: 10, releases: [] };
   const poll = (now: number) => pollReleases(db, async (_o, repo) => (repo === "photocraft" ? data : { stars: 0, releases: [] }), now, (l) => { if (!l.includes("repos read")) throw new Error(l); });
   return { db, poll, set: (d: RepoReleases) => { data = d; } };
@@ -56,8 +57,8 @@ test("the first poll is a baseline, later increases and new assets are recorded,
   // 20 days later the hour buckets of day one are day buckets; the day totals stay.
   const late = T0 + 20 * D;
   await poll(late);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM download_deltas WHERE span = 'h'").get() as { n: number }).n, 0);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM download_deltas WHERE span = 'd'").get() as { n: number }).n, 3);
+  assert.equal((await db.get(db.k.selectFrom("download_deltas").select((eb) => eb.fn.countAll<number>().as("n")).where("span", "=", "h")))!.n, 0);
+  assert.equal((await db.get(db.k.selectFrom("download_deltas").select((eb) => eb.fn.countAll<number>().as("n")).where("span", "=", "d")))!.n, 3);
   assert.equal((await dl(db, "30d", late)).totals.downloads, 14);
   assert.equal((await dl(db, "7d", late)).totals.downloads, 0);
 });
@@ -71,11 +72,12 @@ test("range sums count issues, merged PRs and release health from the mirror", a
   const b = release(2, "v1.1.0", "2026-11-08T00:00:00Z", [asset(21, "photocraft-1.1.0-linux-x86_64.deb", 2000)]);
   set({ stars: 5, releases: [a, b] });
   await poll(now - 5 * H);
-  const ins = db.prepare("INSERT INTO items (repo, number, kind, state, title, author, created_at, closed_at, merged_at) VALUES ('photocraft', ?, ?, ?, 't', 'u', ?, ?, ?)");
-  await ins.run(1, "issue", "OPEN", "2026-11-05T00:00:00Z", null, null);   // while v1.0.0 was newest
-  await ins.run(2, "issue", "CLOSED", "2026-11-08T05:00:00Z", "2026-11-09T01:00:00Z", null);   // while v1.1.0 was newest
-  await ins.run(3, "issue", "OPEN", "2026-11-09T02:00:00Z", null, null);
-  await ins.run(4, "pr", "MERGED", "2026-11-09T00:00:00Z", "2026-11-09T03:00:00Z", "2026-11-09T03:00:00Z");
+  const ins = (number: number, kind: string, state: string, created_at: string, closed_at: string | null, merged_at: string | null) =>
+    db.run(db.k.insertInto("items").values({ repo: "photocraft", number, kind, state, title: "t", author: "u", created_at, closed_at, merged_at }));
+  await ins(1, "issue", "OPEN", "2026-11-05T00:00:00Z", null, null);   // while v1.0.0 was newest
+  await ins(2, "issue", "CLOSED", "2026-11-08T05:00:00Z", "2026-11-09T01:00:00Z", null);   // while v1.1.0 was newest
+  await ins(3, "issue", "OPEN", "2026-11-09T02:00:00Z", null, null);
+  await ins(4, "pr", "MERGED", "2026-11-09T00:00:00Z", "2026-11-09T03:00:00Z", "2026-11-09T03:00:00Z");
   const t = await dl(db, "today", now);
   assert.deepEqual([t.totals.downloads, t.totals.issuesOpened, t.totals.issuesClosed, t.totals.prsMerged], [2000, 1, 1, 1]);
   assert.equal(t.totals.issuesPer1k, 0.5);
@@ -103,7 +105,7 @@ test("an asset GitHub stops listing keeps its history and resumes from its store
   await poll(T0 + 3 * H);
   assert.equal((await dl(db, "all", T0 + 3 * H)).totals.downloads, 115);
   assert.equal((await dl(db, "today", T0 + 3 * H)).totals.downloads, 15, "only the increase since the stored count is added");
-  assert.equal((await db.prepare("SELECT gone_at FROM release_assets WHERE asset_id = 11").get() as { gone_at: string | null }).gone_at, null);
+  assert.equal((await db.get(db.k.selectFrom("release_assets").select("gone_at").where("asset_id", "=", 11)))!.gone_at, null);
 });
 
 test("a poll with no new counts does not move the settings topic the planner listens to", async () => {

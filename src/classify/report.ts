@@ -14,9 +14,9 @@ export const itemUrl = (r: { repo: string; number: number; kind: string }) =>
   `https://github.com/${slugOf(r.repo)}/${r.kind === "pr" ? "pull" : "issues"}/${r.number}`;
 
 export async function loadRows(db: Db, runId: string): Promise<Row[]> {
-  const rows = await db.prepare(`SELECT c.repo, c.number, i.kind, i.title, c.classifier, c.type_label, c.flags, c.reason, c.probs
-    FROM classifications c JOIN items i ON i.repo = c.repo AND i.number = c.number WHERE c.run_id = ?`).all(runId) as
-    (Omit<Row, "flags" | "top"> & { flags: string | null; probs: string | null })[];
+  const rows = await db.all(db.k.selectFrom("classifications as c").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "c.repo").onRef("i.number", "=", "c.number"))
+    .select((eb) => ["c.repo", "c.number", "i.kind", eb.fn.coalesce("i.title", eb.val("")).as("title"), "c.classifier", eb.fn.coalesce("c.type_label", eb.val("")).as("type_label"),
+      "c.flags", eb.fn.coalesce("c.reason", eb.val("")).as("reason"), "c.probs"]).$narrowType<{ kind: "pr" | "issue" }>().where("c.run_id", "=", runId));
   return rows.map(({ flags, probs, ...r }) => ({
     ...r, flags: flags ? JSON.parse(flags) : [], top: probs ? (JSON.parse(probs).top ?? null) : null,
   }));

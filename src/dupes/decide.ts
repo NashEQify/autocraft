@@ -5,18 +5,19 @@
 // which the later stages read to hold the items to close. Per-pair decisions from
 // before groups exist stay until answered; an open one of a group is superseded
 // by the group decision.
-import { settledBySql } from "../settlers.ts";
+import { settledByExpr } from "../settlers.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { audit } from "../dash/audit.ts";
 import { actionable, ask, factsOf, getDecision, validateAsk } from "../decisions.ts";
 import { compareCanonical, canonInfo } from "./canonical.ts";
-import { backlogHeldSql, DUP_FACT, GROUP_OPTIONS, groupId, keepKey, keptOf } from "./held.ts";
+import { DUP_FACT, GROUP_OPTIONS, groupId, keepKey, keptOf } from "./held.ts";
 import { duplicateGroups, kindSetsLoader, currentComparison, storedComparisons, type Group, type KindSet, type StoredComparison } from "./plan.ts";
 import { oneSentence } from "../review/summary.ts";
 import { storeOptionTexts } from "./texts.ts";
-import { inPilot, pilotSqlFor } from "../pilot.ts";
+import { inPilot, pilotExprFor } from "../pilot.ts";
 import { withdrawGroupedQuestions } from "../merge/withdraw.ts";
 import { filterSeq, mapSeq, someSeq } from "../async-seq.ts";
+import * as kx from "../db/kx.ts";
 import type { Db } from "../db/index.ts";
 
 export { duplicateEdges, duplicateGroups, type Group } from "./plan.ts";
@@ -37,7 +38,7 @@ export type GroupPlan = {
 
 const list = (ns: number[]) => ns.map((n) => `#${n}`).join(", ");
 
-const ANSWERED_GROUP_SQL = "d.kind = 'duplicate' AND d.answer IS NOT NULL AND d.answer NOT IN ('superseded', 'distinct', 'backlog')";
+const answeredGroup = (eb: kx.AnyEb) => eb.and([eb("d.kind", "=", "duplicate"), eb("d.answer", "is not", null), eb("d.answer", "not in", ["superseded", "distinct", "backlog"])]);
 type Answered = { settled: Set<number>; keep: Map<string, number> };
 
 /**
@@ -45,17 +46,21 @@ type Answered = { settled: Set<number>; keep: Map<string, number> };
  * their keep stays kept. The decisions and their members, without the released ones, are read once for all groups.
  */
 async function answeredKeepsLoader(db: Db, repo?: string): Promise<(repo: string, members: number[]) => Answered> {
-  const only = repo !== undefined ? [repo] : [];
   const byMember = new Map<string, { id: string; asked_at: string | null }[]>();
-  for (const r of await db.prepare(`SELECT DISTINCT d.id, d.asked_at, gi.repo, gi.number FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE ${ANSWERED_GROUP_SQL}${repo !== undefined ? " AND gi.repo = ?" : ""}`).all(...only) as { id: string; asked_at: string | null; repo: string; number: number }[]) {
+  for (const r of await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id")
+    .select(["d.id", "d.asked_at", "gi.repo", "gi.number"]).distinct()
+    .where(answeredGroup).$if(repo !== undefined, (q) => q.where("gi.repo", "=", repo!)))) {
     const k = `${r.repo}#${r.number}`;
     (byMember.get(k) ?? byMember.set(k, []).get(k)!).push({ id: r.id, asked_at: r.asked_at });
   }
   // Each decision's members in its primary key order (number), as a read by decision id gives them.
   const members = new Map<string, { number: number; kind: string; role: string }[]>();
-  for (const r of await db.prepare(`SELECT gi.decision_id, gi.number, gi.kind, gi.role FROM dupe_group_items gi JOIN decisions d ON d.id = gi.decision_id WHERE ${ANSWERED_GROUP_SQL}
-    AND NOT EXISTS (SELECT 1 FROM dupe_group_posts p WHERE p.decision_id = gi.decision_id AND p.number = gi.number AND p.step = 'released') ORDER BY gi.decision_id, gi.number`).all() as { decision_id: string; number: number; kind: string; role: string }[])
+  for (const r of await db.all(db.k.selectFrom("dupe_group_items as gi").innerJoin("decisions as d", "d.id", "gi.decision_id")
+    .select(["gi.decision_id", "gi.number", "gi.kind", "gi.role"])
+    .where(answeredGroup)
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("dupe_group_posts as p").select(eb.lit(1).as("one"))
+      .whereRef("p.decision_id", "=", "gi.decision_id").whereRef("p.number", "=", "gi.number").where("p.step", "=", "released"))))
+    .orderBy("gi.decision_id").orderBy("gi.number")))
     (members.get(r.decision_id) ?? members.set(r.decision_id, []).get(r.decision_id)!).push(r);
   // ORDER BY asked_at, id: NULL first, then byte order.
   const before = (a: string | null, b: string | null): number => (a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : 1);
@@ -118,7 +123,7 @@ export async function groupPlans(db: Db, repo?: string): Promise<GroupPlan[]> {
 
 /** What Act compares before closing a member: a PR's head commit, an issue's text hash. */
 async function headOf(db: Db, repo: string, n: number, kind: string): Promise<string | null> {
-  const r = await db.prepare("SELECT head_oid, embed_hash FROM items WHERE repo = ? AND number = ?").get(repo, n) as { head_oid: string | null; embed_hash: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("items").select(["head_oid", "embed_hash"]).where("repo", "=", repo).where("number", "=", n));
   return (kind === "pr" ? r?.head_oid : r?.embed_hash) ?? null;
 }
 
@@ -132,28 +137,29 @@ async function boundHead(db: Db, p: GroupPlan, i: { number: number; kind: string
 }
 
 async function supersede(db: Db, p: GroupPlan, id: string, at: string): Promise<void> {
-  const ph = p.group.members.map(() => "?").join(",");
-  const rows = await db.prepare(`SELECT id FROM decisions WHERE kind = 'duplicate' AND repo = ? AND answer IS NULL AND id <> ? AND number IN (${ph})`).all(p.repo, id, ...p.group.members) as { id: string }[];
-  const items = await db.prepare(`SELECT DISTINCT d.id FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE d.kind = 'duplicate' AND d.repo = ? AND d.answer IS NULL AND d.id <> ? AND gi.number IN (${ph})`).all(p.repo, id, ...p.group.members) as { id: string }[];
+  const rows = await db.all(db.k.selectFrom("decisions").select("id").where("kind", "=", "duplicate").where("repo", "=", p.repo).where("answer", "is", null)
+    .where("id", "<>", id).where(kx.inList(db, "number", p.group.members, "bigint")));
+  const items = await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id").select("d.id").distinct()
+    .where("d.kind", "=", "duplicate").where("d.repo", "=", p.repo).where("d.answer", "is", null).where("d.id", "<>", id)
+    .where(kx.inList(db, "gi.number", p.group.members, "bigint")));
   for (const r of new Set([...rows, ...items].map((x) => x.id))) {
-    await db.prepare("UPDATE main.decisions SET answer = 'superseded', answered_by = ?, answered_at = ?, applied_at = ? WHERE id = ? AND answer IS NULL").run(ACTOR, at, at, r);
+    await db.run(db.k.updateTable("main.decisions").set({ answer: "superseded", answered_by: ACTOR, answered_at: at, applied_at: at }).where("id", "=", r).where("answer", "is", null));
     await audit(db, ACTOR, "duplicate-superseded", r, { by: id });
   }
 }
 
 async function unchanged(db: Db, q: Record<string, unknown>, p: GroupPlan): Promise<boolean> {
   const id = q.id as string;
-  const cur = await db.prepare("SELECT question, context, facts, options, recommended, recommended_reason, summary, summary_by, prepared_at FROM decisions WHERE id = ? AND answer IS NULL").get(id) as Record<string, string | null> | undefined;
+  const cur = await db.get(db.k.selectFrom("decisions").select(["question", "context", "facts", "options", "recommended", "recommended_reason", "summary", "summary_by", "prepared_at"])
+    .where("id", "=", id).where("answer", "is", null));
   if (!cur) return false;
   const next = validateAsk(q);
   // A prepared decision keeps the judgement model's summary and pick.
-  const cols = ["question", "context", "facts", "options", ...(cur.prepared_at ? [] : ["recommended", "recommended_reason", "summary", "summary_by"])];
+  const cols: (keyof typeof cur)[] = ["question", "context", "facts", "options", ...(cur.prepared_at ? [] : ["recommended", "recommended_reason", "summary", "summary_by"] as const)];
   if (cols.some((c) => cur[c] !== next[c])) return false;
-  const g = await db.prepare("SELECT source, applied_answer FROM dupe_groups WHERE decision_id = ?").get(id) as { source: string; applied_answer: string | null } | undefined;
+  const g = await db.get(db.k.selectFrom("dupe_groups").select(["source", "applied_answer"]).where("decision_id", "=", id));
   if (!g || g.source !== p.source || g.applied_answer !== null) return false;
-  type Row = { number: number; role: string; target: number | null; base_role: string; base_target: number | null; detail: string | null; head: string | null };
-  const rows = await db.prepare("SELECT number, role, target, base_role, base_target, detail, head FROM dupe_group_items WHERE decision_id = ?").all(id) as Row[];
+  const rows = await db.all(db.k.selectFrom("dupe_group_items").select(["number", "role", "target", "base_role", "base_target", "detail", "head"]).where("decision_id", "=", id));
   if (rows.some((r) => r.role !== r.base_role || r.target !== r.base_target)) return false;
   const key = (number: number, role: string, target: number | null, detail: string | null, head: string | null) => JSON.stringify([number, role, target, detail, head]);
   const stored = rows.map((r) => key(r.number, r.base_role, r.base_target, r.detail, r.head)).sort();
@@ -163,9 +169,9 @@ async function unchanged(db: Db, q: Record<string, unknown>, p: GroupPlan): Prom
 
 /** The open group decision that already lists one of the plan's members, else the first unused id. */
 async function idFor(db: Db, p: GroupPlan): Promise<string> {
-  const ph = p.group.members.map(() => "?").join(",");
-  const open = await db.prepare(`SELECT d.id FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE d.kind = 'duplicate' AND d.answer IS NULL AND d.id LIKE '%:dupegroup:%' AND gi.repo = ? AND gi.number IN (${ph}) ORDER BY d.id LIMIT 1`).get(p.repo, ...p.group.members) as { id: string } | undefined;
+  const open = await db.get(db.k.selectFrom("decisions as d").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id").select("d.id")
+    .where("d.kind", "=", "duplicate").where("d.answer", "is", null).where((eb) => kx.like(db, "d.id", eb.val("%:dupegroup:%")))
+    .where("gi.repo", "=", p.repo).where(kx.inList(db, "gi.number", p.group.members, "bigint")).orderBy("d.id").limit(1));
   if (open) return open.id;
   for (let k = 1; ; k++) {
     const id = k === 1 ? p.baseId : `${p.baseId}~${k}`;
@@ -176,7 +182,6 @@ async function idFor(db: Db, p: GroupPlan): Promise<string> {
 const refList = (ns: number[]) => list(ns);
 
 async function textOf(db: Db, p: GroupPlan) {
-  const info = db.prepare("SELECT kind, state, title, comments_count FROM items WHERE repo = ? AND number = ?");
   const keeps = p.items.filter((i) => i.role === "keep");
   const closes = p.items.filter((i) => i.role === "close").map((i) => i.number);
   const stays = p.items.filter((i) => i.role === "stay").map((i) => i.number);
@@ -193,7 +198,7 @@ async function textOf(db: Db, p: GroupPlan) {
   const lead = p.sets.find((s) => s.cmp.kept === primary.number) ?? p.sets[0]!;
   const why = byRule || lead.cmp.source === "single" ? null : oneSentence(lead.cmp.why) ?? oneSentence(lead.cmp.reason);
   const keepFacts = await mapSeq(keeps, async (k) => {
-    const r = await info.get(p.repo, k.number) as { kind: string; state: string; title: string | null; comments_count: number | null };
+    const r = (await db.get(db.k.selectFrom("items").select(["kind", "state", "title", "comments_count"]).where("repo", "=", p.repo).where("number", "=", k.number)))!;
     return `Keep: #${k.number} (${r.kind === "pr" ? "PR" : "issue"}, ${r.state === "OPEN" ? "open" : r.state === "MERGED" ? "merged" : "closed"}, ${r.comments_count ?? 0} comments): ${clip(r.title)}`;
   });
   const chosen = byRule ? `Chosen by: rule (${p.reasons.map((r) => r.replace(/^kept by rule: /, "")).join(", ") || "older"}); the model comparison gave no answer`
@@ -217,8 +222,9 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
         return null;
       }
       // An answer waiting for Act that already lists every member to close: no second decision.
-      const waiting = new Set((await db.prepare(`SELECT gi.number FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id WHERE d.kind = 'duplicate' AND d.id LIKE '%:dupegroup:%' AND d.repo = ?
-        AND d.answer IS NOT NULL AND d.answer NOT IN ('superseded', 'distinct', 'backlog') AND d.applied_at IS NULL`).all(p.repo) as { number: number }[]).map((r) => r.number));
+      const waiting = new Set((await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id").select("gi.number")
+        .where("d.kind", "=", "duplicate").where((eb) => kx.like(db, "d.id", eb.val("%:dupegroup:%"))).where("d.repo", "=", p.repo)
+        .where("d.answer", "is not", null).where("d.answer", "not in", ["superseded", "distinct", "backlog"]).where("d.applied_at", "is", null))).map((r) => r.number));
       p.items = p.items.filter((i) => !(i.role === "close" && waiting.has(i.number)));
       if (!p.items.some((i) => i.role === "close")) return null;
       const id = await idFor(db, p);
@@ -236,14 +242,17 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
       if (await unchanged(db, q, p)) return null;
       await ask(db, [q], true);
       // ask() keeps the stored summary_by when the new one is empty; the author must follow the text.
-      await db.prepare("UPDATE main.decisions SET summary_by = ? WHERE id = ?").run(t.by || null, id);
+      await db.run(db.k.updateTable("main.decisions").set({ summary_by: t.by || null }).where("id", "=", id));
       // A refresh restores the comparison's roles; an answer is applied to them again.
-      await db.prepare("INSERT INTO dupe_groups (decision_id, repo, source) VALUES (?, ?, ?) ON CONFLICT(decision_id) DO UPDATE SET source = excluded.source, applied_answer = NULL").run(id, p.repo, p.source);
-      await db.prepare("DELETE FROM dupe_group_items WHERE decision_id = ?").run(id);
-      const ins = db.prepare("INSERT INTO dupe_group_items (decision_id, repo, number, kind, role, target, detail, base_role, base_target, head) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
-      for (const i of p.items) await ins.run(id, p.repo, i.number, i.kind, i.role, i.target, i.detail ? JSON.stringify(i.detail) : null, i.role, i.target, await boundHead(db, p, i));
+      await db.run(db.k.insertInto("dupe_groups").values({ decision_id: id, repo: p.repo, source: p.source })
+        .onConflict((oc) => oc.column("decision_id").doUpdateSet((eb) => ({ source: eb.ref("excluded.source"), applied_answer: null }))));
+      await db.run(db.k.deleteFrom("dupe_group_items").where("decision_id", "=", id));
+      for (const i of p.items) await db.run(db.k.insertInto("dupe_group_items").values({
+        decision_id: id, repo: p.repo, number: i.number, kind: i.kind, role: i.role, target: i.target, detail: i.detail ? JSON.stringify(i.detail) : null,
+        base_role: i.role, base_target: i.target, head: await boundHead(db, p, i),
+      }));
       await storeOptionTexts(db, id, ["accept", ...alts.map((a) => keepKey(a.number))], async (n) => {
-        const r = await db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?").get(p.repo, n) as { state: string } | undefined;
+        const r = await db.get(db.k.selectFrom("items").select("state").where("repo", "=", p.repo).where("number", "=", n));
         return r?.state === "OPEN" && await inPilot(db, p.repo, n);
       });
       return id;
@@ -259,8 +268,9 @@ export async function askGroupDecisions(db: Db, repo: string | undefined, at: st
 /** Groups whose plan has no decision yet. Reads only, for the autopilot. */
 export async function groupsToAsk(db: Db, repo?: string): Promise<GroupPlan[]> {
   // A plan is asked under a new id unless an open group decision already lists one of its members (idFor), read once for all plans.
-  const open = new Set((await db.prepare(`SELECT gi.repo || '#' || gi.number AS k FROM decisions d JOIN dupe_group_items gi ON gi.decision_id = d.id
-    WHERE d.kind = 'duplicate' AND d.answer IS NULL AND d.id LIKE '%:dupegroup:%'`).all() as { k: string }[]).map((r) => r.k));
+  const open = new Set((await db.all(db.k.selectFrom("decisions as d").innerJoin("dupe_group_items as gi", "gi.decision_id", "d.id")
+    .select((eb) => eb(eb(eb.ref("gi.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "gi.number")).as("k"))
+    .where("d.kind", "=", "duplicate").where("d.answer", "is", null).where((eb) => kx.like(db, "d.id", eb.val("%:dupegroup:%"))))).map((r) => r.k));
   return (await groupPlans(db, repo)).filter((p) => p.closing && !p.group.members.some((n) => open.has(`${p.repo}#${n}`)));
 }
 
@@ -269,56 +279,66 @@ export async function groupsToAsk(db: Db, repo?: string): Promise<GroupPlan[]> {
  * Each is listed with the items it concerns (a pair's two, a group's members), so the item plans can carry it.
  */
 export async function answersToApply(db: Db): Promise<{ id: string; refs: string[] }[]> {
-  const rows = await db.prepare(`SELECT d.id, d.repo, d.number FROM decisions d WHERE d.kind = 'duplicate' AND d.answer IS NOT NULL AND d.answer <> 'backlog' AND d.applied_at IS NULL
-    AND ${settledBySql("d")}
-    AND ((d.id NOT LIKE '%:dupegroup:%' AND d.answer <> 'close' AND ${pilotSqlFor("d.repo", "d.number")})
-      OR (d.id LIKE '%:dupegroup:%' AND EXISTS (SELECT 1 FROM dupe_group_items gi WHERE gi.decision_id = d.id AND ${pilotSqlFor("gi.repo", "gi.number")}) AND COALESCE((SELECT g.applied_answer FROM dupe_groups g WHERE g.decision_id = d.id), '') <> d.answer))`).all() as
-    { id: string; repo: string | null; number: number | null }[];
-  const members = db.prepare("SELECT repo, number FROM dupe_group_items WHERE decision_id = ?");
+  const rows = await db.all(db.k.selectFrom("decisions as d").select(["d.id", "d.repo", "d.number"])
+    .where("d.kind", "=", "duplicate").where("d.answer", "is not", null).where("d.answer", "<>", "backlog").where("d.applied_at", "is", null)
+    .where((eb) => settledByExpr(db, eb, "d"))
+    .where((eb) => eb.or([
+      eb.and([eb.not(kx.like(db, "d.id", eb.val("%:dupegroup:%"))), eb("d.answer", "<>", "close"), pilotExprFor(db, eb, "d.repo", "d.number")]),
+      eb.and([
+        kx.like(db, "d.id", eb.val("%:dupegroup:%")),
+        eb.exists(eb.selectFrom("dupe_group_items as gi").select(eb.lit(1).as("one")).whereRef("gi.decision_id", "=", "d.id")
+          .where((e) => pilotExprFor(db, e, "gi.repo", "gi.number"))),
+        eb(eb.fn.coalesce(eb.selectFrom("dupe_groups as g").select("g.applied_answer").whereRef("g.decision_id", "=", "d.id"), eb.val("")), "<>", eb.ref("d.answer")),
+      ]),
+    ])));
   return await mapSeq(rows, async (d) => {
-    if (d.id.includes(":dupegroup:")) return { id: d.id, refs: (await members.all(d.id) as { repo: string; number: number }[]).map((m) => `${m.repo}#${m.number}`) };
+    if (d.id.includes(":dupegroup:")) return { id: d.id, refs: (await db.all(db.k.selectFrom("dupe_group_items").select(["repo", "number"]).where("decision_id", "=", d.id))).map((m) => `${m.repo}#${m.number}`) };
     const other = /@(\d+)$/.exec(d.id)?.[1];
     return { id: d.id, refs: [`${d.repo}#${d.number}`, ...(other ? [`${d.repo}#${other}`] : [])] };
   });
 }
 
 async function markDistinct(db: Db, repo: string, numbers: number[], at: string): Promise<void> {
-  const upd = db.prepare("UPDATE duplicate_pairs SET verdict = 'distinct', by_operator = 1 WHERE repo = ? AND a = ? AND b = ?");
-  const ins = db.prepare(`INSERT OR IGNORE INTO duplicate_pairs (repo, a, b, a_hash, b_hash, similarity, verdict, by_operator, created_at, checked_at)
-    SELECT ?, ?, ?, ia.embed_hash, ib.embed_hash, 0, 'distinct', 1, ?, ? FROM items ia, items ib
-    WHERE ia.repo = ? AND ia.number = ? AND ib.repo = ? AND ib.number = ?`);
   for (const x of numbers) for (const y of numbers) {
     if (x >= y) continue;
-    await upd.run(repo, x, y);
+    await db.run(db.k.updateTable("duplicate_pairs").set({ verdict: "distinct", by_operator: 1 }).where("repo", "=", repo).where("a", "=", x).where("b", "=", y));
     // A pair not stored yet (or stored at other text) still must never be asked again.
-    await ins.run(repo, x, y, at, at, repo, x, repo, y);
+    await db.run(db.k.insertInto("duplicate_pairs")
+      .columns(["repo", "a", "b", "a_hash", "b_hash", "similarity", "verdict", "by_operator", "created_at", "checked_at"])
+      .expression((eb) => eb.selectFrom(["items as ia", "items as ib"]).select((e) => [
+        e.val(repo).as("repo"), e.val(x).as("a"), e.val(y).as("b"), "ia.embed_hash as a_hash", "ib.embed_hash as b_hash", e.lit(0).as("similarity"),
+        e.val("distinct").as("verdict"), e.lit(1).as("by_operator"), e.val(at).as("created_at"), e.val(at).as("checked_at"),
+      ]).where("ia.repo", "=", repo).where("ia.number", "=", x).where("ib.repo", "=", repo).where("ib.number", "=", y)
+        .where("ia.embed_hash", "is not", null).where("ib.embed_hash", "is not", null))
+      .onConflict((oc) => oc.doNothing()));
   }
 }
 
 /** Back to the comparison's roles; the next answer is applied to them. */
 async function restoreRoles(db: Db, id: string): Promise<void> {
-  await db.prepare("UPDATE dupe_group_items SET role = base_role, target = base_target WHERE decision_id = ?").run(id);
+  await db.run(db.k.updateTable("dupe_group_items").set((eb) => ({ role: eb.ref("base_role"), target: eb.ref("base_target") })).where("decision_id", "=", id));
 }
 
 /** An undone answer leaves nothing of it in the roles. */
 export async function resetGroupAnswer(db: Db, id: string): Promise<void> {
   if (!id.includes(":dupegroup:")) return;
   await restoreRoles(db, id);
-  await db.prepare("UPDATE dupe_groups SET applied_answer = NULL WHERE decision_id = ?").run(id);
+  await db.run(db.k.updateTable("dupe_groups").set({ applied_answer: null }).where("decision_id", "=", id));
 }
 
 /** Writes the roles an answer of "keep #N instead" implies: N is kept; the kept item it replaces closes when it is open and in the pilot, else stays. */
 async function rekeep(db: Db, id: string, n: number, repo: string): Promise<void> {
   await restoreRoles(db, id);
-  const row = await db.prepare("SELECT kind FROM dupe_group_items WHERE decision_id = ? AND number = ?").get(id, n) as { kind: string } | undefined;
+  const row = await db.get(db.k.selectFrom("dupe_group_items").select("kind").where("decision_id", "=", id).where("number", "=", n));
   if (!row) return;
-  const old = await db.prepare("SELECT gi.number, i.state FROM dupe_group_items gi JOIN items i ON i.repo = gi.repo AND i.number = gi.number WHERE gi.decision_id = ? AND gi.kind = ? AND gi.role = 'keep' AND gi.number <> ?").all(id, row.kind, n) as { number: number; state: string }[];
+  const old = await db.all(db.k.selectFrom("dupe_group_items as gi").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "gi.repo").onRef("i.number", "=", "gi.number"))
+    .select(["gi.number", "i.state"]).where("gi.decision_id", "=", id).where("gi.kind", "=", row.kind).where("gi.role", "=", "keep").where("gi.number", "<>", n));
   for (const o of old) {
     const closes = o.state === "OPEN" && await inPilot(db, repo, o.number);
-    await db.prepare("UPDATE dupe_group_items SET role = ?, target = ? WHERE decision_id = ? AND number = ?").run(closes ? "close" : "stay", closes ? n : null, id, o.number);
+    await db.run(db.k.updateTable("dupe_group_items").set({ role: closes ? "close" : "stay", target: closes ? n : null }).where("decision_id", "=", id).where("number", "=", o.number));
   }
-  await db.prepare("UPDATE dupe_group_items SET target = ? WHERE decision_id = ? AND kind = ? AND role = 'close' AND number <> ?").run(n, id, row.kind, n);
-  await db.prepare("UPDATE dupe_group_items SET role = 'keep', target = NULL WHERE decision_id = ? AND number = ?").run(id, n);
+  await db.run(db.k.updateTable("dupe_group_items").set({ target: n }).where("decision_id", "=", id).where("kind", "=", row.kind).where("role", "=", "close").where("number", "<>", n));
+  await db.run(db.k.updateTable("dupe_group_items").set({ role: "keep", target: null }).where("decision_id", "=", id).where("number", "=", n));
 }
 
 /**
@@ -333,16 +353,16 @@ export async function applyDuplicateAnswers(db: Db, at: string, only?: ReadonlyS
     if (a.kind !== "duplicate" || a.number === null || a.repo === null) continue;
     if (only && !only.has(a.id)) continue;
     if (a.id.includes(":dupegroup:")) {
-      const g = await db.prepare("SELECT applied_answer FROM dupe_groups WHERE decision_id = ?").get(a.id) as { applied_answer: string | null } | undefined;
+      const g = await db.get(db.k.selectFrom("dupe_groups").select("applied_answer").where("decision_id", "=", a.id));
       if (!g || g.applied_answer === a.answer) continue;
       await restoreRoles(db, a.id);
-      const members = (await db.prepare("SELECT number FROM dupe_group_items WHERE decision_id = ?").all(a.id) as { number: number }[]).map((r) => r.number);
+      const members = (await db.all(db.k.selectFrom("dupe_group_items").select("number").where("decision_id", "=", a.id))).map((r) => r.number);
       const kept = keptOf(a.answer);
       if (a.answer === "distinct") {
         await markDistinct(db, a.repo, members, at);
-        await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+        await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "=", a.id).where("applied_at", "is", null));
       } else if (kept !== null) await rekeep(db, a.id, kept, a.repo);
-      await db.prepare("UPDATE dupe_groups SET applied_answer = ? WHERE decision_id = ?").run(a.answer, a.id);
+      await db.run(db.k.updateTable("dupe_groups").set({ applied_answer: a.answer }).where("decision_id", "=", a.id));
       await audit(db, ACTOR, "duplicate-answer", `${a.repo}#${a.number}`, { decision: a.id, answer: a.answer });
       n++;
       continue;
@@ -352,7 +372,7 @@ export async function applyDuplicateAnswers(db: Db, at: string, only?: ReadonlyS
     const f = factsOf(d).find((x) => x.startsWith(DUP_FACT))?.slice(DUP_FACT.length);
     const m = f ? /^([\w.-]+)#(\d+)$/.exec(f) : null;
     if ((a.answer === "distinct" || a.answer === "keep") && m) await markDistinct(db, a.repo, [a.number, Number(m[2])], at);
-    await db.prepare("UPDATE main.decisions SET applied_at = ? WHERE id = ? AND applied_at IS NULL").run(at, a.id);
+    await db.run(db.k.updateTable("main.decisions").set({ applied_at: at }).where("id", "=", a.id).where("applied_at", "is", null));
     await audit(db, ACTOR, "duplicate-answer", `${a.repo}#${a.number}`, { decision: a.id, answer: a.answer });
     n++;
   }

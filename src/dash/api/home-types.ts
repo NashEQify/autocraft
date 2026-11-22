@@ -1,6 +1,9 @@
 // The Home and Items-status contract. The dashboard declares the same shapes in web/src/api/types.ts.
 import type { DecisionKind, ItemChecks, ItemKind, ItemState, RepoName } from "../../../web/src/api/types.ts";
 import type { ItemPhase, ItemStatus } from "../../core/item-status.ts";
+import type { AliasableExpression } from "kysely";
+import type { Db } from "../../db/index.ts";
+import { jsonText, type Eb } from "../../db/kx.ts";
 
 export type { ItemPhase, ItemStatus };
 export const ITEM_PHASES: readonly ItemPhase[] = ["Triage", "Waiting for a person", "Review", "Fixing", "Verifying", "In queue", "Merged", "Closed", "Held", "Out of scope", "Pipeline off"];
@@ -24,3 +27,9 @@ export interface ItemStatusList { rows: ItemStatusRow[]; byPhase: Record<ItemPha
 
 /** The SQL expression of an item's phase: its plan's stored status, else the one an item without a plan gets (core/item-status.ts statusFromItem). Needs `i` (items) and `p` (item_plans, left joined). */
 export const PHASE_SQL = `COALESCE(json_extract(p.view, '$.status.phase'), CASE WHEN i.merged_at IS NOT NULL THEN 'Merged' WHEN i.closed_at IS NOT NULL THEN 'Closed' ELSE 'Triage' END)`;
+
+/** `PHASE_SQL` as an expression on `i` (items) and `p` (item_plans, left joined). */
+export const phaseExpr = (db: Db, eb: Eb): AliasableExpression<ItemPhase> => eb.fn.coalesce(
+  jsonText(db, "p.view", "$.status.phase"),
+  eb.case().when("i.merged_at", "is not", null).then("Merged").when("i.closed_at", "is not", null).then("Closed").else("Triage").end(),
+) as AliasableExpression<ItemPhase>;

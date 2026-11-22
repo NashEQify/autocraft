@@ -1,14 +1,14 @@
 // Kind, state and title of mirrored items, for rows that show an item reference.
 import type { ItemRef, ItemShown, ItemState } from "../../../web/src/api/types.ts";
 import type { Db } from "../../db/index.ts";
+import { tupleIn } from "../../db/kx.ts";
 
 const STATE: Record<string, ItemState> = { OPEN: "open", MERGED: "merged", CLOSED: "closed" };
 export const itemState = (s: string | null | undefined): ItemState => STATE[s ?? ""] ?? "open";
 
 export function shownLookup(db: Db): (repo: string, number: number) => Promise<ItemShown> {
-  const q = db.prepare("SELECT kind, state, title FROM items WHERE repo = ? AND number = ?");
   return async (repo, number) => {
-    const r = await q.get(repo, number) as { kind: string; state: string; title: string | null } | undefined;
+    const r = await db.get(db.k.selectFrom("items").select(["kind", "state", "title"]).where("repo", "=", repo).where("number", "=", number));
     return r ? { kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), title: r.title } : { kind: null, state: null, title: null };
   };
 }
@@ -21,8 +21,8 @@ export async function shownMap(db: Db, refs: Iterable<{ repo: string; number: nu
   for (const r of refs) keys.set(`${r.repo}#${r.number}`, [r.repo, r.number]);
   const out = new Map<string, ItemShown>();
   if (!keys.size) return out;
-  const rows = await db.prepare(`SELECT repo, number, kind, state, title FROM items WHERE (repo, number) IN (SELECT value ->> 0, value ->> 1 FROM json_each(?))`)
-    .all(JSON.stringify([...keys.values()])) as { repo: string; number: number; kind: string; state: string; title: string | null }[];
+  const rows = await db.all(db.k.selectFrom("items").select(["repo", "number", "kind", "state", "title"])
+    .where(tupleIn(db, ["repo", "number"], [...keys.values()], ["text", "bigint"])));
   for (const r of rows) out.set(`${r.repo}#${r.number}`, { kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), title: r.title });
   return out;
 }

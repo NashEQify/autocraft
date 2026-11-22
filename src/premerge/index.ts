@@ -28,7 +28,7 @@ export const commands = {
       const db = await openDb();
       const { runPremerge } = await import("./review.ts");
       // A job reviewing the same heads at once would count two tries for one failure.
-      if (o.apply && await db.prepare("SELECT 1 FROM jobs WHERE step = 'premerge' AND state = 'running' AND repo = ?").get(o.repo)) throw new Error(`a premerge job is running for ${o.repo}; try again when it has finished`);
+      if (o.apply && await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", "premerge").where("state", "=", "running").where("repo", "=", o.repo).limit(1))) throw new Error(`a premerge job is running for ${o.repo}; try again when it has finished`);
       if (o.apply) await audit(db, "cli", "premerge-review", o.number ? `${o.repo}#${o.number}` : o.repo, {});
       const s = await runPremerge(db, { repo: o.repo, number: o.number, dryRun: !o.apply });
       if (!o.apply) for (const c of s.candidates) console.log(`  ${c}`);

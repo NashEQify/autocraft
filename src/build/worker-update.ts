@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const PENDING_KEY = "worker_update_pending";
 export const FAILURES_KEY = "worker_update_failures";
@@ -79,11 +80,11 @@ export const sshAdmin: WorkerAdmin = {
   },
 };
 
-const getSetting = async (db: Db, key: string): Promise<string | null> => (await db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined)?.value ?? null;
+const getSetting = async (db: Db, key: string): Promise<string | null> => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", key)))?.value ?? null;
 const putSetting = async (db: Db, key: string, value: string): Promise<void> => {
-  await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+  await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
 };
-const clearSetting = async (db: Db, key: string): Promise<void> => { await db.prepare("DELETE FROM settings WHERE key = ?").run(key); };
+const clearSetting = async (db: Db, key: string): Promise<void> => { await db.run(db.k.deleteFrom("settings").where("key", "=", key)); };
 
 export async function pendingUpdate(db: Db): Promise<UpdateSpec | null> {
   const raw = await getSetting(db, PENDING_KEY);
@@ -107,8 +108,8 @@ export async function updateFailures(db: Db): Promise<{ count: number; error: st
 
 /** Claimed or running tasks on the local sandbox environments, the ones whose worker the update restarts. */
 export async function busyTasks(db: Db): Promise<number> {
-  return (await db.prepare(`SELECT COUNT(*) AS n FROM build_tasks WHERE state IN ('claimed', 'running')
-    AND env_id IN (SELECT id FROM build_envs WHERE kind = 'local-sandbox')`).get() as { n: number }).n;
+  return (await db.get(db.k.selectFrom("build_tasks").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "in", ["claimed", "running"])
+    .where("env_id", "in", db.k.selectFrom("build_envs").select("id").where("kind", "=", "local-sandbox"))))!.n;
 }
 
 /**

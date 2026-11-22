@@ -6,6 +6,7 @@ import { queueCommand } from "./commands.ts";
 import { ONE_QUERY, Transient, writeItemNode, type Querier } from "../mirror.ts";
 import { ownerOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export const WEBHOOK_PATH = "/webhooks/github";
 export const WEBHOOK_BODY_LIMIT = 1024 * 1024;
@@ -28,7 +29,7 @@ async function trackedName(db: Db, payload: Obj): Promise<string | null> {
   if (i < 1) return null;
   const owner = full.slice(0, i);
   const name = full.slice(i + 1);
-  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(name)) return null;
+  if (!await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", name))) return null;
   return ownerOf(name).toLowerCase() === owner.toLowerCase() ? name : null;
 }
 
@@ -53,7 +54,8 @@ export async function itemNumbers(db: Db, repo: string, event: string, payload: 
       if (own.length || listed.length) return own;
       const sha = body.head_sha;
       if (typeof sha !== "string" || !sha) return [];
-      return (await db.prepare("SELECT number FROM main.items WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND head_oid = ?").all(repo, sha) as { number: number }[]).map((r) => r.number);
+      return (await db.all(db.k.selectFrom("main.items").select("number").where("repo", "=", repo).where("kind", "=", "pr")
+        .where("state", "=", "OPEN").where("head_oid", "=", sha))).map((r) => r.number);
     }
     default: return [];
   }
@@ -73,9 +75,10 @@ export async function queueDelivery(db: Db, event: string, payload: unknown, now
   const numbers = await itemNumbers(db, repo, event, p);
   if (!numbers.length) return 0;
   const at = now.toISOString().replace(/\.\d+Z$/, "Z");
-  const ins = db.prepare(`INSERT INTO main.sync_requests (repo, number, event, requested_at) VALUES (?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET event = excluded.event, requested_at = excluded.requested_at`);
-  for (const n of numbers) await ins.run(repo, n, event, at);
+  for (const n of numbers) {
+    await db.run(db.k.insertInto("main.sync_requests").values({ repo, number: n, event, requested_at: at })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["event", "requested_at"]))));
+  }
   return numbers.length;
 }
 
@@ -106,11 +109,12 @@ const ABANDON_MS = 6 * 3600_000;
  */
 export async function drainSyncRequests(db: Db, client: Querier, opts: { limit?: number; reserve?: number; now?: Date; log?: (l: string) => void } = {}): Promise<number> {
   const now = opts.now ?? new Date();
-  const rows = await db.prepare("SELECT repo, number, requested_at FROM main.sync_requests ORDER BY requested_at LIMIT ?").all(opts.limit ?? 20) as { repo: string; number: number; requested_at: string }[];
+  const rows = await db.all(db.k.selectFrom("main.sync_requests").select(["repo", "number", "requested_at"])
+    .orderBy("requested_at").limit(opts.limit ?? 20));
   let done = 0;
   for (const r of rows) {
     // Arrived after this row was read: left for the next drain.
-    const gone = async (): Promise<void> => void await db.prepare("DELETE FROM main.sync_requests WHERE repo = ? AND number = ? AND requested_at = ?").run(r.repo, r.number, r.requested_at);
+    const gone = async (): Promise<void> => void await db.run(db.k.deleteFrom("main.sync_requests").where("repo", "=", r.repo).where("number", "=", r.number).where("requested_at", "=", r.requested_at));
     if (now.getTime() - Date.parse(r.requested_at) > ABANDON_MS) { await gone(); continue; }
     // Never wait out a rate limit here; the poll has its own handling.
     if (client.remaining !== null && client.remaining < (opts.reserve ?? 1000)) break;

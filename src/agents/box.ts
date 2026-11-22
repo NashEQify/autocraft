@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { envVar } from "../env.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export const ACCOUNT_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
 
@@ -33,7 +34,7 @@ export async function boxAccounts(db?: Db): Promise<BoxAccount[]> {
   const out = fileAccounts();
   if (db && configRoot()) {
     const seen = new Set(out.map((a) => a.id));
-    for (const r of await db.prepare("SELECT id FROM claude_accounts ORDER BY rowid").all() as { id: string }[]) {
+    for (const r of await db.all(db.k.selectFrom("claude_accounts").select("id").orderBy(kx.rowid("claude_accounts")))) {
       const dir = managedDir(r.id);
       if (dir && !seen.has(r.id)) out.push({ id: r.id, configDir: dir });
     }

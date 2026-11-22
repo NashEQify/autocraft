@@ -62,7 +62,7 @@ export type TaskLease = { id: number; runId: number | null; login: string; serve
 export async function taskLease(db: Db, secret: string | undefined): Promise<TaskLease | null> {
   const l = await liveLease(db, secret);
   if (!l) return null;
-  const r = await db.prepare("SELECT bundle, reference_repo FROM main.remote_calls WHERE id = ?").get(l.id) as { bundle: string; reference_repo: string | null };
+  const r = (await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "reference_repo"]).where("id", "=", l.id)))!;
   const b = JSON.parse(r.bundle) as Omit<TaskBundle, "callId">;
   return { id: l.id, runId: l.runId, login: l.login, servers: b.mcpServers, mounts: b.mounts, referenceRepo: r.reference_repo };
 }
@@ -92,7 +92,8 @@ const reserved = new Map<string, number>();
 async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): Promise<ToolResult> {
   const repo = lease.referenceRepo;
   if (!repo) return { text: "this call has no reference documentation", isError: true };
-  const used = (await db.prepare("SELECT COUNT(*) AS n FROM main.remote_passages WHERE call_id = ? AND run_id IS ?").get(lease.id, lease.runId) as { n: number }).n;
+  const used = (await db.get(db.k.selectFrom("main.remote_passages").select((eb) => eb.fn.countAll<number>().as("n")).where("call_id", "=", lease.id)
+    .where("run_id", "is not distinct from", lease.runId)))!.n;
   const key = `${lease.id}:${lease.runId}`;
   const left = PASSAGES_PER_LEASE - Number(used) - (reserved.get(key) ?? 0);
   if (left <= 0) return { text: `refused: the ${PASSAGES_PER_LEASE} reference passages of this call are used up; answer with what you know`, isError: true };
@@ -112,8 +113,7 @@ async function reference(db: Db, lease: TaskLease, name: string, raw: unknown): 
     }
     served = found.slice(0, left);
     const now = Date.now();
-    const ins = db.prepare("INSERT INTO main.remote_passages (call_id, run_id, user_login, repo, passage_id, page, at) VALUES (?, ?, ?, ?, ?, ?, ?)");
-    for (const p of served) await ins.run(lease.id, lease.runId, lease.login, repo, p.id, p.page, now);
+    for (const p of served) await db.run(db.k.insertInto("main.remote_passages").values({ call_id: lease.id, run_id: lease.runId, user_login: lease.login, repo, passage_id: p.id, page: p.page, at: now }));
   } finally {
     const rest = (reserved.get(key) ?? 0) - left;
     if (rest > 0) reserved.set(key, rest);

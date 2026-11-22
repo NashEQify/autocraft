@@ -4,8 +4,11 @@
 import type { DatabaseSync } from "node:sqlite";
 import type { ItemBar, ItemBarStep, ItemKind, ItemState, ItemStatus } from "../../../web/src/api/types.ts";
 import { stagesInOrder, stageOfStep, type StageId } from "../../stages/registry.ts";
-import { clip, hiddenSql, hiddenArgs, stepTitle, type Ctx } from "./trace.ts";
+import { clip, hiddenExpr, stepTitle, type Ctx } from "./trace.ts";
 import { COMMENT_UNSENT_DELAYS_MS } from "../../core/rules.ts";
+import type { NotNull } from "kysely";
+import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
 
 /** A step as people read it: its stage's short name ("Fix-up"), else its title. */
 const nameOf = (step: string): string => stageOfStep(step)?.title ?? stepTitle(step);
@@ -74,21 +77,18 @@ export function deriveSteps(i: {
   return out;
 }
 
-type Q = <T>(sql: string, ...args: (string | number)[]) => Promise<T[]>;
-
 const FIX_DONE = /^(pushed|merged)$/;
-/** The unsent comments at the row's head (and, for fix-ups, of its source and carry-over), as column `unsent`. */
-const unsentCount = (table: string, head: string, same = "") => `(SELECT COUNT(*) FROM ${table} u WHERE u.repo = x.repo AND u.number = x.number AND u.${head} = x.${head}${same} AND u.state = 'comment-unsent') AS unsent`;
 const FIX_FAILED = /^(failed|refused|rejected|too-large|cannot-push|push-denied|comment-failed)$/;
 
-async function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boolean): Promise<Evidence[]> {
-  const { repo, n } = c;
+async function evidenceOf(c: Ctx, mergedAt: string | null, mergedByUs: boolean): Promise<Evidence[]> {
+  const { db, repo, n } = c;
   const out: Evidence[] = [];
   const reasonOf = (s: string | null | undefined) => (c.staff && s ? clip(s.replace(/^(refused|failed|error):\s*/i, ""), 160) : null);
   const cleared = new Map<string, string>();
   const seen = new Set<number>();
-  for (const j of await q<{ id: number; step: string; state: string; outcome: string | null; at: string; ended_at: string | null; error: string | null }>(
-    "SELECT j.id, j.step, j.state, ji.outcome, ji.at, j.ended_at, j.error FROM job_items ji JOIN jobs j ON j.id = ji.job_id WHERE ji.repo = ? AND ji.number = ? AND j.state IN ('done', 'failed')", repo, n)) {
+  for (const j of await db.all(db.k.selectFrom("job_items as ji").innerJoin("jobs as j", "j.id", "ji.job_id")
+    .select(["j.id", "j.step", "j.state", "ji.outcome", "ji.at", "j.ended_at", "j.error"])
+    .where("ji.repo", "=", repo).where("ji.number", "=", n).where("j.state", "in", ["done", "failed"]).orderBy("ji.id"))) {
     seen.add(j.id);
     const stage = stageOfStep(j.step)?.id;
     const at = j.ended_at ?? j.at;
@@ -100,8 +100,8 @@ async function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boo
   }
   // A crashed job has no job_items row: read it by its params.
   const since = new Date(Date.now() - FAILED_JOBS_DAYS * 86400_000).toISOString();
-  for (const j of await q<{ id: number; step: string; ended_at: string; error: string | null }>(
-    "SELECT id, step, ended_at, error FROM jobs WHERE state = 'failed' AND repo = ?1 AND ended_at > ?3 AND json_extract(params, '$.number') = ?2", repo, n, since)) {
+  for (const j of await db.all(db.k.selectFrom("jobs").select(["id", "step", "ended_at", "error"]).$narrowType<{ ended_at: NotNull }>()
+    .where("state", "=", "failed").where("repo", "=", repo).where("ended_at", ">", since).where((eb) => eb(kx.jsonNum(db, "params", "$.number"), "=", n)))) {
     const stage = stageOfStep(j.step)?.id;
     if (stage && !seen.has(j.id)) out.push({ stage, state: "failed", at: j.ended_at, jobId: j.id, label: nameOf(j.step), reason: reasonOf(j.error), step: j.step });
   }
@@ -114,38 +114,52 @@ async function evidenceOf(c: Ctx, q: Q, mergedAt: string | null, mergedByUs: boo
     const r = top && (FIX_DONE.test(top.state) || failed(top)) ? top : undefined;
     if (r) live.push({ stage, state: FIX_DONE.test(r.state) ? "done" : "failed", at: r.at, jobId: null, label, reason: FIX_DONE.test(r.state) ? null : reasonOf(r.reason) });
   };
-  rowsOf("Fix-up", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("fixups", "from_head", " AND u.source IS x.source AND u.carry_decision IS x.carry_decision")} FROM fixups x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  rowsOf("CI fix", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("ci_fixes", "head")} FROM ci_fixes x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  rowsOf("Conflict merge", "fixup", await q(`SELECT state, reason, created_at AS at, ${unsentCount("conflict_merges", "from_head")} FROM conflict_merges x WHERE repo = ? AND number = ? AND state != 'superseded' ORDER BY created_at DESC, rowid DESC`, repo, n));
-  for (const v of await q<{ state: string; summary: string | null; at: string }>("SELECT state, summary, COALESCE(finished_at, created_at) AS at FROM verifications WHERE repo = ? AND number = ? AND state != 'stale' ORDER BY created_at DESC LIMIT 1", repo, n)) {
+  // The unsent comments at the row's head (and, for fix-ups, of its source and carry-over), as column `unsent`.
+  rowsOf("Fix-up", "fixup", await db.all(db.k.selectFrom("fixups as x")
+    .select((eb) => ["x.state", "x.reason", "x.created_at as at", eb.selectFrom("fixups as u").select((e) => e.fn.countAll<number>().as("n"))
+      .whereRef("u.repo", "=", "x.repo").whereRef("u.number", "=", "x.number").whereRef("u.from_head", "=", "x.from_head")
+      .where((e) => e.and([e("u.source", "is not distinct from", e.ref("x.source")), e("u.carry_decision", "is not distinct from", e.ref("x.carry_decision"))]))
+      .where("u.state", "=", "comment-unsent").as("unsent")]).$narrowType<{ unsent: number }>()
+    .where("x.repo", "=", repo).where("x.number", "=", n).where("x.state", "!=", "superseded").orderBy("x.created_at", "desc").orderBy(kx.rowid("fixups", "x"), "desc")));
+  rowsOf("CI fix", "fixup", await db.all(db.k.selectFrom("ci_fixes as x")
+    .select((eb) => ["x.state", "x.reason", "x.created_at as at", eb.selectFrom("ci_fixes as u").select((e) => e.fn.countAll<number>().as("n"))
+      .whereRef("u.repo", "=", "x.repo").whereRef("u.number", "=", "x.number").whereRef("u.head", "=", "x.head").where("u.state", "=", "comment-unsent").as("unsent")]).$narrowType<{ unsent: number }>()
+    .where("x.repo", "=", repo).where("x.number", "=", n).where("x.state", "!=", "superseded").orderBy("x.created_at", "desc").orderBy(kx.rowid("ci_fixes", "x"), "desc")));
+  rowsOf("Conflict merge", "fixup", await db.all(db.k.selectFrom("conflict_merges as x")
+    .select((eb) => ["x.state", "x.reason", "x.created_at as at", eb.selectFrom("conflict_merges as u").select((e) => e.fn.countAll<number>().as("n"))
+      .whereRef("u.repo", "=", "x.repo").whereRef("u.number", "=", "x.number").whereRef("u.from_head", "=", "x.from_head").where("u.state", "=", "comment-unsent").as("unsent")]).$narrowType<{ unsent: number }>()
+    .where("x.repo", "=", repo).where("x.number", "=", n).where("x.state", "!=", "superseded").orderBy("x.created_at", "desc").orderBy(kx.rowid("conflict_merges", "x"), "desc")));
+  for (const v of await db.all(db.k.selectFrom("verifications").select(["state", "summary", (eb) => eb.fn.coalesce("finished_at", "created_at").as("at")])
+    .where("repo", "=", repo).where("number", "=", n).where("state", "!=", "stale").orderBy("created_at", "desc").limit(1))) {
     if (v.state === "passed" || v.state === "ci-enough") live.push({ stage: "verify", state: "done", at: v.at, jobId: null, label: "Verify", reason: null });
     else if (v.state === "failed" || v.state === "error") live.push({ stage: "verify", state: "failed", at: v.at, jobId: null, label: "Verify", reason: reasonOf(v.summary) });
   }
-  for (const r of await q<{ at: string }>("SELECT MAX(answered_at) AS at FROM decisions WHERE repo = ? AND number = ? AND answer IS NOT NULL HAVING at IS NOT NULL", repo, n)) live.push({ stage: "decide", state: "done", at: r.at, jobId: null, label: "Decision", reason: null });
+  for (const r of await db.all(db.k.selectFrom("decisions").select((eb) => eb.fn.max<string>("answered_at").as("at"))
+    .where("repo", "=", repo).where("number", "=", n).where("answer", "is not", null).having((eb) => eb.fn.max("answered_at"), "is not", null))) live.push({ stage: "decide", state: "done", at: r.at, jobId: null, label: "Decision", reason: null });
   if (mergedAt && mergedByUs) live.push({ stage: "merge", state: "done", at: mergedAt, jobId: null, label: "Merge", reason: null });
   return live;
 }
 
 export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; mergedAt: string | null; pipelineOn: boolean }, status: ItemStatus): Promise<ItemBar> {
   const { db, repo, n } = c;
-  const q: Q = async (sql, ...args) => await db.prepare(sql).all(...args) as never;
   if (c.veiled) return { headline: { tone: "idle", text: status.phase, next: null, model: null, startedAt: null, jobId: null }, steps: [] };
 
   // A job_items row of a running job means the item is finished, so running work is matched by the job's params and by the item's own running calls.
-  const active = await q<{ id: number; step: string; state: string; started_at: string | null }>(
-    "SELECT id, step, state, started_at FROM jobs WHERE state IN ('running', 'queued') AND repo = ?1 AND json_extract(params, '$.number') = ?2 ORDER BY id", repo, n);
-  const runs = await q<{ step: string; model: string; job_id: number | null; started_at: string }>(
-    "SELECT r.step, r.model, r.job_id, r.started_at FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.state = 'running' ORDER BY r.id", repo, n);
+  const active = await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "started_at"])
+    .where("state", "in", ["running", "queued"]).where("repo", "=", repo).where((eb) => eb(kx.jsonNum(db, "params", "$.number"), "=", n)).orderBy("id"));
+  const runs = await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.model", "r.job_id", "r.started_at"])
+    .where("i.repo", "=", repo).where("i.number", "=", n).where("r.state", "=", "running").orderBy("r.id"));
   const job = active.find((j) => j.state === "running");
   const run = runs.find((r) => job && r.job_id === job.id) ?? runs[0];
   const queued = active.find((j) => j.state === "queued");
 
-  const mergedByUs = it.state === "merged" && await db.prepare("SELECT 1 FROM merges WHERE repo = ? AND number = ? AND outcome = 'merged'").get(repo, n) !== undefined;
-  const evidence = await evidenceOf(c, q, it.mergedAt, mergedByUs);
+  const mergedByUs = it.state === "merged" && await db.get(db.k.selectFrom("merges").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n).where("outcome", "=", "merged").limit(1)) !== undefined;
+  const evidence = await evidenceOf(c, it.mergedAt, mergedByUs);
   const costs = new Map<StageId, number>();
-  for (const r of await q<{ step: string; cost: number | null }>(`SELECT r.step, r.cost_usd AS cost FROM agent_run_items i JOIN agent_runs r ON r.id = i.run_id WHERE i.repo = ? AND i.number = ? AND r.cost_usd IS NOT NULL${hiddenSql(c.hidden)}`, repo, n, ...hiddenArgs(c.hidden))) {
+  for (const r of await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").select(["r.step", "r.cost_usd as cost"]).$narrowType<{ cost: NotNull }>()
+    .where("i.repo", "=", repo).where("i.number", "=", n).where("r.cost_usd", "is not", null).where((eb) => hiddenExpr(db, eb, c.hidden) ?? eb.lit(true)).orderBy("i.run_id"))) {
     const id = stageOfStep(r.step)?.id;
-    if (id) costs.set(id, (costs.get(id) ?? 0) + r.cost!);
+    if (id) costs.set(id, (costs.get(id) ?? 0) + r.cost);
   }
 
   const runningStep = job?.step ?? run?.step ?? null;
@@ -154,7 +168,7 @@ export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; merg
   const latestFail = [...evidence].filter((e) => e.state === "failed").sort((a, b) => (a.at < b.at ? 1 : -1))
     .find((f) => !evidence.some((e) => e.stage === f.stage && e.state === "done" && e.at > f.at) && (!phaseStage || f.stage === phaseStage || Date.now() - Date.parse(f.at) < RECENT_MS));
   // A failed pre-approval heads the bar until a newer one replaces it or the PR merges.
-  const pre = open ? (await q<{ state: string; reason: string | null }>("SELECT state, reason FROM preapprovals WHERE repo = ? AND number = ? ORDER BY id DESC LIMIT 1", repo, n))[0] : undefined;
+  const pre = open ? await db.get(db.k.selectFrom("preapprovals").select(["state", "reason"]).where("repo", "=", repo).where("number", "=", n).orderBy("id", "desc").limit(1)) : undefined;
   const preFailed = pre?.state === "failed" ? { label: /fix-up/i.test(pre.reason ?? "") ? "Fix-up" : "Pre-approved merge", reason: c.staff && pre.reason ? clip(pre.reason, 160) : null } : null;
   const current: StageId | null = runningStep ? stageOfStep(runningStep)?.id ?? null : queued ? stageOfStep(queued.step)?.id ?? null : open ? phaseStage ?? null : null;
 
@@ -163,7 +177,7 @@ export async function barOf(c: Ctx, it: { kind: ItemKind; state: ItemState; merg
   const failText = (label: string, reason: string | null) => `${label} failed${reason ? `: ${reason}` : ""}`;
   if (open && runningStep) headline = { tone: "running", text: `${nameOf(runningStep)} running`, next: status.next, model: run?.model ?? null, startedAt: job?.started_at ?? run?.started_at ?? null, jobId: job?.id ?? run?.job_id ?? null };
   else if (open && queued) {
-    const pos = (await db.prepare("SELECT COUNT(*) AS k FROM jobs WHERE state = 'queued' AND step = ? AND id < ?").get(queued.step, queued.id) as { k: number }).k + 1;
+    const pos = (await db.get(db.k.selectFrom("jobs").select((eb) => eb.fn.countAll<number>().as("k")).where("state", "=", "queued").where("step", "=", queued.step).where("id", "<", queued.id)))!.k + 1;
     headline = { ...base, tone: "queued", text: `Queued for ${nameOf(queued.step)} · #${pos} in line`, jobId: queued.id };
   } else if (open && status.outside) headline = { ...base, tone: "waiting", text: `Waiting: ${status.waiting ?? "an operator's release"}`, outside: status.outside };
   else if (preFailed) headline = { ...base, tone: "failed", text: failText(preFailed.label, preFailed.reason) };

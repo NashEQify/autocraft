@@ -3,6 +3,7 @@
 import { audit } from "../dash/audit.ts";
 import type { Reserve } from "./protocol.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const DEFAULT_RESERVE: Reserve = { fiveHour: 20, weekly: 20 };
 /** The highest reserve a user may set: above it a helper would hardly ever claim. */
@@ -11,7 +12,7 @@ const KEYS = { fiveHour: "reserve_five_hour", weekly: "reserve_weekly" } as cons
 
 /** The user's reserve, with the default for a window they never set. */
 export async function userReserve(db: Db, login: string): Promise<Reserve> {
-  const rows = await db.prepare("SELECT key, value FROM main.user_settings WHERE login = ? AND key IN (?, ?)").all(login, KEYS.fiveHour, KEYS.weekly) as { key: string; value: string }[];
+  const rows = await db.all(db.k.selectFrom("main.user_settings").select(["key", "value"]).where("login", "=", login).where("key", "in", [KEYS.fiveHour, KEYS.weekly]));
   const out = { ...DEFAULT_RESERVE };
   for (const r of rows) {
     const n = Number(r.value);
@@ -36,9 +37,10 @@ export function parseReserve(raw: unknown): Reserve {
 export async function setUserReserve(db: Db, login: string, reserve: Reserve): Promise<Reserve> {
   const was = await userReserve(db, login);
   const at = new Date().toISOString();
-  const put = db.prepare("INSERT INTO main.user_settings (login, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT (login, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at");
-  await put.run(login, KEYS.fiveHour, String(reserve.fiveHour), at);
-  await put.run(login, KEYS.weekly, String(reserve.weekly), at);
+  const put = (key: string, value: string) => db.run(db.k.insertInto("main.user_settings").values({ login, key, value, updated_at: at })
+    .onConflict((oc) => oc.columns(["login", "key"]).doUpdateSet(excluded(["value", "updated_at"]))));
+  await put(KEYS.fiveHour, String(reserve.fiveHour));
+  await put(KEYS.weekly, String(reserve.weekly));
   if (was.fiveHour !== reserve.fiveHour || was.weekly !== reserve.weekly) await audit(db, login, "usage-reserve", login, { reserve, was });
   return reserve;
 }

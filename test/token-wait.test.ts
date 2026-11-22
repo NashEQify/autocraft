@@ -21,7 +21,7 @@ test("a near-expiry token holds a sandboxed call back and leaves host-only calls
   allocation.pollMs = 10;
 
   await assert.rejects(startClaudeRun(db, call, quiet, 50, 30 * 60_000), WaitLimitError);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM agent_runs").get() as { n: number }).n, 0);
+  assert.equal((await db.get(db.k.selectFrom("agent_runs").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
   assert.equal((await startClaudeRun(db, call, quiet, 50)).accountId, "t");
 
   writeFileSync(creds, JSON.stringify({ claudeAiOauth: { expiresAt: Date.now() + 3 * 3600_000 } }));

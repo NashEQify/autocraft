@@ -17,6 +17,7 @@ import {
 } from "./pods.ts";
 import { appendLog, claim, finishTask, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
+import { cols } from "../db/kx.ts";
 
 export const PASS_MS = 5000;
 /** A pod not yet started after this long shows in the environment's health. */
@@ -79,7 +80,7 @@ const statusOf = (pod: KPod, name: string): ContainerStatus | undefined =>
 const clean = (s: string | undefined): string => (s ?? "").replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
 
 export async function launcherPass(d: LauncherDeps, state: LauncherState): Promise<void> {
-  const envs = await d.db.prepare("SELECT id, enabled, slots, settings FROM build_envs WHERE kind = 'kubernetes' ORDER BY id").all() as EnvRow[];
+  const envs = await d.db.all(d.db.k.selectFrom("build_envs").select(["id", "enabled", "slots", "settings"]).where("kind", "=", "kubernetes").orderBy("id"));
   for (const env of envs) {
     try {
       await envPass(d, state, env);
@@ -99,7 +100,7 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   const report = async (health: Omit<EnvHealth, "since"> | null, reachable: boolean) => await kubeReport(db, env.id, caps, env.slots, health, reachable);
   const image = s.image ?? d.defaultImage;
   const ctx: EnvCtx = { d, state, api: d.api, env, s, image, pods: [], pending: [], now };
-  const runs = async () => await db.prepare("SELECT * FROM build_pod_runs WHERE env_id = ? ORDER BY task_id").all(env.id) as Run[];
+  const runs = async () => await db.all(db.k.selectFrom("build_pod_runs").select(cols("build_pod_runs")).where("env_id", "=", env.id).orderBy("task_id"));
   for (const run of await runs()) await touchTask(db, env.id, run.task_id);
 
   const api = d.api;
@@ -162,7 +163,7 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   await report(health, true);
 }
 
-const taskOf = async (db: Db, id: number) => await db.prepare("SELECT id, state, env_id, plan, requires, log_bytes FROM build_tasks WHERE id = ?").get(id) as TaskRow | undefined;
+const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build_tasks").select(["id", "state", "env_id", "plan", "requires", "log_bytes"]).where("id", "=", id));
 const overdue = (c: EnvCtx, run: Run): boolean => c.now() > Date.parse(run.started_at) + c.s.deadlineSec * 1000 + DEADLINE_MARGIN_MS;
 const overdueText = (c: EnvCtx) => `The task passed its deadline of ${c.s.deadlineSec} s and its pod did not stop`;
 
@@ -172,11 +173,11 @@ async function start(c: EnvCtx, taskId: number): Promise<string | null> {
   const key = newPodKey(taskId);
   const pvc = `acb-${taskId}-${randomBytes(3).toString("hex")}`;
   try {
-    await db.prepare("INSERT INTO build_pod_runs (task_id, env_id, key_hash, pvc, stage, started_at) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(taskId, c.env.id, hashKey(key), pvc, STAGE_TASK, new Date(c.now()).toISOString());
+    await db.run(db.k.insertInto("build_pod_runs")
+      .values({ task_id: taskId, env_id: c.env.id, key_hash: hashKey(key), pvc, stage: STAGE_TASK, started_at: new Date(c.now()).toISOString() }));
     await startTask(db, c.env.id, taskId);
     await c.api!.createPvc(c.s.namespace, pvcSpec(c.s, c.env.id, taskId, pvc));
-    const run = await db.prepare("SELECT * FROM build_pod_runs WHERE task_id = ?").get(taskId) as Run;
+    const run = (await db.get(db.k.selectFrom("build_pod_runs").select(cols("build_pod_runs")).where("task_id", "=", taskId)))!;
     await createPod(c, run, STAGE_TASK, (ctx) => taskPod(ctx, c.image!, key));
     c.d.log(`pod launcher: task ${taskId} started on ${c.env.id}`);
     return null;
@@ -184,7 +185,7 @@ async function start(c: EnvCtx, taskId: number): Promise<string | null> {
     const msg = (e as Error).message;
     c.d.log(`pod launcher: task ${taskId}: could not start: ${msg}`);
     await c.api!.deletePvc(c.s.namespace, pvc).catch(() => {});
-    await db.prepare("DELETE FROM build_pod_runs WHERE task_id = ?").run(taskId);
+    await db.run(db.k.deleteFrom("build_pod_runs").where("task_id", "=", taskId));
     await releaseClaim(db, c.env.id, taskId);
     return msg;
   }
@@ -197,7 +198,7 @@ async function createPod(c: EnvCtx, run: Run, stage: number, spec: (ctx: PodCtx)
   const name = `acb-${run.task_id}-${stage}-${randomBytes(3).toString("hex")}`;
   const ctx: PodCtx = { s: c.s, envId: c.env.id, taskId: run.task_id, stage, name, pvc: run.pvc, deadlineSec: Math.min(deadlineSec, left) };
   const at = new Date(now).toISOString();
-  await c.d.db.prepare("UPDATE build_pod_runs SET stage = ?, pod = ?, pod_created_at = ? WHERE task_id = ?").run(stage, name, at, run.task_id);
+  await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ stage, pod: name, pod_created_at: at }).where("task_id", "=", run.task_id));
   Object.assign(run, { stage, pod: name, pod_created_at: at });
   await c.api!.createPod(c.s.namespace, spec(ctx));
 }
@@ -207,7 +208,7 @@ async function removeRun(c: EnvCtx, run: Run): Promise<void> {
     if (run.pod) await c.api.deletePod(c.s.namespace, run.pod).catch(() => {});
     await c.api.deletePvc(c.s.namespace, run.pvc).catch(() => {});
   }
-  await c.d.db.prepare("DELETE FROM build_pod_runs WHERE task_id = ?").run(run.task_id);
+  await c.d.db.run(c.d.db.k.deleteFrom("build_pod_runs").where("task_id", "=", run.task_id));
 }
 
 async function lose(c: EnvCtx, run: Run, reason: string): Promise<void> {
@@ -230,7 +231,7 @@ async function podLog(c: EnvCtx, run: Run, container: string, step: string): Pro
   }
   logged.push(id);
   run.logged = JSON.stringify(logged);
-  await c.d.db.prepare("UPDATE build_pod_runs SET logged = ? WHERE task_id = ?").run(run.logged, run.task_id);
+  await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ logged: run.logged }).where("task_id", "=", run.task_id));
   // A quarter of the chunk cap in characters stays under it in bytes.
   for (let i = 0; i < text.length; i += MAX_CHUNK_BYTES / 4) {
     if ((await appendLog(c.d.db, c.env.id, run.task_id, step, text.slice(i, i + MAX_CHUNK_BYTES / 4))).truncated) break;
@@ -298,7 +299,7 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
     await podLog(c, run, "task", "source");
     if (statusOf(pod, "task")?.state?.terminated?.exitCode !== 0) return lose(c, run, `The task pod could not read its task: ${podFailure(pod)}`);
     // No key is valid while repository code runs; the upload pod gets a new one.
-    await db.prepare("UPDATE build_pod_runs SET key_hash = ? WHERE task_id = ?").run(hashKey(randomBytes(32).toString("hex")), run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(randomBytes(32).toString("hex")) }).where("task_id", "=", run.task_id));
     return next(c, run, t, STAGE_SOURCE);
   }
   if (run.stage === STAGE_SOURCE) {
@@ -312,7 +313,7 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
     if (!image) return finish(c, run, `no toolchain image for ${json<Requires>(t.requires, {}).toolchains?.join(", ") || "this task"}`);
     const kept: Kept = { ...r.prepared, image };
     run.prepared = JSON.stringify(kept);
-    await db.prepare("UPDATE build_pod_runs SET prepared = ? WHERE task_id = ?").run(run.prepared, run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ prepared: run.prepared }).where("task_id", "=", run.task_id));
     return next(c, run, t, FIRST_GROUP);
   }
   if (run.stage >= FIRST_GROUP && run.stage < up) {
@@ -348,7 +349,7 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       if (failed) break;
     }
     if (!failed && pod.status?.phase === "Failed") return lose(c, run, podFailure(pod));
-    await db.prepare("UPDATE build_pod_runs SET results = ?, ran = ?, failed = ? WHERE task_id = ?").run(JSON.stringify(results), ran, failed, run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ results: JSON.stringify(results), ran, failed }).where("task_id", "=", run.task_id));
     Object.assign(run, { results: JSON.stringify(results), ran, failed });
     const nextGroup = run.stage - FIRST_GROUP + 1;
     if (!failed && nextGroup < groups.length) return next(c, run, t, FIRST_GROUP + nextGroup);
@@ -366,7 +367,7 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
 /** Deletes the stage's pod and starts `stage`. */
 async function next(c: EnvCtx, run: Run, t: TaskRow, stage: number): Promise<void> {
   if (run.pod) await c.api!.deletePod(c.s.namespace, run.pod).catch(() => {});
-  await c.d.db.prepare("UPDATE build_pod_runs SET stage = ?, pod = NULL, create_tries = 0, failing_since = NULL, retry_at = NULL WHERE task_id = ?").run(stage, run.task_id);
+  await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ stage, pod: null, create_tries: 0, failing_since: null, retry_at: null }).where("task_id", "=", run.task_id));
   Object.assign(run, { stage, pod: null, create_tries: 0, failing_since: null, retry_at: null });
   return createStage(c, run, t, stage);
 }
@@ -395,12 +396,12 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     spec = (ctx) => stepPod(ctx, kept.image, c.image!, plan, g, kept, index === 0);
   } else if (stage === uploadStage(plan)) {
     const key = newPodKey(run.task_id);
-    await db.prepare("UPDATE build_pod_runs SET key_hash = ? WHERE task_id = ?").run(hashKey(key), run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ key_hash: hashKey(key) }).where("task_id", "=", run.task_id));
     spec = (ctx) => uploadPod(ctx, c.image!, key, run.ran);
   } else return lose(c, run, `The build pod run is at an unknown stage ${stage}`);
   try {
     await createPod(c, run, stage, spec, deadline);
-    await db.prepare("UPDATE build_pod_runs SET create_tries = 0, failing_since = NULL, retry_at = NULL WHERE task_id = ?").run(run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ create_tries: 0, failing_since: null, retry_at: null }).where("task_id", "=", run.task_id));
   } catch (e) {
     const now = c.now();
     const tries = run.create_tries + 1;
@@ -410,7 +411,7 @@ async function createStage(c: EnvCtx, run: Run, t: TaskRow, stage: number): Prom
     Object.assign(run, { pod: null, create_tries: tries, failing_since: since });
     if (tries >= CREATE_TRIES || now - Date.parse(since) > CREATE_GIVE_UP_MS) return lose(c, run, why);
     const retry = new Date(now + Math.min(15_000 * 2 ** (tries - 1), 5 * 60_000)).toISOString();
-    await db.prepare("UPDATE build_pod_runs SET pod = NULL, create_tries = ?, failing_since = ?, retry_at = ? WHERE task_id = ?").run(tries, since, retry, run.task_id);
+    await db.run(db.k.updateTable("build_pod_runs").set({ pod: null, create_tries: tries, failing_since: since, retry_at: retry }).where("task_id", "=", run.task_id));
     run.retry_at = retry;
     c.d.log(`pod launcher: task ${run.task_id}: ${why} (try ${tries}, again at ${retry})`);
   }

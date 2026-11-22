@@ -95,7 +95,7 @@ describe("claude accounts", () => {
   test("the watcher reads status for all and usage for enabled signed-in accounts", async () => {
     const c = await addAccount(db, { label: "Team C" }, "op");
     writeFileSync(join(dir, "root", c.id, "in"), "");
-    await db.prepare("UPDATE claude_accounts SET enabled = 1 WHERE id = ?").run(c.id);
+    await db.run(db.k.updateTable("claude_accounts").set({ enabled: 1 }).where("id", "=", c.id));
     await new AccountWatcher(db, () => {}).tick();
     assert.equal((await listAccounts(db)).find((x) => x.id === c.id)!.auth.loggedIn, true);
     assert.equal(readUsage(c.id)?.fiveHour?.pct, 42);

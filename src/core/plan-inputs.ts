@@ -6,6 +6,7 @@
 // SQL fragments name the written row `r` (`r.repo`); the triggers put `new` or `old` in its place. Subqueries must not use the
 // alias `r` themselves.
 import { BOOKKEEPING_SETTINGS } from "../live.ts";
+import { pgExpr, pgJsonArray } from "./pg-expr.ts";
 
 /**
  * - item: a row belongs to one item; a change re-decides that item.
@@ -32,6 +33,11 @@ export type PlanInput = {
   full?: string;
   /** Condition on `old` and `new` that forces a full pass on UPDATE, instead of `full`; it is checked on its own, without the changed-columns check. */
   fullUpdate?: string;
+  /**
+   * Postgres forms of the fragments above, for those the mechanical rewrite (pgExpr in src/core/plan-changes.ts) cannot
+   * translate: JSON functions, GLOB, integer results used as conditions.
+   */
+  pg?: Partial<Record<"refs" | "when" | "updateWhen" | "full" | "fullUpdate", string>>;
 };
 
 /** The PR number at the end of a pull request URL (`fastScoreSql` and `pilotSqlFor` link a fix attempt to its PR this way), else NULL. */
@@ -64,11 +70,17 @@ const changed = (cols: string[]): string => cols.map((c) => `old.${c} IS NOT new
 
 /** A pilot list is set: a fix attempt's link then moves its PR's scope, and with it duplicate sets and integration PRs. */
 const PILOT_LIST_SET = `COALESCE((SELECT json_array_length(CASE WHEN json_valid(ps.value) THEN ps.value ELSE '[]' END) FROM settings ps WHERE ps.key = 'pilot_items'), 0) > 0`;
+const PILOT_LIST_SET_PG = `COALESCE((SELECT json_array_length(${pgJsonArray("ps.value")}) FROM settings ps WHERE ps.key = 'pilot_items'), 0) > 0`;
 
 /** Item columns that change other PRs' facts: issues' open PR (title, body, closing_issues), stacked PRs (head_ref, head_repo), long-lived branches (base_ref, author_association), authors' tiers (state). */
 const PR_CROSS_COLUMNS = ["state", "title", "body", "closing_issues", "head_ref", "head_repo", "base_ref", "author_association"];
 /** Item columns that change duplicate sets, group plans and the canonical pick of the item's group. */
 const DUPE_COLUMNS = ["state", "title", "body", "embed_hash", "comments_count", "created_at", "closing_issues"];
+
+/** An item write that forces a full pass; `no` is the dialect's false (the CASE keeps SQLite from probing the dupe tables on every write). */
+const itemsFullUpdate = (no: string): string => `${changed(["kind", "author", "author_id"])}
+      OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)}))
+      OR (CASE WHEN ${changed(DUPE_COLUMNS)} THEN ${inDupeSet("new")} ELSE ${no} END)`;
 
 /** Settings rows the runner, sync and planner write for their own use (src/live.ts), less `classify_run`, which picks the run every item's labels come from; and the planner's shadow switch, which no fact reads. */
 export const PLAN_IGNORED_SETTINGS = [...BOOKKEEPING_SETTINGS.filter((k) => k !== "classify_run"), "plan_shadow"];
@@ -131,9 +143,8 @@ export const PLAN_INPUTS: PlanInput[] = [
     table: "items", class: "cross", why: "One item's mirror row; a new or deleted item, a PR's state, text or branches, an author, or a change to a member of a duplicate set changes other items' facts.",
     refs: "SELECT r.repo AS repo, r.number AS number",
     full: "r.kind = 'pr'",
-    fullUpdate: `${changed(["kind", "author", "author_id"])}
-      OR (new.kind = 'pr' AND (${changed(PR_CROSS_COLUMNS)}))
-      OR (CASE WHEN ${changed(DUPE_COLUMNS)} THEN ${inDupeSet("new")} ELSE 0 END)`,
+    fullUpdate: itemsFullUpdate("0"),
+    pg: { fullUpdate: pgExpr(itemsFullUpdate("false")) },
   },
   {
     table: "items", class: "cross", why: "An item's state or text hash: the other item of its unchecked duplicate pairs (pairs to check).",
@@ -154,6 +165,14 @@ export const PLAN_INPUTS: PlanInput[] = [
       UNION SELECT r.repo, CAST(substr(r.id, instr(r.id, '@') + 1) AS INTEGER) WHERE r.kind = 'duplicate' AND r.id NOT LIKE '%:dupegroup:%' AND r.id GLOB '*@[0-9]*'
       UNION ${carriesOf("r.id")}
       UNION ${blockedBy("r.repo", "r.number")}`,
+    pg: {
+      refs: `SELECT r.repo AS repo, r.number AS number
+      UNION SELECT dj ->> 'repo', ac_int(dj ->> 'number') FROM json_array_elements(${pgJsonArray("r.items")}) dj WHERE json_typeof(dj) = 'object'
+      UNION ${groupMembers("r.id")}
+      UNION SELECT r.repo, ac_int(substr(r.id, instr(r.id, '@') + 1)) WHERE r.kind = 'duplicate' AND r.id NOT LIKE '%:dupegroup:%' AND r.id ~ '@[0-9]'
+      UNION ${carriesOf("r.id")}
+      UNION ${blockedBy("r.repo", "r.number")}`,
+    },
   },
   {
     table: "opus_reviews", class: "cross", why: "The latest review of one PR; integration PRs carrying it check their members' reviews, and PRs held for it as a blocking item read its verdict.",
@@ -183,6 +202,7 @@ export const PLAN_INPUTS: PlanInput[] = [
     table: "fix_attempts", class: "cross", why: "A fix attempt: its issue and the PR it opened (fast-track score, own PRs, unmirrored PR); with a pilot list, the PR's scope moves duplicate sets and integration PRs.",
     refs: `SELECT r.repo AS repo, r.number AS number UNION SELECT r.repo, ${prOfUrl("r.pr_url")}`,
     full: `r.pr_url IS NOT NULL AND ${PILOT_LIST_SET}`,
+    pg: { full: `r.pr_url IS NOT NULL AND ${PILOT_LIST_SET_PG}` },
   },
   {
     table: "build_tasks", class: "cross", why: "A sandbox task's state: its item, and the fix attempt, fix-up, CI fix or conflict merge whose task it is.",
@@ -199,7 +219,7 @@ export const PLAN_INPUTS: PlanInput[] = [
     refs: "SELECT ai.repo AS repo, ai.number AS number FROM agent_run_items ai WHERE ai.run_id = r.id",
   },
   {
-    table: "conversation_cards", class: "cross", why: "A queued or running card locks the decision it settles (lockLiveSql), named by the decision's exec_reason.",
+    table: "conversation_cards", class: "cross", why: "A queued or running card locks the decision it settles (lockLiveExpr), named by the decision's exec_reason.",
     columns: ["state", "acted_at"],
     // 'settling' is SETTLING in src/answers/hold.ts.
     refs: "SELECT d.repo AS repo, d.number AS number FROM decisions d WHERE d.exec_state = 'settling' AND d.exec_reason LIKE r.id || ':%'",

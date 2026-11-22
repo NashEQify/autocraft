@@ -16,8 +16,8 @@ test("an answered decision whose act a gate refuses shows the reason, with the r
   const why = gates(f, { kind: "act", bucket: "scope" }, "pipeline");
   assert.equal(why, "Comments in sandbox are not approved");
   const items = [{ repo: "sandbox", number: 1, kind: "issue", action: "act", bucket: "scope", fast: false, rank: null, inFlight: false, next: false, blocked: why }];
-  await db.prepare("INSERT INTO lane_next (lane, total, items, at) VALUES ('act', 1, ?, 't')").run(JSON.stringify(items));
-  await db.prepare("INSERT INTO decisions (id, kind, repo, number, question, options, asked_at, answer, answered_by, answered_at, exec_state) VALUES ('sandbox#1:scope', 'scope', 'sandbox', 1, 'q', '[]', 't', 'close', 'op', 't', 'pending')").run();
+  await db.run(db.k.insertInto("lane_next").values({ lane: "act", total: 1, items: JSON.stringify(items), at: "t" }));
+  await db.run(db.k.insertInto("decisions").values({ id: "sandbox#1:scope", kind: "scope", repo: "sandbox", number: 1, question: "q", options: "[]", asked_at: "t", answer: "close", answered_by: "op", answered_at: "t", exec_state: "pending" }));
   const d = (await getDecision(db, "sandbox#1:scope"))!;
   const viewer = (operator: boolean) => ({ login: "x", role: operator ? "operator" : "viewer", operator, staff: operator });
   assert.deepEqual(await execOf(db, d, "sandbox", viewer(true)), { state: "pending", reason: "Comments in sandbox are not approved", approvalsRepo: "sandbox" });

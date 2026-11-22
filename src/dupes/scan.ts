@@ -1,8 +1,9 @@
 // Candidate pairs: for each open item that is new or whose text changed (its
 // stored embed_hash differs from the one at its last scan), its nearest
 // neighbours in the same repo from the vector index.
-import { notOwnIntegrationSql } from "./held.ts";
-import { quietSqlFor } from "../security/quiet.ts";
+import { notOwnIntegrationExpr } from "./held.ts";
+import { quietExprFor } from "../security/quiet.ts";
+import { excluded } from "../db/kx.ts";
 import type { VectorIndex } from "../embed/vectors.ts";
 import type { Db } from "../db/index.ts";
 
@@ -23,7 +24,7 @@ export type ScanItem = {
   repo: string; number: number; kind: string; state: string; embed_hash: string;
   closed_at: string | null; merged_at: string | null; closing_issues: string | null;
 };
-const COLS = "i.repo, i.number, i.kind, i.state, i.embed_hash, i.closed_at, i.merged_at, i.closing_issues";
+const COLS = ["i.repo", "i.number", "i.kind", "i.state", "i.embed_hash", "i.closed_at", "i.merged_at", "i.closing_issues"] as const;
 
 const issuesOf = (i: ScanItem): number[] => {
   try { const v = JSON.parse(i.closing_issues ?? "[]") as unknown; return Array.isArray(v) ? v.filter((n): n is number => typeof n === "number") : []; } catch { return []; }
@@ -48,14 +49,15 @@ export async function neighbourPairs(db: Db, index: VectorIndex, item: ScanItem,
   const v = await index.vectorOf(db, item.repo, item.number);
   if (!v) return [];
   // A quiet pull request is never paired: a duplicate close or group question would name it on GitHub.
-  const quiet = db.prepare(`SELECT 1 AS q WHERE ${quietSqlFor("?", "?")}`);
-  if (await quiet.get(item.repo, item.number)) return [];
-  const get = db.prepare(`SELECT ${COLS} FROM items i WHERE i.repo = ? AND i.number = ? AND ${notOwnIntegrationSql("i")} AND NOT ${quietSqlFor("i.repo", "i.number")}`);
+  if (await db.get(db.k.selectNoFrom((eb) => eb.lit(1).as("q")).where((eb) => quietExprFor(db, eb, eb.val(item.repo), eb.val(item.number))))) return [];
   const out: Pair[] = [];
   for (const h of await index.nearest(db, v, LOOKUP, `${item.repo}#${item.number}`, item.repo)) {
     if (h.score < threshold || out.length >= cap) break;
-    const o = await get.get(h.repo, h.number) as ScanItem | undefined;
-    if (!o || !o.embed_hash || !comparable(item, o, nowMs)) continue;
+    const row = await db.get(db.k.selectFrom("items as i").select(COLS).where("i.repo", "=", h.repo).where("i.number", "=", h.number)
+      .where((eb) => eb.and([notOwnIntegrationExpr(db, eb, "i"), eb.not(quietExprFor(db, eb, "i.repo", "i.number"))])));
+    if (!row || !row.embed_hash) continue;
+    const o: ScanItem = { ...row, embed_hash: row.embed_hash };
+    if (!comparable(item, o, nowMs)) continue;
     const [x, y] = item.number < o.number ? [item, o] : [o, item];
     out.push({ repo: item.repo, a: x.number, b: y.number, a_hash: x.embed_hash, b_hash: y.embed_hash, similarity: Math.round(h.score * 10000) / 10000 });
   }
@@ -65,15 +67,15 @@ export async function neighbourPairs(db: Db, index: VectorIndex, item: ScanItem,
 /** Stores the item's new pairs and marks it scanned. Pairs already checked at these hashes, and pairs an operator ruled on, are not added again. Returns the number added. */
 export async function scanItem(db: Db, index: VectorIndex, item: ScanItem, now: Date): Promise<number> {
   const pairs = await neighbourPairs(db, index, item, now.getTime());
-  const ruled = db.prepare("SELECT 1 FROM duplicate_pairs WHERE repo = ? AND a = ? AND b = ? AND by_operator = 1");
-  const put = db.prepare(`INSERT OR IGNORE INTO duplicate_pairs (repo, a, b, a_hash, b_hash, similarity, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`);
   let added = 0;
   await db.write(async () => {
     for (const p of pairs) {
-      if (await ruled.get(p.repo, p.a, p.b)) continue;
-      added += Number((await put.run(p.repo, p.a, p.b, p.a_hash, p.b_hash, p.similarity, now.toISOString())).changes);
+      if (await db.get(db.k.selectFrom("duplicate_pairs").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("a", "=", p.a).where("b", "=", p.b).where("by_operator", "=", 1))) continue;
+      added += (await db.run(db.k.insertInto("duplicate_pairs").values({ repo: p.repo, a: p.a, b: p.b, a_hash: p.a_hash, b_hash: p.b_hash, similarity: p.similarity, created_at: now.toISOString() })
+        .onConflict((oc) => oc.doNothing()))).changes;
     }
-    await db.prepare("INSERT INTO duplicate_scans (repo, number, hash, at) VALUES (?, ?, ?, ?) ON CONFLICT (repo, number) DO UPDATE SET hash = excluded.hash, at = excluded.at").run(item.repo, item.number, item.embed_hash, now.toISOString());
+    await db.run(db.k.insertInto("duplicate_scans").values({ repo: item.repo, number: item.number, hash: item.embed_hash, at: now.toISOString() })
+      .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["hash", "at"]))));
   });
   return added;
 }

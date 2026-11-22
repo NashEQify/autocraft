@@ -24,13 +24,13 @@ export function checkoutCommit(dir: string): { repo: string; sha: string } | nul
 }
 
 const repoRow = async (db: Db, repo: string): Promise<{ owner: string; visibility: string | null }> =>
-  (await db.prepare("SELECT owner, visibility FROM main.repos WHERE name = ?").get(repo) as { owner: string; visibility: string | null } | undefined) ?? { owner: "", visibility: null };
+  (await db.get(db.k.selectFrom("main.repos").select(["owner", "visibility"]).where("name", "=", repo))) ?? { owner: "", visibility: null };
 
 /** A repo at a commit: a git mount for a public repo (with the pull request's head ref when the commit is a head of one of `items`), else a tarball the server serves. */
 async function repoMount(db: Db, path: string, repo: string, sha: string, items: ItemRef[]): Promise<Mount> {
   const r = await repoRow(db, repo);
   if (r.visibility !== "public" || !r.owner) return { kind: "tarball", path, repo, sha };
-  const pr = await findSeq(items, async (i) => i.repo === repo && await db.prepare("SELECT 1 FROM main.items WHERE repo = ? AND number = ? AND kind = 'pr' AND head_oid = ?").get(repo, i.number, sha) !== undefined);
+  const pr = await findSeq(items, async (i) => i.repo === repo && await db.get(db.k.selectFrom("main.items").select("number").where("repo", "=", repo).where("number", "=", i.number).where("kind", "=", "pr").where("head_oid", "=", sha)) !== undefined);
   return { kind: "git", path, owner: r.owner, repo, sha, ...(pr && { ref: `refs/pull/${pr.number}/head` }) };
 }
 

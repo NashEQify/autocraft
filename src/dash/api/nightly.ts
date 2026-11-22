@@ -25,7 +25,7 @@ const median = (xs: number[]): number => {
 };
 
 async function benchesOf(db: Db, repo: string): Promise<NightlyBench[]> {
-  const names = (await db.prepare("SELECT DISTINCT bench FROM nightly_bench WHERE repo = ? ORDER BY bench").all(repo) as { bench: string }[]).map((r) => r.bench);
+  const names = (await db.all(db.k.selectFrom("nightly_bench").select("bench").distinct().where("repo", "=", repo).orderBy("bench"))).map((r) => r.bench);
   return await mapSeq(names, async (name) => {
     const s = await benchSeries(db, repo, name);
     const last = s[s.length - 1]!;
@@ -51,7 +51,8 @@ async function repoOf(db: Db, repo: string): Promise<NightlyRepo> {
 
 /** Repos with the switch on, any selection row or any run. */
 const shown = async (db: Db, repo: string): Promise<boolean> =>
-  await featureOn(db, "nightly", repo) || !!await db.prepare("SELECT 1 FROM nightly_selection WHERE repo = ? UNION ALL SELECT 1 FROM nightly_runs WHERE repo = ? LIMIT 1").get(repo, repo);
+  await featureOn(db, "nightly", repo) || !!await db.get(db.k.selectFrom("nightly_selection").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo)
+    .unionAll(db.k.selectFrom("nightly_runs").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo)).limit(1));
 
 export const grid = async (db: Db, req: Req): Promise<NightlyGrid> =>
   ({ repos: await mapSeq((await filterSeq((await visibleRepos(db, req)), async (r) => await shown(db, r))), async (r) => await repoOf(db, r)) });

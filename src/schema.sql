@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS decisions (
   summary TEXT, summary_by TEXT, summary_at TEXT,  -- AI summary of the item or batch, by which model, when
   adopted_opinion TEXT,               -- decision_opinions.id when the answer adopted an opinion
   snoozed_by TEXT,                    -- operator who snoozed the open question
-  snoozed_at TEXT,                    -- the question is snoozed while the item has no activity after this (SNOOZED_SQL)
+  snoozed_at TEXT,                    -- the question is snoozed while the item has no activity after this (snoozedExpr)
   exec_state TEXT, exec_reason TEXT,  -- the answer's GitHub write: pending | waiting-token | waiting-permission | done | failed, and why it waits or failed; an open decision: settling while a card runs (reason `<card id>:<login>`); an answered one: disputed (src/answers/hold.ts)
   dispute_by TEXT, dispute_reason TEXT, dispute_at TEXT  -- who disputed the unapplied answer, why, and when
 );
@@ -2393,4 +2393,48 @@ CREATE TRIGGER IF NOT EXISTS build_tasks_ever AFTER INSERT ON build_tasks WHEN N
 END;
 CREATE TRIGGER IF NOT EXISTS agent_run_items_ever AFTER INSERT ON agent_run_items WHEN NEW.repo IS NOT NULL BEGIN
   INSERT OR IGNORE INTO ever_tracked_repos (name) VALUES (CASE WHEN NEW.repo LIKE '(security):%' THEN substr(NEW.repo, 12) ELSE NEW.repo END);
+END;
+
+-- Settled verdicts per classification run (src/classify/settled.ts), for queries that count or filter many items. A run
+-- is built in full on first use and listed in item_settled_runs; from then on only the items in item_settled_dirty are
+-- worked out again. Triggers on classifications mark an item dirty (n counts the marks, so a refresh clears only the
+-- marks it saw). Items without a Jev or Haiku verdict have no row ("unclassified").
+CREATE TABLE IF NOT EXISTS item_settled (
+  run TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  label TEXT,
+  source TEXT,
+  top REAL,
+  jev_label TEXT,
+  haiku_label TEXT,
+  flags TEXT NOT NULL,                -- JSON array
+  security INTEGER NOT NULL,
+  needs_decision INTEGER NOT NULL,
+  referee_label TEXT,
+  referee_sure INTEGER,
+  referee_reason TEXT,
+  referee_final INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (run, repo, number)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS item_settled_runs (run TEXT PRIMARY KEY, refreshed_at TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS item_settled_dirty (
+  run_id TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  n INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY (run_id, repo, number)
+) WITHOUT ROWID;
+CREATE TRIGGER IF NOT EXISTS classifications_settled_i AFTER INSERT ON classifications BEGIN
+  INSERT INTO item_settled_dirty (run_id, repo, number) VALUES (NEW.run_id, NEW.repo, NEW.number)
+    ON CONFLICT (run_id, repo, number) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS classifications_settled_u AFTER UPDATE ON classifications BEGIN
+  INSERT INTO item_settled_dirty (run_id, repo, number) VALUES (OLD.run_id, OLD.repo, OLD.number), (NEW.run_id, NEW.repo, NEW.number)
+    ON CONFLICT (run_id, repo, number) DO UPDATE SET n = n + 1;
+END;
+CREATE TRIGGER IF NOT EXISTS classifications_settled_d AFTER DELETE ON classifications BEGIN
+  INSERT INTO item_settled_dirty (run_id, repo, number) VALUES (OLD.run_id, OLD.repo, OLD.number)
+    ON CONFLICT (run_id, repo, number) DO UPDATE SET n = n + 1;
 END;

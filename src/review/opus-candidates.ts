@@ -13,8 +13,7 @@ export type OpusCandidate = {
 
 /** The candidate of a PR at `head`: its text and author association from the items row, size and score from its facts. */
 export async function opusCandidateOf(db: Db, f: Pick<PrFacts, "repo" | "number" | "lines" | "size" | "score">, head: string, fallbackTitle = ""): Promise<OpusCandidate> {
-  const it = await db.prepare("SELECT title, body, author_association FROM items WHERE repo = ? AND number = ?").get(f.repo, f.number) as
-    { title: string | null; body: string | null; author_association: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("items").select(["title", "body", "author_association"]).where("repo", "=", f.repo).where("number", "=", f.number));
   return { repo: f.repo, number: f.number, title: it?.title ?? fallbackTitle, body: it?.body ?? "", author_association: it?.author_association ?? null, head_oid: head, lines_changed: f.lines, size: f.size, score: f.score };
 }
 

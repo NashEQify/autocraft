@@ -8,28 +8,27 @@ import { HttpError } from "./dash/server/util.ts";
 import { slugOf } from "./owners.ts";
 import { everySeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import { nowParam } from "./db/portable.ts";
+import * as kx from "./db/kx.ts";
+import type { AliasableExpression, Expression, SqlBool } from "kysely";
 
 export const MAINTAINER_WRITES_KEY = "maintainer_writes";
 
 export const maintainerWritesOn = async (db: Db): Promise<boolean> =>
-  (await db.prepare("SELECT value FROM main.settings WHERE key = ?").get(MAINTAINER_WRITES_KEY) as { value: string } | undefined)?.value === "1";
+  (await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", MAINTAINER_WRITES_KEY)))?.value === "1";
 
 /** Maintainers settle now where they have write access: `maintainer_writes` on and the app's identity (which is instance-wide, as `allAppIdentity` reads it). */
 export const maintainersSettle = async (db: Db): Promise<boolean> => await maintainerWritesOn(db) && await githubIdentity(db) === "app";
 
 export async function setMaintainerWrites(db: Db, on: boolean): Promise<boolean> {
   if (await maintainerWritesOn(db) === on) return false;
-  if (on) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, '1') ON CONFLICT (key) DO UPDATE SET value = '1'").run(MAINTAINER_WRITES_KEY);
-  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(MAINTAINER_WRITES_KEY);
+  if (on) await db.run(db.k.insertInto("main.settings").values({ key: MAINTAINER_WRITES_KEY, value: "1" }).onConflict((oc) => oc.column("key").doUpdateSet({ value: "1" })));
+  else await db.run(db.k.deleteFrom("main.settings").where("key", "=", MAINTAINER_WRITES_KEY));
   return true;
 }
 
-/** SQL for the logins whose answers the pipeline acts on: operators, and maintainers while `maintainer_writes` is on. */
-export const SETTLER_LOGINS_SQL = `(SELECT login FROM main.access WHERE role = 'operator'
-  OR (role = 'maintainer' AND EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')))`;
-
 export async function settlerLogins(db: Db): Promise<Set<string>> {
-  return new Set((await db.prepare(`SELECT login FROM ${SETTLER_LOGINS_SQL}`).all() as { login: string }[]).map((r) => r.login));
+  return new Set((await db.all(db.k.selectFrom((eb) => settlerLoginsQuery(eb).as("s")).select("s.login"))).map((r) => r.login));
 }
 
 /**
@@ -42,7 +41,7 @@ export const settleKey = (login: string, repo: string): string => `${login}\n${r
 
 const roles = async (db: Db, m: SettleMemo): Promise<void> => {
   if (m.operators) return;
-  const rows = await db.prepare("SELECT login, role FROM main.access WHERE role IN ('operator', 'maintainer')").all() as { login: string; role: string }[];
+  const rows = await db.all(db.k.selectFrom("main.access").select(["login", "role"]).where("role", "in", ["operator", "maintainer"]));
   m.operators = new Set(rows.filter((r) => r.role === "operator").map((r) => r.login));
   m.maintainers = new Set(rows.filter((r) => r.role === "maintainer").map((r) => r.login));
   m.on = await maintainerWritesOn(db);
@@ -57,14 +56,12 @@ export async function allAppIdentity(db: Db, repos: string[], m: SettleMemo = se
   });
 }
 
-const WRITE = "('write', 'maintain', 'admin')";
-
 /** A cached write permission younger than PERM_READ_TTL, or an older one the memo holds; the write itself reads the live permission again. */
 async function cachedWrite(db: Db, login: string, repo: string, m: SettleMemo): Promise<boolean> {
   const k = settleKey(login, repo);
   let v = m.write.get(k);
   if (v === undefined) {
-    const row = await db.prepare(`SELECT checked_at FROM main.repo_permissions WHERE login = ? AND repo = ? AND permission IN ${WRITE}`).get(login, repo) as { checked_at: string } | undefined;
+    const row = await db.get(db.k.selectFrom("main.repo_permissions").select("checked_at").where("login", "=", login).where("repo", "=", repo).where("permission", "in", WRITE_PERMISSIONS));
     m.write.set(k, (v = !!row && (Date.now() - Date.parse(row.checked_at) < PERM_READ_TTL || !!m.held?.has(k))));
   }
   return v;
@@ -111,36 +108,10 @@ export async function settlesNow(db: Db, login: string | null, repos: string[], 
   return m.operators!.has(login) || (m.maintainers!.has(login) && await canSettleCached(db, login, "maintainer", repos, m));
 }
 
-/**
- * SQL: `login` (an expression) is an operator, or a maintainer who settles on the repo expression (setting on, app identity, fresh cached write).
- * Binds `:settles_after` (settlesAfter): a cached write permission read before it is not fresh.
- */
-export const settlesLoginSql = (login: string, repo: string): string => `(${login} IN (SELECT login FROM main.access WHERE role = 'operator')
-  OR (${login} IN ${SETTLER_LOGINS_SQL}
-    AND EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')
-    AND EXISTS (SELECT 1 FROM main.repo_permissions rp WHERE rp.login = ${login} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}
-      AND rp.checked_at > :settles_after)))`;
-
-/** The named parameter settlesLoginSql binds, at `nowMs`. */
+/** The cutoff settlesLoginExpr reads a cached write permission against, at `nowMs`: one read before it is not fresh. */
 export const settlesAfter = (nowMs: number): { settles_after: string } => ({ settles_after: new Date(nowMs - PERM_READ_TTL).toISOString() });
 
-/** SQL: when the cached write permission that lets `login` settle on `repo` (expressions) was read; null for an operator, whose settling does not age. Freshness ends PERM_READ_TTL after it. */
-export const settlesCheckedAtSql = (login: string, repo: string): string => `(CASE WHEN ${login} IN (SELECT login FROM main.access WHERE role = 'operator') THEN NULL
-  ELSE (SELECT max(rp.checked_at) FROM main.repo_permissions rp WHERE rp.login = ${login} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}) END)`;
-
-/**
- * SQL condition on a decisions row (`a` is its table name or alias): a disputed answer never counts. Otherwise its answer counts because its answerer is an operator, or a
- * maintainer while `maintainer_writes` is on and every repo the decision covers (its own and its batch items') has the app's
- * identity, so its merge or close is made as that person. Checked wherever the pipeline reads answers.
- */
-export const settledBySql = (a: string): string => `(${a}.exec_state IS NOT 'disputed' AND (${a}.answered_by IN (SELECT login FROM main.access WHERE role = 'operator')
-  OR (${a}.answered_by IN ${SETTLER_LOGINS_SQL}
-    AND (${a}.repo IS NOT NULL OR json_array_length(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) > 0)
-    AND NOT EXISTS (SELECT 1 WHERE ${a}.repo IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app'))
-    AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')))))`;
-
-/** The same check for one loaded decision row. */
+/** settledByExpr's check for one loaded decision row. */
 export async function settledBy(db: Db, d: { answered_by: string | null; repo: string | null; items: string | null; exec_state?: string | null }, m: SettleMemo = settleMemo()): Promise<boolean> {
   if (!d.answered_by || d.exec_state === "disputed") return false;
   await roles(db, m);
@@ -151,21 +122,75 @@ export async function settledBy(db: Db, d: { answered_by: string | null; repo: s
   return await allAppIdentity(db, [...new Set([...(d.repo ? [d.repo] : []), ...items.map((i) => i.repo)])], m);
 }
 
+const WRITE_PERMISSIONS = ["write", "maintain", "admin"];
+
+/** The logins of operators. */
+const operatorLogins = (eb: kx.AnyEb) => kx.schemaEb(eb).selectFrom("main.access").select("login").where("role", "=", "operator");
+
+/** The logins whose answers the pipeline acts on: operators, and maintainers while `maintainer_writes` is on. */
+const settlerLoginsQuery = (eb: kx.AnyEb) => {
+  const t = kx.schemaEb(eb);
+  return t.selectFrom("main.access").select("login").where((w) => w.or([w("role", "=", "operator"), w.and([w("role", "=", "maintainer"),
+    w.exists(t.selectFrom("main.settings").select(w.lit(1).as("one")).where("key", "=", MAINTAINER_WRITES_KEY).where("value", "=", "1"))])]));
+};
+
+/** The instance runs as the GitHub App. */
+const appIdentity = (eb: kx.AnyEb) =>
+  eb.exists(kx.schemaEb(eb).selectFrom("main.settings as s").select(eb.lit(1).as("one")).where("s.key", "=", "github_identity").where("s.value", "=", "app"));
+
+/** The `items` of decisions row `a` when it is a JSON array, else `[]`. */
+const itemsJson = (db: Db, eb: kx.AnyEb, a: string) => eb.case().when(kx.jsonValid(db, `${a}.items`)).then(eb.ref(`${a}.items`)).else(eb.val("[]")).end();
+
+/** `login` is an operator, or a maintainer who settles on `repo` (setting on, app identity, a cached write permission read after settlesAfter(nowMs)). */
+export function settlesLoginExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex, nowMs: number): AliasableExpression<SqlBool> {
+  const l = kx.exprOf(eb, login);
+  return eb.or([eb(l, "in", operatorLogins(eb)), eb.and([eb(l, "in", settlerLoginsQuery(eb)), appIdentity(eb),
+    eb.exists(kx.schemaEb(eb).selectFrom("main.repo_permissions as rp").select(eb.lit(1).as("one")).where("rp.login", "=", l).where("rp.repo", "=", kx.exprOf(eb, repo))
+      .where("rp.permission", "in", WRITE_PERMISSIONS).where("rp.checked_at", ">", settlesAfter(nowMs).settles_after))])]);
+}
+
+/** When the cached write permission that lets `login` settle on `repo` (expressions) was read; null for an operator, whose settling does not age. Freshness ends PERM_READ_TTL after it. */
+export function settlesCheckedAtExpr(eb: kx.AnyEb, login: kx.Ex, repo: kx.Ex): AliasableExpression<string | null> {
+  const l = kx.exprOf(eb, login);
+  return eb.case().when(l, "in", operatorLogins(eb)).then(eb.lit(null))
+    .else(kx.schemaEb(eb).selectFrom("main.repo_permissions as rp").select((s) => s.fn.max("rp.checked_at").as("at")).where("rp.login", "=", l)
+      .where("rp.repo", "=", kx.exprOf(eb, repo)).where("rp.permission", "in", WRITE_PERMISSIONS)).end();
+}
+
 /**
- * SQL condition on a decisions row (`a`: its table name or alias): `login` with `role` settles it, as `canSettleCached` decides for one row. An operator
+ * Condition on a decisions row (`a` is its table name or alias): a disputed answer never counts. Otherwise its answer counts because its answerer is an operator, or a
+ * maintainer while `maintainer_writes` is on and every repo the decision covers (its own and its batch items') has the app's
+ * identity, so its merge or close is made as that person. Checked wherever the pipeline reads answers.
+ */
+export function settledByExpr(db: Db, eb: kx.AnyEb, a: string): AliasableExpression<SqlBool> {
+  const c = (col: string) => eb.ref(`${a}.${col}`);
+  return eb.and([eb(c("exec_state"), "is distinct from", "disputed"), eb.or([eb(c("answered_by"), "in", operatorLogins(eb)), eb.and([
+    eb(c("answered_by"), "in", settlerLoginsQuery(eb)),
+    eb.or([eb(c("repo"), "is not", null), eb(kx.jsonArrayLength(db, itemsJson(db, eb, a)), ">", 0)]),
+    eb.not(eb.and([eb(c("repo"), "is not", null), eb.not(appIdentity(eb))])),
+    eb.not(eb.exists(kx.schemaEb(eb).selectFrom(kx.jsonEach(db, itemsJson(db, eb, a), "j")).select(eb.lit(1).as("one"))
+      .where(kx.jsonText(db, "j.value", "$.repo"), "is not", null).where(eb.not(appIdentity(eb))))),
+  ])])]);
+}
+
+/**
+ * Condition on a decisions row (`a`: its table name or alias): `login` with `role` settles it, as `canSettleCached` decides for one row. An operator
  * settles everything. A maintainer needs `maintainer_writes` on, and for the decision's repo and every batch item's repo the app's identity and a fresh
  * cached write permission. Anyone else settles nothing.
  */
-export function canSettleSql(login: string, role: string, a = "decisions"): string {
-  if (role === "operator") return "1";
-  if (role !== "maintainer") return "0";
-  const me = `'${login.replace(/'/g, "''")}'`;
-  const ok = (repo: string): string => `(EXISTS (SELECT 1 FROM main.settings s WHERE s.key = 'github_identity' AND s.value = 'app')
-    AND EXISTS (SELECT 1 FROM main.repo_permissions rp WHERE rp.login = ${me} AND rp.repo = ${repo} AND rp.permission IN ${WRITE}
-      AND rp.checked_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-${PERM_READ_TTL / 1000} seconds')))`;
-  return `(EXISTS (SELECT 1 FROM main.settings WHERE key = '${MAINTAINER_WRITES_KEY}' AND value = '1')
-    AND (${a}.repo IS NOT NULL OR json_array_length(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) > 0)
-    AND (${a}.repo IS NULL OR ${ok(`${a}.repo`)})
-    AND NOT EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(${a}.items) THEN ${a}.items ELSE '[]' END) j
-      WHERE json_extract(j.value, '$.repo') IS NOT NULL AND NOT ${ok("json_extract(j.value, '$.repo')")}))`;
+export function canSettleExpr(db: Db, eb: kx.AnyEb, login: string, role: string, a = "decisions"): AliasableExpression<SqlBool> {
+  if (role === "operator") return eb.lit(true);
+  if (role !== "maintainer") return eb.lit(false);
+  const t = kx.schemaEb(eb);
+  const c = (col: string) => eb.ref(`${a}.${col}`);
+  const fresh = nowParam({ offsetMs: -PERM_READ_TTL });
+  const ok = (repo: Expression<any>) => eb.and([appIdentity(eb), eb.exists(t.selectFrom("main.repo_permissions as rp").select(eb.lit(1).as("one"))
+    .where("rp.login", "=", login).where("rp.repo", "=", repo).where("rp.permission", "in", WRITE_PERMISSIONS).where("rp.checked_at", ">", fresh))]);
+  const itemRepo = () => kx.jsonText(db, "j.value", "$.repo");
+  return eb.and([
+    eb.exists(t.selectFrom("main.settings").select(eb.lit(1).as("one")).where("key", "=", MAINTAINER_WRITES_KEY).where("value", "=", "1")),
+    eb.or([eb(c("repo"), "is not", null), eb(kx.jsonArrayLength(db, itemsJson(db, eb, a)), ">", 0)]),
+    eb.or([eb(c("repo"), "is", null), ok(c("repo"))]),
+    eb.not(eb.exists(t.selectFrom(kx.jsonEach(db, itemsJson(db, eb, a), "j")).select(eb.lit(1).as("one")).where(itemRepo(), "is not", null).where(eb.not(ok(itemRepo()))))),
+  ]);
 }

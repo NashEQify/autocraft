@@ -10,13 +10,14 @@ import { mergeDecisionId, UNKNOWN_REREADS } from "../core/rules.ts";
 import { withdrawMergeQuestion } from "./withdraw.ts";
 import { readEnvFor } from "../github/read.ts";
 import type { Db } from "../db/index.ts";
+import { excluded, like, rowid } from "../db/kx.ts";
 
 const PREFIX = "mergeable_unknown:";
 const keyOf = (repo: string, n: number) => `${PREFIX}${repo}#${n}`;
 
 export type UnknownState = { head: string; since: string; reads: number; rereads: number; stuck: boolean };
 
-const parse = (v: string): UnknownState | null => { try { const x = JSON.parse(v) as UnknownState; return typeof x.since === "string" && typeof x.head === "string" ? x : null; } catch { return null; } };
+const parse = (v: string | null): UnknownState | null => { try { if (v === null) return null; const x = JSON.parse(v) as UnknownState; return typeof x.since === "string" && typeof x.head === "string" ? x : null; } catch { return null; } };
 
 /** GraphQL checks reads in a row that still showed an unknown state before GitHub's REST endpoint is asked (a count, not a clock). */
 export const READS_BEFORE_REQUEST = 5;
@@ -26,33 +27,36 @@ export const READS_BEFORE_REQUEST = 5;
  * that still show an unknown state; a known state forgets the PR (and sets aside a Merge? question that was asked about the unknown state).
  */
 export async function noteMergeable(db: Db, rows: PrChecks[], at: string): Promise<void> {
-  const get = db.prepare("SELECT value FROM main.settings WHERE key = ?");
-  const set = db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value");
-  const del = db.prepare("DELETE FROM main.settings WHERE key = ?");
-  const taken = db.prepare(`SELECT 1 FROM final_reviews l WHERE l.repo = ? AND l.number = ? AND l.head_oid = ? AND l.verdict IN ('take', 'take-fix')
-    AND l.head_oid = (SELECT r.head_oid FROM opus_reviews r WHERE r.repo = l.repo AND r.number = l.number AND r.verdict IS NOT NULL ORDER BY r.at DESC, r.rowid DESC LIMIT 1)`);
-  const open = db.prepare("SELECT id FROM decisions WHERE id = ? AND answer IS NULL AND context LIKE '%still reports the merge state as unknown%'");
+  const get = (k: string) => db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", k));
+  const set = (k: string, value: string) => db.run(db.k.insertInto("main.settings").values({ key: k, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
+  const del = (k: string) => db.run(db.k.deleteFrom("main.settings").where("key", "=", k));
+  const taken = (repo: string, number: number, head: string) => db.get(db.k.selectFrom("final_reviews as l").select((eb) => eb.lit(1).as("one"))
+    .where("l.repo", "=", repo).where("l.number", "=", number).where("l.head_oid", "=", head).where("l.verdict", "in", ["take", "take-fix"])
+    .where((eb) => eb("l.head_oid", "=", eb.selectFrom("opus_reviews as r").select("r.head_oid").whereRef("r.repo", "=", "l.repo").whereRef("r.number", "=", "l.number")
+      .where("r.verdict", "is not", null).orderBy("r.at", "desc").orderBy(rowid("opus_reviews", "r"), "desc").limit(1))));
+  const open = (id: string) => db.get(db.k.selectFrom("decisions").select("id").where("id", "=", id).where("answer", "is", null)
+    .where((eb) => like(db, "context", eb.val("%still reports the merge state as unknown%"))));
   for (const r of rows) {
     const k = keyOf(r.repo, r.number);
-    const cur = await get.get(k) as { value: string } | undefined;
+    const cur = await get(k);
     const known = r.mergeable === "MERGEABLE" || r.mergeable === "CONFLICTING";
-    if (known || r.state !== "OPEN" || r.overall !== "success" || !await taken.get(r.repo, r.number, r.head_oid)) {
+    if (known || r.state !== "OPEN" || r.overall !== "success" || !await taken(r.repo, r.number, r.head_oid)) {
       if (cur) {
-        await del.run(k);
+        await del(k);
         const prev = parse(cur.value);
-        if (prev && known && await open.get(mergeDecisionId(r.repo, r.number, prev.head))) await withdrawMergeQuestion(db, r.repo, r.number, prev.head, at, "GitHub now reports the merge state");
+        if (prev && known && await open(mergeDecisionId(r.repo, r.number, prev.head))) await withdrawMergeQuestion(db, r.repo, r.number, prev.head, at, "GitHub now reports the merge state");
       }
       continue;
     }
     const prev = cur ? parse(cur.value) : null;
-    if (!prev || prev.head !== r.head_oid) await set.run(k, JSON.stringify({ head: r.head_oid, since: at, reads: 1, rereads: 0, stuck: false } satisfies UnknownState));
-    else await set.run(k, JSON.stringify({ ...prev, reads: prev.reads + 1 } satisfies UnknownState));
+    if (!prev || prev.head !== r.head_oid) await set(k, JSON.stringify({ head: r.head_oid, since: at, reads: 1, rereads: 0, stuck: false } satisfies UnknownState));
+    else await set(k, JSON.stringify({ ...prev, reads: prev.reads + 1 } satisfies UnknownState));
   }
 }
 
 /** What the planner needs for one PR at a head, or null when its state is not unknown (or not noted yet). */
 export async function unknownOf(db: Db, repo: string, n: number, head: string): Promise<UnknownState | null> {
-  const row = await db.prepare("SELECT value FROM main.settings WHERE key = ?").get(keyOf(repo, n)) as { value: string } | undefined;
+  const row = await db.get(db.k.selectFrom("main.settings").select("value").where("key", "=", keyOf(repo, n)));
   const s = row ? parse(row.value) : null;
   return s && s.head === head ? s : null;
 }
@@ -78,21 +82,21 @@ export const restMergeable: RestRead = async (repo, number) => {
  * A null answer marks the PR stuck, and the merge queue asks a person. No clock: one request per PR and head. A known answer is stored by reading the PR's checks again.
  */
 export async function rereadUnknown(db: Db, client: Querier, repo: string, log: (line: string) => void = () => {}, read: RestRead = restMergeable): Promise<number[]> {
-  const rows = await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE ?").all(`${PREFIX}${repo}#%`) as { key: string; value: string }[];
-  const open = db.prepare("SELECT 1 FROM main.items WHERE repo = ? AND number = ? AND kind = 'pr' AND state = 'OPEN'");
+  const rows = await db.all(db.k.selectFrom("main.settings").select(["key", "value"]).where((eb) => like(db, "key", eb.val(`${PREFIX}${repo}#%`))));
+  const open = (number: number) => db.get(db.k.selectFrom("main.items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", number).where("kind", "=", "pr").where("state", "=", "OPEN"));
   const done: number[] = [], known: number[] = [];
-  const set = db.prepare("UPDATE main.settings SET value = ? WHERE key = ?");
+  const set = (value: string, key: string) => db.run(db.k.updateTable("main.settings").set({ value }).where("key", "=", key));
   for (const r of rows) {
     const s = parse(r.value);
     const n = Number(r.key.slice(r.key.lastIndexOf("#") + 1));
     if (!Number.isInteger(n)) continue;
-    if (!s || !await open.get(repo, n)) { await db.prepare("DELETE FROM main.settings WHERE key = ?").run(r.key); continue; }
+    if (!s || !await open(n)) { await db.run(db.k.deleteFrom("main.settings").where("key", "=", r.key)); continue; }
     if (s.stuck || s.rereads >= UNKNOWN_REREADS || s.reads < READS_BEFORE_REQUEST) continue;
     let state: string | null;
     try { state = await read(repo, n); } catch (e) { log(`checks: ${repo}#${n}: the REST read failed: ${String((e as Error).message ?? e)}`); continue; }
     done.push(n);
     if (state !== null) { known.push(n); continue; }
-    await set.run(JSON.stringify({ ...s, rereads: s.rereads + 1, stuck: true } satisfies UnknownState), r.key);
+    await set(JSON.stringify({ ...s, rereads: s.rereads + 1, stuck: true } satisfies UnknownState), r.key);
   }
   if (known.length) await refreshChecks(db, client, repo, known, log);
   if (done.length) log(`checks: ${repo}: requested ${done.length} PR${done.length === 1 ? "" : "s"} with an unknown mergeable state from GitHub (${done.map((n) => `#${n}`).join(", ")})`);

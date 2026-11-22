@@ -3,6 +3,7 @@
 import { audit } from "./dash/audit.ts";
 import { githubUserId } from "./github/users.ts";
 import type { Db } from "./db/index.ts";
+import * as kx from "./db/kx.ts";
 import { openDb } from "./db/open.ts";
 
 export type Tier = "whitelisted" | "not" | "allow" | "deny";
@@ -33,7 +34,7 @@ export type Contributor = {
 };
 
 export async function getRule(db: Db): Promise<Rule> {
-  const rows = await db.prepare("SELECT key, value FROM settings WHERE key IN ('whitelist_min_merged','whitelist_min_merge_rate')").all() as { key: string; value: string }[];
+  const rows = await db.all(db.k.selectFrom("settings").select(["key", "value"]).where("key", "in", ["whitelist_min_merged", "whitelist_min_merge_rate"]));
   const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return { minMerged: Number(m.whitelist_min_merged ?? 5), minRate: Number(m.whitelist_min_merge_rate ?? 0.6) };
 }
@@ -41,9 +42,8 @@ export async function getRule(db: Db): Promise<Rule> {
 export async function setRule(db: Db, rule: Rule, by: string): Promise<void> {
   if (!Number.isInteger(rule.minMerged) || rule.minMerged < 0) throw new Error("min merged must be a whole number ≥ 0");
   if (!(rule.minRate >= 0 && rule.minRate <= 1)) throw new Error("min merge rate must be between 0 and 1");
-  const set = db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)");
-  await set.run("whitelist_min_merged", String(rule.minMerged));
-  await set.run("whitelist_min_merge_rate", String(rule.minRate));
+  await db.run(db.k.insertInto("settings").values([{ key: "whitelist_min_merged", value: String(rule.minMerged) }, { key: "whitelist_min_merge_rate", value: String(rule.minRate) }])
+    .onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   await audit(db, by, "rule", "whitelist", rule);
 }
 
@@ -53,14 +53,13 @@ export function tierOf(merged: number, closed: number, override: string | null, 
   return merged >= rule.minMerged && done > 0 && merged / done >= rule.minRate ? "whitelisted" : "not";
 }
 
-// SQL for per-author PR stats; the `items_pr_author` index covers it.
-export const STATS_SQL = `
-  SELECT author AS login,
-         SUM(state = 'MERGED') AS merged,
-         SUM(state = 'CLOSED') AS closed,
-         SUM(state = 'OPEN') AS open,
-         MAX(merged_at) AS last_merge
-  FROM items WHERE kind = 'pr' AND author IS NOT NULL`;
+const stateCount = (eb: kx.AnyEb, state: string) => eb.fn.sum<number>(eb.case().when("state", "=", state).then(eb.lit(1)).else(eb.lit(0)).end());
+
+/** Per-author PR stats (the `items_pr_author` index covers them); add the GROUP BY (and any filter). */
+export function statsExpr(db: Db) {
+  return db.k.selectFrom("items").select((eb) => ["author as login" as const, stateCount(eb, "MERGED").as("merged"), stateCount(eb, "CLOSED").as("closed"), stateCount(eb, "OPEN").as("open"),
+    eb.fn.max("merged_at").as("last_merge")]).where("kind", "=", "pr").where("author", "is not", null);
+}
 
 export type AuthorRef = { login: string; id: number | null };
 export const tierKey = (a: AuthorRef): string => `${a.login}\0${a.id ?? ""}`;
@@ -79,17 +78,15 @@ async function standings(db: Db, authors: AuthorRef[]): Promise<Map<string, Stan
   const logins = [...new Set(authors.map((a) => a.login))];
   // A long list (the contributors page) reads every login rather than binding thousands of parameters.
   const all = logins.length > 500;
-  const marks = logins.map(() => "?").join(",");
-  const only = (col: string, nocase = false): string => (all ? "1" : `${col}${nocase ? " COLLATE NOCASE" : ""} IN (${marks})`);
-  const args = all ? [] : logins;
   const rows = new Map<string, { id: number | null; merged: number; closed: number }[]>();
-  for (const r of await db.prepare(`SELECT author AS login, author_id AS id, SUM(state = 'MERGED') AS merged, SUM(state = 'CLOSED') AS closed
-    FROM items WHERE kind = 'pr' AND author IS NOT NULL AND ${only("author")} GROUP BY author, author_id`).all(...args) as { login: string; id: number | null; merged: number; closed: number }[]) {
+  for (const r of await db.all(db.k.selectFrom("items")
+    .select((eb) => ["author as login", "author_id as id", stateCount(eb, "MERGED").as("merged"), stateCount(eb, "CLOSED").as("closed")]).$narrowType<{ login: string }>()
+    .where("kind", "=", "pr").where("author", "is not", null).$if(!all, (q) => q.where(kx.inList(db, "author", logins))).groupBy(["author", "author_id"]))) {
     (rows.get(r.login) ?? rows.set(r.login, []).get(r.login)!).push(r);
   }
-  const over = new Map((await db.prepare(`SELECT login, status, github_id FROM whitelist_overrides WHERE ${only("login", true)}`).all(...args) as { login: string; status: string; github_id: number | null }[])
+  const over = new Map((await db.all(db.k.selectFrom("whitelist_overrides").select(["login", "status", "github_id"]).$if(!all, (q) => q.where((eb) => kx.inList(db, eb.fn("lower", ["login"]), logins.map((l) => l.toLowerCase()))))))
     .map((r) => [r.login.toLowerCase(), r]));
-  const bound = new Map((await db.prepare(`SELECT login, id FROM author_ids WHERE ${only("login")}`).all(...args) as { login: string; id: number }[]).map((r) => [r.login, r.id]));
+  const bound = new Map((await db.all(db.k.selectFrom("author_ids").select(["login", "id"]).$if(!all, (q) => q.where(kx.inList(db, "login", logins))))).map((r) => [r.login, r.id]));
   for (const a of authors) {
     const owner = bound.get(a.login);
     const account = a.id ?? owner ?? null;
@@ -110,23 +107,21 @@ export async function tiersOf(db: Db, authors: AuthorRef[]): Promise<Map<string,
 
 export async function contributors(db: Db, opts: { repo?: string; login?: string } = {}): Promise<Contributor[]> {
   const rule = await getRule(db);
-  const where = [opts.repo ? "AND repo = :repo" : "", opts.login ? "AND author = :login" : ""].join(" ");
-  const params: Record<string, string | number> = {};
-  if (opts.repo) params.repo = opts.repo;
-  if (opts.login) params.login = opts.login;
   // Stats always come from every repo; the repo filter only picks who is listed.
-  const rows = await db.prepare(`
-    WITH s AS (${STATS_SQL} GROUP BY author),
-    r AS (SELECT author, GROUP_CONCAT(DISTINCT repo) AS repos FROM items WHERE kind = 'pr' AND author IS NOT NULL ${where} GROUP BY author),
-    j AS (
-      SELECT r.author AS login, COALESCE(s.merged,0) AS merged, COALESCE(s.closed,0) AS closed, COALESCE(s.open,0) AS open,
-             s.last_merge, r.repos, o.status AS override, o.note, o.by AS override_by, o.at AS override_at
-      FROM r LEFT JOIN s ON s.login = r.author LEFT JOIN whitelist_overrides o ON o.login = r.author COLLATE NOCASE
-      UNION ALL
-      SELECT o.login, 0, 0, 0, NULL, '', o.status, o.note, o.by, o.at FROM whitelist_overrides o
-      WHERE NOT EXISTS (SELECT 1 FROM items i WHERE i.kind = 'pr' AND i.author = o.login COLLATE NOCASE) ${opts.repo ? "AND 0" : ""} ${opts.login ? "AND o.login = :login" : ""}
-    )
-    SELECT j.* FROM j`).all(params) as Omit<Contributor, "rate" | "tier" | "override_in_effect">[];
+  const listed = db.k.selectFrom((eb) => eb.selectFrom("items").select(["author", "repo"]).distinct().$narrowType<{ author: string }>()
+    .where("kind", "=", "pr").where("author", "is not", null)
+    .$if(!!opts.repo, (q) => q.where("repo", "=", opts.repo!)).$if(!!opts.login, (q) => q.where("author", "=", opts.login!)).as("d"))
+    .select(["d.author", kx.groupConcat(db, "d.repo", ",", "d.repo").as("repos")]).$narrowType<{ repos: string }>().groupBy("d.author");
+  const rows = await db.all(db.k.with("s", () => statsExpr(db).groupBy("author")).with("r", () => listed)
+    .selectFrom("r").leftJoin("s", "s.login", "r.author").leftJoin("whitelist_overrides as o", (j) => j.on((eb) => kx.ciEq(db, "o.login", eb.ref("r.author"))))
+    .select((eb) => ["r.author as login", eb.fn.coalesce("s.merged", eb.lit(0)).as("merged"), eb.fn.coalesce("s.closed", eb.lit(0)).as("closed"), eb.fn.coalesce("s.open", eb.lit(0)).as("open"),
+      "s.last_merge", "r.repos", "o.status as override", "o.note", "o.by as override_by", "o.at as override_at"]).$narrowType<{ override: Contributor["override"] }>()
+    .unionAll((eb) => eb.selectFrom("whitelist_overrides as o")
+      .select((eb) => ["o.login", eb.lit<number>(0).as("merged"), eb.lit<number>(0).as("closed"), eb.lit<number>(0).as("open"), eb.cast<string | null>(eb.lit(null), "text").as("last_merge"), eb.cast<string>(eb.val(""), "text").as("repos"),
+        "o.status as override", "o.note", "o.by as override_by", "o.at as override_at"]).$narrowType<{ override: "allow" | "deny" }>()
+      .where((eb) => eb.not(eb.exists(eb.selectFrom("items as i").select(eb.lit(1).as("one")).where("i.kind", "=", "pr").where(kx.ciEq(db, "i.author", eb.ref("o.login"))))))
+      .$if(!!opts.repo, (q) => q.where((eb) => eb.or([])))
+      .$if(!!opts.login, (q) => q.where("o.login", "=", opts.login!))));
   // History, override and tier are those of the account the login is bound to, as the merge rule reads them.
   const st = await standings(db, rows.map((r) => ({ login: r.login, id: null })));
   return rows.map((r) => {
@@ -158,11 +153,11 @@ export async function setOverride(db: Db, login: string, status: "allow" | "deny
   if (!OVERRIDE_LOGIN.test(login)) throw new Error(`not a GitHub login: ${login}`);
   if (status === "allow" && githubId === null) throw new Error(`${login} is not a GitHub user`);
   if (status === null) {
-    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE").run(login);
+    await db.run(db.k.deleteFrom("whitelist_overrides").where((eb) => kx.ciEq(db, "login", eb.val(login))));
   } else {
-    await db.prepare("DELETE FROM whitelist_overrides WHERE login = ? COLLATE NOCASE AND login <> ?").run(login, login);
-    await db.prepare("INSERT OR REPLACE INTO whitelist_overrides (login, status, note, by, at, github_id) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(login, status, note || null, by, new Date().toISOString(), githubId);
+    await db.run(db.k.deleteFrom("whitelist_overrides").where((eb) => kx.ciEq(db, "login", eb.val(login))).where("login", "<>", login));
+    await db.run(db.k.insertInto("whitelist_overrides").values({ login, status, note: note || null, by, at: new Date().toISOString(), github_id: githubId })
+      .onConflict((oc) => oc.column("login").doUpdateSet(kx.excluded(["status", "note", "by", "at", "github_id"]))));
   }
   // The note is private: the audit row records only that one was given.
   await audit(db, by, "override", login, { status: status ?? "clear", note: note ? true : undefined, githubId: githubId ?? undefined });

@@ -5,6 +5,7 @@ import type { DiscordKeys } from "./keys.ts";
 import { DEFAULT_OWNER } from "../owners.ts";
 import { parseRefs, type TrackedRepo } from "./refs.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export type DiscordMessage = {
   id: string; channel_id: string; guild_id?: string; content?: string; timestamp?: string;
@@ -12,55 +13,58 @@ export type DiscordMessage = {
 };
 
 export const trackedRepos = async (db: Db): Promise<TrackedRepo[]> =>
-  await db.prepare(`SELECT t.name AS name, COALESCE(r.owner, '${DEFAULT_OWNER}') AS owner FROM main.tracked_repos t LEFT JOIN main.repos r ON r.name = t.name`).all() as TrackedRepo[];
+  await db.all(db.k.selectFrom("main.tracked_repos as t").leftJoin("main.repos as r", "r.name", "t.name")
+    .select((eb) => ["t.name as name", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER)).as("owner")]));
 
 /** A channel is watched when the operators chose it, or it is a thread or forum post of a watched channel. */
 export const isWatched = async (db: Db, channelId: string): Promise<boolean> =>
-  !!await db.prepare(`SELECT 1 FROM discord_channels c WHERE c.channel_id = ? AND (c.watched = 1
-    OR EXISTS (SELECT 1 FROM discord_channels p WHERE p.channel_id = c.parent_id AND p.watched = 1))`).get(channelId);
+  !!await db.get(db.k.selectFrom("discord_channels as c").select((eb) => eb.lit(1).as("one"))
+    .where("c.channel_id", "=", channelId)
+    .where((eb) => eb.or([
+      eb("c.watched", "=", 1),
+      eb.exists(eb.selectFrom("discord_channels as p").select(eb.lit(1).as("one")).whereRef("p.channel_id", "=", "c.parent_id").where("p.watched", "=", 1)),
+    ])));
 
 /** Sets a message's rows to exactly the items its text names. Returns the number of rows newly recorded (0 for a repeat), or -1 when the event carries no text. */
 export async function recordMessage(db: Db, keys: DiscordKeys, m: DiscordMessage, guildId: string | undefined): Promise<number> {
   if (m.content === undefined || !guildId) return -1;
   const msgHash = keys.hash("message", m.id);
   const refs = m.author?.bot ? [] : parseRefs(m.content, await trackedRepos(db));
-  const have = await db.prepare("SELECT repo, number, sealed FROM discord_mentions WHERE msg_hash = ?").all(msgHash) as { repo: string; number: number; sealed: string }[];
+  const have = await db.all(db.k.selectFrom("discord_mentions").select(["repo", "number", "sealed"]).where("msg_hash", "=", msgHash));
   const want = new Set(refs.map((r) => `${r.repo}#${r.number}`));
   // An edit event may carry no author: keep the one sealed with the existing rows.
   const author = m.author?.id ? keys.hash("author", m.author.id) : have.map((h) => keys.open(h.sealed, msgHash)?.author).find((a) => a);
   const sealed = keys.seal({ guildId, channelId: m.channel_id, messageId: m.id, at: m.timestamp ?? new Date().toISOString(), ...(author && { author }) }, msgHash);
-  const del = db.prepare("DELETE FROM discord_mentions WHERE msg_hash = ? AND repo = ? AND number = ?");
-  const ins = db.prepare("INSERT OR IGNORE INTO discord_mentions (msg_hash, channel_hash, repo, number, sealed) VALUES (?, ?, ?, ?, ?)");
   let added = 0;
   await db.write(async () => {
-    for (const h of have) if (!want.has(`${h.repo}#${h.number}`)) await del.run(msgHash, h.repo, h.number);
-    for (const r of refs) added += Number((await ins.run(msgHash, keys.hash("channel", m.channel_id), r.repo, r.number, sealed)).changes);
+    for (const h of have) if (!want.has(`${h.repo}#${h.number}`)) await db.run(db.k.deleteFrom("discord_mentions").where("msg_hash", "=", msgHash).where("repo", "=", h.repo).where("number", "=", h.number));
+    for (const r of refs) added += Number((await db.run(db.k.insertInto("discord_mentions")
+      .values({ msg_hash: msgHash, channel_hash: keys.hash("channel", m.channel_id), repo: r.repo, number: r.number, sealed })
+      .onConflict((oc) => oc.doNothing()))).changes);
   });
   return added;
 }
 
 /** Mention rows only: our replies live in Discord and are deleted with it (src/discord/replies.ts). */
 export async function forgetMessages(db: Db, keys: DiscordKeys, ids: string[]): Promise<number> {
-  const del = db.prepare("DELETE FROM discord_mentions WHERE msg_hash = ?");
   let n = 0;
-  for (const id of ids) n += Number((await del.run(keys.hash("message", id))).changes);
+  for (const id of ids) n += Number((await db.run(db.k.deleteFrom("discord_mentions").where("msg_hash", "=", keys.hash("message", id)))).changes);
   return n;
 }
 
 /** For a channel that is gone (deleted, or its server removed the bot): its replies went with it, so only the rows are removed. */
 export async function forgetChannel(db: Db, keys: DiscordKeys, channelId: string): Promise<number> {
   const h = keys.hash("channel", channelId);
-  await db.prepare("DELETE FROM discord_replies WHERE channel_hash = ?").run(h);
-  return Number((await db.prepare("DELETE FROM discord_mentions WHERE channel_hash = ?").run(h)).changes);
+  await db.run(db.k.deleteFrom("discord_replies").where("channel_hash", "=", h));
+  return Number((await db.run(db.k.deleteFrom("discord_mentions").where("channel_hash", "=", h))).changes);
 }
 
 /** Opens every row to find the author's: slow, and rare enough (a deletion request) not to need a column that would name a person. */
 export async function forgetAuthor(db: Db, keys: DiscordKeys, userId: string): Promise<number> {
   const want = keys.hash("author", userId);
-  const del = db.prepare("DELETE FROM discord_mentions WHERE msg_hash = ? AND repo = ? AND number = ?");
   let n = 0;
-  for (const r of await db.prepare("SELECT msg_hash, repo, number, sealed FROM discord_mentions").all() as { msg_hash: string; repo: string; number: number; sealed: string }[])
-    if (keys.open(r.sealed, r.msg_hash)?.author === want) n += Number((await del.run(r.msg_hash, r.repo, r.number)).changes);
+  for (const r of await db.all(db.k.selectFrom("discord_mentions").select(["msg_hash", "repo", "number", "sealed"])))
+    if (keys.open(r.sealed, r.msg_hash)?.author === want) n += Number((await db.run(db.k.deleteFrom("discord_mentions").where("msg_hash", "=", r.msg_hash).where("repo", "=", r.repo).where("number", "=", r.number))).changes);
   return n;
 }
 
@@ -77,22 +81,22 @@ export async function handleDispatch(db: Db, keys: DiscordKeys, type: string, d:
     if (Array.isArray(x.ids)) await forgetMessages(db, keys, x.ids.filter((i): i is string => typeof i === "string"));
   } else if ((type === "CHANNEL_DELETE" || type === "THREAD_DELETE") && typeof x.id === "string") {
     await forgetChannel(db, keys, x.id);
-    for (const c of await db.prepare("SELECT channel_id FROM discord_channels WHERE parent_id = ?").all(x.id) as { channel_id: string }[]) await forgetChannel(db, keys, c.channel_id);
+    for (const c of await db.all(db.k.selectFrom("discord_channels").select("channel_id").where("parent_id", "=", x.id))) await forgetChannel(db, keys, c.channel_id);
   } else if (type === "GUILD_DELETE" && typeof x.id === "string" && !x.unavailable) {
-    for (const c of await db.prepare("SELECT channel_id FROM discord_channels WHERE guild_id = ?").all(x.id) as { channel_id: string }[]) await forgetChannel(db, keys, c.channel_id);
+    for (const c of await db.all(db.k.selectFrom("discord_channels").select("channel_id").where("guild_id", "=", x.id))) await forgetChannel(db, keys, c.channel_id);
   }
   return null;
 }
 
 const channelGuild = async (db: Db, channelId: string): Promise<string | undefined> =>
-  (await db.prepare("SELECT guild_id FROM discord_channels WHERE channel_id = ?").get(channelId) as { guild_id: string } | undefined)?.guild_id;
+  (await db.get(db.k.selectFrom("discord_channels").select("guild_id").where("channel_id", "=", channelId)))?.guild_id;
 
 export type DiscordLink = { url: string; at: string };
 
 /** Message links of an item, newest first. Empty when the key is missing or a row does not open. */
 export async function linksOf(db: Db, keys: DiscordKeys | null, repo: string, number: number): Promise<DiscordLink[]> {
   if (!keys) return [];
-  const rows = await db.prepare("SELECT msg_hash, sealed FROM discord_mentions WHERE repo = ? AND number = ?").all(repo, number) as { msg_hash: string; sealed: string }[];
+  const rows = await db.all(db.k.selectFrom("discord_mentions").select(["msg_hash", "sealed"]).where("repo", "=", repo).where("number", "=", number));
   return rows.flatMap((r) => {
     const v = keys.open(r.sealed, r.msg_hash);
     return v ? [{ url: `https://discord.com/channels/${v.guildId}/${v.channelId}/${v.messageId}`, at: v.at }] : [];
@@ -100,22 +104,25 @@ export async function linksOf(db: Db, keys: DiscordKeys | null, repo: string, nu
 }
 
 export const countOf = async (db: Db, repo: string, number: number): Promise<number> =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM discord_mentions WHERE repo = ? AND number = ?").get(repo, number) as { n: number }).n;
+  (await db.get(db.k.selectFrom("discord_mentions").select((eb) => eb.fn.countAll<number>().as("n")).where("repo", "=", repo).where("number", "=", number)))!.n;
 
 /** What the bot reports about a guild and its channels, for the admin page. The watched flag is kept across updates. */
 export async function upsertChannel(db: Db, c: { channelId: string; guildId: string; guildName: string | null; name: string | null; parentId?: string | null; position?: number | null; categoryId?: string | null }): Promise<void> {
-  await db.prepare(`INSERT INTO discord_channels (channel_id, guild_id, guild_name, name, parent_id, position, category_id) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(channel_id) DO UPDATE SET guild_id = excluded.guild_id, guild_name = COALESCE(excluded.guild_name, guild_name), name = COALESCE(excluded.name, name), parent_id = excluded.parent_id,
-      position = excluded.position, category_id = excluded.category_id`)
-    .run(c.channelId, c.guildId, c.guildName, c.name, c.parentId ?? null, c.position ?? null, c.categoryId ?? null);
+  await db.run(db.k.insertInto("discord_channels")
+    .values({ channel_id: c.channelId, guild_id: c.guildId, guild_name: c.guildName, name: c.name, parent_id: c.parentId ?? null, position: c.position ?? null, category_id: c.categoryId ?? null })
+    .onConflict((oc) => oc.column("channel_id").doUpdateSet((eb) => ({
+      guild_id: eb.ref("excluded.guild_id"), guild_name: eb.fn.coalesce("excluded.guild_name", "discord_channels.guild_name"),
+      name: eb.fn.coalesce("excluded.name", "discord_channels.name"), parent_id: eb.ref("excluded.parent_id"),
+      position: eb.ref("excluded.position"), category_id: eb.ref("excluded.category_id"),
+    }))));
 }
 
 export async function upsertCategory(db: Db, c: { categoryId: string; guildId: string; name: string | null; position: number | null }): Promise<void> {
-  await db.prepare(`INSERT INTO discord_categories (category_id, guild_id, name, position) VALUES (?, ?, ?, ?)
-    ON CONFLICT(category_id) DO UPDATE SET guild_id = excluded.guild_id, name = excluded.name, position = excluded.position`).run(c.categoryId, c.guildId, c.name, c.position);
+  await db.run(db.k.insertInto("discord_categories").values({ category_id: c.categoryId, guild_id: c.guildId, name: c.name, position: c.position })
+    .onConflict((oc) => oc.column("category_id").doUpdateSet(excluded(["guild_id", "name", "position"]))));
 }
 
 export async function setStatus(db: Db, state: string, detail: string | null): Promise<void> {
-  await db.prepare(`INSERT INTO discord_status (id, state, detail, at) VALUES (1, ?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET state = excluded.state, detail = excluded.detail, at = excluded.at`).run(state, detail, new Date().toISOString());
+  await db.run(db.k.insertInto("discord_status").values({ id: 1, state, detail, at: new Date().toISOString() })
+    .onConflict((oc) => oc.column("id").doUpdateSet(excluded(["state", "detail", "at"]))));
 }

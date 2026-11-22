@@ -10,6 +10,7 @@ import { flowMembers } from "./flow.ts";
 import { queueTextFor, readerOf, type Reader } from "./reader.ts";
 import { isHiddenRepo } from "../../hidden-sql.ts";
 import type { Db } from "../../db/index.ts";
+import * as kx from "../../db/kx.ts";
 
 const TIER: Record<string, Tier> = { whitelisted: "whitelisted", not: "not", allow: "override-allow", deny: "override-deny" };
 const MERGEABLE: Record<string, Mergeable> = { MERGEABLE: "clean", CONFLICTING: "conflicts" };
@@ -37,8 +38,9 @@ function parseCursor(s: string | null): { repo: string; number: number } | undef
 // The queue rows come from the Plan cache (src/core/plan-read.ts): open PRs are read whole (counts and the state filter need all of
 // them) and cut into pages by (repo, number); merged PRs are read a page at a time and only when state=merged.
 /** PRs (repo#number@head) in an integration batch in flight: without a state filter they are listed under their batch, not in the PR list. */
-const inFlight = async (db: Db): Promise<Set<string>> => new Set((await db.prepare(`SELECT b.repo || '#' || p.number || '@' || p.head_oid AS k
-  FROM main.merge_batch_prs p JOIN main.merge_batches b ON b.id = p.batch_id WHERE b.state IN ('checking', 'open')`).all() as { k: string }[]).map((r) => r.k));
+const inFlight = async (db: Db): Promise<Set<string>> => new Set((await db.all(db.k.selectFrom("main.merge_batch_prs as p").innerJoin("main.merge_batches as b", "b.id", "p.batch_id")
+  .select((eb) => eb(eb(eb(eb(eb.ref("b.repo"), "||", eb.val("#")), "||", kx.exprOf(eb, "p.number")), "||", eb.val("@")), "||", eb.ref("p.head_oid")).as("k"))
+  .where("b.state", "in", ["checking", "open"]))).map((r) => r.k));
 
 export async function queue(db: Db, req: Req): Promise<QueueList> {
   const repo = req.query.get("repo") || undefined;

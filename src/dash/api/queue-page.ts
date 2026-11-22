@@ -23,6 +23,8 @@ import { readerOf, veiledFor } from "./reader.ts";
 import { stageById } from "../../stages/registry.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import type { NotNull } from "kysely";
+import * as kx from "../../db/kx.ts";
 
 export const TABS: QueueTab[] = ["all", "review", "fix", "verify", "merge"];
 const NEXT_LIMIT = 10;
@@ -80,7 +82,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const inScope = (repo: string, number: number): boolean =>
     reposParam === "all" ? visibleSet.has(repo) : reposParam === "pipeline" ? visibleSet.has(repo) && scoped!.has(`${repo}#${number}`) : repo === reposParam;
   const fastOf = (repo: string, number: number): FastPosition | null => fast.get(`${repo}#${number}`) ?? null;
-  const held = new Set((await db.prepare("SELECT repo, number FROM main.merge_holds").all() as { repo: string; number: number }[]).map((r) => `${r.repo}#${r.number}`));
+  const held = new Set((await db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
 
   // A linked item (`item=repo:number`) comes with the first page: it is cut long enough to include the item.
   const item = req.query.get("item");
@@ -97,10 +99,10 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const allEntries = await cachedQueue(db, { merged: "exclude" });
   const slots = await queueSlots(db, visible);
   const score = scoreLookup(db);
-  type Row = { repo: string; number: number; kind: string; title: string | null; score: number; breakdown: string; next: string | null; label: string | null; item_state: string | null };
-  const ranked = await db.prepare(`SELECT i.repo, i.number, i.kind, i.title, r.score, r.breakdown, json_extract(p.view, '$.next') AS next, json_extract(p.view, '$.label') AS label, p.item_state
-    FROM items i JOIN item_rank r ON r.repo = i.repo AND r.number = i.number LEFT JOIN item_plans p ON p.repo = i.repo AND p.number = i.number
-    WHERE i.state = 'OPEN' ORDER BY r.score DESC, i.repo, i.number`).all() as Row[];
+  const ranked = await db.all(db.k.selectFrom("items as i").innerJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "i.repo").onRef("r.number", "=", "i.number"))
+    .leftJoin("item_plans as p", (j) => j.onRef("p.repo", "=", "i.repo").onRef("p.number", "=", "i.number"))
+    .select(["i.repo", "i.number", "i.kind", "i.title", "r.score", "r.breakdown", kx.jsonText(db, "p.view", "$.next").as("next"), kx.jsonText(db, "p.view", "$.label").as("label"), "p.item_state"])
+    .where("i.state", "=", "OPEN").orderBy("r.score", "desc").orderBy("i.repo").orderBy("i.number"));
   // Fast-tracked items (and the Fix PRs of fast-tracked issues) first, then the work rank.
   const inView = await mapSeq(ranked.filter((r) => visibleSet.has(r.repo) && inScope(r.repo, r.number)), async (r) => ({ r, s: await score(r.repo, r.number) ?? r.score }));
   inView.sort((a, b) => b.s - a.s);
@@ -140,7 +142,7 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
   const active = batches.filter((b) => (b.state === "checking" || b.state === "open") && b.prs.some((p) => inScope(b.repo, p.number)));
   const rowOf = new Map(await mapSeq(entries, async (e) => [`${e.repo}#${e.number}`, await asRow(e)]));
   const batchOf = new Map(active.flatMap((b) => b.prs.map((p) => [`${b.repo}#${p.number}`, { id: b.id, branch: b.branch }] as const)));
-  const scores = new Map((await db.prepare("SELECT repo, number, score FROM item_rank").all() as { repo: string; number: number; score: number }[]).map((r) => [`${r.repo}#${r.number}`, r.score]));
+  const scores = new Map((await db.all(db.k.selectFrom("item_rank").select(["repo", "number", "score"]))).map((r) => [`${r.repo}#${r.number}`, r.score]));
   const free = await mapSeq((await mergeOrder(db, entries)), asRow);
   out.itemIndex = indexOf(free);
   out.mergeRows = free.slice(offset, offset + sizeFor(free, offset));
@@ -160,10 +162,10 @@ export async function queuePage(db: Db, req: Req): Promise<QueuePage> {
 async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, number: number) => boolean, originOf: (e: Pick<CachedEntry, "repo" | "number" | "decisionId" | "reviewedAt">) => Promise<QueueOrigin>,
   fastOf: (repo: string, number: number) => FastPosition | null, held: Set<string>): Promise<QueuePendingRow[]> {
   const queued = new Set(entries.map((e) => `${e.repo}#${e.number}`));
-  type P = { repo: string; number: number; state: "fixup" | "review" | "ci"; title: string | null; author: string | null; breakdown: string | null };
-  const rows = await db.prepare(`SELECT p.repo, p.number, p.state, i.title, i.author, r.breakdown FROM preapprovals p JOIN main.items i ON i.repo = p.repo AND i.number = p.number
-    LEFT JOIN item_rank r ON r.repo = p.repo AND r.number = p.number
-    WHERE p.state IN ('fixup', 'review', 'ci') AND i.state = 'OPEN' AND i.kind = 'pr' ORDER BY p.id`).all() as P[];
+  const rows = await db.all(db.k.selectFrom("preapprovals as p").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "p.repo").onRef("i.number", "=", "p.number"))
+    .leftJoin("item_rank as r", (j) => j.onRef("r.repo", "=", "p.repo").onRef("r.number", "=", "p.number"))
+    .select(["p.repo", "p.number", "p.state", "i.title", "i.author", "r.breakdown"]).$narrowType<{ state: "fixup" | "review" | "ci" }>()
+    .where("p.state", "in", ["fixup", "review", "ci"]).where("i.state", "=", "OPEN").where("i.kind", "=", "pr").orderBy("p.id"));
   const seen = new Set<string>();
   return await flatMapSeq(rows, async (p) => {
     const k = `${p.repo}#${p.number}`;
@@ -185,15 +187,16 @@ async function pendingRows(db: Db, entries: CachedEntry[], want: (repo: string, 
 export async function queueOrigins(db: Db, staff: boolean): Promise<(e: Pick<CachedEntry, "repo" | "number" | "decisionId" | "reviewedAt">) => Promise<QueueOrigin>> {
   type Pre = { id: number; repo: string; number: number; by: string; at: string; instructions: string; from_head: string; head: string | null };
   const pre = new Map<string, Pre>();
-  for (const p of await db.prepare("SELECT id, repo, number, by, at, instructions, from_head, head FROM preapprovals WHERE state IN ('fixup', 'review', 'ci', 'queued') ORDER BY id").all() as Pre[]) pre.set(`${p.repo}#${p.number}`, p);
-  const answer = db.prepare("SELECT answered_by, answered_at FROM decisions WHERE id = ? AND answer = 'merge'");
+  for (const p of await db.all(db.k.selectFrom("preapprovals").select(["id", "repo", "number", "by", "at", "instructions", "from_head", "head"]).where("state", "in", ["fixup", "review", "ci", "queued"]).orderBy("id"))) pre.set(`${p.repo}#${p.number}`, p);
+  const answer = async (id: string) => await db.get(db.k.selectFrom("decisions").select(["answered_by", "answered_at"]).where("id", "=", id).where("answer", "=", "merge"));
   // A Merge answer carried to a new head is audited as such when its row is made; a queued row's head also moves with our own pushes.
-  const carried = db.prepare("SELECT 1 FROM audit WHERE action = 'preapproval' AND target = :target AND json_extract(details, '$.id') = :id AND json_extract(details, '$.carried') IS NOT NULL");
+  const carried = async (target: string, id: number) => await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "preapproval").where("target", "=", target)
+    .where(kx.jsonNum(db, "details", "$.id"), "=", id).where(kx.jsonText(db, "details", "$.carried"), "is not", null).limit(1));
   const who = (login: string | null | undefined) => (staff ? login || null : null);
   return async (e) => {
     const p = pre.get(`${e.repo}#${e.number}`);
-    if (p) return { how: p.instructions ? "preapproved" : await carried.get({ target: `${p.repo}#${p.number}`, id: p.id }) ? "answer" : "queued", by: who(p.by), at: p.at };
-    const d = e.decisionId ? (await answer.get(e.decisionId) as { answered_by: string | null; answered_at: string | null } | undefined) : undefined;
+    if (p) return { how: p.instructions ? "preapproved" : await carried(`${p.repo}#${p.number}`, p.id) ? "answer" : "queued", by: who(p.by), at: p.at };
+    const d = e.decisionId ? await answer(e.decisionId) : undefined;
     if (d) return { how: "answer", by: who(d.answered_by), at: d.answered_at };
     return { how: "review", by: null, at: e.reviewedAt };
   };
@@ -201,7 +204,8 @@ export async function queueOrigins(db: Db, staff: boolean): Promise<(e: Pick<Cac
 
 /** The issues each PR closes when it merges (GitHub's closing references, from the mirror), by `repo#number`; PRs without any are left out. */
 async function closingIssues(db: Db): Promise<Map<string, number[]>> {
-  const rows = await db.prepare("SELECT repo, number, closing_issues FROM main.items INDEXED BY items_closing WHERE kind = 'pr' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all() as { repo: string; number: number; closing_issues: string }[];
+  const rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_closing", "i")).select(["i.repo", "i.number", "i.closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
+    .where("i.kind", "=", kx.literal("pr")).where("i.closing_issues", "is not", null).where("i.closing_issues", "<>", kx.literal("[]")));
   const out = new Map<string, number[]>();
   for (const r of rows) {
     try {
@@ -231,7 +235,7 @@ export async function fastTrackRefs(db: Db, req: Req): Promise<string[]> {
 /** PRs whose merge an operator holds, as `repo#number`, in visible repos. */
 export async function heldMergeRefs(db: Db, req: Req): Promise<string[]> {
   const visible = new Set(await visibleRepos(db, req));
-  const rows = await db.prepare("SELECT repo, number FROM main.merge_holds ORDER BY repo, number").all() as { repo: string; number: number }[];
+  const rows = await db.all(db.k.selectFrom("main.merge_holds").select(["repo", "number"]).orderBy("repo").orderBy("number"));
   return rows.filter((r) => visible.has(r.repo)).map((r) => `${r.repo}#${r.number}`);
 }
 
@@ -292,13 +296,14 @@ export async function fastTrackWeight(db: Db, req: Req): Promise<string[]> {
  */
 async function markFast(db: Db, by: string, repo: string, number: number, w: number | null, via?: string): Promise<void> {
   const ref = `${repo}#${number}`;
-  const had = (await db.prepare("SELECT weight FROM main.fast_track WHERE repo = ? AND number = ?").get(repo, number) as { weight: number } | undefined)?.weight;
+  const had = (await db.get(db.k.selectFrom("main.fast_track").select("weight").where("repo", "=", repo).where("number", "=", number)))?.weight;
   await guarded(async () => (had === undefined ? await addFastTrack(db, by, ref, w ?? WEIGHT_DEFAULT, via) : w !== null && w > had ? await setFastTrackWeight(db, by, ref, w, via) : null));
 }
 
 /** The open PRs of `repo` that close issue `issue` when they merge (GitHub's closing references, from the mirror). */
 export async function openPrsClosing(db: Db, repo: string, issue: number): Promise<number[]> {
-  const rows = await db.prepare("SELECT number, closing_issues FROM main.items INDEXED BY items_closing WHERE repo = ? AND kind = 'pr' AND state = 'OPEN' AND closing_issues IS NOT NULL AND closing_issues <> '[]'").all(repo) as { number: number; closing_issues: string }[];
+  const rows = await db.all(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_closing", "i")).select(["i.number", "i.closing_issues"]).$narrowType<{ closing_issues: NotNull }>()
+    .where("i.repo", "=", repo).where("i.kind", "=", kx.literal("pr")).where("i.state", "=", "OPEN").where("i.closing_issues", "is not", null).where("i.closing_issues", "<>", kx.literal("[]")));
   return rows
     .filter((p) => {
       try {
@@ -332,7 +337,7 @@ export async function queueAdd(db: Db, req: Req, via?: string, pin?: (pr: number
   // A pre-approved merge is a Merge answer given ahead, so it takes the rule of an answer (src/settlers.ts): an operator with write access, or a maintainer where they settle decisions.
   await requireSettle(db, req.user, [r.repo], queueWhat(r.repo));
   const by = req.user.login;
-  const kind = (await db.prepare("SELECT kind FROM main.items WHERE repo = ? AND number = ?").get(r.repo, r.number) as { kind: string } | undefined)?.kind;
+  const kind = (await db.get(db.k.selectFrom("main.items").select("kind").where("repo", "=", r.repo).where("number", "=", r.number)))?.kind;
   if (kind === "issue") {
     await markFast(db, by, r.repo, r.number, w, via);
     const prs = await openPrsClosing(db, r.repo, r.number);
@@ -390,7 +395,7 @@ export async function batchRemovePr(db: Db, req: Req, run?: Exec): Promise<{ bat
 
 export async function batchStop(db: Db, req: Req, run?: Exec): Promise<{ batch: string; prs: number[]; held: number[]; closed: number | null }> {
   const id = Number(req.params.id);
-  const repo = Number.isInteger(id) ? (await db.prepare("SELECT repo FROM main.merge_batches WHERE id = ?").get(id) as { repo: string } | undefined)?.repo : undefined;
+  const repo = Number.isInteger(id) ? (await db.get(db.k.selectFrom("main.merge_batches").select("repo").where("id", "=", id)))?.repo : undefined;
   if (!repo) throw new HttpError(404, `no batch ${req.params.id}`);
   await needVisible(db, req, repo);
   return guarded(async () => stopBatch(db, req.user.login, id, run));

@@ -23,13 +23,13 @@ const head = (n: number) => String(n).repeat(40);
 async function setup(prs: number): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await useTestAccount(db);
-  await db.prepare("UPDATE claude_accounts SET max_concurrent = 8").run();
-  await db.prepare("INSERT INTO tracked_repos (name, added_by, added_at, pipeline) VALUES ('app', 'op', ?, 1)").run(T0);
+  await db.run(db.k.updateTable("claude_accounts").set({ max_concurrent: 8 }));
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
   for (let n = 1; n <= prs; n++) {
-    await db.prepare(`INSERT INTO items (repo, number, kind, state, title, author, additions, deletions, head_oid, head_ref, head_repo, base_ref, maintainer_can_modify, mergeable, created_at, updated_at)
-      VALUES ('app', ?, 'pr', 'OPEN', 'Fix a thing', 'someone', 5, 0, ?, 'fix', 'contrib/app', 'main', 1, 'MERGEABLE', '${T0}', '${T0}')`).run(n, head(n));
-    await db.prepare(`INSERT INTO opus_reviews (repo, number, head_oid, run_id, at, model, verdict, reason, fixes, sure, mode) VALUES ('app', ?, ?, 'rv', '${T0}', 'm', 'take-fix', 'nearly right', ?, 1, 'full')`).run(n, head(n), FIXES);
+    await db.run(db.k.insertInto("items").values({ repo: "app", number: n, kind: "pr", state: "OPEN", title: "Fix a thing", author: "someone", additions: 5, deletions: 0, head_oid: head(n), head_ref: "fix", head_repo: "contrib/app", base_ref: "main",
+      maintainer_can_modify: 1, mergeable: "MERGEABLE", created_at: T0, updated_at: T0 }));
+    await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: n, head_oid: head(n), run_id: "rv", at: T0, model: "m", verdict: "take-fix", reason: "nearly right", fixes: FIXES, sure: 1, mode: "full" }));
   }
   return db;
 }
@@ -57,7 +57,7 @@ async function run(limit: number | undefined, need: number, o: { prs?: number; m
   let waiting = 0, peak = 0, asked = 0;
   let open!: () => void;
   const gate = new Promise<void>((r) => (open = r));
-  const failures = async () => (await db.prepare("SELECT COUNT(*) AS n FROM fixups WHERE state = 'failed'").get() as { n: number }).n;
+  const failures = async () => (await db.get(db.k.selectFrom("fixups").select((eb) => eb.fn.countAll<number>().as("n")).where("state", "=", "failed")))!.n;
   const deps = {
     querier, exec, now: () => new Date(T0), root: join(dir, "cache"),
     fetchDiff: async () => ({ ok: true, text: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-x\n+y\n" }),

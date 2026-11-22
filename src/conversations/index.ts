@@ -53,7 +53,7 @@ export const commands = {
         }
         for (const t of await turnsOf(db, ref.repo, ref.number)) {
           console.log(`\n[${t.id}] ${t.login} ${t.at}${t.status ? ` (${t.status})` : ""}\n${t.body}`);
-          for (const c of await db.prepare("SELECT id, state, description, text FROM conversation_cards WHERE turn_id = ? ORDER BY id").all(t.id) as { id: number; state: string; description: string; text: string | null }[]) {
+          for (const c of await db.all(db.k.selectFrom("conversation_cards").select(["id", "state", "description", "text"]).where("turn_id", "=", t.id).orderBy("id"))) {
             console.log(`  card ${c.id} [${c.state}] ${c.description}${c.text ? `\n    ${c.text.replace(/\n/g, "\n    ")}` : ""}`);
           }
         }

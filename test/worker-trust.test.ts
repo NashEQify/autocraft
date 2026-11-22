@@ -31,7 +31,7 @@ test("a signing worker takes no PR-code task, a PR build needs a base commit, an
   const t = { repo: "app", plan, requires: { os: "linux" as const, toolchains: ["rust-stable"] } };
   const noBase = await createTask(db, { ...t, step: "pr-build", number: 1, headSha: sha("a") });
   assert.deepEqual((await claim(db, "plain", 4)).tasks.map((x) => x.id), [], "a PR build without a base is not handed out");
-  await db.prepare("DELETE FROM build_tasks WHERE id = ?").run(noBase);
+  await db.run(db.k.deleteFrom("build_tasks").where("id", "=", noBase));
   const pr = await createTask(db, { ...t, step: "pr-build", number: 1, headSha: sha("a"), baseSha: sha("b") });
   const main = await createTask(db, { ...t, step: "verify", headSha: sha("c"), warm: { key: "app", role: "build" } });
   assert.deepEqual((await claim(db, "signer", 4)).tasks.map((x) => x.id), [main]);

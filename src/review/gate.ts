@@ -1,6 +1,6 @@
 // Reasons a due review waits: another item blocks the PR, CI at its head has not passed, the PR used its reviews for the day,
 // the last review is too recent, or the last attempts at this head failed.
-import { refIn, refPairs } from "../core/ref-filter.ts";
+import * as kx from "../db/kx.ts";
 import { audit } from "../dash/audit.ts";
 import { effectiveCi, effectiveCiWith, optionalChecksOf } from "../optional-checks.ts";
 import { BLOCKED_EXPIRES_MS, BLOCKS_REVIEW, blockersLoader, storedBlockedBy } from "./blockers.ts";
@@ -8,6 +8,7 @@ import { MAX_RERUNS_PER_DAY, discussionState, maintainerSince, nextUtcMidnight, 
 import { ourCommitsLoader } from "./ours.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
+import type { NotNull } from "kysely";
 
 /** Opus review calls of one PR per UTC day, new heads, re-runs and failed calls together (a reply-fix turn is part of its review). */
 export const MAX_REVIEWS_PER_DAY = MAX_RERUNS_PER_DAY;
@@ -31,7 +32,7 @@ export async function setReviewMinInterval(db: Db, input: unknown, by: string): 
   const n = typeof input === "number" ? input : typeof input === "string" && /^[0-9]+$/.test(input) ? Number(input) : NaN;
   if (!Number.isInteger(n) || n < 0 || n > MIN_INTERVAL_MAX) throw new Error(`the minimum minutes between reviews must be a whole number from 0 to ${MIN_INTERVAL_MAX}`);
   const was = await reviewMinInterval(db);
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(MIN_INTERVAL_KEY, String(n));
+  await db.run(db.k.insertInto("main.settings").values({ key: MIN_INTERVAL_KEY, value: String(n) }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
   if (n !== was) await audit(db, by, "review-min-interval", "pipeline", { minutes: n, was });
   return n;
 }
@@ -43,8 +44,8 @@ export async function recordReviewFailure(db: Db, repo: string, number: number, 
   const key = failKey(repo, number, head);
   const cur = await setting(db, key);
   const n = (Number(cur?.split("|")[0]) || 0) + 1;
-  await db.prepare("DELETE FROM main.settings WHERE key LIKE ? AND key <> ?").run(`${FAIL_KEY}${repo}#${number}@%`, key);
-  await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, `${n}|${new Date(nowMs).toISOString()}`);
+  await db.run(db.k.deleteFrom("main.settings").where((eb) => kx.like(db, "key", eb.val(`${FAIL_KEY}${repo}#${number}@%`))).where("key", "<>", key));
+  await db.run(db.k.insertInto("main.settings").values({ key, value: `${n}|${new Date(nowMs).toISOString()}` }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
 }
 
 /** `until`: when a timed wait ends (ms), so the planner wakes then. `red`: a ci hold whose head's CI has failed (not still running). */
@@ -52,7 +53,7 @@ export type ReviewHold = { kind: "blocked" | "ci" | "cap" | "interval" | "failed
 
 /** CI at the PR's head as the review gate reads it: "ok" (passed, or no checks and none pending), "pending", "failure", or "unknown" when the stored checks describe another head. */
 export async function headCi(db: Db, repo: string, number: number, head: string): Promise<"ok" | "pending" | "failure" | "unknown"> {
-  const c = await db.prepare("SELECT head_oid, overall, checks FROM main.pr_checks WHERE repo = ? AND number = ?").get(repo, number) as { head_oid: string; overall: string; checks: string | null } | undefined;
+  const c = await db.get(db.k.selectFrom("main.pr_checks").select(["head_oid", "overall", "checks"]).where("repo", "=", repo).where("number", "=", number));
   if (!c || c.head_oid !== head) return "unknown";
   const o = await effectiveCi(db, repo, c.overall, c.checks);
   return o === "pending" ? "pending" : o === "failure" ? "failure" : "ok";
@@ -61,7 +62,7 @@ export async function headCi(db: Db, repo: string, number: number, head: string)
 export { nextUtcMidnight };
 
 /**
- * The hold check of every PR of one planning pass: statements are prepared once. A hold is what keeps the next review of a PR at `head`
+ * The hold check of every PR of one planning pass: the statements run once. A hold is what keeps the next review of a PR at `head`
  * from starting, or null. A maintainer's or operator's request after the latest review lifts every hold.
  * An unknown CI state does not hold (the review step reads the checks live before asking the model and applies this again).
  * Not held by CI: the first review of a PR when CI is red (running CI still waits), and the one review after the blockers settled.
@@ -70,32 +71,51 @@ export { nextUtcMidnight };
  */
 export async function reviewHolds(db: Db, nowMs: number = Date.now(), refs?: Iterable<string>): Promise<(repo: string, number: number, head: string, refresh?: (at: number) => void) => Promise<ReviewHold | null>> {
   // Each table is read once, on first use, for every PR (or only `refs`, "repo#number"), keyed by `repo#number`.
-  const only = refs ? refPairs(refs) : null;
-  const narrow = (a: string): string => (only ? ` AND ${refIn(a)}` : "");
-  const bind = (p: Record<string, string> = {}): Record<string, string> => (only ? { ...p, refs: only } : p);
+  const only = refs ? [...refs] : null;
   const once = <T>(load: () => Promise<T>): (() => Promise<T>) => { let v: T | undefined; return async () => (v ??= await load()); };
+  const keyOf = (r: { repo: string; number: number }) => `${r.repo}#${r.number}`;
   type Last = { k: string; head_oid: string; at: string; verdict: string; seen_at: string | null; disc_hash: string | null; blocked_by: string | null };
   const lastReviews = once(async () => {
     const out = new Map<string, Last>();
-    for (const r of await db.prepare(`SELECT o.repo || '#' || o.number AS k, o.head_oid, o.at, o.verdict, o.seen_at, o.disc_hash, o.blocked_by FROM main.opus_reviews o
-      WHERE o.verdict IS NOT NULL${narrow("o")} ORDER BY o.at DESC, o.rowid DESC`).all(bind()) as Last[]) if (!out.has(r.k)) out.set(r.k, r);
+    const rows = await db.all(db.k.selectFrom("main.opus_reviews as o")
+      .select(["o.repo", "o.number", "o.head_oid", "o.at", "o.verdict", "o.seen_at", "o.disc_hash", "o.blocked_by"])
+      .where("o.verdict", "is not", null)
+      .$if(!!only, (q) => q.where(kx.refIn(db, "o", only!)))
+      .$narrowType<{ verdict: NotNull }>()
+      .orderBy("o.at", "desc").orderBy(kx.rowid("main.opus_reviews", "o"), "desc"));
+    for (const r of rows) if (!out.has(keyOf(r))) out.set(keyOf(r), { ...r, k: keyOf(r) });
     return out;
   });
   type Count = { k: string; n: number; last: string | null };
-  const countMap = (sql: string) => once(async () => new Map((await db.prepare(sql).all(bind({ today })) as Count[]).map((r) => [r.k, r])));
-  const history = countMap(`SELECT h.repo || '#' || h.number AS k, COUNT(CASE WHEN h.at >= :today THEN 1 END) AS n, MAX(h.at) AS last FROM main.opus_review_history h
-    WHERE h.model IS NOT NULL AND h.model <> 'carried' AND COALESCE(h.mode, '') <> 'carried'${narrow("h")} GROUP BY h.repo, h.number`);
+  const countMap = (load: () => Promise<{ repo: string; number: number; n: number; last: string | null }[]>) =>
+    once(async () => new Map((await load()).map((r): [string, Count] => [keyOf(r), { k: keyOf(r), n: r.n, last: r.last }])));
+  const history = countMap(() => db.all(db.k.selectFrom("main.opus_review_history as h")
+    .select((eb) => ["h.repo", "h.number", eb.fn.count<number>(eb.case().when("h.at", ">=", today).then(1).end()).as("n"), eb.fn.max<string | null>("h.at").as("last")])
+    .where("h.model", "is not", null).where("h.model", "<>", "carried")
+    .where((eb) => eb(eb.fn.coalesce("h.mode", eb.val("")), "<>", "carried"))
+    .$if(!!only, (q) => q.where(kx.refIn(db, "h", only!)))
+    .groupBy(["h.repo", "h.number"])));
   // One review call per job and PR: the reply-lint fix turn is a follow-up run of the same job, not another review.
-  const runs = countMap(`SELECT x.repo || '#' || x.number AS k, COUNT(CASE WHEN x.s >= :today THEN 1 END) AS n, MAX(x.s) AS last FROM (
-      SELECT i.repo, i.number, MIN(r.started_at) AS s FROM main.agent_run_items i JOIN main.agent_runs r ON r.id = i.run_id
-      WHERE r.step = 'opus-review'${narrow("i")} GROUP BY i.repo, i.number, COALESCE(r.job_id, -r.id)) x GROUP BY x.repo, x.number`);
+  const runs = countMap(() => db.all(db.k.selectFrom((eb) => eb.selectFrom("main.agent_run_items as i")
+      .innerJoin("main.agent_runs as r", "r.id", "i.run_id")
+      .select((eb2) => ["i.repo", "i.number", eb2.fn.min<string>("r.started_at").as("s")])
+      .where("r.step", "=", "opus-review")
+      .$if(!!only, (q) => q.where(kx.refIn(db, "i", only!)))
+      .groupBy(["i.repo", "i.number"]).groupBy((eb2) => eb2.fn.coalesce("r.job_id", eb2("r.id", "*", -1)))
+      .as("x"))
+    .select((eb) => ["x.repo", "x.number", eb.fn.count<number>(eb.case().when("x.s", ">=", today).then(1).end()).as("n"), eb.fn.max<string | null>("x.s").as("last")])
+    .groupBy(["x.repo", "x.number"])));
   // A "Queue items" row at the head it started on (no fix-up, no push since) asks for no review of its own: CI, the cap and the interval hold it as any PR.
-  const preapproved = once(async () => new Set((await db.prepare(`SELECT p.repo || '#' || p.number || '@' || p.head AS k FROM main.preapprovals p
-    WHERE p.state = 'review' AND (p.fix_id IS NOT NULL OR p.head <> p.from_head)${narrow("p")}`).all(bind()) as { k: string }[]).map((r) => r.k)));
-  const failures = once(async () => new Map((await db.prepare("SELECT key, value FROM main.settings WHERE key LIKE :prefix").all({ prefix: `${FAIL_KEY}%` }) as { key: string; value: string }[]).map((r) => [r.key, r.value])));
+  const preapproved = once(async () => new Set((await db.all(db.k.selectFrom("main.preapprovals as p").select(["p.repo", "p.number", "p.head"])
+    .where("p.state", "=", "review")
+    .where((eb) => eb.or([eb("p.fix_id", "is not", null), eb("p.head", "<>", eb.ref("p.from_head"))]))
+    .$if(!!only, (q) => q.where(kx.refIn(db, "p", only!))))).flatMap((r) => (r.head === null ? [] : [`${keyOf(r)}@${r.head}`]))));
+  const failures = once(async () => new Map((await db.all(db.k.selectFrom("main.settings").select(["key", "value"])
+    .where((eb) => kx.like(db, "key", eb.val(`${FAIL_KEY}%`))))).map((r) => [r.key, r.value])));
   // The checks list only where effectiveCiWith() reads it: a failure.
-  const checks = once(async () => new Map((await db.prepare(`SELECT c.repo || '#' || c.number AS k, c.head_oid, c.overall, CASE WHEN c.overall = 'failure' THEN c.checks END AS checks FROM main.pr_checks c WHERE 1${narrow("c")}`).all(bind()) as
-    { k: string; head_oid: string; overall: string; checks: string | null }[]).map((r) => [r.k, r])));
+  const checks = once(async () => new Map((await db.all(db.k.selectFrom("main.pr_checks as c")
+    .select((eb) => ["c.repo", "c.number", "c.head_oid", "c.overall", eb.case().when("c.overall", "=", "failure").then(eb.ref("c.checks")).end().as("checks")])
+    .$if(!!only, (q) => q.where(kx.refIn(db, "c", only!))))).map((r) => [keyOf(r), r])));
   const optional = once(async () => await optionalChecksOf(db));
   const staleSince = once(async () => await staleMarksSince(db));
   const blockers = once(async () => blockersLoader(db));

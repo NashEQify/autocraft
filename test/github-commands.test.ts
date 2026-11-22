@@ -10,6 +10,7 @@ import { preapprovalOf } from "../src/preapproval/index.ts";
 import { OPERATOR, world, type World } from "./world-db.ts";
 import { validating } from "./gql.ts";
 import type { AppPermission } from "../src/remote/permission.ts";
+import * as kx from "../src/db/kx.ts";
 
 const SLUG = "autocraft-bot";
 const SECRET = "hook-secret";
@@ -18,7 +19,7 @@ const OP_ID = 101;
 let current: World | null = null;
 const fresh = async (off: Parameters<World["repo"]>[0] = []): Promise<World> => {
   const w = (current = await (await world()).repo(off));
-  await w.db.prepare("UPDATE access SET github_id = ? WHERE login = ?").run(OP_ID, OPERATOR);
+  await w.db.run(w.db.k.updateTable("access").set({ github_id: OP_ID }).where("login", "=", OPERATOR));
   return w;
 };
 afterEach(() => current?.close());
@@ -33,7 +34,7 @@ const deliver = async (w: World, p: unknown, slug: string | null = SLUG) => {
   const raw = Buffer.from(JSON.stringify(p));
   return await handleDelivery(w.db, SECRET, { event: "issue_comment", signature: signatureOf(SECRET, raw) }, raw, safeEqual, slug);
 };
-const rows = async (w: World) => (await w.db.prepare("SELECT comment_id, number, pr, weight, login, state, result, reply FROM github_commands ORDER BY comment_id").all()).map((r) => ({ ...r }));
+const rows = async (w: World) => (await w.db.all(w.db.k.selectFrom("github_commands").select(["comment_id", "number", "pr", "weight", "login", "state", "result", "reply"]).orderBy("comment_id"))).map((r) => ({ ...r }));
 
 /** A fake gh that records the comments it posts. */
 function ghFake(code = 0) {
@@ -46,11 +47,11 @@ function ghFake(code = 0) {
 }
 /** GitHub as the stubs answer it: the comment as written (by its stored commenter and weight), each PR at its mirror head, opened long ago and unchanged. */
 const stillThere = (w: World) => async (_repo: string, id: number): Promise<CommentNow> => {
-  const r = await w.db.prepare("SELECT github_id, weight FROM github_commands WHERE comment_id = ?").get(id) as { github_id: number; weight: number | null };
+  const r = (await w.db.get(w.db.k.selectFrom("github_commands").select(["github_id", "weight"]).where("comment_id", "=", id)))!;
   return { kind: "ok", authorId: r.github_id, body: `@${SLUG} merge queue${r.weight === null ? "" : ` ${r.weight}`}` };
 };
 const unchanged = (w: World) => async (_q: unknown, _repo: string, n: number): Promise<PrNow | null> =>
-  ({ head: (await w.db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n) as { head_oid: string }).head_oid, opened: "2020-01-01T00:00:00Z", changed: false });
+  ({ head: (await w.db.get(w.db.k.selectFrom("items").select("head_oid").$narrowType<{ head_oid: string }>().where("repo", "=", "app").where("number", "=", n)))!.head_oid, opened: "2020-01-01T00:00:00Z", changed: false });
 const WRITE: AppPermission = { kind: "ok", permission: "write" };
 const FAILED: AppPermission = { kind: "error", why: "GitHub permission check failed: HTTP 502" };
 const PERMS: Record<"ok" | "no" | "transient", AppPermission> = { ok: WRITE, no: { kind: "ok", permission: "read" }, transient: FAILED };
@@ -59,11 +60,11 @@ const deps = (w: World, o: Partial<CommandDeps> & { perm?: "ok" | "no" | "transi
 });
 /** The item was read from GitHub at `at` (as the webhook's re-read or the poll write it). */
 const readAt = async (w: World, number: number, at: Date) =>
-  await w.db.prepare("INSERT INTO item_reads (repo, number, synced_at) VALUES ('app', ?, ?) ON CONFLICT (repo, number) DO UPDATE SET synced_at = excluded.synced_at").run(number, at.toISOString());
+  await w.db.run(w.db.k.insertInto("item_reads").values({ repo: "app", number, synced_at: at.toISOString() }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["synced_at"]))));
 /** Drains after the re-reads: every commanded item was read just now. */
 const drained = async (w: World, o: Parameters<typeof deps>[1] = {}) => {
-  await w.db.script("DELETE FROM sync_requests");
-  for (const { number } of await w.db.prepare("SELECT DISTINCT number FROM github_commands").all() as { number: number }[]) await readAt(w, number, new Date(Date.now() + 1000));
+  await w.db.run(w.db.k.deleteFrom("sync_requests"));
+  for (const { number } of await w.db.all(w.db.k.selectFrom("github_commands").select("number").distinct())) await readAt(w, number, new Date(Date.now() + 1000));
   return drainCommands(w.db, deps(w, o));
 };
 
@@ -110,9 +111,9 @@ describe("webhook", () => {
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5005 }), null);
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5006, login: "bad login" }));
     assert.deepEqual(await rows(w), [{ comment_id: 5000, number: 1, pr: 1, weight: 7, login: OPERATOR, state: "queued", result: null, reply: null }]);
-    const cols = (await w.db.prepare("SELECT name FROM pragma_table_info('github_commands')").all() as { name: string }[]).map((c) => c.name);
+    const cols = (await w.db.k.introspection.getTables()).find((t) => t.name === "github_commands")!.columns.map((c) => c.name);
     assert.ok(!cols.includes("body"), "the comment's text has no column");
-    assert.deepEqual((await w.db.prepare("SELECT number FROM sync_requests").all()).map((r) => ({ ...r })), [{ number: 1 }], "the item is still re-read");
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 1 }], "the item is still re-read");
   });
 });
 
@@ -130,10 +131,11 @@ describe("drainCommands", () => {
     assert.equal(gh.posted.length, 1);
     assert.deepEqual(gh.posted[0]!.args.slice(0, 5), ["pr", "comment", "1", "--repo", "storytold/app"]);
     assert.match(gh.posted[0]!.body, /^_Automated reply_\n\n@op Added to the merge queue; .*Fast-tracked with weight 7, 1 of 1\.$/);
-    const audit = await w.db.prepare("SELECT action, login, details FROM audit WHERE action IN ('preapproval', 'fasttrack-add', 'github-command', 'github-command-reply') ORDER BY rowid").all() as { action: string; login: string; details: string }[];
+    const audit = await w.db.all(w.db.k.selectFrom("audit").select(["action", "login", "details"])
+      .where("action", "in", ["preapproval", "fasttrack-add", "github-command", "github-command-reply"]).orderBy(kx.rowid("audit")));
     assert.deepEqual(audit.map((a) => [a.action, a.login]), [["preapproval", OPERATOR], ["fasttrack-add", OPERATOR], ["github-command", OPERATOR], ["github-command-reply", OPERATOR]]);
-    assert.equal(JSON.parse(audit[1]!.details).via, "github");
-    assert.equal(JSON.parse(audit[3]!.details).state, "done");
+    assert.equal(JSON.parse(audit[1]!.details!).via, "github");
+    assert.equal(JSON.parse(audit[3]!.details!).state, "done");
     assert.equal(await drained(w, { exec: gh.exec }), 0, "nothing is left");
     assert.equal(gh.posted.length, 1);
   });
@@ -144,12 +146,12 @@ describe("drainCommands", () => {
     await deliver(w, payload({ body: `@${SLUG} merge queue` }));
     const gh = ghFake();
     assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "the re-read is still queued");
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "the request is gone but the last read is older than the comment");
     assert.equal((await rows(w))[0]!.state, "queued");
     assert.equal(await preapprovalOf(w.db, "app", 1), null);
-    assert.deepEqual((await w.db.prepare("SELECT number FROM sync_requests").all()).map((r) => ({ ...r })), [{ number: 1 }], "the command asks for a new read");
-    await w.db.script("DELETE FROM sync_requests");
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 1 }], "the command asks for a new read");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 1, new Date(Date.now() + 1000));
     assert.equal(await drainCommands(w.db, deps(w, { exec: gh.exec })), 0, "it looks again a minute after asking");
     const later = new Date(Date.now() + 2 * 60_000);
@@ -160,8 +162,8 @@ describe("drainCommands", () => {
   test("a read stamped at the comment's own instant does not count: it may have started before it", async () => {
     const w = await (await fresh()).pr(1);
     await deliver(w, payload({ body: `@${SLUG} merge queue` }));
-    await w.db.script("DELETE FROM sync_requests");
-    const at = (await w.db.prepare("SELECT requested_at FROM github_commands").get() as { requested_at: string }).requested_at;
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
+    const at = (await w.db.get(w.db.k.selectFrom("github_commands").select("requested_at")))!.requested_at;
     await readAt(w, 1, new Date(at));
     assert.equal(await drainCommands(w.db, deps(w, { exec: ghFake().exec })), 0);
     assert.equal(await preapprovalOf(w.db, "app", 1), null);
@@ -172,28 +174,28 @@ describe("drainCommands", () => {
   test("an older read written while the permission is read from GitHub makes the command wait instead of queuing that head", async () => {
     const w = await (await fresh()).pr(1);
     await deliver(w, payload({ body: `@${SLUG} merge queue` }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 1, new Date(Date.now() + 1000));
     // A reconcile that started before the comment lands while the permission read waits on GitHub: it sets the read time back.
     const permission = async () => { await readAt(w, 1, new Date(Date.now() - 60_000)); return WRITE; };
     assert.equal(await drainCommands(w.db, { ...deps(w, { exec: ghFake().exec }), permission }), 0);
     assert.equal((await rows(w))[0]!.state, "queued");
     assert.equal(await preapprovalOf(w.db, "app", 1), null, "the older snapshot is not pre-approved");
-    assert.deepEqual((await w.db.prepare("SELECT number FROM sync_requests").all()).map((r) => ({ ...r })), [{ number: 1 }], "the item is read again");
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 1 }], "the item is read again");
   });
 
   test("on an issue, the PR that closes it must be read after the comment too before it is queued", async () => {
     const w = await (await (await fresh()).issue(3)).pr(4);
-    await w.db.prepare("UPDATE items SET closing_issues = '[3]' WHERE repo = 'app' AND number = 4").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[3]" }).where("repo", "=", "app").where("number", "=", 4));
     await readAt(w, 4, new Date(Date.now() - 60_000));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 3, pr: false }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 3, new Date(Date.now() + 1000));
     assert.equal(await drainCommands(w.db, deps(w, { exec: ghFake().exec })), 0, "the issue is fresh, its closing PR is not");
-    assert.deepEqual((await w.db.prepare("SELECT number FROM sync_requests").all()).map((r) => ({ ...r })), [{ number: 4 }], "the PR is read again");
+    assert.deepEqual((await w.db.all(w.db.k.selectFrom("sync_requests").select("number"))).map((r) => ({ ...r })), [{ number: 4 }], "the PR is read again");
     assert.equal(await preapprovalOf(w.db, "app", 4), null);
     await readAt(w, 4, new Date(Date.now() + 1000));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     assert.equal(await drainCommands(w.db, deps(w, { exec: ghFake().exec, now: () => new Date(Date.now() + 2 * 60_000) })), 1);
     assert.equal((await preapprovalOf(w.db, "app", 4))?.state, "review");
   });
@@ -203,7 +205,7 @@ describe("drainCommands", () => {
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 1, comment: 7001 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 2, comment: 7002 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 3, comment: 7003 }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 2, new Date(Date.now() + 1000));
     await readAt(w, 3, new Date(Date.now() + 1000));
     // #1 is not read yet; #2's permission cannot be told; with one GitHub call per drain #3 still gets its turn next.
@@ -230,7 +232,7 @@ describe("drainCommands", () => {
 
   test("Queue items' rule decides: a maintainer without maintainer writes and an operator without write access are refused; a viewer or a login never bound gets no answer", async () => {
     const w = await (await fresh()).pr(1);
-    await w.db.prepare("INSERT INTO access (login, role, github_id) VALUES ('maint', 'maintainer', 202), ('view', 'viewer', 404), ('newop', 'operator', NULL)").run();
+    await w.db.run(w.db.k.insertInto("access").values([{ login: "maint", role: "maintainer", github_id: 202 }, { login: "view", role: "viewer", github_id: 404 }, { login: "newop", role: "operator", github_id: null }]));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, login: "maint", id: 202 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5001, login: "view", id: 404 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5002, login: "newop", id: 303 }));
@@ -244,13 +246,13 @@ describe("drainCommands", () => {
     assert.equal(bodies.length, 2);
     assert.match(bodies[0]!, /@maint Not added to the merge queue: only an operator, or a maintainer with write access where the app acts for them, queues items on app\.$/);
     assert.match(bodies[1]!, /@op Not added to the merge queue: no write access to storytold\/app/);
-    assert.equal((await w.db.prepare("SELECT github_id FROM access WHERE login = 'newop'").get() as { github_id: number | null }).github_id, null, "a comment never binds an id");
+    assert.equal((await w.db.get(w.db.k.selectFrom("access").select("github_id").where("login", "=", "newop")))!.github_id, null, "a comment never binds an id");
   });
 
   test("a maintainer who settles decisions on the repo queues, as with Queue items; without write access they do not", async () => {
     const w = await (await (await fresh()).pr(1)).pr(2);
-    await w.db.prepare("INSERT INTO access (login, role, github_id) VALUES ('maint', 'maintainer', 202)").run();
-    await w.db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('maintainer_writes', '1'), ('github_identity', 'app')").run();
+    await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer", github_id: 202 }));
+    await w.db.run(w.db.k.insertInto("settings").values([{ key: "maintainer_writes", value: "1" }, { key: "github_identity", value: "app" }]).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, login: "maint", id: 202, number: 2, comment: 6000 }));
     await drained(w, { exec: ghFake().exec, perm: "no" });
     assert.equal((await rows(w))[0]!.state, "refused");
@@ -299,7 +301,7 @@ describe("drainCommands", () => {
   test("due retries do not keep a command that was never tried out, also with drains minutes apart", async () => {
     const w = await (await (await (await fresh()).pr(1)).pr(2)).pr(3);
     for (const n of [1, 2, 3]) await deliver(w, payload({ body: `@${SLUG} merge queue`, number: n, comment: 8000 + n }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     for (const n of [1, 2, 3]) await readAt(w, n, new Date(Date.now() + 1000));
     // One GitHub call per drain, drains two minutes apart, so a retry is due again at every drain. GitHub cannot tell the
     // permission for the first two calls. Oldest first alone would retry #1 at every drain and never reach #3.
@@ -316,20 +318,20 @@ describe("drainCommands", () => {
   test("the role and binding are read again after the permission read: a demoted or rebound commenter queues nothing", async () => {
     const w = await (await (await fresh()).pr(1)).pr(2);
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 1, comment: 9001 }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 1, new Date(Date.now() + 1000));
     const gh = ghFake();
     // Demoted to a maintainer, who does not settle here, while GitHub answers.
-    await drainCommands(w.db, { ...deps(w, { exec: gh.exec }), permission: async () => { await w.db.prepare("UPDATE access SET role = 'maintainer' WHERE login = ?").run(OPERATOR); return WRITE; } });
+    await drainCommands(w.db, { ...deps(w, { exec: gh.exec }), permission: async () => { await w.db.run(w.db.k.updateTable("access").set({ role: "maintainer" }).where("login", "=", OPERATOR)); return WRITE; } });
     assert.equal((await rows(w))[0]!.state, "refused");
     assert.equal(await preapprovalOf(w.db, "app", 1), null);
     assert.match(gh.posted[0]!.body, /@op Not added to the merge queue: only an operator, or a maintainer/);
     // The login is bound to another GitHub account while GitHub answers: no pre-approval and no answer.
-    await w.db.prepare("UPDATE access SET role = 'operator' WHERE login = ?").run(OPERATOR);
+    await w.db.run(w.db.k.updateTable("access").set({ role: "operator" }).where("login", "=", OPERATOR));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 2, comment: 9002 }));
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 2, new Date(Date.now() + 1000));
-    await drainCommands(w.db, { ...deps(w, { exec: gh.exec }), permission: async () => { await w.db.prepare("UPDATE access SET github_id = 999 WHERE login = ?").run(OPERATOR); return WRITE; } });
+    await drainCommands(w.db, { ...deps(w, { exec: gh.exec }), permission: async () => { await w.db.run(w.db.k.updateTable("access").set({ github_id: 999 }).where("login", "=", OPERATOR)); return WRITE; } });
     assert.equal((await rows(w))[1]!.state, "ignored");
     assert.equal(await preapprovalOf(w.db, "app", 2), null);
     assert.equal(gh.posted.length, 1);
@@ -338,7 +340,7 @@ describe("drainCommands", () => {
   test("a command exactly an hour old has expired", async () => {
     const w = await (await fresh()).pr(1);
     await deliver(w, payload({ body: `@${SLUG} merge queue` }));
-    const at = Date.parse((await w.db.prepare("SELECT requested_at FROM github_commands").get() as { requested_at: string }).requested_at);
+    const at = Date.parse((await w.db.get(w.db.k.selectFrom("github_commands").select("requested_at")))!.requested_at);
     await drained(w, { exec: ghFake().exec, now: () => new Date(at + 3600_000) });
     assert.deepEqual((await rows(w)).map((r) => r.state), ["expired"]);
     assert.equal(await preapprovalOf(w.db, "app", 1), null);
@@ -351,7 +353,7 @@ describe("drainCommands", () => {
     // 59 minutes when the drain starts, 61 once the permission read is back.
     let at = Date.now() + 59 * 60_000;
     const permission = async () => { at = Date.now() + 61 * 60_000; return WRITE; };
-    await w.db.script("DELETE FROM sync_requests");
+    await w.db.run(w.db.k.deleteFrom("sync_requests"));
     await readAt(w, 1, new Date(Date.now() + 1000));
     await drainCommands(w.db, { ...deps(w, { exec: gh.exec, now: () => new Date(at) }), permission });
     assert.deepEqual((await rows(w)).map((r) => r.state), ["expired"]);
@@ -397,7 +399,7 @@ describe("comment-time checks", () => {
     const w = await (await (await (await fresh()).pr(1)).pr(2)).pr(3);
     for (const n of [1, 2, 3]) await deliver(w, payload({ body: `@${SLUG} merge queue`, number: n, comment: 6000 + n }));
     const gh = ghFake();
-    const head = async (n: number) => (await w.db.prepare("SELECT head_oid FROM items WHERE repo = 'app' AND number = ?").get(n) as { head_oid: string }).head_oid;
+    const head = async (n: number) => (await w.db.get(w.db.k.selectFrom("items").select("head_oid").$narrowType<{ head_oid: string }>().where("repo", "=", "app").where("number", "=", n)))!.head_oid;
     const pr = async (_q: unknown, _repo: string, n: number): Promise<PrNow> =>
       n === 1 ? { head: await head(1), opened: "2020-01-01T00:00:00Z", changed: true } : { head: n === 2 ? "f".repeat(40) : await head(3), opened: "2020-01-01T00:00:00Z", changed: false };
     await drained(w, { exec: gh.exec, pr });
@@ -410,7 +412,7 @@ describe("comment-time checks", () => {
 
   test("on an issue, a closing PR opened or pushed to after the comment is named, not queued", async () => {
     const w = await (await (await fresh()).issue(3)).pr(4);
-    await w.db.prepare("UPDATE items SET closing_issues = '[3]' WHERE repo = 'app' AND number = 4").run();
+    await w.db.run(w.db.k.updateTable("items").set({ closing_issues: "[3]" }).where("repo", "=", "app").where("number", "=", 4));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, number: 3, pr: false }));
     const gh = ghFake();
     await readAt(w, 4, new Date(Date.now() + 1000));
@@ -437,9 +439,8 @@ describe("comment-time checks", () => {
 
   test("a quiet PR: a maintainer's command is refused without an answer, an operator's is carried out without one", async () => {
     const w = await (await fresh()).pr(1);
-    await w.db.prepare("INSERT INTO access (login, role, github_id) VALUES ('maint', 'maintainer', 202)").run();
-    await w.db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, state, refs, reach, impact, fingerprint, fix_pr, created_at, updated_at)
-      VALUES ('app', 1, 1, 'a', 't', 'high', 'landing', '[]', 'r', 'i', 'f', 1, '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')`).run();
+    await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer", github_id: 202 }));
+    await w.db.run(w.db.k.insertInto("security_findings").values({ repo: "app", number: 1, scan_id: 1, area: "a", title: "t", severity: "high", state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "f", fix_pr: 1, created_at: "2020-01-01T00:00:00Z", updated_at: "2020-01-01T00:00:00Z" }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, login: "maint", id: 202, comment: 5001 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5002 }));
     const gh = ghFake();
@@ -451,7 +452,7 @@ describe("comment-time checks", () => {
 
   test("an unexpected error is answered with a fixed text; a refused person's answer needs the repo's comment approval", async () => {
     const w = await (await fresh(["comment"])).pr(1);
-    await w.db.prepare("INSERT INTO access (login, role, github_id) VALUES ('maint', 'maintainer', 202)").run();
+    await w.db.run(w.db.k.insertInto("access").values({ login: "maint", role: "maintainer", github_id: 202 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, comment: 5001 }));
     await deliver(w, payload({ body: `@${SLUG} merge queue`, login: "maint", id: 202, comment: 5002 }));
     const gh = ghFake();

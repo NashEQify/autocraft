@@ -9,6 +9,7 @@ import { enqueue, JobError, requestCancel } from "../runner/jobs.ts";
 import { securityRepo, SECURITY_STEP, REASON_MAX, MIN_VERIFY_SCORE } from "./rules.ts";
 import { activeScan, ACTIVE_STATES, advance, clearRounds, finishScan, findingKey, findingRow, moveFinding, reconcileFindings, reconcileScans, reopenUnchecked, scanRow, toFinding, toScan, UNCHECKED_RESULT } from "./store.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export class SecurityError extends Error {
   readonly status: number;
@@ -37,14 +38,14 @@ export async function startScanAs(db: Db, repo: string, login: string, capUsd: u
   await reconcileScans(db, repo);
   if (await activeScan(db, repo)) throw new SecurityError(409, `${repo} already has a scan running`);
   const at = new Date().toISOString();
-  const id = Number((await db.prepare("INSERT INTO security_scans (repo, state, cap_usd, started_by, started_at) VALUES (?, 'modeling', ?, ?, ?)").run(repo, cap, login, at)).lastInsertRowid);
+  const id = (await db.get(db.k.insertInto("security_scans").values({ repo, state: "modeling", cap_usd: cap, started_by: login, started_at: at }).returning("id")))!.id;
   try {
     const job = await enqueue(db, SECURITY_STEP, { repo, scan: id }, login);
     // The job is recorded under the scan's pseudo repo, so every job listing that leaves out hidden repos leaves it out for viewers.
-    await db.prepare("UPDATE jobs SET repo = ? WHERE id = ?").run(securityRepo(repo), job.id);
-    await db.prepare("UPDATE security_scans SET job_id = ? WHERE id = ?").run(job.id, id);
+    await db.run(db.k.updateTable("jobs").set({ repo: securityRepo(repo) }).where("id", "=", job.id));
+    await db.run(db.k.updateTable("security_scans").set({ job_id: job.id }).where("id", "=", id));
   } catch (e) {
-    await db.prepare("DELETE FROM security_scans WHERE id = ?").run(id);
+    await db.run(db.k.deleteFrom("security_scans").where("id", "=", id));
     if (e instanceof JobError) throw new SecurityError(e.status, e.message);
     throw e;
   }
@@ -66,17 +67,18 @@ export async function continueScanAs(db: Db, id: number, login: string, capUsd: 
   if (cap !== null && cap <= scan.cost_usd) throw new SecurityError(400, `the new cap must be above the $${scan.cost_usd.toFixed(2)} the scan has spent`);
   await reconcileScans(db, scan.repo);
   if (await activeScan(db, scan.repo)) throw new SecurityError(409, `${scan.repo} already has a scan running`);
-  const state = !scan.threat_model ? "modeling" : await db.prepare("SELECT 1 FROM security_findings WHERE scan_id = ? AND state = 'new' AND json_extract(verification, '$.result') = ?").get(id, UNCHECKED_RESULT) ? "verifying" : "scanning";
-  const moved = (await db.prepare("UPDATE security_scans SET state = ?, cap_usd = ?, ended_at = NULL, error = NULL, job_id = NULL WHERE id = ? AND state = 'capped'").run(state, cap, id)).changes;
+  const state = !scan.threat_model ? "modeling" : await db.get(db.k.selectFrom("security_findings").select((eb) => eb.lit(1).as("one")).where("scan_id", "=", id).where("state", "=", "new")
+    .where((eb) => eb(kx.jsonText(db, "verification", "$.result"), "=", UNCHECKED_RESULT)).limit(1)) ? "verifying" : "scanning";
+  const moved = (await db.run(db.k.updateTable("security_scans").set({ state, cap_usd: cap, ended_at: null, error: null, job_id: null }).where("id", "=", id).where("state", "=", "capped"))).changes;
   if (!moved) throw new SecurityError(409, "the scan changed; reload and try again");
   await reopenUnchecked(db, id);
   try {
     const job = await enqueue(db, SECURITY_STEP, { repo: scan.repo, scan: id }, login);
-    await db.prepare("UPDATE jobs SET repo = ? WHERE id = ?").run(securityRepo(scan.repo), job.id);
-    await db.prepare("UPDATE security_scans SET job_id = ? WHERE id = ?").run(job.id, id);
+    await db.run(db.k.updateTable("jobs").set({ repo: securityRepo(scan.repo) }).where("id", "=", job.id));
+    await db.run(db.k.updateTable("security_scans").set({ job_id: job.id }).where("id", "=", id));
   } catch (e) {
     await finishScan(db, id, "capped");
-    await db.prepare("UPDATE security_scans SET cap_usd = ?, job_id = ? WHERE id = ?").run(scan.cap_usd, scan.job_id, id);
+    await db.run(db.k.updateTable("security_scans").set({ cap_usd: scan.cap_usd, job_id: scan.job_id }).where("id", "=", id));
     if (e instanceof JobError) throw new SecurityError(e.status, e.message);
     throw e;
   }
@@ -120,13 +122,17 @@ export async function actOnFindingAs(db: Db, repo: string, n: number, login: str
  */
 export async function autoFixConfirmed(db: Db, repo?: string, n?: number): Promise<number> {
   // A fix whose job was cancelled (the pipeline was switched off) left the finding fixing; it goes back to new first.
-  const repos = repo ? [repo] : (await db.prepare("SELECT DISTINCT repo FROM security_findings WHERE state = 'fixing'").all() as { repo: string }[]).map((r) => r.repo);
+  const repos = repo ? [repo] : (await db.all(db.k.selectFrom("security_findings").select("repo").distinct().where("state", "=", "fixing"))).map((r) => r.repo);
   for (const r of repos) await reconcileFindings(db, r);
-  const rows = await db.prepare(`SELECT repo, number FROM security_findings f WHERE state = 'new' AND json_extract(verification, '$.score') >= ?
-      AND (? IS NULL OR repo = ?) AND (? IS NULL OR number = ?)
-      AND NOT EXISTS (SELECT 1 FROM jobs WHERE step = 'security-fix' AND state != 'cancelled' AND json_extract(params, '$.repo') = f.repo AND json_extract(params, '$.number') = f.number)
-      ${await featureOn(db, "scan-tests") ? "AND NOT EXISTS (SELECT 1 FROM security_scan_tests t WHERE t.repo = f.repo AND t.number = f.number AND t.state IN ('building', 'not-shown'))" : ""}
-      ORDER BY repo, number`).all(MIN_VERIFY_SCORE, repo ?? null, repo ?? null, n ?? null, n ?? null) as { repo: string; number: number }[];
+  const scanTests = await featureOn(db, "scan-tests");
+  const rows = await db.all(db.k.selectFrom("security_findings as f").select(["f.repo", "f.number"]).where("f.state", "=", "new")
+    .where((eb) => eb(kx.jsonNum(db, "f.verification", "$.score"), ">=", MIN_VERIFY_SCORE))
+    .$if(repo !== undefined, (q) => q.where("f.repo", "=", repo!))
+    .$if(n !== undefined, (q) => q.where("f.number", "=", n!))
+    .where((eb) => eb.not(eb.exists(eb.selectFrom("jobs as j").select(eb.lit(1).as("one")).where("j.step", "=", "security-fix").where("j.state", "!=", "cancelled")
+      .where((e) => e.and([e(kx.jsonText(db, "j.params", "$.repo"), "=", e.ref("f.repo")), e(kx.jsonNum(db, "j.params", "$.number"), "=", e.ref("f.number"))])))))
+    .$if(scanTests, (q) => q.where((eb) => eb.not(eb.exists(eb.selectFrom("security_scan_tests as t").select(eb.lit(1).as("one")).whereRef("t.repo", "=", "f.repo").whereRef("t.number", "=", "f.number").where("t.state", "in", ["building", "not-shown"])))))
+    .orderBy("f.repo").orderBy("f.number"));
   let queued = 0;
   for (const r of rows) {
     try {
@@ -149,17 +155,19 @@ export const ROUND_BUILD_LIMIT_MS = 4 * 3_600_000;
  * only while `pipelineOn`. Returns how many jobs it queued.
  */
 export async function advanceSecurityFixes(db: Db, pipelineOn = true): Promise<number> {
-  const rows = await db.prepare(`SELECT f.repo, f.number, f.decided_by AS by, r.created_at, r.head_task, r.base_task FROM security_findings f
-      JOIN security_fix_rounds r ON r.repo = f.repo AND r.number = f.number AND r.state = 'building'
-      WHERE f.state = 'fixing'
-      AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.step = 'security-fix' AND j.state IN ('queued', 'running') AND json_extract(j.params, '$.repo') = f.repo AND json_extract(j.params, '$.number') = f.number)
-      ORDER BY f.repo, f.number`).all() as { repo: string; number: number; by: string | null; created_at: string | null; head_task: number | null; base_task: number | null }[];
+  const noJob = (eb: kx.AnyEb) => eb.not(eb.exists(eb.selectFrom("jobs as j").select(eb.lit(1).as("one")).where("j.step", "=", "security-fix").where("j.state", "in", ["queued", "running"])
+    .where((e) => e.and([e(kx.jsonText(db, "j.params", "$.repo"), "=", e.ref("f.repo")), e(kx.jsonNum(db, "j.params", "$.number"), "=", e.ref("f.number"))]))));
+  const rows: { repo: string; number: number; by: string | null; created_at: string | null; head_task: number | null; base_task: number | null }[] = await db.all(db.k.selectFrom("security_findings as f")
+    .innerJoin("security_fix_rounds as r", (j) => j.onRef("r.repo", "=", "f.repo").onRef("r.number", "=", "f.number").on("r.state", "=", "building"))
+    .select(["f.repo", "f.number", "f.decided_by as by", "r.created_at", "r.head_task", "r.base_task"])
+    .where("f.state", "=", "fixing").where(noJob)
+    .orderBy("f.repo").orderBy("f.number"));
   // A fix that waits for a confidential build environment continues once one is ready.
   if (await confidentialReadyAt(db) !== null) {
-    rows.push(...await db.prepare(`SELECT f.repo, f.number, f.decided_by AS by, NULL AS created_at, NULL AS head_task, NULL AS base_task FROM security_findings f
-      WHERE f.state = 'fixing' AND f.env_wait_at IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.step = 'security-fix' AND j.state IN ('queued', 'running') AND json_extract(j.params, '$.repo') = f.repo AND json_extract(j.params, '$.number') = f.number)
-      ORDER BY f.repo, f.number`).all() as typeof rows);
+    rows.push(...await db.all(db.k.selectFrom("security_findings as f")
+      .select((eb) => ["f.repo", "f.number", "f.decided_by as by", eb.lit(null).as("created_at"), eb.lit(null).as("head_task"), eb.lit(null).as("base_task")])
+      .where("f.state", "=", "fixing").where("f.env_wait_at", "is not", null).where(noJob)
+      .orderBy("f.repo").orderBy("f.number")));
   }
   let queued = 0;
   for (const r of rows) {
@@ -173,7 +181,7 @@ export async function advanceSecurityFixes(db: Db, pipelineOn = true): Promise<n
     }
     try {
       const job = await enqueue(db, STEPS.fix!.step, { repo: r.repo, number: r.number }, by);
-      await db.prepare("UPDATE jobs SET repo = ? WHERE id = ?").run(securityRepo(r.repo), job.id);
+      await db.run(db.k.updateTable("jobs").set({ repo: securityRepo(r.repo) }).where("id", "=", job.id));
       queued++;
     } catch (e) {
       if (!(e instanceof JobError)) throw e;
@@ -187,7 +195,8 @@ async function startStep(db: Db, repo: string, n: number, login: string, action:
   const row = await findingRow(db, repo, n);
   if (!row) throw new SecurityError(404, NOT_FOUND);
   if (!s.from.includes(row.state)) throw new SecurityError(409, `a finding that is ${row.state} cannot be ${action === "fix" ? "fixed" : action === "land" ? "landed" : action === "advisory" ? "sent the advisory way" : "published"}; this needs ${s.busy}`);
-  if (action === "publish" && await db.prepare("SELECT 1 FROM jobs WHERE step = ? AND state IN ('queued', 'running') AND json_extract(params, '$.repo') = ? AND json_extract(params, '$.number') = ?").get(s.step, repo, n)) {
+  if (action === "publish" && await db.get(db.k.selectFrom("jobs").select((eb) => eb.lit(1).as("one")).where("step", "=", s.step).where("state", "in", ["queued", "running"])
+    .where((eb) => eb.and([eb(kx.jsonText(db, "params", "$.repo"), "=", repo), eb(kx.jsonNum(db, "params", "$.number"), "=", n)])).limit(1))) {
     throw new SecurityError(409, "this finding is already being published");
   }
   if (action === "fix" && !row.verification) throw new SecurityError(409, "the finding has not been verified");
@@ -195,15 +204,15 @@ async function startStep(db: Db, repo: string, n: number, login: string, action:
   const reset: Record<string, null> = action === "land" && row.state === "awaiting-admin" ? { fork: null, fix_pr: null } : {};
   if (action === "fix") await clearRounds(db, repo, n);
   if (s.to && !await advance(db, repo, n, s.from, s.to, { note: null, ...reset }, login)) throw new SecurityError(409, "the finding changed; reload and try again");
-  if (action === "fix") await db.prepare("UPDATE security_findings SET fix_attempts = fix_attempts + 1, last_failure = NULL WHERE repo = ? AND number = ?").run(repo, n);
+  if (action === "fix") await db.run(db.k.updateTable("security_findings").set((eb) => ({ fix_attempts: eb("fix_attempts", "+", 1), last_failure: null })).where("repo", "=", repo).where("number", "=", n));
   try {
     const params: Record<string, string | number> = { repo, number: n, ...(action === "publish" && { cve: b.cve === true ? 1 : 0 }) };
     const job = await enqueue(db, s.step, params, login);
     // The job is recorded under the scan's pseudo repo, like the scan's own jobs, so job listings leave it out for viewers.
-    await db.prepare("UPDATE jobs SET repo = ? WHERE id = ?").run(securityRepo(repo), job.id);
+    await db.run(db.k.updateTable("jobs").set({ repo: securityRepo(repo) }).where("id", "=", job.id));
   } catch (e) {
     if (s.to) await advance(db, repo, n, [s.to], row.state, { fork: row.fork, fix_pr: row.fix_pr });
-    if (action === "fix") await db.prepare("UPDATE security_findings SET fix_attempts = ?, last_failure = ? WHERE repo = ? AND number = ?").run(row.fix_attempts, row.last_failure, repo, n);
+    if (action === "fix") await db.run(db.k.updateTable("security_findings").set({ fix_attempts: row.fix_attempts, last_failure: row.last_failure }).where("repo", "=", repo).where("number", "=", n));
     if (e instanceof JobError) throw new SecurityError(e.status, e.message);
     throw e;
   }

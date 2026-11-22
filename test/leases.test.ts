@@ -10,6 +10,7 @@ import { leaseItem, leaseSkips, take } from "../src/runner/leases.ts";
 import type { StepDef } from "../src/runner/steps.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import { excluded } from "../src/db/kx.ts";
 
 after(() => setCallContext(null));
 
@@ -18,8 +19,10 @@ async function fresh(name: string) {
   return await connectDb(join(SCRATCH, `leases-${name}-${process.pid}.db`));
 }
 const addJob = async (db: Awaited<ReturnType<typeof fresh>>, step: string, state: string, params: object = {}, items = 0): Promise<number> =>
-  Number((await db.prepare("INSERT INTO jobs (step, params, requested_by, requested_at, state, started_at, items) VALUES (?, ?, 'pipeline', ?, ?, ?, ?)")
-    .run(step, JSON.stringify(params), new Date().toISOString(), state, state === "queued" ? null : new Date().toISOString(), items)).lastInsertRowid);
+  (await db.get(db.k.insertInto("jobs").values({
+    step, params: JSON.stringify(params), requested_by: "pipeline", requested_at: new Date().toISOString(), state,
+    started_at: state === "queued" ? null : new Date().toISOString(), items,
+  }).returning("id")))!.id;
 const as = (jobId: number, step: string) => setCallContext({ jobId, step, stage: 1, cancelled: async () => false });
 
 test("fixup and cifix on one PR: the second job skips it, and a lease of an ended job is free", async () => {
@@ -38,14 +41,14 @@ test("fixup and cifix on one PR: the second job skips it, and a lease of an ende
   assert.ok(await take(db, "pr:r#1", fixup, "fixup"), "the holder may take it again");
   // The holder's job ends: its leases go, and a lease left by a crash (job no longer running) is free.
   await endJob(db, fixup, 0, null, null);
-  assert.equal((await db.prepare("SELECT COUNT(*) AS n FROM work_leases WHERE job_id = ?").get(fixup))!.n, 0);
-  await db.prepare("INSERT INTO work_leases (key, job_id, step, taken_at) VALUES ('pr:r#3', ?, 'fixup', 'x')").run(fixup);
+  assert.deepEqual(await db.all(db.k.selectFrom("work_leases").select("key").where("job_id", "=", fixup)), []);
+  await db.run(db.k.insertInto("work_leases").values({ key: "pr:r#3", job_id: fixup, step: "fixup", taken_at: "x" }));
   assert.ok(await take(db, "pr:r#3", cifix, "cifix"));
 });
 
 test("a second job of a step gets the day's remainder minus the first job's unspent limit", async () => {
   const db = await fresh("limit");
-  await db.prepare("INSERT OR REPLACE INTO stage_limits (step, per_day) VALUES ('fixup', 20)").run();
+  await db.run(db.k.insertInto("stage_limits").values({ step: "fixup", per_day: 20 }).onConflict((oc) => oc.column("step").doUpdateSet(excluded(["per_day"]))));
   const step = { name: "fixup", params: [{ name: "limit", kind: "int", min: 1, max: 50, default: 15 }] } as unknown as StepDef;
   assert.deepEqual(await jobLimit(db, step), { limit: 15 });
   await addJob(db, "fixup", "running", { limit: 15 }, 4); // 4 used (counted today), 11 unspent

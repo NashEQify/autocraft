@@ -1,17 +1,17 @@
 import { isBotCommand, isBotLogin } from "./review/bots.ts";
-import { loadOwners } from "./owners.ts";
+import { loadOwners, type OwnerRow } from "./owners.ts";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { fillHashesSync } from "./itemhash.ts";
-import { fillTextRefs } from "./fixissue/candidates.ts";
+import { fillHashesSync, fillTextRefs, bulkWritesSync } from "./db/sqlite-backfill.ts";
 import { BOOKKEEPING_COLUMNS, liveSql } from "./live.ts";
-import { bulkWritesSync, planChangesSql } from "./core/plan-changes.ts";
+import { planChangesSql } from "./core/plan-changes.ts";
 import { JEV_USD_PER_INPUT_TOKEN } from "./prompts/index.ts";
 import { JEV_NEEDS_DECISION_YES, JEV_SECURITY_YES } from "./classify/parse.ts";
 import { envVar } from "./env.ts";
+import { isLockTimeout } from "./db/errors.ts";
 import { NO_CI_SAMPLE, NO_CI_SQL, noCiFrom } from "./merge/no-ci.ts";
 import { fixupEditable } from "./fixup/patch.ts";
 import { SLUGS_KEY, namesOf, parseSlugs } from "./github/slugs.ts";
@@ -19,13 +19,23 @@ import { SIM_THRESHOLD } from "./dupes/scan.ts";
 
 export const DEFAULT_DB = join(homedir(), ".local/share/autocraft/mirror.db");
 
-export function dbPath(): string {
-  return envVar("DB") ?? DEFAULT_DB;
+/** The SQLite file: `AUTOCRAFT_DB`, else mirror.db in `AUTOCRAFT_DATA_DIR`, else the default under the home. */
+export function dbPath(env: NodeJS.ProcessEnv = process.env): string {
+  const dir = envVar("DATA_DIR", env);
+  return envVar("DB", env) ?? (dir ? join(dir, "mirror.db") : DEFAULT_DB);
+}
+
+/**
+ * The instance's data directory (reference documents, artifacts, the item snapshot): `AUTOCRAFT_DATA_DIR`, else the
+ * SQLite file's directory. A Postgres instance keeps its files here too.
+ */
+export function dataDir(env: NodeJS.ProcessEnv = process.env): string {
+  return envVar("DATA_DIR", env) || dirname(dbPath(env));
 }
 
 // Columns added to existing tables after their first release. CREATE TABLE IF
 // NOT EXISTS leaves an older table as it was, so these are added here.
-const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
+export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["opus_reviews", "base_ref", "TEXT"],
   ["fast_track", "weight", "INTEGER NOT NULL DEFAULT 5"],
   ["items", "reactions_count", "INTEGER"],
@@ -80,7 +90,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["decisions", "summary_by", "TEXT"],
   ["decisions", "summary_at", "TEXT"],
   ["decisions", "adopted_opinion", "TEXT"],
-  // Snoozed by an operator: out of the inbox until new activity on the item (SNOOZED_SQL).
+  // Snoozed by an operator: out of the inbox until new activity on the item (snoozedExpr).
   ["decisions", "snoozed_by", "TEXT"],
   // What Opus had seen of the item when it proposed the card: JSON {head, last_comment}; null for cards stored before this.
   ["conversation_cards", "seen", "TEXT"],
@@ -271,7 +281,7 @@ const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
 // Indexes on added columns: they can only be created once the column exists.
 // Covering indexes on the hash columns let the planner compare stored hashes without reading item rows.
 // The trigger clears the hashes of an item whose hashed fields were edited without bringing its own (sync does).
-const ADDED_INDEXES = [
+export const ADDED_INDEXES = [
   // Covers the claims' read of the queued remote calls (src/remote/calls.ts queuedCalls) and the room count, so neither walks the overflow pages of each row's bundle.
   // remote_calls_queued, the same index without the pick columns, stays while the previous release may still read it
   // (INDEXED BY) during a rollout: the deploy migrates the database before the old processes restart. The next release drops it.
@@ -311,7 +321,7 @@ const ADDED_INDEXES = [
 ];
 
 // Columns removed after their first release.
-const DROPPED_COLUMNS: [table: string, column: string][] = [["classifications", "topics"], ["classifications", "area"], ["mcp_tokens", "cooloff_until"]];
+export const DROPPED_COLUMNS: [table: string, column: string][] = [["classifications", "topics"], ["classifications", "area"], ["mcp_tokens", "cooloff_until"]];
 
 /** Appends the stored review rows that the history does not hold yet. */
 export const HISTORY_COPY_SQL = `INSERT INTO main.opus_review_history (repo, number, head_oid, at, model, mode, verdict, sure, reason, risks, fixes, summary, why, public_review, claims, blocked_by, trigger, job_id)
@@ -705,6 +715,8 @@ function stampOf(db: DatabaseSync): string | null {
   }
 }
 
+const ownerRows = (db: DatabaseSync): OwnerRow[] => db.prepare("SELECT name, owner FROM main.repos").all() as OwnerRow[];
+
 /**
  * Opens the database and brings its schema up to date. `busyTimeoutMs` replaces the 30-second busy timeout once the
  * schema is current: a connection that serves requests waits that long for a write lock, then throws SQLITE_BUSY.
@@ -715,8 +727,8 @@ export function connect(path: string = dbPath(), opts: { busyTimeoutMs?: number 
   return db;
 }
 
-/** Whether `e` is SQLite's "database is locked" (SQLITE_BUSY, any extended code): another connection held the write lock past the busy timeout. */
-export const isBusy = (e: unknown): boolean => typeof (e as { errcode?: unknown } | null)?.errcode === "number" && ((e as { errcode: number }).errcode & 0xff) === 5;
+/** Whether `e` is a lock wait that ran out (SQLITE_BUSY or Postgres 55P03): another connection held the write lock past the timeout. */
+export const isBusy = isLockTimeout;
 
 function open(path: string): DatabaseSync {
   mkdirSync(dirname(path), { recursive: true });
@@ -732,7 +744,7 @@ function open(path: string): DatabaseSync {
   // A current database takes no write lock here: opening a connection must not wait for a sync.
   if (stampOf(db) === stamp) {
     migrateValues(db);
-    loadOwners(db);
+    loadOwners(() => ownerRows(db));
     return db;
   }
   db.exec(schema);
@@ -763,6 +775,6 @@ function open(path: string): DatabaseSync {
   db.exec(`INSERT OR IGNORE INTO main.settings (key, value) SELECT 'tracking_started_at',
     COALESCE((SELECT MIN(synced_at) FROM main.repos), strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))`);
   db.prepare("INSERT INTO main.settings (key, value) VALUES ('schema_stamp', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(stamp);
-  loadOwners(db);
+  loadOwners(() => ownerRows(db));
   return db;
 }

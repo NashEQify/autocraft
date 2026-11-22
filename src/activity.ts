@@ -4,6 +4,7 @@
 import type { Querier } from "./mirror.ts";
 import { ownerOf } from "./owners.ts";
 import type { Db } from "./db/index.ts";
+import { excluded } from "./db/kx.ts";
 // Local, as in mirror.ts: importing it from review/checks.ts closes an import cycle through mirror.ts.
 
 /** Items read per sync pass; a backlog drains over several passes. */
@@ -55,32 +56,51 @@ export function commitLogins(authors: Node[]): string[] {
 export async function saveActivity(db: Db, repo: string, number: number, node: Node, item: { head: string | null; updated_at: string | null }, at: string): Promise<void> {
   await db.write(async () => {
     const events: Node[] = (node.prTimeline ?? node.issueTimeline)?.nodes ?? [];
-    const insEvent = db.prepare("INSERT OR REPLACE INTO item_activity (repo, number, id, kind, at, actor, label, before_oid, after_oid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
     for (const e of events) {
       if (!e?.id) continue;
       const kind = e.__typename === "LabeledEvent" ? "labeled" : e.__typename === "UnlabeledEvent" ? "unlabeled" : e.__typename === "HeadRefForcePushedEvent" ? "force-push" : null;
-      if (kind) await insEvent.run(repo, number, e.id, kind, e.createdAt, e.actor?.login ?? null, e.label?.name ?? null, e.beforeCommit?.oid ?? null, e.afterCommit?.oid ?? null);
+      if (!kind) continue;
+      await db.run(db.k.insertInto("item_activity")
+        .values({ repo, number, id: e.id, kind, at: e.createdAt, actor: e.actor?.login ?? null, label: e.label?.name ?? null, before_oid: e.beforeCommit?.oid ?? null, after_oid: e.afterCommit?.oid ?? null })
+        .onConflict((oc) => oc.columns(["repo", "number", "id"]).doUpdateSet(excluded(["kind", "at", "actor", "label", "before_oid", "after_oid"]))));
     }
     if (node.__typename === "PullRequest") {
       const head = node.headRefOid as string;
-      await db.prepare("DELETE FROM pr_files WHERE repo = ? AND number = ?").run(repo, number);
-      const insFile = db.prepare("INSERT OR REPLACE INTO pr_files (repo, number, head, path, additions, deletions, change_type) VALUES (?, ?, ?, ?, ?, ?, ?)");
-      for (const f of node.files?.nodes ?? []) if (f?.path) await insFile.run(repo, number, head, f.path, f.additions ?? 0, f.deletions ?? 0, f.changeType ?? "CHANGED");
-      const insCommit = db.prepare(`INSERT INTO pr_commits (repo, number, oid, committed_at, author, first_seen_at, message, co_authors) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT (repo, number, oid) DO UPDATE SET committed_at = excluded.committed_at, author = excluded.author, message = COALESCE(excluded.message, message), co_authors = COALESCE(excluded.co_authors, co_authors)`);
+      await db.run(db.k.deleteFrom("pr_files").where("repo", "=", repo).where("number", "=", number));
+      for (const f of node.files?.nodes ?? []) {
+        if (!f?.path) continue;
+        await db.run(db.k.insertInto("pr_files")
+          .values({ repo, number, head, path: f.path, additions: f.additions ?? 0, deletions: f.deletions ?? 0, change_type: f.changeType ?? "CHANGED" })
+          .onConflict((oc) => oc.columns(["repo", "number", "head", "path"]).doUpdateSet(excluded(["additions", "deletions", "change_type"]))));
+      }
       for (const c of node.commits?.nodes ?? []) {
         if (!c?.commit?.oid) continue;
         const authors = c.commit.authors?.nodes as Node[] | undefined;
-        await insCommit.run(repo, number, c.commit.oid, c.commit.committedDate, c.commit.author?.user?.login ?? null, at, c.commit.messageHeadline ?? null, authors ? JSON.stringify(commitLogins(authors)) : null);
+        await db.run(db.k.insertInto("pr_commits")
+          .values({
+            repo, number, oid: c.commit.oid, committed_at: c.commit.committedDate, author: c.commit.author?.user?.login ?? null, first_seen_at: at,
+            message: c.commit.messageHeadline ?? null, co_authors: authors ? JSON.stringify(commitLogins(authors)) : null,
+          })
+          .onConflict((oc) => oc.columns(["repo", "number", "oid"]).doUpdateSet((eb) => ({
+            committed_at: eb.ref("excluded.committed_at"),
+            author: eb.ref("excluded.author"),
+            message: eb.fn.coalesce("excluded.message", "pr_commits.message"),
+            co_authors: eb.fn.coalesce("excluded.co_authors", "pr_commits.co_authors"),
+          }))));
       }
     }
-    await db.prepare("INSERT OR REPLACE INTO activity_sync (repo, number, head, updated_at, read_at) VALUES (?, ?, ?, ?, ?)").run(repo, number, item.head, item.updated_at, at);
+    await saveSyncState(db, { repo, number, ...item }, at, null, null);
   });
 }
 
-/** Records the attempt, so the item waits for its next change or the retry time instead of heading every pass. */
+/**
+ * Records the read or the attempt, so the item waits for its next change or the retry time instead of heading every pass.
+ * Every column is written: a successful read clears the error and retry time of an earlier failed one.
+ */
 async function saveSyncState(db: Db, it: { repo: string; number: number; head: string | null; updated_at: string | null }, at: string, error: string | null, retryAt: string | null): Promise<void> {
-  await db.prepare("INSERT OR REPLACE INTO activity_sync (repo, number, head, updated_at, read_at, error, retry_at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(it.repo, it.number, it.head, it.updated_at, at, error, retryAt);
+  await db.run(db.k.insertInto("activity_sync")
+    .values({ repo: it.repo, number: it.number, head: it.head, updated_at: it.updated_at, read_at: at, error, retry_at: retryAt })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(excluded(["head", "updated_at", "read_at", "error", "retry_at"]))));
 }
 
 /**
@@ -89,11 +109,22 @@ async function saveSyncState(db: Db, it: { repo: string; number: number; head: s
  */
 export async function syncActivity(db: Db, client: Querier, now: Date = new Date()): Promise<number> {
   const since = new Date(now.getTime() - ACTIVITY_WINDOW_MS).toISOString();
-  const due = await db.prepare(`SELECT i.repo, i.number, i.head_oid AS head, i.updated_at FROM items i
-    JOIN tracked_repos t ON t.name = i.repo LEFT JOIN activity_sync s ON s.repo = i.repo AND s.number = i.number
-    WHERE (i.state = 'OPEN' OR i.updated_at >= ?)
-      AND (s.repo IS NULL OR s.head IS NOT i.head_oid OR s.updated_at IS NOT i.updated_at OR (s.retry_at IS NOT NULL AND s.retry_at <= ?))
-    ORDER BY i.updated_at DESC LIMIT ?`).all(since, now.toISOString(), ACTIVITY_PER_PASS) as { repo: string; number: number; head: string | null; updated_at: string | null }[];
+  const due = await db.all(db.k.selectFrom("items as i")
+    .innerJoin("tracked_repos as t", "t.name", "i.repo")
+    .leftJoin("activity_sync as s", (j) => j.onRef("s.repo", "=", "i.repo").onRef("s.number", "=", "i.number"))
+    .select(["i.repo", "i.number", "i.head_oid as head", "i.updated_at"])
+    .where((eb) => eb.and([
+      eb.or([eb("i.state", "=", "OPEN"), eb("i.updated_at", ">=", since)]),
+      eb.or([
+        eb("s.repo", "is", null),
+        eb("s.head", "is distinct from", eb.ref("i.head_oid")),
+        eb("s.updated_at", "is distinct from", eb.ref("i.updated_at")),
+        eb.and([eb("s.retry_at", "is not", null), eb("s.retry_at", "<=", now.toISOString())]),
+      ]),
+    ]))
+    // SQLite's order for DESC; Postgres would put NULLs first.
+    .orderBy("i.updated_at", (o) => o.desc().nullsLast())
+    .limit(ACTIVITY_PER_PASS));
   const started = Date.now();
   let read = 0;
   for (const it of due) {

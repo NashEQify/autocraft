@@ -2,6 +2,7 @@
 // A lease whose job is not running counts as free, so a crash leaves nothing behind.
 import { currentJob } from "../agents/call.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 let skipped = 0;
 /** Items this process skipped because another job held their lease. */
@@ -23,19 +24,21 @@ export function skipItem(key: string, log: (line: string) => void, why: string):
 /** Takes the lease for the job. False when another running job holds it. */
 export async function take(db: Db, key: string, jobId: number, step: string): Promise<boolean> {
   return await db.write(async () => {
-    const held = await db.prepare("SELECT l.job_id AS job, j.state AS state FROM work_leases l LEFT JOIN jobs j ON j.id = l.job_id WHERE l.key = ?").get(key) as { job: number; state: string | null } | undefined;
+    const held = await db.get(db.k.selectFrom("work_leases as l").leftJoin("jobs as j", "j.id", "l.job_id")
+      .select(["l.job_id as job", "j.state as state"]).where("l.key", "=", key));
     if (held && held.job !== jobId && held.state === "running") return false;
-    await db.prepare("INSERT OR REPLACE INTO work_leases (key, job_id, step, taken_at) VALUES (?, ?, ?, ?)").run(key, jobId, step, new Date().toISOString());
+    await db.run(db.k.insertInto("work_leases").values({ key, job_id: jobId, step, taken_at: new Date().toISOString() })
+      .onConflict((oc) => oc.column("key").doUpdateSet(excluded(["job_id", "step", "taken_at"]))));
     return true;
   });
 }
 
 export async function release(db: Db, key: string, jobId: number): Promise<void> {
-  await db.prepare("DELETE FROM work_leases WHERE key = ? AND job_id = ?").run(key, jobId);
+  await db.run(db.k.deleteFrom("work_leases").where("key", "=", key).where("job_id", "=", jobId));
 }
 
 export async function releaseJob(db: Db, jobId: number): Promise<void> {
-  await db.prepare("DELETE FROM work_leases WHERE job_id = ?").run(jobId);
+  await db.run(db.k.deleteFrom("work_leases").where("job_id", "=", jobId));
 }
 
 /**

@@ -4,14 +4,15 @@
 // permission on it (stored in repo_permissions, refreshed by the server).
 // Every query that spans repos must go through this.
 import type { HiddenRepos } from "../../hidden-sql.ts";
-import type { SQLInputValue } from "node:sqlite";
 import { trackedNames } from "../../repos.ts";
 import { DEFAULT_OWNER, ownerOf } from "../../owners.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { securityRepo } from "../../security/rules.ts";
 import { canSeeInternals } from "./staff.ts";
+import type { AliasableExpression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
+import { inList, type Ex } from "../../db/kx.ts";
 
 const memo = new WeakMap<Req, Promise<string[]>>();
 
@@ -19,7 +20,7 @@ const memo = new WeakMap<Req, Promise<string[]>>();
 export async function visibleTo(db: Db, user: Pick<User, "role" | "canRead">): Promise<string[]> {
   const tracked = await trackedNames(db);
   if (user.role === "operator") return tracked;
-  const pub = new Set((await db.prepare("SELECT name FROM main.repos WHERE lower(visibility) = 'public'").all() as { name: string }[]).map((r) => r.name));
+  const pub = new Set((await db.all(db.k.selectFrom("main.repos").select("name").where((eb) => eb(eb.fn<string>("lower", ["visibility"]), "=", "public")))).map((r) => r.name));
   const rest = tracked.filter((r) => !pub.has(r));
   const ok = await Promise.all(rest.map((r) => user.canRead(r).catch(() => false)));
   const allowed = new Set(rest.filter((_, i) => ok[i]));
@@ -51,7 +52,7 @@ export async function repoOwners(db: Db, req: Req): Promise<Record<string, strin
 
 /** Every repo name the database knows, tracked or not: the mirror's repos and every repo that was ever tracked (its work rows stay after untracking). */
 async function knownRepos(db: Db): Promise<string[]> {
-  return (await db.prepare("SELECT name FROM main.repos UNION SELECT name FROM main.tracked_repos UNION SELECT name FROM main.ever_tracked_repos ORDER BY 1").all() as { name: string }[]).map((r) => r.name);
+  return (await db.all(db.k.selectFrom("main.repos").select("name").union(db.k.selectFrom("main.tracked_repos").select("name")).union(db.k.selectFrom("main.ever_tracked_repos").select("name")).orderBy("name"))).map((r) => r.name);
 }
 
 /**
@@ -68,7 +69,7 @@ export async function hiddenRepos(db: Db, req: Req): Promise<HiddenRepos> {
   const known = await knownRepos(db);
   const staff = canSeeInternals(req);
   const hidden = known.filter((r) => !visible.has(r));
-  // The list stays the denylist for text matching; SQL filters use the allow-list attached to it (see excludeHidden).
+  // The list stays the denylist for text matching; SQL filters use the allow-list attached to it (see excludeHiddenExpr).
   // Staff who can see a repo also see its security pseudo repo, so it belongs in the allow-list.
   return Object.assign([...hidden, ...known.filter((r) => !staff || !visible.has(r)).map(securityRepo)], { visible: staff ? [...visibleList, ...visibleList.map(securityRepo)] : visibleList });
 }
@@ -90,14 +91,12 @@ export async function needVisible(db: Db, req: Req, repo: string): Promise<void>
 }
 
 /**
- * SQL that leaves out the hidden repos: `<col> NOT IN (...)`, binding the names
- * into `params` under `<prefix>0`, `<prefix>1`, ... Null when nothing is hidden.
+ * Leaves out the hidden repos, on the repo in `col`; null when nothing is hidden. A list from hiddenRepos carries the repos the
+ * requester may see: rows of any other repo, known or not, are left out.
  */
-export function excludeHidden(col: string, hidden: string[] & { visible?: string[] }, params: Record<string, SQLInputValue>, prefix = "hid"): string | null {
-  // A list from hiddenRepos carries the repos the requester may see: rows of any other repo, known or not, are left out.
-  if (hidden.visible) return hidden.visible.length ? `${col} IN (${hidden.visible.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})` : "0";
-  if (!hidden.length) return null;
-  return `${col} NOT IN (${hidden.map((h, k) => ((params[`${prefix}${k}`] = h), `:${prefix}${k}`)).join(",")})`;
+export function excludeHiddenExpr(db: Db, col: Ex, hidden: string[] & { visible?: string[] }): AliasableExpression<SqlBool> | null {
+  if (hidden.visible) return inList(db, col, hidden.visible);
+  return hidden.length ? inList(db, col, hidden, "text", true) : null;
 }
 
 const namePatterns = new WeakMap<string[], RegExp | null>();

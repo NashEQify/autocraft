@@ -6,9 +6,9 @@
 import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind, LiveWorker, LiveWorkerCall } from "../../../web/src/api/types.ts";
 import { listAccounts } from "../../agents/accounts.ts";
 import { STATUS_FRESH_MS } from "../../remote/helpers.ts";
-import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
-import { touchesHidden } from "../../agents/runs.ts";
-import { filtered, hiddenTest, type HiddenRepos } from "../../hidden-sql.ts";
+import { privateStepExpr } from "../../build/tasks.ts";
+import { touchesHiddenExpr } from "../../agents/runs.ts";
+import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import type { Req } from "../types.ts";
 import { QUIET_STEPS } from "./now.ts";
 import { shownLookup } from "./shown.ts";
@@ -17,6 +17,7 @@ import { stepTitle } from "./trace.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { flatMapSeq, mapSeq } from "../../async-seq.ts";
 import type { Db } from "../../db/index.ts";
+import type { Eb } from "../../db/kx.ts";
 
 /** Ended jobs stay on the board this long. */
 const RECENT_MS = 20 * 60_000;
@@ -27,11 +28,11 @@ const SAMPLES = 60;
 /** Fewer earlier runs than this give no estimate. */
 const MIN_SAMPLES = 3;
 
-type Args = (string | number)[];
-const all = async <T>(db: Db, sql: string, ...args: Args): Promise<T[]> => await db.prepare(sql).all(...args) as T[];
-const notHidden = (col: string, hidden: HiddenRepos, nullOk = false): string =>
-  filtered(hidden) ? ` AND (${nullOk ? `${col} IS NULL OR ` : ""}NOT (${hiddenTest(col, hidden).sql}))` : "";
-const hideArgs = (hidden: HiddenRepos): string[] => (filtered(hidden) ? hiddenTest("x", hidden).args : []);
+/** `col` is not in a hidden repo (or is null, with `nullOk`). */
+const notHidden = (db: Db, eb: Eb, col: string, hidden: HiddenRepos, nullOk = false) => {
+  const not = eb.not(hiddenTestExpr(db, col, hidden));
+  return nullOk ? eb.or([eb(col, "is", null), not]) : not;
+};
 
 /** Median and 90th percentile of durations in ms; null with too few. */
 function estimateOf(ms: number[]): LiveEstimate | null {
@@ -52,6 +53,8 @@ export function buildKind(name: string): LiveOpKind {
 }
 
 const iso = (ms: number) => new Date(ms).toISOString();
+/** The milliseconds from `started_at` to `ended_at`. */
+const durationMs = (eb: Eb) => eb(eb.parens(eb.fn<number>("julianday", ["ended_at"]), "-", eb.fn<number>("julianday", ["started_at"])), "*", eb.lit(86400000));
 
 export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const hidden = await hiddenRepos(db, req);
@@ -64,13 +67,15 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   const memo = new Map<string, LiveEstimate | null>();
   const memoized = async (key: string, read: () => Promise<number[]>) => (memo.has(key) ? memo.get(key)! : memo.set(key, estimateOf(await read())).get(key)!);
   const jobEstimate = async (step: string) => await memoized(`job:${step}`, async () =>
-    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM jobs WHERE step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, SAMPLES)).map((r) => r.ms));
+    (await db.all(db.k.selectFrom("jobs").select((eb) => durationMs(eb).as("ms")).where("step", "=", step).where("state", "=", "done").where("started_at", "is not", null).where("ended_at", "is not", null)
+      .orderBy("id", "desc").limit(SAMPLES))).map((r) => r.ms));
   const callEstimate = async (step: string, model: string) => await memoized(`call:${step}:${model}`, async () =>
-    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM agent_runs WHERE step = ? AND model = ? AND state = 'done' AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, step, model, SAMPLES)).map((r) => r.ms));
+    (await db.all(db.k.selectFrom("agent_runs").select((eb) => durationMs(eb).as("ms")).where("step", "=", step).where("model", "=", model).where("state", "=", "done").where("ended_at", "is not", null)
+      .orderBy("id", "desc").limit(SAMPLES))).map((r) => r.ms));
   const taskEstimate = async (repo: string, step: string) => await memoized(`task:${repo}:${step}`, async () =>
-    (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM build_tasks WHERE repo = ? AND step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, repo, step, SAMPLES)).map((r) => r.ms));
+    (await db.all(db.k.selectFrom("build_tasks").select((eb) => durationMs(eb).as("ms")).where("repo", "=", repo).where("step", "=", step).where("state", "=", "done").where("started_at", "is not", null).where("ended_at", "is not", null)
+      .orderBy("id", "desc").limit(SAMPLES))).map((r) => r.ms));
 
-  const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
   type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
   const callOp = async (c: Call): Promise<LiveOp> => ({
     kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
@@ -94,33 +99,37 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
     }
     return [{ kind: t.current ? buildKind(t.current) : "build", label: t.current ?? "Build task", detail: stepTitle(t.step), start: t.started_at, end: null, estimate: await taskEstimate(t.repo, t.step) }];
   };
-  const taskCols = `t.id, t.job_id, t.step, t.repo, t.number, t.state, t.queued_at, t.started_at, t.ended_at, t.results, t.summary,
-    (SELECT l.step FROM build_task_logs l WHERE l.task_id = t.id ORDER BY l.seq DESC LIMIT 1) AS current`;
-  const privateTasks = staff ? "" : ` AND t.step NOT IN (${PRIVATE_STEPS_SQL})`;
+  const taskQuery = () => db.k.selectFrom("build_tasks as t")
+    .select(["t.id", "t.job_id", "t.step", "t.repo", "t.number", "t.state", "t.queued_at", "t.started_at", "t.ended_at", "t.results", "t.summary",
+      (eb) => eb.selectFrom("build_task_logs as l").select("l.step").whereRef("l.task_id", "=", "t.id").orderBy("l.seq", "desc").limit(1).as("current")])
+    .$if(!staff, (q) => q.where((eb) => eb.not(privateStepExpr(eb, "t.step"))));
+  const callQuery = () => db.k.selectFrom("agent_runs as r").leftJoin("claude_accounts as a", "a.id", "r.account_id")
+    .select(["r.id", "r.job_id", "r.step", "r.model", "r.provider", (eb) => eb.fn.coalesce("a.label", "r.account_id").as("label"), "r.started_at", "r.ended_at", "r.state", "r.progress"])
+    .$if(filtered(hidden), (q) => q.where((eb) => touchesHiddenExpr(db, eb, hidden)));
 
   // Jobs: running, then queued (the next few), then the ones that ended lately.
   type Job = { id: number; step: string; state: string; requested_at: string; started_at: string | null; ended_at: string | null; progress: string | null; summary: string | null; error: string | null; repo: string | null };
-  const cols = "id, step, state, requested_at, started_at, ended_at, progress, summary, error, repo";
+  const jobQuery = () => db.k.selectFrom("jobs").select(["id", "step", "state", "requested_at", "started_at", "ended_at", "progress", "summary", "error", "repo"])
+    .where((eb) => eb.or([eb("state", "=", "failed"), eb("step", "not in", quiet)]));
   const since = iso(nowMs - RECENT_MS);
   // Housekeeping steps show only when they fail; left out before any LIMIT, so they never take a slot.
   const quiet = [...QUIET_STEPS];
-  const loud = ` AND (state = 'failed' OR step NOT IN (${quiet.map(() => "?").join(", ")}))`;
   const jobs = [
-    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'running'${loud}${notHidden("repo", hidden, true)} ORDER BY id`, ...quiet, ...hideArgs(hidden)),
-    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state = 'queued'${loud}${notHidden("repo", hidden, true)} ORDER BY id LIMIT ?`, ...quiet, ...hideArgs(hidden), QUEUED_MAX),
-    ...await all<Job>(db, `SELECT ${cols} FROM jobs WHERE state IN ('done', 'failed') AND ended_at > ? AND started_at IS NOT NULL${loud}${notHidden("repo", hidden, true)} ORDER BY ended_at DESC LIMIT ?`, since, ...quiet, ...hideArgs(hidden), RECENT_MAX * 3),
+    ...await db.all(jobQuery().where("state", "=", "running").$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden, true))).orderBy("id")),
+    ...await db.all(jobQuery().where("state", "=", "queued").$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden, true))).orderBy("id").limit(QUEUED_MAX)),
+    ...await db.all(jobQuery().where("state", "in", ["done", "failed"]).where("ended_at", ">", since).where("started_at", "is not", null).$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden, true)))
+      .orderBy("ended_at", "desc").limit(RECENT_MAX * 3)),
   ];
 
   const lanes: LiveLane[] = [];
   let recent = 0;
   for (const j of jobs) {
     const ended = j.state === "done" || j.state === "failed";
-    const its = await all<{ repo: string; number: number }>(db, `SELECT repo, number FROM job_items WHERE job_id = ?${notHidden("repo", hidden)} ORDER BY id`, j.id, ...hideArgs(hidden));
+    const its = await db.all(db.k.selectFrom("job_items").select(["repo", "number"]).where("job_id", "=", j.id).$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden))).orderBy("id"));
     if (ended && its.length === 0 && j.state !== "failed") continue;
     if (ended && ++recent > RECENT_MAX) continue;
-    const calls = await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
-      FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.job_id = ?${hiddenRuns} ORDER BY r.id`, j.id, ...hideArgs(hidden));
-    const tasks = await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.job_id = ?${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, j.id, ...hideArgs(hidden));
+    const calls = await db.all(callQuery().where("r.job_id", "=", j.id).orderBy("r.id"));
+    const tasks = await db.all(taskQuery().where("t.job_id", "=", j.id).$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "t.repo", hidden))).orderBy("t.id"));
     const line = j.state === "running" ? blankIfHidden(j.progress, hidden) : j.state === "failed" ? (staff && j.error ? blankIfHidden(j.error, hidden) : "Failed") : j.state === "done" ? blankIfHidden(j.summary, hidden) : null;
     lanes.push({
       key: `job:${j.id}`, title: stepTitle(j.step), state: j.state === "running" ? "running" : j.state === "queued" ? "queued" : j.state === "failed" ? "failed" : "done",
@@ -132,19 +141,19 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   }
 
   // Calls and build tasks that run without a job.
-  for (const c of await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
-      FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.state = 'running' AND r.job_id IS NULL${hiddenRuns} ORDER BY r.id`, ...hideArgs(hidden))) {
-    const it = (await all<{ repo: string; number: number }>(db, "SELECT repo, number FROM agent_run_items WHERE run_id = ? ORDER BY repo, number LIMIT 1", c.id))[0];
+  for (const c of await db.all(callQuery().where("r.state", "=", "running").where("r.job_id", "is", null).orderBy("r.id"))) {
+    const it = (await db.all(db.k.selectFrom("agent_run_items").select(["repo", "number"]).where("run_id", "=", c.id).orderBy("repo").orderBy("number").limit(1)))[0];
     const op = await callOp(c);
     lanes.push({ key: `run:${c.id}`, title: stepTitle(c.step), state: "running", start: c.started_at, end: null, line: blankIfHidden(c.progress, hidden) || null, item: it ? await item(it.repo, it.number) : null, itemCount: it ? 1 : 0, repo: it?.repo ?? null, detail: `/agents/${c.id}`, estimate: op.estimate, ops: [op] });
   }
   // Open integration batches, with the build task of their combined tree; that task gets no lane of its own.
   type Batch = { id: number; repo: string; state: string; created_at: string; summary: string | null; task_id: number | null; pr_number: number | null };
-  const batches = await all<Batch>(db, `SELECT id, repo, state, created_at, summary, task_id, pr_number FROM merge_batches WHERE state IN ('checking', 'open')${notHidden("repo", hidden)} ORDER BY id`, ...hideArgs(hidden));
+  const batches = await db.all(db.k.selectFrom("merge_batches").select(["id", "repo", "state", "created_at", "summary", "task_id", "pr_number"]).where("state", "in", ["checking", "open"])
+    .$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "repo", hidden))).orderBy("id"));
   const batchTasks = new Set(batches.map((b) => b.task_id).filter((id): id is number => id !== null));
   for (const b of batches) {
-    const prs = await all<{ number: number }>(db, "SELECT number FROM merge_batch_prs WHERE batch_id = ? ORDER BY position", b.id);
-    const tasks = b.task_id === null ? [] : await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.id = ?${privateTasks}`, b.task_id);
+    const prs = await db.all(db.k.selectFrom("merge_batch_prs").select("number").where("batch_id", "=", b.id).orderBy("position"));
+    const tasks = b.task_id === null ? [] : await db.all(taskQuery().where("t.id", "=", b.task_id));
     const ops = await flatMapSeq(tasks, taskOps);
     lanes.push({
       key: `batch:${b.id}`, title: "Integration batch", state: "running", start: b.created_at, end: null,
@@ -152,7 +161,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
       item: prs[0] ? await item(b.repo, prs[0].number) : null, itemCount: prs.length, repo: b.repo, detail: `/batches/${b.id}`, estimate: null, ops,
     });
   }
-  for (const t of await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.state IN ('queued', 'claimed', 'running') AND t.job_id IS NULL${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, ...hideArgs(hidden))) {
+  for (const t of await db.all(taskQuery().where("t.state", "in", ["queued", "claimed", "running"]).where("t.job_id", "is", null).$if(filtered(hidden), (q) => q.where((eb) => notHidden(db, eb, "t.repo", hidden))).orderBy("t.id"))) {
     if (batchTasks.has(t.id)) continue;
     const ops = await taskOps(t);
     lanes.push({
@@ -169,10 +178,12 @@ export const WORKER_WINDOW_MS = 60 * 60_000;
 /** At most this many calls go on the worker view, the newest. */
 const WORKER_CALLS_MAX = 400;
 
+const n0 = (v: number | bigint | string | null | undefined): number => (v === null || v === undefined ? 0 : Number(v));
+
 /**
  * One row per worker: each Task Runner with a fresh status or a call in the window, each enabled box account (operators only; a disabled
- * one only with a call in the window) and Jev when it ran. Rows keep a fixed order (runners by owner and name, then accounts, then Jev),
- * so a row does not move when its work starts or ends. Calls on repos hidden from the reader are left out.
+ * one only with a call in the window) and Jev when it ran. Rows keep a fixed order (runners by owner and id, then accounts, then Jev), so a
+ * row does not move when its work starts or ends. Calls on repos hidden from the reader are left out.
  */
 async function workersOf(
   db: Db, req: Req, hidden: HiddenRepos, nowMs: number,
@@ -181,32 +192,33 @@ async function workersOf(
 ): Promise<LiveWorker[]> {
   const operator = req.user.role === "operator";
   const since = iso(nowMs - WORKER_WINDOW_MS);
-  const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
-  type Run = { id: number; step: string; model: string; provider: string; account_id: string | null; user_login: string | null; started_at: string; ended_at: string | null; state: string;
-    tokens: number | null; n: number; repo: string | null; number: number | null };
-  const runs = (await all<Run>(db, `SELECT r.id, r.step, r.model, r.provider, r.account_id, r.user_login, r.started_at, r.ended_at, r.state,
-      CASE WHEN r.input_tokens IS NULL AND r.output_tokens IS NULL THEN NULL
-        ELSE COALESCE(r.input_tokens, 0) + COALESCE(r.output_tokens, 0) + COALESCE(r.cache_read_tokens, 0) + COALESCE(r.cache_write_tokens, 0) END AS tokens,
-      (SELECT COUNT(*) FROM agent_run_items i WHERE i.run_id = r.id) AS n,
-      (SELECT i.repo FROM agent_run_items i WHERE i.run_id = r.id ORDER BY i.repo, i.number LIMIT 1) AS repo,
-      (SELECT i.number FROM agent_run_items i WHERE i.run_id = r.id ORDER BY i.repo, i.number LIMIT 1) AS number
-    FROM agent_runs r WHERE (r.state = 'running' OR r.ended_at > ?)${hiddenRuns} ORDER BY r.id DESC LIMIT ?`, since, ...hideArgs(hidden), WORKER_CALLS_MAX)).sort((a, b) => a.started_at.localeCompare(b.started_at));
+  const runs = (await db.all(db.k.selectFrom("agent_runs as r")
+    .select(["r.id", "r.step", "r.model", "r.provider", "r.account_id", "r.user_login", "r.started_at", "r.ended_at", "r.state",
+      "r.input_tokens", "r.output_tokens", "r.cache_read_tokens", "r.cache_write_tokens",
+      (eb) => eb.selectFrom("agent_run_items as i").select((e) => e.fn.countAll<number>().as("n")).whereRef("i.run_id", "=", "r.id").as("n"),
+      (eb) => eb.selectFrom("agent_run_items as i").select("i.repo").whereRef("i.run_id", "=", "r.id").orderBy("i.repo").orderBy("i.number").limit(1).as("repo"),
+      (eb) => eb.selectFrom("agent_run_items as i").select("i.number").whereRef("i.run_id", "=", "r.id").orderBy("i.repo").orderBy("i.number").limit(1).as("number")])
+    .where((eb) => eb.or([eb("r.state", "=", "running"), eb("r.ended_at", ">", since)]))
+    .$if(filtered(hidden), (q) => q.where((eb) => touchesHiddenExpr(db, eb, hidden)))
+    .orderBy("r.id", "desc").limit(WORKER_CALLS_MAX))).sort((a, b) => a.started_at.localeCompare(b.started_at));
   // The runner credential that leased each remote call (only the lease's run is linked; an older lease falls back to its owner).
-  const leases = new Map((await all<{ run_id: number; token_id: number }>(db, `SELECT run_id, token_id FROM remote_calls
-      WHERE run_id IS NOT NULL AND token_id IS NOT NULL AND (state = 'leased' OR (state IN ('done', 'failed') AND ended_at > ?))`, nowMs - WORKER_WINDOW_MS)).map((l) => [Number(l.run_id), Number(l.token_id)]));
+  const leases = new Map((await db.all(db.k.selectFrom("remote_calls").select(["run_id", "token_id"]).where("run_id", "is not", null).where("token_id", "is not", null)
+    .where((eb) => eb.or([eb("state", "=", "leased"), eb.and([eb("state", "in", ["done", "failed"]), eb("ended_at", ">", nowMs - WORKER_WINDOW_MS)])]))))
+    .map((l) => [Number(l.run_id), Number(l.token_id)]));
 
   const rows = new Map<string, LiveWorker>();
+  type Run = (typeof runs)[number];
   const workerOfRun = (r: Run): string | null =>
     r.provider === "jev" ? "jev"
-      : r.user_login ? (leases.has(r.id) ? `runner:${leases.get(r.id)}` : `login:${r.user_login.toLowerCase()}`)
+      : r.user_login ? (leases.has(Number(r.id)) ? `runner:${leases.get(Number(r.id))}` : `login:${r.user_login.toLowerCase()}`)
       : r.account_id && operator ? `account:${r.account_id}` : null;
 
   // Task Runners with a fresh status, and every one that ran a call in the window.
   const tokenIds = [...new Set(leases.values())];
-  type Helper = { id: number; login: string; label: string | null; machine: string | null; readiness: string | null; reason: string | null; harness: string | null; reported_at: number | null; slots: number | null; busy: number | null };
-  const helpers = await all<Helper>(db, `SELECT t.id, t.login, t.label, t.machine, h.readiness, h.reason, h.harness, h.reported_at, h.slots, h.busy
-      FROM mcp_tokens t LEFT JOIN remote_helpers h ON h.token_id = t.id
-    WHERE t.kind = 'runner' AND (h.reported_at > ?${tokenIds.length ? ` OR t.id IN (${tokenIds.map(() => "?").join(", ")})` : ""})`, nowMs - STATUS_FRESH_MS, ...tokenIds);
+  const helpers = await db.all(db.k.selectFrom("mcp_tokens as t").leftJoin("remote_helpers as h", "h.token_id", "t.id")
+    .select(["t.id", "t.login", "t.label", "t.machine", "h.readiness", "h.reason", "h.harness", "h.reported_at", "h.slots"])
+    .where("t.kind", "=", "runner")
+    .where((eb) => eb.or([eb("h.reported_at", ">", nowMs - STATUS_FRESH_MS), ...(tokenIds.length ? [eb("t.id", "in", tokenIds)] : [])])));
   const machineName = (m: string | null): string | null => { try { return m ? (JSON.parse(m) as { hostname?: string }).hostname ?? null : null; } catch { return null; } };
   for (const h of helpers.sort((a, b) => a.login.localeCompare(b.login) || Number(a.id) - Number(b.id))) {
     const fresh = h.reported_at !== null && nowMs - Number(h.reported_at) <= STATUS_FRESH_MS;
@@ -217,7 +229,7 @@ async function workersOf(
     });
   }
   for (const r of runs) {
-    if (!r.user_login || leases.has(r.id)) continue;
+    if (!r.user_login || leases.has(Number(r.id))) continue;
     const key = `login:${r.user_login.toLowerCase()}`;
     if (!rows.has(key)) rows.set(key, { key, kind: "runner", name: "Task Runner", login: r.user_login, harness: null, status: "offline", note: null, busy: 0, slots: null, calls: [] });
   }
@@ -240,10 +252,12 @@ async function workersOf(
     if (!row) continue;
     const running = r.state === "running";
     if (running) row.busy++;
+    const recorded = r.input_tokens !== null || r.output_tokens !== null;
     const call: LiveWorkerCall = {
       id: Number(r.id), title: stepTitle(r.step), model: r.provider === "jev" ? "Jev" : r.model,
-      item: r.repo !== null && r.number !== null ? await item(r.repo, Number(r.number)) : null, itemCount: Number(r.n),
-      start: r.started_at, end: r.ended_at, tokens: r.tokens === null ? null : Number(r.tokens),
+      item: r.repo !== null && r.number !== null ? await item(r.repo, Number(r.number)) : null, itemCount: n0(r.n),
+      start: r.started_at, end: r.ended_at,
+      tokens: recorded ? n0(r.input_tokens) + n0(r.output_tokens) + n0(r.cache_read_tokens) + n0(r.cache_write_tokens) : null,
       estimate: running ? await callEstimate(r.step, r.model) : null, ...(r.state === "failed" ? { failed: true } : {}),
     };
     row.calls.push(call);

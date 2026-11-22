@@ -1,10 +1,14 @@
 // Opens database handles. The only module that loads the kysely and pg packages, with dynamic imports: the build worker
 // runs src/ without node_modules and never opens the app database (test/no-package-imports.test.ts).
+import { createHash } from "node:crypto";
+import { basename } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { connect, dbPath } from "../db.ts";
 import { envVar } from "../env.ts";
 import { Handle } from "./handle.ts";
-import type { Db } from "./index.ts";
+import type { Db, DbRole } from "./index.ts";
+import { migratePg, pgStamp, storedPgStamp } from "./pg-triggers.ts";
+import { pgConnectionString, postgresEngine } from "./postgres.ts";
 import { bindSql } from "./sql.ts";
 import { sqliteEngine } from "./sqlite.ts";
 
@@ -31,9 +35,93 @@ export function dbFor(sync: DatabaseSync): Promise<Db> {
   return h;
 }
 
-/** A handle of its own on the SQLite database at `path`, schema brought up to date (see `connect()`). */
-export async function connectDb(path: string = dbPath(), opts: { busyTimeoutMs?: number } = {}): Promise<Db> {
-  return dbFor(connect(path, opts));
+export const isPgUrl = (target: string): boolean => /^postgres(ql)?:\/\//.test(target);
+
+/**
+ * The configured database: `AUTOCRAFT_DB_URL` (Postgres) or else `AUTOCRAFT_DB` (a SQLite file, default under the home).
+ * Both set to different values is refused: one of them would be ignored without a word.
+ */
+export function dbTarget(env: NodeJS.ProcessEnv = process.env): string {
+  const url = envVar("DB_URL", env);
+  const path = envVar("DB", env);
+  if (url !== undefined && path !== undefined && url !== path) throw new Error("AUTOCRAFT_DB_URL and AUTOCRAFT_DB are both set and differ: set only one");
+  if (url !== undefined && !isPgUrl(url)) throw new Error("AUTOCRAFT_DB_URL must be a postgres:// or postgresql:// URL");
+  return url ?? dbPath(env);
+}
+
+const DB_VARS = ["AUTOCRAFT_DB", "CRAFT_AUTO_DB", "AUTOCRAFT_DB_URL", "CRAFT_AUTO_DB_URL"];
+
+/** `env` for a child process that opens `target`: the one variable that names it, and no other database variable. */
+export function dbEnv(target: string, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const out = { ...env };
+  for (const k of DB_VARS) delete out[k];
+  out[isPgUrl(target) ? "AUTOCRAFT_DB_URL" : "AUTOCRAFT_DB"] = target;
+  return out;
+}
+
+/**
+ * A file-name-safe name for `target`, for lock files that exclude a second run on the same database: a SQLite file's
+ * base name, or for Postgres a hash of the host, port and database name (no credentials).
+ */
+export function dbLockName(target: string = dbTarget()): string {
+  if (!isPgUrl(target)) return basename(target);
+  const u = new URL(target);
+  return `pg-${createHash("sha256").update(`${u.hostname}:${u.port || "5432"}${u.pathname}`).digest("hex").slice(0, 12)}`;
+}
+
+let role: DbRole = "cli";
+
+let testRedirect: ((sqliteTarget: string) => Promise<string>) | undefined;
+
+/**
+ * Test hook: `connectDb` on a SQLite target opens the Postgres URL `map(target)` gives instead. test/pg-suite.ts installs
+ * it to run the SQLite tests on Postgres; refused unless AUTOCRAFT_TEST_PG_URL is set.
+ */
+export function setTestDbRedirect(map: (sqliteTarget: string) => Promise<string>): void {
+  if (!process.env.AUTOCRAFT_TEST_PG_URL) throw new Error("setTestDbRedirect is for tests on Postgres: AUTOCRAFT_TEST_PG_URL is not set");
+  testRedirect = map;
+}
+
+/** Sets the role of this process's handles (pool size on Postgres). Called by long-running commands before they open one. */
+export function setDbRole(r: DbRole): void {
+  role = r;
+}
+
+export interface ConnectOptions {
+  /** How long a write waits for the write lock before failing with a lock timeout. */
+  busyTimeoutMs?: number;
+  /** The handle's use, for its pool size on Postgres. Defaults to the process's role (`setDbRole`). */
+  role?: DbRole;
+  /** Postgres: bring the schema and triggers up to date first (default). False opens the database as it is. */
+  migrate?: boolean;
+}
+
+/**
+ * A handle of its own on `target`: a SQLite file or a Postgres URL, schema brought up to date (see `connect()` and
+ * `migratePg()`).
+ */
+export async function connectDb(target: string = dbTarget(), opts: ConnectOptions = {}): Promise<Db> {
+  if (testRedirect && !isPgUrl(target)) target = await testRedirect(target);
+  if (!isPgUrl(target)) return dbFor(connect(target, opts));
+  const [k, pg] = await Promise.all([loadKysely(), loadPg()]);
+  const db = new Handle((ctx) => postgresEngine(k, pg, target, { role: opts.role ?? role, busyTimeoutMs: opts.busyTimeoutMs }, ctx));
+  if (opts.migrate === false) return db;
+  try {
+    // A current database costs two reads on the pool; only a stale one opens a connection of its own for the migration.
+    if (await storedPgStamp((sql) => db.prepare(sql).all()) !== pgStamp()) {
+      const client = new pg.Client({ connectionString: pgConnectionString(target), application_name: "autocraft-migrate" });
+      await client.connect();
+      try {
+        await migratePg(client);
+      } finally {
+        await client.end();
+      }
+    }
+  } catch (e) {
+    await db.close();
+    throw e;
+  }
+  return db;
 }
 
 let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
@@ -44,7 +132,6 @@ let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
  * `closeDb()` closes it.
  */
 export async function openDb(): Promise<Db> {
-  if (envVar("DB_URL") !== undefined) throw new Error("AUTOCRAFT_DB_URL is set, but the Postgres backend is not available yet");
   proc ??= connectDb().then((db) => {
     const close = db.close.bind(db);
     db.close = async () => {};

@@ -54,6 +54,7 @@ if [ -r "$ENV_FILE" ]; then
 	. "$ENV_FILE"
 	set +a
 	AUTOCRAFT_DB="${AUTOCRAFT_DB:-${CRAFT_AUTO_DB:-}}"
+	AUTOCRAFT_DB_URL="${AUTOCRAFT_DB_URL:-${CRAFT_AUTO_DB_URL:-}}"
 	AUTOCRAFT_LISTEN="${AUTOCRAFT_LISTEN:-${CRAFT_AUTO_LISTEN:-}}"
 else
 	echo "!! $ENV_FILE is missing; create it first (README, Production install)" >&2
@@ -83,7 +84,9 @@ REL="$ROOT/releases/$sha"
 echo "-- Deploying ${sha:0:12} to $REL --"
 
 # Snapshot first: nothing of the new code has touched the database yet.
-if [ -n "${AUTOCRAFT_DB:-}" ] && [ -f "$AUTOCRAFT_DB" ]; then
+if [ -n "${AUTOCRAFT_DB_URL:-}" ]; then
+	echo "-> No snapshot: AUTOCRAFT_DB_URL names a Postgres database, whose backups are the database provider's."
+elif [ -n "${AUTOCRAFT_DB:-}" ] && [ -f "$AUTOCRAFT_DB" ]; then
 	echo "-> Snapshotting the database..."
 	bash "$ROOT/app/deploy/backup.sh" predeploy 3 2>/dev/null || {
 		# First deploy of this layout has no app/ yet: use the checkout about to be built.

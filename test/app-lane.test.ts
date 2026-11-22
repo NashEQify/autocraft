@@ -12,6 +12,7 @@ import type { GuardedItem, GuardedRepo } from "../src/core/guard.ts";
 import type { ExecOpts } from "../src/fixup/git.ts";
 import { SCRATCH } from "./scratch.ts";
 import { connectDb } from "../src/db/open.ts";
+import * as kx from "../src/db/kx.ts";
 
 const BOX = "ghp_box_account_token";
 const APP = "ghs_installation_token";
@@ -22,7 +23,7 @@ const note = { by: "fixed" } as never;
 test("app identity: the installation token is the whole child environment; legacy and user grants are untouched", async () => {
   mkdirSync(SCRATCH, { recursive: true });
   const db = await connectDb(join(SCRATCH, `app-lane-${process.pid}.db`));
-  await db.prepare("INSERT OR IGNORE INTO tracked_repos (name) VALUES ('lane')").run();
+  await db.run(db.k.insertInto("tracked_repos").values({ name: "lane" }).onConflict((oc) => oc.doNothing()));
   process.env.GITHUB_TOKEN = BOX;
   process.env.GH_TOKEN = BOX;
   let mintFails = false;
@@ -58,6 +59,6 @@ test("app identity: the installation token is the whole child environment; legac
   assert.equal(r.code, 1);
   assert.match(r.stderr, /not installed on storytold/);
   assert.equal(seen.length, 0);
-  const row = await db.prepare("SELECT details FROM audit WHERE action = 'act-comment' ORDER BY rowid DESC LIMIT 1").get() as { details: string };
-  assert.equal(JSON.parse(row.details).state, "failed");
+  const row = (await db.get(db.k.selectFrom("audit").select("details").where("action", "=", "act-comment").orderBy(kx.rowid("audit"), "desc").limit(1)))!;
+  assert.equal(JSON.parse(row.details!).state, "failed");
 });

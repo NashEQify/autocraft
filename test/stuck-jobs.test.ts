@@ -25,7 +25,7 @@ mkdirSync(SCRATCH, { recursive: true });
 const dir = mkdtempSync(join(SCRATCH, "stuck-jobs-"));
 const dbFile = join(dir, "runner.db");
 const db = await connectDb(dbFile);
-const runner = new Runner({ db, dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
+const runner = new Runner({ db, dbTarget: dbFile, logs: join(dir, "logs"), killAfterMs: 2000, log: () => {}, maxMin: (s) => (s === "test-sleep" ? 0.02 : 999), noProgressMin: (s) => (s === "test-other" ? 0.02 : 999), graceMs: 500 });
 after(async () => {
   await runner.stop();
   await db.close();
@@ -41,7 +41,7 @@ test("a job past its step's deadline is stopped and failed, and warns until ackn
   assert.deepEqual((await deadlineStops(db)).map((d) => d.step), ["test-sleep"]);
   assert.match((await jobDetail(db, slow.id)).log ?? "", /may finish its current item/);
   // The stopped paid work is not started again for an hour, whatever the input does.
-  await db.prepare("UPDATE jobs SET requested_by = 'pipeline' WHERE id = ?").run(slow.id);
+  await db.run(db.k.updateTable("jobs").set({ requested_by: "pipeline" }).where("id", "=", slow.id));
   const b = await failureBackoff(db, "test-sleep", Date.now(), { fp: "changed" });
   assert.ok(b && b.until - Date.parse(j.endedAt!) >= DEADLINE_BACKOFF_MS);
   // Every step with model calls gets at least the time the code lets its job work.

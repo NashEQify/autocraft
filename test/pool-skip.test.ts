@@ -22,10 +22,10 @@ mkdirSync(SCRATCH, { recursive: true });
 test("a pool skips a unit nobody may take and runs the later ones", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
   await setUserRepos(db, "olga", ["deckcraft"]);
 
   const repos = ["photocraft", "deckcraft", "deckcraft"];
@@ -54,10 +54,10 @@ test("user-local batches hold one repo's items in the order of their first item;
 test("a limited selection takes the items with a taker before the ones nobody may take", async () => {
   const db = await connectDb(join(mkdtempSync(join(SCRATCH, "pool-skip-")), "t.db"));
   await setInferenceMode(db, "user-local", "test");
-  await db.prepare("INSERT INTO access (login, role) VALUES ('olga', 'operator')").run();
+  await db.run(db.k.insertInto("access").values({ login: "olga", role: "operator" }));
   const id = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   await storeStatus(db, id, "olga", parseStatus({ slots: 1, busy: 0, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  await db.prepare("UPDATE mcp_tokens SET idle_claim_at = ? WHERE id = ?").run(Date.now(), id);
+  await db.run(db.k.updateTable("mcp_tokens").set({ idle_claim_at: Date.now() }).where("id", "=", id));
   await setUserRepos(db, "olga", ["deckcraft"]);
   const items = [{ repo: "photocraft", n: 1 }, { repo: "deckcraft", n: 2 }, { repo: "photocraft", n: 3 }, { repo: "deckcraft", n: 4 }];
   const picked = (await takersFirst(db, items, (x) => [x.repo], (x) => [{ repo: x.repo, number: x.n }])).slice(0, 1);

@@ -7,6 +7,7 @@ import type { Role } from "../types.ts";
 import { randomToken, sha256hex } from "../server/crypto.ts";
 import { HttpError } from "../server/util.ts";
 import type { Db } from "../../db/index.ts";
+import { nocase } from "../../db/kx.ts";
 
 const DAY = 86_400_000;
 export const MCP_TOKEN_TTL = 90 * DAY;
@@ -30,7 +31,7 @@ export type McpTokenRow = { id: number; label: string | null; kind: TokenKind; c
 export type McpCaller = { tokenId: number; login: string; role: Role; canAnswer: boolean; canAgent: boolean; kind: TokenKind };
 
 type Raw = { id: number; label: string | null; kind: TokenKind; can_answer: number; can_agent: number; can_run: number; created_at: string; last_used_at: string | null; expires_at: string };
-const COLS = "id, label, kind, can_answer, can_agent, can_run, created_at, last_used_at, expires_at";
+const COLS = ["id", "label", "kind", "can_answer", "can_agent", "can_run", "created_at", "last_used_at", "expires_at"] as const;
 const toRow = (r: Raw): McpTokenRow =>
   ({ id: Number(r.id), label: r.label, kind: r.kind, canAnswer: r.can_answer === 1, canAgent: r.kind === "connector" || r.can_agent === 1, canRun: r.can_run === 1, createdAt: r.created_at, lastUsedAt: r.last_used_at, expiresAt: r.expires_at });
 
@@ -42,8 +43,10 @@ export function cleanLabel(raw: unknown): string | null {
 
 /** The login's live tokens of one kind, or of both, newest first. */
 export async function listTokens(db: Db, login: string, kind?: TokenKind): Promise<McpTokenRow[]> {
-  return (await db.prepare(`SELECT ${COLS} FROM mcp_tokens WHERE login = ? AND expires_at > ?${kind ? " AND kind = ?" : ""} ORDER BY created_at DESC, id DESC`)
-    .all(login, new Date().toISOString(), ...(kind ? [kind] : [])) as Raw[]).map(toRow);
+  return (await db.all(db.k.selectFrom("mcp_tokens").select(COLS).$narrowType<{ kind: TokenKind }>()
+    .where("login", "=", login).where("expires_at", ">", new Date().toISOString())
+    .$if(!!kind, (q) => q.where("kind", "=", kind!))
+    .orderBy("created_at", "desc").orderBy("id", "desc"))).map(toRow);
 }
 
 export type Scopes = { agent: boolean; answer: boolean };
@@ -54,8 +57,10 @@ async function insert(db: Db, login: string, hash: string, label: string | null,
   }
   const now = new Date();
   const ttl = kind === "runner" ? RUNNER_TOKEN_TTL : scopes.answer ? MCP_ANSWER_TOKEN_TTL : MCP_TOKEN_TTL;
-  return toRow(await db.prepare(`INSERT INTO mcp_tokens (login, token_hash, label, kind, can_answer, can_agent, can_run, machine, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING ${COLS}`)
-    .get(login, hash, label, kind, scopes.answer ? 1 : 0, kind === "runner" && scopes.agent ? 1 : 0, kind === "runner" ? 1 : 0, machine, now.toISOString(), new Date(now.getTime() + ttl).toISOString()) as Raw);
+  return toRow((await db.get(db.k.insertInto("mcp_tokens").values({
+    login, token_hash: hash, label, kind, can_answer: scopes.answer ? 1 : 0, can_agent: kind === "runner" && scopes.agent ? 1 : 0, can_run: kind === "runner" ? 1 : 0,
+    machine, created_at: now.toISOString(), expires_at: new Date(now.getTime() + ttl).toISOString(),
+  }).returning(COLS).$narrowType<{ kind: TokenKind }>()))!);
 }
 
 /**
@@ -76,35 +81,36 @@ export async function addRunnerToken(db: Db, login: string, hash: string, label:
 
 /** Sets the scopes of one of the login's runners; false when it has no such runner. The caller checks who may grant `answer`. */
 export async function setRunnerScopes(db: Db, login: string, id: number, scopes: Scopes): Promise<boolean> {
-  return (await db.prepare("UPDATE mcp_tokens SET can_agent = ?, can_answer = ? WHERE id = ? AND login = ? AND kind = 'runner' AND expires_at > ?")
-    .run(scopes.agent ? 1 : 0, scopes.answer ? 1 : 0, id, login, new Date().toISOString())).changes === 1;
+  return (await db.run(db.k.updateTable("mcp_tokens").set({ can_agent: scopes.agent ? 1 : 0, can_answer: scopes.answer ? 1 : 0 })
+    .where("id", "=", id).where("login", "=", login).where("kind", "=", "runner").where("expires_at", ">", new Date().toISOString()))).changes === 1;
 }
 
 /** Revokes one of the login's own credentials of `kind`; false when it has no such credential. */
 export async function revokeToken(db: Db, login: string, id: number, kind: TokenKind): Promise<boolean> {
-  return (await db.prepare("DELETE FROM mcp_tokens WHERE id = ? AND login = ? AND kind = ?").run(id, login, kind)).changes === 1;
+  return (await db.run(db.k.deleteFrom("mcp_tokens").where("id", "=", id).where("login", "=", login).where("kind", "=", kind))).changes === 1;
 }
 
 /** Ends every token of a login (it left the access list). */
 export async function endTokens(db: Db, login: string): Promise<number> {
-  return Number((await db.prepare("DELETE FROM mcp_tokens WHERE login = ?").run(login)).changes);
+  return Number((await db.run(db.k.deleteFrom("mcp_tokens").where("login", "=", login))).changes);
 }
 
 /** Ends a login's answering connector tokens and takes answering from its runners (its role was lowered); the rest stay. */
 export async function endAnswerTokens(db: Db, login: string): Promise<number> {
-  return Number((await db.prepare("DELETE FROM mcp_tokens WHERE login = ? AND can_answer = 1 AND kind = 'connector'").run(login)).changes)
-    + Number((await db.prepare("UPDATE mcp_tokens SET can_answer = 0 WHERE login = ? AND can_answer = 1 AND kind = 'runner'").run(login)).changes);
+  return Number((await db.run(db.k.deleteFrom("mcp_tokens").where("login", "=", login).where("can_answer", "=", 1).where("kind", "=", "connector"))).changes)
+    + Number((await db.run(db.k.updateTable("mcp_tokens").set({ can_answer: 0 }).where("login", "=", login).where("can_answer", "=", 1).where("kind", "=", "runner"))).changes);
 }
 
 /** Every login's live tokens, for operators on the Access page. */
 export async function listAllTokens(db: Db): Promise<(McpTokenRow & { login: string })[]> {
-  return (await db.prepare(`SELECT login, ${COLS} FROM mcp_tokens WHERE expires_at > ? ORDER BY login COLLATE NOCASE, created_at DESC, id DESC`)
-    .all(new Date().toISOString()) as (Raw & { login: string })[]).map((r) => ({ ...toRow(r), login: r.login }));
+  return (await db.all(db.k.selectFrom("mcp_tokens").select(["login", ...COLS]).$narrowType<{ kind: TokenKind }>()
+    .where("expires_at", ">", new Date().toISOString())
+    .orderBy(nocase(db, "login")).orderBy("created_at", "desc").orderBy("id", "desc"))).map((r) => ({ ...toRow(r), login: r.login }));
 }
 
 /** Revokes any login's credential by id (an operator's action); its login and kind, or null when there is none. */
 export async function revokeAnyToken(db: Db, id: number): Promise<{ login: string; kind: TokenKind } | null> {
-  return (await db.prepare("DELETE FROM mcp_tokens WHERE id = ? RETURNING login, kind").get(id) as { login: string; kind: TokenKind } | undefined) ?? null;
+  return (await db.get(db.k.deleteFrom("mcp_tokens").where("id", "=", id).returning(["login", "kind"]).$narrowType<{ kind: TokenKind }>())) ?? null;
 }
 
 /**
@@ -116,21 +122,22 @@ export async function loadToken(db: Db, token: string | undefined): Promise<McpC
   const prefix = token.startsWith(RUNNER_TOKEN_PREFIX) ? "runner" : token.startsWith(MCP_TOKEN_PREFIX) ? "connector" : null;
   if (!prefix) return null;
   const now = new Date();
-  const row = await db.prepare(`SELECT t.id, t.login, t.kind, t.last_used_at, t.can_answer, t.can_agent, a.role FROM mcp_tokens t JOIN access a ON a.login = t.login
-    WHERE t.token_hash = ? AND t.expires_at > ?`).get(sha256hex(token), now.toISOString()) as
-    { id: number; login: string; kind: TokenKind; last_used_at: string | null; can_answer: number; can_agent: number; role: Role } | undefined;
+  const row = await db.get(db.k.selectFrom("mcp_tokens as t").innerJoin("access as a", "a.login", "t.login")
+    .select(["t.id", "t.login", "t.kind", "t.last_used_at", "t.can_answer", "t.can_agent", "a.role"])
+    .$narrowType<{ kind: TokenKind; role: Role }>()
+    .where("t.token_hash", "=", sha256hex(token)).where("t.expires_at", ">", now.toISOString()));
   if (!row) return null;
   // Runner credentials from before the split carry the connector prefix.
   if (prefix === "runner" && row.kind !== "runner") return null;
   if (!row.last_used_at || now.getTime() - Date.parse(row.last_used_at) > TOUCH_EVERY) {
-    if (row.kind === "runner") await db.prepare("UPDATE mcp_tokens SET last_used_at = ?, expires_at = ? WHERE id = ?").run(now.toISOString(), new Date(now.getTime() + RUNNER_TOKEN_TTL).toISOString(), row.id);
-    else await db.prepare("UPDATE mcp_tokens SET last_used_at = ? WHERE id = ?").run(now.toISOString(), row.id);
+    if (row.kind === "runner") await db.run(db.k.updateTable("mcp_tokens").set({ last_used_at: now.toISOString(), expires_at: new Date(now.getTime() + RUNNER_TOKEN_TTL).toISOString() }).where("id", "=", row.id));
+    else await db.run(db.k.updateTable("mcp_tokens").set({ last_used_at: now.toISOString() }).where("id", "=", row.id));
   }
   return { tokenId: Number(row.id), login: row.login, role: row.role, canAnswer: row.can_answer === 1, canAgent: row.kind === "connector" || row.can_agent === 1, kind: row.kind };
 }
 
 /** Ended credentials, and device logins an hour past their expiry, which their runner has had time to poll for the outcome. */
 export async function pruneTokens(db: Db): Promise<void> {
-  await db.prepare("DELETE FROM mcp_tokens WHERE expires_at <= ?").run(new Date().toISOString());
-  await db.prepare("DELETE FROM runner_logins WHERE expires_at <= ?").run(Date.now() - 3_600_000);
+  await db.run(db.k.deleteFrom("mcp_tokens").where("expires_at", "<=", new Date().toISOString()));
+  await db.run(db.k.deleteFrom("runner_logins").where("expires_at", "<=", Date.now() - 3_600_000));
 }

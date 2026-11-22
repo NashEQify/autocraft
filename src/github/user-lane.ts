@@ -16,6 +16,7 @@ import { exec as defaultExec, type Exec } from "../fixup/git.ts";
 import { Client, GithubError, Transient, type Querier } from "../mirror.ts";
 import { slugOf } from "../owners.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
 
 export type ExecState = "pending" | "waiting-token" | "waiting-permission" | "done" | "failed";
 export const WAITING: readonly ExecState[] = ["waiting-token", "waiting-permission"];
@@ -25,12 +26,15 @@ export const noWriteReason = (repo: string): string => `You have no write access
 
 /** Sets the state shown on the decision. Writes nothing when it is already that, so the planner is not woken for nothing. */
 export async function setExecState(db: Db, id: string, state: ExecState, reason: string | null = null): Promise<void> {
-  await db.prepare("UPDATE main.decisions SET exec_state = ?, exec_reason = ? WHERE id = ? AND exec_state IS NOT 'disputed' AND (exec_state IS NOT ? OR exec_reason IS NOT ?)").run(state, reason, id, state, reason);
+  await db.run(db.k.updateTable("main.decisions").set({ exec_state: state, exec_reason: reason }).where("id", "=", id)
+    .where("exec_state", "is distinct from", "disputed")
+    .where((eb) => eb.or([eb("exec_state", "is distinct from", state), eb("exec_reason", "is distinct from", reason)])));
 }
 
 /** Decisions the pipeline applied are done. */
 export async function markExecDone(db: Db): Promise<void> {
-  await db.prepare("UPDATE main.decisions SET exec_state = 'done', exec_reason = NULL WHERE applied_at IS NOT NULL AND exec_state IS NOT NULL AND exec_state <> 'done'").run();
+  await db.run(db.k.updateTable("main.decisions").set({ exec_state: "done", exec_reason: null })
+    .where("applied_at", "is not", null).where("exec_state", "is not", null).where("exec_state", "<>", "done"));
 }
 
 /**
@@ -38,28 +42,33 @@ export async function markExecDone(db: Db): Promise<void> {
  * (a database read only: the network checks happen when the write runs).
  */
 export async function initExecState(db: Db, id: string): Promise<void> {
-  const d = await db.prepare("SELECT repo, answered_by FROM main.decisions WHERE id = ? AND answer IS NOT NULL AND applied_at IS NULL").get(id) as { repo: string | null; answered_by: string | null } | undefined;
+  const d = await db.get(db.k.selectFrom("main.decisions").select(["repo", "answered_by"]).where("id", "=", id)
+    .where("answer", "is not", null).where("applied_at", "is", null));
   if (!d?.repo || !d.answered_by || await githubIdentity(db) !== "app") return;
-  const has = await db.prepare("SELECT 1 FROM main.user_tokens WHERE login = ? AND status = 'ok'").get(d.answered_by);
+  const has = await db.get(db.k.selectFrom("main.user_tokens").select("login").where("login", "=", d.answered_by).where("status", "=", "ok"));
   if (has) await setExecState(db, id, "pending");
   else await setExecState(db, id, "waiting-token", SIGN_IN_REASON);
 }
 
 /** Puts the waiting (and, for one decision, failed) decisions back to pending so the stages take them up again. Returns how many changed. */
 export async function retryWaiting(db: Db, login?: string): Promise<number> {
-  const r = await db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
-    WHERE exec_state IN ('waiting-token', 'waiting-permission') AND applied_at IS NULL AND answer IS NOT NULL AND (? IS NULL OR answered_by = ? COLLATE NOCASE)`).run(login ?? null, login ?? null);
+  const r = await db.run(db.k.updateTable("main.decisions").set({ exec_state: "pending", exec_reason: null })
+    .where("exec_state", "in", ["waiting-token", "waiting-permission"]).where("applied_at", "is", null).where("answer", "is not", null)
+    .$if(login != null, (q) => q.where((eb) => kx.ciEq(db, "answered_by", eb.val(login!)))));
   return Number(r.changes);
 }
 
 /** Act's tries of a decision start again: a target it stopped after repeated failures is planned once more. Used when the answer is undone, given again, kept after a dispute, or retried. */
 export async function resetActTries(db: Db, id: string): Promise<void> {
-  await db.prepare("UPDATE main.actions SET state = CASE WHEN state = 'stopped' THEN 'failed' ELSE state END, attempts = 0 WHERE decision_id = ? AND state IN ('stopped', 'failed')").run(id);
+  await db.run(db.k.updateTable("main.actions")
+    .set((eb) => ({ state: eb.case().when("state", "=", "stopped").then("failed").else(eb.ref("state")).end(), attempts: 0 }))
+    .where("decision_id", "=", id).where("state", "in", ["stopped", "failed"]));
 }
 
 export async function retryDecision(db: Db, id: string): Promise<boolean> {
-  const r = await db.prepare(`UPDATE main.decisions SET exec_state = 'pending', exec_reason = NULL
-    WHERE id = ? AND exec_state IN ('waiting-token', 'waiting-permission', 'failed') AND applied_at IS NULL AND answer IS NOT NULL`).run(id);
+  const r = await db.run(db.k.updateTable("main.decisions").set({ exec_state: "pending", exec_reason: null })
+    .where("id", "=", id).where("exec_state", "in", ["waiting-token", "waiting-permission", "failed"])
+    .where("applied_at", "is", null).where("answer", "is not", null));
   if (Number(r.changes) > 0) await resetActTries(db, id);
   return Number(r.changes) > 0;
 }
@@ -164,7 +173,8 @@ export async function resolveLane(deps: LaneDeps, login: string, repos: string[]
 
 const NOT_APP_REASON = "This answer was given by a maintainer and can only be carried out as that person: the repo does not use the app identity";
 const answeredByMaintainer = async (db: Db, decisionId: string): Promise<boolean> =>
-  !!await db.prepare("SELECT 1 FROM main.decisions d JOIN main.access a ON a.login = d.answered_by WHERE d.id = ? AND a.role = 'maintainer'").get(decisionId);
+  !!await db.get(db.k.selectFrom("main.decisions as d").innerJoin("main.access as a", "a.login", "d.answered_by").select("d.id")
+    .where("d.id", "=", decisionId).where("a.role", "=", "maintainer"));
 
 /**
  * The lane for the operator who answered `decisionId`, or null when every repo is on the box account (`legacy`): the
@@ -176,7 +186,7 @@ export async function laneForDecision(db: Db, deps: LaneDeps | undefined, decisi
   if (app.length < repos.length && await answeredByMaintainer(db, decisionId)) return { state: "waiting-permission", reason: NOT_APP_REASON };
   if (!app.length) return null;
   // A decision that waits stays put until its operator signs in or someone retries it: no network call per run.
-  const row = await db.prepare("SELECT exec_state, exec_reason FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null; exec_reason: string | null } | undefined;
+  const row = await db.get(db.k.selectFrom("main.decisions").select(["exec_state", "exec_reason"]).where("id", "=", decisionId));
   if (row && (row.exec_state === "waiting-token" || row.exec_state === "waiting-permission")) return { state: row.exec_state, reason: row.exec_reason ?? SIGN_IN_REASON };
   const who = await identityOfDecision(db, decisionId);
   if (who === "app") return { state: "waiting-token", reason: SIGN_IN_REASON };
@@ -192,7 +202,7 @@ export async function laneForOperator(db: Db, deps: LaneDeps | undefined, login:
 /** A decision that waits for its operator's token or access, or whose answer is disputed: the stages leave it out of their work until it is retried or the dispute is settled. */
 export async function isWaiting(db: Db, decisionId: string | null | undefined): Promise<boolean> {
   if (!decisionId) return false;
-  const r = await db.prepare("SELECT exec_state FROM main.decisions WHERE id = ?").get(decisionId) as { exec_state: string | null } | undefined;
+  const r = await db.get(db.k.selectFrom("main.decisions").select("exec_state").where("id", "=", decisionId));
   return r?.exec_state === "waiting-token" || r?.exec_state === "waiting-permission" || r?.exec_state === "disputed";
 }
 

@@ -20,7 +20,7 @@ const save = async (w: World, n: number, head: string, verdict: "take" | "hold",
 const startPushed = async (w: World, n: number, to: string) => {
   await runPipelineStep(w.db, { repo: "app", number: n, step: { kind: "fixup", instructions: "rename a to b", merge: true }, by: OPERATOR });
   const fix = (await w.rows("SELECT id FROM operator_fixups WHERE number = ? ORDER BY id DESC", n))[0]!.id as number;
-  await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at, source, operator_fix) VALUES ('app', ?, ?, ?, 'pushed', 1, ?, 'operator', ?)").run(n, `sha${n}`, to, T0, fix);
+  await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: n, from_head: `sha${n}`, to_head: to, state: "pushed", attempt: 1, created_at: T0, source: "operator", operator_fix: fix }));
   await w.synced(n, to);
 };
 const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePreapprovals(w.db); };
@@ -28,7 +28,7 @@ const settle = async (w: World) => { for (let i = 0; i < 5; i++) await advancePr
 describe("pre-approval and review holds", () => {
   test("the fix-up push lifts a blocked hold; a review that failed for good asks a Merge question", async () => {
     const w = await (await (await (await (await (await fresh()).pr(1)).review(1, { verdict: "take-fix" })).pr(2)).pr(3)).review(3, { verdict: "take-fix" });
-    await w.db.prepare("UPDATE opus_reviews SET verdict = 'hold' WHERE number = 1").run();
+    await w.db.run(w.db.k.updateTable("opus_reviews").set({ verdict: "hold" }).where("number", "=", 1));
     await save(w, 1, "sha1", "hold", true, ["app#2"]);
     await startPushed(w, 1, "sha1b");
     await settle(w);
@@ -83,7 +83,7 @@ describe("a sure take-fix review of a pre-approved fix-up", () => {
     const kinds = (await w.prPlan(1)).actions.map((a) => `${a.kind}:${String(a.params?.source ?? "")}`);
     assert.ok(kinds.includes("fixup:review"), kinds.join());
 
-    await w.db.prepare("INSERT INTO fixups (repo, number, from_head, to_head, state, attempt, created_at, source) VALUES ('app', 1, 'sha1b', 'sha1c', 'pushed', 1, ?, 'review')").run(T0);
+    await w.db.run(w.db.k.insertInto("fixups").values({ repo: "app", number: 1, from_head: "sha1b", to_head: "sha1c", state: "pushed", attempt: 1, created_at: T0, source: "review" }));
     await w.synced(1, "sha1c");
     await settle(w);
     assert.equal((await preapprovalOf(w.db, "app", 1))?.head, "sha1c");

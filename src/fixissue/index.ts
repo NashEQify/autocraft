@@ -56,13 +56,16 @@ import { branchName, claimCommentText, commentText, commitMessage, prBody, prTit
 import { changedRsFiles, foldFormat, lintSteps, readLint } from "../prepush/index.ts";
 import { ghComment, ghDeleteComment, ghFork, ghOpenPr, pushOwnBranch, type Writer } from "../github/write.ts";
 import { COMMENTS_SHOWN, COMMENT_CHARS, FILE_CAP, ISSUE_BODY_LIMIT, MAX_PATHS, MAX_ROUNDS, TOTAL_CAP, type IssueText, type PatchInput, type TriageInput } from "./types.ts";
-import { inPilot, pilotSqlFor } from "../pilot.ts";
-import { backlogHeldSql, duplicateHeld } from "../dupes/held.ts";
+import { inPilot, pilotExprFor } from "../pilot.ts";
+import { backlogHeldExpr, duplicateHeld } from "../dupes/held.ts";
 import { jobItem } from "../runner/job-items.ts";
 import { ownerOf, slugOf } from "../owners.ts";
 import { isBotLogin } from "../review/bots.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import * as kx from "../db/kx.ts";
+import type { FixAttempts } from "../db/types.ts";
+import type { Updateable } from "kysely";
 import { openDb } from "../db/open.ts";
 
 export { type IssueCandidate } from "./candidates.ts";
@@ -155,12 +158,12 @@ const byUpdated = (a: AttemptRow, b: AttemptRow): number => (a.updated_at < b.up
 
 /** An issue the Plans send to a first triage. */
 async function candidateOf(db: Db, repo: string, number: number, score: number | null): Promise<IssueCandidate> {
-  const r = await db.prepare("SELECT title, body FROM items WHERE repo = ? AND number = ?").get(repo, number) as { title: string | null; body: string | null };
+  const r = (await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", repo).where("number", "=", number)))!;
   return { repo, number, title: r.title ?? "", body: r.body ?? "", hash: textHash(r.title ?? "", r.body ?? ""), score };
 }
 
 export const attemptOf = async (db: Db, repo: string, number: number): Promise<AttemptRow | null> =>
-  (await db.prepare("SELECT * FROM fix_attempts WHERE repo = ? AND number = ?").get(repo, number) as AttemptRow | undefined) ?? null;
+  (await db.get(db.k.selectFrom("fix_attempts").select(kx.cols("fix_attempts")).where("repo", "=", repo).where("number", "=", number))) ?? null;
 
 /** Whether the issue's attempt is still as selected: another job may have changed it before this one took the lease. */
 /** A log that names the item on every line, so lines of items running side by side stay readable. */
@@ -186,14 +189,12 @@ async function unchanged(db: Db, repo: string, number: number, before: string | 
   return false;
 }
 
-async function update(db: Db, d: FixIssueDeps, r: { repo: string; number: number }, set: Record<string, string | number | null>): Promise<void> {
-  const keys = Object.keys(set);
-  await db.prepare(`UPDATE fix_attempts SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = ? WHERE repo = ? AND number = ?`)
-    .run(...keys.map((k) => set[k]!), iso(d), r.repo, r.number);
+async function update(db: Db, d: FixIssueDeps, r: { repo: string; number: number }, set: Updateable<FixAttempts>): Promise<void> {
+  await db.run(db.k.updateTable("fix_attempts").set({ ...set, updated_at: iso(d) }).where("repo", "=", r.repo).where("number", "=", r.number));
 }
 
 async function stage(db: Db, d: FixIssueDeps, r: { repo: string; number: number }, kind: "hold" | "take", note: string): Promise<void> {
-  await db.prepare("INSERT INTO main.stages (repo, number, stage, at, actor, note) VALUES (?, ?, ?, ?, ?, ?)").run(r.repo, r.number, kind, iso(d), ACTOR, note.slice(0, 300));
+  await db.run(db.k.insertInto("main.stages").values({ repo: r.repo, number: r.number, stage: kind, at: iso(d), actor: ACTOR, note: note.slice(0, 300) }));
   await jobItem(db, r.repo, r.number, note, () => {});   // the callers log the outcome themselves
 }
 
@@ -215,7 +216,8 @@ async function roundFailed(db: Db, d: FixIssueDeps, r: AttemptRow, round: number
 async function issueText(db: Db, c: { repo: string; number: number; title: string; body: string }): Promise<IssueText> {
   // The mirror stores bot logins without `[bot]`, so bots are recognised by name and our own logins are dropped explicitly.
   const own = await ownLogins(db, c.repo);
-  const comments = (await db.prepare("SELECT author, body FROM comments WHERE repo = ? AND number = ? AND COALESCE(kind, 'comment') = 'comment' ORDER BY created_at LIMIT 40").all(c.repo, c.number) as { author: string | null; body: string | null }[])
+  const comments = (await db.all(db.k.selectFrom("comments").select(["author", "body"]).where("repo", "=", c.repo).where("number", "=", c.number)
+    .where((eb) => eb(eb.fn.coalesce("kind", eb.val("comment")), "=", "comment")).orderBy("created_at", (o) => o.asc().nullsFirst()).limit(40)))
     .filter((x) => x.author && !own.has(x.author) && !isBotLogin(x.author)).slice(0, COMMENTS_SHOWN)
     .map((x) => ({ author: x.author!, body: (x.body ?? "").slice(0, COMMENT_CHARS) }));
   return { ref: refOf(c), title: c.title.slice(0, 300), body: c.body.slice(0, ISSUE_BODY_LIMIT), comments };
@@ -244,7 +246,7 @@ export type FixIssueParams = { repo: string; limit?: number; dryRun?: boolean; o
 export type FixIssueSummary = { runId: string; repo: string; dryRun: boolean; started: string[]; queued: string[]; skipped: string[]; failed: string[] };
 
 export const branchOf = async (db: Db, repo: string): Promise<string> =>
-  (await db.prepare("SELECT default_branch FROM repos WHERE name = ?").get(repo) as { default_branch: string | null } | undefined)?.default_branch ?? "main";
+  (await db.get(db.k.selectFrom("repos").select("default_branch").where("name", "=", repo)))?.default_branch ?? "main";
 
 type Ctx = { db: Db; d: FixIssueDeps; git: Git; log: (l: string) => void; runId: string; usage: Usage; /** Who asked; default: an operator at the command line. */ by?: By };
 
@@ -274,7 +276,7 @@ async function startAttempt(x: Ctx, c: IssueCandidate): Promise<"started" | "ski
   const cr = await cachedCrates(c.repo, main, d.fetchCrates);
   if (!cr.ok) { log(`  ${ref}: no crate list: ${cr.error}`); return "none"; }
   if (!cr.rust) {
-    await db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)").run(notRustKey(c.repo), main);
+    await db.run(db.k.insertInto("settings").values({ key: notRustKey(c.repo), value: main }).onConflict((oc) => oc.column("key").doUpdateSet(kx.excluded(["value"]))));
     log(`  ${c.repo}: not a Rust workspace`);
     return "none";
   }
@@ -291,8 +293,15 @@ async function startAttempt(x: Ctx, c: IssueCandidate): Promise<"started" | "ski
   }
   const at = iso(d);
   const row = async (state: string, reason: string, extra: Partial<AttemptRow> = {}): Promise<AttemptRow> => {
-    await db.prepare(`INSERT OR REPLACE INTO fix_attempts (repo, number, main_sha, text_hash, state, round, files, crate, crate_dir, reason, size, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`).run(c.repo, c.number, main, c.hash, state, extra.files ?? null, extra.crate ?? null, extra.crate_dir ?? null, reason, extra.size ?? null, at, at);
+    // A new attempt starts from a clean row: columns the triage does not set go back to NULL or 0.
+    await db.run(db.k.insertInto("fix_attempts").values({
+      repo: c.repo, number: c.number, main_sha: main, text_hash: c.hash, state, round: 0, files: extra.files ?? null, crate: extra.crate ?? null,
+      crate_dir: extra.crate_dir ?? null, patch: null, test_patch: null, head_task_id: null, base_task_id: null, retries: 0, push_tries: 0,
+      summary: null, pr_url: null, reason, size: extra.size ?? null, format_diff: null, created_at: at, updated_at: at,
+    }).onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded([
+      "main_sha", "text_hash", "state", "round", "files", "crate", "crate_dir", "patch", "test_patch", "head_task_id", "base_task_id", "retries",
+      "push_tries", "summary", "pr_url", "reason", "size", "format_diff", "created_at", "updated_at",
+    ]))));
     return (await attemptOf(db, c.repo, c.number))!;
   };
   if (!parsed) { log(`  ${ref}: no answer from the triage`); return "none"; }
@@ -354,10 +363,11 @@ async function claimIssue(x: Ctx, c: IssueCandidate): Promise<void> {
 
 /** The claim comment of `ref` that is still on the issue: the latest successful claim with a URL, unless a delete came after it. */
 async function liveClaim(db: Db, ref: string): Promise<{ url: string } | null> {
-  const claim = await db.prepare("SELECT rowid AS id, details FROM audit WHERE action = 'fixissue-claim' AND target = ? AND COALESCE(details, '') NOT LIKE '%\"error\":%' ORDER BY rowid DESC LIMIT 1").get(ref) as { id: number; details: string | null } | undefined;
+  const claim = await db.get(db.k.selectFrom("audit").select([kx.rowid("audit").as("id"), "details"]).where("action", "=", "fixissue-claim").where("target", "=", ref)
+    .where((eb) => eb.not(kx.like(db, eb.fn.coalesce("details", eb.val("")), eb.val('%"error":%')))).orderBy(kx.rowid("audit"), "desc").limit(1));
   if (!claim) return null;
   const url = (JSON.parse(claim.details ?? "{}") as { url?: string }).url;
-  const later = await db.prepare("SELECT details FROM audit WHERE action = 'fixissue-unclaim' AND target = ? AND rowid > ?").all(ref, claim.id) as { details: string | null }[];
+  const later = await db.all(db.k.selectFrom("audit").select("details").where("action", "=", "fixissue-unclaim").where("target", "=", ref).where(kx.rowid("audit"), ">", claim.id));
   const done = later.some((r) => (r.details ?? "").includes('"state":"done"'));
   return url && !done && later.length < MAX_UNCLAIM_TRIES ? { url } : null;
 }
@@ -370,7 +380,7 @@ export async function unclaimHeld(x: Ctx, repo: string): Promise<number> {
   const { db, d, log } = x;
   const q = d.querier;
   if (!q) return 0;
-  const held = await db.prepare("SELECT number FROM fix_attempts WHERE repo = ? AND state IN ('failed', 'skipped') AND pr_url IS NULL").all(repo) as { number: number }[];
+  const held = await db.all(db.k.selectFrom("fix_attempts").select("number").where("repo", "=", repo).where("state", "in", ["failed", "skipped"]).where("pr_url", "is", null));
   let deleted = 0;
   for (const { number } of held) {
     const ref = `${repo}#${number}`;
@@ -420,7 +430,7 @@ async function patchRound(x: Ctx, r: AttemptRow): Promise<boolean> {
     if (f.content.length > FILE_CAP || total > TOTAL_CAP) { await fail(db, d, row, "the files to read are over the size limit"); return false; }
     shown.push({ path, content: f.content });
   }
-  const issue = await db.prepare("SELECT title, body FROM items WHERE repo = ? AND number = ?").get(r.repo, r.number) as { title: string | null; body: string | null } | undefined;
+  const issue = await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", r.repo).where("number", "=", r.number));
   const input: PatchInput = {
     ...await issueText(db, { repo: r.repo, number: r.number, title: issue?.title ?? "", body: issue?.body ?? "" }),
     crate: { name: r.crate!, dir: r.crate_dir! }, test_path: testPath, files: shown,
@@ -528,12 +538,13 @@ export function collectDefaults(): CollectDeps {
 
 /** The daily limit of the fixissue stage (null: none). Opened PRs count against it. */
 export async function perDay(db: Db): Promise<number> {
-  const row = await db.prepare("SELECT per_day FROM stage_limits WHERE step = 'fixissue'").get() as { per_day: number | null } | undefined;
+  const row = await db.get(db.k.selectFrom("stage_limits").select("per_day").where("step", "=", "fixissue"));
   return row?.per_day ?? Infinity;
 }
 
 export const openedToday = async (db: Db, now: Date): Promise<number> =>
-  (await db.prepare("SELECT COUNT(*) AS n FROM audit WHERE action = 'fixissue-pr' AND COALESCE(details, '') NOT LIKE '%\"state\":\"failed\"%' AND at >= ?").get(`${now.toISOString().slice(0, 10)}T00:00:00.000Z`) as { n: number }).n;
+  (await db.get(db.k.selectFrom("audit").select((eb) => eb.fn.countAll<number>().as("n")).where("action", "=", "fixissue-pr")
+    .where((eb) => eb.not(kx.like(db, eb.fn.coalesce("details", eb.val("")), eb.val('%"state":"failed"%')))).where("at", ">=", `${now.toISOString().slice(0, 10)}T00:00:00.000Z`)))!.n;
 
 export async function runFixIssueCollect(db: Db, params: CollectParams = {}, log: (line: string) => void = console.log, deps?: CollectDeps): Promise<CollectSummary> {
   const d = deps ?? collectDefaults();
@@ -541,8 +552,9 @@ export async function runFixIssueCollect(db: Db, params: CollectParams = {}, log
   // Attempts whose build tasks finished or whose fix passed, from the Plans; and those of issues that closed since (their tasks are cancelled below), which have no Plan.
   const rows = [
     ...await mapSeq((await plannedItems(db, "fixissue-collect")), async (p) => (await attemptOf(db, p.facts.repo, p.facts.number))!),
-    ...(await db.prepare(`SELECT a.* FROM fix_attempts a JOIN items i ON i.repo = a.repo AND i.number = a.number
-      WHERE a.state = 'testing' AND i.state <> 'OPEN' AND ${pilotSqlFor("a.repo", "a.number")} AND NOT ${backlogHeldSql("a")}`).all() as AttemptRow[]),
+    ...(await db.all(db.k.selectFrom("fix_attempts as a").innerJoin("items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number"))
+      .select(kx.cols("fix_attempts", "a")).where("a.state", "=", "testing").where("i.state", "<>", "OPEN")
+      .where((eb) => eb.and([pilotExprFor(db, eb, "a.repo", "a.number"), eb.not(backlogHeldExpr(db, eb, "a"))])))),
   ].sort(byUpdated).filter((r, i, all) => all.findIndex((o) => o.repo === r.repo && o.number === r.number) === i);
   s.looked = rows.length;
   if (params.dryRun) { log(`fixissue-collect: ${rows.length} pending; dry run`); return s; }
@@ -559,7 +571,7 @@ export async function runFixIssueCollect(db: Db, params: CollectParams = {}, log
     try {
       if (!await unchanged(db, r.repo, r.number, r.updated_at, ilog)) return;
       if (r.state === "passed") { if (await openPr(x(r.repo), r)) { s.opened++; s.changed++; } return; }
-      const item = await db.prepare("SELECT state FROM items WHERE repo = ? AND number = ?").get(r.repo, r.number) as { state: string } | undefined;
+      const item = await db.get(db.k.selectFrom("items").select("state").where("repo", "=", r.repo).where("number", "=", r.number));
       const head = r.head_task_id === null ? null : await getTask(db, r.head_task_id);
       const base = r.base_task_id === null ? null : await getTask(db, r.base_task_id);
       if (item && item.state !== "OPEN") {
@@ -621,7 +633,7 @@ async function checkPatch(x: Ctx, r: AttemptRow): Promise<boolean> {
   const patch = r.patch ?? "";
   const failRound = async (why: string): Promise<false> => (await roundFailed(db, d, r, r.round, why, r.patch, log, 600), false);
   if (patch.length > CHECK_PATCH_CAP) return await failRound(`the patch is over the ${CHECK_PATCH_CAP} character limit for the check`);
-  const issue = await db.prepare("SELECT title, body FROM items WHERE repo = ? AND number = ?").get(r.repo, r.number) as { title: string | null; body: string | null } | undefined;
+  const issue = await db.get(db.k.selectFrom("items").select(["title", "body"]).where("repo", "=", r.repo).where("number", "=", r.number));
   const input: FixIssueCheckInput = {
     ...await issueText(db, { repo: r.repo, number: r.number, title: issue?.title ?? "", body: issue?.body ?? "" }),
     triage_reason: r.reason ?? "", patch, test_path: regressionPath(r.crate_dir!, regressionName(r.number)),
@@ -679,7 +691,7 @@ async function liveIssueState(d: FixIssueDeps, repo: string, number: number): Pr
 async function closedLive(x: Ctx, r: AttemptRow): Promise<boolean> {
   const live = await liveIssueState(x.d, r.repo, r.number);
   if (live !== "CLOSED") return false;
-  await x.db.prepare("UPDATE main.items SET state = 'CLOSED' WHERE repo = ? AND number = ? AND state = 'OPEN'").run(r.repo, r.number);
+  await x.db.run(x.db.k.updateTable("main.items").set({ state: "CLOSED" }).where("repo", "=", r.repo).where("number", "=", r.number).where("state", "=", "OPEN"));
   return true;
 }
 
@@ -687,7 +699,7 @@ async function closedLive(x: Ctx, r: AttemptRow): Promise<boolean> {
 export async function comment(x: Ctx, g: GuardedItem | GuardedRepo, r: AttemptRow, url: string): Promise<void> {
   const { db, d, log } = x;
   const ref = refOf(r);
-  if (await db.prepare("SELECT 1 FROM audit WHERE action = 'fixissue-comment' AND target = ?").get(ref)) return;
+  if (await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one")).where("action", "=", "fixissue-comment").where("target", "=", ref))) return;
   if (await closedLive(x, r)) { log(`  ${ref}: not commenting, the issue is closed`); return; }
   const text = commentText(url);
   const cm = await ghComment({ db, login: ACTOR }, g, d.exec, "fixissue-comment", { repo: r.repo, number: r.number, pr: false }, { by: "model", kind: "comment", model: PATCH.models[0] }, text, { run: x.runId });
@@ -715,7 +727,7 @@ export async function openPr(x: Ctx, r: AttemptRow): Promise<boolean> {
   const giveBack = (): void => { if (reserved) opening--; reserved = false; };
   try {
     if (!await permitted()) return false;
-    const issueNow = await db.prepare("SELECT state, title FROM items WHERE repo = ? AND number = ?").get(r.repo, r.number) as { state: string; title: string | null } | undefined;
+    const issueNow = await db.get(db.k.selectFrom("items").select(["state", "title"]).where("repo", "=", r.repo).where("number", "=", r.number));
     if (issueNow && issueNow.state !== "OPEN") { await fail(db, d, r, "the issue is closed"); return false; }
     if (await closedLive(x, r)) { await fail(db, d, r, "the issue is closed"); return false; }
     const who = await whoAmI(d.exec);
@@ -833,7 +845,7 @@ export const commands = {
     async run(args: string[]): Promise<void> {
       const i = args.indexOf("--repo");
       const db = await openDb();
-      const repos = i >= 0 ? [args[i + 1]!] : (await db.prepare("SELECT name FROM tracked_repos ORDER BY name").all() as { name: string }[]).map((r) => r.name);
+      const repos = i >= 0 ? [args[i + 1]!] : (await db.all(db.k.selectFrom("tracked_repos").select("name").orderBy("name"))).map((r) => r.name);
       for (const r of repos) {
         const a = await fixIssueApprovalOf(db, r);
         console.log(`${r}\t${a ? `approved by ${a.by} at ${a.at}` : "not approved"}`);

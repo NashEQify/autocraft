@@ -141,7 +141,7 @@ const SECURITY_FINDING_PARAMS: ParamDef[] = [
 
 /** The finding exists and is in a state the step works on. */
 async function securityFindingCheck(db: Db, p: Params, states: string[]): Promise<string | null> {
-  const row = await db.prepare("SELECT state FROM security_findings WHERE repo = ? AND number = ?").get(String(p.repo), Number(p.number)) as { state: string } | undefined;
+  const row = await db.get(db.k.selectFrom("security_findings").select("state").where("repo", "=", String(p.repo)).where("number", "=", Number(p.number)));
   if (!row) return "no such finding";
   return states.includes(row.state) ? null : `the finding is ${row.state}`;
 }
@@ -535,7 +535,7 @@ export const STEPS: StepDef[] = [
       { name: "scan", label: "Scan", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the scan row the API created" },
     ],
     check: async (db, p) => {
-      const row = await db.prepare("SELECT repo, state FROM security_scans WHERE id = ?").get(Number(p.scan)) as { repo: string; state: string } | undefined;
+      const row = await db.get(db.k.selectFrom("security_scans").select(["repo", "state"]).where("id", "=", Number(p.scan)));
       if (!row || row.repo !== p.repo) return "no such scan";
       return ["modeling", "scanning", "verifying"].includes(row.state) ? null : `the scan already ended (${row.state})`;
     },
