@@ -85,10 +85,10 @@ test("every table the fact loaders read is classified", { skip: sqliteOnly("read
   const db = await connectDb(join(dir, "reads.db"));
   const tables = (await db.prepare("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all() as { name: string; type: string; sql: string }[]);
   const views = new Map(tables.filter((t) => t.type === "view").map((t) => [t.name, t.sql]));
-  // A view stands for the tables its own SQL names.
+  // A view stands for the tables its own SQL names. Query builder statements quote their names ("main"."items").
   const named = (sql: string, out: Set<string>, seen = new Set<string>()): void => {
     for (const t of tables) {
-      if (seen.has(t.name) || !new RegExp(`(?<![\\w.'"])(main\\.)?${t.name}(?![\\w'"])`).test(sql)) continue;
+      if (seen.has(t.name) || !new RegExp(`(?<![\\w.'"])(?:(?:main|"main")\\.)?(?:${t.name}|"${t.name}")(?![\\w'"])`).test(sql)) continue;
       if (views.has(t.name)) named(views.get(t.name)!, out, new Set([...seen, t.name])); else out.add(t.name);
     }
   };
