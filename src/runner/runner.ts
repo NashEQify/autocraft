@@ -9,7 +9,7 @@ import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync,
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
-import { advancePreapprovals } from "../preapproval/index.ts";
+import { advancePreapprovals, preapprovalInputs } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
 import { recordUsageSamples } from "../agents/accounts.ts";
 import { AccountWatcher } from "../agents/manage.ts";
@@ -118,6 +118,8 @@ export class Runner {
   private reconcileClient: import("../mirror.ts").Client | null = null;
   private planning: Promise<void> | null = null;
   private detected: Detected | null = null;
+  /** What the last pre-approval pass read (preapprovalInputs) and the earliest time its answer changes with the clock alone. */
+  private preapprovalMark: { sig: string; wakeAt: number } | null = null;
   private flowing: Promise<void> | null = null;
   private readonly planThread: OffThread;
   private readonly flowThread: OffThread;
@@ -316,11 +318,26 @@ export class Runner {
       }
     } catch (e) { this.o.log(`security scan tests: ${(e as Error).message}`); }
     // Pre-approved merges move on rows other steps wrote; they are read here, not on a timer of their own.
-    try { await advancePreapprovals(this.db, this.o.log); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
+    try { await this.preapprovals(); } catch (e) { this.o.log(`preapprovals: ${(e as Error).message}`); }
     if (this.planning || !await planDue(this.db)) return;
     this.planning = this.detect(Date.now())
       .then((d) => { this.detected = d; }, (e) => this.o.log(`autopilot: detection failed: ${(e as Error).message}`))
       .finally(() => (this.planning = null));
+  }
+
+  /**
+   * The pre-approval pass, when what it reads changed since the last one (read before it runs, so its own moves make the next tick run it
+   * again) or a time it was told about has come. A pass that throws runs again on the next tick.
+   */
+  private async preapprovals(): Promise<void> {
+    const t = Date.now();
+    const sig = await preapprovalInputs(this.db);
+    const m = this.preapprovalMark;
+    if (m && m.sig === sig && t < m.wakeAt) return;
+    this.preapprovalMark = null;
+    let wakeAt = Infinity;
+    await advancePreapprovals(this.db, this.o.log, {}, (at) => { if (at < wakeAt) wakeAt = at; });
+    this.preapprovalMark = { sig, wakeAt };
   }
 
   private updateAt = 0;

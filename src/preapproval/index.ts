@@ -40,6 +40,8 @@ import { lockLiveExpr } from "../answers/hold.ts";
 import type { Db } from "../db/index.ts";
 import type { NotNull } from "kysely";
 import * as kx from "../db/kx.ts";
+import { readSeqs } from "../live.ts";
+import { INPUT_TOPICS } from "../runner/autopilot.ts";
 
 export type PipelineStep = Extract<Step, { kind: "review" | "fixup" }>;
 
@@ -331,11 +333,12 @@ type ReviewRead = { kind: "none" | "stale" | "take" | "takefix" | "bad"; why: st
  * The Opus review at `head`. A take or take-fix that is not stale goes on, sure or unsure: the merge approval says the change is wanted,
  * so a take-fix is the pipeline's own fix-up to make and the pre-approval goes on with its push. Any other verdict stops it.
  */
-async function reviewAt(db: Db, p: Row, head: string): Promise<ReviewRead> {
+async function reviewAt(db: Db, p: Row, head: string, wake?: Wake): Promise<ReviewRead> {
   const r = await db.get(db.k.selectFrom("opus_reviews").select(["verdict", "sure", "reason"]).$narrowType<{ verdict: NotNull }>()
     .where("repo", "=", p.repo).where("number", "=", p.number).where("head_oid", "=", head).where("verdict", "is not", null));
   if (!r) return { kind: "none", why: "", unsure: false };
-  if ((await staleReviews(db, p.repo)).has(`${p.repo}#${p.number}@${head}`)) return { kind: "stale", why: "", unsure: false };
+  const ref = `${p.repo}#${p.number}`;
+  if ((await staleReviews(db, p.repo, false, { refresh: (r, at) => (r === ref ? wake?.(at) : undefined) })).has(`${ref}@${head}`)) return { kind: "stale", why: "", unsure: false };
   const unsure = r.sure !== 1;
   if (r.verdict === "take") return { kind: "take", why: "", unsure };
   if (r.verdict === "take-fix") return { kind: "takefix", why: r.reason ? oneLine(r.reason, 160) : "", unsure };
@@ -391,7 +394,7 @@ function stepRuns(f: PrFacts, step: "cifix" | "conflict"): boolean {
 const FAILED_FIXUP = ["failed", "refused", "rejected", "cannot-push", "too-large", "push-denied", "asked", "comment-failed", "superseded"];
 
 /** One pre-approved merge: reads what the other steps recorded and makes at most one transition. */
-async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => Promise<PrFacts | null>): Promise<void> {
+async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => Promise<PrFacts | null>, wake: Wake): Promise<void> {
   const it = await prRow(db, p.repo, p.number);
   const cancel = async (reason: string) => void await cancelRow(db, p.id, ACTOR, reason, `The pre-approved merge was cancelled: ${reason}.`);
   const stop = async (to: "asked" | "failed", why: string, head: string, facts: string[] = [why]) => {
@@ -443,7 +446,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
   }
 
   if (p.state === "review") {
-    const r = await reviewAt(db, p, head);
+    const r = await reviewAt(db, p, head, wake);
     if (r.kind === "stale") return;
     if (r.kind === "none") {
       // No review is coming for a PR the planner does not review (an open scope question, a draft, a hold).
@@ -476,7 +479,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
 
   if (p.state === "ci") {
     // A re-review since the move to ci counts: the hand-over needs a take at this head now.
-    const r = await reviewAt(db, p, head);
+    const r = await reviewAt(db, p, head, wake);
     if (r.kind === "none" || r.kind === "stale") return void await move(db, p, "review", { line: `The review of ${headName(p)} is out of date; Opus reviews it again.` });
     if (r.kind === "takefix") return void await move(db, p, "review", { line: `The review of ${headName(p)} now asks for fixes; the pipeline's fix-up comes first.` });
     if (r.kind === "bad") return await stop("asked", r.why, head, [reviewFact(p, r.why)]);
@@ -517,7 +520,7 @@ async function advance(db: Db, p: Row, held: ReadonlySet<string>, factOf: () => 
 }
 
 /** Ends fix-up requests the planner can no longer work (the PR's head moved, it closed, the push is not possible), with the reason in the thread. Requests of a pre-approved merge end with it. */
-async function endStaleRequests(db: Db, held: ReadonlySet<string>): Promise<void> {
+async function endStaleRequests(db: Db, held: ReadonlySet<string>, wake: Wake): Promise<void> {
   // A request whose maker stopped settling (a maintainer after the setting went off, the repo left the app identity, a demotion) is dropped before the planner can push it.
   for (const o of await db.all(db.k.selectFrom("operator_fixups").select(["id", "repo", "number", "from_head", "by", "preapproval_id"]).where("state", "=", "queued").orderBy("id"))) {
     if (o.preapproval_id !== null || await isOperator(db, o.by, o.repo, held)) continue;
@@ -528,6 +531,7 @@ async function endStaleRequests(db: Db, held: ReadonlySet<string>): Promise<void
   for (const o of await openOperatorFixups(db)) {
     if (o.preapprovalId !== null) continue;
     const f = await loadPrFact(db, o.repo, o.number);
+    if (f?.refreshAt !== undefined) wake(f.refreshAt);
     const why = !f ? "the PR is no longer open" : f.head !== o.head ? `the head moved to ${short(f.head)}` : o.started ? null : await whyNotPlanned(db, f);
     if (!why) continue;
     if ((await db.run(db.k.updateTable("operator_fixups").set({ state: "ended" }).where("id", "=", o.id).where("state", "=", "queued"))).changes !== 1) continue;
@@ -584,7 +588,7 @@ const REVIEW_ONLY_STOP = /^the review says take(-fix)? \(unsure\)|^the review of
  * A row that stopped in asked only because of a review the rule now goes on with, at the head that is still the PR's, goes back to review
  * while its Merge? question there is still open, and that question is withdrawn: the next evaluation takes it on from the review.
  */
-async function resumeReviewStops(db: Db, held: ReadonlySet<string>): Promise<void> {
+async function resumeReviewStops(db: Db, held: ReadonlySet<string>, wake: Wake): Promise<void> {
   const rows = await db.all(preapprovalRows(db).$narrowType<{ head: NotNull; reason: NotNull }>().where("state", "=", "asked").where("head", "is not", null).where("reason", "is not", null)
     .where((eb) => eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name"))).orderBy("id"));
   for (const p of rows) {
@@ -593,7 +597,7 @@ async function resumeReviewStops(db: Db, held: ReadonlySet<string>): Promise<voi
     if (await db.get(db.k.selectFrom("preapprovals").select((eb) => eb.lit(1).as("one")).where("repo", "=", p.repo).where("number", "=", p.number).where("id", ">", p.id))) continue;
     const it = await prRow(db, p.repo, p.number);
     if (!it || it.state !== "OPEN" || it.head_oid !== p.head) continue;
-    const r = await reviewAt(db, p, p.head);
+    const r = await reviewAt(db, p, p.head, wake);
     if (r.kind !== "take" && r.kind !== "takefix") continue;
     const d = await getDecision(db, mergeDecisionId(p.repo, p.number, p.head));
     if (!d || d.answer !== null) continue;
@@ -608,27 +612,44 @@ async function resumeReviewStops(db: Db, held: ReadonlySet<string>): Promise<voi
   }
 }
 
+/** Told each time at which a pass's answer changes with the clock alone. */
+export type Wake = (at: number) => void;
+
 /**
- * Runs on every runner tick: moves each pre-approved merge that other steps' rows have carried to a new state. Writes nothing when nothing moved,
- * except the maintainers' write permissions it reads again first (refreshSettlers).
+ * What advancePreapprovals reads, as change markers: the planner's input topics (the PR facts and the rows the pass reads), `access` (roles and
+ * the audit entries an answer's source is read from) and `trace` (the base merges whose own diff it reads). A pass whose markers are the ones it
+ * read before and whose wake time (`Wake`) has not come would move nothing.
  */
-export async function advancePreapprovals(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}): Promise<number> {
+export async function preapprovalInputs(db: Db): Promise<string> {
+  const seqs = await readSeqs(db);
+  return [...INPUT_TOPICS, "access", "trace"].map((t) => seqs[t] ?? 0).join(",");
+}
+
+/**
+ * Moves each pre-approved merge that other steps' rows have carried to a new state; the runner tick runs it when its inputs changed
+ * (preapprovalInputs) or a time `wake` was told has come. Writes nothing when nothing moved, except the maintainers' write permissions it
+ * reads again first (refreshSettlers). A failure tells `wake` the pass's own time, so the next tick runs it again.
+ */
+export async function advancePreapprovals(db: Db, log: (line: string) => void = () => {}, deps: RefreshDeps = {}, wake: Wake = () => {}): Promise<number> {
+  const t = Date.now();
   let n = 0;
   let held: Set<string>;
   try {
-    held = await refreshSettlers(db, log, deps);
+    held = await refreshSettlers(db, log, deps, wake);
   } catch (e) {
     // Without the permission reads a stale row would end a maintainer's pre-approval: nothing moves this pass.
     log(`preapproval permissions: ${(e as Error).message}`);
+    wake(t);
     return 0;
   }
   try {
-    await endStaleRequests(db, held);
+    await endStaleRequests(db, held, wake);
     await settleCancelled(db);
     await carryAnswers(db, held);
-    await resumeReviewStops(db, held);
+    await resumeReviewStops(db, held, wake);
   } catch (e) {
     log(`preapproval requests: ${(e as Error).message}`);
+    wake(t);
   }
   const rows = await db.all(preapprovalRows(db).where("state", "in", ACTIVE).where((eb) => eb("repo", "in", eb.selectFrom("main.tracked_repos").select("name"))).orderBy("id"));
   // The facts of the PRs of this row and the rows after it, loaded together when a row first needs its PR's, with the settings
@@ -637,17 +658,22 @@ export async function advancePreapprovals(db: Db, log: (line: string) => void = 
   let facts: Map<string, PrFacts> | null = null;
   for (const [i, p] of rows.entries()) {
     const factOf = async (): Promise<PrFacts | null> => {
-      facts ??= new Map((await withSettingsSnapshot(db, () => loadPrFacts(db, { refs: rows.slice(i).map((r) => `${r.repo}#${r.number}`) }))).map((f) => [`${f.repo}#${f.number}`, f]));
+      if (!facts) {
+        const loaded = await withSettingsSnapshot(db, () => loadPrFacts(db, { refs: rows.slice(i).map((r) => `${r.repo}#${r.number}`) }));
+        for (const f of loaded) if (f.refreshAt !== undefined) wake(f.refreshAt);
+        facts = new Map(loaded.map((f) => [`${f.repo}#${f.number}`, f]));
+      }
       return facts.get(`${p.repo}#${p.number}`) ?? null;
     };
     try {
-      await advance(db, p, held, factOf);
+      await advance(db, p, held, factOf, wake);
       if ((await db.get(db.k.selectFrom("preapprovals").select("state").where("id", "=", p.id)))!.state !== p.state) {
         n++;
         facts = null;
       }
     } catch (e) {
       facts = null;
+      wake(t);
       const msg = oneLine(String((e as Error).message ?? e), 300);
       log(`preapproval ${p.repo}#${p.number}: ${msg}`);
       // Runs every tick: the item's trace gets the error once, not once per tick.
