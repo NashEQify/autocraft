@@ -4,9 +4,13 @@
 // No Node imports: the helper keeps its own copy of these shapes and the dashboard build may import this file.
 
 /** Bumped on any change to these shapes; the server refuses a claim from a helper of a version outside ACCEPTED_PROTOCOLS. */
-export const PROTOCOL_VERSION = 4;
-/** The protocol versions the server answers. 3 is a helper without long-polling claims (no `Claim.wait`); its claims are answered at once. */
-export const ACCEPTED_PROTOCOLS: readonly number[] = [3, 4];
+export const PROTOCOL_VERSION = 5;
+/**
+ * The protocol versions the server answers. 3 is a helper without long-polling claims (no `Claim.wait`); its claims are
+ * answered at once. 4 is a helper that reads only the text of a `ToolReply`; `autocraft tool` of such a helper prints no
+ * image (a harness on MCP reads the server's replies itself, whatever the helper's version).
+ */
+export const ACCEPTED_PROTOCOLS: readonly number[] = [3, 4, 5];
 
 /**
  * API routes on the dashboard origin. Runner routes take `Authorization: Bearer <Task Runner credential>` (an MCP Connector
@@ -27,9 +31,9 @@ export const ROUTES = {
   release: "/api/remote/release",
   /** Lease secret. A private repo's checkout or a workspace entry as a tar stream: `?repo=<name>&sha=<sha>`. */
   tarball: "/api/remote/tarball",
-  /** Lease secret. One tool call of a server the bundle lists, without MCP: `POST ${tool}/<server>/<tool>`, body the tool's arguments, reply `ToolReply`. A long call (the `check` tool) sends whitespace before the JSON while it runs. */
+  /** Lease secret. One tool call of a server the bundle lists, without MCP: `POST ${tool}/<server>/<tool>`, body the tool's arguments, reply `ToolReply`. A long call (`check`, the workspace tools) sends whitespace before the JSON while it runs. */
   tool: "/api/remote/tool",
-  /** Lease secret. Streamable HTTP MCP servers with only this call's tools, one per server name: `/mcp/task/<name>` (items, build, reference). */
+  /** Lease secret. Streamable HTTP MCP servers with only this call's tools, one per server name: `/mcp/task/<name>` (items, build, reference, workspace). */
   mcp: "/mcp/task",
   /** No credential. Body `LoginStart`, reply `LoginStartReply`: a Task Runner asks to have the credential it made approved by a signed-in user. */
   loginStart: "/api/remote/login/start",
@@ -269,7 +273,13 @@ export type Submit =
 export type SubmitReply = { accepted: boolean; reason?: string };
 
 /** A tool's result, as an MCP tools/call result carries it. */
-export type ToolReply = { content: { type: "text"; text: string }[]; isError?: boolean };
+/** One entry of a tool reply's content. Protocol 5: a tool result's images (base64) follow its text. */
+export type ToolContent = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
+export type ToolReply = { content: ToolContent[]; isError?: boolean };
+
+/** The content of a tool result, as a ToolReply and an MCP tools/call reply carry it: the text, then the images. */
+export const toolContent = (r: { text: string; images?: readonly { data: string; mimeType: string }[] }): ToolContent[] =>
+  [{ type: "text", text: r.text }, ...(r.images ?? []).map((i): ToolContent => ({ type: "image", data: i.data, mimeType: i.mimeType }))];
 
 export type Release = { /** Why the helper gives the lease back, shown on the call. */ reason: string };
 

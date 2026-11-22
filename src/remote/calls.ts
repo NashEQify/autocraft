@@ -33,6 +33,8 @@ import { MANUAL_ONLY_KEY, manualExpr, manualOf, manualOnly } from "./manual-only
 import { WRITE_PERMISSIONS } from "../dash/server/provider.ts";
 import { PERM_READ_TTL } from "../dash/server/sessions.ts";
 import { endChecks, serveChecks } from "./check-relay.ts";
+import { WorkspaceServer, type ToolSession } from "../build/workspace-relay.ts";
+import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
@@ -510,7 +512,8 @@ class Taken extends Error {}
  * harness. With `cap`, only while the login holds fewer leases than that (checked in the same transaction, so parallel claims
  * of one user cannot pass it together); "limit" when it holds that many. `live` is asked inside the same transaction, just
  * before the lease is written: "gone" when no one waits for the reply any more, and nothing is written. With `clearIdle`, the
- * lease also marks the caller's credential busy (idle_claim_at).
+ * lease also marks the caller's credential busy (idle_claim_at). A call whose bundle lists the workspace server goes only to
+ * the claude harness (null for another).
  */
 async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model: string, nowMs: number, cap: number | null, live: () => boolean, clearIdle: boolean): Promise<Extract<ClaimReply, { lease: object }>["lease"] | "limit" | "gone" | null> {
   const secret = `${LEASE_PREFIX}${randomToken(32)}`;
@@ -518,8 +521,11 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
   // What the run is made of never changes on a call's row, so it is read here with the bundle and the run goes in before the lease.
   const q = await db.get(db.k.selectFrom("main.remote_calls").select(["bundle", "job_id", "step", "stage", "prompt_id", "prompt_version", "asked_model", "items"]).where("id", "=", id).where("state", "=", "queued"));
   if (!q) return null;
+  const bundle = JSON.parse(q.bundle) as Omit<TaskBundle, "callId">;
+  // A workspace session runs only in Claude Code with its own tools off; another harness would keep a shell of its own.
+  if (bundle.mcpServers.includes(WORKSPACE_SERVER) && claim.harness !== "claude") return null;
   const refs = JSON.parse(q.items) as ItemRef[];
-  const prompt = packPrompt(joinParts(forHarness(JSON.parse(q.bundle) as Omit<TaskBundle, "callId">, claim.harness, claim.root ?? "")));
+  const prompt = packPrompt(joinParts(forHarness(bundle, claim.harness, claim.root ?? "")));
   try {
     return await db.write(async () => {
       if (cap !== null && await leasedBy(db, caller.login) >= cap) return "limit";
@@ -1099,17 +1105,27 @@ const runsLiveLease = async (db: Db, parentId: number, nowMs: number): Promise<b
  * after `maxWaitMs` in the queue (WaitLimitError), and, for a follow-up, after STICKY_MS while its session's login runs no live
  * lease, else after STICKY_CAP_MS. A call the dashboard withdrew because no Task Runner could take it (takers.ts) throws a
  * NoTakerError and counts as a skipped item (skipItem), so the planner runs the step again. The helper's progress lines go to `onProgress`.
- * While the call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts).
+ * While the call is leased, each poll runs the `check` requests the dashboard relayed for it on `check` (src/remote/check-relay.ts)
+ * and the tool calls of the workspace bound to the call (src/build/workspace-relay.ts), which also run as soon as their wake
+ * arrives. `workspace` gives the session they run on (default: the process's session on the workspace, jobSession).
  */
-export async function awaitCall(db: Db, id: number, opts: { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run"> } = {}): Promise<Outcome> {
+export async function awaitCall(db: Db, id: number, opts: AwaitOptions = {}): Promise<Outcome> {
+  const ws = await WorkspaceServer.open(db, id, opts.workspace);
   try {
-    return await pollCall(db, id, opts);
+    return await pollCall(db, id, opts, ws);
   } finally {
-    await endChecks(db, id);
+    // Each cleanup runs even when one before it fails.
+    try {
+      await endChecks(db, id);
+    } finally {
+      await ws?.end();
+    }
   }
 }
 
-async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run"> }): Promise<Outcome> {
+type AwaitOptions = { onProgress?: (line: string) => void; maxWaitMs?: number; log?: (line: string) => void; check?: Pick<CheckTool, "run">; workspace?: (db: Db, workspaceId: number) => ToolSession };
+
+async function pollCall(db: Db, id: number, opts: AwaitOptions, ws: WorkspaceServer | null): Promise<Outcome> {
   const log = opts.log ?? console.log;
   let lastProgress: string | null = null, lastLog = 0, lastSeen = 0;
   for (;;) {
@@ -1158,6 +1174,7 @@ async function pollCall(db: Db, id: number, opts: { onProgress?: (line: string) 
       }
     }
     if (r.state === "leased" && opts.check) await serveChecks(db, id, opts.check);
+    if (r.state === "leased" && ws) await ws.serve();
     if (r.progress && r.progress !== lastProgress) {
       lastProgress = r.progress;
       try { opts.onProgress?.(r.progress); } catch { /* progress is best effort */ }

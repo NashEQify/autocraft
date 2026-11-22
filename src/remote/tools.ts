@@ -1,6 +1,7 @@
 // The per-lease tools of a remote call (src/remote/protocol.ts ROUTES.tool and ROUTES.mcp): the item tools over the
-// snapshot, the repo's reference documentation and the `check` build tool, each served only to a call whose bundle lists
-// its server. The dashboard runs them; `check` is relayed to the job process that holds the call's CheckTool.
+// snapshot, the repo's reference documentation, the `check` build tool and the workspace tools, each served only to a call
+// whose bundle lists its server. The dashboard runs the first two; `check` is relayed to the job process that holds the
+// call's CheckTool, and the workspace tools to the job that owns the workspace (src/build/workspace-relay.ts).
 import { spawn, type ChildProcess } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, utimesSync } from "node:fs";
 import { finished, PassThrough, type Readable } from "node:stream";
@@ -16,6 +17,8 @@ import { diffCacheDir } from "../review/diff.ts";
 import { REFERENCE_SERVER } from "./bundle.ts";
 import { liveLease } from "./calls.ts";
 import { relayCheck } from "./check-relay.ts";
+import { relayWorkspaceCall } from "../build/workspace-relay.ts";
+import { WORKSPACE_SERVER, WORKSPACE_TOOLS, type WorkspaceToolResult } from "../build/workspace-tools.ts";
 import type { Mount, TaskBundle } from "./protocol.ts";
 import type { DatabaseSync } from "node:sqlite";
 import type { Db } from "../db/index.ts";
@@ -54,7 +57,7 @@ const REFERENCE_TOOLS = [
 ];
 
 /** The tool definitions of each task server, as tools/list returns them. */
-export const TASK_TOOLS: Record<string, readonly unknown[]> = { [ITEM_SERVER]: ITEM_TOOLS, [CHECK_SERVER]: [CHECK_TOOL], [REFERENCE_SERVER]: REFERENCE_TOOLS };
+export const TASK_TOOLS: Record<string, readonly unknown[]> = { [ITEM_SERVER]: ITEM_TOOLS, [CHECK_SERVER]: [CHECK_TOOL], [REFERENCE_SERVER]: REFERENCE_TOOLS, [WORKSPACE_SERVER]: WORKSPACE_TOOLS };
 
 export type TaskLease = { id: number; runId: number | null; login: string; servers: string[]; mounts: Mount[]; referenceRepo: string | null };
 
@@ -157,16 +160,19 @@ function items(name: string, raw: unknown): ToolResult {
 
 /**
  * Runs one tool of `server` for the lease, which must list the server. Bad arguments and refusals come back as an error
- * result. `check` waits for the job process: `tick` is called about every 15 s meanwhile, and `signal` ends the wait.
+ * result. `check` and the workspace tools wait for a job process: `tick` is called about every 15 s meanwhile, and
+ * `signal` ends the wait. Only workspace tools return images.
  */
-export async function callTaskTool(db: Db, lease: TaskLease, secret: string, server: string, name: unknown, raw: unknown, opts: { signal?: AbortSignal; tick?: () => void } = {}): Promise<ToolResult> {
+export async function callTaskTool(db: Db, lease: TaskLease, secret: string, server: string, name: unknown, raw: unknown, opts: { signal?: AbortSignal; tick?: () => void } = {}): Promise<WorkspaceToolResult> {
   const tools = TASK_TOOLS[server] as { name: string }[] | undefined;
   if (!tools || !lease.servers.includes(server)) return { text: `this call has no ${server} tools`, isError: true };
   if (typeof name !== "string" || !tools.some((t) => t.name === name)) return { text: `unknown tool ${JSON.stringify(name)}`, isError: true };
   try {
     if (server === ITEM_SERVER) return await items(name, raw);
     if (server === REFERENCE_SERVER) return await reference(db, lease, name, raw);
-    return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live: async () => (await liveLease(db, secret))?.id === lease.id, ...opts });
+    const live = async (): Promise<boolean> => (await liveLease(db, secret))?.id === lease.id;
+    if (server === WORKSPACE_SERVER) return await relayWorkspaceCall(db, { id: lease.id, runId: lease.runId }, name, raw, { live, ...opts });
+    return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live, ...opts });
   } catch (e) {
     if (e instanceof BadArgs) return { text: e.message, isError: true };
     console.error(`task tool ${server}/${name}: ${(e as Error).stack ?? e}`);

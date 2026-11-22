@@ -20,7 +20,8 @@ import { addFastTrack, fastPositions, FastTrackError, parseItemRef, removeFastTr
 import { callStatus, claimableCalls } from "../../remote/calls.ts";
 import { listHelpers } from "../../remote/helpers.ts";
 import { isTier, TIERS } from "../../remote/mode.ts";
-import type { HarnessId, Tier } from "../../remote/protocol.ts";
+import { toolContent, type HarnessId, type Tier } from "../../remote/protocol.ts";
+import type { ToolImage } from "../../build/workspace-tools.ts";
 import { HttpError, RateLimiter } from "../server/util.ts";
 import type { Req, User } from "../types.ts";
 import { mapSeq } from "../../async-seq.ts";
@@ -58,7 +59,8 @@ export type McpEnv = {
 
 export type Msg = { jsonrpc?: unknown; id?: string | number | null; method?: unknown; params?: Record<string, unknown> };
 export type Reply = { jsonrpc: "2.0"; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
-export type ToolResult = { text: string; isError?: boolean };
+/** A tool's result; only the workspace tools of a remote call return images. */
+export type ToolResult = { text: string; isError?: boolean; images?: readonly ToolImage[] };
 
 const INSTRUCTIONS = `AutoCraft's MCP Connector. The Inbox holds the open work its pipeline could not settle on its own, across every storytold craft app it tracks. You act as the signed-in dashboard user who made this token, with their role.
 
@@ -814,7 +816,7 @@ export async function mcpReply(server: McpServerDef, msg: Msg): Promise<Reply | 
       return ok({ tools: server.tools });
     case "tools/call": {
       const r = await server.call(msg.params?.name, msg.params?.arguments);
-      return ok({ content: [{ type: "text", text: r.text }], ...(r.isError ? { isError: true } : {}) });
+      return ok({ content: toolContent(r), ...(r.isError ? { isError: true } : {}) });
     }
     default:
       return { jsonrpc: "2.0", id, error: { code: -32601, message: `method not found: ${msg.method}` } };

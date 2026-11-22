@@ -42,13 +42,18 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.3.5";
+export const HELPER_VERSION = "1.3.6";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
 
-/** The server refuses a claim of a protocol it does not accept; a server that knows only 3 is asked again with 3 (claimProtocol). */
-export const PROTOCOL_VERSION = 4;
+/**
+ * The server refuses a claim of a protocol it does not accept; a server not yet updated is asked again with the older
+ * protocols (claimRequest). 5: a tool reply's content may hold images after the text.
+ */
+export const PROTOCOL_VERSION = 5;
+/** The protocols a claim falls back to, newest first: 4 and 3 differ from 5 only in what the server sends, 3 also has no held wait. */
+const OLDER_PROTOCOLS = [4, 3];
 
 export const ROUTES = {
   claim: "/api/remote/claim",
@@ -1935,6 +1940,25 @@ export function transient(e, signal) {
   return x.name === "TimeoutError" || NET_CODES.has(x.code ?? "") || NET_CODES.has(x.cause?.code ?? "");
 }
 
+/** Servers whose tool calls run commands and writes that must not run twice: a request that may have reached the server is not sent again. */
+const ONCE_SERVERS = new Set(["workspace"]);
+/** Codes of a connection that was never made, so the request reached nobody. */
+const UNSENT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+
+/**
+ * Whether a failed request certainly did not run on the server: refused for the rate (429, answered before the body is
+ * read) or never connected.
+ * @param {unknown} e
+ */
+export function notRun(e) {
+  if (e instanceof HttpError) return e.status === 429;
+  const x = /** @type {{ code?: string, cause?: { code?: string } } | null} */ (e && typeof e === "object" ? e : null);
+  return UNSENT_CODES.has(x?.code ?? "") || UNSENT_CODES.has(x?.cause?.code ?? "");
+}
+
+/** The error for a cut-off call of a ONCE_SERVERS server. @param {unknown} e */
+const mayHaveRun = (e) => new Error(`${msg(e)}; the call may have run in the workspace and is not sent again: look with shell_status or read before you repeat it`);
+
 /** The wait before retry `attempt` (0 first): exponential from `baseMs` up to 30 s with jitter, at least the server's Retry-After. @param {number} attempt @param {number | null} retryAfter */
 export function backoffMs(attempt, retryAfter, baseMs = scaled(1000)) {
   const exp = Math.min(scaled(30_000), baseMs * 2 ** attempt);
@@ -1943,16 +1967,16 @@ export function backoffMs(attempt, retryAfter, baseMs = scaled(1000)) {
 }
 
 /**
- * Runs `fn` until it succeeds, fails for good (`transient` says no) or runs out of time (`deadline`, ms since epoch) or of
- * `tries`; then throws its last error. `signal` ends the waits between tries.
- * @template T @param {() => Promise<T>} fn @param {{ deadline: number, tries?: number, signal?: AbortSignal, baseMs?: number }} o
+ * Runs `fn` until it succeeds, fails for good (`transient` says no, or `again` when given) or runs out of time (`deadline`,
+ * ms since epoch) or of `tries`; then throws its last error. `signal` ends the waits between tries.
+ * @template T @param {() => Promise<T>} fn @param {{ deadline: number, tries?: number, signal?: AbortSignal, baseMs?: number, again?: (e: unknown) => boolean }} o
  * @returns {Promise<T>}
  */
 export async function withRetry(fn, o) {
   for (let attempt = 0; ; attempt++) {
     try { return await fn(); }
     catch (e) {
-      if (!transient(e, o.signal) || (o.tries !== undefined && attempt + 1 >= o.tries)) throw e;
+      if (!transient(e, o.signal) || (o.again && !o.again(e)) || (o.tries !== undefined && attempt + 1 >= o.tries)) throw e;
       const wait = backoffMs(attempt, e instanceof HttpError ? e.retryAfterMs : null, o.baseMs);
       if (Date.now() + wait >= o.deadline) throw e;
       try { await sleep(wait, undefined, o.signal && { signal: o.signal }); } catch { throw e; }
@@ -2848,14 +2872,15 @@ const newClaimId = () => randomBytes(16).toString("hex");
 
 /** Seconds a protocol 4 claim lets the server hold it open while nothing is queued (Claim.wait). */
 export const CLAIM_WAIT_S = 25;
-/** How long a server that refused protocol 4 is asked with protocol 3 before 4 is tried again. */
+/** How long a server that refused the current protocol is asked with an older one before the current one is tried again. */
 const PROTOCOL_FALLBACK_MS = 3600_000;
-/** Until when claims use protocol 3: the server answered 409 to protocol 4 and accepted 3 (a server not yet updated). */
-let protocol3Until = 0;
+/** The older protocol the server accepted after it answered 409 to the current one (a server not yet updated), and until when claims use it. */
+let fallback = { protocol: PROTOCOL_VERSION, until: 0 };
 
 /**
- * Sends a claim: with protocol 4 and a held wait, or with protocol 3 while the server refused 4. A 409 to protocol 4 is
- * asked again at once with protocol 3; only a 409 to that is a refusal of this runner.
+ * Sends a claim: with the current protocol, or with the older one the server accepted while it refuses the current one.
+ * A 409 is asked again at once with each older protocol in turn (a held wait from 4 on); only a 409 to the oldest is a
+ * refusal of this runner.
  * `signal` (a `work` stopping) ends a held claim.
  * @param {string} server @param {string} token @param {Omit<Claim, "protocol" | "wait">} base @param {AbortSignal} [signal] @returns {Promise<ClaimReply>}
  */
@@ -2867,13 +2892,16 @@ export async function claimRequest(server, token, base, signal) {
     // Retries resend the same request id, so a claim whose reply was lost gets its lease back instead of leaving it to expire.
     return withRetry(() => api(server, ROUTES.claim, token, claim, { timeoutMs: scaled(hold * 1000) + 30_000, ...(signal && { signal }) }), { tries: 5, deadline: Date.now() + scaled(hold * 1000) + Math.min(scaled(60_000), CLAIM_ID_TTL_MS / 2), ...(signal && { signal }) });
   };
-  if (Date.now() < protocol3Until) return send(3);
-  try { return await send(PROTOCOL_VERSION); }
-  catch (e) {
-    if (!(e instanceof HttpError && e.status === 409)) throw e;
-    const reply = await send(3);
-    protocol3Until = Date.now() + PROTOCOL_FALLBACK_MS;
-    return reply;
+  if (Date.now() < fallback.until) return send(fallback.protocol);
+  const tries = [PROTOCOL_VERSION, ...OLDER_PROTOCOLS];
+  for (let i = 0; ; i++) {
+    try {
+      const reply = await send(tries[i]);
+      if (i > 0) fallback = { protocol: tries[i], until: Date.now() + PROTOCOL_FALLBACK_MS };
+      return reply;
+    } catch (e) {
+      if (!(e instanceof HttpError && e.status === 409) || i === tries.length - 1) throw e;
+    }
   }
 }
 
@@ -4182,6 +4210,8 @@ async function cmdMcp(argv) {
   const forward = async (line) => {
     let m;
     try { m = JSON.parse(line); } catch { return; }
+    // A tool call of a server whose calls must not run twice is sent again only when it certainly did not run.
+    const once = ONCE_SERVERS.has(name) && m?.method === "tools/call";
     try {
       // Retried until the server answers with a status that is not transient; a reply's body, once read, is not.
       const res = await withRetry(async () => {
@@ -4189,7 +4219,7 @@ async function cmdMcp(argv) {
         if (res.status === 410) throw new Gone("the lease is gone");
         if (!res.ok && res.status !== 202) throw new HttpError(`${ROUTES.mcp}/${name}`, res.status, await res.text().catch(() => ""), retryAfterMs(res.headers.get("retry-after")));
         return res;
-      }, { deadline: Date.now() + TOOL_RETRY_MS });
+      }, { deadline: Date.now() + TOOL_RETRY_MS, ...(once && { again: notRun }) });
       const sid = res.headers.get("mcp-session-id");
       if (sid) session = sid;
       if (res.status === 202) return;
@@ -4211,7 +4241,8 @@ async function cmdMcp(argv) {
         if (text) { const j = JSON.parse(text); for (const x of Array.isArray(j) ? j : [j]) emit(x); }
       }
     } catch (e) {
-      if (m && m.id !== undefined && m.method) out({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: `autocraft proxy: ${msg(e)}` } });
+      const why = once && !(e instanceof Gone) && !notRun(e) ? msg(mayHaveRun(e)) : msg(e);
+      if (m && m.id !== undefined && m.method) out({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: `autocraft proxy: ${why}` } });
     }
   };
   for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
@@ -4247,11 +4278,29 @@ async function cmdTool(argv) {
   let args;
   try { args = JSON.parse(json ?? "{}"); } catch { throw new Error("the tool arguments must be JSON"); }
   const { secret, server } = leaseAccess(id);
-  // A `check` streams whitespace while it runs; a reply cut off or a 5xx runs the call again.
-  /** @type {{ content?: { text?: string }[], isError?: boolean }} */
-  const r = await withRetry(() => api(server, `${ROUTES.tool}/${name}/${tool}`, secret, args, { timeoutMs: 60 * 60_000 }), { deadline: Date.now() + TOOL_RETRY_MS });
-  console.log((r.content ?? []).map((c) => c.text ?? "").join("\n"));
+  // A `check` streams whitespace while it runs; a reply cut off or a 5xx runs the call again, except for a server whose calls must not run twice.
+  const once = ONCE_SERVERS.has(name);
+  /** @type {{ content?: { type?: string, text?: string }[], isError?: boolean }} */
+  let r;
+  try {
+    r = await withRetry(() => api(server, `${ROUTES.tool}/${name}/${tool}`, secret, args, { timeoutMs: 60 * 60_000 }), { deadline: Date.now() + TOOL_RETRY_MS, ...(once && { again: notRun }) });
+  } catch (e) {
+    if (once && !(e instanceof Gone) && !notRun(e)) throw mayHaveRun(e);
+    throw e;
+  }
+  console.log(contentText(r.content));
   return r.isError ? 1 : 0;
+}
+
+/**
+ * The text of a tool reply's content, with a line for each image, which a command cannot show.
+ * @param {{ type?: string, text?: string }[] | undefined} content
+ */
+export function contentText(content) {
+  const c = content ?? [];
+  const texts = c.filter((x) => x.type !== "image").map((x) => x.text ?? "");
+  const images = c.length - texts.length;
+  return [...texts, ...(images ? [`[${images} image${images === 1 ? "" : "s"} not shown: this command prints text only]`] : [])].join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -4927,7 +4976,7 @@ export function parseToolArgs(tool, argv, cmd) {
 function printResult(r, json) {
   if (json) console.log(JSON.stringify(r, null, 2));
   else {
-    const text = (r?.content ?? []).map((c) => c.text ?? "").join("\n") || (r?.structuredContent !== undefined ? JSON.stringify(r.structuredContent, null, 2) : "");
+    const text = contentText(r?.content) || (r?.structuredContent !== undefined ? JSON.stringify(r.structuredContent, null, 2) : "");
     (r?.isError ? console.error : console.log)(text);
   }
   return r?.isError ? 1 : 0;
