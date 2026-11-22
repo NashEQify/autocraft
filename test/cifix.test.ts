@@ -45,8 +45,7 @@ async function fresh(head: string, o: Opts = {}): Promise<Db> {
   const db = await connectDb(join(mkdtempSync(join(dir, "db-")), "t.db"));
   await db.run(db.k.insertInto("items").values({ repo: "app", number: 7, kind: "pr", state: "OPEN", title: "Rename a to b", author: "someone", additions: 5, deletions: 0, head_oid: head, created_at: T0, updated_at: T0 }));
   await db.run(db.k.insertInto("opus_reviews").values({ repo: "app", number: 7, head_oid: head, run_id: "rv", at: T0, model: "m", verdict: o.verdict ?? "take", reason: "looks right", fixes: "[]", sure: 1, mode: "full" }));
-  await db.prepare(`INSERT INTO pr_checks (repo, number, head_oid, state, is_draft, overall, checks, mergeable, maintainer_can_modify, fetched_at)
-    VALUES ('app', 7, ?, 'OPEN', 0, ?, '[{"name":"gate / test","state":"failure"}]', 'MERGEABLE', ?, '${T1}')`).run(head, o.overall ?? "failure", o.canModify === false ? 0 : 1);
+  await db.run(db.k.insertInto("pr_checks").values({ repo: "app", number: 7, head_oid: head, state: "OPEN", is_draft: 0, overall: o.overall ?? "failure", checks: '[{"name":"gate / test","state":"failure"}]', mergeable: "MERGEABLE", maintainer_can_modify: o.canModify === false ? 0 : 1, fetched_at: T1 }));
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }).onConflict((oc) => oc.doNothing()));
   if (o.push !== false) await setPushApproval(db, "op", "app", true);
   if (o.comment) await setCommentApproval(db, "op", "app", true);

@@ -18,6 +18,7 @@ import { mergeHeld } from "./holds.ts";
 import { trackedNames } from "../repos.ts";
 import { ghExec, type Gh } from "./safe-merge.ts";
 import { slugOf } from "../owners.ts";
+import * as kx from "../db/kx.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
@@ -37,10 +38,10 @@ export async function ciApprovalOf(db: Db, repo: string): Promise<CiApproval | n
 
 // Returns false when nothing changed.
 export async function setCiApproval(db: Db, by: string, repo: string, approved: boolean): Promise<boolean> {
-  if (!await db.prepare("SELECT 1 FROM main.tracked_repos WHERE name = ?").get(repo)) throw new Error(`${repo} is not tracked`);
+  if (!await db.get(db.k.selectFrom("main.tracked_repos").select((eb) => eb.lit(1).as("one")).where("name", "=", repo))) throw new Error(`${repo} is not tracked`);
   if ((await ciApprovalOf(db, repo) !== null) === approved) return false;
-  if (approved) await db.prepare("INSERT INTO main.settings (key, value) VALUES (?, ?)").run(key(repo), JSON.stringify({ by, at: new Date().toISOString() }));
-  else await db.prepare("DELETE FROM main.settings WHERE key = ?").run(key(repo));
+  if (approved) await db.run(db.k.insertInto("main.settings").values({ key: key(repo), value: JSON.stringify({ by, at: new Date().toISOString() }) }));
+  else await db.run(db.k.deleteFrom("main.settings").where("key", "=", key(repo)));
   await audit(db, by, approved ? "ci-approve" : "ci-revoke", repo);
   return true;
 }
@@ -62,7 +63,7 @@ type Row = { head_oid: string; cross_repo: number; runs: string; approved: strin
 /** Records the workflow runs waiting for approval at the PR's head, from the check suites the sync read. Called with every PR the checks job stores. */
 export async function recordRuns(db: Db, c: { repo: string; number: number; head_oid: string; state: string; cross_repo?: boolean; suites?: Suite[] }, at = new Date().toISOString()): Promise<void> {
   if (c.state !== "OPEN") return;
-  const prev = await db.prepare("SELECT * FROM ci_run_approvals WHERE repo = ? AND number = ?").get(c.repo, c.number) as Row | undefined;
+  const prev = await db.get(db.k.selectFrom("ci_run_approvals").select(kx.cols("ci_run_approvals")).where("repo", "=", c.repo).where("number", "=", c.number));
   const suites = c.suites ?? [];
   const same = prev?.head_oid === c.head_oid ? prev : undefined;
   const approved = (JSON.parse(same?.approved ?? "[]") as number[]);
@@ -74,23 +75,22 @@ export async function recordRuns(db: Db, c: { repo: string; number: number; head
   if (!prev && !waiting.length) return;
   // With the approval off nothing clears a mark the suites do not confirm, so the sync does.
   const reread = same?.reread && (suites.some((x) => x.conclusion === "ACTION_REQUIRED") || await ciApprovalOf(db, c.repo)) ? 1 : 0;
-  await db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at, approved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (repo, number) DO UPDATE SET head_oid = excluded.head_oid, cross_repo = excluded.cross_repo, runs = excluded.runs, approved = excluded.approved,
-      reread = excluded.reread, failed = excluded.failed, checked_at = excluded.checked_at, approved_at = excluded.approved_at`)
-    .run(c.repo, c.number, c.head_oid, c.cross_repo ? 1 : 0, JSON.stringify(waiting), JSON.stringify(left), reread, same?.failed ?? "{}", at, same?.approved_at ?? null);
+  await db.run(db.k.insertInto("ci_run_approvals")
+    .values({ repo: c.repo, number: c.number, head_oid: c.head_oid, cross_repo: c.cross_repo ? 1 : 0, runs: JSON.stringify(waiting), approved: JSON.stringify(left), reread, failed: same?.failed ?? "{}", checked_at: at, approved_at: same?.approved_at ?? null })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet(kx.excluded(["head_oid", "cross_repo", "runs", "approved", "reread", "failed", "checked_at", "approved_at"]))));
 }
 
 /** A merge was refused because of `action_required` runs the sync does not list: the step reads that head's runs. */
 export async function markReread(db: Db, repo: string, number: number, head: string, at = new Date().toISOString()): Promise<void> {
-  await db.prepare("DELETE FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid <> ?").run(repo, number, head);
-  await db.prepare(`INSERT INTO ci_run_approvals (repo, number, head_oid, cross_repo, runs, approved, reread, failed, checked_at) VALUES (?, ?, ?, 1, '[]', '[]', 1, '{}', ?)
-    ON CONFLICT (repo, number) DO UPDATE SET reread = 1, checked_at = excluded.checked_at`).run(repo, number, head, at);
+  await db.run(db.k.deleteFrom("ci_run_approvals").where("repo", "=", repo).where("number", "=", number).where("head_oid", "<>", head));
+  await db.run(db.k.insertInto("ci_run_approvals").values({ repo, number, head_oid: head, cross_repo: 1, runs: "[]", approved: "[]", reread: 1, failed: "{}", checked_at: at })
+    .onConflict((oc) => oc.columns(["repo", "number"]).doUpdateSet({ reread: 1, ...kx.excluded(["checked_at"]) })));
 }
 
 /** `overall` as CI reads for the PR's head, with failures of the repo's optional checks left out (effectiveOverall): "pending" while runs wait for approval or the ones we approved have not finished, since the check rollup does not list them. */
 export async function overallAt(db: Db, repo: string, number: number, head: string, overall: string): Promise<string> {
-  const eff = overall === "failure" ? await effectiveCi(db, repo, overall, (await db.prepare("SELECT checks FROM pr_checks WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { checks: string } | undefined)?.checks) : overall;
-  const r = await db.prepare("SELECT runs, approved, reread FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, number, head) as { runs: string; approved: string; reread: number } | undefined;
+  const eff = overall === "failure" ? await effectiveCi(db, repo, overall, (await db.get(db.k.selectFrom("pr_checks").select("checks").where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head)))?.checks) : overall;
+  const r = await db.get(db.k.selectFrom("ci_run_approvals").select(["runs", "approved", "reread"]).where("repo", "=", repo).where("number", "=", number).where("head_oid", "=", head));
   if (!r) return eff;
   return r.reread || JSON.parse(r.runs).length || JSON.parse(r.approved).length ? "pending" : eff;
 }
@@ -103,10 +103,9 @@ export type Candidate = { number: number; head: string; runs: WaitingRun[]; rere
  * The runs are read from the recorded row at the action's head.
  */
 export async function needsWork(db: Db, repo: string, run?: string | null, plans?: PlanSet): Promise<Candidate[]> {
-  const row = db.prepare("SELECT runs, reread, failed, cross_repo FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?");
   const out: Candidate[] = [];
   for (const { facts, action } of await planned(db, "approve-ci", { repo, ...(run !== undefined ? { run } : {}), ...(plans ? { plans } : {}) })) {
-    const a = await row.get(repo, facts.number, action.head) as { runs: string; reread: number; failed: string; cross_repo: number } | undefined;
+    const a = await db.get(db.k.selectFrom("ci_run_approvals").select(["runs", "reread", "failed", "cross_repo"]).where("repo", "=", repo).where("number", "=", facts.number).where("head_oid", "=", action.head!));
     if (!a) continue;
     out.push({ number: facts.number, head: action.head!, runs: JSON.parse(a.runs) as WaitingRun[], reread: !!a.reread, failed: JSON.parse(a.failed) as Record<string, number>, crossRepo: !!a.cross_repo });
   }
@@ -144,10 +143,11 @@ export async function approveRuns(db: Db, repo: string, d: ApproveDeps): Promise
   const w: Writer = { db, login: ACTOR };
   const out: ApproveResult = { approved: [], skipped: [], failed: [] };
   const save = async (c: Candidate, runs: WaitingRun[], approved: number[], failed: Record<string, number>): Promise<void> => {
-    const prev = await db.prepare("SELECT approved FROM ci_run_approvals WHERE repo = ? AND number = ? AND head_oid = ?").get(repo, c.number, c.head) as { approved: string } | undefined;
+    const prev = await db.get(db.k.selectFrom("ci_run_approvals").select("approved").where("repo", "=", repo).where("number", "=", c.number).where("head_oid", "=", c.head));
     const all = [...new Set([...(JSON.parse(prev?.approved ?? "[]") as number[]), ...approved])];
-    await db.prepare("UPDATE ci_run_approvals SET runs = ?, approved = ?, reread = 0, failed = ?, approved_at = CASE WHEN ? THEN ? ELSE approved_at END WHERE repo = ? AND number = ? AND head_oid = ?")
-      .run(JSON.stringify(runs), JSON.stringify(all), JSON.stringify(failed), approved.length ? 1 : 0, new Date().toISOString(), repo, c.number, c.head);
+    await db.run(db.k.updateTable("ci_run_approvals")
+      .set({ runs: JSON.stringify(runs), approved: JSON.stringify(all), reread: 0, failed: JSON.stringify(failed), ...(approved.length ? { approved_at: new Date().toISOString() } : {}) })
+      .where("repo", "=", repo).where("number", "=", c.number).where("head_oid", "=", c.head));
   };
   for (const c of await needsWork(db, repo)) {
     if (out.approved.length + out.failed.length >= d.limit) break;
