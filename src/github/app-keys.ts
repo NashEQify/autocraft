@@ -70,12 +70,14 @@ export class AppKeys {
   unreadable(): boolean { return this.#unreadable !== null; }
 
   /**
-   * Stores a newly registered app. Refuses (EEXIST) when another app is registered; keys this process cannot open are
-   * replaced (the status page names them unreadable before an operator registers).
+   * Stores a newly registered app. Refuses (EEXIST) when another app is registered. Keys this process cannot open were
+   * sealed with a different session_key and may be readable again once that key is restored, so they are replaced only
+   * with `replaceUnreadable`; otherwise the refusal has code EUNREADABLE.
    */
-  async save(app: AppSecrets): Promise<void> {
+  async save(app: AppSecrets, replaceUnreadable = false): Promise<void> {
     const row = this.#row(app);
     const unreadable = this.#unreadable;
+    if (unreadable !== null && !replaceUnreadable) throw Object.assign(new Error("the stored keys are sealed with a different session_key"), { code: "EUNREADABLE" });
     const r = await this.#db.run(this.#db.k.insertInto("github_app").values(row)
       .onConflict((oc) => oc.column("id").doUpdateSet(row).where((eb) => unreadable === null ? eb("github_app.keys_enc", "is", null)
         : eb.or([eb("github_app.keys_enc", "is", null), eb("github_app.keys_enc", "=", unreadable)]))));

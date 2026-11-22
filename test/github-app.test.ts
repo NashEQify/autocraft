@@ -229,12 +229,13 @@ describe("github app registration", () => {
     closers.push(two.close);
     assert.equal((await status(two.url)).app?.slug, "file-app");
 
-    // Under another session_key the stored keys are unreadable, said so, and a new registration may replace them.
+    // Under another session_key the stored keys are unreadable, said so, and a new registration replaces them only when confirmed.
     const other = await new AppKeys(db, new TokenBox("o".repeat(40)), null).load();
     assert.equal(other.current(), null);
     assert.equal(other.unreadable(), true);
     const replaced = { id: "77", slug: "other-app", privateKey: PEM, clientId: "Iv1.o", clientSecret: "o", webhookSecret: null, owner: null };
-    await other.save(replaced);
+    await assert.rejects(other.save(replaced), { code: "EUNREADABLE" });
+    await other.save(replaced, true);
     assert.equal((await new AppKeys(db, new TokenBox("o".repeat(40)), null).load()).current()?.slug, "other-app");
     await assert.rejects(other.save(replaced), /another app/);
 

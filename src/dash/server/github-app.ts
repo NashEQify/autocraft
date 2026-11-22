@@ -83,16 +83,16 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
   }];
 }
 
-const UNREADABLE = "The stored GitHub App keys cannot be read: was session_key changed? Restore it, or register a new app, which replaces them.";
+const UNREADABLE = "The stored GitHub App keys cannot be read: was session_key changed? Restore it, or confirm replacing the keys when you register a new app.";
 
 export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Promise<Omit<GithubAppStatus, "csrf" | "authorized">> {
   const app = config.secrets.app;
   const status: Omit<GithubAppStatus, "csrf" | "authorized"> = {
     configured: !!app, identity: await githubIdentity(db), canRegister: !!boundAppKeys(config.secrets),
-    defaultName: envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME, app: null, installations: [], links: await openLinks(db), error: null,
+    defaultName: envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME, app: null, installations: [], links: await openLinks(db), error: null, keysUnreadable: false,
   };
   if (!app) {
-    if (boundAppKeys(config.secrets)?.unreadable()) status.error = UNREADABLE;
+    if (boundAppKeys(config.secrets)?.unreadable()) { status.error = UNREADABLE; status.keysUnreadable = true; }
     return status;
   }
   status.app = { id: app.id, slug: app.slug, name: null, installUrl: installUrl(app.slug), transferUrl: transferUrl(app.slug, app.owner) };
@@ -106,6 +106,9 @@ export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Pr
   }
   return status;
 }
+
+/** A registration state starting with this was started with the operator's confirmation to replace unreadable keys. */
+const REPLACE_PREFIX = "replace.";
 
 const refuse = (nonce: string, status: number, text: string, to: { back: string; backLabel: string } = { back: "/admin/github-app", backLabel: "GitHub App" }): Res =>
   ({ status, html: plainPage(nonce, "GitHub App", `<p>${esc(text)}</p><p><a href="${esc(to.back)}">${esc(to.backLabel)}</a></p>`) });
@@ -124,7 +127,9 @@ export async function startRegistration(db: Db, config: Config, req: IncomingMes
   const org = (form.get("org") ?? "").trim() || null;
   if (!APP_NAME.test(name)) return refuse(nonce, 400, "The app name must be 1 to 34 letters, digits, spaces, dashes or underscores.");
   if (org && !ORG.test(org)) return refuse(nonce, 400, "That is not a GitHub organization name.");
-  const state = randomToken(24);
+  const replace = form.get("replace_unreadable") === "1";
+  if (boundAppKeys(config.secrets)?.unreadable() && !replace) return refuse(nonce, 409, `${UNREADABLE} Tick the confirmation to replace them.`);
+  const state = (replace ? REPLACE_PREFIX : "") + randomToken(24);
   await db.run(db.k.deleteFrom("github_app_states").where("created_at", "<=", new Date(Date.now() - STATE_TTL_MS).toISOString()));
   await db.run(db.k.insertInto("github_app_states").values({ state, login: session.login, session_hash: session.idHash, created_at: new Date().toISOString() }));
   const manifest = JSON.stringify(appManifest(name, publicBase(config, req)));
@@ -190,7 +195,7 @@ export async function convertAndStore(db: Db, config: Config, deps: AppDeps, cod
     }
     try {
       if (config.secrets.app) throw Object.assign(new Error("another app was registered meanwhile"), { code: "EEXIST" });
-      await keys.save(app);
+      await keys.save(app, state.startsWith(REPLACE_PREFIX));
     } catch (e) {
       console.error(`github-app registration: app ${app.slug} exists on GitHub but its keys were not stored (${errorCode(e)})`);
       await audit(db, actor.login, "github-app-register-failed", app.slug, { id: app.id, code: errorCode(e) });

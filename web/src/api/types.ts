@@ -990,6 +990,8 @@ export interface GithubAppStatus {
   identity: "box" | "app";
   /** False when the server has nowhere to keep the keys. */
   canRegister: boolean;
+  /** Stored keys exist that this process cannot open (sealed with another session_key); registering needs the replace confirmation. */
+  keysUnreadable: boolean;
   defaultName: string;
   /** The session's CSRF token, for the registration form. */
   csrf: string;
