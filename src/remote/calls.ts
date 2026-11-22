@@ -140,7 +140,7 @@ function adoptEarlier(db: Db, jobId: number, startedMs: number, c: NewCall, hash
       // before the stop (its earlier caller's last poll) counts toward its wait limits, the restart's does not.
       await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
         queued_ms: eb("queued_ms", "+", eb.case().when(eb.and([eb("state", "=", "queued"), eb("queued_since", "is not", null)]))
-          .then(greatest(db, eb.lit(0), eb(least(db, "seen_at", eb.val(nowMs)), "-", eb.ref("queued_since")))).else(eb.lit(0)).end()),
+          .then(greatest(db, [eb.lit(0), eb(least(db, ["seen_at", eb.val(nowMs)]), "-", eb.ref("queued_since"))])).else(eb.lit(0)).end()),
         queued_since: eb.case().when("state", "=", "queued").then(nowMs).else(eb.ref("queued_since")).end(), seen_at: nowMs,
       })).where("id", "=", id));
       dropQueueCache(db);
@@ -185,7 +185,7 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
 export async function withdrawCall(db: Db, id: number, reason: string, states: ("queued" | "leased")[] = ["queued", "leased"], nowMs: number = Date.now()): Promise<boolean> {
   const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
     state: "failed", error: reason, ended_at: nowMs,
-    queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since")))).end()), queued_since: null,
+    queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, [eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since"))])).end()), queued_since: null,
   })).where("id", "=", id).where(inList(db, "state", states)).returning("run_id"));
   if (!r) return false;
   if (r.run_id !== null) await finishRun(db, r.run_id, { state: "failed", error: reason, summary: "withdrawn" });
@@ -500,7 +500,7 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
     const r = await db.get(db.k.updateTable("main.remote_calls").set((eb) => ({
       state: "leased", token_id: caller.tokenId, user_login: caller.login, harness: claim.harness, harness_version: claim.harnessVersion, model, root: claim.root ?? null, lease_secret_hash: sha256hex(secret),
       leased_at: nowMs, heartbeat_at: nowMs, started_at: null, claim_id: claim.requestId,
-      queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since")))).end()), queued_since: null, progress: null, error: null,
+      queued_ms: eb("queued_ms", "+", eb.case().when("queued_since", "is", null).then(eb.lit(0)).else(greatest(db, [eb.lit(0), eb(eb.val(nowMs), "-", eb.ref("queued_since"))])).end()), queued_since: null, progress: null, error: null,
       picked_by: null, picked_at: null, pick_until: null, no_taker_since: null,
     })).where("id", "=", id).where("state", "=", "queued")
       .where((eb) => eb.or([eb("picked_by", "is", null), eb("picked_by", "=", caller.login), pickLapsedExpr(db, eb, nowMs)]))

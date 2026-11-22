@@ -245,7 +245,7 @@ async function githubOf(c: Ctx, it: Item, ev: Ev[], url: string, syncedAt: strin
   events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.id < b.id ? -1 : 1));
   const pushed = await pushedCommits(db, repo, n);
   const commits = (await db.all(db.k.selectFrom("pr_commits")
-    .select((eb) => ["oid", "message", "author", least<string>(db, "committed_at", eb.fn.coalesce("first_seen_at", "committed_at")).as("at")])
+    .select((eb) => ["oid", "message", "author", least<string>(db, ["committed_at", eb.fn.coalesce("first_seen_at", "committed_at")], "text").as("at")])
     .$narrowType<{ at: string }>().where("repo", "=", repo).where("number", "=", n).orderBy("at").orderBy("oid")))
     .map((m) => ({ sha: short(m.oid), message: clean(m.message ?? "", 500), author: m.author ?? "unknown", at: m.at, byAutoCraft: (!!m.author && own.has(m.author)) || pushed.has(m.oid) }));
   return {

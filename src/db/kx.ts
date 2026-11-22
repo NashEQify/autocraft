@@ -46,7 +46,7 @@ export function jsonNum(d: D, e: Ex, path: string): RawBuilder<number | null> {
   return pgOf(d) ? sql`((${x(e)})::json #>> ${sql.raw(pgPath(path))})::numeric` : sql`json_extract(${x(e)}, ${sql.raw(quote(path))})`;
 }
 
-/** The boolean at `path` as 1/0; NULL when absent or not a boolean. */
+/** The boolean at `path` as 1/0; NULL when absent. Any other value gives NULL on Postgres and the value itself on SQLite (stored values are only true and false). */
 export function jsonBool(d: D, e: Ex, path: string): RawBuilder<0 | 1 | null> {
   if (!pgOf(d)) return sql`json_extract(${x(e)}, ${sql.raw(quote(path))})`;
   return sql`(CASE (${x(e)})::json #>> ${sql.raw(pgPath(path))} WHEN 'true' THEN 1 WHEN 'false' THEN 0 END)`;
@@ -207,19 +207,19 @@ export function trimChars(d: D, e: Ex, chars: string): RawBuilder<string | null>
 /** `text` with `esc` (one character), `%` and `_` escaped by `esc`: `like(db, "title", eb.val(`%${likeEscape(s)}%`), "\\")`. */
 export const likeEscape = (text: string, esc = "\\"): string => text.replaceAll(esc, esc + esc).replace(/[%_]/g, (c) => esc + c);
 
-function extreme<T>(d: D, fn: "max" | "min", args: Ex[]): RawBuilder<T | null> {
+function extreme<T>(d: D, fn: "max" | "min", args: Ex[], type: ElemType): RawBuilder<T | null> {
   if (args.length < 2) throw new Error(`${fn === "max" ? "greatest" : "least"} needs two or more arguments`);
-  const list = sql.join(args.map(x));
-  if (!pgOf(d)) return sql`${sql.raw(fn)}(${list})`;
-  const rows = sql.join(args.map((a) => sql`(${x(a)})`));
+  if (!pgOf(d)) return sql`${sql.raw(fn)}(${sql.join(args.map(x))})`;
+  // Each argument is cast: bound parameters alone would be resolved as text, and '9' > '10'.
+  const rows = sql.join(args.map((a) => sql`((${x(a)})::${sql.raw(type)})`));
   return sql`(SELECT CASE WHEN count(*) = count(g.x) THEN ${sql.raw(fn)}(g.x) END FROM (VALUES ${rows}) AS g(x))`;
 }
 
-/** The largest argument, NULL when any is NULL (SQLite's scalar max; Postgres GREATEST would skip NULLs). */
-export const greatest = <T = number>(d: D, ...args: Ex[]): RawBuilder<T | null> => extreme<T>(d, "max", args);
+/** The largest of `args`, NULL when any is NULL (SQLite's scalar max; Postgres GREATEST would skip NULLs). `type` is the arguments' type on Postgres. */
+export const greatest = <T = number>(d: D, args: Ex[], type: ElemType = "bigint"): RawBuilder<T | null> => extreme<T>(d, "max", args, type);
 
-/** The smallest argument, NULL when any is NULL (SQLite's scalar min). */
-export const least = <T = number>(d: D, ...args: Ex[]): RawBuilder<T | null> => extreme<T>(d, "min", args);
+/** The smallest of `args`, NULL when any is NULL (SQLite's scalar min). `type` is the arguments' type on Postgres. */
+export const least = <T = number>(d: D, args: Ex[], type: ElemType = "bigint"): RawBuilder<T | null> => extreme<T>(d, "min", args, type);
 
 /**
  * Aggregate: the non-NULL values of `e` as text joined by `sep`, in `orderBy` order (required: Postgres has no default

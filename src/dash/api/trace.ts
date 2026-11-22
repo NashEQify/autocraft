@@ -87,7 +87,7 @@ const github: Source = {
       out.push(commentEvent(c, own));
     }
     for (const c of await db.all(db.k.selectFrom("pr_commits")
-      .select((eb) => ["oid", kx.least<string>(db, "committed_at", eb.fn.coalesce("first_seen_at", "committed_at")).as("committed_at"), "author"])
+      .select((eb) => ["oid", kx.least<string>(db, ["committed_at", eb.fn.coalesce("first_seen_at", "committed_at")], "text").as("committed_at"), "author"])
       .where("repo", "=", repo).where("number", "=", n)
       .$narrowType<{ committed_at: string }>())) {
       // Our own commits are shown by their audit rows.

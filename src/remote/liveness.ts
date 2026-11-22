@@ -25,9 +25,9 @@ export async function stampAlive(db: Db, nowMs: number = Date.now()): Promise<vo
     else if (nowMs - Number(r.alive_at) > ALIVE_STALE_MS) {
       const gap = nowMs - Number(r.alive_at);
       await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
-        heartbeat_at: least(db, eb("heartbeat_at", "+", gap), eb.val(nowMs)),
-        leased_at: least(db, eb("leased_at", "+", gap), eb.val(nowMs)),
-        started_at: eb.case().when("started_at", "is", null).then(eb.lit(null)).else(least(db, eb("started_at", "+", gap), eb.val(nowMs))).end(),
+        heartbeat_at: least(db, [eb("heartbeat_at", "+", gap), eb.val(nowMs)]),
+        leased_at: least(db, [eb("leased_at", "+", gap), eb.val(nowMs)]),
+        started_at: eb.case().when("started_at", "is", null).then(eb.lit(null)).else(least(db, [eb("started_at", "+", gap), eb.val(nowMs)])).end(),
       })).where("state", "=", "leased"));
       await db.run(db.k.updateTable("main.remote_liveness").set({ alive_at: nowMs, since: nowMs }).where("id", "=", 1));
     } else await db.run(db.k.updateTable("main.remote_liveness").set({ alive_at: nowMs }).where("id", "=", 1));
