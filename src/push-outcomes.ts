@@ -76,32 +76,46 @@ export async function recordPush(db: Db, action: string, o: { repo: string; numb
  * expires old unsettled ones, and lets the breaker look at every stage that got a `broke`.
  */
 export async function resolvePushes(db: Db, rows: { repo: string; number: number; head_oid: string; checks: CheckRow }[], at = new Date().toISOString()): Promise<void> {
+  // The unsettled pushes at the rows' heads in one read per batch, so a checks run of a large repo makes no read per PR.
+  const pending: { id: number; stage: string; before_res: string | null; repo: string; number: number | null; to_oid: string }[] = [];
+  for (const heads of kx.batches([...new Map(rows.map((r) => [`${r.repo}\n${r.head_oid}`, [r.repo, r.head_oid] as const])).values()]))
+    pending.push(...await db.all(db.k.selectFrom("push_outcomes").select(["id", "stage", "before_res", "repo", "number", "to_oid"])
+      .where("outcome", "is", null).where((eb) => kx.tupleIn(db, [eb.ref("repo"), eb.ref("to_oid")], heads, ["text", "text"])).orderBy("id")));
+  const optional = new Map<string, string[]>();
+  const optionalOf = async (repo: string): Promise<string[]> => {
+    if (!optional.has(repo)) optional.set(repo, await optionalChecks(db, repo));
+    return optional.get(repo)!;
+  };
+  const settled: { id: number; number: number; after_res: string; outcome: Outcome }[] = [];
+  const done = new Set<number>();
   const broke = new Set<string>();
   for (const r of rows) {
-    const open = await db.all(db.k.selectFrom("push_outcomes").select(["id", "stage", "before_res"])
-      .where("repo", "=", r.repo).where("to_oid", "=", r.head_oid).where("outcome", "is", null)
-      .where((eb) => eb.or([eb("number", "=", r.number), eb("number", "is", null)])));
+    // A push recorded without a number settles with the first PR at its head, as it then carries that PR's number.
+    const open = pending.filter((p) => !done.has(p.id) && p.repo === r.repo && p.to_oid === r.head_oid && (p.number === r.number || p.number === null));
     if (!open.length) continue;
-    const after = requiredResult(r.checks, await optionalChecks(db, r.repo));
+    const after = requiredResult(r.checks, await optionalOf(r.repo));
     for (const p of open) {
       const outcome = classifyPush(p.before_res as Required | "unknown", after);
       if (outcome === null) continue;
-      await db.run(db.k.updateTable("push_outcomes").set({ number: r.number, after_res: after, outcome, resolved_at: at }).where("id", "=", p.id));
+      done.add(p.id);
+      settled.push({ id: p.id, number: r.number, after_res: after, outcome });
       if (outcome === "broke") broke.add(p.stage);
     }
   }
-  // A push whose PR is closed or merged, or whose head moved past the pushed commit (the mirror may still show the head before the push), will not get a result of its own.
-  await db.run(db.k.updateTable("push_outcomes").set({ outcome: "unknown", resolved_at: at }).where("outcome", "is", null).where("number", "is not", null)
-    .where((eb) => eb.exists(eb.selectFrom("items as i").select(eb.lit(1).as("one"))
-      .whereRef("i.repo", "=", "push_outcomes.repo").whereRef("i.number", "=", "push_outcomes.number")
-      .where((ie) => ie.or([ie("i.state", "<>", "OPEN"), ie.and([
-        ie("i.head_oid", "is not", null),
-        ie("i.head_oid", "<>", ie.ref("push_outcomes.to_oid")),
-        ie("i.head_oid", "is distinct from", ie.ref("push_outcomes.from_oid")),
-      ])])))));
   const old = new Date(Date.parse(at) - EXPIRE_MS).toISOString();
-  if (await db.get(db.k.selectFrom("push_outcomes").select((eb) => eb.lit(1).as("one")).where("outcome", "is", null).where("at", "<", old).limit(1)))
+  await db.write(async () => {
+    for (const p of settled) await db.run(db.k.updateTable("push_outcomes").set({ number: p.number, after_res: p.after_res, outcome: p.outcome, resolved_at: at }).where("id", "=", p.id));
+    // A push whose PR is closed or merged, or whose head moved past the pushed commit (the mirror may still show the head before the push), will not get a result of its own.
+    await db.run(db.k.updateTable("push_outcomes").set({ outcome: "unknown", resolved_at: at }).where("outcome", "is", null).where("number", "is not", null)
+      .where((eb) => eb.exists(eb.selectFrom("items as i").select(eb.lit(1).as("one"))
+        .whereRef("i.repo", "=", "push_outcomes.repo").whereRef("i.number", "=", "push_outcomes.number")
+        .where((ie) => ie.or([ie("i.state", "<>", "OPEN"), ie.and([
+          ie("i.head_oid", "is not", null),
+          ie("i.head_oid", "<>", ie.ref("push_outcomes.to_oid")),
+          ie("i.head_oid", "is distinct from", ie.ref("push_outcomes.from_oid")),
+        ])])))));
     await db.run(db.k.updateTable("push_outcomes").set({ outcome: "unknown", resolved_at: at }).where("outcome", "is", null).where("at", "<", old));
+  });
   for (const s of broke) await evaluatePushBreaker(db, s as TripStage, at);
 }
 
