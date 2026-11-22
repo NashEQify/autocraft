@@ -1,8 +1,8 @@
 #!/bin/sh
 # In-pod workspace helper: `ws <subcommand> <fixed args> -- <data>`. Every subcommand's
 # first stdout line is a header `WS <fields...>`; helper errors are `WS error <code> <msg>`
-# with exit 2 (usage), 3 (no such call) or 4 (conflict). A command's own exit code
-# goes in the header, never in the helper's exit status.
+# with exit 2 (usage), 3 (no such call or file) or 4 (conflict). A command's own exit
+# code goes in the header, never in the helper's exit status.
 
 ROOT=${WS_ROOT:-/work}
 CALLS=$ROOT/.ws/calls
@@ -10,6 +10,12 @@ CAP=30720
 HEAD_BYTES=4096
 TAIL_BYTES=26624
 IN_LIMIT=1048576
+TMPD=$ROOT/.ws/tmp
+READ_CAP=131072  # bytes of lines one read returns
+LINE_BYTES=8192  # bytes kept of each line read; the job cuts lines at 2000 characters
+IMG_LIMIT=10485760
+IMG_OUT=3750000  # bytes of image sent at most, so its base64 stays under 5 MB; larger PNGs go out as JPEG
+RG_RAW=16777216
 
 die() { # code exit message...
   code=$1; st=$2; shift 2
@@ -67,6 +73,46 @@ emit_log() {
 wait_exit() {
   _deadline=$(($(now_ms) + $2 * 1000))
   while [ ! -f "$CALLS/$1.exit" ] && [ "$(now_ms)" -lt "$_deadline" ]; do sleep 0.05; done
+}
+
+# A new temporary file under .ws/tmp, its path on stdout.
+new_tmp() {
+  mkdir -p "$TMPD" 2>/dev/null
+  mktemp "$TMPD/t.XXXXXX" 2>/dev/null
+}
+
+file_size() { wc -c <"$1" | tr -d ' '; }
+
+# png, jpeg, gif or webp from the file's first bytes; empty for anything else.
+image_kind() {
+  _sig=$(od -An -tx1 -N12 "$1" 2>/dev/null | tr -d ' \n')
+  case $_sig in
+    89504e470d0a1a0a*) echo png ;;
+    ffd8ff*) echo jpeg ;;
+    474946383761* | 474946383961*) echo gif ;;
+    52494646????????57454250) echo webp ;;
+  esac
+}
+
+im_identify() {
+  if command -v magick >/dev/null 2>&1; then magick identify "$@"
+  elif command -v identify >/dev/null 2>&1; then identify "$@"
+  else return 127; fi
+}
+
+im_convert() {
+  if command -v magick >/dev/null 2>&1; then magick "$@"
+  elif command -v convert >/dev/null 2>&1; then convert "$@"
+  else return 127; fi
+}
+
+# Width and height of the first frame of image $1, as "w h"; fails when unreadable.
+image_dims() {
+  _d=$(im_identify -format '%w %h' "${1}[0]" 2>/dev/null) || return 1
+  case $_d in
+    [1-9]*' '[1-9]*) echo "$_d" ;;
+    *) return 1 ;;
+  esac
 }
 
 cmd_init() {
@@ -209,28 +255,155 @@ cmd_put() {
     "$ROOT"/*) ;;
     *) die usage 2 "path must be under $ROOT" ;;
   esac
+  # Writes go to the file a link points at, which must also be under ROOT, so a link
+  # is never replaced by a regular file.
+  dir=$(dirname "$p")
+  mkdir -p "$dir" || die io 2 "cannot create $dir"
+  root=$(readlink -f -- "$ROOT") || die io 2 "cannot resolve $ROOT"
+  real=$(readlink -f -- "$p") || die io 2 "cannot resolve $p"
+  case $real in
+    "$root"/*) ;;
+    *) die usage 2 "$p resolves to $real, outside $ROOT" ;;
+  esac
+  [ -d "$real" ] && die isdir 2 "$p is a directory"
+  rdir=$(dirname "$real")
   mkdir -p "$ROOT/.ws/locks" || die io 2 "cannot create lock dir"
-  key=$(printf '%s' "$p" | sha256sum | cut -d' ' -f1)
+  tmp=$(mktemp "$rdir/.ws-put.XXXXXX") || die io 2 "cannot write in $rdir"
+  # stdin is read before the lock, so the check and the replace happen together.
+  cat >"$tmp" || { rm -f "$tmp"; die io 2 "cannot read the new content"; }
+  key=$(printf '%s' "$real" | sha256sum | cut -d' ' -f1)
   (
     flock 9
-    if [ -e "$p" ]; then
-      cur=$(sha256sum <"$p" | cut -d' ' -f1)
+    if [ -e "$real" ]; then
+      cur=$(sha256sum <"$real" | cut -d' ' -f1)
+      mode=$(stat -c %a "$real") || die io 2 "cannot read the mode of $p"
     else
       cur=none
+      mode=644
     fi
     if [ -n "$expect" ] && [ "$expect" != "$cur" ]; then
       die conflict 4 "$cur"
     fi
-    dir=$(dirname "$p")
-    mkdir -p "$dir" || die io 2 "cannot create $dir"
-    tmp=$(mktemp "$dir/.ws-put.XXXXXX") || die io 2 "cannot write in $dir"
-    cat >"$tmp"
-    chmod 0644 "$tmp"
+    chmod "$mode" "$tmp" || die io 2 "cannot set the mode of $p"
     bytes=$(wc -c <"$tmp" | tr -d ' ')
     sha=$(sha256sum <"$tmp" | cut -d' ' -f1)
-    mv -f "$tmp" "$p" || { rm -f "$tmp"; die io 2 "cannot replace $p"; }
+    mv -f "$tmp" "$real" || die io 2 "cannot replace $p"
     printf 'WS ok %s %s\n' "$bytes" "$sha"
   ) 9>"$ROOT/.ws/locks/$key"
+  st=$?
+  rm -f "$tmp"
+  return "$st"
+}
+
+need_file() {
+  case $1 in
+    /*) ;;
+    *) die usage 2 "path must be absolute" ;;
+  esac
+  [ -e "$1" ] || die nofile 3 "no such file $1"
+  [ -d "$1" ] && die isdir 2 "$1 is a directory"
+  [ -f "$1" ] || die nofile 3 "$1 is not a regular file"
+}
+
+# image <path> <max_edge>: `WS ok image <bytes> <w> <h> <out_w> <out_h>`, then the image, its long
+# edge scaled down to max_edge. Larger PNG output goes out as JPEG.
+cmd_image() {
+  [ $# -eq 2 ] || die usage 2 "image <path> <max_edge>"
+  p=$1; m=$2
+  is_pos "$m" || die usage 2 "max_edge must be a positive integer"
+  need_file "$p"
+  kind=$(image_kind "$p")
+  [ -n "$kind" ] || die notimage 2 "not a PNG, JPEG, GIF or WebP image"
+  size=$(file_size "$p")
+  [ "$size" -le "$IMG_LIMIT" ] || die toolarge 2 "$size bytes; images are read up to $IMG_LIMIT bytes"
+  dims=$(image_dims "$p") || die image 2 "cannot read the image size (is ImageMagick installed?)"
+  w=${dims% *}; h=${dims#* }
+  long=$w
+  [ "$h" -gt "$long" ] && long=$h
+  if [ "$long" -le "$m" ] && [ "$size" -le "$IMG_OUT" ]; then
+    printf 'WS ok image %s %s %s %s %s\n' "$size" "$w" "$h" "$w" "$h"
+    cat "$p"
+    return 0
+  fi
+  tmp=$(new_tmp) || die io 2 "cannot write in $TMPD"
+  out=png
+  [ "$kind" = jpeg ] && out=jpeg
+  if ! im_convert "${p}[0]" -auto-orient -resize "${m}x${m}>" -strip -quality 85 "$out:$tmp" 2>/dev/null; then
+    rm -f "$tmp"; die image 2 "cannot scale the image"
+  fi
+  if [ "$out" = png ] && [ "$(file_size "$tmp")" -gt "$IMG_OUT" ]; then
+    im_convert "png:$tmp" -quality 85 "jpeg:$tmp" 2>/dev/null || { rm -f "$tmp"; die image 2 "cannot scale the image"; }
+  fi
+  if [ "$(file_size "$tmp")" -gt "$IMG_OUT" ]; then
+    rm -f "$tmp"; die toolarge 2 "the scaled image is larger than $IMG_OUT bytes"
+  fi
+  nd=$(image_dims "$tmp") || { rm -f "$tmp"; die image 2 "cannot read the scaled image"; }
+  printf 'WS ok image %s %s %s %s %s\n' "$(file_size "$tmp")" "$w" "$h" "${nd% *}" "${nd#* }"
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+# read <path> <offset> <limit> <max_edge>: an image as `image` prints it; a text file as
+# `WS ok text <lines> <bytes>` and lines offset.. (at most limit of them, each cut at
+# LINE_BYTES, READ_CAP in all). A binary file is `WS error binary <bytes> <type>`.
+cmd_read() {
+  [ $# -eq 4 ] || die usage 2 "read <path> <offset> <limit> <max_edge>"
+  p=$1; o=$2; l=$3; m=$4
+  is_pos "$o" || die usage 2 "offset must be a positive integer"
+  is_pos "$l" || die usage 2 "limit must be a positive integer"
+  need_file "$p"
+  if [ -n "$(image_kind "$p")" ]; then
+    cmd_image "$p" "$m"
+    return
+  fi
+  size=$(file_size "$p")
+  if [ "$(head -c 8192 "$p" | wc -c)" -ne "$(head -c 8192 "$p" | tr -d '\000' | wc -c)" ]; then
+    type=$(file -b --mime-type "$p" 2>/dev/null) || type=
+    die binary 2 "$size ${type:-unknown}"
+  fi
+  lines=$(wc -l <"$p" | tr -d ' ')
+  [ "$size" -gt 0 ] && [ "$(tail -c 1 "$p" | od -An -tx1 | tr -d ' \n')" != 0a ] && lines=$((lines + 1))
+  printf 'WS ok text %s %s\n' "$lines" "$size"
+  end=$((o + l - 1))
+  sed -n "${o},${end}p;${end}q" "$p" | cut -b "1-$LINE_BYTES" | head -c "$READ_CAP"
+}
+
+# cat <path> <max_bytes>: `WS ok <bytes> <sha256>`, then the file as it was hashed.
+cmd_cat() {
+  [ $# -eq 2 ] || die usage 2 "cat <path> <max_bytes>"
+  p=$1; max=$2
+  is_uint "$max" || die usage 2 "max_bytes must be a byte count"
+  need_file "$p"
+  size=$(file_size "$p")
+  [ "$size" -le "$max" ] || die toolarge 2 "$size bytes"
+  tmp=$(new_tmp) || die io 2 "cannot write in $TMPD"
+  cat "$p" >"$tmp" || { rm -f "$tmp"; die io 2 "cannot read $p"; }
+  printf 'WS ok %s %s\n' "$(file_size "$tmp")" "$(sha256sum <"$tmp" | cut -d' ' -f1)"
+  cat "$tmp"
+  rm -f "$tmp"
+}
+
+# rg <path> <timeout_sec> <limit> -- <rg options...>: ripgrep over path, from path's directory
+# (so globs match relative to it), with stderr merged. `WS ok <rg exit> <output lines>`, then
+# the first limit lines, CAP bytes at most.
+cmd_rg() {
+  [ $# -ge 4 ] && [ "$4" = -- ] || die usage 2 "rg <path> <timeout_sec> <limit> -- <rg options...>"
+  p=$1; t=$2; l=$3; shift 4
+  is_pos "$t" || die usage 2 "timeout must be a positive integer"
+  is_pos "$l" || die usage 2 "limit must be a positive integer"
+  case $p in
+    /*) ;;
+    *) die usage 2 "path must be absolute" ;;
+  esac
+  [ -e "$p" ] || die nofile 3 "no such file or directory $p"
+  if [ -d "$p" ]; then d=$p; else d=$(dirname "$p"); fi
+  cd "$d" || die io 2 "cannot enter $d"
+  tmp=$(new_tmp) || die io 2 "cannot write in $TMPD"
+  { timeout -k 5 "$t" rg --no-config --color never "$@" "$p" 2>&1; echo "$?" >"$tmp.rc"; } | head -c "$RG_RAW" >"$tmp"
+  rc=$(cat "$tmp.rc" 2>/dev/null || echo 2)
+  printf 'WS ok %s %s\n' "$rc" "$(wc -l <"$tmp" | tr -d ' ')"
+  head -n "$l" "$tmp" | head -c "$CAP"
+  rm -f "$tmp" "$tmp.rc"
 }
 
 cmd_untar() {
@@ -253,7 +426,7 @@ cmd_untar() {
   printf 'WS ok %s\n' "$(git rev-parse HEAD)"
 }
 
-[ $# -ge 1 ] || die usage 2 "ws <init|run|status|kill|put|untar>"
+[ $# -ge 1 ] || die usage 2 "ws <init|run|status|kill|put|untar|read|image|cat|rg>"
 sub=$1; shift
 case $sub in
   init) cmd_init "$@" ;;
@@ -262,5 +435,9 @@ case $sub in
   kill) cmd_kill "$@" ;;
   put) cmd_put "$@" ;;
   untar) cmd_untar "$@" ;;
+  read) cmd_read "$@" ;;
+  image) cmd_image "$@" ;;
+  cat) cmd_cat "$@" ;;
+  rg) cmd_rg "$@" ;;
   *) die usage 2 "unknown subcommand $sub" ;;
 esac

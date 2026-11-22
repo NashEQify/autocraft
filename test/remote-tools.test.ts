@@ -19,7 +19,7 @@ import type { Embedder } from "../src/embed/model.ts";
 import { writeSnapshot } from "../src/itemtools/snapshot.ts";
 import { awaitCall, claimCall, enqueueCall, submitCall, type Caller } from "../src/remote/calls.ts";
 import { setInferenceMode } from "../src/remote/mode.ts";
-import { PROTOCOL_VERSION, ROUTES, type TaskBundle, type ToolReply } from "../src/remote/protocol.ts";
+import { PROTOCOL_VERSION, ROUTES, type TaskBundle } from "../src/remote/protocol.ts";
 import { buildReferenceIndex } from "../src/reference-search.ts";
 import { PASSAGES_PER_LEASE, referenceOptions } from "../src/remote/tools.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -84,7 +84,7 @@ describe("per-lease tools of remote calls", async () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  const tool = async (lease: string, server: string, name: string, args: unknown): Promise<{ status: number; body: ToolReply & { error?: string } }> => {
+  const tool = async (lease: string, server: string, name: string, args: unknown): Promise<{ status: number; body: { content: { type: string; text: string }[]; isError?: boolean; error?: string } }> => {
     const r = await fetch(`${base}${ROUTES.tool}/${server}/${name}`, { method: "POST", headers: { authorization: `Bearer ${leases.get(lease)!.secret}`, "content-type": "application/json" }, body: JSON.stringify(args) });
     return { status: r.status, body: JSON.parse(await r.text()) };
   };

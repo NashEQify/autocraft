@@ -1081,7 +1081,8 @@ CREATE TABLE IF NOT EXISTS workspaces (
   owner TEXT,                         -- what asked for it: `cli` or a job id
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  ended_at TEXT
+  ended_at TEXT,
+  remote_call_id INTEGER              -- the remote call whose session uses the workspace's tools (src/build/workspace-relay.ts)
 );
 CREATE INDEX IF NOT EXISTS workspaces_env ON workspaces(env_id, state);
 
@@ -1097,7 +1098,8 @@ CREATE TABLE IF NOT EXISTS workspace_calls (
   created_at TEXT NOT NULL,
   started_at TEXT,
   deadline_at TEXT,                   -- past this a call still marked running no longer keeps the pod from parking
-  finished_at TEXT
+  finished_at TEXT,
+  run_id INTEGER                      -- a session's call: the agent run of the lease it came from
 );
 CREATE INDEX IF NOT EXISTS workspace_calls_ws ON workspace_calls(workspace_id, id);
 CREATE INDEX IF NOT EXISTS build_tasks_state ON build_tasks(state, id);

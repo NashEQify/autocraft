@@ -276,12 +276,16 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["remote_calls", "bundle_hash", "TEXT"],
   // When the caller read the done reply; a done call not yet read can still be adopted.
   ["remote_calls", "consumed_at", "INTEGER"],
+  // A session's workspace tools: the call bound to the workspace, and the lease run a relayed call came from (src/build/workspace-relay.ts).
+  ["workspaces", "remote_call_id", "INTEGER"],
+  ["workspace_calls", "run_id", "INTEGER"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.
 // Covering indexes on the hash columns let the planner compare stored hashes without reading item rows.
 // The trigger clears the hashes of an item whose hashed fields were edited without bringing its own (sync does).
 export const ADDED_INDEXES = [
+  "CREATE INDEX IF NOT EXISTS main.workspaces_call ON workspaces(remote_call_id) WHERE remote_call_id IS NOT NULL",
   // Covers the claims' read of the queued remote calls (src/remote/calls.ts queuedCalls) and the room count, so neither walks the overflow pages of each row's bundle.
   // remote_calls_queued, the same index without the pick columns, stays while the previous release may still read it
   // (INDEXED BY) during a rollout: the deploy migrates the database before the old processes restart. The next release drops it.

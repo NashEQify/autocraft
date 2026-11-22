@@ -46,9 +46,10 @@ import { isBusy } from "../../db.ts";
 import { inferenceMode } from "../../remote/mode.ts";
 import { hasFreshRunner, parseStatus, storeStatus } from "../../remote/helpers.ts";
 import { addressKey, parseLoginStart, pollLogin, startLogin } from "../../remote/device-login.ts";
-import { ENCODINGS, ROUTES, type ClaimReply, type LoginPollReply, type LoginStartReply, type StatusReply, type ToolReply } from "../../remote/protocol.ts";
+import { ENCODINGS, ROUTES, toolContent, type ClaimReply, type LoginPollReply, type LoginStartReply, type StatusReply, type ToolReply } from "../../remote/protocol.ts";
 import { userReserve } from "../../remote/reserve.ts";
 import { startLiveness } from "../../remote/liveness.ts";
+import { WORKSPACE_SERVER } from "../../build/workspace-tools.ts";
 import { archiveOf, callTaskTool, TASK_TOOLS, taskLease, type TaskLease, type ToolResult } from "../../remote/tools.ts";
 import { handleDelivery, WEBHOOK_BODY_LIMIT, WEBHOOK_PATH } from "../../github/webhooks.ts";
 import { esc, HttpError, parseCookies, plainPage, previewTags, RateLimiter, safeReturnTo } from "./util.ts";
@@ -65,6 +66,9 @@ const BODY_LIMIT = 64 * 1024;
 const SUBMIT_BODY_LIMIT = 8 * 1024 * 1024;
 /** A task tool call: a `check` call carries the whole patch, as the local bridge allows. */
 const TOOL_BODY_LIMIT = 2 * 1024 * 1024;
+/** A workspace `write` carries a file of up to 2 MiB, which JSON escaping can make several times larger. */
+const WORKSPACE_BODY_LIMIT = 12 * 1024 * 1024;
+const toolBodyLimit = (server: string): number => (server === WORKSPACE_SERVER ? WORKSPACE_BODY_LIMIT : TOOL_BODY_LIMIT);
 const HELPER_FILE = new URL("../../../worker/autocraft.mjs", import.meta.url);
 const PUBLIC_FILES = new Set(["/artcraft-mark.svg", "/artcraft-mark.png"]);
 const FILE_TYPES: Record<string, string> = {
@@ -854,10 +858,10 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
       const [, server, name] = tool!;
       if (!TASK_TOOLS[server!] || !lease.servers.includes(server!)) return reply(403, { error: `this call has no ${server} tools` });
       if (!remoteToolLimit.allow(String(lease.id))) return tooMany();
-      const args = await readRemoteJson(req, TOOL_BODY_LIMIT);
+      const args = await readRemoteJson(req, toolBodyLimit(server!));
       const w = waitingJson(res);
       const r = await callTaskTool(db, lease, bearer!, server!, name, args, w.opts);
-      return w.send({ content: [{ type: "text", text: r.text }], ...(r.isError && { isError: true }) } satisfies ToolReply);
+      return w.send({ content: toolContent(r), ...(r.isError && { isError: true }) } satisfies ToolReply);
     } catch (e) {
       if (e instanceof HttpError) return reply(e.status, { error: e.message });
       throw e;
@@ -903,7 +907,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     if (!remoteToolLimit.allow(String(lease.id))) return reply(429, rpcError(-32000, "too many requests; wait a minute"), { "retry-after": "60" });
     let msg: unknown;
     try {
-      msg = await readJson(req, TOOL_BODY_LIMIT);
+      msg = await readJson(req, toolBodyLimit(server));
     } catch (e) {
       if (e instanceof HttpError) return reply(e.status, rpcError(e.status === 400 ? -32700 : -32600, e.message));
       throw e;
