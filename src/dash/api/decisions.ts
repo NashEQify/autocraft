@@ -32,7 +32,6 @@ import { backlogHeld } from "../../dupes/held.ts";
 import { filtered, hiddenTestExpr, type HiddenRepos } from "../../hidden-sql.ts";
 import { pickDecision, shortRepo } from "../../../web/src/lib/links.ts";
 import { canSeeInternals } from "./staff.ts";
-import { mayRunRepo } from "../repo-access.ts";
 import { canSettleCached, canSettleExpr, requireSettle, settleRefusal, settledBy, settleMemo, type SettleMemo } from "../../settlers.ts";
 import { DEFAULT_BAND } from "../../rank/level.ts";
 import { isQuiet, quietFixPrs } from "../../security/quiet.ts";
