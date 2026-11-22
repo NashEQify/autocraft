@@ -10,6 +10,7 @@ import { DEFAULT_OWNER } from "../owners.ts";
 import { hiddenExpr, isPublicRepo, publicRepoNames } from "../public/status.ts";
 import { PICK_CANDIDATES, PICK_MAX, parsePicks, type PickInput } from "./pick.ts";
 import type { Db } from "../db/index.ts";
+import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
 /** How many nearest vectors are read before the filters (pull requests, private repos and old closed issues are dropped). */
@@ -22,7 +23,6 @@ export const QUESTION_CHARS = 1000;
 const USER_LIMIT = { n: 5, ms: 60_000 };
 const CHANNEL_LIMIT = { n: 20, ms: 60_000 };
 /** Longest the call waits for a Claude account before the embedding answer is used. */
-const MODEL_WAIT_MS = 20_000;
 
 export type Match = { repo: string; number: number; title: string; url: string; closed: boolean; reason?: string };
 export type Found = { matches: Match[]; /** Whether a model chose and explained them. */ judged: boolean };
@@ -37,8 +37,8 @@ function byActivity(a: Candidate, b: Candidate): number {
 /** The model step; tests replace it. Returns the reply text, or null when the call failed or got no answer. */
 export type Ask = (db: Db, input: PickInput) => Promise<string | null>;
 
-export const askHaiku: Ask = async (db, input) => {
-  const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS });
+export const askHaiku = async (db: Db, input: PickInput, takeWaitMs = DISCORD_TAKE_WAIT_MS): Promise<string | null> => {
+  const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: takeWaitMs });
   return reply?.text ?? null;
 };
 

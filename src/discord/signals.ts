@@ -11,6 +11,7 @@ import { jevSignal, parseSignal, signalBand, signalState, type SignalAsk } from 
 import { isWatched, trackedRepos, type DiscordLink } from "./store.ts";
 import { parseRefs, type ItemKey } from "./refs.ts";
 import type { Db } from "../db/index.ts";
+import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 export const SIGNAL_CAP_KEY = "discord_signal_daily_usd";
 export const DEFAULT_SIGNAL_CAP_USD = 1;
@@ -21,8 +22,6 @@ const AUTHOR_LIMIT = { n: 10, ms: 60_000 };
 const CHANNEL_LIMIT = { n: 30, ms: 60_000 };
 /** Model calls at once; later checks wait their turn. */
 const MAX_CALLS = 2;
-/** Longest the Haiku call waits for a Claude account. */
-const MODEL_WAIT_MS = 20_000;
 
 /** The model calls; tests replace them. Jev gives the yes-probability, Haiku the answer; null when there was none. */
 export type Judge = { jev: (db: Db, ask: SignalAsk) => Promise<number | null>; haiku: (db: Db, ask: SignalAsk) => Promise<boolean | null> };
@@ -50,7 +49,7 @@ export const modelJudge: Judge = {
     return r.ok ? r.value : null;
   },
   haiku: async (db, a) => {
-    const r = await runModelStep(db, HAIKU_STEP, a, { maxWaitMs: MODEL_WAIT_MS });
+    const r = await runModelStep(db, HAIKU_STEP, a, { maxWaitMs: DISCORD_TAKE_WAIT_MS });
     return r.ok ? r.value : null;
   },
 };
