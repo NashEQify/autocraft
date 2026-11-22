@@ -29,7 +29,7 @@ const RULES: [prefix: string, topics: Topic[]][] = [
   ["item-page:", [...new Set<Topic>([...TRACE, "discord", "fasttrack", "github", "ranks"])]],
   ["items-status:", withSlot("items", "stages", "flow", "classify", "decisions", "plans", "pr-builds", "verify")],
   // The Live board: jobs, model calls (their progress lines too), build tasks (each step's log) and integration batches.
-  ["live", ["jobs", "agents", "tasks", "queue"]],
+  ["live", ["jobs", "agents", "tasks", "queue", "accounts", "usage"]],
   ["home", withSlot("decisions", "decision-snooze", "plans", "jobs", "limits", "accounts", "settings", "queue", "items", "mainci", "github", "usage", "security")],
   // One opened event row: its detail reads what the timeline does; the run, task and decision behind it read one table each.
   ["item-trace-detail:", TRACE],

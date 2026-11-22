@@ -106,9 +106,9 @@ function liveBoard(now: number): LiveBoard {
     lanes: [
       { key: "job:1", title: "Review pull requests", state: "running", start: t(14), end: null, line: "Reviewing photocraft#9981 (2 of 3)", item: it("photocraft", 9981, "Fix crop handles on rotated layers"), itemCount: 3, repo: "photocraft", detail: "/pipeline/1", estimate: est(18, 31),
         ops: [
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(14), end: t(9), estimate: null },
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(8.5), end: t(3), estimate: null },
-          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(2.5), end: null, estimate: est(5, 9) },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(14), end: t(9), estimate: null, account: "claude:a" },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(8.5), end: t(3), estimate: null, account: "claude:a" },
+          { kind: "model", label: "claude-opus", detail: "Opus review on main", start: t(2.5), end: null, estimate: est(5, 9), account: "claude:a" },
         ] },
       { key: "job:2", title: "Verify pull requests", state: "running", start: t(11), end: null, line: "Running the tests of wordcraft#2231", item: it("wordcraft", 2231, "Keep the hyperlink run when exporting the last paragraph"), itemCount: 1, repo: "wordcraft", detail: "/pipeline/2", estimate: est(16, 24),
         ops: [
@@ -118,9 +118,9 @@ function liveBoard(now: number): LiveBoard {
         ] },
       { key: "job:3", title: "Fix-up pull requests", state: "running", start: t(26), end: null, line: "Second round on vectorcraft#1388", item: it("vectorcraft", 1388, "Snap guides ignore locked layers"), itemCount: 1, repo: "vectorcraft", detail: "/pipeline/3", estimate: est(19, 25),
         ops: [
-          { kind: "model", label: "claude-sonnet", detail: "Fix-up on main", start: t(26), end: t(17), estimate: null },
+          { kind: "model", label: "claude-sonnet", detail: "Fix-up on Team B", start: t(26), end: t(17), estimate: null, account: "claude:b" },
           { kind: "lint", label: "lint", detail: "Fix-up check", start: t(17), end: t(15), estimate: null, failed: true },
-          { kind: "model", label: "claude-sonnet", detail: "Fix-up on main", start: t(15), end: null, estimate: est(8, 11) },
+          { kind: "model", label: "claude-sonnet", detail: "Fix-up on Team B", start: t(15), end: null, estimate: est(8, 11), account: "claude:b" },
         ] },
       { key: "task:4", title: "Build task, Build pull requests", state: "running", start: t(3), end: null, line: null, item: it("filmcraft", 3149, "Panel resize handle flickers"), itemCount: 1, repo: "filmcraft", detail: "/envs/4", estimate: null,
         ops: [{ kind: "build", label: "cargo build", detail: "Build pull requests", start: t(3), end: null, estimate: null }] },
@@ -131,8 +131,14 @@ function liveBoard(now: number): LiveBoard {
         ] },
       { key: "job:5", title: "Classify new items", state: "queued", start: t(1), end: null, line: null, item: it("gridcraft", 977, "Range spill: keep neighbouring cells when a formula grows", "issue"), itemCount: 4, repo: "gridcraft", detail: "/pipeline/5", estimate: null, ops: [] },
       { key: "job:6", title: "Ask Merge? decisions", state: "done", start: t(9), end: t(7), line: "Asked Merge? on 1 PR", item: it("designcraft", 1484, "Add Hungarian spellchecking and nonstandard hyphenation"), itemCount: 1, repo: "designcraft", detail: "/pipeline/6", estimate: null,
-        ops: [{ kind: "model", label: "claude-haiku", detail: "Merge? on main", start: t(9), end: t(7.5), estimate: null }] },
+        ops: [{ kind: "model", label: "claude-haiku", detail: "Merge? on Team B", start: t(9), end: t(7.5), estimate: null, account: "claude:b" }] },
       { key: "job:7", title: "Merge pull requests", state: "failed", start: t(6), end: t(5), line: "Refused: required check has not finished", item: it("filmcraft", 1161, "Color grading: keep state after copy and paste"), itemCount: 1, repo: "filmcraft", detail: "/pipeline/7", estimate: null, ops: [] },
+    ],
+    accounts: [
+      { key: "claude:a", label: "main", provider: "claude", running: 1, maxConcurrent: 3, fiveHourPct: 46, pausedReason: null, calls: 14, tokens: 3_820_000 },
+      { key: "claude:b", label: "Team B", provider: "claude", running: 1, maxConcurrent: 2, fiveHourPct: 91, pausedReason: "5-hour use 91 % (pauses at 90 %)", calls: 6, tokens: 1_240_000 },
+      { key: "claude:c", label: "Spare", provider: "claude", running: 0, maxConcurrent: 2, fiveHourPct: 3, pausedReason: null, calls: 0, tokens: 0 },
+      { key: "jev", label: "Jev", provider: "jev", running: 0, maxConcurrent: null, fiveHourPct: null, pausedReason: null, calls: 22, tokens: 410_000 },
     ],
   };
 }

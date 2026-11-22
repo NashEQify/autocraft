@@ -1,11 +1,13 @@
 // The Live board at the top of Home: every running and queued unit of the pipeline's work on one time axis. A lane is a job (or a call or
 // build task of its own); its thin bar is the job, the tall bars are its model calls and build steps. Solid: done, pulsing: running now,
 // dashed: the expected rest (median of earlier runs), red line: 90% of earlier runs were done by then. Under the lanes, the latest few
-// finished events of the feed (merges, GitHub writes, answered questions).
-import { useEffect, useMemo, useReducer, useRef } from "react";
+// finished events of the feed (merges, GitHub writes, answered questions). Above the lanes, who provides the tokens: one card per account
+// with its share of the last hour's tokens; operators press one to pick out its model calls on the lanes.
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "../../api/client";
-import type { LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../api/types";
+import type { LiveAccount, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../api/types";
+import { compact } from "../../ui/molecules/BarList";
 import { nowMs } from "../../lib/format";
 import { itemPath } from "../../lib/links";
 import { useNow } from "../../lib/useNow";
@@ -63,7 +65,7 @@ function BarTip({ detail, start, end, estimate, now, failed }: { detail?: string
 }
 
 /** One lane's track: the job as a thin bar, its calls and steps as tall ones, and the expected rest of what runs. */
-function Track({ lane, from, to, now }: { lane: LiveLane; from: number; to: number; now: number }) {
+function Track({ lane, from, to, now, picked }: { lane: LiveLane; from: number; to: number; now: number; picked: string | null }) {
   const x = (t: number) => `${((Math.min(Math.max(t, from), to) - from) / (to - from)) * 100}%`;
   const w = (a: number, b: number) => `${(Math.max(0, Math.min(b, to) - Math.max(a, from)) / (to - from)) * 100}%`;
   const start = Date.parse(lane.start);
@@ -92,11 +94,18 @@ function Track({ lane, from, to, now }: { lane: LiveLane; from: number; to: numb
         const s = Date.parse(o.start);
         const e = o.end ? Date.parse(o.end) : now;
         if (e < from) return null;
+        // With an account picked, its calls stand out and everything else steps back.
+        const mine = picked !== null && o.kind === "model" && o.account === picked;
         return (
           <span key={i}>
             <Tooltip title={`${KIND[o.kind].label}: ${o.label}`} content={<BarTip detail={o.detail} start={s} end={o.end ? e : null} estimate={o.estimate} now={now} failed={o.failed} />}>
               <div
-                className={cn("absolute top-1 h-3.5 rounded-sm", o.failed ? "bg-bad" : KIND[o.kind].bg, o.end === null ? "animate-pulse" : "opacity-70")}
+                className={cn(
+                  "absolute top-1 h-3.5 rounded-sm",
+                  o.failed ? "bg-bad" : KIND[o.kind].bg,
+                  picked !== null && !mine ? "opacity-20" : o.end === null ? "animate-pulse" : "opacity-70",
+                  mine && "opacity-100 ring-2 ring-ink",
+                )}
                 style={{ left: x(s), width: w(s, e), minWidth: 3 }}
               />
             </Tooltip>
@@ -182,6 +191,62 @@ function useSteadyLanes(lanes: LiveLane[] | undefined): LiveLane[] {
   }, [lanes, pruned]);
 }
 
+/** One account's card: label, slots in use, its share of the last hour's tokens, calls and 5-hour use. A button for operators. */
+function AccountCard({ a, share, picked, onPick }: { a: LiveAccount; share: number; picked: boolean; onPick: (() => void) | null }) {
+  const busy = a.running > 0;
+  const name = `${a.label}: ${compact(a.tokens)} tokens in ${a.calls} ${a.calls === 1 ? "call" : "calls"}, ${a.running}${a.maxConcurrent !== null ? ` of ${a.maxConcurrent}` : ""} running${a.fiveHourPct !== null ? `, 5-hour use ${Math.round(a.fiveHourPct)}%` : ""}${a.pausedReason ? `, paused: ${a.pausedReason}` : ""}`;
+  const body = (
+    <>
+      <span className="flex items-center gap-1.5">
+        <span className={cn("size-2 shrink-0 rounded-full", busy ? "animate-pulse bg-ok" : "bg-ink/30")} aria-hidden />
+        <span className="truncate text-xs font-medium">{a.label}</span>
+        {a.pausedReason && <span className="shrink-0 rounded bg-warn/15 px-1 text-2xs text-warn">paused</span>}
+        <span className="num ml-auto shrink-0 text-2xs text-ink/55">
+          {a.running}
+          {a.maxConcurrent !== null && `/${a.maxConcurrent}`} running
+        </span>
+      </span>
+      <span className="mt-1.5 block h-1.5 overflow-hidden rounded-full bg-ink/[0.08]" aria-hidden>
+        <span className={cn("block h-full rounded-full", a.provider === "jev" ? "bg-c2" : "bg-accent")} style={{ width: `${Math.round(share * 100)}%` }} />
+      </span>
+      <span className="num mt-1 flex gap-2 text-2xs text-ink/55">
+        <span className="font-medium text-ink/80">{compact(a.tokens)} tokens</span>
+        <span>{a.calls} {a.calls === 1 ? "call" : "calls"}</span>
+        {a.fiveHourPct !== null && <span className={cn("ml-auto", a.pausedReason && "text-warn")}>5h {Math.round(a.fiveHourPct)}%</span>}
+      </span>
+    </>
+  );
+  const cls = "block min-w-[11rem] flex-1 rounded-md border px-2.5 py-1.5 text-left";
+  const tip = a.pausedReason ?? undefined;
+  if (!onPick) return <div className={cn(cls, "border-line")} title={tip} role="group" aria-label={name}>{body}</div>;
+  return (
+    <button type="button" onClick={onPick} aria-pressed={picked} aria-label={name} title={tip}
+      className={cn(cls, "transition-colors hover:bg-ink/[0.04] focus-visible:outline-2 focus-visible:outline-accent-ink", picked ? "border-ink bg-ink/[0.06]" : "border-line")}>
+      {body}
+    </button>
+  );
+}
+
+/** Who provides the tokens: the accounts, busiest first, each with its share of the last hour's tokens. */
+function Accounts({ accounts, picked, onPick }: { accounts: LiveAccount[]; picked: string | null; onPick: ((key: string) => void) | null }) {
+  const total = accounts.reduce((s, a) => s + a.tokens, 0);
+  const shown = [...accounts].sort((x, y) => y.running - x.running || y.tokens - x.tokens);
+  return (
+    <div className="border-b border-line px-3 py-2">
+      <div className="mb-1.5 flex items-baseline gap-2 text-2xs text-ink/55">
+        <span className="font-medium text-ink/75">Tokens from</span>
+        <span className="num">{compact(total)} in the last hour</span>
+        {onPick && <span className="ml-auto max-sm:hidden">{picked ? "Showing that account's model calls; press it again to show all" : "Press an account to pick out its model calls"}</span>}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {shown.map((a) => (
+          <AccountCard key={a.key} a={a} share={total ? a.tokens / total : 0} picked={picked === a.key} onPick={onPick && (() => onPick(a.key))} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 const FEED_SHOWN = 5;
 
 /** The latest finished events of the feed; what runs is on the lanes above. */
@@ -208,6 +273,12 @@ export function LiveBoard({ to }: { to: string }) {
   useNow(1000);
   const now = nowMs();
   const lanes = useSteadyLanes(data?.lanes);
+  const accounts = data?.accounts ?? [];
+  // Only operators get calls tagged with their account, so only they can pick one out.
+  const canPick = lanes.some((l) => l.ops.some((o) => o.account));
+  const [picked, setPicked] = useState<string | null>(null);
+  const pick = canPick ? (key: string) => setPicked((p) => (p === key ? null : key)) : null;
+  const pickedLabel = accounts.find((a) => a.key === picked)?.label;
   const running = lanes.filter((l) => l.state === "running");
   // Axis: the last hour (less when nothing is that old), up to the latest expected end.
   const starts = lanes.filter((l) => l.state !== "queued").map((l) => Date.parse(l.start));
@@ -236,9 +307,18 @@ export function LiveBoard({ to }: { to: string }) {
       linkLabel="Full feed"
     >
       <ErrorLine error={error?.message} />
+      <span className="sr-only" aria-live="polite">
+        {picked && pickedLabel ? `Showing the model calls of ${pickedLabel}` : ""}
+      </span>
+      {data && lanes.length === 0 && accounts.length > 0 && (
+        <div className="overflow-hidden rounded-md border border-line">
+          <Accounts accounts={accounts} picked={null} onPick={null} />
+        </div>
+      )}
       {data && lanes.length === 0 && <p className="border-t border-line py-3 text-sm text-ink/55">Nothing is running or queued.</p>}
       {lanes.length > 0 && (
         <div className="overflow-hidden rounded-md border border-line">
+          {accounts.length > 0 && <Accounts accounts={accounts} picked={canPick ? picked : null} onPick={pick} />}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-line bg-ink/[0.03] px-3 py-1.5 text-2xs text-ink/55">
             {LEGEND.map((k) => (
               <span key={k} className="inline-flex items-center gap-1.5">
@@ -265,7 +345,7 @@ export function LiveBoard({ to }: { to: string }) {
                   <LaneInfo lane={l} now={now} />
                 </div>
                 <div className="flex flex-col justify-center border-b border-line px-3 py-2 max-md:pt-0">
-                  <Track lane={l} from={from} to={to2} now={now} />
+                  <Track lane={l} from={from} to={to2} now={now} picked={canPick ? picked : null} />
                 </div>
               </div>
             ))}

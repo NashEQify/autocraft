@@ -2388,6 +2388,27 @@ export interface LiveOp {
   /** For a running op: how long the same work took before. */
   estimate: LiveEstimate | null;
   failed?: boolean;
+  /** A model call's account (a `LiveAccount.key`); operators only, as account labels on the board are. */
+  account?: string;
+}
+/**
+ * Who provides the tokens on the Live board: an enabled Claude account, or Jev when it ran in the window. Calls and tokens count the
+ * calls that ended in the board's last hour, leaving out calls on repos the reader cannot see.
+ */
+export interface LiveAccount {
+  /** "claude:<id>" or "jev". */
+  key: string;
+  label: string;
+  provider: "claude" | "jev";
+  /** Calls running now, against `maxConcurrent` (null for Jev). */
+  running: number;
+  maxConcurrent: number | null;
+  /** 5-hour use in %; null for Jev or before the first reading. */
+  fiveHourPct: number | null;
+  pausedReason: string | null;
+  calls: number;
+  /** Input, output and cache tokens. */
+  tokens: number;
 }
 /** One unit of the pipeline's work on the Live board: a job (with its model calls and build tasks) or a build task or call of its own. */
 export interface LiveLane {
@@ -2409,7 +2430,7 @@ export interface LiveLane {
   ops: LiveOp[];
 }
 /** `GET /api/live`: running and queued work and what ended in the last minutes, for the Live timeline on Home. */
-export interface LiveBoard { lanes: LiveLane[] }
+export interface LiveBoard { lanes: LiveLane[]; accounts: LiveAccount[] }
 
 export type Now = { health: NowHealth; /** Titles of housekeeping jobs that are running, shown as one line. */ alsoRunning: string[] } & NowFeed;
 

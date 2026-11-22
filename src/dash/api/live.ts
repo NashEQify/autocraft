@@ -1,8 +1,10 @@
 // The Live board on Home: every running and queued unit of the pipeline's work (jobs, model calls and build tasks of their own, open
 // integration batches) on one time axis, with the model calls and build steps inside it and how long the same work took before. Jobs that
-// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); account
-// labels are for operators only.
-import type { ItemRef, ItemShown, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../../web/src/api/types.ts";
+// ended in the last minutes stay on it, faded. Repos the reader cannot see are left out as on the Now page (src/dash/api/now.ts); which
+// account a call ran on is for operators only. Above the lanes, who provides the tokens: each enabled account (as the Agents page shows it to
+// everyone) with its calls and tokens of the last hour.
+import type { ItemRef, ItemShown, LiveAccount, LiveBoard, LiveEstimate, LiveLane, LiveOp, LiveOpKind } from "../../../web/src/api/types.ts";
+import { listAccounts } from "../../agents/accounts.ts";
 import { PRIVATE_STEPS_SQL } from "../../build/tasks.ts";
 import { touchesHidden } from "../../agents/runs.ts";
 import { filtered, hiddenTest, type HiddenRepos } from "../../hidden-sql.ts";
@@ -68,11 +70,18 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
     (await all<{ ms: number }>(db, `SELECT (julianday(ended_at) - julianday(started_at)) * 86400000 AS ms FROM build_tasks WHERE repo = ? AND step = ? AND state = 'done' AND started_at IS NOT NULL AND ended_at IS NOT NULL ORDER BY id DESC LIMIT ?`, repo, step, SAMPLES)).map((r) => r.ms));
 
   const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
-  type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
-  const callOp = async (c: Call): Promise<LiveOp> => ({
-    kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && req.user.role === "operator" ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
-    start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? await callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
-  });
+  type Call = { id: number; job_id: number | null; step: string; model: string; provider: string; account_id: string | null; label: string | null; started_at: string; ended_at: string | null; state: string; progress: string | null };
+  const operator = req.user.role === "operator";
+  const callAccount = (c: Call): string | null => (c.provider === "jev" ? "jev" : c.account_id ? `claude:${c.account_id}` : null);
+  const callOp = async (c: Call): Promise<LiveOp> => {
+    const account = operator ? callAccount(c) : null;
+    return {
+      kind: "model", label: c.provider === "jev" ? "Jev" : c.model, detail: c.provider !== "jev" && operator ? `${stepTitle(c.step)} on ${c.label ?? "an unknown account"}` : stepTitle(c.step),
+      start: c.started_at, end: c.ended_at, estimate: c.state === "running" ? await callEstimate(c.step, c.model) : null, ...(c.state === "failed" ? { failed: true } : {}),
+      ...(account ? { account } : {}),
+    };
+  };
+  const callCols = "r.id, r.job_id, r.step, r.model, r.provider, r.account_id, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress";
   type Task = { id: number; job_id: number | null; step: string; repo: string; number: number | null; state: string; queued_at: string; started_at: string | null; ended_at: string | null; results: string; summary: string | null; current: string | null };
   /** A finished task as one op per step (from its recorded durations); a running one as one op named by the step its log is on. */
   const taskOps = async (t: Task): Promise<LiveOp[]> => {
@@ -115,7 +124,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
     const its = await all<{ repo: string; number: number }>(db, `SELECT repo, number FROM job_items WHERE job_id = ?${notHidden("repo", hidden)} ORDER BY id`, j.id, ...hideArgs(hidden));
     if (ended && its.length === 0 && j.state !== "failed") continue;
     if (ended && ++recent > RECENT_MAX) continue;
-    const calls = await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
+    const calls = await all<Call>(db, `SELECT ${callCols}
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.job_id = ?${hiddenRuns} ORDER BY r.id`, j.id, ...hideArgs(hidden));
     const tasks = await all<Task>(db, `SELECT ${taskCols} FROM build_tasks t WHERE t.job_id = ?${notHidden("t.repo", hidden)}${privateTasks} ORDER BY t.id`, j.id, ...hideArgs(hidden));
     const line = j.state === "running" ? blankIfHidden(j.progress, hidden) : j.state === "failed" ? (staff && j.error ? blankIfHidden(j.error, hidden) : "Failed") : j.state === "done" ? blankIfHidden(j.summary, hidden) : null;
@@ -129,7 +138,7 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
   }
 
   // Calls and build tasks that run without a job.
-  for (const c of await all<Call>(db, `SELECT r.id, r.job_id, r.step, r.model, r.provider, COALESCE(a.label, r.account_id) AS label, r.started_at, r.ended_at, r.state, r.progress
+  for (const c of await all<Call>(db, `SELECT ${callCols}
       FROM agent_runs r LEFT JOIN claude_accounts a ON a.id = r.account_id WHERE r.state = 'running' AND r.job_id IS NULL${hiddenRuns} ORDER BY r.id`, ...hideArgs(hidden))) {
     const it = (await all<{ repo: string; number: number }>(db, "SELECT repo, number FROM agent_run_items WHERE run_id = ? ORDER BY repo, number LIMIT 1", c.id))[0];
     const op = await callOp(c);
@@ -157,5 +166,31 @@ export async function live(db: Db, req: Req): Promise<LiveBoard> {
       item: t.number === null ? null : await item(t.repo, t.number), itemCount: t.number === null ? 0 : 1, repo: t.repo, detail: `/envs/${t.id}`, estimate: ops[0]?.estimate ?? null, ops,
     });
   }
-  return { lanes };
+  return { lanes, accounts: await accountsOf(db, hidden, nowMs) };
+}
+
+/** Calls and tokens per account count the calls that ended this long ago at most. */
+export const ACCOUNT_WINDOW_MS = 60 * 60_000;
+
+/**
+ * Who provides the tokens: each enabled Claude account with its slots in use, 5-hour use, and the calls and tokens that ended in the last hour,
+ * then Jev when it ran in that hour. Calls on repos hidden from the reader are left out of the counts.
+ */
+async function accountsOf(db: Db, hidden: HiddenRepos, nowMs: number): Promise<LiveAccount[]> {
+  const hiddenRuns = filtered(hidden) ? ` AND ${touchesHidden(hidden).sql}` : "";
+  type Use = { provider: string; account_id: string | null; running: number; calls: number; tokens: number };
+  const use = await all<Use>(db, `SELECT r.provider, r.account_id,
+      SUM(r.state = 'running') AS running,
+      SUM(r.state <> 'running' AND r.ended_at > ?) AS calls,
+      SUM(CASE WHEN r.state <> 'running' AND r.ended_at > ? THEN COALESCE(r.input_tokens, 0) + COALESCE(r.output_tokens, 0) + COALESCE(r.cache_read_tokens, 0) + COALESCE(r.cache_write_tokens, 0) ELSE 0 END) AS tokens
+    FROM agent_runs r WHERE (r.state = 'running' OR r.ended_at > ?)${hiddenRuns} GROUP BY r.provider, r.account_id`,
+  ...Array<string>(3).fill(iso(nowMs - ACCOUNT_WINDOW_MS)), ...hideArgs(hidden));
+  const byAccount = new Map(use.filter((u) => u.provider !== "jev" && u.account_id).map((u) => [u.account_id!, u]));
+  const out: LiveAccount[] = (await listAccounts(db, nowMs, false)).filter((a) => a.enabled).map((a) => ({
+    key: `claude:${a.id}`, label: a.label, provider: "claude", running: a.running, maxConcurrent: a.maxConcurrent,
+    fiveHourPct: a.usage.fiveHourPct, pausedReason: blankIfHidden(a.pausedReason, hidden) || null, calls: byAccount.get(a.id)?.calls ?? 0, tokens: byAccount.get(a.id)?.tokens ?? 0,
+  }));
+  const jev = use.filter((u) => u.provider === "jev").reduce((s, u) => ({ running: s.running + u.running, calls: s.calls + u.calls, tokens: s.tokens + u.tokens }), { running: 0, calls: 0, tokens: 0 });
+  if (jev.running || jev.calls) out.push({ key: "jev", label: "Jev", provider: "jev", maxConcurrent: null, fiveHourPct: null, pausedReason: null, ...jev });
+  return out;
 }
