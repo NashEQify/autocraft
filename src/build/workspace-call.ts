@@ -36,6 +36,10 @@ export type WorkspaceCallRequest = {
   /** Keep the harness session so a follow-up turn (`parentId`) can continue it. */
   keepSession?: boolean;
   parentId?: number;
+  /** Only this user's own Task Runners take the call (calls.ts NewCall.forLogin); a follow-up keeps its parent's. */
+  forLogin?: string;
+  /** With forLogin: the call runs in one of that user's Task Runner slots, not their own lane (NewCall.boundSlot). */
+  boundSlot?: boolean;
 };
 
 /** The `claude` arguments of a workspace session: no built-in tools, only the listed MCP servers' tools, allowed without asking. */
@@ -63,6 +67,7 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
     const id = await enqueueCall(db, {
       promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, askedModel: r.model, items: r.items, level: r.level ?? 2, maxAttempts: r.maxAttempts ?? 1,
       ...(r.parentId !== undefined && { parentId: r.parentId }), ...(r.referenceRepo && extra.includes(REFERENCE_SERVER) && { referenceRepo: r.referenceRepo }),
+      ...(r.forLogin !== undefined && { forLogin: r.forLogin, boundSlot: r.boundSlot === true }),
       bundle: {
         promptId: r.promptId, promptVersion: r.promptVersion, tier: r.tier, effort: r.effort, timeoutSeconds: r.timeoutSeconds, maxTurns: r.maxTurns,
         stdin: r.stdin, system: r.system ?? null, mounts: [], mcpServers: servers, keepSession: r.keepSession === true,

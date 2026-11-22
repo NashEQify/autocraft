@@ -111,6 +111,11 @@ export type NewCall = {
   referenceRepo?: string;
   /** Only this user's own Task Runners take the call (a maintainer's conversation turn); a follow-up keeps its parent's. */
   forLogin?: string;
+  /**
+   * With forLogin: the call runs in one of that user's Task Runner slots and counts toward their Max calls at once, never in
+   * the own lane (Claim.ownLane), which is for short turns; a follow-up keeps its parent's.
+   */
+  boundSlot?: boolean;
 };
 
 /** JSON with object keys sorted, so equal values give equal text. */
@@ -177,14 +182,16 @@ export async function enqueueCall(db: Db, c: NewCall, nowMs: number = Date.now()
     const id = await adoptEarlier(db, s.jobId, Date.parse(run.startedAt), c, hash, nowMs);
     if (id !== null) return id;
   }
-  const parent = c.parentId === undefined ? undefined : await db.get(db.k.selectFrom("main.remote_calls").select(["user_login", "for_login"]).where("id", "=", c.parentId));
+  const parent = c.parentId === undefined ? undefined : await db.get(db.k.selectFrom("main.remote_calls").select(["user_login", "for_login", "bound_slot"]).where("id", "=", c.parentId));
   const sticky = parent?.user_login ?? null;
   const authors = judges(c.promptId) ? JSON.stringify(await authorsOf(db, c.items)) : "[]";
+  const forLogin = c.forLogin ?? parent?.for_login ?? null;
+  const boundSlot = forLogin !== null && (c.forLogin !== undefined ? c.boundSlot === true : parent?.bound_slot === 1);
   const id = Number((await db.get(db.k.insertInto("main.remote_calls").values({
     job_id: s.jobId, step: s.step, stage: s.stage, prompt_id: c.promptId, prompt_version: c.promptVersion, tier: c.tier, effort: c.effort, asked_model: c.askedModel,
     bundle: JSON.stringify(c.bundle), bundle_hash: hash, state: "queued", items: JSON.stringify(c.items), repo: q.repo, class: q.cls, level: c.level, since: nowMs, seen_at: nowMs, queued_since: nowMs,
     max_attempts: Math.max(1, c.maxAttempts), timeout_ms: c.bundle.timeoutSeconds * 1000, parent_id: c.parentId ?? null, sticky_login: sticky, reference_repo: c.referenceRepo ?? null, authors,
-    for_login: c.forLogin ?? parent?.for_login ?? null,
+    for_login: forLogin, bound_slot: boundSlot ? 1 : 0,
   }).returning("id")))!.id);
   if (s.jobId !== null) adopted.add(id);
   dropQueueCache(db);
@@ -383,6 +390,8 @@ type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_logi
   refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null;
   /** The lowercase login whose own Task Runners alone take the call (NewCall.forLogin), or null for the shared pool. */
   forLogin: string | null;
+  /** A bound call that runs in a slot of its user's Task Runners, not their own lane (NewCall.boundSlot). */
+  boundSlot: boolean;
   /** The lowercase login of the call's pick ("Run on my Task Runner", picks.ts), when it has one, live or not (pickCounts). */
   pickedBy: string | null; pickedAt: number | null; pickUntil: number | null;
   /** Ends the call's pick; set while it has one. */
@@ -509,7 +518,8 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
 
 /**
  * The calls the login's helpers hold leases on now, all helpers together, that count toward its Max calls at once: a call its
- * own lane runs (Claim.ownLane, a call bound to the login) does not; one an older helper runs in a slot does.
+ * own lane runs (Claim.ownLane, a call bound to the login) does not; one in a slot does (a bound call an older helper runs,
+ * or one that runs in a slot, NewCall.boundSlot).
  */
 export const leasedBy = async (db: Db, login: string): Promise<number> => Number((await db.get(leasedRow(db, login)))!.n);
 
@@ -603,7 +613,7 @@ export const QUEUE_CACHE_MS = 2_000;
 type QueueCache = { at: number; sig: string; followUps: Cand[]; ordered: Cand[] };
 const queueCaches = new WeakMap<Db, QueueCache>();
 /** The parsed items, repos, authors and bound login of each queued call by id: they never change, so a rebuild reads them only for new calls. */
-type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin">;
+type Parsed = Pick<Cand, "refs" | "repos" | "authors" | "forLogin" | "boundSlot">;
 const parsedCalls = new WeakMap<Db, Map<number, Parsed>>();
 /** Drops the cached queue order: a call was queued or leased by this process. Other processes' changes show in the signature (count and newest id of the queued calls) or within QUEUE_CACHE_MS. */
 export const dropQueueCache = (db: Db): void => void queueCaches.delete(db);
@@ -646,12 +656,13 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
   const queued = await db.all(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c"))
     .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until",
       (eb) => eb("id", ">", newest).as("inline"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("items")).end().as("items"),
-      (eb) => eb.case().when("id", ">", newest).then(eb.ref("authors")).end().as("authors"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("for_login")).end().as("for_login")])
+      (eb) => eb.case().when("id", ">", newest).then(eb.ref("authors")).end().as("authors"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("for_login")).end().as("for_login"),
+      (eb) => eb.case().when("id", ">", newest).then(eb.ref("bound_slot")).end().as("bound_slot")])
     .where("state", "=", literal("queued")).$narrowType<{ tier: Tier }>());
   // The items and authors of older calls not parsed yet (a requeued lease), in one read.
   const fresh = queued.filter((r) => !known.has(Number(r.id)) && !r.inline).map((r) => Number(r.id));
-  const texts = new Map<number, { items: string | null; authors: string | null; for_login: string | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
-  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors", "for_login"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
+  const texts = new Map<number, { items: string | null; authors: string | null; for_login: string | null; bound_slot: number | null }>(queued.filter((r) => r.inline).map((r) => [Number(r.id), r]));
+  if (fresh.length) for (const x of await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors", "for_login", "bound_slot"]).where(inList(db, "id", fresh, "bigint")))) texts.set(Number(x.id), x);
   const rows = await mapSeq(queued, async (r): Promise<Cand> => {
     const id = Number(r.id);
     let p = known.get(id);
@@ -660,7 +671,7 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
       const refs = JSON.parse(x.items!) as ItemRef[];
       // Calls queued before authors were stored on the row are read now.
       const authors = x.authors !== null ? JSON.parse(x.authors) as string[] : judges(r.prompt_id) ? await authorsOf(db, refs) : [];
-      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors), forLogin: x.for_login?.toLowerCase() ?? null };
+      p = { refs, repos: [...new Set([...refs.map((i) => i.repo), ...(r.repo ? [r.repo] : [])])], authors: new Set(authors), forLogin: x.for_login?.toLowerCase() ?? null, boundSlot: Number(x.bound_slot) === 1 };
     }
     seen.set(id, p);
     return {
@@ -703,7 +714,8 @@ const orderReads = async (db: Db, login: string, nowMs: number): Promise<OrderRe
  * come after its follow-ups, like picks; calls bound to another user are not offered. `bound` says where the caller's bound
  * calls and their follow-ups go: an own-lane claim (Claim.ownLane) gets only them ("only"), the slots of a Task Runner that has
  * an own lane (Claim.withOwnLane) none of them ("without"), and other Task Runners' slots take them with the rest ("with": older
- * ones, and a harness that runs one call at a time). A fast-lane claim gets only what fastLaneFits. A Manual
+ * ones, and a harness that runs one call at a time). Bound calls that run in a slot (NewCall.boundSlot) and their follow-ups
+ * go with the slots' calls: never to the own lane, and to the slots of a Task Runner that has one. A fast-lane claim gets only what fastLaneFits. A Manual
  * only user (manual-only.ts) gets no calls from the queue's order. The caller's pick of a call it released or whose role
  * rules it no longer fits ends here; one it may not take for another reason ends in eligible.
  */
@@ -717,9 +729,9 @@ async function claimOrder(db: Db, caller: Caller, tiers: ReadonlySet<Tier>, repo
   const allFollowUps = q.followUps.filter((r) => sessions.has(r.parent_id!) && sameLogin(r.sticky_login, caller.login) && fits(r));
   // Calls bound to the caller (a maintainer's own conversation turn) next, oldest first: like picks, they go by no repo, task or item choice.
   const own = q.ordered.filter((r) => r.forLogin === login && live(r) && !released(r) && tiers.has(r.tier) && (!fastLane || fastLaneFits(r)));
-  if (bound === "only") return [...allFollowUps.filter((r) => r.forLogin === login), ...own];
-  const followUps = bound === "without" ? allFollowUps.filter((r) => r.forLogin === null) : allFollowUps;
-  const ownHere = bound === "with" ? own : [];
+  if (bound === "only") return [...allFollowUps.filter((r) => r.forLogin === login && !r.boundSlot), ...own.filter((r) => !r.boundSlot)];
+  const followUps = bound === "without" ? allFollowUps.filter((r) => r.forLogin === null || r.boundSlot) : allFollowUps;
+  const ownHere = bound === "with" ? own : own.filter((r) => r.boundSlot);
   let fresh: Set<string> | null = null;
   // The caller's own picks count for it; whether other pickers can take theirs is read once, when a pick needs it.
   const counts = async (r: Cand): Promise<boolean> => await pickCounts(r, nowMs, async (who) => who === login || (fresh ??= await pickerLogins(db, nowMs)).has(who));
