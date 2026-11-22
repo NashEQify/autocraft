@@ -9,6 +9,8 @@ export class AreaError extends Error {}
 
 const now = () => new Date().toISOString();
 const same = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+// "none" names the items without an area in item filters (`area=none`), so no area may take it.
+const reserved = (name: string) => same(name, NONE_OF_THESE) || same(name, "none");
 
 export function cleanName(v: unknown): string {
   return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, AREA_NAME_MAX) : "";
@@ -23,7 +25,7 @@ export function lenientAreas(v: unknown, max = AREAS_MAX): Area[] {
   if (!Array.isArray(v)) return out;
   for (const o of v as Record<string, unknown>[]) {
     const name = cleanName(o?.name), description = cleanDescription(o?.description);
-    if (!name || !description || same(name, NONE_OF_THESE) || out.some((a) => same(a.name, name))) continue;
+    if (!name || !description || reserved(name) || out.some((a) => same(a.name, name))) continue;
     out.push({ name, description });
     if (out.length >= max) break;
   }
@@ -83,7 +85,7 @@ const find = (areas: Area[], name: string): number => {
 function validName(areas: Area[], v: unknown, except?: string): string {
   const name = cleanName(v);
   if (!name) throw new AreaError("an area needs a name");
-  if (same(name, NONE_OF_THESE)) throw new AreaError(`"${NONE_OF_THESE}" is not an area name`);
+  if (reserved(name)) throw new AreaError(`"${name}" is not an area name`);
   if (areas.some((a) => same(a.name, name) && !(except && same(a.name, except)))) throw new AreaError(`there is already an area "${name}"`);
   return name;
 }

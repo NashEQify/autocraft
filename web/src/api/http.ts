@@ -195,7 +195,7 @@ export function createHttpApi(): Api {
     home: () => get("/api/home"),
     itemPage: (repo, number, since) => get(`/api/items/${encodeURIComponent(repo)}/${number}/page${qs({ since })}`),
     itemPeek: (repo, number) => get(`/api/items/${encodeURIComponent(repo)}/${encodeURIComponent(String(number))}/peek`),
-    itemStatusList: (f) => get(`/api/items/status${qs({ q: f.q, phase: f.phase, kind: f.kind, repo: f.repo?.join(","), discord: f.discord ? "1" : undefined, cursor: f.cursor })}`),
+    itemStatusList: (f) => get(`/api/items/status${qs({ q: f.q, phase: f.phase, kind: f.kind, repo: f.repo?.join(","), area: f.area?.join(","), discord: f.discord ? "1" : undefined, cursor: f.cursor })}`),
     securityList: () => get("/api/security/findings"),
     findingPage: (repo, number) => get(`/api/security/findings/${encodeURIComponent(repo)}/${number}/page`),
     mainCi: () => get("/api/main-ci"),

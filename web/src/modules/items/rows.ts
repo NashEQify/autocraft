@@ -133,6 +133,8 @@ export interface RowFacts {
   mergedAt?: string | null;
   /** Normal lists only: messages in watched Discord channels that name the item. */
   discord?: number;
+  /** Normal lists only: the item's area, null without one. */
+  area?: string | null;
   /** True for the phase list: classification, queue slot and row metadata are not in that payload. */
   phaseScoped: boolean;
 }
@@ -141,7 +143,7 @@ export function factsFromListRow(row: ItemListRow): RowFacts {
   return {
     key: refKey(row), repo: row.repo, number: row.number, kind: row.kind, state: row.state, title: row.title, updatedAt: row.updatedAt,
     settled: row.settled, stage: row.stage, queue: row.queue ?? null, flags: row.settled.flags, author: row.author,
-    snippet: row.snippet ?? null, mergedHow: row.mergedHow ?? null, mergedAt: row.mergedAt ?? null, discord: row.discord, phaseScoped: false,
+    snippet: row.snippet ?? null, mergedHow: row.mergedHow ?? null, mergedAt: row.mergedAt ?? null, discord: row.discord, area: row.area ?? null, phaseScoped: false,
   };
 }
 

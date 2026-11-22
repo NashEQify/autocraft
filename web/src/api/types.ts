@@ -572,6 +572,10 @@ export interface ItemFilter {
   discord?: boolean;
   /** A flowchart branch, `<node>.<branch>` (FlowNode.id, FlowBranch.id): only the items it counts. */
   flow?: string;
+  /** Area names, any of them; `none` is the items without an area. */
+  area?: string[];
+  /** `area`: rows ordered by area name, items without one last, the sort within each; the list carries `byArea`. */
+  group?: "area";
   /** Default `relevance` with a query, else `updated`. */
   sort?: ItemSort;
   /** Default true. */
@@ -603,6 +607,8 @@ export interface ItemListRow extends ItemRef {
   mergedHow?: "rule" | "operator" | "batch" | null;
   /** When AutoCraft merged it; set with `mergedHow`. */
   mergedAt?: string | null;
+  /** The item's area in its repo's list; null without one. */
+  area?: string | null;
 }
 
 export interface ItemList {
@@ -611,6 +617,8 @@ export interface ItemList {
   /** Matches per settled status, under every filter except `status`. */
   byStatus: Record<SettledStatus, number>;
   run: string | null;
+  /** With `group=area`: matching items per area under every filter; `area` null counts the items without one. */
+  byArea?: { area: string | null; items: number }[];
 }
 
 export interface SearchHit extends ItemRef {
@@ -3059,7 +3067,7 @@ export interface ItemPeek {
 }
 /** A PR's merge checks as the merge queue shows them. */
 export type ItemChecks = Pick<QueueRow, "verdict" | "ci" | "mergeable" | "verify" | "size" | "prBuild">;
-export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
+export interface ItemStatusFilter { q?: string; phase?: ItemPhase; kind?: ItemKind; repo?: RepoName[]; /** Area names, `none` for the items without one. */ area?: string[]; /** Only items mentioned in a watched Discord channel. */ discord?: boolean; cursor?: string }
 /** `byPhase` and `total` count every row that matches the filter except `phase`; `nextCursor` is null on the last page. */
 export interface ItemStatusList { rows: ItemStatusRow[]; byPhase: Record<ItemPhase, number>; total: number; nextCursor: string | null }
 
