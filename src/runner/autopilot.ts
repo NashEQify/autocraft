@@ -48,7 +48,7 @@ import { premergeCandidates } from "../premerge/review.ts";
 import { pendingDefects, selectPostmerge } from "../postmerge/select.ts";
 import { mainFixDue } from "../mainfix/index.ts";
 import { statusApprovalOf } from "../prstatus/approval.ts";
-import { statusDue } from "../prstatus/index.ts";
+import { statusDue, statusRetriesDue, statusRetryAt } from "../prstatus/index.ts";
 import { latestRun } from "../classify/settled.ts";
 import { PIPELINE_DRAIN } from "../core/rules.ts";
 import { DEADLINE_ERROR, enqueue, JobError, now, requestCancel, RUNNER_STOPPED } from "./jobs.ts";
@@ -131,6 +131,8 @@ export type Lane = {
   steps?: string[];
   /** Its jobs are per repo: the lane's jobs are judged one repo at a time. */
   perRepo?: boolean;
+  /** Its jobs may run for tracked repos outside the pipeline scope (the PR status comment's last edits); `detect` decides which. */
+  anyTracked?: boolean;
   /** The change topics the lane's input lives in (default: INPUT_TOPICS). A job that handled nothing is not queued again while these and `extra` are unchanged. */
   topics?: string[];
   /** Input that no topic reports, e.g. the state of sandbox tasks. */
@@ -721,12 +723,19 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
   },
   {
     // One status comment per PR, in repos with the PR status switch on: queued when a PR's status line differs from the posted one.
+    // Every tracked repo, not only those in scope: comments already posted get their last Merged or Closed edit after the repo's Pipeline is switched off.
     name: "pr-status",
     perRepo: true,
+    anyTracked: true,
+    // A PR's failure backoff ends with the clock, not with a change in the data.
+    extra: async (db) => await statusRetriesDue(db),
     detect: async (db, ctx) => {
       const now = Date.now();
-      return (await filterSeq(ctx.tracked, async (repo) => {
-        if (!await statusApprovalOf(db, repo) || !(await statusDue(db, repo)).length) return false;
+      return (await filterSeq(await trackedNames(db), async (repo) => {
+        if (!await statusApprovalOf(db, repo)) return false;
+        const retry = await statusRetryAt(db, repo, now);
+        if (retry !== null) ctx.wake?.push(retry);
+        if (!(await statusDue(db, repo, now)).length) return false;
         // A repo whose GitHub write budget is used up would write nothing (the writes are refused as paced): it waits for the window to move.
         const wait = await pipelineWriteWait(db, "pr-status-comment", repo, now);
         if (wait <= PACE_MAX_WAIT_MS) return true;
@@ -1188,7 +1197,7 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
       if (!candidates.length) { for (const s of lane.steps ?? []) note(s, "nothing to do"); continue; }
       let taken = 0;
       for (const c of candidates) {
-        const outside = [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
+        const outside = lane.anyTracked ? undefined : [c, c.gate].find((x) => x && typeof x.params.repo === "string" && !scope.has(x.params.repo));
         if (outside) { note(outside.step, "outside the pipeline scope"); continue; }
         if (c.gate && !await gate(c.gate.step, c.gate.params, lane, c.gate.poll)) continue;
         const g = await gate(c.step, c.params, lane, c.poll);
@@ -1361,7 +1370,7 @@ export const LANE_KINDS: Record<string, ActionKind[]> = {
 };
 
 /** Lanes whose jobs are not about listed items (counters, collection, operator messages, per-repo scans); every other lane needs a LANE_KINDS entry. */
-export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "conversation-maintainer", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly"];
+export const NO_ITEM_LANES = ["rank", "verify-collect", "pr-build", "conversation", "conversation-maintainer", "postmerge", "postmerge-file", "main-fix", "cifix-rerun", "nightly", "pr-status"];
 
 export type LaneItem = {
   repo: string; number: number; kind: "pr" | "issue"; action: string; bucket: string | null;

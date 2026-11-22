@@ -961,12 +961,12 @@ export const STEPS: StepDef[] = [
   {
     name: "pr-status",
     title: "PR status comments",
-    description: "Keeps one status comment on each pull request the pipeline works on: posted once the PR is past triage, then edited in place when its step or place in the merge queue changes, with a last edit when it merges or closes. Only in repos where the PR status switch is on. Calls no model.",
+    description: "Keeps one status comment on each pull request the pipeline works on: posted once the PR is past triage, then edited in place when its step or place in the merge queue changes, and when it merges or closes. Only in repos where the PR status switch is on. Calls no model.",
     stage: runStage("pr-status"),
     requires: "operator",
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
-      { name: "limit", label: "At most", kind: "int", min: 1, max: 500, default: 100, help: "comments to post or edit in this job" },
+      { name: "limit", label: "At most", kind: "int", min: 1, max: 2000, default: 100, help: "comments to post or edit in this job" },
     ],
     check: async (db, p) => {
       const { statusApprovalOf } = await import("../prstatus/approval.ts");

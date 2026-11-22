@@ -1,5 +1,6 @@
 // The PR status comment follows a PR through the merge queue, an integration batch and the merge: one post, then edits of
-// the same comment, also after its stored record was lost (found again on GitHub by its marker).
+// the same comment, also after its stored record was lost (found again on GitHub by its marker, on an older page) and after
+// the repo's Pipeline was switched off.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { writePlanCache } from "../src/core/plan-cache.ts";
@@ -28,7 +29,12 @@ test("one status comment per PR: posted in the queue, edited in a batch and afte
         : { code: 0, stdout: JSON.stringify({ html_url: "https://github.com/o/app/pull/1#issuecomment-1001" }), stderr: "" };
     };
     const onGitHub = () => calls.at(-1)!.body;
-    const querier: Querier = { spent: 0, remaining: 5000, query: async () => ({ repository: { pullRequest: { comments: { nodes: calls.length ? [{ databaseId: 1001, body: onGitHub(), author: { login: "pipeline-bot" } }] : [] } } } }) as never };
+    // GitHub's comments, newest page first: ours sits on the older page behind someone else's newer comment.
+    const querier: Querier = { spent: 0, remaining: 5000, query: async (_q, v) => {
+      const older = (v as { before: string | null }).before === "c2";
+      const nodes = older ? (calls.length ? [{ databaseId: 1001, body: onGitHub(), author: { login: "pipeline-bot" } }] : []) : [{ databaseId: 2002, body: "looks good", author: { login: "someone" } }];
+      return { repository: { pullRequest: { comments: { pageInfo: { hasPreviousPage: !older, startCursor: older ? null : "c2" }, nodes } } } } as never;
+    } };
     const run = async () => await runPrStatus(db, { repo: "app", by: "pipeline", runId: "t", limit: 10, exec, querier, base: "https://dash.example" });
 
     assert.deepEqual((await run()).posted, [], "the switch is off by default");
@@ -45,14 +51,18 @@ test("one status comment per PR: posted in the queue, edited in a batch and afte
 
     // A restart lost the record between the post and its row: the comment is found on GitHub and edited.
     await db.prepare("DELETE FROM pr_status_comments").run();
-    await db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, pr_number, created_at, updated_at) VALUES (7, 'app', 'integration-app-1', 'open', 'b0', 'c1', 50, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')").run();
+    await db.prepare("INSERT INTO merge_batches (id, repo, branch, state, base_sha, commit_sha, created_at, updated_at) VALUES (7, 'app', 'integration-app-1', 'open', 'b0', 'c1', '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')").run();
     await db.prepare("INSERT INTO merge_batch_prs (batch_id, number, head_oid, position) VALUES (7, 1, 'sha1', 0)").run();
     await replan();
+    assert.equal((await run()).due, 0, "a batch member keeps its line until the batch PR opens");
+    await db.prepare("UPDATE merge_batches SET pr_number = 50 WHERE id = 7").run();
     const batched = await run();
     assert.deepEqual([batched.posted, batched.edited], [[], ["app#1"]]);
     assert.ok(calls.at(-1)!.args.includes("PATCH") && calls.at(-1)!.args.some((a) => a.endsWith("/issues/comments/1001")), "the same comment is edited");
     assert.match(onGitHub(), /Status:\*\* In the merge queue: checked in merge batch #50/);
 
+    // The repo's Pipeline is switched off before the merge: the posted comment still gets its last edit.
+    await db.prepare("UPDATE tracked_repos SET pipeline = 0 WHERE name = 'app'").run();
     await db.prepare("UPDATE items SET state = 'MERGED' WHERE repo = 'app' AND number = 1").run();
     await db.prepare("UPDATE merge_batches SET state = 'merged' WHERE id = 7").run();
     await replan();
