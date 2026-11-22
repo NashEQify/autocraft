@@ -1,5 +1,6 @@
 // The outside-author protections over JSON (src/outside.ts): the three numbers, and the operator's releases.
-import { filtered, hiddenTest } from "../../hidden-sql.ts";
+import { filtered, hiddenTestExpr } from "../../hidden-sql.ts";
+import { ciEq } from "../../db/kx.ts";
 import type { NeedsOutsideList } from "../../../web/src/api/types.ts";
 import { OutsideError, releaseAuthor, releaseOutside, setOutsideLimits } from "../../outside.ts";
 import { HttpError } from "../server/util.ts";
@@ -48,7 +49,10 @@ export async function releaseAll(db: Db, req: Req) {
 /** The items held for one author, oldest first. */
 export async function held(db: Db, req: Req): Promise<NeedsOutsideList> {
   const hidden = await hiddenRepos(db, req);
-  const rows = await db.prepare(`SELECT h.repo, h.number, h.kind, h.reason, i.title, i.created_at FROM main.outside_holds h LEFT JOIN items i ON i.repo = h.repo AND i.number = h.number
-    WHERE h.author = ? COLLATE NOCASE${filtered(hidden) ? ` AND NOT (${hiddenTest("h.repo", hidden).sql})` : ""} ORDER BY i.created_at, h.number LIMIT 200`).all(req.params.author!, ...(filtered(hidden) ? hiddenTest("h.repo", hidden).args : [])) as { repo: string; number: number; kind: "pr" | "issue"; reason: "limit" | "surge"; title: string | null; created_at: string | null }[];
+  const rows = await db.all(db.k.selectFrom("main.outside_holds as h").leftJoin("items as i", (j) => j.onRef("i.repo", "=", "h.repo").onRef("i.number", "=", "h.number"))
+    .select(["h.repo", "h.number", "h.kind", "h.reason", "i.title", "i.created_at"]).$narrowType<{ kind: "pr" | "issue"; reason: "limit" | "surge" }>()
+    .where((eb) => ciEq(db, "h.author", eb.val(req.params.author!)))
+    .$if(filtered(hidden), (q) => q.where((eb) => eb.not(hiddenTestExpr(db, "h.repo", hidden))))
+    .orderBy("i.created_at", (o) => o.asc().nullsFirst()).orderBy("h.number").limit(200));
   return { rows: rows.map((r) => ({ id: `outside:${r.repo}#${r.number}`, repo: r.repo, number: r.number, title: r.title ?? "", kind: r.kind, reason: r.reason, createdAt: r.created_at })) };
 }

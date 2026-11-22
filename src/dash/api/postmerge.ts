@@ -11,9 +11,8 @@ export async function postmergeOf(db: Db, repo: string, n: number, staff: boolea
   if (!r) return null;
   const all = await followupsOf(db, repo, n);
   const follow = all.filter((f) => f.review_at === r.at);
-  const issueOf = db.prepare("SELECT state, title FROM items WHERE repo = ? AND number = ?");
   const filedIssue = async (row: Followup) => {
-    const it = await issueOf.get(repo, row.issue_number) as { state: string; title: string | null } | undefined;
+    const it = await db.get(db.k.selectFrom("items").select(["state", "title"]).where("repo", "=", repo).where("number", "=", row.issue_number!));
     return { number: row.issue_number!, url: row.url, state: it ? itemState(it.state) : null, title: it?.title ?? row.title };
   };
   const held = await heldReason(db, repo, n, r.at);

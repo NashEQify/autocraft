@@ -13,7 +13,6 @@ import type { Db } from "../../db/index.ts";
 
 const WAITING_LIMIT = 500;
 
-type PlanRow = { repo: string; number: number; wait: string | null; view: string };
 const parseView = (view: string): { next?: string; scope?: true } => { try { return (JSON.parse(view) as { next?: string; scope?: true } | null) ?? {}; } catch { return {}; } };
 const nextText = (view: string): string | null => parseView(view).next ?? null;
 
@@ -26,9 +25,9 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
   const shown = shownLookup(db);
   const stepDefs = await loadSteps();
   const status = await stageStatus(db);
-  const plan = db.prepare("SELECT repo, number, wait, view FROM item_plans WHERE repo = ? AND number = ?");
+  const plan = async (repo: string, number: number) => await db.get(db.k.selectFrom("item_plans").select(["repo", "number", "wait", "view"]).where("repo", "=", repo).where("number", "=", number));
   const why = async (repo: string, number: number, action: string): Promise<string> =>
-    (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText((await plan.get(repo, number) as PlanRow | undefined)?.view ?? "{}"), hidden) || null) ?? action;
+    (veiledFor(reader, repo, number) ? null : blankIfHidden(nextText((await plan(repo, number))?.view ?? "{}"), hidden) || null) ?? action;
   const stageOf = new Map(lanesInOrder().map((l) => [l.name, STAGES.find((s) => s.id === l.stage)?.title ?? l.stage]));
   const steps: NextStep[] = [];
   for (const lane of LANES) {
@@ -45,7 +44,7 @@ export async function nextPage(db: Db, visibleNames: string[], opts: { nowMs?: n
       note: blankIfHidden((lane.steps ?? []).map((s) => status[s]).find(Boolean) ?? null, hidden) || null, total, items,
     });
   }
-  const rows = await db.prepare("SELECT repo, number, wait, view FROM item_plans WHERE wait IS NOT NULL ORDER BY repo, number").all() as PlanRow[];
+  const rows = await db.all(db.k.selectFrom("item_plans").select(["repo", "number", "wait", "view"]).where("wait", "is not", null).orderBy("repo").orderBy("number"));
   const scoped = rows.filter((r) => visible.has(r.repo) && parseView(r.view).scope);
   const waiting: NextWaiting[] = await mapSeq(scoped.slice(0, WAITING_LIMIT), async (r) => {
     const s = statusFor(reader, r.repo, r.number, { waiting: r.wait, next: nextText(r.view) });

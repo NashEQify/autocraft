@@ -65,7 +65,7 @@ export async function stopFixItem(db: Db, req: Req): Promise<{ ok: true }> {
   await needVisible(db, req, repo);
   const answer = (req.json as { answer?: unknown } | undefined)?.answer;
   if (answer !== "close" && answer !== "backlog") throw new HttpError(400, "answer must be close or backlog");
-  const it = await db.prepare("SELECT kind, state, title FROM items WHERE repo = ? AND number = ?").get(repo, n) as { kind: string; state: string; title: string | null } | undefined;
+  const it = await db.get(db.k.selectFrom("items").select(["kind", "state", "title"]).where("repo", "=", repo).where("number", "=", n));
   if (!it || it.kind !== "issue" || it.state !== "OPEN") throw new HttpError(409, `${repo}#${n} is not an open issue`);
   const a = await stoppedFix(db, repo, n);
   if (!a) throw new HttpError(409, `${repo}#${n} has no skipped or failed fix attempt`);
