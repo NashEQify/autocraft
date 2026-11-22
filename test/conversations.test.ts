@@ -125,9 +125,8 @@ describe("cards", () => {
       R([{ kind: "comment" }], null, { text: "Which version?" }),
     ])}\n\`\`\``;
     assert.deepEqual((await parseReply(db, "app", 2, reply))!.cards.map((c) => c.params.kind === "resolution" ? c.params.steps.map((x) => x.kind).join() : ""), ["label", "open_issue"]);
-    await db.prepare("INSERT INTO security_scans (id, repo, state, started_by, started_at) VALUES (900, 'app', 'done', 'op', ?)").run(T0);
-    await db.prepare(`INSERT INTO security_findings (repo, number, scan_id, area, title, severity, urgent, state, refs, reach, impact, fingerprint, fix_pr, created_at, updated_at)
-      VALUES ('app', 900, 900, 'a', 't', 'high', 0, 'landing', '[]', 'r', 'i', 'fp900', 2, ?, ?)`).run(T0, T0);
+    await db.run(db.k.insertInto("security_scans").values({ id: 900, repo: "app", state: "done", started_by: "op", started_at: T0 }));
+    await db.run(db.k.insertInto("security_findings").values({ repo: "app", number: 900, scan_id: 900, area: "a", title: "t", severity: "high", urgent: 0, state: "landing", refs: "[]", reach: "r", impact: "i", fingerprint: "fp900", fix_pr: 2, created_at: T0, updated_at: T0 }));
     const p = (await parseReply(db, "app", 2, reply))!;
     assert.deepEqual(p.cards.map((c) => c.params.kind === "resolution" ? c.params.steps.map((x) => x.kind).join() : ""), ["label"]);
     assert.equal(p.notes.length, 2);

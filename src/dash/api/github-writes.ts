@@ -1,6 +1,7 @@
 // AutoCraft's GitHub writes on one item, read from the audit table and joined to the comments and commits they made.
 // Plain rows only: the item page API maps them to its own shapes.
 import { GITHUB_ACTIONS } from "../../github/actions.ts";
+import * as kx from "../../db/kx.ts";
 import { ownLogins } from "../../github/identity.ts";
 import type { Db } from "../../db/index.ts";
 
@@ -22,20 +23,21 @@ export type WriteRow = {
   jobId: number | null;
   error: string | null;
   /** The mirrored comment or review this write made, when one is found. */
-  comment: { id: string; kind: string; url: string | null; created_at: string; author: string | null } | null;
+  comment: { id: string; kind: string | null; url: string | null; created_at: string | null; author: string | null } | null;
 };
 
-type AuditRow = { rowid: number; at: string; action: string; details: string | null };
-type CommentRow = { id: string; kind: string; url: string | null; created_at: string; author: string | null };
+type CommentRow = { id: string; kind: string | null; url: string | null; created_at: string | null; author: string | null };
 
+/** A comment without a creation time never falls inside a window. */
+const timeOf = (t: string | null): number => (t === null ? NaN : Date.parse(t));
 const str = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
 
 /** The writes AutoCraft made on `repo#number`, oldest first. */
 export async function writesOf(db: Db, repo: string, number: number): Promise<WriteRow[]> {
   const actions = Object.keys(GITHUB_ACTIONS);
-  const audit = await db.prepare(`SELECT rowid, at, action, details FROM audit WHERE target = ? AND action IN (${actions.map(() => "?").join(",")}) ORDER BY at, rowid`)
-    .all(`${repo}#${number}`, ...actions) as AuditRow[];
-  const comments = await db.prepare("SELECT id, kind, url, created_at, author FROM comments WHERE repo = ? AND number = ?").all(repo, number) as CommentRow[];
+  const audit = await db.all(db.k.selectFrom("audit").select([kx.rowid("audit").as("rowid"), "at", "action", "details"])
+    .where("target", "=", `${repo}#${number}`).where("action", "in", actions).orderBy("at").orderBy(kx.rowid("audit")));
+  const comments = await db.all(db.k.selectFrom("comments").select(["id", "kind", "url", "created_at", "author"]).where("repo", "=", repo).where("number", "=", number).orderBy(kx.rowid("comments")));
   const taken = new Set<string>();
   const byUrl = new Map(comments.filter((c) => c.url).map((c) => [c.url!, c]));
   const byId = new Map(comments.map((c) => [c.id, c]));
@@ -63,8 +65,8 @@ export async function writesOf(db: Db, repo: string, number: number): Promise<Wr
     let best: CommentRow | null = null;
     for (const c of comments) {
       if (taken.has(c.id) || c.kind !== kind || !c.author || !by.has(c.author)) continue;
-      const dt = Math.abs(Date.parse(c.created_at) - t);
-      if (dt <= MATCH_WINDOW_MS && (!best || dt < Math.abs(Date.parse(best.created_at) - t))) best = c;
+      const dt = Math.abs(timeOf(c.created_at) - t);
+      if (dt <= MATCH_WINDOW_MS && (!best || dt < Math.abs(timeOf(best.created_at) - t))) best = c;
     }
     if (best) { row.comment = best; taken.add(best.id); }
   }
@@ -73,13 +75,21 @@ export async function writesOf(db: Db, repo: string, number: number): Promise<Wr
 
 /** Whether AutoCraft pushed this commit to the item: an audit push row on it recorded the oid as its `commit`. */
 export async function pushedByAutoCraft(db: Db, repo: string, number: number, oid: string): Promise<boolean> {
-  return await db.prepare("SELECT 1 FROM audit WHERE target = ?2 AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done' AND (json_extract(details, '$.commit') = ?1 OR json_extract(details, '$.sha') = ?1) LIMIT 1").get(oid, `${repo}#${number}`) !== undefined;
+  return await db.get(db.k.selectFrom("audit").select((eb) => eb.lit(1).as("one"))
+    .where("target", "=", `${repo}#${number}`).where((eb) => kx.like(db, "action", eb.val("%-push")))
+    .where((eb) => eb.and([
+      eb(kx.jsonText(db, "details", "$.state"), "=", "done"),
+      eb.or([eb(kx.jsonText(db, "details", "$.commit"), "=", oid), eb(kx.jsonText(db, "details", "$.sha"), "=", oid)]),
+    ])).limit(1)) !== undefined;
 }
 
 /** The commits AutoCraft pushed to the item, as `pushedByAutoCraft` finds them: the `commit` or `sha` its done audit push rows recorded. */
 export async function pushedCommits(db: Db, repo: string, number: number): Promise<Set<string>> {
   const out = new Set<string>();
-  for (const r of await db.prepare("SELECT json_extract(details, '$.commit') AS c, json_extract(details, '$.sha') AS s FROM audit WHERE target = ? AND action LIKE '%-push' AND json_extract(details, '$.state') = 'done'").all(`${repo}#${number}`) as { c: unknown; s: unknown }[])
+  for (const r of await db.all(db.k.selectFrom("audit")
+    .select([kx.jsonText(db, "details", "$.commit").as("c"), kx.jsonText(db, "details", "$.sha").as("s")])
+    .where("target", "=", `${repo}#${number}`).where((eb) => kx.like(db, "action", eb.val("%-push")))
+    .where(kx.jsonText(db, "details", "$.state"), "=", "done")))
     for (const v of [r.c, r.s]) if (typeof v === "string") out.add(v);
   return out;
 }

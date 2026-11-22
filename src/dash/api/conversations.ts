@@ -6,6 +6,7 @@ import { parseCoreKey, type ChoicesRow, type CoreKey } from "../../decide/choice
 import { getDecision } from "../../decisions.ts";
 import { disputeCard, keepCard, queuePlace, queueReason } from "../../conversations/queue.ts";
 import { audit } from "../audit.ts";
+import * as kx from "../../db/kx.ts";
 import { NOTE_MAX } from "../../conversations/types.ts";
 import { cardDigest, cardOf, cardRepos, dismissCard, doCard, editCard, sweepRunningCards, type ActDeps, type CardRow } from "../../conversations/act.ts";
 import { ConversationError, addOperatorMessage, conversationOf, includesOf, pendingTurn, setInclude, staleOf, turnsOf, type IncludeRow, type StoreDeps } from "../../conversations/store.ts";
@@ -103,7 +104,7 @@ export async function choicesView(db: Db, repo: string, n: number): Promise<Deci
   if (!row || row.stamp !== await decisionStamp(db, d)) return null;
   const cores = await applyDrafts(db, d, base, row);
   const strip = ({ parsed: _p, decision: _d, allowed: _a, closing: _c, ...view }: Core) => view;
-  const run = (await db.prepare("SELECT id, state, error FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as { id: number; state: string; error: string | null } | undefined);
+  const run = await db.get(db.k.selectFrom("conversation_cards").select(["id", "state", "error"]).where("choice_id", "=", row.id).orderBy("id", "desc").limit(1));
   const pick = row.pick.core && cores.some((c) => c.key === row.pick.core) ? { core: row.pick.core, reason: row.pick.reason ?? "" } : null;
   return {
     id: row.id, decisionId: d.id, pick, cores: cores.map(strip),
@@ -122,7 +123,7 @@ export async function conversationView(db: Db, repo: string, n: number, who?: { 
   const includes = await includesOf(db, repo, n);
   const choices = await choicesView(db, repo, n);
   if (!c) return { repo, number: n, exists: false, pending: false, startedBy: null, turns: [], includes, choices };
-  const cards = await db.prepare("SELECT * FROM conversation_cards WHERE repo = ? AND number = ? ORDER BY id").all(repo, n) as unknown as CardRow[];
+  const cards = await db.all(db.k.selectFrom("conversation_cards").select(kx.cols("conversation_cards")).where("repo", "=", repo).where("number", "=", n).orderBy("id"));
   const turns: ConversationTurn[] = await mapSeq((await turnsOf(db, repo, n)), async (t) => ({
     id: t.id, kind: t.kind, login: t.login, at: t.at, body: t.body,
     actions: await mapSeq(cards.filter((x) => x.turn_id === t.id), async (x) => await cardView(db, x, who)),
@@ -326,7 +327,7 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
   const d = await getDecision(db, row.decisionId);
   if (!d || d.answer !== null) throw new HttpError(409, "the decision is already settled");
   if (await decisionStamp(db, d) !== row.stamp || (await openDecision(db, row.repo, row.number))?.id !== d.id) throw new HttpError(409, "the decision changed since these choices were written");
-  const priorOf = async (): Promise<CardRow | undefined> => await db.prepare("SELECT * FROM conversation_cards WHERE choice_id = ? ORDER BY id DESC LIMIT 1").get(row.id) as unknown as CardRow | undefined;
+  const priorOf = async (): Promise<CardRow | undefined> => await db.get(db.k.selectFrom("conversation_cards").select(kx.cols("conversation_cards")).where("choice_id", "=", row.id).orderBy("id", "desc").limit(1));
   // A card for these choices that is already running or done is returned as it is (a second press).
   const first = await priorOf();
   if (first && (first.state === "running" || first.state === "done" || first.state === "queued")) return await cardView(db, first, req.user);
@@ -364,9 +365,10 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
     // A run whose outcome is unknown may have repeated writes: the operator prepares again or says what else to do.
     if (prior?.state === "failed" && /^outcome unknown/.test(prior.error ?? "")) throw new HttpError(409, "the last run of these choices stopped after some of its steps; Re-prepare, or tell Opus what to do next");
     failedBefore = prior?.state === "failed" ? prior : undefined;
-    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE choice_id = ? AND state = 'proposed'").run(row.id);
-    id = Number((await db.prepare("INSERT INTO main.conversation_cards (turn_id, repo, number, kind, params, text, description, seen, choice_id) VALUES (?, ?, ?, 'resolution', ?, ?, ?, ?, ?) RETURNING id")
-      .get(row.turnId ?? 0, row.repo, row.number, JSON.stringify(v.card.params), v.card.text, v.card.description, seenJson(row.seen), row.id) as { id: number }).id);
+    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("choice_id", "=", row.id).where("state", "=", "proposed"));
+    id = (await db.get(db.k.insertInto("main.conversation_cards")
+      .values({ turn_id: row.turnId ?? 0, repo: row.repo, number: row.number, kind: "resolution", params: JSON.stringify(v.card.params), text: v.card.text, description: v.card.description, seen: seenJson(row.seen), choice_id: row.id })
+      .returning("id")))!.id;
     return undefined;
   });
   if (pressed) return await cardView(db, pressed, req.user);
@@ -383,7 +385,7 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
     if (fix?.kind === "fixup" && body.params.instructions !== undefined && body.params.instructions.trim() !== fix.instructions) edit.instructions = body.params.instructions;
     if (Object.keys(edit).length) await guard(async () => await editCard(db, id, req.user.login, edit));
   } catch (e) {
-    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
+    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("id", "=", id).where("state", "=", "proposed"));
     throw e;
   }
   // Steps a failed earlier press of these choices completed (its error names them) are not run again.
@@ -396,7 +398,7 @@ async function pressChoices(db: Db, req: Req, claimed: () => void, deps?: ActDep
     ran = await guardAsync(() => doCard(db, id, req.user.login, { ...deps, claimed, skip: alreadyDone, note: body.note, noteStaysOut: !isOperator(req), role: req.user.role, canWrite: (r) => req.user.canWrite(r) }));
   } catch (e) {
     // Refused before the claim (lane, approval): the card never ran and must not stay proposed.
-    await db.prepare("UPDATE main.conversation_cards SET state = 'replaced' WHERE id = ? AND state = 'proposed'").run(id);
+    await db.run(db.k.updateTable("main.conversation_cards").set({ state: "replaced" }).where("id", "=", id).where("state", "=", "proposed"));
     throw e;
   }
   return await cardView(db, ran.card, req.user);
