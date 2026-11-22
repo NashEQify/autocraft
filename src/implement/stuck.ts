@@ -49,6 +49,7 @@ export const STUCK_OPTIONS = {
   tryAgain: { key: "try-again", label: "Try again", hint: "Plan and implement it again in a new attempt. Text you add goes to the model as guidance." },
   draft: { key: "draft-pr", label: "Open as draft PR", hint: "Open the change as it is as a draft pull request for a person to finish." },
   close: { key: "close-issue", label: "Close issue", hint: "AutoCraft comments that the issue is closed for now and closes it as not planned." },
+  closePr: { key: "close-pr", label: "Close PR", hint: "AutoCraft comments on the pull request and closes it; the implementation ends and the issue stays open." },
   reviseAgain: { key: "try-again", label: "Try again", hint: "Send the pull request back to the session for the same revision. Text you add goes to the model as guidance." },
 } as const satisfies Record<string, Option>;
 
@@ -65,6 +66,8 @@ async function currentTextHash(db: Db, repo: string, number: number): Promise<st
   return it ? textHash(it.title ?? "", it.body ?? "") : null;
 }
 
+/** The comment Close PR of a stuck revision posts on our PR before the close. */
+export const STUCK_CLOSE_PR_COMMENT = "Closing this pull request: the implementation could not finish its revision. The issue stays open.";
 /** The comment the stuck decision's Close issue posts before the close. */
 export const STUCK_CLOSE_COMMENT = "Closing this as not planned for now. Reopen it when it should be picked up again.";
 
@@ -91,7 +94,7 @@ export async function markStuck(db: Db, impl: Implementation, cause: StuckCause,
   // A revision of our open PR is tried again on the same PR; the PR stays open, so there is no draft and no close of the issue.
   const revising = impl.prNumber !== null;
   const draft = revising || cause === "diff-refused" || cause === "no-change" ? { ok: false } : await (o.diffCheck ?? noDiffCheck)(db, impl);
-  const options: Option[] = revising ? [STUCK_OPTIONS.reviseAgain, BACKLOG] : [
+  const options: Option[] = revising ? [STUCK_OPTIONS.reviseAgain, STUCK_OPTIONS.closePr, BACKLOG] : [
     ...(tries < MAX_ATTEMPTS_PER_TEXT ? [STUCK_OPTIONS.tryAgain] : []),
     ...(draft.ok ? [STUCK_OPTIONS.draft] : []),
     STUCK_OPTIONS.close, BACKLOG,
@@ -224,6 +227,13 @@ export async function applyStuckAnswer(db: Db, impl: Implementation, o: { at?: s
     await setImplementationState(db, impl.id, "opening", {}, at);
     await applied();
     return { did: "handed to the PR step as a draft", next: null };
+  }
+  if (a.answer === STUCK_OPTIONS.closePr.key) {
+    if (impl.prNumber === null) return await again("the attempt has no pull request to close");
+    const r = await closeOnAnswer(db, impl, { decisionId: a.id, answer: a.answer, bucket: "build", comment: STUCK_CLOSE_PR_COMMENT, pr: impl.prNumber }, { ...o.close, now: () => at });
+    if ("done" in r) return { did: r.done, next: null };
+    if ("waiting" in r) return { did: `not closed yet: ${r.waiting}`, next: null };
+    return await again(r.refused);
   }
   if (a.answer === STUCK_OPTIONS.close.key) {
     const r = await closeOnAnswer(db, impl, { decisionId: a.id, answer: a.answer, bucket: "build", comment: STUCK_CLOSE_COMMENT }, { ...o.close, now: () => at });
