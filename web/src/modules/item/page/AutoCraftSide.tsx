@@ -29,7 +29,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
   // The folded choices come back once Opus's reply (new choices, a reply without any, or a failure) is in.
   useEffect(() => {
     if (!updating || !conv || conv.pending) return;
-    const failed = [...conv.turns].reverse().find((t) => t.kind === "operator")?.status === "failed";
+    const failed = [...conv.turns].reverse().find((t) => t.kind === "operator" || t.kind === "maintainer")?.status === "failed";
     if (opusTurns > updating.opusTurns || conv.choices?.id !== updating.choicesId || failed) localActions.stopUpdating(item);
   }, [updating, conv, opusTurns, item]);
   // Only the newest Opus turn's cards are live: a card that leaves the question open is a suggested reply.
@@ -53,7 +53,7 @@ export function AutoCraftSide({ d, flash }: { d: ItemPageData; flash: string | n
         <Story d={d} flash={flash} conv={conv} />
         <div className="px-4 pb-4 md:px-5">
           <ErrorLine error={conversationError?.message} />
-          {conv && <Composer flush repo={d.repo} number={d.number} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} feedbackOn={open.length === 1 ? open[0] : undefined} choices={choices} opusTurns={opusTurns} />}
+          {conv && <Composer flush repo={d.repo} number={d.number} talk={conv.canTalk} withdrawable={conv.canWithdraw} operator={user.role === "operator"} commenter={canComment(user)} exists={conv.exists} pending={conv.pending} feedbackOn={open.length === 1 ? open[0] : undefined} choices={choices} opusTurns={opusTurns} />}
         </div>
       </DisclosurePanel>
     </div>

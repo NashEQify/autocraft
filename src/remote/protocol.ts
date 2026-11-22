@@ -80,6 +80,13 @@ export type Claim = {
   /** The claim comes from the helper's fast-lane slot: the server offers it only follow-ups of its sessions, gating calls and small-tier calls. */
   fastLane?: boolean;
   /**
+   * The claim comes from the helper's own lane, beside its slots: the server offers it only calls bound to the helper's user (a
+   * maintainer's own conversation turn) and their follow-ups, which count toward no slot or Max calls at once.
+   */
+  ownLane?: boolean;
+  /** A claim from a slot or the fast lane of a helper that also runs an own lane: the calls bound to its user are left to that lane. */
+  withOwnLane?: boolean;
+  /**
    * Protocol 4 only: how long the server may hold the claim open when nothing is queued for it, in whole seconds (0 to 30).
    * A call queued meanwhile is leased at once; when none comes, the empty reply has `retryAfter: 1`. Absent or 0: answered at once.
    */
@@ -106,8 +113,8 @@ export type Encoding = (typeof ENCODINGS)[number];
 export type Envelope = { encoding: Encoding; body: string };
 
 export type ClaimReply =
-  | { lease: null; /** Seconds to wait before the next claim when nothing is queued. */ retryAfter: number; reserve: Reserve; /** Present while the token gets no calls: why (repeated lost leases, the user's limit of calls at once), and with a cool-off when it may claim again (ms since epoch). `retryAfter` then runs to `until`. */ reason?: string; until?: number; /** The body encodings the server accepts (ENCODINGS); absent from a server that takes plain JSON only. */ encodings?: Encoding[] }
-  | { lease: { id: number; secret: string; /** One line: prompt id and the item, e.g. "review.opus on designcraft#1502". */ title: string; requiredHelper: string }; reserve: Reserve; encodings?: Encoding[] };
+  | { lease: null; /** Seconds to wait before the next claim when nothing is queued. */ retryAfter: number; reserve: Reserve; /** Present while the token gets no calls: why (repeated lost leases, the user's limit of calls at once), and with a cool-off when it may claim again (ms since epoch). `retryAfter` then runs to `until`. */ reason?: string; until?: number; /** The body encodings the server accepts (ENCODINGS); absent from a server that takes plain JSON only. */ encodings?: Encoding[]; /** The server answered the claim's `ownLane`; a server without it ignores the field and leaves this out. */ ownLane?: true }
+  | { lease: { id: number; secret: string; /** One line: prompt id and the item, e.g. "review.opus on designcraft#1502". */ title: string; requiredHelper: string }; reserve: Reserve; encodings?: Encoding[]; ownLane?: true };
 
 /**
  * Whether a helper takes calls now. `ready`: it claims. `quota-held`: a plan window is at or below the reserve, its usage

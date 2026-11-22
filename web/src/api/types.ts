@@ -2131,6 +2131,8 @@ export interface DecisionChoices {
   run?: { cardId: number; state: ConversationCardState; error?: string };
   source: "prepare" | "conversation" | "converted";
   at: string;
+  /** Source conversation: the login whose message to Opus led to this version. */
+  after?: string;
 }
 
 /** Body of `conversations.doChoice`. */
@@ -2144,8 +2146,8 @@ export interface DoChoiceBody {
 
 export interface ConversationTurn {
   id: number;
-  kind: "operator" | "opus" | "system";
-  /** The operator's login, "opus" or "system". */
+  kind: "operator" | "maintainer" | "opus" | "system";
+  /** The writer's login, "opus" or "system". */
   login: string;
   at: string;
   body: string;
@@ -2153,7 +2155,7 @@ export interface ConversationTurn {
   actions: ConversationCard[];
   /** Opus turns: why proposed cards were dropped. */
   notes: string[];
-  /** Operator turns: pending while Opus has not answered, failed when it gave no usable reply. */
+  /** Operator and maintainer turns: pending while Opus has not answered, failed when it gave no usable reply. */
   status?: "pending" | "answered" | "failed";
   error?: string;
 }
@@ -2163,8 +2165,12 @@ export interface Conversation {
   number: number;
   /** False when the item has no conversation yet; turns is then empty. */
   exists: boolean;
-  /** An operator message waits for Opus's reply. */
+  /** A person's message waits for Opus's reply. */
   pending: boolean;
+  /** The viewer may write to Opus here: an operator, or a maintainer with write access to the repo (their messages run on their own Task Runner). */
+  canTalk: boolean;
+  /** A maintainer's message waits for Opus and the viewer may withdraw it: an operator, or the maintainer who wrote it. */
+  canWithdraw: boolean;
   /** While a reply is being written: what Opus did last, up to five plain lines, newest last. */
   progress?: string[];
   startedBy: string | null;
@@ -2630,7 +2636,7 @@ export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: strin
 export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
-export type ModelQueueWhyCode = "picked" | "session" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
+export type ModelQueueWhyCode = "picked" | "session" | "bound" | "bound-off" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";
 
 /** One queued model call of the user-local inference mode, as GET /api/model-queue shows it to the signed-in user's role. */
 export interface ModelQueueCall {

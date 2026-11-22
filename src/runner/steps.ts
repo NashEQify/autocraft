@@ -813,14 +813,30 @@ export const STEPS: StepDef[] = [
     name: "conversation",
     priority: 1,
     title: "Answer conversations",
-    description: "Answers each operator message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
+    description: "Answers each operator's message in an item's conversation with one Opus call, with read-only tools on the item's repository, the workspace and the item tools. The reply may propose action cards that an operator runs with a button; nothing runs by itself. Messages are answered even for a repo whose pipeline is off. Each answered message counts as one item.",
     stage: runStage("conversation"),
     requires: "operator",
     models: ["opus"],
     params: [{ name: "limit", label: "At most", kind: "int", min: 1, max: 200, default: 30, help: "messages to answer in this job" }],
     run: async (ctx) => {
       const { runConversations } = await import("../conversations/run.ts");
-      const r = await runConversations(ctx.db, { limit: Number(ctx.params.limit), onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
+      const r = await runConversations(ctx.db, { kind: "operator", limit: Number(ctx.params.limit), onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
+      ctx.usageRun(r.usageRun);
+      return `${r.answered} of ${r.waiting} messages answered`;
+    },
+  },
+  {
+    name: "conversation-maintainer",
+    priority: 1,
+    title: "Answer maintainers' conversations",
+    description: "Answers each maintainer's message in an item's conversation with one Opus call on that maintainer's own Task Runner, which takes it beside its other calls, with the same tools as the operators' conversations. A message none of their runners takes within two minutes waits for a later job. The reply may propose action cards; nothing runs by itself. These calls use the maintainers' own subscriptions, so the step has no daily limit and its messages do not count toward the operators' conversations.",
+    stage: runStage("conversation-maintainer"),
+    requires: "operator",
+    models: ["opus"],
+    params: [],
+    run: async (ctx) => {
+      const { runConversations } = await import("../conversations/run.ts");
+      const r = await runConversations(ctx.db, { kind: "maintainer", onHandled: ctx.handled, cancelled: ctx.cancelled }, ctx.log);
       ctx.usageRun(r.usageRun);
       return `${r.answered} of ${r.waiting} messages answered`;
     },

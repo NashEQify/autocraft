@@ -888,6 +888,8 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   timeout_ms INTEGER NOT NULL,        -- the bundle's wall-clock limit
   parent_id INTEGER,                  -- a follow-up turn: the call whose harness session it continues
   sticky_login TEXT COLLATE NOCASE,   -- a follow-up turn: only this user's helper holds the session
+  for_login TEXT COLLATE NOCASE,      -- the call runs on this user's own Task Runners only (a maintainer's conversation turn); follow-ups keep it
+  own_lane INTEGER NOT NULL DEFAULT 0, -- 1 while leased on the Task Runner's own lane (Claim.ownLane): counts toward no slot or Max calls at once
   released_by TEXT COLLATE NOCASE, released_at INTEGER, -- the last helper that gave the lease back: not offered that login again for a while
   progress TEXT,                      -- the helper's last progress line
   reply TEXT, usage TEXT, turns INTEGER, session_id TEXT, duration_ms INTEGER,
@@ -1553,12 +1555,12 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo TEXT NOT NULL,
   number INTEGER NOT NULL,
-  kind TEXT NOT NULL,                 -- operator | opus | system
-  login TEXT NOT NULL,                -- operator login, 'opus' or 'system'
+  kind TEXT NOT NULL,                 -- operator | maintainer | opus | system
+  login TEXT NOT NULL,                -- the writer's login, 'opus' or 'system'
   at TEXT NOT NULL,
   body TEXT NOT NULL,
   block TEXT NOT NULL,
-  status TEXT,                        -- operator turns: pending | answering | answered | failed; system turns: held | NULL
+  status TEXT,                        -- operator and maintainer turns: pending | answering | answered | failed; system turns: held | NULL
   error TEXT,
   notes TEXT,                         -- opus turns: JSON array of notes about dropped cards
   seq INTEGER,                        -- position in the prompt; NULL while pending, answering or held
@@ -1641,7 +1643,8 @@ CREATE TABLE IF NOT EXISTS decision_choices (
   added TEXT NOT NULL DEFAULT '[]',   -- JSON: core keys Opus added
   pick TEXT NOT NULL,                 -- JSON {core, reason}
   state TEXT NOT NULL DEFAULT 'current',  -- current | replaced
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  asked_by TEXT                       -- source conversation: the login whose message the reply that wrote it answered
 );
 CREATE INDEX IF NOT EXISTS decision_choices_item ON decision_choices(repo, number, state);
 CREATE INDEX IF NOT EXISTS decision_choices_decision ON decision_choices(decision_id, state);

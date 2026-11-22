@@ -49,7 +49,7 @@ export const HANDLED: Option = { key: "handled", label: "Handled in the conversa
 export const WITHDRAWN_OPTION: Option = { key: "withdrawn", label: "Withdrawn" };
 /**
  * A decision is snoozed while `snoozed_at` is set and the item has had no activity since: a GitHub comment or review, a pushed commit or force-push,
- * a decision comment or opinion, an operator conversation message. Evaluated at read time, so no writer has to clear it and a missed
+ * a decision comment or opinion, an operator's or maintainer's conversation message. Evaluated at read time, so no writer has to clear it and a missed
  * clear is impossible. `a` names the decisions table in the caller's query.
  */
 export function snoozedExpr(eb: kx.AnyEb, a = "decisions"): AliasableExpression<SqlBool> {
@@ -65,7 +65,7 @@ export function snoozedExpr(eb: kx.AnyEb, a = "decisions"): AliasableExpression<
     eb.exists(t.selectFrom("item_activity as sf").select(one).where(onItem("sf")).where("sf.kind", "=", "force-push").where("sf.at", ">", at)),
     eb.exists(t.selectFrom("decision_comments as sd").select(one).where("sd.decision_id", "=", c("id")).where("sd.at", ">", at)),
     eb.exists(t.selectFrom("decision_opinions as so").select(one).where("so.decision_id", "=", c("id")).where("so.at", ">", at)),
-    eb.exists(t.selectFrom("conversation_turns as st").select(one).where(onItem("st")).where("st.kind", "=", "operator").where("st.at", ">", at)),
+    eb.exists(t.selectFrom("conversation_turns as st").select(one).where(onItem("st")).where("st.kind", "in", ["operator", "maintainer"]).where("st.at", ">", at)),
   ]))]);
 }
 

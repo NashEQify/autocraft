@@ -166,8 +166,8 @@ export const STAGES: StageDef[] = [
   {
     id: "decide", title: "Decide", order: 5, runStage: 3, docSection: "Decide", mode: "gate",
     description: "Asks an operator for scope calls, prepares every open decision with a summary, a pick and drafted answers, and answers questions about an item in its conversation.",
-    steps: [{ name: "decide", maxMin: 75, label: "Decide", limit: null, seeded: 100 }, { name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }],
-    lanes: [{ name: "decide", steps: ["decide"], order: 6 }, { name: "conversation", steps: ["conversation"], order: 20 }],
+    steps: [{ name: "decide", maxMin: 75, label: "Decide", limit: null, seeded: 100 }, { name: "conversation", maxMin: 30, label: "Conversations", limit: 30 }, { name: "conversation-maintainer", maxMin: 30, label: "Maintainers' conversations", limit: null }],
+    lanes: [{ name: "decide", steps: ["decide"], order: 6 }, { name: "conversation", steps: ["conversation"], order: 20 }, { name: "conversation-maintainer", steps: ["conversation-maintainer"], order: 21 }],
     reads: ["Classified items", "Reviews", "Operator answers"],
     sets: ["Decisions with summary, pick and drafted answers", "Conversation replies"],
     states: [

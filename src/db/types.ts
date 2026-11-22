@@ -441,6 +441,7 @@ export interface DecisionChoices {
   pick: string;
   state: Generated<string>;
   created_at: string;
+  asked_by: string | null;
 }
 
 export interface DecisionClaims {
@@ -1623,6 +1624,8 @@ export interface RemoteCalls {
   timeout_ms: number;
   parent_id: number | null;
   sticky_login: string | null;
+  for_login: string | null;
+  own_lane: Generated<number>;
   released_by: string | null;
   released_at: number | null;
   progress: string | null;
@@ -2574,7 +2577,7 @@ export const COLUMNS = {
   conversation_includes: ["repo", "number", "source", "by", "at", "sent_turn"],
   conversation_turns: ["id", "repo", "number", "kind", "login", "at", "body", "block", "status", "error", "notes", "seq", "claim", "claimed_at", "progress"],
   conversations: ["repo", "number", "item_block", "item_sig", "created_at", "created_by"],
-  decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at"],
+  decision_choices: ["id", "decision_id", "repo", "number", "turn_id", "stamp", "seen", "source", "drafts", "added", "pick", "state", "created_at", "asked_by"],
   decision_claims: ["decision_id", "login", "since", "at"],
   decision_comments: ["id", "decision_id", "login", "at", "body", "via"],
   decision_items: ["repo", "number", "decision_id"],
@@ -2671,7 +2674,7 @@ export const COLUMNS = {
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
-  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin"],
+  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "for_login", "own_lane", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin"],
   remote_checks: ["id", "call_id", "run_id", "input", "state", "result", "requested_at", "ended_at"],
   remote_cooloffs: ["login", "until", "reason", "failures", "failures_since"],
   remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version"],
