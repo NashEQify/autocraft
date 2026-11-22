@@ -257,12 +257,12 @@ export type EnvHealth = { state: "warn" | "fail"; text: string; since: string };
 
 /**
  * The pod launcher's pass over a kubernetes environment: what its pods offer, its health (undefined keeps it), and, when
- * the Kubernetes API answered, the heartbeat. `health` keeps its `since` while the text stays the same.
+ * the Kubernetes API answered, the heartbeat. `health` keeps its `since` while the text stays the same; `slots` undefined keeps the reported slots.
  */
-export async function kubeReport(db: Db, id: string, caps: Capabilities, slots: number, health: Omit<EnvHealth, "since"> | null | undefined, reachable: boolean): Promise<void> {
+export async function kubeReport(db: Db, id: string, caps: Capabilities, slots: number | undefined, health: Omit<EnvHealth, "since"> | null | undefined, reachable: boolean): Promise<void> {
   const at = new Date().toISOString();
   if (health === undefined) {
-    await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), reported_slots: slots }).where("id", "=", id));
+    await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), ...(slots === undefined ? {} : { reported_slots: slots }) }).where("id", "=", id));
     if (reachable) await touchSeen(db, id, at);
     return;
   }
@@ -272,7 +272,7 @@ export async function kubeReport(db: Db, id: string, caps: Capabilities, slots: 
     old = prior?.health ? (JSON.parse(prior.health) as EnvHealth) : null;
   } catch { /* rewritten below */ }
   const next = health ? JSON.stringify({ ...health, since: old && old.text === health.text && old.state === health.state ? old.since : at }) : null;
-  await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), reported_slots: slots, health: next, health_at: at }).where("id", "=", id));
+  await db.run(db.k.updateTable("build_envs").set({ capabilities: JSON.stringify(caps), ...(slots === undefined ? {} : { reported_slots: slots }), health: next, health_at: at }).where("id", "=", id));
   if (reachable) await touchSeen(db, id, at);
 }
 

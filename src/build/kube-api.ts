@@ -29,6 +29,8 @@ export type KPod = {
     phase?: "Pending" | "Running" | "Succeeded" | "Failed" | "Unknown";
     reason?: string;
     message?: string;
+    /** When the kubelet took the pod; unset while it waits for a node. */
+    startTime?: string;
     conditions?: { type: string; status: string; reason?: string; message?: string }[];
     initContainerStatuses?: ContainerStatus[];
     containerStatuses?: ContainerStatus[];

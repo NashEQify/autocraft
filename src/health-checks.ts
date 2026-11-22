@@ -153,7 +153,7 @@ async function queueCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
   if (!r.n) return [ok("build-queue", "/envs")];
   // Workers that are up but busy leave tasks waiting: that is slow, not broken.
   const anyUp = (await enabledEnvs(db)).some((e) => seenRecently(e, nowMs));
-  const text = `${r.n} build task${r.n === 1 ? " has" : "s have"} waited over ${minutes(THRESHOLDS.taskQueuedMs)} for a worker`;
+  const text = `${r.n} build task${r.n === 1 ? " has" : "s have"} waited over ${minutes(THRESHOLDS.taskQueuedMs)} for a worker or build pod capacity`;
   return [{ id: "build-queue", state: anyUp ? "warn" : "fail", text, brief: text, since: r.oldest, to: "/envs" }];
 }
 

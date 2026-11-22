@@ -331,7 +331,7 @@ export const WARM_VERIFY_CONFIGMAP = "warm-verify-key";
 const VERIFY_KEY = "/keys/verify/public.pem";
 const RUSTC_FILE = "/meta/rustc.txt";
 const BAD_BLOBS_FILE = "/meta/bad-blobs";
-const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
+export const ARCH_LABEL: Record<KubeSettings["arch"], string> = { x86_64: "amd64", aarch64: "arm64" };
 export const stepContainer = (i: number): string => `step-${i}`;
 
 /** A repository's step memory in bytes (src/build/sizing.ts). */

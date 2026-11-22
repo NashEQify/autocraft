@@ -274,6 +274,59 @@ test("a pod on a lost node loses its task", async () => {
   assert.equal(kube.pods.size, 0);
 });
 
+const capacityPass = () => launcherPass({ db, api: kube, capacity: kube, defaultImage: null, log: () => {}, now: () => clock }, state);
+const node = (name: string, cpu: string) => ({ metadata: { name, labels: { "kubernetes.io/arch": "amd64" } }, status: { conditions: [{ type: "Ready", status: "True" }], allocatable: { cpu, memory: "64Gi" } } });
+const UNSCHEDULABLE = { phase: "Pending" as const, conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message: "0/1 nodes are available: 1 Insufficient cpu." }] };
+
+test("under cluster capacity, claims stop at the first task that does not fit and while one of our pods is unschedulable", async () => {
+  kube.nodes = [node("node-a", "6")];
+  const a = await simple(), b = await simple();
+  await capacityPass();
+  assert.equal((await queued(a)).state, "running");
+  assert.equal((await queued(b)).state, "queued", "the node has no room left for a second step pod");
+  const first = kube.only(a);
+  assert.deepEqual(first.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchExpressions[0].values, ["node-a"]);
+  const slots = async () => (await db.get(db.k.selectFrom("build_envs").select("reported_slots").where("id", "=", "pods")))!.reported_slots;
+  assert.equal(await slots(), 1);
+
+  kube.nodes = [node("node-a", "64")];
+  first.status = structuredClone(UNSCHEDULABLE);
+  await capacityPass();
+  assert.equal((await queued(b)).state, "queued", "the scheduler found no room for our pod: nothing new is claimed");
+  first.status = { phase: "Running" };
+  await capacityPass();
+  assert.equal((await queued(b)).state, "running");
+  assert.equal(await slots(), 2, "with room to spare the environment offers its slots, the ceiling");
+
+  await db.run(db.k.updateTable("build_tasks").set({ state: "cancelled" }).where("id", "in", [a, b]));
+  await capacityPass();
+  assert.equal(kube.pods.size, 0);
+  kube.nodes = [];
+});
+
+test("a preempted step pod runs again on the same volume without using an attempt", async () => {
+  const id = await simple();
+  await pass();
+  kube.end(kube.only(id));
+  await pass();
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  const step = kube.only(id);
+  step.status = {
+    phase: "Failed", conditions: [{ type: "DisruptionTarget", status: "True", reason: "PreemptionByScheduler", message: "preempted by a higher priority pod" }],
+    initContainerStatuses: [{ name: "step-0", state: { terminated: { exitCode: 137, reason: "Error" } } }],
+  };
+  await pass();
+  const again = kube.only(id);
+  assert.notEqual(again.metadata.name, step.metadata.name);
+  assert.equal(again.metadata.labels!["craft.build/stage"], step.metadata.labels!["craft.build/stage"]);
+  assert.deepEqual(again.spec.volumes[0], step.spec.volumes[0], "the same volume");
+  assert.deepEqual({ ...await queued(id) }, { state: "running", attempts: 1 });
+  kube.end(again);
+  await pass();
+  assert.equal((await queued(id)).state, "done");
+});
+
 test("with a compile cache, offline build steps read it at the CI runners' paths; fetch and bare steps never reach it", () => {
   const s = { ...DEFAULT_SETTINGS, sccacheUrl: "http://cache.test:8080" };
   const plan = [
