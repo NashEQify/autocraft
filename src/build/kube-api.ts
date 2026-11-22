@@ -2,7 +2,9 @@
 // The in-cluster client uses the runner container's service-account token and CA, read at each
 // call because the projected token is rotated. Only `node:` modules: no client library.
 import { readFileSync } from "node:fs";
-import { request } from "node:https";
+import { request as httpRequest } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { wsConnect, WsHandshakeError, type WsConn } from "./ws-client.ts";
 
 export const SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount";
 
@@ -37,7 +39,28 @@ export interface KubeApi {
   deletePvc(ns: string, name: string): Promise<void>;
   /** A SelfSubjectAccessReview: whether this service account may `verb` the `resource` in `ns`. */
   canI(ns: string, verb: string, resource: string): Promise<boolean>;
+  /**
+   * Runs `argv` in a container and returns its output and exit code. Throws a KubeError when the
+   * command never started (no connection, refused upgrade); once it may have run, every outcome is
+   * an ExecResult.
+   */
+  exec(ns: string, pod: string, container: string, argv: string[], opts: ExecOptions): Promise<ExecResult>;
 }
+
+export type ExecOptions = {
+  stdin?: Buffer;
+  /** Bytes of stdout and stderr together; past it the stream is closed and `truncated` set. */
+  maxOut: number;
+  /** From the upgrade to the end of the stream. */
+  timeoutMs: number;
+  /** Default 10 s. */
+  connectTimeoutMs?: number;
+};
+/** `exitCode` is null when the command's end was not seen (timeout, truncation, lost stream) or exec failed; `error` says why. */
+export type ExecResult = { exitCode: number | null; stdout: Buffer; stderr: Buffer; truncated: boolean; error?: string };
+
+/** Where an API server is and how to authenticate to it. `tls: false` is for tests only. */
+export type KubeConn = { host: string; port: number; tls?: boolean; ca?: string | Buffer; token?: string; cert?: string | Buffer; key?: string | Buffer };
 
 export class KubeError extends Error {
   status: number;
@@ -54,32 +77,55 @@ export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR)
   const host = env.KUBERNETES_SERVICE_HOST;
   if (!host) return null;
   const port = Number(env.KUBERNETES_SERVICE_PORT || 443);
+  return kubeApi(() => {
+    try {
+      return { host, port, token: readFileSync(`${dir}/token`, "utf8").trim(), ca: readFileSync(`${dir}/ca.crt`) };
+    } catch (e) {
+      throw new KubeError(0, `no service-account token in the runner container (${(e as NodeJS.ErrnoException).code ?? "error"})`);
+    }
+  });
+}
+
+const clean = (s: string): string => s.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 300);
+
+/** The API message of an error body: a Status object's `message`, or the body's start. */
+function statusMessage(text: string): string {
+  try {
+    const m = (JSON.parse(text) as { message?: string }).message;
+    if (m) return m;
+  } catch { /* not JSON */ }
+  return text.slice(0, 300);
+}
+
+/** The client for an explicit API server; `conn` is called at each request, so credentials may rotate. */
+export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi {
+  const get = typeof conn === "function" ? conn : () => conn;
 
   function call(method: string, path: string, body?: object, accept = "application/json"): Promise<string> {
-    let token: string, ca: Buffer;
+    let c: KubeConn;
     try {
-      token = readFileSync(`${dir}/token`, "utf8").trim();
-      ca = readFileSync(`${dir}/ca.crt`);
+      c = get();
     } catch (e) {
-      return Promise.reject(new KubeError(0, `no service-account token in the runner container (${(e as NodeJS.ErrnoException).code ?? "error"})`));
+      return Promise.reject(e);
     }
     const data = body === undefined ? undefined : JSON.stringify(body);
     return new Promise((resolve, reject) => {
-      const req = request({
-        host, port, method, path, ca, timeout: 30_000,
-        headers: { authorization: `Bearer ${token}`, accept, ...(data !== undefined ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}) },
+      const req = (c.tls === false ? httpRequest : httpsRequest)({
+        host: c.host, port: c.port, method, path, timeout: 30_000,
+        ...(c.tls === false ? {} : { ca: c.ca, cert: c.cert, key: c.key }),
+        headers: {
+          ...(c.token ? { authorization: `Bearer ${c.token}` } : {}),
+          accept,
+          ...(data !== undefined ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) } : {}),
+        },
       }, (res) => {
         const chunks: Buffer[] = [];
-        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           const status = res.statusCode ?? 0;
           if (status >= 200 && status < 300) return resolve(text);
-          let msg = text.slice(0, 300);
-          try {
-            msg = (JSON.parse(text) as { message?: string }).message ?? msg;
-          } catch { /* not JSON */ }
-          reject(new KubeError(status, `${method} ${path.split("?")[0]}: HTTP ${status} ${msg}`));
+          reject(new KubeError(status, `${method} ${path.split("?")[0]}: HTTP ${status} ${statusMessage(text)}`));
         });
         res.on("error", reject);
       });
@@ -108,5 +154,101 @@ export function inClusterApi(env: NodeJS.ProcessEnv = process.env, dir = SA_DIR)
       })) as { status?: { allowed?: boolean } };
       return r.status?.allowed === true;
     },
+    exec: async (ns, pod, container, argv, opts) => {
+      const c = get();
+      const query = [`container=${enc(container)}`, "stdout=true", "stderr=true", "stdin=true", ...argv.map((a) => `command=${enc(a)}`)].join("&");
+      let ws: WsConn;
+      try {
+        ws = await wsConnect({
+          tls: c.tls !== false, host: c.host, port: c.port, path: `${pods(ns)}/${enc(pod)}/exec?${query}`,
+          ca: c.ca, cert: c.cert, key: c.key,
+          headers: c.token ? { authorization: `Bearer ${c.token}` } : {},
+          protocol: EXEC_PROTOCOL,
+          connectTimeoutMs: opts.connectTimeoutMs ?? 10_000,
+        });
+      } catch (e) {
+        const status = e instanceof WsHandshakeError ? e.status : 0;
+        const detail = e instanceof WsHandshakeError && e.body ? `${e.message} ${statusMessage(e.body)}` : (e as Error).message;
+        throw new KubeError(status, `exec in ${pod}: ${clean(detail)}`);
+      }
+      return execStream(ws, opts);
+    },
   };
+}
+
+/** v5 adds channel 255, which lets the client close the command's stdin. */
+const EXEC_PROTOCOL = "v5.channel.k8s.io";
+/** Payload of one stdin message, channel byte included. */
+const STDIN_FRAME = 64 * 1024;
+
+function execStream(ws: WsConn, o: ExecOptions): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    const out: Buffer[] = [], err: Buffer[] = [];
+    let used = 0, truncated = false, ended = false, sawStatus = false;
+    let exitCode: number | null = null, error: string | undefined;
+    const end = () => {
+      if (ended) return;
+      ended = true;
+      clearTimeout(timer);
+      ws.close();
+      resolve({ exitCode, stdout: Buffer.concat(out), stderr: Buffer.concat(err), truncated, ...(error !== undefined ? { error } : {}) });
+    };
+    const timer = setTimeout(() => {
+      exitCode = null;
+      error = "timed out";
+      end();
+    }, o.timeoutMs);
+    ws.start({
+      onMessage: (m) => {
+        if (ended || m.length === 0) return;
+        const ch = m[0], data = m.subarray(1);
+        if (ch === 1 || ch === 2) {
+          const take = data.subarray(0, Math.max(0, o.maxOut - used));
+          if (take.length) {
+            (ch === 1 ? out : err).push(Buffer.from(take));
+            used += take.length;
+          }
+          if (take.length < data.length) {
+            truncated = true;
+            end();
+          }
+        } else if (ch === 3) {
+          sawStatus = true;
+          ({ exitCode, error } = execStatus(data));
+        }
+      },
+      onClose: (code, reason) => {
+        if (!sawStatus) error = clean(`the stream closed without an exit status (${code}${reason ? ` ${reason}` : ""})`);
+        end();
+      },
+    });
+    // stdin is always requested and always closed, so a command without input reads EOF at once.
+    void (async () => {
+      const input = o.stdin ?? Buffer.alloc(0);
+      for (let i = 0; i < input.length && !ended && !ws.closed; i += STDIN_FRAME - 1) {
+        const part = input.subarray(i, i + STDIN_FRAME - 1);
+        const f = Buffer.allocUnsafe(part.length + 1);
+        f[0] = 0;
+        part.copy(f, 1);
+        if (!ws.send(f)) await ws.drained();
+      }
+      if (!ended) ws.send(Buffer.from([255, 0]));
+    })();
+  });
+}
+
+/** The exit code from a channel-3 Status: 0 on Success, n on NonZeroExitCode, else null with the message. */
+function execStatus(data: Buffer): { exitCode: number | null; error?: string } {
+  let s: { status?: string; reason?: string; message?: string; details?: { causes?: { reason?: string; message?: string }[] } };
+  try {
+    s = JSON.parse(data.toString("utf8"));
+  } catch {
+    return { exitCode: null, error: "unreadable exec status" };
+  }
+  if (s.status === "Success") return { exitCode: 0 };
+  if (s.reason === "NonZeroExitCode") {
+    const n = Number(s.details?.causes?.find((c) => c.reason === "ExitCode")?.message);
+    if (Number.isInteger(n)) return { exitCode: n };
+  }
+  return { exitCode: null, error: clean(s.message || s.reason || "exec failed") || "exec failed" };
 }
