@@ -10,8 +10,12 @@ export const MAX_CALLS_MAX = 64;
 
 /** The user's limit, or null for none. */
 export async function userMaxCalls(db: Db, login: string): Promise<number | null> {
-  const row = await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", MAX_CALLS_KEY));
-  const n = row ? Number(row.value) : NaN;
+  return maxCallsOf((await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", MAX_CALLS_KEY)))?.value);
+}
+
+/** The limit of a stored `max_calls` value (undefined: no row). */
+export function maxCallsOf(value: string | undefined): number | null {
+  const n = value !== undefined ? Number(value) : NaN;
   return Number.isInteger(n) && n >= 1 && n <= MAX_CALLS_MAX ? n : null;
 }
 

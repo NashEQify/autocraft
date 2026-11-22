@@ -8,16 +8,20 @@ import { excluded } from "../db/kx.ts";
 export const DEFAULT_RESERVE: Reserve = { fiveHour: 20, weekly: 20 };
 /** The highest reserve a user may set: above it a helper would hardly ever claim. */
 export const MAX_RESERVE = 90;
-const KEYS = { fiveHour: "reserve_five_hour", weekly: "reserve_weekly" } as const;
+export const RESERVE_KEYS = { fiveHour: "reserve_five_hour", weekly: "reserve_weekly" } as const;
 
 /** The user's reserve, with the default for a window they never set. */
 export async function userReserve(db: Db, login: string): Promise<Reserve> {
-  const rows = await db.all(db.k.selectFrom("main.user_settings").select(["key", "value"]).where("login", "=", login).where("key", "in", [KEYS.fiveHour, KEYS.weekly]));
+  return reserveOf(await db.all(db.k.selectFrom("main.user_settings").select(["key", "value"]).where("login", "=", login).where("key", "in", [RESERVE_KEYS.fiveHour, RESERVE_KEYS.weekly])));
+}
+
+/** The reserve of the stored rows of its keys. */
+export function reserveOf(rows: readonly { key: string; value: string }[]): Reserve {
   const out = { ...DEFAULT_RESERVE };
   for (const r of rows) {
     const n = Number(r.value);
     if (!Number.isInteger(n) || n < 0 || n > MAX_RESERVE) continue;
-    if (r.key === KEYS.fiveHour) out.fiveHour = n;
+    if (r.key === RESERVE_KEYS.fiveHour) out.fiveHour = n;
     else out.weekly = n;
   }
   return out;
@@ -39,8 +43,8 @@ export async function setUserReserve(db: Db, login: string, reserve: Reserve): P
   const at = new Date().toISOString();
   const put = (key: string, value: string) => db.run(db.k.insertInto("main.user_settings").values({ login, key, value, updated_at: at })
     .onConflict((oc) => oc.columns(["login", "key"]).doUpdateSet(excluded(["value", "updated_at"]))));
-  await put(KEYS.fiveHour, String(reserve.fiveHour));
-  await put(KEYS.weekly, String(reserve.weekly));
+  await put(RESERVE_KEYS.fiveHour, String(reserve.fiveHour));
+  await put(RESERVE_KEYS.weekly, String(reserve.weekly));
   if (was.fiveHour !== reserve.fiveHour || was.weekly !== reserve.weekly) await audit(db, login, "usage-reserve", login, { reserve, was });
   return reserve;
 }

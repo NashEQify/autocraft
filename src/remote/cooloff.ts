@@ -59,9 +59,15 @@ export async function noteSuccess(db: Db, login: string): Promise<void> {
 
 /** When the login's helpers may claim again and why they may not now, or null when the login is not cooling off. */
 export async function cooloffOf(db: Db, login: string, nowMs: number): Promise<{ until: number; reason: string } | null> {
-  const r = await db.get(db.k.selectFrom("main.remote_cooloffs").select(["until", "reason"]).where("login", "=", login));
-  return r?.until != null && Number(r.until) > nowMs ? { until: Number(r.until), reason: r.reason ?? DROP_REASON } : null;
+  return cooledOf(await db.get(cooloffRow(db, login)), nowMs);
 }
+
+/** The login's cool-off row, as cooloffOf reads it. */
+export const cooloffRow = (db: Db, login: string) => db.k.selectFrom("main.remote_cooloffs").select(["until", "reason"]).where("login", "=", login);
+
+/** cooloffOf for the row already read (undefined: none). */
+export const cooledOf = (r: { until: number | null; reason: string | null } | undefined, nowMs: number): { until: number; reason: string } | null =>
+  r?.until != null && Number(r.until) > nowMs ? { until: Number(r.until), reason: r.reason ?? DROP_REASON } : null;
 
 /** Deletes drops older than the window and cool-off rows that neither hold a login nor count failures (calls.ts pruneRemote). */
 export async function pruneCooloffs(db: Db, nowMs: number): Promise<void> {

@@ -798,12 +798,15 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         res.once("close", () => { if (!res.writableEnded) gone.abort(); });
         if (req.socket.destroyed) gone.abort();
         const claim = remote.parseClaim(await readRemoteJson(req));
-        // In the server mode no call is queued for helpers: nothing to take for a while.
-        if (await inferenceMode(db) !== "user-local") return reply(200, { lease: null, retryAfter: 300, reserve: await userReserve(db, caller.login), encodings: [...ENCODINGS] } satisfies ClaimReply);
-        const perm = await claimPermission(caller.login, caller.role);
-        const out = await remote.claimCall(db, caller, claim, perm.canWrite, Date.now(), { waits: claimWaits, signal: gone.signal, blocked: () => perm.errors.size > 0 });
+        // The permission reader's session read runs with the claim's first reads, which also read the mode: in the server mode the claim takes nothing.
+        let errors: Map<string, string> | null = null;
+        const perm = claimPermission(caller.login, caller.role).then((p) => (errors = p.errors, p));
+        perm.catch(() => {});
+        const canWrite = async (repo: string): Promise<boolean> => await (await perm).canWrite(repo);
+        const out = await remote.claimCall(db, caller, claim, canWrite, Date.now(), { waits: claimWaits, signal: gone.signal, blocked: () => (errors?.size ?? 0) > 0 }, { userLocalOnly: true });
         // Calls passed over because GitHub could not confirm the permission: the helper logs why it gets nothing.
-        if (!out.lease && out.reason === undefined && perm.errors.size) out.reason = [...perm.errors.values()][0];
+        const failed = errors as Map<string, string> | null;
+        if (!out.lease && out.reason === undefined && failed?.size) out.reason = [...failed.values()][0];
         // How long the claim waited for a call, so a latency measurement can leave it out.
         return reply(200, { ...out, encodings: [...ENCODINGS] } satisfies ClaimReply, { "x-held-ms": String(heldMsOf(out)) });
       }

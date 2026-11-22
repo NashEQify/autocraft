@@ -20,9 +20,11 @@ const isTaskItems = (v: unknown): v is TaskItems => typeof v === "string" && (TA
 
 /** The user's item choice; "all" with no row or a value no longer offered. */
 export async function userTaskItems(db: Db, login: string): Promise<TaskItems> {
-  const v = (await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", TASK_ITEMS_KEY)))?.value;
-  return isTaskItems(v) ? v : "all";
+  return taskItemsOf((await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", TASK_ITEMS_KEY)))?.value);
 }
+
+/** The choice of a stored `task_items` value (undefined: no row). */
+export const taskItemsOf = (value: string | undefined): TaskItems => (isTaskItems(value) ? value : "all");
 
 /** The item choice from a request body; throws with the reason for a bad one. */
 export function parseTaskItems(raw: unknown): TaskItems {
@@ -45,7 +47,11 @@ export type ItemFilter = { refs: ReadonlySet<string>; repos: ReadonlySet<string>
 
 /** The user's ItemFilter, read now. */
 export async function itemFilter(db: Db, login: string): Promise<ItemFilter> {
-  const choice = await userTaskItems(db, login);
+  return await itemFilterOf(db, login, await userTaskItems(db, login));
+}
+
+/** The ItemFilter of the user's `choice`, already read. */
+export async function itemFilterOf(db: Db, login: string, choice: TaskItems): Promise<ItemFilter> {
   if (choice === "all") return null;
   // The live pre-approval states are ACTIVE in src/preapproval/index.ts.
   const rows = await db.all(db.k.selectFrom("main.fast_track as f")

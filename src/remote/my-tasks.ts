@@ -44,10 +44,14 @@ export function taskOfStep(step: string): string {
 
 /** The tasks the user unticked; empty when they take every task. Ids no longer offered are dropped. */
 export async function userSkips(db: Db, login: string): Promise<Set<string>> {
-  const row = await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", SKIP_TASKS_KEY));
-  if (!row) return new Set();
+  return skipsOf((await db.get(db.k.selectFrom("main.user_settings").select("value").where("login", "=", login).where("key", "=", SKIP_TASKS_KEY)))?.value);
+}
+
+/** The unticked tasks of a stored `skip_tasks` value (undefined: no row). */
+export function skipsOf(value: string | undefined): Set<string> {
+  if (value === undefined) return new Set();
   try {
-    const v = JSON.parse(row.value) as unknown;
+    const v = JSON.parse(value) as unknown;
     return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && TASK_IDS.has(x)) : []);
   } catch {
     return new Set();

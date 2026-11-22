@@ -21,6 +21,9 @@ export async function manualOnly(db: Db, login: string): Promise<boolean> {
   return await db.get(db.k.selectFrom("main.user_settings").select((eb) => eb.lit(1).as("one")).where("login", "=", login).where("key", "=", MANUAL_ONLY_KEY).where("value", "=", "1")) !== undefined;
 }
 
+/** The switch of a stored `manual_only` value (undefined: no row). */
+export const manualOf = (value: string | undefined): boolean => value === "1";
+
 /** A value from a request body, checked: a boolean; throws with the reason otherwise. */
 export function parseManualOnly(raw: unknown): boolean {
   if (typeof raw !== "boolean") throw new Error("manualOnly must be true or false");
