@@ -231,7 +231,22 @@ im_import() {
 }
 
 cmd_init() {
+  boot=$(now_ms)
   mkdir -p "$ROOT/.ws/calls" "$ROOT/.ws/locks" "$ROOT/src" "$ROOT/home" || die io 2 "cannot create $ROOT"
+  # A call an earlier pod on this volume left without an exit ended with that pod: mark it killed,
+  # so its status says so and a kill never signals a pid of this pod.
+  for s in "$CALLS"/*.start; do
+    [ -f "$s" ] || continue
+    n=${s##*/}; n=${n%.start}
+    is_pos "$n" && [ ! -f "$CALLS/$n.exit" ] || continue
+    st=$(cat "$s" 2>/dev/null)
+    is_uint "$st" && [ "$st" -lt "$boot" ] || continue
+    : >"$CALLS/$n.killed"
+    echo "$boot" >"$CALLS/$n.end"
+    echo 137 >"$CALLS/$n.exit.tmp" && mv "$CALLS/$n.exit.tmp" "$CALLS/$n.exit"
+  done
+  # A git of an earlier pod that died mid-command leaves its lock; no git of this pod runs yet.
+  rm -f "$ROOT/src/.git/index.lock"
   printf 'WS ok init\n'
   if command -v Xvfb >/dev/null 2>&1; then
     start_xvfb

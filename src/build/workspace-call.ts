@@ -9,8 +9,8 @@ import { enqueueCall } from "../remote/calls.ts";
 import type { TaskBundle, Tier } from "../remote/protocol.ts";
 import { MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { BuildError } from "./envs.ts";
-import { WORKSPACE_SERVER } from "./workspace-tools.ts";
-import { LIVE_STATES } from "./workspaces.ts";
+import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
+import { diffStat, LIVE_STATES } from "./workspaces.ts";
 
 /** Servers a workspace session may have beside `workspace`. */
 const EXTRA_SERVERS = new Set([ITEM_SERVER, REFERENCE_SERVER]);
@@ -79,4 +79,27 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
     await db.run(db.k.updateTable("workspaces").set({ remote_call_id: id, updated_at: new Date().toISOString() }).where("id", "=", ws.id));
     return id;
   });
+}
+
+const hhmm = (iso: string): string => `${iso.slice(11, 16)} UTC`;
+
+/**
+ * A workspace session's prompt for its next lease, from `base`, the stdin as queued: with a note when an earlier lease of
+ * the call already worked in the workspace (its Task Runner was lost). The note says what the workspace kept, from what the
+ * last resume did, and the changes as of the last checkpoint, which the launcher takes when the call goes back to the queue.
+ */
+export async function resumePrompt(db: Db, callId: number, base: string): Promise<string> {
+  const w = await db.get(db.k.selectFrom("workspaces").select(["id", "checkpoint", "checkpoint_at", "restored", "restored_at"]).where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
+  const since = (await db.get(db.k.selectFrom("remote_calls").select("since").where("id", "=", callId)))?.since;
+  if (!w || since == null) return base;
+  const worked = await db.get(db.k.selectFrom("workspace_calls").select("created_at").where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS)
+    .where("created_at", ">=", new Date(Number(since)).toISOString()).orderBy("id").limit(1));
+  if (!worked) return base;
+  const r = w.restored_at !== null && w.restored_at > worked.created_at ? w.restored : null;
+  const kept = r === null ? "The workspace kept its tree: /work/src holds the earlier session's changes, and commands it started may still run or have ended."
+    : r === "kept" ? "The workspace was started again on its volume: /work/src holds the earlier session's changes, and the commands it started were stopped."
+    : r.startsWith("checkpoint ") ? `The workspace was rebuilt from the base commit and a checkpoint of its changes taken at ${hhmm(r.slice(11))}: changes made after that were lost, and the commands it started were stopped.`
+    : "The workspace was rebuilt from the base commit with no checkpoint: the earlier session's changes were lost.";
+  const stat = w.checkpoint?.length && w.checkpoint_at ? `Its changes against the base commit as of ${hhmm(w.checkpoint_at)} (the last checkpoint):\n${diffStat(w.checkpoint)}\n` : "";
+  return `${base}\n\n---\nNote from AutoCraft: an earlier session on this task was cut off before it finished. ${kept}\n${stat}Check the current state with \`git status\` and \`git diff --stat\` in /work/src before you continue.\n`;
 }

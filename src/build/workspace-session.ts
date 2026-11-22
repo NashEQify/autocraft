@@ -13,11 +13,10 @@ import { trackedNames } from "../repos.ts";
 import type { Params, StepContext } from "../runner/steps.ts";
 import { BuildError } from "./envs.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { PENDING_LIMIT_MS } from "./pods.ts";
 import { queueWorkspaceCall } from "./workspace-call.ts";
-import { SEED_LIMIT_MS } from "./workspace-launch.ts";
+import { READY_LIMIT_MS, SEED_LIMIT_MS } from "./workspace-launch.ts";
 import { OWN_CALLS, WORKSPACE_SERVER } from "./workspace-tools.ts";
-import { cleanOutput, createWorkspace, endWorkspace, execWs, getWorkspace, LIVE_STATES, type WorkspaceStateName } from "./workspaces.ts";
+import { cleanOutput, createWorkspace, endWorkspace, execWs, getWorkspace, LIVE_STATES, resumeWorkspace, type WorkspaceStateName } from "./workspaces.ts";
 
 export const TRY_STEP = "workspace-try";
 export const TRY_PROMPT_ID = "workspace.try";
@@ -25,18 +24,18 @@ export const TRY_PROMPT_ID = "workspace.try";
 export const TRY_DEADLINE_SEC = { min: 300, max: 7200, default: 3600 } as const;
 export const TRY_PROMPT_MAX_BYTES = 8 * 1024;
 const TRY_MAX_TURNS = 400;
-/** The launcher fails a workspace that takes longer than this to start and seed; a minute more covers its pass interval. */
-export const READY_LIMIT_MS = PENDING_LIMIT_MS + SEED_LIMIT_MS + 60_000;
 const READY_POLL_MS = 3000;
 /** The most a session call may wait in the remote call queue in all; past it the call is withdrawn and the session fails. */
 export const TRY_QUEUE_WAIT_MS = 30 * 60_000;
 /**
- * The pod's time limit (activeDeadlineSeconds, counted from its start) over the call's: seeding, the call's longest wait in
- * the queue, and a margin for the lease's start and end, so the call's own limit or the queue wait ends the session first.
+ * The pod's time limit (activeDeadlineSeconds, counted from its start) over the call's attempts: seeding, the call's longest
+ * wait in the queue, and a margin for the lease's start and end, so the call's own limit or the queue wait ends the session first.
  */
 const POD_MARGIN_SEC = (SEED_LIMIT_MS + TRY_QUEUE_WAIT_MS) / 1000 + 10 * 60;
-/** Workspaces a try can take: live ones with a pod coming or up (nothing restarts a parked pod yet). */
-const TAKEN_STATES = ["requested", "starting", "seeding", "ready"];
+/** Workspaces a try can take: live ones; a parked one is resumed. */
+const TAKEN_STATES = LIVE_STATES as string[];
+/** Attempts of the session's call: a lease lost with its Task Runner goes back to the queue once, onto the same workspace. */
+const TRY_ATTEMPTS = 2;
 
 /** Implementation work's model choice: the fix-issue patch prompt's model, effort and tier. */
 const IMPLEMENT = CLAUDE_PROMPTS["fixissue.patch"];
@@ -133,7 +132,7 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
       if (wsId === null) {
         // The workspace and the session's link to it in one write, so a resumed job takes the same workspace.
         wsId = await db.write(async () => {
-          const w = await createWorkspace(db, { repo: s.repo, baseSha: s.base_sha, envId: s.env_id, limits: { deadlineSec: s.deadline_sec + POD_MARGIN_SEC }, owner: `job ${ctx.job.id}` });
+          const w = await createWorkspace(db, { repo: s.repo, baseSha: s.base_sha, envId: s.env_id, limits: { deadlineSec: s.deadline_sec * TRY_ATTEMPTS + POD_MARGIN_SEC }, owner: `job ${ctx.job.id}` });
           await update({ workspace_id: w });
           return w;
         });
@@ -145,6 +144,10 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
         const w = await getWorkspace(db, wsId);
         if (!w) return await fail(`workspace ${wsId} is gone`);
         if (w.state === "ready") break;
+        if (w.state === "parked") {
+          if (!await resumeWorkspace(db, wsId)) return await fail(`workspace ${wsId} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}`);
+          ctx.log(`workspace ${wsId} parked; resuming it`);
+        }
         if (!TAKEN_STATES.includes(w.state)) return await fail(`workspace ${wsId} is ${w.state}${w.error ? `: ${w.error}` : ""}`);
         if (Date.now() - waitFrom > READY_LIMIT_MS) return await fail(`workspace ${wsId} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
         if (await ctx.cancelled()) return await fail("cancelled while the workspace started");
@@ -160,7 +163,7 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
       const system = SYSTEM.replaceAll("{{repo}}", s.repo).replace("{{sha}}", s.base_sha).replace("{{item}}", String(s.item));
       callId = await queueWorkspaceCall(db, {
         workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("fixissue.patch"), effort: IMPLEMENT.effort,
-        stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }],
+        stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }], maxAttempts: TRY_ATTEMPTS,
       });
       await update({ remote_call_id: callId, state: "running" });
       ctx.log(`session ${id}: model call ${callId} queued`);
