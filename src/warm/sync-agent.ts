@@ -17,7 +17,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, BadBlobError, clearDir, decodeManifest, encodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, BadBlobError, clearDir, decodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -359,9 +359,12 @@ export class SyncAgent {
       return null;
     }
     // Retired versions stay on disk for the grace period, so they count: the new version waits until they expire.
+    // The held version of this key moves into grace after the swap, so it is not counted twice.
     const wb = this.warmBytes();
-    if (wb.current + wb.grace + l.bytes > maxBytes) {
-      return `waiting for retired versions to expire: ${gb(l.bytes)} GiB more on top of ${gb(wb.current)} GiB current and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
+    const others = wb.current - (h ? this.metaOf(join(kd, h.gen))?.bytes ?? 0 : 0);
+    if (others + wb.grace + l.bytes > maxBytes) {
+      const why = wb.grace > 0 ? "waiting for retired versions to expire" : "over the node cap";
+      return `${why}: ${gb(l.bytes)} GiB more on top of ${gb(others)} GiB current (other keys) and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
     }
     const fs = this.fsUse();
     if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
@@ -378,7 +381,7 @@ export class SyncAgent {
     const final = join(kd, gen), tmp = `${final}.tmp`;
     const t0 = performance.now();
     try {
-      const manifest = await this.c.store.manifest(l);
+      const { manifest, raw } = await this.c.store.manifestWithBytes(l);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
@@ -391,7 +394,7 @@ export class SyncAgent {
         key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc,
         envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, cargoLock: hd.cargoLock ?? null, manifestSha256: l.sha256, synced: this.c.now(),
       };
-      writeFileSync(join(tmp, "manifest.zst"), encodeManifest(manifest), { mode: 0o644 });
+      writeFileSync(join(tmp, "manifest.zst"), raw, { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
       writeFileSync(join(tmp, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
       renameSync(tmp, final);

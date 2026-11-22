@@ -251,12 +251,17 @@ export class WarmStore {
 
   /** The manifest latest.json names, checked against its sha256, key and commit. */
   async manifest(l: Latest, dav: WebDav = this.read): Promise<Manifest> {
+    return (await this.manifestWithBytes(l, dav)).manifest;
+  }
+
+  /** Like `manifest`, with the verified bytes as stored, for copies that must keep the sha256 latest.json names. */
+  async manifestWithBytes(l: Latest, dav: WebDav = this.read): Promise<{ manifest: Manifest; raw: Buffer }> {
     const buf = await dav.get(WarmStore.manifestPath(l.key, l.commit), l.size, true);
     if (!buf) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} is missing`);
     if (buf.length !== l.size || createHash("sha256").update(buf).digest("hex") !== l.sha256) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} does not match latest.json`);
     const m = decodeManifest(buf);
     if (m.header.key !== l.key || m.header.commit !== l.commit || m.header.bytes !== l.bytes) throw new StoreError(`manifest ${l.key}/${l.commit.slice(0, 12)} is for another version`);
-    return m;
+    return { manifest: m, raw: buf };
   }
 
   blobs(dav: WebDav = this.read): BlobSource {
