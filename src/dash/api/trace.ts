@@ -156,7 +156,7 @@ export const runColumnsExpr = (db: Db, eb: Eb) => [
   "r.id", "r.step", "r.prompt_id", "r.model", "r.provider", "r.state", "r.started_at", "r.ended_at", "r.input_tokens", "r.output_tokens", "r.cost_usd",
   "r.summary", "r.job_id", "r.user_login", "r.harness", "r.reported_model",
   eb.fn.coalesce(eb.ref("a.label"), eb.ref("r.account_id")).as("label") as AliasedExpression<string | null, "label">,
-  db.k.selectFrom("agent_run_tools as t").select((e) => e.fn.countAll<number>().as("n")).where("t.run_id", "=", eb.ref("r.id")).as("tools") as unknown as AliasedExpression<number, "tools">,
+  db.k.selectFrom("agent_run_tools as t").select((e) => e.fn.countAll<number>().as("n")).where("t.run_id", "=", eb.ref("r.id")).as("tools"),
 ] as const;
 
 export const runEvent = (r: { id: number; step: string; prompt_id: string; model: string; provider: string; state: string; started_at: string; ended_at: string | null; input_tokens: number | null; output_tokens: number | null;
@@ -170,7 +170,7 @@ export const runEvent = (r: { id: number; step: string; prompt_id: string; model
 const modelCalls: Source = {
   kinds: ["model-call"],
   run: async ({ db, repo, n, hidden, staff }) => (await db.all(db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id").leftJoin("claude_accounts as a", "a.id", "r.account_id")
-    .select((eb) => runColumnsExpr(db, eb)).where("i.repo", "=", repo).where("i.number", "=", n)
+    .select((eb) => runColumnsExpr(db, eb)).$narrowType<{ tools: number }>().where("i.repo", "=", repo).where("i.number", "=", n)
     .$if(filtered(hidden), (q) => q.where((eb) => hiddenExpr(db, eb, hidden)!)))).map((r) => runEvent(r, staff)),
 };
 
@@ -490,40 +490,39 @@ async function headerOf(c: Ctx): Promise<ItemTraceHeader> {
  * Each query selects its values in the order the fingerprint lists them; the states of several rows join in key order.
  */
 const fingerprintQueries = (db: Db, repo: string, n: number, ref: string) => {
-  const k = db.k;
   const flag = (eb: kx.Eb, col: string) => eb.fn.sum<number | null>(eb.case().when(col, "is not", null).then(eb.lit(1)).else(eb.lit(0)).end());
   return [
-    k.selectFrom("items").select(["updated_at", "head_oid", "state", "assignees", "closed_at", "merged_at"]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("item_plans").select(["planned_at", "state", "head"]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("comments").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("created_at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("stages").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("stages")).as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("plan_history").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("job_items as i").innerJoin("jobs as j", "j.id", "i.job_id").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("i.id").as("newest"), kx.groupConcat(db, "j.state", ",", "i.id").as("states")])
+    db.k.selectFrom("items").select(["updated_at", "head_oid", "state", "assignees", "closed_at", "merged_at"]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("item_plans").select(["planned_at", "state", "head"]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("comments").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("created_at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("stages").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("stages")).as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("plan_history").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("job_items as i").innerJoin("jobs as j", "j.id", "i.job_id").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("i.id").as("newest"), kx.groupConcat(db, "j.state", ",", "i.id").as("states")])
       .where("i.repo", "=", repo).where("i.number", "=", n),
-    k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id")
+    db.k.selectFrom("agent_run_items as i").innerJoin("agent_runs as r", "r.id", "i.run_id")
       .select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("i.run_id").as("newest"), flag(eb, "r.ended_at").as("ended"), flag(eb, "r.cost_usd").as("costed")])
       .where("i.repo", "=", repo).where("i.number", "=", n),
-    k.selectFrom("model_checks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "outcome").as("done")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("build_tasks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "ended_at").as("ended"), kx.groupConcat(db, "state", ",", "id").as("states")])
+    db.k.selectFrom("model_checks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "outcome").as("done")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("build_tasks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "ended_at").as("ended"), kx.groupConcat(db, "state", ",", "id").as("states")])
       .where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("push_outcomes").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "outcome").as("done")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("patch_checks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("opus_review_history").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("opus_review_history")).as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("opus_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("premerge_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>("tries").as("tries")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("postmerge_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>("tries").as("tries")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("verifications").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("finished_at", "created_at")).as("newest"), kx.groupConcat(db, "state", ",", kx.rowid("verifications")).as("states")])
+    db.k.selectFrom("push_outcomes").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), flag(eb, "outcome").as("done")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("patch_checks").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("opus_review_history").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("opus_review_history")).as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("opus_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("premerge_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>("tries").as("tries")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("postmerge_reviews").select((eb) => [eb.fn.max<string | null>("at").as("newest"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number | null>("tries").as("tries")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("verifications").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("finished_at", "created_at")).as("newest"), kx.groupConcat(db, "state", ",", kx.rowid("verifications")).as("states")])
       .where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("fixups").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("fixups")).as("states")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("ci_fixes").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("ci_fixes")).as("states")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("conflict_merges").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("conflict_merges")).as("states")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("merges").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("actions").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, "state", ",", "id").as("states")]).where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("conversation_turns").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), kx.groupConcat(db, eb.fn.coalesce("status", eb.val("")), ",", "id").as("states")])
+    db.k.selectFrom("fixups").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("fixups")).as("states")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("ci_fixes").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("ci_fixes")).as("states")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("conflict_merges").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, eb("state", "||", eb.fn.coalesce("to_head", eb.val(""))), ",", kx.rowid("conflict_merges")).as("states")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("merges").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>("at").as("newest")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("actions").select((eb) => [eb.fn.countAll<number>().as("n"), kx.groupConcat(db, "state", ",", "id").as("states")]).where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("conversation_turns").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>("id").as("newest"), kx.groupConcat(db, eb.fn.coalesce("status", eb.val("")), ",", "id").as("states")])
       .where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("activity_sync").select("read_at").where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("merge_holds").select("held_at").where("repo", "=", repo).where("number", "=", n),
-    k.selectFrom("audit").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("audit")).as("newest"), eb.fn.sum<number | null>(eb.fn("length", [eb.fn.coalesce("details", eb.val(""))])).as("length")]).where("target", "=", ref),
+    db.k.selectFrom("activity_sync").select("read_at").where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("merge_holds").select("held_at").where("repo", "=", repo).where("number", "=", n),
+    db.k.selectFrom("audit").select((eb) => [eb.fn.countAll<number>().as("n"), eb.fn.max<number | null>(kx.rowid("audit")).as("newest"), eb.fn.sum<number | null>(eb.fn("length", [eb.fn.coalesce("details", eb.val(""))])).as("length")]).where("target", "=", ref),
   ];
 };
 

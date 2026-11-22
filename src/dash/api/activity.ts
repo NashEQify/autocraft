@@ -111,6 +111,7 @@ export const SOURCES: Source[] = [
           .innerJoin("agent_run_items as i", (j) => j.onRef("i.run_id", "=", "r.id").on((eb) => eb.and([eb("i.repo", "=", firstItem(eb).select("x.repo")), eb("i.number", "=", firstItem(eb).select("x.number"))])))
           .leftJoin("claude_accounts as a", "a.id", "r.account_id")
           .select((eb) => [...runColumnsExpr(c.db, eb), "i.repo as repo", "i.number as number"])
+          .$narrowType<{ tools: number }>()
           .where((eb) => hiddenExpr(c.db, eb, c.hidden) ?? eb.and([])),
         time: "r.started_at", repoCol: "i.repo", map: (r) => [runEvent(r, c.staff)],
       });
@@ -168,7 +169,7 @@ export const SOURCES: Source[] = [
         time: "at", repoCol: null,
         // A write is AutoCraft's when the viewer is not staff (the actor is hidden) or the pipeline recorded a state with it (writeEvent).
         only: () => (c.staff
-          ? (eb) => eb.and([eb(eb.case().when(kx.jsonValid(c.db, "details")).then(kx.jsonType(c.db, "details", "$.state")).end(), "=", "text"), kx.inList(c.db, "action", Object.keys(GITHUB_ACTIONS))])
+          ? (eb) => eb.and([eb(eb.case().when(kx.jsonValid(c.db, "details")).then(kx.jsonType(c.db, "details", "$.state")).end(), "in", ["text", "object", "array"]), kx.inList(c.db, "action", Object.keys(GITHUB_ACTIONS))])
           : EVERY),
         of: (r) => {
           const i = r.target.lastIndexOf("#"), n = Number(r.target.slice(i + 1)), repo = r.target.slice(0, i);
