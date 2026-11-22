@@ -87,7 +87,8 @@ async function runnerCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
 
 /**
  * Leader election on Postgres (src/db/leader.ts): `runner-leader` and `periodic-leader` are ok while a leader writes its
- * status, with `since` its start and `count` the standbys waiting; a standby is not a problem. No row: one process, no check.
+ * status, with `since` its start and `count` the standbys waiting; a standby is not a problem unless a copy is set to one
+ * replica (warn). No row: one process, no check.
  */
 async function leaderChecks({ db, nowMs }: CheckCtx): Promise<Check[]> {
   const out: Check[] = [];
@@ -97,7 +98,10 @@ async function leaderChecks({ db, nowMs }: CheckCtx): Promise<Check[]> {
     const id = `${role}-leader`, at = s.leader ? Date.parse(s.leader.at) : NaN;
     const name = role === "runner" ? "runner" : "periodic chores (sync)";
     if (!Number.isNaN(at) && nowMs - at <= THRESHOLDS.leaderStaleMs) {
-      out.push(ok(id, "/pipeline", { since: s.leader!.since, count: s.standbys }));
+      if (s.unwatched) {
+        const text = `A standby of the ${name} runs while AUTOCRAFT_RUNNER_REPLICAS is 1, so the leader runs without the watchdog two copies need; set it to the number of copies`;
+        out.push({ id, state: "warn", text, brief: `The ${name} copies are misconfigured`, since: s.leader!.since, count: s.standbys, to: "/pipeline" });
+      } else out.push(ok(id, "/pipeline", { since: s.leader!.since, count: s.standbys }));
       continue;
     }
     const text = `No copy of the ${name} has reported as leader for ${Number.isNaN(at) ? "a while" : minutes(nowMs - at)}${s.standbys ? `; ${s.standbys} standby waiting` : ""}`;

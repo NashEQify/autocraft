@@ -65,8 +65,9 @@ export const standbyPrefix = (role: LeaderRole): string => `leader:${role}:stand
 
 /** What the server says of a lock connection: its backend, the keepalive settings in effect and the client address it sees. */
 export type ConnInfo = { pid: number; keepalivesIdle: string | null; userTimeout: string | null; clientAddr: string | null };
-export type LeaderStatus = { holder: string; epoch: number; since: string; at: string; conn: Omit<ConnInfo, "pid"> };
-export type StandbyStatus = { holder: string; since: string; at: string };
+/** `replicas`: the copy's AUTOCRAFT_RUNNER_REPLICAS (absent in rows of older versions). */
+export type LeaderStatus = { holder: string; epoch: number; since: string; at: string; replicas?: number; conn: Omit<ConnInfo, "pid"> };
+export type StandbyStatus = { holder: string; since: string; at: string; replicas?: number };
 
 export type Lease = {
   role: LeaderRole;
@@ -149,7 +150,8 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   const pg = await loadPg();
   const key = LOCK_KEYS[role];
   const retryMs = o.retryMs ?? RETRY_MS, checkMs = o.checkMs ?? CHECK_MS, lossMs = o.lossMs ?? LOSS_MS, beatMs = o.beatMs ?? BEAT_MS;
-  const watchdog = (o.replicas ?? runnerReplicas()) >= 2;
+  const replicas = o.replicas ?? runnerReplicas();
+  const watchdog = replicas >= 2;
   const standbyRow = `${standbyPrefix(role)}${holder}`;
   const waitingSince = iso();
   let onLost: (c: Pg.Client, why: string) => void = () => {};
@@ -177,11 +179,13 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
       if (!announced) {
         announced = true;
         log(`leader: another copy leads the ${role}; waiting as a standby`);
+        // Outside a deploy's brief overlap, a standby means a second replica runs without the watchdog it needs.
+        if (!watchdog) log(`leader: warning: AUTOCRAFT_RUNNER_REPLICAS is ${replicas}, but another copy of the ${role} runs; set it to the number of copies`);
         o.onStandby?.();
       }
       if (Date.now() - standbyBeat >= beatMs) {
         standbyBeat = Date.now();
-        await putSetting(db, standbyRow, JSON.stringify({ holder, since: waitingSince, at: iso() } satisfies StandbyStatus));
+        await putSetting(db, standbyRow, JSON.stringify({ holder, since: waitingSince, at: iso(), replicas } satisfies StandbyStatus));
       }
       lastError = "";
     } catch (e) {
@@ -211,7 +215,7 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   };
   const status = (at: string): string => {
     const { pid: _, ...c } = current.info;
-    return JSON.stringify({ holder, epoch, since, at, conn: c } satisfies LeaderStatus);
+    return JSON.stringify({ holder, epoch, since, at, replicas, conn: c } satisfies LeaderStatus);
   };
 
   /** Gives the lock back (if this session still holds it) and runs the election again. */
@@ -308,15 +312,16 @@ export async function elect(db: Db, role: LeaderRole, o: ElectOptions = {}): Pro
   };
   onLost = (c, why) => { if (c === current.client) void reacquire(why); };
 
-  let checking = false;
+  /** The client whose check has not answered yet: a hung check on a discarded client must not hold up checks on its successor. */
+  let checkingOn: Pg.Client | null = null;
   check = setInterval(() => {
-    if (checking || recovering) return;
-    checking = true;
+    if (checkingOn === current.client || recovering) return;
     const sent = Date.now(), c = current.client;
+    checkingOn = c;
     c.query("SELECT 1").then(
       () => { if (c === current.client) lastOk = Math.max(lastOk, sent); },
       (e: Error) => { if (c === current.client) void reacquire(e.message); },
-    ).finally(() => { checking = false; });
+    ).finally(() => { if (checkingOn === c) checkingOn = null; });
   }, checkMs);
   // Wall-clock time: after a stall of the event loop this fires late and sees the whole gap.
   watch = setInterval(() => {
@@ -364,13 +369,19 @@ async function pruneStandbys(db: Db, role: LeaderRole): Promise<void> {
   }
 }
 
-/** What the health checks show of a role: its leader's status and the standbys seen within `freshMs`; null when no copy was ever elected (SQLite). */
-export async function leaderStatus(db: Db, role: LeaderRole, freshMs: number, nowMs = Date.now()): Promise<{ leader: LeaderStatus | null; standbys: number } | null> {
+/**
+ * What the health checks show of a role: its leader's status, the standbys seen within `freshMs`, and `unwatched`, whether
+ * a standby runs beside a copy set to one replica (which then runs without the watchdog two copies need); null when no
+ * copy was ever elected (SQLite).
+ */
+export async function leaderStatus(db: Db, role: LeaderRole, freshMs: number, nowMs = Date.now()): Promise<{ leader: LeaderStatus | null; standbys: number; unwatched: boolean } | null> {
   const rows = await db.all(db.k.selectFrom("settings").select(["key", "value"]).where("key", "like", `${leaderKey(role)}%`));
   const lead = rows.find((r) => r.key === leaderKey(role));
   if (!lead) return null;
   const parse = <T>(v: string | null): T | null => { try { return v ? JSON.parse(v) as T : null; } catch { return null; } };
   const fresh = (s: { at?: unknown } | null): boolean => typeof s?.at === "string" && nowMs - Date.parse(s.at) <= freshMs;
-  const standbys = rows.filter((r) => r.key.startsWith(standbyPrefix(role)) && fresh(parse<StandbyStatus>(r.value))).length;
-  return { leader: parse<LeaderStatus>(lead.value), standbys };
+  const live = rows.filter((r) => r.key.startsWith(standbyPrefix(role))).map((r) => parse<StandbyStatus>(r.value)).filter((s) => fresh(s));
+  const leader = parse<LeaderStatus>(lead.value);
+  const single = (s: { replicas?: unknown } | null): boolean => typeof s?.replicas === "number" && s.replicas < 2;
+  return { leader, standbys: live.length, unwatched: live.length > 0 && (single(leader) || live.some(single)) };
 }

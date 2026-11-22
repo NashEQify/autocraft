@@ -58,19 +58,31 @@ export function within<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
 const settingsLogged = new Set<string>();
 
 /**
- * Sends one SET per setting on a connection, in order, and resolves once all have answered. Session SETs rather than
- * startup parameters: a server or proxy that does not accept one refuses that statement alone, where a startup
- * parameter it does not accept would refuse the connection. A refused or unanswered setting keeps the server's default.
+ * SETs `settings` on a connection and resolves once the server has answered. Session SETs rather than startup
+ * parameters: a server or proxy that does not accept one refuses that statement alone, where a startup parameter it
+ * does not accept would refuse the connection. A refused or unanswered setting keeps the server's default and is logged
+ * once per process and `where`.
  */
 export async function setSession(query: (text: string) => Promise<unknown>, settings: Record<string, number>, where: string, log: (line: string) => void, timeoutMs?: number): Promise<void> {
-  for (const [k, v] of Object.entries(settings)) {
-    const sent = query(`SET ${k} = ${Math.floor(v)}`);
-    await (timeoutMs ? within(sent, timeoutMs, `SET ${k}`) : sent).catch((e: Error) => {
-      const id = `${where}\0${k}`;
-      if (settingsLogged.has(id)) return;
-      settingsLogged.add(id);
-      log(e instanceof QueryTimeout ? `db: SET ${k} = ${v} on ${where} timed out after ${timeoutMs} ms` : `db: the server refused ${k} = ${v} on ${where}: ${e.message}`);
-    });
+  const entries = Object.entries(settings).map(([k, v]) => [k, Math.floor(v)] as const);
+  const run = (text: string, what: string): Promise<unknown> => (timeoutMs ? within(query(text), timeoutMs, what) : query(text));
+  const note = (id: string, line: string): void => {
+    if (settingsLogged.has(`${where}\0${id}`)) return;
+    settingsLogged.add(`${where}\0${id}`);
+    log(line);
+  };
+  // One round trip. The statements of one query run as one implicit transaction, so a refusal undoes them all; then
+  // each is sent alone, to keep the ones the server accepts.
+  try {
+    await run(entries.map(([k, v]) => `SET ${k} = ${v}`).join("; "), "the session settings");
+    return;
+  } catch (e) {
+    if (e instanceof QueryTimeout) return note("", `db: the session settings on ${where} timed out after ${timeoutMs} ms`);
+  }
+  for (const [k, v] of entries) {
+    await run(`SET ${k} = ${v}`, `SET ${k}`).catch((e: Error) => note(k, e instanceof QueryTimeout
+      ? `db: SET ${k} = ${v} on ${where} timed out after ${timeoutMs} ms`
+      : `db: the server refused ${k} = ${v} on ${where}: ${e.message}`));
   }
 }
 
@@ -190,8 +202,8 @@ export function postgresEngine(k: typeof K, pg: typeof Pg.default, url: string, 
    * wait), so every statement runs with the session settings in effect.
    */
   const prepareConnection = async (conn: K.DatabaseConnection): Promise<void> => {
-    await setSession((text) => conn.executeQuery(raw(text)), sessionSettings, "pool connections", (l) => console.warn(l));
     lockWrites(conn);
+    await setSession((text) => conn.executeQuery(raw(text)), sessionSettings, "pool connections", (l) => console.warn(l));
   };
   const lockTimeout = (tx: Tx | undefined) => Math.max(1, Math.floor(tx?.lockTimeoutMs ?? opts.busyTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS));
   // A fenced process (src/db/fence.ts) checks its epoch after the writer lock: the check sees every write committed before it.
