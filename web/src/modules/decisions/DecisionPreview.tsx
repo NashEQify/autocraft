@@ -124,9 +124,9 @@ function DecisionPeek({ d }: { d: Decision }) {
  */
 export function DecisionPreview({ peek, query, onClose }: { peek: string; query: DecisionListQuery; onClose: () => void }) {
   const user = useUser();
-  const decisions = query.loading ? undefined : query.data?.decisions;
+  const decisions = query.loading || query.error ? undefined : query.data?.decisions;
   const fromList = decisions?.find((d) => d.id === peek);
-  const missing = !query.loading && !!query.data && !fromList;
+  const missing = !query.loading && !query.error && !!query.data && !fromList;
   // gcTime 0: this read-only lookup is for one preview; a browsed-away decision should not keep its
   // payload cached for the default five minutes.
   const one = useQuery(`decision:preview:${user.login}:${user.role}:${peek}`, (api) => api.decisions.get(peek), { enabled: missing, gcTime: 0 });
