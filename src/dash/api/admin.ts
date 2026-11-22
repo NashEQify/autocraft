@@ -17,6 +17,7 @@ import { mergeApprovalOf, setMergeApproval } from "../../merge/approval.ts";
 import { ciApprovalOf, setCiApproval } from "../../merge/ci-approval.ts";
 import { optionalChecks, seenChecks, setOptionalCheck } from "../../optional-checks.ts";
 import { mainFixApprovalOf, setMainFixApproval } from "../../mainfix/approval.ts";
+import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts";
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
 import { setRepoPipeline } from "../../pilot.ts";
@@ -46,7 +47,7 @@ const AUDIT_PAGE = 50;
 export const operatorOnly = (a: string) => a.startsWith("access-") || a.startsWith("github-app-") || a.startsWith("account-") || a.startsWith("mcp-token-") || a.startsWith("runner-") || ["session-revoke", "sign-in", "sign-in-refused", "usage-reserve", "my-repos", "max-calls", "manual-only"].includes(a);
 export const AUDIT_ACTIONS = [
   "answer", "undo", "dispute", "dispute-resolve", "answer-sweep", "adopt", "opinion", "opinion-retract", "comment", "override", "rule", "access-add", "access-remove", "access-role",
-  "session-revoke", "mcp-token-create", "mcp-token-revoke", "runner-migrate", "runner-approve", "runner-deny", "runner-revoke", "runner-scopes", "usage-reserve", "my-repos", "max-calls", "manual-only", "runner-private", "remote-pick", "remote-unpick", "remote-pick-minutes", "sign-in", "sign-in-refused", "account-add", "account-change", "account-login-start", "account-login-code", "account-login-cancel", "account-token-start", "account-token-code", "account-token-cancel", "account-token-set", "account-token-remove", "account-sign-out", "account-refresh", "repo-track", "repo-untrack", "reference-import", "labels-approve", "labels-revoke", "labels-apply", "merge-approve", "merge-revoke", "comment-approve", "comment-revoke", "act-comment", "act-close", "act-reopen", "act-open-issue", "discord-issue-open", "discord-issue-label", "act-unlabel", "act-transfer", "act-request-reviewers", "act-skip", "push-approve", "push-revoke", "fixup-push", "fixup-comment", "fixup-comment-edit", "fixissue-approve", "fixissue-revoke", "mainfix-approve", "mainfix-revoke", "optional-check-add", "optional-check-remove", "fixissue-push", "fixissue-pr", "fixissue-comment", "implement-push", "implement-pr", "implement-comment",
+  "session-revoke", "mcp-token-create", "mcp-token-revoke", "runner-migrate", "runner-approve", "runner-deny", "runner-revoke", "runner-scopes", "usage-reserve", "my-repos", "max-calls", "manual-only", "runner-private", "remote-pick", "remote-unpick", "remote-pick-minutes", "sign-in", "sign-in-refused", "account-add", "account-change", "account-login-start", "account-login-code", "account-login-cancel", "account-token-start", "account-token-code", "account-token-cancel", "account-token-set", "account-token-remove", "account-sign-out", "account-refresh", "repo-track", "repo-untrack", "reference-import", "labels-approve", "labels-revoke", "labels-apply", "merge-approve", "merge-revoke", "comment-approve", "comment-revoke", "act-comment", "act-close", "act-reopen", "act-open-issue", "discord-issue-open", "discord-issue-label", "act-unlabel", "act-transfer", "act-request-reviewers", "act-skip", "push-approve", "push-revoke", "fixup-push", "fixup-comment", "fixup-comment-edit", "fixissue-approve", "fixissue-revoke", "prstatus-approve", "prstatus-revoke", "pr-status-comment", "pr-status-comment-edit", "mainfix-approve", "mainfix-revoke", "optional-check-add", "optional-check-remove", "fixissue-push", "fixissue-pr", "fixissue-comment", "implement-push", "implement-pr", "implement-comment",
   "job-request", "job-cancel", "security-scan-start", "security-scan-stop", "security-finding-dismiss", "security-finding-backlog", "security-finding-reopen", "security-finding-fix", "security-finding-land", "security-finding-advisory", "security-finding-publish", "security-land-push", "security-land", "security-land-opened", "security-landed", "security-advisory", "security-advisory-fork", "security-advisory-push", "security-advisory-pr", "security-advisory-ready", "security-publish", "security-published", "security-cve", "pipeline-switch", "stage-limit", "limit-reset", "pilot-set", "pilot-clear", "repo-pipeline", "github-identity", "review-post", "review-edit", "batch-again", "reopen", "backlog-bulk", "withdraw",
   "single-merge-max", "label-create", "batch-pr-close", "fork-create", "assign", "unassign", "merge", "batch-push", "batch-pr", "shared-repos",
   "fasttrack-add", "fasttrack-remove", "fasttrack-weight", "abuse-limits", "outside-release", "outside-release-author", "merge-hold", "merge-release", "batch-remove", "batch-stop", "areas-edit", "areas-accept", "ci-approve", "ci-revoke", "ci-run-approve", "ci-rerun", "cifix-push", "cifix-comment", "cifix-check", "postmerge-file", "postmerge-file-one", "postmerge-review", "postmerge-backfill",
@@ -289,6 +290,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
     fixing: r.tracked ? approvalInfo(await fixIssueApprovalOf(db, r.name)) : null,
     mainFixing: r.tracked ? approvalInfo(await mainFixApprovalOf(db, r.name)) : null,
     ciApproving: r.tracked ? approvalInfo(await ciApprovalOf(db, r.name)) : null,
+    statusComments: r.tracked ? approvalInfo(await statusApprovalOf(db, r.name)) : null,
     optionalChecks: r.tracked ? await optionalChecks(db, r.name) : [],
     seenChecks: r.tracked ? await seenChecks(db, r.name) : [],
     pipeline: !!r.tracked && !!r.pipeline,
@@ -621,6 +623,21 @@ export async function optionalCheck(db: Db, req: Req, on: boolean): Promise<Trac
     }
   });
   if (!changed) throw new HttpError(409, `${check} is ${on ? "already" : "not"} an optional check of ${name}`);
+  return await oneRepo(db, req, name);
+}
+
+// An operator, or a maintainer with write access to the repo, switches the PR status comment on or off for a repo.
+export async function statusApproval(db: Db, req: Req, approved: boolean): Promise<TrackedRepo> {
+  const name = required(body(req).name, "name");
+  await requireRunRepo(req, name);
+  const changed = await refused(async () => {
+    try {
+      return await setStatusApproval(db, req.user.login, name, approved);
+    } catch (e) {
+      throw new RepoError((e as Error).message);
+    }
+  });
+  if (!changed) throw new HttpError(409, `PR status comments are already ${approved ? "on" : "off"} for ${name}`);
   return await oneRepo(db, req, name);
 }
 

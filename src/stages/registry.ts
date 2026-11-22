@@ -36,7 +36,7 @@ export type StageDef = {
   /** The `stage` label of the stage's prompts: equal, or followed by " (...)". */
   promptStage: string;
   waits: { name: string; why: string; howLong: string; showsAs: string; kind: "external" | "backoff" }[];
-  writes: { what: string; approval?: "label" | "comment" | "push" | "fix" | "merge" | "ci" | "main-fix" }[];
+  writes: { what: string; approval?: "label" | "comment" | "push" | "fix" | "merge" | "ci" | "main-fix" | "status" }[];
   /** What stops for a person, or null. */
   person: string | null;
   swimlane: { id: string; lane: LaneId; row: number; lines: string[]; approval?: string }[];
@@ -367,8 +367,8 @@ export const STAGES: StageDef[] = [
   {
     id: "merge", title: "Merge queue", order: 11, runStage: 6, docSection: "Merge queue", mode: "steps",
     description: "Merges PRs that pass the rules in integration batches (up to 50 PRs, checked by upstream CI on the batch PR) through safe-merge, and asks for a Merge? decision on PRs outside the rules. Before a PR the rule would merge goes into a batch, and before a pre-approved merge is handed over to the queue, Opus reviews its head commit once more, adversarially and independently of the first review; a defect it verifies becomes a fix-up or a Merge? question (for a pre-approved merge, a Merge? question). Approves held CI runs of outside contributors where the repo allows it.",
-    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "merge-ask", maxMin: 10 }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }],
-    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge-ask", steps: ["merge-ask"], order: 10 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }],
+    steps: [{ name: "merge", maxMin: 15, label: "Merge", limit: null, seeded: 10 }, { name: "premerge", maxMin: 60, label: "Pre-merge review", limit: null }, { name: "merge-ask", maxMin: 10 }, { name: "ci-approve", maxMin: 10, label: "Approve CI runs", limit: 30 }, { name: "unassign", maxMin: 10 }, { name: "pr-status", maxMin: 10, label: "PR status comments", limit: 2000 }],
+    lanes: [{ name: "premerge", steps: ["premerge"], order: 9 }, { name: "merge-ask", steps: ["merge-ask"], order: 10 }, { name: "merge", steps: ["checks", "merge"], order: 11 }, { name: "ci-approve", steps: ["ci-approve"], order: 21 }, { name: "unassign", steps: ["unassign"], order: 27 }, { name: "pr-status", steps: ["pr-status"], order: 17 }],
     reads: ["Reviews", "Verification results", "CI state", "Merge decisions"],
     sets: ["Integration batches", "Merged PRs", "Merge? decisions"],
     states: [
@@ -409,9 +409,10 @@ export const STAGES: StageDef[] = [
       { name: "Batch CI red at the base", why: "Every failed check of the batch PR also failed on the default branch at the batch's base, so no PR in the batch is to blame and rerunning would not help", howLong: "Until the default branch head changes; the batch is then rebuilt on it. No timer", showsAs: "Batch note \"failed on the default branch at the base too; waits for the default branch to change\"", kind: "external" },
       { name: "Batch CI runs in progress", why: "GitHub shows the batch PR's CI red as soon as one job fails while the run's other jobs go on, and refuses to rerun the failed jobs of a run in progress; the one rerun waits until every failed check's run has completed", howLong: "Until those runs complete (read again with each merge run); no timer, and no rerun is recorded meanwhile", showsAs: "Batch note \"waiting for the failed CI runs to finish before the one rerun\"", kind: "external" },
       { name: "Batch CI rerun", why: "With no PR traced, the failed runs of the batch tip were rerun once, and the batch waits for new results", howLong: "Up to 45 minutes after the rerun for results newer than it; older or unreadable results do not count. If every rerun call was refused the batch does not wait: it splits or fails at once", showsAs: "Batch note \"no PR traced, rerunning the failed runs once\"; audit `batch-rerun`", kind: "external" },
+      { name: "PR status comment retry", why: "Writing a PR's status comment failed 3 times in a row (GitHub refused it, or the PR's comments could not be read)", howLong: "1 hour, doubling with each further failure up to 24 hours; a success resets it", showsAs: "Job log of the pr-status step: \"status comment failed\" on the item", kind: "backoff" },
       { name: "Changes requested", why: "A reviewer with write access has a formal review that blocks the merge", howLong: "Until that reviewer approves or a maintainer dismisses the review; no timer. Blocked PRs are read again every merge run", showsAs: "Queue state `changes-requested` with the reviewer in its note", kind: "external" },
     ],
-    writes: [{ what: "Merge of the batch PR", approval: "merge" }, { what: "Approval of held workflow runs", approval: "ci" }, { what: "Rerun of the failed CI runs of the batch PR (once per batch)", approval: "merge" }],
+    writes: [{ what: "Merge of the batch PR", approval: "merge" }, { what: "Approval of held workflow runs", approval: "ci" }, { what: "Rerun of the failed CI runs of the batch PR (once per batch)", approval: "merge" }, { what: "One status comment per PR, edited in place", approval: "status" }],
     person: "Merge? decision for PRs outside the rules",
     swimlane: [
       { id: "queue", lane: "auto", row: 14, lines: ["Merge queue", "rule met at this head?"] },

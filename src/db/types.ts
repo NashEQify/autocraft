@@ -1569,6 +1569,19 @@ export interface PrFiles {
   change_type: string;
 }
 
+export interface PrStatusComments {
+  repo: string;
+  number: number;
+  comment_id: string | null;
+  author: string | null;
+  line: string | null;
+  steps: Generated<string>;
+  final: Generated<number>;
+  failures: Generated<number>;
+  retry_at: string | null;
+  updated_at: string;
+}
+
 export interface Preapprovals {
   id: Generated<number>;
   repo: string;
@@ -2369,6 +2382,7 @@ export interface DB {
   pr_checks: PrChecks;
   pr_commits: PrCommits;
   pr_files: PrFiles;
+  pr_status_comments: PrStatusComments;
   preapprovals: Preapprovals;
   premerge_reviews: PremergeReviews;
   push_outcomes: PushOutcomes;
@@ -2550,6 +2564,7 @@ export interface DB {
   "main.pr_checks": PrChecks;
   "main.pr_commits": PrCommits;
   "main.pr_files": PrFiles;
+  "main.pr_status_comments": PrStatusComments;
   "main.preapprovals": Preapprovals;
   "main.premerge_reviews": PremergeReviews;
   "main.push_outcomes": PushOutcomes;
@@ -2735,6 +2750,7 @@ export const COLUMNS = {
   pr_checks: ["repo", "number", "head_oid", "state", "is_draft", "overall", "checks", "mergeable", "maintainer_can_modify", "fetched_at"],
   pr_commits: ["repo", "number", "oid", "committed_at", "author", "first_seen_at", "co_authors", "message"],
   pr_files: ["repo", "number", "head", "path", "additions", "deletions", "change_type"],
+  pr_status_comments: ["repo", "number", "comment_id", "author", "line", "steps", "final", "failures", "retry_at", "updated_at"],
   preapprovals: ["id", "repo", "number", "by", "at", "instructions", "state", "from_head", "head", "reason", "updated_at", "fix_id"],
   premerge_reviews: ["repo", "number", "head_oid", "at", "run_id", "model", "findings", "searched", "error", "tries", "conflicts", "base_ref", "unsure", "claims"],
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],

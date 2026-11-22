@@ -10,9 +10,9 @@ export type By = "pipeline" | { operator: string };
 export type Want<K extends ActionKind = ActionKind> = { kind: K; bucket?: string };
 
 /** The repo approvals a write can need. */
-export type Approval = "merge" | "push" | "comment" | "ci" | "labels" | "fix-issue" | "main-fix";
+export type Approval = "merge" | "push" | "comment" | "ci" | "labels" | "fix-issue" | "main-fix" | "status";
 
-const WHAT: Record<Approval, string> = { merge: "Merges", push: "Pushes", comment: "Comments", ci: "CI run approvals", labels: "Labels", "fix-issue": "Issue implementations", "main-fix": "Main CI fixes" };
+const WHAT: Record<Approval, string> = { merge: "Merges", push: "Pushes", comment: "Comments", ci: "CI run approvals", labels: "Labels", "fix-issue": "Issue implementations", "main-fix": "Main CI fixes", status: "PR status comments" };
 
 /** A repo's approvals and the global switch, as the repo-level guard loads them. */
 export type RepoApprovals = Record<Approval, boolean> & { pipelineOn: boolean };
@@ -63,7 +63,7 @@ export function gates(f: PrFacts | ItemFacts, a: Want, by: By): string | null {
   const need = approvalOf(f as { pushable?: boolean }, a);
   if (!need) return null;
   const r = f.repoFacts as Record<string, boolean | undefined>;
-  const ok = { merge: r.mergeApproved, push: r.pushApproved, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined }[need];
+  const ok = { merge: r.mergeApproved, push: r.pushApproved, comment: r.commentApproved, ci: r.ciApproved, labels: r.labelsApproved, "fix-issue": r.fixIssueApproved, "main-fix": undefined, status: undefined }[need];
   return ok ? null : `${WHAT[need]} in ${f.repo} are not approved`;
 }
 
