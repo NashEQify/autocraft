@@ -39,7 +39,7 @@ import { filterSeq, mapSeq } from "../async-seq.ts";
 import type { AliasableExpression, SqlBool } from "kysely";
 import { adoptableCallExpr, earlierRunCallExpr, resumedRun, resumingJobsExpr } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
-import { ciEq as ciEqExpr, greatest, inList, least, ref, type Eb, type Ex } from "../db/kx.ts";
+import { ciEq as ciEqExpr, greatest, indexedBy, inList, least, literal, ref, type Eb, type Ex } from "../db/kx.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
 export const LEASE_IDLE_MS = scaled(2 * 60_000);
@@ -266,13 +266,16 @@ async function readExpiry(db: Db, nowMs: number, id?: number): Promise<Expiry> {
     const live = await dashboardAlive(db, nowMs);
     if (!live.alive) return { idle: 0, lost: [] };
     const idle = live.since <= nowMs - LEASE_IDLE_MS ? 1 : 0;
-    // One call: by its id.
+    // Every lease: the leased rows are found in remote_calls_leased and only the lost ones are read. One call: by its id.
+    const ended = (eb: Eb) => eb.and([eb("state", "=", literal("leased")), eb.or([
+      ...(idle === 1 ? [eb("heartbeat_at", "<", nowMs - LEASE_IDLE_MS)] : []),
+      eb.and([eb("started_at", "is", null), eb(eb("leased_at", "+", scaled(PREPARE_MAX_S * 1000)), "<", nowMs)]),
+      eb.and([eb("started_at", "is not", null), eb(eb(eb("started_at", "+", eb.ref("timeout_ms")), "+", LEASE_MARGIN_MS), "<", nowMs)]),
+    ])]);
     const rows = await db.all(db.k.selectFrom("main.remote_calls").select(["id", "run_id", "attempt", "max_attempts", "heartbeat_at", "leased_at", "started_at", "timeout_ms", "token_id", "user_login", "lease_secret_hash"])
-      .where((eb) => eb.and([eb("state", "=", "leased"), eb.or([
-        ...(idle === 1 ? [eb("heartbeat_at", "<", nowMs - LEASE_IDLE_MS)] : []),
-        eb.and([eb("started_at", "is", null), eb(eb("leased_at", "+", scaled(PREPARE_MAX_S * 1000)), "<", nowMs)]),
-        eb.and([eb("started_at", "is not", null), eb(eb(eb("started_at", "+", eb.ref("timeout_ms")), "+", LEASE_MARGIN_MS), "<", nowMs)]),
-      ])])).$if(id !== undefined, (q) => q.where("id", "=", id!)));
+      .where((eb) => (id === undefined
+        ? eb("id", "in", eb.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "rl")).select("rl.id").where(ended))
+        : eb.and([ended(eb), eb("id", "=", id)]))));
     return { idle, lost: rows };
   };
   const [l, gone] = await Promise.all([lost(), goneCalls(db, nowMs, id)]);
@@ -489,7 +492,8 @@ function titleOf(promptId: string, refs: ItemRef[]): string {
 
 /** The calls the login's helpers hold leases on now, all helpers together. */
 export const leasedBy = async (db: Db, login: string): Promise<number> =>
-  Number((await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => eb.and([eb("state", "=", "leased"), ciEqExpr(db, "user_login", eb.val(login))]))))!.n);
+  Number((await db.get(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb.fn.countAll<number>().as("n"))
+    .where((eb) => eb.and([eb("c.state", "=", literal("leased")), ciEqExpr(db, "c.user_login", eb.val(login))]))))!.n);
 
 /** The role of a live Task Runner credential's user, or null when the credential is gone or expired. */
 async function runnerRole(db: Db, tokenId: number, nowMs: number): Promise<Role | null> {
@@ -577,9 +581,9 @@ async function queuedCalls(db: Db, nowMs: number): Promise<QueueCache> {
   const hit = queueCaches.get(db);
   if (hit && hit.sig === sig && nowMs >= hit.at && nowMs - hit.at < QUEUE_CACHE_MS) return hit;
   const known = parsedCalls.get(db) ?? new Map<number, Parsed>(), seen = new Map<number, Parsed>();
-  const queued = await db.all(db.k.selectFrom("main.remote_calls")
+  const queued = await db.all(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c"))
     .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until"])
-    .where("state", "=", "queued").$narrowType<{ tier: Tier }>());
+    .where("state", "=", literal("queued")).$narrowType<{ tier: Tier }>());
   // The items and authors of the calls not parsed yet, in one read.
   const fresh = queued.map((r) => Number(r.id)).filter((id) => !known.has(id));
   const texts = new Map(fresh.length ? (await db.all(db.k.selectFrom("main.remote_calls").select(["id", "items", "authors"]).where(inList(db, "id", fresh, "bigint")))).map((x) => [Number(x.id), x]) : []);
@@ -668,8 +672,8 @@ const pickerArgs = (nowMs: number): [string, number, number] => [new Date(nowMs)
 function pickerExpr(db: Db, eb: Eb, login: Ex, nowMs: number): AliasableExpression<SqlBool> {
   const [expires, fresh, now] = pickerArgs(nowMs);
   const max = eb.cast<number>(eb.case().when("ps.key", "=", MAX_CALLS_KEY).then(eb.ref("ps.value")).end(), "bigint");
-  const leased = db.k.selectFrom("main.remote_calls as pl").select((e) => e.fn.countAll<number>().as("n"))
-    .where("pl.state", "=", "leased").where(ciEqExpr(db, "pl.user_login", login));
+  const leased = db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "pl")).select((e) => e.fn.countAll<number>().as("n"))
+    .where("pl.state", "=", literal("leased")).where(ciEqExpr(db, "pl.user_login", login));
   return eb.and([
     eb.exists(db.k.selectFrom("main.remote_helpers as ph").innerJoin("main.mcp_tokens as pt", "pt.id", "ph.token_id").select(eb.lit(1).as("one"))
       .where("ph.login", "=", ref<string>(login)).where("pt.kind", "=", "runner").where("pt.expires_at", ">", expires).where("ph.reported_at", ">=", fresh)),
@@ -1019,8 +1023,8 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 /** Whether the helper that ran the parent call (its agent token, which holds the session) holds a lease that heartbeats: it is alive and busy. */
 const runsLiveLease = async (db: Db, parentId: number, nowMs: number): Promise<boolean> =>
-  await db.get(db.k.selectFrom("main.remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "leased").where("heartbeat_at", ">=", nowMs - STICKY_LIVE_MS)
-    .where("token_id", "=", (eb) => eb.selectFrom("main.remote_calls").select("token_id").where("id", "=", parentId)).limit(1)) !== undefined;
+  await db.get(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_leased", "c")).select((eb) => eb.lit(1).as("one")).where("c.state", "=", literal("leased")).where("c.heartbeat_at", ">=", nowMs - STICKY_LIVE_MS)
+    .where("c.token_id", "=", (eb) => eb.selectFrom("main.remote_calls as p").select("p.token_id").where("p.id", "=", parentId)).limit(1)) !== undefined;
 
 /**
  * Waits for the call's result, polling its row like the model queue polls (allocation.pollMs). Each poll ends a lost lease

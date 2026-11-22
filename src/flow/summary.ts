@@ -87,7 +87,7 @@ export async function markChanged(db: Db): Promise<number> {
     const add = async (q: SelectQueryBuilder<any, any, { repo: string }>) => {
       for (const r of await db.all(q)) dirty.add(r.repo);
     };
-    await add(db.k.selectFrom("main.items").select("repo").distinct().where("updated_at", ">", prev.items));
+    await add(db.k.selectFrom(kx.indexedBy(db, "main.items", "items_updated", "i")).select("i.repo").distinct().where("i.updated_at", ">", prev.items));
     await add(db.k.selectFrom("main.classifications").select("repo").distinct().where(kx.rowid("main.classifications"), ">", prev.cls));
     await add(db.k.selectFrom("main.stages").select("repo").distinct().where(kx.rowid("main.stages"), ">", prev.stages));
     await add(db.k.selectFrom("main.opus_reviews").select("repo").distinct().where(kx.rowid("main.opus_reviews"), ">", prev.opus ?? 0));

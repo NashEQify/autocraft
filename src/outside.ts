@@ -141,8 +141,10 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
         eb.case().when("p.author", "is", null).then(eb.ref("i.author_type")).else(eb.ref("p.author_type")).end().as("author_type"),
       ])
       .$narrowType<{ created_at: string; author: string }>()
-      .where("i.created_at", ">=", new Date(from).toISOString()).where("i.author", "is not", null)
-      .orderBy("i.repo").orderBy("i.number"))).filter((r) => scope.has(r.repo) && !fast.has(`${r.repo}#${r.number}`));
+      .where("i.created_at", ">=", new Date(from).toISOString()).where("i.author", "is not", null)))
+      // Sorted here: an ORDER BY makes SQLite walk every item in key order instead of the recent ones by created_at.
+      .sort((a, b) => (a.repo < b.repo ? -1 : a.repo > b.repo ? 1 : a.number - b.number))
+      .filter((r) => scope.has(r.repo) && !fast.has(`${r.repo}#${r.number}`));
     await backfillAdmitted(db, new Date(from).toISOString(), now);
     const admitted = new Set((await db.all(db.k.selectFrom("main.outside_admitted").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
     const inside = await insiders(db);

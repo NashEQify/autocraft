@@ -2,7 +2,7 @@
 import { latestRun, settledOnExpr, settledTable } from "../../classify/settled.ts";
 import type { AliasableExpression, Expression, SqlBool } from "kysely";
 import type { Db } from "../../db/index.ts";
-import { like, ref, type Eb, type Ex } from "../../db/kx.ts";
+import { indexedBy, like, ref, type Eb, type Ex } from "../../db/kx.ts";
 
 /**
  * Latest stage per item, from the item_stage table the stages trigger maintains, as a WITH clause to build the query on:
@@ -55,7 +55,7 @@ export type DoneRow = { repo: string; merged_pipeline: number; closed_pipeline: 
 // Done since tracking began. Merged PRs carry closed_at too, so one range covers both.
 export async function doneByRepo(db: Db, start: string, repo?: string): Promise<DoneRow[]> {
   return (await db.all(latestCteExpr(db, repo)
-    .with("d", (qb) => qb.selectFrom("main.items as i").leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
+    .with("d", (qb) => qb.selectFrom(indexedBy(db, "main.items", "items_closed", "i")).leftJoin("latest as l", (j) => j.onRef("l.repo", "=", "i.repo").onRef("l.number", "=", "i.number"))
       .select(["i.repo", "i.state", "l.stage"])
       .where("i.closed_at", ">=", start).where("i.state", "<>", "OPEN").where((eb) => trackedExpr(db, eb, "i.repo"))
       .$if(!!repo, (q) => q.where("i.repo", "=", repo!)))
@@ -83,11 +83,12 @@ export async function trend(db: Db, start: string, openNow: Map<string, number>,
     if (d >= today || days.length > 365) break;
   }
   const day = (eb: Eb, col: string) => eb.fn<string>("substr", [col, eb.lit(1), eb.lit(10)]);
-  const created = await db.all(db.k.selectFrom("main.items")
+  // Over every repo the date indexes read only the range; the planner would rather walk the repo index.
+  const created = await db.all(db.k.selectFrom(indexedBy(db, "main.items", "items_created", "i"))
     .select((eb) => ["repo", day(eb, "created_at").as("d"), eb.fn.countAll<number>().as("n")])
     .where("created_at", ">=", start).where((eb) => trackedExpr(db, eb)).$if(!!repo, (q) => q.where("repo", "=", repo!))
     .groupBy((eb) => ["repo", day(eb, "created_at")]).orderBy("repo").orderBy("d"));
-  const closed = await db.all(db.k.selectFrom("main.items")
+  const closed = await db.all(db.k.selectFrom(indexedBy(db, "main.items", "items_closed", "i"))
     .select((eb) => ["repo", day(eb, "closed_at").as("d"), eb.fn.countAll<number>().as("n")])
     .where("closed_at", ">=", start).where("state", "<>", "OPEN").where((eb) => trackedExpr(db, eb)).$if(!!repo, (q) => q.where("repo", "=", repo!))
     .groupBy((eb) => ["repo", day(eb, "closed_at")]).orderBy("repo").orderBy("d"));
