@@ -59,7 +59,7 @@ export type BuildRun = {
 
 /** `checks`: the last checks round; a draft may have none, or failing ones. */
 export type OpenPr = (run: BuildRun, impl: Implementation, o: { draft: boolean; checks: CheckRound | null }) =>
-  Promise<{ ok: true; url: string } | { ok: false; reason: string; retry: boolean; problems?: string[]; recheck?: boolean }>;
+  Promise<{ ok: true; url: string } | { ok: false; reason: string; retry: boolean; problems?: string[]; recheck?: boolean; stale?: boolean }>;
 
 export type BuildDeps = {
   calls: CallDeps;
@@ -327,6 +327,8 @@ async function openingPhase(run: BuildRun, deps: BuildDeps, impl: Implementation
   if (!draft && !checks?.clean) throw new Stuck("checks-failing", "the attempt reached the PR step without clean checks");
   const r = await deps.openPr(run, impl, { draft, checks });
   if (r.ok) return `PR ${r.url}`;
+  // The attempt left opening while the PR step ran (a cancel or a stuck decision): that state stands.
+  if (r.stale) return r.reason;
   if (r.recheck) {
     await setImplementationState(db, impl.id, "checking");
     return `${r.reason}; the checks run again`;
