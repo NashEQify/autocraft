@@ -89,8 +89,9 @@ const parseSteps = (s: string): HistoryStep[] => {
 /** Failures in a row before a PR waits; the wait starts at RETRY_FIRST_MS and doubles up to RETRY_MAX_MS. */
 export const RETRY_AFTER = 3;
 const RETRY_FIRST_MS = 3_600_000, RETRY_MAX_MS = 24 * 3_600_000;
-const retryAt = (failures: number, now: number): string | null =>
-  failures < RETRY_AFTER ? null : new Date(now + Math.min(RETRY_MAX_MS, RETRY_FIRST_MS * 2 ** (failures - RETRY_AFTER))).toISOString();
+/** Every failure registers a wait end; the first RETRY_AFTER failures wait the first step, then it doubles. */
+const retryAt = (failures: number, now: number): string =>
+  new Date(now + Math.min(RETRY_MAX_MS, RETRY_FIRST_MS * 2 ** Math.max(0, failures - RETRY_AFTER))).toISOString();
 
 /**
  * The PRs of a repo whose comment is due: an open PR in the pipeline's scope past triage with no comment yet, or a PR
@@ -100,7 +101,10 @@ const retryAt = (failures: number, now: number): string | null =>
  */
 export async function statusDue(db: Db, repo: string, now: number = Date.now()): Promise<Due[]> {
   const stored = await db.all(db.k.selectFrom("main.pr_status_comments").select(["number", "comment_id", "author", "line", "steps", "failures", "retry_at"])
-    .where("repo", "=", repo).where("final", "=", 0));
+    .where("repo", "=", repo).where("final", "=", 0)
+    // A Closed line is final until the item is open again: its state then leaves CLOSED and the row is read again.
+    .where((eb) => eb.not(eb.and([eb("line", "=", WORDS.Closed), eb.exists(eb.selectFrom("main.items as c").select(eb.lit(1).as("one"))
+      .whereRef("c.repo", "=", "main.pr_status_comments.repo").whereRef("c.number", "=", "main.pr_status_comments.number").where("c.state", "=", "CLOSED"))]))));
   const byNumber = new Map(stored.map((r) => [r.number, r]));
   const inScope = new Set((await db.all(db.k.selectFrom("main.items as i").select("i.number")
     .where("i.repo", "=", repo).where("i.kind", "=", "pr").where("i.state", "=", "OPEN")
@@ -208,14 +212,14 @@ export async function runPrStatus(db: Db, p: PrStatusParams): Promise<PrStatusRe
   const log = p.log ?? (() => {});
   const out: PrStatusResult = { posted: [], edited: [], gone: [], failed: [], due: 0, paced: false };
   const now = p.now ?? (() => new Date());
-  const due = await statusDue(db, p.repo, now().getTime());
-  out.due = due.length;
-  if (!due.length) return out;
+  if (!(await statusDue(db, p.repo, now().getTime())).length) return out;
   const g = await guardRepo(db, p.repo, "status", p.by);
   if ("refused" in g) { log(g.refused); return out; }
   const release = await leaseItem(db, `pr-status:${p.repo}`, log);
   if (!release) return out;
   try {
+    const due = await statusDue(db, p.repo, now().getTime());
+    out.due = due.length;
     const w: Writer = { db, login: ACTOR };
     const q = p.querier ?? new Client(500), run = p.exec ?? realExec;
     const base = (p.base === undefined ? envVar("BASE_URL") ?? null : p.base)?.replace(/\/+$/, "") || null;
