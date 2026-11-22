@@ -2495,7 +2495,7 @@ export type FindingState = "new" | "dismissed" | "backlog" | "fixing" | "ready" 
 export type FindingAction = "fix" | "dismiss" | "backlog" | "reopen" | "land" | "advisory" | "publish";
 
 export interface ScanView {
-  /** The caller may stop or continue the scan and decide its findings; the server sets it per request. */
+  /** The caller may stop the scan and decide its findings (continuing stays with operators); the server sets it per request. */
   canAct: boolean;
   id: number;
   repo: string;

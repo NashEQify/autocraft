@@ -1,4 +1,4 @@
-// The security deep scan API. Operators and maintainers read; operators start scans; operators and maintainers with write access to the repo stop scans and decide findings. Everyone else gets 404, so the
+// The security deep scan API. Operators and maintainers read; operators start and continue scans; operators and maintainers with write access to the repo stop scans and decide findings. Everyone else gets 404, so the
 // endpoints do not show that findings exist.
 import { mayRunRepo } from "../repo-access.ts";
 import type { FindingView, ScanDetail, ScanView, SecurityOverview } from "../../../web/src/api/types.ts";
@@ -18,10 +18,10 @@ function needStaff(req: Req): void {
 
 function needOperator(req: Req): void {
   needStaff(req);
-  if (req.user.role !== "operator") throw new HttpError(403, "only operators start scans");
+  if (req.user.role !== "operator") throw new HttpError(403, "only operators start or continue scans");
 }
 
-/** Stopping or continuing a scan and deciding findings: an operator, or a maintainer with write access to the repo. */
+/** Stopping a scan and deciding findings: an operator, or a maintainer with write access to the repo. */
 async function needRunRepo(req: Req, repo: string): Promise<void> {
   needStaff(req);
   if (!await mayRunRepo(req.user, repo)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, stops scans and decides findings");
@@ -85,15 +85,12 @@ export async function stopScan(db: Db, req: Req): Promise<ScanView> {
 }
 
 export async function continueScan(db: Db, req: Req): Promise<ScanView> {
-  needStaff(req);
+  needOperator(req);
   const id = number(req.params.id, "scan");
   const scan = await scanRow(db, id);
   if (!scan) throw new HttpError(404, NOT_FOUND);
   await needVisible(db, req, scan.repo);
-  await needRunRepo(req, scan.repo);
   const cap = body(req).cap;
-  // A maintainer may only continue within the cap the scan was given; no cap or a higher one spends more and stays with operators.
-  if (req.user.role !== "operator" && (typeof cap !== "number" || scan.cap_usd === null || cap > scan.cap_usd)) throw new HttpError(403, "only an operator continues a scan with no cap or a cap above the one it had");
   return await withAct(req, await asHttp(async () => continueScanAs(db, id, req.user.login, cap)));
 }
 

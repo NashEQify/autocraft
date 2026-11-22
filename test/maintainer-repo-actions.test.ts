@@ -40,12 +40,11 @@ test("a maintainer with write runs their repo's approvals, findings and jobs; ot
   // Advisory and publish open or publish an advisory: operator only.
   for (const action of ["advisory", "publish"]) await assert.rejects(dismiss(as("maint", "maintainer", { action }, { repo: "alpha", n: "1" })), { status: 403 });
 
-  // Continuing a capped scan: a maintainer only with a cap, not above the scan's own.
+  // Continuing a capped scan spends more: operator only, whatever the cap.
   await db.run(db.k.insertInto("security_scans").values({ id: 1, repo: "alpha", state: "capped", cap_usd: 10, cost_usd: 5, started_by: "op", started_at: at }));
   const cont = (cap: number | null) => continueScan(db, as("maint", "maintainer", { cap }, { id: "1" }));
   await assert.rejects(cont(null), { status: 403 });
-  await assert.rejects(cont(20), { status: 403 });
-  assert.notEqual((await cont(8)).state, "capped");
+  await assert.rejects(cont(8), { status: 403 });
 
   // Starting a scan spends money: operator only.
   await assert.rejects(startScan(db, as("maint", "maintainer", {}, { repo: "alpha" })), { status: 403 });

@@ -165,10 +165,9 @@ export function createSecurityMock(me: User, changed: () => void): Pick<Api, "se
         return wait(s);
       },
       continueScan: async (id, capUsd) => {
+        operator();
         const s = sc.find((x) => x.id === id);
         if (!s) throw new Error("Not found");
-        mayAct(s.repo);
-        if (me.role !== "operator" && (capUsd === null || s.capUsd === null || capUsd > s.capUsd)) throw new Error("only an operator continues a scan with no cap or a cap above the one it had");
         if (s.state !== "capped") throw new Error("only a scan that stopped at its cap can be continued");
         if (capUsd !== null && capUsd <= s.costUsd) throw new Error("the new cap must be above what the scan has spent");
         Object.assign(s, { state: "scanning", capUsd, endedAt: null });
