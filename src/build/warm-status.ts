@@ -68,6 +68,11 @@ export class WarmStatus {
     }).sort((a, b) => b.stored - a.stored || a.node.localeCompare(b.node));
   }
 
+  /** Blobs any node found bad for `key`, for the producer's next publish to recheck. */
+  badBlobsFor(key: string): string[] {
+    return [...new Set(this.fresh().flatMap((s) => s.badBlobs?.[key] ?? []))].sort();
+  }
+
   /** Per key, its newest version and how many of the reporting nodes hold it; sorted by key. */
   summary(): WarmLine[] {
     const of = this.statuses.length;

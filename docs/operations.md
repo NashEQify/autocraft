@@ -1068,6 +1068,69 @@ The image carries Xvfb, x11-utils (`xwininfo`, `xprop`), ImageMagick, Mesa's lav
 
 **Trying a workspace session.** `autocraft-server workspace try <repo> <sha> --item N --prompt TEXT [--workspace ID] [--env ID] [--keep] [--deadline-sec N]`, in the runner or dashboard container, records a `workspace_sessions` row (kind `try`) and queues a `workspace-try` job, printing both ids. The item is an issue or PR of the repo that the model call is filed under; the prompt is at most 8 KiB and goes only into the call, never into the job's params or log. The job creates a workspace for the commit (or takes the live one `--workspace` names, which must hold the same repo and commit), waits for it to be ready (failing when the launcher fails or ends it, or after 26 minutes), then runs one session with the fix-issue patch prompt's model and effort, with only the workspace tools and a time limit of `--deadline-sec` (300 to 7200, default 3600). The call fails the session if it waits more than 30 minutes in all for a Task Runner; while it is queued or leased the launcher does not park the workspace. A runner restart resumes the job on the same workspace and call. Its log has the outcome and cost, the number of tool calls and their shell time, and `git diff --stat` against the base commit with the new files. The workspace is ended afterwards unless `--keep` is given; the session row keeps the outcome. A job that ends without ending its session (its deadline, a cancel, a stop it does not resume from) has the session failed and the workspace ended (unless kept) on the launcher's next pass.
 
+### Warm sync on the nodes
+
+`autocraft-server warm-sync` runs on every node (a DaemonSet in the cache namespace) and keeps the newest signed version of each assigned warm key in a node directory that build and workspace pods mount read-only. Versions come from the warm store (`warm/v1/` on the shared WebDAV cache, src/warm/store-client.ts), read through its anonymous read-only URL.
+
+Layout of the node directory:
+
+| Path | What it is |
+|---|---|
+| `<key>/gen-<sha12>/target`, `cargo` | One version: the target dir and the dependency part of CARGO_HOME, with the producer's modes and mtimes. |
+| `<key>/gen-<sha12>/meta.json` | Key, repo, commit, `stored`, bytes, files, toolchain image, rustc, env hash, and the checkout, target and CARGO_HOME paths the producer built at. Cargo's fingerprints hold absolute paths, so a consumer builds at those paths. |
+| `<key>/gen-<sha12>/manifest.zst` | The version's manifest, the hard-link source for the next one. |
+| `<key>/current` | Symlink to the version consumers start from. |
+
+Every 60 seconds the agent:
+
+1. Reads the assignment and every assigned key's `latest.json`, and verifies its signature. A latest.json that is unsigned, signed by another key, or older (`stored`) than the version held is refused, and the held version stays.
+2. Plans the cap: keys in priority order, each with the bytes of its newest version. A key that does not fit under `maxGbPerNode` after the keys above it is left out, and stops being current.
+3. Syncs each key whose newest version it does not hold, one at a time. It builds `gen-<sha12>.tmp` from the manifest: files whose sha256 and mode match the current version (mtime within the slack) are hard links, and the rest are downloaded and checked against their sha256. Disk writes are paced to `AUTOCRAFT_WARM_WRITE_MB_PER_SEC`. The finished dir is renamed into place and `current` is swapped with a rename. No new version starts while the node filesystem is at least `AUTOCRAFT_WARM_MAX_FS_PCT` full. A failed sync leaves `current` untouched and is retried after 10 minutes or when latest.json changes.
+4. Deletes versions that stopped being current more than `AUTOCRAFT_WARM_GRACE_MIN` ago, so copies that started from them can finish. A key no longer assigned also stops being current and goes the same way.
+5. Writes the ConfigMap `warm-status-<node>` when what it says changes, and every 5 minutes.
+
+Settings, all environment variables:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AUTOCRAFT_WARM_STORE_URL` | required | WebDAV root of the warm store, read-only port. Plain http only to cluster-internal or private hosts. |
+| `AUTOCRAFT_WARM_VERIFY_KEYS` | required | Comma-separated Ed25519 public key PEM files, read each cycle. |
+| `AUTOCRAFT_WARM_NODE` | required | The node's name (downward API `spec.nodeName`). |
+| `AUTOCRAFT_WARM_DIR` | `/var/lib/craft-warm` | The node directory (hostPath). |
+| `AUTOCRAFT_WARM_ASSIGN_DIR` | `/etc/warm-assign` | The mounted `warm-assign` ConfigMap, read each cycle. |
+| `AUTOCRAFT_WARM_STATUS_NAMESPACE` | the pod's namespace | Where the status ConfigMap is written. |
+| `AUTOCRAFT_WARM_WRITE_MB_PER_SEC` | 150 | Download write rate in MB/s; 0 for no limit. |
+| `AUTOCRAFT_WARM_POLL_SEC` | 60 | Time between cycles. |
+| `AUTOCRAFT_WARM_GRACE_MIN` | 60 | How long a replaced version stays. |
+| `AUTOCRAFT_WARM_MAX_FS_PCT` | 80 | No new versions at or above this filesystem use. |
+
+`--once` runs one cycle and exits. When the assignment cannot be read, the agent changes nothing in that cycle.
+
+The `warm-assign` ConfigMap has two keys, mounted as files:
+
+```yaml
+data:
+  repos: |
+    # one warm key per line, highest priority first
+    deckcraft
+    designcraft
+  maxGbPerNode: "300"
+```
+
+`maxGbPerNode` is in GiB and counts the versions keys are current at. A replaced version stays for the grace period on top of it, and the filesystem limit bounds the total.
+
+The status ConfigMap holds one key, `status.json`: `node`, `updated` (ms, the node's clock), `fs` (`sizeBytes`, `usedBytes`, `usedPct`), `keys` (key → `commit`, `stored`, `bytes`, `image`, `envHash`, `synced`), `pending` (assigned key → why it is not at its newest version), and `badBlobs` (key → sha256 of blobs that were missing or did not match their sha256 in a failed sync; the producer passes them to publish's recheck). The agent writes it with the in-cluster service-account token, so its service account needs `create` on configmaps and `get`, `update` and `patch` on its node's status ConfigMap.
+
+What the DaemonSet needs:
+
+| Item | Detail |
+|---|---|
+| User | A uid of its own, not the build pods' uid, so build pods cannot write warm files. Read-only root filesystem, no capabilities. |
+| Volumes | hostPath `/var/lib/craft-warm` read-write; ConfigMaps `warm-assign` and `warm-verify-key` (key `public.pem`) mounted read-only. |
+| Network | Egress to the cache's read-only port and the API server. |
+
+**On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there. A status not rewritten for 15 minutes counts as not warm. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
+
 ## Similar items and semantic search
 
 `autocraft-server embed [--all] [--threads N] [--batch N]` embeds every tracked item whose text changed since its last embedding (`--all`: every tracked item) into `item_embeddings`, and removes vectors of items that left the mirror or the tracked repos. Each batch commits on its own, so an interrupted run continues where it stopped. The dashboard reads the table for "Similar items" on the Item page and for the search box's meaning toggle; it embeds search queries, and items without a vector yet, itself.

@@ -1,9 +1,9 @@
 // `autocraft-server warm-sync`: the per-node warm-sync agent (src/warm/sync-agent.ts), configured by AUTOCRAFT_WARM_*.
-import { createPublicKey } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { inClusterApi, SA_DIR } from "../build/kube-api.ts";
 import { checkServiceUrl } from "../worker/config.ts";
+import { loadEd25519 } from "./manifest.ts";
 import { WarmStore } from "./store-client.ts";
 import { readAssignDir, SyncAgent } from "./sync-agent.ts";
 
@@ -67,7 +67,7 @@ async function warmSync(args: string[]): Promise<void> {
   const agent = new SyncAgent({
     dir: c.dir, node: c.node, namespace: c.namespace, kube, log,
     store: new WarmStore({ readUrl: c.url }),
-    verifyKeys: () => c.keyFiles.map((f) => createPublicKey(readFileSync(f))),
+    verifyKeys: () => c.keyFiles.map((f) => loadEd25519(readFileSync(f), "public")),
     assign: () => readAssignDir(c.assignDir),
     writeBytesPerSec: c.writeBytesPerSec, graceMs: c.graceMs, maxFsPct: c.maxFsPct,
   });

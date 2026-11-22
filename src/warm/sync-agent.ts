@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { ConfigMapApi } from "../build/kube-api.ts";
 import { KubeError } from "../build/kube-api.ts";
 import { WARM_KEY } from "../worker/warm.ts";
-import { applyManifest, decodeManifest, encodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
+import { applyManifest, BadBlobError, clearDir, decodeManifest, encodeManifest, type Latest, type Manifest, type Previous } from "./manifest.ts";
 import type { WarmStore } from "./store-client.ts";
 
 export const STATUS_PREFIX = "warm-status-";
@@ -22,6 +22,15 @@ export const STATUS_DATA_KEY = "status.json";
 export const STATUS_LABEL = "craft.build/warm-status";
 const GEN = /^gen-[0-9a-f]{7,12}(-[0-9]+)?$/;
 const NODE_NAME = /^[a-z0-9]([-a-z0-9.]{0,230}[a-z0-9])?$/;
+const MAX_BAD_BLOBS = 32;
+
+/** Removes a tree the agent made, read-only directories inside it included. */
+function removeTree(p: string): void {
+  const st = lstatSync(p, { throwIfNoEntry: false });
+  if (!st) return;
+  if (st.isDirectory()) clearDir(p);
+  rmSync(p, { recursive: true, force: true });
+}
 
 /** What `warm-status-<node>` holds (data key `status.json`). */
 export type NodeStatus = {
@@ -34,6 +43,8 @@ export type NodeStatus = {
   keys: Record<string, KeyStatus>;
   /** Assigned keys that are not held at their newest version, and why. */
   pending: Record<string, string>;
+  /** Per key, blobs a sync found missing or not matching their sha256, for the producer's next publish to recheck. */
+  badBlobs: Record<string, string[]>;
 };
 export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number };
 
@@ -125,6 +136,7 @@ export class SyncAgent {
   private readonly pacer: Pacer;
   private readonly failed = new Map<string, { sha256: string; at: number; why: string }>();
   private pending: Record<string, string> = {};
+  private readonly badBlobs = new Map<string, Set<string>>();
   private written: { sig: string; at: number } | null = null;
 
   constructor(c: SyncConfig) {
@@ -174,8 +186,11 @@ export class SyncAgent {
       for (const k of assign.keys) {
         try {
           const l = await this.c.store.latest(k, keys);
-          if (l) latest.set(k, l);
-          else pending[k] = "the store has no version";
+          const h = this.held(k);
+          if (!l) pending[k] = "the store has no version";
+          // A validly signed but older latest.json is a replay or a rollback of the store: keep the newer version.
+          else if (h && l.stored < h.meta.stored) pending[k] = `latest.json names ${l.commit.slice(0, 12)}, older than the version held (${h.meta.commit.slice(0, 12)})`;
+          else latest.set(k, l);
         } catch (e) {
           pending[k] = `store: ${(e as Error).message}`.slice(0, 200);
         }
@@ -235,7 +250,7 @@ export class SyncAgent {
   private removeLeftovers(): void {
     for (const k of this.keyDirs()) {
       for (const n of readdirSync(join(this.c.dir, k))) {
-        if (n.endsWith(".tmp")) rmSync(join(this.c.dir, k, n), { recursive: true, force: true });
+        if (n.endsWith(".tmp")) removeTree(join(this.c.dir, k, n));
       }
     }
   }
@@ -267,12 +282,12 @@ export class SyncAgent {
         if (!GEN.test(n) || n === cur) continue;
         const p = join(kd, n);
         if (now - lstatSync(p).mtimeMs < this.c.graceMs) continue;
-        rmSync(p, { recursive: true, force: true });
+        removeTree(p);
         this.c.log(`warm sync: deleted ${k}/${n}`);
       }
       // A `current` that names no readable version is no use to consumers.
       if (cur === undefined && lstatSync(join(kd, "current"), { throwIfNoEntry: false })) unlinkSync(join(kd, "current"));
-      if (!readdirSync(kd).length) rmSync(kd, { recursive: true, force: true });
+      if (!readdirSync(kd).length) removeTree(kd);
     }
   }
 
@@ -308,7 +323,7 @@ export class SyncAgent {
     try {
       const manifest = await this.c.store.manifest(l);
       const previous = h ? this.previousOf(join(kd, h.gen)) : undefined;
-      rmSync(tmp, { recursive: true, force: true });
+      removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
       const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
       const s = await applyManifest(manifest, roots, this.c.store.blobs(), { previous, concurrency: this.c.concurrency, pace: (n) => this.pacer.take(n) });
@@ -321,14 +336,20 @@ export class SyncAgent {
       };
       writeFileSync(join(tmp, "manifest.zst"), encodeManifest(manifest), { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
-      rmSync(final, { recursive: true, force: true });
+      removeTree(final);
       renameSync(tmp, final);
       this.swap(key, gen, h);
       this.failed.delete(key);
+      this.badBlobs.delete(key);
       log(`warm sync: ${key}@${l.commit.slice(0, 12)} current: ${s.files} files (${gb(s.bytes)} GiB), ${s.linked} linked from the previous version, ${s.fetched} fetched (${gb(s.fetchedBytes)} GiB), ${s.copied} copied, in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
       return null;
     } catch (e) {
-      rmSync(tmp, { recursive: true, force: true });
+      removeTree(tmp);
+      if (e instanceof BadBlobError) {
+        const bad = this.badBlobs.get(key) ?? new Set<string>();
+        if (bad.size < MAX_BAD_BLOBS) bad.add(e.sha256);
+        this.badBlobs.set(key, bad);
+      }
       const why = `sync of ${l.commit.slice(0, 12)} failed: ${(e as Error).message}`.slice(0, 200);
       this.failed.set(key, { sha256: l.sha256, at: this.c.now(), why });
       log(`warm sync: ${key}: ${why}`);
@@ -373,14 +394,15 @@ export class SyncAgent {
       const h = this.held(k);
       if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced };
     }
-    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending };
+    const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
+    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending, badBlobs };
   }
 
   /** Writes the status ConfigMap when what it says changed, and every `statusEveryMs` so readers see the node is alive. */
   async report(): Promise<void> {
     if (!this.c.kube) return;
     const st = this.status();
-    const sig = JSON.stringify({ keys: st.keys, pending: st.pending, full: st.fs.usedPct >= this.c.maxFsPct });
+    const sig = JSON.stringify({ keys: st.keys, pending: st.pending, badBlobs: st.badBlobs, full: st.fs.usedPct >= this.c.maxFsPct });
     if (this.written && this.written.sig === sig && this.c.now() - this.written.at < this.c.statusEveryMs) return;
     const name = `${STATUS_PREFIX}${this.c.node}`;
     const data = { [STATUS_DATA_KEY]: JSON.stringify(st) };
