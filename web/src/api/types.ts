@@ -2422,6 +2422,8 @@ export interface LiveLane {
 export interface LiveWorkerCall {
   /** The agent run; its page is `/agents/<id>`. */
   id: number;
+  /** The step's name, which picks its colour. */
+  step: string;
   /** The step's title, e.g. "Review pull requests". */
   title: string;
   model: string;
@@ -2437,14 +2439,15 @@ export interface LiveWorkerCall {
   estimate: LiveEstimate | null;
 }
 /**
- * Who does the model calls, one row each on the Live board's worker view: a person's Task Runner (with their own tokens), one of the
- * box's Claude accounts, or Jev. Runners go to operators and maintainers, box accounts to operators only, as the call pages show them.
+ * Who does the model calls, one row each on the Live board's worker view: a person's Task Runner (with their own tokens), the runners
+ * their owners keep private (one row, no owner), one of the box's Claude accounts, or Jev. Runners go to operators and maintainers, box
+ * accounts to operators only, as the call pages show them.
  */
 export interface LiveWorker {
-  /** "runner:<token id>", "login:<login>" (a runner no longer known), "account:<id>" or "jev". */
+  /** "runner:<token id>", "login:<login>" (a runner no longer known), "private", "account:<id>" or "jev". */
   key: string;
-  kind: "runner" | "account" | "jev";
-  /** The runner's label or machine name, the account's label, or "Jev". */
+  kind: "runner" | "private" | "account" | "jev";
+  /** The runner's label ("Task Runner" without one), "Private Task Runner", the account's label, or "Jev". */
   name: string;
   /** A runner's owner. */
   login: string | null;
@@ -2456,6 +2459,8 @@ export interface LiveWorker {
   /** Calls running now, against `slots` (null when not known). */
   busy: number;
   slots: number | null;
+  /** The models a shared runner with a fresh status offers. */
+  models: string[];
   /** The calls that ran in the board's last hour, oldest first. */
   calls: LiveWorkerCall[];
 }
@@ -2587,10 +2592,14 @@ export type { HelperInfo as RemoteHelper, Readiness as HelperReadiness, UsageWin
  * ids of `taskChoices` the runners take from the queue; every one unless the user unticked some. A choice's `about` says what
  * the task does, `models` which Claude models its calls ask for.
  */
-/** `taskItems`: the items the runners take work on: every item, fast-tracked items only, or items the user fast-tracked. */
+/**
+ * `taskItems`: the items the runners take work on: every item, fast-tracked items only, or items the user fast-tracked.
+ * `runnerPrivate`: the Live board shows the runners' calls to others under one "Private Task Runner" row, without the user's login,
+ * the runners' labels, slots or models.
+ */
 export type TaskItems = "all" | "fast" | "mine";
-export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems };
-export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems };
+export type MySettings = UserSettingsReply & { manualOnly: boolean; tasks: string[]; taskChoices: { id: string; title: string; about: string; models: string[] }[]; taskItems: TaskItems; runnerPrivate: boolean };
+export type MySettingsChange = UserSettings & { manualOnly: boolean; tasks: string[]; taskItems: TaskItems; runnerPrivate: boolean };
 
 /** Why a queued model call waits, most specific first: picked by a user; waiting for the runner that holds its session; no runner ready for its tier; every ready runner is Manual only; every runner that may take it is busy; no ready runner's user can take calls on its repo; calls ahead of it. */
 export type ModelQueueWhyCode = "picked" | "session" | "no-runner" | "manual-only" | "busy" | "no-repo-access" | "task-off" | "items-off" | "behind";

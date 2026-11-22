@@ -8,6 +8,7 @@ import { connectDb } from "../src/db/open.ts";
 import { setupBox } from "./accounts-fixture.ts";
 import { syncAccounts } from "../src/agents/accounts.ts";
 import { parseStatus, storeStatus } from "../src/remote/helpers.ts";
+import { setSettings } from "../src/dash/api/user-settings.ts";
 
 const req = { query: new URLSearchParams(), user: { role: "operator", login: "o", canRead: async () => true } } as unknown as Req;
 const ago = (min: number) => new Date(Date.now() - min * 60_000).toISOString();
@@ -66,42 +67,62 @@ test("viewers see no account label and no progress line that names a repo hidden
   assert.doesNotMatch((await live(db, as("maintainer"))).lanes[0]!.ops[0]!.detail ?? "", / on /);
 });
 
-test("the worker view gives each Task Runner and account a row with the calls it ran in the last hour, for staff only, accounts for operators only", async () => {
+test("the worker view: staff see shared runners with owner, slots and models, private runners as one neutral row, box accounts for operators; never a hostname", async () => {
   const db = await connectDb(":memory:");
   setupBox(["acc"]);
   await syncAccounts(db);
-  await db.script("UPDATE claude_accounts SET enabled = 1, label = 'Box account' WHERE id = 'acc'");
-  await db.script("INSERT INTO repos (name, visibility) VALUES ('app', 'public'), ('secret', 'private'); INSERT OR IGNORE INTO tracked_repos (name) VALUES ('app'), ('secret')");
-  const token = async (login: string, label: string) => Number((await db.prepare("INSERT INTO mcp_tokens (login, token_hash, label, kind, can_run, created_at, expires_at) VALUES (?, ?, ?, 'runner', 1, ?, ?) RETURNING id")
-    .get(login, `h-${label}`, label, ago(600), new Date(Date.now() + 86400_000).toISOString()) as { id: number }).id);
-  const alice = await token("alice", "alice laptop");
-  const idle = await token("bob", "bob desktop");
-  await storeStatus(db, alice, "alice", parseStatus({ slots: 2, busy: 1, readiness: "ready", harness: "claude", models: { top: "opus" }, reserve: { fiveHour: 0, weekly: 0 } }));
-  await storeStatus(db, idle, "bob", parseStatus({ slots: 1, busy: 0, readiness: "paused", reason: "paused by the user", harness: "codex", models: { top: "gpt" }, reserve: { fiveHour: 0, weekly: 0 } }));
+  await db.run(db.k.updateTable("claude_accounts").set({ enabled: 1, label: "Box account" }).where("id", "=", "acc"));
+  await db.run(db.k.insertInto("repos").values([{ name: "app", visibility: "public" }, { name: "secret", visibility: "private" }]));
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "app" }, { name: "secret" }]).onConflict((oc) => oc.doNothing()));
+  const token = async (login: string, label: string, hostname: string) => (await db.get(db.k.insertInto("mcp_tokens").values({
+    login, token_hash: `h-${label}`, label, kind: "runner", can_run: 1, created_at: ago(600), expires_at: new Date(Date.now() + 86400_000).toISOString(),
+    machine: JSON.stringify({ hostname, platform: "linux", arch: "x64" }),
+  }).returning("id")))!.id;
+  const status = (slots: number, readiness: string, models: Record<string, string>) => parseStatus({ slots, busy: 0, readiness, harness: "claude", models, reserve: { fiveHour: 0, weekly: 0 } });
+  const alice = await token("alice", "alice laptop", "alice-host.lan");
+  const carol = await token("carol", "carol-box", "carol-box"); // the label defaulted to the hostname
+  const bob = await token("bob", "bob desktop", "bob-host.lan");
+  await storeStatus(db, alice, "alice", status(2, "ready", { top: "opus", mid: "sonnet" }));
+  await storeStatus(db, carol, "carol", status(1, "ready", { mid: "sonnet" }));
+  await storeStatus(db, bob, "bob", status(3, "ready", { top: "opus" }));
+  const as = (role: "viewer" | "maintainer" | "operator", login = "u", json?: unknown) =>
+    ({ query: new URLSearchParams(), json, user: { role, login, canRead: async (r: string) => r !== "secret", canWrite: async () => false } }) as unknown as Req;
+  await setSettings(db, as("maintainer", "bob", { runnerPrivate: true }));
+  assert.ok(await db.get(db.k.selectFrom("audit").select("at").where("action", "=", "runner-private").where("login", "=", "bob")), "the switch is audited");
+
   const call = async (o: { account?: string; runner?: { token: number; login: string }; repo?: string; started: number; ended?: number }) => {
     const id = await insertRun(db, { jobId: null, step: "review", stage: 1, promptId: "p", promptVersion: "1", provider: "claude", model: "opus", accountId: o.account ?? null, items: [{ repo: o.repo ?? "app", number: 7 }], prompt: "p" });
-    await db.prepare("UPDATE agent_runs SET state = ?, started_at = ?, ended_at = ?, input_tokens = 100, user_login = ? WHERE id = ?")
-      .run(o.ended === undefined ? "running" : "done", ago(o.started), o.ended === undefined ? null : ago(o.ended), o.runner?.login ?? null, id);
-    if (o.runner) await db.prepare(`INSERT INTO remote_calls (step, stage, run_id, prompt_id, prompt_version, tier, effort, asked_model, bundle, state, since, seen_at, max_attempts, timeout_ms, token_id, user_login, ended_at)
-      VALUES ('review', 1, ?, 'p', '1', 'top', 'high', 'opus', '{}', ?, 0, 0, 1, 60000, ?, ?, ?)`).run(id, o.ended === undefined ? "leased" : "done", o.runner.token, o.runner.login, o.ended === undefined ? null : Date.now() - o.ended * 60_000);
+    const ended = o.ended === undefined ? null : ago(o.ended);
+    await db.run(db.k.updateTable("agent_runs").set({ state: ended ? "done" : "running", started_at: ago(o.started), ended_at: ended, input_tokens: 100, user_login: o.runner?.login ?? null }).where("id", "=", id));
+    if (o.runner) await db.run(db.k.insertInto("remote_calls").values({
+      step: "review", stage: 1, run_id: id, prompt_id: "p", prompt_version: "1", tier: "top", effort: "high", asked_model: "opus", bundle: "{}", state: ended ? "done" : "leased",
+      since: 0, seen_at: 0, max_attempts: 1, timeout_ms: 60000, token_id: o.runner.token, user_login: o.runner.login, ended_at: ended ? Date.now() - o.ended! * 60_000 : null,
+    }));
     return id;
   };
   const running = await call({ runner: { token: alice, login: "alice" }, started: 3 });
   const done = await call({ runner: { token: alice, login: "alice" }, started: 20, ended: 12 });
   await call({ runner: { token: alice, login: "alice" }, started: 300, ended: 200 }); // before the window
   await call({ runner: { token: alice, login: "alice" }, repo: "secret", started: 9, ended: 8 });
+  const bobs = await call({ runner: { token: bob, login: "bob" }, started: 5 });
   await call({ account: "acc", started: 30, ended: 25 });
-  const as = (role: "viewer" | "maintainer" | "operator") => ({ query: new URLSearchParams(), user: { role, login: "u", canRead: async (r: string) => r !== "secret" } }) as unknown as Req;
 
-  assert.equal((await live(db, as("viewer"))).workers, undefined);
-  const rows = (await live(db, as("maintainer"))).workers!;
+  assert.equal((await live(db, as("viewer"))).workers, undefined, "viewers get no workers");
+  const board = await live(db, as("maintainer"));
+  const rows = board.workers!;
   const a = rows.find((w) => w.key === `runner:${alice}`)!;
-  assert.deepEqual([a.login, a.name, a.status, a.busy], ["alice", "alice laptop", "online", 1]);
+  assert.deepEqual([a.login, a.name, a.status, a.busy, a.slots, a.models], ["alice", "alice laptop", "online", 1, 2, ["opus", "sonnet"]]);
   assert.deepEqual(a.calls.map((c) => c.id), [done, running], "the window's calls, oldest first, without the hidden repo's");
-  assert.equal(a.calls[1]!.end, null);
-  const b = rows.find((w) => w.key === `runner:${idle}`)!;
-  assert.deepEqual([b.status, b.note, b.calls.length], ["held", "paused by the user", 0]);
+  assert.equal(rows.find((w) => w.key === `runner:${carol}`)!.name, "Task Runner", "a label that is the hostname is not shown");
+  const p = rows.find((w) => w.kind === "private")!;
+  assert.deepEqual([p.name, p.login, p.harness, p.slots, p.models, p.calls.map((c) => c.id)], ["Private Task Runner", null, null, null, [], [bobs]]);
+  assert.ok(!rows.some((w) => w.login === "bob" || w.key === `runner:${bob}`), "no row names the private runner's owner");
+  assert.doesNotMatch(JSON.stringify(rows), /bob/, "the private runner's login and label go nowhere");
   assert.ok(!rows.some((w) => w.kind === "account"), "maintainers get no box account rows");
-  const acc = (await live(db, as("operator"))).workers!.find((w) => w.key === "account:acc")!;
-  assert.deepEqual([acc.name, acc.calls.length], ["Box account", 1]);
+  assert.equal(rows.find((w) => w.key === `runner:${bob}`), undefined);
+  const own = (await live(db, as("maintainer", "bob"))).workers!.find((w) => w.key === `runner:${bob}`)!;
+  assert.deepEqual([own.login, own.calls.map((c) => c.id)], ["bob", [bobs]], "the owner sees their own private runner");
+  const op = await live(db, as("operator"));
+  assert.deepEqual(op.workers!.find((w) => w.key === "account:acc")!.calls.length, 1);
+  for (const r of [board, op, await live(db, as("maintainer", "bob"))]) assert.doesNotMatch(JSON.stringify(r), /alice-host|carol-box|bob-host/, "no hostname in any reply");
 });
