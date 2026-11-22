@@ -131,6 +131,15 @@ start_xvfb() {
   echo "$!" >"$ROOT/.ws/xvfb.pid"
 }
 
+# A pid this helper may wait on or signal: a positive integer above 1 (never init, never a process group of all).
+valid_pid() { is_pos "$1" && [ "$1" -gt 1 ]; }
+
+# The Xvfb pid from .ws/xvfb.pid when that process is still Xvfb; empty otherwise.
+xvfb_pid() {
+  _xp=$(cat "$ROOT/.ws/xvfb.pid" 2>/dev/null)
+  valid_pid "$_xp" && [ "$(cat "/proc/$_xp/comm" 2>/dev/null)" = Xvfb ] && echo "$_xp"
+}
+
 x_up() { xwininfo -display "$DPY" -root >/dev/null 2>&1; }
 
 # Waits up to $1 seconds for the display to answer.
@@ -147,14 +156,16 @@ need_x() {
   { command -v xwininfo && command -v xprop; } >/dev/null 2>&1 || die nodisplay 2 "xwininfo and xprop (x11-utils) are not installed in this image"
 }
 
-# Makes sure the display answers, starting Xvfb again if it died; prints 1 when it did, else 0.
+# Makes sure the display answers, starting Xvfb again if it died; writes 1 to file $1 when it did, else 0.
+# Errors go to stdout as the call's header.
 ensure_display() {
   need_x
-  if x_up; then echo 0; return 0; fi
-  _xp=$(cat "$ROOT/.ws/xvfb.pid" 2>/dev/null)
-  if [ -n "$_xp" ] && kill -0 "$_xp" 2>/dev/null; then
+  echo 0 >"$1"
+  x_up && return 0
+  _xp=$(xvfb_pid)
+  if [ -n "$_xp" ]; then
     # Still starting, or hung.
-    if wait_display 5; then echo 0; return 0; fi
+    wait_display 5 && return 0
     kill -KILL "$_xp" 2>/dev/null
     sleep 0.2
   fi
@@ -162,7 +173,7 @@ ensure_display() {
   echo "ws: display $DPY was not running; starting Xvfb again ($(date -u +%FT%TZ))" >>"$ROOT/.ws/xvfb.log"
   start_xvfb
   wait_display 10 || die nodisplay 2 "Xvfb did not start; see $ROOT/.ws/xvfb.log"
-  echo 1
+  echo 1 >"$1"
 }
 
 # Top-level windows, one id per line. Without a window manager, app windows are the root's children.
@@ -174,7 +185,7 @@ top_windows() {
 win_geom() {
   if [ "$1" = -root ]; then _i=$(xwininfo -display "$DPY" -root 2>/dev/null) || return 1
   else _i=$(xwininfo -display "$DPY" -id "$1" 2>/dev/null) || return 1; fi
-  case $_i in *'Map State: IsViewable'*) ;; *) return 1 ;; esac
+  printf '%s\n' "$_i" | grep -qx ' *Map State: IsViewable' || return 1
   printf '%s\n' "$_i" | sed -n 's/^ *Absolute upper-left X: *\(-\{0,1\}[0-9]*\)$/x \1/p; s/^ *Absolute upper-left Y: *\(-\{0,1\}[0-9]*\)$/y \1/p; s/^ *Width: *\([0-9]*\)$/w \1/p; s/^ *Height: *\([0-9]*\)$/h \1/p' |
     { x=; y=; w=; h=
       while read -r _k _v; do eval "$_k=\$_v"; done
@@ -188,14 +199,17 @@ win_session() {
   sed 's/.*) //' "/proc/$_wp/stat" 2>/dev/null | cut -d' ' -f4
 }
 
-# find_window <pid> [<before>]: "id x y w h" of the largest viewable window of app <pid>; with <before> (the window
-# list from before the launch), else the largest new window no process claims. Fails when there is none.
+# find_window <n> <pid> [<before>]: "id x y w h" of the largest viewable window of app <n> (pid <pid>); with <before>
+# (the window list from before the launch), else the largest new window no process claims. A window another running
+# app's .win names is never this app's (a display started again reuses ids, so only running apps count).
 find_window() {
+  _others=$(for _o in $(live_apps); do [ "$_o" != "$1" ] && cat "$APPS/$_o.win"; done 2>/dev/null)
   _best=; _area=0; _new=; _narea=0
   for _w in $(top_windows); do
+    [ -n "$_others" ] && printf '%s\n' "$_others" | grep -qx "$_w" && continue
     _s=$(win_session "$_w")
-    if [ -n "$_s" ]; then [ "$_s" = "$1" ] || continue
-    elif [ -z "${2:-}" ] || grep -qx "$_w" "$2" 2>/dev/null; then continue; fi
+    if [ -n "$_s" ]; then [ "$_s" = "$2" ] || continue
+    elif [ -z "${3:-}" ] || grep -qx "$_w" "$3" 2>/dev/null; then continue; fi
     _g=$(win_geom "$_w") || continue
     _ww=$(echo "$_g" | cut -d' ' -f3); _hh=$(echo "$_g" | cut -d' ' -f4)
     [ "$_ww" -gt 1 ] && [ "$_hh" -gt 1 ] || continue
@@ -225,7 +239,7 @@ cmd_init() {
     echo "ws: Xvfb not installed, skipping display"
   fi
   # app-start may have started Xvfb again, so the pid file names the one to stop.
-  trap 'kill "$(cat "$ROOT/.ws/xvfb.pid" 2>/dev/null)" 2>/dev/null; exit 0' TERM INT
+  trap '_xp=$(xvfb_pid); [ -n "$_xp" ] && kill "$_xp" 2>/dev/null; exit 0' TERM INT
   while :; do
     sleep 1 &
     wait $!
@@ -540,15 +554,20 @@ wait_file() {
   while [ ! -f "$1" ] && [ "$(now_ms)" -lt "$_deadline" ]; do sleep 0.05; done
 }
 
-# The apps still running, one call number per line. One whose wrapper is gone without writing its exit is not.
+# The apps still running, one call number per line. One whose wrapper ended without writing its exit is not, nor one
+# that has no pid a few seconds after its start (its wrapper never launched it).
 live_apps() {
   for _f in "$APPS"/*.start; do
     [ -e "$_f" ] || continue
     _m=${_f##*/}; _m=${_m%.start}
     [ -f "$APPS/$_m.exit" ] && continue
     _p=$(cat "$APPS/$_m.pid" 2>/dev/null)
-    [ -z "$_p" ] || kill -0 "$_p" 2>/dev/null || continue
-    echo "$_m"
+    if [ -z "$_p" ]; then
+      _st=$(cat "$_f" 2>/dev/null)
+      is_uint "$_st" && [ $(($(now_ms) - _st)) -lt 5000 ] && echo "$_m"
+      continue
+    fi
+    valid_pid "$_p" && kill -0 "$_p" 2>/dev/null && echo "$_m"
   done
 }
 
@@ -587,10 +606,17 @@ need_app() {
 # the call waits for and reports that app, so a resumed job does not start it twice.
 cmd_app_start() {
   [ $# -ge 5 ] || die usage 2 "app-start <n> <scale> <binary> <k> <NAME=VALUE>... -- <args...>"
-  n=$1; scale=$2; bin=$3; shift 3
+  n=$1
   is_pos "$n" || die usage 2 "call number must be a positive integer"
+  [ -f "$APPS/$n.start" ] || launch_app "$@"
+  app_wait "$n"
+}
+
+launch_app() {
+  n=$1; scale=$2; bin=$3; k=$4; shift 3
   case $scale in 1 | 2) ;; *) die usage 2 "scale must be 1 or 2" ;; esac
   check_app_args "$@"
+  shift
   case $bin in
     "$ROOT"/*) ;;
     *) die usage 2 "binary must be under $ROOT" ;;
@@ -603,52 +629,63 @@ cmd_app_start() {
   esac
   [ -f "$real" ] || die nofile 3 "no such file $bin"
   [ -x "$real" ] || die notexec 2 "$bin is not executable"
+  { setsid_bin=$(command -v setsid) && env_bin=$(command -v env); } || die io 2 "setsid or env is not installed"
   mkdir -p "$APPS" "$ROOT/.ws/locks" || die io 2 "cannot create $APPS"
-  if [ ! -f "$APPS/$n.start" ]; then
-    (
-      flock 9
-      [ ! -f "$APPS/$n.start" ] || exit 0
-      [ "$(live_apps | wc -l)" -lt "$APP_MAX" ] || die limit 2 "$APP_MAX apps are running; end one with app_stop"
-      ensure_display >"$APPS/$n.restarted" || exit $?
-      top_windows >"$APPS/$n.before"
-      now_ms >"$APPS/$n.start"
-      : >"$APPS/$n.log"
-      # The app runs in a session of its own (setsid execs it in place), so app-stop signals the app and its children
-      # but not this wrapper, which records the exit code.
-      # shellcheck disable=SC2016
-      setsid sh -c '
-        a=$1; n=$2; s=$3; HOME=$4; dir=$5; DISPLAY=$6; bin=$7; k=$8; shift 8
-        WGPU_BACKEND=vulkan; LP_NUM_THREADS=4
-        export HOME DISPLAY WGPU_BACKEND LP_NUM_THREADS
-        if [ -z "${VK_ICD_FILENAMES:-}" ]; then
-          for f in /usr/share/vulkan/icd.d/lvp_icd*.json; do [ -e "$f" ] && { VK_ICD_FILENAMES=$f; export VK_ICD_FILENAMES; }; break; done
-        fi
-        i=0
-        while [ "$i" -lt "$k" ]; do export "$1"; shift; i=$((i + 1)); done
-        shift
-        WINIT_X11_SCALE_FACTOR=$s; export WINIT_X11_SCALE_FACTOR
-        cd "$dir" || cd /
-        setsid "$bin" "$@" </dev/null >"$a/$n.log" 2>&1 &
-        ap=$!
-        echo "$ap" >"$a/$n.pid"
-        wait "$ap"; rc=$?
-        date +%s%3N >"$a/$n.end"
-        echo "$rc" >"$a/$n.exit.tmp"
-        mv "$a/$n.exit.tmp" "$a/$n.exit"
-      ' ws-app "$APPS" "$n" "$scale" "$ROOT/home" "$ROOT/src" "$DPY" "$bin" "$@" </dev/null >/dev/null 2>&1 9>&- &
-    ) 9>"$ROOT/.ws/locks/apps" || exit $?
-  fi
-  restarted=$(cat "$APPS/$n.restarted" 2>/dev/null || echo 0)
-  deadline=$(($(cat "$APPS/$n.start") + APP_WAIT * 1000))
+  (
+    flock 9
+    [ ! -f "$APPS/$n.start" ] || exit 0
+    [ "$(live_apps | wc -l)" -lt "$APP_MAX" ] || die limit 2 "$APP_MAX apps are running; end one with app_stop"
+    ensure_display "$APPS/$n.restarted"
+    top_windows >"$APPS/$n.before"
+    now_ms >"$APPS/$n.start"
+    : >"$APPS/$n.log"
+    # The wrapper sets only fixed variables; the session's env reaches the app through env(1), so no value can change
+    # the wrapper's own shell, and it always records the pid and the exit code. setsid execs the app in place, in a
+    # session of its own, so app-stop signals the app and its children but not the wrapper.
+    # shellcheck disable=SC2016
+    setsid sh -c '
+      a=$1; n=$2; s=$3; HOME=$4; dir=$5; DISPLAY=$6; sid=$7; envb=$8; bin=$9; shift 9
+      k=$1; shift
+      WGPU_BACKEND=vulkan; LP_NUM_THREADS=4; WINIT_X11_SCALE_FACTOR=$s
+      export HOME DISPLAY WGPU_BACKEND LP_NUM_THREADS WINIT_X11_SCALE_FACTOR
+      if [ -z "${VK_ICD_FILENAMES:-}" ]; then
+        for f in /usr/share/vulkan/icd.d/lvp_icd*.json; do [ -e "$f" ] && { VK_ICD_FILENAMES=$f; export VK_ICD_FILENAMES; }; break; done
+      fi
+      # "NAME=VALUE... -- args..." becomes "NAME=VALUE... <setsid> <bin> args...".
+      total=$#; i=0
+      while [ "$i" -lt "$total" ]; do
+        if [ "$i" -eq "$k" ]; then set -- "$@" "$sid" "$bin"; else set -- "$@" "$1"; fi
+        shift; i=$((i + 1))
+      done
+      cd "$dir" || cd /
+      "$envb" "$@" </dev/null >"$a/$n.log" 2>&1 &
+      ap=$!
+      echo "$ap" >"$a/$n.pid"
+      wait "$ap"; rc=$?
+      date +%s%3N >"$a/$n.end"
+      echo "$rc" >"$a/$n.exit.tmp"
+      mv "$a/$n.exit.tmp" "$a/$n.exit"
+    ' ws-app "$APPS" "$n" "$scale" "$ROOT/home" "$ROOT/src" "$DPY" "$setsid_bin" "$env_bin" "$bin" "$k" "$@" </dev/null >/dev/null 2>&1 9>&- &
+  ) 9>"$ROOT/.ws/locks/apps" || exit $?
+}
+
+# Waits for app <n>'s window (or its exit) until APP_WAIT seconds after its start, and reports it.
+app_wait() {
+  n=$1
+  restarted=$(cat "$APPS/$n.restarted" 2>/dev/null)
+  [ "$restarted" = 1 ] || restarted=0
+  st=$(cat "$APPS/$n.start" 2>/dev/null)
+  is_uint "$st" || st=$(now_ms)
+  deadline=$((st + APP_WAIT * 1000))
   pid=
   while :; do
     if [ -f "$APPS/$n.exit" ]; then
       printf 'WS ok exited %s\n' "$(cat "$APPS/$n.exit")"
-      tail -c "$APP_LOG_START" "$APPS/$n.log"
+      tail -c "$APP_LOG_START" "$APPS/$n.log" 2>/dev/null
       return 0
     fi
-    [ -n "$pid" ] || pid=$(cat "$APPS/$n.pid" 2>/dev/null)
-    if [ -n "$pid" ] && win=$(find_window "$pid" "$APPS/$n.before"); then
+    valid_pid "$pid" || pid=$(cat "$APPS/$n.pid" 2>/dev/null)
+    if valid_pid "$pid" && win=$(find_window "$n" "$pid" "$APPS/$n.before"); then
       echo "${win%% *}" >"$APPS/$n.win"
       printf 'WS ok app %s %s %s\n' "$pid" "$win" "$restarted"
       return 0
@@ -656,8 +693,9 @@ cmd_app_start() {
     [ "$(now_ms)" -lt "$deadline" ] || break
     sleep 0.2
   done
-  printf 'WS ok nowindow %s %s\n' "${pid:--}" "$restarted"
-  tail -c "$APP_LOG_START" "$APPS/$n.log"
+  valid_pid "$pid" || pid=-
+  printf 'WS ok nowindow %s %s\n' "$pid" "$restarted"
+  tail -c "$APP_LOG_START" "$APPS/$n.log" 2>/dev/null
 }
 
 # app-stop <n> [--force]: SIGTERM to the app's session (SIGKILL with --force), SIGKILL after 5 s.
@@ -676,7 +714,7 @@ cmd_app_stop() {
     was=1
     wait_file "$APPS/$n.pid" 2
     pid=$(cat "$APPS/$n.pid" 2>/dev/null)
-    if [ -n "$pid" ]; then
+    if valid_pid "$pid"; then
       sig=TERM
       [ "$force" = 1 ] && sig=KILL
       kill -"$sig" -- "-$pid" 2>/dev/null || kill -"$sig" "$pid" 2>/dev/null
@@ -685,6 +723,10 @@ cmd_app_stop() {
         kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null
         wait_file "$APPS/$n.exit" 5
       fi
+    elif [ ! -f "$APPS/$n.exit" ]; then
+      # The wrapper never launched the app: record it as ended, so it stops counting as running.
+      echo "ws: app $n has no pid; its wrapper did not start it" >>"$APPS/$n.log"
+      echo 127 >"$APPS/$n.exit"
     fi
   fi
   printf 'WS ok stopped %s %s\n' "$(cat "$APPS/$n.exit" 2>/dev/null || echo -)" "$was"
@@ -719,7 +761,8 @@ cmd_shot() {
   else
     if [ -f "$APPS/$app.exit" ]; then die exited 2 "app $app exited with code $(cat "$APPS/$app.exit")"; fi
     pid=$(cat "$APPS/$app.pid" 2>/dev/null)
-    found=$(find_window "${pid:-0}") || found=
+    found=
+    valid_pid "$pid" && { found=$(find_window "$app" "$pid") || found=; }
     if [ -z "$found" ]; then
       last=$(cat "$APPS/$app.win" 2>/dev/null)
       [ -n "$last" ] && g=$(win_geom "$last") && found="$last $g"
