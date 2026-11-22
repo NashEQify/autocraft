@@ -18,6 +18,7 @@ export type { KubeSettings };
 import { BuildError } from "./envs.ts";
 import { slugOf } from "../owners.ts";
 import { CACHE_VERSION, MAX_WARM_COMMAND } from "../worker/gate.ts";
+import { WARM_COPY_CONTAINER, WARM_MEMORY_FACTOR, WARM_MEMORY_MAX_BYTES, WARM_VERIFY_CONFIGMAP, warmCopyParts, warmNodeVolume, warmTmpfsLimit, warmVerifyVolume, type WarmUse } from "./warm-mount.ts";
 
 
 export const DEFAULT_SETTINGS: KubeSettings = {
@@ -235,6 +236,8 @@ export type Prepared = {
   cacheVersion?: string | null;
   /** The CI gate's warm-command, reported for warm tasks only; null: the default warm build. */
   warmCommand?: string | null;
+  /** sha256 of the checkout's Cargo.lock (after the patch); null when it has none or the source pod did not report it. */
+  cargoLock?: string | null;
 };
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
@@ -258,13 +261,14 @@ export function parsePrepared(message: string | undefined): { ok: true; prepared
   const ref = (v: unknown) => (v === null || v === undefined ? null : typeof v === "string" && REF.test(v) ? v : undefined);
   const fonts = ref(o.craftFontsRef), i18n = ref(o.craftI18nRev);
   const cacheVersion = o.cacheVersion === undefined || o.cacheVersion === null ? null : typeof o.cacheVersion === "string" && CACHE_VERSION.test(o.cacheVersion) ? o.cacheVersion : undefined;
+  const cargoLock = o.cargoLock === undefined || o.cargoLock === null ? null : typeof o.cargoLock === "string" && /^[0-9a-f]{64}$/.test(o.cargoLock) ? o.cargoLock : undefined;
   const warmCommand = o.warmCommand === undefined || o.warmCommand === null ? null : typeof o.warmCommand === "string" && o.warmCommand.length <= MAX_WARM_COMMAND && !o.warmCommand.includes("\0") ? o.warmCommand : undefined;
   const bad =
     !env || typeof env !== "object" || Array.isArray(env) || Object.keys(env).length > 40 || Object.entries(env).some(([k, v]) => !ENV_NAME.test(k) || typeof v !== "string" || v.length > 1000 || v.includes("\0")) ||
     !Array.isArray(mounts) || mounts.length > 2 || mounts.some((m) => typeof m.sub !== "string" || !MOUNT_SUB.test(m.sub) || (m.target !== "/craft-fonts" && m.target !== "/craft-i18n")) ||
-    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined || cacheVersion === undefined || warmCommand === undefined;
+    !Array.isArray(packages) || packages.length > 100 || packages.some((p) => typeof p !== "string" || !PKG_RE.test(p)) || fonts === undefined || i18n === undefined || cacheVersion === undefined || warmCommand === undefined || cargoLock === undefined;
   if (bad) return { ok: false, summary: "source: the source pod's report is not valid" };
-  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n, cacheVersion, warmCommand } };
+  return { ok: true, prepared: { env: env as Record<string, string>, mounts: mounts as Prepared["mounts"], packages: packages as string[], craftFontsRef: fonts, craftI18nRev: i18n, cacheVersion, warmCommand, cargoLock } };
 }
 
 // ---- specs -------------------------------------------------------------------
@@ -329,7 +333,7 @@ const MIRROR_CA = "/etc/craft-mirror/ca.crt";
 const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA };
 const SIGNING_KEY = "/keys/signing/private.pem";
 /** ConfigMap in the build namespace with the public half of the signing key (`public.pem`): restore and gc verify with it, so only the publish holds the private key. */
-export const WARM_VERIFY_CONFIGMAP = "warm-verify-key";
+export { WARM_VERIFY_CONFIGMAP };
 const VERIFY_KEY = "/keys/verify/public.pem";
 const RUSTC_FILE = "/meta/rustc.txt";
 const BAD_BLOBS_FILE = "/meta/bad-blobs";
@@ -374,10 +378,8 @@ function stepResources(s: KubeSettings, m: StepMemory | null | undefined, extraM
   };
 }
 
-/** A warm target in memory takes this share more than the version's size: the build adds to what the restore put there. */
-export const WARM_MEMORY_FACTOR = 1.2;
-/** Above this much expected target (the same threshold as for consumers) the producer's target lives on the volume. */
-export const WARM_MEMORY_MAX_BYTES = 32 * 1024 ** 3;
+// Above WARM_MEMORY_MAX_BYTES of expected target (the same threshold as for consumers) the producer's target lives on the volume.
+export { WARM_MEMORY_FACTOR, WARM_MEMORY_MAX_BYTES };
 /** The memory a producer's pod adds for an in-memory target, or null when the target goes on the volume: no published version is known yet (the first build), or it is large. */
 export function warmMemory(warm: WarmPod): number | null {
   if (!warm.bytes || warm.bytes <= 0) return null;
@@ -465,7 +467,9 @@ function appPod(c: PodCtx, image: string, phase: "task" | "source" | "upload", n
 
 export const taskPod = (c: PodCtx, image: string, key: string) =>
   appPod(c, image, "task", "api", { AUTOCRAFT_POD_KEY: key, AUTOCRAFT_WORKER_URL: c.s.workerUrl }, false);
-export const sourcePod = (c: PodCtx, image: string) => appPod(c, image, "source", "fetch", {}, false);
+/** `warmCommit`: the warm version the task's node holds, which the source pod lists the checkout's changes against. */
+export const sourcePod = (c: PodCtx, image: string, warmCommit?: string | null) =>
+  appPod(c, image, "source", "fetch", warmCommit ? { AUTOCRAFT_POD_WARM_COMMIT: warmCommit } : {}, false);
 export const uploadPod = (c: PodCtx, image: string, key: string, ran: number) =>
   appPod(c, image, "upload", "api", { AUTOCRAFT_POD_KEY: key, AUTOCRAFT_WORKER_URL: c.s.workerUrl, AUTOCRAFT_POD_RAN: String(ran) }, true);
 
@@ -492,6 +496,11 @@ function sccacheEnv(url: string, cacheVersion: string, write: boolean): Record<s
     SCCACHE_IGNORE_SERVER_IO_ERROR: "1", SCCACHE_IDLE_TIMEOUT: "0",
   };
 }
+/** The env every step at the CI paths shares: the gate's (ciEnv), HOME, CARGO_HOME and CI. */
+export const gateEnvOf = (prepared: Prepared): Record<string, string> => ({ ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" });
+/** What a warm tree was built with besides the image and the paths: the shared step env and the cache version. */
+export const warmEnvHash = (gateEnv: Record<string, string>, cacheVersion: string | null): string =>
+  createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
 /** The writer Secret's credentials as env references: the values never pass through the runner or the pod spec. */
 const writerEnv = (secret: string, user: string, password: string) => [
   { name: user, valueFrom: { secretKeyRef: { name: secret, key: "username" } } },
@@ -521,24 +530,33 @@ export const MAX_RECHECK = 200;
  * due, `warm-gc`) publishes the target and CARGO_HOME. The pod carries `craft.build/cache=write`. Only the steps, the
  * publish and the gc get the writer credentials; only the publish mounts the signing key. The restore and the gc mount the
  * public key from the `warm-verify-key` ConfigMap.
+ *
+ * With `use` (an offline group of any other build that starts warm, src/build/warm-mount.ts): `warm-copy` fills the target
+ * at the checkout from the node's warm version, in memory (`tmpfs`) or on the task's volume (`pvc`), and the steps build at
+ * the CI paths, as the version was built.
  */
-export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string, warm?: WarmPod) {
+export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskStep[], group: Group, prepared: Prepared, checkPackages: boolean, repo: string, warm?: WarmPod, use?: WarmUse) {
   const offline = group.network === "none";
   const mirror = group.network === "mirror";
   const checkout = ciCheckout(repo);
   const cacheVersion = prepared.cacheVersion;
   const writing = !!warm && offline && !!checkout;
+  const starting = !writing && !!use && offline && !!checkout;
   const cacheUrl = writing ? c.s.cacheWriteUrl : c.s.sccacheUrl;
   const cached = (step: TaskStep): boolean => offline && !step.bare && !!cacheUrl && !!cacheVersion && !!checkout;
-  const atCi = (step: TaskStep): boolean => cached(step) || (writing && !step.bare);
-  const target = writing ? `${checkout}/target` : null;
+  const atCi = (step: TaskStep): boolean => cached(step) || ((writing || starting) && !step.bare);
+  const target = writing || starting ? `${checkout}/target` : null;
   const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
   if (mirror) volumes.push({ name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } });
   // In memory when the version's size is known and moderate (the build containers' memory limit grows by it); else on the task's volume.
   const extraMemory = writing ? warmMemory(warm!) : null;
-  const targetVolume = extraMemory !== null
+  const targetVolume: { name: string; subPath?: string } = extraMemory !== null || (starting && use!.target === "tmpfs")
     ? { name: "warm-target" }
     : { name: "work", subPath: "target" };
+  if (starting) {
+    volumes.push(warmNodeVolume(use!), warmVerifyVolume());
+    if (use!.target === "tmpfs") volumes.push({ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(warmTmpfsLimit(use!, quantity(stepMemory(c.s, c.memory).limit))) } });
+  }
   if (writing) {
     volumes.push(
       ...(extraMemory !== null ? [{ name: "warm-target", emptyDir: { medium: "Memory", sizeLimit: String(Math.ceil(quantity(stepMemory(c.s, c.memory).limit) + extraMemory)) } }] : []),
@@ -547,7 +565,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
       { name: "warm-signing", secret: { secretName: c.s.signingSecret, items: [{ key: "private.pem", path: "private.pem" }], defaultMode: 0o440 } },
     );
   }
-  const gateEnv = { ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" };
+  const gateEnv = gateEnvOf(prepared);
   const steps = group.steps.map((i) => {
     const step = plan[i]!;
     const ci = atCi(step);
@@ -591,7 +609,10 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   const spec = mirror && c.s.crateMirror ? { hostAliases: [{ ip: c.s.crateMirror, hostnames: MIRROR_HOSTS }] } : {};
   if (!writing) {
     const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
-    return pod(c, group.network, volumes, [disk, ...check, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
+    const copy = starting
+      ? [container(WARM_COPY_CONTAINER, appImage, stepResources(c.s, c.memory), warmCopyParts(use!, { checkout: checkout!, image, envHash: warmEnvHash(gateEnv, cacheVersion ?? null), targetVolume, tmpVolume: "check-tmp" }))]
+      : [];
+    return pod(c, group.network, volumes, [disk, ...check, ...copy, ...steps.slice(0, -1)], steps.slice(-1), labels, spec);
   }
   const w = warmPhases(c, appImage, warm!, target!, checkout!, image, gateEnv, cacheVersion ?? null, targetVolume, extraMemory);
   const [init, last] = warm!.gc ? [[...steps, w.publish], [w.gc]] : [steps, [w.publish]];
@@ -604,8 +625,7 @@ function warmPhases(c: PodCtx, appImage: string, warm: WarmPod, target: string, 
   const signing = { name: "warm-signing", mountPath: "/keys/signing", readOnly: true };
   const verify = { name: "warm-verify", mountPath: "/keys/verify", readOnly: true };
   const tmp = { name: "warm-tmp", mountPath: "/tmp" };
-  // What the tree was built with besides the image and the paths: the env every build step shares.
-  const envHash = createHash("sha256").update(JSON.stringify([Object.entries(gateEnv).sort(), cacheVersion])).digest("hex");
+  const envHash = warmEnvHash(gateEnv, cacheVersion);
   const writer = writerEnv(c.s.writerSecret!, "AUTOCRAFT_WARM_STORE_USER", "AUTOCRAFT_WARM_STORE_PASSWORD");
   const phase = (name: string, env: object[], mounts: object[], extraMemory: number | null = null) =>
     container(name, appImage, stepResources(c.s, c.memory, extraMemory ?? 0), { args: ["worker", "pod", name], env, volumeMounts: [...mounts, tmp] });

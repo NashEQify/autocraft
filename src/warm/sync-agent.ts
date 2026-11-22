@@ -1,6 +1,7 @@
 // The warm-sync agent. One runs on every node (a DaemonSet) and keeps the newest signed version of each assigned warm
 // key in a node directory that build and workspace pods mount read-only:
 //   <dir>/<key>/gen-<sha12>/{target,cargo,meta.json,manifest.zst}   one version of the key
+//   <dir>/<key>/gen-<sha12>/latest.json                            its signed record, which consumers verify
 //   <dir>/<key>/current -> gen-<sha12>                             the version consumers start from
 // A new version is built as `gen-<sha12>.tmp` with the current one as `previous`, so files that did not change are hard
 // links and only the rest is downloaded (writes paced to a byte rate). The finished dir is renamed into place and
@@ -54,12 +55,12 @@ export type NodeStatus = {
   /** Why the agent cannot work at all (the assignment cannot be read); absent when it can. */
   error?: string;
 };
-export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number };
+export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number; cargoLock?: string | null };
 
 /** meta.json of a version. Consumers build at `checkout`, `targetDir` and `cargoHome`: cargo fingerprints hold absolute paths. */
 export type GenMeta = {
   key: string; repo: string; commit: string; stored: number; bytes: number; files: number;
-  image: string | null; rustc: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string;
+  image: string | null; rustc: string | null; envHash: string | null; checkout: string | null; targetDir: string; cargoHome: string; cargoLock?: string | null;
   manifestSha256: string; synced: number;
 };
 
@@ -388,10 +389,11 @@ export class SyncAgent {
       const hd = manifest.header;
       const meta: GenMeta = {
         key, repo: hd.repo, commit: hd.commit, stored: hd.stored, bytes: hd.bytes, files: hd.files, image: hd.image, rustc: hd.rustc,
-        envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, manifestSha256: l.sha256, synced: this.c.now(),
+        envHash: hd.envHash, checkout: hd.checkout, targetDir: hd.targetDir, cargoHome: hd.cargoHome, cargoLock: hd.cargoLock ?? null, manifestSha256: l.sha256, synced: this.c.now(),
       };
       writeFileSync(join(tmp, "manifest.zst"), encodeManifest(manifest), { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
+      writeFileSync(join(tmp, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
       renameSync(tmp, final);
       this.swap(key, gen, h);
       this.failed.delete(key);
@@ -475,7 +477,7 @@ export class SyncAgent {
     const keys: Record<string, KeyStatus> = {};
     for (const k of this.keyDirs()) {
       const h = this.held(k);
-      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced };
+      if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced, cargoLock: h.meta.cargoLock ?? null };
     }
     const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
     return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), warmBytes: this.warmBytes(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };

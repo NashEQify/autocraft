@@ -51,6 +51,8 @@ export type ManifestHeader = {
   checkout: string | null;
   targetDir: string;
   cargoHome: string;
+  /** sha256 of the checkout's Cargo.lock; null or absent when it had none or the publisher did not record it. */
+  cargoLock?: string | null;
   /** Sum of file sizes. */
   bytes: number;
   files: number;
@@ -226,7 +228,7 @@ function isDir(p: string): boolean {
 // ---------------------------------------------------------------------------------------------------------------
 // Encoding: zstd of JSON lines, the header first, then one entry per line in path order.
 
-type HeaderLine = { format: string; version: 1; key: string; repo: string; commit: string; stored: number; image: string | null; rustc: string | null; env_hash: string | null; checkout: string | null; target_dir: string; cargo_home: string; bytes: number; files: number };
+type HeaderLine = { format: string; version: 1; key: string; repo: string; commit: string; stored: number; image: string | null; rustc: string | null; env_hash: string | null; checkout: string | null; target_dir: string; cargo_home: string; cargo_lock: string | null; bytes: number; files: number };
 
 export function makeHeader(h: Omit<ManifestHeader, "bytes" | "files">, entries: Entry[]): ManifestHeader {
   let bytes = 0, files = 0;
@@ -238,7 +240,7 @@ export function encodeManifest(m: Manifest): Buffer {
   validateHeader(m.header);
   validateEntries(m.entries);
   const h = m.header;
-  const head: HeaderLine = { format: MANIFEST_FORMAT, version: 1, key: h.key, repo: h.repo, commit: h.commit, stored: h.stored, image: h.image, rustc: h.rustc, env_hash: h.envHash, checkout: h.checkout, target_dir: h.targetDir, cargo_home: h.cargoHome, bytes: h.bytes, files: h.files };
+  const head: HeaderLine = { format: MANIFEST_FORMAT, version: 1, key: h.key, repo: h.repo, commit: h.commit, stored: h.stored, image: h.image, rustc: h.rustc, env_hash: h.envHash, checkout: h.checkout, target_dir: h.targetDir, cargo_home: h.cargoHome, cargo_lock: h.cargoLock ?? null, bytes: h.bytes, files: h.files };
   const lines = [JSON.stringify(head)];
   for (const e of m.entries) {
     const ns = e.mtimeNs.toString();
@@ -252,7 +254,7 @@ export function encodeManifest(m: Manifest): Buffer {
 function validateHeader(h: ManifestHeader): void {
   const optStr = (v: unknown) => v === null || (typeof v === "string" && v.length <= 65536);
   const ok = WARM_KEY.test(h.key) && typeof h.repo === "string" && /^[\w.-]+\/[\w.-]+$/.test(h.repo) && COMMIT.test(h.commit) && Number.isSafeInteger(h.stored) && h.stored > 0
-    && optStr(h.image) && optStr(h.rustc) && optStr(h.envHash) && optStr(h.checkout) && typeof h.targetDir === "string" && typeof h.cargoHome === "string"
+    && optStr(h.image) && optStr(h.rustc) && (h.cargoLock == null || /^[0-9a-f]{64}$/.test(h.cargoLock)) && optStr(h.envHash) && optStr(h.checkout) && typeof h.targetDir === "string" && typeof h.cargoHome === "string"
     && Number.isSafeInteger(h.bytes) && h.bytes >= 0 && Number.isSafeInteger(h.files) && h.files >= 0;
   if (!ok) throw new ManifestError("manifest header refused");
 }
@@ -278,7 +280,7 @@ export function decodeManifest(buf: Buffer): Manifest {
   if (h.format !== MANIFEST_FORMAT || h.version !== 1) throw new ManifestError("not a v1 warm manifest");
   const header: ManifestHeader = {
     key: h.key as string, repo: h.repo as string, commit: h.commit as string, stored: h.stored as number, image: (h.image ?? null) as string | null, rustc: (h.rustc ?? null) as string | null,
-    envHash: (h.env_hash ?? null) as string | null, checkout: (h.checkout ?? null) as string | null, targetDir: h.target_dir as string, cargoHome: h.cargo_home as string, bytes: h.bytes as number, files: h.files as number,
+    envHash: (h.env_hash ?? null) as string | null, checkout: (h.checkout ?? null) as string | null, targetDir: h.target_dir as string, cargoHome: h.cargo_home as string, cargoLock: (h.cargo_lock ?? null) as string | null, bytes: h.bytes as number, files: h.files as number,
   };
   validateHeader(header);
   if (lines.length - 1 > MAX_ENTRIES) throw new ManifestError(`manifest lists more than ${MAX_ENTRIES} entries`);
