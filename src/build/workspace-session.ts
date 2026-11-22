@@ -144,7 +144,10 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
         const w = await getWorkspace(db, wsId);
         if (!w) return await fail(`workspace ${wsId} is gone`);
         if (w.state === "ready") break;
-        if (w.state === "parked" && await resumeWorkspace(db, wsId)) ctx.log(`workspace ${wsId} parked; resuming it`);
+        if (w.state === "parked") {
+          if (!await resumeWorkspace(db, wsId)) return await fail(`workspace ${wsId} is parked and could not be resumed${w.error ? `: ${w.error}` : ""}`);
+          ctx.log(`workspace ${wsId} parked; resuming it`);
+        }
         if (!TAKEN_STATES.includes(w.state)) return await fail(`workspace ${wsId} is ${w.state}${w.error ? `: ${w.error}` : ""}`);
         if (Date.now() - waitFrom > READY_LIMIT_MS) return await fail(`workspace ${wsId} was not ready within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
         if (await ctx.cancelled()) return await fail("cancelled while the workspace started");

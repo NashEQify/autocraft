@@ -279,6 +279,13 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   // A session's workspace tools: the call bound to the workspace, and the lease run a relayed call came from (src/build/workspace-relay.ts).
   ["workspaces", "remote_call_id", "INTEGER"],
   ["workspace_calls", "run_id", "INTEGER"],
+  // Workspace resumes (src/build/workspace-launch.ts) and the prompt a lease rewrote for one (src/build/workspace-call.ts).
+  ["workspaces", "volume_fresh", "INTEGER NOT NULL DEFAULT 0"],
+  ["workspaces", "resume_tries", "INTEGER NOT NULL DEFAULT 0"],
+  ["workspaces", "checkpoint_error", "TEXT"],
+  ["workspaces", "restored", "TEXT"],
+  ["workspaces", "restored_at", "TEXT"],
+  ["remote_calls", "base_stdin", "TEXT"],
 ];
 
 // Indexes on added columns: they can only be created once the column exists.

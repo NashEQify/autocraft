@@ -1642,6 +1642,7 @@ export interface RemoteCalls {
   no_taker_since: number | null;
   bundle_hash: string | null;
   consumed_at: number | null;
+  base_stdin: string | null;
 }
 
 export interface RemoteChecks {
@@ -2174,6 +2175,11 @@ export interface Workspaces {
   updated_at: string;
   ended_at: string | null;
   remote_call_id: number | null;
+  volume_fresh: Generated<number>;
+  resume_tries: Generated<number>;
+  checkpoint_error: string | null;
+  restored: string | null;
+  restored_at: string | null;
 }
 
 export interface DB {
@@ -2665,7 +2671,7 @@ export const COLUMNS = {
   push_outcomes: ["id", "at", "stage", "action", "repo", "number", "from_oid", "to_oid", "before_res", "after_res", "outcome", "resolved_at"],
   release_apps: ["repo", "name", "stars", "updated_at"],
   release_assets: ["asset_id", "repo", "release_id", "tag", "release_name", "published_at", "prerelease", "name", "platform", "processor", "format", "downloads", "first_seen", "updated_at", "gone_at"],
-  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at"],
+  remote_calls: ["id", "job_id", "step", "stage", "run_id", "prompt_id", "prompt_version", "tier", "effort", "asked_model", "bundle", "state", "items", "repo", "class", "level", "since", "seen_at", "queued_since", "queued_ms", "user_login", "harness", "harness_version", "model", "lease_secret_hash", "token_id", "leased_at", "heartbeat_at", "started_at", "claim_id", "attempt", "max_attempts", "timeout_ms", "parent_id", "sticky_login", "released_by", "released_at", "progress", "reply", "usage", "turns", "session_id", "duration_ms", "error", "ended_at", "reference_repo", "root", "authors", "picked_by", "picked_at", "pick_until", "no_taker_since", "bundle_hash", "consumed_at", "base_stdin"],
   remote_checks: ["id", "call_id", "run_id", "input", "state", "result", "requested_at", "ended_at"],
   remote_cooloffs: ["login", "until", "reason", "failures", "failures_since"],
   remote_helpers: ["token_id", "login", "readiness", "until", "reason", "harness", "models", "reserve", "usage", "reported_at", "slots", "busy", "last_error", "helper_version"],
@@ -2711,5 +2717,5 @@ export const COLUMNS = {
   work_leases: ["key", "job_id", "step", "taken_at"],
   workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "deadline_at", "finished_at", "run_id"],
   workspace_sessions: ["id", "kind", "repo", "base_sha", "item", "prompt", "env_id", "keep", "deadline_sec", "state", "outcome", "workspace_id", "remote_call_id", "job_id", "requested_by", "created_at", "updated_at", "ended_at"],
-  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id"],
+  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id", "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at"],
 } as const;

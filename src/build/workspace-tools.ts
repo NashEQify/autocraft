@@ -205,7 +205,7 @@ export class WorkspaceSession {
       const w = await this.db.get(this.db.k.selectFrom("workspaces").select(["state", "error"]).where("id", "=", this.workspaceId));
       if (w?.state === "ready") return;
       if (!w || w.state === "ended" || w.state === "failed") throw new Refused(`the workspace is ${w?.state ?? "gone"}${w?.error ? ` (${w.error})` : ""}; submit your work`);
-      if (w.state === "parked") await resumeWorkspace(this.db, this.workspaceId);
+      if (w.state === "parked" && !await resumeWorkspace(this.db, this.workspaceId)) throw new Refused(`the workspace could not be resumed${w.error ? ` (${w.error})` : ""}; submit your work`);
       if (Date.now() - from > READY_LIMIT_MS) throw new Error(`the workspace did not come back within ${Math.round(READY_LIMIT_MS / 60_000)} min (still ${w.state})`);
       await new Promise((r) => setTimeout(r, READY_POLL_MS));
     }

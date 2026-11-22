@@ -130,6 +130,8 @@ cmd_init() {
     echo "$boot" >"$CALLS/$n.end"
     echo 137 >"$CALLS/$n.exit.tmp" && mv "$CALLS/$n.exit.tmp" "$CALLS/$n.exit"
   done
+  # A git of an earlier pod that died mid-command leaves its lock; no git of this pod runs yet.
+  rm -f "$ROOT/src/.git/index.lock"
   printf 'WS ok init\n'
   xpid=
   if command -v Xvfb >/dev/null 2>&1; then

@@ -901,7 +901,8 @@ CREATE TABLE IF NOT EXISTS remote_calls (
   pick_until INTEGER,                 -- the pick counts until then
   no_taker_since INTEGER,             -- while queued: since when no Task Runner may take it (src/remote/takers.ts); withdrawn after a while
   bundle_hash TEXT,                   -- sha256 of the canonical bundle JSON: a resumed job adopts its earlier run's call with the same bundle
-  consumed_at INTEGER                 -- when the caller read the done reply; a done call not yet read can still be adopted
+  consumed_at INTEGER,                -- when the caller read the done reply; a done call not yet read can still be adopted
+  base_stdin TEXT                     -- the bundle's stdin as queued, once a lease rewrote it (a workspace session's resume note)
 );
 CREATE INDEX IF NOT EXISTS remote_calls_state ON remote_calls(state, tier);
 CREATE INDEX IF NOT EXISTS remote_calls_ended ON remote_calls(state, ended_at);
@@ -1082,7 +1083,12 @@ CREATE TABLE IF NOT EXISTS workspaces (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   ended_at TEXT,
-  remote_call_id INTEGER              -- the remote call whose session uses the workspace's tools (src/build/workspace-relay.ts)
+  remote_call_id INTEGER,             -- the remote call whose session uses the workspace's tools (src/build/workspace-relay.ts)
+  volume_fresh INTEGER NOT NULL DEFAULT 0, -- 1: the volume was made empty for the current start, so seeding fills it
+  resume_tries INTEGER NOT NULL DEFAULT 0, -- resumes that failed since the workspace was last ready
+  checkpoint_error TEXT,              -- why the last checkpoint failed; while set, the volume holds work no checkpoint has
+  restored TEXT,                      -- how the last resume brought the tree back: kept | checkpoint <checkpoint_at> | empty
+  restored_at TEXT
 );
 CREATE INDEX IF NOT EXISTS workspaces_env ON workspaces(env_id, state);
 

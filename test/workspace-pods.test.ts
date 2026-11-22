@@ -9,11 +9,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createEnv } from "../src/build/envs.ts";
-import type { ExecOptions, ExecResult, KPod, KubeApi } from "../src/build/kube-api.ts";
+import type { ExecOptions, ExecResult, KNode, KPod, KubeApi } from "../src/build/kube-api.ts";
 import { launcherPass, LauncherState } from "../src/build/launcher.ts";
 import { queueWorkspaceCall } from "../src/build/workspace-call.ts";
-import { IDLE_PARK_MS, PARKED_VOLUME_MS, workspacePass, WorkspaceState } from "../src/build/workspace-launch.ts";
-import { createWorkspace, getCheckpoint, getWorkspace } from "../src/build/workspaces.ts";
+import { IDLE_PARK_MS, NODE_LOST_MS, PARKED_VOLUME_MS, RESUME_PENDING_MS, workspacePass, WorkspaceState } from "../src/build/workspace-launch.ts";
+import { createWorkspace, getCheckpoint, getWorkspace, RESUME_TRIES, resumeWorkspace } from "../src/build/workspaces.ts";
 import { WS_POD_PATH } from "../src/build/workspace.ts";
 import { connectDb } from "../src/db/open.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -53,6 +53,11 @@ class FakeKube implements KubeApi {
   /** Whether the volume still holds the tree (the resume check's answer). */
   kept = true;
   put: Buffer | null = null;
+  /** The checkpoint's read fails. */
+  checkpointFails = false;
+  /** Nodes by name; a missing one is gone. */
+  nodes = new Map<string, KNode>([["node-a", { metadata: { name: "node-a" }, status: { conditions: [{ type: "Ready", status: "True" }] } }]]);
+  async getNode(name: string) { return this.nodes.get(name) ?? null; }
   async listPods(_ns: string, sel: string) { return [...this.pods.values()].filter((p) => matches(p.metadata.labels, sel)); }
   async createPod(_ns: string, pod: object) { const p = structuredClone(pod) as Pod; this.pods.set(p.metadata.name, { ...p, status: { phase: "Pending" } }); }
   async deletePod(_ns: string, name: string) { this.pods.delete(name); }
@@ -81,8 +86,12 @@ class FakeKube implements KubeApi {
       this.put = Buffer.isBuffer(opts.stdin) ? opts.stdin : null;
       return ok(`WS ok ${this.put?.length ?? 0} ${"d".repeat(64)}\n`);
     }
-    if (argv[0] === "head") return ok(DIFF);
+    if (argv[0] === "head") return this.checkpointFails ? { exitCode: 1, stdout: Buffer.alloc(0), stderr: Buffer.from("no"), truncated: false } : ok(DIFF);
     return { exitCode: 2, stdout: Buffer.from("WS error usage unknown\n"), stderr: Buffer.alloc(0), truncated: false };
+  }
+  /** The scheduler cannot place the pod. */
+  unschedulable(name: string, message: string) {
+    this.pods.get(name)!.status = { phase: "Pending", conditions: [{ type: "PodScheduled", status: "False", reason: "Unschedulable", message }] };
   }
   /** The pod runs and its container is ready, on node-a. */
   run(name: string) {
@@ -232,7 +241,6 @@ test("a parked workspace comes back for its bound call: on its volume, else rebu
   w = (await getWorkspace(db, id))!;
   assert.equal(w.state, "parked");
   assert.equal(w.pvc, null);
-  kube.kept = false;
   await call();
   await pass();
   await pass();
@@ -246,5 +254,98 @@ test("a parked workspace comes back for its bound call: on its volume, else rebu
   assert.ok(kube.execs.filter((a) => a[1] === "untar").length > untars, "the base is seeded again");
   assert.deepEqual(kube.put, DIFF, "the checkpoint goes into the pod");
   assert.ok(kube.execs.some((a) => a.includes("apply") && a.includes("--binary")), "and is applied");
+  assert.equal(w.restored?.split(" ")[0], "checkpoint");
+});
+
+/** A workspace parked after it sat idle, with a session call queued for it (so the launcher resumes it). */
+async function parkedWithCall(): Promise<number> {
+  const id = await readyWorkspace();
+  clock += IDLE_PARK_MS + 60_000;
+  await pass();
+  assert.equal((await getWorkspace(db, id))!.state, "parked");
+  await queueWorkspaceCall(db, { workspaceId: id, promptId: "workspace.try", promptVersion: "1", model: "opus", tier: "top", effort: "medium", stdin: "x", timeoutSeconds: 600, maxTurns: 5, items: [] });
+  return id;
+}
+
+test("a kept volume is only checked, never seeded again; a resume that fails goes back to parked with it", async () => {
+  const id = await parkedWithCall();
+  const volume = (await getWorkspace(db, id))!.pvc!;
+  const untars = kube.execs.filter((a) => a[1] === "untar").length;
+  kube.kept = false;
+  for (let i = 1; i <= RESUME_TRIES; i++) {
+    await pass();
+    const w = (await getWorkspace(db, id))!;
+    assert.equal(w.state, "starting", `resume ${i} starts`);
+    assert.equal(w.pvc, volume, "on the kept volume");
+    kube.run(w.pod!);
+    await pass();
+    const back = (await getWorkspace(db, id))!;
+    assert.equal(back.state, "parked", "a volume without the base commit sends it back to parked");
+    assert.equal(back.pvc, volume);
+    assert.equal(back.resume_tries, i);
+    assert.ok(kube.pvcs.has(volume), "the volume is kept");
+  }
+  assert.equal(kube.execs.filter((a) => a[1] === "untar").length, untars, "the kept volume is never seeded or wiped");
+  assert.ok(!kube.execs.some((a) => a.includes("-delete")), "nor emptied");
+  await pass();
+  assert.equal((await getWorkspace(db, id))!.state, "parked", "after its tries it stays parked");
+  assert.equal(await resumeWorkspace(db, id), false);
+  assert.match((await getWorkspace(db, id))!.error ?? "", /stays parked/);
   kube.kept = true;
+});
+
+test("a kept volume is dropped only when its node is gone, and never while it holds work no checkpoint has", async () => {
+  const id = await readyWorkspace();
+  // The checkpoint at parking fails: the volume is the only copy of the latest work and outlives the keep time.
+  kube.checkpointFails = true;
+  clock += IDLE_PARK_MS + 60_000;
+  await pass();
+  kube.checkpointFails = false;
+  let w = (await getWorkspace(db, id))!;
+  assert.equal(w.state, "parked");
+  assert.ok(w.checkpoint_error);
+  clock += PARKED_VOLUME_MS + 60_000;
+  await pass();
+  w = (await getWorkspace(db, id))!;
+  const volume = w.pvc!;
+  assert.ok(volume && kube.pvcs.has(volume), "kept past the keep time");
+
+  await queueWorkspaceCall(db, { workspaceId: id, promptId: "workspace.try", promptVersion: "1", model: "opus", tier: "top", effort: "medium", stdin: "x", timeoutSeconds: 600, maxTurns: 5, items: [] });
+  const unscheduled = async (message: string) => {
+    await pass();
+    const s = (await getWorkspace(db, id))!;
+    assert.equal(s.state, "starting");
+    kube.unschedulable(s.pod!, message);
+    clock += RESUME_PENDING_MS + 60_000;
+    await pass();
+    return (await getWorkspace(db, id))!;
+  };
+  // A full node is waited for.
+  w = await unscheduled("0/3 nodes are available: 1 Insufficient cpu, 2 node(s) had volume node affinity conflict.");
+  assert.equal(w.state, "starting");
+  assert.equal(w.pvc, volume, "a full node keeps the volume");
+
+  // The node is gone, but the last checkpoint failed: back to parked with the volume.
+  kube.nodes.set("node-a", { metadata: { name: "node-a" }, status: { conditions: [{ type: "Ready", status: "Unknown", lastTransitionTime: iso(clock - NODE_LOST_MS - 60_000) }] } });
+  await pass();
+  w = (await getWorkspace(db, id))!;
+  assert.equal(w.state, "parked");
+  assert.equal(w.pvc, volume);
+  assert.ok(kube.pvcs.has(volume), "never dropped while it holds work no checkpoint has");
+
+  // With a good checkpoint, a node that is gone loses its volume and the workspace rebuilds on a new one.
+  await db.run(db.k.updateTable("workspaces").set({ checkpoint: DIFF, checkpoint_at: iso(clock), checkpoint_error: null }).where("id", "=", id));
+  kube.nodes.delete("node-a");
+  w = await unscheduled("0/2 nodes are available: 2 node(s) had volume node affinity conflict.");
+  assert.equal(w.state, "starting");
+  assert.notEqual(w.pvc, volume);
+  assert.equal(w.volume_fresh, 1);
+  assert.ok(!kube.pvcs.has(volume), "the lost volume is deleted");
+  kube.nodes.set("node-a", { metadata: { name: "node-a" }, status: { conditions: [{ type: "Ready", status: "True" }] } });
+  await pass();
+  kube.run((await getWorkspace(db, id))!.pod!);
+  await pass();
+  w = (await getWorkspace(db, id))!;
+  assert.equal(w.state, "ready");
+  assert.equal(w.restored?.split(" ")[0], "checkpoint", "rebuilt from the checkpoint");
 });

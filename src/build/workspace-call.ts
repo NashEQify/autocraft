@@ -81,24 +81,25 @@ export async function queueWorkspaceCall(db: Db, r: WorkspaceCallRequest): Promi
   });
 }
 
-/** Starts the note a lease adds to a workspace session's prompt; what follows it is replaced at each lease. */
-const RESUME_MARK = "\n\n---\nNote from AutoCraft: ";
+const hhmm = (iso: string): string => `${iso.slice(11, 16)} UTC`;
 
 /**
- * A workspace session's prompt for its next lease: `stdin` without an earlier lease's note, plus a note when an earlier
- * lease of the call already worked in the workspace (its Task Runner was lost): the workspace keeps that work, and the
- * note gives its changes as of the last checkpoint, which the launcher takes when the call goes back to the queue.
+ * A workspace session's prompt for its next lease, from `base`, the stdin as queued: with a note when an earlier lease of
+ * the call already worked in the workspace (its Task Runner was lost). The note says what the workspace kept, from what the
+ * last resume did, and the changes as of the last checkpoint, which the launcher takes when the call goes back to the queue.
  */
-export async function resumePrompt(db: Db, callId: number, stdin: string): Promise<string> {
-  const mark = stdin.indexOf(RESUME_MARK);
-  const prompt = mark < 0 ? stdin : stdin.slice(0, mark);
-  const w = await db.get(db.k.selectFrom("workspaces").select(["id", "checkpoint", "checkpoint_at"]).where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
+export async function resumePrompt(db: Db, callId: number, base: string): Promise<string> {
+  const w = await db.get(db.k.selectFrom("workspaces").select(["id", "checkpoint", "checkpoint_at", "restored", "restored_at"]).where("remote_call_id", "=", callId).where("state", "in", LIVE_STATES));
   const since = (await db.get(db.k.selectFrom("remote_calls").select("since").where("id", "=", callId)))?.since;
-  if (!w || since == null) return prompt;
-  const worked = await db.get(db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS)
-    .where("created_at", ">=", new Date(Number(since)).toISOString()).limit(1));
-  if (!worked) return prompt;
-  const at = w.checkpoint_at ? `${w.checkpoint_at.slice(11, 16)} UTC` : null;
-  const stat = w.checkpoint?.length && at ? `Its changes against the base commit as of ${at} (the last checkpoint):\n${diffStat(w.checkpoint)}\n` : "";
-  return `${prompt}${RESUME_MARK}an earlier session on this task was cut off before it finished. The workspace keeps its work, so /work/src may already hold changes, and commands it started may have ended.\n${stat}Check the current state with \`git status\` and \`git diff --stat\` in /work/src before you continue.\n`;
+  if (!w || since == null) return base;
+  const worked = await db.get(db.k.selectFrom("workspace_calls").select("created_at").where("workspace_id", "=", w.id).where("tool", "not in", OWN_CALLS)
+    .where("created_at", ">=", new Date(Number(since)).toISOString()).orderBy("id").limit(1));
+  if (!worked) return base;
+  const r = w.restored_at !== null && w.restored_at > worked.created_at ? w.restored : null;
+  const kept = r === null ? "The workspace kept its tree: /work/src holds the earlier session's changes, and commands it started may still run or have ended."
+    : r === "kept" ? "The workspace was started again on its volume: /work/src holds the earlier session's changes, and the commands it started were stopped."
+    : r.startsWith("checkpoint ") ? `The workspace was rebuilt from the base commit and a checkpoint of its changes taken at ${hhmm(r.slice(11))}: changes made after that were lost, and the commands it started were stopped.`
+    : "The workspace was rebuilt from the base commit with no checkpoint: the earlier session's changes were lost.";
+  const stat = w.checkpoint?.length && w.checkpoint_at ? `Its changes against the base commit as of ${hhmm(w.checkpoint_at)} (the last checkpoint):\n${diffStat(w.checkpoint)}\n` : "";
+  return `${base}\n\n---\nNote from AutoCraft: an earlier session on this task was cut off before it finished. ${kept}\n${stat}Check the current state with \`git status\` and \`git diff --stat\` in /work/src before you continue.\n`;
 }

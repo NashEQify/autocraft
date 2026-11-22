@@ -24,6 +24,7 @@ const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 export const WORKSPACE_COLUMNS = [
   "id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits",
   "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id",
+  "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at",
 ] as const;
 export const getWorkspace = async (db: Db, id: number) => await db.get(db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).where("id", "=", id));
 export type WorkspaceRow = NonNullable<Awaited<ReturnType<typeof getWorkspace>>>;
@@ -72,16 +73,20 @@ export async function moveWorkspace(db: Db, id: number, from: WorkspaceStateName
   return r.changes > 0;
 }
 
+/** Failed resumes after which a parked workspace stays parked, with its volume and checkpoint, until someone looks at it. */
+export const RESUME_TRIES = 3;
+
 /**
- * Brings a parked workspace back: the launcher starts a new pod when a slot is free, on the kept volume when there is one
- * (its node is kept, so the launcher can tell a resume onto it), else on a new volume rebuilt from the base and the
- * checkpoint. True when the row is coming back or up; false when it is gone, ended or failed.
+ * Brings a parked workspace back: the launcher starts a new pod when a slot is free, on the kept volume when there is one,
+ * else on a new volume rebuilt from the base and the checkpoint. True when the row is coming back or up; false when it is
+ * gone, ended or failed, or its resumes failed RESUME_TRIES times (its error says why).
  */
 export async function resumeWorkspace(db: Db, id: number, now = Date.now()): Promise<boolean> {
   const w = await getWorkspace(db, id);
   if (!w) return false;
   if (w.state !== "parked") return POD_STATES.includes(w.state as WorkspaceStateName) || w.state === "requested";
-  if (await moveWorkspace(db, id, ["parked"], "requested", { create_tries: 0, error: null, ...(w.pvc ? {} : { node: null }) }, now)) return true;
+  if (w.resume_tries >= RESUME_TRIES) return false;
+  if (await moveWorkspace(db, id, ["parked"], "requested", { create_tries: 0, ...(w.pvc ? {} : { node: null }) }, now)) return true;
   return await resumeWorkspace(db, id, now);
 }
 
