@@ -10,6 +10,7 @@ import { endWorkspace } from "../build/workspaces.ts";
 import { guardItem, guardRepo } from "../core/guard.ts";
 import type { By } from "../core/gates.ts";
 import { getDecision } from "../decisions.ts";
+import { inActiveBatch, mergeRunning } from "../preapproval/index.ts";
 import { closeItem, commentOn, type Writer } from "../github/write.ts";
 import { authFailure, isWaiting, laneForDecision, markExecDone, noWriteReason, setExecState, SIGN_IN_REASON, type LaneDeps } from "../github/user-lane.ts";
 import { Client, type Querier } from "../mirror.ts";
@@ -66,6 +67,8 @@ export async function closeOnAnswer(db: Db, impl: Implementation, o: { decisionI
   const ref = `${impl.repo}#${target}`, id = o.decisionId;
   if (!await answerStands(db, id, o.answer)) return { waiting: "the answer was taken back or disputed" };
   if (await isWaiting(db, id)) return { waiting: "the answer waits for its person's sign-in or access" };
+  // A repo-wide comment grant does not look at the PR itself: a PR in an open batch or in a merge run in flight stays open.
+  if (o.pr !== undefined && (await inActiveBatch(db, impl.repo, o.pr) || await mergeRunning(db, impl.repo))) return { refused: `${ref} is in a merge batch or being merged, so it was not closed` };
   if (!await commentApprovalOf(db, impl.repo)) return { refused: `commenting in ${impl.repo} is not approved, so ${ref} was not closed` };
   const lr = await laneForDecision(db, deps.lane, id, [impl.repo]);
   if (lr && !("lane" in lr)) {
