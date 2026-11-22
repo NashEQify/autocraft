@@ -102,6 +102,11 @@ export async function addRound(db: Db, implementationId: number, kind: RoundKind
   }).returning("id")))!.id);
 }
 
+/** Replaces a round's result (a turn round settled after it was queued). */
+export async function updateRound(db: Db, id: number, result: unknown): Promise<void> {
+  await db.run(db.k.updateTable("main.implementation_rounds").set({ result: JSON.stringify(result) }).where("id", "=", id));
+}
+
 /** The attempt's rounds, oldest first. */
 export async function roundsOf(db: Db, implementationId: number): Promise<ImplementationRound[]> {
   return (await db.all(db.k.selectFrom("main.implementation_rounds").select(kx.cols("implementation_rounds")).where("implementation_id", "=", implementationId).orderBy("id")))
