@@ -5,7 +5,7 @@
 //   4. the older one;
 //   5. the lower number.
 import type { Db } from "../db/index.ts";
-import { jsonEach, jsonNum, jsonText, jsonValid } from "../db/portable.ts";
+import * as kx from "../db/kx.ts";
 
 export const ACTIVITY_MARGIN = 5;
 
@@ -25,14 +25,15 @@ export function compareCanonical(x: CanonInfo, y: CanonInfo): number {
 /** CanonInfo of the items, keyed by `repo#number`, in one query; an item not in the database has no entry. */
 export async function canonInfoAll(db: Db, items: { repo: string; number: number }[]): Promise<Map<string, CanonInfo>> {
   // The issues merged PRs of these repos close, with each PR's list parsed once.
-  const rows = await db.prepare(`WITH fixed AS MATERIALIZED (SELECT DISTINCT p.repo, f.value AS number FROM items p,
-      ${jsonEach(db, `CASE WHEN ${jsonValid(db, "p.closing_issues")} THEN p.closing_issues ELSE '[]' END`, "f", "bigint")}
-      WHERE p.kind = 'pr' AND p.state = 'MERGED' AND p.repo IN (SELECT ${jsonText(db, "r.value", "$[0]")} FROM ${jsonEach(db, "?1", "r")}))
-    SELECT i.repo || '#' || i.number AS k, i.number, i.state, i.created_at, COALESCE(i.comments_count, 0) AS comments,
-      EXISTS (SELECT 1 FROM fixed x WHERE x.repo = i.repo AND x.number = i.number) AS fixed
-    FROM ${jsonEach(db, "?1", "j")} JOIN items i ON i.repo = ${jsonText(db, "j.value", "$[0]")} AND i.number = ${jsonNum(db, "j.value", "$[1]")}`).all(JSON.stringify(items.map((x) => [x.repo, x.number]))) as
-    { k: string; number: number; state: string; created_at: string | null; comments: number; fixed: number }[];
-  return new Map(rows.map((r) => [r.k, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
+  const rows = await db.all(db.k.with((cte) => cte("fixed").materialized(), (qb) => qb.selectFrom("items as p")
+    .crossJoin((eb) => kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "p.closing_issues")).then(eb.ref("p.closing_issues")).else(eb.val("[]")).end(), "f", "bigint"))
+    .select(["p.repo", "f.value as number"]).distinct()
+    .where("p.kind", "=", "pr").where("p.state", "=", "MERGED").where(kx.inList(db, "p.repo", items.map((x) => x.repo))))
+    .selectFrom(kx.refPairs(db, items.map((x) => [x.repo, x.number] as const), "j"))
+    .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "j.repo").onRef("i.number", "=", "j.number"))
+    .select((eb) => ["i.repo", "i.number", "i.state", "i.created_at", eb.fn.coalesce("i.comments_count", eb.lit(0)).as("comments"),
+      eb.case().when(eb.exists(eb.selectFrom("fixed as x").select(eb.lit(1).as("one")).whereRef("x.repo", "=", "i.repo").whereRef("x.number", "=", "i.number"))).then(eb.lit(1)).else(eb.lit(0)).end().as("fixed")]));
+  return new Map(rows.map((r) => [`${r.repo}#${r.number}`, { number: r.number, state: r.state, created_at: r.created_at, comments: r.comments, fixedByMerged: r.fixed === 1 }]));
 }
 
 export async function canonInfo(db: Db, repo: string, numbers: number[], known?: Map<string, CanonInfo>): Promise<CanonInfo[]> {
