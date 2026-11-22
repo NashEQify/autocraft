@@ -43,6 +43,8 @@ export type NodeStatus = {
   /** ms since the epoch, by the node's clock. */
   updated: number;
   fs: { sizeBytes: number; usedBytes: number; usedPct: number };
+  /** Warm bytes on the node: current versions, and retired versions still in their grace period. Both count against the node cap. */
+  warmBytes: { current: number; grace: number };
   /** The version each key's `current` names. */
   keys: Record<string, KeyStatus>;
   /** Assigned keys that are not held at their newest version, and why. */
@@ -241,7 +243,7 @@ export class SyncAgent {
       if (!fit.has(k) || !l) continue;
       const h = this.held(k);
       if (h && h.meta.commit === l.commit && h.meta.manifestSha256 === l.sha256) continue;
-      const why = await this.sync(k, l, h);
+      const why = await this.sync(k, l, h, assign.maxBytes);
       if (why) pending[k] = why;
       else delete pending[k];
       this.pending = pending;
@@ -343,7 +345,7 @@ export class SyncAgent {
   // ---- sync ------------------------------------------------------------------------------------------------------
 
   /** Makes `l` the key's current version; returns why not, or null when it is. */
-  private async sync(key: string, l: Latest, h: Held | null): Promise<string | null> {
+  private async sync(key: string, l: Latest, h: Held | null, maxBytes: number): Promise<string | null> {
     const { dir, log } = this.c;
     const kd = join(dir, key);
     mkdirSync(kd, { recursive: true, mode: 0o755 });
@@ -354,6 +356,11 @@ export class SyncAgent {
       this.swap(key, base, h);
       log(`warm sync: ${key}@${l.commit.slice(0, 12)} is current again`);
       return null;
+    }
+    // Retired versions stay on disk for the grace period, so they count: the new version waits until they expire.
+    const wb = this.warmBytes();
+    if (wb.current + wb.grace + l.bytes > maxBytes) {
+      return `waiting for retired versions to expire: ${gb(l.bytes)} GiB more on top of ${gb(wb.current)} GiB current and ${gb(wb.grace)} GiB in grace would pass the node cap of ${gb(maxBytes)} GiB`;
     }
     const fs = this.fsUse();
     if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
@@ -422,6 +429,23 @@ export class SyncAgent {
     }
   }
 
+  /** Bytes of the versions `current` names, and of retired versions whose grace period has not ended. */
+  private warmBytes(): { current: number; grace: number } {
+    const now = this.c.now();
+    let current = 0, grace = 0;
+    for (const k of this.keyDirs()) {
+      const kd = join(this.c.dir, k);
+      const cur = this.held(k)?.gen;
+      for (const n of readdirSync(kd)) {
+        if (!GEN.test(n)) continue;
+        const bytes = this.metaOf(join(kd, n))?.bytes ?? 0;
+        if (n === cur) current += bytes;
+        else if (now - lstatSync(join(kd, n)).mtimeMs < this.c.graceMs) grace += bytes;
+      }
+    }
+    return { current, grace };
+  }
+
   /** The current version as hard-link source; none when its manifest cannot be read (everything is fetched then). */
   private previousOf(genDir: string): Previous | undefined {
     try {
@@ -454,7 +478,7 @@ export class SyncAgent {
       if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced };
     }
     const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
-    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
+    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), warmBytes: this.warmBytes(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
   }
 
   /** Writes the status ConfigMap when what it says changed, and every `statusEveryMs` so readers see the node is alive. */
