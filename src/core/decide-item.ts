@@ -49,7 +49,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   }
   if (BUILD_STATES.has(state!)) return due("build");
   if (state === "revising") return due("revise");
-  if (state === "stuck") return { wait: "a decision on the stuck implementation", waitKind: "person" };
+  if (state === "stuck") return row!.decisionAnswered ? due("build") : { wait: "a decision on the stuck implementation", waitKind: "person" };
   // pr-opened: the open PR is the wait (fix.openPr); a PR that closed unmerged leaves it to a person.
   return row!.prOpen ? null : { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };
 }

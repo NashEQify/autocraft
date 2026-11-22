@@ -39,8 +39,8 @@ const TAKEN_STATES = LIVE_STATES as string[];
 /** Attempts of the session's call: a lease lost with its Task Runner goes back to the queue once, onto the same workspace. */
 const TRY_ATTEMPTS = 2;
 
-/** Implementation work's model choice: the fix-issue patch prompt's model, effort and tier. */
-const IMPLEMENT = CLAUDE_PROMPTS["fixissue.patch"];
+/** Implementation work's model choice: the implement.session prompt's model, effort and tier. */
+const IMPLEMENT = CLAUDE_PROMPTS["implement.session"];
 
 const SYSTEM = `You work in a workspace: a checkout of {{repo}} at commit {{sha}} in /work/src, in a container with no network access. The task is for {{repo}}#{{item}}.
 
@@ -167,7 +167,7 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
 
       const system = SYSTEM.replaceAll("{{repo}}", s.repo).replace("{{sha}}", s.base_sha).replace("{{item}}", String(s.item));
       callId = await queueWorkspaceCall(db, {
-        workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("fixissue.patch"), effort: IMPLEMENT.effort,
+        workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("implement.session"), effort: IMPLEMENT.effort,
         stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }], maxAttempts: TRY_ATTEMPTS,
       });
       await update({ remote_call_id: callId, state: "running" });

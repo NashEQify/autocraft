@@ -130,10 +130,14 @@ async function checkPushApproved(db: Db, p: Params): Promise<string | null> {
   return await pushApprovalOf(db, String(p.repo)) || await commentApprovalOf(db, String(p.repo)) ? null : `pushing fix-ups or commenting in ${p.repo} is not approved`;
 }
 
+/** The `implement` buckets this build carries out. */
+const IMPLEMENT_BUILT: ReadonlySet<string> = new Set(["build"]);
+
 /** An implementation needs the repo's issue implementation approval, its Implement switch and a queuer who settles on it. */
 async function checkImplement(db: Db, p: Params): Promise<string | null> {
   const { implementRefusal } = await import("../implement/gate.ts");
-  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? "Implement is not built yet";
+  const bucket = String(p.bucket ?? "plan");
+  return await implementRefusal(db, String(p.repo), Number(p.number)) ?? (IMPLEMENT_BUILT.has(bucket) ? null : `Implement ${bucket} is not built yet`);
 }
 
 /** Opening fix PRs from issues is opt-in per repo. */
@@ -508,7 +512,11 @@ export const STEPS: StepDef[] = [
     run: async (ctx) => {
       const refused = await checkImplement(ctx.db, ctx.params);
       if (refused) throw new Error(refused);
-      return `${ctx.params.repo}#${ctx.params.number}: nothing was done`;
+      const { runBuild } = await import("../implement/build.ts");
+      ctx.handled(1);
+      const r = await runBuild({ ...ctx, startedMs: Date.parse(ctx.job.startedAt) }, String(ctx.params.repo), Number(ctx.params.number));
+      if (r.moved) ctx.acted(1);
+      return r.summary;
     },
   },
   {
@@ -557,7 +565,7 @@ export const STEPS: StepDef[] = [
     description: "An operator's test of a model session in a workspace pod: creates the workspace (or takes a live one), waits for it to be ready, runs one session with the implementation model through the workspace tools, and logs the outcome, cost, tool calls, shell time and the diff stat. Started only with `workspace try` on the command line; nothing goes to GitHub.",
     stage: runStage("workspace-try"),
     requires: "operator",
-    models: [CLAUDE_PROMPTS["fixissue.patch"].models[0]],
+    models: [CLAUDE_PROMPTS["implement.session"].models[0]],
     params: [
       { name: "repo", label: "Repo", kind: "repo", required: true },
       { name: "session", label: "Session", kind: "int", min: 1, max: 1_000_000_000, required: true, help: "the session row `workspace try` created" },

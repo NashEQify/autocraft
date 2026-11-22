@@ -21,7 +21,8 @@ export const MAX_LIVE_PER_REPO = 2;
 export const IMPLEMENT_BUCKETS = ["plan", "build", "revise"] as const;
 export type ImplementBucket = (typeof IMPLEMENT_BUCKETS)[number];
 
-export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question"] as const;
+/** `guidance`: a person's note for the attempt (a Try again answer's text), read into its plan and session input. */
+export const ROUND_KINDS = ["plan", "session", "follow-up", "checks", "refusal", "question", "guidance"] as const;
 export type RoundKind = (typeof ROUND_KINDS)[number];
 
 /** One `implementations` row. JSON columns are parsed; a column that does not parse reads as null. */
