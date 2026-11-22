@@ -1,10 +1,12 @@
 // The workspace tools against the real in-pod helper: a fake Kubernetes API runs deploy/container/ws locally, with /work
 // mapped to a scratch directory. Edits refuse a missing or ambiguous match and a file that changed under them, long
 // shell output comes back cut in the middle, writes keep a file's mode and go through links, shell time is counted by
-// the job's clock whatever the call files say, and the call limit holds for a session rebuilt after a job restart.
+// the job's clock whatever the call files say, app_start refuses bad arguments and a fifth app, and the call limit holds
+// for a session rebuilt after a job restart. With Xvfb on the machine, the helper itself is run on a spare display: a
+// repeated app-start starts one app, and env values the shell treats specially cannot stop it recording the app.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createEnv } from "../src/build/envs.ts";
@@ -115,6 +117,72 @@ test("shell time is the job's: a command that writes its own end into the call f
   const charged = (JSON.parse(row!.result!) as { acct: { ms: number } }).acct.ms;
   assert.ok(charged >= Date.now() - started - 1000 && charged >= 1000, `charged ${charged} ms`);
 });
+
+test("app_start refuses names the workspace sets, too many args, a binary it cannot run and a fifth app", async () => {
+  assert.ok(!(await call("write", { path: "notes.txt", content: "not a program\n" })).isError);
+  const refusals: [unknown, RegExp][] = [
+    [{ binary: "run.sh", env: { DISPLAY: ":1" } }, /cannot set DISPLAY/],
+    [{ binary: "run.sh", env: { VK_ICD_FILENAMES: "x" } }, /cannot set VK_ICD_FILENAMES/],
+    [{ binary: "run.sh", env: { lower: "x" } }, /must match/],
+    [{ binary: "run.sh", args: Array.from({ length: 33 }, () => "x") }, /more than 32/],
+    [{ binary: "run.sh", scale: 3 }, /scale must be/],
+    [{ binary: "/etc/hostname" }, /below \/work/],
+    [{ binary: "notes.txt" }, /not executable/],
+  ];
+  for (const [args, re] of refusals) {
+    const r = await call("app_start", args);
+    assert.ok(r.isError && re.test(r.text), r.text);
+  }
+  const shot = await call("screenshot", { region: { x: 0, y: 0, w: 0, h: 10 } });
+  assert.ok(shot.isError && /region.w/.test(shot.text), shot.text);
+
+  // Four apps the pod counts as running; this test's own process stands in for each.
+  const apps = join(root, ".ws/apps");
+  mkdirSync(apps, { recursive: true });
+  for (let n = 9001; n <= 9004; n++) {
+    writeFileSync(join(apps, `${n}.start`), "0\n");
+    writeFileSync(join(apps, `${n}.pid`), `${process.pid}\n`);
+  }
+  const fifth = await call("app_start", { binary: "run.sh" });
+  assert.ok(fifth.isError && /4 apps are running/.test(fifth.text), fifth.text);
+});
+
+const hasCommand = (c: string) => spawnSync("sh", ["-c", `command -v ${c}`]).status === 0;
+test("app-start run twice with one call number starts one app, and the session's env cannot break the wrapper",
+  { skip: hasCommand("Xvfb") && hasCommand("xmessage") ? false : "needs Xvfb and xmessage" }, () => {
+    const wr = join(dir, "x11");
+    for (const d of ["src", "home"]) mkdirSync(join(wr, d), { recursive: true });
+    const display = Array.from({ length: 30 }, (_, i) => 170 + i).find((n) => !existsSync(`/tmp/.X11-unix/X${n}`) && !existsSync(`/tmp/.X${n}-lock`));
+    assert.ok(display, "a free display number");
+    const ws = (...args: string[]) => spawnSync("sh", [helper, ...args], { env: { ...process.env, WS_ROOT: wr, WS_DISPLAY: String(display) }, encoding: "utf8" }).stdout;
+    const marker = `ws-app-test-${process.pid}`;
+    writeFileSync(join(wr, "src/app.sh"), `#!/bin/sh\nexec xmessage ${marker}\n`, { mode: 0o755 });
+    writeFileSync(join(wr, "src/quit.sh"), "#!/bin/sh\nexit 3\n", { mode: 0o755 });
+    const apps = join(wr, ".ws/apps");
+    try {
+      const first = ws("app-start", "1", "1", join(wr, "src/app.sh"), "0", "--");
+      assert.match(first, /^WS ok app /);
+      const again = ws("app-start", "1", "1", join(wr, "src/app.sh"), "0", "--");
+      assert.equal(again, first, "the second call reports the same app");
+      const running = readdirSync("/proc").filter((d) => {
+        try {
+          return /^\d+$/.test(d) && readFileSync(`/proc/${d}/cmdline`, "latin1").includes(marker);
+        } catch {
+          return false;
+        }
+      });
+      assert.equal(running.length, 1, "one app process");
+      assert.deepEqual(readdirSync(apps).filter((f) => f.endsWith(".start") || f.endsWith(".pid")).sort(), ["1.pid", "1.start"]);
+
+      const broken = ws("app-start", "2", "1", join(wr, "src/quit.sh"), "3", "OPTIND=x", "IFS=:", "PATH=/nonexistent", "--");
+      assert.match(broken, /^WS ok exited \d+/);
+      for (const f of ["2.pid", "2.exit"]) assert.ok(existsSync(join(apps, f)), `${f} is written`);
+    } finally {
+      ws("app-stop", "1", "--force");
+      const xvfb = Number(readFileSync(join(wr, ".ws/xvfb.pid"), "utf8"));
+      if (xvfb > 1) process.kill(xvfb);
+    }
+  });
 
 test("a session rebuilt after a restart still counts the calls made before it", async () => {
   const done = await db.all(db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", ws).where("state", "!=", "queued"));

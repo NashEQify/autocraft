@@ -11,7 +11,7 @@ import * as kx from "../db/kx.ts";
 import type { ExecOptions, KubeApi } from "./kube-api.ts";
 import {
   ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, imageSize, isToolName, OUTPUT_CAP, podPath,
-  READ_LINE_CHARS, seconds, SESSION_IMAGES, SRC_ROOT, TOOL_DEFINITIONS, type Args, type WorkspaceToolName,
+  READ_LINE_CHARS, seconds, SESSION_IMAGES, SRC_ROOT, TOOL_DEFINITIONS, WORK_ROOT, type Args, type Rect, type WorkspaceToolName,
 } from "./workspace-tool-specs.ts";
 import { CALL_GRACE_MS, cleanOutput, execHelper, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
 
@@ -42,6 +42,11 @@ const NO_OUTPUT = "999999999999";
 export const OWN_CALLS = ["seed", "checkpoint", "cli", "report"];
 /** A killed command's process group gets this long after SIGTERM. */
 const KILL_GRACE_MS = 5_000;
+/** app_start's exec: the helper waits 30 s for the window, after up to 15 s for a display that had to start again. */
+const APP_START_MS = 75_000;
+const APP_STOP_MS = 30_000;
+const SHOT_MS = 60_000;
+const appLog = (n: number) => `${WORK_ROOT}/.ws/apps/${n}.log`;
 
 /** Bookkeeping a call row's result carries, read back when a session is rebuilt. Numbers only, so SQL can read them. */
 type Acct = { ms?: number; bytes?: number; bg?: 1; limit?: number; ref?: number; ended?: 0 | 1; images?: number };
@@ -232,6 +237,9 @@ export class WorkspaceSession {
       case "edit": { const p = podPath(a.path as string); return await this.onPath(p, () => this.edit(p, a, row)); }
       case "glob": return await this.gate.run(() => this.glob(a, row));
       case "grep": return await this.gate.run(() => this.grep(a, row));
+      case "app_start": return await this.gate.run(() => this.appStart(a, row));
+      case "app_stop": return await this.gate.run(() => this.appStop(a, row));
+      case "screenshot": return await this.gate.run(() => this.screenshot(a, row));
     }
   }
 
@@ -518,6 +526,98 @@ export class WorkspaceSession {
       "-e", a.pattern as string,
     ];
     return await this.rg(path, Number(a.head_limit ?? 250), args, row, "no matches", "lines");
+  }
+
+  // ---- apps --------------------------------------------------------------------
+
+  /** Row `row`'s `ws` call number: the one it already has (a resumed job runs the row again), else a new one. */
+  private async callNumber(row: number): Promise<number> {
+    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select("n").where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    return r?.n != null ? Number(r.n) : await takeCallNumber(this.db, this.workspaceId);
+  }
+
+  /** The `ws` call number of app `id` (its app_start row) of this workspace. */
+  private async appCall(id: number): Promise<number> {
+    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["tool", "n"]).where("id", "=", id).where("workspace_id", "=", this.workspaceId));
+    if (r?.tool !== "app_start" || r.n === null) throw new Refused(`there is no app ${id} in this workspace`);
+    return Number(r.n);
+  }
+
+  /** The app id (app_start row) of `ws` call number `n`. */
+  private async appId(n: number): Promise<number | null> {
+    const r = await this.db.get(this.db.k.selectFrom("workspace_calls").select("id").where("workspace_id", "=", this.workspaceId).where("tool", "=", "app_start").where("n", "=", n));
+    return r ? Number(r.id) : null;
+  }
+
+  private async appStart(a: Args, row: number): Promise<Out> {
+    const binary = podPath(a.binary as string, "binary");
+    const env = Object.entries((a.env as Record<string, string> | undefined) ?? {}).map(([k, v]) => `${k}=${v}`);
+    const n = await this.callNumber(row);
+    await this.begin(row, APP_START_MS, n);
+    const argv = ["app-start", String(n), String(a.scale ?? 1), binary, String(env.length), ...env, "--", ...((a.args as string[] | undefined) ?? [])];
+    const r = await this.exec(argv, { maxOut: SMALL_OUT, timeoutMs: APP_START_MS });
+    const h = r.header;
+    if (h?.kind === "error") {
+      if (h.code === "limit") throw new Refused(h.message);
+      return { text: h.message || h.code, isError: true };
+    }
+    if (h?.kind !== "ok") return helperFailure(r, "the app did not start");
+    const log = appLog(n);
+    const [what, ...f] = h.fields;
+    const tail = cleanOutput(r.body).replace(/\n$/, "");
+    const restarted = f.at(-1) === "1" ? "\n[the display had stopped; it was started again, so earlier apps are gone]" : "";
+    if (what === "app" && f.length === 7) {
+      const [pid, window, x, y, w, hgt] = f;
+      return { text: `${JSON.stringify({ app: row, pid: Number(pid), window, geometry: { x: Number(x), y: Number(y), w: Number(w), h: Number(hgt) }, log })}${restarted}` };
+    }
+    if (what === "exited") return { text: `the app exited with code ${f[0]} before it opened a window; the end of ${log}:\n${tail || "(empty)"}`, isError: true };
+    if (what === "nowindow") {
+      return { text: `${JSON.stringify({ app: row, pid: f[0] === "-" ? null : Number(f[0]), window: null, log })}${restarted}\n[no window after 30 s; the app runs on: look with screenshot, or end it with app_stop]\n${tail}` };
+    }
+    return helperFailure(r, "the app did not start");
+  }
+
+  private async appStop(a: Args, row: number): Promise<Out> {
+    const id = a.app as number;
+    const n = await this.appCall(id);
+    await this.begin(row, APP_STOP_MS);
+    const r = await this.exec(["app-stop", String(n), ...(a.force === true ? ["--force"] : [])], { maxOut: SMALL_OUT, timeoutMs: APP_STOP_MS });
+    if (r.header?.kind !== "ok" || r.header.fields[0] !== "stopped") return helperFailure(r, `app ${id} did not stop`);
+    const [, code, was] = r.header.fields;
+    const tail = cleanOutput(r.body).replace(/\n$/, "");
+    if (code === "-") return { text: `app ${id} did not stop after SIGKILL; the end of ${appLog(n)}:\n${tail || "(empty)"}`, isError: true };
+    return { text: `app ${id} ${was === "1" ? "stopped" : "had already exited"}: exit code ${code}; the end of ${appLog(n)}:\n${tail || "(empty)"}` };
+  }
+
+  private async screenshot(a: Args, row: number): Promise<Out> {
+    const target = a.app !== undefined ? await this.appCall(a.app as number) : 0;
+    const region = a.region as Rect | undefined;
+    // Taken before the exec, so parallel shots cannot pass the limit together; given back when no image comes.
+    if (this.images >= SESSION_IMAGES) throw new Refused(`the session's ${SESSION_IMAGES} images are used up`);
+    this.images++;
+    let out: Out | undefined;
+    try {
+      out = await this.shot(target, region, Number(a.max_edge ?? IMAGE_EDGE), row);
+      return out;
+    } finally {
+      if (!out?.images) this.images--;
+    }
+  }
+
+  private async shot(target: number, region: Rect | undefined, maxEdge: number, row: number): Promise<Out> {
+    const n = await this.callNumber(row);
+    await this.begin(row, SHOT_MS, n);
+    const argv = ["shot", String(n), String(target), String(maxEdge), ...(region ? ["--region", String(region.x), String(region.y), String(region.w), String(region.h)] : [])];
+    const r = await this.exec(argv, { maxOut: IMAGE_MAX_BYTES + SMALL_OUT, timeoutMs: SHOT_MS });
+    const h = r.header;
+    if (h?.kind === "error") return { text: h.message || h.code, isError: true };
+    if (h?.kind !== "ok" || h.fields[0] !== "shot" || h.fields.length !== 12) return helperFailure(r, "screenshot");
+    const [, appN, window, x, y, w, hgt, ...img] = h.fields;
+    const id = appN === "0" ? null : await this.appId(Number(appN));
+    const what = appN === "0" ? `the screen (${w}x${hgt})` : `app ${id ?? `#${appN}`}, window ${window} (${w}x${hgt} at ${x},${y})`;
+    const shot = this.image(`${WORK_ROOT}/.ws/shots/${n}.png`, img.map(Number), r);
+    if (!shot.images) return shot;
+    return { ...shot, text: `${what}${region ? `, region ${region.w}x${region.h} at ${region.x},${region.y}` : ""}: ${shot.text}`, acct: { images: 1 } };
   }
 }
 
