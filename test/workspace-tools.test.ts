@@ -1,7 +1,8 @@
 // The workspace tools against the real in-pod helper: a fake Kubernetes API runs deploy/container/ws locally, with /work
 // mapped to a scratch directory. Edits refuse a missing or ambiguous match and a file that changed under them, long
 // shell output comes back cut in the middle, writes keep a file's mode and go through links, shell time is counted by
-// the job's clock whatever the call files say, and the call limit holds for a session rebuilt after a job restart.
+// the job's clock whatever the call files say, app_start refuses bad arguments and a fifth app, and the call limit holds
+// for a session rebuilt after a job restart.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -114,6 +115,35 @@ test("shell time is the job's: a command that writes its own end into the call f
   const row = await db.get(db.k.selectFrom("workspace_calls").select("result").where("tool", "=", "shell_status").orderBy("id", "desc").limit(1));
   const charged = (JSON.parse(row!.result!) as { acct: { ms: number } }).acct.ms;
   assert.ok(charged >= Date.now() - started - 1000 && charged >= 1000, `charged ${charged} ms`);
+});
+
+test("app_start refuses names the workspace sets, too many args, a binary it cannot run and a fifth app", async () => {
+  assert.ok(!(await call("write", { path: "notes.txt", content: "not a program\n" })).isError);
+  const refusals: [unknown, RegExp][] = [
+    [{ binary: "run.sh", env: { DISPLAY: ":1" } }, /cannot set DISPLAY/],
+    [{ binary: "run.sh", env: { VK_ICD_FILENAMES: "x" } }, /cannot set VK_ICD_FILENAMES/],
+    [{ binary: "run.sh", env: { lower: "x" } }, /must match/],
+    [{ binary: "run.sh", args: Array.from({ length: 33 }, () => "x") }, /more than 32/],
+    [{ binary: "run.sh", scale: 3 }, /scale must be/],
+    [{ binary: "/etc/hostname" }, /below \/work/],
+    [{ binary: "notes.txt" }, /not executable/],
+  ];
+  for (const [args, re] of refusals) {
+    const r = await call("app_start", args);
+    assert.ok(r.isError && re.test(r.text), r.text);
+  }
+  const shot = await call("screenshot", { region: { x: 0, y: 0, w: 0, h: 10 } });
+  assert.ok(shot.isError && /region.w/.test(shot.text), shot.text);
+
+  // Four apps the pod counts as running; this test's own process stands in for each.
+  const apps = join(root, ".ws/apps");
+  mkdirSync(apps, { recursive: true });
+  for (let n = 9001; n <= 9004; n++) {
+    writeFileSync(join(apps, `${n}.start`), "0\n");
+    writeFileSync(join(apps, `${n}.pid`), `${process.pid}\n`);
+  }
+  const fifth = await call("app_start", { binary: "run.sh" });
+  assert.ok(fifth.isError && /4 apps are running/.test(fifth.text), fifth.text);
 });
 
 test("a session rebuilt after a restart still counts the calls made before it", async () => {

@@ -19,15 +19,30 @@ export const READ_LINE_CHARS = 2000;
 export const FILE_MAX_BYTES = 2 * 1024 * 1024;
 export const GLOB_LIMIT = 500;
 
+/** Apps one session runs at once (the helper counts them in the pod). */
+export const APP_LIMIT = 4;
+const APP_ARGS = 32;
+const APP_ENV = 16;
+const ARG_BYTES = 4096;
+const RECT_MAX = 16384;
+export type Rect = { x: number; y: number; w: number; h: number };
+/** Names app_start's env takes; DISPLAY, HOME, the scale factor and the renderer's VK_*, LP_* and XDG_* stay the workspace's. */
+const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
+const ENV_KEPT = /^(DISPLAY|HOME|WINIT_X11_SCALE_FACTOR|VK_.*|LP_.*|XDG_.*)$/;
+
 type Field =
   | { type: "string"; description: string; maxBytes: number; enum?: readonly string[] }
   | { type: "integer"; description: string; min: number; max: number }
-  | { type: "boolean"; description: string };
+  | { type: "boolean"; description: string }
+  | { type: "strings"; description: string; maxItems: number; maxBytes: number }
+  | { type: "env"; description: string; maxItems: number; maxBytes: number }
+  | { type: "rect"; description: string };
 type Spec = { description: string; readOnly: boolean; required: readonly string[]; fields: Record<string, Field> };
 
 const PATH_NOTE = "an absolute path below /work, or a path relative to /work/src";
 const path = (what: string): Field => ({ type: "string", description: `${what}: ${PATH_NOTE}.`, maxBytes: 4096 });
 const id: Field = { type: "integer", description: "The id a shell call returned.", min: 1, max: Number.MAX_SAFE_INTEGER };
+const app = (what: string): Field => ({ type: "integer", description: `${what}: the id app_start returned.`, min: 1, max: Number.MAX_SAFE_INTEGER });
 
 const SPECS = {
   shell: {
@@ -103,6 +118,33 @@ const SPECS = {
       head_limit: { type: "integer", description: "At most this many output lines (default 250).", min: 1, max: 2000 },
     },
   },
+  app_start: {
+    description: `Starts a GUI app on the workspace's virtual display (2880x1800, no window manager, software Vulkan) and waits up to 30 s for its window. Returns the app id, pid, window id and geometry and the log path; if the app exits first, its exit code and the last 4 KiB of its log. At most ${APP_LIMIT} apps run at once. Drive the app through its own CLI with shell; look at it with screenshot.`,
+    readOnly: false,
+    required: ["binary"],
+    fields: {
+      binary: path("The executable, e.g. a build in /work/target/debug"),
+      args: { type: "strings", description: "Its arguments.", maxItems: APP_ARGS, maxBytes: ARG_BYTES },
+      scale: { type: "integer", description: "Scale factor (default 1). 2 renders at twice the pixels; region then gives full-resolution crops.", min: 1, max: 2 },
+      env: { type: "env", description: "Extra environment variables (names A-Z, 0-9, _; not DISPLAY, HOME, WINIT_X11_SCALE_FACTOR, VK_*, LP_* or XDG_*). WGPU_BACKEND=gl selects the GL fallback.", maxItems: APP_ENV, maxBytes: ARG_BYTES },
+    },
+  },
+  app_stop: {
+    description: "Stops an app: SIGTERM, SIGKILL 5 seconds later. Returns its exit code and the last 2 KiB of its log.",
+    readOnly: false,
+    required: ["app"],
+    fields: { app: app("The app"), force: { type: "boolean", description: "SIGKILL at once (default false)." } },
+  },
+  screenshot: {
+    description: `A PNG of an app's window as the display shows it (dialogs and menus over it included), or of the whole screen. The full-size image is kept at /work/.ws/shots/<n>.png, which read returns again. Counts toward the session's ${SESSION_IMAGES} images.`,
+    readOnly: true,
+    required: [],
+    fields: {
+      app: app("The app (default: the only running app, else the whole screen)"),
+      region: { type: "rect", description: "Only this part, in window pixels: {x, y, w, h}." },
+      max_edge: { type: "integer", description: `Longest edge of the image returned, scaled down to it (default ${IMAGE_EDGE}).`, min: 256, max: IMAGE_EDGE },
+    },
+  },
 } satisfies Record<string, Spec>;
 
 export type WorkspaceToolName = keyof typeof SPECS;
@@ -112,10 +154,7 @@ export const isToolName = (n: string): n is WorkspaceToolName => Object.hasOwn(S
 /** The MCP tool definitions, as tools/list returns them. */
 export const TOOL_DEFINITIONS: readonly unknown[] = TOOL_NAMES.map((name) => {
   const s: Spec = SPECS[name];
-  const properties = Object.fromEntries(Object.entries(s.fields).map(([k, f]) => [k,
-    f.type === "string" ? { type: "string", description: f.description, ...(f.enum ? { enum: f.enum } : { maxLength: f.maxBytes }) }
-      : f.type === "integer" ? { type: "integer", description: f.description, minimum: f.min, ...(f.max < Number.MAX_SAFE_INTEGER ? { maximum: f.max } : {}) }
-        : { type: "boolean", description: f.description }]));
+  const properties = Object.fromEntries(Object.entries(s.fields).map(([k, f]) => [k, fieldSchema(f)]));
   return {
     name, description: s.description,
     inputSchema: { type: "object", additionalProperties: false, required: [...s.required], properties },
@@ -123,10 +162,25 @@ export const TOOL_DEFINITIONS: readonly unknown[] = TOOL_NAMES.map((name) => {
   };
 });
 
+function fieldSchema(f: Field): unknown {
+  const description = f.description;
+  switch (f.type) {
+    case "string": return { type: "string", description, ...(f.enum ? { enum: f.enum } : { maxLength: f.maxBytes }) };
+    case "integer": return { type: "integer", description, minimum: f.min, ...(f.max < Number.MAX_SAFE_INTEGER ? { maximum: f.max } : {}) };
+    case "boolean": return { type: "boolean", description };
+    case "strings": return { type: "array", description, maxItems: f.maxItems, items: { type: "string", maxLength: f.maxBytes } };
+    case "env": return { type: "object", description, maxProperties: f.maxItems, propertyNames: { pattern: ENV_NAME.source }, additionalProperties: { type: "string", maxLength: f.maxBytes } };
+    case "rect": {
+      const n = (min: number) => ({ type: "integer", minimum: min, maximum: RECT_MAX });
+      return { type: "object", description, additionalProperties: false, required: ["x", "y", "w", "h"], properties: { x: n(0), y: n(0), w: n(1), h: n(1) } };
+    }
+  }
+}
+
 /** A call's arguments that break the table: the message says which and why. */
 export class ArgError extends Error {}
 
-export type Args = Record<string, string | number | boolean | undefined>;
+export type Args = Record<string, string | number | boolean | string[] | Record<string, string> | Rect | undefined>;
 
 /** `args` checked against tool `name`'s table row; throws ArgError. */
 export function checkArgs(name: WorkspaceToolName, args: unknown): Args {
@@ -144,11 +198,49 @@ export function checkArgs(name: WorkspaceToolName, args: unknown): Args {
       if (f.enum && !f.enum.includes(v)) throw new ArgError(`${k} must be one of ${f.enum.join(", ")}`);
     } else if (f.type === "integer") {
       if (typeof v !== "number" || !Number.isInteger(v) || v < f.min || v > f.max) throw new ArgError(`${k} must be an integer from ${f.min}${f.max < Number.MAX_SAFE_INTEGER ? ` to ${f.max}` : " up"}`);
-    } else if (typeof v !== "boolean") throw new ArgError(`${k} must be true or false`);
+    } else if (f.type === "boolean") {
+      if (typeof v !== "boolean") throw new ArgError(`${k} must be true or false`);
+    } else {
+      out[k] = checkCompound(k, f, v);
+      continue;
+    }
     out[k] = v;
   }
   for (const k of s.required) if (out[k] === undefined) throw new ArgError(`${name} needs ${k}`);
   return out;
+}
+
+/** An array, env or rect argument checked against its field. Strings go into argv, so they carry no NUL. */
+function checkCompound(k: string, f: Extract<Field, { type: "strings" | "env" | "rect" }>, v: unknown): string[] | Record<string, string> | Rect {
+  const str = (what: string, s: unknown, max: number): string => {
+    if (typeof s !== "string") throw new ArgError(`${what} must be a string`);
+    if (Buffer.byteLength(s) > max) throw new ArgError(`${what} is longer than ${max} bytes`);
+    if (s.includes("\0")) throw new ArgError(`${what} contains a NUL byte`);
+    return s;
+  };
+  if (f.type === "strings") {
+    if (!Array.isArray(v)) throw new ArgError(`${k} must be an array of strings`);
+    if (v.length > f.maxItems) throw new ArgError(`${k} has more than ${f.maxItems} items`);
+    return v.map((s, i) => str(`${k}[${i}]`, s, f.maxBytes));
+  }
+  if (typeof v !== "object" || v === null || Array.isArray(v)) throw new ArgError(`${k} must be an object`);
+  if (f.type === "env") {
+    const e = Object.entries(v);
+    if (e.length > f.maxItems) throw new ArgError(`${k} has more than ${f.maxItems} variables`);
+    for (const [name] of e) {
+      if (!ENV_NAME.test(name)) throw new ArgError(`${k} name ${JSON.stringify(name.slice(0, 64))} must match ${ENV_NAME.source}`);
+      if (ENV_KEPT.test(name)) throw new ArgError(`${k} cannot set ${name}; the workspace sets it`);
+    }
+    return Object.fromEntries(e.map(([name, s]) => [name, str(`${k}.${name}`, s, f.maxBytes)]));
+  }
+  const r = v as Record<string, unknown>;
+  for (const key of Object.keys(r)) if (!["x", "y", "w", "h"].includes(key)) throw new ArgError(`${k} takes only x, y, w and h`);
+  const n = (key: "x" | "y" | "w" | "h", min: number): number => {
+    const x = r[key];
+    if (typeof x !== "number" || !Number.isInteger(x) || x < min || x > RECT_MAX) throw new ArgError(`${k}.${key} must be an integer from ${min} to ${RECT_MAX}`);
+    return x;
+  };
+  return { x: n("x", 0), y: n("y", 0), w: n("w", 1), h: n("h", 1) };
 }
 
 /** A session path as the absolute, normalised path in the pod; throws ArgError for one outside /work. */
