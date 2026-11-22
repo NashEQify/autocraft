@@ -12,6 +12,7 @@ import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from 
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
+import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
@@ -28,7 +29,7 @@ const USAGE = `usage: autocraft-server envs list
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
-       autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA
+       autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA [--build]
        autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
        autocraft-server workspace list [--all]
        autocraft-server workspace show <id>
@@ -246,9 +247,12 @@ async function tasks(args: string[]): Promise<void> {
   } else die(USAGE);
 }
 
-/** A harmless smoke-test task: system facts with no network, then the cargo version. */
+/**
+ * A smoke-test task: system facts with no network, then the cargo version. `--build` instead fetches the crates and builds
+ * the workspace's tests (`cargo test --no-run`) in the rust-stable toolchain, as the pipeline's builds do.
+ */
 async function enqueueTest(db: Db, args: string[]): Promise<void> {
-  const { opt } = options(args);
+  const { opt } = options(args, ["build"]);
   const os = opt.get("env-requires");
   const repo = opt.get("repo");
   const sha = opt.get("sha");
@@ -257,12 +261,18 @@ async function enqueueTest(db: Db, args: string[]): Promise<void> {
   if (!(await trackedNames(db)).includes(repo)) die(`${repo} is not a tracked repo`);
   const vis = (await db.get(db.k.selectFrom("main.repos").select("visibility").where("name", "=", repo)))?.visibility;
   if (vis?.toLowerCase() !== "public") die(`${repo} is not public; workers fetch source anonymously`);
+  const build = opt.has("build");
   const id = await run(async () => await createTask(db, {
-    step: "smoke-test", repo, headSha: sha, requires: { os: os as "linux" | "macos" | "windows" },
-    plan: [
-      { name: "system", cmd: ["sh", "-c", "uname -a; nproc; free -g"], network: "none", timeoutSec: 60 },
-      { name: "cargo version", cmd: ["cargo", "--version"], network: "none", timeoutSec: 60 },
-    ],
+    step: "smoke-test", repo, headSha: sha, requires: { os: os as "linux" | "macos" | "windows", ...(build ? { toolchains: ["rust-stable"] } : {}) },
+    plan: build
+      ? [
+          { name: "fetch deps", cmd: ["sh", "-c", FETCH_SCRIPT], network: "fetch", timeoutSec: 900 },
+          { name: "build tests", cmd: ["cargo", "test", "--workspace", "--no-run", "--offline", "--locked"], network: "none", timeoutSec: 7200 },
+        ]
+      : [
+          { name: "system", cmd: ["sh", "-c", "uname -a; nproc; free -g"], network: "none", timeoutSec: 60 },
+          { name: "cargo version", cmd: ["cargo", "--version"], network: "none", timeoutSec: 60 },
+        ],
   }));
   console.log(`task ${id} queued`);
 }
