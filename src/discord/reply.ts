@@ -34,7 +34,7 @@ export async function renderMatches(db: Db, matches: Match[], question: string, 
   const shown: Match[] = [];
   let size = 0;
   for (const m of matches) {
-    const line = `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
+    const line = `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
     if (size + line.length + 1 > CONTENT_CHARS) break;
     size += line.length + 1;
     lines.push(line);

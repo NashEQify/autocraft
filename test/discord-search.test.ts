@@ -15,7 +15,11 @@ import { installAccountCommands } from "../src/discord/commands.ts";
 import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
 import { RestClient, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
-import { Search, dropTexts, type Ask } from "../src/discord/search.ts";
+import { renderMatches } from "../src/discord/reply.ts";
+import { Search, askHaiku, dropTexts, type Ask } from "../src/discord/search.ts";
+import { DISCORD_TAKE_WAIT_MS } from "../src/discord/limits.ts";
+import { allocation } from "../src/agents/call.ts";
+import { setInferenceMode } from "../src/remote/mode.ts";
 import { installSearchCommands } from "../src/discord/search-commands.ts";
 import { useTestAccount } from "./accounts-fixture.ts";
 import { SCRATCH } from "./scratch.ts";
@@ -125,7 +129,7 @@ describe("ping replies", () => {
     // The model saw the quoted text, not the ping, and only public open issues and recently completed ones.
     const input = asked[0] as { question: string; candidates: { ref: string; closed: boolean }[] };
     assert.equal(input.question, QUESTION);
-    assert.deepEqual(input.candidates.map((c) => c.ref).sort(), ["photocraft#1", "photocraft#2", "photocraft#3"]);
+    assert.deepEqual(input.candidates.map((c) => c.ref).sort(), ["photocraft#1", "photocraft#2", "photocraft#3", "photocraft#4"]);
   });
 
   test("bots, unwatched channels and edits get no reply", async () => {
@@ -324,5 +328,47 @@ describe("repo named in the question", () => {
     assert.deepEqual(await repos("photocraft crash in layers", "vectorcraft"), ["vectorcraft"]);
     assert.deepEqual(await repos("photocraft or vectorcraft crash in layers"), ["photocraft", "vectorcraft"]);
     assert.deepEqual(await repos("crash in layers", "secret"), ["photocraft", "vectorcraft"]);
+  });
+});
+
+describe("no helper takes the call", () => {
+  test("the search falls back at once and the queued call is withdrawn", async () => {
+    assert.ok(DISCORD_TAKE_WAIT_MS <= 10_000, "a short deadline");
+    const poll = allocation.pollMs;
+    allocation.pollMs = 10;
+    await setInferenceMode(db, "user-local", "test");
+    try {
+      const waiting = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask: (d, i) => askHaiku(d, i, 80) });
+      const found = await waiting.find("zebra-unique webp export quality");
+      assert.equal(found.judged, false);
+      assert.ok(found.matches.length > 0);
+      const calls = await db.all(db.k.selectFrom("remote_calls").select(["state", "error"]).where("prompt_id", "=", "discord.search"));
+      assert.ok(calls.length >= 1 && calls.every((c) => c.state === "failed" && /in time/.test(c.error ?? "")));
+    } finally {
+      await setInferenceMode(db, "server", "test");
+      allocation.pollMs = poll;
+    }
+  });
+});
+
+describe("pull requests", () => {
+  test("open and recently merged pull requests are candidates and labelled; a closed unmerged one is not", async () => {
+    const at = new Date(Date.now() - 2 * 86_400_000).toISOString();
+    const old = new Date(Date.now() - 20 * 86_400_000).toISOString();
+    const vec = toBlob((await embedder.embed(["WebP export quality merged change"], "item"))[0]!);
+    for (const [n, state, merged] of [[7, "MERGED", at], [8, "CLOSED", null], [9, "MERGED", old]] as const) {
+      await db.run(db.k.insertInto("items").values({ repo: "photocraft", number: n, kind: "pr", state, closed_at: merged ?? at, merged_at: merged, title: "WebP export quality merged change", body: "", url: `https://github.com/storytold/photocraft/pull/${n}` }));
+      await emb("photocraft", n, vec, at);
+    }
+    const fresh = new Search({ db, embedder, index: new VectorIndex(embedder), log: () => {}, ask });
+    const found = { matches: await fresh.candidates("zebra-unique webp export quality") };
+    const by = (n: number) => found.matches.find((m) => m.number === n);
+    assert.equal(by(4)?.pr, true);
+    assert.deepEqual([by(7)?.pr, by(7)?.merged], [true, true]);
+    assert.equal(by(8), undefined);
+    assert.equal(by(9), undefined, "merged more than 7 days ago");
+    const { score: _s, body: _b, activity: _a, updatedAt: _u, ...m7 } = by(7)!;
+    const rendered = await renderMatches(db, [m7], "q", undefined);
+    assert.match(rendered.content, /photocraft#7 .* \(PR\) \(merged\)/);
   });
 });

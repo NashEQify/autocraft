@@ -6,7 +6,7 @@ export const PICK_CANDIDATES = 20;
 export const PICK_BODY_CHARS = 300;
 export const PICK_REASON_CHARS = 140;
 
-export type PickCandidate = { ref: string; title: string; body: string; closed: boolean };
+export type PickCandidate = { ref: string; title: string; body: string; closed: boolean; /** Only for a pull request. */ kind?: "pr" };
 /** `ref` is not an item: the call is about a question, not a tracked item. */
 export type PickInput = { ref: string; question: string; candidates: PickCandidate[] };
 export type Pick = { ref: string; reason: string };

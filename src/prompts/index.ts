@@ -1185,11 +1185,11 @@ const DISCORD_SEARCH: ClaudePrompt = {
   id: "discord.search",
   stage: "Discord",
   runner: "claude",
-  purpose: `Picks up to ${PICK_MAX} of the issues the embedding search found that answer a question someone asked the Discord bot, each with a one-line reason.`,
+  purpose: `Picks up to ${PICK_MAX} of the issues and pull requests the embedding search found that answer a question someone asked the Discord bot, each with a one-line reason.`,
   models: ["haiku"],
   effort: "medium",
-  placeholders: { question: "A JSON object indented by one space: the question text the person gave the bot.", candidates: `The ${PICK_CANDIDATES} closest public issues as a JSON array: ref, title, body (first ${PICK_BODY_CHARS} characters) and closed.` },
-  template: `You help people find an existing GitHub issue that matches what they asked in a chat. Below are a question and candidate issues, closest first by text similarity.
+  placeholders: { question: "A JSON object indented by one space: the question text the person gave the bot.", candidates: `The ${PICK_CANDIDATES} closest public issues and pull requests as a JSON array: ref, title, body (first ${PICK_BODY_CHARS} characters), closed and, for a pull request, kind "pr".` },
+  template: `You help people find an existing GitHub issue that matches what they asked in a chat. Below are a question and candidate issues and pull requests, closest first by text similarity. A candidate with kind "pr" is a pull request; prefer an issue for a problem or request, and a pull request when the question is about a change.
 
 - Pick at most ${PICK_MAX} candidates that report the same problem, request the same feature or answer the question. Picking none is a good answer.
 - Choose only from the candidates; copy each ref exactly. Do not invent issues.

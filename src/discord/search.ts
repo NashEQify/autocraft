@@ -10,8 +10,10 @@ import { DEFAULT_OWNER } from "../owners.ts";
 import { hiddenExpr, isPublicRepo, publicRepoNames } from "../public/status.ts";
 import { PICK_CANDIDATES, PICK_MAX, parsePicks, type PickInput } from "./pick.ts";
 import type { Db } from "../db/index.ts";
+import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 const CLOSED_WINDOW_MS = 180 * 86_400_000;
+const MERGED_WINDOW_MS = 7 * 86_400_000;
 /** How many nearest vectors are read before the filters (pull requests, private repos and old closed issues are dropped). */
 const SCAN = 300;
 /** Cosine floor of the embedding-only answer, where no model judges relevance. */
@@ -22,9 +24,8 @@ export const QUESTION_CHARS = 1000;
 const USER_LIMIT = { n: 5, ms: 60_000 };
 const CHANNEL_LIMIT = { n: 20, ms: 60_000 };
 /** Longest the call waits for a Claude account before the embedding answer is used. */
-const MODEL_WAIT_MS = 20_000;
 
-export type Match = { repo: string; number: number; title: string; url: string; closed: boolean; reason?: string };
+export type Match = { repo: string; number: number; title: string; url: string; closed: boolean; /** A pull request; `merged` when it was merged. */ pr?: boolean; merged?: boolean; reason?: string };
 export type Found = { matches: Match[]; /** Whether a model chose and explained them. */ judged: boolean };
 
 type Candidate = Match & { body: string; score: number; activity: number; updatedAt: string };
@@ -37,8 +38,8 @@ function byActivity(a: Candidate, b: Candidate): number {
 /** The model step; tests replace it. Returns the reply text, or null when the call failed or got no answer. */
 export type Ask = (db: Db, input: PickInput) => Promise<string | null>;
 
-export const askHaiku: Ask = async (db, input) => {
-  const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS });
+export const askHaiku = async (db: Db, input: PickInput, takeWaitMs = DISCORD_TAKE_WAIT_MS): Promise<string | null> => {
+  const reply = await askClaude("discord.search", "haiku", [input], db, { maxWaitMs: takeWaitMs });
   return reply?.text ?? null;
 };
 
@@ -103,7 +104,7 @@ export class Search {
     return pass;
   }
 
-  /** The ten closest public issues: open ones, and ones closed as completed in the last 180 days. */
+  /** The closest public issues and pull requests: open ones, issues closed as completed and pull requests merged in the last 7 days. */
   async candidates(question: string, repo?: string): Promise<Candidate[]> {
     const { db, embedder, index } = this.#d;
     // An explicit repo wins; otherwise a repo named in the question restricts the search and its word is left out of the embedded text.
@@ -123,15 +124,19 @@ export class Search {
       if (!isPublic.has(h.repo)) isPublic.set(h.repo, await isPublicRepo(db, h.repo));
       if (!isPublic.get(h.repo)) continue;
       const r = await db.get(db.k.selectFrom("main.items as i").innerJoin("main.repos as r", "r.name", "i.repo")
-        .select((eb) => ["i.title", "i.body", "i.state", "i.state_reason", "i.closed_at", "i.updated_at", "i.comments_count", "i.reactions_count",
-          eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.val("/issues/")),
+        .select((eb) => ["i.title", "i.body", "i.kind", "i.state", "i.state_reason", "i.closed_at", "i.merged_at", "i.updated_at", "i.comments_count", "i.reactions_count",
+          eb.fn.coalesce("i.url", eb(eb(eb(eb(eb(eb.val("https://github.com/"), "||", eb.fn.coalesce("r.owner", eb.val(DEFAULT_OWNER))), "||", eb.val("/")), "||", eb.ref("i.repo")), "||", eb.case().when("i.kind", "=", "pr").then(eb.val("/pull/")).else(eb.val("/issues/")).end()),
             "||", eb.cast<string>("i.number", "text"))).as("url")])
-        .where("i.repo", "=", h.repo).where("i.number", "=", h.number).where("i.kind", "=", "issue")
+        .where("i.repo", "=", h.repo).where("i.number", "=", h.number).where("i.kind", "in", ["issue", "pr"])
         .where((eb) => eb.not(hiddenExpr(db, eb, "i.repo", "i.number", "i.labels"))));
       if (!r) continue;
       const open = r.state === "OPEN";
-      if (!open && !(r.state === "CLOSED" && r.state_reason === "COMPLETED" && now - Date.parse(r.closed_at ?? "") <= CLOSED_WINDOW_MS)) continue;
-      out.push({ repo: h.repo, number: h.number, title: r.title ?? "", body: r.body ?? "", url: r.url, closed: !open, score: h.score,
+      const pr = r.kind === "pr";
+      const merged = pr && r.merged_at !== null;
+      // Closed issues count when completed, pull requests when merged, issues within 180 days, pull requests within 7; a pull request closed unmerged does not.
+      const doneAt = pr ? (merged ? r.merged_at : null) : r.state === "CLOSED" && r.state_reason === "COMPLETED" ? r.closed_at : null;
+      if (!open && !(doneAt !== null && now - Date.parse(doneAt) <= (pr ? MERGED_WINDOW_MS : CLOSED_WINDOW_MS))) continue;
+      out.push({ repo: h.repo, number: h.number, title: r.title ?? "", body: r.body ?? "", url: r.url, closed: !open, ...(pr && { pr: true }), ...(merged && { merged: true }), score: h.score,
         activity: (r.comments_count ?? 0) + (r.reactions_count ?? 0), updatedAt: r.updated_at ?? "" });
       if (out.length >= PICK_CANDIDATES) break;
     }
@@ -147,7 +152,7 @@ export class Search {
     const fallback = (): Found => ({ matches: cands.filter((c) => c.score >= FALLBACK_MIN_SCORE).slice(0, PICK_MAX).sort(byActivity).map(strip), judged: false });
     if (!cands.length) return { matches: [], judged: true };
     if (await spentTodayUsd(db, (this.#d.now ?? Date.now)()) >= await dailyCapUsd(db)) return fallback();
-    const input: PickInput = { ref: "discord", question: q, candidates: cands.map((c) => ({ ref: `${c.repo}#${c.number}`, title: c.title, body: c.body, closed: c.closed })) };
+    const input: PickInput = { ref: "discord", question: q, candidates: cands.map((c) => ({ ref: `${c.repo}#${c.number}`, title: c.title, body: c.body, closed: c.closed, ...(c.pr && { kind: "pr" as const }) })) };
     try {
       const text = await (this.#d.ask ?? askHaiku)(db, input);
       const picks = text === null ? null : parsePicks(text, input.candidates);

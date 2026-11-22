@@ -19,6 +19,7 @@ import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
 import { trackedRepos } from "./store.ts";
 import { findSeq } from "../async-seq.ts";
 import type { Db } from "../db/index.ts";
+import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 export const ISSUE_CAP_KEY = "discord_issue_daily_usd";
 export const DEFAULT_ISSUE_CAP_USD = 2;
@@ -26,7 +27,6 @@ export const ISSUE_STEP = "discord-issue";
 const SESSION_MS = 15 * 60_000;
 const HOUR = 3_600_000;
 const USER_LIMIT = 3, CHANNEL_LIMIT = 10;
-const MODEL_WAIT_MS = 20_000;
 const MAX_APPS = 25;
 const MESSAGE_CHARS = 1900;
 const MAX_CALLS = 2;
@@ -38,7 +38,7 @@ export type IssueAsk = {
   (db: Db, id: "discord.issue-draft", input: IssueDraftInput): Promise<string | null>;
 };
 export const askIssueModel: IssueAsk = (async (db: Db, id: "discord.issue-questions", input: IssueQuestionsInput) =>
-  (await askClaude(id, "haiku", [input], db, { maxWaitMs: MODEL_WAIT_MS }))?.text ?? null) as IssueAsk;
+  (await askClaude(id, "haiku", [input], db, { maxWaitMs: DISCORD_TAKE_WAIT_MS }))?.text ?? null) as IssueAsk;
 
 export async function issueCapUsd(db: Db): Promise<number> {
   const v = Number((await db.get(db.k.selectFrom("settings").select("value").where("key", "=", ISSUE_CAP_KEY)))?.value);

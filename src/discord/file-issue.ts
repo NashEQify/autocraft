@@ -20,6 +20,7 @@ import { failReporter, forgetReporterRow, newReporterState, readReporter, report
 import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import type { SelectQueryBuilder } from "kysely";
+import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
 /** Filing from Discord under the person's account is built but off: the sign-in needs a Discord identity step first, so a forwarded sign-in link cannot link someone else's GitHub account. While off, the draft offers only the prefilled GitHub link and the sign-in routes answer 404. */
 export const FILING_IN_DISCORD = false;
@@ -80,10 +81,9 @@ const HAIKU_STEP: ClaudeStep<JunkAsk, boolean> = {
     return v === null ? null : { value: v };
   },
 };
-const MODEL_WAIT_MS = 20_000;
 const modelJudge: NonNullable<FileHooks["judge"]> = {
   jev: async (db, a) => { const r = await runModelStep(db, JEV_STEP, a); return r.ok ? r.value : null; },
-  haiku: async (db, a) => { const r = await runModelStep(db, HAIKU_STEP, a, { maxWaitMs: MODEL_WAIT_MS }); return r.ok ? r.value : null; },
+  haiku: async (db, a) => { const r = await runModelStep(db, HAIKU_STEP, a, { maxWaitMs: DISCORD_TAKE_WAIT_MS }); return r.ok ? r.value : null; },
 };
 
 /** Jev first, Haiku where Jev is unsure or unavailable. With no model answer the draft is not filed ("unknown"): the person still has the GitHub link. The texts of the calls are deleted when they end. */
