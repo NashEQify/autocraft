@@ -22,6 +22,8 @@ export class AppKeys {
   #app: AppSecrets | null = null;
   #readAt = 0;
   #reading: Promise<void> | null = null;
+  /** The sealed keys of the stored row when this process cannot open them (another session_key); logged once per store. */
+  #unreadable: string | null = null;
 
   constructor(db: Db, box: TokenBox, file: string | null) {
     this.#db = db;
@@ -43,8 +45,9 @@ export class AppKeys {
     const app = this.#app;
     if (file?.webhookSecret && app && app.id === file.id && app.webhookSecret !== file.webhookSecret) {
       const next = { ...app, webhookSecret: file.webhookSecret };
-      await this.#db.run(this.#db.k.updateTable("github_app").set({ keys_enc: this.#row(next).keys_enc, updated_at: new Date().toISOString() }).where("id", "=", 1));
-      this.#set(next);
+      const r = await this.#db.run(this.#db.k.updateTable("github_app").set({ keys_enc: this.#row(next).keys_enc, updated_at: new Date().toISOString() })
+        .where("id", "=", 1).where("app_id", "=", file.id).where("keys_enc", "is not", null));
+      if (r.changes === 1) this.#set(next);
     }
     return this;
   }
@@ -63,12 +66,21 @@ export class AppKeys {
     return this.#app;
   }
 
-  /** Stores a newly registered app. Refuses (EEXIST) when another app is registered. */
+  /** Whether a stored app's keys could not be opened at the last read: the session_key differs from the one that sealed them. */
+  unreadable(): boolean { return this.#unreadable !== null; }
+
+  /**
+   * Stores a newly registered app. Refuses (EEXIST) when another app is registered; keys this process cannot open are
+   * replaced (the status page names them unreadable before an operator registers).
+   */
   async save(app: AppSecrets): Promise<void> {
     const row = this.#row(app);
+    const unreadable = this.#unreadable;
     const r = await this.#db.run(this.#db.k.insertInto("github_app").values(row)
-      .onConflict((oc) => oc.column("id").doUpdateSet(row).where("github_app.keys_enc", "is", null)));
+      .onConflict((oc) => oc.column("id").doUpdateSet(row).where((eb) => unreadable === null ? eb("github_app.keys_enc", "is", null)
+        : eb.or([eb("github_app.keys_enc", "is", null), eb("github_app.keys_enc", "=", unreadable)]))));
     if (!r.changes) throw Object.assign(new Error("another app is registered"), { code: "EEXIST" });
+    this.#unreadable = null;
     this.#set(app);
   }
 
@@ -76,6 +88,7 @@ export class AppKeys {
   async clear(): Promise<void> {
     await this.#db.run(this.#db.k.insertInto("github_app").values({ id: 1, app_id: null, slug: null, keys_enc: null, updated_at: new Date().toISOString() })
       .onConflict((oc) => oc.column("id").doUpdateSet({ app_id: null, slug: null, keys_enc: null, updated_at: new Date().toISOString() })));
+    this.#unreadable = null;
     this.#set(null);
   }
 
@@ -95,7 +108,10 @@ export class AppKeys {
     const row = await this.#db.get(this.#db.k.selectFrom("github_app").select("keys_enc").where("id", "=", 1));
     const plain = row?.keys_enc ? this.#box.open(row.keys_enc, AAD) : null;
     let app: AppSecrets | null = null;
-    try { app = plain ? (JSON.parse(plain) as AppSecrets) : null; } catch { /* unreadable: no app */ }
+    try { app = plain ? (JSON.parse(plain) as AppSecrets) : null; } catch { /* unreadable, as below */ }
+    const unreadable = row?.keys_enc && !app ? row.keys_enc : null;
+    if (unreadable && !this.#unreadable) console.error("the stored GitHub App keys cannot be opened with this session_key (was session_key changed?); no app is in use");
+    this.#unreadable = unreadable;
     this.#set(app);
   }
 }

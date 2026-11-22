@@ -24,7 +24,6 @@ import { dbReady, startHealthServer } from "../health.ts";
 import { envVar } from "../env.ts";
 import { startDiscord } from "../discord/index.ts";
 import { openDb, setDbRole } from "../db/open.ts";
-import { openAppKeys } from "../github/app-keys.ts";
 
 const USAGE = `usage: autocraft-server runner serve
        autocraft-server runner steps
@@ -44,8 +43,6 @@ async function serve(): Promise<void> {
   setDbRole("runner");
   const db = await openDb();
   await scopeToTracked(db);
-  // The GitHub App's keys, from the database (imported once from the secrets file).
-  await openAppKeys(db).catch((e: Error) => console.error(`runner: GitHub App keys not read: ${e.message}`));
   // Once per database: open decisions' proposed cards become choices. Here rather than in db.ts migrations, which cannot import the decision modules.
   const conv = await convertOpenDecisionsOnce(db);
   if (conv) console.log(`runner: converted ${conv.converted} open decisions to choices (${conv.skipped} skipped, ${conv.stale} stale cards, ${conv.unconverted} cards matching no choice)`);
@@ -128,8 +125,6 @@ async function enqueueCmd(args: string[]): Promise<void> {
   }
   const db = await openDb();
   await scopeToTracked(db);
-  // The GitHub App's keys, from the database (imported once from the secrets file).
-  await openAppKeys(db).catch((e: Error) => console.error(`runner: GitHub App keys not read: ${e.message}`));
   try {
     const job = await enqueue(db, name, params, "cli");
     console.log(`job ${job.id} queued: ${job.step} ${JSON.stringify(job.params)}`);

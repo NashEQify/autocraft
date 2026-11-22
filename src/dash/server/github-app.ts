@@ -83,13 +83,18 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
   }];
 }
 
+const UNREADABLE = "The stored GitHub App keys cannot be read: was session_key changed? Restore it, or register a new app, which replaces them.";
+
 export async function githubAppStatus(db: Db, config: Config, deps: AppDeps): Promise<Omit<GithubAppStatus, "csrf" | "authorized">> {
   const app = config.secrets.app;
   const status: Omit<GithubAppStatus, "csrf" | "authorized"> = {
     configured: !!app, identity: await githubIdentity(db), canRegister: !!boundAppKeys(config.secrets),
     defaultName: envVar("GITHUB_APP_NAME") ?? DEFAULT_APP_NAME, app: null, installations: [], links: await openLinks(db), error: null,
   };
-  if (!app) return status;
+  if (!app) {
+    if (boundAppKeys(config.secrets)?.unreadable()) status.error = UNREADABLE;
+    return status;
+  }
   status.app = { id: app.id, slug: app.slug, name: null, installUrl: installUrl(app.slug), transferUrl: transferUrl(app.slug, app.owner) };
   try {
     status.app.name = await appName(app, deps);

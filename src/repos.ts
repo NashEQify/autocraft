@@ -184,7 +184,7 @@ export const commands = {
       if (args[0] === undefined) { console.log(await githubIdentity(db)); return; }
       try {
         let registered = false;
-        try { registered = readAppSecrets() !== null; } catch { /* unreadable file: no app */ }
+        registered = readAppSecrets() !== null;
         const changed = await setGithubIdentityChecked(db, "cli", args[0], { registered: () => registered });
         console.log(changed ? `identity ${args[0]} (dashboard sessions end; everyone signs in again)` : `identity was already ${args[0]}`);
       } catch (e) {

@@ -132,9 +132,11 @@ let proc: Promise<{ db: Db; close: () => Promise<void> }> | undefined;
  * `closeDb()` closes it.
  */
 export async function openDb(): Promise<Db> {
-  proc ??= connectDb().then((db) => {
+  proc ??= connectDb().then(async (db) => {
     const close = db.close.bind(db);
     db.close = async () => {};
+    // The GitHub App's keys of this process (job processes, commands, the runner) come from this database.
+    await (await import("../github/app-keys.ts")).openAppKeys(db).catch((e: Error) => console.error(`GitHub App keys not read: ${e.message}`));
     return { db, close };
   });
   return (await proc).db;

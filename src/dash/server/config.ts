@@ -120,6 +120,17 @@ export function appSecretsOf(raw: Record<string, unknown>): AppSecrets | null {
 
 let devSessionKey: string | undefined;
 
+/** The session_key of a dev secrets file, when it has one long enough. */
+function devFileKey(file: string | undefined): string | null {
+  if (!file) return null;
+  try {
+    const k = (JSON.parse(readFileSync(file, "utf8")) as { session_key?: unknown }).session_key;
+    return typeof k === "string" && k.length >= 32 ? k : null;
+  } catch {
+    return null;
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const { host, port } = parseListen(envVar("LISTEN", env) ?? (envVar("DEV_AUTH", env) === "1" ? DEV_LISTEN : DEFAULT_LISTEN));
   const devAuth = envVar("DEV_AUTH", env) === "1";
@@ -128,7 +139,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (devAuth) {
     if (!isLoopback(host)) throw new ConfigError("AUTOCRAFT_DEV_AUTH=1 is allowed only on a loopback listen address");
     // Dev sessions don't survive a restart: the key lives only in this process.
-    secrets = { githubClientId: "dev", githubClientSecret: "dev", sessionKey: (devSessionKey ??= randomToken()), app: null };
+    // A dev secrets file's session_key keeps what is sealed with it (the GitHub App's keys) readable after a restart.
+    secrets = { githubClientId: "dev", githubClientSecret: "dev", sessionKey: devFileKey(envVar("SECRETS_FILE", env)) ?? (devSessionKey ??= randomToken()), app: null };
   } else {
     secrets = readSecrets(envVar("SECRETS_FILE", env));
   }

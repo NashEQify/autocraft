@@ -11,7 +11,8 @@ import { join } from "node:path";
 import { after, afterEach, before, describe, test } from "node:test";
 import { addLogin } from "../src/access.ts";
 import { loadConfig } from "../src/dash/server/config.ts";
-import { sha256hex } from "../src/dash/server/crypto.ts";
+import { sha256hex, TokenBox } from "../src/dash/server/crypto.ts";
+import { AppKeys } from "../src/github/app-keys.ts";
 import { startServer } from "../src/dash/server/index.ts";
 import { FakeProvider } from "../src/dash/server/provider.ts";
 import type { Route } from "../src/dash/types.ts";
@@ -227,6 +228,15 @@ describe("github app registration", () => {
     const two = await startServer({ config: loadConfig({ ...env, AUTOCRAFT_SECRETS_FILE: bare }), db, provider: new FakeProvider(permsFile), routes: [], githubApi });
     closers.push(two.close);
     assert.equal((await status(two.url)).app?.slug, "file-app");
+
+    // Under another session_key the stored keys are unreadable, said so, and a new registration may replace them.
+    const other = await new AppKeys(db, new TokenBox("o".repeat(40)), null).load();
+    assert.equal(other.current(), null);
+    assert.equal(other.unreadable(), true);
+    const replaced = { id: "77", slug: "other-app", privateKey: PEM, clientId: "Iv1.o", clientSecret: "o", webhookSecret: null, owner: null };
+    await other.save(replaced);
+    assert.equal((await new AppKeys(db, new TokenBox("o".repeat(40)), null).load()).current()?.slug, "other-app");
+    await assert.rejects(other.save(replaced), /another app/);
 
     // Removed through one dashboard, the app is not imported again from the file at the next start.
     assert.equal((await (await signedIn("boss", one.url)).json("/api/admin/github-app/remove", {})).status, 200);
