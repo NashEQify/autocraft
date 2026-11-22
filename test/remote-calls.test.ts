@@ -48,9 +48,11 @@ describe("user-local remote calls", async () => {
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
   const leaseFor = async (login: string) => {
     for (let i = 0; i < 200; i++) {
+      // A call queued before the claim and not leased by it: nothing for this login. One queued while the claim ran is tried again.
+      const queued = !!await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"));
       const r = await claimCall(db, callers[login]!, claim(), canWrite);
       if (r.lease) return r.lease;
-      if (await db.get(db.k.selectFrom("remote_calls").select((eb) => eb.lit(1).as("one")).where("state", "=", "queued"))) return null;
+      if (queued) return null;
       await sleep(5);
     }
     throw new Error("no call was queued");
