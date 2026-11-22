@@ -1068,6 +1068,48 @@ The image carries Xvfb, x11-utils (`xwininfo`, `xprop`), ImageMagick, Mesa's lav
 
 **Trying a workspace session.** `autocraft-server workspace try <repo> <sha> --item N --prompt TEXT [--workspace ID] [--env ID] [--keep] [--deadline-sec N]`, in the runner or dashboard container, records a `workspace_sessions` row (kind `try`) and queues a `workspace-try` job, printing both ids. The item is an issue or PR of the repo that the model call is filed under; the prompt is at most 8 KiB and goes only into the call, never into the job's params or log. The job creates a workspace for the commit (or takes the live one `--workspace` names, which must hold the same repo and commit), waits for it to be ready (failing when the launcher fails or ends it, or after 26 minutes), then runs one session with the fix-issue patch prompt's model and effort, with only the workspace tools and a time limit of `--deadline-sec` (300 to 7200, default 3600). The call fails the session if it waits more than 30 minutes in all for a Task Runner; while it is queued or leased the launcher does not park the workspace. A runner restart resumes the job on the same workspace and call. Its log has the outcome and cost, the number of tool calls and their shell time, and `git diff --stat` against the base commit with the new files. The workspace is ended afterwards unless `--keep` is given; the session row keeps the outcome. A job that ends without ending its session (its deadline, a cancel, a stop it does not resume from) has the session failed and the workspace ended (unless kept) on the launcher's next pass.
 
+### Crate mirror
+
+`autocraft-server crate-mirror serve` is a read-only mirror of crates.io and of an allowlist of GitHub repositories, for build pods without public egress. Clients keep the public URLs and reach the mirror through host aliases and a private CA, so cargo writes the same `registry/src/index.crates.io-<hash>` and `git/checkouts/<name>-<hash>` paths as with direct access (a `replace-with` source would change those directory names, and with them every fingerprint and sccache key). The process needs no database or GitHub credentials.
+
+It terminates TLS for four names and picks the certificate by SNI; a client that sends another name, or none, fails the handshake, and a Host header that differs from the SNI name gets 421.
+
+| Name | Serves |
+|---|---|
+| `index.crates.io` | Sparse index files and `config.json`, pulled through and cached 60 s. When upstream fails (5xx, timeout, unreachable), a copy up to 7 days old is served; older or never fetched: 502. Upstream 404 is passed on and drops the cached copy. ETag/If-None-Match with the client; the mirror revalidates upstream with its own conditional request. |
+| `static.crates.io` | `/crates/<name>/<version>/download` and `/crates/<name>/<name>-<version>.crate`. A miss looks up the version's `cksum` in the upstream index over real TLS (never the cache), downloads the file and keeps it only if its sha256 matches; otherwise 502 and nothing stored. Stored files are never replaced. |
+| `github.com` | Git smart HTTP for allowlisted repos only: `GET <owner>/<repo>[.git]/info/refs?service=git-upload-pack` and `POST …/git-upload-pack`, answered by `git upload-pack --stateless-rpc` from a bare mirror (protocol v0 and v2). Everything else, including receive-pack, is 404. |
+| `api.github.com` | Always 404. Cargo asks it whether a git dependency moved; a 404 makes cargo fetch instead. |
+
+Only GET and HEAD are accepted, plus that one POST. No client header reaches upstream (`Git-Protocol` only selects the local upload-pack protocol). Limits: index responses 32 MiB, `.crate` downloads 100 MiB, git request bodies 16 MiB (also after gzip), git responses 4 GiB.
+
+**Storage** (`<data dir>/`): `index/` (LRU by last read, cap 2 GiB), `crates/` (LRU by last read, cap 50 GiB; a read sets the file's mtime at most hourly, so the order survives restarts), `git/<owner>/<repo>.git` (bare mirrors of `refs/heads/*` and `refs/tags/*`, HEAD following upstream's default branch). Every allowlisted repo is fetched (`git fetch --prune`) at start and every 2 minutes, and on `info/refs` when its last fetch is older than 30 s; a failed fetch keeps serving the mirror as it is. `git gc` runs weekly per repo. The allowlist is reread on each 2-minute pass; a repo removed from it is 404 from then on and its mirror is deleted. Repos must be public: the mirror fetches without credentials.
+
+**Logs**: one JSON line per request on stdout (`event: "request"`, host, method, path without the query, status, ms, `cache: hit|miss|revalidated|stale`, bytes), plus `upstream-error`, `checksum-mismatch`, `git-fetch`, `git-gc`, `git-error`. No client addresses or headers are logged.
+
+**Config** (flag, then variable, then default):
+
+| Flag | Variable | Default | |
+|---|---|---|---|
+| `--listen` | `AUTOCRAFT_MIRROR_LISTEN` | `0.0.0.0:8443` | TLS listener (map the Service's 443 to it) |
+| `--health-listen` | `AUTOCRAFT_MIRROR_HEALTH_LISTEN` | `0.0.0.0:8080` | Plain HTTP, `/healthz` and `/readyz` only; the answer carries store sizes and the repo count |
+| `--data-dir` | `AUTOCRAFT_MIRROR_DIR` | `/data` | Volume for the stores |
+| `--tls-dir` | `AUTOCRAFT_MIRROR_TLS_DIR` | `/tls` | `<name>.crt` and `<name>.key` for each of the four names (a leaf with several names may be repeated under each); all eight files are required at start and reloaded within 5 minutes when they change |
+| `--git-allowlist` | `AUTOCRAFT_MIRROR_GIT_ALLOWLIST` | none | File, one `owner/repo` per line, `#` comments |
+| `--git-repos` | `AUTOCRAFT_MIRROR_GIT_REPOS` | none | Inline list, comma or space separated; added to the file's |
+| `--crate-cap-gb` | `AUTOCRAFT_MIRROR_CRATE_CAP_GB` | `50` | |
+| `--index-cap-gb` | `AUTOCRAFT_MIRROR_INDEX_CAP_GB` | `2` | |
+
+The mirror pod itself must resolve the real names (no host aliases) and reach public 443. It runs as any uid that can write the data dir, with `git` on `PATH` (the AutoCraft image has it).
+
+**Clients.** `hostAliases` mapping the four names to the mirror Service's ClusterIP, the CA certificate mounted (for example at `/etc/craft-mirror/ca.crt`) and:
+
+- `CARGO_HTTP_CAINFO=/etc/craft-mirror/ca.crt` for cargo's own HTTP (index, downloads) and for git dependencies fetched by cargo's built-in git (libgit2), which goes through the same HTTP stack.
+- `GIT_SSL_CAINFO=/etc/craft-mirror/ca.crt` for the git CLI, which cargo uses with `CARGO_NET_GIT_FETCH_WITH_CLI=true`.
+- `SSL_CERT_FILE=/etc/craft-mirror/ca.crt` for other OpenSSL-based tools.
+
+The CA file replaces the system bundle for these clients, so they trust nothing but the mirror. Cargo's HTTP stack also reads `SSL_CERT_FILE` when `CARGO_HTTP_CAINFO` is unset. Verified with cargo 1.99 in a container with host aliases to the mirror: `cargo fetch --locked` of a project with crates.io dependencies and a GitHub git dependency (by tag) wrote `registry/src/index.crates.io-1949cf8c6b5b557f` and `git/checkouts/ryu-9e38bd28e6ca957f`, the same names as a direct fetch, both with the default libgit2 mode and `CARGO_HTTP_CAINFO` alone and with `CARGO_NET_GIT_FETCH_WITH_CLI=true` plus `GIT_SSL_CAINFO`; without the CA cargo fails with an invalid-certificate error. `cargo update` in a CARGO_HOME that already had the git dependency asked `api.github.com`, got 404 and fetched from the mirror.
+
 ## Similar items and semantic search
 
 `autocraft-server embed [--all] [--threads N] [--batch N]` embeds every tracked item whose text changed since its last embedding (`--all`: every tracked item) into `item_embeddings`, and removes vectors of items that left the mirror or the tracked repos. Each batch commits on its own, so an interrupted run continues where it stopped. The dashboard reads the table for "Similar items" on the Item page and for the search box's meaning toggle; it embeds search queries, and items without a vector yet, itself.
