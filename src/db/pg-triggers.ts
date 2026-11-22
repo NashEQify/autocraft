@@ -18,6 +18,7 @@ import { applyPgSchema, pgSchemaStamp, type PgQueryable } from "./pg-migrate.ts"
 import { translateSqlite } from "./pg-schema.ts";
 import { pgScopeSql, SCOPED_SCHEMA } from "./scoped.ts";
 import { splitStageTripsPg, TRIP_SPLIT_VERSION } from "./trip-split.ts";
+import { retireFixAttemptsPg } from "./fix-retire.ts";
 
 const OPS = ["INSERT", "UPDATE", "DELETE"] as const;
 type Op = (typeof OPS)[number];
@@ -193,6 +194,7 @@ export async function migratePg(client: PgClient): Promise<void> {
     await client.query(pgScopeSql((await rows("SELECT current_schema() AS s"))[0]!.s as string));
     await client.query(PIN_SEARCH_PATH);
     await splitStageTripsPg(client);
+    await retireFixAttemptsPg(client);
     await client.query("INSERT INTO settings (key, value) VALUES ('schema_stamp', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value", [stamp]);
   }, {
     unless: async () => (await storedPgStamp(rows)) === stamp,

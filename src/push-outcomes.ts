@@ -137,7 +137,7 @@ export type TripRow = StageTripRow;
 const OUTSIDE_SURGE_KEY = "outside-surge";
 export const tripRow = async (db: Db, key: string): Promise<TripRow | undefined> => await db.get(db.k.selectFrom("stage_trips").select(kx.cols("stage_trips")).where("stage", "=", key));
 
-/** Push-breaker trips active now, by key (`fixissue:deckcraft`, or `fixissue` for the instance-wide tier), with the reason. */
+/** Push-breaker trips active now, by key (`implement:deckcraft`, or `implement` for the instance-wide tier), with the reason. */
 export async function activeTrips(db: Db): Promise<Record<string, string>> {
   const out: Record<string, string> = {};
   for (const r of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason"]).where("active", "=", 1))) if (tripOf(r.stage)) out[r.stage] = r.reason;

@@ -1,6 +1,10 @@
 // Facts of open items (issues and PRs) for the triage steps: classification, priority, embedding, duplicates, scope decision, labels.
 // Loaded in one pass for a whole database or a slice. Reads only: the old selectors fill missing text hashes in the database on the way; here a missing hash is computed.
-import { settleMemo, settledBy } from "../settlers.ts";
+import { settleMemo, settledBy, settlesNow } from "../settlers.ts";
+import { featureOn } from "../build/features.ts";
+import { latestAttempts, liveByRepo } from "../implement/store.ts";
+import { LIVE_STATES } from "../implement/types.ts";
+import { isBotLogin } from "../review/bots.ts";
 import { groupClosersPending } from "../act/dupe-groups.ts";
 import { pipelineWrites } from "./rules.ts";
 import { assignmentsOf, ownFixPrs, refreshTimes } from "./facts.ts";
@@ -203,22 +207,40 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     .where("r.head_oid", "=", (eb) => eb.selectFrom("opus_reviews as r2").select("r2.head_oid").whereRef("r2.repo", "=", "r.repo").whereRef("r2.number", "=", "r.number").where("r2.verdict", "is not", null)
       .orderBy("r2.at", "desc").orderBy(kx.rowid("opus_reviews", "r2"), "desc").limit(1))))
     closeReview.set(`${r.repo}#${r.number}`, { head: r.head_oid, atHead: headOf({ head_oid: r.i_head, updated_at: r.updated_at, c_head: r.c_head, c_at: r.c_at }) === r.head_oid, asked: !!r.asked });
-  const repoMemo = new Map<string, { comment: boolean; fix: boolean; pub: boolean; notRust: boolean; openPrs: Map<number, OpenPr> }>();
+  const repoMemo = new Map<string, { comment: boolean; fix: boolean; implement: boolean; pub: boolean; notRust: boolean; openPrs: Map<number, OpenPr> }>();
   // Public repos and open PRs, read once for every repo on first use.
   let tables: { pub: Set<string>; openPrs: (repo: string) => Map<number, OpenPr> } | undefined;
   const repoOf = async (repo: string) => {
     let m = repoMemo.get(repo);
     if (!m) {
       const t = (tables ??= { pub: new Set((await db.all(db.k.selectFrom("repos").select("name").where("visibility", "=", "public"))).map((x) => x.name)), openPrs: await issuesWithOpenPrAll(db) });
-      m = { comment: await commentApprovalOf(db, repo) !== null, fix: await fixIssueApprovalOf(db, repo) !== null, pub: t.pub.has(repo),
+      m = { comment: await commentApprovalOf(db, repo) !== null, fix: await fixIssueApprovalOf(db, repo) !== null, implement: await featureOn(db, "implement", repo), pub: t.pub.has(repo),
         notRust: await hasSetting(db, notRustKey(repo)), openPrs: t.openPrs(repo) };
       repoMemo.set(repo, m);
     }
     return m;
   };
-  // Item text, read only for the rows that need it (a skipped Fix attempt, a missing text hash, a classifier hash to recompute), in one query.
+  // Implement: who queued each issue (its fast_track row), its latest attempt, and the live attempts per repo.
+  const queuedBy = new Map((await db.all(db.k.selectFrom("fast_track").select(["repo", "number", "added_by"]).$if(!!opts.repo, (q) => q.where("repo", "=", opts.repo!))))
+    .map((r) => [`${r.repo}#${r.number}`, r.added_by]));
+  const attempts = await latestAttempts(db, opts.repo);
+  const liveImpl = await liveByRepo(db);
+  const implDecisions = [...new Set([...attempts.values()].flatMap((a) => (a.decisionId ? [a.decisionId] : [])))];
+  const answeredImpl = new Set(implDecisions.length ? (await db.all(db.k.selectFrom("decisions").select("id").where("id", "in", implDecisions).where("answer", "is not", null))).map((d) => d.id) : []);
+  const implPrs = [...attempts.values()].flatMap((a) => (a.prNumber !== null ? [[a.repo, a.prNumber] as const] : []));
+  const prState = new Map(implPrs.length ? (await db.all(db.k.selectFrom("items as i").select(["i.repo", "i.number", "i.state"]).where(kx.refIn(db, "i", implPrs)))).map((r) => [`${r.repo}#${r.number}`, r.state]) : []);
+  // A person's comment after an asked attempt's question: not a bot's, not the pipeline account's.
+  const pipelineLogin = await setting(db, "pipeline_login");
+  const commentedAfter = new Set<string>();
+  for (const a of attempts.values()) {
+    if (a.state !== "asked" || a.questionAt === null) continue;
+    const later = await db.all(db.k.selectFrom("comments").select("author").where("repo", "=", a.repo).where("number", "=", a.number).where("created_at", ">", a.questionAt));
+    if (later.some((c) => c.author !== null && c.author !== pipelineLogin && !isBotLogin(c.author))) commentedAfter.add(`${a.repo}#${a.number}`);
+  }
+  const settles = settleMemo();
+  // Item text, read only for the rows that need it (an implementation attempt, a missing text hash, a classifier hash to recompute), in one query.
   const classed = (ref: string): boolean => (byItem.get(ref) ?? []).some((c) => c.classifier === "jev" || (c.classifier === "haiku" && c.input_hash !== null));
-  const needText = rows.filter((r) => r.a_state === "skipped" || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
+  const needText = rows.filter((r) => (r.kind === "issue" && attempts.has(`${r.repo}#${r.number}`)) || r.embed_hash === null || (r.class_hash === null && classed(`${r.repo}#${r.number}`)));
   const texts = new Map(needText.length ? (await db.all(db.k.selectFrom(kx.refPairs(db, needText.map((r) => [r.repo, r.number] as const), "j"))
     .innerJoin("items as i", (j) => j.onRef("i.repo", "=", "j.repo").onRef("i.number", "=", "j.number"))
     .select(["i.repo", "i.number", "i.kind", "i.title", "i.body", "i.additions", "i.deletions", "i.changed_files", "i.author_association"]))).map((t) => [`${t.repo}#${t.number}`, t]) : []);
@@ -266,7 +288,7 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
     const embedHash = r.embed_hash ?? (() => { const b = texts.get(ref)!; return hashOfText(b.title, b.body); })();
     const note = labeled.get(ref) ?? null;
     return {
-      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped: tripsOfRepo(tripped, r.repo), inFlight: r.state === "OPEN" && (["retry", "testing", "passed"].includes(r.a_state ?? "") || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
+      repo: r.repo, number: r.number, kind: r.kind, open: r.state === "OPEN", assignment: assigned(ref, r.assignees), now, ...(refreshAt !== undefined ? { refreshAt } : {}), pipelineOn, tripped: tripsOfRepo(tripped, r.repo), inFlight: r.state === "OPEN" && ((r.kind === "issue" && LIVE_STATES.has(attempts.get(ref)?.state ?? "failed")) || (r.kind === "pr" && own.prs.has(ref) && await own.isOwn(r.repo, r.author))), draft: !!r.is_draft,
       inScope: !!r.in_pilot, ...(outsideHolds.has(ref) ? { outsideHold: outsideHolds.get(ref)! } : {}), integration: !r.not_integration,
       held: r.held_backlog ? "backlog" : r.held_dup ? "duplicate" : null,
       fast: (r.score ?? 0) >= FAST_FLOOR, score: r.score, repoFacts: { labelsApproved: await labelsApproved(r.repo), commentApproved: (await repoOf(r.repo)).comment, fixIssueApproved: (await repoOf(r.repo)).fix },
@@ -284,13 +306,29 @@ export async function loadItemFacts(db: Db, opts: ItemLoadOptions = {}): Promise
       fix: {
         attempt: r.a_state === null ? null : {
           state: r.a_state,
-          textChanged: r.a_state === "skipped" && (() => { const b = texts.get(ref)!; return textHash(b.title ?? "", b.body ?? "") !== r.a_hash; })(),
+          textChanged: false,
           headDone: r.h_state !== null && (TERMINAL as string[]).includes(r.h_state),
           baseDone: r.a_base === null || (r.b_state !== null && (TERMINAL as string[]).includes(r.b_state)),
         },
         publicRepo: (await repoOf(r.repo)).pub, notRust: (await repoOf(r.repo)).notRust, openPr: r.kind === "issue" ? (await repoOf(r.repo)).openPrs.get(r.number) ?? await ownPrUnmirrored(r.a_state, r.a_pr) : null, impact: r.impact,
         scopeDecision: latestScope.get(ref) ?? null,
       },
+      implement: await (async () => {
+        const by = r.kind === "issue" ? queuedBy.get(ref) ?? null : null;
+        const a = r.kind === "issue" ? attempts.get(ref) : undefined;
+        const live = liveImpl.get(r.repo);
+        return {
+          queuedBy: by, settles: by !== null && await settlesNow(db, by, [r.repo], settles), featureOn: (await repoOf(r.repo)).implement,
+          row: a ? {
+            state: a.state, attempt: a.attempt,
+            textChanged: (() => { const b = texts.get(ref)!; return textHash(b.title ?? "", b.body ?? "") !== a.textHash; })(),
+            newCommentAfterQuestion: commentedAfter.has(ref), decisionAnswered: a.decisionId !== null && answeredImpl.has(a.decisionId),
+            asked: a.state === "asked" ? (a.decisionId !== null ? "maintainer" : "author") : null,
+            prOpen: a.prNumber !== null && (prState.get(`${r.repo}#${a.prNumber}`) ?? "OPEN") === "OPEN",
+          } : null,
+          liveInRepo: (live?.size ?? 0) - (live?.has(ref) ? 1 : 0),
+        };
+      })(),
     };
   });
 }

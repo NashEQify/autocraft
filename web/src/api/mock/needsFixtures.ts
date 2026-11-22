@@ -41,7 +41,7 @@ export function needsPage(f: { feedback?: boolean; cursor?: string }): NeedsPage
     stopped: [
       { id: "breaker:merge:deckcraft", kind: "breaker", title: "Merge queued pull requests", repo: "deckcraft", reason: "main CI of deckcraft is red after our merge of #2031", since: at(95), resume: { type: "trip", stage: "merge:deckcraft", canResume: true } },
       { id: "breaker:fixup", kind: "breaker", title: "Fix up take-fix pull requests", reason: "3 of the last 10 fixup pushes broke a required check, in 2 repos (designcraft, photocraft)", since: at(30), resume: { type: "trip", stage: "fixup", canResume: true } },
-      { id: "breaker:fixissue:designcraft", kind: "breaker", title: "Fix issues", repo: "designcraft", reason: "2 of the last 10 fixissue pushes in designcraft broke a required check", since: at(70), resume: { type: "trip", stage: "fixissue:designcraft", canResume: false } },
+      { id: "breaker:implement:designcraft", kind: "breaker", title: "Implement issues", repo: "designcraft", reason: "2 of the last 10 implement pushes in designcraft broke a required check", since: at(70), resume: { type: "trip", stage: "fixissue:designcraft", canResume: false } },
       { id: "limit:fixup", kind: "limit", title: "Fix-up", reason: "The daily limit is 0", since: at(60 * 30), resume: { type: "link", to: "/pipeline" } },
       { id: "account:b", kind: "account", title: "Second account", reason: "paused: 5-hour use 92% (pause at 80%)", since: null, resume: { type: "link", to: "/accounts" } },
       { id: "act:photocraft#4:7", kind: "act", title: "photocraft#4080", reason: "stopped after 3 failed tries: GitHub refused the close", since: at(120), resume: { type: "retry", decision: "photocraft#4080:scope" } },

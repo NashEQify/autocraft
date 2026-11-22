@@ -95,7 +95,9 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
   conversations: [{ table: "conversations" }, { table: "conversation_turns" }, { table: "conversation_cards" }],
   // Follow-up issues held until the merge; the Act lane reads the item, decision and pre-approval rows that move them, so not planner input.
   "held-followups": [{ table: "held_followups" }],
-  fixes: [{ table: "fix_attempts" }, { table: "patch_checks" }, { table: "dupe_carries" }],
+  // Implementations and the Implement switches are planner input: a queued issue's next step reads them.
+  fixes: [{ table: "fix_attempts" }, { table: "patch_checks" }, { table: "dupe_carries" }, { table: "implementations" }, { table: "implementation_rounds" },
+    { table: "settings", when: "new_key LIKE 'build\\_feature:implement%' ESCAPE '\\'" }],
   verify: [{ table: "verifications" }, { table: "fixups" }, { table: "ci_fixes" }],
   // Pre-approved merges and the operator fix-ups behind them: the planner works them, so the topic is planner input.
   preapprovals: [{ table: "preapprovals" }, { table: "operator_fixups" }],
@@ -119,7 +121,7 @@ export const TOPIC_TABLES: Record<string, Source[]> = {
     { table: "dupe_group_items" }, { table: "item_rank" }, { table: "classifications", ops: ["INSERT", "DELETE"] },
     { table: "classifications", ops: ["UPDATE"], when: ["classifier", "run_id", "at", "type_label", "want", "reference", "flags", "dup_of", "reason", "probs", "input_hash"].map((c) => `old.${c} IS NOT new.${c}`).join(" OR ") },
     { table: "opus_reviews" }, { table: "verifications" },
-    { table: "fix_attempts" }, { table: "postmerge_followups" }, { table: "premerge_reviews" }, { table: "pr_checks" }, { table: "push_outcomes" }, { table: "stage_trips" }, { table: "fast_track" }, { table: "merge_holds" }, { table: "merges" }, { table: "merge_batches" },
+    { table: "fix_attempts" }, { table: "implementations" }, { table: "postmerge_followups" }, { table: "premerge_reviews" }, { table: "pr_checks" }, { table: "push_outcomes" }, { table: "stage_trips" }, { table: "fast_track" }, { table: "merge_holds" }, { table: "merges" }, { table: "merge_batches" },
     { table: "merge_batch_prs" }, { table: "tracked_repos" },
     { table: "settings", when: "new_key IN ('pilot_items', 'classify_run', 'pipeline_login')" },
   ],

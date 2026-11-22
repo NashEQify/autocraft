@@ -125,7 +125,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
   const featureOn = new Set<string>(["screenshots", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
   const scopes: Record<string, PrBuildScope> = { pdfcraft: "all" };
   let perDay = 10;
-  const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true };
+  const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true };
   const features = (): BuildFeatures => ({
     features: (Object.keys(SCOPED) as BuildFeatureName[]).map((feature) => ({
       feature, on: featureOn.has(feature), repoScoped: SCOPED[feature],

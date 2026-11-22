@@ -245,7 +245,7 @@ const PIPELINE_USAGE = `usage: autocraft-server pipeline on [--if-draining] | of
        autocraft-server pipeline parallel [<N|none>]
        autocraft-server pipeline review-interval [<minutes>]
        autocraft-server pipeline pick-minutes [<minutes>]
-       autocraft-server pipeline resume <fixup|cifix|fixissue|merge>[:<repo>] | outside-surge
+       autocraft-server pipeline resume <fixup|cifix|implement|merge>[:<repo>] | outside-surge
        autocraft-server pipeline pilot set <repo#number>... | show | clear`;
 
 // Recorded as `cli`: only someone with a shell on the host can run this.
