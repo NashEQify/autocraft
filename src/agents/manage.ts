@@ -25,7 +25,7 @@ export async function addAccount(db: Db, input: unknown, by: string): Promise<Cl
   if (!input || typeof input !== "object" || Array.isArray(input)) throw new AccountError(400, "the body must be a JSON object");
   const label = validLabel((input as { label?: unknown }).label);
   if (!configRoot()) throw new AccountError(400, "no config root is set for new accounts (AUTOCRAFT_ACCOUNTS_ROOT)");
-  const taken = new Set((await db.prepare("SELECT id FROM claude_accounts").all() as { id: string }[]).map((r) => r.id));
+  const taken = new Set((await db.all(db.k.selectFrom("claude_accounts").select("id"))).map((r) => r.id));
   for (const a of await boxAccounts(db)) taken.add(a.id);
   let n = 1;
   while (taken.has(`a${n}`)) n++;
@@ -34,7 +34,7 @@ export async function addAccount(db: Db, input: unknown, by: string): Promise<Cl
   mkdirSync(configRoot()!, { recursive: true, mode: 0o700 });
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  await db.prepare("INSERT INTO claude_accounts (id, label, enabled, updated_by, updated_at) VALUES (?, ?, 0, ?, ?)").run(id, label, by, new Date().toISOString());
+  await db.run(db.k.insertInto("claude_accounts").values({ id, label, enabled: 0, updated_by: by, updated_at: new Date().toISOString() }));
   await syncAccounts(db);
   await audit(db, by, "account-add", `account:${id}`, { label });
   return await view(db, id);
@@ -162,10 +162,10 @@ export class AccountWatcher {
     this.busy = true;
     try {
       await syncAccounts(this.db);
-      const enabled = new Set((await this.db.prepare("SELECT id FROM claude_accounts WHERE enabled = 1").all() as { id: string }[]).map((r) => r.id));
+      const enabled = new Set((await this.db.all(this.db.k.selectFrom("claude_accounts").select("id").where("enabled", "=", 1))).map((r) => r.id));
       for (const a of await boxAccounts(this.db)) {
         if (!ACCOUNT_ID.test(a.id) || loginRunning(a.id)) continue;
-        let loggedIn = (await this.db.prepare("SELECT logged_in FROM claude_account_status WHERE account_id = ?").get(a.id) as { logged_in: number } | undefined)?.logged_in === 1;
+        let loggedIn = (await this.db.get(this.db.k.selectFrom("claude_account_status").select("logged_in").where("account_id", "=", a.id)))?.logged_in === 1;
         if (nowMs - (this.statusAt.get(a.id) ?? 0) >= this.statusMs) {
           this.statusAt.set(a.id, nowMs);
           loggedIn = (await refreshStatus(this.db, a.id, a.configDir))?.loggedIn ?? loggedIn;

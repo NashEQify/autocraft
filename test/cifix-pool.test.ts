@@ -54,8 +54,8 @@ async function setup(calls = 2) {
   }
   await db.run(db.k.insertInto("tracked_repos").values({ name: "app", added_by: "op", added_at: T0, pipeline: 1 }));
   await setPushApproval(db, "op", "app", true);
-  await db.prepare("INSERT OR IGNORE INTO claude_accounts (id, label) VALUES ('a1', 'a1')").run();
-  await db.prepare("UPDATE claude_accounts SET enabled = 1, max_concurrent = 8 WHERE id = 'a1'").run();
+  await db.run(db.k.insertInto("claude_accounts").values({ id: "a1", label: "a1" }).onConflict((oc) => oc.doNothing()));
+  await db.run(db.k.updateTable("claude_accounts").set({ enabled: 1, max_concurrent: 8 }).where("id", "=", "a1"));
   const querier: Querier = validating({
     spent: 0, remaining: 5000,
     async query(_q: string, v: { n: number }) {

@@ -10,6 +10,7 @@ import { delimiter, join } from "node:path";
 import { jevCloudflareConfig } from "./jev-cloudflare.ts";
 import { audit } from "../dash/audit.ts";
 import type { Db } from "../db/index.ts";
+import { excluded } from "../db/kx.ts";
 
 export const JEV_ENABLED_KEY = "jev_enabled";
 export const JEV_UNAVAILABLE_KEY = "jev_unavailable";
@@ -18,8 +19,8 @@ export const JEV_RETRY_MS = 60 * 60_000;
 
 export type JevOutage = { kind: "off" | "missing" | "account"; reason: string; since: string; at: string };
 
-const get = async (db: Db, key: string): Promise<string | undefined> => (await db.prepare("SELECT value FROM settings WHERE key = ?").get(key) as { value: string } | undefined)?.value;
-const put = async (db: Db, key: string, value: string): Promise<void> => void await db.prepare("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value").run(key, value);
+const get = async (db: Db, key: string): Promise<string | undefined> => (await db.get(db.k.selectFrom("settings").select("value").where("key", "=", key)))?.value ?? undefined;
+const put = async (db: Db, key: string, value: string): Promise<void> => void await db.run(db.k.insertInto("settings").values({ key, value }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
 
 export const jevEnabled = async (db: Db): Promise<boolean> => await get(db, JEV_ENABLED_KEY) !== "no";
 
@@ -30,7 +31,7 @@ export async function jevOutage(db: Db): Promise<JevOutage | null> {
   } catch { return null; }
 }
 
-const clear = async (db: Db): Promise<void> => void await db.prepare("DELETE FROM settings WHERE key = ?").run(JEV_UNAVAILABLE_KEY);
+const clear = async (db: Db): Promise<void> => void await db.run(db.k.deleteFrom("settings").where("key", "=", JEV_UNAVAILABLE_KEY));
 
 /** True when Jev can be reached: Cloudflare Workers AI is configured, or an executable `jev` is on PATH. */
 export function jevInstalled(): boolean {
