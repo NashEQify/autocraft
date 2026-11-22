@@ -79,7 +79,7 @@ const realOpenPr: OpenPr = async (run, impl, o) => {
   const d = await attemptDiff(run.db, impl);
   if (!d.ok) return { ok: false, reason: d.reason, retry: true };
   const r = await openImplementationPr(run.db, {
-    implementation: { ...impl, baseSha: d.base }, diff: d.diff, model: SESSION_MODEL, checks: o.checks ? checkLines(o.checks) : [], by: run.by ?? "pipeline", draft: o.draft,
+    implementation: impl, base: d.base, diff: d.diff, model: SESSION_MODEL, checks: o.checks ? checkLines(o.checks) : [], by: run.by ?? "pipeline", draft: o.draft,
   }, { ...defaultPrDeps(), log: run.log });
   return r.ok ? { ok: true, url: r.url } : r;
 };

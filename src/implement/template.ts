@@ -57,6 +57,8 @@ export type PrBodyInput = {
   model: string;
   /** Changed Cargo manifests and lockfiles (validateImplementation). */
   manifests: string[];
+  /** Compile-time manifest changes (validateImplementation): the PR opens as a draft for a maintainer. */
+  compileTime?: { path: string; what: string }[];
   draft?: boolean;
 };
 
@@ -78,15 +80,19 @@ export function implPrBody(o: PrBodyInput): string {
     ? `Checks AutoCraft ran in the workspace:\n${o.checks.map((c) => `- [${c.ok ? "x" : " "}] ${code(c.name.slice(0, 100))}${c.detail ? `: ${oneLine(c.detail, CHECK_MAX)}` : ""}`).join("\n")}`
     : "AutoCraft ran no checks on this change.");
   if (o.manifests.length) parts.push(`This PR changes ${o.manifests.map(code).join(", ")}: check the dependency changes.`);
-  if (o.draft) parts.push("Opened as a draft: the implementation stopped before it passed every step, and a maintainer chose to open it as it is.");
+  if (o.compileTime?.length) {
+    parts.push(`Opened as a draft: this change makes Cargo run new code while it builds, so a maintainer decides whether it goes further.\n${o.compileTime.map((c) => `- ${code(c.path)}: ${c.what}`).join("\n")}`);
+  } else if (o.draft) parts.push("Opened as a draft: the implementation stopped before it passed every step, and a maintainer chose to open it as it is.");
   const plan = o.plan ? block(o.plan, PLAN_MAX) : "";
   if (plan) parts.push(`<details><summary>Plan</summary>\n\n${plan}\n\n</details>`);
   parts.push(`Written by ${modelLabel(o.model)} in a workspace session. The checks above are AutoCraft's own runs, not the session's report.`);
   return `${parts.join("\n\n")}\n`;
 }
 
+/** The commit message; file paths are untrusted and cleaned like titles, so none closes an issue or pings anyone. */
 export function implCommitMessage(title: string, number: number, files: string[]): string {
-  const list = files.length > 20 ? [...files.slice(0, 20), `and ${files.length - 20} more`] : files;
+  const shown = files.slice(0, 20).map(plainTitle);
+  const list = files.length > 20 ? [...shown, `and ${files.length - 20} more`] : shown;
   return `${title}\n\nFixes #${number}.\n\n${list.map((f) => `- ${f}`).join("\n")}\n`;
 }
 
