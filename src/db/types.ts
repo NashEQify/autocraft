@@ -2113,6 +2113,43 @@ export interface WorkLeases {
   taken_at: string;
 }
 
+export interface WorkspaceCalls {
+  id: Generated<number>;
+  workspace_id: number;
+  n: number | null;
+  tool: string;
+  args: Generated<string>;
+  state: Generated<string>;
+  result: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface Workspaces {
+  id: Generated<number>;
+  repo: string;
+  base_sha: string;
+  base_commit: string | null;
+  app: string | null;
+  env_id: string;
+  state: Generated<string>;
+  state_at: string;
+  pod: string | null;
+  pvc: string | null;
+  node: string | null;
+  limits: Generated<string>;
+  checkpoint: Uint8Array | null;
+  checkpoint_at: string | null;
+  last_call_at: string | null;
+  next_call: Generated<number>;
+  error: string | null;
+  owner: string | null;
+  created_at: string;
+  updated_at: string;
+  ended_at: string | null;
+}
+
 export interface DB {
   access: Access;
   account_usage_samples: AccountUsageSamples;
@@ -2288,6 +2325,8 @@ export interface DB {
   verifications: Verifications;
   whitelist_overrides: WhitelistOverrides;
   work_leases: WorkLeases;
+  workspace_calls: WorkspaceCalls;
+  workspaces: Workspaces;
   "main.access": Access;
   "main.account_usage_samples": AccountUsageSamples;
   "main.actions": Actions;
@@ -2462,6 +2501,8 @@ export interface DB {
   "main.verifications": Verifications;
   "main.whitelist_overrides": WhitelistOverrides;
   "main.work_leases": WorkLeases;
+  "main.workspace_calls": WorkspaceCalls;
+  "main.workspaces": Workspaces;
 }
 
 /** Each table's and view's columns in table order (no rowid), for selecting a whole row: `kx.cols`. */
@@ -2640,4 +2681,6 @@ export const COLUMNS = {
   verifications: ["repo", "number", "head_sha", "base_sha", "kind", "reason", "plan", "model", "head_task_id", "base_task_id", "state", "summary", "note", "created_at", "finished_at"],
   whitelist_overrides: ["login", "status", "note", "by", "at", "github_id"],
   work_leases: ["key", "job_id", "step", "taken_at"],
+  workspace_calls: ["id", "workspace_id", "n", "tool", "args", "state", "result", "created_at", "started_at", "finished_at"],
+  workspaces: ["id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pvc", "node", "limits", "checkpoint", "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at"],
 } as const;

@@ -13,10 +13,10 @@ export type ContainerState = {
   running?: { startedAt?: string };
   terminated?: { exitCode: number; reason?: string; message?: string; startedAt?: string; finishedAt?: string };
 };
-export type ContainerStatus = { name: string; state?: ContainerState };
+export type ContainerStatus = { name: string; ready?: boolean; state?: ContainerState };
 export type KPod = {
   metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string; deletionTimestamp?: string };
-  spec?: { activeDeadlineSeconds?: number };
+  spec?: { activeDeadlineSeconds?: number; nodeName?: string };
   status?: {
     phase?: "Pending" | "Running" | "Succeeded" | "Failed" | "Unknown";
     reason?: string;
@@ -48,7 +48,8 @@ export interface KubeApi {
 }
 
 export type ExecOptions = {
-  stdin?: Buffer;
+  /** A stream that fails ends the exec without closing stdin, so the command never takes a cut-off input as complete. */
+  stdin?: Buffer | AsyncIterable<Buffer>;
   /** Bytes of stdout and stderr together; past it the stream is closed and `truncated` set. */
   maxOut: number;
   /** From the upgrade to the end of the stream. */
@@ -225,12 +226,21 @@ function execStream(ws: WsConn, o: ExecOptions): Promise<ExecResult> {
     // stdin is always requested and always closed, so a command without input reads EOF at once.
     void (async () => {
       const input = o.stdin ?? Buffer.alloc(0);
-      for (let i = 0; i < input.length && !ended && !ws.closed; i += STDIN_FRAME - 1) {
-        const part = input.subarray(i, i + STDIN_FRAME - 1);
-        const f = Buffer.allocUnsafe(part.length + 1);
-        f[0] = 0;
-        part.copy(f, 1);
-        if (!ws.send(f)) await ws.drained();
+      try {
+        for await (const chunk of Buffer.isBuffer(input) ? [input] : input) {
+          for (let i = 0; i < chunk.length && !ended && !ws.closed; i += STDIN_FRAME - 1) {
+            const part = chunk.subarray(i, i + STDIN_FRAME - 1);
+            const f = Buffer.allocUnsafe(part.length + 1);
+            f[0] = 0;
+            part.copy(f, 1);
+            if (!ws.send(f)) await ws.drained();
+          }
+          if (ended || ws.closed) return;
+        }
+      } catch (e) {
+        exitCode = null;
+        error = clean(`the input failed: ${(e as Error).message}`);
+        return end();
       }
       if (!ended) ws.send(Buffer.from([255, 0]));
     })();
