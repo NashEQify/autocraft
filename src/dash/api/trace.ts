@@ -518,14 +518,7 @@ const fingerprintQueries = (db: Db, repo: string, n: number, ref: string) => {
   ];
 };
 
-/**
- * The column values of the first row of each query in select order (`[]` when there is none), read in one statement. Every
- * value is an integer, text or null, which a JSON array carries unchanged.
- */
-export async function rowValuesOf(db: Db, queries: readonly SelectQueryBuilder<any, any, any>[]): Promise<unknown[][]> {
-  const row: Record<string, string | null> | undefined = await db.get(db.k.selectNoFrom(queries.map((q, k) => kx.rowArray(db, q).as(`c${k}`))));
-  return queries.map((_, k) => { const v = row?.[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
-}
+export const rowValuesOf = kx.rowValues;
 
 export async function fingerprint(c: Ctx, qkey: string): Promise<string> {
   const { db, repo, n, ref } = c;

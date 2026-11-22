@@ -36,10 +36,10 @@ import { endChecks, serveChecks } from "./check-relay.ts";
 import { NO_TAKER_SKIP, skipItem } from "../runner/leases.ts";
 import type { CheckTool } from "../checktool/index.ts";
 import { filterSeq, mapSeq } from "../async-seq.ts";
-import type { AliasableExpression, SelectQueryBuilder, SqlBool } from "kysely";
+import type { AliasableExpression, SqlBool } from "kysely";
 import { adoptableCallExpr, earlierRunCallExpr, resumedRun, resumingJobsExpr } from "../runner/resuming.ts";
 import type { Db } from "../db/index.ts";
-import { ciEq as ciEqExpr, greatest, indexedBy, inList, least, literal, ref, rowArray, type Eb, type Ex } from "../db/kx.ts";
+import { ciEq as ciEqExpr, greatest, indexedBy, inList, least, literal, ref, rowValues, type Eb, type Ex } from "../db/kx.ts";
 import { settings } from "../settings-read.ts";
 
 /** A lease with no heartbeat for this long, while the dashboard was serving (liveness.ts), goes back to the queue. */
@@ -819,12 +819,6 @@ type TryReads = {
   role: Role | null; idle: boolean; cooled: { until: number; reason: string } | null; accepted: Record<Tier, string[]>; floors: Partial<Record<Tier, Effort>>;
   repos: ReadonlySet<string> | null; max: number | null; leased: number; reserve: Reserve; mode: InferenceMode; order: OrderReads;
 };
-
-/** The single-row reads of `queries` in one statement (kx.rowArray), each as its row's values in select order; [] for no row. */
-async function rowValues(db: Db, queries: readonly SelectQueryBuilder<any, any, any>[]): Promise<unknown[][]> {
-  const row: Record<string, string | null> | undefined = await db.get(db.k.selectNoFrom(queries.map((q, k) => rowArray(db, q).as(`c${k}`))));
-  return queries.map((_, k) => { const v = row?.[`c${k}`]; return v === null || v === undefined ? [] : (JSON.parse(v) as unknown[]); });
-}
 
 /** The user settings a claim try reads. */
 const CLAIM_USER_KEYS = [REPOS_KEY, MAX_CALLS_KEY, RESERVE_KEYS.fiveHour, RESERVE_KEYS.weekly, MANUAL_ONLY_KEY, SKIP_TASKS_KEY, TASK_ITEMS_KEY] as const;

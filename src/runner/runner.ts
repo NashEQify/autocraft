@@ -307,7 +307,7 @@ export class Runner {
     }
     // A private fix waits for its build without a job; the next job starts when the build tasks end, for operator-started fixes with the pipeline off too.
     try {
-      const next = await advanceSecurityFixes(this.db, await isEnabled(this.db));
+      const next = await advanceSecurityFixes(this.db, isEnabled(this.db));
       if (next) this.o.log(`security: continued the private fix of ${next} findings after their builds`);
     } catch (e) { this.o.log(`security fixes: ${(e as Error).message}`); }
     // The build task of a scan test is read here (database only); a finding whose test ended can then start its automatic fix.
@@ -465,6 +465,7 @@ export class Runner {
     const steps = await loadSteps();
     const queued = (await this.db.all(this.db.k.selectFrom("jobs").select(["id", "step", "params", "requested_by", "repo"]).where("state", "=", "queued").orderBy("id")))
       .sort((a, b) => (steps.get(b.step)?.priority ?? 0) - (steps.get(a.step)?.priority ?? 0) || a.id - b.id);
+    if (!queued.length) return;
     // Automatic jobs wait while the pipeline is off; they are cancelled when it is switched off. While it drains, nothing new starts.
     const [on, draining] = await Promise.all([isEnabled(this.db), isDraining(this.db)]);
     // Room by class, then by the job's step and repo ("" for a job without one): a runner counts only for the tasks it takes.
