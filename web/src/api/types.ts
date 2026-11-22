@@ -904,6 +904,8 @@ export interface TrackedRepo {
   seenChecks: string[];
   /** Whether the pipeline stages run on this repo; off means sync only. False for repos that are not tracked. */
   pipeline: boolean;
+  /** Whether the viewer may switch this repo's pipeline: an operator, or a maintainer with write access to the repo. */
+  canSwitch: boolean;
 }
 
 export interface AccessEntry {

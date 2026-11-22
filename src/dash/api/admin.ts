@@ -269,10 +269,10 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r));
+  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r, req));
 }
 
-async function toTrackedRepo(db: Db, r: RepoRow): Promise<TrackedRepo> {
+async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo> {
   return {
     name: r.name, owner: r.owner, tracked: !!r.tracked, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
     labels: r.tracked ? await labelsInfo(db, r.name) : null,
@@ -285,14 +285,15 @@ async function toTrackedRepo(db: Db, r: RepoRow): Promise<TrackedRepo> {
     optionalChecks: r.tracked ? await optionalChecks(db, r.name) : [],
     seenChecks: r.tracked ? await seenChecks(db, r.name) : [],
     pipeline: !!r.tracked && !!r.pipeline,
+    canSwitch: !!r.tracked && await maySwitch(req, r.name),
   };
 }
 
 // One repo, for the endpoints that change a single repo's settings: the web patches it into its list, so the answer skips every other repo's label plan.
-async function oneRepo(db: Db, name: string): Promise<TrackedRepo> {
+async function oneRepo(db: Db, req: Req, name: string): Promise<TrackedRepo> {
   const r = (await listAll(db)).find((x) => x.name === name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return await toTrackedRepo(db, r);
+  return await toTrackedRepo(db, r, req);
 }
 
 function approvalInfo(a: { by: string; at: string } | null): RepoApproval {
@@ -322,7 +323,7 @@ export async function labelsApproval(db: Db, req: Req, approved: boolean): Promi
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for labelling`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 // Only an operator lets the pipeline merge pull requests in a repo.
@@ -337,7 +338,7 @@ export async function mergeApproval(db: Db, req: Req, approved: boolean): Promis
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for merging`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 // Only an operator lets the pipeline approve the CI runs GitHub holds for outside contributors' PRs in a repo.
@@ -352,7 +353,7 @@ export async function ciApproval(db: Db, req: Req, approved: boolean): Promise<T
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for approving CI runs`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 export async function workspaceInfo(db: Db, req: Req): Promise<{ excluded: string[] }> {
@@ -394,7 +395,7 @@ export async function commentApproval(db: Db, req: Req, approved: boolean): Prom
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for commenting`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 // Only an operator lets the pipeline push fix-up commits to contributors' branches in a repo.
@@ -409,7 +410,7 @@ export async function pushApproval(db: Db, req: Req, approved: boolean): Promise
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for pushing`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 // Only an operator lets the pipeline open fix PRs for issues in a repo.
@@ -424,13 +425,18 @@ export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Pro
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing issues`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
-// Only an operator switches the pipeline stages on or off for a repo (off: sync only).
+// An operator, or a maintainer with write permission on the repo (read live from GitHub), switches the pipeline stages on or off for it (off: sync only).
+async function maySwitch(req: Req, repo: string): Promise<boolean> {
+  if (req.user.role === "operator") return true;
+  return req.user.role === "maintainer" && await req.user.canWrite(repo).catch(() => false);
+}
+
 export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
-  requireOperator(req, "switch the pipeline");
   const name = required(body(req).name, "name");
+  if (!await maySwitch(req, name)) throw new HttpError(403, "only an operator, or a maintainer with write access to the repo, switches its pipeline");
   const changed = await refused(async () => {
     try {
       return await setRepoPipeline(db, req.user.login, name, on);
@@ -439,7 +445,7 @@ export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<Tra
     }
   });
   if (!changed) throw new HttpError(409, `the pipeline is already ${on ? "on" : "off"} for ${name}`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 export async function track(db: Db, req: Req, on: boolean): Promise<TrackedRepo[]> {
@@ -610,7 +616,7 @@ export async function optionalCheck(db: Db, req: Req, on: boolean): Promise<Trac
     }
   });
   if (!changed) throw new HttpError(409, `${check} is ${on ? "already" : "not"} an optional check of ${name}`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }
 
 // Only an operator lets the pipeline act on a red default branch in a repo: rerun failed jobs, and open an issue on an operator's answer.
@@ -625,5 +631,5 @@ export async function mainFixApproval(db: Db, req: Req, approved: boolean): Prom
     }
   });
   if (!changed) throw new HttpError(409, `${name} is ${approved ? "already" : "not"} approved for fixing a red main`);
-  return await oneRepo(db, name);
+  return await oneRepo(db, req, name);
 }

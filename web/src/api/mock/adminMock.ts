@@ -99,15 +99,18 @@ const SORTS: Record<ContributorSort, (a: Author, b: Author, rule: WhitelistRule)
 
 const UNTRACKED = ["craft-website", "craft-ci-images", "craft-docs-archive", "artcraft-old-installer", "craft-design-tokens"];
 
-function buildRepos(): TrackedRepo[] {
+/** Repos where the mock maintainer has write access. */
+const MAINTAINER_WRITES = new Set(["designcraft", "craft-libs"]);
+
+function buildRepos(role: string): TrackedRepo[] {
   const r = rng(77);
   const tracked = REPO_OPEN.map(([name, open]) => {
     const prs = Math.round(open * (0.3 + r() * 0.2));
     const toAdd = Math.round(prs * (0.4 + r() * 0.3));
     const labels = { approved: false, approvedBy: null, approvedAt: null, toAdd, skipped: Math.round(prs * 0.2), conflicts: r() < 0.3 ? Math.floor(r() * 4) : 0 };
-    return { name, owner: MOCK_REPO_OWNERS[name] ?? "storytold", tracked: true, openPrs: prs, openIssues: open - prs, mirrored: Math.round(open * (3.5 + r())), syncedAt: iso((2 + r() * 40) * 60_000), labels, merging: { approved: false, approvedBy: null, approvedAt: null }, pushing: { approved: false, approvedBy: null, approvedAt: null }, commenting: { approved: false, approvedBy: null, approvedAt: null }, fixing: { approved: false, approvedBy: null, approvedAt: null }, mainFixing: { approved: false, approvedBy: null, approvedAt: null }, ciApproving: { approved: false, approvedBy: null, approvedAt: null }, optionalChecks: name === "designcraft" ? ["sonarcloud / SonarCloud Scan"] : [], seenChecks: ["gate / test", "gate / lint", "sonarcloud / SonarCloud Scan", "docs / link-check"], pipeline: name === "designcraft" };
+    return { name, owner: MOCK_REPO_OWNERS[name] ?? "storytold", tracked: true, openPrs: prs, openIssues: open - prs, mirrored: Math.round(open * (3.5 + r())), syncedAt: iso((2 + r() * 40) * 60_000), labels, merging: { approved: false, approvedBy: null, approvedAt: null }, pushing: { approved: false, approvedBy: null, approvedAt: null }, commenting: { approved: false, approvedBy: null, approvedAt: null }, fixing: { approved: false, approvedBy: null, approvedAt: null }, mainFixing: { approved: false, approvedBy: null, approvedAt: null }, ciApproving: { approved: false, approvedBy: null, approvedAt: null }, optionalChecks: name === "designcraft" ? ["sonarcloud / SonarCloud Scan"] : [], seenChecks: ["gate / test", "gate / lint", "sonarcloud / SonarCloud Scan", "docs / link-check"], pipeline: name === "designcraft", canSwitch: role === "operator" || (role === "maintainer" && MAINTAINER_WRITES.has(name)) };
   });
-  const rest = UNTRACKED.map((name) => ({ name, owner: "storytold", tracked: false, openPrs: Math.floor(r() * 30), openIssues: Math.floor(r() * 80), mirrored: name === "craft-docs-archive" ? 412 : 0, syncedAt: name === "craft-docs-archive" ? iso(12 * D) : null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false as const }));
+  const rest = UNTRACKED.map((name) => ({ name, owner: "storytold", tracked: false, openPrs: Math.floor(r() * 30), openIssues: Math.floor(r() * 80), mirrored: name === "craft-docs-archive" ? 412 : 0, syncedAt: name === "craft-docs-archive" ? iso(12 * D) : null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false as const, canSwitch: false }));
   return [...tracked, ...rest];
 }
 
@@ -174,7 +177,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
   const authors = buildAuthors();
   let singleMax = 3;
   let githubIdentity: "box" | "app" = typeof location !== "undefined" && location.search.includes("identity=app") ? "app" : "box";
-  const repos = buildRepos();
+  const repos = buildRepos(me.role);
   const access = structuredClone(ACCESS);
   const setupLinks: GithubSetupLink[] = [
     { id: "l1", org: "storytold", createdBy: me.login, createdAt: new Date(NOW - 2 * H).toISOString(), expiresAt: new Date(NOW + 7 * D - 2 * H).toISOString() },
@@ -305,7 +308,7 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         if (!/^[A-Za-z0-9._-]{1,100}$/.test(bare)) throw new Error("Not a repo name.");
         let r = repos.find((x) => x.name === bare);
         if (r?.tracked) throw new Error(`${name} is already tracked`);
-        if (!r) repos.push((r = { name: bare, owner, tracked: true, openPrs: null, openIssues: null, mirrored: 0, syncedAt: null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false }));
+        if (!r) repos.push((r = { name: bare, owner, tracked: true, openPrs: null, openIssues: null, mirrored: 0, syncedAt: null, labels: null, merging: null, pushing: null, commenting: null, fixing: null, mainFixing: null, ciApproving: null, optionalChecks: [], seenChecks: [], pipeline: false, canSwitch: operator }));
         r.tracked = true;
         r.labels ??= { approved: false, approvedBy: null, approvedAt: null, toAdd: 0, skipped: 0, conflicts: 0 };
         r.merging ??= { approved: false, approvedBy: null, approvedAt: null };
@@ -386,9 +389,9 @@ export function createAdminMock(me: User, changed: () => void): AdminApi {
         return wait(structuredClone(repos.find((x) => x.name === name)!), 40);
       },
       async setPipeline(name, on) {
-        requireOperator("switch the pipeline");
         const r = repos.find((x) => x.name === name);
         if (!r?.tracked) throw new Error(`${name} is not tracked`);
+        if (!r.canSwitch) throw new Error("only an operator, or a maintainer with write access to the repo, switches its pipeline");
         if (r.pipeline !== on) {
           r.pipeline = on;
           log("repo-pipeline", name, { on });
