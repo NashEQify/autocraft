@@ -122,11 +122,11 @@ function ResetCount({ l }: { l: StageLimit }) {
   );
 }
 
-/** Operators clear a pause the circuit breaker set. */
+/** Whoever the server allows (an operator, or a maintainer with write access to the repos it names) clears a pause the circuit breaker set. */
 function ResumeTrip({ l }: { l: StageLimit }) {
   const api = useApi();
   const write = useWrite();
-  if (!l.tripped) return null;
+  if (!l.tripped || !l.canResume) return null;
   const stage = l.tripped;
   return (
     <>
@@ -184,7 +184,7 @@ export function StageLimitRow({ step }: { step: string }) {
       </span>
       {operator && <ResetCount l={l} />}
       <PauseBadge l={l} />
-      {operator && <ResumeTrip l={l} />}
+      <ResumeTrip l={l} />
       {operator && <LimitEditor l={l} />}
     </div>
   );
@@ -219,7 +219,7 @@ export function StageLimits() {
                   <td className="px-3">
                     <div className="flex flex-wrap items-center gap-2">
                       {l.pausedReason ? <Badge tone="warn">{l.pausedReason}</Badge> : <span className="text-ink/45">{l.status ?? "ready"}</span>}
-                      {operator && <ResumeTrip l={l} />}
+                      <ResumeTrip l={l} />
                       {operator && <ResetCount l={l} />}
                     </div>
                   </td>

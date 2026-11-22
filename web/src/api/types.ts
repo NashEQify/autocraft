@@ -1225,8 +1225,10 @@ export interface JobFilter {
 }
 
 export type StageLimit = { step: string; title: string; perDay: number | null; usedToday: number; pausedReason: string | null;
-  /** The circuit-breaker stage that paused this step (fixup, cifix, fixissue, merge); an operator resumes it. */
+  /** The circuit-breaker stage that paused this step (fixup, cifix, fixissue, merge); an operator or a maintainer resumes it. */
   tripped?: string;
+  /** With `tripped`: whether the viewer may resume it. */
+  canResume?: boolean;
   /** What the stage is doing when nothing pauses it: "running", "queued", or why it is not starting ("nothing to do", "waiting for CI on 3 PRs in x"). */
   status?: string | null };
 export type PipelineState = { /** The model that prepares every question's options and recommendation (the prepare step), and the models an operator may pick ("opus", "sonnet"). */ judgementModel: string; judgementModels: string[]; enabled: boolean; /** Switched to drain: no new jobs, jobs already running keep their writes; shown as "Draining". Never true with enabled. */ draining: boolean; changedBy: string | null; changedAt: string | null; heartbeat: string | null; limits: StageLimit[]; /** "repo#number" refs the pipeline is limited to; empty when there is no pilot. */ pilot: string[]; outside: OutsideState };
@@ -2281,7 +2283,7 @@ export type NeedsFeedbackRow = {
   handled: boolean;
 };
 export type NeedsFeedbackPage = { rows: NeedsFeedbackRow[]; nextCursor: string | null };
-export type NeedsResume = { type: "trip"; stage: string } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
+export type NeedsResume = { type: "trip"; stage: string; /** Whether the viewer may resume it: an operator, or a maintainer with write access to the repos it names. */ canResume: boolean } | { type: "link"; to: string } | { type: "retry"; decision: string } | { type: "fixes"; repo: RepoName } | { type: "outside"; author: string };
 export type NeedsStoppedRow = {
   id: string;
   kind: "breaker" | "limit" | "account" | "act" | "fix-group" | "outside-group";

@@ -20,7 +20,7 @@ function Resume({ row, onDone }: { row: NeedsStoppedRow; onDone: () => void }) {
   const r = row.resume;
   if (r.type === "fixes" || r.type === "outside") return null;
   if (r.type === "link") return <TextLink to={r.to}>Open</TextLink>;
-  if (!operator) return null;
+  if (r.type === "trip" ? !r.canResume : !operator) return null;
   if (r.type === "retry") {
     return (
       <div className="flex flex-col items-end gap-1">
