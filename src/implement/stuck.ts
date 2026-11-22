@@ -25,6 +25,7 @@ export const STUCK_CAUSES = {
   blocked: "The session could not finish",
   "needs-dependency": "The change needs a dependency the workspace does not have",
   "checks-failing": "AutoCraft's checks still fail after three follow-up rounds",
+  "checks-no-verdict": "AutoCraft's checks gave no verdict twice (timeout, killed or did not run)",
   "no-change": "The session finished without changing anything",
   "diff-refused": "The change touches what an implementation may not change",
   "push-failed": "Pushing the branch failed repeatedly",

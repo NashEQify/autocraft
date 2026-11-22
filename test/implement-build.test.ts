@@ -33,6 +33,8 @@ async function setup() {
   const queued: WorkspaceCallRequest[] = [];
   let checksRound = 0;
   const clippyFails = { rounds: new Set<number>() };
+  /** Output files replaced per checks round (round number to file name to content). */
+  const override = new Map<number, Record<string, string>>();
   const pod: Pod = {
     async run(what) {
       if (what === "implement-changes") checksRound++;
@@ -47,6 +49,7 @@ async function setup() {
         "clippy.json": failing ? `${WARNING}\n{"reason":"build-finished","success":false}\n` : `{"reason":"build-finished","success":true}\n`,
         "tests.exit": "0", "tests.txt": "test result: ok. 3 passed",
       };
+      Object.assign(files, override.get(checksRound));
       return name in files ? Buffer.from(files[name]!) : null;
     },
   };
@@ -59,7 +62,7 @@ async function setup() {
     diffCheck: async () => ({ ok: false }),
   };
   const run: BuildRun = { db, log: () => {}, progress: async () => {}, cancelled: async () => false, stopping: async () => false, startedMs: Date.now(), noPr: true };
-  return { db, impl, deps, run, queued, clippyFails };
+  return { db, impl, deps, run, queued, clippyFails, override };
 }
 
 test("check findings go back to the same session as a follow-up, and a clean round leaves the attempt ready for its PR", async () => {
@@ -98,4 +101,26 @@ test("findings that survive three follow-ups make the attempt stuck, and Try aga
   assert.notEqual(next.id, s.impl.id);
   assert.equal(next.state, "planning");
   assert.deepEqual((await roundsOf(s.db, next.id)).map((r) => [r.kind, (r.result as { text?: string }).text]), [["guidance", "Keep the old signature."]]);
+});
+
+test("tests that timed out are no verdict: the checks run again, and a second no verdict makes the attempt stuck without findings for the session", async () => {
+  const s = await setup();
+  const timedOut = { "tests.exit": "124", "tests.txt": "" };
+  s.override.set(1, timedOut);
+  s.override.set(2, timedOut);
+  await runBuild(s.run, "app", 7, s.deps);
+  const im = (await implementationById(s.db, s.impl.id))!;
+  assert.equal(im.state, "stuck");
+  assert.equal(s.queued.length, 1, "nothing goes back to the session");
+  assert.match(String(im.reason ?? ""), /no verdict/i);
+});
+
+test("a no verdict that passes on the rerun is clean, and cargo fmt that is not installed is no verdict", async () => {
+  const s = await setup();
+  s.override.set(1, { "fmt.exit": "1", "fmt.txt": "error: no such command: `fmt`\n\tcargo-fmt is not installed" });
+  await runBuild(s.run, "app", 7, s.deps);
+  assert.equal((await implementationById(s.db, s.impl.id))!.state, "opening", "the second round has a verdict");
+  const checks = (await roundsOf(s.db, s.impl.id)).filter((r) => r.kind === "checks").map((r) => r.result as { clean: boolean; noVerdict: string[] });
+  assert.deepEqual(checks.map((c) => c.clean), [false, true]);
+  assert.match(checks[0]!.noVerdict[0]!, /cargo fmt gave no verdict/);
 });
