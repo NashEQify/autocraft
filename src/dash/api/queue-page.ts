@@ -367,7 +367,7 @@ async function openClosingIndex(db: Db, repo?: string): Promise<Map<string, numb
 }
 
 /** The planner's next steps of an issue whose PR Fix is building (src/core/decide-item.ts nextStep). */
-const FIX_BUILDS = new Set(["Fix", "Fix: in progress"]);
+const FIX_BUILDS = new Set(["Implement", "Implement: planning", "Implement: in progress"]);
 
 /** Queue states the Merge board puts in no group unless the PR has a merge hold (web/src/modules/queue/MergeBoard.tsx: neither a step nor stopped). */
 const UNSHOWN_STATES = new Set<string>(["declined", "held-duplicate", "held-backlog", "merged"]);
