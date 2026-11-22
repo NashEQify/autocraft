@@ -1084,7 +1084,8 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   node TEXT,                          -- the node the run was placed on; its volume binds there
   reserved_cpu_m INTEGER,             -- the run's largest stage request, held on that node for the run's life
   reserved_mem_bytes INTEGER,
-  disruptions INTEGER NOT NULL DEFAULT 0 -- stage pods the cluster took away (preemption, eviction) and that were recreated
+  disruptions INTEGER NOT NULL DEFAULT 0, -- stage pods the cluster took away (preemption, eviction) and that were recreated
+  replaces INTEGER NOT NULL DEFAULT 0  -- first pods no node had room for, deleted and placed again
 );
 
 -- A repository's memory for build step pods (src/build/sizing.ts); a repository without a row gets the environment's.

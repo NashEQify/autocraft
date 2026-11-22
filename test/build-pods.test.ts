@@ -327,6 +327,35 @@ test("a preempted step pod runs again on the same volume without using an attemp
   assert.equal((await queued(id)).state, "done");
 });
 
+test("a task pod recreated after a disruption stays on its volume's node; an eviction for the pod's own size limit is the step's failure", async () => {
+  const id = await simple();
+  await pass();
+  const first = kube.only(id);
+  first.status = { phase: "Failed", conditions: [{ type: "DisruptionTarget", status: "True", reason: "TerminationByKubelet" }] };
+  await pass();
+  const again = kube.only(id);
+  assert.notEqual(again.metadata.name, first.metadata.name);
+  again.status = structuredClone(UNSCHEDULABLE);
+  clock += 20 * 60_000;
+  await pass();
+  assert.equal(kube.only(id).metadata.name, again.metadata.name, "its volume is bound: it waits for room instead of moving");
+  assert.equal((await queued(id)).state, "running");
+  kube.end(again);
+  await pass();
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  const step = kube.only(id);
+  step.status = {
+    phase: "Failed", reason: "Evicted", message: "Usage of EmptyDir volume \"tmp\" exceeds the limit \"16Gi\".",
+    initContainerStatuses: [{ name: "step-0", state: { terminated: { exitCode: 137, reason: "Error" } } }],
+  };
+  await pass();
+  const t = (await getTask(db, id))!;
+  assert.equal(t.state, "failed");
+  assert.equal((await queued(id)).attempts, 1);
+  assert.match(t.summary ?? "", /exceeds the limit/);
+});
+
 test("with a compile cache, offline build steps read it at the CI runners' paths; fetch and bare steps never reach it", () => {
   const s = { ...DEFAULT_SETTINGS, sccacheUrl: "http://cache.test:8080" };
   const plan = [

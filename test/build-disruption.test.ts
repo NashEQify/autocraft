@@ -14,7 +14,8 @@ test("classifyPodEnd separates disruptions, node loss and the task's own faults"
   for (const reason of ["PreemptionByScheduler", "TerminationByKubelet", "EvictionByEvictionAPI", "DeletionByTaintManager"]) {
     assert.equal(classifyPodEnd(pod({ phase: "Failed", conditions: [{ type: "DisruptionTarget", status: "True", reason }], containerStatuses: term(137) }), true), "disruption", reason);
   }
-  assert.equal(classifyPodEnd(pod({ phase: "Failed", reason: "Evicted" }), true), "disruption");
+  assert.equal(classifyPodEnd(pod({ phase: "Failed", reason: "Evicted", message: "The node was low on resource: memory." }), true), "disruption");
+  assert.equal(classifyPodEnd(pod({ phase: "Failed", reason: "Evicted", message: "Usage of EmptyDir volume \"tmp\" exceeds the limit \"16Gi\"." }), true), "own-fault");
   assert.equal(classifyPodEnd(null, true), "disruption");
   assert.equal(classifyPodEnd(null, false), "node-lost");
   assert.equal(classifyPodEnd(null, null), "node-lost");

@@ -185,10 +185,10 @@ const runsPrCode = (t: { step: string; number: number | null }): boolean => t.st
 
 /**
  * Whether an environment has room for a task it would claim (the pod launcher's cluster capacity): "fit" claims it,
- * "stop" ends claiming for now (no later task is taken in its place, so priority order holds), and `fail` ends the task
- * at once with that summary (it can never fit).
+ * "stop" ends claiming for now (no later task is taken in its place, so priority order holds), "skip" passes over a task
+ * this environment can never run but another may, and `fail` ends the task at once with that summary (no environment can run it).
  */
-export type ClaimFit = (t: { id: number; repo: string; step: string; warmKey: string | null }) => Promise<"fit" | "stop" | { fail: string }>;
+export type ClaimFit = (t: { id: number; repo: string; step: string; warmKey: string | null; requires: Requires }) => Promise<"fit" | "stop" | "skip" | { fail: string }>;
 
 /**
  * Hands out queued tasks to an environment that has `free` slots: the oldest of the highest priority
@@ -239,8 +239,9 @@ export async function claim(db: Db, envId: string, free: number, nowMs: number =
             [head, base, plan] = [w.head, w.head, w.plan];
           }
           if (fit) {
-            const f = await fit({ id: t.id, repo: t.repo, step: t.step, warmKey: t.warm_key });
+            const f = await fit({ id: t.id, repo: t.repo, step: t.step, warmKey: t.warm_key, requires: json<Requires>(t.requires, {}) });
             if (f === "stop") break;
+            if (f === "skip") continue;
             if (f !== "fit") {
               await db.run(db.k.updateTable("build_tasks").set({ state: "failed", ended_at: at, summary: f.fail.slice(0, 300) }).where("id", "=", t.id).where("state", "=", "queued"));
               continue;

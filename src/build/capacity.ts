@@ -7,8 +7,12 @@
 import type { KContainerSpec, KNode, KPod, KResourceQuota } from "./kube-api.ts";
 import { APP_LABEL, quantity } from "./pods.ts";
 
-/** CPU in millicores, memory in bytes. */
-export type Res = { cpu: number; mem: number };
+/**
+ * CPU in millicores, memory in bytes: requests. The optional fields are what quotas may also count: limits of CPU and
+ * memory, and requests and limits of ephemeral storage. Nodes count requests only.
+ */
+export type Res = { cpu: number; mem: number; limCpu?: number; limMem?: number; ephReq?: number; ephLim?: number };
+type QuotaKey = keyof Res;
 
 export type CapNode = { name: string; ready: boolean; unschedulable: boolean; arch: string | undefined; labels: Record<string, string>; allocatable: Res };
 export type CapPod = {
@@ -45,6 +49,8 @@ export type Capacity = {
   fit(request: Res, prefer?: readonly string[]): string | null;
   /** `fit`, and deducts the request from that node and the quota so the next call sees it. */
   take(request: Res, prefer?: readonly string[]): string | null;
+  /** Gives back a request taken earlier (on `node`, when it had one) and its share of the quota. */
+  release(request: Res, node: string | null): void;
   /** How many more pods of this size fit, node by node and within quota. */
   countFit(request: Res): number;
 };
@@ -84,34 +90,38 @@ export function toCapPod(p: KPod): CapPod {
   };
 }
 
-/** Room left under the namespace's quotas (the smallest across quotas); null when none limits requests of cpu or memory. */
-export function quotaRoom(quotas: readonly KResourceQuota[]): Res | null {
-  let cpu: number | null = null, mem: number | null = null;
-  const room = (q: KResourceQuota, keys: string[], parse: (s: string | undefined) => number): number | null => {
-    for (const k of keys) {
-      const hard = q.status?.hard?.[k];
-      if (hard !== undefined) return parse(hard) - parse(q.status?.used?.[k]);
-    }
-    return null;
-  };
+const QUOTA_KEYS: [QuotaKey, string[], (q: string | undefined) => number][] = [
+  ["cpu", ["requests.cpu", "cpu"], cpuOf], ["mem", ["requests.memory", "memory"], memOf], ["limCpu", ["limits.cpu"], cpuOf], ["limMem", ["limits.memory"], memOf],
+  ["ephReq", ["requests.ephemeral-storage", "ephemeral-storage"], memOf], ["ephLim", ["limits.ephemeral-storage"], memOf],
+];
+
+/** Per quota key the smallest of `value(quota, its names)` across quotas; null when no quota limits any key. Missing cpu or mem is Infinity. */
+function acrossQuotas(quotas: readonly KResourceQuota[], value: (q: KResourceQuota, name: string, parse: (s: string | undefined) => number) => number): Res | null {
+  const out: Partial<Record<QuotaKey, number>> = {};
   for (const q of quotas) {
-    const c = room(q, ["requests.cpu", "cpu"], cpuOf), m = room(q, ["requests.memory", "memory"], memOf);
-    if (c !== null) cpu = cpu === null ? c : Math.min(cpu, c);
-    if (m !== null) mem = mem === null ? m : Math.min(mem, m);
+    for (const [key, names, parse] of QUOTA_KEYS) {
+      const name = names.find((n) => q.status?.hard?.[n] !== undefined);
+      if (name === undefined) continue;
+      const v = value(q, name, parse);
+      out[key] = Math.min(out[key] ?? Infinity, v);
+    }
   }
-  return cpu === null && mem === null ? null : { cpu: cpu ?? Infinity, mem: mem ?? Infinity };
+  return Object.keys(out).length ? { ...out, cpu: out.cpu ?? Infinity, mem: out.mem ?? Infinity } : null;
 }
 
-/** The smallest hard limit on requests of cpu and memory across the namespace's quotas; null when none limits them. A request above it never fits. */
+/** Room left under the namespace's quotas (the smallest across quotas); null when none limits what build pods use. */
+export function quotaRoom(quotas: readonly KResourceQuota[]): Res | null {
+  return acrossQuotas(quotas, (q, name, parse) => parse(q.status?.hard?.[name]) - parse(q.status?.used?.[name]));
+}
+
+/** The smallest hard limit across the namespace's quotas; null when none limits what build pods use. A request above it never fits. */
 export function quotaHard(quotas: readonly KResourceQuota[]): Res | null {
-  let cpu = Infinity, mem = Infinity;
-  for (const q of quotas) {
-    const h = q.status?.hard;
-    const c = h?.["requests.cpu"] ?? h?.cpu, m = h?.["requests.memory"] ?? h?.memory;
-    if (c !== undefined) cpu = Math.min(cpu, cpuOf(c));
-    if (m !== undefined) mem = Math.min(mem, memOf(m));
-  }
-  return cpu === Infinity && mem === Infinity ? null : { cpu, mem };
+  return acrossQuotas(quotas, (q, name, parse) => parse(q.status?.hard?.[name]));
+}
+
+/** The quota keys of `room` that `r` exceeds. */
+export function overQuota(room: Res, r: Res): QuotaKey[] {
+  return QUOTA_KEYS.map(([k]) => k).filter((k) => room[k] !== undefined && (r[k] ?? 0) > room[k]!);
 }
 
 export type CapacityInput = {
@@ -125,7 +135,7 @@ export type CapacityInput = {
   settings: CapacitySettings;
 };
 
-const fits = (free: Res, r: Res) => free.cpu >= r.cpu && free.mem >= r.mem;
+const fits = (free: Res, r: Res) => free.cpu >= r.cpu && free.mem >= r.mem && !overQuota(free, r).length;
 
 export function computeCapacity(input: CapacityInput): Capacity {
   const { settings } = input;
@@ -175,14 +185,19 @@ export function computeCapacity(input: CapacityInput): Capacity {
       const n = pick(r, prefer);
       if (!n) return null;
       n.free.cpu -= r.cpu; n.free.mem -= r.mem;
-      if (quota) { quota.cpu -= r.cpu; quota.mem -= r.mem; }
+      if (quota) for (const [k] of QUOTA_KEYS) if (quota[k] !== undefined) quota[k] = quota[k]! - (r[k] ?? 0);
       return n.name;
+    },
+    release(r, node) {
+      const n = nodes.find((x) => x.name === node);
+      if (n) { n.free.cpu += r.cpu; n.free.mem += r.mem; }
+      if (quota) for (const [k] of QUOTA_KEYS) if (quota[k] !== undefined) quota[k] = quota[k]! + (r[k] ?? 0);
     },
     countFit(r) {
       if (r.cpu <= 0 && r.mem <= 0) return 0;
       let n = 0;
       for (const node of nodes) n += Math.min(r.cpu > 0 ? Math.floor(node.free.cpu / r.cpu) : Infinity, r.mem > 0 ? Math.floor(node.free.mem / r.mem) : Infinity);
-      if (quota) n = Math.min(n, r.cpu > 0 ? Math.floor(quota.cpu / r.cpu) : Infinity, r.mem > 0 ? Math.floor(quota.mem / r.mem) : Infinity);
+      if (quota) for (const [k] of QUOTA_KEYS) if (quota[k] !== undefined && (r[k] ?? 0) > 0) n = Math.min(n, Math.floor(quota[k]! / r[k]!));
       return n;
     },
   };

@@ -18,7 +18,9 @@ export function classifyPodEnd(pod: KPod | null, nodeReady: boolean | null): Pod
   if (!pod) return nodeReady === true ? "disruption" : "node-lost";
   const st = pod.status;
   if (st?.conditions?.some((c) => c.type === "DisruptionTarget" && c.status === "True" && DISRUPTION_REASONS.has(c.reason ?? ""))) return "disruption";
-  if (st?.reason === "Evicted") return "disruption";
+  // The kubelet evicts for node pressure ("The node was low on resource: ...") and for the pod's own ephemeral storage or
+  // emptyDir size limit; only the first is the cluster's doing.
+  if (st?.reason === "Evicted") return /node was low on resource/i.test(st.message ?? "") ? "disruption" : "own-fault";
   const phase = st?.phase;
   if (phase === "Succeeded") return "ok";
   const statuses = [...(st?.initContainerStatuses ?? []), ...(st?.containerStatuses ?? [])];
@@ -31,14 +33,15 @@ export function classifyPodEnd(pod: KPod | null, nodeReady: boolean | null): Pod
 
 /**
  * A pod still Pending. A stage pod pinned to its volume's node cannot move, so insufficient resources there is a wait
- * with no time limit; an unpinned first pod unscheduled past the pending limit is deleted and placed again.
+ * with no time limit; an unpinned first pod short of room past the pending limit is deleted and placed again.
  */
 export function pendingKind(pod: KPod, ageMs: number, pinned: boolean): PendingKind {
   if (pod.status?.phase !== "Pending") return "wait";
   const sched = pod.status.conditions?.find((c) => c.type === "PodScheduled");
   if (sched?.status !== "False") return "wait";
-  if (pinned) return sched.reason === "Unschedulable" && /insufficient/i.test(sched.message ?? "") ? "capacity-wait" : "wait";
-  return ageMs > PENDING_LIMIT_MS ? "replace" : "wait";
+  const short = sched.reason === "Unschedulable" && /insufficient/i.test(sched.message ?? "");
+  if (pinned) return short ? "capacity-wait" : "wait";
+  return short && ageMs > PENDING_LIMIT_MS ? "replace" : "wait";
 }
 
 /** A disruption recreates the stage without using an attempt, up to MAX_DISRUPTIONS per task; `disruptions` counts those so far. */

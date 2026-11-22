@@ -13,22 +13,22 @@
 // same volume without using one of the task's attempts.
 import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Requires, SandboxEnv, TaskResult, TaskStep } from "../../web/src/api/types.ts";
+import type { Capabilities, Requires, SandboxEnv, TaskResult, TaskStep } from "../../web/src/api/types.ts";
 import { envVar } from "../env.ts";
 import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
-import { computeCapacity, feedbackCapacity, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
+import { computeCapacity, feedbackCapacity, overQuota, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
 import { classifyPodEnd, disruptionPolicy, MAX_DISRUPTIONS, pendingKind } from "./disruption.ts";
 import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQuota, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
 import { gib, raiseAfterOom, repoMemory } from "./sizing.ts";
 import { WarmStatus } from "./warm-status.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
-  PULL_REASONS, pvcSpec, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
+  PULL_REASONS, pvcSpec, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
   WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod,
 } from "./pods.ts";
 import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
-import { appendLog, claim, finishTask, type ClaimFit, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
+import { appendLog, claim, finishTask, satisfies, type ClaimFit, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
 import { cols } from "../db/kx.ts";
 
@@ -45,11 +45,13 @@ const APP_POD_SEC = 30 * 60;
 const WARM_PHASES_SEC = 30 * 60;
 /** A stage's pod the quota had no room for is created again after this long (an external wait, until the task's deadline). */
 const QUOTA_RETRY_MS = 60_000;
+/** A first pod no node had room for is placed again at most this often; after that it is lost as before. */
+const MAX_REPLACES = 2;
 
 type Run = {
   task_id: number; env_id: string; key_hash: string; pvc: string; stage: number; pod: string | null; pod_created_at: string | null;
   prepared: string | null; results: string; failed: string | null; ran: number; logged: string; create_tries: number; failing_since: string | null;
-  retry_at: string | null; started_at: string; node: string | null; reserved_cpu_m: number | null; reserved_mem_bytes: number | null; disruptions: number;
+  retry_at: string | null; started_at: string; node: string | null; reserved_cpu_m: number | null; reserved_mem_bytes: number | null; disruptions: number; replaces: number;
 };
 type TaskRow = { id: number; step: string; state: string; env_id: string | null; repo: string; plan: string; requires: string; log_bytes: number; warm_key: string | null };
 type EnvRow = { id: string; enabled: number; slots: number; settings: string | null };
@@ -75,7 +77,13 @@ export type LauncherDeps = {
  * One pass's view of cluster capacity for envs that share a namespace, arch and node reserve: `take` deducts from it, so
  * envs that share it see each other's claims. `error`: the reads failed, and those envs run their fixed slots.
  */
-type CapView = { cap: Capacity; tooLarge: (r: Res) => string | null } | { error: string };
+type CapView = {
+  cap: Capacity;
+  /** Why a request can never fit (`by` names what bounds it: the arch's nodes, or the namespace's quota); null when it can. */
+  tooLarge: (r: Res) => { text: string; by: "nodes" | "quota" } | null;
+  /** The most allocatable memory of any node of the arch, or null with none. */
+  nodeMaxMem: number | null;
+} | { error: string };
 /** Reads made once per pass: the nodes, each namespace's quota, and the capacity views built from them. */
 class PassReads {
   nodes: Promise<CapNode[]> | null = null;
@@ -88,7 +96,8 @@ export class LauncherState {
   warm: WarmStatus | null = null;
   reads = new PassReads();
   access = new Map<string, { at: number; missing: string[] }>();
-  backoff = new Map<string, { until: number; why: string }>();
+  /** `capacity`: the quota refused a first pod, a capacity wait rather than a fault. */
+  backoff = new Map<string, { until: number; why: string; capacity?: boolean }>();
   unknownSince = new Map<string, number>();
   /** Runs whose next pod the quota refused, with the health text shown while they wait for the retry. */
   quotaWait = new Map<number, string>();
@@ -188,7 +197,12 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
       if ("error" in view) return "fit";
       const { res } = await requestOf(ctx, t.repo, t.step);
       const large = view.tooLarge(res);
-      if (large) return { fail: `${large}; lower the repository's size with \`tasks sizes\`` };
+      if (large) {
+        const text = `${large.text}; lower the repository's size with \`tasks sizes\``;
+        if (!await otherEnvMayRun(ctx, t.requires, large.by)) return { fail: text };
+        ctx.pending.push(`Task ${t.id} is left to other environments: ${text}`.slice(0, 300));
+        return "skip";
+      }
       if (view.cap.fit(res) === null) {
         waiting = res;
         return "stop";
@@ -202,7 +216,8 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
       if (!t) break;
       const r = await start(ctx, t.id, view);
       if (r?.quota) {
-        ctx.pending.push("New tasks wait for build pod capacity: the namespace's quota has no room");
+        // The quota counts what the model may not (another quota key, pods outside AutoCraft): the next try waits a minute.
+        state.backoff.set(env.id, { until: now() + CREATE_BACKOFF_MS, why: r.err, capacity: true });
         quotaFull = true;
         break;
       }
@@ -235,6 +250,7 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   const health: Omit<EnvHealth, "since"> | null =
     access.missing.length ? { state: "fail", text: `The runner may not ${access.missing.join(", ")} in namespace ${ns}` }
     : !image ? { state: "fail", text: "No AutoCraft image is known for build pods: set AUTOCRAFT_IMAGE on the runner or the environment's image" }
+    : backNow && backNow.until > now() && backNow.capacity ? { state: "warn", text: "New tasks wait for build pod capacity: the namespace's quota has no room" }
     : backNow && backNow.until > now() ? { state: "fail", text: `A build pod could not be created: ${backNow.why}`.slice(0, 300) }
     : ctx.pending.length ? { state: "warn", text: ctx.pending[0]! }
     : !Object.keys(s.toolchainImages).length ? { state: "warn", text: "No toolchain image is set, so tasks that name a toolchain (every pipeline build) are not taken" }
@@ -278,7 +294,8 @@ async function requestOf(c: EnvCtx, repo: string, step: string): Promise<{ res: 
   const memory = await repoMemory(db, repo, c.s);
   const key = warmKeyOf(repo);
   const warm: WarmPod | undefined = step === WARM_STEP && c.s.warmWriter ? { key, gc: false, bytes: await warmBytes(db, key) } : undefined;
-  return { res: toRes(taskRequest(c.s, memory, warm)), memory };
+  const lim = taskLimits(c.s, memory, warm);
+  return { res: { ...toRes(taskRequest(c.s, memory, warm)), limCpu: lim.cpuM, limMem: lim.memBytes, ephReq: lim.ephRequest, ephLim: lim.ephLimit }, memory };
 }
 
 /** This pass's capacity view for the env (see CapView); the reads happen on the first call that needs them. */
@@ -316,34 +333,56 @@ async function readView(c: EnvCtx): Promise<CapView> {
     }
     // Other pods are not visible to the runner (capacity.ts): only our own reservations are taken off.
     const cap = computeCapacity({ nodes, pods: [], quota, reservations, settings: { archLabel, nodeReserve: reserve, buildPriority: 0 } });
-    const room = nodes.filter((n) => n.ready && !n.unschedulable && n.arch === archLabel).map((n) => ({ cpu: n.allocatable.cpu - reserve.cpu, mem: n.allocatable.mem - reserve.mem }));
+    // The bound counts every node of the arch, Ready or not, cordoned or not: one that comes back may take the task.
+    const arch = nodes.filter((n) => n.arch === archLabel);
+    const room = arch.map((n) => ({ cpu: n.allocatable.cpu - reserve.cpu, mem: n.allocatable.mem - reserve.mem }));
     const need = (r: Res) => `The task needs ${cpuText(r.cpu)} CPU and ${gib(r.mem)} of memory`;
-    const tooLarge = (r: Res): string | null => {
-      if (hard && (r.cpu > hard.cpu || r.mem > hard.mem)) return `${need(r)}, more than the namespace's quota allows in all (${[Number.isFinite(hard.cpu) ? `${cpuText(hard.cpu)} CPU` : "", Number.isFinite(hard.mem) ? gib(hard.mem) : ""].filter(Boolean).join(", ")})`;
-      // With no eligible node at all nothing is too large for the nodes: the tasks wait for one.
-      if (room.length && !room.some((n) => n.cpu >= r.cpu && n.mem >= r.mem)) return `${need(r)}, more than any build node offers`;
+    const tooLarge = (r: Res): { text: string; by: "nodes" | "quota" } | null => {
+      const over = hard ? overQuota(hard, r) : [];
+      if (over.length) return { text: `${need(r)}; it exceeds the namespace's quota in all (${over.join(", ")})`, by: "quota" };
+      // With no node of the arch at all nothing is too large for the nodes: the tasks wait for one.
+      if (room.length && !room.some((n) => n.cpu >= r.cpu && n.mem >= r.mem)) return { text: `${need(r)}, more than any build node offers`, by: "nodes" };
       return null;
     };
-    return { cap, tooLarge };
+    return { cap, tooLarge, nodeMaxMem: arch.length ? Math.max(...arch.map((n) => n.allocatable.mem)) : null };
   } catch (e) {
     return { error: (e as Error).message };
   }
+}
+
+/**
+ * Whether an enabled environment other than this one may run a task this one never can: one whose capabilities meet the
+ * task's requirements and that is not bound the same way (a kubernetes environment of the same arch shares the nodes, one
+ * in the same namespace shares the quota).
+ */
+async function otherEnvMayRun(c: EnvCtx, requires: Requires, by: "nodes" | "quota"): Promise<boolean> {
+  const others = await c.d.db.all(c.d.db.k.selectFrom("build_envs").select(["id", "kind", "capabilities", "settings"]).where("enabled", "=", 1).where("id", "!=", c.env.id));
+  return others.some((e) => {
+    const caps = json<Capabilities | null>(e.capabilities, null);
+    if (!caps || !satisfies(caps, requires)) return false;
+    if (e.kind !== "kubernetes") return true;
+    const s = settingsOf(e.settings);
+    return by === "nodes" ? s.arch !== c.s.arch : s.namespace !== c.s.namespace;
+  });
 }
 
 /** The nodes whose warm status holds the task's warm key, tried first so its build starts warm. */
 const warmNodes = (c: EnvCtx, t: TaskRow): string[] => c.state.warm?.warmNodesFor(t.warm_key ?? warmKeyOf(t.repo)).map((n) => n.node) ?? [];
 
 /**
- * Places a run under cluster capacity: picks its node (warm nodes first, then most free room, never `avoid` while another
- * fits) and records node and reservation. Without a view the node is left to the scheduler and learnt from the pod.
+ * Places a run under cluster capacity: picks its node (warm nodes first, then the most free room now; with `avoid`, any
+ * other node that fits before it) and records node and reservation. Without a view the node is left to the scheduler
+ * and learnt from the pod.
  */
 async function place(c: EnvCtx, run: Run, t: TaskRow, view: CapView | null, avoid?: string | null): Promise<void> {
   const { res } = await requestOf(c, t.repo, t.step);
   let node: string | null = null;
   if (view && !("error" in view)) {
-    const others = view.cap.nodes.map((n) => n.name).filter((n) => n !== avoid);
     const warm = warmNodes(c, t).filter((n) => n !== avoid);
-    node = view.cap.take(res, [...warm, ...others.filter((n) => !warm.includes(n))]);
+    const others = avoid
+      ? [...view.cap.nodes].sort((a, b) => b.free.cpu - a.free.cpu || b.free.mem - a.free.mem).map((n) => n.name).filter((n) => n !== avoid && !warm.includes(n))
+      : [];
+    node = view.cap.take(res, [...warm, ...others]);
   }
   Object.assign(run, { node, reserved_cpu_m: res.cpu, reserved_mem_bytes: res.mem });
   await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ node, reserved_cpu_m: res.cpu, reserved_mem_bytes: res.mem }).where("task_id", "=", run.task_id));
@@ -438,7 +477,13 @@ async function advance(c: EnvCtx, run: Run): Promise<void> {
   const now = c.now();
   const t = await taskOf(db, run.task_id);
   if (!t || t.env_id !== c.env.id || (t.state !== "claimed" && t.state !== "running")) return removeRun(c, run);
-  if (overdue(c, run)) return lose(c, run, overdueText(c));
+  if (overdue(c, run)) {
+    // A run that spent its time waiting for room ends as failed: requeued, it would wait again with a fresh deadline.
+    const pending = c.pods.find((p) => p.metadata.name === run.pod);
+    const unscheduled = pending?.status?.phase === "Pending" && pending.status.conditions?.some((x) => x.type === "PodScheduled" && x.status === "False");
+    if (c.state.quotaWait.has(run.task_id) || unscheduled) return finish(c, run, run.failed ?? "the task passed its deadline waiting for build capacity");
+    return lose(c, run, overdueText(c));
+  }
   if (!run.pod) {
     if (run.retry_at && now < Date.parse(run.retry_at)) {
       const wait = c.state.quotaWait.get(run.task_id);
@@ -482,13 +527,14 @@ async function advance(c: EnvCtx, run: Run): Promise<void> {
     if (phase === "Pending" && !statuses.some((s) => s.state?.running || s.state?.terminated)) {
       const why = sched?.status === "False" ? sched.message ?? sched.reason ?? "not scheduled" : pull ? `${pull.state!.waiting!.reason}` : "starting";
       if (unscheduled) {
-        // Later stages are pinned to the node that holds the task's volume; the first pod's volume is not bound yet.
-        const kind = pendingKind(pod, age, run.stage !== STAGE_TASK);
+        // Later stages are pinned to the node that holds the task's volume, and so is a task pod recreated after a
+        // disruption; only a first pod that never ran has an unbound volume.
+        const kind = pendingKind(pod, age, run.stage !== STAGE_TASK || run.disruptions > 0);
         if (kind === "capacity-wait") {
           c.pending.push(`Task ${t.id} waits for room on node ${pod.spec?.nodeName ?? run.node ?? "of its volume"} until its deadline: ${why}`.slice(0, 300));
           return;
         }
-        if (kind === "replace") return replace(c, run, t, why);
+        if (kind === "replace" && run.replaces < MAX_REPLACES) return replace(c, run, t, why);
         if (age > PENDING_LIMIT_MS) return lose(c, run, `No node took the build pod within ${minutes(PENDING_LIMIT_MS)}: ${why}`.slice(0, 300));
       }
       // The text stays the same while the pod waits, so the health check's `since` holds.
@@ -538,7 +584,16 @@ async function replace(c: EnvCtx, run: Run, t: TaskRow, why: string): Promise<vo
   c.d.log(`pod launcher: task ${run.task_id}: no node took its first pod (${why}); placing it again`);
   if (run.pod) await c.api!.deletePod(c.s.namespace, run.pod).catch(() => {});
   const avoid = run.node;
-  await place(c, run, t, c.cluster ? await capacityView(c) : null, avoid);
+  const view = c.cluster ? await capacityView(c) : null;
+  // The view counts this run's reservation and its pod's quota share; both go with the deleted pod.
+  if (view && !("error" in view)) {
+    const { res } = await requestOf(c, t.repo, t.step);
+    view.cap.release({ ...res, cpu: run.reserved_cpu_m ?? res.cpu, mem: run.reserved_mem_bytes ?? res.mem }, avoid);
+  }
+  const replaces = run.replaces + 1;
+  await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ replaces }).where("task_id", "=", run.task_id));
+  run.replaces = replaces;
+  await place(c, run, t, view, avoid);
   return next(c, run, t, STAGE_TASK);
 }
 
@@ -603,7 +658,8 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       if (timedOut) failed = `${step.name} timed out`;
       else if (oomKilled) {
         // The repository's next builds get more memory; this one fails as any failed step does.
-        const r = await raiseAfterOom(db, t.repo, c.s);
+        const view = c.cluster ? await capacityView(c) : null;
+        const r = await raiseAfterOom(db, t.repo, c.s, view && !("error" in view) ? view.nodeMaxMem : null);
         failed = `${step.name} ran out of memory; ${r.raised ? `the repository's next builds get ${gib(r.memory.limitBytes)}` : `${gib(r.memory.limitBytes)} is already the most a build pod gets`}`;
       }
       else if (term!.exitCode !== 0) failed = pod.status?.reason === "Evicted" ? `${step.name} failed: ${pod.status.message ?? "evicted"}`.slice(0, 300) : `${step.name} failed (exit ${term!.exitCode})`;

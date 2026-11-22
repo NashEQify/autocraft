@@ -36,11 +36,12 @@ async function write(db: Db, repo: string, m: StepMemory, reason: string): Promi
 }
 
 /**
- * After a step of `repo` was OOM-killed: its request and limit grow by OOM_RAISE, each at most the environment's maxPodMemory.
- * `raised` is false when the limit was already there, so a rerun would get no more memory.
+ * After a step of `repo` was OOM-killed: its request and limit grow by OOM_RAISE, each at most the environment's maxPodMemory
+ * and `nodeMaxBytes` (the largest node's allocatable memory, when known). `raised` is false when the limit was already
+ * there, so a rerun would get no more memory.
  */
-export async function raiseAfterOom(db: Db, repo: string, s: KubeSettings): Promise<{ memory: StepMemory; raised: boolean }> {
-  const max = quantity(s.maxPodMemory);
+export async function raiseAfterOom(db: Db, repo: string, s: KubeSettings, nodeMaxBytes: number | null = null): Promise<{ memory: StepMemory; raised: boolean }> {
+  const max = Math.min(quantity(s.maxPodMemory), nodeMaxBytes ?? Infinity);
   const before = await repoMemory(db, repo, s);
   const limit = Math.min(roundUp(before.limitBytes * OOM_RAISE), max);
   const memory = { requestBytes: Math.min(roundUp(before.requestBytes * OOM_RAISE), limit), limitBytes: limit };

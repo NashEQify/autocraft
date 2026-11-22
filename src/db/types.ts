@@ -216,6 +216,7 @@ export interface BuildPodRuns {
   reserved_cpu_m: number | null;
   reserved_mem_bytes: number | null;
   disruptions: Generated<number>;
+  replaces: Generated<number>;
 }
 
 export interface BuildSizes {
@@ -2652,7 +2653,7 @@ export const COLUMNS = {
   autorepins: ["repo", "number", "ref_repo", "ref_number", "login", "github_id", "requested_at", "state", "sha", "head", "task_id", "tries", "tried_at", "to_head", "result", "done_at", "notice", "ref_branch"],
   build_artifacts: ["task_id", "name", "bytes", "content_type", "file"],
   build_envs: ["id", "label", "kind", "enabled", "slots", "confidential", "confidential_since", "confidential_online_at", "key_hash", "capabilities", "reported_slots", "version", "paused_reason", "last_seen_at", "created_at", "updated_by", "updated_at", "settings", "health", "health_at"],
-  build_pod_runs: ["task_id", "env_id", "key_hash", "pvc", "stage", "pod", "pod_created_at", "prepared", "results", "failed", "ran", "logged", "create_tries", "failing_since", "retry_at", "started_at", "node", "reserved_cpu_m", "reserved_mem_bytes", "disruptions"],
+  build_pod_runs: ["task_id", "env_id", "key_hash", "pvc", "stage", "pod", "pod_created_at", "prepared", "results", "failed", "ran", "logged", "create_tries", "failing_since", "retry_at", "started_at", "node", "reserved_cpu_m", "reserved_mem_bytes", "disruptions", "replaces"],
   build_sizes: ["repo", "memory_request_bytes", "memory_limit_bytes", "updated_at", "reason"],
   build_task_logs: ["task_id", "seq", "step", "chunk"],
   build_tasks: ["id", "job_id", "step", "repo", "number", "head_sha", "base_sha", "requires", "priority", "plan", "state", "env_id", "attempts", "queued_at", "claimed_at", "started_at", "ended_at", "heartbeat_at", "cancel_requested_at", "results", "summary", "log_bytes", "artifact_bytes", "patch", "warm_key", "warm_role", "sandbox_env", "warm_image"],

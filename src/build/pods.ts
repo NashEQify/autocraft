@@ -67,7 +67,9 @@ function checkImage(v: unknown, name: string): string {
 
 export function settingsOf(json: string | null): KubeSettings {
   try {
-    return { ...DEFAULT_SETTINGS, ...(json ? (JSON.parse(json) as Partial<KubeSettings>) : {}) };
+    const stored = json ? (JSON.parse(json) as Partial<KubeSettings>) : {};
+    // Environments stored before capacity existed keep their fixed slots until an operator switches them.
+    return { ...DEFAULT_SETTINGS, ...stored, ...(json && stored.capacity === undefined ? { capacity: "fixed" as const } : {}) };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }
@@ -391,6 +393,19 @@ export function taskRequest(s: KubeSettings, memory?: StepMemory | null, warm?: 
   return {
     cpuM: Math.ceil(Math.max(quantity(APP_CPU_REQUEST), quantity(s.cpuRequest)) * 1000),
     memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_REQUEST), quantity(stepMemory(s, memory).request) + extra)),
+  };
+}
+
+/**
+ * The limits and ephemeral storage one stage counts against a quota, beside taskRequest's requests: the largest container's,
+ * since every pod runs its containers one after another (steps are init containers).
+ */
+export function taskLimits(s: KubeSettings, memory?: StepMemory | null, warm?: WarmPod): { cpuM: number; memBytes: number; ephRequest: number; ephLimit: number } {
+  const extra = warm ? warmMemory(warm) ?? 0 : 0;
+  return {
+    cpuM: Math.ceil(Math.max(quantity(APP_CPU_LIMIT), quantity(s.cpuLimit)) * 1000),
+    memBytes: Math.ceil(Math.max(quantity(APP_MEMORY_LIMIT), quantity(stepMemory(s, memory).limit) + extra)),
+    ephRequest: Math.ceil(quantity(s.ephemeralRequest)), ephLimit: Math.ceil(quantity(s.ephemeralLimit)),
   };
 }
 
