@@ -154,9 +154,8 @@ async function validImageHash(file: string): Promise<string | null> {
   } catch { return null; }
 }
 
-/** Whether a run in flight has work: its tasks ended or started, its PR moved or closed, or the repo's switch went off. */
-export async function screenshotsDue(db: Db): Promise<boolean> {
-  if (await db.get(db.k.selectFrom("screenshot_runs as r")
+/** A run in flight whose tasks ended or started, or whose PR moved or closed: one row when there is one. */
+export const movedRun = (db: Db) => db.k.selectFrom("screenshot_runs as r")
     .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "r.repo").onRef("i.number", "=", "r.number"))
     .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "r.repo").onRef("c.number", "=", "r.number"))
     .leftJoin("build_tasks as h", "h.id", "r.head_task_id")
@@ -171,7 +170,14 @@ export async function screenshotsDue(db: Db): Promise<boolean> {
       eb.and([eb("h.state", "in", TERMINAL), eb.or([eb("b.id", "is", null), eb("b.state", "in", TERMINAL)])]),
       eb.and([eb("r.state", "=", "planned"), eb.or([eb("h.state", "in", ["claimed", "running"]), eb("b.state", "in", ["claimed", "running"])])]),
     ]))
-    .limit(1))) return true;
+    .limit(1);
+
+/**
+ * Whether a run in flight has work: its tasks ended or started, its PR moved or closed, or the repo's switch went off.
+ * `moved`: the answer of movedRun, when the caller read it.
+ */
+export async function screenshotsDue(db: Db, moved?: boolean): Promise<boolean> {
+  if (moved ?? !!await db.get(movedRun(db))) return true;
   const repos = await db.all(db.k.selectFrom("screenshot_runs as r").select("r.repo").distinct()
     .where("r.state", "in", ["planned", "running"])
     .where((eb) => pilotExprFor(db, eb, "r.repo", "r.number"))

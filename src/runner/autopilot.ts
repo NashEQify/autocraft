@@ -55,10 +55,9 @@ import { claudePauseReason } from "../agents/accounts.ts";
 import { inferenceMode } from "../remote/mode.ts";
 import { takerSignature } from "../remote/takers.ts";
 import { activeTrips, tripReasonIn, tripReasonOfStep } from "../push-outcomes.ts";
-import type { TripStage } from "../core/push-outcome.ts";
-import { STEP_STAGE } from "../core/push-outcome.ts";
+import { STEP_STAGE, type TripStage } from "../core/push-outcome.ts";
 import { NO_TAKER_SKIP } from "./leases.ts";
-import { activeJobs, jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
+import { jobBlock, stepParallel, untakenTest, type Active, type UntakenTest } from "./concurrency.ts";
 import { knownStep, loadSteps, STEPS, modelsOf, usesClaude, type Params, type StepDef } from "./steps.ts";
 import { pilotItems, scopeRepos } from "../pilot.ts";
 import { refreshOutsideHolds } from "../outside.ts";
@@ -1082,7 +1081,12 @@ async function detectPass(db: Db, opts: PlanOptions, steps: Map<string, StepDef>
   const scope = ctx.scope ?? await scopeRepos(db);
   const seqs = await readSeqs(db);
   const status: Record<string, string> = {};
-  const active = await activeJobs(db);
+  // activeJobs, read with the items the daily limits reserve (reservedByJobs): one read of the queued and running jobs for the pass.
+  const live = await db.all(db.k.selectFrom("jobs").select(["id", "step", "state", "repo", kx.jsonNum(db, "params", "$.number").as("number"), "params", "items"])
+    .where("state", "in", ["queued", "running"]));
+  const active: Active[] = live.map(({ items: _, ...a }) => a);
+  const reads = passOf(db);
+  if (reads) reads.live = live;
   const perLane = Math.max(PROPOSALS_PER_LANE, Math.min(await stepParallel(db), 16));
   // Pause and limit do not change during the pass: one answer per step.
   const paused = new Map<string, string | null>();

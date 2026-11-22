@@ -111,3 +111,10 @@ export function exclusive(fn: () => Promise<void>): { skip(): Promise<void>; run
     },
   };
 }
+
+/** Awaits the promises of `o` together; the values come back under the same keys. */
+export async function allOf<T extends Record<string, Promise<unknown>>>(o: T): Promise<{ [K in keyof T]: Awaited<T[K]> }> {
+  const keys = Object.keys(o);
+  const values = await Promise.all(keys.map((k) => o[k]));
+  return Object.fromEntries(keys.map((k, i) => [k, values[i]])) as { [K in keyof T]: Awaited<T[K]> };
+}

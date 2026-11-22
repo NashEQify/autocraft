@@ -15,11 +15,11 @@ import { MAX_SUMMARY_WORDS, SUMMARY_LOG_BYTES, type VerifySummaryInput } from ".
 import { pilotExprFor } from "../pilot.ts";
 import { backlogHeldExpr } from "../dupes/held.ts";
 import { jobItem } from "../runner/job-items.ts";
-import { collectScreenshots, screenshotsDue, type ScreenshotDeps } from "./screenshots.ts";
+import { collectScreenshots, movedRun, screenshotsDue, type ScreenshotDeps } from "./screenshots.ts";
 import { mapSeq } from "../async-seq.ts";
 import type { AliasableExpression } from "kysely";
 import type { Db } from "../db/index.ts";
-import { cols, type Eb } from "../db/kx.ts";
+import { cols, rowArray, type Eb } from "../db/kx.ts";
 
 const PROMPT = CLAUDE_PROMPTS["verify.summary"];
 const ACTOR = "verify";
@@ -97,7 +97,7 @@ export async function listVerifications(db: Db, o: { states?: VerificationState[
  * finished, or that is still `planned` while a task has started. One query on the state index.
  */
 export async function collectDue(db: Db): Promise<boolean> {
-  return !!await db.get(db.k.selectFrom("verifications as v")
+  const due = db.k.selectFrom("verifications as v")
     .leftJoin("items as i", (j) => j.onRef("i.repo", "=", "v.repo").onRef("i.number", "=", "v.number"))
     .leftJoin("pr_checks as c", (j) => j.onRef("c.repo", "=", "v.repo").onRef("c.number", "=", "v.number"))
     .leftJoin("build_tasks as h", "h.id", "v.head_task_id")
@@ -112,7 +112,10 @@ export async function collectDue(db: Db): Promise<boolean> {
       eb.and([eb("h.state", "in", TERMINAL), eb.or([eb("b.id", "is", null), eb("b.state", "in", TERMINAL)])]),
       eb.and([eb("v.state", "=", "planned"), eb.or([eb("h.state", "in", ["claimed", "running"]), eb("b.state", "in", ["claimed", "running"])])]),
     ]))
-    .limit(1)) || await screenshotsDue(db);
+    .limit(1);
+  // Read with the screenshot runs' own check in one statement.
+  const r = (await db.get(db.k.selectNoFrom([rowArray(db, due).as("verification"), rowArray(db, movedRun(db)).as("screenshots")])))!;
+  return r.verification !== null || await screenshotsDue(db, r.screenshots !== null);
 }
 
 // ---- judging tasks -----------------------------------------------------------

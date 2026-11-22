@@ -42,11 +42,11 @@ async function sortKeysOf(db: Db, items: { repo: string; number: number }[]): Pr
   return new Map(rows.map((r) => [r.ref, { created: r.created, updated: r.updated }]));
 }
 
-/** The sort keys of a PlanSet's items, read for all of its items on first use (one query for every kind) and kept with the set. */
+/** The sort keys of a PlanSet's items, read on first use for every item with an action (one query for every kind) and kept with the set. */
 const planKeys = new WeakMap<PlanSet, Map<string, Keys>>();
 async function planSortKeys(db: Db, plans: PlanSet, items: { repo: string; number: number }[]): Promise<Map<string, Keys>> {
   let m = planKeys.get(plans);
-  if (!m) planKeys.set(plans, (m = await sortKeysOf(db, plans.items.map((p) => p.facts))));
+  if (!m) planKeys.set(plans, (m = await sortKeysOf(db, plans.items.filter((p) => p.plan.actions.length).map((p) => p.facts))));
   const missing = new Map<string, { repo: string; number: number }>();
   for (const x of items) if (!m.has(`${x.repo}#${x.number}`)) missing.set(`${x.repo}#${x.number}`, x);
   if (missing.size) for (const [k, v] of await sortKeysOf(db, [...missing.values()])) m.set(k, v);

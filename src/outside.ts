@@ -18,11 +18,11 @@ import { allOwnLogins } from "./github/identity.ts";
 import type { OutsideHoldInfo } from "./core/plan.ts";
 import { trip, tripRow } from "./push-outcomes.ts";
 import { isWhitelisted, tierKey, whitelistedOf } from "./whitelist.ts";
-import { pipelineRepos } from "./pilot.ts";
 import { hasSetting, settingRows } from "./settings-read.ts";
 import { isBotLogin } from "./review/bots.ts";
 import { filterSeq } from "./async-seq.ts";
 import type { Db } from "./db/index.ts";
+import * as kx from "./db/kx.ts";
 import { ciEq, excluded } from "./db/kx.ts";
 
 export const OUTSIDE_SURGE = "outside-surge";
@@ -120,7 +120,15 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
   const enabled = lim.prsPerDay > 0 || lim.issuesPerDay > 0 || lim.surgePerHour > 0;
   const holds: Hold[] = [];
   let wakeAt: number | null = null;
-  const released = new Set((await db.all(db.k.selectFrom("main.outside_released").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
+  // The released items, the repos with the pipeline on and the fast-tracked items, in one statement (each list joined with commas).
+  const refList = (eb: kx.AnyEb) => eb(eb(eb.ref("repo"), "||", eb.val("#")), "||", eb.cast<string>("number", "text"));
+  const lists = (await db.get(db.k.selectNoFrom([
+    kx.rowArray(db, db.k.selectFrom("main.outside_released").select((eb) => kx.groupConcat(db, refList(eb), ",", refList(eb)).as("v"))).as("released"),
+    kx.rowArray(db, db.k.selectFrom("main.tracked_repos").select(kx.groupConcat(db, "name", ",", "name").as("v")).where("pipeline", "=", 1)).as("scope"),
+    kx.rowArray(db, db.k.selectFrom("main.fast_track").select((eb) => kx.groupConcat(db, refList(eb), ",", refList(eb)).as("v"))).as("fast"),
+  ])))!;
+  const listOf = (v: string | null): Set<string> => { const [joined] = JSON.parse(v ?? "[null]") as [string | null]; return new Set(joined ? joined.split(",") : []); };
+  const released = listOf(lists.released);
   // The breaker's row, read once: only trip() below writes it, and a trip starts the refresh again.
   const surge = await tripRow(db, OUTSIDE_SURGE);
   if (enabled) {
@@ -130,8 +138,7 @@ export async function refreshOutsideHolds(db: Db, now: number = Date.now()): Pro
     // While the breaker is tripped its holds last until it is resumed, however old the items are.
     const from = Math.min(dayAgo, surgeFrom ?? dayAgo);
     // Only items in scope for model work count: repos with the pipeline on, and not fast-tracked.
-    const scope = await pipelineRepos(db);
-    const fast = new Set((await db.all(db.k.selectFrom("main.fast_track").select(["repo", "number"]))).map((r) => `${r.repo}#${r.number}`));
+    const scope = listOf(lists.scope), fast = listOf(lists.fast);
     // A post-merge follow-up issue is opened by the pipeline from a review of a merged PR: it counts as an item of that PR's author.
     const rows = (await db.all(db.k.selectFrom("items as i")
       .leftJoin("items as p", (j) => j.on("i.kind", "=", "issue").onRef("p.repo", "=", "i.repo").on((eb) => eb("p.number", "=", eb.selectFrom("main.postmerge_followups as f").select("f.number").whereRef("f.repo", "=", "i.repo").whereRef("f.issue_number", "=", "i.number").limit(1))))
