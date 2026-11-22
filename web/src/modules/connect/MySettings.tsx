@@ -6,7 +6,7 @@ import { Input } from "../../ui/atoms/Input";
 import { Switch } from "../../ui/atoms/Switch";
 import { Block } from "../../ui/molecules/Block";
 import { CheckRow } from "../../ui/molecules/CheckRow";
-import { Segmented } from "../../ui/molecules/Segmented";
+import { RadioRow } from "../../ui/molecules/RadioRow";
 import type { TaskItems } from "../../api/types";
 import { TipLines, Tooltip } from "../../ui/atoms/Tooltip";
 import { useWrite } from "../../lib/hooks";
@@ -238,18 +238,21 @@ export function MySettings() {
         </div>
       </Fold>
       <Fold className="mt-1" title="My tasks" summary={`${tasks.length === allTasks.length ? "All tasks" : `${tasks.length} of ${allTasks.length} tasks`}${taskItems === "all" ? "" : `, ${ITEMS_LABEL[taskItems].toLowerCase()}`}`}>
-        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
-          <span className="text-ink/80">Items</span>
-          <Segmented label="Items" value={taskItems} onChange={saveTaskItems} options={(["all", "fast", "mine"] as const).map((v) => ({ value: v, label: ITEMS_LABEL[v] }))} />
+        <div className="mt-1 text-sm text-ink/80">Run my tasks on</div>
+        <div role="radiogroup" aria-label="Run my tasks on" className="mt-1 rounded-md border border-line p-1 sm:max-w-md">
+          {(["all", "fast", "mine"] as const).map((v) => (
+            <RadioRow key={v} selected={taskItems === v} onSelect={() => taskItems !== v && saveTaskItems(v)} title={ITEMS_LABEL[v]} />
+          ))}
         </div>
-        <div role="group" aria-label="My tasks" className="mt-1 rounded-md border border-line p-1 sm:max-w-3xl">
+        <div className="mt-2 text-sm text-ink/80">Tasks</div>
+        <div role="group" aria-label="Tasks" className="mt-1 rounded-md border border-line p-1 sm:max-w-md">
           <CheckRow checked={tasks.length === allTasks.length} onChange={(on) => saveTasks(on ? allTasks : [])} title="All tasks" />
-          <div className="sm:columns-2 sm:gap-x-1 lg:columns-3">
+          <div>
             {data.taskChoices.map((t) => {
               const on = tasks.includes(t.id);
               return (
                 <Tooltip key={t.id} side="right" align="start" title={t.title} content={<TipLines lines={[t.about, t.models.length > 0 && `Models: ${t.models.map(modelName).join(", ")}`]} />}>
-                  <div className="break-inside-avoid">
+                  <div>
                     <CheckRow
                       checked={on}
                       onChange={() => saveTasks(on ? tasks.filter((x) => x !== t.id) : allTasks.filter((x) => x === t.id || tasks.includes(x)))}

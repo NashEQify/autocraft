@@ -8,6 +8,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, statSync, closeSync, mkdirSync, openSync, readFileSync, utimesSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { dbEnv, dbLockName, dbTarget } from "../db/open.ts";
 import { advancePreapprovals } from "../preapproval/index.ts";
 import { applyProposals, AUTOPILOT_USER, isDraining, isEnabled, planDue, type Detected } from "./autopilot.ts";
@@ -50,7 +51,7 @@ export const FLOW_EVERY_MS = 20_000;
 export const WEBHOOK_DRAIN_MS = 5_000;
 /** How often the runner checks for a repo due for its daily reconcile. */
 export const RECONCILE_CHECK_MS = 5 * 60_000;
-const CLI = new URL("../cli.ts", import.meta.url).pathname;
+const CLI = fileURLToPath(new URL("../cli.ts", import.meta.url));
 
 /** Job processes at once. A job that calls Claude also waits for a free account slot (see startJobs). */
 export const DEFAULT_MAX_JOBS = 32;
