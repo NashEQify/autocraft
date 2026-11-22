@@ -16,6 +16,7 @@ import { BACKLOG, BACKLOG_KIND, BACKLOG_QUESTION, backlogDecisionId, HANDLED, is
 import { commentPreview, writeEffect } from "../../act/index.ts";
 import { optionTextsMany, optionTextsOf, textsFor, textsHash } from "../../dupes/texts.ts";
 import { audit } from "../audit.ts";
+import { mayRunRepo } from "../repo-access.ts";
 import { heldLookup, type Held } from "../../runner/autopilot.ts";
 import { queuePlace, queueReason } from "../../conversations/queue.ts";
 import { initExecState, resetActTries, retryDecision } from "../../github/user-lane.ts";
@@ -955,8 +956,10 @@ function requireWriter(req: Req): void {
 }
 
 // Maintainers: a fixed number of opinion and comment writes per login per hour.
-function limited(req: Req, limiter: RateLimiter): void {
-  if (!isOperator(req) && !limiter.allow(req.user.login.toLowerCase())) throw new HttpError(429, "too many feedback posts this hour; try again later");
+// Operators and maintainers who may run the decision's repo are exempt.
+async function limited(req: Req, limiter: RateLimiter, repo: string | null): Promise<void> {
+  if (isOperator(req) || (repo && await mayRunRepo(req.user, repo))) return;
+  if (!limiter.allow(req.user.login.toLowerCase())) throw new HttpError(429, "too many feedback posts this hour; try again later");
 }
 
 /**
@@ -967,7 +970,7 @@ function limited(req: Req, limiter: RateLimiter): void {
 export async function feedback(db: Db, req: Req, limiter: RateLimiter, via?: "mcp"): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
-  limited(req, limiter);
+  await limited(req, limiter, d.repo);
   const b = body(req);
   const option = b.option ?? null;
   if (option !== null && (typeof option !== "string" || !optionsOf(d).some((o) => o.key === option))) throw new HttpError(400, "option must be an option key or null");
@@ -999,7 +1002,7 @@ export async function feedback(db: Db, req: Req, limiter: RateLimiter, via?: "mc
 export async function retract(db: Db, req: Req, limiter: RateLimiter): Promise<Decision> {
   requireWriter(req);
   const d = await needDecision(db, req, req.params.id!);
-  limited(req, limiter);
+  await limited(req, limiter, d.repo);
   if (d.answer) throw new HttpError(409, "the decision is answered; picks are closed");
   const r = await db.run(db.k.updateTable("decision_opinions").set({ retracted_at: new Date().toISOString() }).where("decision_id", "=", d.id).where("login", "=", req.user.login).where("retracted_at", "is", null));
   if (r.changes !== 1) throw new HttpError(404, "you have no opinion on this decision");

@@ -1,4 +1,5 @@
 // The Pipeline page on fake data: a few steps, jobs in every state and recent syncs.
+import { mayRunMock } from "./adminMock";
 import type { Api } from "../client";
 import type { Job, JobDetail, PipelineOverview, PipelineState, PipelineStep, StageLimit, User } from "../types";
 import { NOW, REPOS } from "./fixtures";
@@ -152,7 +153,7 @@ export function createPipelineMock(me: User, changed: () => void): Pick<Api, "pi
       },
       job: (id) => {
         const j = find(id);
-        const d: JobDetail = { ...j, items: JOB_ITEMS[j.id] ?? [], log: j.id === 47 ? LOG : j.startedAt ? `${j.startedAt} job ${j.id}: ${j.step}\n${j.summary ?? j.error ?? ""}` : "", logTruncated: false };
+        const d: JobDetail = { ...j, items: JOB_ITEMS[j.id] ?? [], log: j.id === 47 ? LOG : j.startedAt ? `${j.startedAt} job ${j.id}: ${j.step}\n${j.summary ?? j.error ?? ""}` : "", logTruncated: false, canCancel: me.role === "operator" || (!!j.params.repo && mayRunMock(me, String(j.params.repo))) };
         return wait(d);
       },
       async run(step, params) {

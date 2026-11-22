@@ -906,6 +906,8 @@ export interface TrackedRepo {
   pipeline: boolean;
   /** Whether the viewer may switch this repo's pipeline: an operator, or a maintainer with write access to the repo. */
   canSwitch: boolean;
+  /** The caller may change the repo's GitHub-write approvals and optional checks (the same rule as canSwitch). */
+  canManage: boolean;
 }
 
 export interface AccessEntry {
@@ -1205,6 +1207,8 @@ export interface JobItem extends ItemRef, ItemShown {
 }
 
 export interface JobDetail extends Job {
+  /** The caller may cancel the job: an operator, or a maintainer with write access to its repo. The server sets it per request. */
+  canCancel: boolean;
   /** The items the job handled, in the order it handled them; hidden repos left out. */
   items: JobItem[];
   /** The end of the job's log, with anything token-like replaced; null for viewers. */
@@ -1844,7 +1848,7 @@ export type TaskBatch = { id: number; branch: string; fork: string | null; commi
 /** Image and CI-gate inputs a task ran with. Worker-sent: shown as plain text only. */
 export type SandboxEnv = { image: string; baseImage: string; packages: string[]; craftFontsRef: string | null; craftI18nRev: string | null };
 /** Worker-sent text: shown as plain text only, never as markup. */
-export type BuildTaskDetail = BuildTask & { /** null (with the patch) for viewers: staff only. */ logTail: string | null; logBytes: number; logTruncated: boolean; patch: string | null };
+export type BuildTaskDetail = BuildTask & { /** null (with the patch) for viewers: staff only. */ logTail: string | null; logBytes: number; logTruncated: boolean; patch: string | null; /** The caller may cancel the task: an operator, or a maintainer with write access to its repo. The server sets it per request. */ canCancel: boolean };
 export type TaskFilter = { state?: TaskState | "active"; env?: string; repo?: string; cursor?: string; limit?: number };
 export type TaskPage = { tasks: BuildTask[]; next: string | null };
 /** Queued and running tasks and the slots left over the online, enabled environments (the flowchart's Verify node). */
@@ -1864,7 +1868,8 @@ export type ScreenshotCommand = { doc: string; params: Record<string, Screenshot
 /** The operator-edited setup of one repo; also the body of PUT /api/build/screenshots/:repo. */
 export type ScreenshotConfigJson = { package: string; example: string; driver: "args" | "jsonl"; commands: Record<string, ScreenshotCommand>; ui_paths: string[]; size?: string };
 export type ScreenshotSetup = { repo: string; config: ScreenshotConfigJson; updatedBy: string; updatedAt: string };
-export type ScreenshotSetups = { setups: ScreenshotSetup[] };
+/** `manageable`: the repos whose setup the caller may change (an operator, or a maintainer with write access). */
+export type ScreenshotSetups = { setups: ScreenshotSetup[]; manageable: string[] };
 // ---- Nightly page (/api/nightly) ---------------------------------------------
 
 export type NightlyState = "queued" | "pass" | "fail" | "error" | "skipped" | "warn";
@@ -1878,7 +1883,7 @@ export type NightlyCheckRow = {
   crates: string[]; targets: string[]; cells: (NightlyCell | null)[];
 };
 export type NightlyBench = { name: string; unit: string; latest: number; /** Latest against the median of the 7 nights before it, in percent (positive = slower); null with too little history. */ deltaPct: number | null; points: number[]; at: string };
-export type NightlyRepo = { repo: string; on: boolean; nights: { runId: number; startedAt: string; sha: string }[]; checks: NightlyCheckRow[]; benches: NightlyBench[] };
+export type NightlyRepo = { repo: string; on: boolean; /** The caller may change the repo's nightly checks. */ canSelect: boolean; nights: { runId: number; startedAt: string; sha: string }[]; checks: NightlyCheckRow[]; benches: NightlyBench[] };
 export type NightlyGrid = { repos: NightlyRepo[] };
 export type NightlySeries = { repo: string; bench: string; unit: string; points: { sha: string; at: string; value: number }[] };
 export type NightlySelectInput = { repo: string; check: string; enabled: boolean; crates?: string[]; targets?: string[] };
@@ -2490,6 +2495,8 @@ export type FindingState = "new" | "dismissed" | "backlog" | "fixing" | "ready" 
 export type FindingAction = "fix" | "dismiss" | "backlog" | "reopen" | "land" | "advisory" | "publish";
 
 export interface ScanView {
+  /** The caller may stop the scan and decide its findings (continuing stays with operators); the server sets it per request. */
+  canAct: boolean;
   id: number;
   repo: string;
   /** The pinned commit of the default branch; null before the scan has fetched it. */

@@ -63,7 +63,7 @@ function StartDialog({ repo, open, onClose }: { repo: string; open: boolean; onC
 }
 
 /** Continue a scan that stopped at its cap: prefilled with the estimate of the whole scan, rounded up. */
-function ContinueDialog({ s, open, onClose }: { s: ScanView; open: boolean; onClose: () => void }) {
+function ContinueDialog({ s, open, onClose }: { s: ScanView; max?: number; open: boolean; onClose: () => void }) {
   const api = useApi();
   const initial = Math.ceil(Math.max(s.estimateUsd ?? 0, s.costUsd + 1));
   return <CapDialog title="Continue scan" submit="Continue scan" initial={initial} above={s.costUsd} open={open} onClose={onClose} send={(cap) => api.security.continueScan(s.id, cap)} />;
@@ -84,7 +84,7 @@ export function ScanRow({ s, link }: { s: ScanView; link?: boolean }) {
         {link && <Link to={scanPath(s.id)} className="num text-sm text-accent-ink hover:underline max-md:flex max-md:min-h-11 max-md:items-center">Scan {s.id}</Link>}
         <span className="num text-sm">{s.areasTotal ? `${s.areasDone} of ${s.areasTotal} areas` : "No areas yet"}</span>
         {s.areasTotal > 0 && <RateBar frac={frac} className="w-24 max-md:flex-1" />}
-        {active && (
+        {active && s.canAct && (
           <Button size="md" icon={StopIcon} loading={write.busy === "stop"} onClick={() => void write.run("stop", () => api.security.stopScan(s.id))} className="ml-auto max-md:h-11">
             Stop
           </Button>
