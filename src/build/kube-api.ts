@@ -37,7 +37,8 @@ export interface ConfigMapApi {
   createConfigMap(ns: string, cm: object): Promise<void>;
   /** A JSON merge patch (RFC 7386); throws a 404 KubeError when the ConfigMap does not exist. */
   patchConfigMap(ns: string, name: string, patch: object): Promise<void>;
-  listConfigMaps(ns: string): Promise<KConfigMap[]>;
+  /** `selector` is a label selector, e.g. `key=value`. */
+  listConfigMaps(ns: string, selector?: string): Promise<KConfigMap[]>;
 }
 
 export interface KubeApi {
@@ -186,7 +187,7 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapA
     }),
     createConfigMap: async (ns, cm) => void (await call("POST", cms(ns), cm)),
     patchConfigMap: async (ns, name, patch) => void (await call("PATCH", `${cms(ns)}/${enc(name)}`, patch, "application/json", "application/merge-patch+json")),
-    listConfigMaps: async (ns) => (JSON.parse(await call("GET", cms(ns))) as { items: KConfigMap[] }).items,
+    listConfigMaps: async (ns, selector) => (JSON.parse(await call("GET", `${cms(ns)}${selector ? `?labelSelector=${enc(selector)}` : ""}`)) as { items: KConfigMap[] }).items,
     canI: async (ns, verb, resource) => {
       const r = JSON.parse(await call("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", {
         apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview", spec: { resourceAttributes: { namespace: ns, verb, resource } },

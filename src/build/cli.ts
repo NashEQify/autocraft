@@ -154,6 +154,7 @@ async function envs(args: string[]): Promise<void> {
       const c = e.capabilities;
       console.log(`${e.id.padEnd(16)} ${safe(e.label).padEnd(24)} ${e.kind.padEnd(14)} ${e.enabled ? (e.online ? "online " : "offline") : "disabled"} ${e.running}/${e.slots} slots${e.confidential ? "  confidential" : ""}  ${c ? `${c.os}/${c.arch} ${c.cpus} cpu ${c.memGb} GB ${c.toolchains.join(",")}` : "no report yet"}${e.pausedReason ? `  paused: ${safe(e.pausedReason)}` : ""}`);
       if (e.settings) console.log(`${"".padEnd(16)} ${settingsLine(e.settings)}`);
+      for (const m of c?.warmErrors ?? []) console.log(`${"".padEnd(16)} warm: ${safe(m)}`);
       for (const w of c?.warm ?? []) console.log(`${"".padEnd(16)} ${warmLineText(w)}`);
     }
   } else if (sub === "add") {

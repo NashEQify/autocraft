@@ -1083,11 +1083,11 @@ Layout of the node directory:
 
 Every 60 seconds the agent:
 
-1. Reads the assignment and every assigned key's `latest.json`, and verifies its signature. A latest.json that is unsigned, signed by another key, or older (`stored`) than the version held is refused, and the held version stays.
-2. Plans the cap: keys in priority order, each with the bytes of its newest version. A key that does not fit under `maxGbPerNode` after the keys above it is left out, and stops being current.
-3. Syncs each key whose newest version it does not hold, one at a time. It builds `gen-<sha12>.tmp` from the manifest: files whose sha256 and mode match the current version (mtime within the slack) are hard links, and the rest are downloaded and checked against their sha256. Disk writes are paced to `AUTOCRAFT_WARM_WRITE_MB_PER_SEC`. The finished dir is renamed into place and `current` is swapped with a rename. No new version starts while the node filesystem is at least `AUTOCRAFT_WARM_MAX_FS_PCT` full. A failed sync leaves `current` untouched and is retried after 10 minutes or when latest.json changes.
-4. Deletes versions that stopped being current more than `AUTOCRAFT_WARM_GRACE_MIN` ago, so copies that started from them can finish. A key no longer assigned also stops being current and goes the same way.
-5. Writes the ConfigMap `warm-status-<node>` when what it says changes, and every 5 minutes.
+1. Reads the assignment and every assigned key's `latest.json`, and verifies its signature. A latest.json that is unsigned, signed by another key, or older (`stored`) than the newest version this node ever accepted for the key is refused, and the held version stays. The newest accepted `stored` is kept in `<dir>/<key>.floor`, which survives a key being retired and its directory deleted. To accept an older latest.json on purpose (the producer's clock was ahead and published a `stored` in the future), delete `<dir>/<key>.floor` on every node, and the held version's directory if its `stored` is the future value.
+2. Plans the cap: keys in priority order, each with the bytes of the version it holds until its newer version is current (a key with no version counts its newest). A key that does not fit under `maxGbPerNode` after the keys above it is left out, and stops being current; a key whose version grew pushes lower keys out only once the larger version is current.
+3. Syncs each key whose newest version it does not hold, one at a time. It builds `gen-<sha12>.tmp` from the manifest: files whose sha256 and mode match the current version (mtime within the slack) are hard links, and the rest are downloaded and checked against their sha256. Disk writes are paced to `AUTOCRAFT_WARM_WRITE_MB_PER_SEC`. The finished dir is renamed into place and `current` is swapped with a rename. No new version starts while the node filesystem is at least `AUTOCRAFT_WARM_MAX_FS_PCT` full or would be after adding the version's full size (files that become hard links cost nothing, so this is a bound), and a download stops when use reaches the limit. Only a missing blob, one larger than the manifest says, one that is not valid zstd or one whose sha256 differs counts as a bad blob; timeouts, connection errors, 5xx answers and a full disk are plain failures. A failed sync leaves `current` untouched and is retried after 10 minutes or when latest.json changes.
+4. Deletes versions that stopped being current more than `AUTOCRAFT_WARM_GRACE_MIN` ago, so copies that started from them can finish. Build pods may build straight from the read-only mount until their deadline (`deadlineSec`, 3 h by default), so the grace period must be at least the longest deadline plus 30 minutes; the agent cannot see deadlines, so the default is 210 minutes and must be raised with the deadline. A new version never reuses the name of a version still in its grace period (it gets a `-2`, `-3` suffix). A key no longer assigned also stops being current and goes the same way.
+5. Writes the ConfigMap `warm-status-<node>` when what it says changes, and every 5 minutes from a timer that runs while a sync is in progress, so a long sync does not make the node look stale.
 
 Settings, all environment variables:
 
@@ -1101,7 +1101,7 @@ Settings, all environment variables:
 | `AUTOCRAFT_WARM_STATUS_NAMESPACE` | the pod's namespace | Where the status ConfigMap is written. |
 | `AUTOCRAFT_WARM_WRITE_MB_PER_SEC` | 150 | Download write rate in MB/s; 0 for no limit. |
 | `AUTOCRAFT_WARM_POLL_SEC` | 60 | Time between cycles. |
-| `AUTOCRAFT_WARM_GRACE_MIN` | 60 | How long a replaced version stays. |
+| `AUTOCRAFT_WARM_GRACE_MIN` | 210 | How long a replaced version stays; at least the longest build deadline plus 30 minutes. |
 | `AUTOCRAFT_WARM_MAX_FS_PCT` | 80 | No new versions at or above this filesystem use. |
 
 `--once` runs one cycle and exits. When the assignment cannot be read, the agent changes nothing in that cycle.
@@ -1119,7 +1119,7 @@ data:
 
 `maxGbPerNode` is in GiB and counts the versions keys are current at. A replaced version stays for the grace period on top of it, and the filesystem limit bounds the total.
 
-The status ConfigMap holds one key, `status.json`: `node`, `updated` (ms, the node's clock), `fs` (`sizeBytes`, `usedBytes`, `usedPct`), `keys` (key → `commit`, `stored`, `bytes`, `image`, `envHash`, `synced`), `pending` (assigned key → why it is not at its newest version), and `badBlobs` (key → sha256 of blobs that were missing or did not match their sha256 in a failed sync; the producer passes them to publish's recheck). The agent writes it with the in-cluster service-account token, so its service account needs `create` on configmaps and `get`, `update` and `patch` on its node's status ConfigMap.
+The status ConfigMap holds one key, `status.json`: `node`, `updated` (ms, the node's clock), `fs` (`sizeBytes`, `usedBytes`, `usedPct`), `keys` (key → `commit`, `stored`, `bytes`, `image`, `envHash`, `synced`), `pending` (assigned key → why it is not at its newest version), and `error` (present when the assignment cannot be read; the agent then changes nothing), and `badBlobs` (key → sha256 of blobs that were missing or did not match their sha256 in a failed sync; the producer passes them to publish's recheck). The agent writes it with the in-cluster service-account token, so its service account needs `create` and `patch` on configmaps in its namespace. The status ConfigMaps carry the label `craft.build/warm-status=node`. One service account serves every node, so any node's agent can write any node's status; that is acceptable while the status is informational.
 
 What the DaemonSet needs:
 
@@ -1129,7 +1129,7 @@ What the DaemonSet needs:
 | Volumes | hostPath `/var/lib/craft-warm` read-write; ConfigMaps `warm-assign` and `warm-verify-key` (key `public.pem`) mounted read-only. |
 | Network | Egress to the cache's read-only port and the API server. |
 
-**On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there. A status not rewritten for 15 minutes counts as not warm. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
+**On the runner.** The pod launcher reads every `warm-status-*` ConfigMap in `craft-cache` (or `AUTOCRAFT_WARM_STATUS_NAMESPACE`) once a minute; that needs `list` on configmaps there (it selects by the label `craft.build/warm-status=node`). A status not rewritten for 15 minutes counts as not warm and is not counted in M. A node whose agent reports an error shows `node: message` on the environment's Warm row and in `envs list`. Each kubernetes environment reports a line per key, shown on its card under Warm and by `envs list`: `warm: <key> <sha12> on N/M nodes`, where N nodes hold the key's newest version and M nodes report a status.
 
 ## Similar items and semantic search
 

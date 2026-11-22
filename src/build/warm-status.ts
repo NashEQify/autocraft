@@ -3,7 +3,7 @@
 // rewrites it every 5 minutes while it runs.
 import type { WarmLine } from "../../web/src/api/types.ts";
 import type { ConfigMapApi, KConfigMap } from "./kube-api.ts";
-import { STATUS_DATA_KEY, STATUS_PREFIX, type KeyStatus, type NodeStatus } from "../warm/sync-agent.ts";
+import { STATUS_DATA_KEY, STATUS_LABEL, STATUS_PREFIX, type KeyStatus, type NodeStatus } from "../warm/sync-agent.ts";
 
 export const STATUS_STALE_MS = 15 * 60_000;
 export const STATUS_NAMESPACE = "craft-cache";
@@ -47,7 +47,7 @@ export class WarmStatus {
     if (!force && this.now() - this.readAt < READ_EVERY_MS) return;
     this.readAt = this.now();
     try {
-      this.statuses = (await this.api.listConfigMaps(this.ns)).flatMap((cm) => parseStatus(cm) ?? []);
+      this.statuses = (await this.api.listConfigMaps(this.ns, `${STATUS_LABEL}=node`)).flatMap((cm) => parseStatus(cm) ?? []);
       this.lastError = null;
     } catch (e) {
       const m = (e as Error).message;
@@ -73,9 +73,14 @@ export class WarmStatus {
     return [...new Set(this.fresh().flatMap((s) => s.badBlobs?.[key] ?? []))].sort();
   }
 
+  /** Per node with a fresh status, why its agent cannot work (an unreadable assignment), as `node: message`. */
+  nodeErrors(): string[] {
+    return this.fresh().flatMap((s) => (typeof s.error === "string" && s.error ? [`${s.node}: ${s.error}`] : [])).sort();
+  }
+
   /** Per key, its newest version and how many of the reporting nodes hold it; sorted by key. */
   summary(): WarmLine[] {
-    const of = this.statuses.length;
+    const of = this.fresh().length;
     const keys = new Set(this.fresh().flatMap((s) => Object.keys(s.keys)));
     return [...keys].sort().map((key) => {
       const nodes = this.warmNodesFor(key);

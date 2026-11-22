@@ -77,7 +77,7 @@ test("warm sync: versions with hard links, grace, refused versions, the node cap
   const dir = join(root, "node");
   const agent = new SyncAgent({
     dir, node: "k3s-1", namespace: "craft-cache", kube, store, log: () => {}, verifyKeys: () => [publicKey], assign: () => assign,
-    writeBytesPerSec: 0, now: () => clock, diskUse: () => ({ sizeBytes: 100, usedBytes: 10, availBytes: 90 }),
+    writeBytesPerSec: 0, graceMs: 3600_000, now: () => clock, diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
   });
   const cur = (key: string) => readlinkSync(join(dir, key, "current"));
   const inode = (key: string, gen: string, p: string) => statSync(join(dir, key, gen, p)).ino;
@@ -159,4 +159,59 @@ test("warm sync: versions with hard links, grace, refused versions, the node cap
   const later = new WarmStatus(kube, { now: () => clock + STATUS_STALE_MS + 60_000 });
   await later.refresh(true);
   assert.equal(later.warmNodesFor("deckcraft").length, 0);
+});
+
+test("warm sync: a third publish of one commit keeps the version in its grace period; an older latest.json is refused after a retire", async (t) => {
+  const root = join(SCRATCH, "warm-sync-names");
+  const dav = await fakeDav();
+  t.after(dav.close);
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const store = new WarmStore({ readUrl: dav.url, writeUrl: dav.url, auth: { user: "w", password: "p" } });
+  const src = { target: join(root, "src", "target"), cargoHome: join(root, "src", "cargo") };
+  const put = (body: string) => {
+    mkdirSync(join(src.target, "debug"), { recursive: true });
+    mkdirSync(src.cargoHome, { recursive: true });
+    writeFileSync(join(src.target, "debug", "app"), body);
+  };
+  let stored = Date.now();
+  const publish = (commit: string, at?: number) =>
+    store.publish({ key: "deckcraft", repo: "org/deckcraft", commit, image: null, rustc: null, envHash: null, checkout: "/w/src", source: src, signKey: privateKey, stored: at ?? (stored += 1000) });
+  let clock = Date.now();
+  let assign: Assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
+  const dir = join(root, "node");
+  const agent = new SyncAgent({
+    dir, node: "n1", namespace: "ns", kube: null, store, log: () => {}, verifyKeys: () => [publicKey], assign: () => assign,
+    writeBytesPerSec: 0, graceMs: 3600_000, now: () => clock, diskUse: () => ({ sizeBytes: 1e9, usedBytes: 1e8, availBytes: 9e8 }),
+  });
+  const cur = () => readlinkSync(join(dir, "deckcraft", "current"));
+  const a = `gen-${"a".repeat(12)}`;
+
+  // The same commit published three times with different content: the version replaced twice ago is still in its grace period.
+  put("1");
+  await publish("a".repeat(40));
+  await agent.cycle();
+  assert.equal(cur(), a);
+  put("2");
+  await publish("a".repeat(40));
+  await agent.cycle();
+  assert.equal(cur(), `${a}-2`);
+  put("3");
+  await publish("a".repeat(40));
+  await agent.cycle();
+  assert.equal(cur(), `${a}-3`);
+  assert.equal(readFileSync(join(dir, "deckcraft", a, "target/debug/app"), "utf8"), "1");
+  assert.equal(readFileSync(join(dir, "deckcraft", cur(), "target/debug/app"), "utf8"), "3");
+
+  // After the key is retired and deleted, an older latest.json is still refused.
+  const newest = (await store.latest("deckcraft", [publicKey]))!.stored;
+  assign = { keys: [], maxBytes: 1024 ** 3 };
+  await agent.cycle();
+  clock += 61 * 60_000;
+  await agent.cycle();
+  assert.ok(!existsSync(join(dir, "deckcraft")));
+  assign = { keys: ["deckcraft"], maxBytes: 1024 ** 3 };
+  await publish("b".repeat(40), newest - 5000);
+  await agent.cycle();
+  assert.ok(!existsSync(join(dir, "deckcraft", "current")));
+  assert.match(agent.status().pending.deckcraft!, /older than the newest version accepted/);
 });

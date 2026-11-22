@@ -1767,6 +1767,7 @@ export type Capabilities = {
   toolchains: string[];      // e.g. ["rust-stable", "node-24"]
   warmSigner?: boolean;      // holds the warm-snapshot signing key; takes no PR-code tasks
   warm?: WarmLine[];         // kubernetes: warm keys the cluster's nodes hold (src/build/warm-status.ts)
+  warmErrors?: string[];     // kubernetes: nodes whose warm-sync agent cannot work, as "node: why"
 };
 /** A warm key's newest version on the cluster's nodes: held by `nodes` of the `of` nodes that report. */
 export type WarmLine = { key: string; commit: string; nodes: number; of: number };

@@ -95,7 +95,8 @@ async function envPass(d: LauncherDeps, state: LauncherState, env: EnvRow): Prom
   const now = d.now ?? Date.now;
   const s = settingsOf(env.settings);
   const warm = state.warm?.summary() ?? [];
-  const caps = { ...kubeCapabilities(s), ...(warm.length ? { warm } : {}) };
+  const warmErrors = state.warm?.nodeErrors() ?? [];
+  const caps = { ...kubeCapabilities(s), ...(warm.length ? { warm } : {}), ...(warmErrors.length ? { warmErrors } : {}) };
   const report = async (health: Omit<EnvHealth, "since"> | null, reachable: boolean) => await kubeReport(db, env.id, caps, env.slots, health, reachable);
   const image = s.image ?? d.defaultImage;
   const ctx: EnvCtx = { d, state, api: d.api, env, s, image, pods: [], pending: [], now };

@@ -497,7 +497,11 @@ async function fetchOne(e: FileEntry, dest: string, fetch: BlobSource, pace?: (b
   try {
     await pipeline(await fetch(e.sha256, e.size), createZstdDecompress(), capped(e.size, `blob ${e.sha256.slice(0, 12)}`), tap, createWriteStream(dest, { mode: 0o600, flags: "wx" }));
   } catch (err) {
-    throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`);
+    const msg = `blob ${e.sha256.slice(0, 12)} for ${e.path}: ${(err as Error).message}`;
+    // Only a copy that is missing, too large or not valid zstd is bad; timeouts, 5xx, dropped connections and a full disk say nothing about the store.
+    const code = (err as { code?: unknown }).code;
+    const bad = err instanceof ManifestError || (err as { kind?: string }).kind !== undefined || (typeof code === "string" && code.startsWith("ZSTD_"));
+    throw bad ? new BadBlobError(e.sha256, msg) : new Error(msg, { cause: err });
   }
   if (n !== e.size || h.digest("hex") !== e.sha256) throw new BadBlobError(e.sha256, `blob ${e.sha256.slice(0, 12)} for ${e.path} does not match its sha256`);
 }

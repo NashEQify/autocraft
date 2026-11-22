@@ -168,12 +168,15 @@ function EnvCard({ e, operator }: { e: BuildEnv; operator: boolean }) {
             <dd className="code min-w-0 break-words">{e.capabilities.toolchains.join(", ") || "none"}</dd>
           </>
         )}
-        {e.capabilities?.warm?.length ? (
+        {e.capabilities?.warm?.length || e.capabilities?.warmErrors?.length ? (
           <>
             <dt className="col-span-2 mt-1 text-ink/55">Warm</dt>
             <dd className="col-span-2 min-w-0">
               <ul>
-                {e.capabilities.warm.map((w) => (
+                {(e.capabilities.warmErrors ?? []).map((m) => (
+                  <li key={m} className="code break-words text-warn">{m}</li>
+                ))}
+                {(e.capabilities.warm ?? []).map((w) => (
                   <li key={w.key}>
                     <span className="code break-words">{w.key}</span>{" "}
                     <span className="num text-ink/60"><span className="code whitespace-nowrap">{w.commit.slice(0, 8)}</span> · {w.nodes} of {w.of} nodes</span>

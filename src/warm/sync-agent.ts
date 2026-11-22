@@ -4,8 +4,10 @@
 //   <dir>/<key>/current -> gen-<sha12>                             the version consumers start from
 // A new version is built as `gen-<sha12>.tmp` with the current one as `previous`, so files that did not change are hard
 // links and only the rest is downloaded (writes paced to a byte rate). The finished dir is renamed into place and
-// `current` is swapped with a rename. A version that stopped being current keeps its files for `graceMs`, so copies that
-// started from it can finish; its dir mtime records when it stopped. The agent writes what it holds to the ConfigMap
+// `current` is swapped with a rename. A version that stopped being current keeps its files for `graceMs`, so copies (and
+// builds that run directly from the read-only mount) that started from it can finish; its dir mtime records when it
+// stopped. The grace period must exceed the longest build deadline plus 30 minutes: the default is 3.5 h, for the
+// 3 h default deadline of a build pod. The agent writes what it holds to the ConfigMap
 // `warm-status-<node>`, which the runner reads (src/build/warm-status.ts).
 import type { KeyObject } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statfsSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -23,6 +25,8 @@ export const STATUS_LABEL = "craft.build/warm-status";
 const GEN = /^gen-[0-9a-f]{7,12}(-[0-9]+)?$/;
 const NODE_NAME = /^[a-z0-9]([-a-z0-9.]{0,230}[a-z0-9])?$/;
 const MAX_BAD_BLOBS = 32;
+/** Longest build deadline (3 h by default) plus 30 minutes. */
+export const DEFAULT_GRACE_MS = 3.5 * 3600_000;
 
 /** Removes a tree the agent made, read-only directories inside it included. */
 function removeTree(p: string): void {
@@ -45,6 +49,8 @@ export type NodeStatus = {
   pending: Record<string, string>;
   /** Per key, blobs a sync found missing or not matching their sha256, for the producer's next publish to recheck. */
   badBlobs: Record<string, string[]>;
+  /** Why the agent cannot work at all (the assignment cannot be read); absent when it can. */
+  error?: string;
 };
 export type KeyStatus = { commit: string; stored: number; bytes: number; image: string | null; envHash: string | null; synced: number };
 
@@ -138,11 +144,14 @@ export class SyncAgent {
   private pending: Record<string, string> = {};
   private readonly badBlobs = new Map<string, Set<string>>();
   private written: { sig: string; at: number } | null = null;
+  private assignError: string | undefined;
+  private writing: Promise<void> = Promise.resolve();
+  private diskCheckedAt = 0;
 
   constructor(c: SyncConfig) {
     if (!NODE_NAME.test(c.node)) throw new Error(`warm sync: node name refused: ${c.node.slice(0, 80)}`);
     this.c = {
-      writeBytesPerSec: 150e6, graceMs: 3600_000, maxFsPct: 80, statusEveryMs: 5 * 60_000, retryMs: 10 * 60_000, concurrency: 8,
+      writeBytesPerSec: 150e6, graceMs: DEFAULT_GRACE_MS, maxFsPct: 80, statusEveryMs: 5 * 60_000, retryMs: 10 * 60_000, concurrency: 8,
       now: Date.now, diskUse: statfsUse, ...c,
     };
     this.pacer = new Pacer(this.c.writeBytesPerSec);
@@ -150,13 +159,20 @@ export class SyncAgent {
 
   /** Polls every `pollMs` until `signal` aborts. */
   async run(signal: AbortSignal, pollMs = 60_000): Promise<void> {
-    while (!signal.aborted) {
-      try {
-        await this.cycle();
-      } catch (e) {
-        this.c.log(`warm sync: ${(e as Error).stack ?? e}`);
+    // A sync can take longer than the runner's staleness limit, so the status is rewritten from a timer, not between syncs.
+    const beat = setInterval(() => void this.report(true), this.c.statusEveryMs);
+    beat.unref();
+    try {
+      while (!signal.aborted) {
+        try {
+          await this.cycle();
+        } catch (e) {
+          this.c.log(`warm sync: ${(e as Error).stack ?? e}`);
+        }
+        await sleep(pollMs, undefined, { signal }).catch(() => {});
       }
-      await sleep(pollMs, undefined, { signal }).catch(() => {});
+    } finally {
+      clearInterval(beat);
     }
   }
 
@@ -170,10 +186,12 @@ export class SyncAgent {
       assign = this.c.assign();
     } catch (e) {
       // Holding on to what is there beats dropping every key over a mount that cannot be read.
+      this.assignError = `assignment unreadable: ${(e as Error).message}`.slice(0, 200);
       log(`warm sync: ${(e as Error).message}; nothing changes this cycle`);
       this.cleanup();
       return await this.report();
     }
+    this.assignError = undefined;
     const pending: Record<string, string> = {};
     let keys: KeyObject[] = [];
     try {
@@ -187,9 +205,11 @@ export class SyncAgent {
         try {
           const l = await this.c.store.latest(k, keys);
           const h = this.held(k);
+          if (h) this.raiseFloor(k, h.meta.stored);
           if (!l) pending[k] = "the store has no version";
           // A validly signed but older latest.json is a replay or a rollback of the store: keep the newer version.
           else if (h && l.stored < h.meta.stored) pending[k] = `latest.json names ${l.commit.slice(0, 12)}, older than the version held (${h.meta.commit.slice(0, 12)})`;
+          else if (l.stored < this.floor(k)) pending[k] = `latest.json names ${l.commit.slice(0, 12)}, older than the newest version accepted before`;
           else latest.set(k, l);
         } catch (e) {
           pending[k] = `store: ${(e as Error).message}`.slice(0, 200);
@@ -197,11 +217,14 @@ export class SyncAgent {
       }
     }
 
-    // Keys in priority order; a key that does not fit under the cap after the keys above it is left out.
+    // Keys in priority order; a key that does not fit under the cap after the keys above it is left out. A key counts
+    // with the bytes of the version it holds until its newer version is current, so lower keys stay until then.
     const fit = new Set<string>();
     let planned = 0;
     for (const k of assign.keys) {
-      const bytes = latest.get(k)?.bytes ?? this.held(k)?.meta.bytes;
+      const h = this.held(k);
+      const l = latest.get(k);
+      const bytes = h && l && !(h.meta.commit === l.commit && h.meta.manifestSha256 === l.sha256) ? h.meta.bytes : (l?.bytes ?? h?.meta.bytes);
       if (bytes === undefined) continue;
       if (planned + bytes > assign.maxBytes) {
         pending[k] = `over the node cap (${gb(planned + bytes)} of ${gb(assign.maxBytes)} GiB)`;
@@ -246,6 +269,26 @@ export class SyncAgent {
     }
   }
 
+  /**
+   * The highest `stored` of any version accepted for `key`, kept in `<dir>/<key>.floor` so it survives a retire and the
+   * deletion of the key dir. A latest.json below it is refused. An operator resets it by deleting the file.
+   */
+  private floor(key: string): number {
+    try {
+      const n = Number(readFileSync(join(this.c.dir, `${key}.floor`), "utf8").trim());
+      return Number.isFinite(n) ? n : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  private raiseFloor(key: string, stored: number): void {
+    if (stored <= this.floor(key)) return;
+    const f = join(this.c.dir, `${key}.floor`);
+    writeFileSync(`${f}.tmp`, `${stored}\n`, { mode: 0o644 });
+    renameSync(`${f}.tmp`, f);
+  }
+
   /** Builds dirs of an interrupted sync and a half-made `current` link. */
   private removeLeftovers(): void {
     for (const k of this.keyDirs()) {
@@ -253,6 +296,7 @@ export class SyncAgent {
         if (n.endsWith(".tmp")) removeTree(join(this.c.dir, k, n));
       }
     }
+    for (const n of readdirSync(this.c.dir)) if (n.endsWith(".floor.tmp")) rmSync(join(this.c.dir, n), { force: true });
   }
 
   /** Marks a version as no longer current: its dir mtime starts the grace period. */
@@ -313,11 +357,16 @@ export class SyncAgent {
     }
     const fs = this.fsUse();
     if (fs.usedPct >= this.c.maxFsPct) return `node disk ${fs.usedPct} % full (new versions wait below ${this.c.maxFsPct} %)`;
+    // The version's whole size is the bound: files that turn out to be hard links from the held version cost nothing.
+    const d = this.c.diskUse(dir);
+    const after = Math.round(((d.usedBytes + l.bytes) / Math.max(1, d.usedBytes + d.availBytes)) * 1000) / 10;
+    if (after >= this.c.maxFsPct) return `not enough disk: ${gb(l.bytes)} GiB would take the node to ${after} % (limit ${this.c.maxFsPct} %)`;
     const f = this.failed.get(key);
     if (f && f.sha256 === l.sha256 && this.c.now() - f.at < this.c.retryMs) return f.why;
 
+    // A name that is free on disk: a version of the same commit may still be in its grace period.
     let gen = base;
-    for (let i = 2; gen === h?.gen; i++) gen = `${base}-${i}`;
+    for (let i = 2; existsSync(join(kd, gen)) || gen === h?.gen; i++) gen = `${base}-${i}`;
     const final = join(kd, gen), tmp = `${final}.tmp`;
     const t0 = performance.now();
     try {
@@ -326,7 +375,7 @@ export class SyncAgent {
       removeTree(tmp);
       mkdirSync(tmp, { mode: 0o755 });
       const roots = { target: join(tmp, "target"), cargo: join(tmp, "cargo") };
-      const s = await applyManifest(manifest, roots, this.c.store.blobs(), { previous, concurrency: this.c.concurrency, pace: (n) => this.pacer.take(n) });
+      const s = await applyManifest(manifest, roots, this.c.store.blobs(), { previous, concurrency: this.c.concurrency, pace: async (n) => { await this.pacer.take(n); this.checkDisk(); } });
       // Consumers run as another uid: the roots applyManifest made must be readable to them.
       for (const p of [tmp, roots.target, roots.cargo]) chmodSync(p, 0o755);
       const hd = manifest.header;
@@ -336,7 +385,6 @@ export class SyncAgent {
       };
       writeFileSync(join(tmp, "manifest.zst"), encodeManifest(manifest), { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
-      removeTree(final);
       renameSync(tmp, final);
       this.swap(key, gen, h);
       this.failed.delete(key);
@@ -355,6 +403,15 @@ export class SyncAgent {
       log(`warm sync: ${key}: ${why}`);
       return why;
     }
+  }
+
+  /** Aborts a running download once the node's disk use reaches the limit (looked at most once a second). */
+  private checkDisk(): void {
+    const t = performance.now();
+    if (t - this.diskCheckedAt < 1000) return;
+    this.diskCheckedAt = t;
+    const u = this.fsUse();
+    if (u.usedPct >= this.c.maxFsPct) throw new Error(`node disk ${u.usedPct} % full during the download (limit ${this.c.maxFsPct} %)`);
   }
 
   private metaOf(genDir: string): GenMeta | null {
@@ -384,6 +441,8 @@ export class SyncAgent {
     symlinkSync(gen, link);
     renameSync(link, join(kd, "current"));
     if (h && h.gen !== gen) this.touch(join(kd, h.gen));
+    const stored = this.metaOf(join(kd, gen))?.stored;
+    if (stored !== undefined) this.raiseFloor(key, stored);
   }
 
   // ---- status ----------------------------------------------------------------------------------------------------
@@ -395,20 +454,27 @@ export class SyncAgent {
       if (h) keys[k] = { commit: h.meta.commit, stored: h.meta.stored, bytes: h.meta.bytes, image: h.meta.image, envHash: h.meta.envHash, synced: h.meta.synced };
     }
     const badBlobs = Object.fromEntries([...this.badBlobs].map(([k, v]) => [k, [...v].sort()]));
-    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending, badBlobs };
+    return { version: 1, node: this.c.node, updated: this.c.now(), fs: this.fsUse(), keys, pending: this.pending, badBlobs, ...(this.assignError ? { error: this.assignError } : {}) };
   }
 
   /** Writes the status ConfigMap when what it says changed, and every `statusEveryMs` so readers see the node is alive. */
-  async report(): Promise<void> {
+  report(force = false): Promise<void> {
+    // One write at a time: the heartbeat timer and the sync loop both call this.
+    const run = this.writing.then(() => this.write(force));
+    this.writing = run.catch(() => {});
+    return run;
+  }
+
+  private async write(force: boolean): Promise<void> {
     if (!this.c.kube) return;
     const st = this.status();
-    const sig = JSON.stringify({ keys: st.keys, pending: st.pending, badBlobs: st.badBlobs, full: st.fs.usedPct >= this.c.maxFsPct });
-    if (this.written && this.written.sig === sig && this.c.now() - this.written.at < this.c.statusEveryMs) return;
+    const sig = JSON.stringify({ keys: st.keys, pending: st.pending, badBlobs: st.badBlobs, error: st.error, full: st.fs.usedPct >= this.c.maxFsPct });
+    if (!force && this.written && this.written.sig === sig && this.c.now() - this.written.at < this.c.statusEveryMs) return;
     const name = `${STATUS_PREFIX}${this.c.node}`;
     const data = { [STATUS_DATA_KEY]: JSON.stringify(st) };
     try {
       try {
-        await this.c.kube.patchConfigMap(this.c.namespace, name, { data });
+        await this.c.kube.patchConfigMap(this.c.namespace, name, { metadata: { labels: { [STATUS_LABEL]: "node" } }, data });
       } catch (e) {
         if (!(e instanceof KubeError && e.status === 404)) throw e;
         await this.c.kube.createConfigMap(this.c.namespace, {

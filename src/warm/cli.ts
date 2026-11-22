@@ -5,7 +5,7 @@ import { inClusterApi, SA_DIR } from "../build/kube-api.ts";
 import { checkServiceUrl } from "../worker/config.ts";
 import { loadEd25519 } from "./manifest.ts";
 import { WarmStore } from "./store-client.ts";
-import { readAssignDir, SyncAgent } from "./sync-agent.ts";
+import { DEFAULT_GRACE_MS, readAssignDir, SyncAgent } from "./sync-agent.ts";
 
 const USAGE = `usage: autocraft-server warm-sync [--once]
   AUTOCRAFT_WARM_STORE_URL         WebDAV root of the warm store, read-only (required)
@@ -15,7 +15,7 @@ const USAGE = `usage: autocraft-server warm-sync [--once]
   AUTOCRAFT_WARM_ASSIGN_DIR        mounted warm-assign ConfigMap with files repos and maxGbPerNode (default /etc/warm-assign)
   AUTOCRAFT_WARM_STATUS_NAMESPACE  namespace of the status ConfigMap (default: the pod's own)
   AUTOCRAFT_WARM_WRITE_MB_PER_SEC  disk write rate of downloads, 0 for none (default 150)
-  AUTOCRAFT_WARM_POLL_SEC (60), AUTOCRAFT_WARM_GRACE_MIN (60), AUTOCRAFT_WARM_MAX_FS_PCT (80)`;
+  AUTOCRAFT_WARM_POLL_SEC (60), AUTOCRAFT_WARM_GRACE_MIN (210), AUTOCRAFT_WARM_MAX_FS_PCT (80)`;
 
 function config(env: NodeJS.ProcessEnv) {
   const v = (n: string) => env[`AUTOCRAFT_WARM_${n}`]?.trim() || undefined;
@@ -45,7 +45,7 @@ function config(env: NodeJS.ProcessEnv) {
   return {
     url, keyFiles, node: need("NODE"), dir: path("DIR", "/var/lib/craft-warm"), assignDir: path("ASSIGN_DIR", "/etc/warm-assign"),
     namespace: namespace || "craft-cache", writeBytesPerSec: num("WRITE_MB_PER_SEC", 150, 0) * 1e6,
-    pollMs: num("POLL_SEC", 60, 5) * 1000, graceMs: num("GRACE_MIN", 60, 1) * 60_000, maxFsPct: pct,
+    pollMs: num("POLL_SEC", 60, 5) * 1000, graceMs: num("GRACE_MIN", DEFAULT_GRACE_MS / 60_000, 1) * 60_000, maxFsPct: pct,
   };
 }
 
