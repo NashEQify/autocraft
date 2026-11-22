@@ -879,7 +879,9 @@ const orphanRow = (db: Db, tokenId: number, requestId: string) =>
  */
 async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (repo: string) => Promise<boolean>, nowMs: number, o: ClaimOptions):
   Promise<{ reply: ClaimReply } | { attempt: ClaimTry; idle: (nowMs: number) => Promise<void>; empty: (nowMs: number, held: boolean) => Promise<EmptyReply> }> {
-  if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
+  const older = (): HttpError => new HttpError(409, `helper ${claim.helperVersion} is older than ${REQUIRED_HELPER}, the oldest this server accepts; download the current helper from ${ROUTES.helper}`);
+  // The server mode's answer comes first, whatever the helper's version.
+  if (!o.userLocalOnly && olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw older();
   // One statement reads the first try's single rows with the repeat's orphan lease and the liveness stamp the expiry needs. A repeat
   // the dashboard no longer remembers (it restarted in between): the lease the first claim took cannot be given out again, as only
   // its secret's hash is stored, so it goes back to the queue unused and this claim is answered afresh.
@@ -892,6 +894,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
   const [first, expiry] = await Promise.all([row, readExpiry(db, nowMs, undefined, row.then((r) => r.alive!))]);
   // In the server mode no call is queued for helpers: nothing to take for a while.
   if (!served(first)) return { reply: { lease: null, retryAfter: 300, reserve: first.reserve } };
+  if (olderVersion(claim.helperVersion, REQUIRED_HELPER)) throw older();
   const orphan = first.orphan;
   if (orphan) {
     await unlease(db, { id: Number(orphan.id), runId: orphan.run_id, hash: orphan.lease_secret_hash }, "returned to the queue: the claim that leased it was repeated after a server restart", nowMs);
