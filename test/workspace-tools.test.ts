@@ -1,9 +1,10 @@
 // The workspace tools against the real in-pod helper: a fake Kubernetes API runs deploy/container/ws locally, with /work
 // mapped to a scratch directory. Edits refuse a missing or ambiguous match and a file that changed under them, long
-// shell output comes back cut in the middle, and the call limit holds for a session rebuilt after a job restart.
+// shell output comes back cut in the middle, writes keep a file's mode and go through links, shell time is counted by
+// the job's clock whatever the call files say, and the call limit holds for a session rebuilt after a job restart.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createEnv } from "../src/build/envs.ts";
@@ -87,6 +88,32 @@ test("long shell output keeps its head and tail with the cut noted", async () =>
   assert.ok(Buffer.byteLength(r.text) < 33 * 1024, `${Buffer.byteLength(r.text)} bytes`);
   assert.ok(r.text.includes("\n1\n2\n3\n"), "the head is kept");
   assert.ok(r.text.trimEnd().endsWith("40000\ndone"), "the tail is kept, stderr merged in order");
+});
+
+test("writes keep the file's mode and write through a link inside /work", async () => {
+  const script = join(root, "src/run.sh");
+  writeFileSync(script, "#!/bin/sh\necho one\n");
+  chmodSync(script, 0o755);
+  symlinkSync("run.sh", join(root, "src/link.sh"));
+  assert.ok(!(await call("edit", { path: "link.sh", old_string: "one", new_string: "two" })).isError);
+  assert.ok(lstatSync(join(root, "src/link.sh")).isSymbolicLink(), "the link stays a link");
+  assert.equal(readFileSync(script, "utf8"), "#!/bin/sh\necho two\n");
+  assert.equal(statSync(script).mode & 0o777, 0o755, "the exec bit is kept");
+  symlinkSync("/etc/hostname", join(root, "src/out"));
+  const out = await call("write", { path: "out", content: "x" });
+  assert.ok(out.isError && /outside/.test(out.text), out.text);
+});
+
+test("shell time is the job's: a command that writes its own end into the call files is charged until the job sees it end", async () => {
+  const fake = "n=$(ls ../.ws/calls | sed -n 's/[.]start$//p' | sort -n | tail -1); cp ../.ws/calls/$n.start ../.ws/calls/$n.end; echo 0 > ../.ws/calls/$n.exit; sleep 2";
+  const started = Date.now();
+  const { id } = JSON.parse((await call("shell", { command: fake, background: true })).text) as { id: number };
+  await new Promise((r) => setTimeout(r, 1200));
+  const st = await call("shell_status", { id });
+  assert.match(st.text, /^exited 0 after/);
+  const row = await db.get(db.k.selectFrom("workspace_calls").select("result").where("tool", "=", "shell_status").orderBy("id", "desc").limit(1));
+  const charged = (JSON.parse(row!.result!) as { acct: { ms: number } }).acct.ms;
+  assert.ok(charged >= Date.now() - started - 1000 && charged >= 1000, `charged ${charged} ms`);
 });
 
 test("a session rebuilt after a restart still counts the calls made before it", async () => {

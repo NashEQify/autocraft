@@ -10,8 +10,8 @@ import type { Db } from "../db/index.ts";
 import * as kx from "../db/kx.ts";
 import type { ExecOptions, KubeApi } from "./kube-api.ts";
 import {
-  ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, isToolName, OUTPUT_CAP, pngSize, podPath,
-  READ_LINE_CHARS, seconds, SRC_ROOT, TOOL_DEFINITIONS, TOOL_NAMES, type Args, type WorkspaceToolName,
+  ArgError, checkArgs, cutMiddle, FILE_MAX_BYTES, GLOB_LIMIT, IMAGE_EDGE, IMAGE_MAX_BYTES, imageMime, imageSize, isToolName, OUTPUT_CAP, podPath,
+  READ_LINE_CHARS, seconds, SESSION_IMAGES, SRC_ROOT, TOOL_DEFINITIONS, type Args, type WorkspaceToolName,
 } from "./workspace-tool-specs.ts";
 import { CALL_GRACE_MS, cleanOutput, execHelper, takeCallNumber, type WsHeader, type WsRaw } from "./workspaces.ts";
 
@@ -37,10 +37,19 @@ const READ_BYTES = 128 * 1024;
 /** A `--since` past any log's end: a status call that returns only the header. */
 const NO_OUTPUT = "999999999999";
 
-/** Shell-time bookkeeping a call row's result carries, read back when a session is rebuilt. Numbers only, so SQL can read them. */
-type Acct = { ms?: number; bytes?: number; bg?: 1; limit?: number; ref?: number; ended?: 0 | 1 };
+/** The launcher's and the operator's own calls (execWs); every other row is a session tool call that counts. */
+const OWN_CALLS = ["seed", "checkpoint", "cli"];
+/** A killed command's process group gets this long after SIGTERM. */
+const KILL_GRACE_MS = 5_000;
+
+/** Bookkeeping a call row's result carries, read back when a session is rebuilt. Numbers only, so SQL can read them. */
+type Acct = { ms?: number; bytes?: number; bg?: 1; limit?: number; ref?: number; ended?: 0 | 1; images?: number };
 type Out = WorkspaceToolResult & { acct?: Acct };
-/** A shell command whose time still counts: background ones, and foreground ones a restarted job has not seen end. */
+/**
+ * A shell command whose time still counts: running ones, and background ones. Times are the job's: the pod's call files
+ * are writable by the session, so what they say about a command is advisory (the pod's own limits are the hard bounds).
+ * `n` is 0 until the call number is taken.
+ */
 type Cmd = { n: number; startMs: number; limitMs: number; endMs: number | null; background: boolean };
 
 class Refused extends Error {}
@@ -91,6 +100,7 @@ export class WorkspaceSession {
   private readonly cmds = new Map<number, Cmd>();
   /** Log bytes of each shell call the session has seen, so shell_status returns only what is new. */
   private readonly seen = new Map<number, number>();
+  private images = 0;
   private readonly gate = new Gate(SESSION_LIMITS.execs);
   private readonly pathLocks = new Map<string, Promise<void>>();
 
@@ -106,6 +116,10 @@ export class WorkspaceSession {
       this.loaded = null;
       throw e;
     }));
+    // A row that already has its result (a job restarted after settling it) is answered from it, never run again.
+    const prior = await this.db.get(this.db.k.selectFrom("workspace_calls").select(["state", "result"]).where("id", "=", row).where("workspace_id", "=", this.workspaceId));
+    const stored = prior && (prior.state === "done" || prior.state === "failed") ? storedResult(prior.result) : null;
+    if (stored) return stored;
     let out: Out;
     let state: "done" | "failed" = "done";
     if (!this.counted.has(row) && this.counted.size >= SESSION_LIMITS.calls) {
@@ -138,17 +152,26 @@ export class WorkspaceSession {
     const rows = await db.all(db.k.selectFrom("workspace_calls")
       .select((eb) => {
         const res = eb.case().when(kx.jsonValid(db, "result")).then(eb.ref("result")).end();
+        const arg = eb.case().when(kx.jsonValid(db, "args")).then(eb.ref("args")).end();
         const num = (path: string) => kx.jsonNum(db, res, `$.acct.${path}`);
-        return ["id", "n", "tool", "state", "started_at", num("ms").as("ms"), num("bytes").as("bytes"), num("bg").as("bg"), num("limit").as("lim"), num("ref").as("ref"), num("ended").as("ended")] as const;
+        return ["id", "n", "tool", "state", "started_at", num("ms").as("ms"), num("bytes").as("bytes"), num("bg").as("bg"), num("limit").as("lim"), num("ref").as("ref"),
+          num("ended").as("ended"), num("images").as("images"), kx.jsonBool(db, arg, "$.background").as("background"), kx.jsonNum(db, arg, "$.timeout_sec").as("timeout")] as const;
       })
-      .where("workspace_id", "=", this.workspaceId).where("tool", "in", TOOL_NAMES).orderBy("id"));
+      .where("workspace_id", "=", this.workspaceId).where("tool", "not in", OWN_CALLS).orderBy("id"));
+    // Background commands a restart caught mid-launch: their limit was the time left when they started.
+    const launching: Cmd[] = [];
     for (const r of rows) {
       const id = Number(r.id);
       if (r.state !== "queued") this.counted.add(id);
+      this.images += Number(r.images ?? 0);
       const startMs = r.started_at ? Date.parse(r.started_at) : Date.now();
       if (r.tool === "shell" && r.n !== null) {
         if (r.bg) this.cmds.set(id, { n: Number(r.n), startMs, limitMs: Number(r.lim ?? 0) * 1000, endMs: null, background: true });
-        else if (r.state === "running") this.cmds.set(id, { n: Number(r.n), startMs, limitMs: 600_000, endMs: null, background: false });
+        else if (r.state === "running" && Number(r.background) === 1) {
+          const c: Cmd = { n: Number(r.n), startMs, limitMs: 0, endMs: null, background: true };
+          this.cmds.set(id, c);
+          launching.push(c);
+        } else if (r.state === "running") this.cmds.set(id, { n: Number(r.n), startMs, limitMs: Number(r.timeout ?? 120) * 1000, endMs: null, background: false });
         else if (r.ms !== null) {
           this.fgMs += Number(r.ms);
           this.seen.set(id, Number(r.bytes ?? 0));
@@ -160,6 +183,8 @@ export class WorkspaceSession {
         if (r.tool === "shell_status" && r.bytes !== null) this.seen.set(ref, Math.max(this.seen.get(ref) ?? 0, Number(r.bytes)));
       }
     }
+    const used = this.usedMs();
+    for (const c of launching) c.limitMs = Math.max(0, SESSION_LIMITS.shellMs - used);
   }
 
   private async touch(): Promise<void> {
@@ -211,10 +236,17 @@ export class WorkspaceSession {
 
   // ---- shell -------------------------------------------------------------------
 
-  private usedMs(now = Date.now()): number {
+  /** Shell time used; with `reserve`, running foreground commands count their whole limit, so parallel calls do not share the same remainder. */
+  private usedMs(reserve = false, now = Date.now()): number {
     let ms = this.fgMs;
-    for (const c of this.cmds.values()) ms += c.endMs ?? Math.min(Math.max(0, now - c.startMs), c.limitMs);
+    for (const c of this.cmds.values()) ms += c.endMs ?? (reserve && !c.background ? c.limitMs : Math.min(Math.max(0, now - c.startMs), c.limitMs));
     return ms;
+  }
+
+  /** What command `c` is charged once the job sees it end: from its start to now, by the job's clock. */
+  private ended(c: Cmd): number {
+    c.endMs = Math.min(Math.max(0, Date.now() - c.startMs), c.limitMs + KILL_GRACE_MS);
+    return c.endMs;
   }
 
   private runningBackground(): number {
@@ -226,9 +258,9 @@ export class WorkspaceSession {
   /** Asks the pod which commands not seen ending have ended, for the limits. */
   private async refresh(): Promise<void> {
     for (const c of this.cmds.values()) {
-      if (c.endMs !== null) continue;
+      if (c.endMs !== null || c.n === 0) continue;
       const r = await this.exec(["status", String(c.n), "--since", NO_OUTPUT], { maxOut: SMALL_OUT, timeoutMs: 30_000 });
-      if (r.header?.kind === "status" && r.header.state !== "running") c.endMs = r.header.ms;
+      if (r.header?.kind === "status" && r.header.state !== "running") this.ended(c);
       else if (r.header?.kind === "error" && r.header.code === "nocall") c.endMs = 0;
     }
   }
@@ -238,23 +270,22 @@ export class WorkspaceSession {
     const background = a.background === true;
     const attached = await this.reattach(a, row, background);
     if (attached) return attached;
-    if (this.usedMs() >= SESSION_LIMITS.shellMs - 1000) await this.refresh();
-    const leftSec = Math.floor((SESSION_LIMITS.shellMs - this.usedMs()) / 1000);
+    if (this.usedMs(true) >= SESSION_LIMITS.shellMs - 1000 || (background && this.runningBackground() >= SESSION_LIMITS.background)) await this.refresh();
+    // No await from these checks until the command is in `cmds`, so parallel calls count each other.
+    const leftSec = Math.floor((SESSION_LIMITS.shellMs - this.usedMs(true)) / 1000);
     if (leftSec < 1) throw new Refused(`the session's ${SESSION_LIMITS.shellMs / 3600_000} h of shell time are used up; submit your work`);
     if (background && this.runningBackground() >= SESSION_LIMITS.background) {
-      await this.refresh();
-      if (this.runningBackground() >= SESSION_LIMITS.background) throw new Refused(`${SESSION_LIMITS.background} background commands are running; wait for one with shell_status or end one with shell_kill`);
+      throw new Refused(`${SESSION_LIMITS.background} background commands are running; wait for one with shell_status or end one with shell_kill`);
     }
     const limitSec = background ? leftSec : Math.min(Number(a.timeout_sec ?? 120), leftSec);
-    const n = await takeCallNumber(this.db, this.workspaceId);
-    const cmd: Cmd = { n, startMs: Date.now(), limitMs: limitSec * 1000, endMs: null, background };
-    // Held before the exec, so concurrent calls count it against the limits.
+    const cmd: Cmd = { n: 0, startMs: Date.now(), limitMs: limitSec * 1000, endMs: null, background };
     this.cmds.set(row, cmd);
     const timeoutMs = background ? 30_000 : limitSec * 1000 + JOB_GRACE_MS;
-    await this.begin(row, timeoutMs, n);
-    const argv = ["run", String(n), String(limitSec), "--cwd", cwd, ...(background ? ["--background"] : []), "--", "bash", "-lc", a.command as string];
     let r: WsRaw;
     try {
+      cmd.n = await takeCallNumber(this.db, this.workspaceId);
+      await this.begin(row, timeoutMs, cmd.n);
+      const argv = ["run", String(cmd.n), String(limitSec), "--cwd", cwd, ...(background ? ["--background"] : []), "--", "bash", "-lc", a.command as string];
       r = await this.exec(argv, { ...(a.stdin !== undefined ? { stdin: Buffer.from(a.stdin as string) } : {}), maxOut: RUN_OUT, timeoutMs });
     } catch (e) {
       this.cmds.delete(row);
@@ -274,7 +305,9 @@ export class WorkspaceSession {
     if (prior?.state !== "running" || prior.n === null) return null;
     const n = Number(prior.n);
     const st = await this.exec(["status", String(n), "--since", NO_OUTPUT], { maxOut: SMALL_OUT, timeoutMs: 30_000 });
-    if (st.header?.kind !== "status") return null;
+    // Run again only when the pod never saw the command; an unclear answer must not run it twice.
+    if (st.header?.kind === "error" && st.header.code === "nocall") return null;
+    if (st.header?.kind !== "status") return helperFailure(st, "the command's state in the workspace is unknown, so it was not run again");
     if (background) return { text: JSON.stringify({ id: row }), acct: { bg: 1, limit: Math.round((this.cmds.get(row)?.limitMs ?? 0) / 1000) } };
     const startMs = prior.started_at ? Date.parse(prior.started_at) : Date.now();
     const cmd = this.cmds.get(row) ?? { n, startMs, limitMs: Number(a.timeout_sec ?? 120) * 1000, endMs: null, background: false };
@@ -306,10 +339,11 @@ export class WorkspaceSession {
     }
     const h = r.header;
     this.cmds.delete(row);
-    this.fgMs += h.ms;
+    const ms = Math.max(h.ms, Date.now() - cmd.startMs);
+    this.fgMs += ms;
     this.seen.set(row, h.bytes);
     const body = cleanOutput(cutMiddle(r.body, OUTPUT_CAP + 2048));
-    return { text: `${statusLine(h)}${note}\n${body || "(no output)"}`, acct: { ms: h.ms, bytes: h.bytes } };
+    return { text: `${statusLine(h)}${note}\n${body || "(no output)"}`, acct: { ms, bytes: h.bytes } };
   }
 
   /** The `ws` call number of shell call `id` of this workspace. */
@@ -330,10 +364,10 @@ export class WorkspaceSession {
     const h = r.header;
     const ended = h.state !== "running";
     const c = this.cmds.get(id);
-    if (c && ended) c.endMs = h.ms;
+    const ms = c && ended ? this.ended(c) : h.ms;
     this.seen.set(id, h.bytes);
     const body = cleanOutput(cutMiddle(r.body, OUTPUT_CAP + 2048));
-    return { text: `${statusLine(h)}, ${h.bytes} bytes of output in all\n${body || "(no new output)"}`, acct: { ref: id, ms: h.ms, bytes: h.bytes, ended: ended ? 1 : 0 } };
+    return { text: `${statusLine(h)}, ${h.bytes} bytes of output in all\n${body || "(no new output)"}`, acct: { ref: id, ms, bytes: h.bytes, ended: ended ? 1 : 0 } };
   }
 
   private async shellKill(a: Args, row: number): Promise<Out> {
@@ -345,8 +379,8 @@ export class WorkspaceSession {
     const h = r.header;
     const ended = h.state !== "running";
     const c = this.cmds.get(id);
-    if (c && ended) c.endMs = h.ms;
-    return { text: statusLine(h), acct: { ref: id, ms: h.ms, ended: ended ? 1 : 0 } };
+    const ms = c && ended ? this.ended(c) : h.ms;
+    return { text: statusLine(h), acct: { ref: id, ms, ended: ended ? 1 : 0 } };
   }
 
   // ---- files -------------------------------------------------------------------
@@ -366,7 +400,15 @@ export class WorkspaceSession {
       return { text: h.message || h.code, isError: true };
     }
     if (h?.kind !== "ok") return helperFailure(r, "read");
-    if (h.fields[0] === "image") return this.image(p, h.fields.slice(1).map(Number), r);
+    if (h.fields[0] === "image") {
+      if (this.images >= SESSION_IMAGES) throw new Refused(`the session's ${SESSION_IMAGES} images are used up`);
+      const out = this.image(p, h.fields.slice(1).map(Number), r);
+      if (out.images) {
+        this.images++;
+        out.acct = { images: 1 };
+      }
+      return out;
+    }
     if (h.fields[0] !== "text") return helperFailure(r, "read");
     const total = Number(h.fields[1]);
     let body = r.body;
@@ -386,10 +428,9 @@ export class WorkspaceSession {
     const mime = imageMime(b);
     if (!mime) return { text: `failed: what the pod sent for ${p} is not a PNG, JPEG, GIF or WebP image`, isError: true };
     if (b.length > IMAGE_MAX_BYTES) return { text: `refused: the image of ${p} is ${b.length} bytes`, isError: true };
-    if (mime === "image/png") {
-      const s = pngSize(b);
-      if (Math.max(s.w, s.h) > IMAGE_EDGE) return { text: `failed: the image of ${p} was not scaled (${s.w}x${s.h})`, isError: true };
-    }
+    const s = imageSize(b, mime);
+    if (!s) return { text: `failed: the size of the image of ${p} cannot be read`, isError: true };
+    if (Math.max(s.w, s.h) > IMAGE_EDGE) return { text: `failed: the image of ${p} was not scaled (${s.w}x${s.h})`, isError: true };
     const scaled = ow !== w || oh !== hgt;
     return { text: `${p}: ${mime}, ${ow}x${oh}${scaled ? ` (scaled from ${w}x${hgt})` : ""}, ${b.length} bytes`, images: [{ data: b.toString("base64"), mimeType: mime }] };
   }
@@ -417,7 +458,7 @@ export class WorkspaceSession {
     if (cur.truncated || cur.body.length !== Number(bytes) || createHash("sha256").update(cur.body).digest("hex") !== sha) return { text: `failed: ${p} was cut in transfer`, isError: true };
     let text: string;
     try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(cur.body);
+      text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(cur.body);
     } catch {
       throw new Refused(`${p} is not UTF-8 text; change it with shell`);
     }
@@ -479,6 +520,17 @@ export class WorkspaceSession {
   }
 }
 
+/** A settled row's result as the tool result it was; null when it is not one. */
+function storedResult(json: string | null): WorkspaceToolResult | null {
+  try {
+    const r = JSON.parse(json ?? "null") as Partial<WorkspaceToolResult> | null;
+    if (typeof r?.text !== "string") return null;
+    return { text: r.text, ...(r.isError ? { isError: true } : {}), ...(Array.isArray(r.images) ? { images: r.images } : {}) };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * `text` with `from` replaced by `to`: every occurrence with `all`, else exactly one. A file with CRLF line ends also
  * matches `from` written with LF. Returns why when it refuses.
@@ -486,7 +538,7 @@ export class WorkspaceSession {
 export function replaceText(text: string, from: string, to: string, all: boolean): { text: string; count: number } | string {
   let parts = text.split(from);
   if (parts.length === 1 && text.includes("\r\n") && from.includes("\n") && !from.includes("\r")) {
-    const crlf = (s: string) => s.replace(/\n/g, "\r\n");
+    const crlf = (s: string) => s.replace(/\r?\n/g, "\r\n");
     parts = text.split(crlf(from));
     to = crlf(to);
   }

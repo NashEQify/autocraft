@@ -11,7 +11,10 @@ export const OUTPUT_HEAD = 4 * 1024;
 export const OUTPUT_TAIL = 26 * 1024;
 /** Longest image edge a tool returns; the pod scales down to it. */
 export const IMAGE_EDGE = 1568;
-export const IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** Bytes of one image a tool returns at most, so its base64 stays within the model API's 5 MB. The pod reads files up to 10 MiB. */
+export const IMAGE_MAX_BYTES = 3_750_000;
+/** Images one session gets back in all, as the design's screenshot limit. */
+export const SESSION_IMAGES = 300;
 export const READ_LINE_CHARS = 2000;
 export const FILE_MAX_BYTES = 2 * 1024 * 1024;
 export const GLOB_LIMIT = 500;
@@ -174,7 +177,32 @@ export function imageMime(b: Buffer): ImageMime | null {
   return null;
 }
 
-/** A PNG's width and height from its IHDR chunk. */
-export const pngSize = (b: Buffer): { w: number; h: number } => ({ w: b.readUInt32BE(16), h: b.readUInt32BE(20) });
+/** Width and height from the image's header (PNG IHDR, GIF screen, WebP VP8/VP8L/VP8X, JPEG SOF); null when they cannot be read. */
+export function imageSize(b: Buffer, mime: ImageMime): { w: number; h: number } | null {
+  if (mime === "image/png") return { w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (mime === "image/gif") return b.length >= 10 ? { w: b.readUInt16LE(6), h: b.readUInt16LE(8) } : null;
+  if (mime === "image/webp") {
+    const chunk = b.length >= 30 ? b.toString("latin1", 12, 16) : "";
+    if (chunk === "VP8 " && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) return { w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+    if (chunk === "VP8L" && b[20] === 0x2f) {
+      const bits = b.readUInt32LE(21);
+      return { w: (bits & 0x3fff) + 1, h: ((bits >>> 14) & 0x3fff) + 1 };
+    }
+    if (chunk === "VP8X") return { w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+    return null;
+  }
+  let i = 2;
+  while (i + 9 <= b.length) {
+    if (b[i] !== 0xff) return null;
+    const m = b[i + 1]!;
+    if (m === 0xff) { i++; continue; }
+    if (m === 0x01 || (m >= 0xd0 && m <= 0xd8)) { i += 2; continue; }
+    if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return { w: b.readUInt16BE(i + 7), h: b.readUInt16BE(i + 5) };
+    const len = b.readUInt16BE(i + 2);
+    if (len < 2) return null;
+    i += 2 + len;
+  }
+  return null;
+}
 
 export const seconds = (ms: number): string => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;

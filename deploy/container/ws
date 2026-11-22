@@ -14,7 +14,7 @@ TMPD=$ROOT/.ws/tmp
 READ_CAP=131072  # bytes of lines one read returns
 LINE_BYTES=8192  # bytes kept of each line read; the job cuts lines at 2000 characters
 IMG_LIMIT=10485760
-IMG_OUT=3932160  # larger scaled PNGs go out as JPEG, so the base64 stays under 5 MB
+IMG_OUT=3750000  # bytes of image sent at most, so its base64 stays under 5 MB; larger PNGs go out as JPEG
 RG_RAW=16777216
 
 die() { # code exit message...
@@ -255,28 +255,44 @@ cmd_put() {
     "$ROOT"/*) ;;
     *) die usage 2 "path must be under $ROOT" ;;
   esac
+  # Writes go to the file a link points at, which must also be under ROOT, so a link
+  # is never replaced by a regular file.
+  dir=$(dirname "$p")
+  mkdir -p "$dir" || die io 2 "cannot create $dir"
+  root=$(readlink -f -- "$ROOT") || die io 2 "cannot resolve $ROOT"
+  real=$(readlink -f -- "$p") || die io 2 "cannot resolve $p"
+  case $real in
+    "$root"/*) ;;
+    *) die usage 2 "$p resolves to $real, outside $ROOT" ;;
+  esac
+  [ -d "$real" ] && die isdir 2 "$p is a directory"
+  rdir=$(dirname "$real")
   mkdir -p "$ROOT/.ws/locks" || die io 2 "cannot create lock dir"
-  key=$(printf '%s' "$p" | sha256sum | cut -d' ' -f1)
+  tmp=$(mktemp "$rdir/.ws-put.XXXXXX") || die io 2 "cannot write in $rdir"
+  # stdin is read before the lock, so the check and the replace happen together.
+  cat >"$tmp" || { rm -f "$tmp"; die io 2 "cannot read the new content"; }
+  key=$(printf '%s' "$real" | sha256sum | cut -d' ' -f1)
   (
     flock 9
-    if [ -e "$p" ]; then
-      cur=$(sha256sum <"$p" | cut -d' ' -f1)
+    if [ -e "$real" ]; then
+      cur=$(sha256sum <"$real" | cut -d' ' -f1)
+      mode=$(stat -c %a "$real") || die io 2 "cannot read the mode of $p"
     else
       cur=none
+      mode=644
     fi
     if [ -n "$expect" ] && [ "$expect" != "$cur" ]; then
       die conflict 4 "$cur"
     fi
-    dir=$(dirname "$p")
-    mkdir -p "$dir" || die io 2 "cannot create $dir"
-    tmp=$(mktemp "$dir/.ws-put.XXXXXX") || die io 2 "cannot write in $dir"
-    cat >"$tmp"
-    chmod 0644 "$tmp"
+    chmod "$mode" "$tmp" || die io 2 "cannot set the mode of $p"
     bytes=$(wc -c <"$tmp" | tr -d ' ')
     sha=$(sha256sum <"$tmp" | cut -d' ' -f1)
-    mv -f "$tmp" "$p" || { rm -f "$tmp"; die io 2 "cannot replace $p"; }
+    mv -f "$tmp" "$real" || die io 2 "cannot replace $p"
     printf 'WS ok %s %s\n' "$bytes" "$sha"
   ) 9>"$ROOT/.ws/locks/$key"
+  st=$?
+  rm -f "$tmp"
+  return "$st"
 }
 
 need_file() {
@@ -317,6 +333,9 @@ cmd_image() {
   fi
   if [ "$out" = png ] && [ "$(file_size "$tmp")" -gt "$IMG_OUT" ]; then
     im_convert "png:$tmp" -quality 85 "jpeg:$tmp" 2>/dev/null || { rm -f "$tmp"; die image 2 "cannot scale the image"; }
+  fi
+  if [ "$(file_size "$tmp")" -gt "$IMG_OUT" ]; then
+    rm -f "$tmp"; die toolarge 2 "the scaled image is larger than $IMG_OUT bytes"
   fi
   nd=$(image_dims "$tmp") || { rm -f "$tmp"; die image 2 "cannot read the scaled image"; }
   printf 'WS ok image %s %s %s %s %s\n' "$(file_size "$tmp")" "$w" "$h" "${nd% *}" "${nd#* }"

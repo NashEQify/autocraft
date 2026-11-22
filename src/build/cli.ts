@@ -14,7 +14,7 @@ import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
-import { createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
+import { capJson, createWorkspace, describeHeader, endWorkspace, execWs, getWorkspace, LIVE_STATES, WORKSPACE_COLUMNS, type WorkspaceRow, type WsHeader } from "./workspaces.ts";
 
 const USAGE = `usage: autocraft-server envs list
        autocraft-server envs add <id> --label TEXT --kind local-sandbox|remote --slots N [--confidential yes|no] (--out FILE | --print)
@@ -348,7 +348,7 @@ async function workspace(args: string[]): Promise<void> {
     if (!await getWorkspace(db, id)) die("no such workspace");
     const api = inClusterApi() ?? die("this shell is not in the cluster: run it in the runner container, whose service account may exec in workspace pods");
     const at = new Date().toISOString();
-    const row = Number((await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, tool: name, args: JSON.stringify(args), state: "queued", created_at: at }).returning("id")))!.id);
+    const row = Number((await db.get(db.k.insertInto("workspace_calls").values({ workspace_id: id, tool: name, args: JSON.stringify(capJson(args)), state: "queued", created_at: at }).returning("id")))!.id);
     const r = await new WorkspaceSession(db, api, id).call(name, args, row);
     console.log(`call ${row}${r.isError ? " (error)" : ""}`);
     process.stdout.write(r.text.endsWith("\n") ? r.text : `${r.text}\n`);

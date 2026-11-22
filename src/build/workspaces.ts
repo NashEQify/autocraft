@@ -151,11 +151,11 @@ export function splitHeader(stdout: Buffer): { header: WsHeader | null; body: Bu
 }
 
 /**
- * Runs `ws <argv>` in the workspace's pod after the pod check and returns the raw outcome, with no call row: the caller
- * records it. Throws when the pod check fails or the exec never started.
+ * Runs `ws <argv>` in the workspace's pod after the pod check (or in `at`, a pod the caller just checked) and returns
+ * the raw outcome, with no call row: the caller records it. Throws when the pod check fails or the exec never started.
  */
-export async function execHelper(db: Db, api: KubeApi, id: number, argv: string[], opts: ExecOptions): Promise<WsRaw> {
-  const { ns, pod } = await workspacePod(db, api, id);
+export async function execHelper(db: Db, api: KubeApi, id: number, argv: string[], opts: ExecOptions, at?: { ns: string; pod: string }): Promise<WsRaw> {
+  const { ns, pod } = at ?? await workspacePod(db, api, id);
   const r = await api.exec(ns, pod, WS_CONTAINER, [WS_POD_PATH, ...argv], opts);
   return { ...splitHeader(r.stdout), stderr: cleanOutput(r.stderr).slice(0, 8192), truncated: r.truncated, ...(r.error !== undefined ? { error: r.error } : {}) };
 }
@@ -188,7 +188,7 @@ export type WsCallResult = { callId: number; n: number | null; header: WsHeader 
  */
 export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o: WsCallOptions, now: () => number = Date.now): Promise<WsCallResult> {
   const iso = () => new Date(now()).toISOString();
-  await workspacePod(db, api, id);
+  const at = await workspacePod(db, api, id);
   const n = argv[0] === "run" ? await takeCallNumber(db, id) : null;
   const full = n === null ? argv : ["run", String(n), ...argv.slice(1)];
   const args = JSON.stringify(capJson(o.args ?? { argv }));
@@ -210,7 +210,7 @@ export async function execWs(db: Db, api: KubeApi, id: number, argv: string[], o
   };
   let r: WsRaw;
   try {
-    r = await execHelper(db, api, id, full, { stdin: o.stdin, maxOut: o.maxOut ?? MAX_CALL_OUTPUT, timeoutMs: o.timeoutMs });
+    r = await execHelper(db, api, id, full, { stdin: o.stdin, maxOut: o.maxOut ?? MAX_CALL_OUTPUT, timeoutMs: o.timeoutMs }, at);
   } catch (e) {
     await finish("failed", { error: e instanceof KubeError ? e.message : String((e as Error).message) });
     throw e;
