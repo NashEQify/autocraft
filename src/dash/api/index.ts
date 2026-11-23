@@ -180,7 +180,7 @@ export async function itemCore(db: Db, req: Req): Promise<Item> {
     additions: it.additions ?? 0, deletions: it.deletions ?? 0,
     changedFiles: it.kind === "pr" ? it.changed_files : null,
     // Per-check states of the head come from pr_checks and per-file rows from pr_files (src/activity.ts).
-    files: it.kind === "pr" ? await filesOf(db, repo, n) : [], ciChecks: it.kind === "pr" ? await ciChecksOf(db, repo, n) : [],
+    files, ciChecks,
     ci: it.kind === "pr" ? (CI[it.ci_state ?? ""] ?? "none") : "none",
     mergeable: MERGEABLE[it.mergeable ?? ""] ?? "unknown",
     labels, createdAt: it.created_at ?? "", updatedAt: it.updated_at ?? "",

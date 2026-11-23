@@ -79,10 +79,10 @@ export function effectiveCiWith(optional: string[], overall: string, checks: str
 /** Check names seen on the repo's recent PRs and default-branch heads, for the add control. */
 export async function seenChecks(db: Db, repo: string): Promise<string[]> {
   const names = new Set<string>();
-  const rows = [
-    ...await db.all(db.k.selectFrom("main.pr_checks").select("checks").where("repo", "=", repo).orderBy("fetched_at", "desc").limit(40)),
-    ...await db.all(db.k.selectFrom("main.main_ci").select("checks").where("repo", "=", repo).orderBy("updated_at", "desc").limit(10)),
-  ];
+  const rows = (await Promise.all([
+    db.all(db.k.selectFrom("main.pr_checks").select("checks").where("repo", "=", repo).orderBy("fetched_at", "desc").limit(40)),
+    db.all(db.k.selectFrom("main.main_ci").select("checks").where("repo", "=", repo).orderBy("updated_at", "desc").limit(10)),
+  ])).flat();
   for (const r of rows) {
     try { for (const c of JSON.parse(r.checks) as { name?: string }[]) if (c.name) names.add(c.name); } catch { /* skip */ }
   }

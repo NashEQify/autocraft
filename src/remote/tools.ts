@@ -196,7 +196,7 @@ export async function callTaskTool(db: Db, lease: TaskLease, secret: string, ser
     if (runner && (server === ITEM_SERVER || server === REFERENCE_SERVER)) return await runnerTool(runner, secret, server, name, raw, opts.signal);
     if (server === ITEM_SERVER) return await items(name, raw);
     if (server === REFERENCE_SERVER) return await reference(db, lease, name, raw);
-    const live = async (): Promise<boolean> => (await liveLease(db, secret))?.id === lease.id;
+    const live = async (): Promise<boolean> => (await db.fresh(() => liveLease(db, secret)))?.id === lease.id;
     if (server === WORKSPACE_SERVER) return await relayWorkspaceCall(db, { id: lease.id, runId: lease.runId }, name, raw, { live, ...opts });
     return await relayCheck(db, { id: lease.id, runId: lease.runId }, raw, { live, ...opts });
   } catch (e) {

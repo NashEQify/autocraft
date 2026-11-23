@@ -451,12 +451,14 @@ function veilHeader(h: ItemTraceHeader): ItemTraceHeader {
 
 async function headerOf(c: Ctx): Promise<ItemTraceHeader> {
   const { db, repo, n, box, hidden } = c;
-  const plan = await db.get(db.k.selectFrom("item_plans").select(["head", "state", "actions", "wait", "reasons", "note", "view", "planned_at"]).where("repo", "=", repo).where("number", "=", n));
+  const [plan, it, hold] = await Promise.all([
+    db.get(db.k.selectFrom("item_plans").select(["head", "state", "actions", "wait", "reasons", "note", "view", "planned_at"]).where("repo", "=", repo).where("number", "=", n)),
+    db.get(db.k.selectFrom("items").select("assignees").where("repo", "=", repo).where("number", "=", n)),
+    db.get(db.k.selectFrom("merge_holds").select(["held_by", "held_at"]).where("repo", "=", repo).where("number", "=", n)),
+  ]);
   const view = obj(plan?.view);
   const acts = arr<{ kind?: unknown; head?: unknown }>(plan?.actions).filter((a) => a && typeof a.kind === "string");
-  const it = await db.get(db.k.selectFrom("items").select("assignees").where("repo", "=", repo).where("number", "=", n));
   const assignees = arr(it?.assignees).filter((x): x is string => typeof x === "string");
-  const hold = await db.get(db.k.selectFrom("merge_holds").select(["held_by", "held_at"]).where("repo", "=", repo).where("number", "=", n));
   // The planner's texts as this reader may see them: no item of a hidden repo, and for viewers no note and plain reasons.
   const wait = waitFor(c, plan?.wait ?? null);
   const note = c.staff ? blankIfHidden(plan?.note ?? null, hidden) || null : null;
@@ -525,8 +527,8 @@ export const rowValuesOf = kx.rowValues;
 export async function fingerprint(c: Ctx, qkey: string): Promise<string> {
   const { db, repo, n, ref } = c;
   const parts: unknown[] = [qkey, c.staff, c.operator, c.hidden];
-  parts.push(...await rowValuesOf(db, fingerprintQueries(db, repo, n, ref)));
-  const ids = await decisionIds(c);
+  const [values, ids] = await Promise.all([rowValuesOf(db, fingerprintQueries(db, repo, n, ref)), decisionIds(c)]);
+  parts.push(...values);
   const byId = new Map((await db.all(db.k.selectFrom("decisions as d").select((eb) => ["d.id", "d.answer", "d.answered_at", "d.applied_at", "d.asked_at",
     eb.selectFrom("decision_comments as x").select((e) => e.fn.countAll<number>().as("n")).whereRef("x.decision_id", "=", "d.id").as("comments")])
     .where(kx.inList(db, "d.id", ids)))).map(({ id, ...r }) => [id, [id, ...Object.values(r)]]));
@@ -539,10 +541,13 @@ export async function context(db: Db, req: Req): Promise<Ctx> {
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   // The visibility check decides first: an item of a hidden repo is a 404 for its repo whether or not the mirror has it.
+  // The rest reads alongside, and counts only once both checks passed.
+  const staff = canSeeInternals(req);
+  const rest = Promise.all([setting(db, "pipeline_login"), ownLogins(db, repo), !staff && isQuiet(db, repo, n), hiddenRepos(db, req)]);
+  rest.catch(() => {});
   const [, found] = await Promise.all([needVisible(db, req, repo), db.get(db.k.selectFrom("items").select((eb) => eb.lit(1).as("one")).where("repo", "=", repo).where("number", "=", n))]);
   if (!found) throw new HttpError(404, `no item ${repo}#${n} in the mirror`);
-  const staff = canSeeInternals(req);
-  const [box, own, veiled, hidden] = await Promise.all([setting(db, "pipeline_login"), ownLogins(db, repo), !staff && isQuiet(db, repo, n), hiddenRepos(db, req)]);
+  const [box, own, veiled, hidden] = await rest;
   return { db, repo, n, ref: `${repo}#${n}`, own, box: box ?? "", staff, veiled, operator: req.user.role === "operator", hidden };
 }
 

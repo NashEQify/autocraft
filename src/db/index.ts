@@ -93,6 +93,14 @@ export interface Db {
   /** Transitional raw SQL in the SQLite dialect, with `?` and `:name` parameters. */
   prepare(text: string): Statement;
   /**
+   * Runs `fn` with its Kysely SELECTs outside a transaction shared: one with the same text and parameters as an earlier
+   * one in this async context gets that read's rows (fresh copies) instead of another round trip. A write through the
+   * handle in the context, and the end of `fn`, forget them. For read-only requests, whose parts read the same rows.
+   */
+  shareReads<T>(fn: () => Promise<T>): Promise<T>;
+  /** Runs `fn` with every read going to the database, inside shareReads too: for code that reads until a row changes. */
+  fresh<T>(fn: () => Promise<T>): Promise<T>;
+  /**
    * Runs `fn` in one read snapshot (SQLite BEGIN; Postgres REPEATABLE READ READ ONLY). Inside an open transaction it
    * joins that one.
    */

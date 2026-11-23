@@ -155,14 +155,13 @@ export async function refreshLiveness(db: Db, nowMs: number = Date.now(), force 
 
 /** The stored result; null before the first refresh. */
 export async function storedLiveness(db: Db): Promise<Liveness | null> {
-  const at = await setting(db, "liveness_at");
-  if (!at) return null;
-  const items = await db.all(db.k.selectFrom("main.liveness_items").select(["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since"])
+  const [at, items, openSetting] = await Promise.all([setting(db, "liveness_at"), db.all(db.k.selectFrom("main.liveness_items").select(["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since"])
     .orderBy("verdict", "desc").orderBy("since").orderBy("repo").orderBy("number")
-    .$narrowType<{ kind: "pr" | "issue"; verdict: LivenessVerdict }>());
+    .$narrowType<{ kind: "pr" | "issue"; verdict: LivenessVerdict }>()), setting(db, "liveness_open")]);
+  if (!at) return null;
   const causes: Record<string, number> = {};
   for (const i of items) if (i.verdict === "stuck") causes[i.cause] = (causes[i.cause] ?? 0) + 1;
-  const open = Number(await setting(db, "liveness_open") ?? 0);
+  const open = Number(openSetting ?? 0);
   return { checkedAt: at, stuck: items.filter((i) => i.verdict === "stuck").length, long: items.filter((i) => i.verdict === "long").length, open, causes, items };
 }
 

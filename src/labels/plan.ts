@@ -18,18 +18,17 @@ export type PlanRow = {
 export type PlanCounts = { toAdd: number; already: number; unsettled: number; conflicts: number };
 
 export async function planLabels(db: Db, repo: string, runId?: string): Promise<PlanRow[]> {
-  const items = await db.all(db.k.selectFrom("main.items as i").select(["i.number", "i.kind", "i.url", "i.labels"])
+  const [items, cls, answers, quiet] = await Promise.all([db.all(db.k.selectFrom("main.items as i").select(["i.number", "i.kind", "i.url", "i.labels"])
     .where("i.repo", "=", repo).where("i.state", "=", "OPEN")
     .where((eb) => notOwnIntegrationExpr(db, eb, "i")).where((eb) => pilotExpr(db, eb, "i")).where((eb) => eb.not(backlogHeldExpr(db, eb, "i")))
-    .orderBy("i.number"));
-  const byItem = new Map<number, ClsRow[]>();
-  const cls: (ClsRow & { number: number })[] = await db.all(db.k.selectFrom("main.classifications")
+    .orderBy("i.number")),
+  db.all(db.k.selectFrom("main.classifications")
     .select(["number", "classifier", "run_id", "at", "type_label", "flags", "probs", "input_hash"]).where("repo", "=", repo)
-    .$if(!!runId, (q) => q.where("run_id", "=", runId!)).orderBy("at", "desc"));
+    .$if(!!runId, (q) => q.where("run_id", "=", runId!)).orderBy("at", "desc")) as Promise<(ClsRow & { number: number })[]>,
+  scopeAnswers(db, true), quietFixPrs(db, repo)]);
+  const byItem = new Map<number, ClsRow[]>();
   for (const c of cls) (byItem.get(c.number) ?? byItem.set(c.number, []).get(c.number)!).push(c);
 
-  const answers = await scopeAnswers(db, true);
-  const quiet = await quietFixPrs(db, repo);
   return items.map((it) => {
     let existing: string[] = [];
     try {

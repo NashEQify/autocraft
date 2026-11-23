@@ -6,7 +6,7 @@ import { currentJobId } from "../agents/call.ts";
 import type { ItemShown, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, Requires, SandboxEnv, TaskArtifact, TaskBatch, TaskFilter, TaskPage, TaskResult, TaskState, TaskStep } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
 import { excludeHiddenExpr } from "../dash/api/visible.ts";
-import { shownLookup } from "../dash/api/shown.ts";
+import { shownLookup, shownMap } from "../dash/api/shown.ts";
 import { removeArtifacts } from "./artifacts.ts";
 import { BuildError, slotsOf } from "./envs.ts";
 import { draining } from "./worker-update.ts";
@@ -478,16 +478,21 @@ async function artifactsOf(db: Db, ids: number[]): Promise<Map<number, TaskArtif
 }
 
 /** The integration batches whose sandbox task is one of `ids`. */
-async function batchesOf(db: Db, ids: number[], shown: (repo: string, number: number) => Promise<ItemShown>): Promise<Map<number, TaskBatch>> {
+async function batchesOf(db: Db, ids: number[]): Promise<Map<number, TaskBatch>> {
   const out = new Map<number, TaskBatch>();
   if (!ids.length) return out;
   const rows = await db.all(db.k.selectFrom("main.merge_batches").select(["id", "task_id", "repo", "branch", "commit_sha", "base_sha", "fork"]).$narrowType<{ task_id: number }>()
     .where(inList(db, "task_id", ids, "bigint")));
+  if (!rows.length) return out;
+  const prsOf = new Map<number, number[]>();
+  for (const m of await db.all(db.k.selectFrom("main.merge_batch_prs").select(["batch_id", "number"]).where(inList(db, "batch_id", rows.map((b) => b.id), "bigint")).orderBy("batch_id").orderBy("position")))
+    (prsOf.get(m.batch_id) ?? prsOf.set(m.batch_id, []).get(m.batch_id)!).push(m.number);
+  const items = await shownMap(db, rows.flatMap((b) => (prsOf.get(b.id) ?? []).map((number) => ({ repo: b.repo, number }))));
   for (const b of rows) {
-    const prs = (await db.all(db.k.selectFrom("main.merge_batch_prs").select("number").where("batch_id", "=", b.id).orderBy("position"))).map((m) => m.number);
+    const prs = prsOf.get(b.id) ?? [];
     out.set(b.task_id, {
       id: b.id, branch: b.branch, fork: b.fork, commitSha: b.commit_sha, baseSha: b.base_sha,
-      prs, shown: await mapSeq(prs, async (n) => await shown(b.repo, n)),
+      prs, shown: prs.map((n) => ({ ...(items.get(`${b.repo}#${n}`) ?? { kind: null, state: null, title: null }) })),
     });
   }
   return out;
@@ -512,8 +517,9 @@ async function toTask(r: TaskRow, artifacts: TaskArtifact[], batch: TaskBatch | 
 
 export async function getTask(db: Db, id: number): Promise<BuildTask | null> {
   const r = await db.get(selectTasks(db).where("t.id", "=", id));
-  const shown = shownLookup(db);
-  return r ? await toTask(r, (await artifactsOf(db, [r.id])).get(r.id) ?? [], (await batchesOf(db, [r.id], shown)).get(r.id) ?? null, shown, await confidentialReadyAt(db) === null) : null;
+  if (!r) return null;
+  const [arts, batches, ready] = await Promise.all([artifactsOf(db, [r.id]), batchesOf(db, [r.id]), confidentialReadyAt(db)]);
+  return await toTask(r, arts.get(r.id) ?? [], batches.get(r.id) ?? null, shownLookup(db), ready === null);
 }
 
 /** The last bytes of the log, from whole chunks. */
@@ -589,11 +595,9 @@ export async function listTasks(db: Db, f: TaskFilter, hidden: string[] = [], st
   const limit = Math.min(Math.max(f.limit ?? 50, 1), 200);
   const rows = await db.all(q.orderBy("t.id", "desc").limit(limit + 1));
   const page = rows.slice(0, limit);
-  const arts = await artifactsOf(db, page.map((r) => r.id));
-  const shown = shownLookup(db);
-  const batches = await batchesOf(db, page.map((r) => r.id), shown);
-  const noConfidential = await confidentialReadyAt(db) === null;
-  return { tasks: await mapSeq(page, async (r) => await toTask(r, arts.get(r.id) ?? [], batches.get(r.id) ?? null, shown, noConfidential)), next: rows.length > limit ? String(page[page.length - 1]!.id) : null };
+  const [arts, batches, ready] = await Promise.all([artifactsOf(db, page.map((r) => r.id)), batchesOf(db, page.map((r) => r.id)), confidentialReadyAt(db)]);
+  const shown = shownLookup(db, page.flatMap((r) => (r.number === null ? [] : [{ repo: r.repo, number: r.number }])));
+  return { tasks: await mapSeq(page, async (r) => await toTask(r, arts.get(r.id) ?? [], batches.get(r.id) ?? null, shown, ready === null)), next: rows.length > limit ? String(page[page.length - 1]!.id) : null };
 }
 
 export type { BuildSummary };

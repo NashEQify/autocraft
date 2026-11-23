@@ -36,16 +36,22 @@ export async function settlerLogins(db: Db): Promise<Set<string>> {
  * Values read once per planner pass or response, so a loop over decisions does not query per decision. `held` holds `settleKey`s whose
  * cached write permission still counts past PERM_READ_TTL: the pipeline is reading it again from GitHub and has no newer answer yet.
  */
-export type SettleMemo = { operators?: Set<string>; maintainers?: Set<string>; on?: boolean; app: Map<string, boolean>; write: Map<string, boolean>; held?: ReadonlySet<string> };
+export type SettleMemo = { operators?: Set<string>; maintainers?: Set<string>; on?: boolean; roles?: Promise<void>; app: Map<string, boolean>; write: Map<string, boolean>; held?: ReadonlySet<string> };
 export const settleMemo = (): SettleMemo => ({ app: new Map(), write: new Map() });
 export const settleKey = (login: string, repo: string): string => `${login}\n${repo}`;
 
+// One read per memo, also for callers that share the memo at the same time: all three fields are set together.
 const roles = async (db: Db, m: SettleMemo): Promise<void> => {
   if (m.operators) return;
-  const rows = await db.all(db.k.selectFrom("main.access").select(["login", "role"]).where("role", "in", ["operator", "maintainer"]));
-  m.operators = new Set(rows.filter((r) => r.role === "operator").map((r) => r.login));
-  m.maintainers = new Set(rows.filter((r) => r.role === "maintainer").map((r) => r.login));
-  m.on = await maintainerWritesOn(db);
+  m.roles ??= (async () => {
+    const [rows, on] = await Promise.all([db.all(db.k.selectFrom("main.access").select(["login", "role"]).where("role", "in", ["operator", "maintainer"])), maintainerWritesOn(db)]);
+    m.maintainers = new Set(rows.filter((r) => r.role === "maintainer").map((r) => r.login));
+    m.on = on;
+    m.operators = new Set(rows.filter((r) => r.role === "operator").map((r) => r.login));
+  })();
+  // A failed read is not kept: the next caller reads again.
+  m.roles.catch(() => { m.roles = undefined; });
+  await m.roles;
 };
 
 /** At least one repo, and every repo has the app's identity, so a maintainer's GitHub writes run as that maintainer. */

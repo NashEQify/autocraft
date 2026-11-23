@@ -89,11 +89,16 @@ export function withoutInsertId(changes: number): RunResult {
 /** Whether a call that outlived its transaction throws (tests) or falls back to autocommit with a warning. */
 const strayThrows = (): boolean => process.env.NODE_TEST_CONTEXT !== undefined;
 
+/** The most statements one shareReads scope keeps. */
+const SHARED_READS_MAX = 2000;
+
 export class Handle implements Db {
   readonly dialect: Dialect;
   readonly sync?: DatabaseSync;
   #engine: Engine;
   readonly #als = new AsyncLocalStorage<Tx>();
+  /** The reads shared in this async context (shareReads), by statement and parameters; `open` is false once its `fn` has ended, and inside fresh. */
+  readonly #shared = new AsyncLocalStorage<{ open: boolean; rows: Map<string, Promise<readonly unknown[]>> }>();
   readonly #observers = new Set<(e: DbEvent) => void>();
   readonly #warned = new Set<string>();
   /** The handle's one listening connection, opened at the first listen; it outlives a scope() change of engine. */
@@ -136,17 +141,66 @@ export class Handle implements Db {
   }
 
   async all<O>(q: Compilable<O>): Promise<O[]> {
-    return [...(await this.k.executeQuery(q.compile())).rows];
+    const c = q.compile();
+    const shared = this.#sharedReads();
+    if (!shared || this.#current()) return [...(await this.k.executeQuery(c)).rows];
+    if (c.query.kind !== "SelectQueryNode") return [...(await this.#forgetting(() => this.k.executeQuery(c))).rows];
+    const key = `${c.sql}\0${JSON.stringify(c.parameters, (_, v: unknown) => (typeof v === "bigint" ? `${v}n` : v))}`;
+    let read = shared.get(key);
+    // A request that reads this many different statements reads the rest uncached.
+    if (!read && shared.size >= SHARED_READS_MAX) return [...(await this.k.executeQuery(c)).rows];
+    if (!read) {
+      read = this.#engine.kysely.executeQuery(c).then((r) => r.rows);
+      shared.set(key, read);
+      read.catch(() => shared.get(key) === read && shared.delete(key));
+    }
+    // Copies, so a caller that changes its rows does not change another's.
+    return (await read).map((r) => ({ ...(r as object) }) as O);
+  }
+
+  /** The shared reads of this async context, or undefined outside shareReads or after it ended. */
+  #sharedReads(): Map<string, Promise<readonly unknown[]>> | undefined {
+    const s = this.#shared.getStore();
+    return s?.open ? s.rows : undefined;
+  }
+
+  /** Runs a write, forgetting the shared reads before and after it: a read that ran alongside may hold the rows from before. */
+  async #forgetting<T>(write: () => Promise<T>): Promise<T> {
+    this.#sharedReads()?.clear();
+    try {
+      return await write();
+    } finally {
+      this.#sharedReads()?.clear();
+    }
+  }
+
+  async fresh<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.#sharedReads()) return await fn();
+    return await this.#shared.run({ open: false, rows: new Map() }, fn);
+  }
+
+  async shareReads<T>(fn: () => Promise<T>): Promise<T> {
+    if (this.#sharedReads()) return await fn();
+    const store = { open: true, rows: new Map<string, Promise<readonly unknown[]>>() };
+    try {
+      return await this.#shared.run(store, fn);
+    } finally {
+      store.open = false;
+      store.rows.clear();
+    }
   }
 
   async run(q: Compilable<unknown>): Promise<RunResult> {
-    const r = await this.k.executeQuery(q.compile());
+    const r = await this.#forgetting(() => this.k.executeQuery(q.compile()));
     const changes = Number(r.numAffectedRows ?? 0n);
     return this.dialect === "postgres" ? withoutInsertId(changes) : { changes, lastInsertRowid: Number(r.insertId ?? 0n) };
   }
 
   prepare(text: string): Statement {
-    const exec = async (op: Op, args: Args) => this.#engine.exec(op, text, args, this.#current());
+    const exec = async (op: Op, args: Args) => {
+      const go = () => this.#engine.exec(op, text, args, this.#current());
+      return op === "run" ? await this.#forgetting(go) : await go();
+    };
     async function* iterate(args: Args): AsyncGenerator<Row> {
       yield* (await exec("all", args)) as Row[];
     }
@@ -190,7 +244,7 @@ export class Handle implements Db {
   }
 
   script(text: string): Promise<void> {
-    return this.#engine.script(text, this.#current());
+    return this.#forgetting(() => this.#engine.script(text, this.#current()));
   }
 
   read<T>(fn: () => Promise<T>): Promise<T> {
@@ -198,7 +252,7 @@ export class Handle implements Db {
   }
 
   write<T>(fn: () => Promise<T>, opts: WriteOptions = {}): Promise<T> {
-    return this.#transaction("write", fn, opts.lockTimeoutMs);
+    return this.#forgetting(() => this.#transaction("write", fn, opts.lockTimeoutMs));
   }
 
   async #transaction<T>(mode: Tx["mode"], fn: () => Promise<T>, lockTimeoutMs: number | undefined): Promise<T> {

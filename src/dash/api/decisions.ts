@@ -235,7 +235,16 @@ export async function execOf(db: Db, d: DecisionRow, repo: string | null, viewer
 }
 export const viewerOf = (req: Req): Viewer => ({ login: req.user.login, role: req.user.role, operator: isOperator(req), staff: canSeeInternals(req) });
 /** The viewer with the queue places of the items they may see, computed once for the response. */
-const viewerWith = async (db: Db, req: Req): Promise<Viewer> => ({ ...viewerOf(req), slots: await queueSlots(db, await visibleRepos(db, req)), held: await heldLookup(db), memo: settleMemo(), hidden: await hiddenRepos(db, req) });
+const viewerWith = async (db: Db, req: Req): Promise<Viewer> => {
+  const [slots, held, hidden] = await Promise.all([visibleRepos(db, req).then((v) => queueSlots(db, v)), heldLookup(db), hiddenRepos(db, req)]);
+  return { ...viewerOf(req), slots, held, memo: settleMemo(), hidden };
+};
+/** viewerWith, with what toDecision reads per decision read once for `ds` (decisionPage). */
+const viewerFor = async (db: Db, req: Req, ds: DecisionRow[]): Promise<Viewer> => {
+  const viewer = await viewerWith(db, req);
+  if (ds.length) viewer.page = await decisionPage(db, ds, viewer);
+  return viewer;
+};
 
 /** Whether Undo would succeed: answered, not acted on, and no GitHub write for the answer exists: no act comment, no group post, no write by the card that gave the answer. */
 export const canUndo = async (db: Db, d: DecisionRow): Promise<boolean> =>
@@ -399,36 +408,56 @@ export async function toDecision(db: Db, d: DecisionRow, viewer: Viewer): Promis
   const batch = isBatch(d);
   const refs = itemsOf(d);
   const page = viewer.page;
-  const item = batch ? undefined : page ? page.items.get(`${d.repo}#${d.number}`) : (await db.get(db.k.selectFrom("items").select(["title", "body", "kind", "state"]).where("repo", "=", d.repo!).where("number", "=", d.number!)));
-  const opinions = (page ? (page.opinions.get(d.id) ?? []) : (await db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"])
-    .where("decision_id", "=", d.id).where("retracted_at", "is", null).orderBy("at", "desc")))).map(toOpinion);
-  const adopted = d.adopted_opinion
-    ? (page ? page.adopted.get(d.adopted_opinion) : (await db.get(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where("id", "=", d.adopted_opinion))))
-    : undefined;
-  const claimRow = page ? page.claims.get(d.id) : (await db.get(db.k.selectFrom("decision_claims").select(["login", "since"]).where("decision_id", "=", d.id)
-    .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("at", "desc").limit(1)));
   const pstate = viewer.prep?.get(d.id) ?? (viewer.prep && (d.answer !== null || d.number === null) ? { preparing: false, preparedEarlier: false } : undefined);
-  const commentCount = page ? (page.comments.get(d.id) ?? 0) : (await db.get(db.k.selectFrom("decision_comments").select((eb) => eb.fn.countAll<number>().as("n")).where("decision_id", "=", d.id)))!.n;
-  // Viewers get none of the model text of a decision about a quiet pull request.
-  const veil = !viewer.staff && await touchesQuiet(db, d, page?.quiet ? page : undefined);
+  const orphanable = !!d.answer && !d.applied_at && !isBacklog(d.answer) && !isDisputed(d) && !!d.answered_by && d.answered_by !== "pipeline" && writeEffect(d.kind, d.answer) !== null;
+  const one = <T>(read: () => Promise<T>, none: T): T | Promise<T> => (batch ? none : read());
+  // The parts read independently, so they run together.
+  const [item, opinionRows, adopted, claimRow, commentCount, veil, items, blockFacts, group, risks, undoable, canSettle, exec, settling, queued, settled, snoozed, preparingNow, preparedBefore, related, classifications, area, priority] = await Promise.all([
+    batch ? undefined : page ? page.items.get(`${d.repo}#${d.number}`) : db.get(db.k.selectFrom("items").select(["title", "body", "kind", "state"]).where("repo", "=", d.repo!).where("number", "=", d.number!)),
+    page ? (page.opinions.get(d.id) ?? []) : db.all(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"])
+      .where("decision_id", "=", d.id).where("retracted_at", "is", null).orderBy("at", "desc")),
+    d.adopted_opinion
+      ? (page ? page.adopted.get(d.adopted_opinion) : db.get(db.k.selectFrom("decision_opinions").select(["id", "login", "option", "note", "at", "permission", "via"]).where("id", "=", d.adopted_opinion)))
+      : undefined,
+    page ? page.claims.get(d.id) : db.get(db.k.selectFrom("decision_claims").select(["login", "since"]).where("decision_id", "=", d.id)
+      .where("at", ">", new Date(Date.now() - CLAIM_TTL).toISOString()).where("login", "<>", viewer.login).orderBy("at", "desc").limit(1)),
+    page ? (page.comments.get(d.id) ?? 0) : db.get(db.k.selectFrom("decision_comments").select((eb) => eb.fn.countAll<number>().as("n")).where("decision_id", "=", d.id)).then((r) => r!.n),
+    // Viewers get none of the model text of a decision about a quiet pull request.
+    !viewer.staff && touchesQuiet(db, d, page?.quiet ? page : undefined),
+    batch ? withShown(db, refs, page?.shown) : [],
+    d.answer !== null ? [] : viewer.blocks ? (viewer.blocks.get(`${d.repo}#${d.number}`) ?? []) : blocksFacts(db, d.repo, d.number, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)),
+    groupOf(db, d, page), risksOf(db, d, page), canUndo(db, d),
+    canSettleCached(db, viewer.login, viewer.role, reposOf(d), viewer.memo),
+    execOf(db, d, d.repo ?? refs[0]?.repo ?? null, viewer),
+    settlingBy(db, d), queuedOf(db, d, viewer),
+    orphanable && settledBy(db, d, viewer.memo),
+    snoozedOf(db, d),
+    pstate ? pstate.preparing : preparing(db, d),
+    pstate ? pstate.preparedEarlier : preparedEarlier(db, d),
+    one(() => relatedOf(db, d.repo!, d.number!, viewer.related, page), []),
+    one(async () => (page ? latestClassifications(page.classes.get(`${d.repo}#${d.number}`) ?? []) : await classificationsOf(db, d.repo!, d.number!)), []),
+    one(async () => (page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : await areaNameOf(db, d.repo!, d.number!)), null),
+    one(async () => (page ? (page.priority.get(`${d.repo}#${d.number}`) ?? null) : await priorityOf(db, d.repo!, d.number!)), null),
+  ]);
+  const opinions = opinionRows.map(toOpinion);
   const out: Decision = {
     id: d.id, kind: d.kind as DecisionKind,
     repo: d.repo ?? refs[0]?.repo ?? "",
     number: d.number,
-    items: batch ? await withShown(db, refs, page?.shown) : [],
+    items,
     shown: batch ? null : { kind: item ? (item.kind === "pr" ? "pr" : "issue") : null, state: item ? itemState(item.state) : null, title: item?.title ?? null },
     title: batch ? d.question : (item?.title ?? `${d.repo}#${d.number}`),
     question: d.question,
     summary: d.summary ?? "", summaryBy: d.summary_by ?? "", summaryAt: d.summary_at ?? d.asked_at,
     body: batch ? null : (item?.body ?? null),
     context: contextOf(d.context),
-    facts: [...factsOf(d), ...(d.answer !== null ? [] : viewer.blocks ? (viewer.blocks.get(`${d.repo}#${d.number}`) ?? []) : await blocksFacts(db, d.repo, d.number, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)))],
+    facts: [...factsOf(d), ...blockFacts],
     // An answer the pipeline or a conversation gave is not one of the asked options; it is listed so every view can name it.
     options: [...optionsOf(d), ...[HANDLED, WITHDRAWN_OPTION].filter((o) => o.key === d.answer)].map((o) => ({ ...o, writes: writeEffect(d.kind, o.key) ?? undefined })),
     recommended: d.recommended ?? "",
     recommendedReason: d.recommended ? (d.recommended_reason ?? "") : "",
-    group: await groupOf(db, d, page), risks: await risksOf(db, d, page), undoable: await canUndo(db, d),
-    canSettle: await canSettleCached(db, viewer.login, viewer.role, reposOf(d), viewer.memo),
+    group, risks, undoable,
+    canSettle,
     publicText: commentPreview(d),
     optionTexts: isGroup(d) ? (page ? (page.texts.get(d.id) ?? []) : await optionTextsOf(db, d.id)) : [],
     askedAt: d.asked_at, askedBy: d.asked_by ?? "the pipeline",
@@ -436,23 +465,23 @@ export async function toDecision(db: Db, d: DecisionRow, viewer: Viewer): Promis
     answer: d.answer,
     answerNote: viewer.staff ? d.answer_note : null,
     answeredBy: d.answered_by, answeredAt: d.answered_at, appliedAt: d.applied_at,
-    exec: await execOf(db, d, d.repo ?? refs[0]?.repo ?? null, viewer),
-    settling: await settlingBy(db, d),
-    queued: await queuedOf(db, d, viewer),
+    exec,
+    settling,
+    queued,
     dispute: isDisputed(d) ? { by: d.dispute_by ?? "", reason: viewer.staff ? (d.dispute_reason ?? "") : "", at: d.dispute_at ?? "" } : null,
-    orphaned: !!d.answer && !d.applied_at && !isBacklog(d.answer) && !isDisputed(d) && !!d.answered_by && d.answered_by !== "pipeline" && writeEffect(d.kind, d.answer) !== null && !await settledBy(db, d, viewer.memo),
+    orphaned: orphanable && !settled,
     adoptedOpinion: adopted ? toOpinion(adopted) : null,
     opinions,
     exceptions: exceptionsOf(d),
-    snoozed: await snoozedOf(db, d),
-    preparing: pstate ? pstate.preparing : await preparing(db, d),
-    preparedEarlier: pstate ? pstate.preparedEarlier : await preparedEarlier(db, d),
+    snoozed,
+    preparing: preparingNow,
+    preparedEarlier: preparedBefore,
     claim: d.answer ? null : (claimRow ? { login: claimRow.login, since: claimRow.since } : null),
     commentCount,
-    related: batch ? [] : await relatedOf(db, d.repo!, d.number!, viewer.related, page),
-    classifications: batch ? [] : page ? latestClassifications(page.classes.get(`${d.repo}#${d.number}`) ?? []) : await classificationsOf(db, d.repo!, d.number!),
-    area: batch ? null : page ? (page.areas.get(`${d.repo}#${d.number}`) ?? null) : await areaNameOf(db, d.repo!, d.number!),
-    priority: batch ? null : page ? (page.priority.get(`${d.repo}#${d.number}`) ?? null) : await priorityOf(db, d.repo!, d.number!),
+    related,
+    classifications,
+    area,
+    priority,
     queue: batch ? null : (viewer.slots?.get(`${d.repo}#${d.number}`) ?? null),
   };
   if (!veil) return out;
@@ -568,23 +597,26 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   }
   const matching = (eb: ExpressionBuilder<DB, "decisions">) => eb.and(where.map((w) => w(eb)));
 
-  // Counts and the oldest ask cover every match, not just the page.
-  const kindRows = await db.all(db.k.selectFrom("decisions").select(["kind", (eb) => eb.fn.countAll<number>().as("n"), (eb) => eb.fn.min<string>("asked_at").as("oldest")])
-    .$narrowType<{ kind: DecisionKind }>().where(matching).groupBy("kind"));
-  const byKind: Partial<Record<DecisionKind, number>> = {};
-  let total = 0;
-  let oldestAskedAt: string | null = null;
-  for (const r of kindRows) {
-    byKind[r.kind] = r.n;
-    total += r.n;
-    if (oldestAskedAt === null || r.oldest < oldestAskedAt) oldestAskedAt = r.oldest;
-  }
+  // Counts and the oldest ask cover every match, not just the page. They read alongside the page.
+  const counts = db.all(db.k.selectFrom("decisions").select(["kind", (eb) => eb.fn.countAll<number>().as("n"), (eb) => eb.fn.min<string>("asked_at").as("oldest")])
+    .$narrowType<{ kind: DecisionKind }>().where(matching).groupBy("kind")).then((kindRows) => {
+    const byKind: Partial<Record<DecisionKind, number>> = {};
+    let total = 0;
+    let oldestAskedAt: string | null = null;
+    for (const r of kindRows) {
+      byKind[r.kind] = r.n;
+      total += r.n;
+      if (oldestAskedAt === null || r.oldest < oldestAskedAt) oldestAskedAt = r.oldest;
+    }
+    return { total, byKind, oldestAskedAt };
+  });
+  counts.catch(() => {});
 
   const answered = status === "answered" || status === "backlog";
   const after = q.get("after");
   // limit=0 asks for the counts only: no page, and no queue slots to compute.
   const rawLimit = q.get("limit");
-  if (rawLimit !== null && rawLimit !== "" && Number(rawLimit) === 0) return { decisions: [], total, byKind, oldestAskedAt, next: null };
+  if (rawLimit !== null && rawLimit !== "" && Number(rawLimit) === 0) return { decisions: [], ...await counts, next: null };
   const limit = Math.min(Math.max(Number(rawLimit) || 100, 1), 500);
   let ids: { id: string; cursor: string }[];
   if (answered) {
@@ -624,9 +656,12 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   }
   const more = ids.length > limit;
   const shownIds = ids.slice(0, limit);
-  const rowOf = new Map((shownIds.length ? await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where(kx.inList(db, "id", shownIds.map((r) => r.id)))) as DecisionRow[] : []).map((d) => [d.id, d]));
+  const [rows, viewer] = await Promise.all([
+    shownIds.length ? db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where(kx.inList(db, "id", shownIds.map((r) => r.id)))) as Promise<DecisionRow[]> : [],
+    shownIds.length ? viewerWith(db, req) : viewerOf(req),
+  ]);
+  const rowOf = new Map(rows.map((d) => [d.id, d]));
   const shown = shownIds.map((r) => rowOf.get(r.id)!);
-  const viewer = shown.length ? await viewerWith(db, req) : viewerOf(req);
   const [prep, blocks, related] = await Promise.all([
     prepareStates(db, shown),
     shown.some((d) => d.answer === null) ? blocksIndex(db, viewer.hidden ?? (viewer.operator ? [] : ALL_HIDDEN)) : undefined,
@@ -637,13 +672,14 @@ export async function listDecisions(db: Db, req: Req): Promise<DecisionList> {
   if (related) viewer.related = related;
   if (shown.length) viewer.page = await decisionPage(db, shown, viewer);
   return {
-    decisions: await mapSeq(shown, async (d) => await toDecision(db, d, viewer)), total, byKind, oldestAskedAt,
+    decisions: await mapSeq(shown, async (d) => await toDecision(db, d, viewer)), ...await counts,
     next: more ? shownIds[shownIds.length - 1]!.cursor : null,
   };
 }
 
 export async function getOne(db: Db, req: Req): Promise<Decision> {
-  return await toDecision(db, await needDecision(db, req, req.params.id!), await viewerWith(db, req));
+  const d = await needDecision(db, req, req.params.id!);
+  return await toDecision(db, d, await viewerFor(db, req, [d]));
 }
 
 /** The decision a readable link `/decisions/<repo>/<n>` opens, or null when the item has none the viewer may see. */
@@ -651,17 +687,18 @@ export async function forItem(db: Db, req: Req): Promise<Decision | null> {
   const n = Number(req.params.n);
   if (!Number.isInteger(n)) throw new HttpError(400, "not an item number");
   const repo = shortRepo(req.params.repo!);
-  const visible = new Set(await visibleRepos(db, req));
-  const rows = await db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where((eb) => eb.or([
+  const [visibleList, rows] = await Promise.all([visibleRepos(db, req), db.all(db.k.selectFrom("decisions").select(kx.cols("decisions")).where((eb) => eb.or([
     eb.and([eb("repo", "=", repo), eb("number", "=", n)]),
     eb.and([eb("number", "is", null), eb.exists(db.k.selectFrom(kx.jsonEach(db, eb.case().when(kx.jsonValid(db, "items")).then(eb.ref("items")).else("[]").end(), "j")).select(eb.lit(1).as("one"))
       .where(eb(kx.jsonText(db, "j.value", "$.repo"), "=", repo)).where(eb(kx.jsonNum(db, "j.value", "$.number"), "=", n)))]),
-  ]))) as unknown as DecisionRow[];
-  const viewer = await viewerWith(db, req);
+  ])))]) as [string[], DecisionRow[]];
+  const visible = new Set(visibleList);
   // A batch that also covers the item counts only when no single-item decision exists; it is the item's decision only by membership.
   const single = rows.filter((d) => d.number === n);
   const kind = req.query.get("kind");
-  const shown = await mapSeq((single.length ? single : rows).filter((d) => !kind || d.kind === kind).filter((d) => reposOf(d).every((r) => visible.has(r))), async (d) => await toDecision(db, d, viewer));
+  const picked = (single.length ? single : rows).filter((d) => !kind || d.kind === kind).filter((d) => reposOf(d).every((r) => visible.has(r)));
+  const viewer = await viewerFor(db, req, picked);
+  const shown = await mapSeq(picked, async (d) => await toDecision(db, d, viewer));
   return pickDecision(shown) ?? null;
 }
 

@@ -91,7 +91,7 @@ export async function relayWorkspaceCall(db: Db, lease: { id: number; runId: num
       await waker.wait(Math.min(listening ? SAFETY_POLL_MS : allocation.pollMs, TICK_MS), opts.signal);
       // Read before the row: a result written after the read is then sure to wake the next wait.
       listening = sub?.listening() ?? false;
-      const r = await db.get(db.k.selectFrom("workspace_calls").select(["state", "result"]).where("id", "=", id));
+      const r = await db.fresh(() => db.get(db.k.selectFrom("workspace_calls").select(["state", "result"]).where("id", "=", id)));
       if ((r?.state === "done" || r?.state === "failed") && r.result) {
         const out = parseResult(r.result);
         if (out.images) await stubImages(db, id, r.result);

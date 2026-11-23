@@ -50,7 +50,8 @@ export class Vault {
     const key = login.toLowerCase();
     let p = this.#inflight.get(key);
     if (!p) {
-      p = this.#obtain(login, rejected).finally(() => this.#inflight.delete(key));
+      // Fresh reads: #obtain reads the row again until another process's new pair lands.
+      p = this.#db.fresh(() => this.#obtain(login, rejected)).finally(() => this.#inflight.delete(key));
       this.#inflight.set(key, p);
     }
     return p;

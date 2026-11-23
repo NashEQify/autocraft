@@ -9,7 +9,8 @@ import { decisionPath, itemPath } from "../../../web/src/lib/links.ts";
 import { reviewBots } from "../../review/bots.ts";
 import { HttpError } from "../server/util.ts";
 import type { Req } from "../types.ts";
-import { itemState } from "./shown.ts";
+import { itemState, shownMap } from "./shown.ts";
+import type { ItemShown } from "../../../web/src/api/types.ts";
 import { fixStoppedWait } from "../../core/decide-item.ts";
 import { blankIfHidden, hiddenRepos } from "./visible.ts";
 import { filtered, hiddenTestExpr, isHiddenRepo, type HiddenRepos } from "../../hidden-sql.ts";
@@ -153,9 +154,10 @@ async function feedback(db: Db, hidden: HiddenRepos, cursor: { at: string; id: s
   return { rows: staff ? out : await mapSeq(out, async (r) => (await quietRow(db, r, quiet) ? { ...r, text: "" } : r)), more: rows.length > limit, unhandled };
 }
 
-async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
-  const it = r.repo && r.number !== null ? (await db.get(db.k.selectFrom("items").select(["kind", "state", "title"]).where("repo", "=", r.repo).where("number", "=", r.number))) : undefined;
-  const item = r.repo && r.number !== null ? { repo: r.repo, number: r.number, kind: it ? (it.kind === "pr" ? "pr" as const : "issue" as const) : null, state: it ? itemState(it.state) : null, title: it?.title ?? null } : null;
+/** A feedback row as the list shows it; `items` holds the kind, state and title of the rows' items (shownMap). */
+function view(r: Raw, items: Map<string, ItemShown>): NeedsFeedbackRow {
+  const it = r.repo && r.number !== null ? items.get(`${r.repo}#${r.number}`) : undefined;
+  const item = r.repo && r.number !== null ? { repo: r.repo, number: r.number, kind: it?.kind ?? null, state: it?.state ?? null, title: it?.title ?? null } : null;
   const trace = (event: string) => (item ? `${itemPath(item.repo, item.number)}#event=${encodeURIComponent(event)}` : "/needs");
   const [href, hrefLabel] = r.source === "decision"
     ? [decisionPath({ id: r.decision!, repo: r.repo ?? "", number: null }), "Decision"]
@@ -166,39 +168,49 @@ async function view(db: Db, r: Raw): Promise<NeedsFeedbackRow> {
 
 export async function stopped(db: Db, hidden: HiddenRepos, user: Req["user"]): Promise<NeedsStoppedRow[]> {
   const out: NeedsStoppedRow[] = [];
+  // The reads do not depend on each other, so they run together; the rows are listed in this order.
+  const [trips, limitRows, zero, accounts, acts, outsideGroups, implementations, groups] = await Promise.all([
+    db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at").orderBy("stage")),
+    db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"])),
+    zeroLimits(db),
+    accountListOrNull(db),
+    db.all(db.k.selectFrom("main.actions as a").innerJoin("main.decisions as d", "d.id", "a.decision_id").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number"))
+      .select(["a.decision_id", "a.repo", "a.number", "a.reason", "a.created_at"]).where("a.state", "=", "stopped").where("d.answer", "is not", null).where("d.applied_at", "is", null)
+      .where("d.exec_state", "is distinct from", "disputed").where((eb) => eb.not(kx.like(db, "d.id", eb.val("%~replaced-%")))).where("i.state", "=", "OPEN").orderBy("a.created_at")),
+    db.all(db.k.selectFrom("main.outside_holds as h").leftJoin("items as i", (j) => j.onRef("i.repo", "=", "h.repo").onRef("i.number", "=", "h.number"))
+      .select((eb) => [eb.fn.min<string>("h.author").as("author"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number>(eb.case().when("h.kind", "=", "pr").then(eb.lit(1)).else(eb.lit(0)).end()).as("prs"),
+        eb.fn.min<string | null>("i.created_at").as("since"), eb.fn.max<number>(eb.case().when("h.reason", "=", "surge").then(eb.lit(1)).else(eb.lit(0)).end()).as("surge")])
+      .$if(filtered(hidden), (q) => q.where((eb) => eb.not(hiddenTestExpr(db, "h.repo", hidden)))).groupBy(kx.nocase(db, "h.author")).orderBy("n", "desc").orderBy((eb) => eb.fn.min("h.author"))),
+    implementationRows(db, hidden, canSeeInternals({ user })),
+    db.all(db.k.selectFrom("main.item_plans as p").leftJoin("fix_attempts as a", (j) => j.onRef("a.repo", "=", "p.repo").onRef("a.number", "=", "p.number"))
+      .select((eb) => ["p.repo", eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("a.updated_at", "p.planned_at")).as("since")])
+      .where("p.kind", "=", "issue").where("p.wait", "in", [fixStoppedWait("skipped"), fixStoppedWait("failed")]).groupBy("p.repo").orderBy("n", "desc").orderBy("p.repo")),
+  ]);
   // One row per tripped repo of a push stage, one per push stage tripped on every repo (no repo), and the outside-author surge breaker.
-  for (const t of await db.all(db.k.selectFrom("stage_trips").select(["stage", "reason", "tripped_at"]).where("active", "=", 1).orderBy("tripped_at").orderBy("stage"))) {
+  for (const t of trips) {
     const k = parseTripKey(t.stage);
     if (k && isHiddenRepo(hidden, k.repo)) continue;
     out.push({ id: `breaker:${t.stage}`, kind: "breaker", title: stepTitle(k?.stage ?? t.stage), ...(k ? { repo: k.repo } : {}), reason: blankIfHidden(t.reason, hidden), since: t.tripped_at,
       resume: { type: "trip", stage: t.stage, canResume: await mayResumeTrip(user, t.stage) } });
   }
-  const updated = new Map((await db.all(db.k.selectFrom("stage_limits").select(["step", "updated_at"]))).map((r) => [r.step, r.updated_at]));
-  for (const l of await zeroLimits(db))
+  const updated = new Map(limitRows.map((r) => [r.step, r.updated_at]));
+  for (const l of zero)
     out.push({ id: `limit:${l.step}`, kind: "limit", title: l.title, reason: "The daily limit is 0", since: updated.get(l.step) ?? null, resume: { type: "link", to: "/pipeline" } });
-  for (const a of await accountListOrNull(db) ?? [])
+  for (const a of accounts ?? [])
     if (a.enabled && a.pausedReason) out.push({ id: `account:${a.id}`, kind: "account", title: a.label, reason: blankIfHidden(a.pausedReason, hidden), since: null, resume: { type: "link", to: "/accounts" } });
   // Targets Act stopped after repeated failures, while the answer still stands: an operator retries them from here.
-  for (const a of await db.all(db.k.selectFrom("main.actions as a").innerJoin("main.decisions as d", "d.id", "a.decision_id").innerJoin("main.items as i", (j) => j.onRef("i.repo", "=", "a.repo").onRef("i.number", "=", "a.number"))
-    .select(["a.decision_id", "a.repo", "a.number", "a.reason", "a.created_at"]).where("a.state", "=", "stopped").where("d.answer", "is not", null).where("d.applied_at", "is", null)
-    .where("d.exec_state", "is distinct from", "disputed").where((eb) => eb.not(kx.like(db, "d.id", eb.val("%~replaced-%")))).where("i.state", "=", "OPEN").orderBy("a.created_at"))) {
+  for (const a of acts) {
     if (isHiddenRepo(hidden, a.repo)) continue;
     out.push({ id: `act:${a.decision_id}:${a.number}`, kind: "act", title: `${a.repo}#${a.number}`, reason: blankIfHidden(a.reason ?? "Act stopped after repeated failures", hidden), since: a.created_at, resume: { type: "retry", decision: a.decision_id } });
   }
   // Items held for an outside author's daily limit or a surge: one group row per author, listed by `/api/needs/outside/:author`.
   // One spelling of the author per group: the smallest.
-  for (const g of await db.all(db.k.selectFrom("main.outside_holds as h").leftJoin("items as i", (j) => j.onRef("i.repo", "=", "h.repo").onRef("i.number", "=", "h.number"))
-    .select((eb) => [eb.fn.min<string>("h.author").as("author"), eb.fn.countAll<number>().as("n"), eb.fn.sum<number>(eb.case().when("h.kind", "=", "pr").then(eb.lit(1)).else(eb.lit(0)).end()).as("prs"),
-      eb.fn.min<string | null>("i.created_at").as("since"), eb.fn.max<number>(eb.case().when("h.reason", "=", "surge").then(eb.lit(1)).else(eb.lit(0)).end()).as("surge")])
-    .$if(filtered(hidden), (q) => q.where((eb) => eb.not(hiddenTestExpr(db, "h.repo", hidden)))).groupBy(kx.nocase(db, "h.author")).orderBy("n", "desc").orderBy((eb) => eb.fn.min("h.author")))) {
+  for (const g of outsideGroups) {
     const parts = [g.prs && `${g.prs} PR${g.prs === 1 ? "" : "s"}`, g.n - g.prs && `${g.n - g.prs} issue${g.n - g.prs === 1 ? "" : "s"}`].filter(Boolean).join(", ");
     out.push({ id: `outside:${g.author}`, kind: "outside-group", title: g.author, reason: `${parts} waiting for ${g.surge ? "the outside-surge breaker or " : ""}the author's daily limit`, since: g.since, count: g.n, resume: { type: "outside", author: g.author } });
   }
-  out.push(...await implementationRows(db, hidden, canSeeInternals({ user })));
+  out.push(...implementations);
   // Issues whose fix attempt was skipped or failed wait on a person: one group row per repo, listed by `fixes`.
-  const groups = await db.all(db.k.selectFrom("main.item_plans as p").leftJoin("fix_attempts as a", (j) => j.onRef("a.repo", "=", "p.repo").onRef("a.number", "=", "p.number"))
-    .select((eb) => ["p.repo", eb.fn.countAll<number>().as("n"), eb.fn.max<string | null>(eb.fn.coalesce("a.updated_at", "p.planned_at")).as("since")])
-    .where("p.kind", "=", "issue").where("p.wait", "in", [fixStoppedWait("skipped"), fixStoppedWait("failed")]).groupBy("p.repo").orderBy("n", "desc").orderBy("p.repo"));
   for (const g of groups) {
     if (isHiddenRepo(hidden, g.repo)) continue;
     out.push({ id: `fixes:${g.repo}`, kind: "fix-group", title: g.repo, reason: `${g.n} issue${g.n === 1 ? "" : "s"} with a stopped fix`, since: g.since, count: g.n, resume: { type: "fixes", repo: g.repo } });
@@ -271,15 +283,20 @@ export async function needs(db: Db, req: Req): Promise<NeedsPage> {
     if (i < 1) throw new HttpError(400, "bad cursor");
     cursor = { at: c.slice(0, i), id: c.slice(i + 1) };
   }
-  const fb = await feedback(db, hidden, cursor, q.get("feedback") === "1" ? limit : 1, canSeeInternals(req));
-  // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
-  const decisions = (await db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => needingExpr(db, eb, req))
-    .$if(filtered(hidden), (q) => q.where((eb) => withoutHiddenExpr(db, eb, hidden)!))))!.n;
-  const rows = await stopped(db, hidden, req.user);
+  const withFeedback = q.get("feedback") === "1";
+  // The three parts read independently, so they run together.
+  const [fb, decisions, rows] = await Promise.all([
+    feedback(db, hidden, cursor, withFeedback ? limit : 1, canSeeInternals(req)).then(async (f) =>
+      ({ ...f, items: withFeedback ? await shownMap(db, f.rows.flatMap((r) => (r.repo && r.number !== null ? [{ repo: r.repo, number: r.number }] : []))) : new Map<string, ItemShown>() })),
+    // The same filter as the Needs you list: what this person settles, plus the disputes they resolve; a batch counts only when none of its items is in a hidden repo.
+    db.get(db.k.selectFrom("decisions").select((eb) => eb.fn.countAll<number>().as("n")).where((eb) => needingExpr(db, eb, req))
+      .$if(filtered(hidden), (q) => q.where((eb) => withoutHiddenExpr(db, eb, hidden)!))).then((r) => r!.n),
+    stopped(db, hidden, req.user),
+  ]);
   const last = fb.rows[fb.rows.length - 1];
   return {
     counts: { decisions, feedback: fb.unhandled, stopped: rows.length },
-    feedback: q.get("feedback") === "1" ? { rows: await mapSeq(fb.rows, async (r) => await view(db, r)), nextCursor: fb.more && last ? `${last.at}|${last.id}` : null } : null,
+    feedback: withFeedback ? { rows: fb.rows.map((r) => view(r, fb.items)), nextCursor: fb.more && last ? `${last.at}|${last.id}` : null } : null,
     stopped: rows,
   };
 }

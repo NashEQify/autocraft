@@ -3,17 +3,26 @@ import type { ItemRef, ItemShown, ItemState } from "../../../web/src/api/types.t
 import type { Db } from "../../db/index.ts";
 import { tupleIn } from "../../db/kx.ts";
 
+const NONE: ItemShown = { kind: null, state: null, title: null };
+
 const STATE: Record<string, ItemState> = { OPEN: "open", MERGED: "merged", CLOSED: "closed" };
 export const itemState = (s: string | null | undefined): ItemState => STATE[s ?? ""] ?? "open";
 
-export function shownLookup(db: Db): (repo: string, number: number) => Promise<ItemShown> {
+/** One item's kind, state and title per call; the items of `preload` are read together, in one query, at the first call that needs one. */
+export function shownLookup(db: Db, preload: readonly { repo: string; number: number }[] = []): (repo: string, number: number) => Promise<ItemShown> {
+  const keys = new Set<string>();
+  for (const r of preload) keys.add(`${r.repo}#${r.number}`);
+  let known: Promise<Map<string, ItemShown>> | undefined;
   return async (repo, number) => {
+    const key = `${repo}#${number}`;
+    if (keys.has(key)) {
+      known ??= shownMap(db, preload);
+      return { ...((await known).get(key) ?? NONE) };
+    }
     const r = await db.get(db.k.selectFrom("items").select(["kind", "state", "title"]).where("repo", "=", repo).where("number", "=", number));
     return r ? { kind: r.kind === "pr" ? "pr" : "issue", state: itemState(r.state), title: r.title } : { kind: null, state: null, title: null };
   };
 }
-
-const NONE: ItemShown = { kind: null, state: null, title: null };
 
 /** Kind, state and title of many items in one read, by `repo#number`; items not mirrored are left out. */
 export async function shownMap(db: Db, refs: Iterable<{ repo: string; number: number }>): Promise<Map<string, ItemShown>> {
