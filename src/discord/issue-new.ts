@@ -13,6 +13,7 @@ import { BUTTON_URL_MAX, ISSUE_URL_MAX, cleanDraft, followUp, formDraft, issueUr
 import { fallbackQuestions, ISSUE_ANSWER_CHARS, ISSUE_BODY_CHARS, ISSUE_FORM_BODY_CHARS, ISSUE_TITLE_CHARS, parseDraft, parseQuestions, type FollowUpId, type IssueDraftInput, type IssueQuestionsInput } from "./issue-prompt.ts";
 import type { Call, Interactions } from "./interactions.ts";
 import type { DiscordKeys } from "./keys.ts";
+import { recordEvent } from "./events.ts";
 import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, JUNK_REFUSAL, junkCheck, modelJunkJudge, type BotRequest, type BotResult, type FileDeps, type FileRequest, type FileResult, type IssueKind } from "./file-issue.ts";
 import type { JunkAsk } from "./junk-ask.ts";
 import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
@@ -73,6 +74,8 @@ type Session = {
   bot: boolean;
   /** The Discord name a bot-filed issue credits. */
   name: string;
+  /** The "limits" event was counted for this session. */
+  limitCounted?: boolean;
   /** The person changed the draft in the Edit form: the junk check runs again at submit. */
   edited?: boolean;
   /** True while File it runs, so a second press cannot file twice. */
@@ -213,9 +216,11 @@ export class IssueNew {
     if (!this.#d.search.allow(userKey, channelKey)) return void (await call.edit({ content: "Too many searches just now. Try again in a minute." }));
     s.repo = repo.name; s.repoUrl = `https://github.com/${repo.owner}/${repo.name}`;
     s.description = description; s.title = titleOf(description);
+    await recordEvent(db, "started", this.#d.log, this.#now());
     // The first message is checked before anything else is asked; no answer from a model lets the flow go on.
     const ask: JunkAsk = { title: s.title, body: description, ...(s.chosen && { kind: s.chosen }) };
     if (await (this.#d.junk ?? ((d, a) => junkCheck(d, a, modelJunkJudge(), this.#d.log)))(db, ask) === "junk") {
+      await recordEvent(db, "junk", this.#d.log, this.#now());
       const { url } = issueUrl(s.repoUrl, s.title, description, ISSUE_URL_MAX);
       this.#sessions.delete(sid);
       return void (await call.edit({ content: `${JUNK_REFUSAL}\nYou can still open it on GitHub yourself.${url.length <= BUTTON_URL_MAX ? "" : `\n[Open on GitHub](<${url}>)`}`, components: url.length <= BUTTON_URL_MAX ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] }));
@@ -302,7 +307,10 @@ export class IssueNew {
   async #rendered(s: Session, sid: string): Promise<{ content: string; components: unknown[] }> {
     const { db, keys, log } = this.#d;
     try {
-      s.bot = await (this.#d.botRefusal ?? ((d, r, repo) => botRefusal(d, r, repo, this.#now())))(db, keys.hash("author", s.user), s.repo) === null;
+      const why = await (this.#d.botRefusal ?? ((d, r, repo) => botRefusal(d, r, repo, this.#now())))(db, keys.hash("author", s.user), s.repo);
+      s.bot = why === null;
+      // Once per session: later renders (after an edit) are the same draft.
+      if (why !== null && !s.limitCounted) { s.limitCounted = true; await recordEvent(db, "limits", log, this.#now()); }
     } catch (e) {
       log(`discord: reading the filing limits failed: ${(e as Error).message.slice(0, 200)}`);
       s.bot = false;
@@ -396,9 +404,11 @@ export class IssueNew {
         reporter: keys.hash("author", s.user), reporterName: s.name || call.userName || "", repo: s.repo, title: s.draft.title, body: s.draft.body, kind: s.kind, drafted: s.drafted, junkChecked: !s.edited,
       });
       if (r.status === "filed") {
+        await recordEvent(this.#d.db, "filed", log, this.#now());
         this.#sessions.delete(sid);
         await call.edit({ content: `Filed as ${s.repo}#${r.number}`, components: [{ type: 1, components: [{ type: 2, style: 5, label: `${s.repo}#${r.number}`.slice(0, 80), url: r.url }] }] });
       } else {
+        await recordEvent(this.#d.db, r.reason === JUNK_REFUSAL ? "junk" : "link", log, this.#now());
         await call.edit({ content: `${plain(r.reason)}\nYou can still open it on GitHub yourself.${asButton ? "" : `\n[Open on GitHub](<${url}>)`}`, components: asButton ? [{ type: 1, components: [{ type: 2, style: 5, label: "Open on GitHub", url }] }] : [] });
       }
     } finally {
