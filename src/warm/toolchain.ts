@@ -2,7 +2,7 @@
 //
 // A version records the toolchain image digest it was built with, `rustc -vV`, and the image's toolchain key: the sha256 of
 // TOOLCHAIN_FILE, which deploy/container/Containerfile.rust-stable writes at build time (Rust release, components, targets,
-// sccache release, installed packages and their versions). A pod starts from a version built with its own image, or with
+// sccache release, versions of the C toolchain and of every `-dev` package: what can change compiled output). A pod starts from a version built with its own image, or with
 // one whose rustc and toolchain key both match: a rebuilt image with the same content keeps the warm versions.
 //
 // Only a toolchain-image container can read the image's rustc and file, so warm pods run TOOLCHAIN_ID_SH there first; it

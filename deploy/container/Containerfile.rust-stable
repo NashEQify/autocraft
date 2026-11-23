@@ -15,9 +15,11 @@
 # rust-toolchain.toml asks for: its `channel` must be the release here, and its `components` and `targets` must be
 # installed here. The wasm32 target is the one the pipeline repositories' toolchain files add.
 #
-# The last step writes the toolchain file /usr/local/share/autocraft/toolchain.txt: the Rust release, its components and
-# targets, the sccache release and every installed package with its version. Warm versions are matched on its sha256 and
-# `rustc -vV` (src/warm/toolchain.ts), so a rebuild that changes none of these keeps every warm cache. The image holds no
+# The last step writes the toolchain file /usr/local/share/autocraft/toolchain.txt: what can change compiled output, namely
+# the Rust release, its components and targets, the sccache release, and the versions of the C toolchain (gcc, g++, cpp,
+# binutils, pkg-config) and of every `-dev` package (headers and .pc files build scripts probe, libc6-dev among them).
+# Warm versions are matched on its sha256 and `rustc -vV` (src/warm/toolchain.ts), so a rebuild that changes none of these
+# keeps every warm cache; adding a runtime-only package (Xvfb, Mesa drivers, ImageMagick, runtime libraries) does too. The image holds no
 # AutoCraft code: pods run AutoCraft's phases from the AutoCraft image and its step scripts come with the pod spec.
 #
 #   podman build -f deploy/container/Containerfile.rust-stable -t rust-stable deploy/container
@@ -51,7 +53,8 @@ RUN set -eux; \
     sccache --version; \
     mkdir -p /usr/local/share/autocraft; \
     { rustc -vV; rustup component list --installed; rustup target list --installed; sccache --version; \
-      dpkg-query -W -f '${binary:Package} ${Version}\n' | LC_ALL=C sort; } > /usr/local/share/autocraft/toolchain.txt; \
+      dpkg-query -W -f '${binary:Package} ${Version}\n' \
+        | LC_ALL=C grep -E '^((gcc|g\+\+|cpp|binutils|pkg-config|pkgconf)(-[^: ]+)?|[^: ]+-dev)(:[a-z0-9]+)? ' | LC_ALL=C sort; } > /usr/local/share/autocraft/toolchain.txt; \
     chmod 0644 /usr/local/share/autocraft/toolchain.txt
 
 # The uid build pods run as (the AutoCraft image's); steps write only to their mounts (the checkout, target dir, /cache, /out, /tmp).
