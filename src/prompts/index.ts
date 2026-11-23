@@ -12,6 +12,7 @@ import { LABELS, LABEL_MEANING, RULES, UNTRUSTED_NOTE } from "../classify/rules.
 import { CHECK_MAX_CALLS, CHECK_MAX_WALL_MS, CHECK_OUTPUT_LINES } from "../core/rules.ts";
 import { ENTRY_LIMIT, REVIEW_BODY_LIMIT, TOTAL_LIMIT, VERDICTS } from "../review/parse.ts";
 import { markHarness, stripMarks } from "./harness.ts";
+import { WORKSPACE_BUILD_COMMANDS } from "../worker/rust-targets.ts";
 import { AGENT_TOOL, EXPLORER, EXPLORER_MODEL, EXPLORER_TOOLS, MCP_PATH, mcpTools } from "../sandbox/agents.ts";
 import { AGENTS_PATH, DENIED_READS, REFERENCE_PATH, REPO_DOCS_PATH, REPOS_ROOT, REPO_PATH, WORK_PATH, sandboxCommand } from "../sandbox/command.ts";
 import { CLAIM_CHARS, CLAIM_EVIDENCE_CHARS, MAX_CLAIMS, OPUS_MAX_FIXES, OPUS_REASON_WORDS, STATEMENT_PROMPT_CHARS, statementsList, type OpusPr } from "../review/opus-parse.ts";
@@ -654,6 +655,7 @@ Rules:
 - Make the smallest change that meets every acceptance criterion. Change only what the change needs.
 - Add tests. For a bug, add a regression test that fails without your fix and passes with it.
 - Run cargo fmt, cargo clippy on the crates you changed, and their tests, and fix what they report. Use --offline; nothing can be downloaded.
+- Build with ${WORKSPACE_BUILD_COMMANDS[0]} and test with ${WORKSPACE_BUILD_COMMANDS[1]}, or with cargo test --offline --locked -p <crate> for one crate's tests.
 - For a change that shows in the UI: build the app, start it with app_start, drive it with its own command-line interface through shell, take screenshots and look at them. Put the ones that show the change in the report.
 - Never change files under .github/, CI configuration, build scripts, toolchain files or other files that run with the repository's credentials. Change Cargo.toml or Cargo.lock only when the change needs it.
 {{dependencies}}
