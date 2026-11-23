@@ -4543,6 +4543,20 @@ function lingerOff() {
   return r.status === 0 && r.stdout.trim() === "no";
 }
 
+/**
+ * The node the service runs: the first `node` on PATH that is this same binary, else `execPath`. Node reports its real
+ * path (Homebrew's Cellar/node/<version>/bin/node), which an upgrade deletes; the PATH link follows upgrades.
+ * @param {string} execPath @param {string | undefined} path
+ */
+export function serviceNode(execPath, path) {
+  const real = realpathSync(execPath);
+  for (const d of (path ?? "").split(delimiter).filter(Boolean)) {
+    const c = join(d, "node");
+    try { if (realpathSync(c) === real) return c; } catch { /* next */ }
+  }
+  return execPath;
+}
+
 /** `service install [--parallel N] | uninstall | status`. @param {string[]} argv */
 async function cmdService(argv) {
   const [action, ...rest] = argv;
@@ -4555,7 +4569,7 @@ async function cmdService(argv) {
   if (action === "install") {
     parallelOf(rest);
     needLogin(loadConfig());
-    const run = [process.execPath, realpathSync(self), "work", ...rest];
+    const run = [serviceNode(process.execPath, process.env.PATH), realpathSync(self), "work", ...rest];
     const env = Object.fromEntries(SERVICE_ENV.flatMap((k) => (process.env[k] ? [[k, String(process.env[k])]] : [])));
     mkdirSync(dirname(file), { recursive: true });
     if (mac) {
