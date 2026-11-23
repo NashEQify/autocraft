@@ -152,21 +152,22 @@ export async function prepareEnvironment(cfg: WorkerConfig, task: { repo: string
  * craft-i18n under `<workDir>/ext`. Shared by the container runtime and build pods.
  */
 export async function gateInputs(workDir: string, repo: string, base: string, gate: GateEnv, o: PrepareOptions): Promise<{ env: Record<string, string>; mounts: ExtraMount[]; craftI18nRev: string | null }> {
-  const env: Record<string, string> = { ...gate.env };
   const mounts: ExtraMount[] = [];
+  if (gate.craftFontsRef) mounts.push({ source: await fetchCheckout(workDir, "craft-fonts", gate.craftFontsRef, o.fetchImpl), target: "/craft-fonts" });
+  // The commit comes from the base commit, so a PR cannot make the host download a commit of its choosing.
+  const rev = await resolveI18nRev(repo, base, o.fetchImpl);
+  if (rev) mounts.push({ source: await fetchCheckout(workDir, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
+  if (gate.dropped.length) o.log(`gate env left out: ${gate.dropped.join(", ")}\n`);
+  return { env: gateStepEnv(gate, rev), mounts, craftI18nRev: rev };
+}
+
+/** The steps' env for a gate: its own env and the dirs of the craft-fonts and craft-i18n checkouts (mounted at fixed paths). */
+export function gateStepEnv(gate: GateEnv, i18nRev: string | null): Record<string, string> {
+  const env: Record<string, string> = { ...gate.env };
   if (gate.craftFontsRef) {
-    const dir = await fetchCheckout(workDir, "craft-fonts", gate.craftFontsRef, o.fetchImpl);
-    mounts.push({ source: dir, target: "/craft-fonts" });
     env.CRAFT_FONTS_DIR = "/craft-fonts";
     if (gate.requireFonts) env.CRAFT_FONTS_REQUIRED = "1";
   }
-  // The commit comes from the base commit, so a PR cannot make the host download a commit of its choosing.
-  const rev = await resolveI18nRev(repo, base, o.fetchImpl);
-  if (rev) {
-    mounts.push({ source: await fetchCheckout(workDir, "craft-i18n", rev, o.fetchImpl), target: "/craft-i18n" });
-    env.CRAFT_I18N_DIR = "/craft-i18n";
-    env.CRAFT_I18N_REQUIRED = "1";
-  }
-  if (gate.dropped.length) o.log(`gate env left out: ${gate.dropped.join(", ")}\n`);
-  return { env, mounts, craftI18nRev: rev };
+  if (i18nRev) Object.assign(env, { CRAFT_I18N_DIR: "/craft-i18n", CRAFT_I18N_REQUIRED: "1" });
+  return env;
 }

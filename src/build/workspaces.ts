@@ -5,7 +5,9 @@
 import type { Db } from "../db/index.ts";
 import { BuildError } from "./envs.ts";
 import { KubeError, type ExecOptions, type ExecResult, type KubeApi } from "./kube-api.ts";
-import { settingsOf } from "./pods.ts";
+import { ciCheckout, settingsOf } from "./pods.ts";
+import { repoWarmTarget } from "./sizing.ts";
+import { LAYOUT_CI } from "./workspace-layout.ts";
 import { WS_POD_PATH } from "./workspace.ts";
 import { DEFAULT_WORKSPACE_DEADLINE_SEC, WS_CONTAINER, workspaceSelector, type WorkspaceLimits } from "./workspace-pods.ts";
 
@@ -24,7 +26,7 @@ const REPO = /^[A-Za-z0-9._-]{1,100}$/;
 export const WORKSPACE_COLUMNS = [
   "id", "repo", "base_sha", "base_commit", "app", "env_id", "state", "state_at", "pod", "pod_created_at", "create_tries", "pvc", "node", "limits",
   "checkpoint_at", "last_call_at", "next_call", "error", "owner", "created_at", "updated_at", "ended_at", "remote_call_id",
-  "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at",
+  "volume_fresh", "resume_tries", "checkpoint_error", "restored", "restored_at", "layout", "prepared", "warm", "warm_commit",
 ] as const;
 export const getWorkspace = async (db: Db, id: number) => await db.get(db.k.selectFrom("workspaces").select(WORKSPACE_COLUMNS).where("id", "=", id));
 export type WorkspaceRow = NonNullable<Awaited<ReturnType<typeof getWorkspace>>>;
@@ -61,9 +63,11 @@ export async function createWorkspace(db: Db, r: WorkspaceRequest, now = Date.no
   const deadlineSec = r.limits?.deadlineSec ?? DEFAULT_WORKSPACE_DEADLINE_SEC;
   if (!Number.isInteger(deadlineSec) || deadlineSec < 300 || deadlineSec > 24 * 3600) throw new BuildError(400, "deadlineSec must be 300 to 86400");
   const at = new Date(now).toISOString();
+  // A repository with a warm target works at the CI paths, so its builds reuse the node's warm version (workspace-layout.ts).
+  const layout = ciCheckout(r.repo) && await repoWarmTarget(db, r.repo) !== "none" ? LAYOUT_CI : 1;
   const row = await db.get(db.k.insertInto("workspaces").values({
     repo: r.repo, base_sha: r.baseSha, app: r.app ?? null, env_id: r.envId, state: "requested", state_at: at, limits: JSON.stringify({ deadlineSec }),
-    owner: r.owner, created_at: at, updated_at: at,
+    owner: r.owner, created_at: at, updated_at: at, layout,
   }).returning("id"));
   return Number(row!.id);
 }
