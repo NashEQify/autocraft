@@ -30,6 +30,15 @@ Each run stores `sync_points_last_run` (a full run: `sync_full_points_last_run`)
 - The repo must exist and be readable. With the GitHub App identity, the app's installation must cover it.
 - Sync refreshes the repo list from storytold first, so the GitHub App must be installed on storytold too. An app installed only on the other owner lets tracking succeed and sync fail.
 
+#### Filing-only repos
+
+A filing-only repo is a public repo of any owner that the Discord issue bot offers and files into with "Submit for me", without tracking it: no sync, no embeddings, no pipeline and no Discord search. Operators manage the list with `autocraft-server discord filing list | add <owner/name> | remove <owner/name>` or on the Discord page (Filing-only repos); each add and remove is audited (`discord-filing-add`, `discord-filing-remove`).
+
+- Adding reads the repo through the read path (as the app under the app identity) and refuses it unless it is public, not archived and has issues turned on, and the GitHub App's installation covers it.
+- Names stay unique across owners: a name that is tracked, known in `repos` under another owner, or already on the list is refused. GitHub's spelling of the name is stored.
+- The one write such a repo gets is the bot's issue and its label (`guardBotFiling` in `src/core/guard.ts`), under the same limits and junk check as for tracked repos. When the app has lost access, the reporter is told so and gets the GitHub link.
+- The bot's app select holds at most 25 repos: the preselected one, then the filing-only repos, then the tracked ones with the most open issues.
+
 #### Webhooks
 
 The poll stays the backup and serves repos without the GitHub App. With webhooks on, a change reaches the dashboard in seconds instead of up to a minute. Setup, in the app's GitHub settings under General (an app manager does this):

@@ -975,6 +975,8 @@ export interface DiscordSetup {
   channels: DiscordChannel[];
   /** Tracked repos a channel's default can be. */
   repos: string[];
+  /** Public repos of any owner the bot files issues into without tracking them. */
+  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string }[];
   contact: string;
   /** Whether the bot adds a reaction to messages it recorded against items. */
   reactOn: boolean;
