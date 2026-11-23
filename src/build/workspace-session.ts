@@ -51,6 +51,7 @@ These tools are the only way to see or change the code: call them as tools, neve
 Do the task the user gives you. Finish with a short summary of what you changed and why, and what you ran to check it.`;
 const SYSTEM_VERSION = createHash("sha256").update(SYSTEM).digest("hex").slice(0, 10);
 
+const GITHUB_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}$/;
 const SHA = /^[0-9a-f]{40}$/;
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -59,12 +60,15 @@ export type TryRequest = {
   repo: string; baseSha: string; item: number; prompt: string; envId: string; keep: boolean; deadlineSec?: number;
   /** A live workspace of the same repo and base to use instead of a new one. */
   workspaceId?: number | null;
+  /** The GitHub login whose own Task Runners run the session's model call. */
+  forLogin: string;
   by: string;
 };
 
 /** Checks and records a try session; returns its id. The caller queues the `workspace-try` job with `{repo, session}`. */
 export async function requestTrySession(db: Db, r: TryRequest): Promise<number> {
   if (!(await trackedNames(db)).includes(r.repo)) throw new BuildError(400, `${r.repo} is not a tracked repo`);
+  if (!GITHUB_LOGIN.test(r.forLogin)) throw new BuildError(400, "--for must be a GitHub login");
   if (!SHA.test(r.baseSha)) throw new BuildError(400, "the base must be a full 40-character commit sha");
   if (!Number.isInteger(r.item) || r.item < 1) throw new BuildError(400, "the item must be an issue or PR number");
   if (!await db.get(db.k.selectFrom("items").select("number").where("repo", "=", r.repo).where("number", "=", r.item))) throw new BuildError(404, `${r.repo}#${r.item} is not in the mirror`);
@@ -88,7 +92,7 @@ export async function requestTrySession(db: Db, r: TryRequest): Promise<number> 
   const at = iso();
   const row = await db.get(db.k.insertInto("workspace_sessions").values({
     kind: "try", repo: r.repo, base_sha: r.baseSha, item: r.item, prompt: r.prompt, env_id: envId, keep: r.keep ? 1 : 0, deadline_sec: deadline,
-    workspace_id: r.workspaceId ?? null, requested_by: r.by, created_at: at, updated_at: at,
+    workspace_id: r.workspaceId ?? null, requested_by: r.by, for_login: r.forLogin, created_at: at, updated_at: at,
   }).returning("id"));
   return Number(row!.id);
 }
@@ -170,6 +174,7 @@ export async function runTrySession(ctx: StepContext): Promise<string> {
       callId = await queueWorkspaceCall(db, {
         workspaceId: wsId, promptId: TRY_PROMPT_ID, promptVersion: SYSTEM_VERSION, model, tier: promptTier("implement.session"), effort: IMPLEMENT.effort,
         stdin: s.prompt, system, timeoutSeconds: s.deadline_sec, maxTurns: TRY_MAX_TURNS, items: [{ repo: s.repo, number: s.item }], maxAttempts: TRY_ATTEMPTS,
+        forLogin: s.for_login ?? undefined, boundSlot: true,
       });
       await update({ remote_call_id: callId, state: "running" });
       ctx.log(`session ${id}: model call ${callId} queued`);
