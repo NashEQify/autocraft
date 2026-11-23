@@ -135,7 +135,7 @@ function EnvTaskLine({ t }: { t: EnvTask }) {
     <li>
       <Link to={`/envs/${t.id}`} className="block min-w-0 break-words py-0.5 text-xs hover:underline max-md:py-2">
         <span className="code">{t.repo.split("/").pop()}{t.number !== null && `#${t.number}`}</span>
-        <span className="text-ink/60"> · {t.step}{t.current && ` · ${t.current}`} · <span className="num">{span(ms)}</span></span>
+        <span className="text-ink/60"> · {t.step}{t.current && ` · ${t.current}`} · <span className="num whitespace-nowrap">{span(ms)}</span></span>
       </Link>
     </li>
   );
