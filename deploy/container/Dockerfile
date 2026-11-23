@@ -122,6 +122,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod --ignore-scripts
 COPY src ./src
 COPY scripts ./scripts
+# Served by the dashboard as the Task Runner helper and its legacy name (src/dash/server/index.ts).
+COPY worker ./worker
 COPY deploy/backup.sh deploy/periodic.sh deploy/container/entrypoint.sh ./deploy/
 COPY deploy/container/ws ./deploy/ws
 COPY web/src ./web/src
