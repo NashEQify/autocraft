@@ -103,10 +103,10 @@ const runs = async (db: Db) => await db.all(db.k.selectFrom("screenshot_runs").s
 const shotStages = async (db: Db) => await db.all(db.k.selectFrom("stages").select("stage").where((eb) => kx.like(db, "stage", eb.val("screenshot%"))));
 
 describe("runVerify with screenshots", () => {
-  test("switch off (also global on, repo off): no task, no run row, no planner call, verification saved as today", async () => {
+  test("switch off (also another repo on): no task, no run row, no planner call, verification saved as today", async () => {
     const db = await fresh();
     for (const on of [false, true]) {
-      if (on) await setFeature(db, "screenshots", true, "op");
+      if (on) await setFeature(db, "screenshots", true, "op", "other");
       const s = await runVerify(db, { repo: "app" }, () => {}, deps(UI_DIFF));
       assert.equal(s.candidates, 1);
       assert.equal((await tasks(db)).length, 0);
@@ -122,7 +122,6 @@ describe("runVerify with screenshots", () => {
 
   test("switch on: a UI diff queues the pair and records a planned run; a non-UI diff does not call the planner; the ci-enough row is unchanged", async () => {
     const db = await fresh();
-    await setFeature(db, "screenshots", true, "op");
     await setFeature(db, "screenshots", true, "op", "app");
     const other = "diff --git a/docs/readme.md b/docs/readme.md\n--- a/docs/readme.md\n+++ b/docs/readme.md\n@@ -1,1 +1,2 @@\n a\n+b\n";
     await runVerify(db, { repo: "app" }, () => {}, deps(other));

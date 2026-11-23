@@ -19,7 +19,6 @@ test("a signing worker takes no PR-code task, a PR build needs a base commit, an
   await db.prepare("INSERT INTO repos (name, visibility) VALUES ('app', 'public')").run();
   await db.prepare("INSERT INTO tracked_repos (name, pipeline) VALUES ('app', 1)").run();
   await setFeature(db, "pr-builds", true, "op", "app");
-  await setFeature(db, "pr-builds", true, "op");
   const caps = { os: "linux", arch: "x86_64", cpus: 8, memGb: 32, diskGb: 200, display: false, gpu: false, toolchains: ["rust-stable"] };
   await createEnv(db, { id: "plain", label: "plain", kind: "local-sandbox", slots: 4 }, "op");
   await createEnv(db, { id: "signer", label: "signer", kind: "local-sandbox", slots: 4 }, "op");

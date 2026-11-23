@@ -21,6 +21,8 @@ import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts"
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
 import { setRepoPipeline } from "../../pilot.ts";
+import { SHOWN_FEATURES, featureOn, isFeature } from "../../build/features.ts";
+import { switchFeature } from "./build.ts";
 import { countPlan, planLabels } from "../../labels/plan.ts";
 import { listAll, RepoError, type RepoRow, trackRepoChecked, untrackRepo } from "../../repos.ts";
 import { contributors, getRule, OVERRIDE_LOGIN, setOverride, setRule, tierOf, type Contributor as Row, type Rule } from "../../whitelist.ts";
@@ -296,6 +298,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
     pipeline: !!r.tracked && !!r.pipeline,
     canSwitch,
     canManage: canSwitch,
+    buildFeatures: r.tracked ? await mapSeq(SHOWN_FEATURES, async (feature) => ({ feature, on: await featureOn(db, feature, r.name) })) : [],
   };
 }
 
@@ -440,6 +443,16 @@ export async function fixIssueApproval(db: Db, req: Req, approved: boolean): Pro
 
 // An operator, or a maintainer with write permission on the repo (read live from GitHub), switches the pipeline stages on or off for it (off: sync only).
 const maySwitch = async (req: Req, repo: string): Promise<boolean> => await mayRunRepo(req.user, repo);
+
+/** One repo's build feature switch (src/dash/api/build.ts switchFeature holds the rule). */
+export async function buildFeatureSwitch(db: Db, req: Req): Promise<TrackedRepo> {
+  const b = body(req);
+  const name = required(b.name, "name");
+  if (!isFeature(b.feature)) throw new HttpError(400, "feature is not a build feature");
+  if (typeof b.on !== "boolean") throw new HttpError(400, "on must be true or false");
+  await switchFeature(db, req, b.feature, b.on, name);
+  return await oneRepo(db, req, name);
+}
 
 export async function pipelineSwitch(db: Db, req: Req, on: boolean): Promise<TrackedRepo> {
   const name = required(body(req).name, "name");

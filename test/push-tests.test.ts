@@ -40,9 +40,6 @@ describe("push tests", () => {
     const off = await queueLintFor(d, job("app"), never);
     assert.deepEqual((await getTask(d, off!))!.plan, lintPlan(["crates/a/src/lib.rs"]));
     assert.deepEqual((await getTask(d, off!))!.plan.map((s) => s.name), ["fetch deps", "format", "clippy"]);
-    await setFeature(d, "push-tests", true, "op");
-    const globalOnly = await queueLintFor(d, job("app"), never);   // the repo's own switch is still off
-    assert.equal((await getTask(d, globalOnly!))!.plan.length, 3);
     await setFeature(d, "push-tests", true, "op", "app");
     const on = (await getTask(d, (await queueLintFor(d, job("app"), crates))!))!.plan;
     assert.equal(on.at(-1)!.name, "tests");
@@ -51,7 +48,6 @@ describe("push tests", () => {
 
   test("a failing test that fails again on the rerun is a finding; a flake and a timeout are notes", async () => {
     const d = await db();
-    await setFeature(d, "push-tests", true, "op");
     await setFeature(d, "push-tests", true, "op", "app");
     const failing = "test t::x ... FAILED\n\nfailures:\n\n---- t::x stdout ----\nthread 't::x' panicked at src/lib.rs:3:\nboom\n\nfailures:\n    t::x\n";
     await queueLintFor(d, job("app"), crates);

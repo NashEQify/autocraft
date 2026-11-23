@@ -15,7 +15,7 @@ const PATCH = "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n";
 async function setup(prs: number[], on: boolean) {
   const w = (current = await (await world()).repo());
   for (const n of prs) await (await (await (await w.pr(n)).review(n)).verified(n)).premerge(n, "clean");
-  if (on) { await setFeature(w.db, "batch-build", true, "op"); await setFeature(w.db, "batch-build", true, "op", "app"); }
+  if (on) await setFeature(w.db, "batch-build", true, "op", "app");
   const base = w.gh.batchDeps();
   const calls: string[] = [];
   let patch = PATCH;
@@ -78,7 +78,7 @@ describe("batch-build", () => {
 
     const t = await setup([1], true);
     await run(t);
-    await setFeature(t.w.db, "batch-build", false, "op");
+    await setFeature(t.w.db, "batch-build", false, "op", "app");
     await run(t);
     assert.deepEqual(await tasks(t.w), [{ id: 1, step: "merge-batch", state: "cancelled" }]);
     assert.deepEqual((await batches(t.w)).map((b) => [b.build_state, b.pr_number]), [["skipped", 900]]);

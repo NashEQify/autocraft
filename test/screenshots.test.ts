@@ -56,7 +56,7 @@ const tasks = async (db: Db, step?: string, state?: string): Promise<number> => 
   .$if(!!step, (q) => q.where("step", "=", step!)).$if(!!state, (q) => q.where("state", "=", state!)))).length;
 const count = async (db: Db, table: "screenshot_runs" | "merge_holds"): Promise<number> => (await db.all(db.k.selectFrom(table).select((eb) => eb.lit(1).as("one")))).length;
 const runRow = async <C extends "state" | "reason" | "verdict" | "clear" | "held">(db: Db, ...columns: C[]) => await db.get(db.k.selectFrom("screenshot_runs").select(columns));
-const switchOn = async (db: Db): Promise<void> => { await setFeature(db, "screenshots", true, "op"); await setFeature(db, "screenshots", true, "op", "app"); };
+const switchOn = async (db: Db): Promise<void> => await setFeature(db, "screenshots", true, "op", "app");
 
 /** Plans a run, then ends both tasks as a worker would: results for every step, one screenshot each. */
 async function rendered(db: Db, shots: { head: string; base: string; headSize?: [number, number] }, o: { headFails?: boolean } = {}): Promise<{ head: number; base: number }> {
@@ -81,7 +81,7 @@ describe("screenshots switch off (test A)", () => {
   test("nothing is queued, recorded, planned or compared; an in-flight run is cancelled and skipped", async () => {
     const db = await fresh();
     for (const on of [false, true]) {
-      if (on) await setFeature(db, "screenshots", true, "op");   // global only: the repo's own switch is still off
+      if (on) await setFeature(db, "screenshots", true, "op", "other");   // another repo's switch: this repo's own is still off
       await runVerify(db, { repo: "app" }, () => {}, verifyDeps);
       assert.deepEqual([await tasks(db), await count(db, "screenshot_runs"), planCalls], [0, 0, 0]);
       assert.deepEqual((await db.all(db.k.selectFrom("verifications").select(["kind", "state"]))).map((r) => ({ ...r })), [{ kind: "ci-enough", state: "ci-enough" }]);
@@ -95,7 +95,7 @@ describe("screenshots switch off (test A)", () => {
     const t = await rendered(db, { head: "x", base: "y" });
     await db.run(db.k.updateTable("build_tasks").set({ state: "queued", ended_at: null }).where("id", "=", t.head));
     // Off by hand, so the collect-side guard is what ends the run (setFeature itself stops it at once).
-    await db.run(db.k.updateTable("settings").set({ value: "off" }).where("key", "=", "build_feature:screenshots"));
+    await db.run(db.k.updateTable("settings").set({ value: "off" }).where("key", "=", "build_feature:screenshots:app"));
     assert.equal(await collectDue(db), true);
     await collect(db, reply("regression", true));
     assert.equal(compareCalls, 0);

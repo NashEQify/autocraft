@@ -36,8 +36,6 @@ test("nothing is queued while the switch is off; on, only the outside PR of a pu
   assert.equal((await tasks()).length, 0);
   assert.equal((await db.get(db.k.selectFrom("pr_builds").select((eb) => eb.fn.countAll<number>().as("n"))))!.n, 0);
 
-  await setFeature(db, "pr-builds", true, "op");
-  assert.equal(await prBuildDue(db, "app"), false, "the repo's own switch is still off");
   await setFeature(db, "pr-builds", true, "op", "app");
   await setFeature(db, "pr-builds", true, "op", "vault");
   assert.equal(await prBuildDue(db, "app"), true);
@@ -57,7 +55,6 @@ test("nothing is queued while the switch is off; on, only the outside PR of a pu
 
 test("collect: pass, a failure where CI passed is noted without a hold, a moved head is stale", async () => {
   const { db, add, tasks } = await setup();
-  await setFeature(db, "pr-builds", true, "op");
   await setFeature(db, "pr-builds", true, "op", "app");
   await setScope(db, "app", "all");
   await add("app", 5, "stranger", "NONE", sha("e"));
@@ -100,7 +97,6 @@ const claimer = async (db: Db) => {
 
 test("switching off stops queued builds, and the worker does not claim them while it is off", async () => {
   const { db, tasks } = await setup();
-  await setFeature(db, "pr-builds", true, "op");
   await setFeature(db, "pr-builds", true, "op", "app");
   await runPrBuilds(db, "app", () => {}, noFetch);
   assert.equal((await tasks()).length, 1);
@@ -115,7 +111,6 @@ test("switching off stops queued builds, and the worker does not claim them whil
 
 test("an operator's cancel is not retried; a lost task is retried once", async () => {
   const { db, tasks } = await setup();
-  await setFeature(db, "pr-builds", true, "op");
   await setFeature(db, "pr-builds", true, "op", "app");
   await runPrBuilds(db, "app", () => {}, noFetch);
   await db.run(db.k.updateTable("build_tasks").set({ state: "cancelled" }));
@@ -124,7 +119,6 @@ test("an operator's cancel is not retried; a lost task is retried once", async (
   assert.deepEqual({ ...(await db.get(db.k.selectFrom("pr_builds").select(["state", "summary"]))) }, { state: "error", summary: "the build task was cancelled" });
 
   const t2 = await setup();
-  await setFeature(t2.db, "pr-builds", true, "op");
   await setFeature(t2.db, "pr-builds", true, "op", "app");
   await runPrBuilds(t2.db, "app", () => {}, noFetch);
   await t2.db.run(t2.db.k.updateTable("build_tasks").set({ state: "lost" }));
@@ -134,7 +128,6 @@ test("an operator's cancel is not retried; a lost task is retried once", async (
 
 test("a failure that CI later contradicts is noted once, when CI turns green", async () => {
   const { db } = await setup();
-  await setFeature(db, "pr-builds", true, "op");
   await setFeature(db, "pr-builds", true, "op", "app");
   await runPrBuilds(db, "app", () => {}, noFetch);
   await db.run(db.k.updateTable("build_tasks").set({ state: "failed", results: JSON.stringify([{ step: "fetch deps", exitCode: 0, durationMs: 1, timedOut: false }, { step: "build", exitCode: 1, durationMs: 1, timedOut: false }]) }));

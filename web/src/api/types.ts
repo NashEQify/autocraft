@@ -917,9 +917,13 @@ export interface TrackedRepo {
   pipeline: boolean;
   /** Whether the viewer may switch this repo's pipeline: an operator, or a maintainer with write access to the repo. */
   canSwitch: boolean;
-  /** The caller may change the repo's GitHub-write approvals and optional checks (the same rule as canSwitch). */
+  /** The caller may change the repo's GitHub-write approvals, optional checks and build features (the same rule as canSwitch). */
   canManage: boolean;
+  /** The build features shown for the repo, each with its switch; empty for repos that are not tracked. */
+  buildFeatures: RepoBuildFeature[];
 }
+
+export type RepoBuildFeature = { feature: BuildFeatureName; on: boolean };
 
 export interface AccessEntry {
   login: string;
@@ -1898,13 +1902,16 @@ export type TaskFilter = { state?: TaskState | "active"; env?: string; repo?: st
 export type TaskPage = { tasks: BuildTask[]; next: string | null };
 /** Queued and running tasks and the slots left over the online, enabled environments (the flowchart's Verify node). */
 export type BuildFeatureName = "screenshots" | "push-tests" | "batch-build" | "scan-tests" | "nightly" | "pr-builds" | "implement";
-/** `repos` lists the repos whose own switch is on; scan-tests has none. */
-export type BuildFeatureState = { feature: BuildFeatureName; on: boolean; repoScoped: boolean; repos: string[] };
+/**
+ * `repos` lists the repos whose switch is on; `on` is scan-tests' instance-wide switch (false for the per-repo features).
+ * `shown`: the dashboard shows the feature's switch (its builds run on the cluster's build pods today).
+ */
+export type BuildFeatureState = { feature: BuildFeatureName; on: boolean; repoScoped: boolean; shown: boolean; repos: string[] };
 export type PrBuildScope = "outside" | "all";
 /** `repos` is every tracked repo the viewer can see. `prBuilds`: the scope of each of those repos and the builds a repo may start a day. */
-/** `manageable`: the repos whose Implement switch the viewer may flip (operators: all; maintainers: those they can write to). */
+/** `manageable`: the repos whose shown feature switches the viewer may flip (operators: all; maintainers: those they can write to). */
 export type BuildFeatures = { features: BuildFeatureState[]; repos: string[]; manageable: string[]; prBuilds: { scopes: Record<string, PrBuildScope>; perDay: number } };
-/** `on` switches; `scope` (with `repo`, pr-builds only) and `perDay` (pr-builds only) set the build scope and the daily cap. At least one of the three. */
+/** `on` switches the feature for `repo` (scan-tests: instance-wide, no repo); `scope` (with `repo`, pr-builds only) and `perDay` (pr-builds only) set the build scope and the daily cap. At least one of the three. */
 export type BuildFeatureInput = { feature: BuildFeatureName; on?: boolean; repo?: string; scope?: PrBuildScope; perDay?: number };
 
 

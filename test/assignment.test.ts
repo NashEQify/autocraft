@@ -72,7 +72,6 @@ test("an issue is unassigned when its implementation waits on a person, kept whi
   const plan = async () => (await w.plan()).items.find((i) => i.facts.number === 5)!.plan;
   const implement = async () => (await plan()).actions.filter((a) => a.kind === "implement" || a.kind === "unassign").map((a) => [a.kind, a.params?.bucket]);
   assert.deepEqual(await implement(), [], "Implement off: nothing is planned");
-  await setFeature(w.db, "implement", true, "op");
   await setFeature(w.db, "implement", true, "op", "app");
   assert.deepEqual(await implement(), [["implement", "plan"]]);
   // Queued by someone who does not settle on the repo: not queued for Implement.

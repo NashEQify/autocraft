@@ -34,7 +34,7 @@ import { isQueueState } from "../core/plan.ts";
 import { isWork } from "../core/assignment.ts";
 import { postCandidates } from "../review/post.ts";
 import { collectDue } from "../verify/results.ts";
-import { featureOn } from "../build/features.ts";
+import { featureRepos } from "../build/features.ts";
 import { nightlyRepos } from "../nightly/index.ts";
 import { prBuildDue, reposWithQueuedBuilds } from "../prbuild/index.ts";
 import { actLimit, actUsedToday } from "../conversations/usage.ts";
@@ -799,7 +799,7 @@ const LANE_CODE: Omit<Lane, "steps">[] = [
     name: "nightly",
     perRepo: true,
     // The day's schedule moves with the clock, not with a change in the data.
-    extra: async (db) => (await featureOn(db, "nightly") ? String(Math.floor(Date.now() / 3_600_000)) : ""),
+    extra: async (db) => ((await featureRepos(db, "nightly")).length ? String(Math.floor(Date.now() / 3_600_000)) : ""),
     detect: async (db, { tracked }) => (await nightlyRepos(db, tracked)).map((repo) => ({ step: "nightly", params: { repo } })),
   },
 ];

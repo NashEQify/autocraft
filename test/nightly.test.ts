@@ -62,8 +62,6 @@ test("off by default: no lane output, no rows, no tasks; on for repo a only: a's
   assert.ok(off.note);
   assert.equal(await count(db, "nightly_runs") + await count(db, "nightly_results") + await count(db, "build_tasks"), 0);
 
-  await setFeature(db, "nightly", true, "op");
-  assert.deepEqual(await detect(), [], "global switch alone is not enough for a repo-scoped feature");
   await setFeature(db, "nightly", true, "op", "a");
   assert.deepEqual(await detect(), [{ step: "nightly", params: { repo: "a" } }]);
   await runNightly(db, { repo: "a" }, quiet, f.deps);
@@ -78,7 +76,7 @@ test("off by default: no lane output, no rows, no tasks; on for repo a only: a's
 
 test("a check with no registered toolchain is skipped; miri without crates is skipped", async () => {
   const { db, f } = await setup();
-  await setFeature(db, "nightly", true, "op"); await setFeature(db, "nightly", true, "op", "a");
+  await setFeature(db, "nightly", true, "op", "a");
   await setSelection(db, "a", "audit", true); await setSelection(db, "a", "wasm", true); await setSelection(db, "a", "miri", true);
   f.have.delete("rust-cross");
   await runNightly(db, { repo: "a" }, quiet, f.deps);
@@ -90,7 +88,7 @@ test("a check with no registered toolchain is skipped; miri without crates is sk
 
 test("a failure two nights running asks one decision; open-issue opens one issue and no second one until green", async () => {
   const { db, f } = await setup();
-  await setFeature(db, "nightly", true, "op"); await setFeature(db, "nightly", true, "op", "a");
+  await setFeature(db, "nightly", true, "op", "a");
   await setSelection(db, "a", "audit", true);
   const night = async (fail: boolean, advisories = "") => {
     await runNightly(db, { repo: "a" }, quiet, f.deps); // queue
@@ -131,7 +129,7 @@ test("a failure two nights running asks one decision; open-issue opens one issue
 
 test("an audit failure lists advisory ids only; experimental checks ask nothing", async () => {
   const { db, f } = await setup();
-  await setFeature(db, "nightly", true, "op"); await setFeature(db, "nightly", true, "op", "a");
+  await setFeature(db, "nightly", true, "op", "a");
   await setSelection(db, "a", "audit", true); await setSelection(db, "a", "asan", true);
   await runNightly(db, { repo: "a" }, quiet, f.deps);
   const audit = (await db.get(db.k.selectFrom("build_tasks").select("id").where((eb) => like(db, "plan", eb.val("%cargo audit%")))))!.id;
@@ -149,7 +147,7 @@ test("an audit failure lists advisory ids only; experimental checks ask nothing"
 
 test("a bench 15% above the median of the last 7 nights is a warn with the trend stored; old points are pruned", async () => {
   const { db, f } = await setup();
-  await setFeature(db, "nightly", true, "op"); await setFeature(db, "nightly", true, "op", "a");
+  await setFeature(db, "nightly", true, "op", "a");
   await setSelection(db, "a", "bench", true);
   const line = (n: number) => `running 1 test\ntest sort ... bench:       ${n.toLocaleString("en-US")} ns/iter (+/- 12)\n`;
   const night = async (ns: number) => {

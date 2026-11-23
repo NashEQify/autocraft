@@ -494,7 +494,6 @@ describe("issue journey", () => {
     assert.deepEqual(await kinds(), [], "take alone does not implement it");
     // An operator queues it, and the repo's Implement switch is on: the plan step is due.
     await w.db.run(w.db.k.insertInto("fast_track").values({ repo: "app", number: 5, added_by: "op", added_at: T1 }));
-    await setFeature(w.db, "implement", true, "op");
     await setFeature(w.db, "implement", true, "op", "app");
     assert.deepEqual((await item()).actions.filter((a) => a.kind === "implement").map((a) => a.params?.bucket), ["plan"]);
   });

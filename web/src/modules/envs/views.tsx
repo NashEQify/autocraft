@@ -5,15 +5,13 @@ import { Link, useNavigate } from "react-router-dom";
 import { Dialog } from "radix-ui";
 import { CheckIcon, CopyIcon, DownloadSimpleIcon, PencilSimpleIcon, PlusIcon, XIcon } from "@phosphor-icons/react";
 import { useApi, usePagedQuery, useQuery } from "../../api/client";
-import type { BuildEnv, BuildFeatureName, ScreenshotConfigJson, ScreenshotSetups, BuildFeatures, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, EnvKind, PrBuildScope, Requires, TaskBatch, TaskFilter, TaskState } from "../../api/types";
+import type { BuildEnv, BuildSummary, BuildTask, BuildTaskDetail, Capabilities, EnvKind, Requires, TaskBatch, TaskFilter, TaskState } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { memSize, nowMs, num, span, eventTime } from "../../lib/format";
 import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { useUser } from "../../shell/UserContext";
 import { Badge, type Tone } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
-import { Switch } from "../../ui/atoms/Switch";
-import { Textarea } from "../../ui/atoms/Textarea";
 import { ItemRef } from "../../ui/molecules/ItemRef";
 import { repoSlug } from "../../lib/links";
 import { cn } from "../../ui/cn";
@@ -306,128 +304,6 @@ function EnvsPanel() {
           ))}
         </ul>
       )}
-    </Block>
-  );
-}
-
-// ---- build features ----------------------------------------------------------------
-
-const FEATURE_LABEL: Record<BuildFeatureName, string> = {
-  screenshots: "Screenshots", "push-tests": "Tests before push", "batch-build": "Build batches",
-  "scan-tests": "Run scan tests", nightly: "Nightly checks", "pr-builds": "Build pull requests", implement: "Implement queued issues",
-};
-
-function FeatureState({ on, label, operator, busy, onChange }: { on: boolean; label: string; operator: boolean; busy: boolean; onChange: (on: boolean) => void }) {
-  return operator ? <Switch on={on} label={label} busy={busy} onChange={onChange} /> : <Badge tone={on ? "ok" : "neutral"}>{on ? "On" : "Off"}</Badge>;
-}
-
-/** Per-repo screenshot commands as JSON. The setup is stored whether or not the switch is on; editing waits for the switch. */
-function ScreenshotSetupBlock({ repos, enabled }: { repos: string[]; enabled: boolean }) {
-  const api = useApi();
-  const q = useQuery<ScreenshotSetups>("screenshot-setup", (a) => a.screenshotSetup.list());
-  const write = useWrite();
-  const [picked, setPicked] = useState<string | null>(null);
-  const [draft, setDraft] = useState<{ repo: string; text: string } | null>(null);
-  const repo = picked && repos.includes(picked) ? picked : repos[0];
-  const stored = q.data?.setups.find((x) => x.repo === repo);
-  const storedText = stored ? JSON.stringify(stored.config, null, 2) : "";
-  const text = draft && draft.repo === repo ? draft.text : storedText;
-  let parsed: ScreenshotConfigJson | null = null;
-  let parseError: string | null = null;
-  if (text.trim()) {
-    try {
-      parsed = JSON.parse(text) as ScreenshotConfigJson;
-    } catch (e) {
-      parseError = (e as Error).message;
-    }
-  }
-  if (!repo) return null;
-  const canEdit = !!q.data?.manageable.includes(repo);
-  const off = !enabled || !canEdit;
-  const save = () => parsed && void write.run("save", () => api.screenshotSetup.put(repo, parsed!)).then((ok) => ok && (setDraft(null), q.refetch()));
-  const remove = () => void write.run("remove", () => api.screenshotSetup.remove(repo)).then((ok) => ok && (setDraft(null), q.refetch()));
-  return (
-    <div className="mb-2 mt-1 space-y-2 border-l border-line pl-3" aria-label="Screenshot setup">
-      <div className="flex min-h-11 flex-wrap items-center gap-2">
-        <span className="text-sm font-medium">Screenshot setup</span>
-        <select aria-label="Repo" className={selectCls} value={repo} onChange={(e) => setPicked(e.target.value)}>
-          {repos.map((r) => <option key={r} value={r}>{r}{q.data?.setups.some((x) => x.repo === r) ? "" : " (none)"}</option>)}
-        </select>
-        {stored && <span className="text-xs text-ink/60">saved by {stored.updatedBy} <TimeAgo iso={stored.updatedAt} /></span>}
-      </div>
-      <Textarea
-        aria-label={`Screenshot setup JSON for ${repo}`}
-        rows={10}
-        spellCheck={false}
-        value={text}
-        disabled={off}
-        invalid={parseError !== null}
-        onChange={(e) => setDraft({ repo, text: e.target.value })}
-        className="font-mono text-xs"
-      />
-      <ErrorLine error={parseError ?? write.error ?? q.error?.message} />
-      {canEdit && (
-        <div className="flex gap-2">
-          <Button size="sm" variant="primary" disabled={off || !parsed || text === storedText} loading={write.busy === "save"} onClick={save} className="max-md:h-11">Save</Button>
-          {stored && <ConfirmButton label="Remove" confirmLabel="Confirm remove" loading={write.busy === "remove"} onConfirm={remove} className={off ? "pointer-events-none opacity-50" : undefined} />}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function FeaturesPanel() {
-  const api = useApi();
-  const q = useQuery<BuildFeatures>("build-features", (a) => a.buildFeatures.list());
-  const operator = useUser().role === "operator";
-  const write = useWrite();
-  const set = (feature: BuildFeatureName, on: boolean, repo?: string) =>
-    void write.run(`${feature}:${repo ?? ""}`, () => api.buildFeatures.set({ feature, on, repo })).then(() => q.refetch());
-  const setPrBuilds = (key: string, input: { repo?: string; scope?: PrBuildScope; perDay?: number }) =>
-    void write.run(`pr-builds-${key}`, () => api.buildFeatures.set({ feature: "pr-builds", ...input })).then(() => q.refetch());
-  const pb = q.data?.prBuilds;
-  const perDayOptions = [...new Set([0, 5, 10, 20, 50, 100, pb?.perDay ?? 10])].sort((a, b) => a - b);
-  return (
-    <Block title="Build features">
-      <ErrorLine error={q.error?.message ?? write.error} />
-      <ul className="divide-y divide-line">
-        {(q.data?.features ?? []).map((f) => (
-          <li key={f.feature} className="py-1">
-            <div className="flex min-h-11 items-center gap-3">
-              <span className="min-w-0 flex-1 text-sm">{FEATURE_LABEL[f.feature]}</span>
-              <FeatureState on={f.on} label={FEATURE_LABEL[f.feature]} operator={operator} busy={write.busy === `${f.feature}:`} onChange={(on) => set(f.feature, on)} />
-            </div>
-            {f.feature === "screenshots" && <ScreenshotSetupBlock repos={q.data?.repos ?? []} enabled={f.on} />}
-            {f.repoScoped && f.on && (
-              <ul className="mb-1 flex flex-wrap gap-x-5 pl-3">
-                {q.data!.repos.map((r) => (
-                  <li key={r} className="flex min-h-8 items-center gap-2 text-xs text-ink/75">
-                    <span className="num">{r}</span>
-                    <FeatureState on={f.repos.includes(r)} label={`${FEATURE_LABEL[f.feature]} on ${r}`} operator={operator || (f.feature === "implement" && (q.data?.manageable ?? []).includes(r))} busy={write.busy === `${f.feature}:${r}`} onChange={(on) => set(f.feature, on, r)} />
-                    {f.feature === "pr-builds" && f.repos.includes(r) && (
-                      <select
-                        aria-label={`Which pull requests to build in ${r}`} disabled={!operator || write.busy === `pr-builds-${r}`} value={pb?.scopes[r] ?? "outside"}
-                        onChange={(e) => setPrBuilds(r, { repo: r, scope: e.target.value as PrBuildScope })} className={selectCls}
-                      >
-                        <option value="outside">Outside contributors</option>
-                        <option value="all">Every PR</option>
-                      </select>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {f.feature === "pr-builds" && f.on && pb && (
-              <label className="mb-1 flex min-h-8 items-center gap-2 pl-3 text-xs text-ink/75">
-                <span>Builds a day in each repo</span>
-                <select aria-label="Builds a day in each repo" disabled={!operator || write.busy === "pr-builds-perDay"} value={pb.perDay} onChange={(e) => setPrBuilds("perDay", { perDay: Number(e.target.value) })} className={selectCls}>
-                  {perDayOptions.map((n) => <option key={n} value={n}>{n}</option>)}
-                </select>
-              </label>
-            )}
-          </li>
-        ))}
-      </ul>
     </Block>
   );
 }
@@ -735,12 +611,10 @@ export function DetailPanel({ params }: ViewProps) {
 
 export function EnvsView({ params }: ViewProps) {
   const id = params.id ? Number(params.id) : undefined;
-  const canSee = useUser().role !== "viewer";
   return (
     <Page title="Build environments" sub="Where builds and tests run">
       <div className="mt-4 space-y-4">
         <EnvsPanel />
-        {canSee && <FeaturesPanel />}
         <Tasks selected={id} />
       </div>
     </Page>
