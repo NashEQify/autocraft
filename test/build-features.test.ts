@@ -65,3 +65,13 @@ test("a maintainer with write access to a repo switches its Implement feature, n
   await assert.rejects(postFeature(db, as("maintainer", ["x"], { feature: "nightly", on: true, repo: "x" })), /operator/);
   await assert.rejects(postFeature(db, as("viewer", ["x"], { feature: "implement", on: true, repo: "x" })), /write access/);
 });
+
+test("a write-maintainer approves issue implementations for their repo only", async () => {
+  const { fixIssueApproval } = await import("../src/dash/api/admin.ts");
+  const db = await fresh();
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "x" }, { name: "y" }]).onConflict((oc) => oc.doNothing()));
+  const as = (role: string, name: string) => ({ params: {}, query: new URLSearchParams(), json: { name }, user: { login: "u", role, canWrite: async (r: string) => r === "x", canRead: async () => true } }) as never;
+  assert.equal((await fixIssueApproval(db, as("maintainer", "x"), true)).fixing?.approved, true);
+  await assert.rejects(fixIssueApproval(db, as("maintainer", "y"), true), /write access/);
+  await assert.rejects(fixIssueApproval(db, as("viewer", "x"), false), /write access/);
+});

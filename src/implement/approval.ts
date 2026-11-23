@@ -1,5 +1,5 @@
 // Per-repo approval for the pipeline to open fix PRs for issues there (push to the pipeline fork, open a PR,
-// comment on the issue). Set only from the dashboard by an operator (src/dash/api/admin.ts).
+// Set from the dashboard by an operator or a maintainer with write access to the repo (src/dash/api/admin.ts).
 import { audit } from "../dash/audit.ts";
 import { setting } from "../settings-read.ts";
 import type { Db } from "../db/index.ts";
