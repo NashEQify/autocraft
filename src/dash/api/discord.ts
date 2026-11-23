@@ -9,6 +9,7 @@ import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
 import { countOf, linksOf } from "../../discord/store.ts";
+import { addFilingRepo, botRepos, filingRepos, FilingRepoError, removeFilingRepo } from "../../discord/filing-repos.ts";
 import { reactOn } from "../../discord/react.ts";
 import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
@@ -63,10 +64,14 @@ export async function usageOf(db: Db, now: number = Date.now()): Promise<Discord
   }
   const filed = await db.all(db.k.selectFrom("discord_filed").select(["repo", "number", "login", "at"]).where("number", ">", 0).orderBy("at", "desc").limit(20));
   const cap = await interactiveTakers(db, now);
+  const filingOwner = new Map((await botRepos(db)).filter((r) => r.filingOnly).map((r) => [r.name, r.owner]));
   return {
     counts: await eventCounts(db, now),
     prompts: [...byPrompt.values()].sort((a, b) => a.prompt.localeCompare(b.prompt)),
-    filed: filed.map((f) => ({ repo: f.repo, number: Number(f.number), login: f.login, at: f.at })),
+    filed: filed.map((f) => {
+      const owner = filingOwner.get(f.repo);
+      return { repo: f.repo, number: Number(f.number), login: f.login, at: f.at, githubUrl: owner ? `https://github.com/${owner}/${f.repo}/issues/${Number(f.number)}` : null };
+    }),
     capacity: cap.applies ? { ready: cap.ready, why: cap.why } : null,
   };
 }
@@ -85,6 +90,7 @@ async function setupOf(db: Db): Promise<DiscordSetup> {
     state: st?.state ?? "off", detail: st?.detail ?? null, at: st?.at ?? null,
     channels: channels.map((c) => ({ ...c, watched: !!c.watched })),
     repos: await publicRepoNames(db),
+    filingRepos: await filingRepos(db),
     contact: await contactOf(db), reactOn: await reactOn(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
     usage: await usageOf(db),
   };
@@ -122,6 +128,28 @@ export async function putContact(db: Db, req: Req): Promise<DiscordSetup> {
   if (typeof c !== "string" || c.length > 300) throw new HttpError(400, "contact must be text of at most 300 characters");
   await db.run(db.k.insertInto("settings").values({ key: "discord_contact", value: c.trim() }).onConflict((oc) => oc.column("key").doUpdateSet(excluded(["value"]))));
   await audit(db, req.user.login, "discord-contact", null);
+  return await setupOf(db);
+}
+
+/** Adds a filing-only repo (`repo`: owner/name) once GitHub confirms it; the refusal's reason is the error. */
+export async function addFiling(db: Db, req: Req): Promise<DiscordSetup> {
+  operator(req);
+  const repo = body(req).repo;
+  if (typeof repo !== "string" || repo.length > 200) throw new HttpError(400, "repo (owner/name) is required");
+  try {
+    await addFilingRepo(db, req.user.login, repo);
+  } catch (e) {
+    if (e instanceof FilingRepoError) throw new HttpError(400, e.message);
+    throw e;
+  }
+  return await setupOf(db);
+}
+
+export async function removeFiling(db: Db, req: Req): Promise<DiscordSetup> {
+  operator(req);
+  const repo = body(req).repo;
+  if (typeof repo !== "string") throw new HttpError(400, "repo is required");
+  if (!await removeFilingRepo(db, req.user.login, repo)) throw new HttpError(404, "not a filing-only repo");
   return await setupOf(db);
 }
 

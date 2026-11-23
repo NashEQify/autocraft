@@ -8,7 +8,6 @@
 // length-capped and stripped of mentions and foreign links before it is shown.
 import { randomBytes } from "node:crypto";
 import { askClaude } from "../classify/run.ts";
-import { publicRepoNames } from "../public/status.ts";
 import { BUTTON_URL_MAX, ISSUE_URL_MAX, cleanDraft, followUp, formDraft, issueUrl, sanitize, seedOf, type PublicRepo } from "./issue-draft.ts";
 import { fallbackQuestions, ISSUE_ANSWER_CHARS, ISSUE_BODY_CHARS, ISSUE_FORM_BODY_CHARS, ISSUE_TITLE_CHARS, parseDraft, parseQuestions, type FollowUpId, type IssueDraftInput, type IssueQuestionsInput } from "./issue-prompt.ts";
 import type { Call, Interactions } from "./interactions.ts";
@@ -18,7 +17,7 @@ import { botRefusal, FILING_IN_DISCORD, fileAsBot, fileIssue, JUNK_REFUSAL, junk
 import type { JunkAsk } from "./junk-ask.ts";
 import { deliver, fileRepoUrl, plain, renderMatches } from "./reply.ts";
 import { QUESTION_CHARS, type Match, type Search } from "./search.ts";
-import { trackedRepos } from "./store.ts";
+import { botRepo, botRepos, FILING_MAX } from "./filing-repos.ts";
 import type { Db } from "../db/index.ts";
 import { DISCORD_TAKE_WAIT_MS } from "./limits.ts";
 
@@ -141,8 +140,7 @@ export class IssueNew {
   }
 
   async #repos(): Promise<PublicRepo[]> {
-    const names = new Set(await publicRepoNames(this.#d.db));
-    return (await trackedRepos(this.#d.db)).filter((t) => names.has(t.name)).map((t) => ({ owner: t.owner, name: t.name }));
+    return (await botRepos(this.#d.db)).map((t) => ({ owner: t.owner, name: t.name }));
   }
 
   #session(call: Call, sid: string | undefined): Session | null {
@@ -170,13 +168,21 @@ export class IssueNew {
     }
   }
 
-  /** The public tracked repos as choices: app name (release_apps) else repo name. Discord allows 25 options; with more repos the ones with the most open issues stay, and the preselected repo always does. */
+  /**
+   * The repos the bot offers as choices: app name (release_apps) else repo name. Discord allows 25 options; with more
+   * repos the preselected repo stays, then the filing-only ones (an operator chose each; at most FILING_MAX), then the
+   * tracked ones with the most open issues.
+   */
   async #apps(preselect: string | null): Promise<{ name: string; label: string }[]> {
     const { db } = this.#d;
-    const names = new Set(await publicRepoNames(db));
-    const rows = await db.all(db.k.selectFrom("repos as r").innerJoin("tracked_repos as t", "t.name", "r.name").leftJoin("release_apps as a", "a.repo", "r.name")
-      .select((eb) => ["r.name as name", eb.fn.coalesce("a.name", "r.name").as("label"), eb.fn.coalesce("r.open_issues", eb.lit(0)).as("open")]));
-    const mine = rows.filter((r) => names.has(r.name)).sort((x, y) => Number(y.name === preselect) - Number(x.name === preselect) || y.open - x.open || x.name.localeCompare(y.name));
+    const offered = await botRepos(db);
+    const labels = offered.length ? await db.all(db.k.selectFrom("repos as r").leftJoin("release_apps as a", "a.repo", "r.name")
+      .select((eb) => ["r.name as name", eb.fn.coalesce("a.name", "r.name").as("label"), eb.fn.coalesce("r.open_issues", eb.lit(0)).as("open")])
+      .where("r.name", "in", offered.map((r) => r.name))) : [];
+    const known = new Map(labels.map((l) => [l.name, l]));
+    let filing = 0;
+    const rows = offered.filter((r) => r.name === preselect || !r.filingOnly || ++filing <= FILING_MAX).map((r) => ({ name: r.name, label: known.get(r.name)?.label ?? r.name, open: Number(known.get(r.name)?.open ?? 0), filingOnly: r.filingOnly }));
+    const mine = rows.sort((x, y) => Number(y.name === preselect) - Number(x.name === preselect) || Number(y.filingOnly) - Number(x.filingOnly) || y.open - x.open || x.name.localeCompare(y.name));
     return mine.slice(0, MAX_APPS).sort((x, y) => x.label.localeCompare(y.label)).map((r) => ({ name: r.name, label: r.label }));
   }
 
@@ -208,8 +214,7 @@ export class IssueNew {
     if (!s) return void (await call.edit({ content: "This form has expired. Start again with /autocraft search." }));
     if (s.stage !== "form") return void (await call.edit({ content: USED }));
     const f = call.fields();
-    const publicNames = new Set(await publicRepoNames(db));
-    const repo = (await trackedRepos(db)).find((t) => t.name === f.app && publicNames.has(t.name));
+    const repo = f.app ? await botRepo(db, f.app) : null;
     const description = (f.description ?? "").trim().slice(0, ISSUE_FORM_BODY_CHARS);
     if (!repo || !description) return void (await call.edit({ content: "Pick an app and describe the problem. Start again with /autocraft search." }));
     const userKey = keys.hash("author", s.user), channelKey = keys.hash("channel", call.interaction.channel_id ?? "?");
@@ -236,6 +241,8 @@ export class IssueNew {
         .catch(() => { asking.chosen = fallbackQuestions(s.chosen).slice(0, 3); });
       s.asking = asking;
     }
+    // A filing-only repo's issues are not read, so there is nothing to search.
+    if (repo.filingOnly) return void (await call.edit({ content: "Similar issues are not searched in this repo.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     s.matches = (await this.#d.search.find(description.slice(0, QUESTION_CHARS), s.repo)).matches.filter((m) => m.repo === s.repo);
     if (!s.matches.length) return void (await call.edit({ content: "No similar issue was found.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);

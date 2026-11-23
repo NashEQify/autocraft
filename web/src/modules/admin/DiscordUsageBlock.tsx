@@ -3,6 +3,7 @@ import { Badge } from "../../ui/atoms/Badge";
 import { TimeAgo } from "../../ui/atoms/TimeAgo";
 import { Block } from "../../ui/molecules/Block";
 import { ItemRef } from "../../ui/molecules/ItemRef";
+import { TextLink } from "../../ui/atoms/TextLink";
 
 const COUNT_ROWS: ["started" | "junk" | "filed" | "link" | "limits", string][] = [
   ["started", "Reports started"], ["junk", "Refused as junk"], ["filed", "Filed by the bot"], ["link", "Sent to Open on GitHub"], ["limits", "Turned away by limits"],
@@ -56,7 +57,7 @@ export function DiscordUsageBlock({ usage }: { usage: DiscordUsage }) {
       <ul>
         {usage.filed.map((f) => (
           <li key={f.repo + "#" + f.number} className="flex min-h-11 items-center gap-3 border-t border-line px-4 py-1.5">
-            <div className="min-w-0 flex-1"><ItemRef repo={f.repo} number={f.number} kind="issue" title={null} size="sm" /></div>
+            <div className="min-w-0 flex-1">{f.githubUrl ? <TextLink href={f.githubUrl} className="code block truncate text-sm">{f.repo}#{f.number}</TextLink> : <ItemRef repo={f.repo} number={f.number} kind="issue" title={null} size="sm" />}</div>
             <span className="max-w-[7rem] truncate text-2xs text-ink/55">{f.login}</span>
             <span className="text-2xs text-ink/45"><TimeAgo iso={f.at} /></span>
           </li>

@@ -96,7 +96,12 @@ export function createMockApi(): Api {
   const changed = () => listeners.forEach((fn) => fn());
   let discordLinked = true;
   const discord: DiscordSetup = {
-    state: "connected", detail: null, at: nowIso(), repos: ["photocraft", "pdfcraft", "wordcraft"], contact: "discord-privacy@example.org", reactOn: true, privacyPath: "/privacy",
+    state: "connected", detail: null, at: nowIso(), repos: ["photocraft", "pdfcraft", "wordcraft"],
+    filingRepos: [
+      { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString() },
+      { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString() },
+    ],
+    contact: "discord-privacy@example.org", reactOn: true, privacyPath: "/privacy",
     usage: {
       counts: { started: { day: 14, week: 63 }, junk: { day: 2, week: 9 }, filed: { day: 6, week: 31 }, link: { day: 3, week: 12 }, limits: { day: 1, week: 4 } },
       prompts: [
@@ -107,9 +112,10 @@ export function createMockApi(): Api {
         { prompt: "discord.signal.haiku", day: { calls: 120, usd: 0.0312 }, week: { calls: 806, usd: 0.2143 } },
       ],
       filed: [
-        { repo: "photocraft", number: 4182, login: "(app)", at: new Date(Date.now() - 25 * 60_000).toISOString() },
-        { repo: "pdfcraft", number: 977, login: "(app)", at: new Date(Date.now() - 3 * 3_600_000).toISOString() },
-        { repo: "wordcraft", number: 311, login: "tomas-vale", at: new Date(Date.now() - 9 * 3_600_000).toISOString() },
+        { repo: "sketchpad", number: 7731, login: "(app)", at: new Date(Date.now() - 10 * 60_000).toISOString(), githubUrl: "https://github.com/example-studio/sketchpad/issues/7731" },
+        { repo: "photocraft", number: 4182, login: "(app)", at: new Date(Date.now() - 25 * 60_000).toISOString(), githubUrl: null },
+        { repo: "pdfcraft", number: 977, login: "(app)", at: new Date(Date.now() - 3 * 3_600_000).toISOString(), githubUrl: null },
+        { repo: "wordcraft", number: 311, login: "tomas-vale", at: new Date(Date.now() - 9 * 3_600_000).toISOString(), githubUrl: null },
       ],
       capacity: { ready: false, why: "1 Task Runner has Interactive slots, and it is quota-held" },
     },
@@ -339,6 +345,21 @@ export function createMockApi(): Api {
       setChannelRepo(channelId, repo) {
         if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
         discord.channels.find((c) => c.channelId === channelId)!.defaultRepo = repo;
+        changed();
+        return wait(structuredClone(discord));
+      },
+      addFilingRepo(repo) {
+        if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
+        const [owner, name] = repo.trim().split("/");
+        if (!owner || !name) throw new Error("Give the repo as owner/name.");
+        if (owner === "no-app-here") throw new Error(`The GitHub App is not installed on ${owner}.`);
+        discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso() }];
+        changed();
+        return wait(structuredClone(discord));
+      },
+      removeFilingRepo(repo) {
+        if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
+        discord.filingRepos = discord.filingRepos.filter((r) => `${r.owner}/${r.name}` !== repo);
         changed();
         return wait(structuredClone(discord));
       },

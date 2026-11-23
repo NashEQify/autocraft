@@ -18,6 +18,7 @@ import { deleteRepliesOf } from "./replies.ts";
 import { RestClient } from "./rest.ts";
 import { Reactor } from "./react.ts";
 import { forgetReporter } from "./file-issue.ts";
+import { addFilingRepo, filingRepos, FilingRepoError, removeFilingRepo } from "./filing-repos.ts";
 import { forgetLink } from "./links.ts";
 import { Search } from "./search.ts";
 import { installAccountCommands } from "./commands.ts";
@@ -143,7 +144,8 @@ export async function startDiscord(db: Db, signal: AbortSignal, log: (l: string)
 const USAGE = `usage: autocraft-server discord forget --message <message link or id> | --user <user id>
        autocraft-server discord channels
        autocraft-server discord watch <channel id> | unwatch <channel id>
-       autocraft-server discord panel post <channel id>`;
+       autocraft-server discord panel post <channel id>
+       autocraft-server discord filing list | add <owner/name> | remove <owner/name>`;
 
 function die(msg: string): never {
   console.error(msg);
@@ -206,9 +208,17 @@ async function discord(args: string[]): Promise<void> {
     if (!r) die("no such channel; the bot has not reported it");
     await audit(db, "cli", "discord-panel", b, { message: r.messageId, created: r.created });
     console.log(`${r.created ? "posted" : "updated"} the panel in ${b} (message ${r.messageId})${r.pinError ? `; not pinned: ${r.pinError}` : ""}`);
+  } else if (sub === "filing" && a === "list") {
+    for (const r of await filingRepos(db)) console.log(`${r.owner}/${r.name}  added ${r.addedAt.slice(0, 16).replace("T", " ")} by ${r.addedBy}`);
+  } else if (sub === "filing" && a === "add" && b) {
+    const r = await addFilingRepo(db, "cli", b).catch((e: Error) => die(e instanceof FilingRepoError ? e.message : `adding failed: ${e.message}`));
+    console.log(`the Discord bot files into ${r.owner}/${r.name}`);
+  } else if (sub === "filing" && a === "remove" && b) {
+    if (!await removeFilingRepo(db, "cli", b)) die(`${b} is not a filing-only repo`);
+    console.log(`the Discord bot no longer files into ${b}`);
   } else die(USAGE);
 }
 
 export const commands = {
-  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post", run: (args: string[]) => discord(args) },
+  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post | filing list|add|remove", run: (args: string[]) => discord(args) },
 };

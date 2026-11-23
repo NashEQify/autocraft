@@ -603,6 +603,13 @@ export interface DiscordFiled {
   at: string;
 }
 
+export interface DiscordFilingRepos {
+  name: string;
+  owner: string;
+  added_by: string;
+  added_at: string;
+}
+
 export interface DiscordLinkCodes {
   code_hash: string;
   login: string;
@@ -2339,6 +2346,7 @@ export interface DB {
   discord_channels: DiscordChannels;
   discord_events: DiscordEvents;
   discord_filed: DiscordFiled;
+  discord_filing_repos: DiscordFilingRepos;
   discord_link_codes: DiscordLinkCodes;
   discord_links: DiscordLinks;
   discord_mentions: DiscordMentions;
@@ -2524,6 +2532,7 @@ export interface DB {
   "main.discord_channels": DiscordChannels;
   "main.discord_events": DiscordEvents;
   "main.discord_filed": DiscordFiled;
+  "main.discord_filing_repos": DiscordFilingRepos;
   "main.discord_link_codes": DiscordLinkCodes;
   "main.discord_links": DiscordLinks;
   "main.discord_mentions": DiscordMentions;
@@ -2713,6 +2722,7 @@ export const COLUMNS = {
   discord_channels: ["channel_id", "guild_id", "guild_name", "name", "watched", "parent_id", "default_repo", "position", "category_id", "panel_message"],
   discord_events: ["at", "kind"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
+  discord_filing_repos: ["name", "owner", "added_by", "added_at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],

@@ -400,6 +400,14 @@ CREATE TABLE IF NOT EXISTS discord_events (
   kind TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS discord_events_at ON discord_events (at);
+-- Public repos of any owner the Discord issue bot files into without tracking them: no sync, no pipeline, no search.
+-- A name here is never a tracked repo or a `repos` row of another owner (repo names are unique across owners).
+CREATE TABLE IF NOT EXISTS discord_filing_repos (
+  name TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  added_by TEXT NOT NULL,
+  added_at TEXT NOT NULL
+);
 
 -- One row per started GitHub App registration: the manifest flow's single-use state nonce.
 CREATE TABLE IF NOT EXISTS github_app_states (

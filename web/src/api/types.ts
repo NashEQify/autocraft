@@ -975,6 +975,8 @@ export interface DiscordSetup {
   channels: DiscordChannel[];
   /** Tracked repos a channel's default can be. */
   repos: string[];
+  /** Public repos of any owner the bot files issues into without tracking them. */
+  filingRepos: { owner: string; name: string; addedBy: string; addedAt: string }[];
   contact: string;
   /** Whether the bot adds a reaction to messages it recorded against items. */
   reactOn: boolean;
@@ -991,8 +993,8 @@ export interface DiscordUsage {
   counts: Record<"started" | "junk" | "filed" | "link" | "limits", { day: number; week: number }>;
   /** Model calls and cost of each discord.* prompt. */
   prompts: { prompt: string; day: { calls: number; usd: number }; week: { calls: number; usd: number } }[];
-  /** Issues filed from Discord in the last 24 hours, newest first. */
-  filed: { repo: string; number: number; login: string; at: string }[];
+  /** Issues filed from Discord in the last 24 hours, newest first. `githubUrl`: the issue on GitHub for a filing-only repo (no item page); null for a tracked repo. */
+  filed: { repo: string; number: number; login: string; at: string; githubUrl: string | null }[];
   /** Whether a Task Runner takes Discord calls now, and why not; null when Discord calls do not use Task Runners. */
   capacity: { ready: boolean; why: string | null } | null;
 }
