@@ -26,7 +26,6 @@ async function app(args: string[]): Promise<void> {
   const [sub, a, b] = args;
   const db = await openDb();
   const keys = readAppSecrets();
-  const appOwner = keys?.owner?.login ?? null;
   try {
     if (sub === "owners" && a === "list") {
       const owners = await allowedOwners(db);
@@ -35,7 +34,7 @@ async function app(args: string[]): Promise<void> {
     } else if (sub === "owners" && a === "allow" && b) {
       for (const o of await allowOwner(db, "cli", b, keys)) console.log(o.login);
     } else if (sub === "owners" && a === "remove" && b) {
-      if (!await removeOwner(db, "cli", b, appOwner)) die(`${b} is not an allowed owner`);
+      if (!await removeOwner(db, "cli", b, keys)) die(`${b} is not an allowed owner`);
       console.log(`removed ${b}`);
     } else if (sub === "installations" && a === undefined) {
       if (!keys) die("no GitHub App is registered");

@@ -27,7 +27,7 @@ const INSTALLS: Record<number, { login: string; id: number; repos: string[] }> =
   1: { login: "Glasswing", id: 101, repos: [] },
   2: { login: "lumenworks", id: 102, repos: ["lumenworks/inkwell"] },
   3: { login: "storytold", id: 103, repos: ["storytold/photocraft"] },
-  4: { login: "mirrorco", id: 104, repos: ["storytold/photocraft"] },
+  4: { login: "mirrorco", id: 104, repos: ["mirrorco/photocraft"] },
 };
 const log = () => {};
 
@@ -50,6 +50,7 @@ before(async () => {
     if (req.method === "DELETE" && del) {
       deleted.push(url);
       if (del[1] === "9") return send(404, {});
+      delete INSTALLS[Number(del[1])];
       res.writeHead(204);
       return void res.end();
     }
@@ -77,11 +78,14 @@ test("enforcement removes only installations it may, matching accounts by id", a
   assert.equal(await sweepInstallations(db, app, { apiBase, log }), 0);
   assert.deepEqual(deleted, []);
 
-  // Owners of a tracked repo and of the app stay; the others can go.
-  await assert.rejects(removeOwner(db, "op", "storytold", "glasswing"), AllowedOwnerError);
-  await assert.rejects(removeOwner(db, "op", "glasswing", "glasswing"), AllowedOwnerError);
-  assert.equal(await removeOwner(db, "op", "lumenworks", "glasswing"), true);
-  assert.equal(await removeOwner(db, "op", "mirrorco", "glasswing"), true);
+  // Owners of a tracked repo and of the app stay, and so does an account whose installation covers a tracked repo's name.
+  const deps = { apiBase };
+  await assert.rejects(removeOwner(db, "op", "storytold", app, deps), AllowedOwnerError);
+  await assert.rejects(removeOwner(db, "op", "glasswing", app, deps), AllowedOwnerError);
+  await assert.rejects(removeOwner(db, "op", "mirrorco", app, deps), AllowedOwnerError);
+  assert.equal(await removeOwner(db, "op", "lumenworks", app, deps), true);
+  const unlist = (login: string) => db.run(db.k.deleteFrom("app_allowed_owners").where("login", "=", login));
+  await unlist("mirrorco");
 
   // lumenworks is removed; mirrorco covers the tracked repo, so it is kept and the refusal recorded.
   assert.equal(await sweepInstallations(db, app, { apiBase, log }), 1);
@@ -90,7 +94,17 @@ test("enforcement removes only installations it may, matching accounts by id", a
   const d = JSON.parse(row!.details!) as { state: string; installation: number; identity: string; accountId: number };
   assert.deepEqual([d.state, d.installation, d.identity, d.accountId], ["done", 2, "app", 102]);
   const warned = await unackedRemovals(db, Date.now());
-  assert.ok(warned.some((r) => r.account === "lumenworks" && !r.refused) && warned.some((r) => r.account === "mirrorco" && r.refused === "storytold/photocraft"));
+  assert.ok(warned.some((r) => r.account === "lumenworks" && !r.refused) && warned.some((r) => r.account === "mirrorco" && r.refused === "mirrorco/photocraft"));
+
+  // storytold renames itself; `repos` still names the old login. Its row follows the id, cannot be removed, and even
+  // unlisted the installation stays because it covers the tracked repo.
+  INSTALLS[3] = { login: "storytold-studio", id: 103, repos: ["storytold-studio/photocraft"] };
+  assert.equal(await sweepInstallations(db, app, { apiBase, log }), 0);
+  assert.ok((await allowedOwners(db)).some((o) => o.login === "storytold-studio" && o.accountId === 103));
+  await assert.rejects(removeOwner(db, "op", "storytold-studio", app, deps), AllowedOwnerError);
+  await unlist("storytold-studio");
+  assert.equal(await sweepInstallations(db, app, { apiBase, log }), 0);
+  assert.deepEqual(deleted, ["/app/installations/2"]);
 
   // A renamed account matches its row by id and keeps its installation; the row takes the new login.
   assert.equal(await installationEvent(db, "installation", { action: "created", installation: { id: 7, account: { login: "harborlight-studio", id: 500 } } }, { app, apiBase, log }), false);

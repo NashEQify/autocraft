@@ -168,21 +168,22 @@ export async function installationFor(app: AppSecrets, owner: string, deps: AppD
 }
 
 /**
- * Names of the repos an installation covers. It mints a short-lived
+ * Names of the repos an installation covers, at most 5,000. It mints a short-lived
  * installation token for this one read and drops it; the cached minter used
- * for writes is a later step.
+ * for writes is a later step. `complete`: throw instead of answering a list cut at that cap.
  */
-export async function installationRepos(app: AppSecrets, installationId: number, deps: AppDeps = {}): Promise<string[]> {
+export async function installationRepos(app: AppSecrets, installationId: number, deps: AppDeps = {}, complete = false): Promise<string[]> {
   const base = deps.apiBase ?? GITHUB_API;
   const t = (await call(base, `/app/installations/${installationId}/access_tokens`, appJwt(app), "POST")) as { token?: unknown };
   const token = str(t.token);
   if (!token) throw new AppError("GitHub gave no installation token");
   const out: string[] = [];
-  for (let page = 1; page <= 10; page++) {
+  for (let page = 1; page <= 50; page++) {
     const r = (await call(base, `/installation/repositories?per_page=100&page=${page}`, token)) as { repositories?: Array<{ full_name?: unknown }> };
     const names = (r.repositories ?? []).flatMap((x) => (typeof x.full_name === "string" ? [x.full_name] : []));
     out.push(...names);
-    if (names.length < 100) break;
+    if (names.length < 100) return out;
   }
+  if (complete) throw new AppError(`installation ${installationId} covers more than ${out.length} repos; the list was not read in full`);
   return out;
 }

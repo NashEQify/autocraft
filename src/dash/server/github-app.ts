@@ -92,7 +92,7 @@ export function githubAppRoutes(config: Config, deps: AppDeps, mint?: (owner: st
     handler: async (db, r): Promise<Res> => {
       const login = String((r.json as { login?: unknown } | undefined)?.login ?? "");
       try {
-        if (!await removeOwner(db, r.user.login, login, config.secrets.app?.owner?.login ?? null)) return { status: 404, json: { error: `${login} is not an allowed owner.` } };
+        if (!await removeOwner(db, r.user.login, login, config.secrets.app, deps)) return { status: 404, json: { error: `${login} is not an allowed owner.` } };
       } catch (e) {
         if (e instanceof AllowedOwnerError) return { status: 409, json: { error: e.message } };
         throw e;

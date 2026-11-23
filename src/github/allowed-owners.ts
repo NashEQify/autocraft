@@ -10,7 +10,7 @@ import { audit } from "../dash/audit.ts";
 import type { AppSecrets } from "../dash/server/config.ts";
 import { DEFAULT_OWNER, OWNER } from "../owners.ts";
 import { setting } from "../settings-read.ts";
-import { accountByLogin, installationRepos, installations, type AppDeps, type Installation } from "./app.ts";
+import { accountByLogin, AppError, installationRepos, installations, type AppDeps, type Installation } from "./app.ts";
 import { readAppSecrets } from "./install-token.ts";
 import { removeInstallation } from "./write.ts";
 import type { Db } from "../db/index.ts";
@@ -68,6 +68,16 @@ export async function ownerAllowed(db: Db, login: string): Promise<boolean> {
   return !owners.length || owners.some((o) => lower(o.login) === lower(login));
 }
 
+/** GitHub reads of an operator's change: a GitHub failure becomes an AllowedOwnerError the operator sees. */
+async function readGithub<T>(f: () => Promise<T>): Promise<T> {
+  try {
+    return await f();
+  } catch (e) {
+    if (e instanceof AppError) throw new AllowedOwnerError(`GitHub could not be read: ${e.message}`);
+    throw e;
+  }
+}
+
 async function insertOwner(db: Db, by: string, row: { login: string; accountId: number | null }, details: Record<string, unknown>): Promise<void> {
   const r = await db.run(db.k.insertInto("app_allowed_owners").values({ login: row.login, account_id: row.accountId, added_by: by, added_at: new Date().toISOString() }).onConflict((oc) => oc.doNothing()));
   if (r.changes) await audit(db, by, "app-owner-allow", row.login, { accountId: row.accountId, ...details });
@@ -84,21 +94,24 @@ export async function allowOwner(db: Db, by: string, login: string, app: AppSecr
   if (!app) throw new AllowedOwnerError("No GitHub App is registered.");
   const owners = await allowedOwners(db);
   if (owners.some((o) => lower(o.login) === lower(name))) throw new AllowedOwnerError(`${name} is already an allowed owner.`);
-  const list = await installations(app, deps);
-  const acct = await accountByLogin(app, name, deps, list);
+  const list = await readGithub(() => installations(app, deps));
+  const acct = await readGithub(() => accountByLogin(app, name, deps, list));
   if (!acct) throw new AllowedOwnerError(`GitHub has no account ${name}.`);
   const same = owners.find((o) => o.accountId === acct.id);
   if (same) throw new AllowedOwnerError(`${acct.login} is already an allowed owner, as ${same.login}.`);
-  await insertOwner(db, by, { login: acct.login, accountId: acct.id }, {});
+  const rows: { login: string; accountId: number | null; details: Record<string, unknown> }[] = [{ login: acct.login, accountId: acct.id, details: {} }];
   if (!owners.length) {
-    for (const i of list) await insertOwner(db, by, { login: i.owner, accountId: i.accountId }, { with: acct.login, reason: "installed when enforcement was turned on" });
+    const has = (login: string) => rows.some((r) => lower(r.login) === lower(login));
+    for (const i of list) if (!has(i.owner)) rows.push({ login: i.owner, accountId: i.accountId, details: { with: acct.login, reason: "installed when enforcement was turned on" } });
     for (const k of (await keptOwners(db, app.owner?.login ?? null)).values()) {
-      if ((await allowedOwners(db)).some((o) => lower(o.login) === lower(k.login))) continue;
+      if (has(k.login)) continue;
       let id: number | null = null;
       try { id = (await accountByLogin(app, k.login, deps, list))?.id ?? null; } catch { id = null; }
-      await insertOwner(db, by, { login: k.login, accountId: id }, { with: acct.login, reason: k.why });
+      rows.push({ login: k.login, accountId: id, details: { with: acct.login, reason: k.why } });
     }
   }
+  // Every row of the change or none: a half-written first list could leave out an account it was meant to keep.
+  await db.write(async () => { for (const r of rows) await insertOwner(db, by, r, r.details); });
   return await allowedOwners(db);
 }
 
@@ -116,12 +129,27 @@ export async function listRepoOwner(db: Db, by: string, owner: string, reason: "
   await insertOwner(db, by, { login: acct?.login ?? owner, accountId: acct?.id ?? null }, { with: reason });
 }
 
-/** Takes an account off the list; refused for an account that must stay allowed. Returns false when it was not listed. Audited as `app-owner-remove`. */
-export async function removeOwner(db: Db, by: string, login: string, appOwner: string | null): Promise<boolean> {
+/**
+ * Takes an account off the list. Refused for an account that must stay allowed: by login, by the account id of a kept
+ * owner, or because its installation covers a tracked or filing-only repo (`repos` keeps an owner's old login after a
+ * rename, so the repo names decide). Returns false when it was not listed. Audited as `app-owner-remove`.
+ */
+export async function removeOwner(db: Db, by: string, login: string, app: AppSecrets | null, deps: AppDeps = {}): Promise<boolean> {
   const row = (await allowedOwners(db)).find((o) => lower(o.login) === lower(login.trim()));
   if (!row) return false;
-  const kept = (await keptOwners(db, appOwner)).get(lower(row.login));
+  const keptBy = await keptOwners(db, app?.owner?.login ?? null);
+  const kept = keptBy.get(lower(row.login));
   if (kept) throw new AllowedOwnerError(`${kept.why}, so it stays an allowed owner.`);
+  if (app && row.accountId !== null) {
+    const list = await readGithub(() => installations(app, deps));
+    for (const k of keptBy.values()) {
+      const acct = await readGithub(() => accountByLogin(app, k.login, deps, list));
+      if (acct?.id === row.accountId) throw new AllowedOwnerError(`${k.why}, so it stays an allowed owner.`);
+    }
+    const inst = list.find((i) => i.accountId === row.accountId);
+    const covered = inst ? await readGithub(() => coveredKeptRepo(db, app, inst.id, deps)) : null;
+    if (covered) throw new AllowedOwnerError(`${row.login}'s installation covers ${covered}, so it stays an allowed owner.`);
+  }
   await db.run(db.k.deleteFrom("app_allowed_owners").where("login", "=", row.login));
   await audit(db, by, "app-owner-remove", row.login, { accountId: row.accountId });
   return true;
@@ -146,10 +174,14 @@ export async function verdictFor(db: Db, inst: Pick<Installation, "owner" | "acc
   return kept ? { kept: kept.why } : "foreign";
 }
 
-/** The first tracked or filing-only repo an installation covers, as `owner/name`, or null. */
+/**
+ * The first tracked or filing-only repo an installation covers, as GitHub names it (`owner/name`), or null. Matched by
+ * name alone: names are unique across owners, and `repos` keeps an owner's old login after a rename. A list cut at
+ * installationRepos's cap throws, so an installation too large to read is kept.
+ */
 async function coveredKeptRepo(db: Db, app: AppSecrets, id: number, deps: AppDeps): Promise<string | null> {
-  const kept = new Set((await keptRepos(db)).map((r) => lower(`${r.owner}/${r.name}`)));
-  return (await installationRepos(app, id, deps)).find((n) => kept.has(lower(n))) ?? null;
+  const kept = new Set((await keptRepos(db)).map((r) => lower(r.name)));
+  return (await installationRepos(app, id, deps, true)).find((n) => kept.has(lower(n.slice(n.indexOf("/") + 1)))) ?? null;
 }
 
 export type EnforceDeps = AppDeps & { log?: (line: string) => void };
@@ -198,9 +230,20 @@ async function recordRefusal(db: Db, inst: Inst, found: string, covered: string)
 
 /** Lists the app's installations and removes those on accounts not allowed. Returns how many were removed; nothing is read while the list is empty. */
 export async function sweepInstallations(db: Db, app: AppSecrets, deps: EnforceDeps = {}): Promise<number> {
-  if (!(await allowedOwners(db)).length) return 0;
+  const owners = await allowedOwners(db);
+  if (!owners.length) return 0;
+  const list = await installations(app, deps);
+  // Rows listed while GitHub could not tell their account id get it now, so they stop matching by login.
+  for (const o of owners.filter((r) => r.accountId === null)) {
+    try {
+      const acct = await accountByLogin(app, o.login, deps, list);
+      if (acct) await db.run(db.k.updateTable("app_allowed_owners").set({ account_id: acct.id }).where("login", "=", o.login).where("account_id", "is", null));
+    } catch (e) {
+      (deps.log ?? console.log)(`github app: account id of ${o.login}: ${String((e as Error)?.message ?? e).slice(0, 200)}`);
+    }
+  }
   let n = 0;
-  for (const i of await installations(app, deps)) if (await enforceOne(db, app, i, "sweep", deps)) n++;
+  for (const i of list) if (await enforceOne(db, app, i, "sweep", deps)) n++;
   return n;
 }
 
