@@ -34,7 +34,7 @@ export function implementStep(f: ItemFacts): { bucket: ImplementBucket } | { wai
   const state = row?.state as ImplementationState | undefined;
   const ended = !row || ENDED_STATES.has(state!);
   if (!im.settles) return ended ? null : { wait: `a person who settles on ${f.repo} to queue it again`, waitKind: "person" };
-  const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "person" as const });
+  const due = (bucket: ImplementBucket) => (im.featureOn ? { bucket } : { wait: implementOffWait(f.repo), waitKind: "system" as const });
   if (ended) {
     if (fix.openPr !== null) return null;
     if (row && !row.textChanged && !row.requeuedAfterEnd) return { wait: IMPLEMENT_ENDED_WAIT, waitKind: "person" };

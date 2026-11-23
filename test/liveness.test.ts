@@ -18,6 +18,7 @@ test("an item is live when work is due, a person is asked or the wait has an ext
   assert.equal(cause({ state: "waiting-ci", wait: "CI or GitHub's mergeable state", waitKind: "system" }), "live:external");
   assert.equal(cause({ state: "conflict", wait: "the author", waitKind: "contributor" }), "live:contributor");
   assert.equal(cause({ state: "backlog" }), "live:parked");
+  assert.equal(cause({ state: "classified", wait: "Implement is off for app", waitKind: "system" }), "live:external");
   assert.equal(cause({ state: "ready", wait: "merge held by an operator", waitKind: "person" }), "live:parked");
 });
 

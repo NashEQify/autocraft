@@ -163,7 +163,7 @@ const declinedBy = (f: PrFacts): boolean => f.decision.answer !== null && f.deci
 export const ownImplementation = (f: PrFacts): NonNullable<PrFacts["implementation"]> | null =>
   f.implementation && !ENDED_STATES.has(f.implementation.state as ImplementationState) ? f.implementation : null;
 
-/** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. */
+/** The wait of an implementation (its issue, or its PR) whose next step needs the repo's Implement feature while it is off. A switch a maintainer flips: a system wait, live. */
 export const implementOffWait = (repo: string): string => `Implement is off for ${repo}`;
 
 /** Red CI at the PR's current head: at the reviewed head, our own push that broke it, or the review gate's red CI at a new head. */
@@ -412,7 +412,7 @@ export function decidePr(f: PrFacts, pass: PassFacts = NO_PASS): Plan {
   // waits on the switch.
   const implDue = !!im && (!open || im.state === "revising" || !!reviseOf(f));
   // Ending the attempt is bookkeeping (no GitHub write, no session): it runs whatever the switch says.
-  const implOff = implDue && open && !f.repoFacts.implementOn ? person(implementOffWait(f.repo)) : null;
+  const implOff = implDue && open && !f.repoFacts.implementOn ? system(implementOffWait(f.repo)) : null;
   const implementAct = implDue && !implOff ? act("implement", open ? f.head : null, { bucket: "revise", issue: im!.issue }) : null;
   if (implementAct && !open) extra.push(implementAct);
   const pm = f.postmerge;
