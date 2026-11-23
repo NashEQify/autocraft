@@ -289,12 +289,14 @@ export const STEP_WRAPPER = `${COPY_SOURCE}; t=$1; shift; exec timeout -k 10 "$t
 /**
  * A step that reads the compile cache: rustc runs through sccache, and the cache's hit counts end the step's output. sccache
  * keys a compile on every CARGO_* variable, and the CI gate builds with CARGO_TERM_COLOR set; the wrapper gives that value to
- * rustc alone, because cargo would colour the step's output and artifacts with it. An image without sccache builds uncached.
+ * rustc alone, because cargo would colour the step's output and artifacts with it. An image without sccache or bash builds uncached. The wrapper is a bash script because dash drops environment variables whose names contain a hyphen, such as CARGO_BIN_EXE_<bin>.
  */
 export const CACHE_STEP_WRAPPER = [
   COPY_SOURCE,
   "if command -v sccache >/dev/null 2>&1; then",
-  `  printf '%s\\n' '#!/bin/sh' 'exec env "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  '  if b=$(command -v bash); then',
+  `    printf '%s\\n' "#!$b" 'exec env "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
   't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
@@ -303,14 +305,17 @@ export const CACHE_STEP_WRAPPER = [
 /**
  * A warm producer's build step: as CACHE_STEP_WRAPPER, with compile-cache writes. It records `rustc -vV` for the warm
  * manifest. The step runs with CARGO_NET_OFFLINE (the gate's warm-command does not say --offline); the rustc wrapper drops
- * it, because sccache keys on CARGO_* variables and the CI runners whose entries the build shares do not set it.
+ * it, because sccache keys on CARGO_* variables and the CI runners whose entries the build shares do not set it. The wrapper is a
+ * bash script because dash drops environment variables whose names contain a hyphen, such as CARGO_BIN_EXE_<bin>.
  */
 export const WARM_STEP_WRAPPER = [
   COPY_SOURCE,
   "rustc -vV > /meta/rustc.txt 2>/dev/null || true",
   'if [ -z "${SCCACHE_WEBDAV_ENDPOINT:-}" ]; then echo "the CI gate names no cache version: this step builds without the compile cache" >&2',
   "elif command -v sccache >/dev/null 2>&1; then",
-  `  printf '%s\n' '#!/bin/sh' 'exec env -u CARGO_NET_OFFLINE "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  '  if b=$(command -v bash); then',
+  `    printf '%s\n' "#!$b" 'exec env -u CARGO_NET_OFFLINE "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
+  '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
   't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-write):"; timeout 60 sccache --show-stats; fi',
