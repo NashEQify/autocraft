@@ -615,7 +615,7 @@ async function leaseCall(db: Db, id: number, caller: Caller, claim: Claim, model
       // The fast lane says nothing about the helper's other slots: only their claims mark it idle or busy.
       if (clearIdle) await db.run(db.k.updateTable("main.mcp_tokens").set({ idle_claim_at: null }).where("id", "=", caller.tokenId));
       return { id, secret, title: titleOf(q.prompt_id, refs), requiredHelper: REQUIRED_HELPER };
-    }, { lock: `remote-lease:${caller.login}` });
+    }, { lock: `remote-lease:${caller.login.toLowerCase()}` });
   } catch (e) {
     if (e instanceof Taken) return null;
     throw e;
@@ -1090,10 +1090,12 @@ export async function heartbeat(db: Db, secret: string | undefined, raw: unknown
   if (!l) return false;
   const h = raw as Partial<Heartbeat> | undefined;
   const line = progressLine(typeof h?.progress === "string" ? unrooted(h.progress, l.root) : h?.progress);
-  await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
+  // Compare and set on the lease liveLease found: a lease that ended meanwhile (and may be leased again) is not touched.
+  const up = await db.run(db.k.updateTable("main.remote_calls").set((eb) => ({
     heartbeat_at: nowMs, ...(line !== null && { progress: line }),
     ...(h?.phase === "running" && { started_at: eb.case().when("started_at", "is", null).then(nowMs).else(eb.ref("started_at")).end() }),
-  })).where("id", "=", l.id));
+  })).where("id", "=", l.id).where("state", "=", "leased").where("lease_secret_hash", "=", sha256hex(secret!)));
+  if (Number(up.changes) !== 1) return false;
   if (line && l.runId !== null) await setRunProgress(db, l.runId, line);
   return true;
 }
