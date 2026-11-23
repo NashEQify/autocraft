@@ -25,9 +25,9 @@ import { WarmStatus } from "./warm-status.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
-  WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
+  PEAK_LINE, WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
 } from "./pods.ts";
-import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
+import { recordTrimmedPublish, recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
 import { appendLog, claim, finishTask, satisfies, type ClaimFit, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
@@ -268,6 +268,19 @@ const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build
 const isWarmGroup = (c: EnvCtx, t: TaskRow, groups: Group[], index: number): boolean =>
   t.step === WARM_STEP && c.s.warmWriter && index === groups.length - 1 && groups[index]!.network === "none";
 /** The size of the version a publish reports in its termination message (JSON with `bytes`); 0 when it says none. */
+/** Whether the publish left out the units its build did not use (src/warm/trim.ts). */
+function publishedTrimmed(message: string | undefined): boolean {
+  try {
+    return (JSON.parse(message ?? "") as { trimmed?: unknown }).trimmed === true;
+  } catch {
+    return false;
+  }
+}
+/** A step's peak anonymous memory from its wrapper's termination message (pods.ts PEAK_LINE), at most `max`; 0 without one. */
+function stepPeak(message: string | undefined, max: number): number {
+  const n = Number(PEAK_LINE.exec(message ?? "")?.[1]);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : 0;
+}
 function publishedBytes(message: string | undefined): number {
   try {
     const n = (JSON.parse(message ?? "") as { bytes?: unknown }).bytes;
@@ -674,7 +687,8 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       // running when the pod ended was stopped by the pod's deadline.
       const timedOut = !term || ((term.exitCode === 124 || term.exitCode === 137) && durationMs >= stepCap(c.s, step) * 1000 - 2000);
       const oomKilled = term?.reason === "OOMKilled";
-      results.push({ step: step.name, exitCode: timedOut ? null : term!.exitCode, durationMs, timedOut, ...(oomKilled ? { oomKilled } : {}) });
+      const peak = stepPeak(term?.message, quantity(c.s.maxPodMemory));
+      results.push({ step: step.name, exitCode: timedOut ? null : term!.exitCode, durationMs, timedOut, ...(peak ? { peakMemBytes: peak } : {}), ...(oomKilled ? { oomKilled } : {}) });
       ran = Math.max(ran, i + 1);
       if (timedOut) failed = `${step.name} timed out`;
       else if (oomKilled) {
@@ -697,7 +711,10 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
           await podLog(c, run, WARM_PUBLISH_CONTAINER, "warm publish");
           results.push({ step: "warm publish", exitCode: pub.exitCode, durationMs: runMs(pub), timedOut: false });
           if (pub.exitCode !== 0) failed = `warm publish failed${reported(pub.message) ? `: ${reported(pub.message)}` : ` (exit ${pub.exitCode})`}`.slice(0, 300);
-          else await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+          else {
+            await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+            if (publishedTrimmed(pub.message)) await recordTrimmedPublish(db, t.repo, c.now());
+          }
         } else if (pod.status?.phase !== "Failed") {
           // The pod ended with every step run and no publish status: nothing was published.
           failed = "the warm publish did not run";

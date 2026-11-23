@@ -1094,14 +1094,16 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   replaces INTEGER NOT NULL DEFAULT 0  -- first pods no node had room for, deleted and placed again
 );
 
--- A repository's memory for build step pods (src/build/sizing.ts); a repository without a row gets the environment's.
+-- What an operator set, or an OOM kill taught, for a repository's build step pods (src/build/sizing.ts); without a row
+-- memory and warm target are automatic.
 CREATE TABLE IF NOT EXISTS build_sizes (
   repo TEXT PRIMARY KEY,
   memory_request_bytes INTEGER NOT NULL,
   memory_limit_bytes INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
   reason TEXT NOT NULL,               -- what set it: an operator, or an OOM-killed step
-  warm_target TEXT NOT NULL DEFAULT 'none'  -- tmpfs | pvc | none: where its build pods put a warm target (src/build/warm-mount.ts)
+  warm_target TEXT NOT NULL DEFAULT 'auto',  -- tmpfs | pvc | none, or auto: where its build pods put a warm target (src/build/warm-mount.ts)
+  memory_source TEXT NOT NULL DEFAULT 'operator'  -- operator | oom (a floor) | auto (the memory columns are unused)
 );
 
 -- A workspace: one session's pod and volume in a kubernetes environment (src/build/workspace-launch.ts). The row

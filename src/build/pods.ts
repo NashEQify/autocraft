@@ -285,7 +285,21 @@ export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: nu
  */
 // The children are copied, not `/pristine/.`: /src is a mount point the pod's user doesn't own, so cp could not set its times.
 const COPY_SOURCE = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }';
-export const STEP_WRAPPER = `${COPY_SOURCE}; t=$1; shift; exec timeout -k 10 "$t" "$@"`;
+/**
+ * The step's peak anonymous memory (cgroup v2 `memory.stat` anon of the container, sampled once a second): page cache and
+ * memory-backed volumes are left out, so it measures what the step's processes need (src/build/sizing.ts). The wrapper
+ * writes it to the termination message as `autocraft-peak-anon <bytes>` (stepPeak). The container's own cgroup has a
+ * `memory.max`; the root one does not, so a pod without its own cgroup namespace reports nothing.
+ */
+const PEAK_START = [
+  "pk=; if [ -r /sys/fs/cgroup/memory.stat ] && [ -e /sys/fs/cgroup/memory.max ]; then",
+  '  ( m=0; while :; do a=0; while read -r k v; do if [ "$k" = anon ]; then a=$v; break; fi; done < /sys/fs/cgroup/memory.stat',
+  '    if [ "$a" -gt "$m" ] 2>/dev/null; then m=$a; echo "$m" > /tmp/.autocraft-peak; fi; sleep 1; done ) & pk=$!',
+  "fi",
+].join("\n");
+const PEAK_END = 'if [ -n "$pk" ]; then kill "$pk" 2>/dev/null; p=; read -r p 2>/dev/null < /tmp/.autocraft-peak; [ -n "$p" ] && echo "autocraft-peak-anon $p" 2>/dev/null > /dev/termination-log; fi';
+export const PEAK_LINE = /^autocraft-peak-anon ([0-9]{1,15})$/m;
+export const STEP_WRAPPER = [COPY_SOURCE, PEAK_START, 't=$1; shift; timeout -k 10 "$t" "$@"; s=$?', PEAK_END, "exit $s"].join("\n");
 /**
  * A step that reads the compile cache: rustc runs through sccache, and the cache's hit counts end the step's output. sccache
  * keys a compile on every CARGO_* variable, and the CI gate builds with CARGO_TERM_COLOR set; the wrapper gives that value to
@@ -298,7 +312,9 @@ export const CACHE_STEP_WRAPPER = [
   `    printf '%s\\n' "#!$b" 'exec env "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
+  PEAK_START,
   't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
 ].join("\n");
@@ -317,7 +333,9 @@ export const WARM_STEP_WRAPPER = [
   `    printf '%s\n' "#!$b" 'exec env -u CARGO_NET_OFFLINE "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
+  PEAK_START,
   't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-write):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
 ].join("\n");
