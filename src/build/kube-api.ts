@@ -14,7 +14,7 @@ export type ContainerState = {
   terminated?: { exitCode: number; reason?: string; message?: string; startedAt?: string; finishedAt?: string };
 };
 export type ContainerStatus = { name: string; ready?: boolean; state?: ContainerState };
-export type KContainerSpec = { name?: string; resources?: { requests?: Record<string, string> }; restartPolicy?: string };
+export type KContainerSpec = { name?: string; resources?: { requests?: Record<string, string>; limits?: Record<string, string> }; restartPolicy?: string };
 export type KPod = {
   metadata: { name: string; labels?: Record<string, string>; creationTimestamp?: string; deletionTimestamp?: string };
   spec?: {

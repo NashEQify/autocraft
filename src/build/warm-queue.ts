@@ -1,5 +1,8 @@
 // The warm producer's queue: step `warm` tasks build the current default-branch head of each repo in the pipeline scope
 // for the warm store (src/build/pods.ts warmPod, src/warm/). Only environments with `warmWriter` take them (tasks.ts claim).
+// - Which repos (warmCoverage): every repo in the pipeline scope, once any repo's publish was trimmed (src/warm/trim.ts):
+//   until then a publish could grow by a whole target per dependency repin, so only the repos an operator added are built.
+//   An operator's `warm_repos` adds a repo before that, and `warm_repos_excluded` leaves one out.
 // - The main-CI poll calls warmPass: a repo whose current head (main_ci) has no warm build with the writer's toolchain
 //   image gets one queued task, unless one is already queued or running. A new head or a new toolchain image both count.
 // - At claim the queued task takes the newest head, so merges that land while it waits share one build (warmClaim).
@@ -27,27 +30,62 @@ export const WARM_PRIORITY = -10;
 const TOOLCHAINS = ["rust-stable"];
 
 export const WARM_REPOS_KEY = "warm_repos";
+export const WARM_EXCLUDED_KEY = "warm_repos_excluded";
+/** `<repo> <ISO time>` of the first trimmed publish; from then on every pipeline repo is covered. */
+export const WARM_TRIMMED_KEY = "warm_trimmed_publish";
 
-/** The repos the warm producer builds, sorted; empty means none. Stored as a JSON array. */
-export async function warmRepos(db: Db): Promise<string[]> {
+async function repoList(db: Db, key: string): Promise<string[]> {
   try {
-    const v = JSON.parse((await setting(db, WARM_REPOS_KEY)) ?? "[]");
+    const v = JSON.parse((await setting(db, key)) ?? "[]");
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").sort() : [];
   } catch {
     return [];
   }
 }
 
-/** Adds or removes `repo` (owner/name) in the allowlist; returns the list after the change. */
-export async function changeWarmRepos(db: Db, action: "add" | "remove", repo: string, by: string): Promise<string[]> {
+/** The repos an operator added to the warm producer, sorted. Stored as a JSON array. */
+export const warmRepos = (db: Db): Promise<string[]> => repoList(db, WARM_REPOS_KEY);
+
+export type WarmCoverage = {
+  /** Since when every pipeline repo is covered (the first trimmed publish), or null while only added repos are. */
+  allSince: string | null;
+  added: string[]; excluded: string[];
+  /** The repos in the pipeline scope the producer builds, and why. */
+  repos: { repo: string; why: "pipeline" | "added" }[];
+};
+
+export async function warmCoverage(db: Db): Promise<WarmCoverage> {
+  const added = await warmRepos(db), excluded = await repoList(db, WARM_EXCLUDED_KEY);
+  const trimmed = await setting(db, WARM_TRIMMED_KEY);
+  const allSince = trimmed ? trimmed.split(" ")[1] ?? trimmed : null;
+  const repos = [...await baseScopeRepos(db)].sort().filter((r) => !excluded.includes(r) && (allSince || added.includes(r)))
+    .map((repo) => ({ repo, why: added.includes(repo) ? "added" as const : "pipeline" as const }));
+  return { allSince, added, excluded, repos };
+}
+
+/** Records the first trimmed publish; later ones change nothing. */
+export async function recordTrimmedPublish(db: Db, repo: string, nowMs: number): Promise<void> {
+  await db.run(db.k.insertInto("main.settings").values({ key: WARM_TRIMMED_KEY, value: `${repo} ${new Date(nowMs).toISOString()}` }).onConflict((oc) => oc.column("key").doNothing()));
+}
+
+/**
+ * An operator's override for `repo` (as it is tracked): `add` builds it before every pipeline repo is covered, `exclude`
+ * never builds it, `remove` takes either back. Returns the coverage after the change.
+ */
+export async function changeWarmRepos(db: Db, action: "add" | "remove" | "exclude", repo: string, by: string): Promise<WarmCoverage> {
   if (!/^[\w.-]+(\/[\w.-]+)?$/.test(repo)) throw new BuildError(400, "a repo is written as it is tracked, e.g. owner/name");
-  const was = await warmRepos(db);
-  const now = (action === "add" ? [...new Set([...was, repo])] : was.filter((r) => r !== repo)).sort();
-  if (now.join() !== was.join()) {
-    await writeSetting(db, WARM_REPOS_KEY, JSON.stringify(now));
-    await audit(db, by, "warm-repos", "builds", { action, repo });
+  const lists: [string, boolean][] = [[WARM_REPOS_KEY, action === "add"], [WARM_EXCLUDED_KEY, action === "exclude"]];
+  let changed = false;
+  for (const [key, has] of lists) {
+    const was = await repoList(db, key);
+    const now = (has ? [...new Set([...was, repo])] : was.filter((r) => r !== repo)).sort();
+    if (now.join() !== was.join()) {
+      await writeSetting(db, key, JSON.stringify(now));
+      changed = true;
+    }
   }
-  return now;
+  if (changed) await audit(db, by, "warm-repos", "builds", { action, repo });
+  return await warmCoverage(db);
 }
 
 export async function warmMinInterval(db: Db): Promise<number> {
@@ -123,13 +161,12 @@ async function writers(db: Db): Promise<KubeSettings[]> {
     .map((r) => settingsOf(r.settings)).filter((s) => s.warmWriter);
 }
 
-/** Queues the warm builds the repos in both the pipeline scope and the warm_repos allowlist need; returns how many. Nothing without an enabled warm writer. */
+/** Queues the warm builds the covered repos need (warmCoverage); returns how many. Nothing without an enabled warm writer. */
 export async function warmPass(db: Db): Promise<number> {
   const w = (await writers(db))[0];
   if (!w) return 0;
   let n = 0;
-  const allowed = new Set(await warmRepos(db));
-  for (const repo of [...await baseScopeRepos(db)].filter((r) => allowed.has(r)).sort()) if (await queueWarm(db, repo, w) !== null) n++;
+  for (const { repo } of (await warmCoverage(db)).repos) if (await queueWarm(db, repo, w) !== null) n++;
   return n;
 }
 

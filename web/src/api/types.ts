@@ -1844,6 +1844,8 @@ export type KubeSettings = {
    * publishes the warm store. Needs cacheWriteUrl, writerSecret, signingSecret and sccacheUrl.
    */
   warmWriter: boolean;
+  /** The toolchain images carry Mesa software Vulkan (lavapipe), so the environment takes tasks that require `display`; steps get the software-render env and no display server. */
+  display: boolean;
   /** Read-write WebDAV endpoint of the compile cache and warm store (warm producer only). */
   cacheWriteUrl: string | null;
   /** Secret in the namespace with `username` and `password` for cacheWriteUrl. */

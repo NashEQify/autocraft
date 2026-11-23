@@ -349,7 +349,7 @@ async function warmPublishPhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<numb
     const gb = (n: number) => (n / 1024 ** 3).toFixed(2);
     e.log(`warm trim: ${trim.units} stale units left out, ${gb(s.bytes + trim.bytes)} GB -> ${gb(s.bytes)} GB`);
   }
-  writeFileSync(e.message, JSON.stringify({ ok: true, commit: s.latest.commit, files: s.files, bytes: s.bytes, blobs: s.blobs, uploaded: s.uploaded, uploadedBytes: s.uploadedBytes, repaired: s.repaired }));
+  writeFileSync(e.message, JSON.stringify({ ok: true, commit: s.latest.commit, files: s.files, bytes: s.bytes, trimmed: !!trim && trim.unattributed === 0, blobs: s.blobs, uploaded: s.uploaded, uploadedBytes: s.uploadedBytes, repaired: s.repaired }));
   return 0;
 }
 

@@ -10,12 +10,13 @@ import { trackedNames } from "../repos.ts";
 import { warmLineText } from "./warm-status.ts";
 import { BuildError, createEnv, KINDS, listEnvs, rotateKey, updateEnv } from "./envs.ts";
 import { cancelTask, createTask, getTaskDetail, listTasks, memorySummary } from "./tasks.ts";
-import { clearBuildSize, gib, listBuildSizes, setBuildSize, setWarmTarget } from "./sizing.ts";
+import { autoBuildSize, clearBuildSize, gib, listSizings, setBuildSize, setWarmTarget, type RepoSizing } from "./sizing.ts";
+import { baseScopeRepos } from "../pilot.ts";
 import { quantity } from "./pods.ts";
 import type { Db } from "../db/index.ts";
 import { openDb } from "../db/open.ts";
 import { inClusterApi } from "./kube-api.ts";
-import { changeWarmRepos, setWarmMinInterval, WARM_REPOS_KEY, warmRepos, WARM_INTERVAL_KEY, warmMinInterval } from "./warm-queue.ts";
+import { changeWarmRepos, setWarmMinInterval, warmCoverage, WARM_INTERVAL_KEY, warmMinInterval, type WarmCoverage } from "./warm-queue.ts";
 import { FETCH_SCRIPT } from "../worker/rust.ts";
 import { WorkspaceSession } from "./workspace-tools.ts";
 import { LAYOUT_CI, warmOf } from "./workspace-layout.ts";
@@ -32,16 +33,16 @@ const USAGE = `usage: autocraft-server envs list
            --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
            --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
            --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q --sccache-url URL|none
-           --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
+           --crate-mirror IP|none  --display yes|no  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
            --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
-       autocraft-server envs warm-repos [add|remove <owner/name>]   (repos the warm producer builds; none by default)
+       autocraft-server envs warm-repos [add|exclude|remove <owner/name>]   (repos the warm producer builds: every pipeline repo once a publish was trimmed; add and exclude override, remove undoes either)
        autocraft-server envs warm-interval [<minutes>]   (least time between two warm builds of a repo)
        autocraft-server tasks list [--state S] [--env ID] [--repo NAME] [--limit N]
        autocraft-server tasks show <id>
        autocraft-server tasks cancel <id>
        autocraft-server tasks mem [--days N]
-       autocraft-server tasks sizes list | set <repo> [--memory Q [--limit Q]] [--warm-target tmpfs|pvc|none] | clear <repo>   (step pod memory and warm target per repo)
+       autocraft-server tasks sizes list | set <repo> [--memory Q [--limit Q] | --memory auto] [--warm-target tmpfs|pvc|none|auto] | clear <repo>   (step pod memory and warm target per repo: automatic unless set)
        autocraft-server tasks enqueue-test --env-requires linux --repo NAME --sha SHA [--build]
        autocraft-server workspace start <repo> <sha> [--env ID] [--app NAME] [--deadline-sec N]
        autocraft-server workspace list [--all]
@@ -111,7 +112,7 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   "workspace-slots": "workspaceSlots", "workspace-cpu-request": "workspaceCpuRequest", "workspace-cpu-limit": "workspaceCpuLimit",
   "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
   "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage", "sccache-url": "sccacheUrl",
-  "crate-mirror": "crateMirror", "warm-writer": "warmWriter", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
+  "crate-mirror": "crateMirror", "warm-writer": "warmWriter", display: "display", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
   capacity: "capacity", "priority-class": "priorityClassName", "node-reserve-cpu": "nodeReserveCpu", "node-reserve-memory": "nodeReserveMemory", "max-pod-memory": "maxPodMemory",
 };
 const NULLABLE = new Set<keyof KubeSettings>(["runtimeClassName", "sccacheUrl", "crateMirror", "cacheWriteUrl", "writerSecret", "signingSecret", "priorityClassName"]);
@@ -122,8 +123,8 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    if (key === "warmWriter" && v !== "yes" && v !== "no") die("--warm-writer must be yes or no");
-    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : key === "warmWriter" ? v === "yes"
+    if ((key === "warmWriter" || key === "display") && v !== "yes" && v !== "no") die(`--${name} must be yes or no`);
+    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : key === "warmWriter" || key === "display" ? v === "yes"
       : (key === "image" && v === "runner") || (NULLABLE.has(key) && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
@@ -142,7 +143,7 @@ const settingsLine = (s: KubeSettings): string =>
   `step cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit} (at most ${s.maxPodMemory}), ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
   `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
   `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
-  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
+  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), display ${s.display ? "yes" : "no"}, compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
   (s.warmWriter ? `, warm writer (writes ${s.cacheWriteUrl}, credentials ${s.writerSecret}, signing key ${s.signingSecret})` : "");
 
 /** A yes|no option as a boolean; undefined when it is not given. */
@@ -213,9 +214,9 @@ async function envs(args: string[]): Promise<void> {
     console.log(`${e.id}: ${safe(e.label)}, ${e.enabled ? "enabled" : "disabled"}, ${e.slots} slots${e.confidential ? ", confidential" : ""}`);
     if (e.settings) console.log(settingsLine(e.settings));
   } else if (sub === "warm-repos") {
-    if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && rest[0] !== "add" && rest[0] !== "remove")) die(USAGE);
-    if (rest.length === 2) await run(async () => await changeWarmRepos(db, rest[0] as "add" | "remove", rest[1]!, "cli"));
-    console.log(`${WARM_REPOS_KEY} ${(await warmRepos(db)).join(", ") || "(none)"}`);
+    if (rest.length === 1 || rest.length > 2 || (rest.length === 2 && !["add", "exclude", "remove"].includes(rest[0]!))) die(USAGE);
+    const cov = rest.length === 2 ? await run(async () => await changeWarmRepos(db, rest[0] as "add" | "exclude" | "remove", rest[1]!, "cli")) : await warmCoverage(db);
+    printCoverage(cov);
   } else if (sub === "warm-interval") {
     if (rest.length > 1) die(USAGE);
     if (rest[0] !== undefined) await run(async () => await setWarmMinInterval(db, rest[0]!, "cli"));
@@ -237,6 +238,26 @@ async function envs(args: string[]): Promise<void> {
 
 const OS = ["linux", "macos", "windows"];
 
+const MEMORY_WHY: Record<RepoSizing["memorySource"], string> = { operator: "override", history: "automatic", oom: "automatic, raised after an OOM kill", environment: "automatic: the environment's" };
+
+/** One repo's effective step memory and warm target, each marked automatic or override. */
+function sizingLine(r: RepoSizing): string {
+  const mem = r.memory ? `${gib(r.memory.requestBytes)} / ${gib(r.memory.limitBytes)}` : "environment's";
+  const hist = r.history ? `${r.history.builds} builds: ${gib(r.history.requestBytes)} / ${gib(r.history.limitBytes)}` : "fewer than 3 measured builds";
+  const memWhy = r.memorySource === "operator" ? `override (automatic would be from ${hist})` : r.memorySource === "environment" ? `${MEMORY_WHY.environment}, ${hist}` : `${MEMORY_WHY[r.memorySource]} (${hist})`;
+  const version = r.warmBytes ? `${(r.warmBytes / 1e9).toFixed(1)} GB version` : "no version yet";
+  const warmWhy = r.warmSource === "operator" ? `override (automatic would be ${r.autoWarmTarget}, ${version})` : `automatic (${version})`;
+  return `${safe(r.repo).padEnd(24)} memory ${mem}, ${memWhy}; warm ${r.warmTarget}, ${warmWhy}${r.reason && r.updatedAt ? `  [${r.updatedAt.slice(0, 16)} ${safe(r.reason)}]` : ""}`;
+}
+
+function printCoverage(c: WarmCoverage): void {
+  console.log(c.allSince ? `every pipeline repo since the first trimmed publish (${c.allSince.slice(0, 16)})` : "only added repos until a publish is trimmed");
+  for (const r of c.repos) console.log(`  ${safe(r.repo)}  ${r.why === "added" ? "override: added" : "automatic: pipeline"}`);
+  if (!c.repos.length) console.log("  (none)");
+  if (c.added.length) console.log(`added: ${c.added.map(safe).join(", ")}`);
+  if (c.excluded.length) console.log(`excluded: ${c.excluded.map(safe).join(", ")}`);
+}
+
 async function sizes(db: Db, args: string[]): Promise<void> {
   const [sub, ...rest] = args;
   const { pos, opt } = options(rest);
@@ -246,14 +267,18 @@ async function sizes(db: Db, args: string[]): Promise<void> {
     return b > 0 ? b : die(`--${name} must be a Kubernetes quantity such as 6Gi`);
   };
   if (sub === "list") {
-    const rows = await listBuildSizes(db);
-    if (!rows.length) console.log("no repo has its own size: step pods get their environment's memory");
-    for (const r of rows) console.log(`${safe(r.repo).padEnd(24)} ${gib(r.requestBytes).padStart(10)} / ${gib(r.limitBytes).padEnd(10)} warm ${r.warmTarget.padEnd(6)} ${r.updatedAt.slice(0, 16)}  ${safe(r.reason)}`);
+    const rows = await listSizings(db, await baseScopeRepos(db));
+    if (!rows.length) console.log("no repo in the pipeline scope: step pods get their environment's memory");
+    for (const r of rows) console.log(sizingLine(r));
   } else if (sub === "set") {
-    const memory = bytes("memory");
+    const autoMemory = opt.get("memory") === "auto";
+    const memory = autoMemory ? null : bytes("memory");
     const warm = opt.get("warm-target");
-    if (!pos[0] || (memory === null && warm === undefined)) die(USAGE);
-    if (memory !== null) {
+    if (!pos[0] || (memory === null && !autoMemory && warm === undefined)) die(USAGE);
+    if (autoMemory) {
+      const was = await autoBuildSize(db, pos[0], "cli");
+      console.log(`${safe(pos[0])}: step memory automatic${was ? "" : " (it was)"}`);
+    } else if (memory !== null) {
       const m = await run(async () => await setBuildSize(db, pos[0]!, memory, bytes("limit"), "cli"));
       console.log(`${safe(pos[0]!)}: step memory ${gib(m.requestBytes)} requested, ${gib(m.limitBytes)} limit (each at most the environment's max pod memory)`);
     }
@@ -263,7 +288,7 @@ async function sizes(db: Db, args: string[]): Promise<void> {
     }
   } else if (sub === "clear") {
     if (!pos[0]) die(USAGE);
-    console.log(await clearBuildSize(db, pos[0], "cli") ? `${safe(pos[0])}: step pods get their environment's memory` : `${safe(pos[0])} had no size of its own`);
+    console.log(await clearBuildSize(db, pos[0], "cli") ? `${safe(pos[0])}: step memory and warm target automatic` : `${safe(pos[0])} had no setting of its own`);
   } else die(USAGE);
 }
 

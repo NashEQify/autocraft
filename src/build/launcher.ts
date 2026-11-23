@@ -19,15 +19,16 @@ import { hashKey, kubeReport, newPodKey, type EnvHealth } from "./envs.ts";
 import { computeCapacity, feedbackCapacity, overQuota, quotaHard, quotaRoom, toCapNode, type Capacity, type CapNode, type Res } from "./capacity.ts";
 import { classifyPodEnd, disruptionPolicy, MAX_DISRUPTIONS, pendingKind } from "./disruption.ts";
 import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQuota, type ConfigMapApi, type ContainerStatus, type KPod, type KubeApi } from "./kube-api.ts";
-import { gib, raiseAfterOom, repoMemory, repoWarmTarget } from "./sizing.ts";
+import { gib, raiseAfterOom, repoMemory, repoSizing, repoWarmTarget } from "./sizing.ts";
 import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
-import { WarmStatus } from "./warm-status.ts";
+import { STATUS_NAMESPACE, WarmStatus } from "./warm-status.ts";
+import { WarmPlacer } from "./warm-place.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
   ciCheckout, PULL_REASONS, pvcSpec, stepMemory, warmEnvHash, quantity, settingsOf, sourcePod, STAGE_SOURCE, STAGE_TASK, stepCap, stepContainer, stepPod, STUCK_MS, taskLimits, taskPod, taskRequest, toolchainImage, uploadPod, uploadStage,
-  WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
+  stepPeak, WARM_GC_CONTAINER, WARM_PUBLISH_CONTAINER, WARM_RESTORE_CONTAINER, type Group, type KubeSettings, type PodCtx, type Prepared, type StepMemory, type WarmPod, warmCopyMemory, warmMemory,
 } from "./pods.ts";
-import { recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
+import { recordTrimmedPublish, recordWarmBytes, releaseGc, takeGc, warmBytes } from "./warm-queue.ts";
 import { workspacePass, WorkspaceState } from "./workspace-launch.ts";
 import { appendLog, claim, finishTask, satisfies, type ClaimFit, loseTask, MAX_CHUNK_BYTES, MAX_LOG_BYTES, releaseClaim, startTask, touchTask, WARM_STEP, warmKeyOf } from "./tasks.ts";
 import type { Db } from "../db/index.ts";
@@ -66,6 +67,8 @@ export type LauncherDeps = {
   api: KubeApi | null;
   /** Reads the nodes' warm status (src/build/warm-status.ts); null or left out: no warm status is shown. */
   configMaps?: Pick<ConfigMapApi, "listConfigMaps"> | null;
+  /** Writes the warm placement (src/build/warm-place.ts); null or left out: none is written. */
+  placement?: Pick<ConfigMapApi, "getConfigMap" | "patchConfigMap"> | null;
   /** The runner's own image (AUTOCRAFT_IMAGE), for environments that name none. */
   defaultImage: string | null;
   log: (line: string) => void;
@@ -99,6 +102,7 @@ class PassReads {
 /** Caches between passes: the access review, a pause after a task could not be started, when a pod's node stopped reporting, and the nodes' warm status. */
 export class LauncherState {
   warm: WarmStatus | null = null;
+  placer: WarmPlacer | null = null;
   reads = new PassReads();
   access = new Map<string, { at: number; missing: string[] }>();
   /** `capacity`: the quota refused a first pod, a capacity wait rather than a fault. */
@@ -126,6 +130,10 @@ export async function launcherPass(d: LauncherDeps, state: LauncherState): Promi
   if (envs.length && d.configMaps) {
     state.warm ??= new WarmStatus(d.configMaps, { namespace: envVar("WARM_STATUS_NAMESPACE"), now: d.now, log: d.log });
     await state.warm.refresh();
+    if (d.placement) {
+      state.placer ??= new WarmPlacer(d.placement, { namespace: envVar("WARM_STATUS_NAMESPACE") ?? STATUS_NAMESPACE, now: d.now ?? Date.now, log: d.log });
+      await state.placer.pass(d.db, state.warm);
+    }
   }
   for (const env of envs) {
     try {
@@ -268,6 +276,14 @@ const taskOf = async (db: Db, id: number) => await db.get(db.k.selectFrom("build
 const isWarmGroup = (c: EnvCtx, t: TaskRow, groups: Group[], index: number): boolean =>
   t.step === WARM_STEP && c.s.warmWriter && index === groups.length - 1 && groups[index]!.network === "none";
 /** The size of the version a publish reports in its termination message (JSON with `bytes`); 0 when it says none. */
+/** Whether the publish left out the units its build did not use (src/warm/trim.ts). */
+function publishedTrimmed(message: string | undefined): boolean {
+  try {
+    return (JSON.parse(message ?? "") as { trimmed?: unknown }).trimmed === true;
+  } catch {
+    return false;
+  }
+}
 function publishedBytes(message: string | undefined): number {
   try {
     const n = (JSON.parse(message ?? "") as { bytes?: unknown }).bytes;
@@ -300,11 +316,12 @@ const quotaRefused = (e: unknown): boolean => e instanceof KubeError && e.status
  */
 async function requestOf(c: EnvCtx, repo: string, step: string): Promise<{ res: Res; memory: StepMemory }> {
   const { db } = c.d;
-  const memory = await repoMemory(db, repo, c.s);
+  const sizing = await repoSizing(db, repo);
+  const memory = sizing.memory ?? { requestBytes: quantity(c.s.memoryRequest), limitBytes: quantity(c.s.memoryLimit) };
   const key = warmKeyOf(repo);
   let extra = 0;
-  if (step === WARM_STEP && c.s.warmWriter) extra = warmMemory({ key, gc: false, bytes: await warmBytes(db, key) }) ?? 0;
-  else if (step !== WARM_STEP && !c.s.warmWriter && await repoWarmTarget(db, repo) === "tmpfs") extra = warmCopyMemory(await warmBytes(db, key)) ?? 0;
+  if (step === WARM_STEP && c.s.warmWriter) extra = warmMemory({ key, gc: false, bytes: sizing.warmBytes }) ?? 0;
+  else if (step !== WARM_STEP && !c.s.warmWriter && sizing.warmTarget === "tmpfs") extra = warmCopyMemory(sizing.warmBytes) ?? 0;
   const lim = taskLimits(c.s, memory, extra);
   return { res: { ...toRes(taskRequest(c.s, memory, extra)), limCpu: lim.cpuM, limMem: lim.memBytes, ephReq: lim.ephRequest, ephLim: lim.ephLimit }, memory };
 }
@@ -674,7 +691,9 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
       // running when the pod ended was stopped by the pod's deadline.
       const timedOut = !term || ((term.exitCode === 124 || term.exitCode === 137) && durationMs >= stepCap(c.s, step) * 1000 - 2000);
       const oomKilled = term?.reason === "OOMKilled";
-      results.push({ step: step.name, exitCode: timedOut ? null : term!.exitCode, durationMs, timedOut, ...(oomKilled ? { oomKilled } : {}) });
+      const spec = [...(pod.spec?.initContainers ?? []), ...(pod.spec?.containers ?? [])].find((x) => x.name === stepContainer(i));
+      const peak = stepPeak(term?.message, quantity(spec?.resources?.limits?.memory ?? c.s.maxPodMemory));
+      results.push({ step: step.name, exitCode: timedOut ? null : term!.exitCode, durationMs, timedOut, ...(peak ? { peakMemBytes: peak } : {}), ...(oomKilled ? { oomKilled } : {}) });
       ran = Math.max(ran, i + 1);
       if (timedOut) failed = `${step.name} timed out`;
       else if (oomKilled) {
@@ -697,7 +716,10 @@ async function endStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<voi
           await podLog(c, run, WARM_PUBLISH_CONTAINER, "warm publish");
           results.push({ step: "warm publish", exitCode: pub.exitCode, durationMs: runMs(pub), timedOut: false });
           if (pub.exitCode !== 0) failed = `warm publish failed${reported(pub.message) ? `: ${reported(pub.message)}` : ` (exit ${pub.exitCode})`}`.slice(0, 300);
-          else await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+          else {
+            await recordWarmBytes(db, warmKeyOf(t.repo), publishedBytes(pub.message));
+            if (publishedTrimmed(pub.message)) await recordTrimmedPublish(db, t.repo, c.now());
+          }
         } else if (pod.status?.phase !== "Failed") {
           // The pod ended with every step run and no publish status: nothing was published.
           failed = "the warm publish did not run";
@@ -845,7 +867,11 @@ async function finish(c: EnvCtx, run: Run, failed: string | null): Promise<void>
 /** `guard` runs before every Kubernetes call that changes something, and stops it by throwing (src/build/kube-api.ts guardedApi). */
 export function startPodLauncher(db: Db, signal: AbortSignal, log: (line: string) => void, guard?: () => Promise<void>): void {
   const api = inClusterApi();
-  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
+  const placement = api && {
+    getConfigMap: api.getConfigMap,
+    patchConfigMap: async (ns: string, name: string, patch: object) => (await guard?.(), await api.patchConfigMap(ns, name, patch)),
+  };
+  const deps: LauncherDeps = { db, api: api && guard ? guardedApi(api, guard) : api, configMaps: api, placement, capacity: api, defaultImage: envVar("IMAGE") ?? null, log };
   const state = new LauncherState();
   const workspaces = new WorkspaceState();
   void (async () => {

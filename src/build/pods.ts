@@ -28,7 +28,7 @@ export const DEFAULT_SETTINGS: KubeSettings = {
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
   workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
   workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
-  warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
+  warmWriter: false, display: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -158,6 +158,10 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         if (typeof v !== "boolean") throw new BuildError(400, "warmWriter must be true or false");
         out.warmWriter = v;
         break;
+      case "display":
+        if (typeof v !== "boolean") throw new BuildError(400, "display must be true or false");
+        out.display = v;
+        break;
       case "arch":
         if (v !== "x86_64" && v !== "aarch64") throw new BuildError(400, "arch must be x86_64 or aarch64");
         out.arch = v;
@@ -178,11 +182,11 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
   return out;
 }
 
-/** What a task's pods offer, for claim matching: no display, no GPU, and only the toolchains that have an image. */
+/** What a task's pods offer, for claim matching: `display` when the toolchain images render in software (settings.display), no GPU, and only the toolchains that have an image. */
 export function kubeCapabilities(s: KubeSettings): Capabilities {
   return {
     os: "linux", arch: s.arch, cpus: Math.max(1, Math.floor(quantity(s.cpuLimit))), memGb: Math.floor(quantity(s.memoryLimit) / 1024 ** 3),
-    diskGb: Math.floor(quantity(s.storage) / 1024 ** 3), display: false, gpu: false, toolchains: Object.keys(s.toolchainImages).sort(),
+    diskGb: Math.floor(quantity(s.storage) / 1024 ** 3), display: s.display, gpu: false, toolchains: Object.keys(s.toolchainImages).sort(),
   };
 }
 
@@ -285,7 +289,38 @@ export type PodCtx = { s: KubeSettings; envId: string; taskId: number; stage: nu
  */
 // The children are copied, not `/pristine/.`: /src is a mount point the pod's user doesn't own, so cp could not set its times.
 const COPY_SOURCE = 'find /pristine -mindepth 1 -maxdepth 1 -exec cp -a -t /src/ {} + || { echo "could not copy the source tree" >&2; exit 125; }';
-export const STEP_WRAPPER = `${COPY_SOURCE}; t=$1; shift; exec timeout -k 10 "$t" "$@"`;
+/**
+ * The step's peak anonymous memory (cgroup v2 `memory.stat` anon of the container, sampled once a second): page cache and
+ * memory-backed volumes are left out, so it measures what the step's processes need (src/build/sizing.ts). The sampler
+ * keeps the peak in its own shell and writes it to the termination message as `autocraft-peak-anon <bytes>` (stepPeak)
+ * only when the wrapper stops it, after the step ended. The step runs as the same user and could still write that file;
+ * the launcher caps a reading at the container's memory limit. The container's own cgroup has a `memory.max`; the root
+ * one does not, so a pod without its own cgroup namespace reports nothing.
+ */
+const PEAK_START = [
+  "pk=; if [ -r /sys/fs/cgroup/memory.stat ] && [ -e /sys/fs/cgroup/memory.max ]; then",
+  "  ( m=0; trap 'echo \"autocraft-peak-anon $m\" 2>/dev/null > /dev/termination-log; exit 0' TERM",
+  '    while :; do a=0; while read -r k v; do if [ "$k" = anon ]; then a=$v; break; fi; done < /sys/fs/cgroup/memory.stat',
+  '    if [ "$a" -gt "$m" ] 2>/dev/null; then m=$a; fi; sleep 1; done ) & pk=$!',
+  "fi",
+].join("\n");
+const PEAK_END = 'if [ -n "$pk" ]; then kill "$pk" 2>/dev/null; wait "$pk" 2>/dev/null; fi';
+/**
+ * Runs the step under `timeout` in the background, so the wrapper can stop the sampler afterwards; a TERM to the wrapper
+ * (the pod's deadline or deletion) is passed on to `timeout`, which passes it to the step.
+ */
+const RUN_STEP = [
+  't=$1; shift; timeout -k 10 "$t" "$@" & c=$!',
+  "trap 'kill -TERM \"$c\" 2>/dev/null' TERM",
+  'wait "$c"; s=$?; while kill -0 "$c" 2>/dev/null; do wait "$c"; s=$?; done; trap - TERM',
+].join("\n");
+export const PEAK_LINE = /^autocraft-peak-anon ([0-9]{1,15})$/m;
+/** A step's peak from its termination message (PEAK_LINE), at most `max` (the container's memory limit); 0 without one. */
+export function stepPeak(message: string | undefined, max: number): number {
+  const n = Number(PEAK_LINE.exec(message ?? "")?.[1]);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : 0;
+}
+export const STEP_WRAPPER = [COPY_SOURCE, PEAK_START, RUN_STEP, PEAK_END, "exit $s"].join("\n");
 /**
  * A step that reads the compile cache: rustc runs through sccache, and the cache's hit counts end the step's output. sccache
  * keys a compile on every CARGO_* variable, and the CI gate builds with CARGO_TERM_COLOR set; the wrapper gives that value to
@@ -298,7 +333,9 @@ export const CACHE_STEP_WRAPPER = [
   `    printf '%s\\n' "#!$b" 'exec env "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
-  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  PEAK_START,
+  RUN_STEP,
+  PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-only):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
 ].join("\n");
@@ -317,7 +354,9 @@ export const WARM_STEP_WRAPPER = [
   `    printf '%s\n' "#!$b" 'exec env -u CARGO_NET_OFFLINE "CARGO_TERM_COLOR=$AUTOCRAFT_CI_TERM_COLOR" sccache "$@"' > /tmp/.rustc-wrapper && chmod 755 /tmp/.rustc-wrapper && export RUSTC_WRAPPER=/tmp/.rustc-wrapper`,
   '  else echo "the toolchain image has no bash: the compile cache wrapper cannot run, so this step builds without the compile cache" >&2; fi',
   'else echo "the toolchain image has no sccache: this step builds without the compile cache" >&2; fi',
-  't=$1; shift; timeout -k 10 "$t" "$@"; s=$?',
+  PEAK_START,
+  RUN_STEP,
+  PEAK_END,
   'if [ -n "${RUSTC_WRAPPER:-}" ]; then echo "compile cache (sccache, read-write):"; timeout 60 sccache --show-stats; fi',
   "exit $s",
 ].join("\n");
@@ -526,6 +565,14 @@ function sccacheEnv(url: string, cacheVersion: string, write: boolean): Record<s
     SCCACHE_IGNORE_SERVER_IO_ERROR: "1", SCCACHE_IDLE_TIMEOUT: "0",
   };
 }
+/**
+ * What a step needs to render without a display server: Mesa's software Vulkan (lavapipe) and GL (llvmpipe), with the shader
+ * cache on the step's writable /tmp (the root filesystem is read-only).
+ */
+export const renderEnv = (arch: KubeSettings["arch"]): Record<string, string> => ({
+  VK_ICD_FILENAMES: `/usr/share/vulkan/icd.d/lvp_icd.${arch}.json`, WGPU_BACKEND: "vulkan", LP_NUM_THREADS: "4",
+  XDG_CACHE_HOME: "/tmp/cache", MESA_SHADER_CACHE_DIR: "/tmp/cache/mesa",
+});
 /** The env every step at the CI paths shares: the gate's (ciEnv), HOME, CARGO_HOME and CI. */
 export const gateEnvOf = (prepared: Pick<Prepared, "env">): Record<string, string> => ({ ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" });
 /**
@@ -628,6 +675,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
         ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
       }
       : { ...(offline ? prepared.env : {}), ...(mp ? mp.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
+    if (c.s.display && !writing) Object.assign(env, renderEnv(c.s.arch));
     return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? copyMemory ?? 0), {
       command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: ci ? checkout : "/src",
