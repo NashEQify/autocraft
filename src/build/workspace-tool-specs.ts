@@ -145,6 +145,12 @@ const SPECS = {
       max_edge: { type: "integer", description: `Longest edge of the image returned, scaled down to it (default ${IMAGE_EDGE}).`, min: 256, max: IMAGE_EDGE },
     },
   },
+  fetch_dependencies: {
+    description: "Runs cargo fetch for the workspace through AutoCraft's crate mirror, the one way to add a crate or a newer version of one: edit Cargo.toml first, then call this before you build. It updates Cargo.lock and the cargo cache in the workspace and returns the Cargo.lock changes against the base commit, or cargo's error. Takes up to 10 minutes; one fetch runs at a time. Refused when the repository has no crate mirror.",
+    readOnly: false,
+    required: [],
+    fields: { path: path("Directory whose Cargo.toml to fetch for (default /work/src)") },
+  },
 } satisfies Record<string, Spec>;
 
 export type WorkspaceToolName = keyof typeof SPECS;

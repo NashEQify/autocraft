@@ -35,7 +35,7 @@ import { COPY_MARK_FILE, type WarmTarget } from "./warm-mount.ts";
 import { warmBytes } from "./warm-queue.ts";
 import type { WarmStatus } from "./warm-status.ts";
 import { chooseWarm, LAYOUT_CI, sha256, warmOf, WARM_CHANGED_DIRS, WARM_CHANGED_FILES, WARM_MTIMES_SH, workspaceStorageBytes, type WorkspacePrepared, type WorkspaceWarm } from "./workspace-layout.ts";
-import { workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER, type WorkspaceCiLayout } from "./workspace-pods.ts";
+import { fetchPodKept, workspaceEnvSelector, workspaceName, workspacePodSpec, workspacePvcSpec, workspaceSelector, WS_CONTAINER, type WorkspaceCiLayout } from "./workspace-pods.ts";
 import { resolveGate, resolveI18nRev } from "../worker/gate.ts";
 import { EXT_ARCHIVE_MAX_BYTES, gateStepEnv } from "../worker/environment.ts";
 import { changedFrom, parseLsTree, type CopyMark } from "../worker/warm-copy.ts";
@@ -180,11 +180,13 @@ async function envPass(c: Ctx): Promise<void> {
     }
   }
 
-  // Pods and volumes no live row owns: ended and failed workspaces, a parked one's old pod, a create that failed late.
+  // Pods and volumes no live row owns: ended and failed workspaces, a parked one's old pod, a create that failed late, and
+  // fetch pods whose workspace is no longer ready on the pod they were made for, or that outlived any fetch.
   const owned = await liveRows(c);
   const podNames = new Set(owned.filter((w) => POD_STATES.includes(w.state as WorkspaceStateName)).map((w) => w.pod));
   const pvcNames = new Set(owned.map((w) => w.pvc));
-  for (const p of pods) if (!podNames.has(p.metadata.name) && !p.metadata.deletionTimestamp) await api.deletePod(ns, p.metadata.name).catch((e: Error) => c.d.log(`workspace launcher: delete pod ${p.metadata.name}: ${e.message}`));
+  const kept = (p: KPod): boolean => podNames.has(p.metadata.name) || fetchPodKept(p, owned, c.now());
+  for (const p of pods) if (!kept(p) && !p.metadata.deletionTimestamp) await api.deletePod(ns, p.metadata.name).catch((e: Error) => c.d.log(`workspace launcher: delete pod ${p.metadata.name}: ${e.message}`));
   for (const v of pvcs) if (!pvcNames.has(v.metadata.name)) await api.deletePvc(ns, v.metadata.name).catch((e: Error) => c.d.log(`workspace launcher: delete volume ${v.metadata.name}: ${e.message}`));
   for (const m of [c.state.unknownSince, c.state.checkpointTried, c.state.prepareTries]) for (const id of m.keys()) if (!owned.some((w) => w.id === id)) m.delete(id);
 
@@ -236,14 +238,15 @@ async function giveUp(c: Ctx, w: WorkspaceRow, reason: string): Promise<void> {
 
 type Images = { appImage: string; toolchainImage: string };
 
-/** The images a workspace pod needs, or why the environment cannot start one. */
-function imagesOf(c: Ctx): Images | string {
-  const appImage = c.s.image ?? c.d.defaultImage;
-  const toolchainImage = c.s.toolchainImages[WORKSPACE_TOOLCHAIN];
+/** The images a workspace pod needs, or why the environment cannot start one. `defaultImage`: the runner's own (AUTOCRAFT_IMAGE). */
+export function workspaceImages(s: KubeSettings, defaultImage: string | null): Images | string {
+  const appImage = s.image ?? defaultImage;
+  const toolchainImage = s.toolchainImages[WORKSPACE_TOOLCHAIN];
   if (!appImage) return "No AutoCraft image is known for workspace pods: set AUTOCRAFT_IMAGE on the runner or the environment's image";
   if (!toolchainImage) return `The environment has no ${WORKSPACE_TOOLCHAIN} toolchain image for workspace pods`;
   return { appImage, toolchainImage };
 }
+const imagesOf = (c: Ctx): Images | string => workspaceImages(c.s, c.d.defaultImage);
 
 /** Starts a requested workspace. False when the environment should wait before the next create. */
 async function start(c: Ctx, w: WorkspaceRow): Promise<boolean> {
@@ -278,7 +281,7 @@ const parse = <T>(s: string | null): T | null => {
 const preparedOf = (w: Pick<WorkspaceRow, "prepared">): WorkspacePrepared | null => parse<WorkspacePrepared>(w.prepared);
 
 /** The pod-spec part of a layout-2 row; null for layout 1, or before its gate was read. */
-function ciLayoutOf(w: WorkspaceRow): WorkspaceCiLayout | null {
+export function ciLayoutOf(w: WorkspaceRow): WorkspaceCiLayout | null {
   const checkout = ciCheckout(w.repo);
   const prepared = preparedOf(w);
   if (w.layout !== LAYOUT_CI || !checkout || !prepared) return null;

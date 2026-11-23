@@ -334,6 +334,23 @@ export const MIRROR_CA_CONFIGMAP = "craft-mirror-ca";
 const MIRROR_CA = "/etc/craft-mirror/ca.crt";
 // CARGO_NET_RETRY: a 503 from the mirror (its queue full) is retried instead of failing the fetch.
 const MIRROR_ENV = { CARGO_HTTP_CAINFO: MIRROR_CA, GIT_SSL_CAINFO: MIRROR_CA, SSL_CERT_FILE: MIRROR_CA, CARGO_NET_RETRY: "10" };
+
+/**
+ * What a `mirror` pod adds to its spec: the mirror's CA (volume, mount and env), the `mirror-wait` container that runs before
+ * the containers that fetch, and the hostAliases that send crates.io and GitHub to the mirror. Without `crateMirror` there is
+ * no wait and no alias: nothing resolves, so a fetch fails. `tmpVolume` is an emptyDir the wait mounts at /tmp.
+ */
+export function mirrorParts(s: KubeSettings, appImage: string, tmpVolume: string) {
+  return {
+    volume: { name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } },
+    mount: { name: "mirror-ca", mountPath: "/etc/craft-mirror", readOnly: true },
+    env: MIRROR_ENV,
+    wait: s.crateMirror
+      ? [container(MIRROR_WAIT_CONTAINER, appImage, appResources(s), { args: ["worker", "pod", "mirror-wait"], env: envList({ HOME: "/tmp", AUTOCRAFT_MIRROR_ADDR: s.crateMirror }), volumeMounts: [{ name: tmpVolume, mountPath: "/tmp" }] })]
+      : [],
+    spec: s.crateMirror ? { hostAliases: [{ ip: s.crateMirror, hostnames: MIRROR_HOSTS }] } : {},
+  };
+}
 const SIGNING_KEY = "/keys/signing/private.pem";
 /** ConfigMap in the build namespace with the public half of the signing key (`public.pem`): restore and gc verify with it, so only the publish holds the private key. */
 export { WARM_VERIFY_CONFIGMAP };
@@ -559,7 +576,8 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
   const atCi = (step: TaskStep): boolean => cached(step) || ((writing || starting) && !step.bare);
   const target = writing || starting ? `${checkout}/target` : null;
   const volumes: object[] = [{ name: "check-tmp", emptyDir: { sizeLimit: "64Mi" } }];
-  if (mirror) volumes.push({ name: "mirror-ca", configMap: { name: MIRROR_CA_CONFIGMAP, items: [{ key: "ca.crt", path: "ca.crt" }] } });
+  const mp = mirror ? mirrorParts(c.s, appImage, "check-tmp") : null;
+  if (mp) volumes.push(mp.volume);
   // In memory when the version's size is known and moderate (the build containers' memory limit grows by it); else on the task's volume.
   const extraMemory = writing ? warmMemory(warm!) : null;
   // A consumer's memory-backed target is charged to the pod: warm-copy and the steps get its size on top of their memory.
@@ -597,14 +615,14 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
       ...(writing ? [{ name: "warm-meta", mountPath: "/meta" }] : []),
       { name: "work", mountPath: "/out", subPath: `out/${i}` },
       ...(offline ? prepared.mounts.map((m) => ({ name: "work", mountPath: m.target, subPath: m.sub, readOnly: true })) : []),
-      ...(mirror ? [{ name: "mirror-ca", mountPath: "/etc/craft-mirror", readOnly: true }] : []),
+      ...(mp ? [mp.mount] : []),
     ];
     const env = ci
       ? {
         ...gateEnv, ...(cached(step) ? sccacheEnv(cacheUrl!, cacheVersion!, writing) : {}),
         ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
       }
-      : { ...(offline ? prepared.env : {}), ...(mirror ? MIRROR_ENV : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
+      : { ...(offline ? prepared.env : {}), ...(mp ? mp.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
     return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? copyMemory ?? 0), {
       command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: ci ? checkout : "/src",
@@ -617,13 +635,11 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
     env: envList({ HOME: "/tmp", AUTOCRAFT_POD_DISK_LIMIT: String(Math.floor(quantity(c.s.storage))) }),
     volumeMounts: [{ name: "work", mountPath: "/work", readOnly: true }, { name: "check-tmp", mountPath: "/tmp" }],
   });
-  const wait = mirror && c.s.crateMirror
-    ? [container(MIRROR_WAIT_CONTAINER, appImage, appResources(c.s), { args: ["worker", "pod", "mirror-wait"], env: envList({ HOME: "/tmp", AUTOCRAFT_MIRROR_ADDR: c.s.crateMirror }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
-    : [];
+  const wait = mp?.wait ?? [];
   const check = checkPackages && prepared.packages.length
     ? [container(PACKAGES_CONTAINER, image, appResources(c.s), { command: ["/bin/sh", "-c", PACKAGES_CHECK, "check", ...prepared.packages], env: envList({ HOME: "/tmp" }), volumeMounts: [{ name: "check-tmp", mountPath: "/tmp" }] })]
     : [];
-  const spec = mirror && c.s.crateMirror ? { hostAliases: [{ ip: c.s.crateMirror, hostnames: MIRROR_HOSTS }] } : {};
+  const spec = mp?.spec ?? {};
   if (!writing) {
     const labels: Record<string, string> = group.steps.some((i) => cached(plan[i]!)) ? { "craft.build/cache": "read" } : {};
     const copy = starting

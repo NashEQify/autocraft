@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { crc32 } from "node:zlib";
 import type { Db } from "../db/index.ts";
 import { artifactDir } from "../build/artifacts.ts";
+import { settingsOf } from "../build/pods.ts";
 import { queueWorkspaceCall, resumePrompt, type WorkspaceCallRequest } from "../build/workspace-call.ts";
 import { sessionStats } from "../build/workspace-session.ts";
 import { WORKSPACE_SERVER } from "../build/workspace-tools.ts";
@@ -118,7 +119,15 @@ export const renderSession = (input: SessionInput): { system: string; stdin: str
   const p = claudeParts(SESSION_PROMPT_ID, [input], false);
   return { system: p.system ?? "", stdin: p.stdin };
 };
-const SYSTEM = renderSession(SAMPLE_SESSION[0]!).system;
+/** The two system prompts: with fetch_dependencies (the workspace's environment has a crate mirror) and without. */
+const SYSTEM = { mirror: renderSession({ ...SAMPLE_SESSION[0]!, fetch_dependencies: true }).system, none: renderSession(SAMPLE_SESSION[0]!).system };
+
+/** Whether environment `envId` has a crate mirror, so its session may fetch dependencies. */
+async function hasCrateMirror(db: Db, envId: string | undefined): Promise<boolean> {
+  if (!envId) return false;
+  const env = await db.get(db.k.selectFrom("build_envs").select(["settings"]).where("id", "=", envId));
+  return settingsOf(env?.settings ?? null).crateMirror !== null;
+}
 
 const findingsJson = (f: SessionFinding[]): string => JSON.stringify(f, null, 1).replace(/</g, "\\u003c");
 
@@ -227,13 +236,14 @@ export async function queueTurn(db: Db, calls: CallDeps, t: TurnRequest): Promis
   const follow = t.parentId !== undefined;
   const limits = follow ? FOLLOW_UP_CALL : SESSION_CALL;
   return await db.write(async () => {
+    const w = await getWorkspace(db, t.workspaceId);
+    const system = await hasCrateMirror(db, w?.env_id) ? SYSTEM.mirror : SYSTEM.none;
     const callId = await calls.queue(db, {
       workspaceId: t.workspaceId, promptId: SESSION_PROMPT_ID, promptVersion: PROMPT_VERSION, model: SESSION_MODEL, tier: promptTier(SESSION_PROMPT_ID), effort: PROMPT.effort,
-      stdin: t.stdin, system: SYSTEM, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],
+      stdin: t.stdin, system, timeoutSeconds: limits.timeoutSeconds, maxTurns: limits.maxTurns, items: [{ repo: t.impl.repo, number: t.impl.number }],
       maxAttempts: CALL_ATTEMPTS, keepSession: true, ...(follow && { parentId: t.parentId }), forLogin: t.impl.queuedBy, boundSlot: true,
     });
     // A workspace_sessions row per turn, kept with the workspace: the attempt's workspace outlives each job.
-    const w = await getWorkspace(db, t.workspaceId);
     const at = new Date().toISOString();
     await db.run(db.k.insertInto("workspace_sessions").values({
       kind: "implement", repo: t.impl.repo, base_sha: w?.base_sha ?? t.impl.baseSha ?? "", item: t.impl.number, prompt: null, env_id: w?.env_id ?? "", keep: 1,
