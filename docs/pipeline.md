@@ -227,7 +227,7 @@ Hand-off, by final verdict: take goes to Verify, take-fix to Fix-up (with Opus's
 
 ## Implement
 
-Implements an issue a maintainer queued and opens a pull request for it. Needs the repo's **issue implementations approval**, the `implement` build feature for the repo, and a queuer who may settle decisions on the repo.
+Implements an issue a maintainer queued and opens a pull request for it. Needs the repo's **issue implementations approval**, the `implement` build feature for the repo (an operator, or a maintainer with GitHub write permission on the repo, switches the repo's own switch; the instance-wide switch is an operator's), and a queuer who may settle decisions on the repo.
 
 - **Queued.** An issue is queued when a person who settles on its repo adds it from Queue items or with `@app merge queue`. Nothing is picked up automatically. A queued issue waits while a pending scope decision, a Backlog or duplicate hold, or an open PR that closes or mentions it exists. It is skipped for P4.
 - **Task Runner.** Every model call of an implementation runs on the Task Runner of the person who queued the issue, in one of its normal slots. When that runner is not ready, the item shows the wait.

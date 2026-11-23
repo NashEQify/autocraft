@@ -52,3 +52,16 @@ test("the Implement switch is planner input", async () => {
   assert.ok(woke.length > 0, "no planner input topic moved");
   assert.equal(after.settings, before.settings, "the settings topic keeps its own trigger");
 });
+
+test("a maintainer with write access to a repo switches its Implement feature, not another repo's, and a viewer cannot", async () => {
+  const { postFeature } = await import("../src/dash/api/build.ts");
+  const db = await fresh();
+  await db.run(db.k.insertInto("tracked_repos").values([{ name: "x" }, { name: "y" }]).onConflict((oc) => oc.doNothing()));
+  const as = (role: string, writes: string[], json: unknown) => ({ params: {}, query: new URLSearchParams(), json, user: { login: "u", role, canWrite: async (r: string) => writes.includes(r), canRead: async () => true } }) as never;
+  await postFeature(db, as("maintainer", ["x"], { feature: "implement", on: true, repo: "x" }));
+  assert.equal((await featureStates(db)).find((s) => s.feature === "implement")!.repos.includes("x"), true);
+  await assert.rejects(postFeature(db, as("maintainer", ["x"], { feature: "implement", on: true, repo: "y" })), /write access/);
+  await assert.rejects(postFeature(db, as("maintainer", ["x"], { feature: "implement", on: true })), /operator/);
+  await assert.rejects(postFeature(db, as("maintainer", ["x"], { feature: "nightly", on: true, repo: "x" })), /operator/);
+  await assert.rejects(postFeature(db, as("viewer", ["x"], { feature: "implement", on: true, repo: "x" })), /write access/);
+});

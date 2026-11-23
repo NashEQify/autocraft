@@ -127,7 +127,7 @@ const used = (e: string) => TASKS.filter((t) => t.envId === e && (t.state === "r
 for (const e of envs) e.running = used(e.id);
 
 export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs" | "tasks" | "buildFeatures" | "screenshotSetup"> {
-  const featureOn = new Set<string>(["screenshots", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
+  const featureOn = new Set<string>(["implement", "implement:designcraft", "implement:photocraft", "screenshots", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
   const scopes: Record<string, PrBuildScope> = { pdfcraft: "all" };
   let perDay = 10;
   const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true };
@@ -137,6 +137,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
       repos: SCOPED[feature] ? REPOS.filter((r) => featureOn.has(`${feature}:${r}`)) : [],
     })),
     repos: [...REPOS],
+    manageable: REPOS.filter((r) => mayRunMock(me, r)),
     prBuilds: { scopes: Object.fromEntries(REPOS.map((r) => [r, scopes[r] ?? "outside"])), perDay },
   });
   const setups: ScreenshotSetup[] = [{
@@ -177,7 +178,9 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
     buildFeatures: {
       list: () => wait(features()),
       async set(input) {
-        operator();
+        if (input.feature === "implement" && input.repo && input.on !== undefined && input.scope === undefined && input.perDay === undefined) {
+          if (!mayRunMock(me, input.repo)) throw new Error("only an operator, or a maintainer with write access to the repo, switches its issue implementations");
+        } else operator();
         const k = input.repo ? `${input.feature}:${input.repo}` : input.feature;
         if (input.scope && input.repo) scopes[input.repo] = input.scope;
         if (input.perDay !== undefined) perDay = input.perDay;

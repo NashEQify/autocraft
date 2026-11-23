@@ -616,7 +616,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/nightly/select", handler: ok(nightly.select) },
     get("/api/build/summary", build.buildSummary),
     get("/api/build/features", build.features),
-    { method: "POST", pattern: "/api/build/features", operator: true, handler: ok(build.postFeature) },
+    { method: "POST", pattern: "/api/build/features", handler: ok(build.postFeature) },
     get("/api/build/screenshots", build.screenshots),
     { method: "PUT", pattern: "/api/build/screenshots/:repo", handler: ok(build.putScreenshots) },
     { method: "DELETE", pattern: "/api/build/screenshots/:repo", handler: ok(build.deleteScreenshots) },

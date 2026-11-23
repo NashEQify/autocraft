@@ -86,7 +86,8 @@ async function featuresOf(db: Db, req: Req): Promise<BuildFeatures> {
   const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], repos: s.repos.filter((r) => shown.has(r)) }));
   const scopes: Record<string, PrBuildScope> = {};
   for (const r of repos) scopes[r] = await scopeOf(db, r);
-  return { features, repos, prBuilds: { scopes, perDay: await perDayOf(db) } };
+  const manageable = await filterSeq(repos, async (r) => await mayRunRepo(req.user, r));
+  return { features, repos, manageable, prBuilds: { scopes, perDay: await perDayOf(db) } };
 }
 
 export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
@@ -97,6 +98,11 @@ export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
 export const postFeature = async (db: Db, req: Req): Promise<BuildFeatures> => {
   const b = (req.json ?? {}) as { feature?: unknown; on?: unknown; repo?: unknown; scope?: unknown; perDay?: unknown };
   if (!isFeature(b.feature)) throw new HttpError(400, `feature must be one of ${BUILD_FEATURES.join(", ")}`);
+  // A repo's own Implement switch also goes to a maintainer with write access to that repo; every other change is an operator's.
+  const repoImplement = b.feature === "implement" && typeof b.on === "boolean" && typeof b.repo === "string" && b.scope === undefined && b.perDay === undefined;
+  if (repoImplement ? !await mayRunRepo(req.user, b.repo as string) : req.user.role !== "operator") {
+    throw new HttpError(403, repoImplement ? "only an operator, or a maintainer with write access to the repo, switches its issue implementations" : "only an operator changes the build features");
+  }
   const tracked = async (r: string): Promise<boolean> => !!(await db.get(db.k.selectFrom("main.tracked_repos").select("name").where("name", "=", r)));
   // Every field is checked before anything is written.
   if (b.scope !== undefined || b.perDay !== undefined) {
