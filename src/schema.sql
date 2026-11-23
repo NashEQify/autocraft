@@ -541,7 +541,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   repo TEXT,                          -- params.repo, for the autopilot's per-repo lookups
   items INTEGER,                      -- items the job handled (classified, asked, reviewed, merged ...), for the daily limits
   acted INTEGER,                      -- other progress the job made (a batch advanced or opened, a decision asked ...); with items 0, the job was idle
-  resumes INTEGER NOT NULL DEFAULT 0  -- times a runner stop or restart put the running job back in the queue (src/runner/resuming.ts)
+  resumes INTEGER NOT NULL DEFAULT 0, -- times a runner stop or restart put the running job back in the queue (src/runner/resuming.ts)
+  crash_resumes INTEGER NOT NULL DEFAULT 0 -- the resumes after an unclean stop (a crash or kill without the stop signal)
 );
 CREATE INDEX IF NOT EXISTS jobs_state ON jobs(state, id);
 -- The end of each job's log, copied by the runner from the job's log file in chunks of whole lines (src/runner/job-log.ts),

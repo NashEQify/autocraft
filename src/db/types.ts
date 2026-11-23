@@ -1141,6 +1141,7 @@ export interface Jobs {
   items: number | null;
   acted: number | null;
   resumes: Generated<number>;
+  crash_resumes: Generated<number>;
   lease_skips: number | null;
   lease_skip_keys: string | null;
 }
@@ -2756,7 +2757,7 @@ export const COLUMNS = {
   items: ["repo", "number", "kind", "state", "title", "body", "url", "author", "author_type", "author_association", "created_at", "updated_at", "closed_at", "merged_at", "merged_by", "state_reason", "is_draft", "labels", "assignees", "comments_count", "reactions_count", "additions", "deletions", "changed_files", "head_ref", "head_oid", "head_repo", "base_ref", "maintainer_can_modify", "mergeable", "review_decision", "ci_state", "closing_issues", "detail_level", "embed_hash", "class_hash", "class_scheme", "text_refs", "author_id"],
   job_items: ["id", "job_id", "repo", "number", "outcome", "at", "ref"],
   job_log_chunks: ["job_id", "seq", "start", "next_start", "chunk", "at"],
-  jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "lease_skips", "lease_skip_keys"],
+  jobs: ["id", "step", "params", "requested_by", "requested_at", "state", "started_at", "ended_at", "progress", "summary", "error", "usage", "log_path", "pid", "cancel_requested_at", "cancel_requested_by", "repo", "items", "acted", "resumes", "crash_resumes", "lease_skips", "lease_skip_keys"],
   lane_next: ["lane", "total", "items", "at"],
   leader_leases: ["role", "holder", "epoch", "expires_ms"],
   liveness_items: ["repo", "number", "kind", "verdict", "cause", "state", "wait", "phase", "since", "checked_at"],
