@@ -3,11 +3,12 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
+import { applyManifest, clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
 import { podPhase } from "../src/worker/pod.ts";
 
@@ -298,4 +299,34 @@ test("warm restore onto a non-empty target: one built with this image and Cargo.
   dav.files.clear();
   assert.equal(await podPhase("warm-restore", env()), 0);
   assert.ok(!existsSync(mark));
+});
+
+test("warm restore: applied files are readable to other uids, and a hard-linked inode with missing bits is fixed", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-modes-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const body = Buffer.from("rlib bytes");
+  const sha256 = createHash("sha256").update(body).digest("hex");
+  const mtimeNs = 1_700_000_000_000_000_000n;
+  const mk = (mode: number): any => ({
+    header: {},
+    entries: [
+      { path: "target/d", type: "dir", mode: 0o750, mtimeNs },
+      { path: "target/d/lib.rlib", type: "file", mode, size: body.length, mtimeNs, sha256 },
+    ],
+  });
+  const fetch = async () => (async function* () { yield zstdCompressSync(body); })();
+  const mode = (p: string) => statSync(p).mode & 0o777;
+
+  const prevRoot = join(tmp, "prev");
+  await applyManifest(mk(0o640), { target: prevRoot }, fetch);
+  assert.equal(mode(join(prevRoot, "d/lib.rlib")), 0o644);
+  assert.equal(mode(join(prevRoot, "d")) & 0o055, 0o055);
+
+  // A previous version built before normalization: the inode is 0640 and the manifest entry says so.
+  chmodSync(join(prevRoot, "d/lib.rlib"), 0o640);
+  const next = join(tmp, "next");
+  const stats = await applyManifest(mk(0o640), { target: next }, fetch, { previous: { manifest: mk(0o640), roots: { target: prevRoot } } });
+  assert.equal(stats.linked, 1);
+  assert.equal(mode(join(next, "d/lib.rlib")), 0o644);
+  assert.equal(mode(join(prevRoot, "d/lib.rlib")), 0o644);
 });

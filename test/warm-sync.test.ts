@@ -2,14 +2,14 @@
 // refusals, the node cap, and the runner's reading of the status.
 import assert from "node:assert/strict";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readlinkSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { KubeError, type KConfigMap } from "../src/build/kube-api.ts";
 import { STATUS_STALE_MS, WarmStatus } from "../src/build/warm-status.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
-import { SyncAgent, type Assign, type NodeStatus } from "../src/warm/sync-agent.ts";
+import { addReadBits, SyncAgent, type Assign, type NodeStatus } from "../src/warm/sync-agent.ts";
 import { SCRATCH } from "./scratch.ts";
 
 function fakeDav() {
@@ -322,4 +322,19 @@ test("warm sync: while a version downloads the status lists it as pending with p
   await done;
   assert.equal(kube.status("n1").pending.deckcraft, undefined);
   assert.ok(lines.some((l) => /download starts/.test(l)) && lines.some((l) => /download ok after/.test(l)));
+});
+
+test("warm sync: the startup fix-up adds read bits to files and directories of an older version", async (t) => {
+  const dir = join(SCRATCH, `modes-${process.pid}`);
+  mkdirSync(join(dir, "target/sub"), { recursive: true });
+  writeFileSync(join(dir, "target/sub/f"), "x", { mode: 0o750 });
+  writeFileSync(join(dir, "target/g"), "y");
+  chmodSync(join(dir, "target/g"), 0o640);
+  chmodSync(join(dir, "target/sub"), 0o700);
+  t.after(() => { chmodSync(join(dir, "target/sub"), 0o755); rmSync(dir, { recursive: true, force: true }); });
+  assert.equal(addReadBits(dir), 3);
+  assert.equal(statSync(join(dir, "target/g")).mode & 0o777, 0o644);
+  assert.equal(statSync(join(dir, "target/sub/f")).mode & 0o777, 0o754);
+  assert.equal(statSync(join(dir, "target/sub")).mode & 0o555, 0o555);
+  assert.equal(addReadBits(dir), 0);
 });

@@ -33,6 +33,11 @@ const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{7,64}$/;
 const NS = /^(0|[1-9][0-9]{0,20})$/;
 
+/** Warm data holds no secrets and every pod reads it as another uid: files keep their exec bits and gain read for all. */
+export const readableFileMode = (mode: number): number => mode | 0o444;
+/** Directories gain read and search for all. */
+export const readableDirMode = (mode: number): number => mode | 0o555;
+
 export type FileEntry = { path: string; type: "file"; mode: number; size: number; mtimeNs: bigint; sha256: string };
 export type DirEntry = { path: string; type: "dir"; mode: number; mtimeNs: bigint };
 export type LinkEntry = { path: string; type: "symlink"; target: string; mtimeNs: bigint };
@@ -186,9 +191,9 @@ export async function walkTree(src: WalkSource, opts: WalkOptions = {}): Promise
     if (skip(path)) return false;
     const st = lstatSync(abs, { bigint: true });
     const mode = Number(st.mode & 0o777n);
-    if (st.isDirectory()) entries.push({ path, type: "dir", mode, mtimeNs: st.mtimeNs });
+    if (st.isDirectory()) entries.push({ path, type: "dir", mode: readableDirMode(mode), mtimeNs: st.mtimeNs });
     else if (st.isFile()) {
-      const entry: FileEntry = { path, type: "file", mode, size: Number(st.size), mtimeNs: st.mtimeNs, sha256: "" };
+      const entry: FileEntry = { path, type: "file", mode: readableFileMode(mode), size: Number(st.size), mtimeNs: st.mtimeNs, sha256: "" };
       entries.push(entry);
       files.push({ entry, abs });
     } else if (st.isSymbolicLink()) {
@@ -424,7 +429,9 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
     if (!lstatSync(roots[r]!).isDirectory() || readdirSync(roots[r]!).length) throw new ManifestError(`restore root ${r} is not an empty directory`);
   }
   const rootOf = (p: string) => p.slice(0, p.indexOf("/")) as RootName;
-  const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined) };
+  // Manifests from before modes were normalized may hold 0640 files: every applied entry is readable to all.
+  const readable = (e: Entry): Entry => (e.type === "file" ? { ...e, mode: readableFileMode(e.mode) } : e.type === "dir" ? { ...e, mode: readableDirMode(e.mode) } : e);
+  const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined).map(readable) };
   const abs = (rs: Partial<Roots>, p: string) => join(rs[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
   const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0 };
   opts.onStats?.(stats);
@@ -434,7 +441,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
     const pr = opts.previous.roots;
     for (const e of opts.previous.manifest.entries) {
       if (e.type !== "file" || pr[rootOf(e.path)] === undefined) continue;
-      const k = `${e.sha256}:${e.mode}`, v = { abs: abs(pr, e.path), mtimeNs: e.mtimeNs };
+      const k = `${e.sha256}:${readableFileMode(e.mode)}`, v = { abs: abs(pr, e.path), mtimeNs: e.mtimeNs };
       prev.get(k)?.push(v) ?? prev.set(k, [v]);
     }
   }
@@ -452,7 +459,9 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
       if (!near(c.mtimeNs, e.mtimeNs)) continue;
       try {
         const st = lstatSync(c.abs, { bigint: true });
-        if (!st.isFile() || Number(st.size) !== e.size || !near(st.mtimeNs, e.mtimeNs) || Number(st.mode & 0o777n) !== e.mode) continue;
+        if (!st.isFile() || Number(st.size) !== e.size || !near(st.mtimeNs, e.mtimeNs) || readableFileMode(Number(st.mode & 0o777n)) !== e.mode) continue;
+        // The shared inode may predate the normalization: make it readable for both versions.
+        if ((Number(st.mode & 0o777n) & 0o444) !== 0o444) chmodSync(c.abs, e.mode);
         linkSync(c.abs, dest);
         return true;
       } catch {

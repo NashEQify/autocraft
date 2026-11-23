@@ -23,6 +23,8 @@ import type { WarmStore } from "./store-client.ts";
 export const STATUS_PREFIX = "warm-status-";
 export const STATUS_DATA_KEY = "status.json";
 export const STATUS_LABEL = "craft.build/warm-status";
+/** Written into a version dir once every entry in it is readable to all uids. */
+const MODES_MARK = ".modes-ok";
 const GEN = /^gen-[0-9a-f]{7,12}(-[0-9]+)?$/;
 const NODE_NAME = /^[a-z0-9]([-a-z0-9.]{0,230}[a-z0-9])?$/;
 const MAX_BAD_BLOBS = 32;
@@ -190,6 +192,7 @@ export class SyncAgent {
     const { dir, log } = this.c;
     mkdirSync(dir, { recursive: true });
     this.removeLeftovers();
+    this.fixModes();
     let assign: Assign;
     try {
       assign = this.c.assign();
@@ -296,6 +299,27 @@ export class SyncAgent {
     const f = join(this.c.dir, `${key}.floor`);
     writeFileSync(`${f}.tmp`, `${stored}\n`, { mode: 0o644 });
     renameSync(`${f}.tmp`, f);
+  }
+
+  /**
+   * Versions built before modes were normalized may hold files other uids cannot read. Adds the read bits (search for
+   * directories) to every entry of a version that has no MODES_MARK yet, then writes the mark. Hard links make this
+   * fix older versions that share an inode too. A failure leaves no mark, so the next cycle retries.
+   */
+  private fixModes(): void {
+    for (const k of this.keyDirs()) {
+      for (const n of readdirSync(join(this.c.dir, k))) {
+        const gen = join(this.c.dir, k, n);
+        if (!GEN.test(n) || existsSync(join(gen, MODES_MARK))) continue;
+        try {
+          const fixed = addReadBits(gen);
+          writeFileSync(join(gen, MODES_MARK), "", { mode: 0o644 });
+          if (fixed) this.c.log(`warm sync: ${k}/${n}: made ${fixed} entries readable to all`);
+        } catch (e) {
+          this.c.log(`warm sync: ${k}/${n}: making files readable failed: ${(e as Error).message}`.slice(0, 300));
+        }
+      }
+    }
   }
 
   /** Builds dirs of an interrupted sync and a half-made `current` link. */
@@ -408,6 +432,7 @@ export class SyncAgent {
       writeFileSync(join(tmp, "manifest.zst"), raw, { mode: 0o644 });
       writeFileSync(join(tmp, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o644 });
       writeFileSync(join(tmp, "latest.json"), `${JSON.stringify(l)}\n`, { mode: 0o644 });
+      writeFileSync(join(tmp, MODES_MARK), "", { mode: 0o644 });
       renameSync(tmp, final);
       this.swap(key, gen, h);
       this.failed.delete(key);
@@ -560,4 +585,25 @@ export class SyncAgent {
       this.c.log(`warm sync: writing ${name}: ${(e as Error).message}`);
     }
   }
+}
+
+/** Adds read bits to files and read+search bits to directories under `dir` (not following links); returns how many changed. */
+export function addReadBits(dir: string): number {
+  let n = 0;
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = join(d, e.name);
+      if (e.isSymbolicLink()) continue;
+      const st = lstatSync(p), mode = st.mode & 0o777;
+      if (e.isDirectory()) {
+        if ((mode & 0o555) !== 0o555) { chmodSync(p, mode | 0o555); n++; }
+        walk(p);
+      } else if (e.isFile() && (mode & 0o444) !== 0o444) {
+        chmodSync(p, mode | 0o444);
+        n++;
+      }
+    }
+  };
+  walk(dir);
+  return n;
 }

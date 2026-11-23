@@ -181,10 +181,18 @@ function mergeInto(from: string, to: string): void {
   rmSync(from, { recursive: true, force: true });
 }
 
+/** The summary of a failed cp: files the pod's uid cannot read get their own wording and count, so an operator sees why. */
+export function copyFailure(stderr: string): string {
+  const lines = stderr.trim().split("\n");
+  const denied = lines.filter((l) => /cannot open .* for reading: Permission denied/.test(l)).length;
+  if (denied) return `unreadable files in the warm version (${denied}${lines.length >= denied && denied === lines.length ? "" : "+"} reported; first: ${lines.find((l) => l.includes("Permission denied"))!.slice(0, 160)})`;
+  return `cp: ${lines.slice(-2).join(" ")}`;
+}
+
 function cp(from: string, to: string): Promise<void> {
   return new Promise((resolve, reject) => {
     execFile("cp", ["-a", "--", `${from}/.`, `${to}/`], { timeout: 30 * 60_000, maxBuffer: 1024 * 1024 }, (err, _o, stderr) =>
-      err ? reject(new Error(`cp: ${(stderr || err.message).trim().split("\n").slice(-2).join(" ")}`)) : resolve());
+      err ? reject(new Error(copyFailure(stderr || err.message))) : resolve());
   });
 }
 
