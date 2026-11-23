@@ -30,7 +30,26 @@ export const IS_COMPONENTS_V2 = 1 << 15;
 /** Discord allows 40 components per V2 message; a result takes three (section, text, button) and the action row two or more. */
 const MAX_RESULTS = 10;
 
-export type Rendered = { components: unknown[]; flags: number };
+export type Body = { content?: string; components: unknown[]; flags?: number };
+/** `legacy` is the numbered layout used when Discord rejects the V2 message. */
+export type Rendered = { components: unknown[]; flags: number; legacy: Body };
+/** Discord allows five buttons per action row. */
+const ROW_BUTTONS = 5;
+let loggedRejection = false;
+
+/** Sends the V2 body; when Discord answers 4xx, sends the numbered legacy body once instead and logs the first rejection. */
+export async function deliver(r: Rendered, send: (body: Body) => Promise<unknown>, log: (line: string) => void = console.warn): Promise<void> {
+  try {
+    await send({ components: r.components, flags: r.flags });
+  } catch (e) {
+    const status = (e as { status?: number }).status;
+    if (status === undefined || status < 400 || status >= 500) throw e;
+    if (!loggedRejection) { loggedRejection = true; log(`discord: components v2 reply rejected (${status}): ${(e as Error).message.slice(0, 200)}`); }
+    await send(r.legacy);
+  }
+}
+
+const sectionText = (m: Match): string => `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
 
 /** Each result is a section: its text with its link button beside it, so a button is never far from the issue it opens. "File a new issue" and the other actions sit in a row at the end. */
 export async function renderMatches(db: Db, matches: Match[], question: string, channelId: string | undefined, noneId?: string): Promise<Rendered> {
@@ -38,7 +57,7 @@ export async function renderMatches(db: Db, matches: Match[], question: string, 
   const shown: Match[] = [];
   let size = 0;
   for (const m of matches.slice(0, MAX_RESULTS)) {
-    const text = `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
+    const text = sectionText(m);
     if (size + text.length + 1 > CONTENT_CHARS) break;
     size += text.length + 1;
     sections.push({
@@ -54,5 +73,14 @@ export async function renderMatches(db: Db, matches: Match[], question: string, 
   // `noneId` is the button of the search form's reply: it continues that session instead of opening the form again.
   if (noneId) buttons.push({ type: 2, style: 2, label: "None of these, file a new one", custom_id: noneId });
   else if (repo) buttons.push({ type: 2, style: 2, label: "File a new issue", custom_id: formButtonId(repo.split("/").pop()!, question) });
-  return { components: buttons.length ? [...sections, { type: 1, components: buttons }] : sections, flags: IS_COMPONENTS_V2 };
+  const lines = shown.map((m, i) => `${i + 1}. ${sectionText(m)}`);
+  const numbered: unknown[] = shown.map((m, i) => ({ type: 2, style: 5, label: `${i + 1} · ${m.repo}#${m.number}`.slice(0, 80), url: m.url }));
+  const all = [...numbered, ...buttons];
+  const rows: unknown[] = [];
+  for (let i = 0; i < all.length; i += ROW_BUTTONS) rows.push({ type: 1, components: all.slice(i, i + ROW_BUTTONS) });
+  return {
+    components: buttons.length ? [...sections, { type: 1, components: buttons }] : sections,
+    flags: IS_COMPONENTS_V2,
+    legacy: { content: lines.length ? lines.join("\n") : "No matching issue found.", components: rows },
+  };
 }

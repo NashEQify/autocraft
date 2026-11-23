@@ -14,8 +14,8 @@ import { DiscordKeys } from "../src/discord/keys.ts";
 import { installAccountCommands } from "../src/discord/commands.ts";
 import { createLinkCode, loginOf } from "../src/discord/links.ts";
 import { Pings } from "../src/discord/pings.ts";
-import { RestClient, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
-import { renderMatches } from "../src/discord/reply.ts";
+import { RestClient, RestError, callbackPayload, type CommandDef, type DiscordRest, type EditBody, type MessageBody } from "../src/discord/rest.ts";
+import { deliver, renderMatches } from "../src/discord/reply.ts";
 import { Search, askHaiku, dropTexts, type Ask } from "../src/discord/search.ts";
 import { DISCORD_TAKE_WAIT_MS } from "../src/discord/limits.ts";
 import { allocation } from "../src/agents/call.ts";
@@ -380,5 +380,17 @@ describe("pull requests", () => {
     const { score: _s, body: _b, activity: _a, updatedAt: _u, ...m7 } = by(7)!;
     const rendered = await renderMatches(db, [m7], "q", undefined);
     assert.match(v2text(rendered), /photocraft#7 .* \(PR\) \(merged\)/);
+  });
+
+  test("a rejected V2 reply is sent again with numbered lines and numbered buttons, and logged", async () => {
+    const m = { repo: "photocraft", number: 7, title: "WebP", url: "https://github.com/storytold/photocraft/issues/7", pr: false, merged: false, closed: false, reason: "" } as unknown as Parameters<typeof renderMatches>[1][number];
+    const r = await renderMatches(db, [m, { ...m, number: 8, url: "https://github.com/storytold/photocraft/issues/8" }], "q", undefined);
+    const bodies: { content?: string; components: unknown[]; flags?: number }[] = [];
+    const logs: string[] = [];
+    await deliver(r, async (b) => { bodies.push(b); if (b.flags) throw new RestError(400, "invalid flag"); }, (l) => logs.push(l));
+    assert.equal(bodies.length, 2);
+    assert.match(bodies[1]!.content!, /^1\. photocraft#7 WebP\n2\. photocraft#8 WebP/);
+    assert.deepEqual(v2buttons(bodies[1]!).slice(0, 2).map((b) => b.label), ["1 · photocraft#7", "2 · photocraft#8"]);
+    assert.equal(logs.length, 1);
   });
 });
