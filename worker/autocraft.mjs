@@ -42,7 +42,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 
-export const HELPER_VERSION = "1.4.1";
+export const HELPER_VERSION = "1.4.2";
 
 // ---------------------------------------------------------------------------
 // Wire format: a copy of src/remote/protocol.ts (the helper is served alone, so it keeps its own).
@@ -90,6 +90,7 @@ export const ROUTES = {
  * @property {boolean} [ownLane]  the own lane: only calls bound to this user and their follow-ups
  * @property {boolean} [withOwnLane]  a slot's or the fast lane's claim while an own lane runs beside them
  * @property {number} [wait]  protocol 4: seconds the server may hold the claim open when nothing is queued (0 to 30)
+ * @property {number} [maxTimeoutSeconds]  only calls of at most this timeout: the harness login is refreshed before a longer one could finish
  */
 /** @typedef {{ fiveHour: number, weekly: number }} Reserve  percent of each plan window kept free */
 /** Body encodings besides plain JSON; a server lists the ones it accepts in its claim and status replies. */
@@ -97,7 +98,7 @@ export const ENCODINGS = /** @type {const} */ (["gzip+base64"]);
 /** @typedef {(typeof ENCODINGS)[number]} Encoding */
 /** @typedef {{ encoding: Encoding, body: string }} Envelope  `body`: base64 of the gzip of the plain JSON body */
 /** @typedef {({ lease: null, retryAfter: number, reserve: Reserve, reason?: string, until?: number, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number } | { lease: { id: number, secret: string, title: string, requiredHelper: string }, reserve: Reserve, encodings?: Encoding[], ownLane?: true, interactiveSlots?: number }) & { currentHelper?: string }} ClaimReply */
-/** @typedef {"ready" | "quota-held" | "paused" | "cooled-off" | "sandbox-failed" | "version-refused" | "harness-missing" | "failing"} Readiness */
+/** @typedef {"ready" | "quota-held" | "paused" | "cooled-off" | "sandbox-failed" | "version-refused" | "harness-missing" | "failing" | "login-refresh"} Readiness */
 /** @typedef {{ usedPercent: number, resetsAt: string | null }} UsageWindow */
 /** @typedef {{ fiveHour: UsageWindow | null, weekly: UsageWindow | null, at: string }} UsageReading */
 /**
@@ -220,6 +221,7 @@ const HEARTBEAT_MS = scaled(HEARTBEAT_S * 1000), PREPARE_MAX_MS = scaled(PREPARE
  * @property {(line: string) => string | null} progress  a progress line from one output line, or null
  * @property {(cfg: Config) => string | undefined} token  the stored harness credential
  * @property {(cfg: Config, timeoutSeconds: number) => { token: string } | { problem: string }} [tokenFor]  the credential for a call of this timeout, or why the call can't run now (released, not failed)
+ * @property {(cfg: Config) => { room: number, refreshAt: number } | null} [loginRoom]  the longest call timeout a claim may take before the login's refresh point (`refreshAt`, ms since epoch), or null when the login sets no limit
  * @property {Partial<Record<Tier, string>>} defaultTiers  empty when the user must name every tier's model
  * @property {"high" | "xhigh" | "max"} maxEffort  the highest level of the effort ladder the harness is given; a bundle's higher effort is passed as this
  * @property {(bin: string) => { cmd: string, args: string[], env: Record<string, string> }} versionInSandbox  the harness's version command inside the sandbox (doctor, Linux)
@@ -262,18 +264,41 @@ export function removeInstructionFiles(/** @type {string} */ root) {
 
 export const CLAUDE_LOGIN_EXPIRES = "Claude login expires soon; run claude once to refresh it";
 
+/** Seconds a call needs to spare before the login's refresh point beyond its timeout: the harness's stop after the timeout, clock drift. */
+const LOGIN_CALL_SLACK_S = 60;
+/** Seconds a claim keeps back for the call's preparation (bundle, files) before its timeout starts. */
+const LOGIN_PREPARE_S = 60;
+/** The shortest timeout the server gives a call: with less room before the refresh point, no call fits. */
+const SHORTEST_CALL_S = 120;
+
 /**
- * The access token of a Claude login (the `claudeAiOauth` entry of its `.credentials.json`), only when it is still
- * valid 10 minutes after the call's timeout: the sandboxed claude gets it as CLAUDE_CODE_OAUTH_TOKEN and can't refresh it.
+ * The access token of a Claude login (the `claudeAiOauth` entry of its `.credentials.json`), only when a call of this
+ * timeout started now ends before the login's refresh point (claudeRefreshAt): the sandboxed claude gets the token as
+ * CLAUDE_CODE_OAUTH_TOKEN and can't refresh it, and no call runs while the user's own claude refreshes the login.
  * @param {any} creds @param {number} timeoutSeconds @param {number} [now]
  * @returns {{ token: string } | { problem: string }}
  */
 export function claudeLoginToken(creds, timeoutSeconds, now = Date.now()) {
   const o = creds?.claudeAiOauth;
   if (typeof o?.accessToken !== "string" || !o.accessToken || typeof o.expiresAt !== "number") return { problem: "no Claude login in the configured directory; run claude and log in" };
-  if (o.expiresAt <= now + (timeoutSeconds + 600) * 1000) return { problem: CLAUDE_LOGIN_EXPIRES };
+  if (claudeRefreshAt(o.expiresAt) < now + (timeoutSeconds + LOGIN_CALL_SLACK_S) * 1000) return { problem: CLAUDE_LOGIN_EXPIRES };
   return { token: o.accessToken };
 }
+
+/**
+ * The longest call timeout (seconds) a claim may take now so that the call, prepared and run, ends before the login's
+ * refresh point, and that point; null without an expiring Claude login.
+ * @param {any} creds @param {number} [now] @returns {{ room: number, refreshAt: number } | null}
+ */
+export function claudeLoginRoom(creds, now = Date.now()) {
+  const e = creds?.claudeAiOauth?.expiresAt;
+  if (typeof e !== "number" || e >= Number.MAX_SAFE_INTEGER) return null;
+  const refreshAt = claudeRefreshAt(e);
+  return { room: Math.floor((refreshAt - now) / 1000) - LOGIN_CALL_SLACK_S - LOGIN_PREPARE_S, refreshAt };
+}
+
+/** Whether a login with this much room takes calls: the shortest call fits. @param {{ room: number } | null} r */
+export const loginTakesCalls = (r) => r === null || r.room >= SHORTEST_CALL_S;
 
 /** Why `--config-dir` does not apply on macOS. */
 const CLAUDE_CONFIG_DIR_MACOS = "on macOS Claude Code keeps its login in the Keychain, not in a config directory: use `autocraft harness claude --keychain`, or store a setup-token";
@@ -297,17 +322,13 @@ function claudeCredential(cfg) {
  * user's own claude once, outside the sandbox with the login's own config directory or Keychain item, and lets it refresh.
  */
 const CLAUDE_REFRESH_WINDOW_MS = 4 * 60_000;
+/** When the Task Runner has claude refresh a login that ends at `expiresAt`; no call runs past it. @param {number} expiresAt */
+const claudeRefreshAt = (expiresAt) => expiresAt - CLAUDE_REFRESH_WINDOW_MS;
 const CLAUDE_REFRESH_RETRY_MS = 90_000;
 // The smallest request that goes through Claude Code's login check: no tools, settings, hooks, MCP servers or session file.
 const CLAUDE_REFRESH_ARGS = ["-p", "ok", "--model", "haiku", "--max-turns", "1", "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"];
 /** @type {{ at: number, run: Promise<boolean> | null }} */
 const claudeRefresh = { at: 0, run: null };
-
-/** Whether the harness login ends before a call started now could finish. @param {Adapter} adapter @param {Config} cfg */
-function loginExpiring(adapter, cfg) {
-  const t = adapter.tokenFor?.(cfg, READY_CALL_TIMEOUT_S);
-  return !!t && "problem" in t && t.problem === CLAUDE_LOGIN_EXPIRES;
-}
 
 /**
  * The environment under which the user's own claude finds the login the config names, or null when the helper can't
@@ -676,6 +697,7 @@ const claudeAdapter = {
     if (!cfg.claudeConfigDir) return cfg.claudeToken ? { token: cfg.claudeToken } : { problem: "no Claude token stored" };
     return claudeLoginToken(readClaudeCredentials(cfg.claudeConfigDir), timeoutSeconds);
   },
+  loginRoom: (cfg) => claudeLoginRoom(claudeCredential(cfg)),
   defaultTiers: { top: "opus", mid: "sonnet", small: "haiku" },
   maxEffort: "max",
   detect(cfg) {
@@ -2124,8 +2146,6 @@ const USAGE_ERROR_RETRY_MS = scaled(30_000);
 /** The last good reading keeps counting this long when a new read fails or is refused, while every window keeps the reserve plus LAST_GOOD_MARGIN free. */
 export const LAST_GOOD_MS = 15 * 60_000;
 export const LAST_GOOD_MARGIN = 10;
-/** The longest call timeout readiness assumes when it checks the login's expiry (a lease names its own). */
-const READY_CALL_TIMEOUT_S = 900;
 /** The longest a process waits for another process's usage read. */
 const USAGE_LOCK_WAIT_MS = 20_000;
 export const STATUS_EVERY_MS = scaled(5 * 60_000);
@@ -2520,6 +2540,7 @@ const holdNow = (s, now) => (s.hold && alive(s.hold.pid) && (s.hold.until === nu
  * @property {{ bin: string, version: string }} [detected]
  * @property {Partial<Record<Tier, string>>} models
  * @property {boolean} [quotaReady]  cooled off, but the usage would let it claim: the claim asks the server whether the cool-off still holds (an operator may end it)
+ * @property {number} [maxTimeoutSeconds]  claims take only calls of at most this timeout (Claim.maxTimeoutSeconds)
  */
 
 /**
@@ -2554,9 +2575,12 @@ async function checkReady(cfg, opt = {}) {
     else if (old) st = { ...base, readiness: "harness-missing", until: null, reason: old };
     else if (!Object.keys(models).length) st = { ...base, readiness: "harness-missing", until: null, reason: `no model is set for any tier ("tiers" in ${join(configDir(), "config.json")})` };
     else if (canary) st = { ...base, readiness: "sandbox-failed", until: null, reason: canary.split("\n")[0] ?? canary };
-    else if (loginExpiring(adapter, cfg) && !(adapter.id === "claude" && await refreshClaudeLogin(cfg, d.bin))) {
-      const reason = adapter.id === "claude" && claudeRefreshEnv(cfg) ? `the Claude login expires soon; the Task Runner has claude refresh it ${CLAUDE_REFRESH_WINDOW_MS / 60_000} minutes before it ends` : "the Claude login expires soon; run claude to refresh it";
-      st = { ...base, readiness: "harness-missing", until: null, reason };
+    else if (!loginTakesCalls(adapter.loginRoom?.(cfg) ?? null) && !(adapter.id === "claude" && await refreshClaudeLogin(cfg, d.bin))) {
+      // No call fits before the refresh point. The Task Runner refreshes the login itself when it can; otherwise the user must.
+      const refreshAt = adapter.loginRoom?.(cfg)?.refreshAt ?? 0;
+      st = adapter.id === "claude" && claudeRefreshEnv(cfg) && Date.now() < refreshAt
+        ? { ...base, readiness: "login-refresh", until: refreshAt, reason: `no call fits before the Claude login is refreshed: the Task Runner has claude refresh it ${CLAUDE_REFRESH_WINDOW_MS / 60_000} minutes before it ends` }
+        : { ...base, readiness: "harness-missing", until: null, reason: claudeRefreshEnv(cfg) ? `the Claude login expires soon and claude did not refresh it (tried again every ${CLAUDE_REFRESH_RETRY_MS / 1000} s); run claude to refresh it` : "the Claude login expires soon; run claude to refresh it" };
     }
     else {
       const control = readControl();
@@ -2570,9 +2594,12 @@ async function checkReady(cfg, opt = {}) {
         if (q.dropPark) delete c.park;
         writeControl(c);
       }
+      // Read after a refresh above: the room of the login the claims will use.
+      const room = adapter.loginRoom?.(cfg)?.room;
+      const fit = room !== undefined && { maxTimeoutSeconds: Math.max(1, room) };
       st = cooloff
-        ? { ...base, readiness: "cooled-off", until: cooloff.until, reason: cooloff.reason, reading, detected: { bin: d.bin, version: d.version }, quotaReady: q.readiness === "ready" }
-        : { ...base, readiness: q.readiness, until: q.until, ...(q.reason && { reason: q.reason }), reading, detected: { bin: d.bin, version: d.version } };
+        ? { ...base, readiness: "cooled-off", until: cooloff.until, reason: cooloff.reason, reading, detected: { bin: d.bin, version: d.version }, quotaReady: q.readiness === "ready", ...fit }
+        : { ...base, readiness: q.readiness, until: q.until, ...(q.reason && { reason: q.reason }), reading, detected: { bin: d.bin, version: d.version }, ...fit };
     }
   }
   const usage = usageOfReading(st.reading) ?? prev.usage;
@@ -2627,8 +2654,15 @@ async function sendStatus(cfg, harness, st, usage) {
   if (prev.sentKey === key && prev.sentAt !== undefined && Date.now() - prev.sentAt < STATUS_EVERY_MS) return;
   try {
     /** @type {StatusReply} */
-    const r = await apiRetrying(cfg.server, ROUTES.status, token, body);
-    updateHelperStatus((s) => ({ ...s, sentAt: Date.now(), sentKey: key, sent: body, ...(r?.reserve && { serverReserve: r.reserve }) }));
+    let r;
+    let sent = body;
+    try { r = await apiRetrying(cfg.server, ROUTES.status, token, body); } catch (e) {
+      // A server older than `login-refresh` refuses it: the closest readiness it knows, with the same reason.
+      if (!(e instanceof HttpError && e.status === 400 && body.readiness === "login-refresh")) throw e;
+      sent = { ...body, readiness: "harness-missing" };
+      r = await apiRetrying(cfg.server, ROUTES.status, token, sent);
+    }
+    updateHelperStatus((s) => ({ ...s, sentAt: Date.now(), sentKey: key, sent, ...(r?.reserve && { serverReserve: r.reserve }) }));
     clearError("server");
   } catch (e) { noteError(msg(e), "server"); /* the next check sends it again */ }
 }
@@ -2964,7 +2998,7 @@ async function claimOnce(cfg, slot, fastLane = false, requestId = newClaimId(), 
   const mac = process.platform === "darwin";
   const n = mac ? slot ?? pickSlot(slotBase()) : undefined;
   const root = n === undefined ? undefined : slotRoot(slotBase(), n);
-  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...claimLaneFlags(fastLane, ownLane, withOwnLane, interactiveLane) };
+  const claim = { requestId, helperVersion: HELPER_VERSION, harness: adapter.id, harnessVersion: d.version, tiers, efforts: Object.fromEntries(Object.keys(tiers).map((t) => [t, adapter.maxEffort])), ...(cfg.repos && { repos: cfg.repos }), sessions: heldSessions(n), ...(root && { root }), ...claimLaneFlags(fastLane, ownLane, withOwnLane, interactiveLane), ...(ready.maxTimeoutSeconds !== undefined && { maxTimeoutSeconds: ready.maxTimeoutSeconds }) };
   /** @type {ClaimReply} */
   let reply;
   try {
@@ -3102,13 +3136,15 @@ async function runLease(cfg, id, opt = {}) {
     if (adapter.tokenFor) {
       let t = adapter.tokenFor(cfg, b.timeoutSeconds);
       if ("problem" in t && t.problem !== CLAUDE_LOGIN_EXPIRES) { await sleep(2000); t = adapter.tokenFor(cfg, b.timeoutSeconds); }
-      if ("problem" in t) return await giveBack(t.problem, { readiness: "harness-missing", ms: TOKEN_HOLD_MS });
+      // A call too long for the login goes back without a hold: shorter calls still fit, and readiness says when none does.
+      if ("problem" in t) return await giveBack(t.problem, t.problem === CLAUDE_LOGIN_EXPIRES ? undefined : { readiness: "harness-missing", ms: TOKEN_HOLD_MS });
       runToken = t.token;
     }
     tokens.push(runToken); secretsInUse.add(runToken);
     privateDir(join(cacheDir(), "tasks"));
     taskDir = mkdtempSync(join(cacheDir(), "tasks", `${b.callId}-`));
-    const out = await execute(b, { adapter, bin: d.bin, token: runToken, model, taskDir, lease, root: lease.root ?? "", ...(lease.slot !== undefined && { slot: lease.slot }), ...(opt.signal && { signal: opt.signal }), prep, beat });
+    const late = adapter.tokenFor && (() => { const t = adapter.tokenFor?.(cfg, b.timeoutSeconds); return t && "problem" in t && t.problem === CLAUDE_LOGIN_EXPIRES ? t.problem : null; });
+    const out = await execute(b, { adapter, bin: d.bin, token: runToken, model, taskDir, lease, root: lease.root ?? "", ...(lease.slot !== undefined && { slot: lease.slot }), ...(opt.signal && { signal: opt.signal }), prep, beat, ...(late && { late }) });
     if ("giveBack" in out) return await giveBack(prepStopped() ?? out.giveBack);
     if ("fail" in out) return await fail(out.fail, out.usage);
     const { r, reply, tools } = out;
@@ -3162,7 +3198,8 @@ async function runLease(cfg, id, opt = {}) {
  * Private trees and MCP servers need the lease; `try` runs without one. With a lease, `prep` ends the preparation's requests
  * and `beat` carries its heartbeats; nothing spawns once either ended or `signal` aborted.
  * @param {TaskBundle} b
- * @param {{ adapter: Adapter, bin: string, token: string, model: string, taskDir: string, lease: LeaseRecord | null, root: string, slot?: number, signal?: AbortSignal, prep?: AbortSignal, beat?: ReturnType<typeof heartbeats> }} x
+ * `late`: why the call may no longer start once its files are ready (its login no longer outlasts it), or null.
+ * @param {{ adapter: Adapter, bin: string, token: string, model: string, taskDir: string, lease: LeaseRecord | null, root: string, slot?: number, signal?: AbortSignal, prep?: AbortSignal, beat?: ReturnType<typeof heartbeats>, late?: () => string | null }} x
  * @returns {Promise<{ giveBack: string } | { fail: string, usage?: Usage } | { r: Awaited<ReturnType<typeof harness>>, reply: Reply, tools: SubmitTool[] }>}
  */
 async function execute(b, x) {
@@ -3209,6 +3246,11 @@ async function execute(b, x) {
     if (x.beat?.gone.aborted || x.prep?.aborted || x.signal?.aborted) {
       if (sessionDir && !resumeId) rmSync(sessionDir, { recursive: true, force: true });
       throw x.beat?.gone.aborted ? new Gone("the lease is gone") : new Error("stopped before the run");
+    }
+    const late = x.late?.();
+    if (late) {
+      if (sessionDir && !resumeId) rmSync(sessionDir, { recursive: true, force: true });
+      return { giveBack: late };
     }
     const c = adapter.command({ bundle: b, model: x.model, bin: x.bin, token: x.token, mounts, taskDir: x.taskDir, mcpFile, sessionDir, resumeId, lease: { server, secret }, ...(files && { files: { url: files.url, token: files.token } }), ...(mac && { mac }) });
     const r = await harness(c, b, x.beat ?? null, x.signal, adapter, x.root);

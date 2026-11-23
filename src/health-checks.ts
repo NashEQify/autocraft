@@ -382,7 +382,7 @@ async function remoteNoTakerCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[
     brief: "Some repos have no Task Runner that may take their model calls" }];
 }
 
-const READINESS_WORDS: Record<string, string> = { "quota-held": "holding for its reserve", paused: "paused", "cooled-off": "cooling off", "sandbox-failed": "failing its sandbox check", "version-refused": "too old to run calls", "harness-missing": "missing its model tool", failing: "failing" };
+const READINESS_WORDS: Record<string, string> = { "quota-held": "holding for its reserve", paused: "paused", "cooled-off": "cooling off", "sandbox-failed": "failing its sandbox check", "version-refused": "too old to run calls", "harness-missing": "missing its model tool", failing: "failing", "login-refresh": "waiting for its Claude login to refresh" };
 
 /** Whether a Task Runner can take Discord calls now (user-local mode with Discord configured; `applies` is false otherwise), and when not, why. Shared by interactiveNoTakerCheck and the Discord usage page. */
 export async function interactiveTakers(db: Db, nowMs: number, mode?: InferenceMode): Promise<{ applies: boolean; ready: boolean; why: string | null }> {

@@ -391,7 +391,7 @@ export async function authorsOf(db: Db, refs: readonly ItemRef[]): Promise<strin
 }
 
 /** A queued call as claims read it: the items parsed, the repos it names and its authors. */
-type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_login" | "seen_at"> & {
+type Cand = Waiter & Pick<Row, "prompt_id" | "tier" | "parent_id" | "sticky_login" | "seen_at" | "timeout_ms"> & {
   refs: ItemRef[]; repos: string[]; authors: ReadonlySet<string>; releasedBy: string | null; releasedAt: number | null;
   /** The lowercase login whose own Task Runners alone take the call (NewCall.forLogin), or null for the shared pool. */
   forLogin: string | null;
@@ -506,10 +506,11 @@ export function parseClaim(raw: unknown): Claim {
   if (c.interactiveLane !== undefined && typeof c.interactiveLane !== "boolean") throw new HttpError(400, "interactiveLane must be a boolean");
   if (c.interactiveLane === true && (c.fastLane === true || c.ownLane === true || c.withOwnLane === true)) throw new HttpError(400, "interactiveLane excludes the other lanes");
   if (c.withOwnLane !== undefined && typeof c.withOwnLane !== "boolean") throw new HttpError(400, "withOwnLane must be a boolean");
+  if (c.maxTimeoutSeconds !== undefined && (!Number.isInteger(c.maxTimeoutSeconds) || (c.maxTimeoutSeconds as number) < 1)) throw new HttpError(400, "maxTimeoutSeconds must be whole seconds, at least 1");
   // Protocol 3 helpers know no wait; a field they might send is not read.
   const wait = protocol >= 4 ? c.wait : undefined;
   if (wait !== undefined && (!Number.isInteger(wait) || (wait as number) < 0 || (wait as number) > 30)) throw new HttpError(400, "wait must be whole seconds from 0 to 30");
-  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(c.ownLane === true && { ownLane: true }), ...(c.withOwnLane === true && { withOwnLane: true }), ...(c.interactiveLane === true && { interactiveLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }) };
+  return { requestId: c.requestId, ...(c.fastLane === true && { fastLane: true }), ...(c.ownLane === true && { ownLane: true }), ...(c.withOwnLane === true && { withOwnLane: true }), ...(c.interactiveLane === true && { interactiveLane: true }), ...(wait !== undefined && { wait: wait as number }), protocol, helperVersion: c.helperVersion, harness: c.harness as HarnessId, harnessVersion: c.harnessVersion, tiers, ...(efforts && { efforts }), ...(c.repos !== undefined && { repos: c.repos as string[] }), ...(c.sessions !== undefined && { sessions: c.sessions as number[] }), ...(c.root !== undefined && { root: c.root as string }), ...(c.maxTimeoutSeconds !== undefined && { maxTimeoutSeconds: c.maxTimeoutSeconds as number }) };
 }
 
 /** Whether dotted version `v` is older than `min` (numeric parts compared in order; a part that is not a number counts as 0). */
@@ -671,7 +672,7 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
   const running = runningCounts(db, nowMs);
   void running.catch(() => {});
   const queued = await db.all(db.k.selectFrom(indexedBy(db, "main.remote_calls", "remote_calls_waiting", "c"))
-    .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "released_by", "released_at", "picked_by", "picked_at", "pick_until",
+    .select(["id", "class as cls", "level", "step", "repo", "since", "seen_at", "prompt_id", "tier", "parent_id", "sticky_login", "timeout_ms", "released_by", "released_at", "picked_by", "picked_at", "pick_until",
       (eb) => eb("id", ">", newest).as("inline"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("items")).end().as("items"),
       (eb) => eb.case().when("id", ">", newest).then(eb.ref("authors")).end().as("authors"), (eb) => eb.case().when("id", ">", newest).then(eb.ref("for_login")).end().as("for_login"),
       (eb) => eb.case().when("id", ">", newest).then(eb.ref("bound_slot")).end().as("bound_slot")])
@@ -694,7 +695,7 @@ async function queuedCalls(db: Db, nowMs: number, sigRow?: { n: number; m: numbe
     }
     seen.set(id, p);
     return {
-      id, cls: r.cls, level: r.level, step: r.step, repo: r.repo, since: r.since, seen_at: r.seen_at, prompt_id: r.prompt_id, tier: r.tier, parent_id: r.parent_id, sticky_login: r.sticky_login,
+      id, cls: r.cls, level: r.level, step: r.step, repo: r.repo, since: r.since, seen_at: r.seen_at, prompt_id: r.prompt_id, tier: r.tier, parent_id: r.parent_id, sticky_login: r.sticky_login, timeout_ms: Number(r.timeout_ms),
       ...p, releasedBy: r.released_by?.toLowerCase() ?? null, releasedAt: r.released_at,
       pickedBy: r.picked_by?.toLowerCase() ?? null, pickedAt: r.picked_at, pickUntil: r.pick_until,
       ...(r.picked_by !== null && { unpick: async () => void await clearPick(db, id) }),
@@ -1024,6 +1025,7 @@ async function prepareClaim(db: Db, caller: Caller, claim: Claim, canWrite: (rep
       // Only follow-ups of the helper's own sessions carry a parent here (claimOrder). The own lane's calls count toward no
       // calls at once: it takes them at the limit too, with no limit of its own. An older helper runs them in a slot, as any call.
       if (full && r.parent_id === null && !own) continue;
+      if (claim.maxTimeoutSeconds !== undefined && r.timeout_ms > claim.maxTimeoutSeconds * 1000) continue;
       if (!(await eligible(caller, r, can, others))) continue;
       // The client left, or shutdown answered the claim: nothing is leased to nobody.
       // A credential the try read as busy needs no busy mark.
