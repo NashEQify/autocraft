@@ -34,10 +34,10 @@ const SHA = /^[0-9a-f]{64}$/;
 const COMMIT = /^[0-9a-f]{7,64}$/;
 const NS = /^(0|[1-9][0-9]{0,20})$/;
 
-/** Warm data holds no secrets and every pod reads it as another uid: files keep their exec bits and gain read for all. */
-export const readableFileMode = (mode: number): number => mode | 0o444;
+/** Warm data holds no secrets and every pod reads it as another uid: files keep their exec bits and gain read for all and lose group/other write. */
+export const readableFileMode = (mode: number): number => (mode | 0o444) & ~0o022;
 /** Directories gain read and search for all. */
-export const readableDirMode = (mode: number): number => mode | 0o555;
+export const readableDirMode = (mode: number): number => (mode | 0o555) & ~0o022;
 
 export type FileEntry = { path: string; type: "file"; mode: number; size: number; mtimeNs: bigint; sha256: string };
 export type DirEntry = { path: string; type: "dir"; mode: number; mtimeNs: bigint };
