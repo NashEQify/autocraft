@@ -18,7 +18,7 @@ import { AppReadError, ownerOfVariables, readEnv, resolveOwner } from "./github/
 import { DEFAULT_OWNER, ownerOf, slugOf } from "./owners.ts";
 import { classifyFailure, clearRepoFailure, recordRepoFailure } from "./sync-errors.ts";
 import { exclusive } from "./async-seq.ts";
-import { sql, type Expression, type Insertable } from "kysely";
+import type { Expression, Insertable } from "kysely";
 import type { Db } from "./db/index.ts";
 import * as kx from "./db/kx.ts";
 import type { Comments, Items } from "./db/types.ts";
@@ -381,7 +381,7 @@ async function writePage(db: Db, repo: string, kind: Kind, detail: Detail, nodes
       }))));
       // After the upsert, which clears the stored refs when the text changed (schema trigger items_text_refs_stale).
       if (kind === "pr") {
-        const refs = sql<string>`CASE ${sql.ref("number")} ${sql.join(b.map((x) => sql`WHEN ${x.row.number} THEN ${textRefs(x.row.title, x.row.body)}`), sql` `)} END`;
+        const refs = kx.caseOf("number", b.map((x) => [x.row.number, textRefs(x.row.title, x.row.body)] as const));
         await db.run(db.k.updateTable("main.items").set({ text_refs: refs }).where("repo", "=", repo).where(kx.inList(db, "number", numbersOf(b), "bigint")));
       }
     }
