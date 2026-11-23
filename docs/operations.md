@@ -39,6 +39,10 @@ A filing-only repo is a public repo of any owner that the Discord issue bot offe
 - The one write such a repo gets is the bot's issue and its label (`guardBotFiling` in `src/core/guard.ts`), under the same limits and junk check as for tracked repos. When the app has lost access, the reporter is told so and gets the GitHub link.
 - The bot's app select holds at most 25 repos: the preselected one, then the filing-only repos, then the tracked ones with the most open issues.
 
+#### Hiding tracked repos from the Discord bot
+
+The bot's repo select offers every public tracked repo. An operator hides one with `autocraft-server discord offer list | hide <name> | show <name>` or with its switch under "Offered in Discord" on the Discord page (audited as `discord-offer-hide` and `discord-offer-show`; table `discord_hidden_repos`). A hidden repo stays tracked: Discord search, ping replies and channel default repos still use it, but the bot no longer offers it for a new issue and refuses "Submit for me" there. Filing-only repos are removed, not hidden. The page shows how many of the select's 25 places the offered and filing-only repos fill.
+
 #### Webhooks
 
 The poll stays the backup and serves repos without the GitHub App. With webhooks on, a change reaches the dashboard in seconds instead of up to a minute. Setup, in the app's GitHub settings under General (an app manager does this):

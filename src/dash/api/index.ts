@@ -533,6 +533,7 @@ export function apiRoutes(opts: ApiOptions = {}): Route[] {
     { method: "POST", pattern: "/api/admin/discord/unlink", operator: true, handler: ok(discord.removeLink) },
     { method: "POST", pattern: "/api/admin/discord/filing-repos/add", operator: true, handler: ok(discord.addFiling) },
     { method: "POST", pattern: "/api/admin/discord/filing-repos/remove", operator: true, handler: ok(discord.removeFiling) },
+    { method: "POST", pattern: "/api/admin/discord/offer", operator: true, handler: ok(discord.setOffer) },
     get("/api/account/discord", discord.account),
     post("/api/account/discord/unlink", discord.unlinkOwn),
     post("/api/account/discord/code", discord.linkCode),

@@ -9,7 +9,7 @@ import { HttpError } from "../server/util.ts";
 import { DISCORD_PRIVACY_PATH } from "../server/discord-privacy.ts";
 import { readKeyFile, type DiscordKeys } from "../../discord/keys.ts";
 import { countOf, linksOf } from "../../discord/store.ts";
-import { addFilingRepo, botRepos, filingRepos, FilingRepoError, removeFilingRepo } from "../../discord/filing-repos.ts";
+import { addFilingRepo, botRepos, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "../../discord/filing-repos.ts";
 import { reactOn } from "../../discord/react.ts";
 import { signalCountOf, signalLinks } from "../../discord/signals.ts";
 import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "../../discord/links.ts";
@@ -91,6 +91,7 @@ async function setupOf(db: Db): Promise<DiscordSetup> {
     channels: channels.map((c) => ({ ...c, watched: !!c.watched })),
     repos: await publicRepoNames(db),
     filingRepos: await filingRepos(db),
+    offer: await offerState(db),
     contact: await contactOf(db), reactOn: await reactOn(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
     usage: await usageOf(db),
   };
@@ -150,6 +151,15 @@ export async function removeFiling(db: Db, req: Req): Promise<DiscordSetup> {
   const repo = body(req).repo;
   if (typeof repo !== "string") throw new HttpError(400, "repo is required");
   if (!await removeFilingRepo(db, req.user.login, repo)) throw new HttpError(404, "not a filing-only repo");
+  return await setupOf(db);
+}
+
+/** Offers (`on`: true) or hides one public tracked repo in the bot's repo select. */
+export async function setOffer(db: Db, req: Req): Promise<DiscordSetup> {
+  operator(req);
+  const { repo, on } = body(req);
+  if (typeof repo !== "string" || typeof on !== "boolean") throw new HttpError(400, "repo and on (true or false) are required");
+  if (!await setOffered(db, req.user.login, repo, on)) throw new HttpError(404, "not a public tracked repo");
   return await setupOf(db);
 }
 

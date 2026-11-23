@@ -6,7 +6,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { botRefusal, fileAsBot, type FileHooks } from "../src/discord/file-issue.ts";
-import { addFilingRepo, botRepos, FILING_MAX, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
+import { addFilingRepo, botRepos, offerState, setOffered, FILING_MAX, removeFilingRepo, type ReadRepo } from "../src/discord/filing-repos.ts";
 import { setGithubIdentity } from "../src/github/identity.ts";
 import { AppNotInstalledError } from "../src/github/install-token.ts";
 import { publicRepoNames } from "../src/public/status.ts";
@@ -63,4 +63,17 @@ test("a filing-only repo is offered and filed into as the app under its owner, a
   assert.notEqual(await botRefusal(db, "rep", "sketchpad"), null);
   const audited = await db.all(db.k.selectFrom("audit").select("action").where("action", "like", "discord-filing-%"));
   assert.deepEqual([...new Set(audited.map((a) => a.action))].sort(), ["discord-filing-add", "discord-filing-remove"]);
+});
+
+test("a hidden tracked repo is not offered or filed into, but stays tracked and searchable", async () => {
+  assert.ok((await botRepos(db)).some((r) => r.name === "lumen"));
+  assert.equal(await setOffered(db, "op", "no-such-repo", false), false);
+  assert.equal(await setOffered(db, "op", "lumen", false), true);
+  assert.ok(!(await botRepos(db)).some((r) => r.name === "lumen"), "gone from the select");
+  assert.ok(await botRefusal(db, "rep", "lumen"), "refused");
+  assert.ok((await publicRepoNames(db)).includes("lumen"), "search still covers it");
+  assert.ok((await trackedNames(db)).includes("lumen"));
+  assert.equal((await offerState(db)).repos.find((r) => r.name === "lumen")?.offered, false);
+  await setOffered(db, "op", "lumen", true);
+  assert.ok((await botRepos(db)).some((r) => r.name === "lumen"));
 });

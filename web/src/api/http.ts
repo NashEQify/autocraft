@@ -284,6 +284,7 @@ export function createHttpApi(): Api {
       removeLink: (id) => post("/api/admin/discord/unlink", { id }),
       addFilingRepo: (repo) => post("/api/admin/discord/filing-repos/add", { repo }),
       removeFilingRepo: (repo) => post("/api/admin/discord/filing-repos/remove", { repo }),
+      setOffer: (repo, on) => post("/api/admin/discord/offer", { repo, on }),
       account: () => get("/api/account/discord"),
       unlinkOwn: () => post("/api/account/discord/unlink", {}),
       linkCode: () => post("/api/account/discord/code", {}),

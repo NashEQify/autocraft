@@ -4,6 +4,7 @@ import type { DiscordSetup } from "../../api/types";
 import type { ViewProps } from "../../registry/types";
 import { DiscordUsageBlock } from "./DiscordUsageBlock";
 import { DiscordFilingBlock } from "./DiscordFilingBlock";
+import { DiscordOfferBlock } from "./DiscordOfferBlock";
 import { Badge, type Tone } from "../../ui/atoms/Badge";
 import { Button } from "../../ui/atoms/Button";
 import { ErrorLine } from "../../ui/atoms/ErrorLine";
@@ -81,6 +82,7 @@ export function DiscordView(_: ViewProps) {
               </div>
             ))}
           </Block>
+          <DiscordOfferBlock offer={data.offer} filingCount={data.filingRepos.length} onSet={(r, on) => api.discord.setOffer(r, on).then(() => refetch())} />
           <DiscordFilingBlock repos={data.filingRepos} onAdd={(r) => api.discord.addFilingRepo(r).then(() => refetch())} onRemove={(r) => api.discord.removeFilingRepo(r).then(() => refetch())} />
           <DiscordUsageBlock usage={data.usage} />
           <LinksBlock links={data.links} busy={write.busy} onRemove={(id) => write.run(id, () => api.discord.removeLink(id)).then(() => refetch())} />

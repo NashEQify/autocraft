@@ -977,6 +977,8 @@ export interface DiscordSetup {
   repos: string[];
   /** Public repos of any owner the bot files issues into without tracking them. */
   filingRepos: { owner: string; name: string; addedBy: string; addedAt: string }[];
+  /** Every public tracked repo with whether the bot offers it in its repo select; `used` of `max` places are filled (offered repos plus filing-only ones). */
+  offer: { repos: { name: string; label: string; offered: boolean }[]; used: number; max: number };
   contact: string;
   /** Whether the bot adds a reaction to messages it recorded against items. */
   reactOn: boolean;
