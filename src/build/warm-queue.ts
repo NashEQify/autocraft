@@ -4,7 +4,7 @@
 //   image gets one queued task, unless one is already queued or running. A new head or a new toolchain image both count.
 // - At claim the queued task takes the newest head, so merges that land while it waits share one build (warmClaim).
 // - Builds of one repo start at least warm_min_interval_minutes apart (default 15): a burst of merges coalesces into one
-//   publish. A head whose warm build failed is not built again; the next head is.
+//   publish. A head whose warm build failed is not built again under the same AutoCraft version; the next head or a new version is.
 // - The warm store's gc runs in the producer pod at most once a day (takeGc, releaseGc).
 import type { TaskStep } from "../../web/src/api/types.ts";
 import { audit } from "../dash/audit.ts";
@@ -12,6 +12,7 @@ import { baseScopeRepos } from "../pilot.ts";
 import { setting, writeSetting } from "../settings-read.ts";
 import { warmPlan } from "../worker/rust.ts";
 import type { Db } from "../db/index.ts";
+import { envVar } from "../env.ts";
 import { BuildError } from "./envs.ts";
 import { settingsOf, toolchainImage, type KubeSettings } from "./pods.ts";
 import { createTask, warmKeyOf, WARM_STEP } from "./tasks.ts";
@@ -76,10 +77,18 @@ export async function mainHead(db: Db, repo: string): Promise<string | null> {
 
 const warmTasks = (db: Db, repo: string) => db.k.selectFrom("build_tasks").where("repo", "=", repo).where("step", "=", WARM_STEP);
 
-/** A warm build at `head` with `image` already ended (done or failed); one that failed before its environment was known counts for the image it was queued with. */
+/** The AutoCraft version a warm task is queued under: the runner's image. A failure under another version may have been a bug since fixed. */
+export const autocraftVersion = (): string => envVar("IMAGE") ?? "unknown";
+
+/**
+ * A warm build at `head` with `image` already ended; one that failed before its environment was known counts for the image
+ * it was queued with. A failed one counts only when it was queued under the current AutoCraft version (rows without a
+ * version never do), so each version tries a failing head once.
+ */
 async function attempted(db: Db, repo: string, head: string, image: string): Promise<boolean> {
-  const rows = await db.all(warmTasks(db, repo).select(["sandbox_env", "warm_image"]).where("head_sha", "=", head).where("state", "in", ["done", "failed"]));
-  return rows.some((r) => {
+  const version = autocraftVersion();
+  const rows = await db.all(warmTasks(db, repo).select(["sandbox_env", "warm_image", "warm_version", "state"]).where("head_sha", "=", head).where("state", "in", ["done", "failed"]));
+  return rows.filter((r) => r.state === "done" || r.warm_version === version).some((r) => {
     if (!r.sandbox_env) return !r.warm_image || r.warm_image === image;
     try {
       return (JSON.parse(r.sandbox_env) as { image?: string }).image === image;
@@ -100,7 +109,7 @@ export async function queueWarm(db: Db, repo: string, s: KubeSettings): Promise<
   try {
     return await createTask(db, {
       step: WARM_STEP, repo, headSha: head, baseSha: head, requires: { os: "linux", toolchains: [...TOOLCHAINS] }, priority: WARM_PRIORITY,
-      plan: warmPlan({ mirror: !!s.crateMirror }), warm: { key: warmKeyOf(repo), role: "build" }, warmImage: image,
+      plan: warmPlan({ mirror: !!s.crateMirror }), warm: { key: warmKeyOf(repo), role: "build" }, warmImage: image, warmVersion: autocraftVersion(),
     });
   } catch (e) {
     if (e instanceof BuildError) return null;
