@@ -14,7 +14,7 @@ import { existsSync, lstatSync, lutimesSync, mkdirSync, readdirSync, readFileSyn
 import { dirname, join } from "node:path";
 import { slugOf } from "../owners.ts";
 import { CHANGED_FILE, COPY_MARK_FILE } from "../build/warm-mount.ts";
-import { clearDir, decodeManifest, loadEd25519, parseLatest, verifyLatest } from "../warm/manifest.ts";
+import { clearDir, decodeManifest, removeCargoLocks, loadEd25519, parseLatest, verifyLatest } from "../warm/manifest.ts";
 
 /** 2001-01-01, as CI's restore-mtimes step uses: older than any warm build. */
 export const OLD_MTIME_SEC = 978307200;
@@ -285,6 +285,8 @@ export async function warmCopyPhase(work: string, env: NodeJS.ProcessEnv, log: L
   try {
     if (volume) write({ state: "copying", commit });
     await cp(join(cur, "target"), target);
+    // cp -a keeps hard links, and cargo deadlocks on flocks of lock files that share an inode.
+    await removeCargoLocks(target);
     mkdirSync(cargoTmp, { recursive: true });
     await cp(join(cur, "cargo"), cargoTmp);
   } catch (e) {

@@ -5,6 +5,7 @@ import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { WorkerConfig } from "./config.ts";
+import { removeCargoLocks } from "../warm/manifest.ts";
 import { PATCH_MAX_BYTES } from "./patch.ts";
 import { removeTree } from "./rmtree.ts";
 
@@ -90,6 +91,8 @@ export function copyWarm(cfg: WorkerConfig, key: string, target: string): Promis
     const rec = readRecord(cfg, key);
     if (!rec || !existsSync(dirOf(cfg, key))) return false;
     await run("cp", ["-a", "--reflink=auto", `${dirOf(cfg, key)}/.`, `${target}/`]);
+    // cp -a keeps hard links, and cargo deadlocks on flocks of lock files that share an inode.
+    await removeCargoLocks(target);
     writeRecord(cfg, key, { ...rec, lastUsed: Date.now() });
     return true;
   });

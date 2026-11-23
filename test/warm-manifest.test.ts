@@ -8,7 +8,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
-import { applyManifest, clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
+import { applyManifest, clearDir, decodeManifest, ManifestError, MTIME_SLACK_NS, removeCargoLocks, signLatest, WARM_BASE_MARK, walkTree, type Entry } from "../src/warm/manifest.ts";
 import { WarmStore } from "../src/warm/store-client.ts";
 import { podPhase } from "../src/worker/pod.ts";
 
@@ -329,4 +329,28 @@ test("warm restore: applied files are readable to other uids, and a hard-linked 
   assert.equal(stats.linked, 1);
   assert.equal(mode(join(next, "d/lib.rlib")), 0o644);
   assert.equal(mode(join(prevRoot, "d/lib.rlib")), 0o644);
+});
+
+test("warm cargo locks: never published, empty files get their own inodes, and a restore drops planted locks", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "warm-locks-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const src = join(tmp, "src");
+  mkdirSync(join(src, "debug"), { recursive: true });
+  for (const n of ["a", "b", "c", ".cargo-lock", "debug/.cargo-build-lock", "debug/.cargo-artifact-lock"]) writeFileSync(join(src, n), "");
+  const entries = await walkTree({ target: src, cargoHome: join(tmp, "nohome") });
+  assert.deepEqual(entries.filter((e) => e.type === "file").map((e) => e.path), ["target/a", "target/b", "target/c"]);
+
+  // A manifest published before the fix lists the locks; they are skipped on apply too.
+  const old = entries.concat([{ path: "target/.cargo-lock", type: "file", mode: 0o644, size: 0, mtimeNs: 1n, sha256: createHash("sha256").update("").digest("hex") }]);
+  const dest = join(tmp, "dest");
+  await applyManifest({ header: {} as any, entries: old }, { target: dest }, async () => { throw new Error("no fetch for empty files"); });
+  assert.equal(existsSync(join(dest, ".cargo-lock")), false);
+  const sts = ["a", "b", "c"].map((n) => statSync(join(dest, n)));
+  assert.equal(new Set(sts.map((s) => s.ino)).size, 3);
+  assert.ok(sts.every((s) => s.nlink === 1));
+
+  linkSync(join(dest, "a"), join(dest, ".cargo-lock"));
+  await removeCargoLocks(dest);
+  assert.equal(existsSync(join(dest, ".cargo-lock")), false);
+  assert.equal(existsSync(join(dest, "a")), true);
 });

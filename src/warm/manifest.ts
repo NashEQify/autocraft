@@ -5,7 +5,8 @@
 // The store is not trusted for content: latest.json is signed (Ed25519), it names the manifest's sha256, and the
 // manifest names every blob's sha256, so whatever is fetched is checked before it is kept.
 import { createHash, createPrivateKey, createPublicKey, sign, verify, type KeyObject } from "node:crypto";
-import { chmodSync, copyFileSync, createReadStream, createWriteStream, linkSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { chmodSync, copyFileSync, createReadStream, createWriteStream, linkSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { chmod, lutimes } from "node:fs/promises";
 import { isAbsolute, join, posix } from "node:path";
 import { Transform } from "node:stream";
@@ -132,6 +133,21 @@ const validMode = (m: unknown) => Number.isInteger(m) && (m as number) >= 0 && (
 // Walk
 
 /** Compiles exclusion patterns over manifest paths: `*` matches within a segment, `**` any number of segments. */
+/**
+ * Cargo's lock files (`.cargo-lock`, `.cargo-build-lock`, `.cargo-artifact-lock`) are never published or applied. Cargo
+ * takes flocks on them, and when two names share one inode (empty files de-duplicate to one) it deadlocks on itself.
+ * Cargo recreates them.
+ */
+export const isCargoLock = (path: string): boolean => /^\.cargo-.*lock$/.test(path.slice(path.lastIndexOf("/") + 1));
+
+/** Deletes every cargo lock file under `dir`, so a tree copied from a version that holds linked ones cannot deadlock cargo. */
+export function removeCargoLocks(dir: string): Promise<void> {
+  return new Promise((resolve) => {
+    // Best effort: a failure leaves the files, which only matters for a version published with linked locks.
+    execFile("find", [dir, "-name", ".cargo-*lock", "-type", "f", "-delete"], { timeout: 10 * 60_000 }, () => resolve());
+  });
+}
+
 export function excluder(patterns: string[]): (path: string) => boolean {
   const esc = (s: string) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
   const res = patterns.filter(Boolean).map((p) => new RegExp(`^${p.split("/").map((seg) => (seg === "**" ? "(?:/[^/]+)*" : `/${seg.split("*").map(esc).join("[^/]*")}`)).join("")}$`));
@@ -183,7 +199,7 @@ export type WalkOptions = {
  */
 export async function walkTree(src: WalkSource, opts: WalkOptions = {}): Promise<Entry[]> {
   const excluded = excluder(opts.exclude ?? DEFAULT_EXCLUDES);
-  const skip = (path: string) => path === `target/${WARM_BASE_MARK}` || !!opts.omit?.has(path) || excluded(path);
+  const skip = (path: string) => path === `target/${WARM_BASE_MARK}` || isCargoLock(path) || !!opts.omit?.has(path) || excluded(path);
   const entries: Entry[] = [];
   const files: { entry: FileEntry; abs: string }[] = [];
   let odd = 0;
@@ -431,7 +447,7 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
   const rootOf = (p: string) => p.slice(0, p.indexOf("/")) as RootName;
   // Manifests from before modes were normalized may hold 0640 files: every applied entry is readable to all.
   const readable = (e: Entry): Entry => (e.type === "file" ? { ...e, mode: readableFileMode(e.mode) } : e.type === "dir" ? { ...e, mode: readableDirMode(e.mode) } : e);
-  const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined).map(readable) };
+  const m = { ...full, entries: full.entries.filter((e) => roots[rootOf(e.path)] !== undefined && !isCargoLock(e.path)).map(readable) };
   const abs = (rs: Partial<Roots>, p: string) => join(rs[rootOf(p)]!, p.slice(p.indexOf("/") + 1));
   const stats: ApplyStats = { files: 0, dirs: 0, symlinks: 0, linked: 0, copied: 0, fetched: 0, fetchedBytes: 0, bytes: 0 };
   opts.onStats?.(stats);
@@ -476,6 +492,14 @@ export async function applyManifest(full: Manifest, roots: Partial<Roots>, fetch
       const dest = abs(roots, e.path);
       stats.files++;
       stats.bytes += e.size;
+      if (e.size === 0) {
+        // Every empty file is its own inode: a shared one makes flock-based lock files deadlock.
+        writeFileSync(dest, "", { flag: "wx" });
+        await chmod(dest, e.mode);
+        await setMtimes([{ abs: dest, ns: e.mtimeNs }]);
+        stats.copied++;
+        continue;
+      }
       if (linkFromPrev(e, dest)) {
         stats.linked++;
         local ??= e;

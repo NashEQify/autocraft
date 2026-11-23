@@ -21,7 +21,7 @@ import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSy
 import { connect } from "node:net";
 import { isAbsolute, join, relative } from "node:path";
 import type { PodTask } from "../build/tasks.ts";
-import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, WARM_BASE_MARK, type Roots } from "../warm/manifest.ts";
+import { BadBlobError, clearDir, DEFAULT_EXCLUDES, loadEd25519, removeCargoLocks, WARM_BASE_MARK, type Roots } from "../warm/manifest.ts";
 import { WarmStore } from "../warm/store-client.ts";
 import { markBuildStart, readBuildStart, trimTarget } from "../warm/trim.ts";
 import { checkServiceUrl } from "./config.ts";
@@ -321,8 +321,13 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
   // A mark beside no start (an empty dir, or one left by a cleared dir) must not vouch for what a restore then puts there.
   if (!reuse && markFile) rmSync(markFile, { force: true });
   const t0 = Date.now();
+  // Cargo flocks its lock files, and when a restored tree has two names on one inode it deadlocks on itself; cargo recreates them.
+  const dropLocks = async () => {
+    if (roots.target) await removeCargoLocks(roots.target);
+  };
   try {
     if (reuse) {
+      await dropLocks();
       const summary = "warm restore: reusing the target left on the volume";
       e.log(summary);
       const rest = roots.cargo ? { cargo: roots.cargo } : null;
@@ -338,6 +343,7 @@ async function restorePhase(e: PodEnv, env: NodeJS.ProcessEnv): Promise<number> 
       for (const d of dirs) clearDir(d);
       return cold(`warm restore: ${key}@${r.latest.commit.slice(0, 12)} was built with ${r.manifest.header.image ?? "an unrecorded image"}, not ${image}`);
     }
+    await dropLocks();
     writeMark();
     const s = r.stats;
     const summary = `warm restore: ${key}@${r.latest.commit.slice(0, 12)}, ${s.files} files (${(s.bytes / 1024 ** 3).toFixed(2)} GB), ${s.fetched} fetched, ${s.linked + s.copied} linked or copied, in ${((Date.now() - t0) / 1000).toFixed(1)} s`;
