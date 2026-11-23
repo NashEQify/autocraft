@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import * as helper from "../worker/autocraft.mjs";
 import type * as H from "../worker/autocraft.mjs";
 
@@ -170,6 +170,8 @@ test("the service runs node through the PATH link that resolves to it, so a Home
     assert.equal(helper.serviceNode(real, [other, join(d, "missing"), join(d, "bin")].join(":")), join(d, "bin", "node"));
     assert.equal(helper.serviceNode(real, other), real);
     assert.equal(helper.serviceNode(real, undefined), real);
+    // A relative entry depends on the directory the install ran in, and systemd refuses a relative ExecStart.
+    assert.equal(helper.serviceNode(real, relative(process.cwd(), join(d, "bin"))), real);
   } finally {
     rmSync(d, { recursive: true, force: true });
   }
