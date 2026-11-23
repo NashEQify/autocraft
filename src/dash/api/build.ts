@@ -12,7 +12,7 @@ import { absolute, implementationShotPath, SHOT_FILE } from "../../build/artifac
 import { callRunner, runnerClient, RunnerError } from "../../remote/runner-client.ts";
 import { BuildError, createEnv, listEnvs, rotateKey, updateEnv } from "../../build/envs.ts";
 import { PRIVATE_STEPS, cancelTask, getTaskDetail, listTasks, summary } from "../../build/tasks.ts";
-import { BUILD_FEATURES, REPO_SCOPED, SHOWN_FEATURES, featureStates, isFeature, setFeature, type BuildFeature } from "../../build/features.ts";
+import { BUILD_FEATURES, REPO_SCOPED, featureStates, shownFeatures, isFeature, setFeature, type BuildFeature } from "../../build/features.ts";
 import { ScreenshotConfigError, deleteConfig, listConfigs, putConfig } from "../../verify/screenshot-config.ts";
 import { audit } from "../audit.ts";
 import { scopeOf, perDayOf, setScope, setPerDay } from "../../prbuild/select.ts";
@@ -83,7 +83,8 @@ async function featuresOf(db: Db, req: Req): Promise<BuildFeatures> {
   const tracked = new Set((await db.all(db.k.selectFrom("main.tracked_repos").select("name"))).map((r) => r.name));
   const repos = (await visibleRepos(db, req)).filter((r) => tracked.has(r)).sort();
   const shown = new Set(repos);
-  const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], shown: SHOWN_FEATURES.includes(s.feature), repos: s.repos.filter((r) => shown.has(r)) }));
+  const visible = await shownFeatures(db);
+  const features: BuildFeatureState[] = (await featureStates(db)).map((s) => ({ ...s, repoScoped: REPO_SCOPED[s.feature], shown: visible.includes(s.feature), repos: s.repos.filter((r) => shown.has(r)) }));
   const scopes: Record<string, PrBuildScope> = {};
   for (const r of repos) scopes[r] = await scopeOf(db, r);
   const manageable = await filterSeq(repos, async (r) => await mayRunRepo(req.user, r));
@@ -96,14 +97,15 @@ export const features = async (db: Db, req: Req): Promise<BuildFeatures> => {
 };
 
 /**
- * Switches a feature for one repo. A shown feature (SHOWN_FEATURES) goes to an operator or a maintainer with write access to
+ * Switches a feature for one repo. A shown feature (shownFeatures) goes to an operator or a maintainer with write access to
  * the repo; a hidden one, and scan-tests' instance-wide switch, only to an operator.
  */
 export async function switchFeature(db: Db, req: Req, feature: BuildFeature, on: boolean, repo: unknown): Promise<void> {
   if (REPO_SCOPED[feature]) {
     if (typeof repo !== "string" || !repo) throw new HttpError(400, `${feature} is switched per repo: repo is required`);
-    if (SHOWN_FEATURES.includes(feature) ? !await mayRunRepo(req.user, repo) : req.user.role !== "operator") {
-      throw new HttpError(403, SHOWN_FEATURES.includes(feature) ? "only an operator, or a maintainer with write access to the repo, switches its build features" : "only an operator switches this build feature");
+    const shown = (await shownFeatures(db)).includes(feature);
+    if (shown ? !await mayRunRepo(req.user, repo) : req.user.role !== "operator") {
+      throw new HttpError(403, shown ? "only an operator, or a maintainer with write access to the repo, switches its build features" : "only an operator switches this build feature");
     }
     await trackedRepo(db, repo);
     await setFeature(db, feature, on, req.user.login, repo);

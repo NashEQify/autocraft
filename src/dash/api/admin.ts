@@ -21,7 +21,7 @@ import { setStatusApproval, statusApprovalOf } from "../../prstatus/approval.ts"
 import { setWorkspaceExcluded, workspaceExcluded } from "../../sandbox/workspace.ts";
 import { setSingleMergeMax, singleMergeMax } from "../../merge/single.ts";
 import { setRepoPipeline } from "../../pilot.ts";
-import { SHOWN_FEATURES, featureOn, isFeature } from "../../build/features.ts";
+import { featureOn, isFeature, shownFeatures, type BuildFeature } from "../../build/features.ts";
 import { switchFeature } from "./build.ts";
 import { countPlan, planLabels } from "../../labels/plan.ts";
 import { listAll, RepoError, type RepoRow, trackRepoChecked, untrackRepo } from "../../repos.ts";
@@ -278,10 +278,11 @@ export async function override(db: Db, req: Req, lookup: GithubUserLookup): Prom
 
 export async function allRepos(db: Db, req: Req): Promise<TrackedRepo[]> {
   if (!canSeeInternals(req)) throw new HttpError(403, "only operators and maintainers read the repo settings");
-  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r, req));
+  const shown = await shownFeatures(db);
+  return await mapSeq((await listAll(db)), async (r) => await toTrackedRepo(db, r, req, shown));
 }
 
-async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo> {
+async function toTrackedRepo(db: Db, r: RepoRow, req: Req, shown: BuildFeature[]): Promise<TrackedRepo> {
   const canSwitch = !!r.tracked && await maySwitch(req, r.name);
   return {
     name: r.name, owner: r.owner, tracked: !!r.tracked, openPrs: r.open_prs, openIssues: r.open_issues, mirrored: r.rows, syncedAt: r.synced_at,
@@ -298,7 +299,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
     pipeline: !!r.tracked && !!r.pipeline,
     canSwitch,
     canManage: canSwitch,
-    buildFeatures: r.tracked ? await mapSeq(SHOWN_FEATURES, async (feature) => ({ feature, on: await featureOn(db, feature, r.name) })) : [],
+    buildFeatures: r.tracked ? await mapSeq(shown, async (feature) => ({ feature, on: await featureOn(db, feature, r.name) })) : [],
   };
 }
 
@@ -306,7 +307,7 @@ async function toTrackedRepo(db: Db, r: RepoRow, req: Req): Promise<TrackedRepo>
 async function oneRepo(db: Db, req: Req, name: string): Promise<TrackedRepo> {
   const r = (await listAll(db)).find((x) => x.name === name);
   if (!r) throw new HttpError(404, `${name} is not a known repo`);
-  return await toTrackedRepo(db, r, req);
+  return await toTrackedRepo(db, r, req, await shownFeatures(db));
 }
 
 function approvalInfo(a: { by: string; at: string } | null): RepoApproval {

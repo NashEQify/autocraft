@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BUILD_FEATURES, featureOn, featureRepos, featureStates, setFeature } from "../src/build/features.ts";
+import { BUILD_FEATURES, featureOn, featureRepos, featureStates, setFeature, shownFeatures } from "../src/build/features.ts";
+import { createEnv, hello } from "../src/build/envs.ts";
 import { FEATURES_REPO_ONLY_DONE, featuresRepoOnlySqlite } from "../src/db/feature-repo-only.ts";
 import { connect } from "../src/db.ts";
 import { INPUT_TOPICS } from "../src/runner/autopilot.ts";
@@ -41,6 +42,14 @@ test("a repo switch stays on only where the global switch was on, and featureOn 
   assert.equal(await featureOn(db, "implement", "other"), false);
   assert.equal(await featureOn(db, "implement"), false, "no repo, no answer");
   await assert.rejects(setFeature(db, "implement", true, "op"), /per repo/);
+});
+
+test("Screenshots and Nightly checks show only while an enabled environment can run them", async () => {
+  const db = await fresh();
+  assert.deepEqual(await shownFeatures(db), ["push-tests", "batch-build", "implement"]);
+  await createEnv(db, { id: "box", label: "box", kind: "local-sandbox", slots: 1 }, "op");
+  await hello(db, "box", { version: "1", slots: 1, capabilities: { os: "linux", arch: "x86_64", cpus: 4, memGb: 8, diskGb: 50, display: true, gpu: false, toolchains: ["rust-stable", "rust-nightly"] } });
+  assert.deepEqual(await shownFeatures(db), ["screenshots", "push-tests", "batch-build", "nightly", "implement"]);
 });
 
 test("a switch change is not planner input", async () => {

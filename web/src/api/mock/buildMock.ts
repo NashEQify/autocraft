@@ -36,7 +36,7 @@ const envs: BuildEnv[] = [
     settings: {
       namespace: "craft-builds", image: null, toolchainImages: {}, workerUrl: "http://autocraft-worker-api.craft.svc:8981", cpuRequest: "4", cpuLimit: "16", memoryRequest: "4Gi", memoryLimit: "8Gi",
       maxPodMemory: "64Gi", capacity: "cluster", nodeReserveCpu: "0", nodeReserveMemory: "0", priorityClassName: "craft-build-task",
-      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
+      ephemeralRequest: "4Gi", ephemeralLimit: "16Gi", storage: "40Gi", storageClass: "local-path", deadlineSec: 10800, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64", display: false,
       workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
       workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
       warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
@@ -130,7 +130,7 @@ export function createBuildMock(me: User, changed: () => void): Pick<Api, "envs"
   const featureOn = new Set<string>(["implement:designcraft", "implement:photocraft", "push-tests:designcraft", "screenshots:photocraft", "screenshots:pdfcraft", "pr-builds:photocraft", "pr-builds:pdfcraft"]);
   const scopes: Record<string, PrBuildScope> = { pdfcraft: "all" };
   let perDay = 10;
-  const SHOWN: BuildFeatureName[] = ["push-tests", "batch-build", "implement"];
+  const SHOWN: BuildFeatureName[] = ["screenshots", "push-tests", "batch-build", "nightly", "implement"];
   const SCOPED: Record<BuildFeatureName, boolean> = { screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true };
   const features = (): BuildFeatures => ({
     features: (Object.keys(SCOPED) as BuildFeatureName[]).map((feature) => ({

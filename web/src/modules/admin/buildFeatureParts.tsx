@@ -1,5 +1,5 @@
-// A repo's build features: one switch each, with a line saying what it does. The server lists only the features whose builds
-// run on the cluster's build pods today (SHOWN_FEATURES in src/build/features.ts).
+// A repo's build features: one switch each, with a line saying what it does. The server lists only the features an enabled
+// build environment can run (shownFeatures in src/build/features.ts).
 import { useState } from "react";
 import { useApi, useQuery } from "../../api/client";
 import type { BuildFeatureName, RepoBuildFeature, ScreenshotConfigJson, ScreenshotSetups, TrackedRepo } from "../../api/types";

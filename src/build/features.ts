@@ -5,6 +5,8 @@ import { audit } from "../dash/audit.ts";
 import { TERMINAL, cancelTask } from "./tasks.ts";
 import { setting } from "../settings-read.ts";
 import { mapSeq } from "../async-seq.ts";
+import { listEnvs } from "./envs.ts";
+import { NIGHTLY_CHECKS } from "../nightly/checks.ts";
 import type { Db } from "../db/index.ts";
 import { like, likeEscape, excluded } from "../db/kx.ts";
 
@@ -16,13 +18,22 @@ export const REPO_SCOPED: Record<BuildFeature, boolean> = {
   screenshots: true, "push-tests": true, "batch-build": true, "scan-tests": false, nightly: true, "pr-builds": true, implement: true,
 };
 
+/** Features whose switches the dashboard always shows: their builds run on the cluster's build pods. */
+const ALWAYS_SHOWN: readonly BuildFeature[] = ["push-tests", "batch-build", "implement"];
+/** The toolchains the nightly checks run in; a check whose toolchain no environment has is skipped. */
+const NIGHTLY_TOOLCHAINS = new Set(NIGHTLY_CHECKS.map((c) => c.toolchain));
+
 /**
- * The features whose switches the dashboard shows: those whose build tasks the cluster's build pods can run today. The others
- * keep their code and stored state. Screenshots need a display, which build pods do not offer (kubeCapabilities); the nightly
- * checks need the rust-audit, rust-cross and rust-nightly toolchain images; PR builds wait while CI stays in GitHub Actions;
- * scan tests need a confidential build environment.
+ * The features whose switches the dashboard shows, in BUILD_FEATURES order: those always shown, Screenshots while an enabled
+ * environment reports a display, and Nightly checks while one reports a nightly check's toolchain. The others (PR builds wait
+ * while CI stays in GitHub Actions; scan tests need a confidential environment) keep their code and stored state.
  */
-export const SHOWN_FEATURES: readonly BuildFeature[] = ["push-tests", "batch-build", "implement"];
+export async function shownFeatures(db: Db): Promise<BuildFeature[]> {
+  const caps = (await listEnvs(db)).filter((e) => e.enabled).map((e) => e.capabilities).filter((c) => c !== null);
+  const display = caps.some((c) => c.display);
+  const nightly = caps.some((c) => c.toolchains.some((t) => NIGHTLY_TOOLCHAINS.has(t)));
+  return BUILD_FEATURES.filter((f) => ALWAYS_SHOWN.includes(f) || (f === "screenshots" && display) || (f === "nightly" && nightly));
+}
 
 export const isFeature = (s: unknown): s is BuildFeature => typeof s === "string" && (BUILD_FEATURES as readonly string[]).includes(s);
 
