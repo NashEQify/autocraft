@@ -1,6 +1,6 @@
 // Discord mentions: the admin page's data and writes, and what the item page shows. The channel list and the
 // connection state are written by the runner's gateway client (src/discord/); this file only reads them.
-import type { DiscordAccount, DiscordLinkCode, DiscordInfo, DiscordSetup } from "../../../web/src/api/types.ts";
+import type { DiscordAccount, DiscordLinkCode, DiscordInfo, DiscordSetup, DiscordUsage } from "../../../web/src/api/types.ts";
 import { envVar } from "../../env.ts";
 import { excluded } from "../../db/kx.ts";
 import { audit } from "../audit.ts";
@@ -15,6 +15,8 @@ import { createLinkCode, linkedSince, listLinks, unlinkLogin, unlinkRow } from "
 import type { Req } from "../types.ts";
 import type { Db } from "../../db/index.ts";
 import { setting } from "../../settings-read.ts";
+import { eventCounts } from "../../discord/events.ts";
+import { interactiveTakers } from "../../health-checks.ts";
 
 const PRIVACY_PATH = DISCORD_PRIVACY_PATH;
 
@@ -47,6 +49,28 @@ const operator = (req: Req): void => {
 };
 const body = (req: Req): Record<string, unknown> => (req.json && typeof req.json === "object" ? (req.json as Record<string, unknown>) : {});
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Counters, the cost of the Discord prompts, the issues filed in the last day (the limits table keeps no more) and whether a Task Runner takes Discord calls. */
+export async function usageOf(db: Db, now: number = Date.now()): Promise<DiscordUsage> {
+  const day = new Date(now - DAY_MS).toISOString(), week = new Date(now - 7 * DAY_MS).toISOString();
+  const runs = await db.all(db.k.selectFrom("agent_runs").select(["prompt_id as prompt", "started_at as at", "cost_usd as cost"]).where("prompt_id", "like", "discord.%").where("started_at", ">=", week));
+  const byPrompt = new Map<string, DiscordUsage["prompts"][number]>();
+  for (const r of runs) {
+    const p = byPrompt.get(r.prompt) ?? { prompt: r.prompt, day: { calls: 0, usd: 0 }, week: { calls: 0, usd: 0 } };
+    byPrompt.set(r.prompt, p);
+    for (const w of r.at >= day ? [p.day, p.week] : [p.week]) { w.calls++; w.usd += r.cost ?? 0; }
+  }
+  const filed = await db.all(db.k.selectFrom("discord_filed").select(["repo", "number", "login", "at"]).where("number", ">", 0).orderBy("at", "desc").limit(20));
+  const cap = await interactiveTakers(db, now);
+  return {
+    counts: await eventCounts(db, now),
+    prompts: [...byPrompt.values()].sort((a, b) => a.prompt.localeCompare(b.prompt)),
+    filed: filed.map((f) => ({ repo: f.repo, number: Number(f.number), login: f.login, at: f.at })),
+    capacity: cap.applies ? { ready: cap.ready, why: cap.why } : null,
+  };
+}
+
 async function setupOf(db: Db): Promise<DiscordSetup> {
   const st = await db.get(db.k.selectFrom("discord_status").select(["state", "detail", "at"]).where("id", "=", 1).$narrowType<{ state: DiscordSetup["state"] }>());
   const channels = await db.all(db.k.selectFrom("discord_channels as c")
@@ -62,6 +86,7 @@ async function setupOf(db: Db): Promise<DiscordSetup> {
     channels: channels.map((c) => ({ ...c, watched: !!c.watched })),
     repos: await publicRepoNames(db),
     contact: await contactOf(db), reactOn: await reactOn(db), privacyPath: PRIVACY_PATH, links: await listLinks(db),
+    usage: await usageOf(db),
   };
 }
 

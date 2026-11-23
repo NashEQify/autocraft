@@ -97,6 +97,22 @@ export function createMockApi(): Api {
   let discordLinked = true;
   const discord: DiscordSetup = {
     state: "connected", detail: null, at: nowIso(), repos: ["photocraft", "pdfcraft", "wordcraft"], contact: "discord-privacy@example.org", reactOn: true, privacyPath: "/privacy",
+    usage: {
+      counts: { started: { day: 14, week: 63 }, junk: { day: 2, week: 9 }, filed: { day: 6, week: 31 }, link: { day: 3, week: 12 }, limits: { day: 1, week: 4 } },
+      prompts: [
+        { prompt: "discord.issue-draft", day: { calls: 9, usd: 0.0021 }, week: { calls: 41, usd: 0.0094 } },
+        { prompt: "discord.issue-questions", day: { calls: 11, usd: 0.0019 }, week: { calls: 52, usd: 0.0088 } },
+        { prompt: "discord.junk.jev", day: { calls: 14, usd: 0 }, week: { calls: 63, usd: 0 } },
+        { prompt: "discord.junk.haiku", day: { calls: 3, usd: 0.0006 }, week: { calls: 11, usd: 0.0023 } },
+        { prompt: "discord.signal.haiku", day: { calls: 120, usd: 0.0312 }, week: { calls: 806, usd: 0.2143 } },
+      ],
+      filed: [
+        { repo: "photocraft", number: 4182, login: "(app)", at: new Date(Date.now() - 25 * 60_000).toISOString() },
+        { repo: "pdfcraft", number: 977, login: "(app)", at: new Date(Date.now() - 3 * 3_600_000).toISOString() },
+        { repo: "wordcraft", number: 311, login: "tomas-vale", at: new Date(Date.now() - 9 * 3_600_000).toISOString() },
+      ],
+      capacity: { ready: false, why: "1 Task Runner has Interactive slots, and it is quota-held" },
+    },
     links: [
       { id: "l1", login: "mira-anders", linkedAt: new Date(Date.now() - 3 * 86_400_000).toISOString() },
       { id: "l2", login: "tomas-vale", linkedAt: new Date(Date.now() - 40 * 3_600_000).toISOString() },

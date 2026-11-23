@@ -394,6 +394,12 @@ CREATE TABLE IF NOT EXISTS discord_filed (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS discord_filed_at ON discord_filed (at);
+-- Counters of the public issue flow, for the Discord page's usage: one row per event, no text and no Discord ids. Rows older than 8 days are pruned.
+CREATE TABLE IF NOT EXISTS discord_events (
+  at TEXT NOT NULL,
+  kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS discord_events_at ON discord_events (at);
 
 -- One row per started GitHub App registration: the manifest flow's single-use state nonce.
 CREATE TABLE IF NOT EXISTS github_app_states (
