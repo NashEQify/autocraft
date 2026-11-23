@@ -224,7 +224,7 @@ export class IssueNew {
       return void (await call.edit({ content: "No existing issue looks like this.", components: [{ type: 1, components: [button("Continue", `inewi:none:${sid}`, 1)] }] }));
     }
     const r = await renderMatches(db, s.matches, description, call.interaction.channel_id, `inewi:none:${sid}`);
-    await call.edit({ content: r.content, components: r.components });
+    await call.edit(r);
   }
 
   /** "None of these" or "Continue": the follow-up questions in a second form, or the draft at once when there are none. */

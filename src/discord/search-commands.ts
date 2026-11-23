@@ -16,7 +16,7 @@ export function installSearchCommands(ix: Interactions, deps: { db: Db; keys: Di
     if (!search.allow(keys.hash("author", call.userId ?? "?"), keys.hash("channel", i.channel_id ?? "?"))) return void (await call.edit({ content: "Too many searches just now. Try again in a minute." }));
     const found = await search.find(question);
     const r = await renderMatches(db, found.matches, question, i.channel_id);
-    await call.edit({ content: r.content, components: r.components });
+    await call.edit(r);
   };
   ix.command(FIND_ISSUE, { name: FIND_ISSUE, type: 3, dm_permission: false }, (call) => run(call, call.targetText()));
 }

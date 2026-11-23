@@ -1,4 +1,4 @@
-// What the bot says about search results: a line per match, a GitHub link button for each, and a "File a new issue"
+// What the bot says about search results: a section per match with its GitHub link button beside it, and a "File a new issue"
 // button. Shared by ping replies and the commands.
 import type { Match } from "./search.ts";
 import { publicRepoNames } from "../public/status.ts";
@@ -9,8 +9,6 @@ import type { Db } from "../db/index.ts";
 const TITLE_CHARS = 80;
 /** Discord refuses message content over 2,000 characters; matches that don't fit are left out with their buttons. */
 const CONTENT_CHARS = 1900;
-/** Discord allows five buttons per action row. */
-const ROW_BUTTONS = 5;
 
 const oneLine = (s: string, n: number): string => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 /** Titles and reasons are plain text in the line: markdown characters are replaced so a title cannot format or link. */
@@ -27,25 +25,34 @@ export async function fileRepoUrl(db: Db, channelId: string | undefined, matches
   return t ? `https://github.com/${t.owner}/${t.name}` : null;
 }
 
-export type Rendered = { content: string; components: unknown[] };
+/** Components V2 replaces `content`: a message with this flag is built from components only. */
+export const IS_COMPONENTS_V2 = 1 << 15;
+/** Discord allows 40 components per V2 message; a result takes three (section, text, button) and the action row two or more. */
+const MAX_RESULTS = 10;
 
+export type Rendered = { components: unknown[]; flags: number };
+
+/** Each result is a section: its text with its link button beside it, so a button is never far from the issue it opens. "File a new issue" and the other actions sit in a row at the end. */
 export async function renderMatches(db: Db, matches: Match[], question: string, channelId: string | undefined, noneId?: string): Promise<Rendered> {
-  const lines: string[] = [];
+  const sections: unknown[] = [];
   const shown: Match[] = [];
   let size = 0;
-  for (const m of matches) {
-    const line = `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
-    if (size + line.length + 1 > CONTENT_CHARS) break;
-    size += line.length + 1;
-    lines.push(line);
+  for (const m of matches.slice(0, MAX_RESULTS)) {
+    const text = `${m.repo}#${m.number} ${oneLine(plain(m.title), TITLE_CHARS)}${m.pr ? " (PR)" : ""}${m.merged ? " (merged)" : m.closed ? " (closed)" : ""}${m.reason ? `\n> ${plain(m.reason)}` : ""}`;
+    if (size + text.length + 1 > CONTENT_CHARS) break;
+    size += text.length + 1;
+    sections.push({
+      type: 9,
+      components: [{ type: 10, content: text }],
+      accessory: { type: 2, style: 5, label: `${m.repo}#${m.number}`.slice(0, 80), url: m.url },
+    });
     shown.push(m);
   }
-  const buttons: unknown[] = shown.map((m) => ({ type: 2, style: 5, label: `${m.repo}#${m.number}`.slice(0, 80), url: m.url }));
+  if (!sections.length) sections.push({ type: 10, content: "No matching issue found." });
+  const buttons: unknown[] = [];
   const repo = await fileRepoUrl(db, channelId, shown);
   // `noneId` is the button of the search form's reply: it continues that session instead of opening the form again.
   if (noneId) buttons.push({ type: 2, style: 2, label: "None of these, file a new one", custom_id: noneId });
   else if (repo) buttons.push({ type: 2, style: 2, label: "File a new issue", custom_id: formButtonId(repo.split("/").pop()!, question) });
-  const rows: unknown[] = [];
-  for (let i = 0; i < buttons.length; i += ROW_BUTTONS) rows.push({ type: 1, components: buttons.slice(i, i + ROW_BUTTONS) });
-  return { content: lines.length ? lines.join("\n") : "No matching issue found.", components: rows };
+  return { components: buttons.length ? [...sections, { type: 1, components: buttons }] : sections, flags: IS_COMPONENTS_V2 };
 }

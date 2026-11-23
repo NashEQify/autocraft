@@ -111,6 +111,12 @@ before(async () => {
   await pings.dispatch("READY", { user: { id: "bot1" } });
 });
 
+type V2 = { type: number; content?: string; components?: V2[]; accessory?: V2; label?: string; url?: string; custom_id?: string; style?: number };
+/** The text of a Components V2 body, one line block per TextDisplay. */
+const v2text = (b: { components?: unknown[] }): string => ((b.components ?? []) as V2[]).flatMap((c) => (c.type === 9 ? c.components! : [c])).filter((c) => c.type === 10).map((c) => c.content).join("\n");
+/** Every button of a Components V2 body in order: section accessories, then the action row. */
+const v2buttons = (b: { components?: unknown[] }): V2[] => ((b.components ?? []) as V2[]).flatMap((c) => (c.type === 9 ? [c.accessory!] : c.type === 1 ? c.components! : []));
+
 describe("ping replies", () => {
   test("a reply-ping searches the quoted text and replies once, publicly, with link buttons and no mentions", async () => {
     await pings.dispatch("MESSAGE_CREATE", msg("p1"));
@@ -120,9 +126,13 @@ describe("ping replies", () => {
     const { body } = rest.sent[0]!;
     assert.deepEqual(body.allowed_mentions, { parse: [] });
     assert.deepEqual(body.message_reference, { message_id: "p1", fail_if_not_exists: false });
-    assert.match(body.content!, /photocraft#1 Export to WebP ignores the quality setting\n> Same WebP quality problem/);
-    assert.match(body.content!, /photocraft#3 Add WebP export \(closed\)/);
-    const buttons = (body.components![0] as { components: { style: number; label: string; url?: string; custom_id?: string }[] }).components;
+    assert.match(v2text(body), /photocraft#1 Export to WebP ignores the quality setting\n> Same WebP quality problem/);
+    assert.match(v2text(body), /photocraft#3 Add WebP export \(closed\)/);
+    const buttons = v2buttons(body) as { style: number; label: string; url?: string; custom_id?: string }[];
+    // Each link button is the accessory of the section holding its result's text.
+    const sections = body.components!.filter((c) => (c as V2).type === 9) as V2[];
+    assert.equal(sections.length, 2);
+    for (const sec of sections) assert.ok(sec.components![0]!.content!.startsWith(sec.accessory!.label!));
     assert.deepEqual(buttons.map((b) => b.label), ["photocraft#1", "photocraft#3", "File a new issue"]);
     assert.ok(buttons.slice(0, 2).every((b) => b.style === 5));
     assert.match(buttons[2]!.custom_id!, /^inewi:open:photocraft:/);
@@ -149,7 +159,7 @@ describe("ping replies", () => {
     reply = () => JSON.stringify({ picks: [{ ref: "evil#9", reason: "invented" }, { ref: "photocraft#99", reason: "invented" }] });
     await pings.dispatch("MESSAGE_CREATE", msg("p5", { referenced_message: { content: "crash in layers" } }));
     await pings.idle();
-    const sent = rest.sent.at(-1)!.body.content!;
+    const sent = v2text(rest.sent.at(-1)!.body);
     assert.match(sent, /No matching issue found/);
     assert.doesNotMatch(sent, /evil|#99/);
   });
@@ -174,7 +184,7 @@ describe("ping replies", () => {
     await pings.dispatch("MESSAGE_CREATE", msg("p6", { referenced_message: { content: "webp export quality" } }));
     await pings.idle();
     assert.equal(asked.length, calls);
-    const sent = rest.sent.at(-1)!.body.content!;
+    const sent = v2text(rest.sent.at(-1)!.body);
     assert.match(sent, /photocraft#1 /);
     assert.doesNotMatch(sent, />/);
     await db.run(db.k.deleteFrom("agent_runs").where("step", "=", "discord-search"));
@@ -243,7 +253,7 @@ describe("commands", () => {
     ix.dispatch("INTERACTION_CREATE", { id: "i1", token: "t", type: 2, application_id: "app1", channel_id: "c1", member: { user: { id: "u9" } }, data: { name: "Find issue", type: 3, target_id: "m1", resolved: { messages: { m1: { content: "dark mode layers" } } } } });
     await new Promise((r) => setTimeout(r, 50));
     assert.deepEqual(rest.callbacks.at(-1), { type: 5, ephemeral: true, choices: undefined });
-    assert.match(rest.edits.at(-1)!.content!, /photocraft#2 Dark mode for the layers panel\n> Same panel/);
+    assert.match(v2text(rest.edits.at(-1)!), /photocraft#2 Dark mode for the layers panel\n> Same panel/);
   });
 
   test("/autocraft link, status, and stats: a code links the caller, hidden items are not found, repo choices are public repos", async () => {
@@ -369,6 +379,6 @@ describe("pull requests", () => {
     assert.equal(by(9), undefined, "merged more than 7 days ago");
     const { score: _s, body: _b, activity: _a, updatedAt: _u, ...m7 } = by(7)!;
     const rendered = await renderMatches(db, [m7], "q", undefined);
-    assert.match(rendered.content, /photocraft#7 .* \(PR\) \(merged\)/);
+    assert.match(v2text(rendered), /photocraft#7 .* \(PR\) \(merged\)/);
   });
 });
