@@ -38,6 +38,18 @@ A filing-only repo is a public repo of any owner that the Discord issue bot offe
 - Names stay unique across owners: a name that is tracked, known in `repos` under another owner, or already on the list is refused. GitHub's spelling of the name is stored.
 - The one write such a repo gets is the bot's issue and its label (`guardBotFiling` in `src/core/guard.ts`), under the same limits and junk check as for tracked repos. When the app has lost access, the reporter is told so and gets the GitHub link.
 - The bot's app select holds at most 25 repos: the preselected one, then the filing-only repos, then the tracked ones with the most open issues.
+- While the GitHub App has allowed owners (below), the repo's owner must be one of them.
+
+#### GitHub App installations
+
+A private GitHub App can be installed only on the account that owns it. To let another account (a partner organization) install it, an app manager makes it public: the app's GitHub settings, Advanced, Make public. GitHub then lets any account install it, so AutoCraft keeps its own list of allowed owners.
+
+- Operators manage the list on the GitHub App page (Allowed owners) or with `autocraft-server app owners list | allow <login> | remove <login>`; `autocraft-server app installations` lists the app's installations. Each change is audited (`app-owner-allow`, `app-owner-remove`). The list keeps each account's GitHub id and matches installations by it, so a renamed account stays allowed and its row takes the new login.
+- An empty list enforces nothing: any account may install the app and nothing is removed. The first account allowed also lists every account the app is installed on at that moment and every account that owns a tracked or filing-only repo or the app, so turning enforcement on removes nothing that exists; their audit rows give the reason.
+- To let a new organization install the app, allow it first: an installation on an account not yet listed is removed within seconds.
+- While enforcement is on, tracking a repo or adding a filing-only repo needs its owner on the list; a repo tracked by a path that skips that check puts its owner on the list. Owners of tracked or filing-only repos and of the app show as Protected and cannot be taken off the list, and neither can an account whose installation covers such a repo (repos match by name, since names are unique across owners and survive an owner's rename); untracking does not remove them.
+- With accounts listed, an installation on any other account is uninstalled: right after its `installation` (created, new permissions accepted) or `installation_repositories` (added) webhook is answered, and otherwise by a sweep of the app's installations that the sync run makes every 10 minutes. Before removing, AutoCraft reads the installation's repos; one that is tracked or filing-only keeps the installation, recorded as a failed `app-install-removed` row. Each removal is audited as `app-install-removed` (the account's login and id, the installation id and what found it); an installation GitHub no longer has is recorded with `already`. Removals and kept installations raise the `app-foreign-install` warning in the header for 24 hours, or until an operator acknowledges it.
+- Filing-only repos of an owner that is not on the list are refused.
 
 #### Hiding tracked repos from the Discord bot
 

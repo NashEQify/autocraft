@@ -425,6 +425,16 @@ CREATE TABLE IF NOT EXISTS github_app_states (
   created_at TEXT NOT NULL
 );
 
+-- GitHub accounts the GitHub App may be installed on (src/github/allowed-owners.ts). No row: any account may install it
+-- and nothing is removed; with rows, an installation on another account is uninstalled. Installations match by account id;
+-- a row whose id GitHub could not tell yet matches by login until a later read fills it.
+CREATE TABLE IF NOT EXISTS app_allowed_owners (
+  login TEXT PRIMARY KEY COLLATE NOCASE,  -- as GitHub spells it; refreshed from the installation when the id matches
+  account_id INTEGER UNIQUE,
+  added_by TEXT NOT NULL,
+  added_at TEXT NOT NULL
+);
+
 -- One-time links an operator hands to an org owner to set the GitHub App up in their org. Only the hash of the link's secret is kept.
 CREATE TABLE IF NOT EXISTS github_setup_links (
   id TEXT PRIMARY KEY,
