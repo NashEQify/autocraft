@@ -28,7 +28,7 @@ export const DEFAULT_SETTINGS: KubeSettings = {
   storage: "40Gi", storageClass: "local-path", deadlineSec: 3 * 3600, maxStepSec: 7200, runtimeClassName: null, arch: "x86_64",
   workspaceSlots: 12, workspaceCpuRequest: "2", workspaceCpuLimit: "16", workspaceMemoryRequest: "12Gi", workspaceMemoryLimit: "40Gi",
   workspaceEphemeralRequest: "4Gi", workspaceEphemeralLimit: "16Gi", workspaceStorage: "40Gi", sccacheUrl: null,
-  warmWriter: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
+  warmWriter: false, display: false, cacheWriteUrl: null, writerSecret: null, signingSecret: null, crateMirror: null,
 };
 
 export const APP_LABEL = { "app.kubernetes.io/name": "autocraft-build" } as const;
@@ -158,6 +158,10 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
         if (typeof v !== "boolean") throw new BuildError(400, "warmWriter must be true or false");
         out.warmWriter = v;
         break;
+      case "display":
+        if (typeof v !== "boolean") throw new BuildError(400, "display must be true or false");
+        out.display = v;
+        break;
       case "arch":
         if (v !== "x86_64" && v !== "aarch64") throw new BuildError(400, "arch must be x86_64 or aarch64");
         out.arch = v;
@@ -178,11 +182,11 @@ export function parseSettings(input: unknown, base: KubeSettings = DEFAULT_SETTI
   return out;
 }
 
-/** What a task's pods offer, for claim matching: no display, no GPU, and only the toolchains that have an image. */
+/** What a task's pods offer, for claim matching: `display` when the toolchain images render in software (settings.display), no GPU, and only the toolchains that have an image. */
 export function kubeCapabilities(s: KubeSettings): Capabilities {
   return {
     os: "linux", arch: s.arch, cpus: Math.max(1, Math.floor(quantity(s.cpuLimit))), memGb: Math.floor(quantity(s.memoryLimit) / 1024 ** 3),
-    diskGb: Math.floor(quantity(s.storage) / 1024 ** 3), display: false, gpu: false, toolchains: Object.keys(s.toolchainImages).sort(),
+    diskGb: Math.floor(quantity(s.storage) / 1024 ** 3), display: s.display, gpu: false, toolchains: Object.keys(s.toolchainImages).sort(),
   };
 }
 
@@ -526,6 +530,14 @@ function sccacheEnv(url: string, cacheVersion: string, write: boolean): Record<s
     SCCACHE_IGNORE_SERVER_IO_ERROR: "1", SCCACHE_IDLE_TIMEOUT: "0",
   };
 }
+/**
+ * What a step needs to render without a display server: Mesa's software Vulkan (lavapipe) and GL (llvmpipe), with the shader
+ * cache on the step's writable /tmp (the root filesystem is read-only).
+ */
+export const renderEnv = (arch: KubeSettings["arch"]): Record<string, string> => ({
+  VK_ICD_FILENAMES: `/usr/share/vulkan/icd.d/lvp_icd.${arch}.json`, WGPU_BACKEND: "vulkan", LP_NUM_THREADS: "4",
+  XDG_CACHE_HOME: "/tmp/cache", MESA_SHADER_CACHE_DIR: "/tmp/cache/mesa",
+});
 /** The env every step at the CI paths shares: the gate's (ciEnv), HOME, CARGO_HOME and CI. */
 export const gateEnvOf = (prepared: Pick<Prepared, "env">): Record<string, string> => ({ ...ciEnv(prepared.env), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CI: "1" });
 /**
@@ -628,6 +640,7 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
         ...(writing ? { CARGO_NET_OFFLINE: "true", ...(prepared.warmCommand ? { AUTOCRAFT_WARM_COMMAND: prepared.warmCommand } : {}) } : {}),
       }
       : { ...(offline ? prepared.env : {}), ...(mp ? mp.env : {}), HOME: "/tmp", CARGO_HOME: "/cache/cargo", CARGO_TARGET_DIR: "/target", CI: "1" };
+    if (c.s.display && !writing) Object.assign(env, renderEnv(c.s.arch));
     return container(stepContainer(i), image, stepResources(c.s, c.memory, extraMemory ?? copyMemory ?? 0), {
       command: ["/bin/sh", "-c", writing && ci ? WARM_STEP_WRAPPER : cached(step) ? CACHE_STEP_WRAPPER : STEP_WRAPPER, "step", String(stepCap(c.s, step)), ...step.cmd],
       workingDir: ci ? checkout : "/src",
