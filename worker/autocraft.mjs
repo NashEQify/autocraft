@@ -19,7 +19,7 @@
 //   autocraft update                  replaces this file with the server's current runner
 //   autocraft service install | uninstall | status  runs `work` as a systemd user unit or launchd agent
 //   autocraft runner status | logs | pause | resume | reserve  readiness and plan usage, the service log, pausing, the usage reserve
-//   autocraft inbox | queue | calls | repos | fixups ...  the server's tools as commands (MCP over HTTP); `call <tool>` reaches any tool
+//   autocraft inbox | queue | calls | settings | repos | fixups ...  the server's tools as commands (MCP over HTTP); `call <tool>` reaches any tool
 //   autocraft work [--parallel N]     claims, runs and submits in a loop
 //   autocraft claim                   claims one call; prints its lease id
 //   autocraft run [--detach] [<lease>]  runs a claimed lease (claims one when none is given)
@@ -4793,6 +4793,8 @@ export const CLI_COMMANDS = [
   { path: ["calls", "pick"], tool: "pick_model_call", args: ["id"], usage: "<id>", summary: "reserve a call for your own Task Runners", why: pickWhy },
   { path: ["calls", "unpick"], tool: "unpick_model_call", args: ["id"], usage: "<id>", summary: "end a pick", why: pickWhy },
   { path: ["calls", "mine"], tool: "my_work", usage: "", summary: "today's calls on your machine, and your Task Runners", why: () => "needs one of your Task Runners reporting in, while the server is in the user-local inference mode" },
+  { path: ["settings"], tool: "my_settings", usage: "", summary: "your reserve, repos, calls at once and interactive slots", why: () => "only maintainers and operators have settings" },
+  { path: ["settings", "set"], tool: "set_my_settings", usage: "[--reserve <5h> <weekly>] [--max-calls N | --no-max-calls] [--repos <a,b>|all] [--interactive-slots N]", summary: "change them, as the Connect page does", why: () => "only maintainers and operators have settings" },
   { path: ["repos"], tool: "list_repos", usage: "", summary: "tracked repositories with their open decisions and fix-ups" },
   { path: ["fixups"], tool: "list_fixups", usage: "[--repo R] [--limit N]", summary: "PRs whose review fixes the pipeline could not apply" },
 ];
@@ -5140,7 +5142,7 @@ const RUNNER_HELP = [
   ["autocraft runner status", "whether the runner claims now, with plan usage, reserve and pause"],
   ["autocraft runner logs [-n N] [-f]", "the service's log (journalctl on Linux, service.log on macOS)"],
   ["autocraft runner pause | resume", "claim nothing until the plan window resets; resume ends a pause or a hold"],
-  ["autocraft runner reserve <5h> <weekly> | off", "keep more of each plan window free than the server's reserve (percent)"],
+  ["autocraft runner reserve <5h> <weekly> | off", "keep more of each plan window free than the server's reserve (percent); the server's reserve is set with `settings set --reserve`"],
 ];
 
 /** @type {HelpLine[]} */
@@ -5162,7 +5164,7 @@ const TASK_HELP = [
   ["autocraft config reserve <5h> <weekly> | off", "runner reserve"],
 ];
 
-const GROUP_TITLES = /** @type {const} */ ({ inbox: "Inbox", queue: "Merge queue", calls: "Model calls" });
+const GROUP_TITLES = /** @type {const} */ ({ inbox: "Inbox", queue: "Merge queue", calls: "Model calls", settings: "Settings" });
 
 /** @param {string} group @returns {HelpLine[]} */
 const serverHelp = (group) => CLI_COMMANDS.filter((c) => c.path[0] === group).map((c) => [`autocraft ${[...c.path, c.usage].filter(Boolean).join(" ")}`, c.summary]);
