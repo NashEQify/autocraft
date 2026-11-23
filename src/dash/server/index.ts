@@ -2,7 +2,7 @@
 // routing for the dashboard. Handlers only ever see authenticated requests.
 import { AppKeys, bindSecrets, useAppKeys } from "../../github/app-keys.ts";
 import { maintainerWritesOn } from "../../settlers.ts";
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { gunzip, gunzipSync } from "node:zlib";
@@ -830,7 +830,7 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
         const failed = errors as Map<string, string> | null;
         if (!out.lease && out.reason === undefined && failed?.size) out.reason = [...failed.values()][0];
         // How long the claim waited for a call, so a latency measurement can leave it out.
-        return reply(200, { ...out, encodings: [...ENCODINGS] } satisfies ClaimReply, { "x-held-ms": String(heldMsOf(out)) });
+        return reply(200, { ...out, encodings: [...ENCODINGS], ...(await servedHelperVersion().then((v) => v && { currentHelper: v }, () => undefined)) } satisfies ClaimReply, { "x-held-ms": String(heldMsOf(out)) });
       }
       if (path === ROUTES.status) {
         const caller = await runner();
@@ -951,6 +951,14 @@ export async function createApp(opts: AppOptions & { routes: Route[] }) {
     tar.on("error", () => res.destroy());
     res.on("close", () => tar.destroy());
     tar.pipe(res);
+  }
+
+  /** The version in the helper script this server serves (read again when the file changes), or null. */
+  let helperVersionCache: { mtimeMs: number; version: string | null } | null = null;
+  async function servedHelperVersion(): Promise<string | null> {
+    const { mtimeMs } = await stat(HELPER_FILE);
+    if (helperVersionCache?.mtimeMs !== mtimeMs) helperVersionCache = { mtimeMs, version: /export const HELPER_VERSION = "([^"]+)"/.exec(await readFile(HELPER_FILE, "utf8"))?.[1] ?? null };
+    return helperVersionCache.version;
   }
 
   /** GET or HEAD of the helper script. */

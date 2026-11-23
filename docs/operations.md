@@ -290,9 +290,18 @@ The move (`autocraft migrate`, also run at the first start of 1.3.0, before the 
 | `harness claude\|codex ...` | Chooses the harness login (see [Setting up a Task Runner](#setting-up-a-task-runner)). |
 | `setup [<dashboard URL>] [--yes]` | Installs what the machine lacks, asking first (see [setup](#setup)), then runs `doctor` and returns its exit code. |
 | `doctor` | Checks Node, platform, sandbox (on macOS with the canary), `git` and `tar`, the harness binary, version and login, a harness start inside the sandbox, the server and the tiers. Exit code 1 when a check fails; it then names `autocraft setup`. |
-| `update` | Downloads the server's current Task Runner over this file (checked with `node --check` first); restart `work` or the service afterwards. A version refusal names this command. |
+| `update` | Downloads the server's current Task Runner over this file (checked with `node --check` first); restart `work` or the service afterwards. A version refusal names this command. `work` runs it by itself (see [Self-update](#self-update)). |
 | `service install [--parallel N]` | Writes and starts a systemd user unit (Linux, `~/.config/systemd/user/autocraft.service`) or a launchd agent (macOS, `~/Library/LaunchAgents/autocraft.plist`) that runs `work` with these arguments and restarts it whenever it ends (systemd `Restart=always`, launchd `KeepAlive`). It keeps `PATH`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `CLAUDE_CONFIG_DIR` from the shell it ran in. The log: `journalctl --user -u autocraft -f` (Linux), `$XDG_CACHE_HOME/autocraft-runner/service.log` (macOS). On Linux, when lingering is off, the command prints a line that the service stops at logout and names `loginctl enable-linger`; `doctor` warns the same while a unit is installed. No root. |
 | `service uninstall` / `service status` | Stops and removes the service; prints its state and where its log is. |
+
+**Self-update**
+
+`work` replaces its own file when the server serves a newer Task Runner. Every claim reply carries the served version (`currentHelper`); a refused claim (HTTP 409) or a lease whose `requiredHelper` is newer than the running version has the same effect. `work` then downloads the runner, checks it with `node --check`, stops claiming, lets running calls finish, renames the file into place, runs `migrate` and exits with code 0, logging `autocraft updated from X to Y; restarting`. The systemd unit (`Restart=always`) and the launchd agent (`KeepAlive`) start the new version about 30 seconds later. A `work` started in a terminal exits the same way and prints that it must be started again.
+
+- A version that is not newer than the running one is never installed; the server is asked again after an hour. A failed download or check keeps the current file and retries after 5 minutes, doubling up to an hour.
+- A file inside a git checkout (a `.git` directory in any parent) never updates itself. `work` logs once that an update is available, and the readiness stays `version-refused` while the server refuses the version; update such an install with git.
+- Opt out with `"autoUpdate": false` in the runner's `config.json` or `autocraft work --no-auto-update` (add it to the service's arguments by reinstalling it with the flag in the unit). `autocraft update` still works by hand.
+- `runner status` prints the last update (versions and time) and an update that is pending or was not applied.
 
 **Runner**
 
@@ -485,7 +494,7 @@ The Task Runner reports its readiness to `POST /api/remote/status` on every chan
 | `paused` | The user ran `runner pause`. |
 | `cooled-off` | The server gives the login no calls after repeated lost leases or failed replies. |
 | `sandbox-failed` | The sandbox check or canary failed. |
-| `version-refused` | The server refused the Task Runner's version. |
+| `version-refused` | The server refused the Task Runner's version. `work` updates itself unless that is off (see [Self-update](#self-update)). |
 | `harness-missing` | The harness or its login is missing, no model is set for any tier, the harness version is not audited (Codex), or the Claude login expires soon. |
 | `failing` | The Task Runner's last 5 calls failed or were given back in a row; it claims again at the time shown if its checks pass. |
 
