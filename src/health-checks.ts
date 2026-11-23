@@ -391,7 +391,7 @@ const READINESS_WORDS: Record<string, string> = { "quota-held": "holding for its
  */
 async function interactiveNoTakerCheck({ db, nowMs, mode }: CheckCtx): Promise<Check[]> {
   const id = "interactive-no-taker", to = "/model-queue";
-  if (!envVar("DISCORD_TOKEN_FILE") || (mode ?? await inferenceMode(db)) !== "user-local") return [ok(id, to)];
+  if (!envVar("DISCORD_KEY_FILE") || (mode ?? await inferenceMode(db)) !== "user-local") return [ok(id, to)];
   const rows = await db.all(db.k.selectFrom("main.mcp_tokens as t").innerJoin("main.access as a", "a.login", "t.login")
     .leftJoin("main.remote_helpers as h", "h.token_id", "t.id")
     .leftJoin("main.user_settings as us", (j) => j.onRef("us.login", "=", "t.login").on("us.key", "=", INTERACTIVE_SLOTS_KEY))

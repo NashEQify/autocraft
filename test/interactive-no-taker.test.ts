@@ -20,13 +20,13 @@ test("warns when no ready runner has an interactive slot, ok when one does or Di
   const token = (await createToken(db, "olga", "helper", { kind: "runner" })).row.id;
   const status = (readiness: string) => parseStatus({ slots: 1, busy: 0, readiness, ...(readiness === "quota-held" && { until: new Date(now + 3600_000).toISOString() }), harness: "claude", models: { top: "opus", small: "haiku" }, reserve: { fiveHour: 0, weekly: 0 } });
   const check = async () => (await computeChecks(db, now)).find((c) => c.id === "interactive-no-taker")!;
-  const saved = process.env.AUTOCRAFT_DISCORD_TOKEN_FILE;
+  const saved = process.env.AUTOCRAFT_DISCORD_KEY_FILE;
   try {
-    delete process.env.AUTOCRAFT_DISCORD_TOKEN_FILE;
+    delete process.env.AUTOCRAFT_DISCORD_KEY_FILE;
     await storeStatus(db, token, "olga", status("quota-held"), now);
     assert.equal((await check()).state, "ok", "Discord off");
 
-    process.env.AUTOCRAFT_DISCORD_TOKEN_FILE = "/x";
+    process.env.AUTOCRAFT_DISCORD_KEY_FILE = "/x";
     const held = await check();
     assert.equal(held.state, "warn");
     assert.match(held.text, /holding for its reserve until/);
@@ -35,6 +35,6 @@ test("warns when no ready runner has an interactive slot, ok when one does or Di
     await storeStatus(db, token, "olga", status("ready"), now);
     assert.equal((await check()).state, "ok");
   } finally {
-    if (saved === undefined) delete process.env.AUTOCRAFT_DISCORD_TOKEN_FILE; else process.env.AUTOCRAFT_DISCORD_TOKEN_FILE = saved;
+    if (saved === undefined) delete process.env.AUTOCRAFT_DISCORD_KEY_FILE; else process.env.AUTOCRAFT_DISCORD_KEY_FILE = saved;
   }
 });
