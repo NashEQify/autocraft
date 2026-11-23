@@ -18,7 +18,8 @@ import { appChildEnv, AppNotInstalledError, installationToken, RepoNotInInstalla
 import { type Note, withNote } from "./note.ts";
 import { scrub } from "../runner/scrub.ts";
 import { ownerOf, slugOf, splitSlug } from "../owners.ts";
-import { call, GITHUB_API } from "./app.ts";
+import { appJwt, call, GITHUB_API } from "./app.ts";
+import type { AppSecrets } from "../dash/server/config.ts";
 import { currentJobId } from "../agents/call.ts";
 import { resumedRun } from "../runner/resuming.ts";
 import { createHash } from "node:crypto";
@@ -1080,4 +1081,17 @@ export function cliMergeRecorder(repoSlug: string, pr: string, method: string, h
 export function grantOrgRole(w: Writer, o: { org: string; user: string; role: { id: number; name: string }; token: string; apiBase?: string }): Promise<void> {
   return recorded(w, `user:${w.login}`, "github-app-manager", o.org, { user: o.user, role: o.role.name, roleId: o.role.id },
     () => call(o.apiBase ?? GITHUB_API, `/orgs/${encodeURIComponent(o.org)}/organization-roles/users/${encodeURIComponent(o.user)}/${o.role.id}`, o.token, "PUT").then(() => undefined));
+}
+
+// ---- GitHub App installations ------------------------------------------------
+
+/**
+ * Uninstalls the GitHub App from one account with the app's own JWT; src/github/allowed-owners.ts decides which. Made
+ * as the app itself, which no grant names; audited as `app-install-removed` on the account's login, with the
+ * installation id and what found it (`webhook` or `sweep`).
+ */
+export function removeInstallation(w: Writer, o: { app: Pick<AppSecrets, "clientId" | "privateKey">; installationId: number; account: string; found: "webhook" | "sweep"; apiBase?: string }): Promise<void> {
+  const identity = "app";
+  return recorded(w, identity, "app-install-removed", o.account, { installation: o.installationId, account: o.account, found: o.found },
+    () => call(o.apiBase ?? GITHUB_API, `/app/installations/${o.installationId}`, appJwt(o.app), "DELETE").then(() => undefined), undefined, undefined, undefined, o.account);
 }

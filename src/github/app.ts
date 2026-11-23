@@ -109,7 +109,7 @@ export async function convertManifest(code: string, deps: AppDeps = {}): Promise
   return { id, slug, privateKey, clientId, clientSecret, webhookSecret: str(j.webhook_secret), owner, name: str(j.name) };
 }
 
-export type Installation = { id: number; owner: string; selection: "all" | "selected" };
+export type Installation = { id: number; owner: string; selection: "all" | "selected"; type: "User" | "Organization" | null; createdAt: string | null };
 
 /** The app's name as GitHub shows it. */
 export async function appName(app: AppSecrets, deps: AppDeps = {}): Promise<string | null> {
@@ -119,8 +119,10 @@ export async function appName(app: AppSecrets, deps: AppDeps = {}): Promise<stri
 export async function installations(app: AppSecrets, deps: AppDeps = {}): Promise<Installation[]> {
   const list = (await call(deps.apiBase ?? GITHUB_API, "/app/installations?per_page=100", appJwt(app))) as Array<Record<string, unknown>>;
   return list.flatMap((i) => {
-    const owner = str((i.account as { login?: unknown } | null)?.login);
-    return typeof i.id === "number" && owner ? [{ id: i.id, owner, selection: i.repository_selection === "all" ? "all" as const : "selected" as const }] : [];
+    const account = i.account as { login?: unknown; type?: unknown } | null;
+    const owner = str(account?.login);
+    const type = account?.type === "User" || account?.type === "Organization" ? account.type : null;
+    return typeof i.id === "number" && owner ? [{ id: i.id, owner, selection: i.repository_selection === "all" ? "all" as const : "selected" as const, type, createdAt: str(i.created_at) }] : [];
   });
 }
 

@@ -10,6 +10,7 @@ import { trackedNames } from "./repos.ts";
 import { storedLiveness } from "./liveness.ts";
 import { coverageSnapshot, githubIdentity } from "./github/identity.ts";
 import { readAppSecrets } from "./github/install-token.ts";
+import { unackedRemovals } from "./github/allowed-owners.ts";
 import { PROBE_HEADERS } from "./health.ts";
 import { unboundLogins } from "./author-ids.ts";
 import { inferenceMode, type InferenceMode } from "./remote/mode.ts";
@@ -72,6 +73,8 @@ export type Check = {
   group?: "workers" | "sync-repos" | "deadlines";
   /** Set on a job stopped for running past its step's limit: the step an operator acknowledges to clear it. */
   ackStep?: string;
+  /** Set on a warning an operator clears by acknowledging it (other than deadline stops). */
+  ack?: "app-foreign-install";
   /** Items a check counts (the liveness check); reported with `of`. */
   count?: number;
   /** Size of the group the check is counted against (tracked repos for `sync-repos`). */
@@ -290,6 +293,15 @@ async function appIdentityChecks({ db, probe }: CheckCtx): Promise<Check[]> {
   return [ok("app-keys", "/admin/github-app"), { id: "app-coverage", state: "warn", text, brief: "The GitHub App does not cover every tracked repo", since: null, count: uncovered.length, to: "/admin/github-app" }];
 }
 
+/** The GitHub App was uninstalled from an account that is not an allowed owner (src/github/allowed-owners.ts): a warning for 24 hours, or until an operator acknowledges it. */
+async function foreignInstallCheck({ db, nowMs }: CheckCtx): Promise<Check[]> {
+  const removed = await unackedRemovals(db, nowMs);
+  if (!removed.length) return [ok("app-foreign-install", "/admin/github-app")];
+  const accounts = [...new Set(removed.map((r) => r.account))];
+  const text = `The GitHub App was installed on ${clip(accounts.join(", "), 120)}, not ${accounts.length === 1 ? "an allowed owner" : "allowed owners"}, and removed`;
+  return [{ id: "app-foreign-install", state: "warn", text, brief: "The GitHub App was installed on an account that may not use it", since: removed[0]!.at, count: removed.length, ack: "app-foreign-install", to: "/admin/github-app" }];
+}
+
 /** The last pass that binds contributors' account ids failed: the earlier PRs of the logins it did not bind count toward no tier until a pass succeeds. */
 async function authorIdsCheck({ db }: CheckCtx): Promise<Check[]> {
   const err = await setting(db, "author_ids_error");
@@ -427,7 +439,7 @@ async function interactiveNoTakerCheck({ db, nowMs, mode }: CheckCtx): Promise<C
 }
 
 /** Every check, in the order the lists show them. */
-const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, rateCheck, deadlineChecks, livenessCheck, appIdentityChecks, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
+const SOURCES: ((ctx: CheckCtx) => Promise<Check[]>)[] = [runnerCheck, leaderChecks, workerChecks, queueCheck, confidentialCheck, syncCheck, syncRepoChecks, accountsCheck, rateCheck, deadlineChecks, livenessCheck, appIdentityChecks, foreignInstallCheck, authorIdsCheck, outsideSurgeCheck, remoteCallsCheck, remoteStarvedCheck, remoteManualCheck, remoteNoTakerCheck, interactiveNoTakerCheck];
 
 export async function computeChecks(db: Db, nowMs: number = Date.now(), probe = false): Promise<Check[]> {
   const mode = await inferenceMode(db);

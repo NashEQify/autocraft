@@ -38,6 +38,17 @@ A filing-only repo is a public repo of any owner that the Discord issue bot offe
 - Names stay unique across owners: a name that is tracked, known in `repos` under another owner, or already on the list is refused. GitHub's spelling of the name is stored.
 - The one write such a repo gets is the bot's issue and its label (`guardBotFiling` in `src/core/guard.ts`), under the same limits and junk check as for tracked repos. When the app has lost access, the reporter is told so and gets the GitHub link.
 - The bot's app select holds at most 25 repos: the preselected one, then the filing-only repos, then the tracked ones with the most open issues.
+- While the GitHub App has allowed owners (below), the repo's owner must be one of them.
+
+#### GitHub App installations
+
+A private GitHub App can be installed only on the account that owns it. To let another account (a partner organization) install it, an app manager makes it public: the app's GitHub settings, Advanced, Make public. GitHub then lets any account install it, so AutoCraft keeps its own list of allowed owners.
+
+- Operators manage the list on the GitHub App page (Allowed owners) or with `autocraft-server app owners list | allow <login> | remove <login>`; `autocraft-server app installations` lists the app's installations. Each change is audited (`app-owner-allow`, `app-owner-remove`). Logins match without case.
+- An empty list enforces nothing: any account may install the app and nothing is removed. The first account allowed also lists every account that owns a tracked or filing-only repo, and the account that owns the app.
+- Those accounts cannot be taken off the list, and their installations are never removed, listed or not.
+- With accounts listed, an installation on any other account is uninstalled: at once when its `installation` (created, new permissions accepted) or `installation_repositories` (added) webhook arrives, and otherwise by a sweep of the app's installations that the sync run makes every 10 minutes. Each removal is audited as `app-install-removed` (the account's login, the installation id and what found it) and raises the `app-foreign-install` warning in the header for 24 hours, or until an operator acknowledges it.
+- Filing-only repos of an owner that is not on the list are refused.
 
 #### Hiding tracked repos from the Discord bot
 
