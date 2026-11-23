@@ -85,7 +85,11 @@ export interface KubeApi {
   createPod(ns: string, pod: object): Promise<void>;
   /** A pod that is already gone counts as deleted. */
   deletePod(ns: string, name: string): Promise<void>;
-  podLog(ns: string, name: string, container: string, limitBytes: number): Promise<string>;
+  /**
+   * A container's output, at most `limitBytes` from its start, or from `sinceTime` (RFC 3339, whole seconds: the lines
+   * stamped at or after it). `timestamps` puts each line's RFC 3339 nanosecond time and a space before it.
+   */
+  podLog(ns: string, name: string, container: string, limitBytes: number, opts?: { sinceTime?: string; timestamps?: boolean }): Promise<string>;
   listPvcs(ns: string, selector: string): Promise<KPvc[]>;
   createPvc(ns: string, pvc: object): Promise<void>;
   deletePvc(ns: string, name: string): Promise<void>;
@@ -213,7 +217,7 @@ export function kubeApi(conn: KubeConn | (() => KubeConn)): KubeApi & ConfigMapA
     listPods: async (ns, selector) => (JSON.parse(await call("GET", `${pods(ns)}?labelSelector=${enc(selector)}`)) as { items: KPod[] }).items,
     createPod: async (ns, pod) => void (await call("POST", pods(ns), pod)),
     deletePod: (ns, name) => call("DELETE", `${pods(ns)}/${enc(name)}?gracePeriodSeconds=5`).then(() => {}, gone),
-    podLog: (ns, name, container, limitBytes) => call("GET", `${pods(ns)}/${enc(name)}/log?container=${enc(container)}&limitBytes=${Math.max(1, limitBytes)}`, undefined, "*/*"),
+    podLog: (ns, name, container, limitBytes, opts) => call("GET", `${pods(ns)}/${enc(name)}/log?container=${enc(container)}&limitBytes=${Math.max(1, limitBytes)}${opts?.timestamps ? "&timestamps=true" : ""}${opts?.sinceTime ? `&sinceTime=${enc(opts.sinceTime)}` : ""}`, undefined, "*/*"),
     listPvcs: async (ns, selector) => (JSON.parse(await call("GET", `${pvcs(ns)}?labelSelector=${enc(selector)}`)) as { items: KPvc[] }).items,
     createPvc: async (ns, pvc) => void (await call("POST", pvcs(ns), pvc)),
     deletePvc: (ns, name) => call("DELETE", `${pvcs(ns)}/${enc(name)}`).then(() => {}, gone),

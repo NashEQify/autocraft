@@ -1091,7 +1091,8 @@ CREATE TABLE IF NOT EXISTS build_pod_runs (
   reserved_cpu_m INTEGER,             -- the run's largest stage request, held on that node for the run's life
   reserved_mem_bytes INTEGER,
   disruptions INTEGER NOT NULL DEFAULT 0, -- stage pods the cluster took away (preemption, eviction) and that were recreated
-  replaces INTEGER NOT NULL DEFAULT 0  -- first pods no node had room for, deleted and placed again
+  replaces INTEGER NOT NULL DEFAULT 0, -- first pods no node had room for, deleted and placed again
+  log_positions TEXT NOT NULL DEFAULT '{}' -- JSON {"<pod>/<container>": LogPos}: how far a running container's output reached the task log
 );
 
 -- What an operator set, or an OOM kill taught, for a repository's build step pods (src/build/sizing.ts); without a row

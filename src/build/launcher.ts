@@ -22,6 +22,7 @@ import { guardedApi, inClusterApi, KubeError, type CapacityApi, type KResourceQu
 import { gib, raiseAfterOom, repoMemory, repoSizing, repoWarmTarget } from "./sizing.ts";
 import { decideWarm, WARM_COPY_CONTAINER, type WarmUse } from "./warm-mount.ts";
 import { STATUS_NAMESPACE, WarmStatus } from "./warm-status.ts";
+import { takeLog, type LogPos } from "./pod-log.ts";
 import { WarmPlacer } from "./warm-place.ts";
 import {
   ARCH_LABEL, DISK_CONTAINER, MIRROR_WAIT_CONTAINER, envSelector, FIRST_GROUP, groupsOf, CREATE_TRIES, kubeCapabilities, LIST_GRACE_MS, PACKAGES_CONTAINER, parsePrepared, PENDING_LIMIT_MS, PENDING_WARN_MS, PULL_LIMIT_MS,
@@ -55,7 +56,7 @@ const MAX_REPLACES = 2;
 type Run = {
   task_id: number; env_id: string; key_hash: string; pvc: string; stage: number; pod: string | null; pod_created_at: string | null;
   prepared: string | null; results: string; failed: string | null; ran: number; logged: string; create_tries: number; failing_since: string | null;
-  retry_at: string | null; started_at: string; node: string | null; reserved_cpu_m: number | null; reserved_mem_bytes: number | null; disruptions: number; replaces: number;
+  retry_at: string | null; started_at: string; node: string | null; reserved_cpu_m: number | null; reserved_mem_bytes: number | null; disruptions: number; replaces: number; log_positions: string;
 };
 type TaskRow = { id: number; step: string; state: string; env_id: string | null; repo: string; plan: string; requires: string; log_bytes: number; warm_key: string | null };
 type EnvRow = { id: string; enabled: number; slots: number; settings: string | null };
@@ -481,24 +482,84 @@ async function lose(c: EnvCtx, run: Run, reason: string): Promise<void> {
   await loseTask(c.d.db, run.task_id, reason, "Cancelled; its build pod stopped.");
 }
 
-/** Appends a container's output to the task log under `step` once, within the task's log cap. */
-async function podLog(c: EnvCtx, run: Run, container: string, step: string): Promise<void> {
-  const t = await taskOf(c.d.db, run.task_id);
+/** Bytes of new output one read takes; a running container's output is read once per pass. */
+const LOG_READ_BYTES = 512 * 1024;
+
+/**
+ * Appends a container's output to the task log under `step`, from where the last read of it stopped (LogPos), within the
+ * task's log cap. `live` (the container still runs): one read, complete lines only. Otherwise reads to the end and records
+ * the container in `logged`, so it is never read again. Each read's lines and the position after them are written in one
+ * transaction, so a runner stopped at any point neither repeats nor drops a line.
+ */
+async function podLog(c: EnvCtx, run: Run, container: string, step: string, live = false): Promise<void> {
+  const { db } = c.d;
   const id = `${run.pod}/${container}`;
-  const logged = json<string[]>(run.logged, []);
-  if (!t || !run.pod || logged.includes(id)) return;
-  let text: string;
-  try {
-    text = await c.api!.podLog(c.s.namespace, run.pod, container, Math.max(1024, MAX_LOG_BYTES - t.log_bytes));
-  } catch (e) {
-    text = `(the output of ${container} could not be read: ${(e as Error).message})\n`;
+  if (!run.pod || json<string[]>(run.logged, []).includes(id)) return;
+  let budget = LOG_READ_BYTES;
+  for (;;) {
+    const t = await taskOf(db, run.task_id);
+    if (!t) return;
+    const positions = json<Record<string, LogPos>>(run.log_positions, {});
+    const pos = positions[id];
+    let text: string | null = null;
+    let error: string | null = null;
+    const limit = (pos?.bytes ?? 0) + budget;
+    if (t.log_bytes < MAX_LOG_BYTES) {
+      try {
+        text = await c.api!.podLog(c.s.namespace, run.pod, container, limit, { timestamps: true, ...(pos ? { sinceTime: pos.since } : {}) });
+      } catch (e) {
+        if (live) return;
+        error = `(the output of ${container} could not be read: ${(e as Error).message})\n`;
+      }
+    }
+    // A shorter answer than asked for is the whole rest; a decoded answer is never shorter in bytes than what was sent.
+    const end = !live && (text === null || Buffer.byteLength(text) < limit);
+    let took = text === null ? { text: error ?? "", pos, taken: 0 } : takeLog(text, pos, end);
+    // No complete line fitted: one line is longer than the read. Read more, up to the log cap, then take what came.
+    if (!took.taken && !end && text !== null) {
+      if (live) return;
+      if (budget < MAX_LOG_BYTES) {
+        budget *= 4;
+        continue;
+      }
+      took = takeLog(text, pos, true);
+    }
+    const done = await db.write(async () => {
+      let truncated = false;
+      // A quarter of the chunk cap in characters stays under it in bytes.
+      for (let i = 0; i < took.text.length && !truncated; i += MAX_CHUNK_BYTES / 4) {
+        truncated = (await appendLog(db, c.env.id, run.task_id, step, took.text.slice(i, i + MAX_CHUNK_BYTES / 4))).truncated;
+      }
+      const finished = end || truncated || budget >= MAX_LOG_BYTES || t.log_bytes >= MAX_LOG_BYTES;
+      // Positions are kept only for the run's current pod.
+      const kept = Object.fromEntries(Object.entries(positions).filter(([k]) => k !== id && k.startsWith(`${run.pod}/`)));
+      if (!finished && took.pos) kept[id] = took.pos;
+      run.log_positions = JSON.stringify(kept);
+      if (finished) run.logged = JSON.stringify([...json<string[]>(run.logged, []), id]);
+      await db.run(db.k.updateTable("build_pod_runs").set({ logged: run.logged, log_positions: run.log_positions }).where("task_id", "=", run.task_id));
+      return finished;
+    });
+    if (done || live) return;
   }
-  logged.push(id);
-  run.logged = JSON.stringify(logged);
-  await c.d.db.run(c.d.db.k.updateTable("build_pod_runs").set({ logged: run.logged }).where("task_id", "=", run.task_id));
-  // A quarter of the chunk cap in characters stays under it in bytes.
-  for (let i = 0; i < text.length; i += MAX_CHUNK_BYTES / 4) {
-    if ((await appendLog(c.d.db, c.env.id, run.task_id, step, text.slice(i, i + MAX_CHUNK_BYTES / 4))).truncated) break;
+}
+
+/**
+ * While a step pod runs: its finished warm restore and copy, its finished steps and its running step reach the task log,
+ * in that order, as they would at the pod's end (endStage); containers that have not started are not read.
+ */
+async function followStage(c: EnvCtx, run: Run, t: TaskRow, pod: KPod): Promise<void> {
+  const plan = json<TaskStep[]>(t.plan, []);
+  const groups = groupsOf(plan);
+  const g = groups[run.stage - FIRST_GROUP];
+  if (!g || run.stage >= uploadStage(plan)) return;
+  for (const [name, step] of [[WARM_RESTORE_CONTAINER, "warm restore"], [WARM_COPY_CONTAINER, "warm copy"]] as const) {
+    if (statusOf(pod, name)?.state?.terminated?.exitCode === 0) await podLog(c, run, name, step);
+  }
+  for (const i of g.steps) {
+    const st = statusOf(pod, stepContainer(i))?.state;
+    if (st?.terminated) await podLog(c, run, stepContainer(i), plan[i]!.name);
+    else if (st?.running) await podLog(c, run, stepContainer(i), plan[i]!.name, true);
+    else break;
   }
 }
 
@@ -576,8 +637,9 @@ async function advance(c: EnvCtx, run: Run): Promise<void> {
       }
       // The text stays the same while the pod waits, so the health check's `since` holds.
       if (age > PENDING_WARN_MS) c.pending.push(`The build pod of task ${t.id} is waiting to start: ${why}`.slice(0, 300));
+      return;
     }
-    return;
+    return followStage(c, run, t, pod);
   }
   if (phase === "Failed" && classifyPodEnd(pod, null) === "disruption") return disrupted(c, run, t, pod, disruptionText(pod));
   return endStage(c, run, t, pod);

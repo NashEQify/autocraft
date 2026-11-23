@@ -2,7 +2,8 @@
 // runner reads the results from pod status, and the pod key can read the task but never report a result; a task whose
 // pod disappears or whose node is lost is requeued once, then failed; a claim that cannot start goes back to the queue;
 // a stage's pod that cannot be created is retried; with a compile cache, only offline build steps read it, as CI would; a warm
-// producer's pod gets the cache's write credentials and the signing key only where it needs them, and only it takes warm builds.
+// producer's pod gets the cache's write credentials and the signing key only where it needs them, and only it takes warm builds;
+// a running step's output reaches the task log while it runs, each line once across a runner restart.
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
@@ -49,7 +50,17 @@ class FakeKube implements KubeApi, CapacityApi {
     this.pods.set(p.metadata.name, { ...p, status: { phase: "Pending" } });
   }
   async deletePod(_ns: string, name: string) { this.pods.delete(name); }
-  async podLog(_ns: string, name: string, container: string) { return `${container} of ${name} says hello\n`; }
+  /** A container's output as the kubelet keeps it, one stamped line each ("<RFC 3339 time> <text>\n"); others say hello. */
+  logs = new Map<string, string>();
+  logReads: { container: string; limitBytes: number; sinceTime?: string }[] = [];
+  async podLog(_ns: string, name: string, container: string, limitBytes: number, opts?: { sinceTime?: string; timestamps?: boolean }) {
+    const raw = this.logs.get(`${name}/${container}`);
+    if (raw === undefined) return `${container} of ${name} says hello\n`;
+    this.logReads.push({ container, limitBytes, ...(opts?.sinceTime ? { sinceTime: opts.sinceTime } : {}) });
+    const since = opts?.sinceTime ? Date.parse(opts.sinceTime) : -Infinity;
+    const lines = raw.split(/(?<=\n)/).filter((l) => Date.parse(l.slice(0, l.indexOf(" "))) >= since).map((l) => opts?.timestamps ? l : l.slice(l.indexOf(" ") + 1));
+    return Buffer.from(lines.join("")).subarray(0, limitBytes).toString("utf8");
+  }
   async listPvcs(_ns: string, sel: string) { return [...this.pvcs.values()].filter((v) => matches(v.metadata.labels, sel)); }
   async createPvc(_ns: string, pvc: object) { this.#refused("pvc", pvc); const v = structuredClone(pvc) as { metadata: { name: string } }; this.pvcs.set(v.metadata.name, v); }
   async deletePvc(_ns: string, name: string) { this.pvcs.delete(name); }
@@ -513,4 +524,41 @@ test("a warm writer takes only warm builds, at the newest default-branch head; n
   await d.run(d.k.updateTable("build_tasks").set({ state: "queued", env_id: null }).where("id", "=", warm));
   assert.deepEqual((await claim(d, "pods", 4)).tasks.map((t) => t.id), [pr], "a plain environment never takes a warm build");
   await d.close();
+});
+
+test("a running step's output reaches the task log while it runs, each line once across a runner restart and its end", async () => {
+  const id = await simple();
+  await pass();
+  kube.end(kube.only(id));
+  await pass();
+  kube.end(kube.only(id), { source: { exitCode: 0, message: SOURCE_OK } });
+  await pass();
+  const pod = kube.only(id);
+  const key = `${pod.metadata.name}/step-0`;
+  const logOf = async () => (await db.all(db.k.selectFrom("build_task_logs").select(["step", "chunk"]).where("task_id", "=", id).orderBy("seq")))
+    .filter((r) => r.step === "t").map((r) => r.chunk).join("");
+  const running = () => {
+    pod.status = { phase: "Pending", initContainerStatuses: [
+      { name: "disk", state: { terminated: { exitCode: 0, startedAt: "2026-01-01T00:00:00Z", finishedAt: "2026-01-01T00:00:01Z" } } },
+      { name: "step-0", state: { running: { startedAt: "2026-01-01T00:00:01Z" } } },
+    ] };
+  };
+  running();
+  // Lines that share a second, and two that share the exact time across a read's boundary.
+  kube.logs.set(key, "2026-01-01T00:00:01.5Z one\n2026-01-01T00:00:02.000000001Z two\n2026-01-01T00:00:02.000000001Z three\n2026-01-01T00:00:02.9Z four (");
+  await pass();
+  assert.equal((await queued(id)).state, "running");
+  assert.equal(await logOf(), "one\ntwo\nthree\n", "complete lines appear while the step runs");
+
+  // The runner restarts: new launcher state, the same run row.
+  kube.logs.set(key, `${kube.logs.get(key)}unfinished)\n2026-01-01T00:00:02.000000001Z five\n2026-01-01T00:00:03Z six\n`);
+  await launcherPass({ db, api: kube, defaultImage: null, log: () => {}, now: () => clock }, new LauncherState());
+  assert.equal(await logOf(), "one\ntwo\nthree\nfour (unfinished)\nfive\nsix\n");
+  assert.ok(kube.logReads.at(-1)!.sinceTime, "a later read starts at a time, not from the start");
+
+  kube.logs.set(key, `${kube.logs.get(key)}2026-01-01T00:00:03Z seven\n2026-01-01T00:00:04Z eight`);
+  kube.end(pod);
+  await launcherPass({ db, api: kube, defaultImage: null, log: () => {}, now: () => clock }, new LauncherState());
+  assert.equal((await queued(id)).state, "done");
+  assert.equal(await logOf(), "one\ntwo\nthree\nfour (unfinished)\nfive\nsix\nseven\neight", "each line once, the last one without its newline as written");
 });

@@ -316,6 +316,8 @@ export const ADDED_COLUMNS: [table: string, column: string, type: string][] = [
   ["build_pod_runs", "reserved_mem_bytes", "INTEGER"],
   ["build_pod_runs", "disruptions", "INTEGER NOT NULL DEFAULT 0"],
   ["build_pod_runs", "replaces", "INTEGER NOT NULL DEFAULT 0"],
+  // How far a running step container's output reached the task log (src/build/launcher.ts podLog).
+  ["build_pod_runs", "log_positions", "TEXT NOT NULL DEFAULT '{}'"],
   // Where a repository's build pods put a warm target from their node (src/build/warm-mount.ts).
   ["build_sizes", "warm_target", "TEXT NOT NULL DEFAULT 'auto'"],
   // Whether a repository's memory row is an operator's size, an OOM floor, or unused (src/build/sizing.ts).
