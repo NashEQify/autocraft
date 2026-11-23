@@ -667,7 +667,8 @@ export function stepPod(c: PodCtx, image: string, appImage: string, plan: TaskSt
         target ? { ...targetVolume, mountPath: target } : { name: "work", mountPath: ci ? `${checkout}/target` : "/target", subPath: "target" },
         { name: "work", mountPath: "/cache", subPath: "cache" },
       ]),
-      ...(writing ? [{ name: "warm-meta", mountPath: "/meta" }] : []),
+      // Read-only: the publish signs what toolchain-id and the restore wrote there (toolchain key, build start, bad blobs).
+      ...(writing ? [{ name: "warm-meta", mountPath: "/meta", readOnly: true }] : []),
       { name: "work", mountPath: "/out", subPath: `out/${i}` },
       ...(offline ? prepared.mounts.map((m) => ({ name: "work", mountPath: m.target, subPath: m.sub, readOnly: true })) : []),
       ...(mp ? [mp.mount] : []),

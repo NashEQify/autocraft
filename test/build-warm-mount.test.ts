@@ -47,7 +47,7 @@ test("a rebuilt toolchain image starts from versions of the old one when rustc a
 
   assert.ok(decideWarm(base).use, "same rustc and toolchain key, another digest");
   assert.equal(decideWarm({ ...base, toolchain: { ...toolchain, rustc: rustc.replace("1.100.0", "1.101.0") } }).use, null, "another rustc");
-  assert.equal(decideWarm({ ...base, toolchain: { ...toolchain, toolchain: "e".repeat(64) } }).use, null, "another C toolchain or -dev package set");
+  assert.equal(decideWarm({ ...base, toolchain: { ...toolchain, toolchain: "e".repeat(64) } }).use, null, "another build tool or -dev package");
   assert.equal(decideWarm({ ...base, toolchain: null }).use, null, "the new image's key is not known yet");
   assert.equal(decideWarm({ ...base, status: { ...status, rustc: null, toolchain: null } }).use, null, "a version that records no key matches only its digest");
 });
