@@ -18,7 +18,7 @@ import { deleteRepliesOf } from "./replies.ts";
 import { RestClient } from "./rest.ts";
 import { Reactor } from "./react.ts";
 import { forgetReporter } from "./file-issue.ts";
-import { addFilingRepo, filingRepos, FilingRepoError, removeFilingRepo } from "./filing-repos.ts";
+import { addFilingRepo, filingRepos, FilingRepoError, offerState, removeFilingRepo, setOffered } from "./filing-repos.ts";
 import { forgetLink } from "./links.ts";
 import { Search } from "./search.ts";
 import { installAccountCommands } from "./commands.ts";
@@ -145,7 +145,8 @@ const USAGE = `usage: autocraft-server discord forget --message <message link or
        autocraft-server discord channels
        autocraft-server discord watch <channel id> | unwatch <channel id>
        autocraft-server discord panel post <channel id>
-       autocraft-server discord filing list | add <owner/name> | remove <owner/name>`;
+       autocraft-server discord filing list | add <owner/name> | remove <owner/name>
+       autocraft-server discord offer list | hide <name> | show <name>`;
 
 function die(msg: string): never {
   console.error(msg);
@@ -216,9 +217,16 @@ async function discord(args: string[]): Promise<void> {
   } else if (sub === "filing" && a === "remove" && b) {
     if (!await removeFilingRepo(db, "cli", b)) die(`${b} is not a filing-only repo`);
     console.log(`the Discord bot no longer files into ${b}`);
+  } else if (sub === "offer" && a === "list") {
+    const o = await offerState(db);
+    for (const r of o.repos) console.log(`${r.offered ? "offered" : "hidden "}  ${r.name}${r.label !== r.name ? `  (${r.label})` : ""}`);
+    console.log(`${o.used} of ${o.max} places used`);
+  } else if (sub === "offer" && (a === "hide" || a === "show") && b) {
+    if (!await setOffered(db, "cli", b, a === "show")) die(`${b} is not a public tracked repo`);
+    console.log(`the Discord bot ${a === "show" ? "offers" : "no longer offers"} ${b}`);
   } else die(USAGE);
 }
 
 export const commands = {
-  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post | filing list|add|remove", run: (args: string[]) => discord(args) },
+  discord: { summary: "Discord mentions: forget --message|--user | channels | watch | unwatch | panel post | filing list|add|remove | offer list|hide|show", run: (args: string[]) => discord(args) },
 };

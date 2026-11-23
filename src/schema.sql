@@ -409,6 +409,14 @@ CREATE TABLE IF NOT EXISTS discord_filing_repos (
   added_at TEXT NOT NULL
 );
 
+-- Tracked public repos the Discord issue bot does not offer in its repo select. No row: offered. Search, pings and
+-- channel defaults are unaffected.
+CREATE TABLE IF NOT EXISTS discord_hidden_repos (
+  name TEXT PRIMARY KEY,
+  hidden_by TEXT,
+  hidden_at TEXT
+);
+
 -- One row per started GitHub App registration: the manifest flow's single-use state nonce.
 CREATE TABLE IF NOT EXISTS github_app_states (
   state TEXT PRIMARY KEY,

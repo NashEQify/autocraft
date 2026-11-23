@@ -24,9 +24,15 @@ export async function filingRepos(db: Db): Promise<FilingRepo[]> {
   return await db.all(db.k.selectFrom("discord_filing_repos").select(["owner", "name", "added_by as addedBy", "added_at as addedAt"]).orderBy("owner").orderBy("name"));
 }
 
-/** The repos the bot offers, by name: the public tracked repos, then the filing-only ones. A tracked repo of the same name wins. */
+/** Names of tracked repos an operator hid from the bot's repo select. */
+export async function hiddenRepoNames(db: Db): Promise<Set<string>> {
+  return new Set((await db.all(db.k.selectFrom("discord_hidden_repos").select("name"))).map((r) => r.name));
+}
+
+/** The repos the bot offers, by name: the public tracked repos that are not hidden, then the filing-only ones. A tracked repo of the same name wins. */
 export async function botRepos(db: Db): Promise<BotRepo[]> {
-  const pub = new Set(await publicRepoNames(db));
+  const hidden = await hiddenRepoNames(db);
+  const pub = new Set((await publicRepoNames(db)).filter((n) => !hidden.has(n)));
   const tracked = await trackedRepos(db);
   const names = new Set(tracked.map((t) => t.name.toLowerCase()));
   return [
@@ -101,5 +107,28 @@ export async function removeFilingRepo(db: Db, by: string, input: string): Promi
   if (!row) return false;
   await db.run(db.k.deleteFrom("discord_filing_repos").where("name", "=", row.name));
   await audit(db, by, "discord-filing-remove", row.name, { owner: row.owner });
+  return true;
+}
+
+/** The bot's select holds this many repos. */
+export const BOT_SELECT_MAX = 25;
+export type OfferRow = { name: string; label: string; offered: boolean };
+
+/** Every public tracked repo (app label else name) with whether the bot offers it, and how many places of the select the offered repos plus the filing-only ones fill. */
+export async function offerState(db: Db): Promise<{ repos: OfferRow[]; used: number; max: number }> {
+  const hidden = await hiddenRepoNames(db);
+  const names = await publicRepoNames(db);
+  const labels = names.length ? await db.all(db.k.selectFrom("release_apps").select(["repo", "name"]).where("repo", "in", names)) : [];
+  const label = new Map(labels.map((l) => [l.repo, l.name]));
+  const repos = names.map((name) => ({ name, label: label.get(name) ?? name, offered: !hidden.has(name) })).sort((a, b) => a.label.localeCompare(b.label));
+  return { repos, used: Math.min(BOT_SELECT_MAX, (await botRepos(db)).length), max: BOT_SELECT_MAX };
+}
+
+/** Offers or hides a public tracked repo in the bot's select. Returns false when the name is not one. Audited as `discord-offer-show` / `discord-offer-hide`. */
+export async function setOffered(db: Db, by: string, name: string, offered: boolean): Promise<boolean> {
+  if (!(await publicRepoNames(db)).includes(name)) return false;
+  if (offered) await db.run(db.k.deleteFrom("discord_hidden_repos").where("name", "=", name));
+  else await db.run(db.k.insertInto("discord_hidden_repos").values({ name, hidden_by: by, hidden_at: new Date().toISOString() }).onConflict((oc) => oc.column("name").doNothing()));
+  await audit(db, by, offered ? "discord-offer-show" : "discord-offer-hide", name);
   return true;
 }

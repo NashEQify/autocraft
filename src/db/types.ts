@@ -610,6 +610,12 @@ export interface DiscordFilingRepos {
   added_at: string;
 }
 
+export interface DiscordHiddenRepos {
+  name: string;
+  hidden_by: string | null;
+  hidden_at: string | null;
+}
+
 export interface DiscordLinkCodes {
   code_hash: string;
   login: string;
@@ -2347,6 +2353,7 @@ export interface DB {
   discord_events: DiscordEvents;
   discord_filed: DiscordFiled;
   discord_filing_repos: DiscordFilingRepos;
+  discord_hidden_repos: DiscordHiddenRepos;
   discord_link_codes: DiscordLinkCodes;
   discord_links: DiscordLinks;
   discord_mentions: DiscordMentions;
@@ -2533,6 +2540,7 @@ export interface DB {
   "main.discord_events": DiscordEvents;
   "main.discord_filed": DiscordFiled;
   "main.discord_filing_repos": DiscordFilingRepos;
+  "main.discord_hidden_repos": DiscordHiddenRepos;
   "main.discord_link_codes": DiscordLinkCodes;
   "main.discord_links": DiscordLinks;
   "main.discord_mentions": DiscordMentions;
@@ -2723,6 +2731,7 @@ export const COLUMNS = {
   discord_events: ["at", "kind"],
   discord_filed: ["repo", "number", "login", "reporter", "at"],
   discord_filing_repos: ["name", "owner", "added_by", "added_at"],
+  discord_hidden_repos: ["name", "hidden_by", "hidden_at"],
   discord_link_codes: ["code_hash", "login", "expires_at"],
   discord_links: ["user_hash", "login", "linked_at"],
   discord_mentions: ["msg_hash", "channel_hash", "repo", "number", "sealed", "signal"],

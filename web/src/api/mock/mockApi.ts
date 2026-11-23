@@ -97,6 +97,14 @@ export function createMockApi(): Api {
   let discordLinked = true;
   const discord: DiscordSetup = {
     state: "connected", detail: null, at: nowIso(), repos: ["photocraft", "pdfcraft", "wordcraft"],
+    offer: {
+      repos: [
+        { name: "photocraft", label: "PhotoCraft", offered: true }, { name: "pdfcraft", label: "PDFCraft", offered: true }, { name: "wordcraft", label: "WordCraft", offered: true },
+        { name: "sheetcraft", label: "SheetCraft", offered: true }, { name: "vector-core", label: "vector-core", offered: false }, { name: "codec-kit", label: "codec-kit", offered: false },
+        { name: "font-engine", label: "font-engine", offered: false }, { name: "layout-lib", label: "layout-lib", offered: true },
+      ],
+      used: 6, max: 25,
+    },
     filingRepos: [
       { owner: "example-studio", name: "sketchpad", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 6 * 86_400_000).toISOString() },
       { owner: "open-tools-collective", name: "vector-shapes-and-paths-library", addedBy: "mara-lindqvist", addedAt: new Date(Date.now() - 40 * 60_000).toISOString() },
@@ -354,6 +362,13 @@ export function createMockApi(): Api {
         if (!owner || !name) throw new Error("Give the repo as owner/name.");
         if (owner === "no-app-here") throw new Error(`The GitHub App is not installed on ${owner}.`);
         discord.filingRepos = [...discord.filingRepos, { owner, name, addedBy: "you", addedAt: nowIso() }];
+        changed();
+        return wait(structuredClone(discord));
+      },
+      setOffer(repo, on) {
+        if (mockRole() !== "operator") throw new Error("only operators change the Discord settings");
+        discord.offer.repos.find((r) => r.name === repo)!.offered = on;
+        discord.offer.used = Math.min(discord.offer.max, discord.offer.repos.filter((r) => r.offered).length + discord.filingRepos.length);
         changed();
         return wait(structuredClone(discord));
       },
