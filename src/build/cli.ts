@@ -33,7 +33,7 @@ const USAGE = `usage: autocraft-server envs list
            --storage Q --storage-class NAME --deadline-sec N --max-step-sec N --runtime-class NAME|none --arch x86_64|aarch64
            --workspace-slots N --workspace-cpu-request Q --workspace-cpu-limit Q --workspace-memory-request Q --workspace-memory-limit Q
            --workspace-ephemeral-request Q --workspace-ephemeral-limit Q --workspace-storage Q --sccache-url URL|none
-           --crate-mirror IP|none  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
+           --crate-mirror IP|none  --display yes|no  --warm-writer yes|no --cache-write-url URL|none --writer-secret NAME|none --signing-secret NAME|none
            --capacity cluster|fixed --priority-class NAME|none --node-reserve-cpu Q --node-reserve-memory Q --max-pod-memory Q
        autocraft-server envs rotate-key <id> (--out FILE | --print)
        autocraft-server envs warm-repos [add|exclude|remove <owner/name>]   (repos the warm producer builds: every pipeline repo once a publish was trimmed; add and exclude override, remove undoes either)
@@ -112,7 +112,7 @@ const POD_OPTIONS: Record<string, keyof KubeSettings> = {
   "workspace-slots": "workspaceSlots", "workspace-cpu-request": "workspaceCpuRequest", "workspace-cpu-limit": "workspaceCpuLimit",
   "workspace-memory-request": "workspaceMemoryRequest", "workspace-memory-limit": "workspaceMemoryLimit", "workspace-ephemeral-request": "workspaceEphemeralRequest",
   "workspace-ephemeral-limit": "workspaceEphemeralLimit", "workspace-storage": "workspaceStorage", "sccache-url": "sccacheUrl",
-  "crate-mirror": "crateMirror", "warm-writer": "warmWriter", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
+  "crate-mirror": "crateMirror", "warm-writer": "warmWriter", display: "display", "cache-write-url": "cacheWriteUrl", "writer-secret": "writerSecret", "signing-secret": "signingSecret",
   capacity: "capacity", "priority-class": "priorityClassName", "node-reserve-cpu": "nodeReserveCpu", "node-reserve-memory": "nodeReserveMemory", "max-pod-memory": "maxPodMemory",
 };
 const NULLABLE = new Set<keyof KubeSettings>(["runtimeClassName", "sccacheUrl", "crateMirror", "cacheWriteUrl", "writerSecret", "signingSecret", "priorityClassName"]);
@@ -123,8 +123,8 @@ function podSettings(opt: Map<string, string>, current: KubeSettings | null): Pa
   for (const [name, key] of Object.entries(POD_OPTIONS)) {
     if (!opt.has(name)) continue;
     const v = opt.get(name)!;
-    if (key === "warmWriter" && v !== "yes" && v !== "no") die("--warm-writer must be yes or no");
-    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : key === "warmWriter" ? v === "yes"
+    if ((key === "warmWriter" || key === "display") && v !== "yes" && v !== "no") die(`--${name} must be yes or no`);
+    out[key] = key === "deadlineSec" || key === "maxStepSec" || key === "workspaceSlots" ? Number(v) : key === "warmWriter" || key === "display" ? v === "yes"
       : (key === "image" && v === "runner") || (NULLABLE.has(key) && v === "none") ? null : v;
   }
   if (opt.has("toolchain-image")) {
@@ -143,7 +143,7 @@ const settingsLine = (s: KubeSettings): string =>
   `step cpu ${s.cpuRequest}/${s.cpuLimit}, memory ${s.memoryRequest}/${s.memoryLimit} (at most ${s.maxPodMemory}), ephemeral ${s.ephemeralRequest}/${s.ephemeralLimit}, volume ${s.storage} (${s.storageClass}), ` +
   `deadline ${s.deadlineSec} s, step limit ${s.maxStepSec} s${s.runtimeClassName ? `, runtime class ${s.runtimeClassName}` : ""}, ` +
   `workspaces ${s.workspaceSlots} (cpu ${s.workspaceCpuRequest}/${s.workspaceCpuLimit}, memory ${s.workspaceMemoryRequest}/${s.workspaceMemoryLimit}, ` +
-  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
+  `ephemeral ${s.workspaceEphemeralRequest}/${s.workspaceEphemeralLimit}, volume ${s.workspaceStorage}), display ${s.display ? "yes" : "no"}, compile cache ${s.sccacheUrl ?? "none"}, crate mirror ${s.crateMirror ?? "none"}` +
   (s.warmWriter ? `, warm writer (writes ${s.cacheWriteUrl}, credentials ${s.writerSecret}, signing key ${s.signingSecret})` : "");
 
 /** A yes|no option as a boolean; undefined when it is not given. */
